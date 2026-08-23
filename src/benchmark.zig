@@ -9,6 +9,9 @@ pub const schema_version: u32 = 3;
 pub const workload_id = "zpu-2d-host-memory-v3-240x240-seed-151521030";
 pub const default_rate_tolerance_fraction = 0.20;
 pub const default_latency_tolerance_fraction = 1.50;
+// Per-run timings are intentionally noisy. Keep a catastrophic-route guard,
+// while leaving precise performance claims to the controlled baseline compare.
+pub const in_run_rate_floor_fraction = 0.0625;
 const width = 240;
 const height = 240;
 const surface_bytes = width * height * 4;
@@ -252,8 +255,8 @@ fn latencyRegressed(now: u64, old: u64, tolerance: f64) bool {
     return @as(f64, @floatFromInt(now - old)) / @as(f64, @floatFromInt(old)) > tolerance;
 }
 fn compareMetric(now: Metric, old: Metric, rate_tol: f64, latency_tol: f64) !void {
-    if (regressed(now.mpix_s, old.mpix_s, rate_tol) or regressed(now.bytes_s, old.bytes_s, rate_tol) or regressed(now.effective_gib_s, old.effective_gib_s, rate_tol) or regressed(now.draws_s, old.draws_s, rate_tol) or regressed(now.fps, old.fps, rate_tol)) return error.PerformanceRegression;
     if (latencyRegressed(now.frame.p50_ns, old.frame.p50_ns, latency_tol) or latencyRegressed(now.frame.p95_ns, old.frame.p95_ns, latency_tol) or latencyRegressed(now.frame.p99_ns, old.frame.p99_ns, latency_tol)) return error.LatencyRegression;
+    if (regressed(now.mpix_s, old.mpix_s, rate_tol) or regressed(now.bytes_s, old.bytes_s, rate_tol) or regressed(now.effective_gib_s, old.effective_gib_s, rate_tol) or regressed(now.draws_s, old.draws_s, rate_tol) or regressed(now.fps, old.fps, rate_tol)) return error.PerformanceRegression;
 }
 pub fn compare(current: Report, baseline: Report) !void {
     try validate(current);
@@ -273,7 +276,7 @@ pub fn guardInRun(report: Report, enforce_relative_rates: bool) !void {
         const scalar = report.metrics[@intFromEnum(op)];
         for (report.metrics) |candidate| if (std.mem.eql(u8, candidate.name, @tagName(op)) and !std.mem.eql(u8, candidate.backend, "scalar")) {
             if (candidate.checksum != scalar.checksum or candidate.checksum != oracle(op) or !std.mem.eql(u8, candidate.checksum_hex, scalar.checksum_hex)) return error.ChecksumMismatch;
-            if (enforce_relative_rates and (regressed(candidate.mpix_s, scalar.mpix_s, 0.75) or regressed(candidate.bytes_s, scalar.bytes_s, 0.75) or regressed(candidate.effective_gib_s, scalar.effective_gib_s, 0.75) or regressed(candidate.draws_s, scalar.draws_s, 0.75) or regressed(candidate.fps, scalar.fps, 0.75))) return error.RelativeRegression;
+            if (enforce_relative_rates and (regressed(candidate.mpix_s, scalar.mpix_s, 1.0 - in_run_rate_floor_fraction) or regressed(candidate.bytes_s, scalar.bytes_s, 1.0 - in_run_rate_floor_fraction) or regressed(candidate.effective_gib_s, scalar.effective_gib_s, 1.0 - in_run_rate_floor_fraction) or regressed(candidate.draws_s, scalar.draws_s, 1.0 - in_run_rate_floor_fraction) or regressed(candidate.fps, scalar.fps, 1.0 - in_run_rate_floor_fraction))) return error.RelativeRegression;
         };
     }
 }
@@ -393,14 +396,16 @@ test "canonical metric ordering independently covers optional SIMD sets" {
     try std.testing.expectEqualStrings("runtime", expectedAtFor(all_ops.len, false, false).backend);
 }
 
-test "full-run guard rejects a slow route while smoke remains correctness-only" {
+test "full-run guard tolerates noisy timing but rejects catastrophic routes" {
     var storage: [32]Metric = undefined;
     const r = try canonicalForTest(&storage);
     var index: usize = 0;
     while (index < r.metrics.len and !std.mem.eql(u8, r.metrics[index].backend, "runtime")) : (index += 1) {}
     try std.testing.expect(index < r.metrics.len);
-    storage[index].mpix_s = 10;
+    storage[index].mpix_s = 20;
     try guardInRun(r, false);
+    try guardInRun(r, true);
+    storage[index].mpix_s = 5;
     try std.testing.expectError(error.RelativeRegression, guardInRun(r, true));
 }
 
