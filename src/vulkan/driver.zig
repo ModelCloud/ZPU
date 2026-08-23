@@ -443,7 +443,7 @@ fn conservativeLimits() Limits {
     v.max_vertex_output_components = 64;
     v.max_fragment_input_components = 128;
     v.max_fragment_output_attachments = 4;
-    v.max_fragment_combined_output_resources = 4;
+    v.max_fragment_combined_output_resources = 12;
     v.max_compute_shared_memory_size = 16_384;
     v.max_compute_work_group_count = .{ 65_535, 65_535, 65_535 };
     v.max_compute_work_group_invocations = 128;
@@ -457,16 +457,13 @@ fn conservativeLimits() Limits {
     v.max_sampler_anisotropy = 1;
     v.max_viewports = 1;
     v.max_viewport_dimensions = .{ 4096, 4096 };
-    v.viewport_bounds_range = .{ -8192, 8191 };
+    v.viewport_bounds_range = .{ -32_768, 32_767 };
     v.min_memory_map_alignment = 64;
     v.min_texel_buffer_offset_alignment = 256;
     v.min_uniform_buffer_offset_alignment = 256;
     v.min_storage_buffer_offset_alignment = 256;
     v.min_texel_offset = -8;
     v.max_texel_offset = 7;
-    v.min_interpolation_offset = -0.5;
-    v.max_interpolation_offset = 0.4375;
-    v.sub_pixel_interpolation_offset_bits = 4;
     v.max_framebuffer_width = 4096;
     v.max_framebuffer_height = 4096;
     v.max_framebuffer_layers = 1;
@@ -485,6 +482,7 @@ fn conservativeLimits() Limits {
     v.discrete_queue_priorities = 2;
     v.point_size_range = .{ 1, 1 };
     v.line_width_range = .{ 1, 1 };
+    v.standard_sample_locations = 1;
     v.optimal_buffer_copy_offset_alignment = 1;
     v.optimal_buffer_copy_row_pitch_alignment = 1;
     v.non_coherent_atom_size = 256;
@@ -666,12 +664,12 @@ fn getDeviceQueue(device: ?Device, family: u32, index: u32, output: ?*Queue) cal
                 mutex.unlock();
                 const result = set_loader_data(d, q);
                 lock();
-                if (result == .success) hit(.callback_device_success) else {
-                    hit(.callback_device_decline);
-                    return;
-                }
                 if (!validDeviceLocked(h)) {
                     hit(.callback_device_destroy);
+                    return;
+                }
+                if (result == .success) hit(.callback_device_success) else {
+                    hit(.callback_device_decline);
                     return;
                 }
             }
@@ -815,6 +813,11 @@ fn destroyingDeviceLoaderData(device: Device, object: *anyopaque) callconv(.c) R
     _ = object;
     destroyDevice(device, null);
     return .success;
+}
+fn destroyingDecliningDeviceLoaderData(device: Device, object: *anyopaque) callconv(.c) Result {
+    _ = object;
+    destroyDevice(device, null);
+    return .error_initialization_failed;
 }
 
 test "loader callbacks replace child dispatch words without breaking lifetime" {
@@ -1020,6 +1023,14 @@ test "loader chain bounds and callback destruction revalidation" {
     getDeviceQueue(device, 0, 0, &queue);
     try std.testing.expectEqual(@as(usize, 8), @intFromPtr(queue));
     try std.testing.expect(getDeviceProcAddr(device, "vkDestroyDevice") == null);
+    const declining_destroy_callback = LoaderDeviceInfo{ .s_type = 48, .p_next = null, .function = 1, .value = .{ .set_device_loader_data = destroyingDecliningDeviceLoaderData } };
+    di.p_next = &declining_destroy_callback;
+    try std.testing.expectEqual(Result.success, createDevice(physical[0], &di, null, &device));
+    const stale_device = device;
+    queue = @ptrFromInt(8);
+    getDeviceQueue(device, 0, 0, &queue);
+    try std.testing.expectEqual(@as(usize, 8), @intFromPtr(queue));
+    try std.testing.expect(getDeviceProcAddr(stale_device, "vkDestroyDevice") == null);
     destroyInstance(instance, null);
 }
 
@@ -1036,7 +1047,102 @@ test "physical properties start with coherent conservative limits" {
     try std.testing.expectEqual(@as(u32, 0x1cdc), properties.vendor_id);
     try std.testing.expectEqual(@as(u32, 1), properties.device_id);
     try std.testing.expectEqual(@as(u32, 4), properties.device_type);
-    try std.testing.expectEqualDeep(conservativeLimits(), properties.limits);
+    const l = properties.limits;
+    try std.testing.expect(l.max_image_dimension_1d >= 4096);
+    try std.testing.expect(l.max_image_dimension_2d >= 4096);
+    try std.testing.expect(l.max_image_dimension_3d >= 256);
+    try std.testing.expect(l.max_image_dimension_cube >= 4096);
+    try std.testing.expect(l.max_image_array_layers >= 256);
+    try std.testing.expect(l.max_texel_buffer_elements >= 65_536);
+    try std.testing.expect(l.max_uniform_buffer_range >= 16_384);
+    try std.testing.expect(l.max_storage_buffer_range >= 134_217_728);
+    try std.testing.expect(l.max_push_constants_size >= 128);
+    try std.testing.expect(l.max_memory_allocation_count >= 4096);
+    try std.testing.expect(l.max_sampler_allocation_count >= 4000);
+    try std.testing.expect(l.buffer_image_granularity <= 131_072);
+    try std.testing.expectEqual(@as(u64, 0), l.sparse_address_space_size);
+    try std.testing.expect(l.max_bound_descriptor_sets >= 4);
+    try std.testing.expect(l.max_per_stage_descriptor_samplers >= 16);
+    try std.testing.expect(l.max_per_stage_descriptor_uniform_buffers >= 12);
+    try std.testing.expect(l.max_per_stage_descriptor_storage_buffers >= 4);
+    try std.testing.expect(l.max_per_stage_descriptor_sampled_images >= 16);
+    try std.testing.expect(l.max_per_stage_descriptor_storage_images >= 4);
+    try std.testing.expect(l.max_per_stage_descriptor_input_attachments >= 4);
+    const per_stage_sum = l.max_per_stage_descriptor_uniform_buffers + l.max_per_stage_descriptor_storage_buffers + l.max_per_stage_descriptor_sampled_images + l.max_per_stage_descriptor_storage_images + l.max_per_stage_descriptor_input_attachments + l.max_color_attachments;
+    try std.testing.expect(l.max_per_stage_resources >= @min(per_stage_sum, 128));
+    try std.testing.expect(l.max_descriptor_set_samplers >= 96);
+    try std.testing.expect(l.max_descriptor_set_uniform_buffers >= 72);
+    try std.testing.expect(l.max_descriptor_set_uniform_buffers_dynamic >= 8);
+    try std.testing.expect(l.max_descriptor_set_storage_buffers >= 24);
+    try std.testing.expect(l.max_descriptor_set_storage_buffers_dynamic >= 4);
+    try std.testing.expect(l.max_descriptor_set_sampled_images >= 96);
+    try std.testing.expect(l.max_descriptor_set_storage_images >= 24);
+    try std.testing.expect(l.max_descriptor_set_input_attachments >= 4);
+    try std.testing.expect(l.max_vertex_input_attributes >= 16);
+    try std.testing.expect(l.max_vertex_input_bindings >= 16);
+    try std.testing.expect(l.max_vertex_input_attribute_offset >= 2047);
+    try std.testing.expect(l.max_vertex_input_binding_stride >= 2048);
+    try std.testing.expect(l.max_vertex_output_components >= 64);
+    try std.testing.expectEqual(@as(u32, 0), l.max_tessellation_generation_level);
+    try std.testing.expectEqual(@as(u32, 0), l.max_geometry_shader_invocations);
+    try std.testing.expect(l.max_fragment_input_components >= 128);
+    try std.testing.expect(l.max_fragment_output_attachments >= 4);
+    try std.testing.expectEqual(@as(u32, 0), l.max_fragment_dual_src_attachments);
+    try std.testing.expect(l.max_fragment_combined_output_resources >= l.max_per_stage_descriptor_storage_buffers + l.max_per_stage_descriptor_storage_images + l.max_color_attachments);
+    try std.testing.expect(l.max_compute_shared_memory_size >= 16_384);
+    for (l.max_compute_work_group_count) |value| try std.testing.expect(value >= 65_535);
+    try std.testing.expect(l.max_compute_work_group_invocations >= 128);
+    try std.testing.expect(l.max_compute_work_group_size[0] >= 128 and l.max_compute_work_group_size[1] >= 128 and l.max_compute_work_group_size[2] >= 64);
+    try std.testing.expect(l.sub_pixel_precision_bits >= 4);
+    try std.testing.expect(l.sub_texel_precision_bits >= 4);
+    try std.testing.expect(l.mipmap_precision_bits >= 4);
+    try std.testing.expect(l.max_draw_indexed_index_value >= 0x00ff_ffff);
+    try std.testing.expect(l.max_draw_indirect_count >= 1);
+    try std.testing.expect(l.max_sampler_lod_bias >= 2);
+    try std.testing.expectEqual(@as(f32, 1), l.max_sampler_anisotropy);
+    try std.testing.expectEqual(@as(u32, 1), l.max_viewports);
+    try std.testing.expect(l.max_viewport_dimensions[0] >= l.max_framebuffer_width and l.max_viewport_dimensions[1] >= l.max_framebuffer_height);
+    try std.testing.expect(l.viewport_bounds_range[0] <= -32_768 and l.viewport_bounds_range[1] >= 32_767);
+    try std.testing.expectEqual(@as(u32, 0), l.viewport_sub_pixel_bits);
+    try std.testing.expect(l.min_memory_map_alignment <= 64 and std.math.isPowerOfTwo(l.min_memory_map_alignment));
+    try std.testing.expect(l.min_texel_buffer_offset_alignment <= 256 and std.math.isPowerOfTwo(l.min_texel_buffer_offset_alignment));
+    try std.testing.expect(l.min_uniform_buffer_offset_alignment <= 256 and std.math.isPowerOfTwo(l.min_uniform_buffer_offset_alignment));
+    try std.testing.expect(l.min_storage_buffer_offset_alignment <= 256 and std.math.isPowerOfTwo(l.min_storage_buffer_offset_alignment));
+    try std.testing.expect(l.min_texel_offset <= -8 and l.max_texel_offset >= 7);
+    try std.testing.expectEqual(@as(i32, 0), l.min_texel_gather_offset);
+    try std.testing.expectEqual(@as(u32, 0), l.max_texel_gather_offset);
+    try std.testing.expectEqual(@as(f32, 0), l.min_interpolation_offset);
+    try std.testing.expectEqual(@as(f32, 0), l.max_interpolation_offset);
+    try std.testing.expectEqual(@as(u32, 0), l.sub_pixel_interpolation_offset_bits);
+    try std.testing.expect(l.max_framebuffer_width >= 4096 and l.max_framebuffer_height >= 4096);
+    try std.testing.expectEqual(@as(u32, 1), l.max_framebuffer_layers);
+    const samples_1_4: u32 = 1 | 4;
+    try std.testing.expect(l.framebuffer_color_sample_counts & samples_1_4 == samples_1_4);
+    try std.testing.expect(l.framebuffer_depth_sample_counts & samples_1_4 == samples_1_4);
+    try std.testing.expect(l.framebuffer_stencil_sample_counts & samples_1_4 == samples_1_4);
+    try std.testing.expect(l.framebuffer_no_attachments_sample_counts & samples_1_4 == samples_1_4);
+    try std.testing.expect(l.max_color_attachments >= 4);
+    try std.testing.expect(l.sampled_image_color_sample_counts & samples_1_4 == samples_1_4);
+    try std.testing.expect(l.sampled_image_integer_sample_counts & 1 == 1);
+    try std.testing.expect(l.sampled_image_depth_sample_counts & samples_1_4 == samples_1_4);
+    try std.testing.expect(l.sampled_image_stencil_sample_counts & samples_1_4 == samples_1_4);
+    try std.testing.expect(l.storage_image_sample_counts & 1 == 1);
+    try std.testing.expect(l.max_sample_mask_words >= 1);
+    try std.testing.expectEqual(@as(u32, 0), l.timestamp_compute_and_graphics);
+    try std.testing.expect(l.timestamp_period > 0);
+    try std.testing.expectEqual(@as(u32, 0), l.max_clip_distances);
+    try std.testing.expectEqual(@as(u32, 0), l.max_cull_distances);
+    try std.testing.expectEqual(@as(u32, 0), l.max_combined_clip_and_cull_distances);
+    try std.testing.expect(l.discrete_queue_priorities >= 2);
+    try std.testing.expectEqual([2]f32{ 1, 1 }, l.point_size_range);
+    try std.testing.expectEqual([2]f32{ 1, 1 }, l.line_width_range);
+    try std.testing.expectEqual(@as(f32, 0), l.point_size_granularity);
+    try std.testing.expectEqual(@as(f32, 0), l.line_width_granularity);
+    try std.testing.expectEqual(@as(u32, 0), l.strict_lines);
+    try std.testing.expectEqual(@as(u32, 1), l.standard_sample_locations);
+    try std.testing.expect(std.math.isPowerOfTwo(l.optimal_buffer_copy_offset_alignment));
+    try std.testing.expect(std.math.isPowerOfTwo(l.optimal_buffer_copy_row_pitch_alignment));
+    try std.testing.expect(std.math.isPowerOfTwo(l.non_coherent_atom_size));
     try std.testing.expectEqual(@as(usize, 824), @sizeOf(Properties));
     destroyInstance(instance, null);
 }
