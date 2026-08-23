@@ -1598,13 +1598,12 @@ fn executeValidatedCommand(command: Command) void {
     switch (command) {
         .fill => |op| {
             const bytes = bufferBytes(op.dst)[@intCast(op.offset)..][0..@intCast(op.size)];
-            var i: usize = 0;
-            while (i < bytes.len) : (i += 4) std.mem.writeInt(u32, bytes[i..][0..4], op.data, .little);
+            benchmarkHostMemoryFill(bytes, op.data);
         },
         .copy_buffer => |op| {
             const src = bufferBytes(op.src)[@intCast(op.region.src_offset)..][0..@intCast(op.region.size)];
             const dst = bufferBytes(op.dst)[@intCast(op.region.dst_offset)..][0..@intCast(op.region.size)];
-            std.mem.copyForwards(u8, dst, src);
+            benchmarkHostMemoryCopy(dst, src);
         },
         .clear => |op| {
             const bytes = imageBytes(op.image);
@@ -1633,6 +1632,28 @@ fn executeValidatedCommand(command: Command) void {
             hit(.barrier_transition);
         },
     }
+}
+
+/// CPU implementation shared by vkCmdFillBuffer execution and its benchmark.
+/// This is unified host memory; the Vulkan command semantics do not imply a
+/// discrete-VRAM upload.
+pub fn benchmarkHostMemoryFill(bytes: []u8, data: u32) void {
+    var i: usize = 0;
+    while (i < bytes.len) : (i += 4) std.mem.writeInt(u32, bytes[i..][0..4], data, .little);
+}
+
+/// CPU implementation shared by vkCmdCopyBuffer execution and its benchmark.
+pub fn benchmarkHostMemoryCopy(dst: []u8, src: []const u8) void {
+    std.mem.copyForwards(u8, dst, src);
+}
+
+test "Vulkan host-memory benchmark helpers implement exact command byte semantics" {
+    var filled = [_]u8{0} ** 8;
+    benchmarkHostMemoryFill(&filled, 0x44332211);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x11, 0x22, 0x33, 0x44, 0x11, 0x22, 0x33, 0x44 }, &filled);
+    var copied = [_]u8{0} ** 8;
+    benchmarkHostMemoryCopy(&copied, &filled);
+    try std.testing.expectEqualSlices(u8, &filled, &copied);
 }
 fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy, to_image: bool) void {
     const b = bufferBytes(buffer);

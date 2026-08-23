@@ -137,3 +137,71 @@ This file is append-only. Each entry records a validated JSON report and names t
 | blend | runtime | 63.8670147 | 0.47584634 | 0 | 0 | 901874 | 959688 | 959688 | `d5f99fe5b4e7eef8` |
 | sprites | runtime | 0 | 0.445008613 | 933250.702 | 0 | 137155 | 147176 | 147176 | `3717a00e187d9381` |
 | frame | runtime | 0 | 1.3051471 | 0 | 3876.90065 | 257938 | 268152 | 268152 | `2e480a89ab6181ef` |
+
+### 9ab5b3a893d5090ec8cc4e98734fb98e2c112719
+
+- Entry semantics: benchmarked source commit; the history append commit follows this source commit.
+- UTC: 2026-08-23T11:51:36Z
+- Schema/workload: v3 / `zpu-2d-host-memory-v3-240x240-seed-151521030`
+- Zig/compiler: `0.16.0`; build mode: `ReleaseFast`
+- Trusted CPU: `AMD EPYC 7V13 64-Core Processor`; topology: `0:0@0;0:1@1;0:2@2;0:3@3;0:4@4;0:5@5;0:6@6;0:7@7`; affinity: `0,1,2,3,4,5,6,7`
+- Threads: configured `8`, observed `8`
+- Available backends: avx2, runtime, scalar
+- Baseline comparison: `passed`
+
+| name | backend | MPix/s | bytes/s | modeled GiB/s | draws/s | FPS | p50 ns | p95 ns | p99 ns | checksum_hex |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| clear | scalar | 4064.06548 | 1.62562619e+10 | 15.1398237 | 0 | 0 | 14173 | 17154 | 17154 | `89fcf336d86c4f25` |
+| pixel_write | scalar | 108.199493 | 432797971 | 0.403074521 | 0 | 0 | 4732 | 4824 | 4824 | `3d0737332ec9e1cc` |
+| clipped_rectangle | scalar | 2119.88047 | 8.47952188e+09 | 7.89717015 | 0 | 0 | 5689 | 5721 | 5721 | `2cf726772c9ab549` |
+| vulkan_host_memory_fill | scalar | 6401.42254 | 2.56056902e+10 | 23.8471573 | 0 | 0 | 8998 | 9537 | 9537 | `50dbc316a6090325` |
+| vulkan_host_memory_copy | scalar | 1022.87257 | 8.18298054e+09 | 7.6209945 | 0 | 0 | 56312 | 57259 | 57259 | `4e61ac2d0cc0777b` |
+| source_over_blend | scalar | 45.3709429 | 362967543 | 0.338039867 | 0 | 0 | 1269535 | 1293593 | 1293593 | `d5f99fe5b4e7eef8` |
+| sprite_draw | scalar | 0 | 427058693 | 0.397729402 | 834099.01 | 0 | 153459 | 171075 | 171075 | `e73fc1dc4f99be0c` |
+| frame | scalar | 0 | 966264983 | 0.899904392 | 0 | 2673.13923 | 374092 | 383441 | 383441 | `2e480a89ab6181ef` |
+| clear | avx2 | 17307.6923 | 6.92307692e+10 | 64.4761782 | 0 | 0 | 3328 | 3869 | 3869 | `89fcf336d86c4f25` |
+| pixel_write | avx2 | 109.12191 | 436487639 | 0.406510791 | 0 | 0 | 4692 | 4879 | 4879 | `3d0737332ec9e1cc` |
+| clipped_rectangle | avx2 | 3225.46135 | 1.29018454e+10 | 12.0157799 | 0 | 0 | 3739 | 3916 | 3916 | `2cf726772c9ab549` |
+| source_over_blend | avx2 | 65.1872038 | 521497631 | 0.485682516 | 0 | 0 | 883609 | 1010989 | 1010989 | `d5f99fe5b4e7eef8` |
+| sprite_draw | avx2 | 0 | 425011998 | 0.395823268 | 830101.558 | 0 | 154198 | 161199 | 161199 | `e73fc1dc4f99be0c` |
+| frame | avx2 | 0 | 1.44271403e+09 | 1.34363214 | 0 | 3991.21932 | 250550 | 255935 | 255935 | `2e480a89ab6181ef` |
+| clear | runtime | 16391.5766 | 6.55663062e+10 | 61.0633811 | 0 | 0 | 3514 | 4410 | 4410 | `89fcf336d86c4f25` |
+| pixel_write | runtime | 103.980504 | 415922015 | 0.387357561 | 0 | 0 | 4924 | 6575 | 6575 | `3d0737332ec9e1cc` |
+| clipped_rectangle | runtime | 3064.80305 | 1.22592122e+10 | 11.4172811 | 0 | 0 | 3935 | 4017 | 4017 | `2cf726772c9ab549` |
+| source_over_blend | runtime | 67.5084122 | 540067297 | 0.502976866 | 0 | 0 | 853227 | 998549 | 998549 | `d5f99fe5b4e7eef8` |
+| sprite_draw | runtime | 0 | 404848095 | 0.377044171 | 790718.936 | 0 | 161878 | 179598 | 179598 | `e73fc1dc4f99be0c` |
+| frame | runtime | 0 | 1.45373819e+09 | 1.35389919 | 0 | 4021.71727 | 248650 | 258014 | 258014 | `2e480a89ab6181ef` |
+
+### c5422df938371235922c52be7dcb911afb3daed3
+
+- Entry semantics: benchmarked source commit; the history append commit follows this source commit.
+- UTC: 2026-08-23T12:09:20Z
+- Schema/workload: v3 / `zpu-2d-host-memory-v3-240x240-seed-151521030`
+- Zig/compiler: `0.16.0`; build mode: `ReleaseFast`
+- Trusted CPU: `AMD EPYC 7V13 64-Core Processor`; topology: `0:0@0;0:1@1;0:2@2;0:3@3;0:4@4;0:5@5;0:6@6;0:7@7`; affinity: `0,1,2,3,4,5,6,7`
+- Threads: configured `8`, observed `8`
+- Available backends: avx2, runtime, scalar
+- Baseline comparison: `passed`
+
+| name | backend | MPix/s | bytes/s | modeled GiB/s | draws/s | FPS | p50 ns | p95 ns | p99 ns | checksum_hex |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| clear | scalar | 3891.10315 | 1.55644126e+10 | 14.4954888 | 0 | 0 | 14803 | 15451 | 15451 | `89fcf336d86c4f25` |
+| pixel_write | scalar | 107.068172 | 428272689 | 0.398860024 | 0 | 0 | 4782 | 9736 | 9736 | `3d0737332ec9e1cc` |
+| clipped_rectangle | scalar | 2064.71495 | 8.25885978e+09 | 7.69166256 | 0 | 0 | 5841 | 15313 | 15313 | `2cf726772c9ab549` |
+| vulkan_host_memory_fill | scalar | 6155.81917 | 2.46232767e+10 | 22.9322134 | 0 | 0 | 9357 | 15937 | 15937 | `50dbc316a6090325` |
+| vulkan_host_memory_copy | scalar | 995.317171 | 7.96253737e+09 | 7.4156908 | 0 | 0 | 57871 | 68589 | 68589 | `4e61ac2d0cc0777b` |
+| source_over_blend | scalar | 41.993924 | 335951392 | 0.312879115 | 0 | 0 | 1371627 | 1392424 | 1392424 | `d5f99fe5b4e7eef8` |
+| sprite_draw | scalar | 0 | 395724896 | 0.368547529 | 772900.187 | 0 | 165610 | 179567 | 179567 | `e73fc1dc4f99be0c` |
+| frame | scalar | 0 | 889744379 | 0.828639025 | 0 | 2461.44758 | 406265 | 423219 | 423219 | `2e480a89ab6181ef` |
+| clear | avx2 | 15677.7354 | 6.27109418e+10 | 58.4041157 | 0 | 0 | 3674 | 10273 | 10273 | `89fcf336d86c4f25` |
+| pixel_write | avx2 | 109.471884 | 437887535 | 0.407814546 | 0 | 0 | 4677 | 7730 | 7730 | `3d0737332ec9e1cc` |
+| clipped_rectangle | avx2 | 3205.74163 | 1.28229665e+10 | 11.9423182 | 0 | 0 | 3762 | 8468 | 8468 | `2cf726772c9ab549` |
+| source_over_blend | avx2 | 64.4956852 | 515965481 | 0.480530301 | 0 | 0 | 893083 | 927686 | 927686 | `d5f99fe5b4e7eef8` |
+| sprite_draw | avx2 | 0 | 375859557 | 0.350046491 | 734100.698 | 0 | 174363 | 188365 | 188365 | `e73fc1dc4f99be0c` |
+| frame | avx2 | 0 | 1.24572063e+09 | 1.16016774 | 0 | 3446.24377 | 290171 | 311062 | 311062 | `2e480a89ab6181ef` |
+| clear | runtime | 14761.6607 | 5.90466427e+10 | 54.9914713 | 0 | 0 | 3902 | 11480 | 11480 | `89fcf336d86c4f25` |
+| pixel_write | runtime | 103.246622 | 412986489 | 0.38462364 | 0 | 0 | 4959 | 13491 | 13491 | `3d0737332ec9e1cc` |
+| clipped_rectangle | runtime | 3002.24048 | 1.20089619e+10 | 11.1842173 | 0 | 0 | 4017 | 11541 | 11541 | `2cf726772c9ab549` |
+| source_over_blend | runtime | 63.0457673 | 504366138 | 0.46972757 | 0 | 0 | 913622 | 947687 | 947687 | `d5f99fe5b4e7eef8` |
+| sprite_draw | runtime | 0 | 393940851 | 0.366886008 | 769415.725 | 0 | 166360 | 192143 | 192143 | `e73fc1dc4f99be0c` |
+| frame | runtime | 0 | 1.3210006e+09 | 1.23027768 | 0 | 3654.50326 | 273635 | 291347 | 291347 | `2e480a89ab6181ef` |

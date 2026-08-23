@@ -170,13 +170,13 @@ pub fn main(init: std.process.Init) !void {
     const out = &stdout_file.interface;
     if (json_only) try out.writeAll(encoded) else {
         try out.print("ZPU 2D benchmark: {s}\n", .{bench.workload_id});
-        for (report.metrics) |m| try out.print("{s: <13} {s: <7} {d: >9.2} MPix/s {d: >7.2} modeled-GiB/s {d: >10.0} draws/s {d: >8.1} FPS p50/p95/p99={d}/{d}/{d} ns checksum={s}\n", .{ m.name, m.backend, m.mpix_s, m.effective_gib_s, m.draws_s, m.fps, m.frame.p50_ns, m.frame.p95_ns, m.frame.p99_ns, m.checksum_hex });
+        for (report.metrics) |m| try out.print("{s: <26} {s: <7} {d: >9.2} MPix/s {d: >12.2} bytes/s {d: >7.2} modeled-GiB/s {d: >10.0} draws/s {d: >8.1} FPS p50/p95/p99={d}/{d}/{d} ns checksum={s}\n", .{ m.name, m.backend, m.mpix_s, m.bytes_s, m.effective_gib_s, m.draws_s, m.fps, m.frame.p50_ns, m.frame.p95_ns, m.frame.p99_ns, m.checksum_hex });
     }
     try out.flush();
 }
 
 test "JSON round trip and malformed input" {
-    const r = bench.Report{ .schema_version = bench.schema_version, .workload_id = bench.workload_id, .fingerprint = .{ .arch = "x86_64", .os = "linux", .cpu_model = "cpu", .selected_cpus = "2", .topology = "0:0@2", .compiler = builtin.zig_version_string, .build_mode = @tagName(builtin.mode), .max_threads = 1, .limited_gate = "physical-core-v1" }, .warmup_iterations = 1, .sample_count = 3, .metrics = &[_]bench.Metric{.{ .name = "copy", .backend = "scalar", .iterations = 3, .checksum = 4, .checksum_hex = "0000000000000004", .mpix_s = 1, .effective_gib_s = 2, .draws_s = 0, .fps = 0, .frame = .{ .p50_ns = 1, .p95_ns = 2, .p99_ns = 3 } }} };
+    const r = bench.Report{ .schema_version = bench.schema_version, .workload_id = bench.workload_id, .fingerprint = .{ .arch = "x86_64", .os = "linux", .cpu_model = "cpu", .selected_cpus = "2", .topology = "0:0@2", .compiler = builtin.zig_version_string, .build_mode = @tagName(builtin.mode), .max_threads = 1, .limited_gate = "physical-core-v1" }, .warmup_iterations = 1, .sample_count = 3, .metrics = &[_]bench.Metric{.{ .name = "copy", .backend = "scalar", .iterations = 3, .checksum = 4, .checksum_hex = "0000000000000004", .mpix_s = 1, .bytes_s = 2147483648, .effective_gib_s = 2, .draws_s = 0, .fps = 0, .frame = .{ .p50_ns = 1, .p95_ns = 2, .p99_ns = 3 } }} };
     const bytes = try emitJson(std.testing.allocator, r);
     defer std.testing.allocator.free(bytes);
     var parsed = try parseBaseline(std.testing.allocator, bytes);
