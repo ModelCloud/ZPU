@@ -9,14 +9,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-OPS = ["clear", "pixel", "fill", "transfer_fill", "transfer_copy", "blend", "sprites", "frame"]
-RASTER = ["clear", "pixel", "fill", "blend", "sprites", "frame"]
+OPS = ["clear", "pixel_write", "clipped_rectangle", "vulkan_host_memory_fill", "vulkan_host_memory_copy", "source_over_blend", "sprite_draw", "frame"]
+RASTER = ["clear", "pixel_write", "clipped_rectangle", "source_over_blend", "sprite_draw", "frame"]
 ORACLES = {
-    "clear": "89fcf336d86c4f25", "pixel": "3d0737332ec9e1cc",
-    "fill": "b5cb439ce748a598", "transfer_fill": "50dbc316a6090325",
-    "transfer_copy": "4e61ac2d0cc0777b", "blend": "d5f99fe5b4e7eef8",
-    "sprites": "3717a00e187d9381", "frame": "2e480a89ab6181ef",
+    "clear": "89fcf336d86c4f25", "pixel_write": "3d0737332ec9e1cc",
+    "clipped_rectangle": "2cf726772c9ab549", "vulkan_host_memory_fill": "50dbc316a6090325",
+    "vulkan_host_memory_copy": "4e61ac2d0cc0777b", "source_over_blend": "d5f99fe5b4e7eef8",
+    "sprite_draw": "e73fc1dc4f99be0c", "frame": "2e480a89ab6181ef",
 }
+LEGACY_ORACLES = ["89fcf336d86c4f25", "3d0737332ec9e1cc", "b5cb439ce748a598", "50dbc316a6090325", "4e61ac2d0cc0777b", "d5f99fe5b4e7eef8", "3717a00e187d9381", "2e480a89ab6181ef"]
 
 def fail(message):
     raise SystemExit(f"history refusal: {message}")
@@ -68,7 +69,7 @@ def trusted_fingerprint(fp):
     if fp.get("topology") != ";".join(topo): fail("topology fingerprint is not trusted")
 
 def validate_report(report):
-    if report.get("schema_version") != 2 or report.get("workload_id") != "zpu-2d-v2-240x240-seed-151521030":
+    if report.get("schema_version") != 3 or report.get("workload_id") != "zpu-2d-host-memory-v3-240x240-seed-151521030":
         fail("schema/workload mismatch")
     if report.get("rate_tolerance_fraction") != 0.20 or report.get("latency_tolerance_fraction") != 1.50:
         fail("tolerance policy mismatch")
@@ -91,13 +92,13 @@ def validate_report(report):
         seen.add(key)
         if m.get("checksum_hex") != ORACLES[key[0]] or int(m.get("checksum", -1)) != int(ORACLES[key[0]], 16):
             fail(f"oracle mismatch for {key[0]}/{key[1]}")
-        for field in ("mpix_s", "effective_gib_s", "draws_s", "fps"):
+        for field in ("mpix_s", "bytes_s", "effective_gib_s", "draws_s", "fps"):
             value = m.get(field)
             if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                 fail(f"invalid {field}")
-        if key[0] in ("sprites", "frame") and m["mpix_s"] != 0: fail("inapplicable MPix metric is nonzero")
-        if key[0] == "sprites" and m["draws_s"] <= 0: fail("sprites draws/s is zero")
-        if key[0] != "sprites" and m["draws_s"] != 0: fail("inapplicable draws/s is nonzero")
+        if key[0] in ("sprite_draw", "frame") and m["mpix_s"] != 0: fail("inapplicable MPix metric is nonzero")
+        if key[0] == "sprite_draw" and m["draws_s"] <= 0: fail("sprite draws/s is zero")
+        if key[0] != "sprite_draw" and m["draws_s"] != 0: fail("inapplicable draws/s is nonzero")
         if key[0] == "frame" and m["fps"] <= 0: fail("frame FPS is zero")
         if key[0] != "frame" and m["fps"] != 0: fail("inapplicable FPS is nonzero")
         frame = m.get("frame", {})
@@ -118,12 +119,12 @@ def markdown(report, source_commit, comparison, observed):
         f"- Threads: configured `{fp['max_threads']}`, observed `{observed}`",
         f"- Available backends: {', '.join(sorted({m['backend'] for m in report['metrics']}))}",
         f"- Baseline comparison: `{comparison}`",
-        "", "| name | backend | MPix/s | modeled GiB/s | draws/s | FPS | p50 ns | p95 ns | p99 ns | checksum_hex |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+        "", "| name | backend | MPix/s | bytes/s | modeled GiB/s | draws/s | FPS | p50 ns | p95 ns | p99 ns | checksum_hex |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for m in report["metrics"]:
         p = m["frame"]
-        lines.append(f"| {m['name']} | {m['backend']} | {m['mpix_s']:.9g} | {m['effective_gib_s']:.9g} | {m['draws_s']:.9g} | {m['fps']:.9g} | {p['p50_ns']} | {p['p95_ns']} | {p['p99_ns']} | `{m['checksum_hex']}` |")
+        lines.append(f"| {m['name']} | {m['backend']} | {m['mpix_s']:.9g} | {m['bytes_s']:.9g} | {m['effective_gib_s']:.9g} | {m['draws_s']:.9g} | {m['fps']:.9g} | {p['p50_ns']} | {p['p95_ns']} | {p['p99_ns']} | `{m['checksum_hex']}` |")
     return "\n".join(lines) + "\n"
 
 def main():
@@ -147,7 +148,8 @@ def main():
             block = text.split(f"### {commit}", 1)[1].split("\n### ", 1)[0]
             for required in ("Entry semantics:", "- UTC:", "Schema/workload:", "Zig/compiler:", "Trusted CPU:", "Threads:", "Available backends:", "Baseline comparison:", "| name | backend |"):
                 if required not in block: fail(f"history entry {commit} is missing {required}")
-            for checksum_hex in ORACLES.values():
+            expected_oracles = LEGACY_ORACLES if "Schema/workload: v2 / `zpu-2d-v2-240x240-seed-151521030`" in block else ORACLES.values()
+            for checksum_hex in expected_oracles:
                 if f"`{checksum_hex}`" not in block: fail(f"history entry {commit} is missing checksum {checksum_hex}")
         return
     if not args.json_path or not args.history_path or not args.commit or args.observed_threads is None: fail("JSON, history, --commit, and --observed-threads are required")
