@@ -107,7 +107,7 @@ int main(void) {
     bad.extent.width = UINT32_MAX;
     CHECK_TRUE(vkCreateImage(device, &bad, NULL, &bad_image) == VK_ERROR_INITIALIZATION_FAILED);
     VkBuffer bad_buffer;
-    VkBufferCreateInfo bad_buffer_info = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 16, .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+    VkBufferCreateInfo bad_buffer_info = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 16, .usage = VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
     CHECK_TRUE(vkCreateBuffer(device, &bad_buffer_info, NULL, &bad_buffer) == VK_ERROR_INITIALIZATION_FAILED);
 
     VkBuffer misaligned;

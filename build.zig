@@ -166,4 +166,42 @@ pub fn build(b: *std.Build) void {
     run_transfer.step.dependOn(b.getInstallStep());
     const transfer_step = b.step("transfer", "Run exact 240x240 transfers through the system Vulkan loader");
     transfer_step.dependOn(&run_transfer.step);
+
+    const desktop_probe = b.addExecutable(.{
+        .name = "zpu-desktop-readiness",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize }),
+    });
+    desktop_probe.root_module.addCSourceFile(.{ .file = b.path("test/desktop_readiness.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+    desktop_probe.root_module.link_libc = true;
+    desktop_probe.root_module.linkSystemLibrary("vulkan", .{});
+
+    const run_desktop_probe = b.addRunArtifact(desktop_probe);
+    run_desktop_probe.step.dependOn(&require_limited.step);
+    run_desktop_probe.setEnvironmentVariable("VK_DRIVER_FILES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_desktop_probe.step.dependOn(b.getInstallStep());
+    const desktop_probe_step = b.step("desktop-probe", "Report Vulkan window-system and rendering readiness without requiring success");
+    desktop_probe_step.dependOn(&run_desktop_probe.step);
+
+    const require_desktop_ready = b.addRunArtifact(desktop_probe);
+    require_desktop_ready.addArg("--require-ready");
+    require_desktop_ready.step.dependOn(&require_limited.step);
+    require_desktop_ready.setEnvironmentVariable("VK_DRIVER_FILES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    require_desktop_ready.step.dependOn(b.getInstallStep());
+    const desktop_ready_step = b.step("desktop-ready", "Require enough Vulkan WSI and rendering support to start a window test");
+    desktop_ready_step.dependOn(&require_desktop_ready.step);
+
+    const vkcube_probe = b.addSystemCommand(&.{"test/vkcube_compat.sh"});
+    vkcube_probe.addArg(b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    vkcube_probe.step.dependOn(&require_limited.step);
+    vkcube_probe.step.dependOn(b.getInstallStep());
+    const vkcube_probe_step = b.step("vkcube-probe", "Run two XCB vkcube frames under Xvfb and report the current blocker");
+    vkcube_probe_step.dependOn(&vkcube_probe.step);
+
+    const require_vkcube_ready = b.addSystemCommand(&.{"test/vkcube_compat.sh"});
+    require_vkcube_ready.addArg(b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    require_vkcube_ready.addArg("--require-ready");
+    require_vkcube_ready.step.dependOn(&require_limited.step);
+    require_vkcube_ready.step.dependOn(b.getInstallStep());
+    const vkcube_ready_step = b.step("vkcube-ready", "Require two presented XCB vkcube frames under Xvfb");
+    vkcube_ready_step.dependOn(&require_vkcube_ready.step);
 }

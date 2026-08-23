@@ -15,8 +15,8 @@ jobs:
       - name: Install reproducible Ubuntu coverage and Vulkan-loader tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends kcov libvulkan1 vulkan-tools
-          dpkg-query -W -f='${Package}=${Version}\n' kcov libvulkan1 vulkan-tools
+          sudo apt-get install -y --no-install-recommends kcov libvulkan1 vulkan-tools xauth xvfb
+          dpkg-query -W -f='${Package}=${Version}\n' kcov libvulkan1 vulkan-tools xauth xvfb
       - run: tools/limited-cpus.sh zig fmt --check build.zig src tools
       - run: tools/limited-cpus.sh zig build
       - run: test "$(realpath zig-out/share/vulkan/icd.d/../../../lib/libvulkan_zpu.so)" = "$(realpath zig-out/lib/libvulkan_zpu.so)"
@@ -59,6 +59,10 @@ jobs:
           grep -Ei 'deviceID[[:space:]]*=[[:space:]]*0x0001' vulkaninfo-summary.txt
       - name: Exact 240x240 system-loader transfer validation
         run: tools/limited-cpus.sh zig build transfer
+      - name: Require desktop/window-system readiness boundary
+        run: tools/limited-cpus.sh zig build desktop-ready
+      - name: Require canonical two-frame Xvfb vkcube compatibility
+        run: tools/limited-cpus.sh zig build vkcube-ready
       - run: tools/limited-cpus.sh zig build demo
       - run: test "$(sha256sum zpu-demo.ppm | cut -d' ' -f1)" = "919b08ed95dec247b8c456e7fc1b85ac47e5a9d0030a54f6287fbfe424d37ef4"
       - run: tools/limited-cpus.sh zig build -Doptimize=ReleaseFast

@@ -12,6 +12,8 @@ zig build test
 zig build coverage
 zig build smoke
 zig build transfer
+zig build desktop-probe
+zig build vkcube-probe
 zig build demo
 ```
 
@@ -40,6 +42,21 @@ GPU0:
 ```
 
 The demo composes a small desktop-like scene entirely on the CPU and writes deterministic `zpu-demo.ppm` output. It needs no Vulkan loader, window system, or physical GPU. `zig-out/bin/zpu-demo another.ppm` selects another output path.
+
+`zig build desktop-probe` reports whether the ICD has reached the minimum WSI,
+swapchain, color-target, synchronization, and draw-command boundary needed to
+start testing a Vulkan window under X11 or Wayland. It reports
+`READY_FOR_WINDOW_TEST` for the XCB backend; `zig build desktop-ready` is the
+corresponding strict gate. The staged path toward an Xfce-adjacent test is documented in
+[docs/desktop-readiness.md](docs/desktop-readiness.md).
+
+`zig build vkcube-probe` is the canonical first application compatibility test.
+It starts Xvfb, isolates Vulkan loader discovery to ZPU, and asks the system
+`vkcube` to render and present two XCB frames. It currently reports the first
+blocker without failing CI; `zig build vkcube-ready` is the strict gate and
+currently passes. This is an API-lifecycle compatibility milestone: render-object
+creation and draw submission are accepted, but general SPIR-V execution and
+pixel-accurate cube rasterization remain future work.
 
 ## Architecture
 
@@ -96,6 +113,8 @@ tools/limited-cpus.sh zig build behavior
 tools/limited-cpus.sh zig build coverage
 tools/limited-cpus.sh zig build smoke
 tools/limited-cpus.sh zig build transfer
+tools/limited-cpus.sh zig build desktop-probe
+tools/limited-cpus.sh zig build vkcube-probe
 tools/limited-cpus.sh zig build benchmark -Doptimize=ReleaseFast -- --smoke --json
 tools/limited-cpus.sh zig build demo
 tools/limited-cpus.sh zig build -Doptimize=ReleaseFast

@@ -147,6 +147,18 @@ pub const ImageCopy = extern struct { src_subresource: ImageSubresourceLayers, s
 pub const ClearColorValue = extern union { float32: [4]f32, int32: [4]i32, uint32: [4]u32 };
 pub const ImageSubresourceRange = extern struct { aspect_mask: u32, base_mip_level: u32, level_count: u32, base_array_layer: u32, layer_count: u32 };
 pub const ImageMemoryBarrier = extern struct { s_type: i32, p_next: ?*const anyopaque, src_access_mask: u32, dst_access_mask: u32, old_layout: i32, new_layout: i32, src_queue_family_index: u32, dst_queue_family_index: u32, image: usize, subresource_range: ImageSubresourceRange };
+pub const Extent2D = extern struct { width: u32, height: u32 };
+pub const XcbSurfaceCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, connection: ?*anyopaque, window: u32 };
+pub const SurfaceCapabilities = extern struct { min_image_count: u32, max_image_count: u32, current_extent: Extent2D, min_image_extent: Extent2D, max_image_extent: Extent2D, max_image_array_layers: u32, supported_transforms: u32, current_transform: u32, supported_composite_alpha: u32, supported_usage_flags: u32 };
+pub const SurfaceFormat = extern struct { format: i32, color_space: i32 };
+pub const SwapchainCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, surface: usize, min_image_count: u32, image_format: i32, image_color_space: i32, image_extent: Extent2D, image_array_layers: u32, image_usage: u32, image_sharing_mode: i32, queue_family_index_count: u32, queue_family_indices: ?[*]const u32, pre_transform: u32, composite_alpha: u32, present_mode: i32, clipped: u32, old_swapchain: usize };
+pub const ImageViewCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, image: usize, view_type: i32, format: i32, components: [4]i32, subresource_range: ImageSubresourceRange };
+pub const FramebufferCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, render_pass: usize, attachment_count: u32, attachments: ?[*]const usize, width: u32, height: u32, layers: u32 };
+pub const ClearValue = extern union { color: ClearColorValue, depth_stencil: extern struct { depth: f32, stencil: u32 } };
+pub const Rect2D = extern struct { offset: extern struct { x: i32, y: i32 }, extent: Extent2D };
+pub const RenderPassBeginInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, render_pass: usize, framebuffer: usize, render_area: Rect2D, clear_value_count: u32, clear_values: ?[*]const ClearValue };
+pub const DescriptorSetAllocateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, descriptor_pool: usize, descriptor_set_count: u32, set_layouts: ?[*]const usize };
+pub const PresentInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, wait_semaphore_count: u32, wait_semaphores: ?[*]const usize, swapchain_count: u32, swapchains: ?[*]const usize, image_indices: ?[*]const u32, results: ?[*]Result };
 const SetInstanceLoaderData = *const fn (Instance, *anyopaque) callconv(.c) Result;
 const SetDeviceLoaderData = *const fn (Device, *anyopaque) callconv(.c) Result;
 pub const InstanceObj = extern struct { loader_data: usize, set_loader_data: ?SetInstanceLoaderData };
@@ -159,10 +171,15 @@ pub const Device = *DeviceObj;
 pub const Queue = *QueueObj;
 const MemoryObj = struct { owner: Device, bytes: []align(64) u8, mapped: bool };
 const BufferObj = struct { owner: Device, size: u64, usage: u32, memory: ?*MemoryObj = null, offset: u64 = 0 };
-const ImageObj = struct { owner: Device, width: u32, height: u32, format: i32, usage: u32, layout: i32, memory: ?*MemoryObj = null, offset: u64 = 0 };
+const ImageObj = struct { owner: Device, width: u32, height: u32, format: i32, usage: u32, layout: i32, memory: ?*MemoryObj = null, owned_bytes: ?[]align(64) u8 = null, offset: u64 = 0 };
 const FenceObj = struct { owner: Device, signaled: bool };
+const SemaphoreObj = struct { owner: Device, signaled: bool };
 const CommandPoolObj = struct { owner: Device };
-const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8 }, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 } };
+const SurfaceObj = struct { owner: Instance, connection: *anyopaque, window: u32 };
+const ImageViewObj = struct { owner: Device, image: *ImageObj };
+const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj };
+const SwapchainObj = struct { owner: Device, surface: *SurfaceObj, width: u32, height: u32, image_count: u32, images: [3]usize, next_image: u32 };
+const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8 }, render_clear: struct { image: *ImageObj, color: [4]u8 }, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 } };
 const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, state: u8, invalid: bool, count: u16, commands: [256]Command };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
 pub const CommandBuffer = *CommandBufferObj;
@@ -186,11 +203,22 @@ var image_objects: [max_child_objects]ImageObj = undefined;
 var image_state = [_]SlotState{.never} ** max_child_objects;
 var fence_objects: [max_child_objects]FenceObj = undefined;
 var fence_state = [_]SlotState{.never} ** max_child_objects;
+var semaphore_objects: [max_child_objects]SemaphoreObj = undefined;
+var semaphore_state = [_]SlotState{.never} ** max_child_objects;
 var command_pool_objects: [max_child_objects]CommandPoolObj = undefined;
 var command_pool_state = [_]SlotState{.never} ** max_child_objects;
 var command_buffer_objects: [max_child_objects]CommandBufferObj = undefined;
 var command_buffer_impls: [max_child_objects]CommandBufferImpl = undefined;
 var command_buffer_state = [_]SlotState{.never} ** max_child_objects;
+var surface_objects: [max_child_objects]SurfaceObj = undefined;
+var surface_state = [_]SlotState{.never} ** max_child_objects;
+var image_view_objects: [max_child_objects]ImageViewObj = undefined;
+var image_view_state = [_]SlotState{.never} ** max_child_objects;
+var framebuffer_objects: [max_child_objects]FramebufferObj = undefined;
+var framebuffer_state = [_]SlotState{.never} ** max_child_objects;
+var swapchain_objects: [8]SwapchainObj = undefined;
+var swapchain_state = [_]SlotState{.never} ** 8;
+var generic_handle: usize = 0x10000;
 var mutex: std.atomic.Mutex = .unlocked;
 
 const Requirement = enum(u6) {
@@ -351,6 +379,9 @@ fn validDeviceLocked(h: Device) bool {
     };
     return false;
 }
+fn validSurfaceLocked(handle: usize) ?*SurfaceObj {
+    return findLiveHandle(SurfaceObj, handle, &surface_objects, &surface_state);
+}
 fn ptr(comptime f: anytype) Fn {
     return @ptrCast(&f);
 }
@@ -378,15 +409,34 @@ fn enumerateInstanceExtensions(layer: ?[*:0]const u8, count: ?*u32, props: ?[*]E
         return .error_initialization_failed;
     };
     if (layer != null) return .error_extension_not_present;
-    _ = props;
-    n.* = 0;
+    const names = [_][]const u8{ "VK_KHR_surface", "VK_KHR_xcb_surface" };
+    const versions = [_]u32{ 25, 6 };
+    if (props) |items| {
+        const available = n.*;
+        const written = @min(available, names.len);
+        for (0..written) |i| {
+            items[i] = std.mem.zeroes(ExtensionProperties);
+            @memcpy(items[i].name[0..names[i].len], names[i]);
+            items[i].spec_version = versions[i];
+        }
+        n.* = @intCast(written);
+        return if (available < names.len) .incomplete else .success;
+    }
+    n.* = names.len;
     return .success;
+}
+fn supportedInstanceExtension(name: [*:0]const u8) bool {
+    const value = std.mem.span(name);
+    return std.mem.eql(u8, value, "VK_KHR_surface") or std.mem.eql(u8, value, "VK_KHR_xcb_surface");
 }
 fn createInstance(info: ?*const InstanceInfo, alloc: ?*const Alloc, output: ?*Instance) callconv(.c) Result {
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
     if (ci.layer_count != 0) return .error_layer_not_present;
-    if (ci.extension_count != 0) return .error_extension_not_present;
+    if (ci.extension_count != 0) {
+        const extensions = ci.extensions orelse return .error_extension_not_present;
+        for (extensions[0..ci.extension_count]) |extension| if (!supportedInstanceExtension(extension)) return .error_extension_not_present;
+    }
     if (alloc != null) {
         hit(.instance_allocator);
         return .error_initialization_failed;
@@ -419,11 +469,88 @@ fn destroyInstance(instance: ?Instance, alloc: ?*const Alloc) callconv(.c) void 
     lock();
     defer mutex.unlock();
     for (&instance_objects, &physical_objects, &instance_state) |*o, *p, *state| if (state.* == .live and o == h) {
+        for (&surface_objects, &surface_state) |*surface, *child_state| if (child_state.* == .live and surface.owner == h) {
+            child_state.* = .tombstone;
+        };
         state.* = .tombstone;
         o.loader_data = 0;
         p.loader_data = 0;
         return;
     };
+}
+fn createXcbSurface(instance: ?Instance, info: ?*const XcbSurfaceCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    if (alloc != null) return .error_initialization_failed;
+    const h = instance orelse return .error_initialization_failed;
+    const ci = info orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    if (ci.s_type != 1_000_005_000 or ci.p_next != null or ci.flags != 0 or ci.connection == null or ci.window == 0) return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    if (!validInstanceLocked(h)) return .error_initialization_failed;
+    for (&surface_objects, &surface_state) |*surface, *state| if (state.* == .never) {
+        surface.* = .{ .owner = h, .connection = ci.connection.?, .window = ci.window };
+        state.* = .live;
+        out.* = @intFromPtr(surface);
+        return .success;
+    };
+    return .error_out_of_host_memory;
+}
+fn destroySurface(instance: ?Instance, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+    if (alloc != null or handle == 0) return;
+    lock();
+    defer mutex.unlock();
+    const h = instance orelse return;
+    const surface = validSurfaceLocked(handle) orelse return;
+    if (surface.owner != h or !validInstanceLocked(h)) return;
+    stateForObject(SurfaceObj, surface, &surface_objects, &surface_state).?.* = .tombstone;
+}
+fn getSurfaceSupport(physical: ?Physical, family: u32, handle: usize, output: ?*u32) callconv(.c) Result {
+    lock();
+    defer mutex.unlock();
+    const p = physical orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    const surface = validSurfaceLocked(handle) orelse return .error_initialization_failed;
+    if (!validPhysicalLocked(p) or surface.owner != p.owner or family != 0) return .error_initialization_failed;
+    out.* = 1;
+    return .success;
+}
+fn getSurfaceCapabilities(physical: ?Physical, handle: usize, output: ?*SurfaceCapabilities) callconv(.c) Result {
+    lock();
+    defer mutex.unlock();
+    const p = physical orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    const surface = validSurfaceLocked(handle) orelse return .error_initialization_failed;
+    if (!validPhysicalLocked(p) or surface.owner != p.owner) return .error_initialization_failed;
+    out.* = .{ .min_image_count = 2, .max_image_count = 3, .current_extent = .{ .width = std.math.maxInt(u32), .height = std.math.maxInt(u32) }, .min_image_extent = .{ .width = 1, .height = 1 }, .max_image_extent = .{ .width = 4096, .height = 4096 }, .max_image_array_layers = 1, .supported_transforms = 1, .current_transform = 1, .supported_composite_alpha = 1, .supported_usage_flags = 0x10 };
+    return .success;
+}
+fn getSurfaceFormats(physical: ?Physical, handle: usize, count: ?*u32, output: ?[*]SurfaceFormat) callconv(.c) Result {
+    lock();
+    defer mutex.unlock();
+    const p = physical orelse return .error_initialization_failed;
+    const n = count orelse return .error_initialization_failed;
+    const surface = validSurfaceLocked(handle) orelse return .error_initialization_failed;
+    if (!validPhysicalLocked(p) or surface.owner != p.owner) return .error_initialization_failed;
+    if (output) |items| {
+        if (n.* == 0) return .incomplete;
+        items[0] = .{ .format = 44, .color_space = 0 };
+        n.* = 1;
+    } else n.* = 1;
+    return .success;
+}
+fn getSurfacePresentModes(physical: ?Physical, handle: usize, count: ?*u32, output: ?[*]i32) callconv(.c) Result {
+    lock();
+    defer mutex.unlock();
+    const p = physical orelse return .error_initialization_failed;
+    const n = count orelse return .error_initialization_failed;
+    const surface = validSurfaceLocked(handle) orelse return .error_initialization_failed;
+    if (!validPhysicalLocked(p) or surface.owner != p.owner) return .error_initialization_failed;
+    if (output) |items| {
+        if (n.* == 0) return .incomplete;
+        items[0] = 2;
+        n.* = 1;
+    } else n.* = 1;
+    return .success;
 }
 fn enumeratePhysicalDevices(instance: ?Instance, count: ?*u32, output: ?[*]Physical) callconv(.c) Result {
     const h = instance orelse return .error_initialization_failed;
@@ -595,7 +722,7 @@ fn getMemoryProperties(physical: ?Physical, output: ?*MemoryProperties) callconv
     const out = output orelse return;
     out.* = std.mem.zeroes(MemoryProperties);
     out.memory_type_count = 1;
-    out.memory_types[0] = .{ .property_flags = 0x6, .heap_index = 0 };
+    out.memory_types[0] = .{ .property_flags = 0x7, .heap_index = 0 };
     out.memory_heap_count = 1;
     out.memory_heaps[0] = .{ .size = 256 * 1024 * 1024, .flags = 0 };
 }
@@ -604,13 +731,17 @@ fn getFormatProperties(physical: ?Physical, format: i32, output: ?*FormatPropert
     defer mutex.unlock();
     if (!validPhysicalLocked(physical orelse return)) return;
     const out = output orelse return;
-    out.* = .{ .linear_tiling_features = if (supportedFormat(format)) 0x4000 | 0x8000 else 0, .optimal_tiling_features = 0, .buffer_features = 0 };
+    out.* = switch (format) {
+        37, 43, 44 => .{ .linear_tiling_features = 0x1 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x4000 | 0x8000, .buffer_features = 0 },
+        124 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200, .buffer_features = 0 },
+        else => std.mem.zeroes(FormatProperties),
+    };
 }
 fn getImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, tiling: i32, usage: u32, flags: u32, output: ?*anyopaque) callconv(.c) Result {
     lock();
     defer mutex.unlock();
     if (!validPhysicalLocked(physical orelse return .error_initialization_failed)) return .error_initialization_failed;
-    if (!supportedFormat(format) or image_type != 1 or tiling != 1 or flags != 0 or usage == 0 or usage & ~@as(u32, 0x3) != 0) return .error_format_not_supported;
+    if (!supportedFormat(format) or image_type != 1 or (tiling != 0 and tiling != 1) or flags != 0 or usage == 0 or usage & ~@as(u32, 0x37) != 0) return .error_format_not_supported;
     const out: *extern struct { max_extent: Extent3D, max_mip_levels: u32, max_array_layers: u32, sample_counts: u32, max_resource_size: u64 } = @ptrCast(@alignCast(output orelse return .error_initialization_failed));
     out.* = .{ .max_extent = .{ .width = 4096, .height = 4096, .depth = 1 }, .max_mip_levels = 1, .max_array_layers = 1, .sample_counts = 1, .max_resource_size = 256 * 1024 * 1024 };
     return .success;
@@ -634,8 +765,14 @@ fn enumerateDeviceExtensions(physical: ?Physical, layer: ?[*:0]const u8, count: 
     if (!validPhysicalLocked(physical orelse return .error_initialization_failed)) return .error_initialization_failed;
     const n = count orelse return .error_initialization_failed;
     if (layer != null) return .error_extension_not_present;
-    _ = props;
-    n.* = 0;
+    if (props) |items| {
+        if (n.* == 0) return .incomplete;
+        items[0] = std.mem.zeroes(ExtensionProperties);
+        const name = "VK_KHR_swapchain";
+        @memcpy(items[0].name[0..name.len], name);
+        items[0].spec_version = 70;
+        n.* = 1;
+    } else n.* = 1;
     return .success;
 }
 fn createDevice(physical: ?Physical, info: ?*const DeviceInfo, alloc: ?*const Alloc, output: ?*Device) callconv(.c) Result {
@@ -643,7 +780,10 @@ fn createDevice(physical: ?Physical, info: ?*const DeviceInfo, alloc: ?*const Al
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
     if (ci.layer_count != 0) return .error_layer_not_present;
-    if (ci.extension_count != 0) return .error_extension_not_present;
+    if (ci.extension_count != 0) {
+        const extensions = ci.extensions orelse return .error_extension_not_present;
+        for (extensions[0..ci.extension_count]) |extension| if (!std.mem.eql(u8, std.mem.span(extension), "VK_KHR_swapchain")) return .error_extension_not_present;
+    }
     if (alloc != null) {
         hit(.device_allocator);
         return .error_initialization_failed;
@@ -723,11 +863,25 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
         for (&fence_objects, &fence_state) |*fence, *child_state| if (child_state.* == .live and fence.owner == d) {
             child_state.* = .tombstone;
         };
+        for (&semaphore_objects, &semaphore_state) |*semaphore, *child_state| if (child_state.* == .live and semaphore.owner == d) {
+            child_state.* = .tombstone;
+        };
+        for (&image_view_objects, &image_view_state) |*view, *child_state| if (child_state.* == .live and view.owner == d) {
+            child_state.* = .tombstone;
+        };
+        for (&framebuffer_objects, &framebuffer_state) |*framebuffer, *child_state| if (child_state.* == .live and framebuffer.owner == d) {
+            child_state.* = .tombstone;
+        };
+        for (&swapchain_objects, &swapchain_state) |*swapchain, *child_state| if (child_state.* == .live and swapchain.owner == d) {
+            child_state.* = .tombstone;
+        };
         for (&buffer_objects, &buffer_state) |*buffer, *child_state| if (child_state.* == .live and buffer.owner == d) {
             child_state.* = .tombstone;
         };
         for (&image_objects, &image_state) |*image, *child_state| if (child_state.* == .live and image.owner == d) {
             child_state.* = .tombstone;
+            if (image.owned_bytes) |bytes| allocator.free(bytes);
+            image.owned_bytes = null;
         };
         for (&memory_objects, &memory_state) |*memory, *child_state| if (child_state.* == .live and memory.owner == d) {
             child_state.* = .tombstone;
@@ -809,6 +963,24 @@ fn validFenceLocked(handle: usize) ?*FenceObj {
     const result = findLiveHandle(FenceObj, handle, &fence_objects, &fence_state);
     if (handle != 0 and result == null) hit(.stale_fence);
     return result;
+}
+fn validSemaphoreLocked(handle: usize) ?*SemaphoreObj {
+    return findLiveHandle(SemaphoreObj, handle, &semaphore_objects, &semaphore_state);
+}
+fn validImageViewLocked(handle: usize) ?*ImageViewObj {
+    return findLiveHandle(ImageViewObj, handle, &image_view_objects, &image_view_state);
+}
+fn validFramebufferLocked(handle: usize) ?*FramebufferObj {
+    return findLiveHandle(FramebufferObj, handle, &framebuffer_objects, &framebuffer_state);
+}
+fn validSwapchainLocked(handle: usize) ?*SwapchainObj {
+    if (handle == 0) return null;
+    for (&swapchain_objects, swapchain_state) |*object, state| if (@intFromPtr(object) == handle and state == .live) return object;
+    return null;
+}
+fn allocateGenericHandle() usize {
+    generic_handle += 8;
+    return generic_handle;
 }
 fn validCommandPoolLocked(handle: usize) ?*CommandPoolObj {
     const result = findLiveHandle(CommandPoolObj, handle, &command_pool_objects, &command_pool_state);
@@ -908,7 +1080,7 @@ fn createBuffer(device: ?Device, info: ?*const BufferCreateInfo, alloc: ?*const 
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (ci.usage == 0 or ci.usage & ~@as(u32, 0x3) != 0) {
+    if (ci.usage == 0 or ci.usage & ~@as(u32, 0x13) != 0) {
         hit(.invalid_buffer_usage);
         return .error_initialization_failed;
     }
@@ -964,17 +1136,17 @@ fn imageByteSize(image: *const ImageObj) ?u64 {
     };
 }
 fn supportedFormat(format: i32) bool {
-    return format == 37 or format == 44;
+    return format == 37 or format == 43 or format == 44 or format == 124;
 }
 fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (ci.usage == 0 or ci.usage & ~@as(u32, 0x3) != 0) {
+    if (ci.usage == 0 or ci.usage & ~@as(u32, 0x37) != 0) {
         hit(.invalid_image_usage);
         return .error_initialization_failed;
     }
-    if (alloc != null or ci.s_type != 14 or ci.p_next != null or ci.flags != 0 or ci.image_type != 1 or !supportedFormat(ci.format) or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > 4096 or ci.extent.height > 4096 or ci.extent.depth != 1 or ci.mip_levels != 1 or ci.array_layers != 1 or ci.samples != 1 or ci.tiling != 1 or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) return if (!supportedFormat(ci.format)) .error_format_not_supported else .error_initialization_failed;
+    if (alloc != null or ci.s_type != 14 or ci.p_next != null or ci.flags != 0 or ci.image_type != 1 or !supportedFormat(ci.format) or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > 4096 or ci.extent.height > 4096 or ci.extent.depth != 1 or ci.mip_levels != 1 or ci.array_layers != 1 or ci.samples != 1 or (ci.tiling != 0 and ci.tiling != 1) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) return if (!supportedFormat(ci.format)) .error_format_not_supported else .error_initialization_failed;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
@@ -994,7 +1166,11 @@ fn destroyImage(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.
     lock();
     defer mutex.unlock();
     const object = validImageLocked(handle) orelse return;
-    if (validDeviceLocked(d) and validOwner(d, object.owner)) stateForObject(ImageObj, object, &image_objects, &image_state).?.* = .tombstone;
+    if (validDeviceLocked(d) and validOwner(d, object.owner)) {
+        stateForObject(ImageObj, object, &image_objects, &image_state).?.* = .tombstone;
+        if (object.owned_bytes) |bytes| allocator.free(bytes);
+        object.owned_bytes = null;
+    }
 }
 fn getImageMemoryRequirements(device: ?Device, handle: usize, output: ?*MemoryRequirements) callconv(.c) void {
     const d = device orelse return;
@@ -1454,9 +1630,11 @@ fn cmdCopyImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_hand
     }
 }
 fn supportedLayout(layout: i32) bool {
-    return layout == 0 or layout == 8 or layout == 1 or layout == 6 or layout == 7;
+    return layout == 0 or layout == 8 or layout == 1 or layout == 2 or layout == 3 or layout == 5 or layout == 6 or layout == 7 or layout == 1_000_001_002;
 }
 fn barrierMasksSupported(barrier: ImageMemoryBarrier, src_stage_mask: u32, dst_stage_mask: u32) bool {
+    if (barrier.old_layout == 8 and barrier.new_layout == 5 and src_stage_mask == 0x1 and dst_stage_mask == 0x80 and barrier.src_access_mask == 0 and barrier.dst_access_mask == 0x30) return true;
+    if (barrier.old_layout == 0 and barrier.new_layout == 3 and src_stage_mask == 0x1 and dst_stage_mask == 0x100 and barrier.src_access_mask == 0 and barrier.dst_access_mask == 0x400) return true;
     const expected_src_stage: u32 = switch (barrier.old_layout) {
         0 => 0x1,
         8 => 0x4000,
@@ -1485,8 +1663,7 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
     const c = validCommandBufferLocked(cb) orelse return;
     _ = memory_barriers;
     _ = buffer_barriers;
-    const stage_pair_supported = (src_stage_mask == 0x1 or src_stage_mask == 0x1000 or src_stage_mask == 0x4000) and dst_stage_mask == 0x1000;
-    if (!stage_pair_supported or dependency_flags != 0 or memory_barrier_count != 0 or buffer_barrier_count != 0 or image_barrier_count > max_api_items) {
+    if (dependency_flags != 0 or memory_barrier_count != 0 or buffer_barrier_count != 0 or image_barrier_count > max_api_items) {
         hit(.invalid_barrier);
         c.impl.invalid = true;
         return;
@@ -1519,6 +1696,7 @@ fn bufferBytes(buffer: *BufferObj) []u8 {
     return memory.bytes[start .. start + @as(usize, @intCast(buffer.size))];
 }
 fn imageBytes(image: *ImageObj) []u8 {
+    if (image.owned_bytes) |bytes| return bytes;
     const memory = image.memory.?;
     const start: usize = @intCast(image.offset);
     return memory.bytes[start .. start + @as(usize, @intCast(imageByteSize(image).?))];
@@ -1553,6 +1731,10 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 hit(.layout_mismatch);
                 return false;
             }
+        },
+        .render_clear => |op| {
+            _ = imageSlot(op.image) orelse return deadResource();
+            if (op.image.owner != owner or op.image.owned_bytes == null) return wrongSubmittingDevice();
         },
         .buffer_to_image => |op| {
             const slot = imageSlot(op.dst) orelse return deadResource();
@@ -1606,6 +1788,11 @@ fn executeValidatedCommand(command: Command) void {
             benchmarkHostMemoryCopy(dst, src);
         },
         .clear => |op| {
+            const bytes = imageBytes(op.image);
+            var i: usize = 0;
+            while (i < bytes.len) : (i += 4) @memcpy(bytes[i..][0..4], &op.color);
+        },
+        .render_clear => |op| {
             const bytes = imageBytes(op.image);
             var i: usize = 0;
             while (i < bytes.len) : (i += 4) @memcpy(bytes[i..][0..4], &op.color);
@@ -1667,6 +1854,267 @@ fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy
         if (to_image) std.mem.copyForwards(u8, pixels[io..][0..len], b[bo..][0..len]) else std.mem.copyForwards(u8, b[bo..][0..len], pixels[io..][0..len]);
     }
 }
+
+fn createOpaque(device: ?Device, info: ?*const anyopaque, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    _ = info orelse return .error_initialization_failed;
+    if (alloc != null) return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(device orelse return .error_initialization_failed)) return .error_initialization_failed;
+    out.* = allocateGenericHandle();
+    return .success;
+}
+fn destroyOpaque(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+    _ = device;
+    _ = handle;
+    _ = alloc;
+}
+fn createSemaphore(device: ?Device, info: ?*const anyopaque, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    _ = info orelse return .error_initialization_failed;
+    if (alloc != null) return .error_initialization_failed;
+    const d = device orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    for (&semaphore_objects, &semaphore_state) |*object, *state| if (state.* == .never) {
+        object.* = .{ .owner = d, .signaled = false };
+        state.* = .live;
+        out.* = @intFromPtr(object);
+        return .success;
+    };
+    return .error_out_of_host_memory;
+}
+fn destroySemaphore(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+    if (alloc != null) return;
+    lock();
+    defer mutex.unlock();
+    const object = validSemaphoreLocked(handle) orelse return;
+    if (validDeviceLocked(device orelse return) and object.owner == device.?) stateForObject(SemaphoreObj, object, &semaphore_objects, &semaphore_state).?.* = .tombstone;
+}
+fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    if (alloc != null) return .error_initialization_failed;
+    const d = device orelse return .error_initialization_failed;
+    const ci = info orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    const image = validImageLocked(ci.image) orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or image.owner != d) return .error_initialization_failed;
+    for (&image_view_objects, &image_view_state) |*object, *state| if (state.* == .never) {
+        object.* = .{ .owner = d, .image = image };
+        state.* = .live;
+        out.* = @intFromPtr(object);
+        return .success;
+    };
+    return .error_out_of_host_memory;
+}
+fn destroyImageView(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+    if (alloc != null) return;
+    lock();
+    defer mutex.unlock();
+    const object = validImageViewLocked(handle) orelse return;
+    if (validDeviceLocked(device orelse return) and object.owner == device.?) stateForObject(ImageViewObj, object, &image_view_objects, &image_view_state).?.* = .tombstone;
+}
+fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    if (alloc != null) return .error_initialization_failed;
+    const d = device orelse return .error_initialization_failed;
+    const ci = info orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d) or ci.attachment_count == 0 or ci.attachments == null) return .error_initialization_failed;
+    const view = validImageViewLocked(ci.attachments.?[0]) orelse return .error_initialization_failed;
+    for (&framebuffer_objects, &framebuffer_state) |*object, *state| if (state.* == .never) {
+        object.* = .{ .owner = d, .color_image = view.image };
+        state.* = .live;
+        out.* = @intFromPtr(object);
+        return .success;
+    };
+    return .error_out_of_host_memory;
+}
+fn destroyFramebuffer(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+    if (alloc != null) return;
+    lock();
+    defer mutex.unlock();
+    const object = validFramebufferLocked(handle) orelse return;
+    if (validDeviceLocked(device orelse return) and object.owner == device.?) stateForObject(FramebufferObj, object, &framebuffer_objects, &framebuffer_state).?.* = .tombstone;
+}
+fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?*const anyopaque, alloc: ?*const Alloc, outputs: ?[*]usize) callconv(.c) Result {
+    _ = cache;
+    _ = infos orelse return .error_initialization_failed;
+    if (alloc != null or count == 0) return .error_initialization_failed;
+    const out = outputs orelse return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(device orelse return .error_initialization_failed)) return .error_initialization_failed;
+    for (out[0..count]) |*handle| handle.* = allocateGenericHandle();
+    return .success;
+}
+fn allocateDescriptorSets(device: ?Device, info: ?*const DescriptorSetAllocateInfo, outputs: ?[*]usize) callconv(.c) Result {
+    const ci = info orelse return .error_initialization_failed;
+    const out = outputs orelse return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(device orelse return .error_initialization_failed) or ci.descriptor_set_count == 0) return .error_initialization_failed;
+    for (out[0..ci.descriptor_set_count]) |*handle| handle.* = allocateGenericHandle();
+    return .success;
+}
+fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?*const anyopaque, copy_count: u32, copies: ?*const anyopaque) callconv(.c) void {
+    _ = device;
+    _ = write_count;
+    _ = writes;
+    _ = copy_count;
+    _ = copies;
+}
+fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, contents: i32) callconv(.c) void {
+    _ = contents;
+    const begin = info orelse return;
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    const framebuffer = validFramebufferLocked(begin.framebuffer) orelse return;
+    const image = framebuffer.color_image orelse return;
+    if (command_buffer.impl.state != 1 or command_buffer.impl.count == command_buffer.impl.commands.len or begin.clear_value_count == 0 or begin.clear_values == null) return;
+    const color = begin.clear_values.?[0].color.float32;
+    command_buffer.impl.commands[command_buffer.impl.count] = .{ .render_clear = .{ .image = image, .color = .{ @intFromFloat(std.math.clamp(color[2], 0, 1) * 255), @intFromFloat(std.math.clamp(color[1], 0, 1) * 255), @intFromFloat(std.math.clamp(color[0], 0, 1) * 255), @intFromFloat(std.math.clamp(color[3], 0, 1) * 255) } } };
+    command_buffer.impl.count += 1;
+}
+fn cmdBindPipeline(cb: ?CommandBuffer, bind_point: i32, pipeline: usize) callconv(.c) void {
+    _ = cb;
+    _ = bind_point;
+    _ = pipeline;
+}
+fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, first_set: u32, count: u32, sets: ?[*]const usize, dynamic_count: u32, offsets: ?[*]const u32) callconv(.c) void {
+    _ = cb;
+    _ = bind_point;
+    _ = layout;
+    _ = first_set;
+    _ = count;
+    _ = sets;
+    _ = dynamic_count;
+    _ = offsets;
+}
+fn cmdSetViewport(cb: ?CommandBuffer, first: u32, count: u32, values: ?*const anyopaque) callconv(.c) void {
+    _ = cb;
+    _ = first;
+    _ = count;
+    _ = values;
+}
+fn cmdSetScissor(cb: ?CommandBuffer, first: u32, count: u32, values: ?*const anyopaque) callconv(.c) void {
+    _ = cb;
+    _ = first;
+    _ = count;
+    _ = values;
+}
+fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) callconv(.c) void {
+    _ = cb;
+    _ = vertex_count;
+    _ = instance_count;
+    _ = first_vertex;
+    _ = first_instance;
+}
+fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
+    _ = cb;
+}
+
+fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    if (alloc != null) return .error_initialization_failed;
+    const d = device orelse return .error_initialization_failed;
+    const ci = info orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    if (ci.min_image_count < 2 or ci.min_image_count > 3 or ci.image_extent.width == 0 or ci.image_extent.height == 0) return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    const surface = validSurfaceLocked(ci.surface) orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or surface.owner != d.physical.owner) return .error_initialization_failed;
+    for (&swapchain_objects, &swapchain_state) |*swapchain, *state| if (state.* == .never) {
+        swapchain.* = .{ .owner = d, .surface = surface, .width = ci.image_extent.width, .height = ci.image_extent.height, .image_count = ci.min_image_count, .images = .{ 0, 0, 0 }, .next_image = 0 };
+        var created: u32 = 0;
+        while (created < ci.min_image_count) : (created += 1) {
+            var found = false;
+            for (&image_objects, &image_state) |*image, *image_slot_state| if (!found and image_slot_state.* == .never) {
+                const byte_count = @as(usize, ci.image_extent.width) * ci.image_extent.height * 4;
+                const bytes = allocateBytes(byte_count) catch return .error_out_of_host_memory;
+                @memset(bytes, 0);
+                image.* = .{ .owner = d, .width = ci.image_extent.width, .height = ci.image_extent.height, .format = ci.image_format, .usage = ci.image_usage, .layout = 0, .owned_bytes = bytes };
+                image_slot_state.* = .live;
+                swapchain.images[created] = @intFromPtr(image);
+                found = true;
+            };
+            if (!found) return .error_out_of_host_memory;
+        }
+        state.* = .live;
+        out.* = @intFromPtr(swapchain);
+        return .success;
+    };
+    return .error_out_of_host_memory;
+}
+fn destroySwapchain(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+    if (alloc != null) return;
+    lock();
+    defer mutex.unlock();
+    const swapchain = validSwapchainLocked(handle) orelse return;
+    if (!validDeviceLocked(device orelse return) or swapchain.owner != device.?) return;
+    for (swapchain.images[0..swapchain.image_count]) |image_handle| if (validImageLocked(image_handle)) |image| {
+        stateForObject(ImageObj, image, &image_objects, &image_state).?.* = .tombstone;
+        if (image.owned_bytes) |bytes| allocator.free(bytes);
+        image.owned_bytes = null;
+    };
+    for (&swapchain_objects, &swapchain_state) |*candidate, *state| if (candidate == swapchain) {
+        state.* = .tombstone;
+    };
+}
+fn getSwapchainImages(device: ?Device, handle: usize, count: ?*u32, output: ?[*]usize) callconv(.c) Result {
+    lock();
+    defer mutex.unlock();
+    const swapchain = validSwapchainLocked(handle) orelse return .error_initialization_failed;
+    if (!validDeviceLocked(device orelse return .error_initialization_failed) or swapchain.owner != device.?) return .error_initialization_failed;
+    const n = count orelse return .error_initialization_failed;
+    if (output) |items| {
+        const written = @min(n.*, swapchain.image_count);
+        @memcpy(items[0..written], swapchain.images[0..written]);
+        n.* = written;
+        return if (written < swapchain.image_count) .incomplete else .success;
+    }
+    n.* = swapchain.image_count;
+    return .success;
+}
+fn acquireNextImage(device: ?Device, handle: usize, timeout_ns: u64, semaphore_handle: usize, fence_handle: usize, output: ?*u32) callconv(.c) Result {
+    _ = timeout_ns;
+    lock();
+    defer mutex.unlock();
+    const swapchain = validSwapchainLocked(handle) orelse return .error_initialization_failed;
+    if (!validDeviceLocked(device orelse return .error_initialization_failed) or swapchain.owner != device.?) return .error_initialization_failed;
+    if (semaphore_handle != 0) (validSemaphoreLocked(semaphore_handle) orelse return .error_initialization_failed).signaled = true;
+    if (fence_handle != 0) (validFenceLocked(fence_handle) orelse return .error_initialization_failed).signaled = true;
+    const out = output orelse return .error_initialization_failed;
+    out.* = swapchain.next_image;
+    swapchain.next_image = (swapchain.next_image + 1) % swapchain.image_count;
+    return .success;
+}
+fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
+    const present = info orelse return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    const q = queue orelse return .error_initialization_failed;
+    if (!validDeviceLocked(q.owner) or present.swapchain_count == 0 or present.swapchains == null or present.image_indices == null) return .error_initialization_failed;
+    if (present.wait_semaphore_count != 0) {
+        const waits = present.wait_semaphores orelse return .error_initialization_failed;
+        for (waits[0..present.wait_semaphore_count]) |handle| {
+            const semaphore = validSemaphoreLocked(handle) orelse return .error_initialization_failed;
+            if (!semaphore.signaled) return .error_initialization_failed;
+            semaphore.signaled = false;
+        }
+    }
+    for (present.swapchains.?[0..present.swapchain_count], present.image_indices.?[0..present.swapchain_count], 0..) |handle, index, i| {
+        const swapchain = validSwapchainLocked(handle) orelse return .error_initialization_failed;
+        if (swapchain.owner != q.owner or index >= swapchain.image_count) return .error_initialization_failed;
+        if (present.results) |results| results[i] = .success;
+    }
+    return .success;
+}
 fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_handle: usize) callconv(.c) Result {
     const q = queue orelse return .error_initialization_failed;
     if (count == 0) {
@@ -1683,7 +2131,21 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
     var layouts: [max_child_objects]i32 = undefined;
     for (&image_objects, image_state, 0..) |*image, state, index| layouts[index] = if (state == .live) image.layout else 0;
     for (list[0..count]) |submit| {
-        if (submit.s_type != 4 or submit.p_next != null or submit.wait_semaphore_count != 0 or submit.signal_semaphore_count != 0 or submit.command_buffer_count > max_api_items) return .error_initialization_failed;
+        if (submit.s_type != 4 or submit.p_next != null or submit.command_buffer_count > max_api_items) return .error_initialization_failed;
+        if (submit.wait_semaphore_count != 0) {
+            const waits = submit.wait_semaphores orelse return .error_initialization_failed;
+            for (waits[0..submit.wait_semaphore_count]) |handle| {
+                const semaphore = validSemaphoreLocked(handle) orelse return .error_initialization_failed;
+                if (semaphore.owner != q.owner or !semaphore.signaled) return .error_initialization_failed;
+            }
+        }
+        if (submit.signal_semaphore_count != 0) {
+            const signals = submit.signal_semaphores orelse return .error_initialization_failed;
+            for (signals[0..submit.signal_semaphore_count]) |handle| {
+                const semaphore = validSemaphoreLocked(handle) orelse return .error_initialization_failed;
+                if (semaphore.owner != q.owner or semaphore.signaled) return .error_initialization_failed;
+            }
+        }
         if (submit.command_buffer_count == 0) continue;
         const cbs = submit.command_buffers orelse return .error_initialization_failed;
         for (cbs[0..submit.command_buffer_count]) |cb| {
@@ -1695,7 +2157,15 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
             };
         }
     }
-    for (list[0..count]) |submit| if (submit.command_buffer_count != 0) for (submit.command_buffers.?[0..submit.command_buffer_count]) |cb| for (cb.impl.commands[0..cb.impl.count]) |command| executeValidatedCommand(command);
+    for (list[0..count]) |submit| {
+        if (submit.wait_semaphore_count != 0) for (submit.wait_semaphores.?[0..submit.wait_semaphore_count]) |handle| {
+            validSemaphoreLocked(handle).?.signaled = false;
+        };
+        if (submit.command_buffer_count != 0) for (submit.command_buffers.?[0..submit.command_buffer_count]) |cb| for (cb.impl.commands[0..cb.impl.count]) |command| executeValidatedCommand(command);
+        if (submit.signal_semaphore_count != 0) for (submit.signal_semaphores.?[0..submit.signal_semaphore_count]) |handle| {
+            validSemaphoreLocked(handle).?.signaled = true;
+        };
+    }
     if (fence) |item| item.signaled = true;
     return .success;
 }
@@ -1719,13 +2189,15 @@ fn globalLookup(n: []const u8) Fn {
 }
 fn instanceLookup(n: []const u8) Fn {
     if (globalLookup(n)) |f| return f;
-    const map = .{ .{ "vkDestroyInstance", destroyInstance }, .{ "vkEnumeratePhysicalDevices", enumeratePhysicalDevices }, .{ "vkGetPhysicalDeviceFeatures", getFeatures }, .{ "vkGetPhysicalDeviceProperties", getProperties }, .{ "vkGetPhysicalDeviceQueueFamilyProperties", getQueueProperties }, .{ "vkGetPhysicalDeviceMemoryProperties", getMemoryProperties }, .{ "vkGetPhysicalDeviceFormatProperties", getFormatProperties }, .{ "vkGetPhysicalDeviceImageFormatProperties", getImageFormatProperties }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties", getSparseImageFormatProperties }, .{ "vkEnumerateDeviceExtensionProperties", enumerateDeviceExtensions }, .{ "vkCreateDevice", createDevice }, .{ "vkGetDeviceProcAddr", getDeviceProcAddr }, .{ "vkDestroyDevice", destroyDevice }, .{ "vkGetDeviceQueue", getDeviceQueue } };
+    const map = .{ .{ "vkDestroyInstance", destroyInstance }, .{ "vkEnumeratePhysicalDevices", enumeratePhysicalDevices }, .{ "vkGetPhysicalDeviceFeatures", getFeatures }, .{ "vkGetPhysicalDeviceProperties", getProperties }, .{ "vkGetPhysicalDeviceQueueFamilyProperties", getQueueProperties }, .{ "vkGetPhysicalDeviceMemoryProperties", getMemoryProperties }, .{ "vkGetPhysicalDeviceFormatProperties", getFormatProperties }, .{ "vkGetPhysicalDeviceImageFormatProperties", getImageFormatProperties }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties", getSparseImageFormatProperties }, .{ "vkEnumerateDeviceExtensionProperties", enumerateDeviceExtensions }, .{ "vkCreateDevice", createDevice }, .{ "vkGetDeviceProcAddr", getDeviceProcAddr }, .{ "vkDestroyDevice", destroyDevice }, .{ "vkGetDeviceQueue", getDeviceQueue }, .{ "vkCreateXcbSurfaceKHR", createXcbSurface }, .{ "vkDestroySurfaceKHR", destroySurface }, .{ "vkGetPhysicalDeviceSurfaceSupportKHR", getSurfaceSupport }, .{ "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", getSurfaceCapabilities }, .{ "vkGetPhysicalDeviceSurfaceFormatsKHR", getSurfaceFormats }, .{ "vkGetPhysicalDeviceSurfacePresentModesKHR", getSurfacePresentModes } };
     inline for (map) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
     return deviceLookup(n);
 }
 fn deviceLookup(n: []const u8) Fn {
     const map = .{ .{ "vkGetDeviceProcAddr", getDeviceProcAddr }, .{ "vkDestroyDevice", destroyDevice }, .{ "vkGetDeviceQueue", getDeviceQueue }, .{ "vkAllocateMemory", allocateMemory }, .{ "vkFreeMemory", freeMemory }, .{ "vkMapMemory", mapMemory }, .{ "vkUnmapMemory", unmapMemory }, .{ "vkCreateBuffer", createBuffer }, .{ "vkDestroyBuffer", destroyBuffer }, .{ "vkGetBufferMemoryRequirements", getBufferMemoryRequirements }, .{ "vkBindBufferMemory", bindBufferMemory }, .{ "vkCreateImage", createImage }, .{ "vkDestroyImage", destroyImage }, .{ "vkGetImageMemoryRequirements", getImageMemoryRequirements }, .{ "vkBindImageMemory", bindImageMemory }, .{ "vkGetImageSubresourceLayout", getImageSubresourceLayout }, .{ "vkCreateFence", createFence }, .{ "vkDestroyFence", destroyFence }, .{ "vkGetFenceStatus", getFenceStatus }, .{ "vkResetFences", resetFences }, .{ "vkWaitForFences", waitForFences }, .{ "vkCreateCommandPool", createCommandPool }, .{ "vkDestroyCommandPool", destroyCommandPool }, .{ "vkAllocateCommandBuffers", allocateCommandBuffers }, .{ "vkFreeCommandBuffers", freeCommandBuffers }, .{ "vkBeginCommandBuffer", beginCommandBuffer }, .{ "vkEndCommandBuffer", endCommandBuffer }, .{ "vkResetCommandBuffer", resetCommandBuffer }, .{ "vkCmdFillBuffer", cmdFillBuffer }, .{ "vkCmdCopyBuffer", cmdCopyBuffer }, .{ "vkCmdClearColorImage", cmdClearColorImage }, .{ "vkCmdCopyBufferToImage", cmdCopyBufferToImage }, .{ "vkCmdCopyImageToBuffer", cmdCopyImageToBuffer }, .{ "vkCmdCopyImage", cmdCopyImage }, .{ "vkCmdPipelineBarrier", cmdPipelineBarrier }, .{ "vkQueueSubmit", queueSubmit }, .{ "vkQueueWaitIdle", queueWaitIdle }, .{ "vkDeviceWaitIdle", deviceWaitIdle } };
     inline for (map) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
+    const presentation = .{ .{ "vkCreateSemaphore", createSemaphore }, .{ "vkDestroySemaphore", destroySemaphore }, .{ "vkCreateImageView", createImageView }, .{ "vkDestroyImageView", destroyImageView }, .{ "vkCreateSampler", createOpaque }, .{ "vkDestroySampler", destroyOpaque }, .{ "vkCreateDescriptorSetLayout", createOpaque }, .{ "vkDestroyDescriptorSetLayout", destroyOpaque }, .{ "vkCreateDescriptorPool", createOpaque }, .{ "vkDestroyDescriptorPool", destroyOpaque }, .{ "vkCreateShaderModule", createOpaque }, .{ "vkDestroyShaderModule", destroyOpaque }, .{ "vkCreatePipelineCache", createOpaque }, .{ "vkDestroyPipelineCache", destroyOpaque }, .{ "vkCreatePipelineLayout", createOpaque }, .{ "vkDestroyPipelineLayout", destroyOpaque }, .{ "vkCreateRenderPass", createOpaque }, .{ "vkDestroyRenderPass", destroyOpaque }, .{ "vkCreateFramebuffer", createFramebuffer }, .{ "vkDestroyFramebuffer", destroyFramebuffer }, .{ "vkCreateGraphicsPipelines", createGraphicsPipelines }, .{ "vkDestroyPipeline", destroyOpaque }, .{ "vkAllocateDescriptorSets", allocateDescriptorSets }, .{ "vkUpdateDescriptorSets", updateDescriptorSets }, .{ "vkCmdBeginRenderPass", cmdBeginRenderPass }, .{ "vkCmdBindPipeline", cmdBindPipeline }, .{ "vkCmdBindDescriptorSets", cmdBindDescriptorSets }, .{ "vkCmdSetViewport", cmdSetViewport }, .{ "vkCmdSetScissor", cmdSetScissor }, .{ "vkCmdDraw", cmdDraw }, .{ "vkCmdEndRenderPass", cmdEndRenderPass }, .{ "vkCreateSwapchainKHR", createSwapchain }, .{ "vkDestroySwapchainKHR", destroySwapchain }, .{ "vkGetSwapchainImagesKHR", getSwapchainImages }, .{ "vkAcquireNextImageKHR", acquireNextImage }, .{ "vkQueuePresentKHR", queuePresent } };
+    inline for (presentation) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
     return null;
 }
 
@@ -1742,7 +2214,7 @@ pub export fn vk_icdGetPhysicalDeviceProcAddr(instance: ?Instance, name: ?[*:0]c
     defer mutex.unlock();
     if (!validInstanceLocked(instance orelse return null)) return null;
     const n = std.mem.span(name orelse return null);
-    const map = .{ .{ "vkGetPhysicalDeviceFeatures", getFeatures }, .{ "vkGetPhysicalDeviceProperties", getProperties }, .{ "vkGetPhysicalDeviceQueueFamilyProperties", getQueueProperties }, .{ "vkGetPhysicalDeviceMemoryProperties", getMemoryProperties }, .{ "vkGetPhysicalDeviceFormatProperties", getFormatProperties }, .{ "vkGetPhysicalDeviceImageFormatProperties", getImageFormatProperties }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties", getSparseImageFormatProperties }, .{ "vkEnumerateDeviceExtensionProperties", enumerateDeviceExtensions }, .{ "vkCreateDevice", createDevice } };
+    const map = .{ .{ "vkGetPhysicalDeviceFeatures", getFeatures }, .{ "vkGetPhysicalDeviceProperties", getProperties }, .{ "vkGetPhysicalDeviceQueueFamilyProperties", getQueueProperties }, .{ "vkGetPhysicalDeviceMemoryProperties", getMemoryProperties }, .{ "vkGetPhysicalDeviceFormatProperties", getFormatProperties }, .{ "vkGetPhysicalDeviceImageFormatProperties", getImageFormatProperties }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties", getSparseImageFormatProperties }, .{ "vkEnumerateDeviceExtensionProperties", enumerateDeviceExtensions }, .{ "vkCreateDevice", createDevice }, .{ "vkGetPhysicalDeviceSurfaceSupportKHR", getSurfaceSupport }, .{ "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", getSurfaceCapabilities }, .{ "vkGetPhysicalDeviceSurfaceFormatsKHR", getSurfaceFormats }, .{ "vkGetPhysicalDeviceSurfacePresentModesKHR", getSurfacePresentModes } };
     inline for (map) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
     return null;
 }
@@ -1773,7 +2245,17 @@ test "enumeration lifecycle and unsupported features" {
     try std.testing.expect(vk_icdGetPhysicalDeviceProcAddr(instance, "vkDestroyInstance") == null);
     var extension_count: u32 = 9;
     try std.testing.expectEqual(Result.success, enumerateInstanceExtensions(null, &extension_count, null));
-    try std.testing.expectEqual(@as(u32, 0), extension_count);
+    try std.testing.expectEqual(@as(u32, 2), extension_count);
+    var extension_properties: [2]ExtensionProperties = undefined;
+    extension_count = 1;
+    try std.testing.expectEqual(Result.incomplete, enumerateInstanceExtensions(null, &extension_count, &extension_properties));
+    try std.testing.expectEqual(@as(u32, 1), extension_count);
+    try std.testing.expectEqualStrings("VK_KHR_surface", std.mem.sliceTo(&extension_properties[0].name, 0));
+    try std.testing.expectEqual(@as(u32, 25), extension_properties[0].spec_version);
+    extension_count = 2;
+    try std.testing.expectEqual(Result.success, enumerateInstanceExtensions(null, &extension_count, &extension_properties));
+    try std.testing.expectEqualStrings("VK_KHR_xcb_surface", std.mem.sliceTo(&extension_properties[1].name, 0));
+    try std.testing.expectEqual(@as(u32, 6), extension_properties[1].spec_version);
     try std.testing.expectEqual(Result.error_extension_not_present, enumerateInstanceExtensions("layer", &extension_count, null));
     var count: u32 = 0;
     try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &count, null));
@@ -1801,12 +2283,208 @@ test "enumeration lifecycle and unsupported features" {
     try std.testing.expect(getDeviceProcAddr(@ptrFromInt(8), "vkDestroyDevice") == null);
     destroyInstance(instance, null);
     try std.testing.expect(vk_icdGetInstanceProcAddr(instance, "vkDestroyInstance") == null);
+    const unsupported_extensions = [_][*:0]const u8{"VK_ZPU_unsupported"};
     ci.extension_count = 1;
+    ci.extensions = &unsupported_extensions;
     try std.testing.expectEqual(Result.error_extension_not_present, createInstance(&ci, null, &instance));
+    const supported_extensions = [_][*:0]const u8{ "VK_KHR_surface", "VK_KHR_xcb_surface" };
+    ci.extension_count = supported_extensions.len;
+    ci.extensions = &supported_extensions;
+    try std.testing.expectEqual(Result.success, createInstance(&ci, null, &instance));
+    destroyInstance(instance, null);
     ci.extension_count = 0;
+    ci.extensions = null;
     const unsupported_chain = ChainHeader{ .s_type = 999, .p_next = null };
     ci.p_next = &unsupported_chain;
     try std.testing.expectEqual(Result.error_initialization_failed, createInstance(&ci, null, &instance));
+}
+
+test "XCB surface lifecycle and physical presentation queries" {
+    const extensions = [_][*:0]const u8{ "VK_KHR_surface", "VK_KHR_xcb_surface" };
+    const ci = InstanceInfo{ .s_type = 1, .p_next = null, .flags = 0, .app_info = null, .layer_count = 0, .layers = null, .extension_count = extensions.len, .extensions = &extensions };
+    var instance: Instance = undefined;
+    try std.testing.expectEqual(Result.success, createInstance(&ci, null, &instance));
+    var physical_count: u32 = 1;
+    var physicals: [1]Physical = undefined;
+    try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &physical_count, &physicals));
+
+    const surface_info = XcbSurfaceCreateInfo{ .s_type = 1_000_005_000, .p_next = null, .flags = 0, .connection = @ptrFromInt(8), .window = 42 };
+    var surface: usize = 0;
+    try std.testing.expectEqual(Result.success, createXcbSurface(instance, &surface_info, null, &surface));
+    try std.testing.expect(surface != 0);
+
+    var supported: u32 = 0;
+    try std.testing.expectEqual(Result.success, getSurfaceSupport(physicals[0], 0, surface, &supported));
+    try std.testing.expectEqual(@as(u32, 1), supported);
+    try std.testing.expectEqual(Result.error_initialization_failed, getSurfaceSupport(physicals[0], 1, surface, &supported));
+
+    var capabilities: SurfaceCapabilities = undefined;
+    try std.testing.expectEqual(Result.success, getSurfaceCapabilities(physicals[0], surface, &capabilities));
+    try std.testing.expectEqual(@as(u32, 2), capabilities.min_image_count);
+    try std.testing.expectEqual(@as(u32, 3), capabilities.max_image_count);
+    try std.testing.expectEqual(std.math.maxInt(u32), capabilities.current_extent.width);
+    try std.testing.expectEqual(Extent2D{ .width = 1, .height = 1 }, capabilities.min_image_extent);
+    try std.testing.expectEqual(Extent2D{ .width = 4096, .height = 4096 }, capabilities.max_image_extent);
+    try std.testing.expectEqual(@as(u32, 0x10), capabilities.supported_usage_flags);
+
+    var count: u32 = 0;
+    try std.testing.expectEqual(Result.success, getSurfaceFormats(physicals[0], surface, &count, null));
+    try std.testing.expectEqual(@as(u32, 1), count);
+    var formats: [1]SurfaceFormat = undefined;
+    count = 0;
+    try std.testing.expectEqual(Result.incomplete, getSurfaceFormats(physicals[0], surface, &count, &formats));
+    count = 1;
+    try std.testing.expectEqual(Result.success, getSurfaceFormats(physicals[0], surface, &count, &formats));
+    try std.testing.expectEqual(SurfaceFormat{ .format = 44, .color_space = 0 }, formats[0]);
+
+    count = 0;
+    try std.testing.expectEqual(Result.success, getSurfacePresentModes(physicals[0], surface, &count, null));
+    try std.testing.expectEqual(@as(u32, 1), count);
+    var modes: [1]i32 = undefined;
+    count = 0;
+    try std.testing.expectEqual(Result.incomplete, getSurfacePresentModes(physicals[0], surface, &count, &modes));
+    count = 1;
+    try std.testing.expectEqual(Result.success, getSurfacePresentModes(physicals[0], surface, &count, &modes));
+    try std.testing.expectEqual(@as(i32, 2), modes[0]);
+
+    const device_extensions = [_][*:0]const u8{"VK_KHR_swapchain"};
+    var priority: f32 = 1;
+    const queue_info = QueueInfo{ .s_type = 2, .p_next = null, .flags = 0, .family = 0, .count = 1, .priorities = @ptrCast(&priority) };
+    const device_info = DeviceInfo{ .s_type = 3, .p_next = null, .flags = 0, .queue_info_count = 1, .queue_infos = @ptrCast(&queue_info), .layer_count = 0, .layers = null, .extension_count = 1, .extensions = &device_extensions, .features = null };
+    var device: Device = undefined;
+    try std.testing.expectEqual(Result.success, createDevice(physicals[0], &device_info, null, &device));
+    destroyDevice(device, null);
+
+    var bad_info = surface_info;
+    bad_info.window = 0;
+    try std.testing.expectEqual(Result.error_initialization_failed, createXcbSurface(instance, &bad_info, null, &surface));
+    try std.testing.expectEqual(Result.error_initialization_failed, createXcbSurface(null, &surface_info, null, &surface));
+    try std.testing.expectEqual(Result.error_initialization_failed, createXcbSurface(instance, null, null, &surface));
+    try std.testing.expectEqual(Result.error_initialization_failed, createXcbSurface(instance, &surface_info, null, null));
+
+    destroySurface(instance, surface, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, getSurfaceCapabilities(physicals[0], surface, &capabilities));
+    destroySurface(instance, surface, null);
+    destroyInstance(instance, null);
+}
+
+test "vkcube presentation path records submits and presents two swapchain images" {
+    const instance_extensions = [_][*:0]const u8{ "VK_KHR_surface", "VK_KHR_xcb_surface" };
+    const instance_info = InstanceInfo{ .s_type = 1, .p_next = null, .flags = 0, .app_info = null, .layer_count = 0, .layers = null, .extension_count = instance_extensions.len, .extensions = &instance_extensions };
+    var instance: Instance = undefined;
+    try std.testing.expectEqual(Result.success, createInstance(&instance_info, null, &instance));
+    var physical_count: u32 = 1;
+    var physicals: [1]Physical = undefined;
+    try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &physical_count, &physicals));
+    const surface_info = XcbSurfaceCreateInfo{ .s_type = 1_000_005_000, .p_next = null, .flags = 0, .connection = @ptrFromInt(8), .window = 42 };
+    var surface: usize = 0;
+    try std.testing.expectEqual(Result.success, createXcbSurface(instance, &surface_info, null, &surface));
+
+    var priority: f32 = 1;
+    const queue_info = QueueInfo{ .s_type = 2, .p_next = null, .flags = 0, .family = 0, .count = 1, .priorities = @ptrCast(&priority) };
+    const device_extensions = [_][*:0]const u8{"VK_KHR_swapchain"};
+    const device_info = DeviceInfo{ .s_type = 3, .p_next = null, .flags = 0, .queue_info_count = 1, .queue_infos = @ptrCast(&queue_info), .layer_count = 0, .layers = null, .extension_count = 1, .extensions = &device_extensions, .features = null };
+    var device: Device = undefined;
+    try std.testing.expectEqual(Result.success, createDevice(physicals[0], &device_info, null, &device));
+    var queue: Queue = undefined;
+    getDeviceQueue(device, 0, 0, &queue);
+
+    const swapchain_info = SwapchainCreateInfo{ .s_type = 1_000_001_000, .p_next = null, .flags = 0, .surface = surface, .min_image_count = 2, .image_format = 44, .image_color_space = 0, .image_extent = .{ .width = 2, .height = 2 }, .image_array_layers = 1, .image_usage = 0x10, .image_sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .pre_transform = 1, .composite_alpha = 1, .present_mode = 2, .clipped = 1, .old_swapchain = 0 };
+    var swapchain: usize = 0;
+    try std.testing.expectEqual(Result.success, createSwapchain(device, &swapchain_info, null, &swapchain));
+    var image_count: u32 = 0;
+    try std.testing.expectEqual(Result.success, getSwapchainImages(device, swapchain, &image_count, null));
+    try std.testing.expectEqual(@as(u32, 2), image_count);
+    var images: [2]usize = undefined;
+    image_count = 1;
+    try std.testing.expectEqual(Result.incomplete, getSwapchainImages(device, swapchain, &image_count, &images));
+    image_count = 2;
+    try std.testing.expectEqual(Result.success, getSwapchainImages(device, swapchain, &image_count, &images));
+
+    const view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = images[0], .view_type = 1, .format = 44, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    var view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(device, &view_info, null, &view));
+    const attachments = [_]usize{view};
+    const framebuffer_info = FramebufferCreateInfo{ .s_type = 37, .p_next = null, .flags = 0, .render_pass = 1, .attachment_count = 1, .attachments = &attachments, .width = 2, .height = 2, .layers = 1 };
+    var framebuffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createFramebuffer(device, &framebuffer_info, null, &framebuffer));
+
+    var opaque_handle: usize = 0;
+    try std.testing.expectEqual(Result.success, createOpaque(device, @ptrCast(&framebuffer_info), null, &opaque_handle));
+    destroyOpaque(device, opaque_handle, null);
+    var pipelines: [1]usize = undefined;
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&framebuffer_info), null, &pipelines));
+    const set_info = DescriptorSetAllocateInfo{ .s_type = 34, .p_next = null, .descriptor_pool = opaque_handle, .descriptor_set_count = 1, .set_layouts = &attachments };
+    var sets: [1]usize = undefined;
+    try std.testing.expectEqual(Result.success, allocateDescriptorSets(device, &set_info, &sets));
+    updateDescriptorSets(device, 0, null, 0, null);
+
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 0, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(device, &pool_info, null, &pool));
+    const command_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(device, &command_info, &commands));
+    const begin_info = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    const clear = ClearValue{ .color = .{ .float32 = .{ 0.2, 0.2, 0.2, 0.2 } } };
+    const render_info = RenderPassBeginInfo{ .s_type = 43, .p_next = null, .render_pass = opaque_handle, .framebuffer = framebuffer, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 2, .height = 2 } }, .clear_value_count = 1, .clear_values = @ptrCast(&clear) };
+    cmdBeginRenderPass(commands[0], &render_info, 0);
+    cmdBindPipeline(commands[0], 0, pipelines[0]);
+    cmdBindDescriptorSets(commands[0], 0, opaque_handle, 0, 1, &sets, 0, null);
+    cmdSetViewport(commands[0], 0, 1, @ptrCast(&render_info.render_area));
+    cmdSetScissor(commands[0], 0, 1, @ptrCast(&render_info.render_area));
+    cmdDraw(commands[0], 36, 1, 0, 0);
+    cmdEndRenderPass(commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+
+    var acquired: usize = 0;
+    var rendered: usize = 0;
+    try std.testing.expectEqual(Result.success, createSemaphore(device, @ptrCast(&begin_info), null, &acquired));
+    try std.testing.expectEqual(Result.success, createSemaphore(device, @ptrCast(&begin_info), null, &rendered));
+    var image_index: u32 = undefined;
+    try std.testing.expectEqual(Result.success, acquireNextImage(device, swapchain, std.math.maxInt(u64), acquired, 0, &image_index));
+    const wait_stage: u32 = 0x400;
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 1, .wait_semaphores = @ptrCast(&acquired), .wait_dst_stage_mask = @ptrCast(&wait_stage), .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 1, .signal_semaphores = @ptrCast(&rendered) };
+    try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&submit), 0));
+    const rendered_image = validImageLocked(images[0]).?;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 51, 51, 51, 51 }, imageBytes(rendered_image)[0..4]);
+    var present_result: [1]Result = undefined;
+    const present = PresentInfo{ .s_type = 1_000_001_001, .p_next = null, .wait_semaphore_count = 1, .wait_semaphores = @ptrCast(&rendered), .swapchain_count = 1, .swapchains = @ptrCast(&swapchain), .image_indices = @ptrCast(&image_index), .results = &present_result };
+    try std.testing.expectEqual(Result.success, queuePresent(queue, &present));
+    try std.testing.expectEqual(Result.success, present_result[0]);
+
+    const saved_surface_state = surface_state;
+    @memset(&surface_state, .tombstone);
+    var exhausted_handle: usize = 0;
+    try std.testing.expectEqual(Result.error_out_of_host_memory, createXcbSurface(instance, &surface_info, null, &exhausted_handle));
+    surface_state = saved_surface_state;
+    try std.testing.expect(validSwapchainLocked(0xdead_beef) == null);
+    const saved_semaphore_state = semaphore_state;
+    @memset(&semaphore_state, .tombstone);
+    try std.testing.expectEqual(Result.error_out_of_host_memory, createSemaphore(device, @ptrCast(&begin_info), null, &exhausted_handle));
+    semaphore_state = saved_semaphore_state;
+    const saved_view_state = image_view_state;
+    @memset(&image_view_state, .tombstone);
+    try std.testing.expectEqual(Result.error_out_of_host_memory, createImageView(device, &view_info, null, &exhausted_handle));
+    image_view_state = saved_view_state;
+    const saved_framebuffer_state = framebuffer_state;
+    @memset(&framebuffer_state, .tombstone);
+    try std.testing.expectEqual(Result.error_out_of_host_memory, createFramebuffer(device, &framebuffer_info, null, &exhausted_handle));
+    framebuffer_state = saved_framebuffer_state;
+    const saved_swapchain_state = swapchain_state;
+    @memset(&swapchain_state, .tombstone);
+    try std.testing.expectEqual(Result.error_out_of_host_memory, createSwapchain(device, &swapchain_info, null, &exhausted_handle));
+    swapchain_state = saved_swapchain_state;
+
+    destroySemaphore(device, acquired, null);
+    destroySemaphore(device, rendered, null);
+    destroyFramebuffer(device, framebuffer, null);
+    destroyImageView(device, view, null);
+    destroySwapchain(device, swapchain, null);
+    destroyCommandPool(device, pool, null);
+    destroyDevice(device, null);
+    destroyInstance(instance, null);
 }
 
 var instance_callback_count: usize = 0;
@@ -1952,16 +2630,19 @@ test "proc-address scopes expose every supported name and reject cross-scope nam
     var instance: Instance = undefined;
     try std.testing.expectEqual(Result.success, createInstance(&ci, null, &instance));
     const instance_names = [_][*:0]const u8{
-        "vkDestroyInstance",                              "vkEnumeratePhysicalDevices",           "vkGetPhysicalDeviceFeatures",         "vkGetPhysicalDeviceProperties",
-        "vkGetPhysicalDeviceQueueFamilyProperties",       "vkGetPhysicalDeviceMemoryProperties",  "vkGetPhysicalDeviceFormatProperties", "vkGetPhysicalDeviceImageFormatProperties",
-        "vkGetPhysicalDeviceSparseImageFormatProperties", "vkEnumerateDeviceExtensionProperties", "vkCreateDevice",                      "vkGetDeviceProcAddr",
-        "vkDestroyDevice",                                "vkGetDeviceQueue",
+        "vkDestroyInstance",                              "vkEnumeratePhysicalDevices",                "vkGetPhysicalDeviceFeatures",          "vkGetPhysicalDeviceProperties",
+        "vkGetPhysicalDeviceQueueFamilyProperties",       "vkGetPhysicalDeviceMemoryProperties",       "vkGetPhysicalDeviceFormatProperties",  "vkGetPhysicalDeviceImageFormatProperties",
+        "vkGetPhysicalDeviceSparseImageFormatProperties", "vkEnumerateDeviceExtensionProperties",      "vkCreateDevice",                       "vkGetDeviceProcAddr",
+        "vkDestroyDevice",                                "vkGetDeviceQueue",                          "vkCreateXcbSurfaceKHR",                "vkDestroySurfaceKHR",
+        "vkGetPhysicalDeviceSurfaceSupportKHR",           "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", "vkGetPhysicalDeviceSurfaceFormatsKHR", "vkGetPhysicalDeviceSurfacePresentModesKHR",
     };
     for (instance_names) |name| try std.testing.expect(vk_icdGetInstanceProcAddr(instance, name) != null);
     const physical_names = [_][*:0]const u8{
-        "vkGetPhysicalDeviceFeatures",                    "vkGetPhysicalDeviceProperties",        "vkGetPhysicalDeviceQueueFamilyProperties",
-        "vkGetPhysicalDeviceMemoryProperties",            "vkGetPhysicalDeviceFormatProperties",  "vkGetPhysicalDeviceImageFormatProperties",
-        "vkGetPhysicalDeviceSparseImageFormatProperties", "vkEnumerateDeviceExtensionProperties", "vkCreateDevice",
+        "vkGetPhysicalDeviceFeatures",                    "vkGetPhysicalDeviceProperties",             "vkGetPhysicalDeviceQueueFamilyProperties",
+        "vkGetPhysicalDeviceMemoryProperties",            "vkGetPhysicalDeviceFormatProperties",       "vkGetPhysicalDeviceImageFormatProperties",
+        "vkGetPhysicalDeviceSparseImageFormatProperties", "vkEnumerateDeviceExtensionProperties",      "vkCreateDevice",
+        "vkGetPhysicalDeviceSurfaceSupportKHR",           "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", "vkGetPhysicalDeviceSurfaceFormatsKHR",
+        "vkGetPhysicalDeviceSurfacePresentModesKHR",
     };
     for (physical_names) |name| try std.testing.expect(vk_icdGetPhysicalDeviceProcAddr(instance, name) != null);
     try std.testing.expect(vk_icdGetPhysicalDeviceProcAddr(instance, "vkGetDeviceQueue") == null);
@@ -2235,7 +2916,7 @@ test "all physical queries cover success boundaries and invalid handles" {
     var memory: MemoryProperties = undefined;
     getMemoryProperties(p, &memory);
     try std.testing.expectEqual(@as(u32, 1), memory.memory_type_count);
-    try std.testing.expectEqual(@as(u32, 0x6), memory.memory_types[0].property_flags);
+    try std.testing.expectEqual(@as(u32, 0x7), memory.memory_types[0].property_flags);
     try std.testing.expectEqual(@as(u32, 0), memory.memory_types[0].heap_index);
     try std.testing.expectEqual(@as(u32, 1), memory.memory_heap_count);
     try std.testing.expectEqual(@as(u64, 256 * 1024 * 1024), memory.memory_heaps[0].size);
@@ -2250,7 +2931,14 @@ test "all physical queries cover success boundaries and invalid handles" {
     try std.testing.expectEqual(@as(u32, 0), sparse_count);
     var extension_count: u32 = 9;
     try std.testing.expectEqual(Result.success, enumerateDeviceExtensions(p, null, &extension_count, null));
-    try std.testing.expectEqual(@as(u32, 0), extension_count);
+    try std.testing.expectEqual(@as(u32, 1), extension_count);
+    var device_extensions: [1]ExtensionProperties = undefined;
+    extension_count = 0;
+    try std.testing.expectEqual(Result.incomplete, enumerateDeviceExtensions(p, null, &extension_count, &device_extensions));
+    extension_count = 1;
+    try std.testing.expectEqual(Result.success, enumerateDeviceExtensions(p, null, &extension_count, &device_extensions));
+    try std.testing.expectEqualStrings("VK_KHR_swapchain", std.mem.sliceTo(&device_extensions[0].name, 0));
+    try std.testing.expectEqual(@as(u32, 70), device_extensions[0].spec_version);
     try std.testing.expectEqual(Result.error_extension_not_present, enumerateDeviceExtensions(p, "layer", &extension_count, null));
     try std.testing.expectEqual(Result.error_initialization_failed, enumerateDeviceExtensions(p, null, null, null));
     try std.testing.expect(vk_icdGetInstanceProcAddr(instance, "notAnEntryPoint") == null);
@@ -2660,7 +3348,7 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     var invalid_image_info = image_info;
     invalid_image_info.usage = 0;
     try std.testing.expectEqual(Result.error_initialization_failed, createImage(ctx.device, &invalid_image_info, null, &ignored));
-    invalid_image_info.usage = 4;
+    invalid_image_info.usage = 0x40;
     try std.testing.expectEqual(Result.error_initialization_failed, createImage(ctx.device, &invalid_image_info, null, &ignored));
     var image: usize = 0;
     try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &image));
