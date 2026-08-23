@@ -8,6 +8,26 @@
 #define CHECK_TRUE(expr) do { if (!(expr)) { fprintf(stderr, "check failed: %s\n", #expr); return 1; } } while (0)
 enum { WIDTH = 240, HEIGHT = 240, BYTES = WIDTH * HEIGHT * 4 };
 
+static int submit_wait(VkDevice device, VkQueue queue, VkCommandBuffer command, VkFence fence) {
+    VkSubmitInfo submit = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &command };
+    CHECK_VK(vkQueueSubmit(queue, 1, &submit, fence));
+    CHECK_VK(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX));
+    CHECK_VK(vkResetFences(device, 1, &fence));
+    return 0;
+}
+
+static int check_bytes(VkDevice device, VkDeviceMemory memory, const uint8_t *expected, const char *operation) {
+    uint8_t *actual;
+    CHECK_VK(vkMapMemory(device, memory, 0, VK_WHOLE_SIZE, 0, (void **)&actual));
+    for (size_t i = 0; i < BYTES; ++i) if (actual[i] != expected[i]) {
+        fprintf(stderr, "%s byte mismatch at %zu (pixel %zu channel %zu): expected %u actual %u\n", operation, i, i / 4, i % 4, expected[i], actual[i]);
+        vkUnmapMemory(device, memory);
+        return 1;
+    }
+    vkUnmapMemory(device, memory);
+    return 0;
+}
+
 static uint32_t find_memory_type(VkPhysicalDevice physical, uint32_t bits) {
     VkPhysicalDeviceMemoryProperties p;
     vkGetPhysicalDeviceMemoryProperties(physical, &p);
@@ -70,10 +90,11 @@ int main(void) {
     CHECK_VK(allocate_bind_buffer(device, physical, BYTES, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &upload, &upload_memory));
     CHECK_VK(allocate_bind_buffer(device, physical, BYTES, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &staging, &staging_memory));
     CHECK_VK(allocate_bind_buffer(device, physical, BYTES, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &readback, &readback_memory));
-    VkImage first, second;
-    VkDeviceMemory first_memory, second_memory;
+    VkImage first, second, bgra;
+    VkDeviceMemory first_memory, second_memory, bgra_memory;
     CHECK_VK(allocate_bind_image(device, physical, VK_FORMAT_R8G8B8A8_UNORM, &first, &first_memory));
     CHECK_VK(allocate_bind_image(device, physical, VK_FORMAT_R8G8B8A8_UNORM, &second, &second_memory));
+    CHECK_VK(allocate_bind_image(device, physical, VK_FORMAT_B8G8R8A8_UNORM, &bgra, &bgra_memory));
 
     uint8_t *mapped;
     CHECK_VK(vkMapMemory(device, upload_memory, 0, VK_WHOLE_SIZE, 0, (void **)&mapped));
@@ -93,30 +114,79 @@ int main(void) {
     VkCommandBuffer command;
     CHECK_VK(vkAllocateCommandBuffers(device, &cai, &command));
     VkCommandBufferBeginInfo begin = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-    CHECK_VK(vkBeginCommandBuffer(command, &begin));
-    vkCmdFillBuffer(command, staging, 0, VK_WHOLE_SIZE, 0x11223344u);
-    VkBufferCopy whole = { .size = BYTES };
-    vkCmdCopyBuffer(command, upload, staging, 1, &whole);
-    VkImageSubresourceRange range = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 };
-    VkClearColorValue blue = { .float32 = { 0.0f, 0.0f, 1.0f, 1.0f } };
-    vkCmdClearColorImage(command, second, VK_IMAGE_LAYOUT_GENERAL, &blue, 1, &range);
-    VkBufferImageCopy bir = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { WIDTH, HEIGHT, 1 } };
-    vkCmdCopyBufferToImage(command, staging, first, VK_IMAGE_LAYOUT_GENERAL, 1, &bir);
-    VkImageCopy ir = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .extent = { WIDTH, HEIGHT, 1 } };
-    vkCmdCopyImage(command, first, VK_IMAGE_LAYOUT_GENERAL, second, VK_IMAGE_LAYOUT_GENERAL, 1, &ir);
-    vkCmdCopyImageToBuffer(command, second, VK_IMAGE_LAYOUT_GENERAL, readback, 1, &bir);
-    CHECK_VK(vkEndCommandBuffer(command));
     VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
     VkFence fence;
     CHECK_VK(vkCreateFence(device, &fci, NULL, &fence));
     CHECK_TRUE(vkGetFenceStatus(device, fence) == VK_NOT_READY);
-    VkSubmitInfo submit = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &command };
-    CHECK_VK(vkQueueSubmit(queue, 1, &submit, fence));
-    CHECK_VK(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX));
+
+    CHECK_VK(vkBeginCommandBuffer(command, &begin));
+    vkCmdFillBuffer(command, staging, 0, VK_WHOLE_SIZE, 0x11223344u);
+    CHECK_VK(vkEndCommandBuffer(command));
+    CHECK_VK(submit_wait(device, queue, command, fence));
+    for (size_t i = 0; i < BYTES; i += 4) {
+        expected[i + 0] = 0x44; expected[i + 1] = 0x33; expected[i + 2] = 0x22; expected[i + 3] = 0x11;
+    }
+    CHECK_VK(check_bytes(device, staging_memory, expected, "vkCmdFillBuffer"));
+
+    CHECK_VK(vkResetCommandBuffer(command, 0));
+    CHECK_VK(vkBeginCommandBuffer(command, &begin));
+    VkBufferCopy whole = { .size = BYTES };
+    vkCmdCopyBuffer(command, upload, staging, 1, &whole);
+    CHECK_VK(vkEndCommandBuffer(command));
+    CHECK_VK(submit_wait(device, queue, command, fence));
+    for (uint32_t y = 0; y < HEIGHT; ++y) for (uint32_t x = 0; x < WIDTH; ++x) {
+        size_t i = ((size_t)y * WIDTH + x) * 4;
+        expected[i + 0] = (uint8_t)(x ^ y); expected[i + 1] = (uint8_t)(x + 3 * y); expected[i + 2] = (uint8_t)(255 - x); expected[i + 3] = 255;
+    }
+    CHECK_VK(check_bytes(device, staging_memory, expected, "vkCmdCopyBuffer"));
+
+    VkImageSubresourceRange range = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 };
+    VkClearColorValue blue = { .float32 = { 0.0f, 0.0f, 1.0f, 1.0f } };
+    VkBufferImageCopy bir = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { WIDTH, HEIGHT, 1 } };
+    CHECK_VK(vkResetCommandBuffer(command, 0));
+    CHECK_VK(vkBeginCommandBuffer(command, &begin));
+    vkCmdClearColorImage(command, second, VK_IMAGE_LAYOUT_GENERAL, &blue, 1, &range);
+    CHECK_VK(vkEndCommandBuffer(command));
+    CHECK_VK(submit_wait(device, queue, command, fence));
+    for (size_t i = 0; i < BYTES; i += 4) {
+        expected[i + 0] = 0; expected[i + 1] = 0; expected[i + 2] = 255; expected[i + 3] = 255;
+    }
+    CHECK_VK(check_bytes(device, second_memory, expected, "vkCmdClearColorImage RGBA"));
+
+    CHECK_VK(vkResetCommandBuffer(command, 0));
+    CHECK_VK(vkBeginCommandBuffer(command, &begin));
+    vkCmdCopyImageToBuffer(command, second, VK_IMAGE_LAYOUT_GENERAL, readback, 1, &bir);
+    CHECK_VK(vkEndCommandBuffer(command));
+    CHECK_VK(submit_wait(device, queue, command, fence));
+    CHECK_VK(check_bytes(device, readback_memory, expected, "vkCmdCopyImageToBuffer"));
+
+    VkClearColorValue red = { .float32 = { 1.0f, 0.0f, 0.0f, 1.0f } };
+    CHECK_VK(vkResetCommandBuffer(command, 0));
+    CHECK_VK(vkBeginCommandBuffer(command, &begin));
+    vkCmdClearColorImage(command, bgra, VK_IMAGE_LAYOUT_GENERAL, &red, 1, &range);
+    CHECK_VK(vkEndCommandBuffer(command));
+    CHECK_VK(submit_wait(device, queue, command, fence));
+    CHECK_VK(check_bytes(device, bgra_memory, expected, "vkCmdClearColorImage BGRA"));
+
+    CHECK_VK(vkResetCommandBuffer(command, 0));
+    CHECK_VK(vkBeginCommandBuffer(command, &begin));
+    vkCmdCopyBufferToImage(command, staging, first, VK_IMAGE_LAYOUT_GENERAL, 1, &bir);
+    CHECK_VK(vkEndCommandBuffer(command));
+    CHECK_VK(submit_wait(device, queue, command, fence));
+    for (uint32_t y = 0; y < HEIGHT; ++y) for (uint32_t x = 0; x < WIDTH; ++x) {
+        size_t i = ((size_t)y * WIDTH + x) * 4;
+        expected[i + 0] = (uint8_t)(x ^ y); expected[i + 1] = (uint8_t)(x + 3 * y); expected[i + 2] = (uint8_t)(255 - x); expected[i + 3] = 255;
+    }
+    CHECK_VK(check_bytes(device, first_memory, expected, "vkCmdCopyBufferToImage"));
+
+    VkImageCopy ir = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .extent = { WIDTH, HEIGHT, 1 } };
+    CHECK_VK(vkResetCommandBuffer(command, 0));
+    CHECK_VK(vkBeginCommandBuffer(command, &begin));
+    vkCmdCopyImage(command, first, VK_IMAGE_LAYOUT_GENERAL, second, VK_IMAGE_LAYOUT_GENERAL, 1, &ir);
+    CHECK_VK(vkEndCommandBuffer(command));
+    CHECK_VK(submit_wait(device, queue, command, fence));
     CHECK_VK(vkQueueWaitIdle(queue)); CHECK_VK(vkDeviceWaitIdle(device));
-    CHECK_VK(vkMapMemory(device, readback_memory, 0, VK_WHOLE_SIZE, 0, (void **)&mapped));
-    for (size_t i = 0; i < BYTES; ++i) if (mapped[i] != expected[i]) { fprintf(stderr, "pixel byte mismatch at %zu (pixel %zu channel %zu): expected %u actual %u\n", i, i / 4, i % 4, expected[i], mapped[i]); return 1; }
-    vkUnmapMemory(device, readback_memory);
+    CHECK_VK(check_bytes(device, second_memory, expected, "vkCmdCopyImage"));
 
     CHECK_VK(vkResetCommandBuffer(command, 0));
     CHECK_VK(vkBeginCommandBuffer(command, &begin));
@@ -127,13 +197,12 @@ int main(void) {
     CHECK_VK(vkBeginCommandBuffer(command, &begin));
     vkCmdClearColorImage(command, second, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, &blue, 1, &range);
     CHECK_TRUE(vkEndCommandBuffer(command) == VK_ERROR_INITIALIZATION_FAILED);
-    CHECK_VK(vkResetFences(device, 1, &fence));
     CHECK_TRUE(vkWaitForFences(device, 1, &fence, VK_TRUE, 0) == VK_TIMEOUT);
 
     free(expected);
     vkDestroyFence(device, fence, NULL);
     vkFreeCommandBuffers(device, pool, 1, &command); vkDestroyCommandPool(device, pool, NULL);
-    vkDestroyImage(device, second, NULL); vkFreeMemory(device, second_memory, NULL); vkDestroyImage(device, first, NULL); vkFreeMemory(device, first_memory, NULL);
+    vkDestroyImage(device, bgra, NULL); vkFreeMemory(device, bgra_memory, NULL); vkDestroyImage(device, second, NULL); vkFreeMemory(device, second_memory, NULL); vkDestroyImage(device, first, NULL); vkFreeMemory(device, first_memory, NULL);
     vkDestroyBuffer(device, readback, NULL); vkFreeMemory(device, readback_memory, NULL); vkDestroyBuffer(device, staging, NULL); vkFreeMemory(device, staging_memory, NULL); vkDestroyBuffer(device, upload, NULL); vkFreeMemory(device, upload_memory, NULL);
     vkDestroyDevice(device, NULL); vkDestroyInstance(instance, NULL);
     printf("exact transfer bytes: %u/%u; pixels: %u/%u\n", BYTES, BYTES, WIDTH * HEIGHT, WIDTH * HEIGHT);
