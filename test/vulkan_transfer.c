@@ -293,6 +293,14 @@ int main(void) {
     };
     vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &unsupported_barrier);
     CHECK_TRUE(vkEndCommandBuffer(command) == VK_ERROR_INITIALIZATION_FAILED);
+    CHECK_VK(vkResetCommandBuffer(command, 0));
+    CHECK_VK(vkBeginCommandBuffer(command, &begin));
+    vkCmdFillBuffer(command, staging, 0, 0, 0xffffffffu);
+    CHECK_TRUE(vkEndCommandBuffer(command) == VK_ERROR_INITIALIZATION_FAILED);
+    VkSubmitInfo rejected_submit = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &command };
+    CHECK_TRUE(vkQueueSubmit(queue, 1, &rejected_submit, fence) == VK_ERROR_INITIALIZATION_FAILED);
+    CHECK_TRUE(vkGetFenceStatus(device, fence) == VK_NOT_READY);
+    CHECK_VK(check_bytes(device, staging_memory, expected, "zero-size vkCmdFillBuffer rejection"));
     CHECK_TRUE(vkQueueSubmit(queue, 0, NULL, fence) == VK_ERROR_INITIALIZATION_FAILED);
     CHECK_TRUE(vkGetFenceStatus(device, fence) == VK_NOT_READY);
     CHECK_TRUE(vkWaitForFences(device, 1, &fence, VK_TRUE, 0) == VK_TIMEOUT);

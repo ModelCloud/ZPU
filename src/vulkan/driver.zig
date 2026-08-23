@@ -253,6 +253,8 @@ const Requirement = enum(u6) {
     zero_submit_rejected,
     invalid_clear_color,
     submission_atomicity,
+    zero_fill_rejected,
+    submitting_device_ownership,
 };
 var requirement_hits: u64 = 0;
 var overlap_hold = std.atomic.Value(bool).init(false);
@@ -1230,7 +1232,8 @@ fn cmdFillBuffer(cb: ?CommandBuffer, dst_handle: usize, offset: u64, size: u64, 
     };
     const actual = if (size == std.math.maxInt(u64)) dst.size -| offset else size;
     if (dst.usage & 0x2 == 0) hit(.missing_transfer_usage);
-    if (dst.owner != c.impl.owner or dst.usage & 0x2 == 0 or dst.memory == null or offset % 4 != 0 or actual % 4 != 0 or offset > dst.size or actual > dst.size - offset) {
+    if (actual == 0) hit(.zero_fill_rejected);
+    if (dst.owner != c.impl.owner or dst.usage & 0x2 == 0 or dst.memory == null or actual == 0 or offset % 4 != 0 or actual % 4 != 0 or offset > dst.size or actual > dst.size - offset) {
         c.impl.invalid = true;
         return;
     }
@@ -1321,20 +1324,33 @@ fn validImageRegion(image: *const ImageObj, offset: Offset3D, extent: Extent3D, 
     const end_y = std.math.add(u64, @intCast(offset.y), extent.height) catch return false;
     return end_x <= image.width and end_y <= image.height;
 }
+fn checkedBufferImageSub(a: u64, b: u64) ?u64 {
+    return std.math.sub(u64, a, b) catch {
+        hit(.overflow_buffer_image);
+        return null;
+    };
+}
+fn checkedBufferImageMul(a: u64, b: u64) ?u64 {
+    return std.math.mul(u64, a, b) catch {
+        hit(.overflow_buffer_image);
+        return null;
+    };
+}
+fn checkedBufferImageAdd(a: u64, b: u64) ?u64 {
+    return std.math.add(u64, a, b) catch {
+        hit(.overflow_buffer_image);
+        return null;
+    };
+}
 fn bufferImageEnd(region: BufferImageCopy) ?u64 {
     const row = if (region.buffer_row_length == 0) region.image_extent.width else region.buffer_row_length;
     const height = if (region.buffer_image_height == 0) region.image_extent.height else region.buffer_image_height;
     if (row < region.image_extent.width or height < region.image_extent.height or region.buffer_offset % 4 != 0) return null;
-    const prior_rows = @as(u64, region.image_extent.height - 1) * row;
-    const texels = prior_rows + region.image_extent.width;
-    const bytes = std.math.mul(u64, texels, 4) catch {
-        hit(.overflow_buffer_image);
-        return null;
-    };
-    return std.math.add(u64, region.buffer_offset, bytes) catch {
-        hit(.overflow_buffer_image);
-        return null;
-    };
+    const rows_before_last = checkedBufferImageSub(region.image_extent.height, 1) orelse return null;
+    const prior_rows = checkedBufferImageMul(rows_before_last, row) orelse return null;
+    const texels = checkedBufferImageAdd(prior_rows, region.image_extent.width) orelse return null;
+    const bytes = checkedBufferImageMul(texels, 4) orelse return null;
+    return checkedBufferImageAdd(region.buffer_offset, bytes);
 }
 fn cmdCopyBufferToImage(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize, layout: i32, count: u32, regions: ?[*]const BufferImageCopy) callconv(.c) void {
     lock();
@@ -1515,13 +1531,24 @@ fn deadResource() bool {
     hit(.recorded_dead_resource);
     return false;
 }
-fn prevalidateCommand(command: Command, layouts: *[max_child_objects]i32) bool {
+fn wrongSubmittingDevice() bool {
+    hit(.submitting_device_ownership);
+    return false;
+}
+fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_objects]i32) bool {
     switch (command) {
-        .fill => |op| if (!liveBufferObject(op.dst) or op.dst.memory == null or !liveMemoryObject(op.dst.memory.?)) return deadResource(),
-        .copy_buffer => |op| if (!liveBufferObject(op.src) or !liveBufferObject(op.dst) or op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource(),
+        .fill => |op| {
+            if (!liveBufferObject(op.dst) or op.dst.memory == null or !liveMemoryObject(op.dst.memory.?)) return deadResource();
+            if (op.dst.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
+        },
+        .copy_buffer => |op| {
+            if (!liveBufferObject(op.src) or !liveBufferObject(op.dst) or op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
+            if (op.src.owner != owner or op.dst.owner != owner or op.src.memory.?.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
+        },
         .clear => |op| {
             const slot = imageSlot(op.image) orelse return deadResource();
             if (op.image.memory == null or !liveMemoryObject(op.image.memory.?)) return deadResource();
+            if (op.image.owner != owner or op.image.memory.?.owner != owner) return wrongSubmittingDevice();
             if (layouts[slot] != op.layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -1530,6 +1557,7 @@ fn prevalidateCommand(command: Command, layouts: *[max_child_objects]i32) bool {
         .buffer_to_image => |op| {
             const slot = imageSlot(op.dst) orelse return deadResource();
             if (!liveBufferObject(op.src) or op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
+            if (op.src.owner != owner or op.dst.owner != owner or op.src.memory.?.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
             if (layouts[slot] != op.layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -1538,6 +1566,7 @@ fn prevalidateCommand(command: Command, layouts: *[max_child_objects]i32) bool {
         .image_to_buffer => |op| {
             const slot = imageSlot(op.src) orelse return deadResource();
             if (!liveBufferObject(op.dst) or op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
+            if (op.src.owner != owner or op.dst.owner != owner or op.src.memory.?.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
             if (layouts[slot] != op.layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -1547,6 +1576,7 @@ fn prevalidateCommand(command: Command, layouts: *[max_child_objects]i32) bool {
             const src_slot = imageSlot(op.src) orelse return deadResource();
             const dst_slot = imageSlot(op.dst) orelse return deadResource();
             if (op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
+            if (op.src.owner != owner or op.dst.owner != owner or op.src.memory.?.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
             if (layouts[src_slot] != op.src_layout or layouts[dst_slot] != op.dst_layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -1554,6 +1584,7 @@ fn prevalidateCommand(command: Command, layouts: *[max_child_objects]i32) bool {
         },
         .transition => |op| {
             const slot = imageSlot(op.image) orelse return deadResource();
+            if (op.image.owner != owner) return wrongSubmittingDevice();
             if (layouts[slot] != op.old_layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -1637,7 +1668,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
         for (cbs[0..submit.command_buffer_count]) |cb| {
             const valid_cb = validCommandBufferLocked(cb) orelse return .error_initialization_failed;
             if (valid_cb.impl.owner != q.owner or valid_cb.impl.state != 2) return .error_initialization_failed;
-            for (valid_cb.impl.commands[0..valid_cb.impl.count]) |command| if (!prevalidateCommand(command, &layouts)) {
+            for (valid_cb.impl.commands[0..valid_cb.impl.count]) |command| if (!prevalidateCommand(command, q.owner, &layouts)) {
                 hit(.submission_atomicity);
                 return .error_initialization_failed;
             };
@@ -2584,7 +2615,7 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     const dead_src: *BufferObj = @ptrFromInt(src);
     const dead_dst: *BufferObj = @ptrFromInt(dst);
     var validation_layouts = [_]i32{0} ** max_child_objects;
-    try std.testing.expect(!prevalidateCommand(.{ .copy_buffer = .{ .src = dead_src, .dst = dead_dst, .region = .{ .src_offset = 0, .dst_offset = 0, .size = 1 } } }, &validation_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .copy_buffer = .{ .src = dead_src, .dst = dead_dst, .region = .{ .src_offset = 0, .dst_offset = 0, .size = 1 } } }, ctx.device, &validation_layouts));
     freeMemory(ctx.device, memory_a, null);
     try std.testing.expectEqual(Result.error_memory_map_failed, mapMemory(ctx.device, memory_a, 0, 1, 0, &mapped));
 
@@ -2631,10 +2662,19 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     const live_dst_object: *BufferObj = @ptrFromInt(live_dst);
     var mismatched_layouts = [_]i32{0} ** max_child_objects;
     const mismatch_region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = .{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 1, .height = 1, .depth = 1 } };
-    try std.testing.expect(!prevalidateCommand(.{ .buffer_to_image = .{ .src = live_src_object, .dst = live_image, .layout = 1, .region = mismatch_region } }, &mismatched_layouts));
-    try std.testing.expect(!prevalidateCommand(.{ .image_to_buffer = .{ .src = live_image, .layout = 1, .dst = live_dst_object, .region = mismatch_region } }, &mismatched_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .buffer_to_image = .{ .src = live_src_object, .dst = live_image, .layout = 1, .region = mismatch_region } }, ctx.device, &mismatched_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .image_to_buffer = .{ .src = live_image, .layout = 1, .dst = live_dst_object, .region = mismatch_region } }, ctx.device, &mismatched_layouts));
     const mismatch_copy = ImageCopy{ .src_subresource = mismatch_region.image_subresource, .src_offset = mismatch_region.image_offset, .dst_subresource = mismatch_region.image_subresource, .dst_offset = mismatch_region.image_offset, .extent = mismatch_region.image_extent };
-    try std.testing.expect(!prevalidateCommand(.{ .copy_image = .{ .src = live_image, .src_layout = 1, .dst = live_image, .dst_layout = 1, .region = mismatch_copy } }, &mismatched_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .copy_image = .{ .src = live_image, .src_layout = 1, .dst = live_image, .dst_layout = 1, .region = mismatch_copy } }, ctx.device, &mismatched_layouts));
+    var ownership_layouts = [_]i32{0} ** max_child_objects;
+    const wrong_owner: *DeviceObj = @ptrFromInt(8);
+    try std.testing.expect(!prevalidateCommand(.{ .fill = .{ .dst = live_dst_object, .offset = 0, .size = 4, .data = 0 } }, wrong_owner, &ownership_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .copy_buffer = .{ .src = live_src_object, .dst = live_dst_object, .region = .{ .src_offset = 0, .dst_offset = 0, .size = 4 } } }, wrong_owner, &ownership_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .clear = .{ .image = live_image, .layout = 0, .color = .{ 0, 0, 0, 0 } } }, wrong_owner, &ownership_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .buffer_to_image = .{ .src = live_src_object, .dst = live_image, .layout = 0, .region = mismatch_region } }, wrong_owner, &ownership_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .image_to_buffer = .{ .src = live_image, .layout = 0, .dst = live_dst_object, .region = mismatch_region } }, wrong_owner, &ownership_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .copy_image = .{ .src = live_image, .src_layout = 0, .dst = live_image, .dst_layout = 0, .region = mismatch_copy } }, wrong_owner, &ownership_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .transition = .{ .image = live_image, .old_layout = 0, .new_layout = 1 } }, wrong_owner, &ownership_layouts));
     destroyBuffer(ctx.device, live_dst, null);
     destroyBuffer(ctx.device, live_src, null);
     freeMemory(ctx.device, live_dst_memory, null);
@@ -2708,14 +2748,14 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     destroyImage(ctx.device, image, null);
     try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     const dead_image: *ImageObj = @ptrFromInt(image);
-    try std.testing.expect(!prevalidateCommand(.{ .clear = .{ .image = dead_image, .layout = 1, .color = .{ 1, 2, 3, 4 } } }, &validation_layouts));
-    try std.testing.expect(!prevalidateCommand(.{ .fill = .{ .dst = dead_dst, .offset = 0, .size = 4, .data = 0 } }, &validation_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .clear = .{ .image = dead_image, .layout = 1, .color = .{ 1, 2, 3, 4 } } }, ctx.device, &validation_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .fill = .{ .dst = dead_dst, .offset = 0, .size = 4, .data = 0 } }, ctx.device, &validation_layouts));
     const stale_region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = .{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 1, .height = 1, .depth = 1 } };
-    try std.testing.expect(!prevalidateCommand(.{ .buffer_to_image = .{ .src = dead_src, .dst = dead_image, .layout = 1, .region = stale_region } }, &validation_layouts));
-    try std.testing.expect(!prevalidateCommand(.{ .image_to_buffer = .{ .src = dead_image, .layout = 1, .dst = dead_dst, .region = stale_region } }, &validation_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .buffer_to_image = .{ .src = dead_src, .dst = dead_image, .layout = 1, .region = stale_region } }, ctx.device, &validation_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .image_to_buffer = .{ .src = dead_image, .layout = 1, .dst = dead_dst, .region = stale_region } }, ctx.device, &validation_layouts));
     const stale_image_copy = ImageCopy{ .src_subresource = stale_region.image_subresource, .src_offset = stale_region.image_offset, .dst_subresource = stale_region.image_subresource, .dst_offset = stale_region.image_offset, .extent = stale_region.image_extent };
-    try std.testing.expect(!prevalidateCommand(.{ .copy_image = .{ .src = dead_image, .src_layout = 1, .dst = dead_image, .dst_layout = 1, .region = stale_image_copy } }, &validation_layouts));
-    try std.testing.expect(!prevalidateCommand(.{ .transition = .{ .image = dead_image, .old_layout = 1, .new_layout = 6 } }, &validation_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .copy_image = .{ .src = dead_image, .src_layout = 1, .dst = dead_image, .dst_layout = 1, .region = stale_image_copy } }, ctx.device, &validation_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .transition = .{ .image = dead_image, .old_layout = 1, .new_layout = 6 } }, ctx.device, &validation_layouts));
     getImageMemoryRequirements(ctx.device, image, &stale_requirements);
     try std.testing.expectEqual(@as(u64, 9), stale_requirements.size);
 
@@ -2765,6 +2805,87 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
 
     destroyDevice(ctx.device, null);
     try std.testing.expectEqual(Result.error_memory_map_failed, mapMemory(ctx.device, memory_b, 0, 1, 0, &mapped));
+    destroyInstance(ctx.instance, null);
+}
+
+test "zero fills and extreme buffer image arithmetic reject without side effects" {
+    const ctx = try createTestDeviceContext();
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 64, .memory_type_index = 0 };
+    var buffer_memory: usize = 0;
+    var image_memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &buffer_memory));
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &image_memory));
+    const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 64, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &buffer));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, buffer, buffer_memory, 0));
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 37, .extent = .{ .width = 4, .height = 4, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 1, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &image));
+    try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, image, image_memory, 0));
+    var mapped: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, buffer_memory, 0, 64, 0, &mapped));
+    @memset((@as([*]u8, @ptrCast(mapped.?)))[0..64], 0x6b);
+    unmapMemory(ctx.device, buffer_memory);
+
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    const cb_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var cbs: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &cb_info, &cbs));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    const fence_info = FenceCreateInfo{ .s_type = 8, .p_next = null, .flags = 0 };
+    var fence: usize = 0;
+    try std.testing.expectEqual(Result.success, createFence(ctx.device, &fence_info, null, &fence));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &cbs, .signal_semaphore_count = 0, .signal_semaphores = null };
+
+    const invalid_fills = [_]struct { offset: u64, size: u64 }{
+        .{ .offset = 0, .size = 0 },
+        .{ .offset = 64, .size = std.math.maxInt(u64) },
+    };
+    for (invalid_fills) |fill| {
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(cbs[0], &begin));
+        cmdFillBuffer(cbs[0], buffer, fill.offset, fill.size, 0xdeadbeef);
+        try std.testing.expect(cbs[0].impl.invalid);
+        try std.testing.expectEqual(@as(u16, 0), cbs[0].impl.count);
+        try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(cbs[0]));
+        try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&submit), fence));
+        try std.testing.expectEqual(Result.not_ready, getFenceStatus(ctx.device, fence));
+        try std.testing.expectEqual(Result.success, mapMemory(ctx.device, buffer_memory, 0, 64, 0, &mapped));
+        for ((@as([*]const u8, @ptrCast(mapped.?)))[0..64]) |byte| try std.testing.expectEqual(@as(u8, 0x6b), byte);
+        unmapMemory(ctx.device, buffer_memory);
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(cbs[0], 0));
+    }
+
+    const layers = ImageSubresourceLayers{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 };
+    var extreme = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = std.math.maxInt(u32), .buffer_image_height = std.math.maxInt(u32), .image_subresource = layers, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = std.math.maxInt(u32), .height = std.math.maxInt(u32), .depth = 1 } };
+    try std.testing.expect(checkedBufferImageMul(std.math.maxInt(u64), 2) == null);
+    try std.testing.expect(checkedBufferImageAdd(std.math.maxInt(u64), 1) == null);
+    try std.testing.expect(bufferImageEnd(extreme) == null);
+    extreme.image_extent.height = 0;
+    try std.testing.expect(bufferImageEnd(extreme) == null);
+    extreme.image_extent = .{ .width = 1, .height = 1, .depth = 1 };
+    extreme.buffer_offset = std.math.maxInt(u64) - 3;
+    try std.testing.expect(bufferImageEnd(extreme) == null);
+    extreme = .{ .buffer_offset = 0, .buffer_row_length = std.math.maxInt(u32), .buffer_image_height = std.math.maxInt(u32), .image_subresource = layers, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = std.math.maxInt(u32), .height = std.math.maxInt(u32), .depth = 1 } };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(cbs[0], &begin));
+    cmdCopyBufferToImage(cbs[0], buffer, image, 1, 1, @ptrCast(&extreme));
+    try std.testing.expect(cbs[0].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 0), cbs[0].impl.count);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(cbs[0]));
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&submit), fence));
+    try std.testing.expectEqual(Result.not_ready, getFenceStatus(ctx.device, fence));
+    try std.testing.expectEqual(@as(i32, 0), (@as(*ImageObj, @ptrFromInt(image))).layout);
+
+    destroyFence(ctx.device, fence, null);
+    freeCommandBuffers(ctx.device, pool, 1, &cbs);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyImage(ctx.device, image, null);
+    destroyBuffer(ctx.device, buffer, null);
+    freeMemory(ctx.device, image_memory, null);
+    freeMemory(ctx.device, buffer_memory, null);
+    destroyDevice(ctx.device, null);
     destroyInstance(ctx.instance, null);
 }
 
