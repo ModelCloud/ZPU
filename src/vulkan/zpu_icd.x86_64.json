@@ -1,0 +1,9 @@
+{
+    "file_format_version": "1.0.1",
+    "ICD": {
+        "library_path": "../../../lib/libvulkan_zpu.so",
+        "library_arch": "64",
+        "api_version": "1.0.0",
+        "is_portability_driver": false
+    }
+}

@@ -6,14 +6,43 @@ permissions:
   contents: read
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - run: zig fmt --check build.zig src
+      - name: Install reproducible Ubuntu coverage and Vulkan-loader tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends kcov libvulkan1 vulkan-tools
+          dpkg-query -W -f='${Package}=${Version}\n' kcov libvulkan1 vulkan-tools
+      - run: zig fmt --check build.zig src tools
       - run: zig build
+      - run: test "$(realpath zig-out/share/vulkan/icd.d/../../../lib/libvulkan_zpu.so)" = "$(realpath zig-out/lib/libvulkan_zpu.so)"
       - run: zig build test
+      - run: zig build behavior
+      - run: zig build coverage
+      - run: zig build smoke
+      - name: Authoritative system Vulkan-loader discovery
+        run: |
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/runtime"
+          mkdir -p "$XDG_RUNTIME_DIR"
+          export VK_DRIVER_FILES="$PWD/zig-out/share/vulkan/icd.d/zpu_icd.x86_64.json"
+          vulkaninfo --summary | tee vulkaninfo-summary.txt
+          grep -F 'ZPU Experimental CPU' vulkaninfo-summary.txt
+          grep -E 'deviceType[[:space:]]*=[[:space:]]*PHYSICAL_DEVICE_TYPE_CPU' vulkaninfo-summary.txt
+          grep -E 'apiVersion[[:space:]]*=[[:space:]]*1\.0\.0' vulkaninfo-summary.txt
+          grep -Ei 'vendorID[[:space:]]*=[[:space:]]*0x1cdc' vulkaninfo-summary.txt
+          grep -Ei 'deviceID[[:space:]]*=[[:space:]]*0x0001' vulkaninfo-summary.txt
       - run: zig build demo
       - run: test "$(sha256sum zpu-demo.ppm | cut -d' ' -f1)" = "919b08ed95dec247b8c456e7fc1b85ac47e5a9d0030a54f6287fbfe424d37ef4"
+      - run: zig build -Doptimize=ReleaseFast
+      - name: Verify ICD ELF ABI
+        run: |
+          test -z "$(readelf -d zig-out/lib/libvulkan_zpu.so | grep NEEDED)"
+          exports="$(readelf --dyn-syms --wide zig-out/lib/libvulkan_zpu.so | awk '$5 == "GLOBAL" && $7 != "UND" {print $8}')"
+          test "$(printf '%s\n' "$exports" | wc -l)" -eq 3
+          for symbol in vk_icdNegotiateLoaderICDInterfaceVersion vk_icdGetInstanceProcAddr vk_icdGetPhysicalDeviceProcAddr; do
+            printf '%s\n' "$exports" | grep -qx "$symbol"
+          done
