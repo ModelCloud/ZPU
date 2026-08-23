@@ -18,6 +18,11 @@ import json, sys
 r=json.load(open(sys.argv[1])); r["workload_id"]="forged"; json.dump(r,open(sys.argv[2],"w"))
 PY
 if python3 tools/benchmark_history.py "$tmp/bad.json" "$tmp/bad-history.md" --commit "$sha" --observed-threads 8 2>/dev/null; then exit 1; fi
+python3 - "$json" "$tmp/bad-tolerance.json" <<'PY'
+import json, sys
+r=json.load(open(sys.argv[1])); r["rate_tolerance_fraction"]=0.99; json.dump(r,open(sys.argv[2],"w"))
+PY
+if python3 tools/benchmark_history.py "$tmp/bad-tolerance.json" "$tmp/bad-history.md" --commit "$sha" --observed-threads 8 2>/dev/null; then exit 1; fi
 touch "$root/.history-dirty-sentinel"
 if python3 tools/benchmark_history.py "$json" "$tmp/dirty.md" --commit "$sha" --observed-threads 8 2>/dev/null; then rm -f "$root/.history-dirty-sentinel"; exit 1; fi
 rm -f "$root/.history-dirty-sentinel"

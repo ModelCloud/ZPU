@@ -32,6 +32,8 @@ def emit(name, mutate):
 emit('fingerprint',lambda x:x['fingerprint'].__setitem__('cpu_model','forged'))
 emit('missing',lambda x:x['metrics'].pop())
 emit('duplicate',lambda x:x['metrics'].__setitem__(1,x['metrics'][0]))
+emit('rate',lambda x:x['metrics'][0].__setitem__('mpix_s',x['metrics'][0]['mpix_s']*2))
+emit('latency',lambda x:x['metrics'][0].__setitem__('frame',{'p50_ns':1,'p95_ns':1,'p99_ns':1}))
 PY
 for kind in fingerprint missing duplicate; do
   if run_benchmark --smoke --compare "$tmp/$kind.json" >/dev/null 2>"$tmp/$kind.err"; then exit 1; fi
@@ -39,11 +41,18 @@ done
 grep -F 'IncompatibleFingerprint' "$tmp/fingerprint.err" >/dev/null
 grep -F 'MetricSetMismatch' "$tmp/missing.err" >/dev/null
 grep -F 'MetricSetMismatch' "$tmp/duplicate.err" >/dev/null
+for kind in rate latency; do
+  if run_benchmark --smoke --compare "$tmp/$kind.json" >/dev/null 2>"$tmp/$kind.err"; then exit 1; fi
+done
+grep -F 'PerformanceRegression' "$tmp/rate.err" >/dev/null
+grep -F 'LatencyRegression' "$tmp/latency.err" >/dev/null
 if run_benchmark --smoke --capture "$tmp/no-parent/result.json" >/dev/null 2>"$tmp/path.err"; then exit 1; fi
 if run_benchmark --smoke --capture /proc/1/zpu-forbidden.json >/dev/null 2>"$tmp/permission.err"; then exit 1; fi
 if [[ -z "$kcov_dir" ]]; then
-  if ZPU_SELECTED_CPUS=999999 ZPU_CPU_MODEL=forged ZPU_TOPOLOGY=forged run_benchmark --smoke --compare "$tmp/base.json" >/dev/null 2>"$tmp/forged.err"; then exit 1; fi
-  grep -E 'UntrustedAffinityFingerprint|MissingTrustedAffinity' "$tmp/forged.err" >/dev/null
+  if ZPU_CPU_MODEL=forged run_benchmark --smoke >/dev/null 2>"$tmp/forged-model.err"; then exit 1; fi
+  grep -F 'UntrustedCpuFingerprint' "$tmp/forged-model.err" >/dev/null
+  if ZPU_TOPOLOGY=forged run_benchmark --smoke >/dev/null 2>"$tmp/forged-topology.err"; then exit 1; fi
+  grep -F 'UntrustedTopologyFingerprint' "$tmp/forged-topology.err" >/dev/null
 fi
 if run_benchmark --capture >/dev/null 2>"$tmp/missing-arg.err"; then exit 1; fi
 if run_benchmark --unknown >/dev/null 2>"$tmp/unknown-arg.err"; then exit 1; fi
@@ -57,4 +66,4 @@ if [[ -n "$kcov_dir" ]]; then
   kcov --merge "$kcov_dir/merged" "${inputs[@]}" >/dev/null
   rm -rf "${run_dirs[@]}"
 fi
-echo "benchmark CLI: capture/compare, malformed, fingerprint, duplicate/missing, paths, forged environment: PASS"
+echo "benchmark CLI: capture/compare, rate/latency regressions, malformed, fingerprint, duplicate/missing, paths, forged model/topology: PASS"

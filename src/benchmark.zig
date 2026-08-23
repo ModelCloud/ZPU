@@ -12,6 +12,7 @@ const width = 240;
 const height = 240;
 const surface_bytes = width * height * 4;
 const canonical_iteration = 7;
+const transfer_copy_initial_checksum: u64 = 0xd7373ee7d7183725;
 
 pub const Percentiles = struct { p50_ns: u64, p95_ns: u64, p99_ns: u64 };
 pub const Metric = struct { name: []const u8, backend: []const u8, iterations: u64, checksum: u64, checksum_hex: []const u8, mpix_s: f64, effective_gib_s: f64, draws_s: f64, fps: f64, frame: Percentiles };
@@ -78,14 +79,20 @@ fn backendName(backend: ?dispatch.Backend) []const u8 {
     return if (backend) |b| @tagName(b) else "runtime";
 }
 
-fn runOp(op: Op, backend: ?dispatch.Backend, dst: []u8, src: []const u8, surface: *s.Surface, iteration: usize) void {
+const TransferCopyFn = *const fn ([]u8, []const u8) void;
+
+fn transferCopy(dst: []u8, src: []const u8) void {
+    std.mem.copyForwards(u8, dst, src);
+}
+
+fn runOpWithCopy(op: Op, backend: ?dispatch.Backend, dst: []u8, src: []const u8, surface: *s.Surface, iteration: usize, copy: TransferCopyFn) void {
     const b = backend orelse dispatch.best();
     switch (op) {
         .clear => raster.fillRectWith(surface, .{ .x = 0, .y = 0, .width = width, .height = height }, .rgba(11, 37, @truncate(iteration), 255), b),
         .pixel => for (0..512) |i| raster.fillRectWith(surface, .{ .x = @intCast((i * 37 + iteration) % width), .y = @intCast((i * 73 + iteration) % height), .width = 1, .height = 1 }, .rgba(@truncate(i), 91, 17, 255), b),
         .fill => for (0..32) |i| raster.fillRectWith(surface, .{ .x = @intCast((i * 19) % 220), .y = @intCast((i * 31) % 220), .width = 20, .height = 20 }, .rgba(@truncate(i * 7), 23, 201, 255), b),
         .transfer_fill => @memset(dst, @truncate(iteration *% 17 +% 3)),
-        .transfer_copy => std.mem.copyForwards(u8, dst, src),
+        .transfer_copy => copy(dst, src),
         .blend => raster.blendRectWith(surface, .{ .x = 0, .y = 0, .width = width, .height = height }, .rgba(220, 31, 77, 128), b),
         .sprites => for (0..128) |i| raster.blendRectWith(surface, .{ .x = @intCast((i * 29 + iteration) % 232), .y = @intCast((i * 43) % 232), .width = 8, .height = 8 }, .rgba(@truncate(i * 3), 101, 233, 160), b),
         .frame => {
@@ -93,6 +100,10 @@ fn runOp(op: Op, backend: ?dispatch.Backend, dst: []u8, src: []const u8, surface
             for (0..64) |i| raster.blendRectWith(surface, .{ .x = @intCast((i * 17) % 224), .y = @intCast((i * 41) % 224), .width = 16, .height = 16 }, .rgba(@truncate(i * 5), 140, 60, 180), b);
         },
     }
+}
+
+fn runOp(op: Op, backend: ?dispatch.Backend, dst: []u8, src: []const u8, surface: *s.Surface, iteration: usize) void {
+    runOpWithCopy(op, backend, dst, src, surface, iteration, transferCopy);
 }
 
 fn refWrite(bytes: []u8, index: usize, color: s.Color) void {
@@ -124,8 +135,7 @@ fn refRect(bytes: []u8, x: usize, y: usize, w: usize, h: usize, color: s.Color, 
         if (blend) refBlend(bytes, index, color) else refWrite(bytes, index, color);
     };
 }
-fn referenceOp(op: Op, dst: []u8, src: []const u8) void {
-    const iteration = canonical_iteration;
+fn referenceOp(op: Op, dst: []u8, src: []const u8, iteration: usize) void {
     switch (op) {
         .clear => refRect(dst, 0, 0, width, height, .rgba(11, 37, @truncate(iteration), 255), false),
         .pixel => for (0..512) |i| refRect(dst, (i * 37 + iteration) % width, (i * 73 + iteration) % height, 1, 1, .rgba(@truncate(i), 91, 17, 255), false),
@@ -139,6 +149,15 @@ fn referenceOp(op: Op, dst: []u8, src: []const u8) void {
             for (0..64) |i| refRect(dst, (i * 17) % 224, (i * 41) % 224, 16, 16, .rgba(@truncate(i * 5), 140, 60, 180), true);
         },
     }
+}
+
+fn validateOpOutput(op: Op, backend: ?dispatch.Backend, dst: []u8, src: []const u8, surface: *s.Surface, iteration: usize, copy: TransferCopyFn) !void {
+    prepareDestination(op, dst, src);
+    runOpWithCopy(op, backend, dst, src, surface, iteration, copy);
+    var expected: [surface_bytes]u8 align(64) = undefined;
+    prepareDestination(op, &expected, src);
+    referenceOp(op, &expected, src, iteration);
+    if (!std.mem.eql(u8, dst, &expected)) return error.OutputMismatch;
 }
 
 const oracle_checksums = [_]u64{ 0x89fcf336d86c4f25, 0x3d0737332ec9e1cc, 0xb5cb439ce748a598, 0x50dbc316a6090325, 0x4e61ac2d0cc0777b, 0xd5f99fe5b4e7eef8, 0x3717a00e187d9381, 0x2e480a89ab6181ef };
@@ -261,16 +280,11 @@ pub fn benchmark(io: std.Io, metrics: []Metric, smoke: bool) !usize {
             }
             const pct = try summarize(durations[0..samples]);
             const seconds = @as(f64, @floatFromInt(pct.p50_ns)) / 1e9;
-            const last_iteration = samples * inner - 1;
-            prepareDestination(op, &dst, &src);
-            runOp(op, backend, &dst, &src, &surface, last_iteration);
-            var scalar_dst: [surface_bytes]u8 align(64) = undefined;
-            prepareDestination(op, &scalar_dst, &src);
-            var scalar_surface = try s.Surface.init(&scalar_dst, width, height, width * 4, .rgba8_unorm);
-            runOp(op, .scalar, &scalar_dst, &src, &scalar_surface, last_iteration);
-            if (!std.mem.eql(u8, &dst, &scalar_dst)) return error.OutputMismatch;
-            prepareDestination(op, &dst, &src);
-            runOp(op, backend, &dst, &src, &surface, canonical_iteration);
+            var expected: [surface_bytes]u8 align(64) = undefined;
+            prepareDestination(op, &expected, &src);
+            for (0..samples) |sample| for (0..inner) |iteration| referenceOp(op, &expected, &src, sample * inner + iteration);
+            if (!std.mem.eql(u8, &dst, &expected)) return error.OutputMismatch;
+            try validateOpOutput(op, backend, &dst, &src, &surface, canonical_iteration, transferCopy);
             const output_checksum = checksum(&dst);
             if (output_checksum != oracle(op)) return error.OutputMismatch;
             const pixels = pixelCount(op);
@@ -310,7 +324,7 @@ test "independent reference renderer has fixed checksums" {
     sourceBytes(&src);
     for (all_ops) |op| {
         prepareDestination(op, &dst, &src);
-        referenceOp(op, &dst, &src);
+        referenceOp(op, &dst, &src, canonical_iteration);
         try std.testing.expectEqual(oracle(op), checksum(&dst));
     }
 }
@@ -320,12 +334,26 @@ test "transfer copy is non-vacuous and no-op copy fails its oracle" {
     sourceBytes(&src);
     prepareDestination(.transfer_copy, &dst, &src);
     const before = checksum(&dst);
+    try std.testing.expectEqual(transfer_copy_initial_checksum, before);
     try std.testing.expect(before != oracle(.transfer_copy));
-    referenceOp(.transfer_copy, &dst, &src);
+    referenceOp(.transfer_copy, &dst, &src, canonical_iteration);
     try std.testing.expectEqual(oracle(.transfer_copy), checksum(&dst));
     prepareDestination(.transfer_copy, &dst, &src);
     const no_op = checksum(&dst);
     try std.testing.expect(no_op != oracle(.transfer_copy));
+}
+test "transfer copy validation rejects an executed no-op implementation" {
+    const noOpCopy = struct {
+        fn copy(dst: []u8, src: []const u8) void {
+            _ = dst;
+            _ = src;
+        }
+    }.copy;
+    var src: [surface_bytes]u8 = undefined;
+    var dst: [surface_bytes]u8 = undefined;
+    sourceBytes(&src);
+    var surface = try s.Surface.init(&dst, width, height, width * 4, .rgba8_unorm);
+    try std.testing.expectError(error.OutputMismatch, validateOpOutput(.transfer_copy, .scalar, &dst, &src, &surface, canonical_iteration, noOpCopy));
 }
 test "benchmark validates every available SIMD runtime and oracle" {
     var metrics: [32]Metric = undefined;
@@ -427,6 +455,9 @@ test "baseline compares every applicable rate and every latency independently" {
     try std.testing.expectError(error.MalformedReport, compare(current, baseline));
     baseline.rate_tolerance_fraction = 0.99;
     now_storage[0].mpix_s = 1;
+    try std.testing.expectError(error.MalformedReport, compare(current, baseline));
+    baseline.rate_tolerance_fraction = default_rate_tolerance_fraction;
+    baseline.latency_tolerance_fraction = 2.0;
     try std.testing.expectError(error.MalformedReport, compare(current, baseline));
     try std.testing.expect(!latencyRegressed(std.math.maxInt(u64), std.math.maxInt(u64) - 1, 0.5));
 }

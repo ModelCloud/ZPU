@@ -54,7 +54,8 @@ pub fn build(b: *std.Build) void {
     const run_benchmark_tests = b.addRunArtifact(benchmark_tests);
     run_benchmark_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&run_benchmark_tests.step);
-    const benchmark_cli_tests = b.addSystemCommand(&.{"test/benchmark_cli.sh"});
+    const benchmark_cli_tests = b.addSystemCommand(&.{"bash"});
+    benchmark_cli_tests.addFileArg(b.path("test/benchmark_cli.sh"));
     benchmark_cli_tests.addArtifactArg(benchmark);
     benchmark_cli_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&benchmark_cli_tests.step);
@@ -121,7 +122,8 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_main.zig"), .target = b.graph.host, .optimize = .Debug }),
         .use_llvm = true,
     });
-    const collect_cli_coverage = b.addSystemCommand(&.{"test/benchmark_cli.sh"});
+    const collect_cli_coverage = b.addSystemCommand(&.{"bash"});
+    collect_cli_coverage.addFileArg(b.path("test/benchmark_cli.sh"));
     collect_cli_coverage.step.dependOn(&require_limited.step);
     collect_cli_coverage.addArtifactArg(benchmark_coverage_exe);
     const cli_coverage_output = collect_cli_coverage.addOutputDirectoryArg("benchmark-cli-coverage-v8");

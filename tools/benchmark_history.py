@@ -70,6 +70,8 @@ def trusted_fingerprint(fp):
 def validate_report(report):
     if report.get("schema_version") != 2 or report.get("workload_id") != "zpu-2d-v2-240x240-seed-151521030":
         fail("schema/workload mismatch")
+    if report.get("rate_tolerance_fraction") != 0.20 or report.get("latency_tolerance_fraction") != 1.50:
+        fail("tolerance policy mismatch")
     fp = report.get("fingerprint")
     if not isinstance(fp, dict): fail("missing fingerprint")
     trusted_fingerprint(fp)

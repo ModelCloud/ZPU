@@ -106,7 +106,7 @@ fn trustedTopology(io: std.Io, allocator: std.mem.Allocator, selected: []const u
     return out.toOwnedSlice();
 }
 
-fn verifyTrustedFingerprint(io: std.Io, allocator: std.mem.Allocator, selected: []const u8, model: []const u8, topology: []const u8) !void {
+fn verifyTrustedFingerprint(io: std.Io, allocator: std.mem.Allocator, selected: []const u8, model: []const u8, topology: []const u8) !u8 {
     const status = try readSpecial(io, allocator, "/proc/self/status", 1024 * 1024);
     defer allocator.free(status);
     const affinity_marker = "Cpus_allowed_list:";
@@ -124,7 +124,7 @@ fn verifyTrustedFingerprint(io: std.Io, allocator: std.mem.Allocator, selected: 
     const actual_topology = try trustedTopology(io, allocator, selected);
     defer allocator.free(actual_topology);
     if (!std.mem.eql(u8, topology, actual_topology)) return error.UntrustedTopologyFingerprint;
-    _ = try cpuCount(actual);
+    return cpuCount(actual);
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -149,10 +149,7 @@ pub fn main(init: std.process.Init) !void {
     const cap_text = init.environ_map.get("ZPU_MAX_THREADS") orelse return error.MissingThreadCap;
     const requested_cap = try std.fmt.parseInt(u8, cap_text, 10);
     if (requested_cap == 0 or requested_cap > 8) return error.InvalidThreadCap;
-    try verifyTrustedFingerprint(init.io, allocator, selected, cpu_model, topology);
-    const expanded_selected = try expandCpuList(allocator, selected);
-    defer allocator.free(expanded_selected);
-    const cap = try cpuCount(expanded_selected);
+    const cap = try verifyTrustedFingerprint(init.io, allocator, selected, cpu_model, topology);
     if (requested_cap != cap) return error.ThreadCapAffinityMismatch;
     var metrics: [32]bench.Metric = undefined;
     const count = try bench.benchmark(init.io, &metrics, smoke);
