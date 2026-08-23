@@ -32,6 +32,25 @@ fn exercise(format: s.Format, seed: u64, backend: dispatch.Backend, actual: []u8
         raster.blendRectWith(&scalar_surface, rect, color, .scalar);
         raster.blendRectWith(&test_surface, rect, color, backend);
     }
+    var sprite: [33 * 9 * 4]u8 = undefined;
+    random.bytes(&sprite);
+    const alphas = [_]u8{ 0, 1, 128, 254, 255 };
+    for (0..sprite.len / 4) |pixel| sprite[pixel * 4 + 3] = alphas[pixel % alphas.len];
+    const sprites = [_]s.Rect{
+        .{ .x = -5, .y = -3, .width = 17, .height = 9 },
+        .{ .x = 3, .y = 2, .width = 1, .height = 1 },
+        .{ .x = 7, .y = 4, .width = 7, .height = 5 },
+        .{ .x = 9, .y = 1, .width = 8, .height = 4 },
+        .{ .x = 5, .y = 6, .width = 9, .height = 3 },
+        .{ .x = 2, .y = 10, .width = 16, .height = 2 },
+        .{ .x = 18, .y = 8, .width = 17, .height = 6 },
+        .{ .x = 31, .y = 15, .width = 33, .height = 7 },
+    };
+    for (sprites) |rect| {
+        const source = sprite[0 .. @as(usize, rect.width) * rect.height * 4];
+        raster.drawSpriteWith(&scalar_surface, rect, source, rect.width, rect.height, .scalar);
+        raster.drawSpriteWith(&test_surface, rect, source, rect.width, rect.height, backend);
+    }
     try std.testing.expectEqualSlices(u8, expected, actual);
 }
 

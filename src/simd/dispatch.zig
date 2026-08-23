@@ -39,6 +39,19 @@ pub fn blendSpan(backend: Backend, row: []u8, start: usize, count: usize, format
         .avx512 => vector.blend(16, row, start, count, format, color),
     }
 }
+pub fn blendPixels(backend: Backend, row: []u8, start: usize, source: []const u8, count: usize, format: s.Format) void {
+    switch (backend) {
+        .scalar => scalar.blendPixels(row, start, source, count, format),
+        .avx2 => vector.blendPixels(8, row, start, source, count, format),
+        // Narrow texture spans are common and would otherwise fall through a
+        // 16-lane backend entirely. Retain an 8-lane vector route for them.
+        .avx512 => {
+            const wide_count = count - count % 16;
+            if (wide_count != 0) vector.blendPixels(16, row, start, source, wide_count, format);
+            vector.blendPixels(8, row, start + wide_count, source[wide_count * 4 ..], count - wide_count, format);
+        },
+    }
+}
 
 const Cpuid = struct { a: u32, b: u32, c: u32, d: u32 };
 fn cpuid(leaf: u32, subleaf: u32) Cpuid {

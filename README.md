@@ -45,14 +45,14 @@ The demo composes a small desktop-like scene entirely on the CPU and writes dete
 
 - `src/surface.zig` owns RGBA8/BGRA8 memory layout, validation, colors, and clipping.
 - `src/raster/` implements clear/fill and straight-alpha Porter-Duff source-over rectangles.
-- `src/simd/` owns backend selection and scalar, 8-pixel AVX2-oriented, and 16-pixel AVX-512-oriented paths.
+- `src/simd/` owns backend selection and scalar, 8-pixel AVX2-oriented, and 16-pixel AVX-512-oriented paths for constant-color spans and per-pixel RGBA source spans.
 - `src/command/` decouples command recording semantics from raster execution.
 - `src/platform/` owns presentation; today that is a headless PPM sink.
 - `src/vulkan/` contains original minimal Vulkan 1.0 ABI declarations, private loader entry points, object lifetime handling, and the ICD manifest.
 
 The x86 dispatcher checks CPUID AVX/OSXSAVE, XCR0 state, AVX2, and AVX-512F before selecting a backend, so unsupported systems fall back to scalar. The width-oriented kernels use Zig `@Vector` rather than handwritten intrinsics. Zig/LLVM may legalize or scalarize these operations according to the compilation target; therefore we do not claim a particular emitted instruction sequence. This is intentional: forced-backend correctness tests remain safe on machines without those ISAs, while automatic dispatch never advertises unsupported CPU/OS state. Release builds should be inspected and benchmarked before making code-generation claims.
 
-Tests compare every backend byte-for-byte with scalar for both formats, deliberately misaligned surface starts and padded strides, clipping and off-screen rectangles, odd widths and vector tails, alpha 0/1/128/254/255, and deterministic randomized content and operations.
+Tests compare every backend byte-for-byte with scalar for both formats, deliberately misaligned surface starts and padded strides, clipping and off-screen rectangles and sprites, odd widths and vector tails, alpha 0/1/128/254/255, and deterministic randomized content and operations.
 
 ## Design position
 

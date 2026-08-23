@@ -29,3 +29,15 @@ pub fn blendSpan(row: []u8, start_pixel: usize, count: usize, format: s.Format, 
         s.Surface.write(row, off, format, blendPixel(s.Surface.read(row, off, format), color));
     }
 }
+
+/// Blend a tightly packed RGBA8 source span over a destination row. Keeping
+/// this separate from the constant-color span gives texture/sprite callers a
+/// scalar reference with the same rounding rules as the vector backends.
+pub fn blendPixels(row: []u8, start_pixel: usize, source: []const u8, count: usize, format: s.Format) void {
+    for (0..count) |i| {
+        const source_offset = i * 4;
+        const destination_offset = (start_pixel + i) * 4;
+        const color = s.Color.rgba(source[source_offset], source[source_offset + 1], source[source_offset + 2], source[source_offset + 3]);
+        s.Surface.write(row, destination_offset, format, blendPixel(s.Surface.read(row, destination_offset, format), color));
+    }
+}
