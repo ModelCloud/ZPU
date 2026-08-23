@@ -304,6 +304,9 @@ test "negotiation and exact global lookup" {
     var v: u32 = 99;
     try std.testing.expectEqual(Result.success, vk_icdNegotiateLoaderICDInterfaceVersion(&v));
     try std.testing.expectEqual(@as(u32, 7), v);
+    v = 3;
+    try std.testing.expectEqual(Result.success, vk_icdNegotiateLoaderICDInterfaceVersion(&v));
+    try std.testing.expectEqual(@as(u32, 3), v);
     try std.testing.expectEqual(Result.error_initialization_failed, vk_icdNegotiateLoaderICDInterfaceVersion(null));
     try std.testing.expect(vk_icdGetInstanceProcAddr(null, "vkCreateInstance") != null);
     try std.testing.expect(vk_icdGetInstanceProcAddr(null, "vkDestroyInstance") == null);
@@ -314,6 +317,13 @@ test "enumeration lifecycle and unsupported features" {
     var instance: Instance = undefined;
     try std.testing.expectEqual(Result.success, createInstance(&ci, null, &instance));
     try std.testing.expectEqual(MAGIC, instance.loader_data);
+    try std.testing.expect(vk_icdGetInstanceProcAddr(instance, "vkDestroyInstance") != null);
+    try std.testing.expect(vk_icdGetPhysicalDeviceProcAddr(instance, "vkGetPhysicalDeviceProperties") != null);
+    try std.testing.expect(vk_icdGetPhysicalDeviceProcAddr(instance, "vkDestroyInstance") == null);
+    var extension_count: u32 = 9;
+    try std.testing.expectEqual(Result.success, enumerateInstanceExtensions(null, &extension_count, null));
+    try std.testing.expectEqual(@as(u32, 0), extension_count);
+    try std.testing.expectEqual(Result.error_extension_not_present, enumerateInstanceExtensions("layer", &extension_count, null));
     var count: u32 = 0;
     try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &count, null));
     try std.testing.expectEqual(@as(u32, 1), count);
@@ -334,9 +344,15 @@ test "enumeration lifecycle and unsupported features" {
     getDeviceQueue(device, 0, 0, &queue);
     try std.testing.expectEqual(MAGIC, queue.loader_data);
     destroyDevice(device, null);
+    try std.testing.expect(getDeviceProcAddr(device, "vkDestroyDevice") == null);
     destroyInstance(instance, null);
+    try std.testing.expect(vk_icdGetInstanceProcAddr(instance, "vkDestroyInstance") == null);
     ci.extension_count = 1;
     try std.testing.expectEqual(Result.error_extension_not_present, createInstance(&ci, null, &instance));
+    ci.extension_count = 0;
+    const unsupported_chain = ChainHeader{ .s_type = 999, .p_next = null };
+    ci.p_next = &unsupported_chain;
+    try std.testing.expectEqual(Result.error_initialization_failed, createInstance(&ci, null, &instance));
 }
 
 test "installed manifest contract" {
