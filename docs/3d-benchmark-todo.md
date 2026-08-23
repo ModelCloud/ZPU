@@ -1,0 +1,3 @@
+# TODO: deterministic 3D benchmark (not implemented)
+
+ZPU has no 3D pipeline, so this milestone deliberately adds no synthetic 3D numbers. Once rendering exists, define a versioned deterministic 240×240 scene with an exact reference image/checksum and separately report triangles/s, vertices/s, fragments or shaded pixels/s, color fill and overdraw rates, depth-test/write rates, blend rates, and frame p50/p95/p99. The scene specification must freeze geometry, transforms, shaders, textures, blend/depth state, draw order, viewport, formats, seed, warmup, and sample schedule. Scalar/reference and optimized output must agree before any performance result is accepted.

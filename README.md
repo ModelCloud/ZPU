@@ -15,6 +15,8 @@ zig build transfer
 zig build demo
 ```
 
+All repository gates must be run through the Linux physical-core limiter, for example `tools/limited-cpus.sh zig build test`. Benchmark methodology, stable JSON, controlled baseline capture/comparison, tolerances, reproducibility guidance, and the opt-in hardware guard are documented in [docs/benchmarking.md](docs/benchmarking.md). The deferred 3D metric and deterministic-scene contract is in [docs/3d-benchmark-todo.md](docs/3d-benchmark-todo.md); no 3D pipeline or fabricated 3D measurement was added.
+
 The build installs `zig-out/lib/libvulkan_zpu.so` and `zig-out/share/vulkan/icd.d/zpu_icd.x86_64.json`. The manifest's relative path resolves back to that installed library. The shared object has no dynamic library dependencies. The loader-independent smoke test uses `dlopen` to resolve the three private loader entry points, negotiate interface version 7, create an instance, and enumerate the CPU device.
 
 To ask a system Vulkan loader to discover only ZPU:
@@ -70,7 +72,7 @@ This is deliberately non-conformant. There are no semaphores, events, general me
 
 ## Coverage contract for this milestone
 
-`zig build coverage` is a deterministic 100% executed-line gate for the new ICD implementation. Its agreed scope is every executable line in `src/vulkan/driver.zig`, including all loader-facing functions, lookup tables, validation paths, object lifetime logic, loader callbacks, property/enumeration behavior, and colocated unit tests. The coverage-only test binary uses Zig 0.16.0's LLVM backend (`use_llvm = true`) to emit DWARF that `kcov` can instrument. `kcov --include-path` restricts the report to that one file. `tools/coverage_gate.zig` validates both kcov outputs: aggregate totals must identify exactly the driver file and equal 100%, while `codecov.json` must contain the identical file key, exactly one valid positive executable-line record for every aggregate line, and no unexecuted record. This is runtime executable-line coverage; it does not count source patterns. A kcov record can contain multiple instrumented addresses on one source line, so the verifier requires the line to execute but does not misrepresent address counts as compiler branch coverage.
+`zig build coverage` is a deterministic 100% executed-line gate for the ICD, benchmark core, and benchmark CLI. Independent LLVM/kcov runs require every executable line in `src/vulkan/driver.zig`, `src/benchmark.zig`, and `src/benchmark_main.zig`; scopes cannot hide one file behind another's aggregate. The ICD scope includes all loader-facing functions, lookup tables, validation paths, object lifetime logic, loader callbacks, property/enumeration behavior, and colocated unit tests. Benchmark coverage includes workload/oracle execution, schema and exact-set validation, statistics, byte models, in-run guards, baseline comparison, trusted fingerprint collection, JSON, CLI parsing, filesystem failures, and capture/compare behavior. Coverage-only binaries use Zig 0.16.0's LLVM backend (`use_llvm = true`) to emit DWARF that `kcov` can instrument. `tools/coverage_gate.zig` validates each kcov output: aggregate totals must identify exactly the requested file and equal 100%, while `codecov.json` must contain the identical file key, exactly one valid positive executable-line record for every aggregate line, and no unexecuted record. This is runtime executable-line coverage; it does not count source patterns. A kcov record can contain multiple instrumented addresses on one source line, so the verifier requires the line to execute but does not misrepresent address counts as compiler branch coverage.
 
 On Debian/Ubuntu, install the coverage-only tool with `sudo apt-get install kcov`; CI pins the runner family to Ubuntu 24.04, installs from its signed apt repository, and prints the exact resolved package version in every run. Normal builds, the ICD, and the C smoke client do not require it.
 
@@ -87,14 +89,16 @@ The gate is line coverage, because pinned Zig 0.16.0 exposes neither LLVM source
 ## Development gates
 
 ```sh
-zig fmt --check build.zig src tools
-zig build
-zig build test
-zig build coverage
-zig build smoke
-zig build transfer
-zig build demo
-zig build -Doptimize=ReleaseFast
+tools/limited-cpus.sh zig fmt --check build.zig src tools
+tools/limited-cpus.sh zig build
+tools/limited-cpus.sh zig build test
+tools/limited-cpus.sh zig build behavior
+tools/limited-cpus.sh zig build coverage
+tools/limited-cpus.sh zig build smoke
+tools/limited-cpus.sh zig build transfer
+tools/limited-cpus.sh zig build benchmark -Doptimize=ReleaseFast -- --smoke --json
+tools/limited-cpus.sh zig build demo
+tools/limited-cpus.sh zig build -Doptimize=ReleaseFast
 ```
 
 CI runs these commands on Linux. Generated PPM files and Zig build outputs are ignored.

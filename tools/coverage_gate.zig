@@ -24,7 +24,8 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = std.heap.page_allocator;
     const args = try init.minimal.args.toSlice(allocator);
-    if (args.len != 2) return error.ExpectedCoverageDirectory;
+    if (args.len < 2 or args.len > 3) return error.ExpectedCoverageDirectory;
+    const expected_suffix = if (args.len == 3) args[2] else "/src/vulkan/driver.zig";
 
     var directory = try std.Io.Dir.cwd().openDir(io, args[1], .{ .iterate = true });
     defer directory.close(io);
@@ -50,12 +51,12 @@ pub fn main(init: std.process.Init) !void {
 
     if (summary.files.len != 1) return error.UnexpectedCoverageScope;
     const file = summary.files[0];
-    if (!std.mem.endsWith(u8, file.file, "/src/vulkan/driver.zig")) return error.UnexpectedCoverageScope;
+    if (!std.mem.endsWith(u8, file.file, expected_suffix)) return error.UnexpectedCoverageScope;
     const file_covered = try integer(file.covered_lines);
     const file_total = try integer(file.total_lines);
     if (file_total == 0 or summary.total_lines != file_total or summary.covered_lines != file_covered) return error.InvalidCoverage;
     if (file_covered != file_total) {
-        std.debug.print("ICD coverage FAILED: {d}/{d} executable lines ({d} uncovered)\n", .{ file_covered, file_total, file_total - file_covered });
+        std.debug.print("coverage FAILED: {d}/{d} executable lines ({d} uncovered) in {s}\n", .{ file_covered, file_total, file_total - file_covered, file.file });
         return error.CoverageBelow100Percent;
     }
 
@@ -69,11 +70,16 @@ pub fn main(init: std.process.Init) !void {
     var lines = line_map.object.iterator();
     while (lines.next()) |entry| {
         const line_number = try std.fmt.parseInt(u64, entry.key_ptr.*, 10);
-        if (line_number == 0 or entry.value_ptr.* != .string) return error.InvalidCoverageRecords;
+        if (line_number == 0) return error.InvalidCoverageRecords;
+        if (entry.value_ptr.* == .integer) {
+            if (entry.value_ptr.integer <= 0) return error.InvalidCoverageRecords;
+            continue;
+        }
+        if (entry.value_ptr.* != .string) return error.InvalidCoverageRecords;
         var parts = std.mem.splitScalar(u8, entry.value_ptr.string, '/');
         const executed = try std.fmt.parseInt(u64, parts.next() orelse return error.InvalidCoverageRecords, 10);
         const instrumented = try std.fmt.parseInt(u64, parts.next() orelse return error.InvalidCoverageRecords, 10);
         if (parts.next() != null or executed == 0 or instrumented == 0 or executed > instrumented) return error.InvalidCoverageRecords;
     }
-    std.debug.print("ICD coverage PASS: {d}/{d} executable lines (100.00%) in {s}\n", .{ file_covered, file_total, file.file });
+    std.debug.print("coverage PASS: {d}/{d} executable lines (100.00%) in {s}\n", .{ file_covered, file_total, file.file });
 }
