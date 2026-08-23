@@ -250,8 +250,9 @@ const Requirement = enum(u6) {
     invalid_barrier,
     child_registry_exhaustion,
     bound_memory_retained,
-    empty_submission,
+    zero_submit_rejected,
     invalid_clear_color,
+    submission_atomicity,
 };
 var requirement_hits: u64 = 0;
 var overlap_hold = std.atomic.Value(bool).init(false);
@@ -1439,13 +1440,37 @@ fn cmdCopyImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_hand
 fn supportedLayout(layout: i32) bool {
     return layout == 0 or layout == 8 or layout == 1 or layout == 6 or layout == 7;
 }
+fn barrierMasksSupported(barrier: ImageMemoryBarrier, src_stage_mask: u32, dst_stage_mask: u32) bool {
+    const expected_src_stage: u32 = switch (barrier.old_layout) {
+        0 => 0x1,
+        8 => 0x4000,
+        1, 6, 7 => 0x1000,
+        else => return false,
+    };
+    const expected_src_access: u32 = switch (barrier.old_layout) {
+        0 => 0,
+        8 => 0x4000,
+        1 => 0x1800,
+        6 => 0x800,
+        7 => 0x1000,
+        else => return false,
+    };
+    const expected_dst_access: u32 = switch (barrier.new_layout) {
+        1 => 0x1800,
+        6 => 0x800,
+        7 => 0x1000,
+        else => return false,
+    };
+    return src_stage_mask == expected_src_stage and dst_stage_mask == 0x1000 and barrier.src_access_mask == expected_src_access and barrier.dst_access_mask == expected_dst_access;
+}
 fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u32, dependency_flags: u32, memory_barrier_count: u32, memory_barriers: ?*const anyopaque, buffer_barrier_count: u32, buffer_barriers: ?*const anyopaque, image_barrier_count: u32, image_barriers: ?[*]const ImageMemoryBarrier) callconv(.c) void {
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
     _ = memory_barriers;
     _ = buffer_barriers;
-    if (src_stage_mask == 0 or dst_stage_mask == 0 or dependency_flags != 0 or memory_barrier_count != 0 or buffer_barrier_count != 0 or image_barrier_count > max_api_items) {
+    const stage_pair_supported = (src_stage_mask == 0x1 or src_stage_mask == 0x1000 or src_stage_mask == 0x4000) and dst_stage_mask == 0x1000;
+    if (!stage_pair_supported or dependency_flags != 0 or memory_barrier_count != 0 or buffer_barrier_count != 0 or image_barrier_count > max_api_items) {
         hit(.invalid_barrier);
         c.impl.invalid = true;
         return;
@@ -1464,7 +1489,7 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
         };
         const ignored: u32 = std.math.maxInt(u32);
         const queues_valid = (barrier.src_queue_family_index == ignored and barrier.dst_queue_family_index == ignored) or (barrier.src_queue_family_index == 0 and barrier.dst_queue_family_index == 0);
-        if (barrier.s_type != 45 or barrier.p_next != null or barrier.src_access_mask & ~@as(u32, 0x7800) != 0 or barrier.dst_access_mask & ~@as(u32, 0x7800) != 0 or !supportedLayout(barrier.old_layout) or (barrier.new_layout != 1 and barrier.new_layout != 6 and barrier.new_layout != 7) or !queues_valid or image.owner != c.impl.owner or !validRange(barrier.subresource_range)) {
+        if (barrier.s_type != 45 or barrier.p_next != null or !supportedLayout(barrier.old_layout) or !barrierMasksSupported(barrier, src_stage_mask, dst_stage_mask) or !queues_valid or image.owner != c.impl.owner or !validRange(barrier.subresource_range)) {
             hit(.invalid_barrier);
             c.impl.invalid = true;
             return;
@@ -1482,49 +1507,86 @@ fn imageBytes(image: *ImageObj) []u8 {
     const start: usize = @intCast(image.offset);
     return memory.bytes[start .. start + @as(usize, @intCast(imageByteSize(image).?))];
 }
-fn executeCommand(command: Command) bool {
+fn imageSlot(image: *ImageObj) ?usize {
+    for (&image_objects, &image_state, 0..) |*candidate, state, index| if (candidate == image) return if (state == .live) index else null;
+    return null;
+}
+fn deadResource() bool {
+    hit(.recorded_dead_resource);
+    return false;
+}
+fn prevalidateCommand(command: Command, layouts: *[max_child_objects]i32) bool {
     switch (command) {
-        .fill => |op| {
-            if (!liveBufferObject(op.dst) or op.dst.memory == null or !liveMemoryObject(op.dst.memory.?)) {
-                hit(.recorded_dead_resource);
+        .fill => |op| if (!liveBufferObject(op.dst) or op.dst.memory == null or !liveMemoryObject(op.dst.memory.?)) return deadResource(),
+        .copy_buffer => |op| if (!liveBufferObject(op.src) or !liveBufferObject(op.dst) or op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource(),
+        .clear => |op| {
+            const slot = imageSlot(op.image) orelse return deadResource();
+            if (op.image.memory == null or !liveMemoryObject(op.image.memory.?)) return deadResource();
+            if (layouts[slot] != op.layout) {
+                hit(.layout_mismatch);
                 return false;
             }
+        },
+        .buffer_to_image => |op| {
+            const slot = imageSlot(op.dst) orelse return deadResource();
+            if (!liveBufferObject(op.src) or op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
+            if (layouts[slot] != op.layout) {
+                hit(.layout_mismatch);
+                return false;
+            }
+        },
+        .image_to_buffer => |op| {
+            const slot = imageSlot(op.src) orelse return deadResource();
+            if (!liveBufferObject(op.dst) or op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
+            if (layouts[slot] != op.layout) {
+                hit(.layout_mismatch);
+                return false;
+            }
+        },
+        .copy_image => |op| {
+            const src_slot = imageSlot(op.src) orelse return deadResource();
+            const dst_slot = imageSlot(op.dst) orelse return deadResource();
+            if (op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
+            if (layouts[src_slot] != op.src_layout or layouts[dst_slot] != op.dst_layout) {
+                hit(.layout_mismatch);
+                return false;
+            }
+        },
+        .transition => |op| {
+            const slot = imageSlot(op.image) orelse return deadResource();
+            if (layouts[slot] != op.old_layout) {
+                hit(.layout_mismatch);
+                return false;
+            }
+            layouts[slot] = op.new_layout;
+        },
+    }
+    return true;
+}
+fn executeValidatedCommand(command: Command) void {
+    switch (command) {
+        .fill => |op| {
             const bytes = bufferBytes(op.dst)[@intCast(op.offset)..][0..@intCast(op.size)];
             var i: usize = 0;
             while (i < bytes.len) : (i += 4) std.mem.writeInt(u32, bytes[i..][0..4], op.data, .little);
         },
         .copy_buffer => |op| {
-            if (!liveBufferObject(op.src) or !liveBufferObject(op.dst) or op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) {
-                hit(.recorded_dead_resource);
-                return false;
-            }
             const src = bufferBytes(op.src)[@intCast(op.region.src_offset)..][0..@intCast(op.region.size)];
             const dst = bufferBytes(op.dst)[@intCast(op.region.dst_offset)..][0..@intCast(op.region.size)];
             std.mem.copyForwards(u8, dst, src);
         },
         .clear => |op| {
-            if (!liveImageObject(op.image) or op.image.memory == null or !liveMemoryObject(op.image.memory.?)) {
-                hit(.recorded_dead_resource);
-                return false;
-            }
-            if (op.image.layout != op.layout) {
-                hit(.layout_mismatch);
-                return false;
-            }
             const bytes = imageBytes(op.image);
             var i: usize = 0;
             while (i < bytes.len) : (i += 4) @memcpy(bytes[i..][0..4], &op.color);
         },
         .buffer_to_image => |op| {
-            if (!liveBufferObject(op.src) or !liveImageObject(op.dst) or op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?) or op.dst.layout != op.layout) return false;
             copyBufferImage(op.src, op.dst, op.region, true);
         },
         .image_to_buffer => |op| {
-            if (!liveImageObject(op.src) or !liveBufferObject(op.dst) or op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?) or op.src.layout != op.layout) return false;
             copyBufferImage(op.dst, op.src, op.region, false);
         },
         .copy_image => |op| {
-            if (!liveImageObject(op.src) or !liveImageObject(op.dst) or op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?) or op.src.layout != op.src_layout or op.dst.layout != op.dst_layout) return false;
             const src = imageBytes(op.src);
             const dst = imageBytes(op.dst);
             var y: u32 = 0;
@@ -1536,19 +1598,10 @@ fn executeCommand(command: Command) bool {
             }
         },
         .transition => |op| {
-            if (!liveImageObject(op.image)) {
-                hit(.recorded_dead_resource);
-                return false;
-            }
-            if (op.image.layout != op.old_layout) {
-                hit(.layout_mismatch);
-                return false;
-            }
             op.image.layout = op.new_layout;
             hit(.barrier_transition);
         },
     }
-    return true;
 }
 fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy, to_image: bool) void {
     const b = bufferBytes(buffer);
@@ -1564,28 +1617,33 @@ fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy
 }
 fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_handle: usize) callconv(.c) Result {
     const q = queue orelse return .error_initialization_failed;
+    if (count == 0) {
+        hit(.zero_submit_rejected);
+        return .error_initialization_failed;
+    }
     if (count > max_api_items) return .error_initialization_failed;
-    if (count == 0) hit(.empty_submission);
-    const list = if (count == 0) null else submits orelse return .error_initialization_failed;
+    const list = submits orelse return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(q.owner)) return .error_initialization_failed;
     const fence = if (fence_handle == 0) null else validFenceLocked(fence_handle) orelse return .error_initialization_failed;
     if (fence) |item| if (!validOwner(q.owner, item.owner) or item.signaled) return .error_initialization_failed;
-    if (list) |items| {
-        for (items[0..count]) |submit| {
-            if (submit.s_type != 4 or submit.p_next != null or submit.wait_semaphore_count != 0 or submit.signal_semaphore_count != 0 or submit.command_buffer_count > max_api_items) return .error_initialization_failed;
-            if (submit.command_buffer_count == 0) {
-                continue;
-            }
-            const cbs = submit.command_buffers orelse return .error_initialization_failed;
-            for (cbs[0..submit.command_buffer_count]) |cb| {
-                const valid_cb = validCommandBufferLocked(cb) orelse return .error_initialization_failed;
-                if (valid_cb.impl.owner != q.owner or valid_cb.impl.state != 2) return .error_initialization_failed;
-                for (valid_cb.impl.commands[0..valid_cb.impl.count]) |command| if (!executeCommand(command)) return .error_initialization_failed;
-            }
+    var layouts: [max_child_objects]i32 = undefined;
+    for (&image_objects, image_state, 0..) |*image, state, index| layouts[index] = if (state == .live) image.layout else 0;
+    for (list[0..count]) |submit| {
+        if (submit.s_type != 4 or submit.p_next != null or submit.wait_semaphore_count != 0 or submit.signal_semaphore_count != 0 or submit.command_buffer_count > max_api_items) return .error_initialization_failed;
+        if (submit.command_buffer_count == 0) continue;
+        const cbs = submit.command_buffers orelse return .error_initialization_failed;
+        for (cbs[0..submit.command_buffer_count]) |cb| {
+            const valid_cb = validCommandBufferLocked(cb) orelse return .error_initialization_failed;
+            if (valid_cb.impl.owner != q.owner or valid_cb.impl.state != 2) return .error_initialization_failed;
+            for (valid_cb.impl.commands[0..valid_cb.impl.count]) |command| if (!prevalidateCommand(command, &layouts)) {
+                hit(.submission_atomicity);
+                return .error_initialization_failed;
+            };
         }
     }
+    for (list[0..count]) |submit| if (submit.command_buffer_count != 0) for (submit.command_buffers.?[0..submit.command_buffer_count]) |cb| for (cb.impl.commands[0..cb.impl.count]) |command| executeValidatedCommand(command);
     if (fence) |item| item.signaled = true;
     return .success;
 }
@@ -2254,6 +2312,35 @@ fn createTestDeviceContext() !TestDeviceContext {
     return .{ .instance = instance, .physical = physicals[0], .device = device, .queue = queue };
 }
 
+test "minimal barrier stage and access contract is exact" {
+    const Case = struct { old: i32, new: i32, src_stage: u32, src_access: u32, dst_access: u32 };
+    const cases = [_]Case{
+        .{ .old = 0, .new = 1, .src_stage = 0x1, .src_access = 0, .dst_access = 0x1800 },         .{ .old = 0, .new = 6, .src_stage = 0x1, .src_access = 0, .dst_access = 0x800 },         .{ .old = 0, .new = 7, .src_stage = 0x1, .src_access = 0, .dst_access = 0x1000 },
+        .{ .old = 8, .new = 1, .src_stage = 0x4000, .src_access = 0x4000, .dst_access = 0x1800 }, .{ .old = 8, .new = 6, .src_stage = 0x4000, .src_access = 0x4000, .dst_access = 0x800 }, .{ .old = 8, .new = 7, .src_stage = 0x4000, .src_access = 0x4000, .dst_access = 0x1000 },
+        .{ .old = 1, .new = 1, .src_stage = 0x1000, .src_access = 0x1800, .dst_access = 0x1800 }, .{ .old = 1, .new = 6, .src_stage = 0x1000, .src_access = 0x1800, .dst_access = 0x800 }, .{ .old = 1, .new = 7, .src_stage = 0x1000, .src_access = 0x1800, .dst_access = 0x1000 },
+        .{ .old = 6, .new = 1, .src_stage = 0x1000, .src_access = 0x800, .dst_access = 0x1800 },  .{ .old = 6, .new = 6, .src_stage = 0x1000, .src_access = 0x800, .dst_access = 0x800 },  .{ .old = 6, .new = 7, .src_stage = 0x1000, .src_access = 0x800, .dst_access = 0x1000 },
+        .{ .old = 7, .new = 1, .src_stage = 0x1000, .src_access = 0x1000, .dst_access = 0x1800 }, .{ .old = 7, .new = 6, .src_stage = 0x1000, .src_access = 0x1000, .dst_access = 0x800 }, .{ .old = 7, .new = 7, .src_stage = 0x1000, .src_access = 0x1000, .dst_access = 0x1000 },
+    };
+    for (cases) |case| {
+        var barrier = ImageMemoryBarrier{ .s_type = 45, .p_next = null, .src_access_mask = case.src_access, .dst_access_mask = case.dst_access, .old_layout = case.old, .new_layout = case.new, .src_queue_family_index = 0, .dst_queue_family_index = 0, .image = 1, .subresource_range = std.mem.zeroes(ImageSubresourceRange) };
+        try std.testing.expect(barrierMasksSupported(barrier, case.src_stage, 0x1000));
+        try std.testing.expect(!barrierMasksSupported(barrier, case.src_stage | 0x2, 0x1000));
+        try std.testing.expect(!barrierMasksSupported(barrier, case.src_stage, 0x1001));
+        barrier.src_access_mask ^= 0x1;
+        try std.testing.expect(!barrierMasksSupported(barrier, case.src_stage, 0x1000));
+        barrier.src_access_mask = case.src_access;
+        barrier.dst_access_mask ^= 0x1;
+        try std.testing.expect(!barrierMasksSupported(barrier, case.src_stage, 0x1000));
+    }
+    var unsupported = std.mem.zeroes(ImageMemoryBarrier);
+    unsupported.old_layout = 2;
+    unsupported.new_layout = 1;
+    try std.testing.expect(!barrierMasksSupported(unsupported, 1, 0x1000));
+    unsupported.old_layout = 0;
+    unsupported.new_layout = 2;
+    try std.testing.expect(!barrierMasksSupported(unsupported, 1, 0x1000));
+}
+
 test "memory transfer objects execute against independently specified bytes" {
     const ici = InstanceInfo{ .s_type = 1, .p_next = null, .flags = 0, .app_info = null, .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null };
     var instance: Instance = undefined;
@@ -2338,8 +2425,8 @@ test "memory transfer objects execute against independently specified bytes" {
     const color = ClearColorValue{ .float32 = .{ 1, 0.5, 0, 1 } };
     const range = ImageSubresourceRange{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
     const barriers = [_]ImageMemoryBarrier{
-        .{ .s_type = 45, .p_next = null, .src_access_mask = 0, .dst_access_mask = 0x1000, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = range },
-        .{ .s_type = 45, .p_next = null, .src_access_mask = 0, .dst_access_mask = 0x1000, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image_two, .subresource_range = range },
+        .{ .s_type = 45, .p_next = null, .src_access_mask = 0, .dst_access_mask = 0x1800, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = range },
+        .{ .s_type = 45, .p_next = null, .src_access_mask = 0, .dst_access_mask = 0x1800, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image_two, .subresource_range = range },
     };
     cmdPipelineBarrier(commands[0], 1, 0x1000, 0, 0, null, 0, null, barriers.len, &barriers);
     cmdClearColorImage(commands[0], image, 1, &color, 1, @ptrCast(&range));
@@ -2496,7 +2583,8 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     destroyBuffer(ctx.device, src, null);
     const dead_src: *BufferObj = @ptrFromInt(src);
     const dead_dst: *BufferObj = @ptrFromInt(dst);
-    try std.testing.expect(!executeCommand(.{ .copy_buffer = .{ .src = dead_src, .dst = dead_dst, .region = .{ .src_offset = 0, .dst_offset = 0, .size = 1 } } }));
+    var validation_layouts = [_]i32{0} ** max_child_objects;
+    try std.testing.expect(!prevalidateCommand(.{ .copy_buffer = .{ .src = dead_src, .dst = dead_dst, .region = .{ .src_offset = 0, .dst_offset = 0, .size = 1 } } }, &validation_layouts));
     freeMemory(ctx.device, memory_a, null);
     try std.testing.expectEqual(Result.error_memory_map_failed, mapMemory(ctx.device, memory_a, 0, 1, 0, &mapped));
 
@@ -2528,6 +2616,29 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     freeMemory(ctx.device, image_memory, null);
     try std.testing.expectEqual(Result.success, mapMemory(ctx.device, image_memory, 0, 1, 0, &mapped));
     unmapMemory(ctx.device, image_memory);
+    var live_src: usize = 0;
+    var live_dst: usize = 0;
+    var live_src_memory: usize = 0;
+    var live_dst_memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &alloc_small, null, &live_src_memory));
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &alloc_small, null, &live_dst_memory));
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &src_info, null, &live_src));
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &dst_info, null, &live_dst));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, live_src, live_src_memory, 0));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, live_dst, live_dst_memory, 0));
+    const live_image: *ImageObj = @ptrFromInt(image);
+    const live_src_object: *BufferObj = @ptrFromInt(live_src);
+    const live_dst_object: *BufferObj = @ptrFromInt(live_dst);
+    var mismatched_layouts = [_]i32{0} ** max_child_objects;
+    const mismatch_region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = .{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 1, .height = 1, .depth = 1 } };
+    try std.testing.expect(!prevalidateCommand(.{ .buffer_to_image = .{ .src = live_src_object, .dst = live_image, .layout = 1, .region = mismatch_region } }, &mismatched_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .image_to_buffer = .{ .src = live_image, .layout = 1, .dst = live_dst_object, .region = mismatch_region } }, &mismatched_layouts));
+    const mismatch_copy = ImageCopy{ .src_subresource = mismatch_region.image_subresource, .src_offset = mismatch_region.image_offset, .dst_subresource = mismatch_region.image_subresource, .dst_offset = mismatch_region.image_offset, .extent = mismatch_region.image_extent };
+    try std.testing.expect(!prevalidateCommand(.{ .copy_image = .{ .src = live_image, .src_layout = 1, .dst = live_image, .dst_layout = 1, .region = mismatch_copy } }, &mismatched_layouts));
+    destroyBuffer(ctx.device, live_dst, null);
+    destroyBuffer(ctx.device, live_src, null);
+    freeMemory(ctx.device, live_dst_memory, null);
+    freeMemory(ctx.device, live_src_memory, null);
     const range = ImageSubresourceRange{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
     const color = ClearColorValue{ .float32 = .{ 0.25, 0.5, 0.75, 1 } };
     try std.testing.expectEqual(Result.success, beginCommandBuffer(cbs[0], &begin));
@@ -2553,7 +2664,7 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     cmdCopyBufferToImage(cbs[0], 0, 0, 1, 0, null);
     cmdCopyImageToBuffer(cbs[0], 0, 1, 0, 0, null);
     cmdCopyImage(cbs[0], 0, 1, 0, 1, 0, null);
-    cmdPipelineBarrier(cbs[0], 1, 1, 0, 0, @ptrFromInt(8), 0, @ptrFromInt(8), 0, null);
+    cmdPipelineBarrier(cbs[0], 1, 0x1000, 0, 0, @ptrFromInt(8), 0, @ptrFromInt(8), 0, null);
     try std.testing.expectEqual(Result.success, endCommandBuffer(cbs[0]));
     try std.testing.expectEqual(Result.success, resetCommandBuffer(cbs[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(cbs[0], &begin));
@@ -2566,19 +2677,19 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(cbs[0]));
     try std.testing.expectEqual(Result.success, resetCommandBuffer(cbs[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(cbs[0], &begin));
-    cmdPipelineBarrier(cbs[0], 1, 1, 0, 0, null, 0, null, 1, null);
+    cmdPipelineBarrier(cbs[0], 1, 0x1000, 0, 0, null, 0, null, 1, null);
     try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(cbs[0]));
     try std.testing.expectEqual(Result.success, resetCommandBuffer(cbs[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(cbs[0], &begin));
     var bad_barrier = barrier;
     bad_barrier.image = 8;
-    cmdPipelineBarrier(cbs[0], 1, 1, 0, 0, null, 0, null, 1, @ptrCast(&bad_barrier));
+    cmdPipelineBarrier(cbs[0], 1, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&bad_barrier));
     try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(cbs[0]));
     try std.testing.expectEqual(Result.success, resetCommandBuffer(cbs[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(cbs[0], &begin));
     bad_barrier = barrier;
     bad_barrier.s_type = 0;
-    cmdPipelineBarrier(cbs[0], 1, 1, 0, 0, null, 0, null, 1, @ptrCast(&bad_barrier));
+    cmdPipelineBarrier(cbs[0], 1, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&bad_barrier));
     try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(cbs[0]));
     try std.testing.expectEqual(Result.success, resetCommandBuffer(cbs[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(cbs[0], &begin));
@@ -2590,21 +2701,29 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     var destroy_barrier = barrier;
     destroy_barrier.old_layout = 1;
     destroy_barrier.new_layout = 6;
-    cmdPipelineBarrier(cbs[0], 1, 1, 0, 0, null, 0, null, 1, @ptrCast(&destroy_barrier));
+    destroy_barrier.src_access_mask = 0x1800;
+    destroy_barrier.dst_access_mask = 0x800;
+    cmdPipelineBarrier(cbs[0], 0x1000, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&destroy_barrier));
     try std.testing.expectEqual(Result.success, endCommandBuffer(cbs[0]));
     destroyImage(ctx.device, image, null);
     try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     const dead_image: *ImageObj = @ptrFromInt(image);
-    try std.testing.expect(!executeCommand(.{ .clear = .{ .image = dead_image, .layout = 1, .color = .{ 1, 2, 3, 4 } } }));
+    try std.testing.expect(!prevalidateCommand(.{ .clear = .{ .image = dead_image, .layout = 1, .color = .{ 1, 2, 3, 4 } } }, &validation_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .fill = .{ .dst = dead_dst, .offset = 0, .size = 4, .data = 0 } }, &validation_layouts));
+    const stale_region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = .{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 1, .height = 1, .depth = 1 } };
+    try std.testing.expect(!prevalidateCommand(.{ .buffer_to_image = .{ .src = dead_src, .dst = dead_image, .layout = 1, .region = stale_region } }, &validation_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .image_to_buffer = .{ .src = dead_image, .layout = 1, .dst = dead_dst, .region = stale_region } }, &validation_layouts));
+    const stale_image_copy = ImageCopy{ .src_subresource = stale_region.image_subresource, .src_offset = stale_region.image_offset, .dst_subresource = stale_region.image_subresource, .dst_offset = stale_region.image_offset, .extent = stale_region.image_extent };
+    try std.testing.expect(!prevalidateCommand(.{ .copy_image = .{ .src = dead_image, .src_layout = 1, .dst = dead_image, .dst_layout = 1, .region = stale_image_copy } }, &validation_layouts));
+    try std.testing.expect(!prevalidateCommand(.{ .transition = .{ .image = dead_image, .old_layout = 1, .new_layout = 6 } }, &validation_layouts));
     getImageMemoryRequirements(ctx.device, image, &stale_requirements);
     try std.testing.expectEqual(@as(u64, 9), stale_requirements.size);
 
     const fci = FenceCreateInfo{ .s_type = 8, .p_next = null, .flags = 0 };
     var fence: usize = 0;
     try std.testing.expectEqual(Result.success, createFence(ctx.device, &fci, null, &fence));
-    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 0, null, fence));
-    try std.testing.expectEqual(Result.success, getFenceStatus(ctx.device, fence));
-    try std.testing.expectEqual(Result.success, resetFences(ctx.device, 1, @ptrCast(&fence)));
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 0, null, fence));
+    try std.testing.expectEqual(Result.not_ready, getFenceStatus(ctx.device, fence));
     var empty = submit;
     empty.command_buffer_count = 0;
     empty.command_buffers = null;
@@ -2641,9 +2760,69 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     try std.testing.expectEqual(Result.error_initialization_failed, beginCommandBuffer(@ptrFromInt(8), &begin));
     var local_memory: MemoryObj = undefined;
     try std.testing.expect(stateForObject(MemoryObj, &local_memory, &memory_objects, &memory_state) == null);
+    var local_image: ImageObj = undefined;
+    try std.testing.expect(imageSlot(&local_image) == null);
 
     destroyDevice(ctx.device, null);
     try std.testing.expectEqual(Result.error_memory_map_failed, mapMemory(ctx.device, memory_b, 0, 1, 0, &mapped));
+    destroyInstance(ctx.instance, null);
+}
+
+test "submission prevalidation is failure atomic" {
+    const ctx = try createTestDeviceContext();
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 64, .memory_type_index = 0 };
+    var memories: [3]usize = undefined;
+    for (&memories) |*memory| try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, memory));
+    const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 64, .usage = 2, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var buffers: [2]usize = undefined;
+    for (&buffers, 0..) |*buffer, index| {
+        try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, buffer));
+        try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, buffer.*, memories[index], 0));
+    }
+    var mapped: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memories[0], 0, 64, 0, &mapped));
+    @memset((@as([*]u8, @ptrCast(mapped.?)))[0..64], 0x5a);
+    unmapMemory(ctx.device, memories[0]);
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 37, .extent = .{ .width = 4, .height = 4, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 1, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &image));
+    try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, image, memories[2], 0));
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 0, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    const cb_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var cbs: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &cb_info, &cbs));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(cbs[0], &begin));
+    cmdFillBuffer(cbs[0], buffers[0], 0, 64, 0x01020304);
+    const range = ImageSubresourceRange{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    const barrier = ImageMemoryBarrier{ .s_type = 45, .p_next = null, .src_access_mask = 0, .dst_access_mask = 0x1800, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = range };
+    cmdPipelineBarrier(cbs[0], 1, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&barrier));
+    cmdFillBuffer(cbs[0], buffers[1], 0, 64, 0xaabbccdd);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(cbs[0]));
+    const original_state = cbs[0].impl.state;
+    const original_count = cbs[0].impl.count;
+    destroyBuffer(ctx.device, buffers[1], null);
+    const fence_info = FenceCreateInfo{ .s_type = 8, .p_next = null, .flags = 0 };
+    var fence: usize = 0;
+    try std.testing.expectEqual(Result.success, createFence(ctx.device, &fence_info, null, &fence));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &cbs, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&submit), fence));
+    try std.testing.expectEqual(Result.not_ready, getFenceStatus(ctx.device, fence));
+    try std.testing.expectEqual(original_state, cbs[0].impl.state);
+    try std.testing.expectEqual(original_count, cbs[0].impl.count);
+    try std.testing.expectEqual(@as(i32, 0), (@as(*ImageObj, @ptrFromInt(image))).layout);
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memories[0], 0, 64, 0, &mapped));
+    for ((@as([*]const u8, @ptrCast(mapped.?)))[0..64]) |byte| try std.testing.expectEqual(@as(u8, 0x5a), byte);
+    unmapMemory(ctx.device, memories[0]);
+    destroyFence(ctx.device, fence, null);
+    freeCommandBuffers(ctx.device, pool, 1, &cbs);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyImage(ctx.device, image, null);
+    destroyBuffer(ctx.device, buffers[0], null);
+    for (memories) |memory| freeMemory(ctx.device, memory, null);
+    destroyDevice(ctx.device, null);
     destroyInstance(ctx.instance, null);
 }
 

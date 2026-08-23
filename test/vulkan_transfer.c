@@ -103,17 +103,36 @@ int main(void) {
     VkImage bad_image;
     VkImageCreateInfo bad = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8_UNORM, .extent = { WIDTH, HEIGHT, 1 }, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_LINEAR, .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
     CHECK_TRUE(vkCreateImage(device, &bad, NULL, &bad_image) == VK_ERROR_FORMAT_NOT_SUPPORTED);
+    bad.format = VK_FORMAT_R8G8B8A8_UNORM;
+    bad.extent.width = UINT32_MAX;
+    CHECK_TRUE(vkCreateImage(device, &bad, NULL, &bad_image) == VK_ERROR_INITIALIZATION_FAILED);
+    VkBuffer bad_buffer;
+    VkBufferCreateInfo bad_buffer_info = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 16, .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+    CHECK_TRUE(vkCreateBuffer(device, &bad_buffer_info, NULL, &bad_buffer) == VK_ERROR_INITIALIZATION_FAILED);
+
+    VkBuffer misaligned;
+    VkDeviceMemory misaligned_memory;
+    VkBufferCreateInfo misaligned_info = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 4, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+    CHECK_VK(vkCreateBuffer(device, &misaligned_info, NULL, &misaligned));
+    VkMemoryRequirements misaligned_req;
+    vkGetBufferMemoryRequirements(device, misaligned, &misaligned_req);
+    VkMemoryAllocateInfo misaligned_ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = misaligned_req.size + 4, .memoryTypeIndex = find_memory_type(physical, misaligned_req.memoryTypeBits) };
+    CHECK_VK(vkAllocateMemory(device, &misaligned_ai, NULL, &misaligned_memory));
+    CHECK_TRUE(vkBindBufferMemory(device, misaligned, misaligned_memory, 1) == VK_ERROR_INITIALIZATION_FAILED);
+    vkDestroyBuffer(device, misaligned, NULL);
+    vkFreeMemory(device, misaligned_memory, NULL);
 
     VkBuffer upload, staging, readback;
     VkDeviceMemory upload_memory, staging_memory, readback_memory;
     CHECK_VK(allocate_bind_buffer(device, physical, BYTES, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &upload, &upload_memory));
     CHECK_VK(allocate_bind_buffer(device, physical, BYTES, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &staging, &staging_memory));
     CHECK_VK(allocate_bind_buffer(device, physical, BYTES, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &readback, &readback_memory));
-    VkImage first, second, bgra;
-    VkDeviceMemory first_memory, second_memory, bgra_memory;
+    VkImage first, second, bgra, bgra_second;
+    VkDeviceMemory first_memory, second_memory, bgra_memory, bgra_second_memory;
     CHECK_VK(allocate_bind_image(device, physical, VK_FORMAT_R8G8B8A8_UNORM, &first, &first_memory));
     CHECK_VK(allocate_bind_image(device, physical, VK_FORMAT_R8G8B8A8_UNORM, &second, &second_memory));
     CHECK_VK(allocate_bind_image(device, physical, VK_FORMAT_B8G8R8A8_UNORM, &bgra, &bgra_memory));
+    CHECK_VK(allocate_bind_image(device, physical, VK_FORMAT_B8G8R8A8_UNORM, &bgra_second, &bgra_second_memory));
 
     uint8_t *mapped;
     CHECK_VK(vkMapMemory(device, upload_memory, 0, VK_WHOLE_SIZE, 0, (void **)&mapped));
@@ -142,6 +161,7 @@ int main(void) {
     transition_image(command, first);
     transition_image(command, second);
     transition_image(command, bgra);
+    transition_image(command, bgra_second);
     CHECK_VK(vkEndCommandBuffer(command));
     CHECK_VK(submit_wait(device, queue, command, fence));
 
@@ -198,6 +218,38 @@ int main(void) {
     }
     CHECK_VK(check_bytes(device, bgra_memory, expected, "vkCmdClearColorImage BGRA"));
 
+    CHECK_VK(vkMapMemory(device, upload_memory, 0, VK_WHOLE_SIZE, 0, (void **)&mapped));
+    for (uint32_t y = 0; y < HEIGHT; ++y) for (uint32_t x = 0; x < WIDTH; ++x) {
+        size_t i = ((size_t)y * WIDTH + x) * 4;
+        expected[i + 0] = (uint8_t)(17 + x);
+        expected[i + 1] = (uint8_t)(29 + 3 * y);
+        expected[i + 2] = (uint8_t)(0xa5u ^ x ^ y);
+        expected[i + 3] = (uint8_t)(255 - ((x + y) & 0x3f));
+        memcpy(mapped + i, expected + i, 4);
+    }
+    vkUnmapMemory(device, upload_memory);
+    CHECK_VK(vkResetCommandBuffer(command, 0));
+    CHECK_VK(vkBeginCommandBuffer(command, &begin));
+    vkCmdCopyBufferToImage(command, upload, bgra, VK_IMAGE_LAYOUT_GENERAL, 1, &bir);
+    CHECK_VK(vkEndCommandBuffer(command));
+    CHECK_VK(submit_wait(device, queue, command, fence));
+    CHECK_VK(check_bytes(device, bgra_memory, expected, "vkCmdCopyBufferToImage BGRA"));
+
+    CHECK_VK(vkResetCommandBuffer(command, 0));
+    CHECK_VK(vkBeginCommandBuffer(command, &begin));
+    vkCmdCopyImageToBuffer(command, bgra, VK_IMAGE_LAYOUT_GENERAL, readback, 1, &bir);
+    CHECK_VK(vkEndCommandBuffer(command));
+    CHECK_VK(submit_wait(device, queue, command, fence));
+    CHECK_VK(check_bytes(device, readback_memory, expected, "vkCmdCopyImageToBuffer BGRA"));
+
+    VkImageCopy ir = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .extent = { WIDTH, HEIGHT, 1 } };
+    CHECK_VK(vkResetCommandBuffer(command, 0));
+    CHECK_VK(vkBeginCommandBuffer(command, &begin));
+    vkCmdCopyImage(command, bgra, VK_IMAGE_LAYOUT_GENERAL, bgra_second, VK_IMAGE_LAYOUT_GENERAL, 1, &ir);
+    CHECK_VK(vkEndCommandBuffer(command));
+    CHECK_VK(submit_wait(device, queue, command, fence));
+    CHECK_VK(check_bytes(device, bgra_second_memory, expected, "vkCmdCopyImage BGRA"));
+
     CHECK_VK(vkResetCommandBuffer(command, 0));
     CHECK_VK(vkBeginCommandBuffer(command, &begin));
     vkCmdCopyBufferToImage(command, staging, first, VK_IMAGE_LAYOUT_GENERAL, 1, &bir);
@@ -209,7 +261,6 @@ int main(void) {
     }
     CHECK_VK(check_bytes(device, first_memory, expected, "vkCmdCopyBufferToImage"));
 
-    VkImageCopy ir = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .extent = { WIDTH, HEIGHT, 1 } };
     CHECK_VK(vkResetCommandBuffer(command, 0));
     CHECK_VK(vkBeginCommandBuffer(command, &begin));
     vkCmdCopyImage(command, first, VK_IMAGE_LAYOUT_GENERAL, second, VK_IMAGE_LAYOUT_GENERAL, 1, &ir);
@@ -227,12 +278,29 @@ int main(void) {
     CHECK_VK(vkBeginCommandBuffer(command, &begin));
     vkCmdClearColorImage(command, second, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, &blue, 1, &range);
     CHECK_TRUE(vkEndCommandBuffer(command) == VK_ERROR_INITIALIZATION_FAILED);
+    CHECK_VK(vkResetCommandBuffer(command, 0));
+    CHECK_VK(vkBeginCommandBuffer(command, &begin));
+    VkImageMemoryBarrier unsupported_barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = first,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+    };
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &unsupported_barrier);
+    CHECK_TRUE(vkEndCommandBuffer(command) == VK_ERROR_INITIALIZATION_FAILED);
+    CHECK_TRUE(vkQueueSubmit(queue, 0, NULL, fence) == VK_ERROR_INITIALIZATION_FAILED);
+    CHECK_TRUE(vkGetFenceStatus(device, fence) == VK_NOT_READY);
     CHECK_TRUE(vkWaitForFences(device, 1, &fence, VK_TRUE, 0) == VK_TIMEOUT);
 
     free(expected);
     vkDestroyFence(device, fence, NULL);
     vkFreeCommandBuffers(device, pool, 1, &command); vkDestroyCommandPool(device, pool, NULL);
-    vkDestroyImage(device, bgra, NULL); vkFreeMemory(device, bgra_memory, NULL); vkDestroyImage(device, second, NULL); vkFreeMemory(device, second_memory, NULL); vkDestroyImage(device, first, NULL); vkFreeMemory(device, first_memory, NULL);
+    vkDestroyImage(device, bgra_second, NULL); vkFreeMemory(device, bgra_second_memory, NULL); vkDestroyImage(device, bgra, NULL); vkFreeMemory(device, bgra_memory, NULL); vkDestroyImage(device, second, NULL); vkFreeMemory(device, second_memory, NULL); vkDestroyImage(device, first, NULL); vkFreeMemory(device, first_memory, NULL);
     vkDestroyBuffer(device, readback, NULL); vkFreeMemory(device, readback_memory, NULL); vkDestroyBuffer(device, staging, NULL); vkFreeMemory(device, staging_memory, NULL); vkDestroyBuffer(device, upload, NULL); vkFreeMemory(device, upload_memory, NULL);
     vkDestroyDevice(device, NULL); vkDestroyInstance(instance, NULL);
     printf("exact transfer bytes: %u/%u; pixels: %u/%u\n", BYTES, BYTES, WIDTH * HEIGHT, WIDTH * HEIGHT);
