@@ -8,6 +8,18 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const icd = b.addLibrary(.{
+        .name = "vulkan_zpu",
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vulkan/driver.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(icd);
+    const install_manifest = b.addInstallFile(b.path("src/vulkan/zpu_icd.x86_64.json"), "share/vulkan/icd.d/zpu_icd.x86_64.json");
+    b.getInstallStep().dependOn(&install_manifest.step);
     const demo = b.addExecutable(.{
         .name = "zpu-demo",
         .root_module = b.createModule(.{
@@ -28,4 +40,16 @@ pub fn build(b: *std.Build) void {
     run_demo.addArg("zpu-demo.ppm");
     const demo_step = b.step("demo", "Render deterministic desktop scene to zpu-demo.ppm");
     demo_step.dependOn(&run_demo.step);
+
+    const smoke = b.addExecutable(.{
+        .name = "zpu-icd-smoke",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize }),
+    });
+    smoke.root_module.addCSourceFile(.{ .file = b.path("test/icd_smoke.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+    smoke.root_module.link_libc = true;
+    smoke.root_module.linkSystemLibrary("dl", .{});
+    const run_smoke = b.addRunArtifact(smoke);
+    run_smoke.addArtifactArg(icd);
+    const smoke_step = b.step("smoke", "dlopen and exercise the private ICD ABI");
+    smoke_step.dependOn(&run_smoke.step);
 }

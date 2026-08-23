@@ -15,5 +15,15 @@ jobs:
       - run: zig fmt --check build.zig src
       - run: zig build
       - run: zig build test
+      - run: zig build smoke
       - run: zig build demo
       - run: test "$(sha256sum zpu-demo.ppm | cut -d' ' -f1)" = "919b08ed95dec247b8c456e7fc1b85ac47e5a9d0030a54f6287fbfe424d37ef4"
+      - run: zig build -Doptimize=ReleaseFast
+      - name: Verify ICD ELF ABI
+        run: |
+          test -z "$(readelf -d zig-out/lib/libvulkan_zpu.so | grep NEEDED)"
+          exports="$(readelf --dyn-syms --wide zig-out/lib/libvulkan_zpu.so | awk '$5 == "GLOBAL" && $7 != "UND" {print $8}')"
+          test "$(printf '%s\n' "$exports" | wc -l)" -eq 3
+          for symbol in vk_icdNegotiateLoaderICDInterfaceVersion vk_icdGetInstanceProcAddr vk_icdGetPhysicalDeviceProcAddr; do
+            printf '%s\n' "$exports" | grep -qx "$symbol"
+          done
