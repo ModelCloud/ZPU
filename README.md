@@ -9,6 +9,7 @@ ZPU targets Zig 0.16.0, the newest stable compiler at the time of this milestone
 ```sh
 zig build
 zig build test
+zig build coverage
 zig build smoke
 zig build demo
 ```
@@ -62,6 +63,18 @@ Mutable ICD entry points are globally serialized. This intentionally simple expe
 
 The loader normally installs dispatch data for the top-level instance/device returned by core creation trampolines. ZPU extracts the documented instance/device loader-data callbacks and invokes them for driver-created child dispatchables (`VkPhysicalDevice` and `VkQueue`); every dispatchable still starts with `ICD_LOADER_MAGIC`. No rendering, memory allocation, command submission, presentation, or synchronization Vulkan entry points exist yet.
 
+## Coverage contract for this milestone
+
+`zig build coverage` is a deterministic 100% executed-line gate for the new ICD implementation. Its agreed scope is every executable line in `src/vulkan/driver.zig`, including all loader-facing functions, lookup tables, validation paths, object lifetime logic, loader callbacks, property/enumeration behavior, and colocated unit tests. The coverage-only test binary uses Zig 0.16.0's LLVM backend (`use_llvm = true`) to emit DWARF that `kcov` can instrument. `kcov --include-path` restricts the report to that one file, and `tools/coverage_gate.zig` parses the generated JSON, verifies the report contains exactly that file and a nonzero line total, and fails unless covered lines equal total lines. This is runtime execution coverage; it does not count source patterns.
+
+On Debian/Ubuntu, install the coverage-only tool with `sudo apt-get install kcov`; CI installs the same package. Normal builds, the ICD, and the C smoke client do not require it.
+
+The gate is line coverage, because pinned Zig 0.16.0 exposes neither LLVM source-profile flags nor a deterministic built-in branch-coverage report. Behavioral tests separately exercise success, rejection, null/invalid/stale handles, count and incomplete boundaries, every supported proc-address scope, loader callback success/failure, concurrent read/destroy lifetime behavior, tombstone exhaustion, physical properties, manifest JSON, and manifest installation. `kcov` is the sole coverage-only system dependency installed by CI; neither the ICD nor its tests gain a runtime project dependency.
+
+## Forward rendering-test contract
+
+The later rendering milestone—not this loader-discovery PR—must add a real Vulkan client that renders through the loader and ICD into an exact 240×240 target. Every newly supported 2D and 3D operation must have an isolated deterministic scene plus combined-operation coverage, with all 57,600 output pixels compared channel-by-channel against checked-in golden data. Any mismatch must fail with the operation, coordinate, expected pixel, and actual pixel. No tolerance or perceptual comparison is permitted for formats whose specified result is exact; any operation with specification-permitted numeric variance must document and enforce its per-channel rule explicitly. This PR does not implement or claim that rendering validation.
+
 ## Roadmap
 
 1. **CPU 2D foundation:** validated surfaces, clipped fills, source-over blending, runtime-selected kernels, command execution, and headless demo.
@@ -72,9 +85,10 @@ The loader normally installs dispatch data for the top-level instance/device ret
 ## Development gates
 
 ```sh
-zig fmt --check build.zig src
+zig fmt --check build.zig src tools
 zig build
 zig build test
+zig build coverage
 zig build smoke
 zig build demo
 zig build -Doptimize=ReleaseFast

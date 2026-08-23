@@ -12,10 +12,12 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - run: zig fmt --check build.zig src
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends kcov
+      - run: zig fmt --check build.zig src tools
       - run: zig build
       - run: test "$(realpath zig-out/share/vulkan/icd.d/../../../lib/libvulkan_zpu.so)" = "$(realpath zig-out/lib/libvulkan_zpu.so)"
       - run: zig build test
+      - run: zig build coverage
       - run: zig build smoke
       - run: zig build demo
       - run: test "$(sha256sum zpu-demo.ppm | cut -d' ' -f1)" = "919b08ed95dec247b8c456e7fc1b85ac47e5a9d0030a54f6287fbfe424d37ef4"

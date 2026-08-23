@@ -36,6 +36,32 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run deterministic unit tests");
     test_step.dependOn(&run_tests.step);
 
+    const coverage_tests = b.addTest(.{
+        .name = "zpu-icd-coverage-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vulkan/driver.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+        .use_llvm = true,
+    });
+    const driver_path = b.pathFromRoot("src/vulkan/driver.zig");
+    const collect_coverage = b.addSystemCommand(&.{ "kcov", "--clean", b.fmt("--include-path={s}", .{driver_path}) });
+    const coverage_output = collect_coverage.addOutputDirectoryArg("coverage");
+    collect_coverage.addArtifactArg(coverage_tests);
+    const coverage_verifier = b.addExecutable(.{
+        .name = "zpu-coverage-gate",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/coverage_gate.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const verify_coverage = b.addRunArtifact(coverage_verifier);
+    verify_coverage.addDirectoryArg(coverage_output);
+    const coverage_step = b.step("coverage", "Require 100% executed-line coverage for the ICD implementation");
+    coverage_step.dependOn(&verify_coverage.step);
+
     const run_demo = b.addRunArtifact(demo);
     run_demo.addArg("zpu-demo.ppm");
     const demo_step = b.step("demo", "Render deterministic desktop scene to zpu-demo.ppm");

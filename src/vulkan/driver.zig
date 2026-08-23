@@ -389,6 +389,7 @@ test "negotiation and exact global lookup" {
     try std.testing.expect(vk_icdGetInstanceProcAddr(null, "vkCreateInstance") != null);
     try std.testing.expect(vk_icdGetInstanceProcAddr(null, "vkDestroyInstance") == null);
     try std.testing.expect(vk_icdGetInstanceProcAddr(null, "vkCreateInstanceX") == null);
+    for ([_][*:0]const u8{ "vkGetInstanceProcAddr", "vkCreateInstance", "vkEnumerateInstanceExtensionProperties" }) |name| try std.testing.expect(vk_icdGetInstanceProcAddr(null, name) != null);
 }
 test "enumeration lifecycle and unsupported features" {
     var ci = InstanceInfo{ .s_type = 1, .p_next = null, .flags = 0, .app_info = null, .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null };
@@ -406,6 +407,7 @@ test "enumeration lifecycle and unsupported features" {
     try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &count, null));
     try std.testing.expectEqual(@as(u32, 1), count);
     var ps: [1]Physical = undefined;
+    count = 0;
     try std.testing.expectEqual(Result.incomplete, enumeratePhysicalDevices(instance, &count, &ps));
     count = 1;
     try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &count, &ps));
@@ -451,6 +453,16 @@ fn syntheticDeviceLoaderData(device: Device, object: *anyopaque) callconv(.c) Re
     device_callback_count += 1;
     return .success;
 }
+fn failingInstanceLoaderData(instance: Instance, object: *anyopaque) callconv(.c) Result {
+    _ = instance;
+    _ = object;
+    return .error_initialization_failed;
+}
+fn failingDeviceLoaderData(device: Device, object: *anyopaque) callconv(.c) Result {
+    _ = device;
+    _ = object;
+    return .error_initialization_failed;
+}
 
 test "loader callbacks replace child dispatch words without breaking lifetime" {
     instance_callback_count = 0;
@@ -483,6 +495,7 @@ test "loader callbacks replace child dispatch words without breaking lifetime" {
     getDeviceQueue(device, 0, 0, &queue);
     try std.testing.expectEqual(@as(usize, 1), device_callback_count);
     try std.testing.expect(getDeviceProcAddr(device, "vkDestroyDevice") != null);
+    try std.testing.expect(getDeviceProcAddr(device, "notADeviceEntryPoint") == null);
     destroyDevice(device, null);
     destroyInstance(instance, null);
 }
@@ -512,6 +525,63 @@ test "destroyed slots are tombstoned and never reused" {
     try std.testing.expect(old_instance != new_instance);
     try std.testing.expect(vk_icdGetInstanceProcAddr(old_instance, "vkDestroyInstance") == null);
     destroyInstance(new_instance, null);
+}
+
+test "declined loader callbacks preserve magic fallback and lifetime" {
+    const instance_callback = LoaderInstanceInfo{ .s_type = 47, .p_next = null, .function = 1, .value = .{ .set_instance_loader_data = failingInstanceLoaderData } };
+    const ci = InstanceInfo{ .s_type = 1, .p_next = &instance_callback, .flags = 0, .app_info = null, .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null };
+    var instance: Instance = undefined;
+    try std.testing.expectEqual(Result.success, createInstance(&ci, null, &instance));
+    var count: u32 = 1;
+    var physical: [1]Physical = undefined;
+    try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &count, &physical));
+    try std.testing.expectEqual(MAGIC, physical[0].loader_data);
+
+    var priority: f32 = 1;
+    const qi = QueueInfo{ .s_type = 2, .p_next = null, .flags = 0, .family = 0, .count = 1, .priorities = @ptrCast(&priority) };
+    const device_callback = LoaderDeviceInfo{ .s_type = 48, .p_next = null, .function = 1, .value = .{ .set_device_loader_data = failingDeviceLoaderData } };
+    const di = DeviceInfo{ .s_type = 3, .p_next = &device_callback, .flags = 0, .queue_info_count = 1, .queue_infos = @ptrCast(&qi), .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null, .features = null };
+    var device: Device = undefined;
+    try std.testing.expectEqual(Result.success, createDevice(physical[0], &di, null, &device));
+    var queue: Queue = @ptrFromInt(8);
+    getDeviceQueue(device, 0, 0, &queue);
+    try std.testing.expectEqual(@as(usize, 8), @intFromPtr(queue));
+    try std.testing.expect(getDeviceProcAddr(device, "vkDestroyDevice") != null);
+    destroyDevice(device, null);
+    destroyInstance(instance, null);
+}
+
+test "proc-address scopes expose every supported name and reject cross-scope names" {
+    const ci = InstanceInfo{ .s_type = 1, .p_next = null, .flags = 0, .app_info = null, .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null };
+    var instance: Instance = undefined;
+    try std.testing.expectEqual(Result.success, createInstance(&ci, null, &instance));
+    const instance_names = [_][*:0]const u8{
+        "vkDestroyInstance",                              "vkEnumeratePhysicalDevices",           "vkGetPhysicalDeviceFeatures",         "vkGetPhysicalDeviceProperties",
+        "vkGetPhysicalDeviceQueueFamilyProperties",       "vkGetPhysicalDeviceMemoryProperties",  "vkGetPhysicalDeviceFormatProperties", "vkGetPhysicalDeviceImageFormatProperties",
+        "vkGetPhysicalDeviceSparseImageFormatProperties", "vkEnumerateDeviceExtensionProperties", "vkCreateDevice",                      "vkGetDeviceProcAddr",
+        "vkDestroyDevice",                                "vkGetDeviceQueue",
+    };
+    for (instance_names) |name| try std.testing.expect(vk_icdGetInstanceProcAddr(instance, name) != null);
+    const physical_names = [_][*:0]const u8{
+        "vkGetPhysicalDeviceFeatures",                    "vkGetPhysicalDeviceProperties",        "vkGetPhysicalDeviceQueueFamilyProperties",
+        "vkGetPhysicalDeviceMemoryProperties",            "vkGetPhysicalDeviceFormatProperties",  "vkGetPhysicalDeviceImageFormatProperties",
+        "vkGetPhysicalDeviceSparseImageFormatProperties", "vkEnumerateDeviceExtensionProperties", "vkCreateDevice",
+    };
+    for (physical_names) |name| try std.testing.expect(vk_icdGetPhysicalDeviceProcAddr(instance, name) != null);
+    try std.testing.expect(vk_icdGetPhysicalDeviceProcAddr(instance, "vkGetDeviceQueue") == null);
+
+    var count: u32 = 1;
+    var physical: [1]Physical = undefined;
+    try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &count, &physical));
+    var priority: f32 = 1;
+    const qi = QueueInfo{ .s_type = 2, .p_next = null, .flags = 0, .family = 0, .count = 1, .priorities = @ptrCast(&priority) };
+    const di = DeviceInfo{ .s_type = 3, .p_next = null, .flags = 0, .queue_info_count = 1, .queue_infos = @ptrCast(&qi), .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null, .features = null };
+    var device: Device = undefined;
+    try std.testing.expectEqual(Result.success, createDevice(physical[0], &di, null, &device));
+    for ([_][*:0]const u8{ "vkGetDeviceProcAddr", "vkDestroyDevice", "vkGetDeviceQueue" }) |name| try std.testing.expect(getDeviceProcAddr(device, name) != null);
+    try std.testing.expect(getDeviceProcAddr(device, "vkCreateDevice") == null);
+    destroyDevice(device, null);
+    destroyInstance(instance, null);
 }
 
 const StressContext = struct { instance: Instance, physical: Physical };
@@ -554,6 +624,107 @@ test "physical properties start with coherent conservative limits" {
     try std.testing.expect(std.mem.readInt(u32, properties.bytes[304..308], .little) > 0);
     try std.testing.expect(std.mem.readInt(u32, properties.bytes[332..336], .little) > 0);
     destroyInstance(instance, null);
+}
+
+test "all physical queries cover success boundaries and invalid handles" {
+    const ci = InstanceInfo{ .s_type = 1, .p_next = null, .flags = 0, .app_info = null, .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null };
+    var instance: Instance = undefined;
+    try std.testing.expectEqual(Result.success, createInstance(&ci, null, &instance));
+    var count: u32 = 1;
+    var physical: [1]Physical = undefined;
+    try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &count, &physical));
+    const p = physical[0];
+
+    var features = Features{ .values = [_]u32{1} ** 55 };
+    getFeatures(p, &features);
+    try std.testing.expectEqualSlices(u32, &([_]u32{0} ** 55), &features.values);
+    var queue_count: u32 = 7;
+    getQueueProperties(p, &queue_count, null);
+    try std.testing.expectEqual(@as(u32, 1), queue_count);
+    var queue_properties: [1]QueueProperties = undefined;
+    queue_count = 0;
+    getQueueProperties(p, &queue_count, &queue_properties);
+    try std.testing.expectEqual(@as(u32, 0), queue_count);
+    queue_count = 1;
+    getQueueProperties(p, &queue_count, &queue_properties);
+    try std.testing.expectEqual(@as(u32, 0x5), queue_properties[0].flags);
+    try std.testing.expectEqual(@as(u32, 1), queue_properties[0].count);
+
+    var memory = MemoryProperties{ .bytes = [_]u8{0xff} ** 520 };
+    getMemoryProperties(p, &memory);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 520), &memory.bytes);
+    var format = FormatProperties{ .linear_tiling_features = 1, .optimal_tiling_features = 1, .buffer_features = 1 };
+    getFormatProperties(p, 0, &format);
+    try std.testing.expectEqual(FormatProperties{ .linear_tiling_features = 0, .optimal_tiling_features = 0, .buffer_features = 0 }, format);
+    try std.testing.expectEqual(Result.error_format_not_supported, getImageFormatProperties(p, 0, 0, 0, 0, 0, null));
+    var sparse_count: u32 = 9;
+    getSparseImageFormatProperties(p, 0, 0, 1, 0, 0, &sparse_count, null);
+    try std.testing.expectEqual(@as(u32, 0), sparse_count);
+    var extension_count: u32 = 9;
+    try std.testing.expectEqual(Result.success, enumerateDeviceExtensions(p, null, &extension_count, null));
+    try std.testing.expectEqual(@as(u32, 0), extension_count);
+    try std.testing.expectEqual(Result.error_extension_not_present, enumerateDeviceExtensions(p, "layer", &extension_count, null));
+    try std.testing.expectEqual(Result.error_initialization_failed, enumerateDeviceExtensions(p, null, null, null));
+    try std.testing.expect(vk_icdGetInstanceProcAddr(instance, "notAnEntryPoint") == null);
+
+    destroyInstance(instance, null);
+    features.values[0] = 7;
+    getFeatures(p, &features);
+    try std.testing.expectEqual(@as(u32, 7), features.values[0]);
+    try std.testing.expectEqual(Result.error_initialization_failed, getImageFormatProperties(p, 0, 0, 0, 0, 0, null));
+    try std.testing.expectEqual(Result.error_initialization_failed, enumerateDeviceExtensions(p, null, &extension_count, null));
+}
+
+test "creation rejects every supported invalid-input class" {
+    var instance: Instance = undefined;
+    var ci = InstanceInfo{ .s_type = 1, .p_next = null, .flags = 0, .app_info = null, .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null };
+    try std.testing.expectEqual(Result.error_initialization_failed, createInstance(null, null, &instance));
+    try std.testing.expectEqual(Result.error_initialization_failed, createInstance(&ci, null, null));
+    ci.layer_count = 1;
+    try std.testing.expectEqual(Result.error_layer_not_present, createInstance(&ci, null, &instance));
+    ci.layer_count = 0;
+    ci.extension_count = 1;
+    try std.testing.expectEqual(Result.error_extension_not_present, createInstance(&ci, null, &instance));
+    ci.extension_count = 0;
+    ci.flags = 1;
+    try std.testing.expectEqual(Result.error_initialization_failed, createInstance(&ci, null, &instance));
+    ci.flags = 0;
+    var app = AppInfo{ .s_type = 0, .p_next = null, .app_name = null, .app_version = 0, .engine_name = null, .engine_version = 0, .api_version = API_1_0 + 1 };
+    ci.app_info = &app;
+    try std.testing.expectEqual(Result.error_initialization_failed, createInstance(&ci, null, &instance));
+    ci.app_info = null;
+    try std.testing.expectEqual(Result.success, createInstance(&ci, null, &instance));
+    var count: u32 = 1;
+    var physical: [1]Physical = undefined;
+    try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &count, &physical));
+
+    var priority: f32 = 1;
+    var qi = QueueInfo{ .s_type = 2, .p_next = null, .flags = 0, .family = 0, .count = 1, .priorities = @ptrCast(&priority) };
+    var di = DeviceInfo{ .s_type = 3, .p_next = null, .flags = 0, .queue_info_count = 1, .queue_infos = @ptrCast(&qi), .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null, .features = null };
+    var device: Device = undefined;
+    try std.testing.expectEqual(Result.error_initialization_failed, createDevice(null, &di, null, &device));
+    try std.testing.expectEqual(Result.error_initialization_failed, createDevice(physical[0], null, null, &device));
+    try std.testing.expectEqual(Result.error_initialization_failed, createDevice(physical[0], &di, null, null));
+    di.layer_count = 1;
+    try std.testing.expectEqual(Result.error_layer_not_present, createDevice(physical[0], &di, null, &device));
+    di.layer_count = 0;
+    di.extension_count = 1;
+    try std.testing.expectEqual(Result.error_extension_not_present, createDevice(physical[0], &di, null, &device));
+    di.extension_count = 0;
+    di.queue_info_count = 0;
+    try std.testing.expectEqual(Result.error_initialization_failed, createDevice(physical[0], &di, null, &device));
+    di.queue_info_count = 1;
+    di.queue_infos = null;
+    try std.testing.expectEqual(Result.error_initialization_failed, createDevice(physical[0], &di, null, &device));
+    di.queue_infos = @ptrCast(&qi);
+    qi.family = 1;
+    try std.testing.expectEqual(Result.error_initialization_failed, createDevice(physical[0], &di, null, &device));
+    qi.family = 0;
+    priority = std.math.nan(f32);
+    try std.testing.expectEqual(Result.error_initialization_failed, createDevice(physical[0], &di, null, &device));
+    priority = 1;
+    destroyInstance(instance, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, createDevice(physical[0], &di, null, &device));
 }
 
 test "tombstone pool exhaustion returns out of host memory" {

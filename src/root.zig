@@ -8,4 +8,5 @@ pub const platform = @import("platform/presenter.zig");
 
 test {
     _ = @import("tests.zig");
+    _ = @import("vulkan/driver.zig");
 }
