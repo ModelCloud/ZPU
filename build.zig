@@ -36,6 +36,17 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run deterministic unit tests");
     test_step.dependOn(&run_tests.step);
 
+    const behavior_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vulkan/driver.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const run_behavior = b.addRunArtifact(behavior_tests);
+    const behavior_step = b.step("behavior", "Require every instrumented ICD behavioral requirement");
+    behavior_step.dependOn(&run_behavior.step);
+
     const coverage_tests = b.addTest(.{
         .name = "zpu-icd-coverage-tests",
         .root_module = b.createModule(.{
