@@ -14,8 +14,8 @@ const surface_bytes = width * height * 4;
 const canonical_iteration = 7;
 
 pub const Percentiles = struct { p50_ns: u64, p95_ns: u64, p99_ns: u64 };
-pub const Metric = struct { name: []const u8, backend: []const u8, iterations: u64, checksum: u64, mpix_s: f64, effective_gib_s: f64, draws_s: f64, fps: f64, frame: Percentiles };
-pub const Fingerprint = struct { arch: []const u8, os: []const u8, cpu_model: []const u8, selected_cpus: []const u8, topology: []const u8, compiler: []const u8, build_mode: []const u8, max_threads: u8 };
+pub const Metric = struct { name: []const u8, backend: []const u8, iterations: u64, checksum: u64, checksum_hex: []const u8, mpix_s: f64, effective_gib_s: f64, draws_s: f64, fps: f64, frame: Percentiles };
+pub const Fingerprint = struct { arch: []const u8, os: []const u8, cpu_model: []const u8, selected_cpus: []const u8, topology: []const u8, compiler: []const u8, build_mode: []const u8, max_threads: u8, limited_gate: []const u8 = "" };
 pub const Report = struct { schema_version: u32, workload_id: []const u8, fingerprint: Fingerprint, warmup_iterations: u32, sample_count: u32, rate_tolerance_fraction: f64 = default_rate_tolerance_fraction, latency_tolerance_fraction: f64 = default_latency_tolerance_fraction, metrics: []const Metric };
 
 const Op = enum { clear, pixel, fill, transfer_fill, transfer_copy, blend, sprites, frame };
@@ -70,6 +70,9 @@ fn pixelCount(op: Op) f64 {
 fn sourceBytes(bytes: []u8) void {
     var prng = std.Random.DefaultPrng.init(0x0908070605040302);
     prng.random().bytes(bytes);
+}
+fn prepareDestination(op: Op, dst: []u8, src: []const u8) void {
+    if (op == .transfer_copy) @memset(dst, 0xa5) else @memcpy(dst, src);
 }
 fn backendName(backend: ?dispatch.Backend) []const u8 {
     return if (backend) |b| @tagName(b) else "runtime";
@@ -139,8 +142,12 @@ fn referenceOp(op: Op, dst: []u8, src: []const u8) void {
 }
 
 const oracle_checksums = [_]u64{ 0x89fcf336d86c4f25, 0x3d0737332ec9e1cc, 0xb5cb439ce748a598, 0x50dbc316a6090325, 0x4e61ac2d0cc0777b, 0xd5f99fe5b4e7eef8, 0x3717a00e187d9381, 0x2e480a89ab6181ef };
+const oracle_hex = [_][]const u8{ "89fcf336d86c4f25", "3d0737332ec9e1cc", "b5cb439ce748a598", "50dbc316a6090325", "4e61ac2d0cc0777b", "d5f99fe5b4e7eef8", "3717a00e187d9381", "2e480a89ab6181ef" };
 fn oracle(op: Op) u64 {
     return oracle_checksums[@intFromEnum(op)];
+}
+fn oracleHex(op: Op) []const u8 {
+    return oracle_hex[@intFromEnum(op)];
 }
 fn isRaster(op: Op) bool {
     return op != .transfer_fill and op != .transfer_copy;
@@ -169,7 +176,7 @@ fn expectedAt(index: usize) MetricKey {
     return expectedAtFor(index, dispatch.available(.avx2), dispatch.available(.avx512));
 }
 fn validFingerprint(f: Fingerprint) bool {
-    return f.arch.len > 0 and f.os.len > 0 and f.cpu_model.len > 0 and f.selected_cpus.len > 0 and f.topology.len > 0 and f.compiler.len > 0 and f.build_mode.len > 0 and f.max_threads > 0 and f.max_threads <= 8;
+    return f.arch.len > 0 and f.os.len > 0 and f.cpu_model.len > 0 and f.selected_cpus.len > 0 and f.topology.len > 0 and f.compiler.len > 0 and f.build_mode.len > 0 and f.max_threads > 0 and f.max_threads <= 8 and std.mem.eql(u8, f.limited_gate, "physical-core-v1");
 }
 fn applicable(op: Op, m: Metric) bool {
     const normal = op != .sprites and op != .frame;
@@ -180,12 +187,12 @@ pub fn validate(report: Report) !void {
     if (report.schema_version != schema_version) return error.UnsupportedSchema;
     if (!std.mem.eql(u8, report.workload_id, workload_id)) return error.WorkloadMismatch;
     if (report.sample_count < 2 or report.warmup_iterations == 0 or !validFingerprint(report.fingerprint)) return error.MalformedReport;
-    if (!std.math.isFinite(report.rate_tolerance_fraction) or report.rate_tolerance_fraction < 0 or report.rate_tolerance_fraction >= 1 or !std.math.isFinite(report.latency_tolerance_fraction) or report.latency_tolerance_fraction < 0 or report.latency_tolerance_fraction > 2) return error.MalformedReport;
+    if (report.rate_tolerance_fraction != default_rate_tolerance_fraction or report.latency_tolerance_fraction != default_latency_tolerance_fraction) return error.MalformedReport;
     if (report.metrics.len != expectedMetricCount()) return error.MetricSetMismatch;
     for (report.metrics, 0..) |m, index| {
         const expected = expectedAt(index);
         if (!std.mem.eql(u8, m.name, @tagName(expected.op)) or !std.mem.eql(u8, m.backend, expected.backend)) return error.MetricSetMismatch;
-        if (m.iterations == 0 or m.checksum != oracle(expected.op) or !std.math.isFinite(m.mpix_s) or !std.math.isFinite(m.effective_gib_s) or !std.math.isFinite(m.draws_s) or !std.math.isFinite(m.fps) or m.mpix_s < 0 or m.effective_gib_s < 0 or m.draws_s < 0 or m.fps < 0 or !applicable(expected.op, m) or m.frame.p50_ns == 0 or m.frame.p50_ns > m.frame.p95_ns or m.frame.p95_ns > m.frame.p99_ns) return error.MalformedMetric;
+        if (m.iterations == 0 or m.checksum != oracle(expected.op) or !std.mem.eql(u8, m.checksum_hex, oracleHex(expected.op)) or !std.math.isFinite(m.mpix_s) or !std.math.isFinite(m.effective_gib_s) or !std.math.isFinite(m.draws_s) or !std.math.isFinite(m.fps) or m.mpix_s < 0 or m.effective_gib_s < 0 or m.draws_s < 0 or m.fps < 0 or !applicable(expected.op, m) or m.frame.p50_ns == 0 or m.frame.p50_ns > m.frame.p95_ns or m.frame.p95_ns > m.frame.p99_ns) return error.MalformedMetric;
     }
 }
 pub fn compatible(a: Fingerprint, b: Fingerprint) bool {
@@ -214,7 +221,7 @@ pub fn compare(current: Report, baseline: Report) !void {
         for (baseline.metrics) |old| if (std.mem.eql(u8, now.name, old.name) and std.mem.eql(u8, now.backend, old.backend)) {
             found = old;
         };
-        try compareMetric(now, found orelse return error.MetricSetMismatch, baseline.rate_tolerance_fraction, baseline.latency_tolerance_fraction);
+        try compareMetric(now, found orelse return error.MetricSetMismatch, default_rate_tolerance_fraction, default_latency_tolerance_fraction);
     }
 }
 pub fn guardInRun(report: Report) !void {
@@ -222,7 +229,7 @@ pub fn guardInRun(report: Report) !void {
     for (raster_ops) |op| {
         const scalar = report.metrics[@intFromEnum(op)];
         for (report.metrics) |candidate| if (std.mem.eql(u8, candidate.name, @tagName(op)) and !std.mem.eql(u8, candidate.backend, "scalar")) {
-            std.debug.assert(candidate.checksum == scalar.checksum and candidate.checksum == oracle(op));
+            if (candidate.checksum != scalar.checksum or candidate.checksum != oracle(op) or !std.mem.eql(u8, candidate.checksum_hex, scalar.checksum_hex)) return error.ChecksumMismatch;
             if (regressed(candidate.mpix_s, scalar.mpix_s, 0.75) or regressed(candidate.effective_gib_s, scalar.effective_gib_s, 0.75) or regressed(candidate.draws_s, scalar.draws_s, 0.75) or regressed(candidate.fps, scalar.fps, 0.75)) return error.RelativeRegression;
         };
     }
@@ -242,9 +249,9 @@ pub fn benchmark(io: std.Io, metrics: []Metric, smoke: bool) !usize {
         if (backend) |b| if (!dispatch.available(b) and b != .scalar) continue;
         for (all_ops) |op| {
             if (!isRaster(op) and backend != .scalar) continue;
-            @memcpy(&dst, &src);
+            prepareDestination(op, &dst, &src);
             runOp(op, backend, &dst, &src, &surface, canonical_iteration);
-            @memcpy(&dst, &src);
+            prepareDestination(op, &dst, &src);
             var durations: [15]u64 = undefined;
             for (0..samples) |sample| {
                 const start = std.Io.Clock.boot.now(io);
@@ -254,12 +261,21 @@ pub fn benchmark(io: std.Io, metrics: []Metric, smoke: bool) !usize {
             }
             const pct = try summarize(durations[0..samples]);
             const seconds = @as(f64, @floatFromInt(pct.p50_ns)) / 1e9;
-            @memcpy(&dst, &src);
+            const last_iteration = samples * inner - 1;
+            prepareDestination(op, &dst, &src);
+            runOp(op, backend, &dst, &src, &surface, last_iteration);
+            var scalar_dst: [surface_bytes]u8 align(64) = undefined;
+            prepareDestination(op, &scalar_dst, &src);
+            var scalar_surface = try s.Surface.init(&scalar_dst, width, height, width * 4, .rgba8_unorm);
+            runOp(op, .scalar, &scalar_dst, &src, &scalar_surface, last_iteration);
+            if (!std.mem.eql(u8, &dst, &scalar_dst)) return error.OutputMismatch;
+            prepareDestination(op, &dst, &src);
             runOp(op, backend, &dst, &src, &surface, canonical_iteration);
             const output_checksum = checksum(&dst);
+            if (output_checksum != oracle(op)) return error.OutputMismatch;
             const pixels = pixelCount(op);
             const bytes = @as(f64, @floatFromInt(try modeledBytes(@tagName(op))));
-            metrics[used] = .{ .name = @tagName(op), .backend = backendName(backend), .iterations = samples * inner, .checksum = output_checksum, .mpix_s = if (op == .sprites or op == .frame) 0 else pixels / seconds / 1e6, .effective_gib_s = bytes / seconds / 1073741824.0, .draws_s = if (op == .sprites) 128 / seconds else 0, .fps = if (op == .frame) 1 / seconds else 0, .frame = pct };
+            metrics[used] = .{ .name = @tagName(op), .backend = backendName(backend), .iterations = samples * inner, .checksum = output_checksum, .checksum_hex = oracleHex(op), .mpix_s = if (op == .sprites or op == .frame) 0 else pixels / seconds / 1e6, .effective_gib_s = bytes / seconds / 1073741824.0, .draws_s = if (op == .sprites) 128 / seconds else 0, .fps = if (op == .frame) 1 / seconds else 0, .frame = pct };
             used += 1;
         }
     }
@@ -267,7 +283,7 @@ pub fn benchmark(io: std.Io, metrics: []Metric, smoke: bool) !usize {
 }
 
 fn fingerprint() Fingerprint {
-    return .{ .arch = @tagName(builtin.cpu.arch), .os = @tagName(builtin.os.tag), .cpu_model = "cpu", .selected_cpus = "2", .topology = "0:0@2", .compiler = builtin.zig_version_string, .build_mode = @tagName(builtin.mode), .max_threads = 1 };
+    return .{ .arch = @tagName(builtin.cpu.arch), .os = @tagName(builtin.os.tag), .cpu_model = "cpu", .selected_cpus = "2", .topology = "0:0@2", .compiler = builtin.zig_version_string, .build_mode = @tagName(builtin.mode), .max_threads = 1, .limited_gate = "physical-core-v1" };
 }
 fn reportFor(metrics: []const Metric) Report {
     return .{ .schema_version = schema_version, .workload_id = workload_id, .fingerprint = fingerprint(), .warmup_iterations = 1, .sample_count = 3, .metrics = metrics };
@@ -293,10 +309,23 @@ test "independent reference renderer has fixed checksums" {
     var dst: [surface_bytes]u8 = undefined;
     sourceBytes(&src);
     for (all_ops) |op| {
-        @memcpy(&dst, &src);
+        prepareDestination(op, &dst, &src);
         referenceOp(op, &dst, &src);
         try std.testing.expectEqual(oracle(op), checksum(&dst));
     }
+}
+test "transfer copy is non-vacuous and no-op copy fails its oracle" {
+    var src: [surface_bytes]u8 = undefined;
+    var dst: [surface_bytes]u8 = undefined;
+    sourceBytes(&src);
+    prepareDestination(.transfer_copy, &dst, &src);
+    const before = checksum(&dst);
+    try std.testing.expect(before != oracle(.transfer_copy));
+    referenceOp(.transfer_copy, &dst, &src);
+    try std.testing.expectEqual(oracle(.transfer_copy), checksum(&dst));
+    prepareDestination(.transfer_copy, &dst, &src);
+    const no_op = checksum(&dst);
+    try std.testing.expect(no_op != oracle(.transfer_copy));
 }
 test "benchmark validates every available SIMD runtime and oracle" {
     var metrics: [32]Metric = undefined;
@@ -357,7 +386,7 @@ test "full validation rejects noncanonical sets fields and callers cannot bypass
 }
 
 fn metricForTest(op: Op, backend: []const u8) !Metric {
-    return .{ .name = @tagName(op), .backend = backend, .iterations = 3, .checksum = oracle(op), .mpix_s = if (op == .sprites or op == .frame) 0 else 100, .effective_gib_s = 100, .draws_s = if (op == .sprites) 100 else 0, .fps = if (op == .frame) 100 else 0, .frame = .{ .p50_ns = 100, .p95_ns = 100, .p99_ns = 100 } };
+    return .{ .name = @tagName(op), .backend = backend, .iterations = 3, .checksum = oracle(op), .checksum_hex = oracleHex(op), .mpix_s = if (op == .sprites or op == .frame) 0 else 100, .effective_gib_s = 100, .draws_s = if (op == .sprites) 100 else 0, .fps = if (op == .frame) 100 else 0, .frame = .{ .p50_ns = 100, .p95_ns = 100, .p99_ns = 100 } };
 }
 
 fn canonicalForTest(storage: []Metric) !Report {
@@ -395,6 +424,9 @@ test "baseline compares every applicable rate and every latency independently" {
     try std.testing.expectError(error.IncompatibleFingerprint, compare(current, baseline));
     current.fingerprint = baseline.fingerprint;
     baseline.rate_tolerance_fraction = std.math.inf(f64);
+    try std.testing.expectError(error.MalformedReport, compare(current, baseline));
+    baseline.rate_tolerance_fraction = 0.99;
+    now_storage[0].mpix_s = 1;
     try std.testing.expectError(error.MalformedReport, compare(current, baseline));
     try std.testing.expect(!latencyRegressed(std.math.maxInt(u64), std.math.maxInt(u64) - 1, 0.5));
 }

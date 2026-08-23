@@ -52,6 +52,16 @@ fn expandCpuList(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
     return out.toOwnedSlice();
 }
 
+fn cpuCount(expanded: []const u8) !u8 {
+    if (expanded.len == 0) return error.InvalidCpuList;
+    var count: usize = 1;
+    for (expanded) |c| {
+        if (c == ',') count += 1;
+    }
+    if (count > 8) return error.InvalidThreadCap;
+    return @intCast(count);
+}
+
 fn readSpecial(io: std.Io, allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
     const file = try std.Io.Dir.openFileAbsolute(io, path, .{});
     defer file.close(io);
@@ -114,6 +124,7 @@ fn verifyTrustedFingerprint(io: std.Io, allocator: std.mem.Allocator, selected: 
     const actual_topology = try trustedTopology(io, allocator, selected);
     defer allocator.free(actual_topology);
     if (!std.mem.eql(u8, topology, actual_topology)) return error.UntrustedTopologyFingerprint;
+    _ = try cpuCount(actual);
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -136,12 +147,17 @@ pub fn main(init: std.process.Init) !void {
     const cpu_model = init.environ_map.get("ZPU_CPU_MODEL") orelse return error.MissingCpuFingerprint;
     const topology = init.environ_map.get("ZPU_TOPOLOGY") orelse return error.MissingTopologyFingerprint;
     const cap_text = init.environ_map.get("ZPU_MAX_THREADS") orelse return error.MissingThreadCap;
-    const cap = try std.fmt.parseInt(u8, cap_text, 10);
-    if (cap == 0 or cap > 8) return error.InvalidThreadCap;
+    const requested_cap = try std.fmt.parseInt(u8, cap_text, 10);
+    if (requested_cap == 0 or requested_cap > 8) return error.InvalidThreadCap;
     try verifyTrustedFingerprint(init.io, allocator, selected, cpu_model, topology);
+    const expanded_selected = try expandCpuList(allocator, selected);
+    defer allocator.free(expanded_selected);
+    const cap = try cpuCount(expanded_selected);
+    if (requested_cap != cap) return error.ThreadCapAffinityMismatch;
     var metrics: [32]bench.Metric = undefined;
     const count = try bench.benchmark(init.io, &metrics, smoke);
-    const report = bench.Report{ .schema_version = bench.schema_version, .workload_id = bench.workload_id, .fingerprint = .{ .arch = @tagName(builtin.cpu.arch), .os = @tagName(builtin.os.tag), .cpu_model = cpu_model, .selected_cpus = selected, .topology = topology, .compiler = builtin.zig_version_string, .build_mode = @tagName(builtin.mode), .max_threads = cap }, .warmup_iterations = 1, .sample_count = if (smoke) 3 else 15, .metrics = metrics[0..count] };
+    if (!std.mem.eql(u8, init.environ_map.get("ZPU_LIMITED") orelse "", "physical-core-v1")) return error.MissingAffinityGate;
+    const report = bench.Report{ .schema_version = bench.schema_version, .workload_id = bench.workload_id, .fingerprint = .{ .arch = @tagName(builtin.cpu.arch), .os = @tagName(builtin.os.tag), .cpu_model = cpu_model, .selected_cpus = selected, .topology = topology, .compiler = builtin.zig_version_string, .build_mode = @tagName(builtin.mode), .max_threads = cap, .limited_gate = "physical-core-v1" }, .warmup_iterations = 1, .sample_count = if (smoke) 3 else 15, .metrics = metrics[0..count] };
     try bench.validate(report);
     try bench.guardInRun(report);
     const encoded = try emitJson(allocator, report);
@@ -157,13 +173,13 @@ pub fn main(init: std.process.Init) !void {
     const out = &stdout_file.interface;
     if (json_only) try out.writeAll(encoded) else {
         try out.print("ZPU 2D benchmark: {s}\n", .{bench.workload_id});
-        for (report.metrics) |m| try out.print("{s: <13} {s: <7} {d: >9.2} MPix/s {d: >7.2} modeled-GiB/s {d: >10.0} draws/s {d: >8.1} FPS p50/p95/p99={d}/{d}/{d} ns checksum={x}\n", .{ m.name, m.backend, m.mpix_s, m.effective_gib_s, m.draws_s, m.fps, m.frame.p50_ns, m.frame.p95_ns, m.frame.p99_ns, m.checksum });
+        for (report.metrics) |m| try out.print("{s: <13} {s: <7} {d: >9.2} MPix/s {d: >7.2} modeled-GiB/s {d: >10.0} draws/s {d: >8.1} FPS p50/p95/p99={d}/{d}/{d} ns checksum={s}\n", .{ m.name, m.backend, m.mpix_s, m.effective_gib_s, m.draws_s, m.fps, m.frame.p50_ns, m.frame.p95_ns, m.frame.p99_ns, m.checksum_hex });
     }
     try out.flush();
 }
 
 test "JSON round trip and malformed input" {
-    const r = bench.Report{ .schema_version = bench.schema_version, .workload_id = bench.workload_id, .fingerprint = .{ .arch = "x86_64", .os = "linux", .cpu_model = "cpu", .selected_cpus = "2", .topology = "0:0@2", .compiler = builtin.zig_version_string, .build_mode = @tagName(builtin.mode), .max_threads = 1 }, .warmup_iterations = 1, .sample_count = 3, .metrics = &[_]bench.Metric{.{ .name = "copy", .backend = "scalar", .iterations = 3, .checksum = 4, .mpix_s = 1, .effective_gib_s = 2, .draws_s = 0, .fps = 0, .frame = .{ .p50_ns = 1, .p95_ns = 2, .p99_ns = 3 } }} };
+    const r = bench.Report{ .schema_version = bench.schema_version, .workload_id = bench.workload_id, .fingerprint = .{ .arch = "x86_64", .os = "linux", .cpu_model = "cpu", .selected_cpus = "2", .topology = "0:0@2", .compiler = builtin.zig_version_string, .build_mode = @tagName(builtin.mode), .max_threads = 1, .limited_gate = "physical-core-v1" }, .warmup_iterations = 1, .sample_count = 3, .metrics = &[_]bench.Metric{.{ .name = "copy", .backend = "scalar", .iterations = 3, .checksum = 4, .checksum_hex = "0000000000000004", .mpix_s = 1, .effective_gib_s = 2, .draws_s = 0, .fps = 0, .frame = .{ .p50_ns = 1, .p95_ns = 2, .p99_ns = 3 } }} };
     const bytes = try emitJson(std.testing.allocator, r);
     defer std.testing.allocator.free(bytes);
     var parsed = try parseBaseline(std.testing.allocator, bytes);
@@ -182,5 +198,19 @@ test "CPU list parsing handles cgroup ranges lists and malformed forms" {
 }
 
 test "forged environment fingerprint cannot pass trusted host verification" {
-    if (verifyTrustedFingerprint(std.testing.io, std.testing.allocator, "999999", "forged", "forged")) |_| return error.ForgedFingerprintAccepted else |_| {}
+    const status = try readSpecial(std.testing.io, std.testing.allocator, "/proc/self/status", 1024 * 1024);
+    defer std.testing.allocator.free(status);
+    const marker = "Cpus_allowed_list:";
+    const start = std.mem.indexOf(u8, status, marker) orelse return error.MissingTrustedAffinity;
+    const tail = status[start + marker.len ..];
+    const end = std.mem.indexOfScalar(u8, tail, '\n') orelse tail.len;
+    const selected = try expandCpuList(std.testing.allocator, std.mem.trim(u8, tail[0..end], " \t"));
+    defer std.testing.allocator.free(selected);
+    const info = try readSpecial(std.testing.io, std.testing.allocator, "/proc/cpuinfo", 4 * 1024 * 1024);
+    defer std.testing.allocator.free(info);
+    const real_model = fieldValue(info, "model name") orelse fieldValue(info, "Hardware") orelse return error.MissingTrustedCpuModel;
+    const real_topology = try trustedTopology(std.testing.io, std.testing.allocator, selected);
+    defer std.testing.allocator.free(real_topology);
+    try std.testing.expectError(error.UntrustedCpuFingerprint, verifyTrustedFingerprint(std.testing.io, std.testing.allocator, selected, "forged-model", real_topology));
+    try std.testing.expectError(error.UntrustedTopologyFingerprint, verifyTrustedFingerprint(std.testing.io, std.testing.allocator, selected, real_model, "forged-topology"));
 }

@@ -58,6 +58,10 @@ pub fn build(b: *std.Build) void {
     benchmark_cli_tests.addArtifactArg(benchmark);
     benchmark_cli_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&benchmark_cli_tests.step);
+    const benchmark_history_tests = b.addSystemCommand(&.{"test/benchmark_history.sh"});
+    benchmark_history_tests.addArtifactArg(benchmark);
+    benchmark_history_tests.step.dependOn(&require_limited.step);
+    test_step.dependOn(&benchmark_history_tests.step);
 
     const behavior_tests = b.addTest(.{
         .root_module = b.createModule(.{
