@@ -103,3 +103,37 @@ This file is append-only. Each entry records a validated JSON report and names t
 | blend | runtime | 65.6943298 | 0.489460899 | 0 | 0 | 876788 | 915107 | 915107 | `d5f99fe5b4e7eef8` |
 | sprites | runtime | 0 | 0.472913454 | 991771.397 | 0 | 129062 | 163877 | 163877 | `3717a00e187d9381` |
 | frame | runtime | 0 | 1.36801119 | 0 | 4063.63655 | 246085 | 260389 | 260389 | `2e480a89ab6181ef` |
+
+### 805f39cafcccf1a2e7fd3f5a82123bd7b1da5b7f
+
+- Entry semantics: benchmarked source commit; the history append commit follows this source commit.
+- UTC: 2026-08-23T09:22:54Z
+- Schema/workload: v2 / `zpu-2d-v2-240x240-seed-151521030`
+- Zig/compiler: `0.16.0`; build mode: `ReleaseFast`
+- Trusted CPU: `AMD EPYC 7V13 64-Core Processor`; topology: `0:0@0;0:1@1;0:2@2;0:3@3;0:4@4;0:5@5;0:6@6;0:7@7`; affinity: `0,1,2,3,4,5,6,7`
+- Threads: configured `8`, observed `8`
+- Available backends: avx2, runtime, scalar
+- Baseline comparison: `not-run`
+
+| name | backend | MPix/s | modeled GiB/s | draws/s | FPS | p50 ns | p95 ns | p99 ns | checksum_hex |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| clear | scalar | 3989.47223 | 14.8619422 | 0 | 0 | 14438 | 16345 | 16345 | `89fcf336d86c4f25` |
+| pixel | scalar | 107.67613 | 0.401124844 | 0 | 0 | 4755 | 10099 | 10099 | `3d0737332ec9e1cc` |
+| fill | scalar | 2131.55704 | 7.94066875 | 0 | 0 | 6005 | 11720 | 11720 | `b5cb439ce748a598` |
+| transfer_fill | scalar | 1503.40615 | 5.60062436 | 0 | 0 | 38313 | 53847 | 53847 | `50dbc316a6090325` |
+| transfer_copy | scalar | 993.65167 | 7.40328185 | 0 | 0 | 57968 | 76819 | 76819 | `4e61ac2d0cc0777b` |
+| blend | scalar | 42.9350265 | 0.319890875 | 0 | 0 | 1341562 | 1384346 | 1384346 | `d5f99fe5b4e7eef8` |
+| sprites | scalar | 0 | 0.31356683 | 657597.304 | 0 | 194648 | 210106 | 210106 | `3717a00e187d9381` |
+| frame | scalar | 0 | 0.837845186 | 0 | 2488.7942 | 401801 | 437768 | 437768 | `2e480a89ab6181ef` |
+| clear | avx2 | 16111.8881 | 60.0214605 | 0 | 0 | 3575 | 8208 | 8208 | `89fcf336d86c4f25` |
+| pixel | avx2 | 107.045787 | 0.398776632 | 0 | 0 | 4783 | 7793 | 7793 | `3d0737332ec9e1cc` |
+| fill | avx2 | 3286.26444 | 12.242289 | 0 | 0 | 3895 | 8469 | 8469 | `b5cb439ce748a598` |
+| blend | avx2 | 64.8881749 | 0.483454577 | 0 | 0 | 887681 | 954408 | 954408 | `d5f99fe5b4e7eef8` |
+| sprites | avx2 | 0 | 0.464619127 | 974376.932 | 0 | 131366 | 144714 | 144714 | `3717a00e187d9381` |
+| frame | avx2 | 0 | 1.30641331 | 0 | 3880.66189 | 257688 | 284233 | 284233 | `2e480a89ab6181ef` |
+| clear | runtime | 15258.2781 | 56.8415155 | 0 | 0 | 3775 | 12390 | 12390 | `89fcf336d86c4f25` |
+| pixel | runtime | 103.959391 | 0.38727891 | 0 | 0 | 4925 | 4979 | 4979 | `3d0737332ec9e1cc` |
+| fill | runtime | 3138.02403 | 11.6900505 | 0 | 0 | 4079 | 10582 | 10582 | `b5cb439ce748a598` |
+| blend | runtime | 63.8670147 | 0.47584634 | 0 | 0 | 901874 | 959688 | 959688 | `d5f99fe5b4e7eef8` |
+| sprites | runtime | 0 | 0.445008613 | 933250.702 | 0 | 137155 | 147176 | 147176 | `3717a00e187d9381` |
+| frame | runtime | 0 | 1.3051471 | 0 | 3876.90065 | 257938 | 268152 | 268152 | `2e480a89ab6181ef` |
