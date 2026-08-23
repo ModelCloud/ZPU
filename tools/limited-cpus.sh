@@ -25,7 +25,14 @@ END {if(count) print out}
 count=$(awk -F, '{print NF}' <<<"$selected")
 export ZPU_MAX_THREADS="$count"
 export ZPU_SELECTED_CPUS="$selected"
-export ZPU_CPU_MODEL="${ZPU_CPU_MODEL:-$(lscpu | awk -F: '/^Model name:/{sub(/^[ \t]+/,"",$2); print $2; exit}')}"
+export ZPU_LIMITED="physical-core-v1"
+# Trusted host values intentionally overwrite caller-provided fingerprint data.
+export ZPU_CPU_MODEL="$(lscpu | awk -F: '/^Model name:/{sub(/^[ \t]+/,"",$2); print $2; exit}')"
+export ZPU_TOPOLOGY="$(${topology_cmd[@]} | awk -F, -v selected="$selected" '
+BEGIN{n=split(selected,a,",");for(i=1;i<=n;i++)wanted[a[i]]=1}
+!/^#/ && NF>=4 && $4=="Y" && wanted[$1+0] {item=$3 ":" $2 "@" $1; out=out (out?";":"") item}
+END{print out}')"
+[[ -n "$ZPU_CPU_MODEL" && -n "$ZPU_TOPOLOGY" ]] || { echo "trusted host fingerprint collection failed" >&2; exit 70; }
 printf 'ZPU affinity: cpus=%s physical_cores=%s max_threads=%s\n' "$selected" "$count" "$ZPU_MAX_THREADS" >&2
 
 args=("$@")
