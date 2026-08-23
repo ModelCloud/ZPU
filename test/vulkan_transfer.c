@@ -57,7 +57,26 @@ static int allocate_bind_image(VkDevice device, VkPhysicalDevice physical, VkFor
     VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = find_memory_type(physical, req.memoryTypeBits) };
     CHECK_VK(vkAllocateMemory(device, &ai, NULL, memory));
     CHECK_VK(vkBindImageMemory(device, *image, *memory, 0));
+    VkImageSubresource subresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT };
+    VkSubresourceLayout layout;
+    vkGetImageSubresourceLayout(device, *image, &subresource, &layout);
+    CHECK_TRUE(layout.offset == 0 && layout.size == BYTES && layout.rowPitch == WIDTH * 4 && layout.arrayPitch == BYTES && layout.depthPitch == BYTES);
     return 0;
+}
+
+static void transition_image(VkCommandBuffer command, VkImage image) {
+    VkImageMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = 0,
+        .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+    };
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
 }
 
 int main(void) {
@@ -120,6 +139,14 @@ int main(void) {
     CHECK_TRUE(vkGetFenceStatus(device, fence) == VK_NOT_READY);
 
     CHECK_VK(vkBeginCommandBuffer(command, &begin));
+    transition_image(command, first);
+    transition_image(command, second);
+    transition_image(command, bgra);
+    CHECK_VK(vkEndCommandBuffer(command));
+    CHECK_VK(submit_wait(device, queue, command, fence));
+
+    CHECK_VK(vkResetCommandBuffer(command, 0));
+    CHECK_VK(vkBeginCommandBuffer(command, &begin));
     vkCmdFillBuffer(command, staging, 0, VK_WHOLE_SIZE, 0x11223344u);
     CHECK_VK(vkEndCommandBuffer(command));
     CHECK_VK(submit_wait(device, queue, command, fence));
@@ -160,12 +187,15 @@ int main(void) {
     CHECK_VK(submit_wait(device, queue, command, fence));
     CHECK_VK(check_bytes(device, readback_memory, expected, "vkCmdCopyImageToBuffer"));
 
-    VkClearColorValue red = { .float32 = { 1.0f, 0.0f, 0.0f, 1.0f } };
+    VkClearColorValue distinct = { .float32 = { 1.0f, 0.5f, 0.25f, 1.0f } };
     CHECK_VK(vkResetCommandBuffer(command, 0));
     CHECK_VK(vkBeginCommandBuffer(command, &begin));
-    vkCmdClearColorImage(command, bgra, VK_IMAGE_LAYOUT_GENERAL, &red, 1, &range);
+    vkCmdClearColorImage(command, bgra, VK_IMAGE_LAYOUT_GENERAL, &distinct, 1, &range);
     CHECK_VK(vkEndCommandBuffer(command));
     CHECK_VK(submit_wait(device, queue, command, fence));
+    for (size_t i = 0; i < BYTES; i += 4) {
+        expected[i + 0] = 64; expected[i + 1] = 128; expected[i + 2] = 255; expected[i + 3] = 255;
+    }
     CHECK_VK(check_bytes(device, bgra_memory, expected, "vkCmdClearColorImage BGRA"));
 
     CHECK_VK(vkResetCommandBuffer(command, 0));
