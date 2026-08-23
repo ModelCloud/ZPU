@@ -112,6 +112,21 @@ pub fn build(b: *std.Build) void {
     verify_benchmark_coverage.addDirectoryArg(benchmark_coverage_output);
     verify_benchmark_coverage.addArg("/src/benchmark.zig");
     coverage_step.dependOn(&verify_benchmark_coverage.step);
+    const benchmark_coverage_exe = b.addExecutable(.{
+        .name = "zpu-benchmark-coverage",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_main.zig"), .target = b.graph.host, .optimize = .Debug }),
+        .use_llvm = true,
+    });
+    const collect_cli_coverage = b.addSystemCommand(&.{"test/benchmark_cli.sh"});
+    collect_cli_coverage.step.dependOn(&require_limited.step);
+    collect_cli_coverage.addArtifactArg(benchmark_coverage_exe);
+    const cli_coverage_output = collect_cli_coverage.addOutputDirectoryArg("benchmark-cli-coverage-v8");
+    collect_cli_coverage.addArg(b.pathFromRoot("src/benchmark_main.zig"));
+    collect_cli_coverage.addArtifactArg(benchmark_coverage_tests);
+    const verify_cli_coverage = b.addRunArtifact(coverage_verifier);
+    verify_cli_coverage.addDirectoryArg(cli_coverage_output);
+    verify_cli_coverage.addArg("/src/benchmark_main.zig");
+    coverage_step.dependOn(&verify_cli_coverage.step);
 
     const run_demo = b.addRunArtifact(demo);
     run_demo.step.dependOn(&require_limited.step);

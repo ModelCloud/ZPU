@@ -70,7 +70,12 @@ pub fn main(init: std.process.Init) !void {
     var lines = line_map.object.iterator();
     while (lines.next()) |entry| {
         const line_number = try std.fmt.parseInt(u64, entry.key_ptr.*, 10);
-        if (line_number == 0 or entry.value_ptr.* != .string) return error.InvalidCoverageRecords;
+        if (line_number == 0) return error.InvalidCoverageRecords;
+        if (entry.value_ptr.* == .integer) {
+            if (entry.value_ptr.integer <= 0) return error.InvalidCoverageRecords;
+            continue;
+        }
+        if (entry.value_ptr.* != .string) return error.InvalidCoverageRecords;
         var parts = std.mem.splitScalar(u8, entry.value_ptr.string, '/');
         const executed = try std.fmt.parseInt(u64, parts.next() orelse return error.InvalidCoverageRecords, 10);
         const instrumented = try std.fmt.parseInt(u64, parts.next() orelse return error.InvalidCoverageRecords, 10);

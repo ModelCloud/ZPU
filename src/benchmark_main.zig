@@ -4,7 +4,7 @@ const bench = @import("benchmark.zig");
 
 fn emitJson(allocator: std.mem.Allocator, report: bench.Report) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
-    errdefer out.deinit();
+    defer out.deinit();
     var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
     try json.write(report);
     try out.writer.writeByte('\n');
@@ -26,7 +26,7 @@ fn fieldValue(text: []const u8, prefix: []const u8) ?[]const u8 {
 
 fn expandCpuList(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
-    errdefer out.deinit();
+    defer out.deinit();
     var first = true;
     var groups = std.mem.splitScalar(u8, std.mem.trim(u8, text, " \t\n"), ',');
     while (groups.next()) |group_raw| {
@@ -56,7 +56,7 @@ fn readSpecial(io: std.Io, allocator: std.mem.Allocator, path: []const u8, limit
     const file = try std.Io.Dir.openFileAbsolute(io, path, .{});
     defer file.close(io);
     var out: std.Io.Writer.Allocating = .init(allocator);
-    errdefer out.deinit();
+    defer out.deinit();
     var buffer: [4096]u8 = undefined;
     while (true) {
         const count = file.readStreaming(io, &.{&buffer}) catch |err| switch (err) {
@@ -72,7 +72,7 @@ fn readSpecial(io: std.Io, allocator: std.mem.Allocator, path: []const u8, limit
 
 fn trustedTopology(io: std.Io, allocator: std.mem.Allocator, selected: []const u8) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
-    errdefer out.deinit();
+    defer out.deinit();
     var cpus = std.mem.splitScalar(u8, selected, ',');
     var first = true;
     while (cpus.next()) |cpu| {
@@ -173,6 +173,7 @@ test "JSON round trip and malformed input" {
 }
 
 test "CPU list parsing handles cgroup ranges lists and malformed forms" {
+    try std.testing.expect(fieldValue("Name:\tzpu\n", "Missing") == null);
     const a = try expandCpuList(std.testing.allocator, "2-4,8,10-11\n");
     defer std.testing.allocator.free(a);
     try std.testing.expectEqualStrings("2,3,4,8,10,11", a);
