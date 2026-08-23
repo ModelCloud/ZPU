@@ -15,6 +15,8 @@ zig build transfer
 zig build demo
 ```
 
+All repository gates must be run through the Linux physical-core limiter, for example `tools/limited-cpus.sh zig build test`. Benchmark methodology, stable JSON, controlled baseline capture/comparison, tolerances, reproducibility guidance, and the opt-in hardware guard are documented in [docs/benchmarking.md](docs/benchmarking.md). The deferred 3D metric and deterministic-scene contract is in [docs/3d-benchmark-todo.md](docs/3d-benchmark-todo.md); no 3D pipeline or fabricated 3D measurement was added.
+
 The build installs `zig-out/lib/libvulkan_zpu.so` and `zig-out/share/vulkan/icd.d/zpu_icd.x86_64.json`. The manifest's relative path resolves back to that installed library. The shared object has no dynamic library dependencies. The loader-independent smoke test uses `dlopen` to resolve the three private loader entry points, negotiate interface version 7, create an instance, and enumerate the CPU device.
 
 To ask a system Vulkan loader to discover only ZPU:
@@ -87,14 +89,16 @@ The gate is line coverage, because pinned Zig 0.16.0 exposes neither LLVM source
 ## Development gates
 
 ```sh
-zig fmt --check build.zig src tools
-zig build
-zig build test
-zig build coverage
-zig build smoke
-zig build transfer
-zig build demo
-zig build -Doptimize=ReleaseFast
+tools/limited-cpus.sh zig fmt --check build.zig src tools
+tools/limited-cpus.sh zig build
+tools/limited-cpus.sh zig build test
+tools/limited-cpus.sh zig build behavior
+tools/limited-cpus.sh zig build coverage
+tools/limited-cpus.sh zig build smoke
+tools/limited-cpus.sh zig build transfer
+tools/limited-cpus.sh zig build benchmark -Doptimize=ReleaseFast -- --smoke --json
+tools/limited-cpus.sh zig build demo
+tools/limited-cpus.sh zig build -Doptimize=ReleaseFast
 ```
 
 CI runs these commands on Linux. Generated PPM files and Zig build outputs are ignored.

@@ -5,6 +5,7 @@ pub const simd = @import("simd/dispatch.zig");
 pub const command = @import("command/processor.zig");
 pub const vulkan = @import("vulkan/icd.zig");
 pub const platform = @import("platform/presenter.zig");
+pub const benchmark = @import("benchmark.zig");
 
 test {
     _ = @import("tests.zig");

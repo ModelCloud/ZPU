@@ -17,29 +17,42 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends kcov libvulkan1 vulkan-tools
           dpkg-query -W -f='${Package}=${Version}\n' kcov libvulkan1 vulkan-tools
-      - run: zig fmt --check build.zig src tools
-      - run: zig build
+      - run: tools/limited-cpus.sh zig fmt --check build.zig src tools
+      - run: tools/limited-cpus.sh zig build
       - run: test "$(realpath zig-out/share/vulkan/icd.d/../../../lib/libvulkan_zpu.so)" = "$(realpath zig-out/lib/libvulkan_zpu.so)"
-      - run: zig build test
-      - run: zig build behavior
-      - run: zig build coverage
-      - run: zig build smoke
+      - run: tools/limited-cpus.sh zig build test
+      - run: tools/limited-cpus.sh zig build behavior
+      - run: tools/limited-cpus.sh zig build coverage
+      - run: tools/limited-cpus.sh zig build smoke
+      - name: Affinity/topology and explicit worker-cap proof
+        run: test/limited_cpus.sh
+      - name: Benchmark correctness, stable JSON schema, and in-run guard
+        run: |
+          tools/limited-cpus.sh zig build benchmark -Doptimize=ReleaseFast -- --smoke --json > benchmark.json
+          python3 - <<'PY'
+          import json
+          r=json.load(open('benchmark.json'))
+          assert r['schema_version']==1 and r['workload_id']=='zpu-2d-v1-240x240-seed-151521030'
+          assert {'clear','pixel','fill','transfer_fill','transfer_copy','blend','sprites','frame'} <= {m['name'] for m in r['metrics']}
+          assert all(m['checksum'] and m['frame']['p50_ns'] <= m['frame']['p95_ns'] <= m['frame']['p99_ns'] for m in r['metrics'])
+          assert r['fingerprint']['max_threads'] <= 8
+          PY
       - name: Authoritative system Vulkan-loader discovery
         run: |
           export XDG_RUNTIME_DIR="$RUNNER_TEMP/runtime"
           mkdir -p "$XDG_RUNTIME_DIR"
           export VK_DRIVER_FILES="$PWD/zig-out/share/vulkan/icd.d/zpu_icd.x86_64.json"
-          vulkaninfo --summary | tee vulkaninfo-summary.txt
+          tools/limited-cpus.sh vulkaninfo --summary | tee vulkaninfo-summary.txt
           grep -F 'ZPU Experimental CPU' vulkaninfo-summary.txt
           grep -E 'deviceType[[:space:]]*=[[:space:]]*PHYSICAL_DEVICE_TYPE_CPU' vulkaninfo-summary.txt
           grep -E 'apiVersion[[:space:]]*=[[:space:]]*1\.0\.0' vulkaninfo-summary.txt
           grep -Ei 'vendorID[[:space:]]*=[[:space:]]*0x1cdc' vulkaninfo-summary.txt
           grep -Ei 'deviceID[[:space:]]*=[[:space:]]*0x0001' vulkaninfo-summary.txt
       - name: Exact 240x240 system-loader transfer validation
-        run: zig build transfer
-      - run: zig build demo
+        run: tools/limited-cpus.sh zig build transfer
+      - run: tools/limited-cpus.sh zig build demo
       - run: test "$(sha256sum zpu-demo.ppm | cut -d' ' -f1)" = "919b08ed95dec247b8c456e7fc1b85ac47e5a9d0030a54f6287fbfe424d37ef4"
-      - run: zig build -Doptimize=ReleaseFast
+      - run: tools/limited-cpus.sh zig build -Doptimize=ReleaseFast
       - name: Verify ICD ELF ABI
         run: |
           test -z "$(readelf -d zig-out/lib/libvulkan_zpu.so | grep NEEDED)"

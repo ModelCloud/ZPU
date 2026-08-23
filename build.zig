@@ -31,10 +31,25 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(demo);
 
+    const benchmark = b.addExecutable(.{
+        .name = "zpu-benchmark",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_main.zig"), .target = target, .optimize = optimize }),
+    });
+    b.installArtifact(benchmark);
+    const run_benchmark = b.addRunArtifact(benchmark);
+    if (b.args) |args| run_benchmark.addArgs(args);
+    const benchmark_step = b.step("benchmark", "Run deterministic 2D benchmark and optional baseline guard");
+    benchmark_step.dependOn(&run_benchmark.step);
+
     const tests = b.addTest(.{ .root_module = zpu });
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run deterministic unit tests");
     test_step.dependOn(&run_tests.step);
+    const benchmark_tests = b.addTest(.{
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_main.zig"), .target = b.graph.host, .optimize = .Debug }),
+    });
+    const run_benchmark_tests = b.addRunArtifact(benchmark_tests);
+    test_step.dependOn(&run_benchmark_tests.step);
 
     const behavior_tests = b.addTest(.{
         .root_module = b.createModule(.{
