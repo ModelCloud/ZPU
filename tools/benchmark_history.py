@@ -142,6 +142,11 @@ def main():
         for commit in commits:
             try: git("cat-file", "-e", f"{commit}^{{commit}}")
             except subprocess.CalledProcessError: fail(f"history commit is not present: {commit}")
+            block = text.split(f"### {commit}", 1)[1].split("\n### ", 1)[0]
+            for required in ("Entry semantics:", "- UTC:", "Schema/workload:", "Zig/compiler:", "Trusted CPU:", "Threads:", "Available backends:", "Baseline comparison:", "| name | backend |"):
+                if required not in block: fail(f"history entry {commit} is missing {required}")
+            for checksum_hex in ORACLES.values():
+                if f"`{checksum_hex}`" not in block: fail(f"history entry {commit} is missing checksum {checksum_hex}")
         return
     if not args.json_path or not args.history_path or not args.commit or args.observed_threads is None: fail("JSON, history, --commit, and --observed-threads are required")
     if not re.fullmatch(r"[0-9a-f]{40}", args.commit): fail("commit must be a full 40-character SHA")

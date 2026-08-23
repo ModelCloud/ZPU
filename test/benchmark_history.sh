@@ -22,4 +22,10 @@ touch "$root/.history-dirty-sentinel"
 if python3 tools/benchmark_history.py "$json" "$tmp/dirty.md" --commit "$sha" --observed-threads 8 2>/dev/null; then rm -f "$root/.history-dirty-sentinel"; exit 1; fi
 rm -f "$root/.history-dirty-sentinel"
 python3 tools/benchmark_history.py "" "$history" --validate-history
+python3 - "$history" "$tmp/bad-history.md" <<'PY'
+import sys
+t=open(sys.argv[1]).read().replace("Trusted CPU:", "Trusted host:")
+open(sys.argv[2], "w").write(t)
+PY
+if python3 tools/benchmark_history.py "" "$tmp/bad-history.md" --validate-history 2>/dev/null; then exit 1; fi
 echo "benchmark history formatter tests passed"
