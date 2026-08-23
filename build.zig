@@ -89,4 +89,17 @@ pub fn build(b: *std.Build) void {
     run_smoke.addArtifactArg(icd);
     const smoke_step = b.step("smoke", "dlopen and exercise the private ICD ABI");
     smoke_step.dependOn(&run_smoke.step);
+
+    const transfer_client = b.addExecutable(.{
+        .name = "zpu-vulkan-transfer",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize }),
+    });
+    transfer_client.root_module.addCSourceFile(.{ .file = b.path("test/vulkan_transfer.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+    transfer_client.root_module.link_libc = true;
+    transfer_client.root_module.linkSystemLibrary("vulkan", .{});
+    const run_transfer = b.addRunArtifact(transfer_client);
+    run_transfer.setEnvironmentVariable("VK_DRIVER_FILES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_transfer.step.dependOn(b.getInstallStep());
+    const transfer_step = b.step("transfer", "Run exact 240x240 transfers through the system Vulkan loader");
+    transfer_step.dependOn(&run_transfer.step);
 }

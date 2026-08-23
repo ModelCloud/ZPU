@@ -35,6 +35,8 @@ jobs:
           grep -E 'apiVersion[[:space:]]*=[[:space:]]*1\.0\.0' vulkaninfo-summary.txt
           grep -Ei 'vendorID[[:space:]]*=[[:space:]]*0x1cdc' vulkaninfo-summary.txt
           grep -Ei 'deviceID[[:space:]]*=[[:space:]]*0x0001' vulkaninfo-summary.txt
+      - name: Exact 240x240 system-loader transfer validation
+        run: zig build transfer
       - run: zig build demo
       - run: test "$(sha256sum zpu-demo.ppm | cut -d' ' -f1)" = "919b08ed95dec247b8c456e7fc1b85ac47e5a9d0030a54f6287fbfe424d37ef4"
       - run: zig build -Doptimize=ReleaseFast

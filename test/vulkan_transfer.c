@@ -1,0 +1,141 @@
+#include <vulkan/vulkan.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define CHECK_VK(expr) do { VkResult r_ = (expr); if (r_ != VK_SUCCESS) { fprintf(stderr, "%s failed: %d\n", #expr, r_); return 1; } } while (0)
+#define CHECK_TRUE(expr) do { if (!(expr)) { fprintf(stderr, "check failed: %s\n", #expr); return 1; } } while (0)
+enum { WIDTH = 240, HEIGHT = 240, BYTES = WIDTH * HEIGHT * 4 };
+
+static uint32_t find_memory_type(VkPhysicalDevice physical, uint32_t bits) {
+    VkPhysicalDeviceMemoryProperties p;
+    vkGetPhysicalDeviceMemoryProperties(physical, &p);
+    for (uint32_t i = 0; i < p.memoryTypeCount; ++i)
+        if ((bits & (1u << i)) && (p.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) return i;
+    return UINT32_MAX;
+}
+
+static int allocate_bind_buffer(VkDevice device, VkPhysicalDevice physical, VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer *buffer, VkDeviceMemory *memory) {
+    VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+    CHECK_VK(vkCreateBuffer(device, &bi, NULL, buffer));
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(device, *buffer, &req);
+    uint32_t type = find_memory_type(physical, req.memoryTypeBits);
+    CHECK_TRUE(type != UINT32_MAX);
+    VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = type };
+    CHECK_VK(vkAllocateMemory(device, &ai, NULL, memory));
+    CHECK_VK(vkBindBufferMemory(device, *buffer, *memory, 0));
+    return 0;
+}
+
+static int allocate_bind_image(VkDevice device, VkPhysicalDevice physical, VkFormat format, VkImage *image, VkDeviceMemory *memory) {
+    VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = format, .extent = { WIDTH, HEIGHT, 1 }, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_LINEAR, .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+    CHECK_VK(vkCreateImage(device, &ii, NULL, image));
+    VkMemoryRequirements req;
+    vkGetImageMemoryRequirements(device, *image, &req);
+    VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = find_memory_type(physical, req.memoryTypeBits) };
+    CHECK_VK(vkAllocateMemory(device, &ai, NULL, memory));
+    CHECK_VK(vkBindImageMemory(device, *image, *memory, 0));
+    return 0;
+}
+
+int main(void) {
+    VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "zpu-transfer-test", .apiVersion = VK_API_VERSION_1_0 };
+    VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app };
+    VkInstance instance;
+    CHECK_VK(vkCreateInstance(&ici, NULL, &instance));
+    uint32_t physical_count = 1;
+    VkPhysicalDevice physical;
+    CHECK_VK(vkEnumeratePhysicalDevices(instance, &physical_count, &physical));
+    CHECK_TRUE(physical_count == 1);
+    float priority = 1.0f;
+    VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = 0, .queueCount = 1, .pQueuePriorities = &priority };
+    VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci };
+    VkDevice device;
+    CHECK_VK(vkCreateDevice(physical, &dci, NULL, &device));
+    VkQueue queue;
+    vkGetDeviceQueue(device, 0, 0, &queue);
+
+    VkImageFormatProperties ifp;
+    CHECK_VK(vkGetPhysicalDeviceImageFormatProperties(physical, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0, &ifp));
+    CHECK_VK(vkGetPhysicalDeviceImageFormatProperties(physical, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0, &ifp));
+    CHECK_TRUE(vkGetPhysicalDeviceImageFormatProperties(physical, VK_FORMAT_R8_UNORM, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0, &ifp) == VK_ERROR_FORMAT_NOT_SUPPORTED);
+    VkImage bad_image;
+    VkImageCreateInfo bad = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8_UNORM, .extent = { WIDTH, HEIGHT, 1 }, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_LINEAR, .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+    CHECK_TRUE(vkCreateImage(device, &bad, NULL, &bad_image) == VK_ERROR_FORMAT_NOT_SUPPORTED);
+
+    VkBuffer upload, staging, readback;
+    VkDeviceMemory upload_memory, staging_memory, readback_memory;
+    CHECK_VK(allocate_bind_buffer(device, physical, BYTES, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &upload, &upload_memory));
+    CHECK_VK(allocate_bind_buffer(device, physical, BYTES, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &staging, &staging_memory));
+    CHECK_VK(allocate_bind_buffer(device, physical, BYTES, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &readback, &readback_memory));
+    VkImage first, second;
+    VkDeviceMemory first_memory, second_memory;
+    CHECK_VK(allocate_bind_image(device, physical, VK_FORMAT_R8G8B8A8_UNORM, &first, &first_memory));
+    CHECK_VK(allocate_bind_image(device, physical, VK_FORMAT_R8G8B8A8_UNORM, &second, &second_memory));
+
+    uint8_t *mapped;
+    CHECK_VK(vkMapMemory(device, upload_memory, 0, VK_WHOLE_SIZE, 0, (void **)&mapped));
+    uint8_t *expected = malloc(BYTES);
+    CHECK_TRUE(expected != NULL);
+    for (uint32_t y = 0; y < HEIGHT; ++y) for (uint32_t x = 0; x < WIDTH; ++x) {
+        size_t i = ((size_t)y * WIDTH + x) * 4;
+        mapped[i + 0] = (uint8_t)(x ^ y); mapped[i + 1] = (uint8_t)(x + 3 * y); mapped[i + 2] = (uint8_t)(255 - x); mapped[i + 3] = 255;
+        memcpy(expected + i, mapped + i, 4);
+    }
+    vkUnmapMemory(device, upload_memory);
+
+    VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = 0 };
+    VkCommandPool pool;
+    CHECK_VK(vkCreateCommandPool(device, &pci, NULL, &pool));
+    VkCommandBufferAllocateInfo cai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
+    VkCommandBuffer command;
+    CHECK_VK(vkAllocateCommandBuffers(device, &cai, &command));
+    VkCommandBufferBeginInfo begin = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    CHECK_VK(vkBeginCommandBuffer(command, &begin));
+    vkCmdFillBuffer(command, staging, 0, VK_WHOLE_SIZE, 0x11223344u);
+    VkBufferCopy whole = { .size = BYTES };
+    vkCmdCopyBuffer(command, upload, staging, 1, &whole);
+    VkImageSubresourceRange range = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 };
+    VkClearColorValue blue = { .float32 = { 0.0f, 0.0f, 1.0f, 1.0f } };
+    vkCmdClearColorImage(command, second, VK_IMAGE_LAYOUT_GENERAL, &blue, 1, &range);
+    VkBufferImageCopy bir = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { WIDTH, HEIGHT, 1 } };
+    vkCmdCopyBufferToImage(command, staging, first, VK_IMAGE_LAYOUT_GENERAL, 1, &bir);
+    VkImageCopy ir = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .extent = { WIDTH, HEIGHT, 1 } };
+    vkCmdCopyImage(command, first, VK_IMAGE_LAYOUT_GENERAL, second, VK_IMAGE_LAYOUT_GENERAL, 1, &ir);
+    vkCmdCopyImageToBuffer(command, second, VK_IMAGE_LAYOUT_GENERAL, readback, 1, &bir);
+    CHECK_VK(vkEndCommandBuffer(command));
+    VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VkFence fence;
+    CHECK_VK(vkCreateFence(device, &fci, NULL, &fence));
+    CHECK_TRUE(vkGetFenceStatus(device, fence) == VK_NOT_READY);
+    VkSubmitInfo submit = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &command };
+    CHECK_VK(vkQueueSubmit(queue, 1, &submit, fence));
+    CHECK_VK(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX));
+    CHECK_VK(vkQueueWaitIdle(queue)); CHECK_VK(vkDeviceWaitIdle(device));
+    CHECK_VK(vkMapMemory(device, readback_memory, 0, VK_WHOLE_SIZE, 0, (void **)&mapped));
+    for (size_t i = 0; i < BYTES; ++i) if (mapped[i] != expected[i]) { fprintf(stderr, "pixel byte mismatch at %zu (pixel %zu channel %zu): expected %u actual %u\n", i, i / 4, i % 4, expected[i], mapped[i]); return 1; }
+    vkUnmapMemory(device, readback_memory);
+
+    CHECK_VK(vkResetCommandBuffer(command, 0));
+    CHECK_VK(vkBeginCommandBuffer(command, &begin));
+    VkBufferCopy invalid = { .srcOffset = BYTES - 2, .size = 4 };
+    vkCmdCopyBuffer(command, upload, staging, 1, &invalid);
+    CHECK_TRUE(vkEndCommandBuffer(command) == VK_ERROR_INITIALIZATION_FAILED);
+    CHECK_VK(vkResetCommandBuffer(command, 0));
+    CHECK_VK(vkBeginCommandBuffer(command, &begin));
+    vkCmdClearColorImage(command, second, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, &blue, 1, &range);
+    CHECK_TRUE(vkEndCommandBuffer(command) == VK_ERROR_INITIALIZATION_FAILED);
+    CHECK_VK(vkResetFences(device, 1, &fence));
+    CHECK_TRUE(vkWaitForFences(device, 1, &fence, VK_TRUE, 0) == VK_TIMEOUT);
+
+    free(expected);
+    vkDestroyFence(device, fence, NULL);
+    vkFreeCommandBuffers(device, pool, 1, &command); vkDestroyCommandPool(device, pool, NULL);
+    vkDestroyImage(device, second, NULL); vkFreeMemory(device, second_memory, NULL); vkDestroyImage(device, first, NULL); vkFreeMemory(device, first_memory, NULL);
+    vkDestroyBuffer(device, readback, NULL); vkFreeMemory(device, readback_memory, NULL); vkDestroyBuffer(device, staging, NULL); vkFreeMemory(device, staging_memory, NULL); vkDestroyBuffer(device, upload, NULL); vkFreeMemory(device, upload_memory, NULL);
+    vkDestroyDevice(device, NULL); vkDestroyInstance(instance, NULL);
+    printf("exact transfer bytes: %u/%u; pixels: %u/%u\n", BYTES, BYTES, WIDTH * HEIGHT, WIDTH * HEIGHT);
+    return 0;
+}
