@@ -466,7 +466,7 @@ fn conservativeLimits() Limits {
     v.max_texel_offset = 7;
     v.max_framebuffer_width = 4096;
     v.max_framebuffer_height = 4096;
-    v.max_framebuffer_layers = 1;
+    v.max_framebuffer_layers = 256;
     v.framebuffer_color_sample_counts = 1 | 4;
     v.framebuffer_depth_sample_counts = 1 | 4;
     v.framebuffer_stencil_sample_counts = 1 | 4;
@@ -1035,6 +1035,8 @@ test "loader chain bounds and callback destruction revalidation" {
 }
 
 test "physical properties start with coherent conservative limits" {
+    // Independent contract values follow Vulkan 1.0 Required Limits:
+    // https://registry.khronos.org/vulkan/specs/1.0/html/vkspec.html#limits-minmax
     const ci = InstanceInfo{ .s_type = 1, .p_next = null, .flags = 0, .app_info = null, .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null };
     var instance: Instance = undefined;
     try std.testing.expectEqual(Result.success, createInstance(&ci, null, &instance));
@@ -1056,10 +1058,10 @@ test "physical properties start with coherent conservative limits" {
     try std.testing.expect(l.max_texel_buffer_elements >= 65_536);
     try std.testing.expect(l.max_uniform_buffer_range >= 16_384);
     try std.testing.expect(l.max_storage_buffer_range >= 134_217_728);
-    try std.testing.expect(l.max_push_constants_size >= 128);
+    try std.testing.expect(l.max_push_constants_size >= 128 and l.max_push_constants_size % 4 == 0);
     try std.testing.expect(l.max_memory_allocation_count >= 4096);
     try std.testing.expect(l.max_sampler_allocation_count >= 4000);
-    try std.testing.expect(l.buffer_image_granularity <= 131_072);
+    try std.testing.expect(l.buffer_image_granularity <= 131_072 and std.math.isPowerOfTwo(l.buffer_image_granularity));
     try std.testing.expectEqual(@as(u64, 0), l.sparse_address_space_size);
     try std.testing.expect(l.max_bound_descriptor_sets >= 4);
     try std.testing.expect(l.max_per_stage_descriptor_samplers >= 16);
@@ -1084,7 +1086,18 @@ test "physical properties start with coherent conservative limits" {
     try std.testing.expect(l.max_vertex_input_binding_stride >= 2048);
     try std.testing.expect(l.max_vertex_output_components >= 64);
     try std.testing.expectEqual(@as(u32, 0), l.max_tessellation_generation_level);
+    try std.testing.expectEqual(@as(u32, 0), l.max_tessellation_patch_size);
+    try std.testing.expectEqual(@as(u32, 0), l.max_tessellation_control_per_vertex_input_components);
+    try std.testing.expectEqual(@as(u32, 0), l.max_tessellation_control_per_vertex_output_components);
+    try std.testing.expectEqual(@as(u32, 0), l.max_tessellation_control_per_patch_output_components);
+    try std.testing.expectEqual(@as(u32, 0), l.max_tessellation_control_total_output_components);
+    try std.testing.expectEqual(@as(u32, 0), l.max_tessellation_evaluation_input_components);
+    try std.testing.expectEqual(@as(u32, 0), l.max_tessellation_evaluation_output_components);
     try std.testing.expectEqual(@as(u32, 0), l.max_geometry_shader_invocations);
+    try std.testing.expectEqual(@as(u32, 0), l.max_geometry_input_components);
+    try std.testing.expectEqual(@as(u32, 0), l.max_geometry_output_components);
+    try std.testing.expectEqual(@as(u32, 0), l.max_geometry_output_vertices);
+    try std.testing.expectEqual(@as(u32, 0), l.max_geometry_total_output_components);
     try std.testing.expect(l.max_fragment_input_components >= 128);
     try std.testing.expect(l.max_fragment_output_attachments >= 4);
     try std.testing.expectEqual(@as(u32, 0), l.max_fragment_dual_src_attachments);
@@ -1115,7 +1128,8 @@ test "physical properties start with coherent conservative limits" {
     try std.testing.expectEqual(@as(f32, 0), l.max_interpolation_offset);
     try std.testing.expectEqual(@as(u32, 0), l.sub_pixel_interpolation_offset_bits);
     try std.testing.expect(l.max_framebuffer_width >= 4096 and l.max_framebuffer_height >= 4096);
-    try std.testing.expectEqual(@as(u32, 1), l.max_framebuffer_layers);
+    const vulkan_1_0_min_framebuffer_layers: u32 = 256;
+    try std.testing.expect(l.max_framebuffer_layers >= vulkan_1_0_min_framebuffer_layers);
     const samples_1_4: u32 = 1 | 4;
     try std.testing.expect(l.framebuffer_color_sample_counts & samples_1_4 == samples_1_4);
     try std.testing.expect(l.framebuffer_depth_sample_counts & samples_1_4 == samples_1_4);
