@@ -14,6 +14,7 @@ jobs:
           version: 0.16.0
       - run: zig fmt --check build.zig src
       - run: zig build
+      - run: test "$(realpath zig-out/share/vulkan/icd.d/../../../lib/libvulkan_zpu.so)" = "$(realpath zig-out/lib/libvulkan_zpu.so)"
       - run: zig build test
       - run: zig build smoke
       - run: zig build demo

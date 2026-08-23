@@ -13,7 +13,7 @@ zig build smoke
 zig build demo
 ```
 
-The build installs `zig-out/lib/libvulkan_zpu.so` and `zig-out/share/vulkan/icd.d/zpu_icd.x86_64.json`. The shared object has no dynamic library dependencies. The loader-independent smoke test uses `dlopen` to resolve the three private loader entry points, negotiate interface version 7, create an instance, and enumerate the CPU device.
+The build installs `zig-out/lib/libvulkan_zpu.so` and `zig-out/share/vulkan/icd.d/zpu_icd.x86_64.json`. The manifest's relative path resolves back to that installed library. The shared object has no dynamic library dependencies. The loader-independent smoke test uses `dlopen` to resolve the three private loader entry points, negotiate interface version 7, create an instance, and enumerate the CPU device.
 
 To ask a system Vulkan loader to discover only ZPU:
 
@@ -21,7 +21,7 @@ To ask a system Vulkan loader to discover only ZPU:
 VK_DRIVER_FILES="$PWD/zig-out/share/vulkan/icd.d/zpu_icd.x86_64.json" vulkaninfo --summary
 ```
 
-Loader discovery is optional for development because the Vulkan loader and `vulkaninfo` are system tools, not project dependencies. The C-ABI smoke test is the authoritative project gate.
+Loader discovery is optional and local-only because the Vulkan loader and `vulkaninfo` are system tools that CI does not install and are not project dependencies. The C-ABI smoke test is the authoritative CI gate.
 
 Loader 1.4.341 and `vulkaninfo` 1.4.341 were also tested with that exact command (and `XDG_RUNTIME_DIR=/tmp` in the headless test environment). It exited 0 and reported:
 
@@ -56,7 +56,11 @@ ZPU borrows only high-level lessons from studying mature projects such as Mesa a
 
 The ICD library has no runtime dependencies. It is Vulkan-only by design: compatibility with OpenGL, legacy APIs, or historical driver ABIs is not a goal, and future interfaces may change incompatibly while the ICD takes shape. ABI declarations are an original narrow transcription traceable to the [Vulkan 1.0 specification](https://registry.khronos.org/vulkan/specs/1.0/html/vkspec.html) and [Khronos loader/driver interface](https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderDriverInterface.md); no Mesa, SwiftShader, Vulkan-Loader, or Vulkan-Headers source is copied.
 
-The current ICD exposes one stable CPU physical device and one serial graphics+transfer queue. It advertises Vulkan 1.0, no extensions, no optional features, no usable device memory heaps, and conservative properties. Custom allocation callbacks and non-null extension chains are rejected. No rendering, memory allocation, command submission, presentation, or synchronization Vulkan entry points exist yet.
+The current ICD exposes one stable CPU physical device and one serial graphics+transfer queue. It advertises Vulkan 1.0, no extensions, no optional features, no usable device memory heaps, and conservative internally consistent properties. Custom allocation callbacks and unsupported direct application extension chains are rejected; documented loader-owned instance/device chains are parsed only while their structure type remains loader-owned, and opaque application tails are not traversed.
+
+Mutable ICD entry points are globally serialized. This intentionally simple experimental lifetime protocol keeps validation and use inside the same critical section. External loader callbacks temporarily release the lock, operate only on permanent slot storage, and are followed by locked lifetime revalidation before a handle is returned. Instance and device storage uses 64 slots per type with monotonic `never → live → tombstone` state: destroyed addresses are never reused, so stale pointers cannot become valid again. Exhaustion returns `VK_ERROR_OUT_OF_HOST_MEMORY`. This bound is a development limitation, not a production allocation strategy.
+
+The loader normally installs dispatch data for the top-level instance/device returned by core creation trampolines. ZPU extracts the documented instance/device loader-data callbacks and invokes them for driver-created child dispatchables (`VkPhysicalDevice` and `VkQueue`); every dispatchable still starts with `ICD_LOADER_MAGIC`. No rendering, memory allocation, command submission, presentation, or synchronization Vulkan entry points exist yet.
 
 ## Roadmap
 
