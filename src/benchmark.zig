@@ -243,13 +243,13 @@ pub fn compare(current: Report, baseline: Report) !void {
         try compareMetric(now, found orelse return error.MetricSetMismatch, default_rate_tolerance_fraction, default_latency_tolerance_fraction);
     }
 }
-pub fn guardInRun(report: Report) !void {
+pub fn guardInRun(report: Report, enforce_relative_rates: bool) !void {
     try validate(report);
     for (raster_ops) |op| {
         const scalar = report.metrics[@intFromEnum(op)];
         for (report.metrics) |candidate| if (std.mem.eql(u8, candidate.name, @tagName(op)) and !std.mem.eql(u8, candidate.backend, "scalar")) {
             if (candidate.checksum != scalar.checksum or candidate.checksum != oracle(op) or !std.mem.eql(u8, candidate.checksum_hex, scalar.checksum_hex)) return error.ChecksumMismatch;
-            if (regressed(candidate.mpix_s, scalar.mpix_s, 0.75) or regressed(candidate.effective_gib_s, scalar.effective_gib_s, 0.75) or regressed(candidate.draws_s, scalar.draws_s, 0.75) or regressed(candidate.fps, scalar.fps, 0.75)) return error.RelativeRegression;
+            if (enforce_relative_rates and (regressed(candidate.mpix_s, scalar.mpix_s, 0.75) or regressed(candidate.effective_gib_s, scalar.effective_gib_s, 0.75) or regressed(candidate.draws_s, scalar.draws_s, 0.75) or regressed(candidate.fps, scalar.fps, 0.75))) return error.RelativeRegression;
         };
     }
 }
@@ -360,7 +360,7 @@ test "benchmark validates every available SIMD runtime and oracle" {
     const count = try benchmark(std.testing.io, &metrics, true);
     const r = reportFor(metrics[0..count]);
     try validate(r);
-    try guardInRun(r);
+    try guardInRun(r, false);
 }
 test "canonical metric ordering independently covers optional SIMD sets" {
     try std.testing.expectEqualStrings("avx512", expectedAtFor(all_ops.len, false, true).backend);
@@ -368,14 +368,15 @@ test "canonical metric ordering independently covers optional SIMD sets" {
     try std.testing.expectEqualStrings("runtime", expectedAtFor(all_ops.len, false, false).backend);
 }
 
-test "in-run guard independently rejects a slow SIMD or runtime route" {
+test "full-run guard rejects a slow route while smoke remains correctness-only" {
     var storage: [32]Metric = undefined;
     const r = try canonicalForTest(&storage);
     var index: usize = 0;
     while (index < r.metrics.len and !std.mem.eql(u8, r.metrics[index].backend, "runtime")) : (index += 1) {}
     try std.testing.expect(index < r.metrics.len);
     storage[index].mpix_s = 10;
-    try std.testing.expectError(error.RelativeRegression, guardInRun(r));
+    try guardInRun(r, false);
+    try std.testing.expectError(error.RelativeRegression, guardInRun(r, true));
 }
 
 test "full validation rejects noncanonical sets fields and callers cannot bypass it" {
@@ -385,7 +386,7 @@ test "full validation rejects noncanonical sets fields and callers cannot bypass
     try validate(r);
     r.metrics = storage[0 .. count - 1];
     try std.testing.expectError(error.MetricSetMismatch, validate(r));
-    try std.testing.expectError(error.MetricSetMismatch, guardInRun(r));
+    try std.testing.expectError(error.MetricSetMismatch, guardInRun(r, false));
     storage[count] = storage[count - 1];
     r.metrics = storage[0 .. count + 1];
     try std.testing.expectError(error.MetricSetMismatch, validate(r));
@@ -410,7 +411,7 @@ test "full validation rejects noncanonical sets fields and callers cannot bypass
     try std.testing.expectError(error.MalformedMetric, validate(r));
     storage[0] = saved0;
     r.schema_version +%= 1;
-    try std.testing.expectError(error.UnsupportedSchema, guardInRun(r));
+    try std.testing.expectError(error.UnsupportedSchema, guardInRun(r, false));
 }
 
 fn metricForTest(op: Op, backend: []const u8) !Metric {

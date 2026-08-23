@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+trap 'status=$?; printf "benchmark CLI FAILED at line %s: %s (status %s)\n" "$LINENO" "$BASH_COMMAND" "$status" >&2' ERR
 benchmark=$1
 kcov_dir=${2:-}
 source_path=${3:-}

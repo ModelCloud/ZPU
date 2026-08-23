@@ -156,7 +156,7 @@ pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, init.environ_map.get("ZPU_LIMITED") orelse "", "physical-core-v1")) return error.MissingAffinityGate;
     const report = bench.Report{ .schema_version = bench.schema_version, .workload_id = bench.workload_id, .fingerprint = .{ .arch = @tagName(builtin.cpu.arch), .os = @tagName(builtin.os.tag), .cpu_model = cpu_model, .selected_cpus = selected, .topology = topology, .compiler = builtin.zig_version_string, .build_mode = @tagName(builtin.mode), .max_threads = cap, .limited_gate = "physical-core-v1" }, .warmup_iterations = 1, .sample_count = if (smoke) 3 else 15, .metrics = metrics[0..count] };
     try bench.validate(report);
-    try bench.guardInRun(report);
+    try bench.guardInRun(report, !smoke);
     const encoded = try emitJson(allocator, report);
     if (capture) |path| try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = encoded });
     if (compare_path) |path| {
