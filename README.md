@@ -1,6 +1,6 @@
 # ZPU
 
-ZPU is a Zig-first experiment in a minimal-dependency, Vulkan-only userspace CPU graphics driver. This milestone adds an **experimental loader-compatible CPU transfer path**. It is not conformant Vulkan and is not yet sufficient for arbitrary Vulkan applications.
+ZPU is a Zig-first experiment in a minimal-dependency, Vulkan-only userspace CPU graphics driver. This milestone adds an **experimental loader-compatible CPU transfer and vkcube rendering path**. It is not conformant Vulkan and is not yet sufficient for arbitrary Vulkan applications.
 
 ## Build and run
 
@@ -13,13 +13,16 @@ zig build coverage
 zig build smoke
 zig build transfer
 zig build desktop-probe
-zig build vkcube-probe
+zig build vkcube-ready
+zig build xcb-present
+zig build vkcube-visual
+zig build desktop-session
 zig build demo
 ```
 
 All repository gates must be run through the Linux physical-core limiter, for example `tools/limited-cpus.sh zig build test`. Benchmark methodology, stable JSON, controlled baseline capture/comparison, tolerances, reproducibility guidance, and the opt-in hardware guard are documented in [docs/benchmarking.md](docs/benchmarking.md). The deferred 3D metric and deterministic-scene contract is in [docs/3d-benchmark-todo.md](docs/3d-benchmark-todo.md); no 3D pipeline or fabricated 3D measurement was added.
 
-The build installs `zig-out/lib/libvulkan_zpu.so` and `zig-out/share/vulkan/icd.d/zpu_icd.x86_64.json`. The manifest's relative path resolves back to that installed library. The shared object has no dynamic library dependencies. The loader-independent smoke test uses `dlopen` to resolve the three private loader entry points, negotiate interface version 7, create an instance, and enumerate the CPU device.
+The build installs `zig-out/lib/libvulkan_zpu.so` and `zig-out/share/vulkan/icd.d/zpu_icd.x86_64.json`. The manifest's relative path resolves back to that installed library. XCB presentation links the shared object to libc, libm, the ELF interpreter, and libxcb. The loader-independent smoke test uses `dlopen` to resolve the three private loader entry points, negotiate interface version 7, create an instance, and enumerate the CPU device.
 
 To ask a system Vulkan loader to discover only ZPU:
 
@@ -52,11 +55,14 @@ corresponding strict gate. The staged path toward an Xfce-adjacent test is docum
 
 `zig build vkcube-probe` is the canonical first application compatibility test.
 It starts Xvfb, isolates Vulkan loader discovery to ZPU, and asks the system
-`vkcube` to render and present two XCB frames. It currently reports the first
-blocker without failing CI; `zig build vkcube-ready` is the strict gate and
-currently passes. This is an API-lifecycle compatibility milestone: render-object
-creation and draw submission are accepted, but general SPIR-V execution and
-pixel-accurate cube rasterization remain future work.
+`vkcube` to render and present two XCB frames. The probe reports the first
+blocker without failing CI; `zig build vkcube-ready` is the strict process gate.
+`zig build vkcube-visual` additionally reads a presented pixel back from the X
+server and rejects the render-pass clear color. `zig build desktop-session`
+runs the same visual oracle while the small `twm` window manager is active.
+These gates currently pass. The CPU draw path is intentionally specialized to
+vkcube's current uniform, vertex, texture, and depth contract; it is not a
+general SPIR-V implementation.
 
 ## Architecture
 
@@ -75,7 +81,7 @@ Tests compare every backend byte-for-byte with scalar for both formats, delibera
 
 ZPU borrows only high-level lessons from studying mature projects such as Mesa and SwiftShader: keep API translation separate from execution, make formats explicit, centralize CPU capability policy, and test optimized paths against a reference. No source code was copied from those or other projects; this implementation is original.
 
-The ICD library has no runtime dependencies. It is Vulkan-only by design: compatibility with OpenGL, legacy APIs, or historical driver ABIs is not a goal, and future interfaces may change incompatibly while the ICD takes shape. ABI declarations are an original narrow transcription traceable to the [Vulkan 1.0 specification](https://registry.khronos.org/vulkan/specs/1.0/html/vkspec.html) and [Khronos loader/driver interface](https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderDriverInterface.md); no Mesa, SwiftShader, Vulkan-Loader, or Vulkan-Headers source is copied.
+The ICD's XCB WSI path has a runtime dependency on libxcb (plus the normal C/math runtime). It is Vulkan-only by design: compatibility with OpenGL, legacy APIs, or historical driver ABIs is not a goal, and future interfaces may change incompatibly while the ICD takes shape. ABI declarations are an original narrow transcription traceable to the [Vulkan 1.0 specification](https://registry.khronos.org/vulkan/specs/1.0/html/vkspec.html) and [Khronos loader/driver interface](https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderDriverInterface.md); no Mesa, SwiftShader, Vulkan-Loader, or Vulkan-Headers source is copied.
 
 The current ICD exposes one stable CPU physical device and one serial graphics+transfer queue. It advertises Vulkan 1.0, no extensions, no optional features, one conservative 256 MiB unified host-visible/coherent non-device-local memory heap/type, and the Vulkan 1.0 mandatory minimum physical-device limits. The heap backs device memory, buffers, and tightly packed linear 2D `VK_FORMAT_R8G8B8A8_UNORM`/`VK_FORMAT_B8G8R8A8_UNORM` images. Vulkan copy/fill commands preserve their API semantics, but on ZPU they operate on unified host memory and are not discrete-VRAM uploads. Custom allocation callbacks and unsupported direct application extension chains are rejected; documented loader-owned instance/device chains are parsed only while their structure type remains loader-owned, and opaque application tails are not traversed.
 
@@ -85,7 +91,7 @@ The loader normally installs dispatch data for the top-level instance/device ret
 
 The serial CPU queue supports `vkCmdFillBuffer`, `vkCmdCopyBuffer`, `vkCmdClearColorImage`, `vkCmdCopyBufferToImage`, `vkCmdCopyImageToBuffer`, and same-format `vkCmdCopyImage`; fences complete synchronously. Submission first validates every submit, command buffer, recorded resource, and layout transition against a shadow layout table, then executes only after the complete batch passes, so a rejected batch cannot partially mutate bytes, layouts, command state, or its fence. A narrow `vkCmdPipelineBarrier` path handles full-color-subresource transitions among undefined/preinitialized, general, transfer-source, and transfer-destination layouts. Its exact source tuples are top-of-pipe/no-access for undefined, host/host-write for preinitialized, and transfer with the layout's corresponding transfer access for the other layouts; its destination is transfer with the new layout's corresponding transfer access. Other stage or access combinations are rejected. `zig build transfer` runs a standalone C Vulkan client through the system loader, transitions its images, executes and independently checks all six commands over 240×240 pixels, and compares all 230,400 bytes after each operation. It queries and validates the returned subresource layout, performs channel-distinct BGRA buffer/image and image/image round trips, and also checks unsupported formats/usages, size overflow, binding alignment, out-of-bounds-copy rejection, invalid layouts/barriers, zero-submit rejection, and fence reset/timeout.
 
-This is deliberately non-conformant. There are no semaphores, events, general memory/buffer barriers, cache operations, sparse/optimal images, non-coherent memory, secondary command buffers, parallel queue execution, presentation, rendering, shaders, descriptors, pipelines, or queries. The only barrier form accepted is the exact full-supported-image transition contract above; ownership transfers and partial subresources are rejected. Transfer regions must be wholly in bounds; Vulkan copy operations do not clip. API arrays are capped at 256 entries before access, and `vkQueueSubmit` rejects a zero submit count. Invalid recorded operations make `vkEndCommandBuffer` return `VK_ERROR_INITIALIZATION_FAILED`, while stale recorded resources or layout mismatches make synchronous submission return that error without executing any command in the batch; these are experimental diagnostics outside Vulkan's valid-usage contract. Images have one color aspect, mip, layer, and depth slice with a tight reported `width*4` row pitch. Only transfer usage flags are accepted, and each command requires its corresponding source/destination capability. Because the supported formats are UNORM, clear colors use the Vulkan `float32` union member; integer clear forms would require integer formats, which are not advertised. Applications must still preserve Vulkan resource lifetime order and external synchronization.
+This is deliberately non-conformant. It has narrow binary semaphores, XCB presentation, render-pass clears, descriptors, and a vkcube-specific CPU draw implementation, but no general shader execution, events, general memory/buffer barriers, cache operations, sparse images, non-coherent memory, secondary command buffers, parallel queue execution, or queries. The only barrier form accepted is the exact full-supported-image transition contract above; ownership transfers and partial subresources are rejected. Transfer regions must be wholly in bounds; Vulkan copy operations do not clip. API arrays are capped at 256 entries before access, and `vkQueueSubmit` rejects a zero submit count. Invalid recorded operations make `vkEndCommandBuffer` return an error, while stale recorded resources or layout mismatches make synchronous submission fail without executing any command in the batch; these are experimental diagnostics outside Vulkan's valid-usage contract. Applications must still preserve Vulkan resource lifetime order and external synchronization.
 
 ## Coverage contract for this milestone
 
@@ -100,8 +106,8 @@ The gate is line coverage, because pinned Zig 0.16.0 exposes neither LLVM source
 1. **CPU 2D foundation:** validated surfaces, clipped fills, source-over blending, runtime-selected kernels, command execution, and headless demo.
 2. **Minimal Vulkan ICD:** loader negotiation and instance/device discovery with no conformance claim.
 3. **CPU memory transfers (this milestone):** coherent memory, buffers, linear images, command submission, fences, and exact loader-level validation.
-4. **Expanded Vulkan execution:** render-pass/dynamic-rendering plumbing and shader execution foundations.
-5. **Later 3D:** vertex processing, sampling, depth/stencil, tiling, increasingly capable shaders, performance work, and eventual conformance investigation.
+4. **First visible 3D path (this milestone):** XCB swapchain transport plus vkcube-specific vertex processing, sampling, rasterization, and depth.
+5. **General 3D:** SPIR-V execution, broader pipeline state, tiling, increasingly capable shaders, performance work, and eventual conformance investigation.
 
 ## Development gates
 
@@ -114,7 +120,10 @@ tools/limited-cpus.sh zig build coverage
 tools/limited-cpus.sh zig build smoke
 tools/limited-cpus.sh zig build transfer
 tools/limited-cpus.sh zig build desktop-probe
-tools/limited-cpus.sh zig build vkcube-probe
+tools/limited-cpus.sh zig build vkcube-ready
+tools/limited-cpus.sh zig build xcb-present
+tools/limited-cpus.sh zig build vkcube-visual
+tools/limited-cpus.sh zig build desktop-session
 tools/limited-cpus.sh zig build benchmark -Doptimize=ReleaseFast -- --smoke --json
 tools/limited-cpus.sh zig build demo
 tools/limited-cpus.sh zig build -Doptimize=ReleaseFast

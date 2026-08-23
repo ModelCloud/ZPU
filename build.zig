@@ -18,6 +18,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    icd.root_module.link_libc = true;
+    icd.root_module.linkSystemLibrary("xcb", .{});
     b.installArtifact(icd);
     const install_manifest = b.addInstallFile(b.path("src/vulkan/zpu_icd.x86_64.json"), "share/vulkan/icd.d/zpu_icd.x86_64.json");
     b.getInstallStep().dependOn(&install_manifest.step);
@@ -166,6 +168,36 @@ pub fn build(b: *std.Build) void {
     run_transfer.step.dependOn(b.getInstallStep());
     const transfer_step = b.step("transfer", "Run exact 240x240 transfers through the system Vulkan loader");
     transfer_step.dependOn(&run_transfer.step);
+
+    const xcb_present_test = b.addExecutable(.{
+        .name = "zpu-xcb-present",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize }),
+    });
+    xcb_present_test.root_module.addCSourceFile(.{ .file = b.path("test/xcb_present.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+    xcb_present_test.root_module.link_libc = true;
+    xcb_present_test.root_module.linkSystemLibrary("vulkan", .{});
+    xcb_present_test.root_module.linkSystemLibrary("xcb", .{});
+    const run_xcb_present = b.addSystemCommand(&.{ "xvfb-run", "-a", "-s", "-screen 0 640x480x24 -nolisten tcp" });
+    run_xcb_present.addArtifactArg(xcb_present_test);
+    run_xcb_present.setEnvironmentVariable("VK_DRIVER_FILES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_xcb_present.step.dependOn(&require_limited.step);
+    run_xcb_present.step.dependOn(b.getInstallStep());
+    const xcb_present_step = b.step("xcb-present", "Require swapchain pixels to reach an XCB window under Xvfb");
+    xcb_present_step.dependOn(&run_xcb_present.step);
+
+    const run_vkcube_visual = b.addSystemCommand(&.{ "xvfb-run", "-a", "-s", "-screen 0 640x480x24 -nolisten tcp", "test/vkcube_visual.sh" });
+    run_vkcube_visual.addArg(b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_vkcube_visual.step.dependOn(&require_limited.step);
+    run_vkcube_visual.step.dependOn(b.getInstallStep());
+    const vkcube_visual_step = b.step("vkcube-visual", "Require non-clear vkcube pixels captured from the XCB window");
+    vkcube_visual_step.dependOn(&run_vkcube_visual.step);
+
+    const run_desktop_session = b.addSystemCommand(&.{ "xvfb-run", "-a", "-s", "-screen 0 640x480x24 -nolisten tcp", "test/desktop_session.sh" });
+    run_desktop_session.addArg(b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_desktop_session.step.dependOn(&require_limited.step);
+    run_desktop_session.step.dependOn(b.getInstallStep());
+    const desktop_session_step = b.step("desktop-session", "Require visually verified vkcube inside a minimal X11 desktop session");
+    desktop_session_step.dependOn(&run_desktop_session.step);
 
     const desktop_probe = b.addExecutable(.{
         .name = "zpu-desktop-readiness",

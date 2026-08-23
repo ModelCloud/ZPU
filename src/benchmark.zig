@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const s = @import("surface.zig");
 const raster = @import("raster/raster.zig");
 const dispatch = @import("simd/dispatch.zig");
-const vulkan = @import("vulkan/driver.zig");
+const host_memory = @import("vulkan/host_memory.zig");
 
 pub const schema_version: u32 = 3;
 pub const workload_id = "zpu-2d-host-memory-v3-240x240-seed-151521030";
@@ -86,7 +86,7 @@ fn backendName(backend: ?dispatch.Backend) []const u8 {
 const TransferCopyFn = *const fn ([]u8, []const u8) void;
 
 fn transferCopy(dst: []u8, src: []const u8) void {
-    vulkan.benchmarkHostMemoryCopy(dst, src);
+    host_memory.copy(dst, src);
 }
 
 fn runOpWithCopy(op: Op, backend: ?dispatch.Backend, dst: []u8, src: []const u8, surface: *s.Surface, iteration: usize, copy: TransferCopyFn) void {
@@ -97,7 +97,7 @@ fn runOpWithCopy(op: Op, backend: ?dispatch.Backend, dst: []u8, src: []const u8,
         .clipped_rectangle => for (0..32) |i| raster.fillRectWith(surface, .{ .x = @as(i32, @intCast((i * 19) % 240)) - 10, .y = @as(i32, @intCast((i * 31) % 240)) - 10, .width = 20, .height = 20 }, .rgba(@truncate(i * 7), 23, 201, 255), b),
         .vulkan_host_memory_fill => {
             const byte: u8 = @truncate(iteration *% 17 +% 3);
-            vulkan.benchmarkHostMemoryFill(dst, @as(u32, byte) * 0x01010101);
+            host_memory.fill(dst, @as(u32, byte) * 0x01010101);
         },
         .vulkan_host_memory_copy => copy(dst, src),
         .source_over_blend => raster.blendRectWith(surface, .{ .x = 0, .y = 0, .width = width, .height = height }, .rgba(220, 31, 77, 128), b),

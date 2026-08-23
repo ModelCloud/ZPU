@@ -74,12 +74,29 @@ It is stronger than `desktop-ready`: the latter inventories declarations and
 entry points, while `vkcube-ready` executes their real lifecycle through the
 system loader and X server.
 
-This milestone validates API compatibility and synchronization/lifetime flow,
-not Vulkan conformance or pixel-accurate cube rendering. The current draw path
-records the render-pass clear while shader modules and pipelines are accepted as
-opaque objects. General SPIR-V execution, triangle rasterization, texture
-sampling, depth testing, and visible XCB image transport are the next rendering
-milestone.
+The stricter visual gate is:
+
+```sh
+tools/limited-cpus.sh zig build vkcube-visual
+```
+
+It enables an ICD-side XCB readback of the first presented frame, requires an
+exact readback marker, and rejects vkcube's render-pass clear color. The current
+CPU path transforms vkcube's uniform data, rasterizes its triangles, samples its
+texture, depth-tests fragments, and transports the BGRA swapchain bytes to the
+XCB window. This path is specialized to vkcube; shader modules and pipelines
+remain opaque and general SPIR-V execution is future work.
+
+To exercise the same visual path while a minimal window manager is running:
+
+```sh
+tools/limited-cpus.sh zig build desktop-session
+```
+
+This starts `twm` under Xvfb with deterministic automatic window placement and
+requires the vkcube visual oracle to pass while the manager remains alive. It
+tests driver/client coexistence in a small desktop session; it does not claim
+that the X11 desktop itself is rendered by ZPU.
 
 ## Bring-up sequence
 
@@ -88,12 +105,14 @@ milestone.
    acquire/submit/present lifecycle.
 3. Completed: make `desktop-ready` and the two-frame `vkcube-ready` API
    compatibility gate pass against ZPU alone.
-4. Implement general shader execution, rasterization, depth/texture operations,
-   and visible XCB image transport; add a captured-pixel oracle to the test.
-5. Only after the visually verified Vulkan window works, run a small desktop session and Vulkan
-   clients inside it. Treat Xfce's own rendering as a separate XRender/GLX or
-   DRM/KMS compatibility project rather than evidence about this Vulkan ICD.
+4. Completed: add visible XCB image transport and a captured-pixel oracle for a
+   vkcube-specialized rasterization, texture, and depth path.
+5. Completed: run the visually verified client inside a small `twm` desktop
+   session. Treat Xfce's own rendering as a separate XRender/GLX or DRM/KMS
+   compatibility project rather than evidence about this Vulkan ICD.
+6. Next: replace the specialized draw contract with general SPIR-V and broader
+   Vulkan pipeline support.
 
-On the current milestone, `vkcube` creates and submits two frames and exits
-successfully. Pixel-accurate visual verification remains deliberately explicit
-rather than being implied by the process-level compatibility result.
+On the current milestone, `vkcube` creates, draws, visibly presents two frames,
+and exits successfully. Visual verification remains a separate explicit gate
+rather than being inferred from the process exit status.

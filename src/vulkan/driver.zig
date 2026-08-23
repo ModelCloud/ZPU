@@ -1,6 +1,9 @@
 //! Original minimal ABI transcription from the public Vulkan 1.0 specification and
 //! Khronos loader/driver interface documentation. This is an experimental ICD.
 const std = @import("std");
+const cpu_cube = @import("cpu_cube.zig");
+const host_memory = @import("host_memory.zig");
+const xcb_present = @import("xcb_present.zig");
 pub const Result = enum(i32) { success = 0, not_ready = 1, timeout = 2, incomplete = 5, error_out_of_host_memory = -1, error_initialization_failed = -3, error_memory_map_failed = -5, error_layer_not_present = -6, error_extension_not_present = -7, error_feature_not_present = -8, error_format_not_supported = -11 };
 pub const Fn = ?*const fn () callconv(.c) void;
 pub const Alloc = opaque {};
@@ -158,6 +161,10 @@ pub const ClearValue = extern union { color: ClearColorValue, depth_stencil: ext
 pub const Rect2D = extern struct { offset: extern struct { x: i32, y: i32 }, extent: Extent2D };
 pub const RenderPassBeginInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, render_pass: usize, framebuffer: usize, render_area: Rect2D, clear_value_count: u32, clear_values: ?[*]const ClearValue };
 pub const DescriptorSetAllocateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, descriptor_pool: usize, descriptor_set_count: u32, set_layouts: ?[*]const usize };
+pub const DescriptorBufferInfo = extern struct { buffer: usize, offset: u64, range: u64 };
+pub const DescriptorImageInfo = extern struct { sampler: usize, image_view: usize, image_layout: i32 };
+pub const WriteDescriptorSet = extern struct { s_type: i32, p_next: ?*const anyopaque, dst_set: usize, dst_binding: u32, dst_array_element: u32, descriptor_count: u32, descriptor_type: i32, image_info: ?[*]const DescriptorImageInfo, buffer_info: ?[*]const DescriptorBufferInfo, texel_buffer_view: ?[*]const usize };
+pub const Viewport = cpu_cube.Viewport;
 pub const PresentInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, wait_semaphore_count: u32, wait_semaphores: ?[*]const usize, swapchain_count: u32, swapchains: ?[*]const usize, image_indices: ?[*]const u32, results: ?[*]Result };
 const SetInstanceLoaderData = *const fn (Instance, *anyopaque) callconv(.c) Result;
 const SetDeviceLoaderData = *const fn (Device, *anyopaque) callconv(.c) Result;
@@ -177,10 +184,11 @@ const SemaphoreObj = struct { owner: Device, signaled: bool };
 const CommandPoolObj = struct { owner: Device };
 const SurfaceObj = struct { owner: Instance, connection: *anyopaque, window: u32 };
 const ImageViewObj = struct { owner: Device, image: *ImageObj };
-const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj };
+const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj };
+const DescriptorSetObj = struct { owner: Device, uniform: ?*BufferObj = null, uniform_offset: u64 = 0, uniform_range: u64 = 0, texture: ?*ImageObj = null };
 const SwapchainObj = struct { owner: Device, surface: *SurfaceObj, width: u32, height: u32, image_count: u32, images: [3]usize, next_image: u32 };
-const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8 }, render_clear: struct { image: *ImageObj, color: [4]u8 }, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 } };
-const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, state: u8, invalid: bool, count: u16, commands: [256]Command };
+const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32 }, cube_draw: struct { framebuffer: *FramebufferObj, descriptors: *DescriptorSetObj, vertex_count: u32, viewport: Viewport, scissor: cpu_cube.Rect }, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 } };
+const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, state: u8, invalid: bool, count: u16, active_framebuffer: ?*FramebufferObj, bound_descriptors: ?*DescriptorSetObj, viewport: Viewport, scissor: cpu_cube.Rect, commands: [256]Command };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
 pub const CommandBuffer = *CommandBufferObj;
 
@@ -216,6 +224,8 @@ var image_view_objects: [max_child_objects]ImageViewObj = undefined;
 var image_view_state = [_]SlotState{.never} ** max_child_objects;
 var framebuffer_objects: [max_child_objects]FramebufferObj = undefined;
 var framebuffer_state = [_]SlotState{.never} ** max_child_objects;
+var descriptor_set_objects: [max_child_objects]DescriptorSetObj = undefined;
+var descriptor_set_state = [_]SlotState{.never} ** max_child_objects;
 var swapchain_objects: [8]SwapchainObj = undefined;
 var swapchain_state = [_]SlotState{.never} ** 8;
 var generic_handle: usize = 0x10000;
@@ -872,6 +882,9 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
         for (&framebuffer_objects, &framebuffer_state) |*framebuffer, *child_state| if (child_state.* == .live and framebuffer.owner == d) {
             child_state.* = .tombstone;
         };
+        for (&descriptor_set_objects, &descriptor_set_state) |*set, *child_state| if (child_state.* == .live and set.owner == d) {
+            child_state.* = .tombstone;
+        };
         for (&swapchain_objects, &swapchain_state) |*swapchain, *child_state| if (child_state.* == .live and swapchain.owner == d) {
             child_state.* = .tombstone;
         };
@@ -972,6 +985,9 @@ fn validImageViewLocked(handle: usize) ?*ImageViewObj {
 }
 fn validFramebufferLocked(handle: usize) ?*FramebufferObj {
     return findLiveHandle(FramebufferObj, handle, &framebuffer_objects, &framebuffer_state);
+}
+fn validDescriptorSetLocked(handle: usize) ?*DescriptorSetObj {
+    return findLiveHandle(DescriptorSetObj, handle, &descriptor_set_objects, &descriptor_set_state);
 }
 fn validSwapchainLocked(handle: usize) ?*SwapchainObj {
     if (handle == 0) return null;
@@ -1322,7 +1338,7 @@ fn allocateCommandBuffers(device: ?Device, info: ?*const CommandBufferAllocateIn
         };
         const cb = &command_buffer_objects[index];
         const impl = &command_buffer_impls[index];
-        impl.* = .{ .owner = d, .pool = pool, .state = 0, .invalid = false, .count = 0, .commands = undefined };
+        impl.* = .{ .owner = d, .pool = pool, .state = 0, .invalid = false, .count = 0, .active_framebuffer = null, .bound_descriptors = null, .viewport = .{ .x = 0, .y = 0, .width = 0, .height = 0, .min_depth = 0, .max_depth = 1 }, .scissor = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, .commands = undefined };
         cb.* = .{ .loader_data = MAGIC, .impl = impl };
         command_buffer_state[index] = .live;
         if (d.set_loader_data) |set| {
@@ -1370,6 +1386,8 @@ fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) 
     c.impl.state = 1;
     c.impl.invalid = false;
     c.impl.count = 0;
+    c.impl.active_framebuffer = null;
+    c.impl.bound_descriptors = null;
     return .success;
 }
 fn endCommandBuffer(cb: ?CommandBuffer) callconv(.c) Result {
@@ -1388,6 +1406,8 @@ fn resetCommandBuffer(cb: ?CommandBuffer, flags: u32) callconv(.c) Result {
     c.impl.state = 0;
     c.impl.invalid = false;
     c.impl.count = 0;
+    c.impl.active_framebuffer = null;
+    c.impl.bound_descriptors = null;
     return .success;
 }
 fn record(cb: CommandBuffer, command: Command) void {
@@ -1735,6 +1755,16 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
         .render_clear => |op| {
             _ = imageSlot(op.image) orelse return deadResource();
             if (op.image.owner != owner or op.image.owned_bytes == null) return wrongSubmittingDevice();
+            if (op.depth) |depth| if (depth.owner != owner or depth.memory == null or !liveMemoryObject(depth.memory.?)) return deadResource();
+        },
+        .cube_draw => |op| {
+            const color = op.framebuffer.color_image orelse return deadResource();
+            const depth = op.framebuffer.depth_image orelse return deadResource();
+            const uniform = op.descriptors.uniform orelse return deadResource();
+            const texture = op.descriptors.texture orelse return deadResource();
+            if ((stateForObject(FramebufferObj, op.framebuffer, &framebuffer_objects, &framebuffer_state) orelse return deadResource()).* != .live or (stateForObject(DescriptorSetObj, op.descriptors, &descriptor_set_objects, &descriptor_set_state) orelse return deadResource()).* != .live) return deadResource();
+            if (color.owner != owner or depth.owner != owner or uniform.owner != owner or texture.owner != owner or color.owned_bytes == null or depth.memory == null or uniform.memory == null or texture.memory == null) return wrongSubmittingDevice();
+            if (!liveMemoryObject(depth.memory.?) or !liveMemoryObject(uniform.memory.?) or !liveMemoryObject(texture.memory.?)) return deadResource();
         },
         .buffer_to_image => |op| {
             const slot = imageSlot(op.dst) orelse return deadResource();
@@ -1796,6 +1826,21 @@ fn executeValidatedCommand(command: Command) void {
             const bytes = imageBytes(op.image);
             var i: usize = 0;
             while (i < bytes.len) : (i += 4) @memcpy(bytes[i..][0..4], &op.color);
+            if (op.depth) |depth| {
+                const depth_bytes = imageBytes(depth);
+                i = 0;
+                while (i < depth_bytes.len) : (i += 4) std.mem.writeInt(u32, depth_bytes[i..][0..4], @bitCast(op.depth_value), .little);
+            }
+        },
+        .cube_draw => |op| {
+            const color = op.framebuffer.color_image.?;
+            const depth = op.framebuffer.depth_image.?;
+            const uniform_buffer = op.descriptors.uniform.?;
+            const uniform_start: usize = @intCast(uniform_buffer.offset + op.descriptors.uniform_offset);
+            const uniform_length: usize = @intCast(@min(op.descriptors.uniform_range, uniform_buffer.size - op.descriptors.uniform_offset));
+            const uniform_memory = uniform_buffer.memory.?.bytes;
+            const texture = op.descriptors.texture.?;
+            _ = cpu_cube.draw(imageBytes(color), imageBytes(depth), color.width, color.height, uniform_memory[uniform_start..][0..uniform_length], imageBytes(texture), texture.width, texture.height, op.vertex_count, op.viewport, op.scissor);
         },
         .buffer_to_image => |op| {
             copyBufferImage(op.src, op.dst, op.region, true);
@@ -1825,13 +1870,12 @@ fn executeValidatedCommand(command: Command) void {
 /// This is unified host memory; the Vulkan command semantics do not imply a
 /// discrete-VRAM upload.
 pub fn benchmarkHostMemoryFill(bytes: []u8, data: u32) void {
-    var i: usize = 0;
-    while (i < bytes.len) : (i += 4) std.mem.writeInt(u32, bytes[i..][0..4], data, .little);
+    host_memory.fill(bytes, data);
 }
 
 /// CPU implementation shared by vkCmdCopyBuffer execution and its benchmark.
 pub fn benchmarkHostMemoryCopy(dst: []u8, src: []const u8) void {
-    std.mem.copyForwards(u8, dst, src);
+    host_memory.copy(dst, src);
 }
 
 test "Vulkan host-memory benchmark helpers implement exact command byte semantics" {
@@ -1926,8 +1970,9 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
     defer mutex.unlock();
     if (!validDeviceLocked(d) or ci.attachment_count == 0 or ci.attachments == null) return .error_initialization_failed;
     const view = validImageViewLocked(ci.attachments.?[0]) orelse return .error_initialization_failed;
+    const depth = if (ci.attachment_count > 1) (validImageViewLocked(ci.attachments.?[1]) orelse return .error_initialization_failed).image else null;
     for (&framebuffer_objects, &framebuffer_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = d, .color_image = view.image };
+        object.* = .{ .owner = d, .color_image = view.image, .depth_image = depth };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
@@ -1958,15 +2003,45 @@ fn allocateDescriptorSets(device: ?Device, info: ?*const DescriptorSetAllocateIn
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(device orelse return .error_initialization_failed) or ci.descriptor_set_count == 0) return .error_initialization_failed;
-    for (out[0..ci.descriptor_set_count]) |*handle| handle.* = allocateGenericHandle();
+    for (out[0..ci.descriptor_set_count]) |*handle| {
+        var allocated = false;
+        for (&descriptor_set_objects, &descriptor_set_state) |*set, *state| if (!allocated and state.* == .never) {
+            set.* = .{ .owner = device.? };
+            state.* = .live;
+            handle.* = @intFromPtr(set);
+            allocated = true;
+        };
+        if (!allocated) return .error_out_of_host_memory;
+    }
     return .success;
 }
 fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?*const anyopaque, copy_count: u32, copies: ?*const anyopaque) callconv(.c) void {
-    _ = device;
-    _ = write_count;
-    _ = writes;
+    const d = device orelse return;
     _ = copy_count;
     _ = copies;
+    if (write_count == 0) return;
+    const raw = writes orelse return;
+    const list: [*]const WriteDescriptorSet = @ptrCast(@alignCast(raw));
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d)) return;
+    for (list[0..write_count]) |write| {
+        const set = validDescriptorSetLocked(write.dst_set) orelse continue;
+        if (set.owner != d or write.descriptor_count == 0) continue;
+        if (write.descriptor_type == 6 and write.dst_binding == 0) {
+            const info = (write.buffer_info orelse continue)[0];
+            const buffer = validBufferLocked(info.buffer) orelse continue;
+            if (buffer.owner == d and info.offset <= buffer.size) {
+                set.uniform = buffer;
+                set.uniform_offset = info.offset;
+                set.uniform_range = if (info.range == std.math.maxInt(u64)) buffer.size - info.offset else info.range;
+            }
+        } else if (write.descriptor_type == 1 and write.dst_binding == 1) {
+            const info = (write.image_info orelse continue)[0];
+            const view = validImageViewLocked(info.image_view) orelse continue;
+            if (view.owner == d and info.image_layout == 5) set.texture = view.image;
+        }
+    }
 }
 fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, contents: i32) callconv(.c) void {
     _ = contents;
@@ -1978,8 +2053,10 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     const image = framebuffer.color_image orelse return;
     if (command_buffer.impl.state != 1 or command_buffer.impl.count == command_buffer.impl.commands.len or begin.clear_value_count == 0 or begin.clear_values == null) return;
     const color = begin.clear_values.?[0].color.float32;
-    command_buffer.impl.commands[command_buffer.impl.count] = .{ .render_clear = .{ .image = image, .color = .{ @intFromFloat(std.math.clamp(color[2], 0, 1) * 255), @intFromFloat(std.math.clamp(color[1], 0, 1) * 255), @intFromFloat(std.math.clamp(color[0], 0, 1) * 255), @intFromFloat(std.math.clamp(color[3], 0, 1) * 255) } } };
+    const depth_value = if (begin.clear_value_count > 1) begin.clear_values.?[1].depth_stencil.depth else 1;
+    command_buffer.impl.commands[command_buffer.impl.count] = .{ .render_clear = .{ .image = image, .depth = framebuffer.depth_image, .color = .{ @intFromFloat(std.math.clamp(color[2], 0, 1) * 255), @intFromFloat(std.math.clamp(color[1], 0, 1) * 255), @intFromFloat(std.math.clamp(color[0], 0, 1) * 255), @intFromFloat(std.math.clamp(color[3], 0, 1) * 255) }, .depth_value = depth_value } };
     command_buffer.impl.count += 1;
+    command_buffer.impl.active_framebuffer = framebuffer;
 }
 fn cmdBindPipeline(cb: ?CommandBuffer, bind_point: i32, pipeline: usize) callconv(.c) void {
     _ = cb;
@@ -1987,36 +2064,49 @@ fn cmdBindPipeline(cb: ?CommandBuffer, bind_point: i32, pipeline: usize) callcon
     _ = pipeline;
 }
 fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, first_set: u32, count: u32, sets: ?[*]const usize, dynamic_count: u32, offsets: ?[*]const u32) callconv(.c) void {
-    _ = cb;
     _ = bind_point;
     _ = layout;
     _ = first_set;
-    _ = count;
-    _ = sets;
     _ = dynamic_count;
     _ = offsets;
+    if (count == 0 or sets == null) return;
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    command_buffer.impl.bound_descriptors = validDescriptorSetLocked(sets.?[0]);
 }
 fn cmdSetViewport(cb: ?CommandBuffer, first: u32, count: u32, values: ?*const anyopaque) callconv(.c) void {
-    _ = cb;
-    _ = first;
-    _ = count;
-    _ = values;
+    if (first != 0 or count == 0 or values == null) return;
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    command_buffer.impl.viewport = @as(*const Viewport, @ptrCast(@alignCast(values.?))).*;
 }
 fn cmdSetScissor(cb: ?CommandBuffer, first: u32, count: u32, values: ?*const anyopaque) callconv(.c) void {
-    _ = cb;
-    _ = first;
-    _ = count;
-    _ = values;
+    if (first != 0 or count == 0 or values == null) return;
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    const rect: *const Rect2D = @ptrCast(@alignCast(values.?));
+    command_buffer.impl.scissor = .{ .x = rect.offset.x, .y = rect.offset.y, .width = rect.extent.width, .height = rect.extent.height };
 }
 fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) callconv(.c) void {
-    _ = cb;
-    _ = vertex_count;
-    _ = instance_count;
-    _ = first_vertex;
-    _ = first_instance;
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    const framebuffer = command_buffer.impl.active_framebuffer orelse return;
+    const descriptors = command_buffer.impl.bound_descriptors orelse return;
+    if (instance_count != 1 or first_vertex != 0 or first_instance != 0 or vertex_count == 0) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .descriptors = descriptors, .vertex_count = vertex_count, .viewport = command_buffer.impl.viewport, .scissor = command_buffer.impl.scissor } });
 }
 fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
-    _ = cb;
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    command_buffer.impl.active_framebuffer = null;
 }
 
 fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
@@ -2111,6 +2201,8 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
     for (present.swapchains.?[0..present.swapchain_count], present.image_indices.?[0..present.swapchain_count], 0..) |handle, index, i| {
         const swapchain = validSwapchainLocked(handle) orelse return .error_initialization_failed;
         if (swapchain.owner != q.owner or index >= swapchain.image_count) return .error_initialization_failed;
+        const image = validImageLocked(swapchain.images[index]) orelse return .error_initialization_failed;
+        if (!xcb_present.present(swapchain.surface.connection, swapchain.surface.window, swapchain.width, swapchain.height, imageBytes(image))) return .error_initialization_failed;
         if (present.results) |results| results[i] = .success;
     }
     return .success;
@@ -2389,7 +2481,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     var queue: Queue = undefined;
     getDeviceQueue(device, 0, 0, &queue);
 
-    const swapchain_info = SwapchainCreateInfo{ .s_type = 1_000_001_000, .p_next = null, .flags = 0, .surface = surface, .min_image_count = 2, .image_format = 44, .image_color_space = 0, .image_extent = .{ .width = 2, .height = 2 }, .image_array_layers = 1, .image_usage = 0x10, .image_sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .pre_transform = 1, .composite_alpha = 1, .present_mode = 2, .clipped = 1, .old_swapchain = 0 };
+    const swapchain_info = SwapchainCreateInfo{ .s_type = 1_000_001_000, .p_next = null, .flags = 0, .surface = surface, .min_image_count = 2, .image_format = 44, .image_color_space = 0, .image_extent = .{ .width = 8, .height = 8 }, .image_array_layers = 1, .image_usage = 0x10, .image_sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .pre_transform = 1, .composite_alpha = 1, .present_mode = 2, .clipped = 1, .old_swapchain = 0 };
     var swapchain: usize = 0;
     try std.testing.expectEqual(Result.success, createSwapchain(device, &swapchain_info, null, &swapchain));
     var image_count: u32 = 0;
@@ -2404,8 +2496,37 @@ test "vkcube presentation path records submits and presents two swapchain images
     const view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = images[0], .view_type = 1, .format = 44, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
     var view: usize = 0;
     try std.testing.expectEqual(Result.success, createImageView(device, &view_info, null, &view));
-    const attachments = [_]usize{view};
-    const framebuffer_info = FramebufferCreateInfo{ .s_type = 37, .p_next = null, .flags = 0, .render_pass = 1, .attachment_count = 1, .attachments = &attachments, .width = 2, .height = 2, .layers = 1 };
+
+    const depth_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 124, .extent = .{ .width = 8, .height = 8, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x20, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var depth_image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(device, &depth_info, null, &depth_image));
+    const depth_alloc = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 8 * 8 * 4, .memory_type_index = 0 };
+    var depth_memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(device, &depth_alloc, null, &depth_memory));
+    try std.testing.expectEqual(Result.success, bindImageMemory(device, depth_image, depth_memory, 0));
+    var depth_view_info = view_info;
+    depth_view_info.image = depth_image;
+    depth_view_info.format = 124;
+    depth_view_info.subresource_range.aspect_mask = 2;
+    var depth_view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(device, &depth_view_info, null, &depth_view));
+
+    const texture_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 43, .extent = .{ .width = 1, .height = 1, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 1, .usage = 4, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 8 };
+    var texture_image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(device, &texture_info, null, &texture_image));
+    const small_alloc = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 4, .memory_type_index = 0 };
+    var texture_memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(device, &small_alloc, null, &texture_memory));
+    try std.testing.expectEqual(Result.success, bindImageMemory(device, texture_image, texture_memory, 0));
+    @memset(imageBytes(validImageLocked(texture_image).?), 255);
+    var texture_view_info = view_info;
+    texture_view_info.image = texture_image;
+    texture_view_info.format = 43;
+    var texture_view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(device, &texture_view_info, null, &texture_view));
+
+    const attachments = [_]usize{ view, depth_view };
+    const framebuffer_info = FramebufferCreateInfo{ .s_type = 37, .p_next = null, .flags = 0, .render_pass = 1, .attachment_count = 2, .attachments = &attachments, .width = 8, .height = 8, .layers = 1 };
     var framebuffer: usize = 0;
     try std.testing.expectEqual(Result.success, createFramebuffer(device, &framebuffer_info, null, &framebuffer));
 
@@ -2419,6 +2540,39 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.success, allocateDescriptorSets(device, &set_info, &sets));
     updateDescriptorSets(device, 0, null, 0, null);
 
+    const uniform_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 160, .usage = 0x10, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var uniform_buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(device, &uniform_info, null, &uniform_buffer));
+    const uniform_alloc = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 160, .memory_type_index = 0 };
+    var uniform_memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(device, &uniform_alloc, null, &uniform_memory));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(device, uniform_buffer, uniform_memory, 0));
+    var mapped_uniform: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(device, uniform_memory, 0, 160, 0, &mapped_uniform));
+    const uniform: [*]f32 = @ptrCast(@alignCast(mapped_uniform.?));
+    @memset(uniform[0..40], 0);
+    uniform[0] = 1;
+    uniform[5] = 1;
+    uniform[10] = 1;
+    uniform[15] = 1;
+    const vertices = [_]f32{
+        -0.8, -0.8, 0.2, 1,
+        0.8,  -0.8, 0.2, 1,
+        0.0,  0.8,  0.2, 1,
+        0,    0,    0,   0,
+        1,    0,    0,   0,
+        0.5,  1,    0,   0,
+    };
+    for (vertices, 0..) |value, index| uniform[16 + index] = value;
+    unmapMemory(device, uniform_memory);
+    const descriptor_buffer = DescriptorBufferInfo{ .buffer = uniform_buffer, .offset = 0, .range = 160 };
+    const descriptor_image = DescriptorImageInfo{ .sampler = 1, .image_view = texture_view, .image_layout = 5 };
+    const descriptor_writes = [_]WriteDescriptorSet{
+        .{ .s_type = 35, .p_next = null, .dst_set = sets[0], .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 6, .image_info = null, .buffer_info = @ptrCast(&descriptor_buffer), .texel_buffer_view = null },
+        .{ .s_type = 35, .p_next = null, .dst_set = sets[0], .dst_binding = 1, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 1, .image_info = @ptrCast(&descriptor_image), .buffer_info = null, .texel_buffer_view = null },
+    };
+    updateDescriptorSets(device, descriptor_writes.len, @ptrCast(&descriptor_writes), 0, null);
+
     const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 0, .queue_family_index = 0 };
     var pool: usize = 0;
     try std.testing.expectEqual(Result.success, createCommandPool(device, &pool_info, null, &pool));
@@ -2427,14 +2581,18 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.success, allocateCommandBuffers(device, &command_info, &commands));
     const begin_info = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
-    const clear = ClearValue{ .color = .{ .float32 = .{ 0.2, 0.2, 0.2, 0.2 } } };
-    const render_info = RenderPassBeginInfo{ .s_type = 43, .p_next = null, .render_pass = opaque_handle, .framebuffer = framebuffer, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 2, .height = 2 } }, .clear_value_count = 1, .clear_values = @ptrCast(&clear) };
+    const clears = [_]ClearValue{
+        .{ .color = .{ .float32 = .{ 0.2, 0.2, 0.2, 0.2 } } },
+        .{ .depth_stencil = .{ .depth = 1, .stencil = 0 } },
+    };
+    const render_info = RenderPassBeginInfo{ .s_type = 43, .p_next = null, .render_pass = opaque_handle, .framebuffer = framebuffer, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 8, .height = 8 } }, .clear_value_count = 2, .clear_values = &clears };
     cmdBeginRenderPass(commands[0], &render_info, 0);
     cmdBindPipeline(commands[0], 0, pipelines[0]);
     cmdBindDescriptorSets(commands[0], 0, opaque_handle, 0, 1, &sets, 0, null);
-    cmdSetViewport(commands[0], 0, 1, @ptrCast(&render_info.render_area));
+    const viewport = Viewport{ .x = 0, .y = 0, .width = 8, .height = 8, .min_depth = 0, .max_depth = 1 };
+    cmdSetViewport(commands[0], 0, 1, @ptrCast(&viewport));
     cmdSetScissor(commands[0], 0, 1, @ptrCast(&render_info.render_area));
-    cmdDraw(commands[0], 36, 1, 0, 0);
+    cmdDraw(commands[0], 3, 1, 0, 0);
     cmdEndRenderPass(commands[0]);
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
 
@@ -2448,11 +2606,22 @@ test "vkcube presentation path records submits and presents two swapchain images
     const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 1, .wait_semaphores = @ptrCast(&acquired), .wait_dst_stage_mask = @ptrCast(&wait_stage), .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 1, .signal_semaphores = @ptrCast(&rendered) };
     try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&submit), 0));
     const rendered_image = validImageLocked(images[0]).?;
-    try std.testing.expectEqualSlices(u8, &[_]u8{ 51, 51, 51, 51 }, imageBytes(rendered_image)[0..4]);
+    const rendered_bytes = imageBytes(rendered_image);
+    try std.testing.expect(!std.mem.eql(u8, &[_]u8{ 51, 51, 51, 51 }, rendered_bytes[4 * (4 * 8 + 4) ..][0..4]));
+    const depth_values: []const f32 = @alignCast(std.mem.bytesAsSlice(f32, imageBytes(validImageLocked(depth_image).?)));
+    try std.testing.expect(depth_values[4 * 8 + 4] < 1);
     var present_result: [1]Result = undefined;
     const present = PresentInfo{ .s_type = 1_000_001_001, .p_next = null, .wait_semaphore_count = 1, .wait_semaphores = @ptrCast(&rendered), .swapchain_count = 1, .swapchains = @ptrCast(&swapchain), .image_indices = @ptrCast(&image_index), .results = &present_result };
     try std.testing.expectEqual(Result.success, queuePresent(queue, &present));
     try std.testing.expectEqual(Result.success, present_result[0]);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    cmdBeginRenderPass(commands[0], &render_info, 0);
+    cmdBindDescriptorSets(commands[0], 0, opaque_handle, 0, 1, &sets, 0, null);
+    cmdDraw(commands[0], 0, 1, 0, 0);
+    cmdEndRenderPass(commands[0]);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
 
     const saved_surface_state = surface_state;
     @memset(&surface_state, .tombstone);
@@ -2476,11 +2645,20 @@ test "vkcube presentation path records submits and presents two swapchain images
     @memset(&swapchain_state, .tombstone);
     try std.testing.expectEqual(Result.error_out_of_host_memory, createSwapchain(device, &swapchain_info, null, &exhausted_handle));
     swapchain_state = saved_swapchain_state;
+    const saved_descriptor_state = descriptor_set_state;
+    @memset(&descriptor_set_state, .tombstone);
+    try std.testing.expectEqual(Result.error_out_of_host_memory, allocateDescriptorSets(device, &set_info, &sets));
+    descriptor_set_state = saved_descriptor_state;
 
     destroySemaphore(device, acquired, null);
     destroySemaphore(device, rendered, null);
     destroyFramebuffer(device, framebuffer, null);
     destroyImageView(device, view, null);
+    destroyImageView(device, depth_view, null);
+    destroyImageView(device, texture_view, null);
+    destroyImage(device, depth_image, null);
+    destroyImage(device, texture_image, null);
+    destroyBuffer(device, uniform_buffer, null);
     destroySwapchain(device, swapchain, null);
     destroyCommandPool(device, pool, null);
     destroyDevice(device, null);
