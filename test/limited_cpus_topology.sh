@@ -70,8 +70,18 @@ fi
 # taskset call stays inside the allocation; the socket/core values are ones the
 # kernel can never report, which is what makes the source unambiguous.
 mapfile -t allowed < <(expand "$(taskset -pc $$ | sed 's/.*: //')" | sort -n)
+first=${allowed[0]}
+cat >"$tmp/topology-one" <<EOF
+# CPU,Core,Socket,Online
+$first,900,7,Y
+EOF
+fixture_one=$(env -u ZPU_MAX_THREADS ZPU_TEST_ALLOWED_CPUS="$first" \
+  ZPU_TEST_LSCPU_FILE="$tmp/topology-one" "$limiter" \
+  sh -c 'printf "%s|%s|%s" "$ZPU_SELECTED_CPUS" "$ZPU_MAX_THREADS" "$ZPU_TOPOLOGY"' 2>/dev/null)
+check 'a one-CPU fixture run must keep file-derived socket/core values' \
+  "$fixture_one" "$first|1|7:900@$first"
+
 if ((${#allowed[@]} >= 2)); then
-  first=${allowed[0]}
   second=${allowed[1]}
   cat >"$tmp/topology" <<EOF
 # CPU,Core,Socket,Online
@@ -97,7 +107,7 @@ EOF
   check 'a fixture run collapses declared SMT siblings to one core' \
     "$smt" "$first|1|7:902@$first"
 else
-  printf 'skip fixture topology proof: this affinity holds fewer than two CPUs\n'
+  printf 'note supplemental two-CPU SMT-collapse proof unavailable in this one-CPU affinity\n'
 fi
 
 if ((failures)); then

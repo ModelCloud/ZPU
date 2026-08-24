@@ -13,14 +13,23 @@ else
   topology_cmd=(lscpu -p=CPU,CORE,SOCKET,ONLINE)
 fi
 
-selected="$(${topology_cmd[@]} | awk -F, -v allowed="$allowed" -v cap="$cap" '
+topology_data="$(${topology_cmd[@]})" || { echo "topology source failed" >&2; exit 66; }
+if ! awk -F, '
+  /^#/ || /^[[:space:]]*$/ { next }
+  NF != 4 { exit 1 }
+' <<<"$topology_data"; then
+  echo "topology rows must contain exactly CPU,CORE,SOCKET,ONLINE" >&2
+  exit 66
+fi
+
+selected="$(awk -F, -v allowed="$allowed" -v cap="$cap" '
 function permitted(cpu, list, n,a,i,p,b,e) {
   n=split(list,a,","); for(i=1;i<=n;i++){p=index(a[i],"-"); if(p){b=substr(a[i],1,p-1)+0;e=substr(a[i],p+1)+0;if(cpu>=b&&cpu<=e)return 1}else if(cpu==a[i]+0)return 1} return 0
 }
 /^#/ {next}
-NF>=4 && $4=="Y" && permitted($1+0,allowed) { key=$3 ":" $2; if(!seen[key]++ && count<cap){out=out (count?",":"") $1; count++} }
+NF==4 && $4=="Y" && permitted($1+0,allowed) { key=$3 ":" $2; if(!seen[key]++ && count<cap){out=out (count?",":"") $1; count++} }
 END {if(count) print out}
-')"
+' <<<"$topology_data")"
 [[ -n "$selected" ]] || { echo "no online physical core intersects allowed affinity $allowed" >&2; exit 69; }
 count=$(awk -F, '{print NF}' <<<"$selected")
 export ZPU_MAX_THREADS="$count"
@@ -32,10 +41,10 @@ export ZPU_CPU_MODEL="$(lscpu | awk -F: '/^Model name:/{sub(/^[ \t]+/,"",$2); pr
 # benchmark reads back from sysfs, so the trusted fingerprint comes from sysfs
 # whenever a real host is being measured. Fixture runs keep using the file.
 if [[ -n "$topology" ]]; then
-  export ZPU_TOPOLOGY="$(${topology_cmd[@]} | awk -F, -v selected="$selected" '
+  export ZPU_TOPOLOGY="$(awk -F, -v selected="$selected" '
 BEGIN{n=split(selected,a,",");for(i=1;i<=n;i++)wanted[a[i]]=1}
-!/^#/ && NF>=4 && $4=="Y" && wanted[$1+0] {item=$3 ":" $2 "@" $1; out=out (out?";":"") item}
-END{print out}')"
+!/^#/ && NF==4 && $4=="Y" && wanted[$1+0] {item=$3 ":" $2 "@" $1; out=out (out?";":"") item}
+END{print out}' <<<"$topology_data")"
 else
   ZPU_TOPOLOGY=""
   IFS=, read -ra selected_cpus <<<"$selected"

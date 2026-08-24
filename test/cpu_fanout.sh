@@ -6,6 +6,7 @@ set -euo pipefail
 
 # Fixtures are the only topology source; never inherit a caller's seams.
 unset ZPU_FANOUT_ALLOWED_CPUS ZPU_FANOUT_CPUSET_FILE ZPU_FANOUT_LSCPU_FILE ZPU_FANOUT_TEST_GROUPS
+unset ZPU_FANOUT_CGROUP_FILE ZPU_FANOUT_CGROUP_ROOT
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 fanout="$root/tools/cpu-fanout.sh"
@@ -174,10 +175,12 @@ check 'dry-run shell-quotes arguments so the printed command is exact' \
 # partition width, an affinity the gate itself verified, and disjoint groups.
 # The workload is tools/require-limited.sh, which refuses unless the canonical
 # marker, the selected CPU list, and the process affinity all agree.
-if live_plan=$("$fanout" --plan 2>/dev/null); then
+live_plan_error="$tmp/live-plan-error"
+if live_plan=$("$fanout" --plan 2>"$live_plan_error"); then
   live_cap=$(field "$live_plan" thread_cap)
-  probe="$root/tools/require-limited.sh >/dev/null 2>&1 && printf '%s|%s|%s\\n' \
-    \"\$ZPU_FANOUT_WORKER\" \"\$ZPU_LIMITED\" \"\$ZPU_MAX_THREADS:\$ZPU_SELECTED_CPUS\""
+  probe="$root/tools/require-limited.sh >/dev/null 2>&1 && printf '%s|%s|%s|%s|%s\\n' \
+    \"\$ZPU_FANOUT_WORKER\" \"\$ZPU_LIMITED\" \"\$ZPU_MAX_THREADS\" \
+    \"\$ZPU_SELECTED_CPUS\" \"\$(taskset -pc \$\$ | sed 's/.*: //')\""
   live_out=$("$fanout" --all -- bash -c "$probe" 2>/dev/null | sort)
   check 'four live workers each satisfy tools/require-limited.sh' \
     "$(grep -c . <<<"$live_out")" 4
@@ -185,9 +188,11 @@ if live_plan=$("$fanout" --plan 2>/dev/null); then
     "$(awk -F'|' '{print $2}' <<<"$live_out" | sort -u | paste -sd, -)" 'physical-core-v1'
   check 'live worker indices are 0..3' \
     "$(awk -F'|' '{print $1}' <<<"$live_out" | paste -sd, -)" '0,1,2,3'
-  live_caps=$(awk -F'|' '{split($3, f, ":"); print f[1]}' <<<"$live_out" | sort -u | paste -sd, -)
+  live_caps=$(awk -F'|' '{print $3}' <<<"$live_out" | sort -u | paste -sd, -)
   check 'every live worker cap matches the partition thread cap' "$live_caps" "$live_cap"
-  live_sel=$(awk -F'|' '{split($3, f, ":"); print f[2]}' <<<"$live_out")
+  live_sel=$(awk -F'|' '{print $4}' <<<"$live_out")
+  check 'every selected CPU list equals its actual process affinity' \
+    "$(awk -F'|' '$4 != $5 { bad++ } END { print bad + 0 }' <<<"$live_out")" 0
   live_sizes=$(awk -F, '{print NF}' <<<"$live_sel" | sort -u | paste -sd, -)
   check 'every live worker selected exactly cap CPUs' "$live_sizes" "$live_cap"
   live_total=$(tr ',' '\n' <<<"$(paste -sd, - <<<"$live_sel")" | grep -c .)
@@ -195,7 +200,9 @@ if live_plan=$("$fanout" --plan 2>/dev/null); then
   check 'live worker affinities are pairwise disjoint' "$live_uniq" "$live_total"
   check 'live workers together hold four times the cap' "$live_total" "$((live_cap * 4))"
 else
-  printf 'skip live launch proof: this host affinity yields fewer than four usable physical cores\n'
+  printf 'FAIL mandatory live four-worker limiter proof cannot run: four usable physical cores are required\n' >&2
+  sed 's/^/  /' "$live_plan_error" >&2
+  exit 1
 fi
 
 # --- failure cases ----------------------------------------------------------
@@ -319,9 +326,24 @@ refuses 'an unknown ONLINE flag is rejected' 66 \
 
 printf '# CPU,Core,Socket,Online\n3,0,0\n' >"$tmp/topology-short-row"
 refuses 'a row with too few fields is rejected' 66 \
-  'row 2 has 3 field(s); expected CPU,CORE,SOCKET,ONLINE' -- \
+  'row 2 has 3 field(s); expected exactly CPU,CORE,SOCKET,ONLINE' -- \
   env ZPU_FANOUT_ALLOWED_CPUS=0-400 ZPU_FANOUT_CPUSET_FILE=/nonexistent \
   ZPU_FANOUT_LSCPU_FILE="$tmp/topology-short-row" "$fanout" --plan
+
+printf '# CPU,Core,Socket,Online\n3,0,0,Y,extra\n' >"$tmp/topology-long-row"
+refuses 'a row with extra fields is rejected' 66 \
+  'row 2 has 5 field(s); expected exactly CPU,CORE,SOCKET,ONLINE' -- \
+  env ZPU_FANOUT_ALLOWED_CPUS=0-400 ZPU_FANOUT_CPUSET_FILE=/nonexistent \
+  ZPU_FANOUT_LSCPU_FILE="$tmp/topology-long-row" "$fanout" --plan
+
+mkdir -p "$tmp/cgroup/a/b"
+printf '0::/a/b\n' >"$tmp/proc-self-cgroup"
+printf '3,5,9,11\n' >"$tmp/cgroup/a/cpuset.cpus.effective"
+ln -s /proc/1/mem "$tmp/cgroup/a/b/cpuset.cpus.effective"
+ancestor=$(env ZPU_FANOUT_ALLOWED_CPUS=0-400 ZPU_FANOUT_CGROUP_FILE="$tmp/proc-self-cgroup" \
+  ZPU_FANOUT_CGROUP_ROOT="$tmp/cgroup" ZPU_FANOUT_LSCPU_FILE="$tmp/topology" "$fanout" --plan)
+check 'an unreadable nearer cgroup cpuset falls back to a readable ancestor' \
+  "$(field "$ancestor" allowed_cpus)" '3,5,9,11'
 
 refuses 'a failing live lscpu becomes a fanout refusal' 66 \
   "'lscpu -p=CPU,CORE,SOCKET,ONLINE' failed" -- \

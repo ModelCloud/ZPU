@@ -36,6 +36,8 @@ Test seams (fixture-driven tests only):
   ZPU_FANOUT_CPUSET_FILE    overrides the resolved cgroup cpuset.cpus.effective
   ZPU_FANOUT_LSCPU_FILE     overrides lscpu -p=CPU,CORE,SOCKET,ONLINE
   ZPU_FANOUT_TEST_GROUPS    feeds literal groups (a,b|c,d|...) to the validator
+  ZPU_FANOUT_CGROUP_FILE    overrides /proc/self/cgroup
+  ZPU_FANOUT_CGROUP_ROOT    overrides /sys/fs/cgroup
 USAGE
 }
 
@@ -82,18 +84,20 @@ resolve_cpuset_file() {
     printf '%s' "$ZPU_FANOUT_CPUSET_FILE"
     return
   fi
-  local rel candidate
-  rel=$(awk -F: '$1 == "0" && $2 == "" { print $3; exit }' /proc/self/cgroup 2>/dev/null) || rel=""
+  local rel candidate fd cgroup_file="${ZPU_FANOUT_CGROUP_FILE:-/proc/self/cgroup}"
+  local cgroup_root="${ZPU_FANOUT_CGROUP_ROOT:-/sys/fs/cgroup}"
+  rel=$(awk -F: '$1 == "0" && $2 == "" { print $3; exit }' "$cgroup_file" 2>/dev/null) || rel=""
   while [[ -n "$rel" && "$rel" != "." ]]; do
-    candidate="/sys/fs/cgroup${rel%/}/cpuset.cpus.effective"
-    if [[ -e "$candidate" ]]; then
+    candidate="${cgroup_root}${rel%/}/cpuset.cpus.effective"
+    if [[ -e "$candidate" ]] && { exec {fd}<"$candidate"; } 2>/dev/null; then
+      exec {fd}<&-
       printf '%s' "$candidate"
       return
     fi
     [[ "$rel" == "/" ]] && break
     rel=$(dirname "$rel")
   done
-  printf '%s' "/sys/fs/cgroup/cpuset.cpus.effective"
+  printf '%s' "$cgroup_root/cpuset.cpus.effective"
 }
 
 derive_allowed_cpus() {
@@ -163,7 +167,7 @@ validate_topology() {
     function bail(msg) { print "row " NR " " msg; bad = 1; exit }
     /^#/ { next }
     /^[[:space:]]*$/ { next }
-    NF < 4 { bail("has " NF " field(s); expected CPU,CORE,SOCKET,ONLINE") }
+    NF != 4 { bail("has " NF " field(s); expected exactly CPU,CORE,SOCKET,ONLINE") }
     { for (i = 1; i <= 4; i++) gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i) }
     $1 !~ /^[0-9]+$/ { bail("has a non-numeric CPU id \"" $1 "\"") }
     $2 !~ /^[0-9]+$/ { bail("has a non-numeric core id \"" $2 "\"") }
