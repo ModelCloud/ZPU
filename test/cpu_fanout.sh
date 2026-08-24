@@ -45,6 +45,11 @@ EOF
   for core in $(seq 0 39); do echo "$((core * 2)),$core,0,Y"; done
 } >"$tmp/topology-wide"
 
+# A stub lscpu that fails, to exercise the live-topology failure path.
+mkdir -p "$tmp/bin"
+printf '#!/bin/sh\nexit 1\n' >"$tmp/bin/lscpu"
+chmod +x "$tmp/bin/lscpu"
+
 plan() { # plan <allowed> <cpuset-file> <topology-file>
   ZPU_FANOUT_ALLOWED_CPUS="$1" ZPU_FANOUT_CPUSET_FILE="$2" ZPU_FANOUT_LSCPU_FILE="$3" \
     "$fanout" --plan
@@ -157,6 +162,42 @@ fanned=$(ZPU_FANOUT_ALLOWED_CPUS=0-400 ZPU_FANOUT_CPUSET_FILE=/nonexistent \
   grep -c '^exec: env ZPU_MAX_THREADS=3 taskset -c ')
 check '--all launches exactly four pinned commands' "$fanned" 4
 
+quoted=$(ZPU_FANOUT_ALLOWED_CPUS=0-400 ZPU_FANOUT_CPUSET_FILE=/nonexistent \
+  ZPU_FANOUT_LSCPU_FILE="$tmp/topology" "$fanout" --worker 0 --dry-run -- sh -c 'echo hi there')
+check 'dry-run shell-quotes arguments so the printed command is exact' \
+  "$(sed -n 2p <<<"$quoted")" \
+  "exec: env ZPU_MAX_THREADS=3 taskset -c 3,5,9 $root/tools/limited-cpus.sh sh -c echo\\ hi\\ there"
+
+# --- live launch through the limited-cpus gate ------------------------------
+# The assertions below are host-independent: whatever this host's cpuset is,
+# four workers must come back with the canonical marker, a cap equal to the
+# partition width, an affinity the gate itself verified, and disjoint groups.
+# The workload is tools/require-limited.sh, which refuses unless the canonical
+# marker, the selected CPU list, and the process affinity all agree.
+if live_plan=$("$fanout" --plan 2>/dev/null); then
+  live_cap=$(field "$live_plan" thread_cap)
+  probe="$root/tools/require-limited.sh >/dev/null 2>&1 && printf '%s|%s|%s\\n' \
+    \"\$ZPU_FANOUT_WORKER\" \"\$ZPU_LIMITED\" \"\$ZPU_MAX_THREADS:\$ZPU_SELECTED_CPUS\""
+  live_out=$("$fanout" --all -- bash -c "$probe" 2>/dev/null | sort)
+  check 'four live workers each satisfy tools/require-limited.sh' \
+    "$(grep -c . <<<"$live_out")" 4
+  check 'live workers report the canonical affinity marker' \
+    "$(awk -F'|' '{print $2}' <<<"$live_out" | sort -u | paste -sd, -)" 'physical-core-v1'
+  check 'live worker indices are 0..3' \
+    "$(awk -F'|' '{print $1}' <<<"$live_out" | paste -sd, -)" '0,1,2,3'
+  live_caps=$(awk -F'|' '{split($3, f, ":"); print f[1]}' <<<"$live_out" | sort -u | paste -sd, -)
+  check 'every live worker cap matches the partition thread cap' "$live_caps" "$live_cap"
+  live_sel=$(awk -F'|' '{split($3, f, ":"); print f[2]}' <<<"$live_out")
+  live_sizes=$(awk -F, '{print NF}' <<<"$live_sel" | sort -u | paste -sd, -)
+  check 'every live worker selected exactly cap CPUs' "$live_sizes" "$live_cap"
+  live_total=$(tr ',' '\n' <<<"$(paste -sd, - <<<"$live_sel")" | grep -c .)
+  live_uniq=$(tr ',' '\n' <<<"$(paste -sd, - <<<"$live_sel")" | sort -u | grep -c .)
+  check 'live worker affinities are pairwise disjoint' "$live_uniq" "$live_total"
+  check 'live workers together hold four times the cap' "$live_total" "$((live_cap * 4))"
+else
+  printf 'skip live launch proof: this host affinity yields fewer than four usable physical cores\n'
+fi
+
 # --- failure cases ----------------------------------------------------------
 
 refuses 'fewer than four usable physical cores is refused' 69 \
@@ -240,8 +281,68 @@ refuses 'launching without a command is refused' 64 \
 refuses 'an unknown argument is refused' 64 \
   "unknown argument '--nope'" -- "$fanout" --nope
 
+: >"$tmp/cpuset-readable-empty"
+refuses 'a readable but empty cgroup cpuset is refused, not ignored' 69 \
+  'is readable but empty, so the effective cpuset' -- \
+  env ZPU_FANOUT_ALLOWED_CPUS=0-400 ZPU_FANOUT_CPUSET_FILE="$tmp/cpuset-readable-empty" \
+  ZPU_FANOUT_LSCPU_FILE="$tmp/topology" "$fanout" --plan
+
+printf '   \n\t\n' >"$tmp/cpuset-whitespace"
+refuses 'a whitespace-only cgroup cpuset is refused, not ignored' 69 \
+  'is readable but empty, so the effective cpuset' -- \
+  env ZPU_FANOUT_ALLOWED_CPUS=0-400 ZPU_FANOUT_CPUSET_FILE="$tmp/cpuset-whitespace" \
+  ZPU_FANOUT_LSCPU_FILE="$tmp/topology" "$fanout" --plan
+
+printf '# CPU,Core,Socket,Online\n3,0,0,Y\nfoo,1,0,Y\n' >"$tmp/topology-bad-cpu"
+refuses 'a non-numeric CPU id is rejected instead of coerced to 0' 66 \
+  'row 3 has a non-numeric CPU id "foo"' -- \
+  env ZPU_FANOUT_ALLOWED_CPUS=0-400 ZPU_FANOUT_CPUSET_FILE=/nonexistent \
+  ZPU_FANOUT_LSCPU_FILE="$tmp/topology-bad-cpu" "$fanout" --plan
+
+printf '# CPU,Core,Socket,Online\n3,0,0,Y\n5,x,0,Y\n' >"$tmp/topology-bad-core"
+refuses 'a non-numeric core id is rejected instead of coerced to 0' 66 \
+  'row 3 has a non-numeric core id "x"' -- \
+  env ZPU_FANOUT_ALLOWED_CPUS=0-400 ZPU_FANOUT_CPUSET_FILE=/nonexistent \
+  ZPU_FANOUT_LSCPU_FILE="$tmp/topology-bad-core" "$fanout" --plan
+
+printf '# CPU,Core,Socket,Online\n3,0,0,Y\n5,1,sock,Y\n' >"$tmp/topology-bad-socket"
+refuses 'a non-numeric socket id is rejected instead of coerced to 0' 66 \
+  'row 3 has a non-numeric socket id "sock"' -- \
+  env ZPU_FANOUT_ALLOWED_CPUS=0-400 ZPU_FANOUT_CPUSET_FILE=/nonexistent \
+  ZPU_FANOUT_LSCPU_FILE="$tmp/topology-bad-socket" "$fanout" --plan
+
+printf '# CPU,Core,Socket,Online\n3,0,0,Y\n5,1,0,maybe\n' >"$tmp/topology-bad-online"
+refuses 'an unknown ONLINE flag is rejected' 66 \
+  'row 3 has an unknown ONLINE flag "maybe"' -- \
+  env ZPU_FANOUT_ALLOWED_CPUS=0-400 ZPU_FANOUT_CPUSET_FILE=/nonexistent \
+  ZPU_FANOUT_LSCPU_FILE="$tmp/topology-bad-online" "$fanout" --plan
+
+printf '# CPU,Core,Socket,Online\n3,0,0\n' >"$tmp/topology-short-row"
+refuses 'a row with too few fields is rejected' 66 \
+  'row 2 has 3 field(s); expected CPU,CORE,SOCKET,ONLINE' -- \
+  env ZPU_FANOUT_ALLOWED_CPUS=0-400 ZPU_FANOUT_CPUSET_FILE=/nonexistent \
+  ZPU_FANOUT_LSCPU_FILE="$tmp/topology-short-row" "$fanout" --plan
+
+refuses 'a failing live lscpu becomes a fanout refusal' 66 \
+  "'lscpu -p=CPU,CORE,SOCKET,ONLINE' failed" -- \
+  env PATH="$tmp/bin:$PATH" ZPU_FANOUT_ALLOWED_CPUS=0-400 \
+  ZPU_FANOUT_CPUSET_FILE=/nonexistent "$fanout" --plan
+
+refuses 'combining --plan and --all is refused' 64 \
+  'conflicting modes: --plan and --all cannot be combined' -- "$fanout" --plan --all
+
+refuses 'combining --worker and --plan is refused' 64 \
+  'conflicting modes: --worker and --plan cannot be combined' -- \
+  env ZPU_FANOUT_ALLOWED_CPUS=0-400 ZPU_FANOUT_CPUSET_FILE=/nonexistent \
+  ZPU_FANOUT_LSCPU_FILE="$tmp/topology" "$fanout" --worker 0 --plan
+
+refuses 'repeating a mode is refused instead of last-one-wins' 64 \
+  'conflicting modes: --worker and --worker cannot be combined' -- \
+  env ZPU_FANOUT_ALLOWED_CPUS=0-400 ZPU_FANOUT_CPUSET_FILE=/nonexistent \
+  ZPU_FANOUT_LSCPU_FILE="$tmp/topology" "$fanout" --worker 0 --worker 3 --dry-run -- true
+
 if ((failures)); then
   printf 'cpu-fanout: %s check(s) failed\n' "$failures" >&2
   exit 1
 fi
-echo "cpu-fanout: non-contiguous ids, offline CPUs, SMT duplicates, surplus cores, restricted cpusets, four disjoint equal groups, safety cap, launch contract, failure diagnostics: PASS"
+echo "cpu-fanout: non-contiguous ids, offline CPUs, SMT duplicates, surplus cores, restricted/empty cpusets, four disjoint equal groups, safety cap, live four-worker launch, failure diagnostics: PASS"

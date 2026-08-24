@@ -32,7 +32,15 @@ Append controlled results with `tools/benchmark_history.py`; it refuses dirty wo
 
 ## Four-worker CPU fanout
 
-`tools/cpu-fanout.sh` partitions this host into exactly four concurrent experiment or optimization workers without letting two workers share a physical core. It derives the effective allowed cpuset at run time from the caller's `sched_getaffinity` mask (`taskset -pc $$`) intersected with `/sys/fs/cgroup/cpuset.cpus.effective` when that file is readable, so LXD and cgroup restrictions narrow the partition instead of being ignored. It then reads `lscpu -p=CPU,CORE,SOCKET,ONLINE`, drops offline CPUs, groups the remaining logical CPUs by physical `(socket, core)`, and keeps the lowest logical CPU of each physical core. SMT siblings are therefore never split across workers: a duplicate thread is left out entirely rather than handed to a second worker.
+`tools/cpu-fanout.sh` partitions this host into exactly four concurrent experiment or optimization workers without letting two workers share a physical core. It derives the effective allowed cpuset at run time from the caller's `sched_getaffinity` mask (`taskset -pc $$`) intersected with the cgroup cpuset described below, so LXD and cgroup restrictions narrow the partition instead of being ignored. It then reads `lscpu -p=CPU,CORE,SOCKET,ONLINE`, drops offline CPUs, groups the remaining logical CPUs by physical `(socket, core)`, and keeps the lowest logical CPU of each physical core. SMT siblings are therefore never split across workers: a duplicate thread is left out entirely rather than handed to a second worker.
+
+Every topology row must carry a numeric CPU, core, and socket id and an `ONLINE` flag of exactly `Y` or `N`. A malformed row is refused by position and value rather than coerced to CPU/core/socket `0`, which would otherwise fabricate a physical core that does not exist. A failing live `lscpu` becomes a fanout refusal naming the command.
+
+### cgroup cpuset scope
+
+The cgroup lookup targets the **unified cgroup v2 hierarchy**. The tool reads the process's own cgroup from `/proc/self/cgroup`, then walks from that directory toward `/sys/fs/cgroup` and uses the nearest `cpuset.cpus.effective` that exists, so a delegated or nested cgroup is honored rather than only the root. cgroup v1 is deliberately not consulted: a v1 cpuset is already reflected in the kernel affinity mask the tool starts from, so reading the v1 hierarchy would apply the same restriction twice.
+
+A `cpuset.cpus.effective` that is readable but **empty** grants no CPU. It takes part in the intersection like any other value, so the run is refused with an empty-effective-cpuset diagnostic instead of being silently ignored and widened back to the bare process affinity. A file that does not exist or cannot be read is a different case: there is no cgroup restriction to apply, and the process affinity stands on its own.
 
 The surviving representatives are ordered by socket then core, so each worker receives a topologically adjacent run of cores. The partition uses `floor(physical_core_count / 4)` cores per worker; surplus cores beyond `4 x floor(physical_core_count / 4)` and every duplicate SMT thread stay unused. Non-contiguous CPU ids are supported throughout — nothing assumes `0..n-1`.
 
@@ -51,9 +59,9 @@ tools/cpu-fanout.sh --worker 0 -- zig build benchmark -Doptimize=ReleaseFast -- 
 tools/cpu-fanout.sh --all -- zig build benchmark -Doptimize=ReleaseFast -- --json
 ```
 
-Add `--dry-run` to print the exact command without running it. Each worker is launched as `taskset -c <group> tools/limited-cpus.sh <command>` with `ZPU_MAX_THREADS` set to the worker's core count, so the existing limited-cpus safety contract still owns the canonical marker, the selection, and the cap that `tools/require-limited.sh` verifies. Because that contract caps threads at eight, a host wide enough for groups larger than eight keeps the full group affinity but reports a thread cap of eight; the wrapper then narrows the selection to eight cores and the gate stays consistent. Each command additionally sees `ZPU_FANOUT_WORKER`, `ZPU_FANOUT_WORKERS`, and `ZPU_FANOUT_GROUP_CPUS`. `--all` exits non-zero if any worker fails and names the failing worker.
+Exactly one of `--plan`, `--worker`, and `--all` may be given; combining or repeating them is refused rather than resolved last-one-wins. Add `--dry-run` to print the exact command without running it — its arguments are shell-quoted, so the printed line can be pasted and run verbatim. Each worker is launched as `taskset -c <group> tools/limited-cpus.sh <command>` with `ZPU_MAX_THREADS` set to the worker's core count, so the existing limited-cpus safety contract still owns the canonical marker, the selection, and the cap that `tools/require-limited.sh` verifies. Because that contract caps threads at eight, a host wide enough for groups larger than eight keeps the full group affinity but reports a thread cap of eight; the wrapper then narrows the selection to eight cores and the gate stays consistent. Each command additionally sees `ZPU_FANOUT_WORKER`, `ZPU_FANOUT_WORKERS`, and `ZPU_FANOUT_GROUP_CPUS`. `--all` exits non-zero if any worker fails and names the failing worker.
 
-The tool refuses, with a diagnostic naming the effective cpuset, when fewer than four usable physical cores survive (exit 69), when the topology source is unreadable or has no CPU rows (exit 66), when a CPU list is malformed or a worker index is outside `0..3` (exit 64), and when a partition is not four equal-size, pairwise-disjoint groups (exit 70).
+The tool refuses, with a diagnostic naming the effective cpuset, when fewer than four usable physical cores survive or the effective cpuset is empty (exit 69), when the topology source is unreadable, malformed, or has no CPU rows (exit 66), when a CPU list is malformed, a worker index is outside `0..3`, or modes conflict (exit 64), and when a partition is not four equal-size, pairwise-disjoint groups (exit 70).
 
 ### Comparability rules
 
@@ -65,7 +73,13 @@ Fanout is a throughput tool for running four independent experiments at once. It
 * `tools/benchmark_history.py` remains the only path for appending controlled results, and fanout runs are not eligible for it.
 * Use fanout for parameter sweeps, A/B search, and optimization iteration where relative ranking within one worker matters and absolute rates do not.
 
-`test/cpu_fanout.sh` proves the partition against checked-in `lscpu` fixtures covering non-contiguous ids, offline CPUs, SMT duplicates, surplus cores, restricted cgroup cpusets, the four-core minimum, the eight-thread safety cap, pairwise disjointness, four equal groups, and every failure diagnostic. It runs planner and `--dry-run` paths only, so it launches no workload and cannot escape the limiter that invoked it. `zig build test` runs it behind `tools/require-limited.sh`, so CI covers it through the existing `zig build test` step.
+`test/cpu_fanout.sh` proves the partition against checked-in `lscpu` fixtures covering non-contiguous ids, offline CPUs, SMT duplicates, surplus cores, restricted cgroup cpusets, a readable-but-empty cpuset, malformed topology fields, the four-core minimum, the eight-thread safety cap, pairwise disjointness, four equal groups, mode conflicts, and every failure diagnostic.
+
+It also proves the launch path for real, not only through `--dry-run`: it fans `tools/require-limited.sh` itself out to all four workers on this host's live partition and asserts that each worker satisfies the gate — canonical `physical-core-v1` marker, a thread cap equal to the partition width, a selected CPU list the gate verified against the process affinity, and four equal-size pairwise-disjoint affinities. Those assertions hold for any host cpuset; when the invoking allocation yields fewer than four usable physical cores the live proof reports a skip instead of guessing.
+
+`test/limited_cpus_topology.sh` covers the fingerprint source in `tools/limited-cpus.sh`: a live run must reproduce each selected CPU's sysfs `physical_package_id`/`core_id`, and a run driven by `ZPU_TEST_LSCPU_FILE` must keep the fixture's socket/core values. Its fixture CPU ids come from the invoking affinity, so the limiter's `taskset` call stays inside the allocation.
+
+Both scripts run every command inside the affinity they inherit, so nothing escapes the limiter that invoked them, and `zig build test` runs both behind `tools/require-limited.sh`.
 
 ## Thread limit
 

@@ -68,6 +68,9 @@ pub fn build(b: *std.Build) void {
     const cpu_fanout_tests = b.addSystemCommand(&.{"test/cpu_fanout.sh"});
     cpu_fanout_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&cpu_fanout_tests.step);
+    const limited_cpus_topology_tests = b.addSystemCommand(&.{"test/limited_cpus_topology.sh"});
+    limited_cpus_topology_tests.step.dependOn(&require_limited.step);
+    test_step.dependOn(&limited_cpus_topology_tests.step);
 
     const behavior_tests = b.addTest(.{
         .root_module = b.createModule(.{

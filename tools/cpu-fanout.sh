@@ -29,9 +29,11 @@ Usage:
             ZPU_FANOUT_WORKER.
 --dry-run   Print the exact command that would be executed instead of running it.
 
+Exactly one of --plan, --worker, and --all may be given.
+
 Test seams (fixture-driven tests only):
   ZPU_FANOUT_ALLOWED_CPUS   overrides the caller's taskset affinity
-  ZPU_FANOUT_CPUSET_FILE    overrides /sys/fs/cgroup/cpuset.cpus.effective
+  ZPU_FANOUT_CPUSET_FILE    overrides the resolved cgroup cpuset.cpus.effective
   ZPU_FANOUT_LSCPU_FILE     overrides lscpu -p=CPU,CORE,SOCKET,ONLINE
   ZPU_FANOUT_TEST_GROUPS    feeds literal groups (a,b|c,d|...) to the validator
 USAGE
@@ -70,6 +72,30 @@ join_csv() { local IFS=,; printf '%s' "$*"; }
 
 # --- effective cpuset -------------------------------------------------------
 
+# The unified (cgroup v2) hierarchy publishes cpuset.cpus.effective inside the
+# process's own cgroup directory, so walk from that cgroup toward the root and
+# use the nearest file that exists. cgroup v1 is deliberately not consulted: a
+# v1 cpuset is already reflected in the kernel affinity mask this tool starts
+# from, and reading the v1 hierarchy would double-count the same restriction.
+resolve_cpuset_file() {
+  if [[ -n "${ZPU_FANOUT_CPUSET_FILE:-}" ]]; then
+    printf '%s' "$ZPU_FANOUT_CPUSET_FILE"
+    return
+  fi
+  local rel candidate
+  rel=$(awk -F: '$1 == "0" && $2 == "" { print $3; exit }' /proc/self/cgroup 2>/dev/null) || rel=""
+  while [[ -n "$rel" && "$rel" != "." ]]; do
+    candidate="/sys/fs/cgroup${rel%/}/cpuset.cpus.effective"
+    if [[ -e "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return
+    fi
+    [[ "$rel" == "/" ]] && break
+    rel=$(dirname "$rel")
+  done
+  printf '%s' "/sys/fs/cgroup/cpuset.cpus.effective"
+}
+
 derive_allowed_cpus() {
   local raw source
   if [[ -n "${ZPU_FANOUT_ALLOWED_CPUS:-}" ]]; then
@@ -84,21 +110,39 @@ derive_allowed_cpus() {
   allowed=$(expand_cpu_list "$raw") || fail 64 "$source contains an inverted range: '$raw'"
 
   # LXD/cgroup cpuset restrictions narrow the set further when exposed.
-  local cpuset_file="${ZPU_FANOUT_CPUSET_FILE:-/sys/fs/cgroup/cpuset.cpus.effective}"
+  local cpuset_file
+  cpuset_file=$(resolve_cpuset_file)
   if [[ -r "$cpuset_file" ]]; then
     local cpuset_raw
     cpuset_raw=$(tr -d '[:space:]' <"$cpuset_file")
-    if [[ -n "$cpuset_raw" ]]; then
-      validate_cpu_list "$cpuset_raw" "cgroup cpuset $cpuset_file"
-      local cpuset_expanded
-      cpuset_expanded=$(expand_cpu_list "$cpuset_raw") ||
-        fail 64 "cgroup cpuset $cpuset_file contains an inverted range: '$cpuset_raw'"
-      allowed=$(intersect_cpus "$allowed" "$cpuset_expanded")
-    fi
+    # A readable but empty cpuset grants no CPU at all. It takes part in the
+    # intersection like any other value instead of being ignored, so the run
+    # is refused rather than silently widened back to the process affinity.
+    [[ -n "$cpuset_raw" ]] ||
+      fail 69 "cgroup cpuset $cpuset_file is readable but empty, so the effective cpuset after intersecting $source with it is empty"
+    validate_cpu_list "$cpuset_raw" "cgroup cpuset $cpuset_file"
+    local cpuset_expanded
+    cpuset_expanded=$(expand_cpu_list "$cpuset_raw") ||
+      fail 64 "cgroup cpuset $cpuset_file contains an inverted range: '$cpuset_raw'"
+    allowed=$(intersect_cpus "$allowed" "$cpuset_expanded")
   fi
   [[ -n "$allowed" ]] ||
     fail 69 "the effective cpuset is empty after intersecting $source with $cpuset_file"
   printf '%s\n' "$allowed"
+}
+
+# --- topology ---------------------------------------------------------------
+
+TOPOLOGY_SOURCE=""
+
+# Named separately from read_topology: that runs in a command substitution, so
+# a variable it assigned would be lost with its subshell.
+topology_source() {
+  if [[ -n "${ZPU_FANOUT_LSCPU_FILE:-}" ]]; then
+    printf '%s' "$ZPU_FANOUT_LSCPU_FILE"
+  else
+    printf '%s' "lscpu -p=CPU,CORE,SOCKET,ONLINE"
+  fi
 }
 
 read_topology() {
@@ -107,27 +151,46 @@ read_topology() {
       fail 66 "topology source '$ZPU_FANOUT_LSCPU_FILE' is unreadable"
     cat "$ZPU_FANOUT_LSCPU_FILE"
   else
-    lscpu -p=CPU,CORE,SOCKET,ONLINE
+    lscpu -p=CPU,CORE,SOCKET,ONLINE 2>/dev/null ||
+      fail 66 "'lscpu -p=CPU,CORE,SOCKET,ONLINE' failed; install util-linux or point ZPU_FANOUT_LSCPU_FILE at a topology file"
   fi
 }
 
-# Every online CPU id the topology source reports, one per line.
-online_cpus() {
+# Reject malformed rows outright instead of coercing them to CPU/core/socket 0.
+validate_topology() {
+  local problem
+  problem=$(printf '%s\n' "$1" | awk -F, '
+    function bail(msg) { print "row " NR " " msg; bad = 1; exit }
+    /^#/ { next }
+    /^[[:space:]]*$/ { next }
+    NF < 4 { bail("has " NF " field(s); expected CPU,CORE,SOCKET,ONLINE") }
+    { for (i = 1; i <= 4; i++) gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i) }
+    $1 !~ /^[0-9]+$/ { bail("has a non-numeric CPU id \"" $1 "\"") }
+    $2 !~ /^[0-9]+$/ { bail("has a non-numeric core id \"" $2 "\"") }
+    $3 !~ /^[0-9]+$/ { bail("has a non-numeric socket id \"" $3 "\"") }
+    $4 != "Y" && $4 != "N" { bail("has an unknown ONLINE flag \"" $4 "\"") }
+    { rows++ }
+    END { if (!bad && !rows) print "contains no CPU rows" }
+  ')
+  [[ -z "$problem" ]] || fail 66 "topology source $TOPOLOGY_SOURCE $problem; expected lscpu -p=CPU,CORE,SOCKET,ONLINE format"
+}
+
+# Normalize validated rows to "socket core cpu online".
+normalize_topology() {
   printf '%s\n' "$1" | awk -F, '
     /^#/ { next }
-    NF >= 4 { rows++; if ($4 == "Y") print $1 + 0 }
-    END { if (!rows) exit 4 }
-  ' | sort -n -u
+    /^[[:space:]]*$/ { next }
+    { for (i = 1; i <= 4; i++) gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
+      print $3 + 0, $2 + 0, $1 + 0, $4 }'
 }
 
 # One representative logical CPU per online, allowed physical (socket, core),
 # ordered by socket then core so a worker group stays topologically adjacent.
 select_core_representatives() {
-  local topology="$1" allowed_csv="$2"
-  printf '%s\n' "$topology" | awk -F, -v allowed="$allowed_csv" '
+  local rows="$1" allowed_csv="$2"
+  printf '%s\n' "$rows" | awk -v allowed="$allowed_csv" '
     BEGIN { n = split(allowed, a, ","); for (i = 1; i <= n; i++) permitted[a[i] + 0] = 1 }
-    /^#/ { next }
-    NF >= 4 && $4 == "Y" && ($1 + 0 in permitted) { print $3 + 0, $2 + 0, $1 + 0 }
+    $4 == "Y" && ($3 in permitted) { print $1, $2, $3 }
   ' | sort -k1,1n -k2,2n -k3,3n | awk '
     { key = $1 ":" $2; if (!(key in seen)) { seen[key] = 1; print $1, $2, $3 } }'
 }
@@ -179,25 +242,24 @@ build_partition() {
     return
   fi
 
-  local allowed topology online
+  local allowed topology rows online
   allowed=$(derive_allowed_cpus)
+  TOPOLOGY_SOURCE=$(topology_source)
   topology=$(read_topology)
-  online=$(online_cpus "$topology") ||
-    fail 66 "topology source produced no CPU rows; expected lscpu -p=CPU,CORE,SOCKET,ONLINE format"
+  validate_topology "$topology"
+  rows=$(normalize_topology "$topology")
+  online=$(printf '%s\n' "$rows" | awk '$4 == "Y" { print $3 }' | sort -n -u)
+  [[ -n "$online" ]] || fail 69 "topology source $TOPOLOGY_SOURCE reports no online CPU"
   # Offline CPUs can sit inside the cpuset; only online ones are usable.
   allowed=$(intersect_cpus "$allowed" "$online")
-  [[ -n "$allowed" ]] ||
-    fail 69 "the effective cpuset contains no online CPU"
+  [[ -n "$allowed" ]] || fail 69 "the effective cpuset contains no online CPU"
   ALLOWED_CSV=$(printf '%s' "$allowed" | paste -sd, -)
-
-  local rows
-  rows=$(select_core_representatives "$topology" "$ALLOWED_CSV")
 
   local -a core_rows=()
   local line
   while IFS= read -r line; do
     [[ -n "$line" ]] && core_rows+=("$line")
-  done <<<"$rows"
+  done <<<"$(select_core_representatives "$rows" "$ALLOWED_CSV")"
 
   PHYSICAL_CORES=${#core_rows[@]}
   local per=$((PHYSICAL_CORES / WORKER_COUNT))
@@ -273,9 +335,11 @@ run_worker() {
   # ones this worker actually runs under.
   unset ZPU_TEST_ALLOWED_CPUS ZPU_TEST_LSCPU_FILE
   if ((dry)); then
+    local quoted
+    quoted=$(printf '%q ' "$@")
     printf 'worker=%s group=%s threads=%s\n' "$worker" "$group" "$cap"
-    printf 'exec: env ZPU_MAX_THREADS=%s taskset -c %s %s/tools/limited-cpus.sh %s\n' \
-      "$cap" "$group" "$root" "$*"
+    printf 'exec: env ZPU_MAX_THREADS=%s taskset -c %s %q %s\n' \
+      "$cap" "$group" "$root/tools/limited-cpus.sh" "${quoted% }"
     return 0
   fi
   exec taskset -c "$group" "$root/tools/limited-cpus.sh" "$@"
@@ -309,14 +373,21 @@ mode=""
 worker=""
 dry_run=0
 cmd=()
+
+set_mode() {
+  [[ -z "$mode" ]] ||
+    fail 64 "conflicting modes: --$mode and --$1 cannot be combined; choose exactly one"
+  mode="$1"
+}
+
 while (($#)); do
   case "$1" in
-    --plan) mode=plan; shift ;;
-    --all) mode=all; shift ;;
+    --plan) set_mode plan; shift ;;
+    --all) set_mode all; shift ;;
     --worker)
       (($# >= 2)) || fail 64 "--worker needs an index"
-      mode=worker; worker="$2"; shift 2 ;;
-    --worker=*) mode=worker; worker="${1#*=}"; shift ;;
+      set_mode worker; worker="$2"; shift 2 ;;
+    --worker=*) set_mode worker; worker="${1#*=}"; shift ;;
     --dry-run) dry_run=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --) shift; cmd=("$@"); break ;;
