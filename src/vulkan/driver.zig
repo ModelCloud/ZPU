@@ -209,12 +209,12 @@ pub const Device = *DeviceObj;
 pub const Queue = *QueueObj;
 const MemoryObj = struct { owner: Device, bytes: []align(64) u8, mapped: bool };
 const BufferObj = struct { owner: Device, size: u64, usage: u32, memory: ?*MemoryObj = null, offset: u64 = 0 };
-const ImageObj = struct { owner: Device, width: u32, height: u32, format: i32, usage: u32, layout: i32, memory: ?*MemoryObj = null, owned_bytes: ?[]align(64) u8 = null, offset: u64 = 0 };
+const ImageObj = struct { owner: Device, width: u32, height: u32, array_layers: u32, samples: u32, format: i32, usage: u32, layout: i32, memory: ?*MemoryObj = null, owned_bytes: ?[]align(64) u8 = null, offset: u64 = 0 };
 const FenceObj = struct { owner: Device, signaled: bool };
 const SemaphoreObj = struct { owner: Device, signaled: bool };
 const CommandPoolObj = struct { owner: Device };
 const SurfaceObj = struct { owner: Instance, connection: *anyopaque, window: u32 };
-const ImageViewObj = struct { owner: Device, image: *ImageObj };
+const ImageViewObj = struct { owner: Device, image: *ImageObj, format: i32, aspect_mask: u32, base_array_layer: u32, layer_count: u32 };
 const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj, render_compatibility: Canonical };
 const DescriptorSetObj = struct { owner: DeviceIdentity, layout: Canonical, uniform: ?*BufferObj = null, uniform_offset: u64 = 0, uniform_range: u64 = 0, texture: ?*ImageObj = null };
 const DeviceIdentity = struct {
@@ -256,7 +256,9 @@ const Canonical = struct {
 };
 const DescriptorSetLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical };
 const PipelineLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical, set0: Canonical };
-const RenderPassObj = struct { owner: DeviceIdentity, canonical: Canonical, compatibility: Canonical, subpass_count: u32 };
+const AttachmentRole = enum(u8) { color, depth };
+const FramebufferAttachmentRequirement = struct { format: i32 = 0, samples: u32 = 0, role: AttachmentRole = .color };
+const RenderPassObj = struct { owner: DeviceIdentity, canonical: Canonical, compatibility: Canonical, subpass_count: u32, framebuffer_supported: bool, framebuffer_attachment_count: u32, framebuffer_attachments: [2]FramebufferAttachmentRequirement };
 const GraphicsPipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, layout: Canonical, set0: Canonical, render_compatibility: Canonical, subpass: u32, execution_abi: u32 };
 const SwapchainObj = struct {
     owner: Device,
@@ -1381,7 +1383,7 @@ fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Al
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
     for (&image_objects, &image_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = d, .width = ci.extent.width, .height = ci.extent.height, .format = ci.format, .usage = ci.usage, .layout = ci.initial_layout };
+        object.* = .{ .owner = d, .width = ci.extent.width, .height = ci.extent.height, .array_layers = ci.array_layers, .samples = ci.samples, .format = ci.format, .usage = ci.usage, .layout = ci.initial_layout };
         if (imageByteSize(object) == null) return .error_initialization_failed;
         state.* = .live;
         out.* = @intFromPtr(object);
@@ -2325,11 +2327,17 @@ fn buildRenderPass(ci: *const RenderPassCreateInfo, compatibility_only: bool) Ca
         try w.u32le(s.input_attachment_count);
         if (s.input_attachments) |refs| for (refs[0..s.input_attachment_count]) |ref| try appendAttachmentRef(&w, ref, ci.attachment_count);
         try w.u32le(s.color_attachment_count);
-        if (s.color_attachments) |refs| for (refs[0..s.color_attachment_count]) |ref| try appendAttachmentRef(&w, ref, ci.attachment_count);
+        if (s.color_attachments) |refs| for (refs[0..s.color_attachment_count], 0..) |ref, index| {
+            for (refs[0..index]) |prior| if (ref.attachment != 0xffff_ffff and ref.attachment == prior.attachment) return error.Invalid;
+            try appendAttachmentRef(&w, ref, ci.attachment_count);
+        };
         try w.u32le(if (s.resolve_attachments == null) 0 else 1);
         if (s.resolve_attachments) |refs| for (refs[0..s.color_attachment_count]) |ref| try appendAttachmentRef(&w, ref, ci.attachment_count);
         try w.u32le(if (s.depth_stencil_attachment == null) 0 else 1);
-        if (s.depth_stencil_attachment) |ref| try appendAttachmentRef(&w, ref.*, ci.attachment_count);
+        if (s.depth_stencil_attachment) |ref| {
+            if (s.color_attachments) |refs| for (refs[0..s.color_attachment_count]) |color| if (ref.attachment != 0xffff_ffff and ref.attachment == color.attachment) return error.Invalid;
+            try appendAttachmentRef(&w, ref.*, ci.attachment_count);
+        }
         try w.u32le(s.preserve_attachment_count);
         if (s.preserve_attachments) |refs| for (refs[0..s.preserve_attachment_count]) |ref| {
             if (ref >= ci.attachment_count) return error.Invalid;
@@ -2351,6 +2359,34 @@ fn buildRenderPass(ci: *const RenderPassCreateInfo, compatibility_only: bool) Ca
     }
     return try w.done();
 }
+
+const RenderPassFramebufferMetadata = struct {
+    supported: bool = false,
+    attachment_count: u32 = 0,
+    attachments: [2]FramebufferAttachmentRequirement = .{ .{}, .{} },
+};
+
+fn snapshotRenderPassFramebufferMetadata(ci: *const RenderPassCreateInfo) RenderPassFramebufferMetadata {
+    if (ci.attachment_count == 0 or ci.attachment_count > 2 or ci.attachments == null or ci.subpasses == null) return .{};
+    var has_depth = false;
+    for (ci.subpasses.?[0..ci.subpass_count], 0..) |subpass, subpass_index| {
+        if (subpass.input_attachment_count != 0 or subpass.resolve_attachments != null or subpass.preserve_attachment_count != 0 or subpass.color_attachment_count != 1 or subpass.color_attachments == null or subpass.color_attachments.?[0].attachment != 0) return .{};
+        const depth = subpass.depth_stencil_attachment;
+        if (depth) |reference| {
+            if (reference.attachment != 1) return .{};
+            if (subpass_index != 0 and !has_depth) return .{};
+            has_depth = true;
+        } else if (subpass_index != 0 and has_depth) return .{};
+    }
+    const expected_count: u32 = if (has_depth) 2 else 1;
+    if (ci.attachment_count != expected_count) return .{};
+    const descriptions = ci.attachments.?;
+    var result = RenderPassFramebufferMetadata{ .supported = true, .attachment_count = expected_count };
+    result.attachments[0] = .{ .format = descriptions[0].format, .samples = descriptions[0].samples, .role = .color };
+    if (has_depth) result.attachments[1] = .{ .format = descriptions[1].format, .samples = descriptions[1].samples, .role = .depth };
+    return result;
+}
+
 fn createRenderPass(device: ?Device, info: ?*const RenderPassCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     if (alloc != null) return .error_initialization_failed;
     const d = device orelse return .error_initialization_failed;
@@ -2361,6 +2397,7 @@ fn createRenderPass(device: ?Device, info: ?*const RenderPassCreateInfo, alloc: 
         canonical.deinit();
         return creationFailure(err);
     };
+    const framebuffer_metadata = snapshotRenderPassFramebufferMetadata(ci);
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) {
@@ -2369,7 +2406,7 @@ fn createRenderPass(device: ?Device, info: ?*const RenderPassCreateInfo, alloc: 
         return .error_initialization_failed;
     }
     for (&render_pass_objects, &render_pass_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .compatibility = compatibility, .subpass_count = ci.subpass_count };
+        object.* = .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .compatibility = compatibility, .subpass_count = ci.subpass_count, .framebuffer_supported = framebuffer_metadata.supported, .framebuffer_attachment_count = framebuffer_metadata.attachment_count, .framebuffer_attachments = framebuffer_metadata.attachments };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
@@ -2755,12 +2792,13 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
+    if (ci.s_type != 15 or ci.p_next != null or ci.flags != 0 or ci.view_type != 1 or !std.meta.eql(ci.components, [_]i32{ 0, 0, 0, 0 }) or ci.subresource_range.base_mip_level != 0 or ci.subresource_range.level_count != 1 or ci.subresource_range.layer_count == 0) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     const image = validImageLocked(ci.image) orelse return .error_initialization_failed;
-    if (!validDeviceLocked(d) or image.owner != d) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or image.owner != d or ci.format != image.format or (ci.subresource_range.aspect_mask != 1 and ci.subresource_range.aspect_mask != 2) or ci.subresource_range.base_array_layer >= image.array_layers or ci.subresource_range.layer_count > image.array_layers - ci.subresource_range.base_array_layer) return .error_initialization_failed;
     for (&image_view_objects, &image_view_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = d, .image = image };
+        object.* = .{ .owner = d, .image = image, .format = ci.format, .aspect_mask = ci.subresource_range.aspect_mask, .base_array_layer = ci.subresource_range.base_array_layer, .layer_count = ci.subresource_range.layer_count };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
@@ -2781,19 +2819,31 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
     const out = output orelse return .error_initialization_failed;
     lock();
     defer mutex.unlock();
-    if (!validDeviceLocked(d) or ci.s_type != 37 or ci.p_next != null or ci.flags != 0 or ci.attachment_count == 0 or ci.attachment_count > 2 or ci.attachments == null or ci.width == 0 or ci.height == 0 or ci.layers != 1) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or ci.s_type != 37 or ci.p_next != null or ci.flags != 0 or ci.attachment_count == 0 or ci.attachment_count > 2 or ci.attachments == null or ci.width == 0 or ci.height == 0 or ci.layers == 0) return .error_initialization_failed;
     const render_pass = validRenderPassLocked(ci.render_pass) orelse return .error_initialization_failed;
-    if (!render_pass.owner.eql(d)) return .error_initialization_failed;
-    const view = validImageViewLocked(ci.attachments.?[0]) orelse return .error_initialization_failed;
-    if (view.owner != d or view.image.usage & 0x10 == 0 or view.image.width < ci.width or view.image.height < ci.height) return .error_initialization_failed;
-    const depth = if (ci.attachment_count == 2) blk: {
-        const depth_view = validImageViewLocked(ci.attachments.?[1]) orelse return .error_initialization_failed;
-        if (depth_view.owner != d or view == depth_view or view.image == depth_view.image or depth_view.image.usage & 0x20 == 0 or depth_view.image.width < ci.width or depth_view.image.height < ci.height) return .error_initialization_failed;
-        break :blk depth_view.image;
-    } else null;
+    if (!render_pass.owner.eql(d) or !render_pass.framebuffer_supported or ci.attachment_count != render_pass.framebuffer_attachment_count) return .error_initialization_failed;
+    var color: ?*ImageObj = null;
+    var depth: ?*ImageObj = null;
+    var prior_view: ?*ImageViewObj = null;
+    for (ci.attachments.?[0..ci.attachment_count], render_pass.framebuffer_attachments[0..ci.attachment_count]) |handle, requirement| {
+        const view = validImageViewLocked(handle) orelse return .error_initialization_failed;
+        if (view.owner != d or view == prior_view or (prior_view != null and view.image == prior_view.?.image) or view.format != requirement.format or view.image.format != requirement.format or view.image.samples != requirement.samples or view.image.width < ci.width or view.image.height < ci.height or view.base_array_layer != 0 or view.layer_count < ci.layers or view.image.array_layers < ci.layers) return .error_initialization_failed;
+        switch (requirement.role) {
+            .color => {
+                if (view.aspect_mask != 1 or view.image.usage & 0x10 == 0 or color != null) return .error_initialization_failed;
+                color = view.image;
+            },
+            .depth => {
+                if (view.aspect_mask != 2 or view.image.usage & 0x20 == 0 or depth != null) return .error_initialization_failed;
+                depth = view.image;
+            },
+        }
+        prior_view = view;
+    }
+    const color_image = color orelse return .error_initialization_failed;
     var compatibility = render_pass.compatibility.clone() catch return .error_out_of_host_memory;
     for (&framebuffer_objects, &framebuffer_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = d, .color_image = view.image, .depth_image = depth, .render_compatibility = compatibility };
+        object.* = .{ .owner = d, .color_image = color_image, .depth_image = depth, .render_compatibility = compatibility };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
@@ -3070,7 +3120,7 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
                 const byte_count = @as(usize, ci.image_extent.width) * ci.image_extent.height * 4;
                 const bytes = allocateBytes(byte_count) catch return .error_out_of_host_memory;
                 @memset(bytes, 0);
-                image.* = .{ .owner = d, .width = ci.image_extent.width, .height = ci.image_extent.height, .format = ci.image_format, .usage = ci.image_usage, .layout = 0, .owned_bytes = bytes };
+                image.* = .{ .owner = d, .width = ci.image_extent.width, .height = ci.image_extent.height, .array_layers = ci.image_array_layers, .samples = 1, .format = ci.image_format, .usage = ci.image_usage, .layout = 0, .owned_bytes = bytes };
                 image_slot_state.* = .live;
                 swapchain.images[created] = @intFromPtr(image);
                 found = true;
@@ -3647,6 +3697,16 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &bad_framebuffer_info, null, &unpublished));
     bad_framebuffer_info = framebuffer_info;
     bad_framebuffer_info.attachment_count = 1;
+    const framebuffer_states_before_missing = framebuffer_state;
+    const missing_output_before = unpublished;
+    try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &bad_framebuffer_info, null, &unpublished));
+    try std.testing.expectEqual(missing_output_before, unpublished);
+    try std.testing.expectEqualSlices(SlotState, &framebuffer_states_before_missing, &framebuffer_state);
+    const color_only_subpass = SubpassDescription{ .flags = 0, .pipeline_bind_point = 0, .input_attachment_count = 0, .input_attachments = null, .color_attachment_count = 1, .color_attachments = @ptrCast(&color_ref), .resolve_attachments = null, .depth_stencil_attachment = null, .preserve_attachment_count = 0, .preserve_attachments = null };
+    const color_only_render_info = RenderPassCreateInfo{ .s_type = 38, .p_next = null, .flags = 0, .attachment_count = 1, .attachments = &attachment_descriptions, .subpass_count = 1, .subpasses = @ptrCast(&color_only_subpass), .dependency_count = 0, .dependencies = null };
+    var color_only_render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(device, &color_only_render_info, null, &color_only_render_pass));
+    bad_framebuffer_info.render_pass = color_only_render_pass;
     var color_only_framebuffer: usize = 0;
     try std.testing.expectEqual(Result.success, createFramebuffer(device, &bad_framebuffer_info, null, &color_only_framebuffer));
     try std.testing.expect(validFramebufferLocked(color_only_framebuffer).?.depth_image == null);
@@ -3658,6 +3718,76 @@ test "vkcube presentation path records submits and presents two swapchain images
     var duplicate_attachments = [_]usize{ view, view };
     bad_framebuffer_info.attachments = &duplicate_attachments;
     try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &bad_framebuffer_info, null, &unpublished));
+    bad_framebuffer_info = framebuffer_info;
+    bad_framebuffer_info.render_pass = 0xdead_beef;
+    try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &bad_framebuffer_info, null, &unpublished));
+    var stale_attachments = attachments;
+    stale_attachments[0] = 0xdead_beef;
+    bad_framebuffer_info = framebuffer_info;
+    bad_framebuffer_info.attachments = &stale_attachments;
+    try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &bad_framebuffer_info, null, &unpublished));
+    var mismatched_color_info = depth_info;
+    mismatched_color_info.format = 43;
+    mismatched_color_info.usage = 0x10;
+    var mismatched_color_image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(device, &mismatched_color_info, null, &mismatched_color_image));
+    var mismatched_color_view_info = view_info;
+    mismatched_color_view_info.image = mismatched_color_image;
+    mismatched_color_view_info.format = 43;
+    var mismatched_color_view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(device, &mismatched_color_view_info, null, &mismatched_color_view));
+    var mismatched_format_attachments = [_]usize{ mismatched_color_view, depth_view };
+    bad_framebuffer_info = framebuffer_info;
+    bad_framebuffer_info.attachments = &mismatched_format_attachments;
+    try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &bad_framebuffer_info, null, &unpublished));
+    var mismatched_depth_info = mismatched_color_info;
+    mismatched_depth_info.usage = 0x20;
+    var mismatched_depth_image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(device, &mismatched_depth_info, null, &mismatched_depth_image));
+    var mismatched_depth_view_info = mismatched_color_view_info;
+    mismatched_depth_view_info.image = mismatched_depth_image;
+    mismatched_depth_view_info.subresource_range.aspect_mask = 2;
+    var mismatched_depth_view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(device, &mismatched_depth_view_info, null, &mismatched_depth_view));
+    var mismatched_depth_attachments = [_]usize{ view, mismatched_depth_view };
+    bad_framebuffer_info.attachments = &mismatched_depth_attachments;
+    try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &bad_framebuffer_info, null, &unpublished));
+    bad_framebuffer_info = framebuffer_info;
+    bad_framebuffer_info.width = 9;
+    try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &bad_framebuffer_info, null, &unpublished));
+    bad_framebuffer_info = framebuffer_info;
+    bad_framebuffer_info.layers = 2;
+    try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &bad_framebuffer_info, null, &unpublished));
+    const render_pass_object = validRenderPassLocked(render_pass).?;
+    render_pass_object.owner.generation += 1;
+    try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &framebuffer_info, null, &unpublished));
+    render_pass_object.owner.generation -= 1;
+    const color_view_object = validImageViewLocked(view).?;
+    color_view_object.owner = stale_device;
+    try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &framebuffer_info, null, &unpublished));
+    color_view_object.owner = device;
+    var multisample_descriptions = attachment_descriptions;
+    multisample_descriptions[0].samples = 2;
+    var multisample_render_info = render_pass_info;
+    multisample_render_info.attachments = &multisample_descriptions;
+    var multisample_render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(device, &multisample_render_info, null, &multisample_render_pass));
+    multisample_descriptions[0].samples = 1;
+    try std.testing.expectEqual(@as(u32, 2), validRenderPassLocked(multisample_render_pass).?.framebuffer_attachments[0].samples);
+    bad_framebuffer_info = framebuffer_info;
+    bad_framebuffer_info.render_pass = multisample_render_pass;
+    try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &bad_framebuffer_info, null, &unpublished));
+    var malformed_subpass = subpass;
+    malformed_subpass.depth_stencil_attachment = &color_ref;
+    var malformed_render_info = render_pass_info;
+    malformed_render_info.subpasses = @ptrCast(&malformed_subpass);
+    try std.testing.expectEqual(Result.error_initialization_failed, createRenderPass(device, &malformed_render_info, null, &unpublished));
+    const framebuffer_states_before_oom = framebuffer_state;
+    test_allocations_before_failure = 0;
+    try std.testing.expectEqual(Result.error_out_of_host_memory, createFramebuffer(device, &framebuffer_info, null, &unpublished));
+    test_allocations_before_failure = null;
+    try std.testing.expectEqual(missing_output_before, unpublished);
+    try std.testing.expectEqualSlices(SlotState, &framebuffer_states_before_oom, &framebuffer_state);
     try std.testing.expectEqual(Result.success, createFramebuffer(device, &framebuffer_info, null, &framebuffer));
 
     var opaque_handle: usize = 0;
@@ -5202,7 +5332,7 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     destroyFence(ctx.device, fence, null);
     try std.testing.expectEqual(Result.error_initialization_failed, getFenceStatus(ctx.device, fence));
 
-    var extreme = ImageObj{ .owner = ctx.device, .width = std.math.maxInt(u32), .height = std.math.maxInt(u32), .format = 37, .usage = 3, .layout = 0 };
+    var extreme = ImageObj{ .owner = ctx.device, .width = std.math.maxInt(u32), .height = std.math.maxInt(u32), .array_layers = 1, .samples = 1, .format = 37, .usage = 3, .layout = 0 };
     try std.testing.expect(imageByteSize(&extreme) == null);
     var extreme_region = BufferImageCopy{ .buffer_offset = std.math.maxInt(u64) - 3, .buffer_row_length = std.math.maxInt(u32), .buffer_image_height = std.math.maxInt(u32), .image_subresource = .{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = std.math.maxInt(u32), .height = std.math.maxInt(u32), .depth = 1 } };
     try std.testing.expect(bufferImageEnd(extreme_region) == null);
