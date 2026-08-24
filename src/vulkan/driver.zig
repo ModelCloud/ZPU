@@ -3568,9 +3568,14 @@ test "vkcube presentation path records submits and presents two swapchain images
     var fragment_shader: usize = 0;
     try std.testing.expectEqual(Result.success, createShaderModule(device, &shader_info, null, &vertex_shader));
     try std.testing.expectEqual(Result.success, createShaderModule(device, &shader_info, null, &fragment_shader));
-    const stages = [_]PipelineShaderStageCreateInfo{
-        .{ .s_type = 18, .p_next = null, .flags = 0, .stage = 1, .module = vertex_shader, .name = "main", .specialization_info = null },
-        .{ .s_type = 18, .p_next = null, .flags = 0, .stage = 16, .module = fragment_shader, .name = "main", .specialization_info = null },
+    var vertex_entry = [_:0]u8{ 'm', 'a', 'i', 'n' };
+    var fragment_entry = [_:0]u8{ 'm', 'a', 'i', 'n' };
+    var specialization_data = [_]u8{ 1, 2, 3, 4 };
+    var specialization_entry = SpecializationMapEntry{ .constant_id = 7, .offset = 0, .size = 4 };
+    var specialization = SpecializationInfo{ .map_entry_count = 1, .map_entries = @ptrCast(&specialization_entry), .data_size = specialization_data.len, .data = &specialization_data };
+    var stages = [_]PipelineShaderStageCreateInfo{
+        .{ .s_type = 18, .p_next = null, .flags = 0, .stage = 1, .module = vertex_shader, .name = &vertex_entry, .specialization_info = &specialization },
+        .{ .s_type = 18, .p_next = null, .flags = 0, .stage = 16, .module = fragment_shader, .name = &fragment_entry, .specialization_info = null },
     };
     const vertex_input = PipelineVertexInputStateCreateInfo{ .s_type = 19, .p_next = null, .flags = 0, .binding_count = 0, .bindings = null, .attribute_count = 0, .attributes = null };
     const input_assembly = PipelineInputAssemblyStateCreateInfo{ .s_type = 20, .p_next = null, .flags = 0, .topology = 3, .primitive_restart_enable = 0 };
@@ -3587,6 +3592,17 @@ test "vkcube presentation path records submits and presents two swapchain images
     var pipelines: [1]usize = undefined;
     try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&pipeline_info), null, &pipelines));
     const baseline_pipeline = validGraphicsPipelineLocked(pipelines[0]).?;
+    var caller_independent = try baseline_pipeline.canonical.clone();
+    defer caller_independent.deinit();
+    stages[0].module = 0;
+    vertex_entry[0] = 'x';
+    specialization_data[0] = 0xff;
+    specialization_entry.constant_id = 99;
+    try std.testing.expect(baseline_pipeline.canonical.eql(&caller_independent));
+    stages[0].module = vertex_shader;
+    vertex_entry[0] = 'm';
+    specialization_data[0] = 1;
+    specialization_entry.constant_id = 7;
     const fragment_object = findLiveHandle(ShaderModuleObj, fragment_shader, &shader_module_objects, &shader_module_state).?;
     const original_bound = fragment_object.module.words[3];
     fragment_object.module.words[3] = original_bound + 1;
