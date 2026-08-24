@@ -107,25 +107,31 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&limited_cpus_topology_tests.step);
     test_step.dependOn(&test_api_inventory.step);
 
+    const behavior_module = b.createModule(.{
+        .root_source_file = b.path("src/vulkan/driver.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    behavior_module.link_libc = true;
+    behavior_module.linkSystemLibrary("xcb", .{});
     const behavior_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/vulkan/driver.zig"),
-            .target = b.graph.host,
-            .optimize = .Debug,
-        }),
+        .root_module = behavior_module,
     });
     const run_behavior = b.addRunArtifact(behavior_tests);
     run_behavior.step.dependOn(&require_limited.step);
     const behavior_step = b.step("behavior", "Require every instrumented ICD behavioral requirement");
     behavior_step.dependOn(&run_behavior.step);
 
+    const coverage_module = b.createModule(.{
+        .root_source_file = b.path("src/vulkan/driver.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    coverage_module.link_libc = true;
+    coverage_module.linkSystemLibrary("xcb", .{});
     const coverage_tests = b.addTest(.{
         .name = "zpu-icd-coverage-tests",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/vulkan/driver.zig"),
-            .target = b.graph.host,
-            .optimize = .Debug,
-        }),
+        .root_module = coverage_module,
         .use_llvm = true,
     });
     const driver_path = b.pathFromRoot("src/vulkan/driver.zig");
