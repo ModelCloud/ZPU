@@ -15,7 +15,9 @@ pub const Rate = struct {
         return .{ .numerator = numerator / divisor, .denominator = denominator / divisor };
     }
 
-    pub fn hz120() Rate { return .{ .numerator = default_hz, .denominator = 1 }; }
+    pub fn hz120() Rate {
+        return .{ .numerator = default_hz, .denominator = 1 };
+    }
 };
 
 pub const Clock = struct {
@@ -27,7 +29,9 @@ pub const Clock = struct {
         return .{ .epoch_ns = now_ns, .rate = rate };
     }
 
-    pub fn init120(now_ns: u64) Clock { return init(now_ns, Rate.hz120()); }
+    pub fn init120(now_ns: u64) Clock {
+        return init(now_ns, Rate.hz120());
+    }
 
     pub fn deadline(self: Clock) u64 {
         const ticks_ns = std.math.mul(u128, self.tick, ns_per_second) catch return std.math.maxInt(u64);
