@@ -30,8 +30,45 @@ The comparison rejects unknown fields, malformed/non-finite data, schema or work
 
 Append controlled results with `tools/benchmark_history.py`; it refuses dirty worktrees, abbreviated or mismatched commits, untrusted fingerprints, malformed or non-oracle reports, duplicate source commits, and results outside the physical-core gate. Entries are append-only and name the exact benchmarked source commit; the commit containing the append follows it.
 
+## Four-worker CPU fanout
+
+`tools/cpu-fanout.sh` partitions this host into exactly four concurrent experiment or optimization workers without letting two workers share a physical core. It derives the effective allowed cpuset at run time from the caller's `sched_getaffinity` mask (`taskset -pc $$`) intersected with `/sys/fs/cgroup/cpuset.cpus.effective` when that file is readable, so LXD and cgroup restrictions narrow the partition instead of being ignored. It then reads `lscpu -p=CPU,CORE,SOCKET,ONLINE`, drops offline CPUs, groups the remaining logical CPUs by physical `(socket, core)`, and keeps the lowest logical CPU of each physical core. SMT siblings are therefore never split across workers: a duplicate thread is left out entirely rather than handed to a second worker.
+
+The surviving representatives are ordered by socket then core, so each worker receives a topologically adjacent run of cores. The partition uses `floor(physical_core_count / 4)` cores per worker; surplus cores beyond `4 x floor(physical_core_count / 4)` and every duplicate SMT thread stay unused. Non-contiguous CPU ids are supported throughout — nothing assumes `0..n-1`.
+
+Inspect the partition:
+
+```sh
+tools/cpu-fanout.sh --plan
+```
+
+It prints `allowed_cpus`, `physical_cores`, `workers`, `cores_per_worker`, `workerN`, `workerN_cores` (the `socket:core` identity behind each CPU), `unused`, and `thread_cap`.
+
+Run one worker, or fan a command out to all four concurrently:
+
+```sh
+tools/cpu-fanout.sh --worker 0 -- zig build benchmark -Doptimize=ReleaseFast -- --json
+tools/cpu-fanout.sh --all -- zig build benchmark -Doptimize=ReleaseFast -- --json
+```
+
+Add `--dry-run` to print the exact command without running it. Each worker is launched as `taskset -c <group> tools/limited-cpus.sh <command>` with `ZPU_MAX_THREADS` set to the worker's core count, so the existing limited-cpus safety contract still owns the canonical marker, the selection, and the cap that `tools/require-limited.sh` verifies. Because that contract caps threads at eight, a host wide enough for groups larger than eight keeps the full group affinity but reports a thread cap of eight; the wrapper then narrows the selection to eight cores and the gate stays consistent. Each command additionally sees `ZPU_FANOUT_WORKER`, `ZPU_FANOUT_WORKERS`, and `ZPU_FANOUT_GROUP_CPUS`. `--all` exits non-zero if any worker fails and names the failing worker.
+
+The tool refuses, with a diagnostic naming the effective cpuset, when fewer than four usable physical cores survive (exit 69), when the topology source is unreadable or has no CPU rows (exit 66), when a CPU list is malformed or a worker index is outside `0..3` (exit 64), and when a partition is not four equal-size, pairwise-disjoint groups (exit 70).
+
+### Comparability rules
+
+Fanout is a throughput tool for running four independent experiments at once. It is not a way to produce comparable performance numbers.
+
+* A fanout result is comparable only with another result from the **same worker index on the same host, same partition, and same `cores_per_worker`**. `--plan` output is the record of that partition; capture it alongside the result.
+* Never compare a fanout result with a `tools/limited-cpus.sh` result, or a worker-0 result with a worker-3 result. Different physical cores mean different cache slices, different memory-controller distance, and on multi-socket hosts different NUMA nodes.
+* Never commit a fanout result as a controlled baseline. Baselines under `## Controlled baseline workflow` require a quiet machine; three sibling workers saturating the rest of the package is the opposite of that. Baseline capture and comparison stay on `tools/limited-cpus.sh`.
+* `tools/benchmark_history.py` remains the only path for appending controlled results, and fanout runs are not eligible for it.
+* Use fanout for parameter sweeps, A/B search, and optimization iteration where relative ranking within one worker matters and absolute rates do not.
+
+`test/cpu_fanout.sh` proves the partition against checked-in `lscpu` fixtures covering non-contiguous ids, offline CPUs, SMT duplicates, surplus cores, restricted cgroup cpusets, the four-core minimum, the eight-thread safety cap, pairwise disjointness, four equal groups, and every failure diagnostic. It runs planner and `--dry-run` paths only, so it launches no workload and cannot escape the limiter that invoked it. `zig build test` runs it behind `tools/require-limited.sh`, so CI covers it through the existing `zig build test` step.
+
 ## Thread limit
 
-Every runnable repository correctness, behavior, coverage, pixel, transfer, and benchmark gate is invoked through `tools/limited-cpus.sh`. On Linux it intersects the caller's allowed affinity with `lscpu`'s online topology, chooses at most eight distinct physical cores with one logical CPU per core, applies `taskset`, overwrites fingerprint variables from `lscpu`/sysfs, exports `ZPU_MAX_THREADS`, and inserts Zig's explicit `-jN` before any application `--` arguments. The benchmark independently verifies affinity from `/proc`, topology from sysfs, and CPU model from `/proc/cpuinfo`, so forged environment values cannot authorize a baseline.
+Every runnable repository correctness, behavior, coverage, pixel, transfer, and benchmark gate is invoked through `tools/limited-cpus.sh`. On Linux it intersects the caller's allowed affinity with `lscpu`'s online topology, chooses at most eight distinct physical cores with one logical CPU per core, applies `taskset`, overwrites fingerprint variables from `lscpu`/sysfs, exports `ZPU_MAX_THREADS`, and inserts Zig's explicit `-jN` before any application `--` arguments. The benchmark independently verifies affinity from `/proc`, topology from sysfs, and CPU model from `/proc/cpuinfo`, so forged environment values cannot authorize a baseline. The exported `ZPU_TOPOLOGY` fingerprint therefore names each selected CPU's kernel `physical_package_id`/`core_id` read from sysfs; `lscpu`'s `CORE` column is a dense renumbering of those ids and is used only for grouping and for fixture-driven tests.
 
 Direct test-like build steps require the canonical marker, exact limited affinity, and cap or refuse with directions to the wrapper. Zig may still parse the build graph or compile prerequisites before a dependency refusal; no repository test workload executes, but only the wrapper's `-jN` controls build-runner job concurrency from process start. Therefore the wrapper—not a direct command—is the supported compile-and-run entry point. `test/observe_zig_threads.sh` uses fresh caches to sustain a real Zig build/test workload and samples `/proc` task counts and descendant affinity; it requires no process to exceed one coordinator plus eight workers. Fewer cores are supported and an empty intersection fails.

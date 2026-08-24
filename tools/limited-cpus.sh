@@ -28,10 +28,25 @@ export ZPU_SELECTED_CPUS="$selected"
 export ZPU_LIMITED="physical-core-v1"
 # Trusted host values intentionally overwrite caller-provided fingerprint data.
 export ZPU_CPU_MODEL="$(lscpu | awk -F: '/^Model name:/{sub(/^[ \t]+/,"",$2); print $2; exit}')"
-export ZPU_TOPOLOGY="$(${topology_cmd[@]} | awk -F, -v selected="$selected" '
+# lscpu's CORE column is a dense renumbering, not the kernel core_id the
+# benchmark reads back from sysfs, so the trusted fingerprint comes from sysfs
+# whenever a real host is being measured. Fixture runs keep using the file.
+if [[ -n "$topology" ]]; then
+  export ZPU_TOPOLOGY="$(${topology_cmd[@]} | awk -F, -v selected="$selected" '
 BEGIN{n=split(selected,a,",");for(i=1;i<=n;i++)wanted[a[i]]=1}
 !/^#/ && NF>=4 && $4=="Y" && wanted[$1+0] {item=$3 ":" $2 "@" $1; out=out (out?";":"") item}
 END{print out}')"
+else
+  ZPU_TOPOLOGY=""
+  IFS=, read -ra selected_cpus <<<"$selected"
+  for cpu in "${selected_cpus[@]}"; do
+    package_file="/sys/devices/system/cpu/cpu$cpu/topology/physical_package_id"
+    core_file="/sys/devices/system/cpu/cpu$cpu/topology/core_id"
+    [[ -r "$package_file" && -r "$core_file" ]] || { echo "missing sysfs topology for cpu $cpu" >&2; exit 70; }
+    ZPU_TOPOLOGY+="${ZPU_TOPOLOGY:+;}$(<"$package_file"):$(<"$core_file")@$cpu"
+  done
+  export ZPU_TOPOLOGY
+fi
 [[ -n "$ZPU_CPU_MODEL" && -n "$ZPU_TOPOLOGY" ]] || { echo "trusted host fingerprint collection failed" >&2; exit 70; }
 printf 'ZPU affinity: cpus=%s physical_cores=%s max_threads=%s\n' "$selected" "$count" "$ZPU_MAX_THREADS" >&2
 

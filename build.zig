@@ -65,6 +65,9 @@ pub fn build(b: *std.Build) void {
     benchmark_history_tests.addArtifactArg(benchmark);
     benchmark_history_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&benchmark_history_tests.step);
+    const cpu_fanout_tests = b.addSystemCommand(&.{"test/cpu_fanout.sh"});
+    cpu_fanout_tests.step.dependOn(&require_limited.step);
+    test_step.dependOn(&cpu_fanout_tests.step);
 
     const behavior_tests = b.addTest(.{
         .root_module = b.createModule(.{
