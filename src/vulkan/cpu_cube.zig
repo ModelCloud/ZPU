@@ -3,6 +3,16 @@ const std = @import("std");
 pub const Viewport = extern struct { x: f32, y: f32, width: f32, height: f32, min_depth: f32, max_depth: f32 };
 pub const Rect = extern struct { x: i32, y: i32, width: u32, height: u32 };
 
+/// Exact work counters for the deliberately narrow vkcube CPU rasterizer.
+pub const Counters = struct {
+    triangles_submitted: u64 = 0,
+    triangles_rasterized: u64 = 0,
+    fragments_tested: u64 = 0,
+    fragments_covered: u64 = 0,
+    depth_tests_passed: u64 = 0,
+    color_writes: u64 = 0,
+};
+
 const Vertex = struct { screen: [3]f32, clip_w: f32, uv: [2]f32 };
 
 fn readFloat(bytes: []const u8, offset: usize) f32 {
@@ -58,8 +68,9 @@ fn shade(texture: []const u8, texture_width: u32, texture_height: u32, u: f32, v
     return .{ rgb[2], rgb[1], rgb[0], texture[offset + 3] };
 }
 
-pub fn draw(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect) usize {
+pub fn drawCounted(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, counters: *Counters) usize {
     if (vertex_count == 0 or vertex_count % 3 != 0 or uniform.len < 64 + @as(usize, vertex_count) * 32 or target.len != @as(usize, width) * height * 4 or depth.len < @as(usize, width) * height * 4 or texture.len != @as(usize, texture_width) * texture_height * 4 or texture_width == 0 or texture_height == 0) return 0;
+    counters.triangles_submitted += vertex_count / 3;
     var pixels_written: usize = 0;
     var triangle: u32 = 0;
     while (triangle < vertex_count) : (triangle += 3) {
@@ -71,6 +82,7 @@ pub fn draw(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const
         const p2 = [2]f32{ v2.screen[0], v2.screen[1] };
         const area = edge(p0, p1, p2);
         if (!std.math.isFinite(area) or @abs(area) < 0.00001) continue;
+        counters.triangles_rasterized += 1;
 
         const dx1 = v1.screen[0] - v0.screen[0];
         const dy1 = v1.screen[1] - v0.screen[1];
@@ -93,27 +105,36 @@ pub fn draw(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const
         while (y < max_y) : (y += 1) {
             var x = min_x;
             while (x < max_x) : (x += 1) {
+                counters.fragments_tested += 1;
                 const sample = [2]f32{ @as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5 };
                 const b0 = edge(p1, p2, sample) / area;
                 const b1 = edge(p2, p0, sample) / area;
                 const b2 = edge(p0, p1, sample) / area;
                 if (b0 < 0 or b1 < 0 or b2 < 0) continue;
+                counters.fragments_covered += 1;
                 const inverse_w = b0 / v0.clip_w + b1 / v1.clip_w + b2 / v2.clip_w;
                 if (@abs(inverse_w) < 0.000001) continue;
                 const z = (b0 * v0.screen[2] / v0.clip_w + b1 * v1.screen[2] / v1.clip_w + b2 * v2.screen[2] / v2.clip_w) / inverse_w;
                 const pixel_index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
                 const depth_offset = pixel_index * 4;
                 if (z > readFloat(depth, depth_offset)) continue;
+                counters.depth_tests_passed += 1;
                 writeFloat(depth, depth_offset, z);
                 const u = (b0 * v0.uv[0] / v0.clip_w + b1 * v1.uv[0] / v1.clip_w + b2 * v2.uv[0] / v2.clip_w) / inverse_w;
                 const v = (b0 * v0.uv[1] / v0.clip_w + b1 * v1.uv[1] / v1.clip_w + b2 * v2.uv[1] / v2.clip_w) / inverse_w;
                 const color = shade(texture, texture_width, texture_height, u, v, light);
                 @memcpy(target[pixel_index * 4 ..][0..4], &color);
+                counters.color_writes += 1;
                 pixels_written += 1;
             }
         }
     }
     return pixels_written;
+}
+
+pub fn draw(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect) usize {
+    var counters = Counters{};
+    return drawCounted(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, &counters);
 }
 
 test "one textured triangle updates color and depth" {
