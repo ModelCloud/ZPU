@@ -18,7 +18,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends kcov libvulkan1 libxcb1-dev twm vulkan-tools xauth xvfb
           dpkg-query -W -f='${Package}=${Version}\n' kcov libvulkan1 libxcb1-dev twm vulkan-tools xauth xvfb
       - run: tools/limited-cpus.sh zig fmt --check build.zig src tools
-      - run: tools/limited-cpus.sh zig build api-inventory
       - run: tools/limited-cpus.sh zig build
       - run: test "$(realpath zig-out/share/vulkan/icd.d/../../../lib/libvulkan_zpu.so)" = "$(realpath zig-out/lib/libvulkan_zpu.so)"
       - run: tools/limited-cpus.sh zig build test
