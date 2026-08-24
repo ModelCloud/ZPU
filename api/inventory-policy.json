@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "target_api_version": "1.4.360",
+  "registry": {
+    "repository": "https://github.com/KhronosGroup/Vulkan-Headers",
+    "tag": "v1.4.360",
+    "tag_object": "95869cacb54b38287a706e36950f628829a5541a",
+    "commit": "0b7f383797fa7be53ae28213e001ae60668ee511",
+    "path": "registry/vk.xml",
+    "sha256": "65d829561fa4b9e01a15e1327d9e6744f66b025b08c5c7ad13636bf0a8b15c62"
+  },
+  "profile_registry": {
+    "repository": "https://github.com/KhronosGroup/Vulkan-Profiles",
+    "tag": "v1.4.360",
+    "commit": "6c1d0b544b1a432bc33d7fb4c8a6a0a71c01dcfd",
+    "path": "profiles/Khronos/VP_KHR_roadmap.json",
+    "sha256": "41d8e5b2421bcd78e36d346de18933f5e8ac8e13a82bbcb197bed3fb7fec066d",
+    "profile": "VP_KHR_roadmap_2026"
+  },
+  "chromium_required_extensions": [
+    {
+      "name": "VK_KHR_external_memory_capabilities",
+      "scope": "instance",
+      "justification": "Chromium ozone/headless always passes this promoted name to instance creation.",
+      "source": "chromium_compat.md#2-instance-extensions--ozoneheadless"
+    },
+    {
+      "name": "VK_KHR_external_semaphore_capabilities",
+      "scope": "instance",
+      "justification": "Chromium ozone/headless always passes this promoted name to instance creation.",
+      "source": "chromium_compat.md#2-instance-extensions--ozoneheadless"
+    },
+    {
+      "name": "VK_KHR_surface",
+      "scope": "instance",
+      "justification": "Chromium ozone/headless requires it when using a surface.",
+      "source": "chromium_compat.md#2-instance-extensions--ozoneheadless"
+    },
+    {
+      "name": "VK_EXT_headless_surface",
+      "scope": "instance",
+      "justification": "Chromium ozone/headless requires it when using a surface.",
+      "source": "chromium_compat.md#2-instance-extensions--ozoneheadless"
+    },
+    {
+      "name": "VK_KHR_swapchain",
+      "scope": "device",
+      "justification": "Chromium ozone/headless requires it when using a surface.",
+      "source": "chromium_compat.md#3-device-extensions--ozoneheadless"
+    }
+  ],
+  "deferred_optional_extensions": [
+    { "name": "VK_KHR_external_memory", "scope": "device", "reason": "Chromium can run without this optional external-memory path." },
+    { "name": "VK_KHR_external_memory_fd", "scope": "device", "reason": "Requires a complete and tested Linux fd import/export implementation." },
+    { "name": "VK_KHR_external_semaphore", "scope": "device", "reason": "Chromium can run without this optional external-semaphore path." },
+    { "name": "VK_KHR_external_semaphore_fd", "scope": "device", "reason": "Requires correct Linux sync_file semantics." },
+    { "name": "VK_KHR_incremental_present", "scope": "device", "reason": "Optional optimization; no implementation exists yet." },
+    { "name": "VK_EXT_image_drm_format_modifier", "scope": "device", "reason": "Must land with tested DRM modifier behavior and dma-buf support." },
+    { "name": "VK_EXT_external_memory_dma_buf", "scope": "device", "reason": "Depends on a safe pre-sandbox udmabuf capability probe." }
+  ]
+}

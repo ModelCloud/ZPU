@@ -4,6 +4,13 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const require_limited = b.addSystemCommand(&.{"tools/require-limited.sh"});
+    const validate_api_inventory = b.addSystemCommand(&.{ "python3", "tools/api_inventory.py" });
+    validate_api_inventory.step.dependOn(&require_limited.step);
+    const test_api_inventory = b.addSystemCommand(&.{"test/api_inventory.sh"});
+    test_api_inventory.step.dependOn(&require_limited.step);
+    const api_inventory_step = b.step("api-inventory", "Validate the pinned Vulkan target inventory and failure fixtures");
+    api_inventory_step.dependOn(&validate_api_inventory.step);
+    api_inventory_step.dependOn(&test_api_inventory.step);
     const zpu = b.addModule("zpu", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -71,6 +78,7 @@ pub fn build(b: *std.Build) void {
     const limited_cpus_topology_tests = b.addSystemCommand(&.{"test/limited_cpus_topology.sh"});
     limited_cpus_topology_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&limited_cpus_topology_tests.step);
+    test_step.dependOn(&test_api_inventory.step);
 
     const behavior_tests = b.addTest(.{
         .root_module = b.createModule(.{
