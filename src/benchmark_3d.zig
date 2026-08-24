@@ -2,13 +2,13 @@ const std = @import("std");
 const builtin = @import("builtin");
 const cube = @import("vulkan/cpu_cube.zig");
 
-pub const schema_version: u32 = 2;
-pub const workload_id = "zpu-vkcube-cpu-3d-v2-320x240-cube12";
-pub const width: u32 = 320;
-pub const height: u32 = 240;
-pub const reference_checksum: u64 = 0xb63a7b2fb2f50601;
+pub const schema_version: u32 = 3;
+pub const workload_id = "zpu-vkcube-cpu-3d-v3-800x600-cube12";
+pub const width: u32 = 800;
+pub const height: u32 = 600;
+pub const reference_checksum: u64 = 0x37d978fe1c101415;
 
-const Percentiles = struct { p50_ns: u64, p95_ns: u64, p99_ns: u64, max_ns: u64, cv: f64 };
+const Percentiles = struct { p50_ns: u64, p95_ns: u64, p99_ns: u64, p999_ns: u64, max_ns: u64, cv: f64 };
 const Metric = struct {
     name: []const u8 = "vkcube_cpu_cube",
     backend: []const u8 = "vkcube-specific-cpu",
@@ -24,7 +24,7 @@ const Report = struct {
     schema_version: u32 = schema_version,
     workload_id: []const u8 = workload_id,
     renderer_scope: []const u8 = "existing vkcube-specific cpu_cube renderer; not general SPIR-V",
-    resolution: []const u8 = "320x240",
+    resolution: []const u8 = "800x600",
     warmup_iterations: u32,
     sample_count: u32,
     source_commit: []const u8,
@@ -76,9 +76,9 @@ fn render(target: []u8, depth: []u8, source: *const Scene, counters: *cube.Count
     return checksum(target);
 }
 
-fn percentile(values: []u64, numerator: usize) u64 {
+fn percentile(values: []u64, numerator: usize, denominator: usize) u64 {
     std.mem.sort(u64, values, {}, std.sort.asc(u64));
-    const rank = (@as(u128, values.len) * numerator + 99) / 100;
+    const rank = (@as(u128, values.len) * numerator + denominator - 1) / denominator;
     return values[@intCast(rank - 1)];
 }
 
@@ -110,9 +110,11 @@ fn run(io: std.Io, allocator: std.mem.Allocator, smoke: bool, source_commit: []c
     var a = timings;
     var b = timings;
     var c = timings;
-    const p50 = percentile(a[0..samples], 50);
-    const p95 = percentile(b[0..samples], 95);
-    const p99 = percentile(c[0..samples], 99);
+    var d = timings;
+    const p50 = percentile(a[0..samples], 50, 100);
+    const p95 = percentile(b[0..samples], 95, 100);
+    const p99 = percentile(c[0..samples], 99, 100);
+    const p999 = percentile(d[0..samples], 999, 1000);
     var total: u128 = 0;
     var maximum: u64 = 0;
     for (timings[0..samples]) |ns| {
@@ -128,7 +130,7 @@ fn run(io: std.Io, allocator: std.mem.Allocator, smoke: bool, source_commit: []c
     const cv = @sqrt(squared / @as(f64, @floatFromInt(samples))) / mean;
     const fps = 1_000_000_000.0 * @as(f64, @floatFromInt(samples)) / @as(f64, @floatFromInt(total));
     const hex = try std.fmt.allocPrint(allocator, "{x:0>16}", .{oracle});
-    return .{ .warmup_iterations = warmups, .sample_count = samples, .source_commit = source_commit, .utc = utc, .metric = .{ .iterations = samples, .checksum = oracle, .checksum_hex = hex, .fps = fps, .triangles_s = fps * 12.0, .frame = .{ .p50_ns = p50, .p95_ns = p95, .p99_ns = p99, .max_ns = maximum, .cv = cv }, .counters_per_frame = expected_counters.? } };
+    return .{ .warmup_iterations = warmups, .sample_count = samples, .source_commit = source_commit, .utc = utc, .metric = .{ .iterations = samples, .checksum = oracle, .checksum_hex = hex, .fps = fps, .triangles_s = fps * 12.0, .frame = .{ .p50_ns = p50, .p95_ns = p95, .p99_ns = p99, .p999_ns = p999, .max_ns = maximum, .cv = cv }, .counters_per_frame = expected_counters.? } };
 }
 
 pub fn main(init: std.process.Init) !void {

@@ -203,6 +203,7 @@ const SwapchainObj = struct {
     retiring: bool,
     present_mutex: std.c.pthread_mutex_t,
     present_condition: std.c.pthread_cond_t,
+    cadence: ?frame_pacing.Clock,
     transport: xcb_present.Transport,
 };
 const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32 }, cube_draw: struct { framebuffer: *FramebufferObj, descriptors: *DescriptorSetObj, vertex_count: u32, viewport: Viewport, scissor: cpu_cube.Rect }, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 } };
@@ -250,6 +251,11 @@ var generic_handle: usize = 0x10000;
 var mutex: std.atomic.Mutex = .unlocked;
 
 const max_present_entries = 24;
+
+fn synchronousOneCore() bool {
+    const value = std.c.getenv("ZPU_ONE_CORE") orelse return false;
+    return value[0] == '1';
+}
 
 fn releasePresented(context: *anyopaque, image_index: u32) void {
     const swapchain: *SwapchainObj = @ptrCast(@alignCast(context));
@@ -2163,6 +2169,7 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
             .retiring = false,
             .present_mutex = std.c.PTHREAD_MUTEX_INITIALIZER,
             .present_condition = std.c.PTHREAD_COND_INITIALIZER,
+            .cadence = null,
             .transport = transport,
         };
         var created: u32 = 0;
@@ -2287,7 +2294,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         mutex.unlock();
         return .error_initialization_failed;
     };
-    if (!validDeviceLocked(q.owner) or present.swapchain_count == 0 or present.swapchain_count > max_present_entries or present.swapchains == null or present.image_indices == null or (!builtin.is_test and !present_worker.ensureStarted())) {
+    if (!validDeviceLocked(q.owner) or present.swapchain_count == 0 or present.swapchain_count > max_present_entries or present.swapchains == null or present.image_indices == null or (!builtin.is_test and !synchronousOneCore() and !present_worker.ensureStarted())) {
         mutex.unlock();
         return .error_initialization_failed;
     }
@@ -2329,7 +2336,22 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
             const image: *ImageObj = @ptrFromInt(swapchain.images[index]);
             _ = xcb_present.present(&swapchain.transport, imageBytes(image));
             releasePresented(swapchain, index);
-        } else if (!present_worker.enqueue(.{ .transport = &swapchain.transport, .pixels = imageBytes(@ptrFromInt(swapchain.images[index])), .context = swapchain, .image_index = index, .release = releasePresented })) {
+        } else if (synchronousOneCore()) {
+            const before = frame_pacing.monotonicNs();
+            if (swapchain.cadence == null) swapchain.cadence = frame_pacing.Clock.init120(before);
+            const deadline = swapchain.cadence.?.deadline();
+            if (deadline > before) frame_pacing.sleepUntil(deadline);
+            const woke = frame_pacing.monotonicNs();
+            swapchain.transport.last.wake_error_ns = @intCast(woke -| deadline);
+            if (!xcb_present.present(&swapchain.transport, imageBytes(@ptrFromInt(swapchain.images[index])))) {
+                releasePresented(swapchain, index);
+                mutex.unlock();
+                return .error_initialization_failed;
+            }
+            swapchain.cadence.?.advance(frame_pacing.monotonicNs());
+            releasePresented(swapchain, index);
+        } else if (!present_worker.enqueue(.{ .transport = &swapchain.transport, .cadence = &swapchain.cadence, .pixels = imageBytes(@ptrFromInt(swapchain.images[index])), .context = swapchain, .image_index = index, .release = releasePresented })) {
+            releasePresented(swapchain, index);
             mutex.unlock();
             return .error_initialization_failed;
         }

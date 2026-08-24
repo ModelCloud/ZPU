@@ -24,7 +24,7 @@ must prove the relationship and reject other intervening changes.
    - Visually inspect the images for the expected scene. A valid PNG header is
      not proof of a successful render.
 
-2. **Twenty-second vkcube video**
+2. **Twenty-second 800x600, 120 FPS vkcube video**
    - Require the project-designated video beneath ignored
      `scratch_tmp/video/`. Prefer an open, high-compression codec and container
      such as VP9 in WebM.
@@ -37,6 +37,10 @@ must prove the relationship and reject other intervening changes.
      otherwise failed captures. Record codec/container, dimensions, duration,
      frame rate/count, byte size, SHA-256, commands, UTC time, and source
      commit.
+   - Require 2400 frames with monotonic PTS, 119–121 visible FPS, mean near
+     8.333 ms, CV <=0.010, p95 <=8.50 ms, p99 <=8.75 ms, p99.9 <=9.0 ms,
+     worst <=10.0 ms, <=1% missed slots, <=1% consecutive duplicates, and
+     zero capture drops. Label Xvfb as synthetic evidence, not scanout proof.
 
 3. **Complete benchmark history**
    - Require the repository's tracked `progress_benchmarks.md` and validate it

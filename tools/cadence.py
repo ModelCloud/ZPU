@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate lossless 60 Hz capture cadence without inventing dropped frames."""
+"""Validate truthful 120 Hz synthetic-Xvfb capture cadence."""
 import argparse
 import hashlib
 import json
@@ -9,7 +9,10 @@ import statistics
 import subprocess
 from pathlib import Path
 
-PERIOD = 1.0 / 60.0
+HZ = 120
+DURATION_SECONDS = 20
+EXPECTED_FRAMES = HZ * DURATION_SECONDS
+PERIOD = 1.0 / HZ
 
 def fail(message):
     raise SystemExit(f"cadence refusal: {message}")
@@ -33,17 +36,18 @@ def metrics(pts, hashes):
     duration = pts[-1] - pts[0] + PERIOD
     visible = (len(hashes) - duplicates) / duration
     return {
-        "packets": len(pts), "duration_s": duration, "visible_fps": visible,
+        "packets": len(pts), "duration_s": duration, "visible_fps": visible, "mean_ms": mean * 1000,
         "p50_ms": percentile(intervals, .50) * 1000,
         "p95_ms": percentile(intervals, .95) * 1000,
         "p99_ms": percentile(intervals, .99) * 1000,
+        "p999_ms": percentile(intervals, .999) * 1000,
         "worst_ms": max(intervals) * 1000,
         "interval_cv": statistics.pstdev(intervals) / mean,
         "missed_deadlines": missed,
         "missed_deadline_pct": 100 * missed / len(intervals),
         "consecutive_duplicates": duplicates,
         "consecutive_duplicate_pct": 100 * duplicates / len(intervals),
-        "monotonic_pts": True, "capture_drops": max(0, 900 - len(pts)),
+        "monotonic_pts": True, "capture_drops": max(0, EXPECTED_FRAMES - len(pts)),
     }
 
 def command_output(*args):
@@ -52,7 +56,7 @@ def command_output(*args):
 def analyze(video):
     probe = json.loads(command_output("ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", str(video)))
     pts = [float(frame["best_effort_timestamp_time"]) for frame in probe.get("frames", [])]
-    md5 = command_output("ffmpeg", "-v", "error", "-i", str(video), "-f", "framemd5", "-")
+    md5 = command_output("ffmpeg", "-v", "error", "-i", str(video), "-fps_mode", "passthrough", "-f", "framemd5", "-")
     hashes = [line.rsplit(",", 1)[-1].strip() for line in md5.splitlines() if line and not line.startswith("#")]
     return metrics(pts, hashes)
 
@@ -78,14 +82,16 @@ def main():
         if saved.get("sha256") != hashlib.sha256(video.read_bytes()).hexdigest(): fail("capture hash mismatch")
         if saved.get("evidence_kind") != "synthetic-xvfb-pacing" or saved.get("physical_scanout") is not False: fail("Xvfb evidence classification missing")
         if not saved.get("affinity", "").startswith("cpu=") or len(saved.get("source_commit", "")) != 40: fail("affinity/commit binding missing")
-        gates = {"packets": saved["packets"] == 900, "visible_fps": saved["visible_fps"] >= 59,
-                 "p50_ms": saved["p50_ms"] <= 17.5, "p95_ms": saved["p95_ms"] <= 20,
-                 "p99_ms": saved["p99_ms"] <= 25, "worst_ms": saved["worst_ms"] <= 33.334,
-                 "interval_cv": saved["interval_cv"] <= .10, "missed_deadline_pct": saved["missed_deadline_pct"] <= 1,
+        gates = {"packets": saved["packets"] == EXPECTED_FRAMES,
+                 "visible_fps": 119.0 <= saved["visible_fps"] <= 121.0,
+                 "mean_ms": abs(saved["mean_ms"] - 1000 / HZ) <= .05,
+                 "p95_ms": saved["p95_ms"] <= 8.50, "p99_ms": saved["p99_ms"] <= 8.75,
+                 "p999_ms": saved["p999_ms"] <= 9.0, "worst_ms": saved["worst_ms"] <= 10.0,
+                 "interval_cv": saved["interval_cv"] <= .010, "missed_deadline_pct": saved["missed_deadline_pct"] <= 1,
                  "consecutive_duplicate_pct": saved["consecutive_duplicate_pct"] <= 1,
                  "capture_drops": saved["capture_drops"] == 0, "monotonic_pts": saved["monotonic_pts"] is True}
         print(json.dumps({"gates": gates, "metrics": metrics_data}, sort_keys=True))
-        if not all(gates.values()): fail("one or more 60 Hz acceptance gates failed")
+        if not all(gates.values()): fail("one or more 120 Hz acceptance gates failed")
         return
     if not all((args.source_commit, args.utc, args.affinity)): fail("creation requires source commit, UTC, and affinity")
     result = dict(metrics_data)
@@ -93,14 +99,14 @@ def main():
         "schema_version": 1, "evidence_kind": "synthetic-xvfb-pacing",
         "physical_scanout": False, "source_commit": args.source_commit,
         "utc": args.utc, "affinity": args.affinity, "capture": str(video),
-        "codec": "ffv1", "resolution": "640x480", "nominal_hz": 60,
+        "codec": "rawvideo", "resolution": "800x600", "nominal_hz": HZ,
         "size_bytes": video.stat().st_size,
         "sha256": hashlib.sha256(video.read_bytes()).hexdigest(),
     })
     Path(args.metadata).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps(metrics_data, sort_keys=True))
-    if result["packets"] != 900 or result["capture_drops"] != 0:
-        fail("capture must contain exactly 900 lossless packets with zero drops")
+    if result["packets"] != EXPECTED_FRAMES or result["capture_drops"] != 0:
+        fail(f"capture must contain exactly {EXPECTED_FRAMES} lossless packets with zero drops")
 
 if __name__ == "__main__":
     main()

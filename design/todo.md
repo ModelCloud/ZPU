@@ -1,5 +1,17 @@
 # ZPU Design TODO
 
+## Locked 120 Hz low-jitter milestone
+
+- [x] Rational 120/1 per-swapchain phase clocks with absolute monotonic deadlines, late-slot skipping, and saturating arithmetic.
+- [x] FIFO ownership through XCB completion, enqueue rollback, and transport-failure release.
+- [x] Cache-local 8x8 vkcube traversal, conservative tile rejection, precomputed reciprocal attributes, and an untiled scalar oracle.
+- [x] Persistent XCB resources and a synchronous `ZPU_ONE_CORE=1` mode without an extra handoff.
+- [ ] Physical scanout validation; Xvfb is synthetic pacing evidence only.
+
+The locked 800x600 CPU-7 gate is 119–121 visible FPS, mean near 8.333 ms,
+CV <=0.010, p95 <=8.50 ms, p99 <=8.75 ms, p99.9 <=9.0 ms, worst <=10.0 ms,
+missed slots and duplicates <=1%, zero capture drops, and monotonic PTS.
+
 ## Parallel rendering architecture
 
 Make ZPU internally massively parallel while preserving standard Vulkan API
