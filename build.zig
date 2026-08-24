@@ -52,6 +52,17 @@ pub fn build(b: *std.Build) void {
     benchmark_step.dependOn(&run_benchmark.step);
     run_benchmark.step.dependOn(&require_limited.step);
 
+    const benchmark_3d = b.addExecutable(.{
+        .name = "zpu-benchmark-3d",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_3d.zig"), .target = target, .optimize = optimize }),
+    });
+    b.installArtifact(benchmark_3d);
+    const run_benchmark_3d = b.addRunArtifact(benchmark_3d);
+    if (b.args) |args| run_benchmark_3d.addArgs(args);
+    run_benchmark_3d.step.dependOn(&require_limited.step);
+    const benchmark_3d_step = b.step("benchmark-3d", "Run the deterministic vkcube-specific CPU 3D benchmark");
+    benchmark_3d_step.dependOn(&run_benchmark_3d.step);
+
     const tests = b.addTest(.{ .root_module = zpu });
     const run_tests = b.addRunArtifact(tests);
     run_tests.step.dependOn(&require_limited.step);
@@ -63,6 +74,12 @@ pub fn build(b: *std.Build) void {
     const run_benchmark_tests = b.addRunArtifact(benchmark_tests);
     run_benchmark_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&run_benchmark_tests.step);
+    const benchmark_3d_tests = b.addTest(.{
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_3d.zig"), .target = b.graph.host, .optimize = .Debug }),
+    });
+    const run_benchmark_3d_tests = b.addRunArtifact(benchmark_3d_tests);
+    run_benchmark_3d_tests.step.dependOn(&require_limited.step);
+    test_step.dependOn(&run_benchmark_3d_tests.step);
     const benchmark_cli_tests = b.addSystemCommand(&.{"bash"});
     benchmark_cli_tests.addFileArg(b.path("test/benchmark_cli.sh"));
     benchmark_cli_tests.addArtifactArg(benchmark);
@@ -72,6 +89,11 @@ pub fn build(b: *std.Build) void {
     benchmark_history_tests.addArtifactArg(benchmark);
     benchmark_history_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&benchmark_history_tests.step);
+    const evidence_tests = b.addSystemCommand(&.{"test/evidence.sh"});
+    evidence_tests.addArtifactArg(benchmark);
+    evidence_tests.addArtifactArg(benchmark_3d);
+    evidence_tests.step.dependOn(&require_limited.step);
+    test_step.dependOn(&evidence_tests.step);
     const cpu_fanout_tests = b.addSystemCommand(&.{"test/cpu_fanout.sh"});
     cpu_fanout_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&cpu_fanout_tests.step);
@@ -149,6 +171,21 @@ pub fn build(b: *std.Build) void {
     verify_cli_coverage.addDirectoryArg(cli_coverage_output);
     verify_cli_coverage.addArg("/src/benchmark_main.zig");
     coverage_step.dependOn(&verify_cli_coverage.step);
+
+    const benchmark_3d_coverage_tests = b.addTest(.{
+        .name = "zpu-benchmark-3d-coverage-tests",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_3d.zig"), .target = b.graph.host, .optimize = .Debug }),
+        .use_llvm = true,
+    });
+    const benchmark_3d_path = b.pathFromRoot("src/benchmark_3d.zig");
+    const collect_benchmark_3d_coverage = b.addSystemCommand(&.{ "kcov", "--clean", b.fmt("--include-path={s}", .{benchmark_3d_path}) });
+    collect_benchmark_3d_coverage.step.dependOn(&require_limited.step);
+    const benchmark_3d_coverage_output = collect_benchmark_3d_coverage.addOutputDirectoryArg("benchmark-3d-coverage");
+    collect_benchmark_3d_coverage.addArtifactArg(benchmark_3d_coverage_tests);
+    const verify_benchmark_3d_coverage = b.addRunArtifact(coverage_verifier);
+    verify_benchmark_3d_coverage.addDirectoryArg(benchmark_3d_coverage_output);
+    verify_benchmark_3d_coverage.addArg("/src/benchmark_3d.zig");
+    coverage_step.dependOn(&verify_benchmark_3d_coverage.step);
 
     const run_demo = b.addRunArtifact(demo);
     run_demo.step.dependOn(&require_limited.step);
@@ -250,4 +287,9 @@ pub fn build(b: *std.Build) void {
     require_vkcube_ready.step.dependOn(b.getInstallStep());
     const vkcube_ready_step = b.step("vkcube-ready", "Require two presented XCB vkcube frames under Xvfb");
     vkcube_ready_step.dependOn(&require_vkcube_ready.step);
+
+    const pr_readiness_command = b.addSystemCommand(&.{"tools/pr_readiness.sh"});
+    pr_readiness_command.step.dependOn(&require_limited.step);
+    const pr_readiness_step = b.step("pr-readiness", "Validate fresh complete benchmark, screenshot, and video evidence");
+    pr_readiness_step.dependOn(&pr_readiness_command.step);
 }

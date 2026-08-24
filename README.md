@@ -19,9 +19,11 @@ zig build xcb-present
 zig build vkcube-visual
 zig build desktop-session
 zig build demo
+zig build benchmark-3d
+zig build pr-readiness
 ```
 
-All repository gates must be run through the Linux physical-core limiter, for example `tools/limited-cpus.sh zig build test`. Benchmark methodology, stable JSON, controlled baseline capture/comparison, tolerances, reproducibility guidance, and the opt-in hardware guard are documented in [docs/benchmarking.md](docs/benchmarking.md). The deferred 3D metric and deterministic-scene contract is in [docs/3d-benchmark-todo.md](docs/3d-benchmark-todo.md); no 3D pipeline or fabricated 3D measurement was added.
+All repository gates must be run through the Linux physical-core limiter, for example `tools/limited-cpus.sh zig build test`. Benchmark methodology, stable JSON, controlled baseline capture/comparison, tolerances, reproducibility guidance, and the opt-in hardware guard are documented in [docs/benchmarking.md](docs/benchmarking.md). The deterministic vkcube-specific 3D benchmark, real 20-second capture, progress table, and commit-bound gate are documented in [docs/pr-readiness.md](docs/pr-readiness.md); this narrow workload is not general SPIR-V.
 
 `tools/limited-cpus.sh zig build api-inventory` validates the pinned Vulkan
 1.4.360 registry and `VP_KHR_roadmap_2026` inputs, regenerates the complete
