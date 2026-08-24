@@ -7,6 +7,7 @@ const host_memory = @import("host_memory.zig");
 const xcb_present = @import("xcb_present.zig");
 const frame_pacing = @import("frame_pacing.zig");
 const frame_lifecycle = @import("frame_lifecycle.zig");
+const present_worker = @import("present_worker.zig");
 pub const Result = enum(i32) { success = 0, not_ready = 1, timeout = 2, incomplete = 5, error_out_of_host_memory = -1, error_initialization_failed = -3, error_memory_map_failed = -5, error_layer_not_present = -6, error_extension_not_present = -7, error_feature_not_present = -8, error_format_not_supported = -11 };
 pub const Fn = ?*const fn () callconv(.c) void;
 pub const Alloc = opaque {};
@@ -248,62 +249,15 @@ var swapchain_state = [_]SlotState{.never} ** 8;
 var generic_handle: usize = 0x10000;
 var mutex: std.atomic.Mutex = .unlocked;
 
-const PresentEntry = struct { swapchain: *SwapchainObj, image_index: u32 };
 const max_present_entries = 24;
-var present_entries: [max_present_entries]PresentEntry = undefined;
-var present_head: usize = 0;
-var present_count: usize = 0;
-var present_mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER;
-var present_condition: std.c.pthread_cond_t = std.c.PTHREAD_COND_INITIALIZER;
-var present_worker_started = false;
 
-fn presentWorker() void {
-    var cadence: ?frame_pacing.Clock = null;
-    while (true) {
-        _ = std.c.pthread_mutex_lock(&present_mutex);
-        while (present_count == 0) _ = std.c.pthread_cond_wait(&present_condition, &present_mutex);
-        const entry = present_entries[present_head];
-        present_head = (present_head + 1) % max_present_entries;
-        present_count -= 1;
-        _ = std.c.pthread_mutex_unlock(&present_mutex);
-
-        const before = frame_pacing.monotonicNs();
-        if (cadence == null) {
-            cadence = frame_pacing.Clock.init(before);
-            cadence.?.advance(before);
-        }
-        const deadline = cadence.?.deadline();
-        if (deadline > before) frame_pacing.sleepUntil(deadline);
-        const image: *ImageObj = @ptrFromInt(entry.swapchain.images[entry.image_index]);
-        _ = xcb_present.present(&entry.swapchain.transport, imageBytes(image));
-        const after = frame_pacing.monotonicNs();
-        cadence.?.advance(after);
-
-        _ = std.c.pthread_mutex_lock(&entry.swapchain.present_mutex);
-        std.debug.assert(frame_lifecycle.release(entry.swapchain.image_states[0..entry.swapchain.image_count], entry.image_index));
-        entry.swapchain.pending -= 1;
-        _ = std.c.pthread_cond_broadcast(&entry.swapchain.present_condition);
-        _ = std.c.pthread_mutex_unlock(&entry.swapchain.present_mutex);
-    }
-}
-
-fn ensurePresentWorkerLocked() bool {
-    if (builtin.is_test) return true;
-    if (present_worker_started) return true;
-    const worker = std.Thread.spawn(.{}, presentWorker, .{}) catch return false;
-    worker.detach();
-    present_worker_started = true;
-    return true;
-}
-
-fn enqueuePresent(entry: PresentEntry) bool {
-    _ = std.c.pthread_mutex_lock(&present_mutex);
-    defer _ = std.c.pthread_mutex_unlock(&present_mutex);
-    if (present_count == max_present_entries) return false;
-    present_entries[(present_head + present_count) % max_present_entries] = entry;
-    present_count += 1;
-    _ = std.c.pthread_cond_signal(&present_condition);
-    return true;
+fn releasePresented(context: *anyopaque, image_index: u32) void {
+    const swapchain: *SwapchainObj = @ptrCast(@alignCast(context));
+    _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
+    std.debug.assert(frame_lifecycle.release(swapchain.image_states[0..swapchain.image_count], image_index));
+    swapchain.pending -= 1;
+    _ = std.c.pthread_cond_broadcast(&swapchain.present_condition);
+    _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
 }
 
 const Requirement = enum(u6) {
@@ -2333,7 +2287,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         mutex.unlock();
         return .error_initialization_failed;
     };
-    if (!validDeviceLocked(q.owner) or present.swapchain_count == 0 or present.swapchain_count > max_present_entries or present.swapchains == null or present.image_indices == null or !ensurePresentWorkerLocked()) {
+    if (!validDeviceLocked(q.owner) or present.swapchain_count == 0 or present.swapchain_count > max_present_entries or present.swapchains == null or present.image_indices == null or (!builtin.is_test and !present_worker.ensureStarted())) {
         mutex.unlock();
         return .error_initialization_failed;
     }
@@ -2374,12 +2328,8 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         if (builtin.is_test) {
             const image: *ImageObj = @ptrFromInt(swapchain.images[index]);
             _ = xcb_present.present(&swapchain.transport, imageBytes(image));
-            _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
-            std.debug.assert(frame_lifecycle.release(swapchain.image_states[0..swapchain.image_count], index));
-            swapchain.pending -= 1;
-            _ = std.c.pthread_cond_broadcast(&swapchain.present_condition);
-            _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
-        } else if (!enqueuePresent(.{ .swapchain = swapchain, .image_index = index })) {
+            releasePresented(swapchain, index);
+        } else if (!present_worker.enqueue(.{ .transport = &swapchain.transport, .pixels = imageBytes(@ptrFromInt(swapchain.images[index])), .context = swapchain, .image_index = index, .release = releasePresented })) {
             mutex.unlock();
             return .error_initialization_failed;
         }
@@ -2665,6 +2615,14 @@ test "XCB surface lifecycle and physical presentation queries" {
     destroyInstance(instance, null);
 }
 
+fn releaseTestSwapchainImage(swapchain: *SwapchainObj) void {
+    frame_pacing.sleepUntil(frame_pacing.monotonicNs() + 2_000_000);
+    _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
+    swapchain.image_states[0] = .available;
+    _ = std.c.pthread_cond_broadcast(&swapchain.present_condition);
+    _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+}
+
 test "vkcube presentation path records submits and presents two swapchain images" {
     const instance_extensions = [_][*:0]const u8{ "VK_KHR_surface", "VK_KHR_xcb_surface" };
     const instance_info = InstanceInfo{ .s_type = 1, .p_next = null, .flags = 0, .app_info = null, .layer_count = 0, .layers = null, .extension_count = instance_extensions.len, .extensions = &instance_extensions };
@@ -2855,6 +2813,59 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.error_out_of_host_memory, allocateDescriptorSets(device, &set_info, &sets));
     descriptor_set_state = saved_descriptor_state;
 
+    const swapchain_object = validSwapchainLocked(swapchain).?;
+    var lifecycle_index: u32 = undefined;
+    try std.testing.expectEqual(Result.success, acquireNextImage(device, swapchain, 0, 0, 0, &lifecycle_index));
+    try std.testing.expectEqual(Result.success, acquireNextImage(device, swapchain, 0, 0, 0, &lifecycle_index));
+    try std.testing.expectEqual(Result.not_ready, acquireNextImage(device, swapchain, 0, 0, 0, &lifecycle_index));
+    try std.testing.expectEqual(Result.timeout, acquireNextImage(device, swapchain, 1_000, 0, 0, &lifecycle_index));
+    const releaser = try std.Thread.spawn(.{}, releaseTestSwapchainImage, .{swapchain_object});
+    try std.testing.expectEqual(Result.success, acquireNextImage(device, swapchain, std.math.maxInt(u64), 0, 0, &lifecycle_index));
+    releaser.join();
+    try std.testing.expectEqual(Result.error_initialization_failed, acquireNextImage(device, 0xdead_beef, 0, 0, 0, &lifecycle_index));
+    try std.testing.expectEqual(Result.error_initialization_failed, acquireNextImage(null, swapchain, 0, 0, 0, &lifecycle_index));
+    try std.testing.expectEqual(Result.error_initialization_failed, acquireNextImage(device, swapchain, 0, 0xdead_beef, 0, &lifecycle_index));
+    try std.testing.expectEqual(Result.error_initialization_failed, acquireNextImage(device, swapchain, 0, 0, 0xdead_beef, &lifecycle_index));
+    try std.testing.expectEqual(Result.error_initialization_failed, acquireNextImage(device, swapchain, 0, 0, 0, null));
+
+    var malformed_present = present;
+    try std.testing.expectEqual(Result.error_initialization_failed, queuePresent(null, &malformed_present));
+    malformed_present.swapchain_count = 0;
+    try std.testing.expectEqual(Result.error_initialization_failed, queuePresent(queue, &malformed_present));
+    malformed_present = present;
+    malformed_present.wait_semaphores = null;
+    try std.testing.expectEqual(Result.error_initialization_failed, queuePresent(queue, &malformed_present));
+    var bad_wait: usize = 0xdead_beef;
+    malformed_present.wait_semaphores = @ptrCast(&bad_wait);
+    try std.testing.expectEqual(Result.error_initialization_failed, queuePresent(queue, &malformed_present));
+    malformed_present.wait_semaphores = @ptrCast(&acquired);
+    try std.testing.expectEqual(Result.error_initialization_failed, queuePresent(queue, &malformed_present));
+    malformed_present = present;
+    malformed_present.wait_semaphore_count = 0;
+    var bad_swapchain: usize = 0xdead_beef;
+    malformed_present.swapchains = @ptrCast(&bad_swapchain);
+    try std.testing.expectEqual(Result.error_initialization_failed, queuePresent(queue, &malformed_present));
+    malformed_present.swapchains = @ptrCast(&swapchain);
+    var bad_index: u32 = 99;
+    malformed_present.image_indices = @ptrCast(&bad_index);
+    try std.testing.expectEqual(Result.error_initialization_failed, queuePresent(queue, &malformed_present));
+    malformed_present.image_indices = @ptrCast(&lifecycle_index);
+    _ = std.c.pthread_mutex_lock(&swapchain_object.present_mutex);
+    swapchain_object.image_states[lifecycle_index] = .available;
+    _ = std.c.pthread_mutex_unlock(&swapchain_object.present_mutex);
+    try std.testing.expectEqual(Result.error_initialization_failed, queuePresent(queue, &malformed_present));
+    try std.testing.expectEqual(Result.success, queueWaitIdle(queue));
+    try std.testing.expectEqual(Result.success, deviceWaitIdle(device));
+    try std.testing.expectEqual(Result.error_initialization_failed, queueWaitIdle(null));
+    try std.testing.expectEqual(Result.error_initialization_failed, deviceWaitIdle(null));
+    var wrong_device: Device = undefined;
+    try std.testing.expectEqual(Result.success, createDevice(physicals[0], &device_info, null, &wrong_device));
+    destroySwapchain(wrong_device, swapchain, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, acquireNextImage(wrong_device, swapchain, 0, 0, 0, &lifecycle_index));
+    destroyDevice(wrong_device, null);
+    destroySwapchain(null, swapchain, null);
+    destroySwapchain(device, 0xdead_beef, null);
+
     destroySemaphore(device, acquired, null);
     destroySemaphore(device, rendered, null);
     destroyFramebuffer(device, framebuffer, null);
@@ -2867,6 +2878,8 @@ test "vkcube presentation path records submits and presents two swapchain images
     destroySwapchain(device, swapchain, null);
     destroyCommandPool(device, pool, null);
     destroyDevice(device, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, queueWaitIdle(queue));
+    try std.testing.expectEqual(Result.error_initialization_failed, deviceWaitIdle(device));
     destroyInstance(instance, null);
 }
 
