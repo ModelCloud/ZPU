@@ -134,13 +134,17 @@ pub fn main(init: std.process.Init) !void {
     var smoke = false;
     var capture: ?[]const u8 = null;
     var compare_path: ?[]const u8 = null;
+    var source_commit: []const u8 = "unbound";
+    var utc: []const u8 = "unbound";
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--json")) json_only = true else if (std.mem.eql(u8, args[i], "--smoke")) smoke = true else if (std.mem.eql(u8, args[i], "--capture") or std.mem.eql(u8, args[i], "--compare")) {
+        if (std.mem.eql(u8, args[i], "--json")) json_only = true else if (std.mem.eql(u8, args[i], "--smoke")) smoke = true else if (std.mem.eql(u8, args[i], "--capture") or std.mem.eql(u8, args[i], "--compare") or std.mem.eql(u8, args[i], "--source-commit") or std.mem.eql(u8, args[i], "--utc")) {
             const is_capture = std.mem.eql(u8, args[i], "--capture");
+            const is_compare = std.mem.eql(u8, args[i], "--compare");
+            const is_commit = std.mem.eql(u8, args[i], "--source-commit");
             i += 1;
             if (i >= args.len) return error.MissingArgument;
-            if (is_capture) capture = args[i] else compare_path = args[i];
+            if (is_capture) capture = args[i] else if (is_compare) compare_path = args[i] else if (is_commit) source_commit = args[i] else utc = args[i];
         } else return error.UnknownArgument;
     }
     const selected = init.environ_map.get("ZPU_SELECTED_CPUS") orelse return error.MissingAffinityFingerprint;
@@ -153,8 +157,9 @@ pub fn main(init: std.process.Init) !void {
     if (requested_cap != cap) return error.ThreadCapAffinityMismatch;
     var metrics: [32]bench.Metric = undefined;
     const count = try bench.benchmark(init.io, &metrics, smoke);
+    const pipeline_metric = try bench.benchmarkPipeline(init.io, smoke);
     if (!std.mem.eql(u8, init.environ_map.get("ZPU_LIMITED") orelse "", "physical-core-v1")) return error.MissingAffinityGate;
-    const report = bench.Report{ .schema_version = bench.schema_version, .workload_id = bench.workload_id, .fingerprint = .{ .arch = @tagName(builtin.cpu.arch), .os = @tagName(builtin.os.tag), .cpu_model = cpu_model, .selected_cpus = selected, .topology = topology, .compiler = builtin.zig_version_string, .build_mode = @tagName(builtin.mode), .max_threads = cap, .limited_gate = "physical-core-v1" }, .warmup_iterations = 1, .sample_count = if (smoke) 3 else 15, .metrics = metrics[0..count] };
+    const report = bench.Report{ .schema_version = bench.schema_version, .workload_id = bench.workload_id, .source_commit = source_commit, .utc = utc, .fingerprint = .{ .arch = @tagName(builtin.cpu.arch), .os = @tagName(builtin.os.tag), .cpu_model = cpu_model, .selected_cpus = selected, .topology = topology, .compiler = builtin.zig_version_string, .build_mode = @tagName(builtin.mode), .max_threads = cap, .limited_gate = "physical-core-v1" }, .warmup_iterations = 1, .sample_count = if (smoke) 3 else 15, .pipeline = pipeline_metric, .metrics = metrics[0..count] };
     try bench.validate(report);
     try bench.guardInRun(report, !smoke);
     const encoded = try emitJson(allocator, report);
@@ -170,13 +175,14 @@ pub fn main(init: std.process.Init) !void {
     const out = &stdout_file.interface;
     if (json_only) try out.writeAll(encoded) else {
         try out.print("ZPU 2D benchmark: {s}\n", .{bench.workload_id});
-        for (report.metrics) |m| try out.print("{s: <26} {s: <7} {d: >9.2} MPix/s {d: >12.2} bytes/s {d: >7.2} modeled-GiB/s {d: >10.0} draws/s {d: >8.1} FPS p50/p95/p99={d}/{d}/{d} ns checksum={s}\n", .{ m.name, m.backend, m.mpix_s, m.bytes_s, m.effective_gib_s, m.draws_s, m.fps, m.frame.p50_ns, m.frame.p95_ns, m.frame.p99_ns, m.checksum_hex });
+        try out.print("pipeline key={d} ns cache-hit={d} ns hits/misses={d}/{d} hit-rate={d:.6}\n", .{ report.pipeline.key_construction_ns, report.pipeline.cache_lookup_ns, report.pipeline.cache_hits, report.pipeline.cache_misses, report.pipeline.cache_hit_rate });
+        for (report.metrics) |m| try out.print("{s: <26} {s: <15} {d: >9.2} MPix/s {d: >12.2} bytes/s {d: >7.2} modeled-GiB/s {d: >10.0} draws/s {d: >8.1} FPS p50/p95/p99/max/CV={d}/{d}/{d}/{d}/{d:.6} checksum={s}\n", .{ m.name, m.backend, m.mpix_s, m.bytes_s, m.effective_gib_s, m.draws_s, m.fps, m.frame.p50_ns, m.frame.p95_ns, m.frame.p99_ns, m.frame.max_ns, m.frame.cv, m.checksum_hex });
     }
     try out.flush();
 }
 
 test "JSON round trip and malformed input" {
-    const r = bench.Report{ .schema_version = bench.schema_version, .workload_id = bench.workload_id, .fingerprint = .{ .arch = "x86_64", .os = "linux", .cpu_model = "cpu", .selected_cpus = "2", .topology = "0:0@2", .compiler = builtin.zig_version_string, .build_mode = @tagName(builtin.mode), .max_threads = 1, .limited_gate = "physical-core-v1" }, .warmup_iterations = 1, .sample_count = 3, .metrics = &[_]bench.Metric{.{ .name = "copy", .backend = "scalar", .iterations = 3, .checksum = 4, .checksum_hex = "0000000000000004", .mpix_s = 1, .bytes_s = 2147483648, .effective_gib_s = 2, .draws_s = 0, .fps = 0, .frame = .{ .p50_ns = 1, .p95_ns = 2, .p99_ns = 3 } }} };
+    const r = bench.Report{ .schema_version = bench.schema_version, .workload_id = bench.workload_id, .source_commit = "unbound", .utc = "unbound", .fingerprint = .{ .arch = "x86_64", .os = "linux", .cpu_model = "cpu", .selected_cpus = "2", .topology = "0:0@2", .compiler = builtin.zig_version_string, .build_mode = @tagName(builtin.mode), .max_threads = 1, .limited_gate = "physical-core-v1" }, .warmup_iterations = 1, .sample_count = 3, .pipeline = .{ .iterations = 3, .key_construction_ns = 1, .cache_lookup_ns = 1, .cache_hits = 3, .cache_misses = 1, .cache_hit_rate = 0.75 }, .metrics = &[_]bench.Metric{.{ .name = "copy", .backend = "scalar", .iterations = 3, .checksum = 4, .checksum_hex = "0000000000000004", .mpix_s = 1, .bytes_s = 2147483648, .effective_gib_s = 2, .draws_s = 0, .fps = 0, .frame = .{ .p50_ns = 1, .p95_ns = 2, .p99_ns = 3, .max_ns = 3, .cv = 0.5 } }} };
     const bytes = try emitJson(std.testing.allocator, r);
     defer std.testing.allocator.free(bytes);
     var parsed = try parseBaseline(std.testing.allocator, bytes);

@@ -32,7 +32,7 @@ def sha256(path):
 def run(*args): return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT)
 
 def validate_3d(report):
-    if report.get("schema_version") != 1 or report.get("workload_id") != "zpu-vkcube-cpu-3d-v1-320x240-cube12": fail("3D schema/workload mismatch")
+    if report.get("schema_version") != 2 or report.get("workload_id") != "zpu-vkcube-cpu-3d-v2-320x240-cube12": fail("3D schema/workload mismatch")
     if report.get("renderer_scope") != "existing vkcube-specific cpu_cube renderer; not general SPIR-V": fail("3D scope mismatch")
     if report.get("resolution") != "320x240" or report.get("warmup_iterations") != 5 or report.get("sample_count") != 30: fail("3D resolution/sampling mismatch")
     m=report.get("metric",{})
@@ -40,8 +40,9 @@ def validate_3d(report):
     if m.get("checksum_hex") != ORACLE_3D or m.get("checksum") != int(ORACLE_3D,16): fail("3D checksum mismatch")
     if m.get("counters_per_frame") != COUNTERS: fail("3D exact counters mismatch")
     if not finite(m.get("fps"),True) or not finite(m.get("triangles_s"),True): fail("3D rates invalid")
-    f=m.get("frame",{}); values=[f.get(k) for k in ("p50_ns","p95_ns","p99_ns")]
+    f=m.get("frame",{}); values=[f.get(k) for k in ("p50_ns","p95_ns","p99_ns","max_ns")]
     if not all(finite(v,True) for v in values) or values != sorted(values): fail("3D percentiles invalid")
+    if not finite(f.get("cv")): fail("3D CV invalid")
     if abs(m["triangles_s"] - m["fps"]*12) > max(1e-7, m["triangles_s"]*1e-12): fail("3D triangle rate inconsistent")
 
 def validate_2d(report):
@@ -56,11 +57,14 @@ def metric_rows(two, three, raw2d, raw3d, commit, utc, cadence=None, raw_cadence
     notes2=f"full 1 warmup/15 samples; checksum-bound; UTC {utc}"
     for m in two["metrics"]:
         common=["2D",two["workload_id"],"240x240",f"{m['name']}/{m['backend']}"]
-        measures=[("MPix/s",m["mpix_s"],"MPix/s"),("bytes/s",m["bytes_s"],"bytes/s"),("modeled GiB/s",m["effective_gib_s"],"GiB/s"),("draws/s",m["draws_s"],"draws/s"),("FPS",m["fps"],"FPS"),("p50",m["frame"]["p50_ns"],"ns"),("p95",m["frame"]["p95_ns"],"ns"),("p99",m["frame"]["p99_ns"],"ns"),("checksum",m["checksum_hex"],"FNV-1a-64")]
+        measures=[("MPix/s",m["mpix_s"],"MPix/s"),("bytes/s",m["bytes_s"],"bytes/s"),("modeled GiB/s",m["effective_gib_s"],"GiB/s"),("draws/s",m["draws_s"],"draws/s"),("FPS",m["fps"],"FPS"),("p50",m["frame"]["p50_ns"],"ns"),("p95",m["frame"]["p95_ns"],"ns"),("p99",m["frame"]["p99_ns"],"ns"),("max",m["frame"]["max_ns"],"ns"),("CV",m["frame"]["cv"],"ratio"),("checksum",m["checksum_hex"],"FNV-1a-64")]
         for measure,value,unit in measures:
             if value != 0: rows.append(common+[measure,value,unit,m["fps"] if m["fps"] else "—","1 warmup + 15 full samples",commit,utc,raw2d,notes2])
+    p=two["pipeline"]
+    for measure,value,unit in (("key construction",p["key_construction_ns"],"ns"),("cache lookup",p["cache_lookup_ns"],"ns"),("cache hits",p["cache_hits"],"count"),("cache misses",p["cache_misses"],"count"),("cache hit rate",p["cache_hit_rate"],"ratio")):
+        rows.append(["2D",two["workload_id"],"240x240","pipeline/cache",measure,value,unit,"—","100000 iterations",commit,utc,raw2d,notes2])
     m=three["metric"]; common=["3D",three["workload_id"],three["resolution"],f"{m['name']}/{m['backend']}"]
-    measures=[("FPS",m["fps"],"FPS"),("triangles/s",m["triangles_s"],"triangles/s"),("p50",m["frame"]["p50_ns"],"ns"),("p95",m["frame"]["p95_ns"],"ns"),("p99",m["frame"]["p99_ns"],"ns"),("checksum",m["checksum_hex"],"FNV-1a-64")]+[(k,v,"count/frame") for k,v in m["counters_per_frame"].items()]
+    measures=[("FPS",m["fps"],"FPS"),("triangles/s",m["triangles_s"],"triangles/s"),("p50",m["frame"]["p50_ns"],"ns"),("p95",m["frame"]["p95_ns"],"ns"),("p99",m["frame"]["p99_ns"],"ns"),("max",m["frame"]["max_ns"],"ns"),("CV",m["frame"]["cv"],"ratio"),("checksum",m["checksum_hex"],"FNV-1a-64")]+[(k,v,"count/frame") for k,v in m["counters_per_frame"].items()]
     for measure,value,unit in measures: rows.append(common+[measure,value,unit,m["fps"],"5 warmups + 30 full samples",commit,utc,raw3d,"vkcube-specific cpu_cube; not general SPIR-V"])
     if cadence:
         common=["pacing","zpu-xvfb-lossless-60hz-v1","640x480","visible-cadence/synthetic-xvfb"]

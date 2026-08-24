@@ -59,14 +59,61 @@ test "all SIMD-width backends match scalar exactly" {
     var actual: [3 + 153 * 13]u8 = undefined;
     for ([_]s.Format{ .rgba8_unorm, .bgra8_unorm }) |format| {
         // Forced backend calls are safe: portable vectors are legalized for the build target.
-        for ([_]dispatch.Backend{ .scalar, .avx2, .avx512 }) |backend| try exercise(format, 0x5a50555eed, backend, &actual, &expected);
+        for ([_]dispatch.Backend{ .scalar, .portable_vector, .avx2 }) |backend| {
+            if (dispatch.available(backend)) try exercise(format, 0x5a50555eed, backend, &actual, &expected);
+        }
     }
 }
 
 test "runtime selection never selects unavailable ISA" {
     const selected = dispatch.best();
     try std.testing.expect(dispatch.available(selected));
-    if (!dispatch.available(.avx2)) try std.testing.expect(selected == .scalar);
+    if (!dispatch.available(.avx2)) try std.testing.expect(selected == .portable_vector);
+}
+
+test "every alignment lane tail format and blend boundary is differential" {
+    var scalar_storage: [16 + 64 * 4 + 16]u8 = undefined;
+    var test_storage: [16 + 64 * 4 + 16]u8 = undefined;
+    var source: [64 * 4]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(0xd1ff_2d5e_ed00_0001);
+    const random = prng.random();
+    random.bytes(&source);
+    const alphas = [_]u8{ 0, 1, 127, 128, 254, 255 };
+    for (0..64) |i| source[i * 4 + 3] = alphas[i % alphas.len];
+    const colors = [_]s.Color{ .rgba(0, 0, 0, 0), .rgba(1, 2, 3, 1), .rgba(17, 91, 203, 127), .rgba(240, 19, 77, 128), .rgba(254, 253, 252, 254), .rgba(255, 255, 255, 255) };
+    for ([_]s.Format{ .rgba8_unorm, .bgra8_unorm }) |format| {
+        for ([_]dispatch.Backend{ .portable_vector, .avx2 }) |backend| {
+            if (!dispatch.available(backend)) continue;
+            for (0..16) |alignment| for (0..34) |count| {
+                random.bytes(&scalar_storage);
+                @memcpy(&test_storage, &scalar_storage);
+                const scalar_row = scalar_storage[alignment .. alignment + 64 * 4];
+                const test_row = test_storage[alignment .. alignment + 64 * 4];
+                const start = (alignment * 7) % (64 - count + 1);
+                for (colors) |color| {
+                    dispatch.fillSpan(.scalar, scalar_row, start, count, format, color);
+                    dispatch.fillSpan(backend, test_row, start, count, format, color);
+                    dispatch.blendSpan(.scalar, scalar_row, start, count, format, color);
+                    dispatch.blendSpan(backend, test_row, start, count, format, color);
+                }
+                dispatch.blendPixels(.scalar, scalar_row, start, &source, count, format);
+                dispatch.blendPixels(backend, test_row, start, &source, count, format);
+                try std.testing.expectEqualSlices(u8, &scalar_storage, &test_storage);
+            };
+        }
+    }
+}
+
+test "normal raster entry points use a deterministic kernel cache" {
+    var pixels = [_]u8{0} ** (8 * 8 * 4);
+    var surface = try s.Surface.init(&pixels, 8, 8, 32, .rgba8_unorm);
+    raster.resetKernelCache();
+    raster.fillRect(&surface, .{ .x = 0, .y = 0, .width = 8, .height = 8 }, .rgba(1, 2, 3, 255));
+    raster.fillRect(&surface, .{ .x = 1, .y = 1, .width = 2, .height = 2 }, .rgba(4, 5, 6, 255));
+    raster.blendRect(&surface, .{ .x = 0, .y = 0, .width = 1, .height = 1 }, .rgba(7, 8, 9, 128));
+    const stats = raster.kernelCacheStats();
+    try std.testing.expectEqual(@as(u64, 1), stats.hits);
+    try std.testing.expectEqual(@as(u64, 2), stats.misses);
 }
 
 test "surface validation and clipping" {

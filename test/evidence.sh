@@ -12,7 +12,7 @@ if rg -n '\.github/workflows|GITHUB_TOKEN|workflow scope' tools/evidence.py tool
   echo "evidence feature depends on GitHub workflow configuration" >&2
   exit 1
 fi
-"$bench2" --smoke --json --capture "$tmp/2d.json" >/dev/null
+"$bench2" --smoke --json --source-commit "$sha" --utc "$utc" --capture "$tmp/2d.json" >/dev/null
 "$bench3" --smoke --json --source-commit "$sha" --utc "$utc" --capture "$tmp/3d.json" >/dev/null
 python3 - "$tmp/2d.json" "$tmp/3d.json" <<'PY'
 import json,sys
