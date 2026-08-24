@@ -52,6 +52,15 @@ fn referenceSerialize(allocator: std.mem.Allocator, program: *const ir.Program) 
     return out.toOwnedSlice(allocator);
 }
 
+fn staticGolden(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, text, " \r\n\t");
+    if (trimmed.len % 2 != 0) return error.InvalidGolden;
+    const bytes = try allocator.alloc(u8, trimmed.len / 2);
+    errdefer allocator.free(bytes);
+    for (bytes, 0..) |*byte, index| byte.* = std.fmt.parseInt(u8, trimmed[index * 2 ..][0..2], 16) catch return error.InvalidGolden;
+    return bytes;
+}
+
 const Value = struct { lanes: [16]f32 = .{0} ** 16, count: usize = 0 };
 
 /// Test-only interpreter for constant frontend semantics. It is never called
@@ -106,5 +115,29 @@ test "independent serializer and frontend-only interpreter match canonical progr
         const reference = try referenceSerialize(std.testing.allocator, &other);
         defer std.testing.allocator.free(reference);
         try std.testing.expectEqualSlices(u8, other.bytes, reference);
+    }
+}
+
+test "checked-in full canonical bytes and digests are exact" {
+    const replacement = [_]u8{ 0, 0, 0x80, 0x40 };
+    const cases = .{
+        .{ &frontend.positive_vertex, ir.Stage.vertex, &[_]frontend.Specialization{}, @embedFile("fixtures/render_ir/basic.hex"), [32]u8{ 147, 176, 210, 157, 182, 241, 166, 53, 43, 75, 183, 222, 184, 184, 234, 234, 215, 129, 120, 163, 36, 111, 87, 19, 0, 16, 171, 170, 61, 214, 239, 158 } },
+        .{ &frontend.rich_vertex, ir.Stage.vertex, &[_]frontend.Specialization{.{ .id = 7, .bytes = &replacement }}, @embedFile("fixtures/render_ir/rich-specialized.hex"), [32]u8{ 242, 93, 216, 29, 239, 147, 201, 3, 137, 2, 38, 142, 165, 61, 60, 169, 8, 175, 106, 183, 205, 163, 191, 253, 124, 28, 118, 43, 152, 86, 230, 249 } },
+        .{ &frontend.uniform_vertex, ir.Stage.vertex, &[_]frontend.Specialization{}, @embedFile("fixtures/render_ir/uniform.hex"), [32]u8{ 30, 212, 169, 98, 196, 78, 72, 125, 143, 18, 20, 237, 172, 191, 75, 237, 76, 143, 228, 48, 240, 29, 76, 137, 99, 203, 167, 140, 34, 44, 186, 23 } },
+        .{ &frontend.bool_fragment, ir.Stage.fragment, &[_]frontend.Specialization{}, @embedFile("fixtures/render_ir/fragment.hex"), [32]u8{ 30, 165, 50, 56, 182, 94, 19, 153, 156, 158, 78, 65, 182, 13, 122, 116, 179, 148, 44, 58, 254, 23, 145, 87, 22, 132, 220, 133, 154, 106, 223, 87 } },
+    };
+    inline for (cases) |case| {
+        var program = try frontend.compile(std.testing.allocator, case[0], case[1], "main", case[2]);
+        defer program.deinit(std.testing.allocator);
+        const golden = try staticGolden(std.testing.allocator, case[3]);
+        defer std.testing.allocator.free(golden);
+        try std.testing.expectEqualSlices(u8, golden, program.bytes);
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(golden, &digest, .{});
+        try std.testing.expectEqual(case[4], digest);
+        try std.testing.expectEqual(case[4], program.identity.digest);
+        const reference = try referenceSerialize(std.testing.allocator, &program);
+        defer std.testing.allocator.free(reference);
+        try std.testing.expectEqualSlices(u8, golden, reference);
     }
 }

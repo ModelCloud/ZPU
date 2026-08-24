@@ -6,6 +6,8 @@ pub const max_profile_bound: u32 = 8192;
 pub const max_interfaces: usize = 64;
 pub const max_specializations: usize = 64;
 pub const max_uniform_block_bytes: u32 = 16 * 1024;
+const max_debug_string_words: u16 = 256;
+const max_entry_point_operands: u16 = 3 + 64 + @as(u16, max_interfaces);
 
 pub const Error = error{ Malformed, Unsupported, LimitExceeded, OutOfMemory };
 
@@ -34,14 +36,15 @@ const Count = struct { min: u16, max: u16 };
 const OpcodeMeta = struct { opcode: u16, operands: Count, supported: bool = true };
 const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 0, .operands = .{ .min = 0, .max = 0 } },
-    .{ .opcode = 3, .operands = .{ .min = 2, .max = 4 } },
-    .{ .opcode = 4, .operands = .{ .min = 1, .max = std.math.maxInt(u16) } },
-    .{ .opcode = 5, .operands = .{ .min = 2, .max = std.math.maxInt(u16) } },
-    .{ .opcode = 6, .operands = .{ .min = 3, .max = std.math.maxInt(u16) } },
-    .{ .opcode = 7, .operands = .{ .min = 2, .max = std.math.maxInt(u16) } },
+    .{ .opcode = 2, .operands = .{ .min = 1, .max = max_debug_string_words } },
+    .{ .opcode = 3, .operands = .{ .min = 2, .max = 3 + max_debug_string_words } },
+    .{ .opcode = 4, .operands = .{ .min = 1, .max = max_debug_string_words } },
+    .{ .opcode = 5, .operands = .{ .min = 2, .max = 1 + max_debug_string_words } },
+    .{ .opcode = 6, .operands = .{ .min = 3, .max = 2 + max_debug_string_words } },
+    .{ .opcode = 7, .operands = .{ .min = 2, .max = 1 + max_debug_string_words } },
     .{ .opcode = 8, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 14, .operands = .{ .min = 2, .max = 2 } },
-    .{ .opcode = 15, .operands = .{ .min = 3, .max = std.math.maxInt(u16) } },
+    .{ .opcode = 15, .operands = .{ .min = 3, .max = max_entry_point_operands } },
     .{ .opcode = 16, .operands = .{ .min = 2, .max = 5 } },
     .{ .opcode = 17, .operands = .{ .min = 1, .max = 1 } },
     .{ .opcode = 19, .operands = .{ .min = 1, .max = 1 } },
@@ -60,7 +63,7 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 48, .operands = .{ .min = 2, .max = 2 } },
     .{ .opcode = 49, .operands = .{ .min = 2, .max = 2 } },
     .{ .opcode = 50, .operands = .{ .min = 3, .max = 3 } },
-    .{ .opcode = 51, .operands = .{ .min = 3, .max = 18 } },
+    .{ .opcode = 51, .operands = .{ .min = 3, .max = 18 }, .supported = false },
     .{ .opcode = 54, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 56, .operands = .{ .min = 0, .max = 0 } },
     .{ .opcode = 59, .operands = .{ .min = 3, .max = 3 } },
@@ -285,7 +288,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         const instruction_meta = opcodeMeta(instruction.opcode).?;
         instruction_functions[instruction_index] = current_function;
         switch (instruction.opcode) {
-            0, 3, 4, 5, 6, 7, 8 => {}, // debug/non-semantic declarations are discarded
+            0, 2, 3, 4, 5, 6, 7, 8 => {}, // bounded debug/non-semantic declarations are discarded
             17 => {
                 const meta = valueMeta(&capability_schema, w[0]) orelse return error.Unsupported;
                 if (!meta.supported or capability) return error.Unsupported;
@@ -401,7 +404,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 if (shape.scalar == .f32 and w.len == 3 and !std.math.isFinite(@as(f32, @bitCast(w[2])))) return error.Unsupported;
                 try define(nodes, w[1], .{ .kind = .constant, .type_id = w[0], .opcode = instruction.opcode, .words = w[2..] });
             },
-            44, 51 => {
+            44 => {
                 if (w.len < 3) return error.Malformed;
                 _ = try resultShape(nodes, w[0]);
                 try define(nodes, w[1], .{ .kind = .constant, .type_id = w[0], .opcode = instruction.opcode, .words = w[2..] });
@@ -454,6 +457,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 if (instruction.opcode != 62)
                     try define(nodes, w[1], .{ .kind = .function_value, .type_id = w[0], .opcode = instruction.opcode, .words = w[2..] });
             },
+            51 => return error.Unsupported,
             else => if (instruction_meta.supported) unreachable else return error.Unsupported,
         }
     }
@@ -495,7 +499,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         if (instruction_function != 0 and instruction_function != entry.function) continue;
         const w = instruction.words;
         switch (instruction.opcode) {
-            44, 51, 80 => {
+            44, 80 => {
                 const result = try resultShape(nodes, w[0]);
                 if (result.rows == 1 and result.columns > 1) {
                     if (w.len - 2 != result.columns) return error.Malformed;
@@ -654,7 +658,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                41, 42, 43, 44, 48, 49, 50, 51, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 133, 136, 142, 145 => w[1],
+                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 133, 136, 142, 145 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
@@ -715,7 +719,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            41, 42, 43, 44, 48, 49, 50, 51, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 133, 136, 142, 145 => w[1],
+            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 133, 136, 142, 145 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
@@ -728,7 +732,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         } else try resultShape(nodes, node.type_id);
         var op: ir.Op = switch (instruction.opcode) {
             41, 42, 43, 48, 49, 50 => .constant,
-            44, 51 => .constant_composite,
+            44 => .constant_composite,
             80 => .composite,
             61 => .input,
             65 => .access,
@@ -1319,6 +1323,7 @@ test "allocation failures never publish a partial frontend program" {
 test "table driven profile schema is unique and every decoration has exact payload metadata" {
     for (opcode_schema, 0..) |meta, index| {
         try std.testing.expect(meta.operands.min <= meta.operands.max);
+        try std.testing.expect(meta.operands.max != std.math.maxInt(u16));
         try std.testing.expectEqual(meta, opcodeMeta(meta.opcode).?);
         for (opcode_schema[0..index]) |prior| try std.testing.expect(meta.opcode != prior.opcode);
     }
@@ -1329,6 +1334,28 @@ test "table driven profile schema is unique and every decoration has exact paylo
         for (schema[0..index]) |prior| try std.testing.expect(meta.value != prior.value);
     };
     try std.testing.expectEqual(@as(?ValueMeta, null), valueMeta(&decoration_schema, 999));
+    try std.testing.expectEqual(@as(u16, 257), opcodeMeta(5).?.operands.max);
+    try std.testing.expectEqual(@as(u16, 258), opcodeMeta(6).?.operands.max);
+    try std.testing.expectEqual(max_entry_point_operands, opcodeMeta(15).?.operands.max);
+
+    const name_offset = testOpcodeOffset(&positive_vertex, 19, 0).?;
+    const name_max = opcodeMeta(5).?.operands.max;
+    const debug_exact = try std.testing.allocator.alloc(u32, @as(usize, name_max) + 1);
+    defer std.testing.allocator.free(debug_exact);
+    @memset(debug_exact, 0);
+    debug_exact[0] = (@as(u32, name_max + 1) << 16) | 5;
+    debug_exact[1] = 1;
+    const with_exact_debug = try testInsertWords(std.testing.allocator, &positive_vertex, name_offset, debug_exact);
+    defer std.testing.allocator.free(with_exact_debug);
+    var exact_program = try compile(std.testing.allocator, with_exact_debug, .vertex, "main", &.{});
+    defer exact_program.deinit(std.testing.allocator);
+    const debug_extra = try std.testing.allocator.alloc(u32, debug_exact.len + 1);
+    defer std.testing.allocator.free(debug_extra);
+    @memset(debug_extra, 0);
+    debug_extra[0] = (@as(u32, name_max + 2) << 16) | 5;
+    const with_extra_debug = try testInsertWords(std.testing.allocator, &positive_vertex, name_offset, debug_extra);
+    defer std.testing.allocator.free(with_extra_debug);
+    try std.testing.expectError(error.Malformed, compile(std.testing.allocator, with_extra_debug, .vertex, "main", &.{}));
 
     try expectDecorationArity(&positive_vertex, 71, 0, true, .vertex); // BuiltIn
     try expectDecorationArity(&rich_vertex, 71, 2, true, .vertex); // SpecId
@@ -1373,12 +1400,20 @@ test "composite specialization payloads are explicitly rejected in profile v1" {
     const composite_offset = testOpcodeOffset(&rich_vertex, 44, 0).?;
     var composite = rich_vertex;
     composite[composite_offset] = (composite[composite_offset] & 0xffff_0000) | 51;
+    try std.testing.expect(!opcodeMeta(51).?.supported);
+    try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, &composite, .vertex, "main", &.{}));
     const decoration = [_]u32{ (4 << 16) | 71, 26, 1, 99 };
     const decorated = try testInsertWords(std.testing.allocator, &composite, testOpcodeOffset(&composite, 19, 0).?, &decoration);
     defer std.testing.allocator.free(decorated);
     try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, decorated, .vertex, "main", &.{.{ .id = 99, .bytes = &.{ 1, 2, 3, 4 } }}));
     try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, decorated, .vertex, "main", &.{.{ .id = 99, .bytes = &.{ 1, 2, 3, 4, 5, 6, 7, 8 } }}));
     try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, &rich_vertex, .vertex, "main", &.{.{ .id = 999, .bytes = &.{ 1, 2, 3, 4 } }}));
+
+    const nested_words = [_]u32{ (4 << 16) | 51, 5, 39, 26 };
+    var nested = try testInsertWords(std.testing.allocator, &composite, testOpcodeOffset(&composite, 54, 0).?, &nested_words);
+    defer std.testing.allocator.free(nested);
+    nested[3] = 40;
+    try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, nested, .vertex, "main", &.{}));
 }
 
 test "specialization uniform matrix and fragment canonical identities are golden" {

@@ -2558,6 +2558,12 @@ test "frontend pipeline interface and descriptor compatibility is exact" {
     try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &set0));
     fragment.interfaces[1].member_count = 1;
     try std.testing.expect(frontendInterfacesCompatible(&vertex, &fragment, &set0));
+    fragment.interfaces = fragment_interfaces[0..1];
+    try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &set0));
+    fragment.interfaces = &fragment_interfaces;
+    var vertex_without_uniform = vertex;
+    vertex_without_uniform.interfaces = vertex_interfaces[0..2];
+    try std.testing.expect(!frontendInterfacesCompatible(&vertex_without_uniform, &fragment, &set0));
     var malformed = set0;
     malformed.bytes = malformed.bytes[0..20];
     try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &malformed));
@@ -2775,8 +2781,20 @@ fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *con
         };
         if (!matched) return false;
     };
-    for (vertex.interfaces) |left| if (left.storage == .uniform) for (fragment.interfaces) |right| if (right.storage == .uniform and left.descriptor_set == right.descriptor_set and left.binding == right.binding) {
-        if (!std.meta.eql(left, right)) return false;
+    for (vertex.interfaces) |left| if (left.storage == .uniform) {
+        var matched = false;
+        for (fragment.interfaces) |right| if (right.storage == .uniform and left.descriptor_set == right.descriptor_set and left.binding == right.binding) {
+            if (!std.meta.eql(left, right)) return false;
+            matched = true;
+        };
+        if (!matched) return false;
+    };
+    for (fragment.interfaces) |right| if (right.storage == .uniform) {
+        var matched = false;
+        for (vertex.interfaces) |left| {
+            if (left.storage == .uniform and left.descriptor_set == right.descriptor_set and left.binding == right.binding) matched = true;
+        }
+        if (!matched) return false;
     };
     for ([_]*const render_ir.Program{ vertex, fragment }) |program| for (program.interfaces) |interface| if (interface.storage == .uniform) {
         if (interface.descriptor_set != 0 or interface.binding == null or set0.bytes.len < 36) return false;
@@ -4037,6 +4055,19 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqualSlices(usize, &.{ 0xaaaa, 0xbbbb }, &rejected_profile_outputs);
     try std.testing.expectEqualSlices(SlotState, &profile_states_before_rejection, &graphics_pipeline_state);
     try std.testing.expectEqual(profile_allocations_before_rejection, canonical_live_allocations);
+    const profile_vertex_object = findLiveHandle(ShaderModuleObj, profile_vertex_shader, &shader_module_objects, &shader_module_state).?;
+    var composite_word: usize = 5;
+    while (composite_word < profile_vertex_object.module.words.len and @as(u16, @truncate(profile_vertex_object.module.words[composite_word])) != 44) composite_word += profile_vertex_object.module.words[composite_word] >> 16;
+    try std.testing.expect(composite_word < profile_vertex_object.module.words.len);
+    profile_vertex_object.module.words[composite_word] = (profile_vertex_object.module.words[composite_word] & 0xffff_0000) | 51;
+    var unsupported_composite_output = [_]usize{0xd00d};
+    const states_before_composite = graphics_pipeline_state;
+    const allocations_before_composite = canonical_live_allocations;
+    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0x1234, 1, @ptrCast(&profile_pipeline_info), null, &unsupported_composite_output));
+    try std.testing.expectEqual(@as(usize, 0xd00d), unsupported_composite_output[0]);
+    try std.testing.expectEqualSlices(SlotState, &states_before_composite, &graphics_pipeline_state);
+    try std.testing.expectEqual(allocations_before_composite, canonical_live_allocations);
+    profile_vertex_object.module.words[composite_word] = (profile_vertex_object.module.words[composite_word] & 0xffff_0000) | 44;
     destroyShaderModule(device, profile_vertex_shader, null);
     destroyShaderModule(device, profile_fragment_shader, null);
     @memset(&profile_vertex_words, 0);
