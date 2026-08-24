@@ -67,6 +67,10 @@ def main():
     parser.add_argument("--source-commit")
     parser.add_argument("--utc")
     parser.add_argument("--affinity")
+    parser.add_argument("--context-switches", type=int)
+    parser.add_argument("--migrations", type=int)
+    parser.add_argument("--minor-faults", type=int)
+    parser.add_argument("--major-faults", type=int)
     parser.add_argument("--validate", action="store_true")
     args = parser.parse_args()
     video = Path(args.video)
@@ -89,16 +93,19 @@ def main():
                  "p999_ms": saved["p999_ms"] <= 9.0, "worst_ms": saved["worst_ms"] <= 10.0,
                  "interval_cv": saved["interval_cv"] <= .010, "missed_deadline_pct": saved["missed_deadline_pct"] <= 1,
                  "consecutive_duplicate_pct": saved["consecutive_duplicate_pct"] <= 1,
-                 "capture_drops": saved["capture_drops"] == 0, "monotonic_pts": saved["monotonic_pts"] is True}
+                 "capture_drops": saved["capture_drops"] == 0, "monotonic_pts": saved["monotonic_pts"] is True,
+                 "cpu_migrations": saved.get("cpu_migrations") == 0}
         print(json.dumps({"gates": gates, "metrics": metrics_data}, sort_keys=True))
         if not all(gates.values()): fail("one or more 120 Hz acceptance gates failed")
         return
-    if not all((args.source_commit, args.utc, args.affinity)): fail("creation requires source commit, UTC, and affinity")
+    if not all((args.source_commit, args.utc, args.affinity)) or None in (args.context_switches,args.migrations,args.minor_faults,args.major_faults): fail("creation requires source commit, UTC, affinity, and process counters")
     result = dict(metrics_data)
     result.update({
         "schema_version": 1, "evidence_kind": "synthetic-xvfb-pacing",
         "physical_scanout": False, "source_commit": args.source_commit,
         "utc": args.utc, "affinity": args.affinity, "capture": str(video),
+        "context_switches": args.context_switches, "cpu_migrations": args.migrations,
+        "minor_faults": args.minor_faults, "major_faults": args.major_faults,
         "codec": "rawvideo", "resolution": "800x600", "nominal_hz": HZ,
         "size_bytes": video.stat().st_size,
         "sha256": hashlib.sha256(video.read_bytes()).hexdigest(),

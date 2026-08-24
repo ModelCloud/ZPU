@@ -63,6 +63,18 @@ pub fn sleepUntil(deadline_ns: u64) void {
     }
 }
 
+/// Absolute sleep remains the baseline; the final bounded interval is spun on
+/// an isolated driver CPU to remove ordinary ~50 us scheduler wake variance.
+/// The bound is deliberately tiny relative to an 8.333 ms slot.
+pub fn sleepUntilPrecise(deadline_ns: u64, spin_ns: u64) void {
+    const bounded_spin = @min(spin_ns, 100_000);
+    if (deadline_ns > bounded_spin) {
+        const sleep_deadline = deadline_ns - bounded_spin;
+        if (monotonicNs() < sleep_deadline) sleepUntil(sleep_deadline);
+    }
+    while (monotonicNs() < deadline_ns) std.atomic.spinLoopHint();
+}
+
 test "120 Hz rational deadlines are phase exact" {
     var clock = Clock.init120(10_000);
     try std.testing.expectEqual(@as(u64, 8_343_333), clock.deadline());

@@ -33,10 +33,14 @@ fn run() void {
         work.transport.last.queue_wait_ns = before - work.enqueued_ns;
         if (work.cadence.* == null) work.cadence.* = frame_pacing.Clock.init120(before);
         const deadline = work.cadence.*.?.deadline();
-        if (deadline > before) frame_pacing.sleepUntil(deadline);
+        if (!xcb_present.upload(work.transport, work.pixels)) {
+            work.release(work.context, work.image_index);
+            continue;
+        }
+        if (deadline > before) frame_pacing.sleepUntilPrecise(deadline, 100_000);
         const woke = frame_pacing.monotonicNs();
         work.transport.last.wake_error_ns = if (woke >= deadline) @intCast(woke - deadline) else -@as(i64, @intCast(deadline - woke));
-        _ = xcb_present.present(work.transport, work.pixels);
+        _ = xcb_present.commit(work.transport, work.pixels);
         const finished = frame_pacing.monotonicNs();
         work.transport.last.frame_total_ns = finished - work.enqueued_ns;
         work.cadence.*.?.advance(finished);

@@ -69,7 +69,7 @@ def metric_rows(two, three, raw2d, raw3d, commit, utc, cadence=None, raw_cadence
     if cadence:
         common=["pacing","zpu-xvfb-lossless-120hz-v2","800x600","visible-cadence/synthetic-xvfb"]
         measures=[("visible FPS",cadence["visible_fps"],"FPS"),("mean",cadence["mean_ms"],"ms"),("p50",cadence["p50_ms"],"ms"),("p95",cadence["p95_ms"],"ms"),("p99",cadence["p99_ms"],"ms"),("p99.9",cadence["p999_ms"],"ms"),("worst",cadence["worst_ms"],"ms"),("interval CV",cadence["interval_cv"],"ratio"),("missed deadlines",cadence["missed_deadline_pct"],"percent"),("consecutive duplicates",cadence["consecutive_duplicate_pct"],"percent"),("packets",cadence["packets"],"packets"),("capture drops",cadence["capture_drops"],"frames")]
-        notes=f"synthetic Xvfb, not physical scanout; {cadence['affinity']}; monotonic PTS={cadence['monotonic_pts']}"
+        notes=f"synthetic Xvfb, not physical scanout; {cadence['affinity']}; monotonic PTS={cadence['monotonic_pts']}; context switches={cadence['context_switches']}; migrations={cadence['cpu_migrations']}; faults={cadence['minor_faults']}/{cadence['major_faults']}"
         for measure,value,unit in measures: rows.append(common+[measure,value,unit,cadence["visible_fps"],"2400 lossless rawvideo packets / 20 s",commit,cadence["utc"],raw_cadence,notes])
     return sorted(rows,key=lambda r:(r[0],r[1],r[3],r[4]))
 

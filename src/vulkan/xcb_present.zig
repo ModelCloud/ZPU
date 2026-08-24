@@ -26,6 +26,12 @@ pub const StageTimings = struct {
     transport_total_ns: u64 = 0,
     frame_total_ns: u64 = 0,
     upload_requests: u32 = 0,
+    present_start_ns: u64 = 0,
+    upload_start_ns: u64 = 0,
+    upload_end_ns: u64 = 0,
+    copy_start_ns: u64 = 0,
+    copy_end_ns: u64 = 0,
+    flush_end_ns: u64 = 0,
 };
 
 fn monotonicNs() u64 {
@@ -58,8 +64,9 @@ pub fn deinit(transport: *Transport) void {
     _ = xcb_flush(transport.connection);
 }
 
-pub fn present(transport: *Transport, pixels: []const u8) bool {
+pub fn upload(transport: *Transport, pixels: []const u8) bool {
     const total_start = monotonicNs();
+    transport.last.present_start_ns = total_start;
     transport.last.upload_requests = 0;
     const width = transport.width;
     const height = transport.height;
@@ -74,6 +81,7 @@ pub fn present(transport: *Transport, pixels: []const u8) bool {
     const rows_per_request = @max(@as(usize, 1), payload_bytes / row_bytes);
     var y: usize = 0;
     const upload_start = monotonicNs();
+    transport.last.upload_start_ns = upload_start;
     while (y < height) {
         const rows = @min(rows_per_request, @as(usize, height) - y);
         const data = pixels[y * row_bytes ..][0 .. rows * row_bytes];
@@ -81,14 +89,28 @@ pub fn present(transport: *Transport, pixels: []const u8) bool {
         transport.last.upload_requests += 1;
         y += rows;
     }
-    transport.last.upload_ns = monotonicNs() - upload_start;
+    transport.last.upload_end_ns = monotonicNs();
+    transport.last.upload_ns = transport.last.upload_end_ns - upload_start;
+    return true;
+}
+
+pub fn commit(transport: *Transport, pixels: []const u8) bool {
+    const width = transport.width;
+    const height = transport.height;
+    if (builtin.is_test) return pixels.len == @as(usize, width) * height * 4;
+    const expected = std.math.mul(usize, @as(usize, width) * height, 4) catch return false;
+    if (pixels.len != expected) return false;
+    const connection = transport.connection;
     const copy_start = monotonicNs();
+    transport.last.copy_start_ns = copy_start;
     _ = xcb_copy_area(connection, transport.pixmap, transport.window, transport.gc, 0, 0, 0, 0, @intCast(width), @intCast(height));
-    transport.last.copy_ns = monotonicNs() - copy_start;
+    transport.last.copy_end_ns = monotonicNs();
+    transport.last.copy_ns = transport.last.copy_end_ns - copy_start;
     const flush_start = monotonicNs();
     if (xcb_flush(connection) <= 0) return false;
-    transport.last.flush_ns = monotonicNs() - flush_start;
-    transport.last.transport_total_ns = monotonicNs() - total_start;
+    transport.last.flush_end_ns = monotonicNs();
+    transport.last.flush_ns = transport.last.flush_end_ns - flush_start;
+    transport.last.transport_total_ns = transport.last.flush_end_ns - transport.last.present_start_ns;
     const verify = std.c.getenv("ZPU_VERIFY_PRESENT") orelse null;
     if (!verification_done and verify != null and verify.?[0] == '1') {
         verification_done = true;
@@ -101,6 +123,10 @@ pub fn present(transport: *Transport, pixels: []const u8) bool {
         }
     }
     return true;
+}
+
+pub fn present(transport: *Transport, pixels: []const u8) bool {
+    return upload(transport, pixels) and commit(transport, pixels);
 }
 
 extern fn xcb_generate_id(connection: *Connection) u32;

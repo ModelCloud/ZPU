@@ -6,6 +6,8 @@
 - [x] FIFO ownership through XCB completion, enqueue rollback, and transport-failure release.
 - [x] Cache-local 8x8 vkcube traversal, conservative tile rejection, precomputed reciprocal attributes, and an untiled scalar oracle.
 - [x] Persistent XCB resources and a synchronous `ZPU_ONE_CORE=1` mode without an extra handoff.
+- [x] Upload complete frames to the off-screen pixmap before the phase deadline;
+  deadline work is limited to CopyArea+flush, with a bounded 100 us spin tail.
 - [ ] Physical scanout validation; Xvfb is synthetic pacing evidence only.
 
 The locked 800x600 CPU-7 gate is 119–121 visible FPS, mean near 8.333 ms,
