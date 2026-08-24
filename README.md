@@ -22,6 +22,8 @@ zig build demo
 
 All repository gates must be run through the Linux physical-core limiter, for example `tools/limited-cpus.sh zig build test`. Benchmark methodology, stable JSON, controlled baseline capture/comparison, tolerances, reproducibility guidance, and the opt-in hardware guard are documented in [docs/benchmarking.md](docs/benchmarking.md). The deferred 3D metric and deterministic-scene contract is in [docs/3d-benchmark-todo.md](docs/3d-benchmark-todo.md); no 3D pipeline or fabricated 3D measurement was added.
 
+To run four independent experiment or optimization commands at once, `tools/cpu-fanout.sh` partitions the effective cpuset into four pairwise-disjoint, equal-size groups of whole physical cores and launches each one through the same limiter; see the fanout section and its comparability rules in [docs/benchmarking.md](docs/benchmarking.md).
+
 The build installs `zig-out/lib/libvulkan_zpu.so` and `zig-out/share/vulkan/icd.d/zpu_icd.x86_64.json`. The manifest's relative path resolves back to that installed library. XCB presentation links the shared object to libc, libm, the ELF interpreter, and libxcb. The loader-independent smoke test uses `dlopen` to resolve the three private loader entry points, negotiate interface version 7, create an instance, and enumerate the CPU device.
 
 To ask a system Vulkan loader to discover only ZPU:
