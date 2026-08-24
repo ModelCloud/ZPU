@@ -82,7 +82,7 @@ general SPIR-V implementation.
 
 - `src/surface.zig` owns RGBA8/BGRA8 memory layout, validation, colors, and clipping.
 - `src/raster/` implements clear/fill and straight-alpha Porter-Duff source-over rectangles.
-- `src/simd/` owns backend selection and scalar, 8-pixel AVX2-oriented, and 16-pixel AVX-512-oriented paths for constant-color spans and per-pixel RGBA source spans.
+- `src/simd/` owns backend selection and scalar, portable four-pixel vector, and host-gated eight-pixel AVX2-oriented paths for constant-color spans and per-pixel RGBA source spans.
 - `src/command/` decouples command recording semantics from raster execution.
 - `src/platform/` owns presentation; today that is a headless PPM sink.
 - `src/vulkan/` contains original minimal Vulkan 1.0 ABI declarations, private loader entry points, object lifetime handling, and the ICD manifest.
