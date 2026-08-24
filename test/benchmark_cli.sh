@@ -33,7 +33,7 @@ def emit(name, mutate):
 emit('fingerprint',lambda x:x['fingerprint'].__setitem__('cpu_model','forged'))
 emit('missing',lambda x:x['metrics'].pop())
 emit('duplicate',lambda x:x['metrics'].__setitem__(1,x['metrics'][0]))
-emit('rate',lambda x:x['metrics'][0].__setitem__('mpix_s',x['metrics'][0]['mpix_s']*2))
+emit('rate',lambda x:x['metrics'][0].__setitem__('mpix_s',x['metrics'][0]['mpix_s']*100))
 emit('latency',lambda x:x['metrics'][0].__setitem__('frame',{'p50_ns':1,'p95_ns':1,'p99_ns':1}))
 PY
 for kind in fingerprint missing duplicate; do
