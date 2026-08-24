@@ -53,18 +53,23 @@ fn transformedVertex(uniform: []const u8, index: u32, vertex_count: u32, viewpor
     };
 }
 
-fn shade(texture: []const u8, texture_width: u32, texture_height: u32, u: f32, v: f32, light: f32) [4]u8 {
+fn lightingTable(light: f32) [256]u8 {
+    var table: [256]u8 = undefined;
+    for (&table, 0..) |*result, encoded_value| {
+        const encoded = @as(f32, @floatFromInt(encoded_value)) / 255.0;
+        const lit = std.math.clamp(srgbToLinear(encoded) * light, 0, 1);
+        result.* = @intFromFloat(std.math.clamp(linearToSrgb(lit), 0, 1) * 255.0);
+    }
+    return table;
+}
+
+fn shade(texture: []const u8, texture_width: u32, texture_height: u32, u: f32, v: f32, table: *const [256]u8) [4]u8 {
     const clamped_u = std.math.clamp(u, 0, 0.999999);
     const clamped_v = std.math.clamp(v, 0, 0.999999);
     const x: usize = @intFromFloat(clamped_u * @as(f32, @floatFromInt(texture_width)));
     const y: usize = @intFromFloat(clamped_v * @as(f32, @floatFromInt(texture_height)));
     const offset = (y * texture_width + x) * 4;
-    var rgb: [3]u8 = undefined;
-    for (0..3) |channel| {
-        const encoded = @as(f32, @floatFromInt(texture[offset + channel])) / 255.0;
-        const lit = std.math.clamp(srgbToLinear(encoded) * light, 0, 1);
-        rgb[channel] = @intFromFloat(std.math.clamp(linearToSrgb(lit), 0, 1) * 255.0);
-    }
+    const rgb = [3]u8{ table[texture[offset]], table[texture[offset + 1]], table[texture[offset + 2]] };
     return .{ rgb[2], rgb[1], rgb[0], texture[offset + 3] };
 }
 
@@ -96,6 +101,7 @@ pub fn drawCounted(target: []u8, depth: []u8, width: u32, height: u32, uniform: 
             component.* /= normal_length;
         };
         const light = std.math.clamp(normal[0] * 0.424 + normal[1] * 0.566 + normal[2] * 0.707, 0.15, 1.0);
+        const lighting = lightingTable(light);
 
         const min_x = @max(@as(i32, @intFromFloat(@floor(@min(p0[0], @min(p1[0], p2[0]))))), scissor.x, 0);
         const min_y = @max(@as(i32, @intFromFloat(@floor(@min(p0[1], @min(p1[1], p2[1]))))), scissor.y, 0);
@@ -122,7 +128,7 @@ pub fn drawCounted(target: []u8, depth: []u8, width: u32, height: u32, uniform: 
                 writeFloat(depth, depth_offset, z);
                 const u = (b0 * v0.uv[0] / v0.clip_w + b1 * v1.uv[0] / v1.clip_w + b2 * v2.uv[0] / v2.clip_w) / inverse_w;
                 const v = (b0 * v0.uv[1] / v0.clip_w + b1 * v1.uv[1] / v1.clip_w + b2 * v2.uv[1] / v2.clip_w) / inverse_w;
-                const color = shade(texture, texture_width, texture_height, u, v, light);
+                const color = shade(texture, texture_width, texture_height, u, v, &lighting);
                 @memcpy(target[pixel_index * 4 ..][0..4], &color);
                 counters.color_writes += 1;
                 pixels_written += 1;

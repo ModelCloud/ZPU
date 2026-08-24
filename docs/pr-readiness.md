@@ -25,18 +25,28 @@ support, plus the existing X11/Vulkan validation tools `Xvfb`, `vkcube`, and
 needed by this feature.
 
 The capture is a real 640×480 XCB vkcube session under Xvfb using only ZPU's
-ICD. It records 20 seconds of VP9 WebM and three PNG observations in ignored
-`scratch_tmp/`. Validation requires the ZPU CPU device, one VP9 640×480 stream,
+ICD, pinned to exactly one verified physical core. It records 900 lossless
+FFV1 packets over 15 seconds for cadence analysis, 20 seconds of VP9 WebM for
+manual inspection, and three PNG observations in ignored `scratch_tmp/`.
+Cadence validation reports visible FPS, p50/p95/p99/worst intervals, interval
+CV, missed rational 60 Hz phase slots, consecutive frame duplicates, monotonic
+PTS, and capture drops. Metadata binds the exact logical CPU and physical
+package/core identity, full source commit, commands, UTC, hashes, sizes, and
+image dimensions. This is explicitly synthetic Xvfb pacing evidence, not
+physical scanout evidence.
+
+Validation additionally requires the ZPU CPU device, one VP9 640×480 stream,
 19–21.5 seconds duration, positive frame count/rate, complete decode, motion,
-nonblack content, and size/SHA-256/UTC/source metadata. FFmpeg and ffprobe are
-evidence tools, not runtime dependencies.
+nonblack content, and matching provenance. FFmpeg and ffprobe are evidence
+tools, not runtime dependencies. The acceptance limits are not weakened when a
+run fails: the validator reports the measured gate failures.
 
 After committing source, generate `progress_benchmarks.md` with
 `tools/evidence.py progress --write`, commit only that Markdown, and run
 `tools/limited-cpus.sh zig build pr-readiness`. The validator requires every
 applicable 2D metric/backend and every 3D metric, canonical order and units,
-both categories, checksums, raw paths, sampling, UTC, and the exact benchmarked
-commit. HEAD may equal that commit or be exactly one later commit whose only
+both categories, the complete pacing row set, checksums, raw paths, sampling,
+UTC, and the exact benchmarked commit. HEAD may equal that commit or be exactly one later commit whose only
 changed path is `progress_benchmarks.md`. Binary media and raw JSON must remain
 ignored and untracked. Heavy capture is an explicit local operation; validator
 failure fixtures remain in the normal `zig build test` gate.

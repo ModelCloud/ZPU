@@ -1,9 +1,12 @@
 //! Original minimal ABI transcription from the public Vulkan 1.0 specification and
 //! Khronos loader/driver interface documentation. This is an experimental ICD.
 const std = @import("std");
+const builtin = @import("builtin");
 const cpu_cube = @import("cpu_cube.zig");
 const host_memory = @import("host_memory.zig");
 const xcb_present = @import("xcb_present.zig");
+const frame_pacing = @import("frame_pacing.zig");
+const frame_lifecycle = @import("frame_lifecycle.zig");
 pub const Result = enum(i32) { success = 0, not_ready = 1, timeout = 2, incomplete = 5, error_out_of_host_memory = -1, error_initialization_failed = -3, error_memory_map_failed = -5, error_layer_not_present = -6, error_extension_not_present = -7, error_feature_not_present = -8, error_format_not_supported = -11 };
 pub const Fn = ?*const fn () callconv(.c) void;
 pub const Alloc = opaque {};
@@ -186,7 +189,21 @@ const SurfaceObj = struct { owner: Instance, connection: *anyopaque, window: u32
 const ImageViewObj = struct { owner: Device, image: *ImageObj };
 const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj };
 const DescriptorSetObj = struct { owner: Device, uniform: ?*BufferObj = null, uniform_offset: u64 = 0, uniform_range: u64 = 0, texture: ?*ImageObj = null };
-const SwapchainObj = struct { owner: Device, surface: *SurfaceObj, width: u32, height: u32, image_count: u32, images: [3]usize, next_image: u32 };
+const SwapchainObj = struct {
+    owner: Device,
+    surface: *SurfaceObj,
+    width: u32,
+    height: u32,
+    image_count: u32,
+    images: [3]usize,
+    image_states: [3]frame_lifecycle.State,
+    next_image: u32,
+    pending: u32,
+    retiring: bool,
+    present_mutex: std.c.pthread_mutex_t,
+    present_condition: std.c.pthread_cond_t,
+    transport: xcb_present.Transport,
+};
 const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32 }, cube_draw: struct { framebuffer: *FramebufferObj, descriptors: *DescriptorSetObj, vertex_count: u32, viewport: Viewport, scissor: cpu_cube.Rect }, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 } };
 const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, state: u8, invalid: bool, count: u16, active_framebuffer: ?*FramebufferObj, bound_descriptors: ?*DescriptorSetObj, viewport: Viewport, scissor: cpu_cube.Rect, commands: [256]Command };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
@@ -230,6 +247,64 @@ var swapchain_objects: [8]SwapchainObj = undefined;
 var swapchain_state = [_]SlotState{.never} ** 8;
 var generic_handle: usize = 0x10000;
 var mutex: std.atomic.Mutex = .unlocked;
+
+const PresentEntry = struct { swapchain: *SwapchainObj, image_index: u32 };
+const max_present_entries = 24;
+var present_entries: [max_present_entries]PresentEntry = undefined;
+var present_head: usize = 0;
+var present_count: usize = 0;
+var present_mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER;
+var present_condition: std.c.pthread_cond_t = std.c.PTHREAD_COND_INITIALIZER;
+var present_worker_started = false;
+
+fn presentWorker() void {
+    var cadence: ?frame_pacing.Clock = null;
+    while (true) {
+        _ = std.c.pthread_mutex_lock(&present_mutex);
+        while (present_count == 0) _ = std.c.pthread_cond_wait(&present_condition, &present_mutex);
+        const entry = present_entries[present_head];
+        present_head = (present_head + 1) % max_present_entries;
+        present_count -= 1;
+        _ = std.c.pthread_mutex_unlock(&present_mutex);
+
+        const before = frame_pacing.monotonicNs();
+        if (cadence == null) {
+            cadence = frame_pacing.Clock.init(before);
+            cadence.?.advance(before);
+        }
+        const deadline = cadence.?.deadline();
+        if (deadline > before) frame_pacing.sleepUntil(deadline);
+        const image: *ImageObj = @ptrFromInt(entry.swapchain.images[entry.image_index]);
+        _ = xcb_present.present(&entry.swapchain.transport, imageBytes(image));
+        const after = frame_pacing.monotonicNs();
+        cadence.?.advance(after);
+
+        _ = std.c.pthread_mutex_lock(&entry.swapchain.present_mutex);
+        std.debug.assert(frame_lifecycle.release(entry.swapchain.image_states[0..entry.swapchain.image_count], entry.image_index));
+        entry.swapchain.pending -= 1;
+        _ = std.c.pthread_cond_broadcast(&entry.swapchain.present_condition);
+        _ = std.c.pthread_mutex_unlock(&entry.swapchain.present_mutex);
+    }
+}
+
+fn ensurePresentWorkerLocked() bool {
+    if (builtin.is_test) return true;
+    if (present_worker_started) return true;
+    const worker = std.Thread.spawn(.{}, presentWorker, .{}) catch return false;
+    worker.detach();
+    present_worker_started = true;
+    return true;
+}
+
+fn enqueuePresent(entry: PresentEntry) bool {
+    _ = std.c.pthread_mutex_lock(&present_mutex);
+    defer _ = std.c.pthread_mutex_unlock(&present_mutex);
+    if (present_count == max_present_entries) return false;
+    present_entries[(present_head + present_count) % max_present_entries] = entry;
+    present_count += 1;
+    _ = std.c.pthread_cond_signal(&present_condition);
+    return true;
+}
 
 const Requirement = enum(u6) {
     instance_allocator,
@@ -2114,13 +2189,28 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (ci.min_image_count < 2 or ci.min_image_count > 3 or ci.image_extent.width == 0 or ci.image_extent.height == 0) return .error_initialization_failed;
+    if (ci.min_image_count < 2 or ci.min_image_count > 3 or ci.image_extent.width == 0 or ci.image_extent.height == 0 or ci.present_mode != 2) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     const surface = validSurfaceLocked(ci.surface) orelse return .error_initialization_failed;
     if (!validDeviceLocked(d) or surface.owner != d.physical.owner) return .error_initialization_failed;
     for (&swapchain_objects, &swapchain_state) |*swapchain, *state| if (state.* == .never) {
-        swapchain.* = .{ .owner = d, .surface = surface, .width = ci.image_extent.width, .height = ci.image_extent.height, .image_count = ci.min_image_count, .images = .{ 0, 0, 0 }, .next_image = 0 };
+        const transport = xcb_present.init(surface.connection, surface.window, ci.image_extent.width, ci.image_extent.height) orelse return .error_initialization_failed;
+        swapchain.* = .{
+            .owner = d,
+            .surface = surface,
+            .width = ci.image_extent.width,
+            .height = ci.image_extent.height,
+            .image_count = ci.min_image_count,
+            .images = .{ 0, 0, 0 },
+            .image_states = .{ .available, .available, .available },
+            .next_image = 0,
+            .pending = 0,
+            .retiring = false,
+            .present_mutex = std.c.PTHREAD_MUTEX_INITIALIZER,
+            .present_condition = std.c.PTHREAD_COND_INITIALIZER,
+            .transport = transport,
+        };
         var created: u32 = 0;
         while (created < ci.min_image_count) : (created += 1) {
             var found = false;
@@ -2144,9 +2234,25 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
 fn destroySwapchain(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
     if (alloc != null) return;
     lock();
+    const swapchain = validSwapchainLocked(handle) orelse {
+        mutex.unlock();
+        return;
+    };
+    if (!validDeviceLocked(device orelse {
+        mutex.unlock();
+        return;
+    }) or swapchain.owner != device.?) {
+        mutex.unlock();
+        return;
+    }
+    swapchain.retiring = true;
+    mutex.unlock();
+    _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
+    while (swapchain.pending != 0) _ = std.c.pthread_cond_wait(&swapchain.present_condition, &swapchain.present_mutex);
+    _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+    lock();
     defer mutex.unlock();
-    const swapchain = validSwapchainLocked(handle) orelse return;
-    if (!validDeviceLocked(device orelse return) or swapchain.owner != device.?) return;
+    xcb_present.deinit(&swapchain.transport);
     for (swapchain.images[0..swapchain.image_count]) |image_handle| if (validImageLocked(image_handle)) |image| {
         stateForObject(ImageObj, image, &image_objects, &image_state).?.* = .tombstone;
         if (image.owned_bytes) |bytes| allocator.free(bytes);
@@ -2172,39 +2278,114 @@ fn getSwapchainImages(device: ?Device, handle: usize, count: ?*u32, output: ?[*]
     return .success;
 }
 fn acquireNextImage(device: ?Device, handle: usize, timeout_ns: u64, semaphore_handle: usize, fence_handle: usize, output: ?*u32) callconv(.c) Result {
-    _ = timeout_ns;
     lock();
-    defer mutex.unlock();
-    const swapchain = validSwapchainLocked(handle) orelse return .error_initialization_failed;
-    if (!validDeviceLocked(device orelse return .error_initialization_failed) or swapchain.owner != device.?) return .error_initialization_failed;
-    if (semaphore_handle != 0) (validSemaphoreLocked(semaphore_handle) orelse return .error_initialization_failed).signaled = true;
-    if (fence_handle != 0) (validFenceLocked(fence_handle) orelse return .error_initialization_failed).signaled = true;
-    const out = output orelse return .error_initialization_failed;
-    out.* = swapchain.next_image;
-    swapchain.next_image = (swapchain.next_image + 1) % swapchain.image_count;
-    return .success;
+    const swapchain = validSwapchainLocked(handle) orelse {
+        mutex.unlock();
+        return .error_initialization_failed;
+    };
+    if (!validDeviceLocked(device orelse {
+        mutex.unlock();
+        return .error_initialization_failed;
+    }) or swapchain.owner != device.?) {
+        mutex.unlock();
+        return .error_initialization_failed;
+    }
+    const semaphore = if (semaphore_handle != 0) validSemaphoreLocked(semaphore_handle) orelse {
+        mutex.unlock();
+        return .error_initialization_failed;
+    } else null;
+    const fence = if (fence_handle != 0) validFenceLocked(fence_handle) orelse {
+        mutex.unlock();
+        return .error_initialization_failed;
+    } else null;
+    const out = output orelse {
+        mutex.unlock();
+        return .error_initialization_failed;
+    };
+    mutex.unlock();
+
+    var realtime_deadline: std.c.timespec = undefined;
+    if (timeout_ns != 0 and timeout_ns != std.math.maxInt(u64)) {
+        if (std.c.clock_gettime(.REALTIME, &realtime_deadline) != 0) return .error_initialization_failed;
+        const deadline = @as(u128, @intCast(realtime_deadline.sec)) * frame_pacing.ns_per_second + @as(u64, @intCast(realtime_deadline.nsec)) + timeout_ns;
+        realtime_deadline.sec = @intCast(deadline / frame_pacing.ns_per_second);
+        realtime_deadline.nsec = @intCast(deadline % frame_pacing.ns_per_second);
+    }
+    _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
+    defer _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+    while (true) {
+        if (frame_lifecycle.acquire(swapchain.image_states[0..swapchain.image_count], &swapchain.next_image)) |index| {
+            out.* = index;
+            if (semaphore) |item| item.signaled = true;
+            if (fence) |item| item.signaled = true;
+            return .success;
+        }
+        if (timeout_ns == 0) return .not_ready;
+        if (timeout_ns == std.math.maxInt(u64)) {
+            _ = std.c.pthread_cond_wait(&swapchain.present_condition, &swapchain.present_mutex);
+        } else if (std.c.pthread_cond_timedwait(&swapchain.present_condition, &swapchain.present_mutex, &realtime_deadline) != .SUCCESS) return .timeout;
+    }
 }
 fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
     const present = info orelse return .error_initialization_failed;
     lock();
-    defer mutex.unlock();
-    const q = queue orelse return .error_initialization_failed;
-    if (!validDeviceLocked(q.owner) or present.swapchain_count == 0 or present.swapchains == null or present.image_indices == null) return .error_initialization_failed;
+    const q = queue orelse {
+        mutex.unlock();
+        return .error_initialization_failed;
+    };
+    if (!validDeviceLocked(q.owner) or present.swapchain_count == 0 or present.swapchain_count > max_present_entries or present.swapchains == null or present.image_indices == null or !ensurePresentWorkerLocked()) {
+        mutex.unlock();
+        return .error_initialization_failed;
+    }
     if (present.wait_semaphore_count != 0) {
-        const waits = present.wait_semaphores orelse return .error_initialization_failed;
+        const waits = present.wait_semaphores orelse {
+            mutex.unlock();
+            return .error_initialization_failed;
+        };
         for (waits[0..present.wait_semaphore_count]) |handle| {
-            const semaphore = validSemaphoreLocked(handle) orelse return .error_initialization_failed;
-            if (!semaphore.signaled) return .error_initialization_failed;
+            const semaphore = validSemaphoreLocked(handle) orelse {
+                mutex.unlock();
+                return .error_initialization_failed;
+            };
+            if (!semaphore.signaled) {
+                mutex.unlock();
+                return .error_initialization_failed;
+            }
             semaphore.signaled = false;
         }
     }
     for (present.swapchains.?[0..present.swapchain_count], present.image_indices.?[0..present.swapchain_count], 0..) |handle, index, i| {
-        const swapchain = validSwapchainLocked(handle) orelse return .error_initialization_failed;
-        if (swapchain.owner != q.owner or index >= swapchain.image_count) return .error_initialization_failed;
-        const image = validImageLocked(swapchain.images[index]) orelse return .error_initialization_failed;
-        if (!xcb_present.present(swapchain.surface.connection, swapchain.surface.window, swapchain.width, swapchain.height, imageBytes(image))) return .error_initialization_failed;
+        const swapchain = validSwapchainLocked(handle) orelse {
+            mutex.unlock();
+            return .error_initialization_failed;
+        };
+        if (swapchain.owner != q.owner or index >= swapchain.image_count or swapchain.retiring) {
+            mutex.unlock();
+            return .error_initialization_failed;
+        }
+        _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
+        if (!frame_lifecycle.queue(swapchain.image_states[0..swapchain.image_count], index)) {
+            _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+            mutex.unlock();
+            return .error_initialization_failed;
+        }
+        swapchain.pending += 1;
+        _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+        if (builtin.is_test) {
+            const image: *ImageObj = @ptrFromInt(swapchain.images[index]);
+            _ = xcb_present.present(&swapchain.transport, imageBytes(image));
+            _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
+            std.debug.assert(frame_lifecycle.release(swapchain.image_states[0..swapchain.image_count], index));
+            swapchain.pending -= 1;
+            _ = std.c.pthread_cond_broadcast(&swapchain.present_condition);
+            _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+        } else if (!enqueuePresent(.{ .swapchain = swapchain, .image_index = index })) {
+            mutex.unlock();
+            return .error_initialization_failed;
+        }
         if (present.results) |results| results[i] = .success;
     }
+    mutex.unlock();
     return .success;
 }
 fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_handle: usize) callconv(.c) Result {
@@ -2264,14 +2445,38 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
 fn queueWaitIdle(queue: ?Queue) callconv(.c) Result {
     const q = queue orelse return .error_initialization_failed;
     lock();
-    defer mutex.unlock();
-    return if (validDeviceLocked(q.owner)) .success else .error_initialization_failed;
+    if (!validDeviceLocked(q.owner)) {
+        mutex.unlock();
+        return .error_initialization_failed;
+    }
+    var owned: [8]*SwapchainObj = undefined;
+    var count: usize = 0;
+    for (&swapchain_objects, swapchain_state) |*swapchain, state| if (state == .live and swapchain.owner == q.owner) {
+        owned[count] = swapchain;
+        count += 1;
+    };
+    mutex.unlock();
+    for (owned[0..count]) |swapchain| {
+        _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
+        while (swapchain.pending != 0) _ = std.c.pthread_cond_wait(&swapchain.present_condition, &swapchain.present_mutex);
+        _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+    }
+    return .success;
 }
 fn deviceWaitIdle(device: ?Device) callconv(.c) Result {
     const d = device orelse return .error_initialization_failed;
     lock();
-    defer mutex.unlock();
-    return if (validDeviceLocked(d)) .success else .error_initialization_failed;
+    if (!validDeviceLocked(d)) {
+        mutex.unlock();
+        return .error_initialization_failed;
+    }
+    var queue: ?Queue = null;
+    for (&device_objects, &queue_objects, device_state) |*candidate, *candidate_queue, state| if (state == .live and candidate == d) {
+        queue = candidate_queue;
+        break;
+    };
+    mutex.unlock();
+    return queueWaitIdle(queue);
 }
 
 fn globalLookup(n: []const u8) Fn {
@@ -3990,5 +4195,4 @@ test "explicit behavioral requirement matrix is complete" {
         const mask = @as(u64, 1) << field.value;
         try std.testing.expect(requirement_hits & mask != 0);
     }
-    std.debug.print("behavioral requirements: {d}/{d}\n", .{ fields.len, fields.len });
 }
