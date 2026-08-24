@@ -157,6 +157,7 @@ pub fn compile(key: Key) !Kernel {
 pub const Cache = struct {
     const capacity = 16;
     entries: [capacity]?Kernel = [_]?Kernel{null} ** capacity,
+    last: ?Kernel = null,
     next: usize = 0,
     hits: u64 = 0,
     misses: u64 = 0,
@@ -164,14 +165,23 @@ pub const Cache = struct {
         self.* = .{};
     }
     pub fn get(self: *Cache, key: Key) !Kernel {
-        for (self.entries) |entry| if (entry) |kernel| if (Key.eql(kernel.key, key)) {
+        if (self.last) |kernel| if (Key.eql(kernel.key, key)) {
             self.hits += 1;
             return kernel;
         };
+        for (self.entries) |entry| {
+            const kernel = entry orelse break;
+            if (Key.eql(kernel.key, key)) {
+                self.hits += 1;
+                self.last = kernel;
+                return kernel;
+            }
+        }
         const kernel = try compile(key);
         self.misses += 1;
         self.entries[self.next] = kernel;
         self.next = (self.next + 1) % capacity;
+        self.last = kernel;
         return kernel;
     }
 };

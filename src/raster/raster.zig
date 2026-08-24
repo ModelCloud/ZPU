@@ -4,13 +4,20 @@ const dispatch = @import("../simd/dispatch.zig");
 const pipeline = @import("../render_pipeline.zig");
 
 threadlocal var kernel_cache = pipeline.Cache{};
+threadlocal var selected_backend: ?dispatch.Backend = null;
 
 fn cachedKernel(format: s.Format, operation: pipeline.Operation) pipeline.Kernel {
-    return kernel_cache.get(pipeline.Key.init(format, operation, dispatch.best())) catch unreachable;
+    const backend = selected_backend orelse blk: {
+        const selected = dispatch.best();
+        selected_backend = selected;
+        break :blk selected;
+    };
+    return kernel_cache.get(pipeline.Key.init(format, operation, backend)) catch unreachable;
 }
 
 pub fn resetKernelCache() void {
     kernel_cache.reset();
+    selected_backend = null;
 }
 pub fn kernelCacheStats() struct { hits: u64, misses: u64 } {
     return .{ .hits = kernel_cache.hits, .misses = kernel_cache.misses };
