@@ -176,7 +176,7 @@ const SetInstanceLoaderData = *const fn (Instance, *anyopaque) callconv(.c) Resu
 const SetDeviceLoaderData = *const fn (Device, *anyopaque) callconv(.c) Result;
 pub const InstanceObj = extern struct { loader_data: usize, set_loader_data: ?SetInstanceLoaderData };
 pub const PhysicalObj = extern struct { loader_data: usize, owner: *InstanceObj, loader_initialized: bool };
-pub const DeviceObj = extern struct { loader_data: usize, physical: *PhysicalObj, set_loader_data: ?SetDeviceLoaderData, heap_used: u64 };
+pub const DeviceObj = extern struct { loader_data: usize, physical: *PhysicalObj, set_loader_data: ?SetDeviceLoaderData, heap_used: u64, generation: u64 };
 pub const QueueObj = extern struct { loader_data: usize, owner: *DeviceObj, loader_initialized: bool };
 pub const Instance = *InstanceObj;
 pub const Physical = *PhysicalObj;
@@ -192,7 +192,19 @@ const SurfaceObj = struct { owner: Instance, connection: *anyopaque, window: u32
 const ImageViewObj = struct { owner: Device, image: *ImageObj };
 const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj };
 const DescriptorSetObj = struct { owner: Device, uniform: ?*BufferObj = null, uniform_offset: u64 = 0, uniform_range: u64 = 0, texture: ?*ImageObj = null };
-const ShaderModuleObj = struct { owner: Device, module: spirv.Module };
+const DeviceIdentity = struct {
+    handle: Device,
+    generation: u64,
+
+    fn capture(device: Device) DeviceIdentity {
+        return .{ .handle = device, .generation = device.generation };
+    }
+
+    fn eql(identity: DeviceIdentity, device: Device) bool {
+        return identity.handle == device and identity.generation == device.generation;
+    }
+};
+const ShaderModuleObj = struct { owner: DeviceIdentity, module: spirv.Module };
 const SwapchainObj = struct {
     owner: Device,
     surface: *SurfaceObj,
@@ -225,6 +237,7 @@ var instance_state = [_]SlotState{.never} ** max_objects;
 var device_objects: [max_objects]DeviceObj = undefined;
 var queue_objects: [max_objects]QueueObj = undefined;
 var device_state = [_]SlotState{.never} ** max_objects;
+var next_device_generation: u64 = 1;
 var memory_objects: [max_child_objects]MemoryObj = undefined;
 var memory_state = [_]SlotState{.never} ** max_child_objects;
 var buffer_objects: [max_child_objects]BufferObj = undefined;
@@ -938,7 +951,10 @@ fn createDevice(physical: ?Physical, info: ?*const DeviceInfo, alloc: ?*const Al
     defer mutex.unlock();
     if (!validPhysicalLocked(p)) return .error_initialization_failed;
     for (&device_objects, &queue_objects, &device_state) |*d, *q, *state| if (state.* == .never) {
-        d.* = .{ .loader_data = MAGIC, .physical = p, .set_loader_data = findDeviceLoaderCallback(ci.p_next), .heap_used = 0 };
+        const generation = next_device_generation;
+        next_device_generation +%= 1;
+        if (next_device_generation == 0) next_device_generation = 1;
+        d.* = .{ .loader_data = MAGIC, .physical = p, .set_loader_data = findDeviceLoaderCallback(ci.p_next), .heap_used = 0, .generation = generation };
         q.* = .{ .loader_data = MAGIC, .owner = d, .loader_initialized = false };
         state.* = .live;
         out.* = d;
@@ -975,7 +991,7 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
         for (&descriptor_set_objects, &descriptor_set_state) |*set, *child_state| if (child_state.* == .live and set.owner == d) {
             child_state.* = .tombstone;
         };
-        for (&shader_module_objects, &shader_module_state) |*shader, *child_state| if (child_state.* == .live and shader.owner == d) {
+        for (&shader_module_objects, &shader_module_state) |*shader, *child_state| if (child_state.* == .live and shader.owner.eql(d)) {
             child_state.* = .tombstone;
             shader.module.deinit(allocator);
         };
@@ -2048,7 +2064,7 @@ fn createShaderModule(device: ?Device, info: ?*const ShaderModuleCreateInfo, all
         return if (err == error.OutOfMemory) .error_out_of_host_memory else .error_invalid_shader;
     };
     errdefer module.deinit(allocator);
-    shader_module_objects[index] = .{ .owner = d, .module = module };
+    shader_module_objects[index] = .{ .owner = DeviceIdentity.capture(d), .module = module };
     shader_module_state[index] = .live;
     out.* = @intFromPtr(&shader_module_objects[index]);
     return .success;
@@ -2060,7 +2076,7 @@ fn destroyShaderModule(device: ?Device, handle: usize, alloc: ?*const Alloc) cal
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return;
     for (&shader_module_objects, &shader_module_state) |*object, *state| if (@intFromPtr(object) == handle) {
-        if (state.* != .live or object.owner != d) {
+        if (state.* != .live or !object.owner.eql(d)) {
             hit(.shader_lifetime);
             return;
         }
@@ -4369,7 +4385,8 @@ test "shader modules use owned validated words and dedicated lifetime-safe ABI h
     caller_words[5] = 0x0001_0001;
     std.testing.allocator.free(caller_words);
     const object = findLiveHandle(ShaderModuleObj, handle, &shader_module_objects, &shader_module_state).?;
-    try std.testing.expectEqual(first.device, object.owner);
+    try std.testing.expect(object.owner.eql(first.device));
+    try std.testing.expectEqual(first.device.generation, object.owner.generation);
     try std.testing.expectEqual(@as(u32, 0x0001_0000), object.module.words[5]);
 
     destroy(second.device, handle, null);
@@ -4394,7 +4411,38 @@ test "shader modules use owned validated words and dedicated lifetime-safe ABI h
     destroyDevice(first.device, null);
     try std.testing.expect(findLiveHandle(ShaderModuleObj, teardown_handle, &shader_module_objects, &shader_module_state) == null);
     destroy(first.device, teardown_handle, null);
+    const stale_output = teardown_handle;
     try std.testing.expectEqual(Result.error_initialization_failed, create(first.device, &replacement_info, null, &teardown_handle));
+    try std.testing.expectEqual(stale_output, teardown_handle);
+}
+
+test "shader module device identity rejects cross-generation address reuse and device slots never reuse" {
+    instance_state = [_]SlotState{.never} ** max_objects;
+    device_state = [_]SlotState{.never} ** max_objects;
+    shader_module_state = [_]SlotState{.never} ** max_child_objects;
+    const first = try createTestDeviceContext();
+    const words = [_]u32{ spirv.magic, spirv.supported_spirv_version, 0, 1, 0 };
+    const info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = @sizeOf(@TypeOf(words)), .p_code = &words };
+    var shader: usize = 0;
+    try std.testing.expectEqual(Result.success, createShaderModule(first.device, &info, null, &shader));
+
+    const original_generation = first.device.generation;
+    first.device.generation +%= 1;
+    destroyShaderModule(first.device, shader, null);
+    try std.testing.expect(findLiveHandle(ShaderModuleObj, shader, &shader_module_objects, &shader_module_state) != null);
+    first.device.generation = original_generation;
+    destroyShaderModule(first.device, shader, null);
+    try std.testing.expect(findLiveHandle(ShaderModuleObj, shader, &shader_module_objects, &shader_module_state) == null);
+
+    const old_device = first.device;
+    const old_generation = first.device.generation;
+    destroyDevice(first.device, null);
+    destroyInstance(first.instance, null);
+    const second = try createTestDeviceContext();
+    defer destroyInstance(second.instance, null);
+    defer destroyDevice(second.device, null);
+    try std.testing.expect(second.device != old_device);
+    try std.testing.expect(second.device.generation != old_generation);
 }
 
 test "shader module ABI rejects malformed and unsupported inputs without publishing handles" {
@@ -4406,31 +4454,42 @@ test "shader module ABI rejects malformed and unsupported inputs without publish
     var info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = valid.len * 4, .p_code = &valid };
     var output: usize = 0xfeed_face;
     try std.testing.expectEqual(Result.error_initialization_failed, createShaderModule(null, &info, null, &output));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), output);
     try std.testing.expectEqual(Result.error_initialization_failed, createShaderModule(ctx.device, null, null, &output));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), output);
     try std.testing.expectEqual(Result.error_initialization_failed, createShaderModule(ctx.device, &info, null, null));
     try std.testing.expectEqual(Result.error_initialization_failed, createShaderModule(ctx.device, &info, @ptrFromInt(8), &output));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), output);
     info.s_type = 15;
     try std.testing.expectEqual(Result.error_initialization_failed, createShaderModule(ctx.device, &info, null, &output));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), output);
     info.s_type = 16;
     info.p_next = @ptrFromInt(8);
     try std.testing.expectEqual(Result.error_initialization_failed, createShaderModule(ctx.device, &info, null, &output));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), output);
     info.p_next = null;
     info.flags = 1;
     try std.testing.expectEqual(Result.error_initialization_failed, createShaderModule(ctx.device, &info, null, &output));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), output);
     info.flags = 0;
 
     info.code_size = 0;
     try std.testing.expectEqual(Result.error_invalid_shader, createShaderModule(ctx.device, &info, null, &output));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), output);
     info.code_size = 5;
     try std.testing.expectEqual(Result.error_invalid_shader, createShaderModule(ctx.device, &info, null, &output));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), output);
     info.code_size = spirv.max_code_bytes + 4;
     try std.testing.expectEqual(Result.error_invalid_shader, createShaderModule(ctx.device, &info, null, &output));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), output);
     info.code_size = valid.len * 4;
     info.p_code = null;
     try std.testing.expectEqual(Result.error_invalid_shader, createShaderModule(ctx.device, &info, null, &output));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), output);
     var bytes = [_]u8{0} ** 32;
     info.p_code = &bytes[1];
     try std.testing.expectEqual(Result.error_invalid_shader, createShaderModule(ctx.device, &info, null, &output));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), output);
 
     const malformed = [_][]const u32{
         &.{ spirv.magic, 0x0001_0000, 0, 1 },
@@ -4439,6 +4498,7 @@ test "shader module ABI rejects malformed and unsupported inputs without publish
         &.{ spirv.magic, 0x0001_0000, 0, 0, 0 },
         &.{ spirv.magic, 0x0001_0000, 0, 1, 0, 0 },
         &.{ spirv.magic, 0x0001_0000, 0, 1, 0, 0x0002_0000 },
+        &.{ spirv.magic, 0x0001_0100, 0, 1, 0 },
     };
     for (malformed) |words| {
         info.code_size = words.len * 4;
