@@ -14,6 +14,7 @@ video="$out/zpu-vkcube-800x600-120hz-20s.webm"; metadata="$out/zpu-vkcube-800x60
 lossless="$out/zpu-vkcube-800x600-120hz-20s.nut"; cadence_metadata="$out/zpu-vkcube-800x600-120hz-raw-20s.json"
 display=":$((170 + ($$ % 70)))"
 runtime=$(mktemp -d); log="$runtime/vkcube.log"
+lossless_tmp="$runtime/cadence-raw.nut"
 xpid=""; cpid=""
 cleanup() { [[ -n "$cpid" ]] && kill "$cpid" 2>/dev/null || true; [[ -n "$xpid" ]] && kill "$xpid" 2>/dev/null || true; rm -rf "$runtime"; }
 trap cleanup EXIT
@@ -31,7 +32,8 @@ grep -F 'ZPU Experimental CPU' "$runtime/vulkaninfo.txt" >/dev/null
 grep -E 'deviceType[[:space:]]*=[[:space:]]*PHYSICAL_DEVICE_TYPE_CPU' "$runtime/vulkaninfo.txt" >/dev/null
 vkcube --wsi xcb --suppress_popups >"$log" 2>&1 & cpid=$!
 sleep 1
-taskset -c "$capture_cpu" ffmpeg -y -hide_banner -loglevel warning -f x11grab -framerate 120 -video_size 800x600 -i "$display.0" -frames:v 2400 -fps_mode passthrough -c:v rawvideo "$lossless"
+taskset -c "$capture_cpu" ffmpeg -y -hide_banner -loglevel warning -f x11grab -framerate 120 -video_size 800x600 -i "$display.0" -frames:v 2400 -fps_mode passthrough -c:v rawvideo "$lossless_tmp"
+cp "$lossless_tmp" "$lossless"
 commit=${ZPU_SOURCE_COMMIT:-$(git rev-parse HEAD)}; utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 context_switches=$(awk '$1=="nr_switches"{print int($3)}' "/proc/$cpid/sched")
 migrations=$(awk '$1=="se.nr_migrations"{print int($3)}' "/proc/$cpid/sched")
