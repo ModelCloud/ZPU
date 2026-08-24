@@ -76,5 +76,7 @@ test "bounded FIFO rejects overflow without corrupting queued entries" {
     defer count = saved_count;
     var transport: xcb_present.Transport = undefined;
     var cadence: ?frame_pacing.Clock = null;
-    try std.testing.expect(!enqueue(.{ .transport = &transport, .cadence = &cadence, .pixels = "", .context = @ptrFromInt(8), .image_index = 0, .release = struct { fn f(_: *anyopaque, _: u32) void {} }.f }));
+    try std.testing.expect(!enqueue(.{ .transport = &transport, .cadence = &cadence, .pixels = "", .context = @ptrFromInt(8), .image_index = 0, .release = struct {
+        fn f(_: *anyopaque, _: u32) void {}
+    }.f }));
 }
