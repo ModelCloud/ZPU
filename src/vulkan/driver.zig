@@ -230,17 +230,24 @@ const DeviceIdentity = struct {
     }
 };
 const ShaderModuleObj = struct { owner: DeviceIdentity, module: spirv.Module };
-const canonical_capacity = 32 * 1024;
 const Canonical = struct {
-    len: u16 = 0,
-    bytes: [canonical_capacity]u8 = undefined,
+    bytes: []u8 = &.{},
     digest: [32]u8 = undefined,
 
     fn finish(self: *Canonical) void {
-        std.crypto.hash.sha2.Sha256.hash(self.bytes[0..self.len], &self.digest, .{});
+        std.crypto.hash.sha2.Sha256.hash(self.bytes, &self.digest, .{});
     }
     fn eql(a: *const Canonical, b: *const Canonical) bool {
-        return a.len == b.len and std.mem.eql(u8, a.bytes[0..a.len], b.bytes[0..b.len]);
+        return std.mem.eql(u8, a.bytes, b.bytes);
+    }
+    fn clone(self: *const Canonical) error{OutOfMemory}!Canonical {
+        if (failTestAllocation()) return error.OutOfMemory;
+        const result = Canonical{ .bytes = allocator.dupe(u8, self.bytes) catch return error.OutOfMemory, .digest = self.digest };
+        return result;
+    }
+    fn deinit(self: *Canonical) void {
+        if (self.bytes.len != 0) allocator.free(self.bytes);
+        self.bytes = &.{};
     }
 };
 const DescriptorSetLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical };
@@ -1057,6 +1064,17 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
         for (&graphics_pipeline_objects, &graphics_pipeline_state) |*object, *child_state| {
             if (child_state.* == .live and object.owner.eql(d)) child_state.* = .tombstone;
         }
+        for (&framebuffer_objects, framebuffer_state) |*object, child_state| if (child_state != .never and object.owner == d) object.render_compatibility.deinit();
+        for (&descriptor_set_layout_objects, descriptor_set_layout_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) object.canonical.deinit();
+        for (&pipeline_layout_objects, pipeline_layout_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) object.canonical.deinit();
+        for (&render_pass_objects, render_pass_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) {
+            object.canonical.deinit();
+            object.compatibility.deinit();
+        };
+        for (&graphics_pipeline_objects, graphics_pipeline_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) {
+            object.canonical.deinit();
+            object.render_compatibility.deinit();
+        };
         for (&swapchain_objects, &swapchain_state) |*swapchain, *child_state| if (child_state.* == .live and swapchain.owner == d) {
             child_state.* = .tombstone;
         };
@@ -2087,13 +2105,17 @@ fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy
     }
 }
 
-const CanonicalError = error{ Invalid, TooLarge };
+const max_canonical_bytes = 2 * spirv.max_code_bytes + 64 * 1024;
+const CanonicalError = error{ Invalid, TooLarge, OutOfMemory };
 const CanonicalWriter = struct {
-    value: Canonical = .{},
+    list: std.ArrayList(u8) = .empty,
+    fn deinit(self: *CanonicalWriter) void {
+        self.list.deinit(allocator);
+    }
     fn raw(self: *CanonicalWriter, bytes: []const u8) CanonicalError!void {
-        if (bytes.len > canonical_capacity - self.value.len) return error.TooLarge;
-        @memcpy(self.value.bytes[self.value.len..][0..bytes.len], bytes);
-        self.value.len += @intCast(bytes.len);
+        if (bytes.len > max_canonical_bytes -| self.list.items.len) return error.TooLarge;
+        if (failTestAllocation()) return error.OutOfMemory;
+        self.list.appendSlice(allocator, bytes) catch return error.OutOfMemory;
     }
     fn u32le(self: *CanonicalWriter, value: u32) CanonicalError!void {
         var bytes: [4]u8 = undefined;
@@ -2122,9 +2144,11 @@ const CanonicalWriter = struct {
         try self.u32le(1); // cpu_cube_v1 execution ABI
         try self.u32le(0); // baseline CPU feature policy; no host-feature specialization
     }
-    fn done(self: *CanonicalWriter) Canonical {
-        self.value.finish();
-        return self.value;
+    fn done(self: *CanonicalWriter) CanonicalError!Canonical {
+        if (failTestAllocation()) return error.OutOfMemory;
+        var value = Canonical{ .bytes = self.list.toOwnedSlice(allocator) catch return error.OutOfMemory };
+        value.finish();
+        return value;
     }
 };
 fn bool32(value: u32) CanonicalError!u32 {
@@ -2132,12 +2156,13 @@ fn bool32(value: u32) CanonicalError!u32 {
     return value;
 }
 fn appendCanonical(writer: *CanonicalWriter, value: *const Canonical) CanonicalError!void {
-    try writer.u32le(value.len);
-    try writer.raw(value.bytes[0..value.len]);
+    try writer.u64le(value.bytes.len);
+    try writer.raw(value.bytes);
 }
 fn creationFailure(err: CanonicalError) Result {
     return switch (err) {
         error.TooLarge => .error_out_of_host_memory,
+        error.OutOfMemory => .error_out_of_host_memory,
         error.Invalid => .error_initialization_failed,
     };
 }
@@ -2153,6 +2178,7 @@ fn buildDescriptorSetLayout(ci: *const DescriptorSetLayoutCreateInfo) CanonicalE
         }
     }.less);
     var w: CanonicalWriter = .{};
+    defer w.deinit();
     try w.header(1);
     try w.u32le(ci.binding_count);
     var previous: ?u32 = null;
@@ -2165,23 +2191,27 @@ fn buildDescriptorSetLayout(ci: *const DescriptorSetLayoutCreateInfo) CanonicalE
         try w.u32le(b.descriptor_count);
         try w.u32le(b.stage_flags);
     }
-    return w.done();
+    return try w.done();
 }
 fn createDescriptorSetLayout(device: ?Device, info: ?*const DescriptorSetLayoutCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     if (alloc != null) return .error_initialization_failed;
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    const canonical = buildDescriptorSetLayout(ci) catch |err| return creationFailure(err);
+    var canonical = buildDescriptorSetLayout(ci) catch |err| return creationFailure(err);
     lock();
     defer mutex.unlock();
-    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    if (!validDeviceLocked(d)) {
+        canonical.deinit();
+        return .error_initialization_failed;
+    }
     for (&descriptor_set_layout_objects, &descriptor_set_layout_state) |*object, *state| if (state.* == .never) {
         object.* = .{ .owner = DeviceIdentity.capture(d), .canonical = canonical };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
     };
+    canonical.deinit();
     return .error_out_of_host_memory;
 }
 fn destroyDescriptorSetLayout(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
@@ -2196,6 +2226,7 @@ fn destroyDescriptorSetLayout(device: ?Device, handle: usize, alloc: ?*const All
 fn buildPipelineLayoutLocked(d: Device, ci: *const PipelineLayoutCreateInfo) CanonicalError!Canonical {
     if (ci.s_type != 30 or ci.p_next != null or ci.flags != 0 or ci.set_layout_count > 4 or ci.push_constant_range_count > 16 or (ci.set_layout_count != 0 and ci.set_layouts == null) or (ci.push_constant_range_count != 0 and ci.push_constant_ranges == null)) return error.Invalid;
     var w: CanonicalWriter = .{};
+    defer w.deinit();
     try w.header(2);
     try w.u32le(ci.set_layout_count);
     if (ci.set_layouts) |handles| for (handles[0..ci.set_layout_count]) |handle| {
@@ -2210,7 +2241,7 @@ fn buildPipelineLayoutLocked(d: Device, ci: *const PipelineLayoutCreateInfo) Can
         try w.u32le(range.offset);
         try w.u32le(range.size);
     };
-    return w.done();
+    return try w.done();
 }
 fn createPipelineLayout(device: ?Device, info: ?*const PipelineLayoutCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     if (alloc != null) return .error_initialization_failed;
@@ -2220,13 +2251,14 @@ fn createPipelineLayout(device: ?Device, info: ?*const PipelineLayoutCreateInfo,
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
-    const canonical = buildPipelineLayoutLocked(d, ci) catch |err| return creationFailure(err);
+    var canonical = buildPipelineLayoutLocked(d, ci) catch |err| return creationFailure(err);
     for (&pipeline_layout_objects, &pipeline_layout_state) |*object, *state| if (state.* == .never) {
         object.* = .{ .owner = DeviceIdentity.capture(d), .canonical = canonical };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
     };
+    canonical.deinit();
     return .error_out_of_host_memory;
 }
 fn destroyPipelineLayout(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
@@ -2246,6 +2278,7 @@ fn appendAttachmentRef(w: *CanonicalWriter, ref: AttachmentReference, count: u32
 fn buildRenderPass(ci: *const RenderPassCreateInfo, compatibility_only: bool) CanonicalError!Canonical {
     if (ci.s_type != 38 or ci.p_next != null or ci.flags != 0 or ci.attachment_count > 16 or ci.subpass_count == 0 or ci.subpass_count > 8 or ci.dependency_count > 32 or (ci.attachment_count != 0 and ci.attachments == null) or ci.subpasses == null or (ci.dependency_count != 0 and ci.dependencies == null)) return error.Invalid;
     var w: CanonicalWriter = .{};
+    defer w.deinit();
     try w.header(if (compatibility_only) 4 else 3);
     try w.u32le(ci.attachment_count);
     if (ci.attachments) |items| for (items[0..ci.attachment_count]) |a| {
@@ -2291,24 +2324,33 @@ fn buildRenderPass(ci: *const RenderPassCreateInfo, compatibility_only: bool) Ca
             try w.u32le(dep.dependency_flags);
         };
     }
-    return w.done();
+    return try w.done();
 }
 fn createRenderPass(device: ?Device, info: ?*const RenderPassCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     if (alloc != null) return .error_initialization_failed;
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    const canonical = buildRenderPass(ci, false) catch |err| return creationFailure(err);
-    const compatibility = buildRenderPass(ci, true) catch |err| return creationFailure(err);
+    var canonical = buildRenderPass(ci, false) catch |err| return creationFailure(err);
+    var compatibility = buildRenderPass(ci, true) catch |err| {
+        canonical.deinit();
+        return creationFailure(err);
+    };
     lock();
     defer mutex.unlock();
-    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    if (!validDeviceLocked(d)) {
+        canonical.deinit();
+        compatibility.deinit();
+        return .error_initialization_failed;
+    }
     for (&render_pass_objects, &render_pass_state) |*object, *state| if (state.* == .never) {
         object.* = .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .compatibility = compatibility, .subpass_count = ci.subpass_count };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
     };
+    canonical.deinit();
+    compatibility.deinit();
     return .error_out_of_host_memory;
 }
 fn destroyRenderPass(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
@@ -2358,14 +2400,17 @@ test "pipeline canonical primitives are ordered, pointer independent, little end
     };
     const first_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 2, .bindings = &bindings };
     var first = try buildDescriptorSetLayout(&first_info);
+    defer first.deinit();
     const reversed = [_]DescriptorSetLayoutBinding{ bindings[1], bindings[0] };
     var second_info = first_info;
     second_info.bindings = &reversed;
     var second = try buildDescriptorSetLayout(&second_info);
+    defer second.deinit();
     try std.testing.expect(first.eql(&second));
     try std.testing.expectEqualSlices(u8, "ZPUC\x01\x00\x00\x00", first.bytes[0..8]);
     bindings[0].descriptor_count = 2;
     var changed = try buildDescriptorSetLayout(&first_info);
+    defer changed.deinit();
     try std.testing.expect(!first.eql(&changed));
     changed.digest = first.digest;
     try std.testing.expectEqualSlices(u8, &first.digest, &changed.digest);
@@ -2380,20 +2425,25 @@ test "specialization canonicalization owns values and rejects bounds overlap and
     };
     var info = SpecializationInfo{ .map_entry_count = 2, .map_entries = &entries, .data_size = data.len, .data = &data };
     var first: CanonicalWriter = .{};
+    defer first.deinit();
     try appendSpecialization(&first, &info);
-    const saved = first.value;
+    const saved = try std.testing.allocator.dupe(u8, first.list.items);
+    defer std.testing.allocator.free(saved);
     @memset(&data, 0xaa);
-    try std.testing.expectEqualSlices(u8, saved.bytes[0..saved.len], first.value.bytes[0..first.value.len]);
+    try std.testing.expectEqualSlices(u8, saved, first.list.items);
     entries[1].constant_id = 8;
     var duplicate: CanonicalWriter = .{};
+    defer duplicate.deinit();
     try std.testing.expectError(error.Invalid, appendSpecialization(&duplicate, &info));
     entries[1].constant_id = 2;
     entries[1].offset = 3;
     var overlap: CanonicalWriter = .{};
+    defer overlap.deinit();
     try std.testing.expectError(error.Invalid, appendSpecialization(&overlap, &info));
     entries[1].offset = 7;
     entries[1].size = 2;
     var bounds: CanonicalWriter = .{};
+    defer bounds.deinit();
     try std.testing.expectError(error.Invalid, appendSpecialization(&bounds, &info));
 }
 
@@ -2411,6 +2461,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     const render_pass = validRenderPassLocked(ci.render_pass) orelse return error.Invalid;
     if (!layout.owner.eql(d) or !render_pass.owner.eql(d) or ci.subpass >= render_pass.subpass_count) return error.Invalid;
     var w: CanonicalWriter = .{};
+    defer w.deinit();
     try w.header(5);
     try w.u32le(1); // cpu_cube_v1
     try appendCanonical(&w, &layout.canonical);
@@ -2432,6 +2483,8 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         try w.u32le(shader.module.identity.ingestion);
         try w.u32le(shader.module.identity.serialization);
         try w.raw(&shader.module.identity.digest);
+        try w.u64le(shader.module.words.len);
+        for (shader.module.words) |word| try w.u32le(word);
         try w.u32le(@intCast(name.len));
         try w.raw(name);
         try appendSpecialization(&w, stage.specialization_info);
@@ -2548,7 +2601,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     if (try bool32(attachment.blend_enable) != 0 or attachment.color_write_mask != 0xf) return error.Invalid;
     try w.u32le(1);
     try w.u32le(0xf);
-    return .{ .owner = DeviceIdentity.capture(d), .canonical = w.done(), .render_compatibility = render_pass.compatibility, .subpass = ci.subpass, .execution_abi = 1 };
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = try w.done(), .render_compatibility = try render_pass.compatibility.clone(), .subpass = ci.subpass, .execution_abi = 1 };
 }
 
 fn createOpaque(device: ?Device, info: ?*const anyopaque, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
@@ -2687,12 +2740,14 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
     if (!render_pass.owner.eql(d)) return .error_initialization_failed;
     const view = validImageViewLocked(ci.attachments.?[0]) orelse return .error_initialization_failed;
     const depth = if (ci.attachment_count > 1) (validImageViewLocked(ci.attachments.?[1]) orelse return .error_initialization_failed).image else null;
+    var compatibility = render_pass.compatibility.clone() catch return .error_out_of_host_memory;
     for (&framebuffer_objects, &framebuffer_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = d, .color_image = view.image, .depth_image = depth, .render_compatibility = render_pass.compatibility };
+        object.* = .{ .owner = d, .color_image = view.image, .depth_image = depth, .render_compatibility = compatibility };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
     };
+    compatibility.deinit();
     return .error_out_of_host_memory;
 }
 fn destroyFramebuffer(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
@@ -2720,7 +2775,17 @@ fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?*c
         free_count += 1;
     };
     if (free_count < count) return .error_out_of_host_memory;
-    for (0..count) |index| built[index] = buildGraphicsPipelineLocked(d, &create_infos[index]) catch |err| return creationFailure(err);
+    var built_count: usize = 0;
+    for (0..count) |index| {
+        built[index] = buildGraphicsPipelineLocked(d, &create_infos[index]) catch |err| {
+            for (built[0..built_count]) |*prior| {
+                prior.canonical.deinit();
+                prior.render_compatibility.deinit();
+            }
+            return creationFailure(err);
+        };
+        built_count += 1;
+    }
     for (0..count) |index| {
         const slot = slots[index];
         graphics_pipeline_objects[slot] = built[index];
@@ -3464,6 +3529,15 @@ test "vkcube presentation path records submits and presents two swapchain images
     const render_pass_info = RenderPassCreateInfo{ .s_type = 38, .p_next = null, .flags = 0, .attachment_count = 2, .attachments = &attachment_descriptions, .subpass_count = 1, .subpasses = @ptrCast(&subpass), .dependency_count = 0, .dependencies = null };
     var render_pass: usize = 0;
     try std.testing.expectEqual(Result.success, createRenderPass(device, &render_pass_info, null, &render_pass));
+    var unpublished: usize = 0xfeed;
+    const stale_device: Device = @ptrFromInt(8);
+    try std.testing.expectEqual(Result.error_initialization_failed, createRenderPass(stale_device, &render_pass_info, null, &unpublished));
+    for (0..96) |budget| {
+        test_allocations_before_failure = budget;
+        const result = createRenderPass(stale_device, &render_pass_info, null, &unpublished);
+        try std.testing.expect(result == .error_out_of_host_memory or result == .error_initialization_failed);
+    }
+    test_allocations_before_failure = null;
     var framebuffer_info = FramebufferCreateInfo{ .s_type = 37, .p_next = null, .flags = 0, .render_pass = render_pass, .attachment_count = 2, .attachments = &attachments, .width = 8, .height = 8, .layers = 1 };
     var framebuffer: usize = 0;
     try std.testing.expectEqual(Result.success, createFramebuffer(device, &framebuffer_info, null, &framebuffer));
@@ -3478,6 +3552,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     const descriptor_layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 2, .bindings = &layout_bindings };
     var descriptor_layout: usize = 0;
     try std.testing.expectEqual(Result.success, createDescriptorSetLayout(device, &descriptor_layout_info, null, &descriptor_layout));
+    try std.testing.expectEqual(Result.error_initialization_failed, createDescriptorSetLayout(stale_device, &descriptor_layout_info, null, &unpublished));
     const pipeline_layout_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&descriptor_layout), .push_constant_range_count = 0, .push_constant_ranges = null };
     var pipeline_layout: usize = 0;
     try std.testing.expectEqual(Result.success, createPipelineLayout(device, &pipeline_layout_info, null, &pipeline_layout));
@@ -3485,7 +3560,8 @@ test "vkcube presentation path records submits and presents two swapchain images
     var push_layout_info = pipeline_layout_info;
     push_layout_info.push_constant_range_count = 1;
     push_layout_info.push_constant_ranges = @ptrCast(&push_range);
-    _ = try buildPipelineLayoutLocked(device, &push_layout_info);
+    var push_canonical = try buildPipelineLayoutLocked(device, &push_layout_info);
+    defer push_canonical.deinit();
     const shader_words = [_]u32{ spirv.magic, spirv.supported_spirv_version, 0, 1, 0 };
     const shader_info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = @sizeOf(@TypeOf(shader_words)), .p_code = &shader_words };
     var vertex_shader: usize = 0;
@@ -3510,7 +3586,40 @@ test "vkcube presentation path records submits and presents two swapchain images
     const pipeline_info = GraphicsPipelineCreateInfo{ .s_type = 28, .p_next = null, .flags = 0, .stage_count = 2, .stages = &stages, .vertex_input = &vertex_input, .input_assembly = &input_assembly, .tessellation = null, .viewport = &viewport_state, .rasterization = &rasterization, .multisample = &multisample, .depth_stencil = &depth_stencil, .color_blend = &color_blend, .dynamic = &dynamic, .layout = pipeline_layout, .render_pass = render_pass, .subpass = 0, .base_pipeline = 0, .base_pipeline_index = -1 };
     var pipelines: [1]usize = undefined;
     try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&pipeline_info), null, &pipelines));
+    const baseline_pipeline = validGraphicsPipelineLocked(pipelines[0]).?;
+    const fragment_object = findLiveHandle(ShaderModuleObj, fragment_shader, &shader_module_objects, &shader_module_state).?;
+    const original_bound = fragment_object.module.words[3];
+    fragment_object.module.words[3] = original_bound + 1;
+    var collision_pipeline: [1]usize = undefined;
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&pipeline_info), null, &collision_pipeline));
+    try std.testing.expectEqualSlices(u8, &fragment_object.module.identity.digest, &findLiveHandle(ShaderModuleObj, vertex_shader, &shader_module_objects, &shader_module_state).?.module.identity.digest);
+    try std.testing.expect(!baseline_pipeline.canonical.eql(&validGraphicsPipelineLocked(collision_pipeline[0]).?.canonical));
+    fragment_object.module.words[3] = original_bound;
+    const longer_words = [_]u32{ spirv.magic, spirv.supported_spirv_version, 0, 1, 0, 0x0001_0000 };
+    const longer_shader_info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = @sizeOf(@TypeOf(longer_words)), .p_code = &longer_words };
+    var longer_shader: usize = 0;
+    try std.testing.expectEqual(Result.success, createShaderModule(device, &longer_shader_info, null, &longer_shader));
+    const longer_object = findLiveHandle(ShaderModuleObj, longer_shader, &shader_module_objects, &shader_module_state).?;
+    longer_object.module.identity.digest = fragment_object.module.identity.digest;
+    var longer_stages = stages;
+    longer_stages[1].module = longer_shader;
+    var longer_pipeline_info = pipeline_info;
+    longer_pipeline_info.stages = &longer_stages;
+    var longer_pipeline: [1]usize = undefined;
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&longer_pipeline_info), null, &longer_pipeline));
+    try std.testing.expect(!baseline_pipeline.canonical.eql(&validGraphicsPipelineLocked(longer_pipeline[0]).?.canonical));
+    const saved_ingestion = fragment_object.module.identity.ingestion;
+    fragment_object.module.identity.ingestion += 1;
+    var version_pipeline: [1]usize = undefined;
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&pipeline_info), null, &version_pipeline));
+    try std.testing.expect(!baseline_pipeline.canonical.eql(&validGraphicsPipelineLocked(version_pipeline[0]).?.canonical));
+    fragment_object.module.identity.ingestion = saved_ingestion;
+    destroyShaderModule(device, longer_shader, null);
     var unchanged = [_]usize{ 0x1111, 0x2222 };
+    test_allocations_before_failure = 0;
+    try std.testing.expectEqual(Result.error_out_of_host_memory, createGraphicsPipelines(device, 0, 1, @ptrCast(&pipeline_info), null, &unchanged));
+    test_allocations_before_failure = null;
+    try std.testing.expectEqual(@as(usize, 0x1111), unchanged[0]);
     var bad_batch = [_]GraphicsPipelineCreateInfo{ pipeline_info, pipeline_info };
     bad_batch[1].stage_count = 0;
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 2, @ptrCast(&bad_batch), null, &unchanged));
@@ -3547,7 +3656,8 @@ test "vkcube presentation path records submits and presents two swapchain images
     extended_render_info.subpasses = @ptrCast(&extended_subpass);
     extended_render_info.dependency_count = 1;
     extended_render_info.dependencies = @ptrCast(&dependency);
-    _ = try buildRenderPass(&extended_render_info, false);
+    var extended_canonical = try buildRenderPass(&extended_render_info, false);
+    defer extended_canonical.deinit();
     const bad_preserve = [_]u32{9};
     extended_subpass.preserve_attachments = &bad_preserve;
     try std.testing.expectError(error.Invalid, buildRenderPass(&extended_render_info, false));
