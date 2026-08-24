@@ -216,7 +216,7 @@ const CommandPoolObj = struct { owner: Device };
 const SurfaceObj = struct { owner: Instance, connection: *anyopaque, window: u32 };
 const ImageViewObj = struct { owner: Device, image: *ImageObj };
 const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj, render_compatibility: Canonical };
-const DescriptorSetObj = struct { owner: Device, uniform: ?*BufferObj = null, uniform_offset: u64 = 0, uniform_range: u64 = 0, texture: ?*ImageObj = null };
+const DescriptorSetObj = struct { owner: DeviceIdentity, layout: Canonical, uniform: ?*BufferObj = null, uniform_offset: u64 = 0, uniform_range: u64 = 0, texture: ?*ImageObj = null };
 const DeviceIdentity = struct {
     handle: Device,
     generation: u64,
@@ -243,17 +243,21 @@ const Canonical = struct {
     fn clone(self: *const Canonical) error{OutOfMemory}!Canonical {
         if (failTestAllocation()) return error.OutOfMemory;
         const result = Canonical{ .bytes = allocator.dupe(u8, self.bytes) catch return error.OutOfMemory, .digest = self.digest };
+        canonical_live_allocations += 1;
         return result;
     }
     fn deinit(self: *Canonical) void {
-        if (self.bytes.len != 0) allocator.free(self.bytes);
+        if (self.bytes.len != 0) {
+            allocator.free(self.bytes);
+            canonical_live_allocations -= 1;
+        }
         self.bytes = &.{};
     }
 };
 const DescriptorSetLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical };
-const PipelineLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical };
+const PipelineLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical, set0: Canonical };
 const RenderPassObj = struct { owner: DeviceIdentity, canonical: Canonical, compatibility: Canonical, subpass_count: u32 };
-const GraphicsPipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, render_compatibility: Canonical, subpass: u32, execution_abi: u32 };
+const GraphicsPipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, layout: Canonical, set0: Canonical, render_compatibility: Canonical, subpass: u32, execution_abi: u32 };
 const SwapchainObj = struct {
     owner: Device,
     surface: *SurfaceObj,
@@ -271,7 +275,7 @@ const SwapchainObj = struct {
     transport: xcb_present.Transport,
 };
 const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32 }, cube_draw: struct { framebuffer: *FramebufferObj, descriptors: *DescriptorSetObj, vertex_count: u32, viewport: Viewport, scissor: cpu_cube.Rect }, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 } };
-const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, state: u8, invalid: bool, count: u16, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, bound_pipeline: ?*GraphicsPipelineObj, bound_descriptors: ?*DescriptorSetObj, viewport: Viewport, scissor: cpu_cube.Rect, commands: [256]Command };
+const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, state: u8, invalid: bool, count: u16, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_descriptors: ?*DescriptorSetObj, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, viewport: Viewport, scissor: cpu_cube.Rect, commands: [256]Command };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
 pub const CommandBuffer = *CommandBufferObj;
 
@@ -1045,7 +1049,7 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
         for (&framebuffer_objects, &framebuffer_state) |*framebuffer, *child_state| if (child_state.* == .live and framebuffer.owner == d) {
             child_state.* = .tombstone;
         };
-        for (&descriptor_set_objects, &descriptor_set_state) |*set, *child_state| if (child_state.* == .live and set.owner == d) {
+        for (&descriptor_set_objects, &descriptor_set_state) |*set, *child_state| if (child_state.* == .live and set.owner.eql(d)) {
             child_state.* = .tombstone;
         };
         for (&shader_module_objects, &shader_module_state) |*shader, *child_state| if (child_state.* == .live and shader.owner.eql(d)) {
@@ -1066,13 +1070,19 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
         }
         for (&framebuffer_objects, framebuffer_state) |*object, child_state| if (child_state != .never and object.owner == d) object.render_compatibility.deinit();
         for (&descriptor_set_layout_objects, descriptor_set_layout_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) object.canonical.deinit();
-        for (&pipeline_layout_objects, pipeline_layout_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) object.canonical.deinit();
+        for (&descriptor_set_objects, descriptor_set_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) object.layout.deinit();
+        for (&pipeline_layout_objects, pipeline_layout_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) {
+            object.canonical.deinit();
+            object.set0.deinit();
+        };
         for (&render_pass_objects, render_pass_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) {
             object.canonical.deinit();
             object.compatibility.deinit();
         };
         for (&graphics_pipeline_objects, graphics_pipeline_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) {
             object.canonical.deinit();
+            object.layout.deinit();
+            object.set0.deinit();
             object.render_compatibility.deinit();
         };
         for (&swapchain_objects, &swapchain_state) |*swapchain, *child_state| if (child_state.* == .live and swapchain.owner == d) {
@@ -1128,6 +1138,8 @@ fn getDeviceQueue(device: ?Device, family: u32, index: u32, output: ?*Queue) cal
 
 const allocator = std.heap.page_allocator;
 var test_allocations_before_failure: ?usize = null;
+var test_fail_render_compatibility_clone = false;
+var canonical_live_allocations: usize = 0;
 fn failTestAllocation() bool {
     if (!@import("builtin").is_test) return false;
     const remaining = test_allocations_before_failure orelse return false;
@@ -1540,7 +1552,7 @@ fn allocateCommandBuffers(device: ?Device, info: ?*const CommandBufferAllocateIn
         };
         const cb = &command_buffer_objects[index];
         const impl = &command_buffer_impls[index];
-        impl.* = .{ .owner = d, .pool = pool, .state = 0, .invalid = false, .count = 0, .active_framebuffer = null, .active_render_pass = null, .bound_pipeline = null, .bound_descriptors = null, .viewport = .{ .x = 0, .y = 0, .width = 0, .height = 0, .min_depth = 0, .max_depth = 1 }, .scissor = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, .commands = undefined };
+        impl.* = .{ .owner = d, .pool = pool, .state = 0, .invalid = false, .count = 0, .active_framebuffer = null, .active_render_pass = null, .bound_pipeline = null, .bound_pipeline_handle = 0, .bound_descriptors = null, .bound_layout = null, .bound_layout_handle = 0, .viewport = .{ .x = 0, .y = 0, .width = 0, .height = 0, .min_depth = 0, .max_depth = 1 }, .scissor = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, .commands = undefined };
         cb.* = .{ .loader_data = MAGIC, .impl = impl };
         command_buffer_state[index] = .live;
         if (d.set_loader_data) |set| {
@@ -1591,7 +1603,10 @@ fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) 
     c.impl.active_framebuffer = null;
     c.impl.active_render_pass = null;
     c.impl.bound_pipeline = null;
+    c.impl.bound_pipeline_handle = 0;
     c.impl.bound_descriptors = null;
+    c.impl.bound_layout = null;
+    c.impl.bound_layout_handle = 0;
     return .success;
 }
 fn endCommandBuffer(cb: ?CommandBuffer) callconv(.c) Result {
@@ -1613,7 +1628,10 @@ fn resetCommandBuffer(cb: ?CommandBuffer, flags: u32) callconv(.c) Result {
     c.impl.active_framebuffer = null;
     c.impl.active_render_pass = null;
     c.impl.bound_pipeline = null;
+    c.impl.bound_pipeline_handle = 0;
     c.impl.bound_descriptors = null;
+    c.impl.bound_layout = null;
+    c.impl.bound_layout_handle = 0;
     return .success;
 }
 fn record(cb: CommandBuffer, command: Command) void {
@@ -2147,6 +2165,7 @@ const CanonicalWriter = struct {
     fn done(self: *CanonicalWriter) CanonicalError!Canonical {
         if (failTestAllocation()) return error.OutOfMemory;
         var value = Canonical{ .bytes = self.list.toOwnedSlice(allocator) catch return error.OutOfMemory };
+        canonical_live_allocations += 1;
         value.finish();
         return value;
     }
@@ -2250,15 +2269,21 @@ fn createPipelineLayout(device: ?Device, info: ?*const PipelineLayoutCreateInfo,
     const out = output orelse return .error_initialization_failed;
     lock();
     defer mutex.unlock();
-    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or ci.set_layout_count != 1) return .error_initialization_failed;
     var canonical = buildPipelineLayoutLocked(d, ci) catch |err| return creationFailure(err);
+    const source_set = validDescriptorSetLayoutLocked(ci.set_layouts.?[0]).?;
+    var set0 = source_set.canonical.clone() catch {
+        canonical.deinit();
+        return .error_out_of_host_memory;
+    };
     for (&pipeline_layout_objects, &pipeline_layout_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = DeviceIdentity.capture(d), .canonical = canonical };
+        object.* = .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .set0 = set0 };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
     };
     canonical.deinit();
+    set0.deinit();
     return .error_out_of_host_memory;
 }
 fn destroyPipelineLayout(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
@@ -2453,10 +2478,13 @@ test "Vulkan graphics pipeline ABI declarations match LP64 layouts" {
     try std.testing.expectEqual(@as(usize, 144), @sizeOf(GraphicsPipelineCreateInfo));
     try std.testing.expectEqual(@as(usize, 104), @offsetOf(GraphicsPipelineCreateInfo, "layout"));
     try std.testing.expectEqual(@as(usize, 136), @offsetOf(GraphicsPipelineCreateInfo, "base_pipeline_index"));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(FramebufferCreateInfo));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(FramebufferCreateInfo, "attachment_count"));
+    try std.testing.expectEqual(@as(usize, 40), @offsetOf(FramebufferCreateInfo, "attachments"));
 }
 
 fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo) CanonicalError!GraphicsPipelineObj {
-    if (ci.s_type != 28 or ci.p_next != null or ci.flags != 0 or ci.stage_count != 2 or ci.stages == null or ci.tessellation != null or ci.base_pipeline != 0) return error.Invalid;
+    if (ci.s_type != 28 or ci.p_next != null or ci.flags != 0 or ci.stage_count != 2 or ci.stages == null or ci.tessellation != null or ci.base_pipeline != 0 or (ci.base_pipeline_index != -1 and ci.base_pipeline_index != 0)) return error.Invalid;
     const layout = validPipelineLayoutLocked(ci.layout) orelse return error.Invalid;
     const render_pass = validRenderPassLocked(ci.render_pass) orelse return error.Invalid;
     if (!layout.owner.eql(d) or !render_pass.owner.eql(d) or ci.subpass >= render_pass.subpass_count) return error.Invalid;
@@ -2583,25 +2611,34 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         try w.u32le(s.extent.height);
     }
     const rs = ci.rasterization orelse return error.Invalid;
-    if (rs.s_type != 23 or rs.p_next != null or rs.flags != 0 or try bool32(rs.depth_clamp_enable) != 0 or try bool32(rs.rasterizer_discard_enable) != 0 or rs.polygon_mode != 0 or rs.cull_mode & ~@as(u32, 3) != 0 or (rs.front_face != 0 and rs.front_face != 1) or try bool32(rs.depth_bias_enable) != 0 or rs.line_width != 1) return error.Invalid;
+    if (rs.s_type != 23 or rs.p_next != null or rs.flags != 0 or try bool32(rs.depth_clamp_enable) != 0 or try bool32(rs.rasterizer_discard_enable) != 0 or rs.polygon_mode != 0 or rs.cull_mode & ~@as(u32, 3) != 0 or (rs.front_face != 0 and rs.front_face != 1) or try bool32(rs.depth_bias_enable) != 0 or rs.depth_bias_constant_factor != 0 or rs.depth_bias_clamp != 0 or rs.depth_bias_slope_factor != 0 or rs.line_width != 1) return error.Invalid;
     try w.u32le(rs.cull_mode);
     try w.i32le(rs.front_face);
     try w.f32le(rs.line_width);
     const ms = ci.multisample orelse return error.Invalid;
-    if (ms.s_type != 24 or ms.p_next != null or ms.flags != 0 or ms.rasterization_samples != 1 or try bool32(ms.sample_shading_enable) != 0 or ms.sample_mask != null or try bool32(ms.alpha_to_coverage_enable) != 0 or try bool32(ms.alpha_to_one_enable) != 0) return error.Invalid;
+    if (ms.s_type != 24 or ms.p_next != null or ms.flags != 0 or ms.rasterization_samples != 1 or try bool32(ms.sample_shading_enable) != 0 or ms.min_sample_shading != 0 or ms.sample_mask != null or try bool32(ms.alpha_to_coverage_enable) != 0 or try bool32(ms.alpha_to_one_enable) != 0) return error.Invalid;
     try w.u32le(1);
     const ds = ci.depth_stencil orelse return error.Invalid;
-    if (ds.s_type != 25 or ds.p_next != null or ds.flags != 0 or try bool32(ds.depth_test_enable) != 1 or try bool32(ds.depth_write_enable) != 1 or ds.depth_compare_op != 3 or try bool32(ds.depth_bounds_test_enable) != 0 or try bool32(ds.stencil_test_enable) != 0) return error.Invalid;
+    if (ds.s_type != 25 or ds.p_next != null or ds.flags != 0 or try bool32(ds.depth_test_enable) != 1 or try bool32(ds.depth_write_enable) != 1 or ds.depth_compare_op != 3 or try bool32(ds.depth_bounds_test_enable) != 0 or try bool32(ds.stencil_test_enable) != 0 or !std.meta.eql(ds.front, std.mem.zeroes(StencilOpState)) or !std.meta.eql(ds.back, std.mem.zeroes(StencilOpState)) or ds.min_depth_bounds != 0 or ds.max_depth_bounds != 1) return error.Invalid;
     try w.u32le(1);
     try w.u32le(1);
     try w.i32le(3);
     const cb = ci.color_blend orelse return error.Invalid;
-    if (cb.s_type != 26 or cb.p_next != null or cb.flags != 0 or try bool32(cb.logic_op_enable) != 0 or cb.attachment_count != 1 or cb.attachments == null) return error.Invalid;
+    if (cb.s_type != 26 or cb.p_next != null or cb.flags != 0 or try bool32(cb.logic_op_enable) != 0 or cb.logic_op != 0 or cb.attachment_count != 1 or cb.attachments == null or !std.meta.eql(cb.blend_constants, [_]f32{ 0, 0, 0, 0 })) return error.Invalid;
     const attachment = cb.attachments.?[0];
-    if (try bool32(attachment.blend_enable) != 0 or attachment.color_write_mask != 0xf) return error.Invalid;
+    if (try bool32(attachment.blend_enable) != 0 or attachment.src_color_blend_factor != 1 or attachment.dst_color_blend_factor != 0 or attachment.color_blend_op != 0 or attachment.src_alpha_blend_factor != 1 or attachment.dst_alpha_blend_factor != 0 or attachment.alpha_blend_op != 0 or attachment.color_write_mask != 0xf) return error.Invalid;
     try w.u32le(1);
     try w.u32le(0xf);
-    return .{ .owner = DeviceIdentity.capture(d), .canonical = try w.done(), .render_compatibility = try render_pass.compatibility.clone(), .subpass = ci.subpass, .execution_abi = 1 };
+    var canonical = try w.done();
+    errdefer canonical.deinit();
+    var layout_identity = try layout.canonical.clone();
+    errdefer layout_identity.deinit();
+    var set0 = try layout.set0.clone();
+    errdefer set0.deinit();
+    if (test_fail_render_compatibility_clone) return error.OutOfMemory;
+    var render_compatibility = try render_pass.compatibility.clone();
+    errdefer render_compatibility.deinit();
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .subpass = ci.subpass, .execution_abi = 1 };
 }
 
 fn createOpaque(device: ?Device, info: ?*const anyopaque, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
@@ -2735,11 +2772,13 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
     const out = output orelse return .error_initialization_failed;
     lock();
     defer mutex.unlock();
-    if (!validDeviceLocked(d) or ci.s_type != 37 or ci.p_next != null or ci.flags != 0 or ci.attachment_count == 0 or ci.attachments == null) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or ci.s_type != 37 or ci.p_next != null or ci.flags != 0 or ci.attachment_count != 2 or ci.attachments == null or ci.width == 0 or ci.height == 0 or ci.layers != 1) return .error_initialization_failed;
     const render_pass = validRenderPassLocked(ci.render_pass) orelse return .error_initialization_failed;
     if (!render_pass.owner.eql(d)) return .error_initialization_failed;
     const view = validImageViewLocked(ci.attachments.?[0]) orelse return .error_initialization_failed;
-    const depth = if (ci.attachment_count > 1) (validImageViewLocked(ci.attachments.?[1]) orelse return .error_initialization_failed).image else null;
+    const depth_view = validImageViewLocked(ci.attachments.?[1]) orelse return .error_initialization_failed;
+    if (view.owner != d or depth_view.owner != d or view == depth_view or view.image == depth_view.image or view.image.usage & 0x10 == 0 or depth_view.image.usage & 0x20 == 0 or view.image.width < ci.width or view.image.height < ci.height or depth_view.image.width < ci.width or depth_view.image.height < ci.height) return .error_initialization_failed;
+    const depth = depth_view.image;
     var compatibility = render_pass.compatibility.clone() catch return .error_out_of_host_memory;
     for (&framebuffer_objects, &framebuffer_state) |*object, *state| if (state.* == .never) {
         object.* = .{ .owner = d, .color_image = view.image, .depth_image = depth, .render_compatibility = compatibility };
@@ -2780,6 +2819,8 @@ fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?*c
         built[index] = buildGraphicsPipelineLocked(d, &create_infos[index]) catch |err| {
             for (built[0..built_count]) |*prior| {
                 prior.canonical.deinit();
+                prior.layout.deinit();
+                prior.set0.deinit();
                 prior.render_compatibility.deinit();
             }
             return creationFailure(err);
@@ -2807,16 +2848,37 @@ fn allocateDescriptorSets(device: ?Device, info: ?*const DescriptorSetAllocateIn
     const out = outputs orelse return .error_initialization_failed;
     lock();
     defer mutex.unlock();
-    if (!validDeviceLocked(device orelse return .error_initialization_failed) or ci.descriptor_set_count == 0) return .error_initialization_failed;
-    for (out[0..ci.descriptor_set_count]) |*handle| {
-        var allocated = false;
-        for (&descriptor_set_objects, &descriptor_set_state) |*set, *state| if (!allocated and state.* == .never) {
-            set.* = .{ .owner = device.? };
-            state.* = .live;
-            handle.* = @intFromPtr(set);
-            allocated = true;
+    const d = device orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or ci.s_type != 34 or ci.p_next != null or ci.descriptor_set_count == 0 or ci.descriptor_set_count > max_child_objects or ci.set_layouts == null) return .error_initialization_failed;
+    var slots: [max_child_objects]u8 = undefined;
+    var free_count: usize = 0;
+    for (descriptor_set_state, 0..) |state, index| if (state == .never) {
+        slots[free_count] = @intCast(index);
+        free_count += 1;
+    };
+    if (free_count < ci.descriptor_set_count) return .error_out_of_host_memory;
+    var layouts: [max_child_objects]Canonical = undefined;
+    var made: usize = 0;
+    for (ci.set_layouts.?[0..ci.descriptor_set_count]) |handle| {
+        const source = validDescriptorSetLayoutLocked(handle) orelse {
+            for (layouts[0..made]) |*prior| prior.deinit();
+            return .error_initialization_failed;
         };
-        if (!allocated) return .error_out_of_host_memory;
+        if (!source.owner.eql(d)) {
+            for (layouts[0..made]) |*prior| prior.deinit();
+            return .error_initialization_failed;
+        }
+        layouts[made] = source.canonical.clone() catch {
+            for (layouts[0..made]) |*prior| prior.deinit();
+            return .error_out_of_host_memory;
+        };
+        made += 1;
+    }
+    for (0..ci.descriptor_set_count) |index| {
+        const slot = slots[index];
+        descriptor_set_objects[slot] = .{ .owner = DeviceIdentity.capture(d), .layout = layouts[index] };
+        descriptor_set_state[slot] = .live;
+        out[index] = @intFromPtr(&descriptor_set_objects[slot]);
     }
     return .success;
 }
@@ -2832,7 +2894,7 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?*const anyop
     if (!validDeviceLocked(d)) return;
     for (list[0..write_count]) |descriptor_write| {
         const set = validDescriptorSetLocked(descriptor_write.dst_set) orelse continue;
-        if (set.owner != d or descriptor_write.descriptor_count == 0) continue;
+        if (!set.owner.eql(d) or descriptor_write.descriptor_count == 0) continue;
         if (descriptor_write.descriptor_type == 6 and descriptor_write.dst_binding == 0) {
             const info = (descriptor_write.buffer_info orelse continue)[0];
             const buffer = validBufferLocked(info.buffer) orelse continue;
@@ -2880,18 +2942,31 @@ fn cmdBindPipeline(cb: ?CommandBuffer, bind_point: i32, pipeline: usize) callcon
         return;
     }
     command_buffer.impl.bound_pipeline = object;
+    command_buffer.impl.bound_pipeline_handle = pipeline;
 }
 fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, first_set: u32, count: u32, sets: ?[*]const usize, dynamic_count: u32, offsets: ?[*]const u32) callconv(.c) void {
-    _ = bind_point;
-    _ = layout;
-    _ = first_set;
-    _ = dynamic_count;
-    _ = offsets;
-    if (count == 0 or sets == null) return;
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    command_buffer.impl.bound_descriptors = validDescriptorSetLocked(sets.?[0]);
+    if (bind_point != 0 or first_set != 0 or count != 1 or sets == null or dynamic_count != 0 or offsets != null or command_buffer.impl.state != 1) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    const layout_object = validPipelineLayoutLocked(layout) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const descriptor = validDescriptorSetLocked(sets.?[0]) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    if (!layout_object.owner.eql(command_buffer.impl.owner) or !descriptor.owner.eql(command_buffer.impl.owner) or !descriptor.layout.eql(&layout_object.set0)) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    command_buffer.impl.bound_descriptors = descriptor;
+    command_buffer.impl.bound_layout = layout_object;
+    command_buffer.impl.bound_layout_handle = layout;
 }
 fn cmdSetViewport(cb: ?CommandBuffer, first: u32, count: u32, values: ?*const anyopaque) callconv(.c) void {
     if (first != 0 or count == 0 or values == null) return;
@@ -2914,12 +2989,27 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
     const command_buffer = validCommandBufferLocked(cb) orelse return;
     const framebuffer = command_buffer.impl.active_framebuffer orelse return;
     const render_pass = command_buffer.impl.active_render_pass orelse return;
-    const pipeline = command_buffer.impl.bound_pipeline orelse {
+    const pipeline_pointer = command_buffer.impl.bound_pipeline orelse {
         command_buffer.impl.invalid = true;
         return;
     };
-    const descriptors = command_buffer.impl.bound_descriptors orelse return;
-    if (pipeline.execution_abi != 1 or pipeline.subpass != 0 or !pipeline.render_compatibility.eql(&render_pass.compatibility) or instance_count != 1 or first_vertex != 0 or first_instance != 0 or vertex_count == 0) {
+    const pipeline = validGraphicsPipelineLocked(command_buffer.impl.bound_pipeline_handle) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const layout_pointer = command_buffer.impl.bound_layout orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const layout = validPipelineLayoutLocked(command_buffer.impl.bound_layout_handle) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const descriptors = command_buffer.impl.bound_descriptors orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    if (pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or pipeline.execution_abi != 1 or pipeline.subpass != 0 or !pipeline.render_compatibility.eql(&render_pass.compatibility) or instance_count != 1 or first_vertex != 0 or first_instance != 0 or vertex_count == 0) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -3540,6 +3630,19 @@ test "vkcube presentation path records submits and presents two swapchain images
     test_allocations_before_failure = null;
     var framebuffer_info = FramebufferCreateInfo{ .s_type = 37, .p_next = null, .flags = 0, .render_pass = render_pass, .attachment_count = 2, .attachments = &attachments, .width = 8, .height = 8, .layers = 1 };
     var framebuffer: usize = 0;
+    var bad_framebuffer_info = framebuffer_info;
+    bad_framebuffer_info.attachment_count = 3;
+    try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &bad_framebuffer_info, null, &unpublished));
+    bad_framebuffer_info = framebuffer_info;
+    bad_framebuffer_info.attachment_count = 1;
+    try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &bad_framebuffer_info, null, &unpublished));
+    var reversed_attachments = [_]usize{ depth_view, view };
+    bad_framebuffer_info = framebuffer_info;
+    bad_framebuffer_info.attachments = &reversed_attachments;
+    try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &bad_framebuffer_info, null, &unpublished));
+    var duplicate_attachments = [_]usize{ view, view };
+    bad_framebuffer_info.attachments = &duplicate_attachments;
+    try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &bad_framebuffer_info, null, &unpublished));
     try std.testing.expectEqual(Result.success, createFramebuffer(device, &framebuffer_info, null, &framebuffer));
 
     var opaque_handle: usize = 0;
@@ -3556,6 +3659,9 @@ test "vkcube presentation path records submits and presents two swapchain images
     const pipeline_layout_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&descriptor_layout), .push_constant_range_count = 0, .push_constant_ranges = null };
     var pipeline_layout: usize = 0;
     try std.testing.expectEqual(Result.success, createPipelineLayout(device, &pipeline_layout_info, null, &pipeline_layout));
+    test_allocations_before_failure = 13;
+    try std.testing.expectEqual(Result.error_out_of_host_memory, createPipelineLayout(device, &pipeline_layout_info, null, &unpublished));
+    test_allocations_before_failure = null;
     const push_range = PushConstantRange{ .stage_flags = 1, .offset = 4, .size = 8 };
     var push_layout_info = pipeline_layout_info;
     push_layout_info.push_constant_range_count = 1;
@@ -3632,6 +3738,14 @@ test "vkcube presentation path records submits and presents two swapchain images
     fragment_object.module.identity.ingestion = saved_ingestion;
     destroyShaderModule(device, longer_shader, null);
     var unchanged = [_]usize{ 0x1111, 0x2222 };
+    const live_before_render_clone_failure = canonical_live_allocations;
+    const pipeline_states_before_render_clone_failure = graphics_pipeline_state;
+    test_fail_render_compatibility_clone = true;
+    try std.testing.expectEqual(Result.error_out_of_host_memory, createGraphicsPipelines(device, 0, 1, @ptrCast(&pipeline_info), null, &unchanged));
+    test_fail_render_compatibility_clone = false;
+    try std.testing.expectEqual(live_before_render_clone_failure, canonical_live_allocations);
+    try std.testing.expectEqualSlices(SlotState, &pipeline_states_before_render_clone_failure, &graphics_pipeline_state);
+    try std.testing.expectEqual(@as(usize, 0x1111), unchanged[0]);
     test_allocations_before_failure = 0;
     try std.testing.expectEqual(Result.error_out_of_host_memory, createGraphicsPipelines(device, 0, 1, @ptrCast(&pipeline_info), null, &unchanged));
     test_allocations_before_failure = null;
@@ -3662,6 +3776,9 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(!validGraphicsPipelineLocked(pipelines[0]).?.canonical.eql(&validGraphicsPipelineLocked(static_handle[0]).?.canonical));
     var invalid_pipeline = pipeline_info;
     invalid_pipeline.base_pipeline = 1;
+    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+    invalid_pipeline = pipeline_info;
+    invalid_pipeline.base_pipeline_index = 1;
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
     const preserve = [_]u32{0};
     var extended_subpass = subpass;
@@ -3716,9 +3833,36 @@ test "vkcube presentation path records submits and presents two swapchain images
     invalid_pipeline = pipeline_info;
     invalid_pipeline.rasterization = &bad_rasterization;
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+    inline for (.{ "depth_bias_constant_factor", "depth_bias_clamp", "depth_bias_slope_factor" }) |field| {
+        bad_rasterization = rasterization;
+        @field(bad_rasterization, field) = 1;
+        invalid_pipeline.rasterization = &bad_rasterization;
+        try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+    }
+    var bad_multisample = multisample;
+    bad_multisample.min_sample_shading = 0.5;
+    invalid_pipeline = pipeline_info;
+    invalid_pipeline.multisample = &bad_multisample;
+    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
     var bad_depth = depth_stencil;
     bad_depth.depth_compare_op = 1;
     invalid_pipeline = pipeline_info;
+    invalid_pipeline.depth_stencil = &bad_depth;
+    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+    bad_depth = depth_stencil;
+    bad_depth.min_depth_bounds = 0.25;
+    invalid_pipeline.depth_stencil = &bad_depth;
+    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+    bad_depth = depth_stencil;
+    bad_depth.max_depth_bounds = 0.75;
+    invalid_pipeline.depth_stencil = &bad_depth;
+    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+    bad_depth = depth_stencil;
+    bad_depth.front.fail_op = 1;
+    invalid_pipeline.depth_stencil = &bad_depth;
+    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+    bad_depth = depth_stencil;
+    bad_depth.back.reference = 1;
     invalid_pipeline.depth_stencil = &bad_depth;
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
     var bad_blend_attachment = blend_attachment;
@@ -3728,16 +3872,54 @@ test "vkcube presentation path records submits and presents two swapchain images
     invalid_pipeline = pipeline_info;
     invalid_pipeline.color_blend = &bad_blend;
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+    inline for (.{ "src_color_blend_factor", "dst_color_blend_factor", "color_blend_op", "src_alpha_blend_factor", "dst_alpha_blend_factor", "alpha_blend_op" }) |field| {
+        bad_blend_attachment = blend_attachment;
+        @field(bad_blend_attachment, field) += 1;
+        bad_blend.attachments = @ptrCast(&bad_blend_attachment);
+        invalid_pipeline.color_blend = &bad_blend;
+        try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+    }
+    bad_blend = color_blend;
+    bad_blend.logic_op = 1;
+    invalid_pipeline.color_blend = &bad_blend;
+    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+    inline for (0..4) |index| {
+        bad_blend = color_blend;
+        bad_blend.blend_constants[index] = 1;
+        invalid_pipeline.color_blend = &bad_blend;
+        try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+    }
     var compatible_render_pass: usize = 0;
     try std.testing.expectEqual(Result.success, createRenderPass(device, &render_pass_info, null, &compatible_render_pass));
+    var compatible_descriptor_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(device, &descriptor_layout_info, null, &compatible_descriptor_layout));
+    var compatible_pipeline_layout_info = pipeline_layout_info;
+    compatible_pipeline_layout_info.set_layouts = @ptrCast(&compatible_descriptor_layout);
+    var compatible_pipeline_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createPipelineLayout(device, &compatible_pipeline_layout_info, null, &compatible_pipeline_layout));
     framebuffer_info.render_pass = compatible_render_pass;
     destroyShaderModule(device, vertex_shader, null);
     destroyShaderModule(device, fragment_shader, null);
     destroyPipelineLayout(device, pipeline_layout, null);
     destroyDescriptorSetLayout(device, descriptor_layout, null);
     destroyRenderPass(device, render_pass, null);
-    const set_info = DescriptorSetAllocateInfo{ .s_type = 34, .p_next = null, .descriptor_pool = opaque_handle, .descriptor_set_count = 1, .set_layouts = &attachments };
+    const set_info = DescriptorSetAllocateInfo{ .s_type = 34, .p_next = null, .descriptor_pool = opaque_handle, .descriptor_set_count = 1, .set_layouts = @ptrCast(&compatible_descriptor_layout) };
     var sets: [1]usize = undefined;
+    var bad_set_handles = [_]usize{ compatible_descriptor_layout, 0 };
+    var bad_set_info = set_info;
+    bad_set_info.descriptor_set_count = 2;
+    bad_set_info.set_layouts = &bad_set_handles;
+    var unpublished_sets = [_]usize{ 0xaaaa, 0xbbbb };
+    try std.testing.expectEqual(Result.error_initialization_failed, allocateDescriptorSets(device, &bad_set_info, &unpublished_sets));
+    try std.testing.expectEqualSlices(usize, &.{ 0xaaaa, 0xbbbb }, &unpublished_sets);
+    bad_set_handles[1] = compatible_descriptor_layout;
+    test_allocations_before_failure = 1;
+    try std.testing.expectEqual(Result.error_out_of_host_memory, allocateDescriptorSets(device, &bad_set_info, &unpublished_sets));
+    test_allocations_before_failure = null;
+    const compatible_descriptor_object = validDescriptorSetLayoutLocked(compatible_descriptor_layout).?;
+    compatible_descriptor_object.owner.generation += 1;
+    try std.testing.expectEqual(Result.error_initialization_failed, allocateDescriptorSets(device, &set_info, &unpublished_sets));
+    compatible_descriptor_object.owner.generation -= 1;
     try std.testing.expectEqual(Result.success, allocateDescriptorSets(device, &set_info, &sets));
     updateDescriptorSets(device, 0, null, 0, null);
 
@@ -3788,9 +3970,8 @@ test "vkcube presentation path records submits and presents two swapchain images
     };
     const render_info = RenderPassBeginInfo{ .s_type = 43, .p_next = null, .render_pass = compatible_render_pass, .framebuffer = framebuffer, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 8, .height = 8 } }, .clear_value_count = 2, .clear_values = &clears };
     cmdBeginRenderPass(commands[0], &render_info, 0);
-    cmdBindPipeline(commands[0], 0, pipelines[0]);
-    destroyPipeline(device, pipelines[0], null);
-    cmdBindDescriptorSets(commands[0], 0, opaque_handle, 0, 1, &sets, 0, null);
+    cmdBindPipeline(commands[0], 0, static_handle[0]);
+    cmdBindDescriptorSets(commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
     const viewport = Viewport{ .x = 0, .y = 0, .width = 8, .height = 8, .min_depth = 0, .max_depth = 1 };
     cmdSetViewport(commands[0], 0, 1, @ptrCast(&viewport));
     cmdSetScissor(commands[0], 0, 1, @ptrCast(&render_info.render_area));
@@ -3819,6 +4000,15 @@ test "vkcube presentation path records submits and presents two swapchain images
 
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    cmdBeginRenderPass(commands[0], &render_info, 0);
+    cmdBindPipeline(commands[0], 0, pipelines[0]);
+    cmdBindDescriptorSets(commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    destroyPipeline(device, pipelines[0], null);
+    cmdDraw(commands[0], 3, 1, 0, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
     cmdBindPipeline(commands[0], 0, pipelines[0]);
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
@@ -3843,6 +4033,57 @@ test "vkcube presentation path records submits and presents two swapchain images
     cmdDraw(commands[0], 0, 1, 0, 0);
     cmdEndRenderPass(commands[0]);
     try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    cmdBindDescriptorSets(commands[0], 1, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    const null_set = [_]usize{0};
+    cmdBindDescriptorSets(commands[0], 0, compatible_pipeline_layout, 0, 1, &null_set, 0, null);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    const descriptor_object = validDescriptorSetLocked(sets[0]).?;
+    descriptor_object.layout.bytes[0] ^= 1;
+    cmdBindDescriptorSets(commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    descriptor_object.layout.bytes[0] ^= 1;
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    cmdBeginRenderPass(commands[0], &render_info, 0);
+    cmdBindPipeline(commands[0], 0, static_handle[0]);
+    cmdBindDescriptorSets(commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    commands[0].impl.bound_layout = null;
+    cmdDraw(commands[0], 3, 1, 0, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    cmdBeginRenderPass(commands[0], &render_info, 0);
+    cmdBindPipeline(commands[0], 0, static_handle[0]);
+    cmdBindDescriptorSets(commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    commands[0].impl.bound_descriptors = null;
+    cmdDraw(commands[0], 3, 1, 0, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    cmdBeginRenderPass(commands[0], &render_info, 0);
+    cmdBindPipeline(commands[0], 0, static_handle[0]);
+    cmdBindDescriptorSets(commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    const compatible_layout_object = validPipelineLayoutLocked(compatible_pipeline_layout).?;
+    compatible_layout_object.canonical.bytes[0] ^= 1;
+    cmdDraw(commands[0], 3, 1, 0, 0);
+    compatible_layout_object.canonical.bytes[0] ^= 1;
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    cmdBeginRenderPass(commands[0], &render_info, 0);
+    cmdBindPipeline(commands[0], 0, static_handle[0]);
+    cmdBindDescriptorSets(commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    destroyPipelineLayout(device, compatible_pipeline_layout, null);
+    cmdDraw(commands[0], 3, 1, 0, 0);
+    try std.testing.expect(commands[0].impl.invalid);
 
     const saved_surface_state = surface_state;
     @memset(&surface_state, .tombstone);
