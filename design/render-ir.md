@@ -40,6 +40,10 @@ SSA-like render IR. Canonical serialization is versioned, little endian, does
 not contain source SPIR-V IDs, and uses a SHA-256 digest plus full-byte equality
 for collision-safe identity.
 
+Opcode, capability, type, storage-class, decoration and execution-mode
+admission is table-driven. Each entry records profile support and an exact or
+bounded operand count; semantic dispatch occurs only after that schema check.
+
 This is not general SPIR-V or Vulkan shader execution. Unsupported opcodes,
 capabilities, types, storage classes, decorations, execution modes and dynamic
 control flow are rejected by the profile compiler. Debug and unreachable
@@ -53,6 +57,11 @@ They are metadata only: `cpu_cube_v1` remains the sole execution ABI and
 `vkCmdDraw` does not interpret this IR, so existing pixels and command behavior
 are unchanged.
 
+Malformed or unsupported profile shaders fail graphics-pipeline creation with
+no object or cache publication. A separate exact-identity compatibility bridge
+admits only the known two-stage, unspecialized `main` shader pair used by the
+existing vkcube `cpu_cube_v1` path; it is not frontend-profile acceptance.
+
 ### Profile v1 boundary
 
 The only accepted capability and memory model are `Shader` and
@@ -61,7 +70,9 @@ function is void, parameterless, nonrecursive, one-block and straight-line.
 Values are bool, 32-bit signed/unsigned integer, finite binary32, vec2–vec4,
 mat4, or pointers into bounded Input, Output and read-only Uniform interfaces.
 Uniform blocks have at most 16 scalar/vector/mat4 members with explicit,
-aligned, nonoverlapping offsets. Interface variables use Location or vertex
+aligned, nonoverlapping offsets and a 16 KiB maximum extent. Nested uniform
+struct members and direct `OpSpecConstantComposite` payload specialization are
+rejected in profile v1. Interface variables use Location or vertex
 Position; uniform variables use DescriptorSet and Binding.
 
 Accepted value operations are constants and specialization constants,

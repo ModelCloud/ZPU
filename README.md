@@ -14,6 +14,13 @@ control flow, calls, derivatives, discard, atomics, barriers, push constants,
 storage writes, dynamic indexing, undefined/non-finite values, and all later
 SPIR-V versions are rejected rather than interpreted.
 
+Pipeline creation treats that rejection as pipeline failure and publishes no
+pipeline or cache result. The only exception is an exact `cpu_cube_v1`
+compatibility predicate for the immutable vertex/fragment module identities
+embedded by the readiness vkcube: both stages, `main`, exact word counts and
+full digests, and no specialization must match. This bridge does not create a
+frontend program and is not broader shader acceptance.
+
 ZPU is a Zig-first experiment in a minimal-dependency, Vulkan-only userspace CPU graphics driver. This milestone adds an **experimental loader-compatible CPU transfer and vkcube rendering path**. It is not conformant Vulkan and is not yet sufficient for arbitrary Vulkan applications. The normative target for the API surface — the pinned core version, the profile ZPU builds toward, the loader–ICD interface requirement, and the gates that must pass before any advertised version changes — is [docs/api-policy.md](docs/api-policy.md). The driver, the ICD manifest, and CI advertise and assert Vulkan 1.0 today; the policy describes the target, not the present state.
 
 ## Build and run

@@ -2530,6 +2530,12 @@ test "frontend pipeline interface and descriptor compatibility is exact" {
         .{ .storage = .input, .ty = .{ .scalar = .f32, .columns = 4 }, .location = 0 },
         .{ .storage = .uniform, .ty = .{ .scalar = .u32 }, .descriptor_set = 0, .binding = 2 },
     };
+    vertex_interfaces[2].block = true;
+    vertex_interfaces[2].member_count = 1;
+    vertex_interfaces[2].members[0] = .{ .ty = .{ .scalar = .f32, .columns = 4 }, .offset = 0 };
+    fragment_interfaces[1].block = true;
+    fragment_interfaces[1].member_count = 1;
+    fragment_interfaces[1].members[0] = vertex_interfaces[2].members[0];
     const vertex = render_ir.Program{ .stage = .vertex, .entry_name = &name, .interfaces = &vertex_interfaces, .instructions = &no_instructions, .bytes = &no_bytes, .identity = .{ .digest = .{0} ** 32, .bytes = &no_bytes } };
     var fragment = render_ir.Program{ .stage = .fragment, .entry_name = &name, .interfaces = &fragment_interfaces, .instructions = &no_instructions, .bytes = &no_bytes, .identity = .{ .digest = .{0} ** 32, .bytes = &no_bytes } };
     try std.testing.expect(frontendInterfacesCompatible(&vertex, &fragment, &set0));
@@ -2542,6 +2548,16 @@ test "frontend pipeline interface and descriptor compatibility is exact" {
     fragment.interfaces[1].descriptor_set = 1;
     try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &set0));
     fragment.interfaces[1].descriptor_set = 0;
+    fragment.interfaces[1].members[0].offset = 16;
+    try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &set0));
+    fragment.interfaces[1].members[0].offset = 0;
+    fragment.interfaces[1].members[0].ty.columns = 3;
+    try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &set0));
+    fragment.interfaces[1].members[0].ty.columns = 4;
+    fragment.interfaces[1].member_count = 0;
+    try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &set0));
+    fragment.interfaces[1].member_count = 1;
+    try std.testing.expect(frontendInterfacesCompatible(&vertex, &fragment, &set0));
     var malformed = set0;
     malformed.bytes = malformed.bytes[0..20];
     try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &malformed));
@@ -2578,6 +2594,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     errdefer if (vertex_program) |*program| program.deinit(allocator);
     var fragment_program: ?render_ir.Program = null;
     errdefer if (fragment_program) |*program| program.deinit(allocator);
+    var cpu_cube_stage_mask: u32 = 0;
     for (stage_indices) |index| {
         const stage = stages[index];
         if (stage.s_type != 18 or stage.p_next != null or stage.flags != 0 or (stage.stage != 1 and stage.stage != 0x10) or stage_mask & stage.stage != 0 or stage.name == null) return error.Invalid;
@@ -2606,16 +2623,17 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
             }
         }
         const frontend_stage: render_ir.Stage = if (stage.stage == 1) .vertex else .fragment;
-        const compiled = spirv_frontend.compile(allocator, shader.module.words, frontend_stage, name, frontend_specs[0..frontend_spec_count]) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => null,
-        };
+        const compiled = try compileFrontendStage(allocator, shader, frontend_stage, name, frontend_specs[0..frontend_spec_count]);
+        if (compiled == null) cpu_cube_stage_mask |= stage.stage;
         if (compiled) |program| {
             if (frontend_stage == .vertex) vertex_program = program else fragment_program = program;
         }
     }
     if (stage_mask != 0x11) return error.Invalid;
-    if (vertex_program != null and fragment_program != null and !frontendInterfacesCompatible(&vertex_program.?, &fragment_program.?, &layout.set0)) return error.Invalid;
+    const profile_pair = vertex_program != null and fragment_program != null and cpu_cube_stage_mask == 0;
+    const cpu_cube_pair = vertex_program == null and fragment_program == null and cpu_cube_stage_mask == 0x11;
+    if (!profile_pair and !cpu_cube_pair) return error.Invalid;
+    if (profile_pair and !frontendInterfacesCompatible(&vertex_program.?, &fragment_program.?, &layout.set0)) return error.Invalid;
     const vi = ci.vertex_input orelse return error.Invalid;
     if (vi.s_type != 19 or vi.p_next != null or vi.flags != 0 or vi.binding_count > 16 or vi.attribute_count > 32 or (vi.binding_count != 0 and vi.bindings == null) or (vi.attribute_count != 0 and vi.attributes == null)) return error.Invalid;
     var binding_indices: [16]u8 = undefined;
@@ -2757,6 +2775,9 @@ fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *con
         };
         if (!matched) return false;
     };
+    for (vertex.interfaces) |left| if (left.storage == .uniform) for (fragment.interfaces) |right| if (right.storage == .uniform and left.descriptor_set == right.descriptor_set and left.binding == right.binding) {
+        if (!std.meta.eql(left, right)) return false;
+    };
     for ([_]*const render_ir.Program{ vertex, fragment }) |program| for (program.interfaces) |interface| if (interface.storage == .uniform) {
         if (interface.descriptor_set != 0 or interface.binding == null or set0.bytes.len < 36) return false;
         const count = std.mem.readInt(u32, set0.bytes[32..36], .little);
@@ -2769,6 +2790,49 @@ fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *con
         if (!found) return false;
     };
     return true;
+}
+
+/// Exact bridge for the immutable distro-vkcube shader pair used by the
+/// cpu_cube_v1 readiness path. This is not render-profile acceptance.
+fn cpuCubeV1ShaderCompatible(shader: *const ShaderModuleObj, stage: render_ir.Stage, name: []const u8, spec_count: usize) bool {
+    if (spec_count != 0 or !std.mem.eql(u8, name, "main")) return false;
+    const expected_len: usize = if (stage == .vertex) 390 else 661;
+    const expected: [32]u8 = if (stage == .vertex)
+        .{ 0x63, 0xb7, 0xd7, 0xa6, 0x2b, 0x47, 0xa6, 0xfe, 0x7c, 0xa0, 0xe8, 0x6b, 0x7b, 0x22, 0xbb, 0x79, 0x7e, 0xcd, 0xbf, 0xf0, 0x6e, 0x04, 0x3c, 0xc9, 0xc5, 0xe3, 0xca, 0x12, 0x87, 0x68, 0x80, 0x05 }
+    else
+        .{ 0x27, 0x68, 0x57, 0x63, 0xf4, 0xc3, 0x5e, 0xe9, 0x17, 0xd4, 0x02, 0x49, 0xcf, 0xd9, 0xa5, 0x1d, 0x43, 0x14, 0x75, 0xc0, 0x67, 0x2e, 0x36, 0xaa, 0xf2, 0x84, 0x38, 0x05, 0xd6, 0x5e, 0xa5, 0x32 };
+    return shader.module.words.len == expected_len and std.mem.eql(u8, &shader.module.identity.digest, &expected);
+}
+
+fn compileFrontendStage(stage_allocator: std.mem.Allocator, shader: *const ShaderModuleObj, stage: render_ir.Stage, name: []const u8, specs: []const spirv_frontend.Specialization) CanonicalError!?render_ir.Program {
+    return spirv_frontend.compile(stage_allocator, shader.module.words, stage, name, specs) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => if (cpuCubeV1ShaderCompatible(shader, stage, name, specs.len)) null else error.Invalid,
+    };
+}
+
+test "cpu_cube_v1 shader compatibility bridge is exact" {
+    var words = [_]u32{0} ** 390;
+    var shader = ShaderModuleObj{ .owner = undefined, .module = .{ .words = &words, .identity = .{
+        .ingestion = 1,
+        .serialization = 1,
+        .digest = .{ 0x63, 0xb7, 0xd7, 0xa6, 0x2b, 0x47, 0xa6, 0xfe, 0x7c, 0xa0, 0xe8, 0x6b, 0x7b, 0x22, 0xbb, 0x79, 0x7e, 0xcd, 0xbf, 0xf0, 0x6e, 0x04, 0x3c, 0xc9, 0xc5, 0xe3, 0xca, 0x12, 0x87, 0x68, 0x80, 0x05 },
+    } } };
+    try std.testing.expect(cpuCubeV1ShaderCompatible(&shader, .vertex, "main", 0));
+    try std.testing.expect(!cpuCubeV1ShaderCompatible(&shader, .vertex, "other", 0));
+    try std.testing.expect(!cpuCubeV1ShaderCompatible(&shader, .vertex, "main", 1));
+    try std.testing.expect(!cpuCubeV1ShaderCompatible(&shader, .fragment, "main", 0));
+    shader.module.identity.digest[0] ^= 1;
+    try std.testing.expect(!cpuCubeV1ShaderCompatible(&shader, .vertex, "main", 0));
+    shader.module.identity.digest[0] ^= 1;
+    shader.module.words = words[0 .. words.len - 1];
+    try std.testing.expect(!cpuCubeV1ShaderCompatible(&shader, .vertex, "main", 0));
+
+    shader.module.words = &words;
+    try std.testing.expect((try compileFrontendStage(std.testing.allocator, &shader, .vertex, "main", &.{})) == null);
+    var valid = ShaderModuleObj{ .owner = undefined, .module = .{ .words = @constCast(&spirv_frontend.positive_vertex), .identity = undefined } };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, compileFrontendStage(failing.allocator(), &valid, .vertex, "main", &.{}));
 }
 
 fn createOpaque(device: ?Device, info: ?*const anyopaque, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
@@ -3899,20 +3963,22 @@ test "vkcube presentation path records submits and presents two swapchain images
     push_layout_info.push_constant_ranges = @ptrCast(&push_range);
     var push_canonical = try buildPipelineLayoutLocked(device, &push_layout_info);
     defer push_canonical.deinit();
-    const shader_words = [_]u32{ spirv.magic, spirv.supported_spirv_version, 0, 1, 0 };
-    const shader_info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = @sizeOf(@TypeOf(shader_words)), .p_code = &shader_words };
+    const vertex_shader_words = spirv_frontend.positive_vertex;
+    const fragment_shader_words = spirv_frontend.bool_fragment;
+    const vertex_shader_info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = @sizeOf(@TypeOf(vertex_shader_words)), .p_code = &vertex_shader_words };
+    const fragment_shader_info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = @sizeOf(@TypeOf(fragment_shader_words)), .p_code = &fragment_shader_words };
     var vertex_shader: usize = 0;
     var fragment_shader: usize = 0;
-    try std.testing.expectEqual(Result.success, createShaderModule(device, &shader_info, null, &vertex_shader));
-    try std.testing.expectEqual(Result.success, createShaderModule(device, &shader_info, null, &fragment_shader));
+    try std.testing.expectEqual(Result.success, createShaderModule(device, &vertex_shader_info, null, &vertex_shader));
+    try std.testing.expectEqual(Result.success, createShaderModule(device, &fragment_shader_info, null, &fragment_shader));
     var vertex_entry = [_:0]u8{ 'm', 'a', 'i', 'n' };
     var fragment_entry = [_:0]u8{ 'm', 'a', 'i', 'n' };
-    var specialization_data = [_]u8{ 1, 2, 3, 4 };
-    var specialization_entry = SpecializationMapEntry{ .constant_id = 7, .offset = 0, .size = 4 };
+    var specialization_data = [_]u8{ 1, 0, 0, 0 };
+    var specialization_entry = SpecializationMapEntry{ .constant_id = 9, .offset = 0, .size = 4 };
     var specialization = SpecializationInfo{ .map_entry_count = 1, .map_entries = @ptrCast(&specialization_entry), .data_size = specialization_data.len, .data = &specialization_data };
     var stages = [_]PipelineShaderStageCreateInfo{
-        .{ .s_type = 18, .p_next = null, .flags = 0, .stage = 1, .module = vertex_shader, .name = &vertex_entry, .specialization_info = &specialization },
-        .{ .s_type = 18, .p_next = null, .flags = 0, .stage = 16, .module = fragment_shader, .name = &fragment_entry, .specialization_info = null },
+        .{ .s_type = 18, .p_next = null, .flags = 0, .stage = 1, .module = vertex_shader, .name = &vertex_entry, .specialization_info = null },
+        .{ .s_type = 18, .p_next = null, .flags = 0, .stage = 16, .module = fragment_shader, .name = &fragment_entry, .specialization_info = &specialization },
     };
     const vertex_input = PipelineVertexInputStateCreateInfo{ .s_type = 19, .p_next = null, .flags = 0, .binding_count = 0, .bindings = null, .attribute_count = 0, .attributes = null };
     const input_assembly = PipelineInputAssemblyStateCreateInfo{ .s_type = 20, .p_next = null, .flags = 0, .topology = 3, .primitive_restart_enable = 0 };
@@ -3939,7 +4005,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     stages[0].module = vertex_shader;
     vertex_entry[0] = 'm';
     specialization_data[0] = 1;
-    specialization_entry.constant_id = 7;
+    specialization_entry.constant_id = 9;
     var profile_vertex_words = spirv_frontend.positive_vertex;
     var profile_fragment_words = spirv_frontend.bool_fragment;
     const profile_vertex_info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = @sizeOf(@TypeOf(profile_vertex_words)), .p_code = &profile_vertex_words };
@@ -3982,9 +4048,17 @@ test "vkcube presentation path records submits and presents two swapchain images
     fragment_object.module.words[3] = original_bound + 1;
     var collision_pipeline: [1]usize = undefined;
     try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&pipeline_info), null, &collision_pipeline));
-    try std.testing.expectEqualSlices(u8, &fragment_object.module.identity.digest, &findLiveHandle(ShaderModuleObj, vertex_shader, &shader_module_objects, &shader_module_state).?.module.identity.digest);
+    try std.testing.expect(!std.mem.eql(u8, &fragment_object.module.identity.digest, &findLiveHandle(ShaderModuleObj, vertex_shader, &shader_module_objects, &shader_module_state).?.module.identity.digest));
     try std.testing.expect(!baseline_pipeline.canonical.eql(&validGraphicsPipelineLocked(collision_pipeline[0]).?.canonical));
     fragment_object.module.words[3] = original_bound;
+    const original_magic = fragment_object.module.words[0];
+    fragment_object.module.words[0] = 0;
+    var malformed_output = [_]usize{0xcafe};
+    const states_before_malformed = graphics_pipeline_state;
+    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&pipeline_info), null, &malformed_output));
+    try std.testing.expectEqual(@as(usize, 0xcafe), malformed_output[0]);
+    try std.testing.expectEqualSlices(SlotState, &states_before_malformed, &graphics_pipeline_state);
+    fragment_object.module.words[0] = original_magic;
     const longer_words = [_]u32{ spirv.magic, spirv.supported_spirv_version, 0, 1, 0, 0x0001_0000 };
     const longer_shader_info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = @sizeOf(@TypeOf(longer_words)), .p_code = &longer_words };
     var longer_shader: usize = 0;
@@ -3995,9 +4069,11 @@ test "vkcube presentation path records submits and presents two swapchain images
     longer_stages[1].module = longer_shader;
     var longer_pipeline_info = pipeline_info;
     longer_pipeline_info.stages = &longer_stages;
-    var longer_pipeline: [1]usize = undefined;
-    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&longer_pipeline_info), null, &longer_pipeline));
-    try std.testing.expect(!baseline_pipeline.canonical.eql(&validGraphicsPipelineLocked(longer_pipeline[0]).?.canonical));
+    var longer_pipeline = [_]usize{0xfeed};
+    const states_before_unsupported = graphics_pipeline_state;
+    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&longer_pipeline_info), null, &longer_pipeline));
+    try std.testing.expectEqual(@as(usize, 0xfeed), longer_pipeline[0]);
+    try std.testing.expectEqualSlices(SlotState, &states_before_unsupported, &graphics_pipeline_state);
     const saved_ingestion = fragment_object.module.identity.ingestion;
     fragment_object.module.identity.ingestion += 1;
     var version_pipeline: [1]usize = undefined;

@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const profile_version: u32 = 1;
-pub const serialization_version: u32 = 1;
+pub const serialization_version: u32 = 2;
 pub const max_values: usize = 4096;
 pub const max_instructions: usize = 4096;
 
@@ -10,6 +10,7 @@ pub const Scalar = enum(u8) { bool = 0, i32 = 1, u32 = 2, f32 = 3 };
 pub const Type = packed struct { scalar: Scalar, columns: u3 = 1, rows: u3 = 1, _pad: u6 = 0 };
 pub const Op = enum(u8) {
     constant,
+    constant_composite,
     input,
     uniform,
     access,
@@ -37,6 +38,8 @@ pub const Instruction = struct {
 };
 
 pub const Storage = enum(u8) { input, output, uniform };
+pub const max_uniform_members: usize = 16;
+pub const UniformMember = struct { ty: Type = .{ .scalar = .u32 }, offset: u32 = 0 };
 pub const Interface = struct {
     storage: Storage,
     ty: Type,
@@ -44,6 +47,9 @@ pub const Interface = struct {
     descriptor_set: ?u32 = null,
     binding: ?u32 = null,
     builtin_position: bool = false,
+    block: bool = false,
+    member_count: u8 = 0,
+    members: [max_uniform_members]UniformMember = .{UniformMember{}} ** max_uniform_members,
 };
 
 pub const Identity = struct {
@@ -137,6 +143,14 @@ pub fn serialize(allocator: std.mem.Allocator, stage: Stage, entry_name: []const
         try putU32(&list, allocator, item.descriptor_set orelse std.math.maxInt(u32));
         try putU32(&list, allocator, item.binding orelse std.math.maxInt(u32));
         try list.append(allocator, @intFromBool(item.builtin_position));
+        try list.append(allocator, @intFromBool(item.block));
+        try list.append(allocator, item.member_count);
+        for (item.members[0..item.member_count]) |member| {
+            try list.append(allocator, @intFromEnum(member.ty.scalar));
+            try list.append(allocator, member.ty.columns);
+            try list.append(allocator, member.ty.rows);
+            try putU32(&list, allocator, member.offset);
+        }
     }
     try putU32(&list, allocator, @intCast(instructions.len));
     for (instructions) |item| {
@@ -161,6 +175,7 @@ pub fn identify(bytes: []const u8) Identity {
 fn valueOperand(op: Op, operand_index: usize) bool {
     return switch (op) {
         .constant, .input, .uniform => false,
+        .constant_composite => true,
         .access => operand_index != 0,
         .composite => true,
         .extract => operand_index == 0,
@@ -171,36 +186,79 @@ fn valueOperand(op: Op, operand_index: usize) bool {
     };
 }
 
-fn constantLess(items: []const Instruction, a: u32, b: u32) bool {
-    const left = items[a];
-    const right = items[b];
+const DeclarationContext = struct { items: []const Instruction, remap: []const u32 };
+fn declarationLess(context: DeclarationContext, a: u32, b: u32) bool {
+    const left = context.items[a];
+    const right = context.items[b];
     if (left.op != right.op) return @intFromEnum(left.op) < @intFromEnum(right.op);
     if (left.ty.scalar != right.ty.scalar) return @intFromEnum(left.ty.scalar) < @intFromEnum(right.ty.scalar);
     if (left.ty.columns != right.ty.columns) return left.ty.columns < right.ty.columns;
     if (left.ty.rows != right.ty.rows) return left.ty.rows < right.ty.rows;
-    return std.mem.order(u8, left.literal, right.literal) == .lt;
+    const literal_order = std.mem.order(u8, left.literal, right.literal);
+    if (literal_order != .eq) return literal_order == .lt;
+    const common = @min(left.operands.len, right.operands.len);
+    for (0..common) |index| {
+        const l = if (valueOperand(left.op, index)) context.remap[left.operands[index]] else left.operands[index];
+        const r = if (valueOperand(right.op, index)) context.remap[right.operands[index]] else right.operands[index];
+        if (l != r) return l < r;
+    }
+    return left.operands.len < right.operands.len;
+}
+
+fn declaration(op: Op) bool {
+    return op == .constant or op == .constant_composite;
 }
 
 /// Deterministically renumbers scalar constants by semantic bytes, then
 /// remaps every SSA use. It is intentionally conservative: operation order is
 /// otherwise preserved, so no floating-point reassociation can occur.
 pub fn canonicalize(allocator: std.mem.Allocator, source: []const Instruction) ![]Instruction {
+    if (source.len > max_instructions) return error.LimitExceeded;
     const order = try allocator.alloc(u32, source.len);
     defer allocator.free(order);
-    var constant_count: usize = 0;
-    for (source, 0..) |instruction, index| if (instruction.op == .constant) {
-        order[constant_count] = @intCast(index);
-        constant_count += 1;
-    };
-    var other_index = constant_count;
-    for (source, 0..) |instruction, index| if (instruction.op != .constant) {
-        order[other_index] = @intCast(index);
-        other_index += 1;
-    };
-    std.mem.sort(u32, order[0..constant_count], source, constantLess);
     const remap = try allocator.alloc(u32, source.len);
     defer allocator.free(remap);
-    for (order, 0..) |old, new| remap[old] = @intCast(new);
+    @memset(remap, std.math.maxInt(u32));
+    const pending = try allocator.alloc(bool, source.len);
+    defer allocator.free(pending);
+    var declaration_count: usize = 0;
+    for (source, 0..) |instruction, index| {
+        pending[index] = declaration(instruction.op);
+        declaration_count += @intFromBool(pending[index]);
+    }
+    var produced: usize = 0;
+    while (produced < declaration_count) {
+        var candidates: std.ArrayList(u32) = .empty;
+        defer candidates.deinit(allocator);
+        for (source, pending, 0..) |instruction, is_pending, index| if (is_pending) {
+            var ready = true;
+            for (instruction.operands, 0..) |operand, operand_index| if (valueOperand(instruction.op, operand_index)) {
+                if (operand >= source.len) return error.InvalidDependency;
+                if (remap[operand] == std.math.maxInt(u32)) {
+                    ready = false;
+                    break;
+                }
+            };
+            if (ready) {
+                try candidates.append(allocator, @intCast(index));
+            }
+        };
+        if (candidates.items.len == 0) return error.InvalidDependency;
+        // Declaration inputs are already in source-topological order. Sort each
+        // ready frontier by semantic data after dependency remapping.
+        std.mem.sort(u32, candidates.items, DeclarationContext{ .items = source, .remap = remap }, declarationLess);
+        for (candidates.items) |candidate| {
+            order[produced] = candidate;
+            remap[candidate] = @intCast(produced);
+            pending[candidate] = false;
+            produced += 1;
+        }
+    }
+    for (source, 0..) |instruction, index| if (!declaration(instruction.op)) {
+        order[produced] = @intCast(index);
+        remap[index] = @intCast(produced);
+        produced += 1;
+    };
     const result = try allocator.alloc(Instruction, source.len);
     var made: usize = 0;
     errdefer {
@@ -215,7 +273,10 @@ pub fn canonicalize(allocator: std.mem.Allocator, source: []const Instruction) !
         const operands = try allocator.dupe(u32, item.operands);
         errdefer allocator.free(operands);
         for (operands, 0..) |*operand, operand_index| {
-            if (valueOperand(item.op, operand_index)) operand.* = remap[operand.*];
+            if (valueOperand(item.op, operand_index)) {
+                if (operand.* >= source.len or remap[operand.*] == std.math.maxInt(u32)) return error.InvalidDependency;
+                operand.* = remap[operand.*];
+            }
         }
         const literal = try allocator.dupe(u8, item.literal);
         result[new] = .{ .op = item.op, .ty = item.ty, .operands = operands, .literal = literal };
@@ -225,11 +286,12 @@ pub fn canonicalize(allocator: std.mem.Allocator, source: []const Instruction) !
 }
 
 test "serialization is exact little endian and identity checks full bytes" {
-    const interfaces = [_]Interface{.{ .storage = .output, .ty = .{ .scalar = .f32, .columns = 4 }, .location = 2 }};
+    var interfaces = [_]Interface{.{ .storage = .uniform, .ty = .{ .scalar = .u32 }, .descriptor_set = 0, .binding = 2, .block = true, .member_count = 1 }};
+    interfaces[0].members[0] = .{ .ty = .{ .scalar = .f32, .columns = 4 }, .offset = 16 };
     const instructions = [_]Instruction{.{ .op = .constant, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{ 4, 3, 2, 1 } }};
     const bytes = try serialize(std.testing.allocator, .fragment, "main", &interfaces, &instructions);
     defer std.testing.allocator.free(bytes);
-    try std.testing.expectEqualSlices(u8, "ZPUIR3D\x00\x01\x00\x00\x00\x01\x00\x00\x00\x01\x04\x00\x00\x00main", bytes[0..25]);
+    try std.testing.expectEqualSlices(u8, "ZPUIR3D\x00\x01\x00\x00\x00\x02\x00\x00\x00\x01\x04\x00\x00\x00main", bytes[0..25]);
     const first = identify(bytes);
     var changed = try std.testing.allocator.dupe(u8, bytes);
     defer std.testing.allocator.free(changed);
@@ -287,7 +349,7 @@ test "canonicalization is idempotent and scalar declaration order invariant" {
     try std.testing.expectEqualSlices(u8, a, c);
 
     var fail_index: usize = 0;
-    while (fail_index < 8) : (fail_index += 1) {
+    while (fail_index < 32) : (fail_index += 1) {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
         const failed = canonicalize(failing.allocator(), &first_source) catch |err| {
             try std.testing.expectEqual(error.OutOfMemory, err);
@@ -300,4 +362,58 @@ test "canonicalization is idempotent and scalar declaration order invariant" {
         failing.allocator().free(failed);
         break;
     }
+}
+
+test "constant composite declaration permutations have identical golden identity" {
+    const a = [_]Instruction{
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &.{ 0, 0, 0x80, 0x3f } },
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &.{ 0, 0, 0, 0x40 } },
+        .{ .op = .constant_composite, .ty = .{ .scalar = .f32, .columns = 2 }, .operands = &.{ 0, 1 }, .literal = &.{} },
+        .{ .op = .constant_composite, .ty = .{ .scalar = .f32, .columns = 2 }, .operands = &.{ 1, 0 }, .literal = &.{} },
+        .{ .op = .constant_composite, .ty = .{ .scalar = .f32, .columns = 2 }, .operands = &.{ 0, 1, 0 }, .literal = &.{} },
+        .{ .op = .fneg, .ty = .{ .scalar = .f32, .columns = 2 }, .operands = &.{2}, .literal = &.{} },
+    };
+    const b = [_]Instruction{
+        a[1],
+        a[0],
+        .{ .op = .constant_composite, .ty = a[2].ty, .operands = &.{ 1, 0 }, .literal = &.{} },
+        .{ .op = .constant_composite, .ty = a[3].ty, .operands = &.{ 0, 1 }, .literal = &.{} },
+        .{ .op = .constant_composite, .ty = a[4].ty, .operands = &.{ 1, 0, 1 }, .literal = &.{} },
+        .{ .op = .fneg, .ty = a[5].ty, .operands = &.{2}, .literal = &.{} },
+    };
+    const first = try canonicalize(std.testing.allocator, &a);
+    defer freeInstructionsForTest(first);
+    const second = try canonicalize(std.testing.allocator, &b);
+    defer freeInstructionsForTest(second);
+    const first_bytes = try serialize(std.testing.allocator, .vertex, "permutation", &.{}, first);
+    defer std.testing.allocator.free(first_bytes);
+    const second_bytes = try serialize(std.testing.allocator, .vertex, "permutation", &.{}, second);
+    defer std.testing.allocator.free(second_bytes);
+    try std.testing.expectEqualSlices(u8, first_bytes, second_bytes);
+    try std.testing.expect(identify(first_bytes).eql(identify(second_bytes)));
+}
+
+test "canonicalize enforces its own instruction limit before allocation" {
+    const over = try std.testing.allocator.alloc(Instruction, max_instructions + 1);
+    defer std.testing.allocator.free(over);
+    @memset(over, .{ .op = .constant, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{ 0, 0, 0, 0 } });
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.LimitExceeded, canonicalize(failing.allocator(), over));
+}
+
+test "canonicalize rejects invalid declaration and executable dependencies" {
+    const bad_declaration = [_]Instruction{.{ .op = .constant_composite, .ty = .{ .scalar = .f32, .columns = 2 }, .operands = &.{1}, .literal = &.{} }};
+    try std.testing.expectError(error.InvalidDependency, canonicalize(std.testing.allocator, &bad_declaration));
+    const cyclic_declaration = [_]Instruction{.{ .op = .constant_composite, .ty = .{ .scalar = .f32, .columns = 2 }, .operands = &.{0}, .literal = &.{} }};
+    try std.testing.expectError(error.InvalidDependency, canonicalize(std.testing.allocator, &cyclic_declaration));
+    const bad_executable = [_]Instruction{.{ .op = .fneg, .ty = .{ .scalar = .f32 }, .operands = &.{1}, .literal = &.{} }};
+    try std.testing.expectError(error.InvalidDependency, canonicalize(std.testing.allocator, &bad_executable));
+}
+
+fn freeInstructionsForTest(items: []Instruction) void {
+    for (items) |item| {
+        std.testing.allocator.free(item.operands);
+        std.testing.allocator.free(item.literal);
+    }
+    std.testing.allocator.free(items);
 }

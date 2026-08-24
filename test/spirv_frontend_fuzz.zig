@@ -67,3 +67,30 @@ test "seed-replay valid profile and canonicalization property corpus" {
         try std.testing.expect(ir.identify(first_bytes).eql(ir.identify(second_bytes)));
     }
 }
+
+test "seed-replay declaration permutation property corpus" {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x4445_434c_5045_524d);
+    const random = prng.random();
+    for (0..256) |_| {
+        var reordered = frontend.rich_vertex;
+        var cursor: usize = 5;
+        while (@as(u16, @truncate(reordered[cursor])) != 44) cursor += reordered[cursor] >> 16;
+        const first_len: usize = reordered[cursor] >> 16;
+        const second = cursor + first_len;
+        const second_len: usize = reordered[second] >> 16;
+        var temporary: [18]u32 = undefined;
+        @memcpy(temporary[0..first_len], reordered[cursor..second]);
+        std.mem.copyForwards(u32, reordered[cursor..][0..second_len], reordered[second..][0..second_len]);
+        @memcpy(reordered[cursor + second_len ..][0..first_len], temporary[0..first_len]);
+        const finite = random.int(u32) & 0x7f7f_ffff;
+        var replacement: [4]u8 = undefined;
+        std.mem.writeInt(u32, &replacement, finite, .little);
+        const specs = [_]frontend.Specialization{.{ .id = 7, .bytes = &replacement }};
+        var original = try frontend.compile(std.testing.allocator, &frontend.rich_vertex, .vertex, "main", &specs);
+        defer original.deinit(std.testing.allocator);
+        var permuted = try frontend.compile(std.testing.allocator, &reordered, .vertex, "main", &specs);
+        defer permuted.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(u8, original.bytes, permuted.bytes);
+        try std.testing.expect(original.identity.eql(permuted.identity));
+    }
+}

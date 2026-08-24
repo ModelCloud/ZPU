@@ -14,8 +14,8 @@ fn referenceSerialize(allocator: std.mem.Allocator, program: *const ir.Program) 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator, &.{ 90, 80, 85, 73, 82, 51, 68, 0 });
-    try u32le(&out, allocator, 1);
-    try u32le(&out, allocator, 1);
+    try u32le(&out, allocator, ir.profile_version);
+    try u32le(&out, allocator, ir.serialization_version);
     try out.append(allocator, @intFromEnum(program.stage));
     try u32le(&out, allocator, @intCast(program.entry_name.len));
     try out.appendSlice(allocator, program.entry_name);
@@ -29,6 +29,14 @@ fn referenceSerialize(allocator: std.mem.Allocator, program: *const ir.Program) 
         try u32le(&out, allocator, item.descriptor_set orelse 0xffff_ffff);
         try u32le(&out, allocator, item.binding orelse 0xffff_ffff);
         try out.append(allocator, @intFromBool(item.builtin_position));
+        try out.append(allocator, @intFromBool(item.block));
+        try out.append(allocator, item.member_count);
+        for (item.members[0..item.member_count]) |member| {
+            try out.append(allocator, @intFromEnum(member.ty.scalar));
+            try out.append(allocator, member.ty.columns);
+            try out.append(allocator, member.ty.rows);
+            try u32le(&out, allocator, member.offset);
+        }
     }
     try u32le(&out, allocator, @intCast(program.instructions.len));
     for (program.instructions) |item| {
@@ -56,7 +64,7 @@ fn referenceInterpret(program: *const ir.Program) !Value {
             values[index].count = instruction.ty.columns * instruction.ty.rows;
             for (0..values[index].count) |lane| values[index].lanes[lane] = @bitCast(std.mem.readInt(u32, instruction.literal[lane * 4 ..][0..4], .little));
         },
-        .composite => {
+        .constant_composite, .composite => {
             values[index].count = 0;
             for (instruction.operands) |operand| for (values[operand].lanes[0..values[operand].count]) |lane| {
                 values[index].lanes[values[index].count] = lane;
@@ -85,4 +93,18 @@ test "independent serializer and frontend-only interpreter match canonical progr
     try std.testing.expectEqualSlices(u8, program.bytes, bytes);
     const value = try referenceInterpret(&program);
     try std.testing.expectEqualSlices(f32, &.{ 1, 1, 1, 1 }, value.lanes[0..value.count]);
+
+    const replacement = [_]u8{ 0, 0, 0x80, 0x40 };
+    const cases = .{
+        .{ &frontend.rich_vertex, ir.Stage.vertex, &[_]frontend.Specialization{.{ .id = 7, .bytes = &replacement }} },
+        .{ &frontend.uniform_vertex, ir.Stage.vertex, &[_]frontend.Specialization{} },
+        .{ &frontend.bool_fragment, ir.Stage.fragment, &[_]frontend.Specialization{} },
+    };
+    inline for (cases) |case| {
+        var other = try frontend.compile(std.testing.allocator, case[0], case[1], "main", case[2]);
+        defer other.deinit(std.testing.allocator);
+        const reference = try referenceSerialize(std.testing.allocator, &other);
+        defer std.testing.allocator.free(reference);
+        try std.testing.expectEqualSlices(u8, other.bytes, reference);
+    }
 }

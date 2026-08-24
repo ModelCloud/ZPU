@@ -2,6 +2,8 @@ const std = @import("std");
 const spirv = @import("spirv.zig");
 
 pub const max_instructions: usize = 16 * 1024;
+pub const max_module_bytes: usize = 1024 * 1024;
+pub const max_module_words: usize = max_module_bytes / @sizeOf(u32);
 
 pub const Error = error{ Malformed, LimitExceeded, OutOfMemory };
 
@@ -19,6 +21,7 @@ pub const Module = struct {
     bound: u32,
 
     pub fn decode(allocator: std.mem.Allocator, source: []const u32) Error!Module {
+        if (source.len > max_module_words) return error.LimitExceeded;
         if (source.len < 5 or source[0] != spirv.magic or source[1] != spirv.supported_spirv_version or
             source[3] == 0 or source[3] > spirv.max_id_bound or source[4] != 0)
             return error.Malformed;
@@ -88,4 +91,28 @@ test "decode owns words and classifies malformed structure and limits" {
     many[3] = 1;
     many[4] = 0;
     try std.testing.expectError(error.LimitExceeded, Module.decode(std.testing.allocator, many));
+}
+
+test "decode accepts exactly one MiB and rejects one additional word before allocation" {
+    const exact = try std.testing.allocator.alloc(u32, max_module_words);
+    defer std.testing.allocator.free(exact);
+    @memset(exact, 0);
+    exact[0] = spirv.magic;
+    exact[1] = spirv.supported_spirv_version;
+    exact[3] = 1;
+    var cursor: usize = 5;
+    while (exact.len - cursor > std.math.maxInt(u16)) {
+        exact[cursor] = (@as(u32, std.math.maxInt(u16)) << 16);
+        cursor += std.math.maxInt(u16);
+    }
+    exact[cursor] = (@as(u32, @intCast(exact.len - cursor)) << 16);
+    var decoded = try Module.decode(std.testing.allocator, exact);
+    defer decoded.deinit(std.testing.allocator);
+    try std.testing.expectEqual(max_module_words, decoded.words.len);
+
+    const above = try std.testing.allocator.alloc(u32, max_module_words + 1);
+    defer std.testing.allocator.free(above);
+    @memset(above, 0);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.LimitExceeded, Module.decode(failing.allocator(), above));
 }
