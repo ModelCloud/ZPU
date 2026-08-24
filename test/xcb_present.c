@@ -103,6 +103,27 @@ int main(void) {
     VkRenderPass render_pass;
     CHECK_VK(vkCreateRenderPass(device, &render_pass_info, NULL, &render_pass));
     VkFramebufferCreateInfo framebuffer_info = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = render_pass, .attachmentCount = 1, .pAttachments = &view, .width = width, .height = height, .layers = 1 };
+    VkAttachmentDescription two_attachments[2] = { attachment, {
+        .format = VK_FORMAT_D32_SFLOAT, .samples = VK_SAMPLE_COUNT_1_BIT,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED, .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    } };
+    VkAttachmentReference depth_reference = { .attachment = 1, .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+    VkSubpassDescription color_depth_subpass = subpass;
+    color_depth_subpass.pDepthStencilAttachment = &depth_reference;
+    VkRenderPassCreateInfo color_depth_info = render_pass_info;
+    color_depth_info.attachmentCount = 2;
+    color_depth_info.pAttachments = two_attachments;
+    color_depth_info.pSubpasses = &color_depth_subpass;
+    VkRenderPass color_depth_render_pass;
+    CHECK_VK(vkCreateRenderPass(device, &color_depth_info, NULL, &color_depth_render_pass));
+    VkFramebufferCreateInfo missing_depth_info = framebuffer_info;
+    missing_depth_info.renderPass = color_depth_render_pass;
+    VkFramebuffer unpublished_framebuffer = (VkFramebuffer)(uintptr_t)0xfeed;
+    CHECK_TRUE(vkCreateFramebuffer(device, &missing_depth_info, NULL, &unpublished_framebuffer) == VK_ERROR_INITIALIZATION_FAILED);
+    CHECK_TRUE(unpublished_framebuffer == (VkFramebuffer)(uintptr_t)0xfeed);
+    vkDestroyRenderPass(device, color_depth_render_pass, NULL);
     VkFramebuffer framebuffer;
     CHECK_VK(vkCreateFramebuffer(device, &framebuffer_info, NULL, &framebuffer));
 

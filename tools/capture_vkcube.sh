@@ -6,6 +6,8 @@ root=$(git rev-parse --show-toplevel)
 for tool in Xvfb ffmpeg ffprobe vulkaninfo vkcube python3; do command -v "$tool" >/dev/null || { echo "missing required tool: $tool" >&2; exit 2; }; done
 [[ "${ZPU_FANOUT_WORKER:-}" == 0 ]] || { echo "capture requires tools/cpu-fanout.sh --worker 0" >&2; exit 2; }
 
+zig build install -Doptimize=ReleaseFast
+
 manifest="$root/zig-out/share/vulkan/icd.d/zpu_icd.x86_64.json"
 [[ -f "$manifest" ]] || { echo "build/install the ICD first" >&2; exit 2; }
 out="$root/scratch_tmp/video"; shots="$root/scratch_tmp/screenshots"
@@ -30,7 +32,7 @@ observer="xvfb_cpu=${xvfb_cpu};capture_cpu=${capture_cpu};driver_cpu=${chosen_cp
 vulkaninfo --summary >"$runtime/vulkaninfo.txt"
 grep -F 'ZPU Experimental CPU' "$runtime/vulkaninfo.txt" >/dev/null
 grep -E 'deviceType[[:space:]]*=[[:space:]]*PHYSICAL_DEVICE_TYPE_CPU' "$runtime/vulkaninfo.txt" >/dev/null
-vkcube --wsi xcb --suppress_popups >"$log" 2>&1 & cpid=$!
+ZPU_ONE_CORE=1 vkcube --wsi xcb --suppress_popups >"$log" 2>&1 & cpid=$!
 sleep 1
 taskset -c "$capture_cpu" ffmpeg -y -hide_banner -loglevel warning -f x11grab -framerate 120 -video_size 800x600 -i "$display.0" -frames:v 2400 -fps_mode passthrough -c:v rawvideo "$lossless_tmp"
 cp "$lossless_tmp" "$lossless"
@@ -51,7 +53,7 @@ images=[]
 for p in sorted(shots.glob("vkcube-*s.png")):
  raw=p.read_bytes(); width,height=struct.unpack(">II",raw[16:24])
  images.append({"path":str(p.relative_to(pathlib.Path.cwd())),"width":width,"height":height,"size_bytes":p.stat().st_size,"sha256":sha(p),"capture_command":f"ffmpeg -ss {p.stem.rsplit('-',1)[-1]} -i {video} -frames:v 1 {p}","utc":str(utc),"source_commit":str(commit)})
-data={"schema_version":3,"source_commit":str(commit),"utc":str(utc),"video":str(video.relative_to(pathlib.Path.cwd())),"size_bytes":video.stat().st_size,"sha256":sha(video),"screenshots":images,"icd":"ZPU Experimental CPU","device_type":"CPU","affinity":affinity,"observer_affinity":observer,"environment":"synthetic Xvfb pacing evidence; driver pinned to one core; observer overhead isolated; not physical scanout proof","capture_command":"ffmpeg x11grab 800x600 120 Hz 2400 truthful frames to rawvideo, then offline libvpx-vp9","workload_command":"ZPU_ONE_CORE=1 vkcube --wsi xcb --suppress_popups"}
+data={"schema_version":3,"source_commit":str(commit),"utc":str(utc),"video":str(video.relative_to(pathlib.Path.cwd())),"size_bytes":video.stat().st_size,"sha256":sha(video),"screenshots":images,"icd":"ZPU Experimental CPU","device_type":"CPU","affinity":affinity,"observer_affinity":observer,"environment":"synthetic Xvfb pacing evidence; ReleaseFast driver pinned to one core; observer overhead isolated; not physical scanout proof","capture_command":"zig build install -Doptimize=ReleaseFast; ffmpeg x11grab 800x600 120 Hz 2400 truthful frames to rawvideo, then offline libvpx-vp9","workload_command":"ZPU_ONE_CORE=1 vkcube --wsi xcb --suppress_popups"}
 metadata.write_text(json.dumps(data,indent=2)+"\n")
 PY
 python3 tools/evidence.py video --video "$video" --metadata "$metadata"
