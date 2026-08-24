@@ -69,20 +69,28 @@ def trusted_fingerprint(fp):
     if fp.get("topology") != ";".join(topo): fail("topology fingerprint is not trusted")
 
 def validate_report(report):
-    if report.get("schema_version") != 3 or report.get("workload_id") != "zpu-2d-host-memory-v3-240x240-seed-151521030":
+    if report.get("schema_version") != 4 or report.get("workload_id") != "zpu-2d-kernels-v4-240x240-seed-151521030":
         fail("schema/workload mismatch")
     if report.get("rate_tolerance_fraction") != 0.20 or report.get("latency_tolerance_fraction") != 1.50:
         fail("tolerance policy mismatch")
+    if not re.fullmatch(r"[0-9a-f]{40}", report.get("source_commit", "")) or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", report.get("utc", "")):
+        fail("source commit/UTC binding missing")
     fp = report.get("fingerprint")
     if not isinstance(fp, dict): fail("missing fingerprint")
     trusted_fingerprint(fp)
+    pipeline = report.get("pipeline", {})
+    if not isinstance(pipeline, dict) or not all(isinstance(pipeline.get(k), int) and not isinstance(pipeline.get(k), bool) and pipeline[k] > 0 for k in ("iterations", "key_construction_ns", "cache_lookup_ns", "cache_hits", "cache_misses")):
+        fail("invalid pipeline benchmark")
+    if pipeline["cache_hits"] != pipeline["iterations"] or pipeline["cache_misses"] != 1:
+        fail("cache lifecycle counters mismatch")
+    if not isinstance(pipeline.get("cache_hit_rate"), (int, float)) or not math.isfinite(pipeline["cache_hit_rate"]) or not 0 < pipeline["cache_hit_rate"] < 1:
+        fail("invalid cache hit rate")
     metrics = report.get("metrics")
     if not isinstance(metrics, list) or not metrics: fail("missing metrics")
     has_avx2 = any(m.get("backend") == "avx2" for m in metrics)
-    has_avx512 = any(m.get("backend") == "avx512" for m in metrics)
     expected = [(op, "scalar") for op in OPS]
+    expected += [(op, "portable_vector") for op in RASTER]
     if has_avx2: expected += [(op, "avx2") for op in RASTER]
-    if has_avx512: expected += [(op, "avx512") for op in RASTER]
     expected += [(op, "runtime") for op in RASTER]
     seen = set()
     for i, (m, key) in enumerate(zip(metrics, expected)):
@@ -102,7 +110,7 @@ def validate_report(report):
         if key[0] == "frame" and m["fps"] <= 0: fail("frame FPS is zero")
         if key[0] != "frame" and m["fps"] != 0: fail("inapplicable FPS is nonzero")
         frame = m.get("frame", {})
-        if not (frame.get("p50_ns", 0) > 0 <= frame.get("p95_ns", 0) <= frame.get("p99_ns", 0)):
+        if not (frame.get("p50_ns", 0) > 0 <= frame.get("p95_ns", 0) <= frame.get("p99_ns", 0) <= frame.get("max_ns", 0)) or not isinstance(frame.get("cv"), (int, float)) or not math.isfinite(frame["cv"]) or frame["cv"] < 0:
             fail("invalid latency percentiles")
     if len(seen) != len(expected): fail("missing metrics")
     return expected
@@ -118,13 +126,14 @@ def markdown(report, source_commit, comparison, observed):
         f"- Trusted CPU: `{fp['cpu_model']}`; topology: `{fp['topology']}`; affinity: `{fp['selected_cpus']}`",
         f"- Threads: configured `{fp['max_threads']}`, observed `{observed}`",
         f"- Available backends: {', '.join(sorted({m['backend'] for m in report['metrics']}))}",
+        f"- Pipeline: key construction `{report['pipeline']['key_construction_ns']} ns`; cache lookup `{report['pipeline']['cache_lookup_ns']} ns`; hits/misses `{report['pipeline']['cache_hits']}/{report['pipeline']['cache_misses']}`; hit rate `{report['pipeline']['cache_hit_rate']:.9g}`",
         f"- Baseline comparison: `{comparison}`",
-        "", "| name | backend | MPix/s | bytes/s | modeled GiB/s | draws/s | FPS | p50 ns | p95 ns | p99 ns | checksum_hex |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "", "| name | backend | MPix/s | bytes/s | modeled GiB/s | draws/s | FPS | p50 ns | p95 ns | p99 ns | max ns | CV | checksum_hex |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for m in report["metrics"]:
         p = m["frame"]
-        lines.append(f"| {m['name']} | {m['backend']} | {m['mpix_s']:.9g} | {m['bytes_s']:.9g} | {m['effective_gib_s']:.9g} | {m['draws_s']:.9g} | {m['fps']:.9g} | {p['p50_ns']} | {p['p95_ns']} | {p['p99_ns']} | `{m['checksum_hex']}` |")
+        lines.append(f"| {m['name']} | {m['backend']} | {m['mpix_s']:.9g} | {m['bytes_s']:.9g} | {m['effective_gib_s']:.9g} | {m['draws_s']:.9g} | {m['fps']:.9g} | {p['p50_ns']} | {p['p95_ns']} | {p['p99_ns']} | {p['max_ns']} | {p['cv']:.9g} | `{m['checksum_hex']}` |")
     return "\n".join(lines) + "\n"
 
 def main():
@@ -162,6 +171,7 @@ def main():
     try: report = json.loads(Path(args.json_path).read_text())
     except (OSError, json.JSONDecodeError) as exc: fail(f"malformed JSON: {exc}")
     validate_report(report)
+    if report.get("source_commit") != args.commit: fail("report source commit mismatch")
     if args.observed_threads < 1 or args.observed_threads > 8: fail("observed threads outside 1..8")
     history = Path(args.history_path)
     existing = history.read_text() if history.exists() else ""

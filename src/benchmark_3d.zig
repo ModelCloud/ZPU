@@ -2,13 +2,13 @@ const std = @import("std");
 const builtin = @import("builtin");
 const cube = @import("vulkan/cpu_cube.zig");
 
-pub const schema_version: u32 = 1;
-pub const workload_id = "zpu-vkcube-cpu-3d-v1-320x240-cube12";
+pub const schema_version: u32 = 2;
+pub const workload_id = "zpu-vkcube-cpu-3d-v2-320x240-cube12";
 pub const width: u32 = 320;
 pub const height: u32 = 240;
 pub const reference_checksum: u64 = 0xb63a7b2fb2f50601;
 
-const Percentiles = struct { p50_ns: u64, p95_ns: u64, p99_ns: u64 };
+const Percentiles = struct { p50_ns: u64, p95_ns: u64, p99_ns: u64, max_ns: u64, cv: f64 };
 const Metric = struct {
     name: []const u8 = "vkcube_cpu_cube",
     backend: []const u8 = "vkcube-specific-cpu",
@@ -114,10 +114,21 @@ fn run(io: std.Io, allocator: std.mem.Allocator, smoke: bool, source_commit: []c
     const p95 = percentile(b[0..samples], 95);
     const p99 = percentile(c[0..samples], 99);
     var total: u128 = 0;
-    for (timings[0..samples]) |ns| total += ns;
+    var maximum: u64 = 0;
+    for (timings[0..samples]) |ns| {
+        total += ns;
+        maximum = @max(maximum, ns);
+    }
+    const mean = @as(f64, @floatFromInt(total)) / @as(f64, @floatFromInt(samples));
+    var squared: f64 = 0;
+    for (timings[0..samples]) |ns| {
+        const delta = @as(f64, @floatFromInt(ns)) - mean;
+        squared += delta * delta;
+    }
+    const cv = @sqrt(squared / @as(f64, @floatFromInt(samples))) / mean;
     const fps = 1_000_000_000.0 * @as(f64, @floatFromInt(samples)) / @as(f64, @floatFromInt(total));
     const hex = try std.fmt.allocPrint(allocator, "{x:0>16}", .{oracle});
-    return .{ .warmup_iterations = warmups, .sample_count = samples, .source_commit = source_commit, .utc = utc, .metric = .{ .iterations = samples, .checksum = oracle, .checksum_hex = hex, .fps = fps, .triangles_s = fps * 12.0, .frame = .{ .p50_ns = p50, .p95_ns = p95, .p99_ns = p99 }, .counters_per_frame = expected_counters.? } };
+    return .{ .warmup_iterations = warmups, .sample_count = samples, .source_commit = source_commit, .utc = utc, .metric = .{ .iterations = samples, .checksum = oracle, .checksum_hex = hex, .fps = fps, .triangles_s = fps * 12.0, .frame = .{ .p50_ns = p50, .p95_ns = p95, .p99_ns = p99, .max_ns = maximum, .cv = cv }, .counters_per_frame = expected_counters.? } };
 }
 
 pub fn main(init: std.process.Init) !void {

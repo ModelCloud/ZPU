@@ -82,12 +82,12 @@ general SPIR-V implementation.
 
 - `src/surface.zig` owns RGBA8/BGRA8 memory layout, validation, colors, and clipping.
 - `src/raster/` implements clear/fill and straight-alpha Porter-Duff source-over rectangles.
-- `src/simd/` owns backend selection and scalar, 8-pixel AVX2-oriented, and 16-pixel AVX-512-oriented paths for constant-color spans and per-pixel RGBA source spans.
+- `src/simd/` owns backend selection and scalar, portable four-pixel vector, and host-gated eight-pixel AVX2-oriented paths for constant-color spans and per-pixel RGBA source spans.
 - `src/command/` decouples command recording semantics from raster execution.
 - `src/platform/` owns presentation; today that is a headless PPM sink.
 - `src/vulkan/` contains original minimal Vulkan 1.0 ABI declarations, private loader entry points, object lifetime handling, and the ICD manifest.
 
-The x86 dispatcher checks CPUID AVX/OSXSAVE, XCR0 state, AVX2, and AVX-512F before selecting a backend, so unsupported systems fall back to scalar. The width-oriented kernels use Zig `@Vector` rather than handwritten intrinsics. Zig/LLVM may legalize or scalarize these operations according to the compilation target; therefore we do not claim a particular emitted instruction sequence. This is intentional: forced-backend correctness tests remain safe on machines without those ISAs, while automatic dispatch never advertises unsupported CPU/OS state. Release builds should be inspected and benchmarked before making code-generation claims.
+The x86 dispatcher checks CPUID AVX/OSXSAVE, XCR0 state, and AVX2 before selecting the host-gated eight-lane backend; other hosts use the portable four-lane family. The width-oriented kernels use Zig `@Vector` rather than handwritten intrinsics. Zig/LLVM may legalize or scalarize these operations according to the compilation target, so the backend names describe kernel families rather than promising emitted instructions. AVX-512 is intentionally excluded until controlled measurements show a tail-latency benefit. Automatic dispatch never advertises unsupported CPU/OS state.
 
 Tests compare every backend byte-for-byte with scalar for both formats, deliberately misaligned surface starts and padded strides, clipping and off-screen rectangles and sprites, odd widths and vector tails, alpha 0/1/128/254/255, and deterministic randomized content and operations.
 

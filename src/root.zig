@@ -6,8 +6,10 @@ pub const command = @import("command/processor.zig");
 pub const vulkan = @import("vulkan/icd.zig");
 pub const platform = @import("platform/presenter.zig");
 pub const benchmark = @import("benchmark.zig");
+pub const render_pipeline = @import("render_pipeline.zig");
 
 test {
     _ = @import("tests.zig");
     _ = @import("vulkan/driver.zig");
+    _ = @import("render_pipeline.zig");
 }
