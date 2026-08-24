@@ -2619,15 +2619,24 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     if (ms.s_type != 24 or ms.p_next != null or ms.flags != 0 or ms.rasterization_samples != 1 or try bool32(ms.sample_shading_enable) != 0 or ms.min_sample_shading != 0 or ms.sample_mask != null or try bool32(ms.alpha_to_coverage_enable) != 0 or try bool32(ms.alpha_to_one_enable) != 0) return error.Invalid;
     try w.u32le(1);
     const ds = ci.depth_stencil orelse return error.Invalid;
-    if (ds.s_type != 25 or ds.p_next != null or ds.flags != 0 or try bool32(ds.depth_test_enable) != 1 or try bool32(ds.depth_write_enable) != 1 or ds.depth_compare_op != 3 or try bool32(ds.depth_bounds_test_enable) != 0 or try bool32(ds.stencil_test_enable) != 0 or !std.meta.eql(ds.front, std.mem.zeroes(StencilOpState)) or !std.meta.eql(ds.back, std.mem.zeroes(StencilOpState)) or ds.min_depth_bounds != 0 or ds.max_depth_bounds != 1) return error.Invalid;
+    const zero_stencil = std.mem.zeroes(StencilOpState);
+    var always_stencil = zero_stencil;
+    always_stencil.compare_op = 7;
+    if (ds.s_type != 25 or ds.p_next != null or ds.flags != 0 or try bool32(ds.depth_test_enable) != 1 or try bool32(ds.depth_write_enable) != 1 or ds.depth_compare_op != 3 or try bool32(ds.depth_bounds_test_enable) != 0 or try bool32(ds.stencil_test_enable) != 0 or (!std.meta.eql(ds.front, zero_stencil) and !std.meta.eql(ds.front, always_stencil)) or (!std.meta.eql(ds.back, zero_stencil) and !std.meta.eql(ds.back, always_stencil)) or ds.min_depth_bounds != 0 or (ds.max_depth_bounds != 0 and ds.max_depth_bounds != 1)) return error.Invalid;
     try w.u32le(1);
     try w.u32le(1);
     try w.i32le(3);
     const cb = ci.color_blend orelse return error.Invalid;
     if (cb.s_type != 26 or cb.p_next != null or cb.flags != 0 or try bool32(cb.logic_op_enable) != 0 or cb.logic_op != 0 or cb.attachment_count != 1 or cb.attachments == null or !std.meta.eql(cb.blend_constants, [_]f32{ 0, 0, 0, 0 })) return error.Invalid;
     const attachment = cb.attachments.?[0];
-    if (try bool32(attachment.blend_enable) != 0 or attachment.src_color_blend_factor != 1 or attachment.dst_color_blend_factor != 0 or attachment.color_blend_op != 0 or attachment.src_alpha_blend_factor != 1 or attachment.dst_alpha_blend_factor != 0 or attachment.alpha_blend_op != 0 or attachment.color_write_mask != 0xf) return error.Invalid;
+    if (try bool32(attachment.blend_enable) != 0 or attachment.src_color_blend_factor < 0 or attachment.src_color_blend_factor > 18 or attachment.dst_color_blend_factor < 0 or attachment.dst_color_blend_factor > 18 or attachment.color_blend_op < 0 or attachment.color_blend_op > 4 or attachment.src_alpha_blend_factor < 0 or attachment.src_alpha_blend_factor > 18 or attachment.dst_alpha_blend_factor < 0 or attachment.dst_alpha_blend_factor > 18 or attachment.alpha_blend_op < 0 or attachment.alpha_blend_op > 4 or attachment.color_write_mask != 0xf) return error.Invalid;
     try w.u32le(1);
+    try w.i32le(attachment.src_color_blend_factor);
+    try w.i32le(attachment.dst_color_blend_factor);
+    try w.i32le(attachment.color_blend_op);
+    try w.i32le(attachment.src_alpha_blend_factor);
+    try w.i32le(attachment.dst_alpha_blend_factor);
+    try w.i32le(attachment.alpha_blend_op);
     try w.u32le(0xf);
     var canonical = try w.done();
     errdefer canonical.deinit();
@@ -2772,13 +2781,16 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
     const out = output orelse return .error_initialization_failed;
     lock();
     defer mutex.unlock();
-    if (!validDeviceLocked(d) or ci.s_type != 37 or ci.p_next != null or ci.flags != 0 or ci.attachment_count != 2 or ci.attachments == null or ci.width == 0 or ci.height == 0 or ci.layers != 1) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or ci.s_type != 37 or ci.p_next != null or ci.flags != 0 or ci.attachment_count == 0 or ci.attachment_count > 2 or ci.attachments == null or ci.width == 0 or ci.height == 0 or ci.layers != 1) return .error_initialization_failed;
     const render_pass = validRenderPassLocked(ci.render_pass) orelse return .error_initialization_failed;
     if (!render_pass.owner.eql(d)) return .error_initialization_failed;
     const view = validImageViewLocked(ci.attachments.?[0]) orelse return .error_initialization_failed;
-    const depth_view = validImageViewLocked(ci.attachments.?[1]) orelse return .error_initialization_failed;
-    if (view.owner != d or depth_view.owner != d or view == depth_view or view.image == depth_view.image or view.image.usage & 0x10 == 0 or depth_view.image.usage & 0x20 == 0 or view.image.width < ci.width or view.image.height < ci.height or depth_view.image.width < ci.width or depth_view.image.height < ci.height) return .error_initialization_failed;
-    const depth = depth_view.image;
+    if (view.owner != d or view.image.usage & 0x10 == 0 or view.image.width < ci.width or view.image.height < ci.height) return .error_initialization_failed;
+    const depth = if (ci.attachment_count == 2) blk: {
+        const depth_view = validImageViewLocked(ci.attachments.?[1]) orelse return .error_initialization_failed;
+        if (depth_view.owner != d or view == depth_view or view.image == depth_view.image or depth_view.image.usage & 0x20 == 0 or depth_view.image.width < ci.width or depth_view.image.height < ci.height) return .error_initialization_failed;
+        break :blk depth_view.image;
+    } else null;
     var compatibility = render_pass.compatibility.clone() catch return .error_out_of_host_memory;
     for (&framebuffer_objects, &framebuffer_state) |*object, *state| if (state.* == .never) {
         object.* = .{ .owner = d, .color_image = view.image, .depth_image = depth, .render_compatibility = compatibility };
@@ -3635,7 +3647,10 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &bad_framebuffer_info, null, &unpublished));
     bad_framebuffer_info = framebuffer_info;
     bad_framebuffer_info.attachment_count = 1;
-    try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &bad_framebuffer_info, null, &unpublished));
+    var color_only_framebuffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createFramebuffer(device, &bad_framebuffer_info, null, &color_only_framebuffer));
+    try std.testing.expect(validFramebufferLocked(color_only_framebuffer).?.depth_image == null);
+    destroyFramebuffer(device, color_only_framebuffer, null);
     var reversed_attachments = [_]usize{ depth_view, view };
     bad_framebuffer_info = framebuffer_info;
     bad_framebuffer_info.attachments = &reversed_attachments;
@@ -3877,7 +3892,10 @@ test "vkcube presentation path records submits and presents two swapchain images
         @field(bad_blend_attachment, field) += 1;
         bad_blend.attachments = @ptrCast(&bad_blend_attachment);
         invalid_pipeline.color_blend = &bad_blend;
-        try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+        var mutated_blend_pipeline: [1]usize = undefined;
+        try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &mutated_blend_pipeline));
+        try std.testing.expect(!baseline_pipeline.canonical.eql(&validGraphicsPipelineLocked(mutated_blend_pipeline[0]).?.canonical));
+        destroyPipeline(device, mutated_blend_pipeline[0], null);
     }
     bad_blend = color_blend;
     bad_blend.logic_op = 1;
