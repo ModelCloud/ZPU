@@ -9,6 +9,8 @@ const frame_pacing = @import("frame_pacing.zig");
 const frame_lifecycle = @import("frame_lifecycle.zig");
 const present_worker = @import("present_worker.zig");
 const spirv = @import("spirv.zig");
+const spirv_frontend = @import("spirv_frontend.zig");
+const render_ir = @import("render_ir.zig");
 pub const Result = enum(i32) { success = 0, not_ready = 1, timeout = 2, incomplete = 5, error_out_of_host_memory = -1, error_initialization_failed = -3, error_memory_map_failed = -5, error_layer_not_present = -6, error_extension_not_present = -7, error_feature_not_present = -8, error_format_not_supported = -11, error_invalid_shader = -1_000_012_000 };
 pub const Fn = ?*const fn () callconv(.c) void;
 pub const Alloc = opaque {};
@@ -259,7 +261,7 @@ const PipelineLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical, 
 const AttachmentRole = enum(u8) { color, depth };
 const FramebufferAttachmentRequirement = struct { format: i32 = 0, samples: u32 = 0, role: AttachmentRole = .color };
 const RenderPassObj = struct { owner: DeviceIdentity, canonical: Canonical, compatibility: Canonical, subpass_count: u32, framebuffer_supported: bool, framebuffer_attachment_count: u32, framebuffer_attachments: [2]FramebufferAttachmentRequirement };
-const GraphicsPipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, layout: Canonical, set0: Canonical, render_compatibility: Canonical, subpass: u32, execution_abi: u32 };
+const GraphicsPipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, layout: Canonical, set0: Canonical, render_compatibility: Canonical, vertex_program: ?render_ir.Program, fragment_program: ?render_ir.Program, subpass: u32, execution_abi: u32 };
 const SwapchainObj = struct {
     owner: Device,
     surface: *SurfaceObj,
@@ -1086,6 +1088,8 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
             object.layout.deinit();
             object.set0.deinit();
             object.render_compatibility.deinit();
+            if (object.vertex_program) |*program| program.deinit(allocator);
+            if (object.fragment_program) |*program| program.deinit(allocator);
         };
         for (&swapchain_objects, &swapchain_state) |*swapchain, *child_state| if (child_state.* == .live and swapchain.owner == d) {
             child_state.* = .tombstone;
@@ -2509,6 +2513,40 @@ test "specialization canonicalization owns values and rejects bounds overlap and
     try std.testing.expectError(error.Invalid, appendSpecialization(&bounds, &info));
 }
 
+test "frontend pipeline interface and descriptor compatibility is exact" {
+    const binding = DescriptorSetLayoutBinding{ .binding = 2, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 0x11, .immutable_samplers = null };
+    const layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding) };
+    var set0 = try buildDescriptorSetLayout(&layout_info);
+    defer set0.deinit();
+    var name = [_]u8{ 'm', 'a', 'i', 'n' };
+    var no_instructions: [0]render_ir.Instruction = .{};
+    var no_bytes: [0]u8 = .{};
+    var vertex_interfaces = [_]render_ir.Interface{
+        .{ .storage = .output, .ty = .{ .scalar = .f32, .columns = 4 }, .location = 9 },
+        .{ .storage = .output, .ty = .{ .scalar = .f32, .columns = 4 }, .location = 0 },
+        .{ .storage = .uniform, .ty = .{ .scalar = .u32 }, .descriptor_set = 0, .binding = 2 },
+    };
+    var fragment_interfaces = [_]render_ir.Interface{
+        .{ .storage = .input, .ty = .{ .scalar = .f32, .columns = 4 }, .location = 0 },
+        .{ .storage = .uniform, .ty = .{ .scalar = .u32 }, .descriptor_set = 0, .binding = 2 },
+    };
+    const vertex = render_ir.Program{ .stage = .vertex, .entry_name = &name, .interfaces = &vertex_interfaces, .instructions = &no_instructions, .bytes = &no_bytes, .identity = .{ .digest = .{0} ** 32, .bytes = &no_bytes } };
+    var fragment = render_ir.Program{ .stage = .fragment, .entry_name = &name, .interfaces = &fragment_interfaces, .instructions = &no_instructions, .bytes = &no_bytes, .identity = .{ .digest = .{0} ** 32, .bytes = &no_bytes } };
+    try std.testing.expect(frontendInterfacesCompatible(&vertex, &fragment, &set0));
+    fragment.interfaces[0].ty.columns = 3;
+    try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &set0));
+    fragment.interfaces[0].ty.columns = 4;
+    fragment.interfaces[1].binding = 3;
+    try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &set0));
+    fragment.interfaces[1].binding = 2;
+    fragment.interfaces[1].descriptor_set = 1;
+    try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &set0));
+    fragment.interfaces[1].descriptor_set = 0;
+    var malformed = set0;
+    malformed.bytes = malformed.bytes[0..20];
+    try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &malformed));
+}
+
 test "Vulkan graphics pipeline ABI declarations match LP64 layouts" {
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(SpecializationInfo));
     try std.testing.expectEqual(@as(usize, 48), @sizeOf(PipelineShaderStageCreateInfo));
@@ -2536,6 +2574,10 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     const stages = ci.stages.?[0..2];
     if (stages[1].stage < stages[0].stage) stage_indices = .{ 1, 0 };
     var stage_mask: u32 = 0;
+    var vertex_program: ?render_ir.Program = null;
+    errdefer if (vertex_program) |*program| program.deinit(allocator);
+    var fragment_program: ?render_ir.Program = null;
+    errdefer if (fragment_program) |*program| program.deinit(allocator);
     for (stage_indices) |index| {
         const stage = stages[index];
         if (stage.s_type != 18 or stage.p_next != null or stage.flags != 0 or (stage.stage != 1 and stage.stage != 0x10) or stage_mask & stage.stage != 0 or stage.name == null) return error.Invalid;
@@ -2553,8 +2595,27 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         try w.u32le(@intCast(name.len));
         try w.raw(name);
         try appendSpecialization(&w, stage.specialization_info);
+        var frontend_specs: [64]spirv_frontend.Specialization = undefined;
+        var frontend_spec_count: usize = 0;
+        if (stage.specialization_info) |specialization| {
+            const entries = if (specialization.map_entries) |p| p[0..specialization.map_entry_count] else &.{};
+            const data: [*]const u8 = if (specialization.data) |p| @ptrCast(p) else @ptrFromInt(1);
+            for (entries) |entry| {
+                frontend_specs[frontend_spec_count] = .{ .id = entry.constant_id, .bytes = data[entry.offset..][0..entry.size] };
+                frontend_spec_count += 1;
+            }
+        }
+        const frontend_stage: render_ir.Stage = if (stage.stage == 1) .vertex else .fragment;
+        const compiled = spirv_frontend.compile(allocator, shader.module.words, frontend_stage, name, frontend_specs[0..frontend_spec_count]) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => null,
+        };
+        if (compiled) |program| {
+            if (frontend_stage == .vertex) vertex_program = program else fragment_program = program;
+        }
     }
     if (stage_mask != 0x11) return error.Invalid;
+    if (vertex_program != null and fragment_program != null and !frontendInterfacesCompatible(&vertex_program.?, &fragment_program.?, &layout.set0)) return error.Invalid;
     const vi = ci.vertex_input orelse return error.Invalid;
     if (vi.s_type != 19 or vi.p_next != null or vi.flags != 0 or vi.binding_count > 16 or vi.attribute_count > 32 or (vi.binding_count != 0 and vi.bindings == null) or (vi.attribute_count != 0 and vi.attributes == null)) return error.Invalid;
     var binding_indices: [16]u8 = undefined;
@@ -2684,7 +2745,30 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     if (test_fail_render_compatibility_clone) return error.OutOfMemory;
     var render_compatibility = try render_pass.compatibility.clone();
     errdefer render_compatibility.deinit();
-    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .subpass = ci.subpass, .execution_abi = 1 };
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = 1 };
+}
+
+fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, set0: *const Canonical) bool {
+    for (fragment.interfaces) |input| if (input.storage == .input) {
+        var matched = false;
+        for (vertex.interfaces) |output| if (output.storage == .output and output.location == input.location and output.builtin_position == input.builtin_position) {
+            matched = output.ty.scalar == input.ty.scalar and output.ty.columns == input.ty.columns and output.ty.rows == input.ty.rows;
+            break;
+        };
+        if (!matched) return false;
+    };
+    for ([_]*const render_ir.Program{ vertex, fragment }) |program| for (program.interfaces) |interface| if (interface.storage == .uniform) {
+        if (interface.descriptor_set != 0 or interface.binding == null or set0.bytes.len < 36) return false;
+        const count = std.mem.readInt(u32, set0.bytes[32..36], .little);
+        if (set0.bytes.len != 36 + @as(usize, count) * 16) return false;
+        var found = false;
+        for (0..count) |index| {
+            const item = set0.bytes[36 + index * 16 ..][0..16];
+            if (std.mem.readInt(u32, item[0..4], .little) == interface.binding.? and std.mem.readInt(i32, item[4..8], .little) == 6 and std.mem.readInt(u32, item[8..12], .little) == 1 and std.mem.readInt(u32, item[12..16], .little) & (if (program.stage == .vertex) @as(u32, 1) else 16) != 0) found = true;
+        }
+        if (!found) return false;
+    };
+    return true;
 }
 
 fn createOpaque(device: ?Device, info: ?*const anyopaque, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
@@ -2884,6 +2968,8 @@ fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?*c
                 prior.layout.deinit();
                 prior.set0.deinit();
                 prior.render_compatibility.deinit();
+                if (prior.vertex_program) |*program| program.deinit(allocator);
+                if (prior.fragment_program) |*program| program.deinit(allocator);
             }
             return creationFailure(err);
         };
@@ -3854,6 +3940,43 @@ test "vkcube presentation path records submits and presents two swapchain images
     vertex_entry[0] = 'm';
     specialization_data[0] = 1;
     specialization_entry.constant_id = 7;
+    var profile_vertex_words = spirv_frontend.positive_vertex;
+    var profile_fragment_words = spirv_frontend.bool_fragment;
+    const profile_vertex_info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = @sizeOf(@TypeOf(profile_vertex_words)), .p_code = &profile_vertex_words };
+    const profile_fragment_info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = @sizeOf(@TypeOf(profile_fragment_words)), .p_code = &profile_fragment_words };
+    var profile_vertex_shader: usize = 0;
+    var profile_fragment_shader: usize = 0;
+    try std.testing.expectEqual(Result.success, createShaderModule(device, &profile_vertex_info, null, &profile_vertex_shader));
+    try std.testing.expectEqual(Result.success, createShaderModule(device, &profile_fragment_info, null, &profile_fragment_shader));
+    var profile_stages = stages;
+    profile_stages[0].module = profile_vertex_shader;
+    profile_stages[0].specialization_info = null;
+    profile_stages[1].module = profile_fragment_shader;
+    var profile_pipeline_info = pipeline_info;
+    profile_pipeline_info.stages = &profile_stages;
+    var profile_handle: [1]usize = undefined;
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&profile_pipeline_info), null, &profile_handle));
+    const profile_pipeline = validGraphicsPipelineLocked(profile_handle[0]).?;
+    try std.testing.expect(profile_pipeline.vertex_program != null);
+    try std.testing.expect(profile_pipeline.fragment_program != null);
+    try std.testing.expectEqual(@as(u32, 1), profile_pipeline.execution_abi);
+    const owned_vertex_digest = profile_pipeline.vertex_program.?.identity.digest;
+    const owned_fragment_digest = profile_pipeline.fragment_program.?.identity.digest;
+    var rejected_profile_batch = [_]GraphicsPipelineCreateInfo{ profile_pipeline_info, profile_pipeline_info };
+    rejected_profile_batch[1].stage_count = 0;
+    var rejected_profile_outputs = [_]usize{ 0xaaaa, 0xbbbb };
+    const profile_states_before_rejection = graphics_pipeline_state;
+    const profile_allocations_before_rejection = canonical_live_allocations;
+    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 2, @ptrCast(&rejected_profile_batch), null, &rejected_profile_outputs));
+    try std.testing.expectEqualSlices(usize, &.{ 0xaaaa, 0xbbbb }, &rejected_profile_outputs);
+    try std.testing.expectEqualSlices(SlotState, &profile_states_before_rejection, &graphics_pipeline_state);
+    try std.testing.expectEqual(profile_allocations_before_rejection, canonical_live_allocations);
+    destroyShaderModule(device, profile_vertex_shader, null);
+    destroyShaderModule(device, profile_fragment_shader, null);
+    @memset(&profile_vertex_words, 0);
+    @memset(&profile_fragment_words, 0);
+    try std.testing.expectEqualSlices(u8, &owned_vertex_digest, &profile_pipeline.vertex_program.?.identity.digest);
+    try std.testing.expectEqualSlices(u8, &owned_fragment_digest, &profile_pipeline.fragment_program.?.identity.digest);
     const fragment_object = findLiveHandle(ShaderModuleObj, fragment_shader, &shader_module_objects, &shader_module_state).?;
     const original_bound = fragment_object.module.words[3];
     fragment_object.module.words[3] = original_bound + 1;

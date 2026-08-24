@@ -1,5 +1,19 @@
 # ZPU
 
+ZPU includes the frontend-only, non-conformant
+`zpu_spirv_render_profile_v1`. It validates and lowers a small bounded SPIR-V
+1.0 subset to owned canonical render IR for pipeline metadata. It does not
+provide general SPIR-V/Vulkan shader execution: `cpu_cube_v1` remains the only
+active graphics execution ABI and draw pixels are unchanged.
+
+The v1 frontend accepts only Shader + Logical GLSL450, a selected straight-line
+Vertex or Fragment entry, bounded scalar/vector/mat4 and read-only uniform data,
+and the small arithmetic/composite operation list documented in
+[`design/render-ir.md`](design/render-ir.md). Textures, sampling, ExtInst,
+control flow, calls, derivatives, discard, atomics, barriers, push constants,
+storage writes, dynamic indexing, undefined/non-finite values, and all later
+SPIR-V versions are rejected rather than interpreted.
+
 ZPU is a Zig-first experiment in a minimal-dependency, Vulkan-only userspace CPU graphics driver. This milestone adds an **experimental loader-compatible CPU transfer and vkcube rendering path**. It is not conformant Vulkan and is not yet sufficient for arbitrary Vulkan applications. The normative target for the API surface — the pinned core version, the profile ZPU builds toward, the loader–ICD interface requirement, and the gates that must pass before any advertised version changes — is [docs/api-policy.md](docs/api-policy.md). The driver, the ICD manifest, and CI advertise and assert Vulkan 1.0 today; the policy describes the target, not the present state.
 
 ## Build and run

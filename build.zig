@@ -120,6 +120,20 @@ pub fn build(b: *std.Build) void {
     run_shader_module.step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_shader_module.step);
 
+    const reference_module = b.createModule(.{ .root_source_file = b.path("test/spirv_frontend_reference.zig"), .target = b.graph.host, .optimize = .Debug });
+    reference_module.addImport("frontend", b.createModule(.{ .root_source_file = b.path("src/vulkan/spirv_frontend.zig"), .target = b.graph.host, .optimize = .Debug }));
+    const spirv_reference_tests = b.addTest(.{ .root_module = reference_module });
+    const run_spirv_reference = b.addRunArtifact(spirv_reference_tests);
+    run_spirv_reference.step.dependOn(&require_limited.step);
+    test_step.dependOn(&run_spirv_reference.step);
+
+    const fuzz_module = b.createModule(.{ .root_source_file = b.path("test/spirv_frontend_fuzz.zig"), .target = b.graph.host, .optimize = .Debug });
+    fuzz_module.addImport("frontend", b.createModule(.{ .root_source_file = b.path("src/vulkan/spirv_frontend.zig"), .target = b.graph.host, .optimize = .Debug }));
+    const spirv_fuzz_tests = b.addTest(.{ .root_module = fuzz_module });
+    const run_spirv_fuzz = b.addRunArtifact(spirv_fuzz_tests);
+    run_spirv_fuzz.step.dependOn(&require_limited.step);
+    test_step.dependOn(&run_spirv_fuzz.step);
+
     const behavior_module = b.createModule(.{
         .root_source_file = b.path("src/vulkan/driver.zig"),
         .target = b.graph.host,
@@ -179,6 +193,27 @@ pub fn build(b: *std.Build) void {
     verify_spirv_coverage.addDirectoryArg(spirv_coverage_output);
     verify_spirv_coverage.addArg("/src/vulkan/spirv.zig");
     coverage_step.dependOn(&verify_spirv_coverage.step);
+
+    inline for (.{
+        .{ "spirv-decode", "src/vulkan/spirv_decode.zig" },
+        .{ "spirv-frontend", "src/vulkan/spirv_frontend.zig" },
+        .{ "render-ir", "src/vulkan/render_ir.zig" },
+    }) |source| {
+        const source_tests = b.addTest(.{
+            .name = "zpu-" ++ source[0] ++ "-coverage-tests",
+            .root_module = b.createModule(.{ .root_source_file = b.path(source[1]), .target = b.graph.host, .optimize = .Debug }),
+            .use_llvm = true,
+        });
+        const source_path = b.pathFromRoot(source[1]);
+        const collect_source = b.addSystemCommand(&.{ "kcov", "--clean", b.fmt("--include-path={s}", .{source_path}) });
+        collect_source.step.dependOn(&require_limited.step);
+        const source_output = collect_source.addOutputDirectoryArg(source[0] ++ "-coverage");
+        collect_source.addArtifactArg(source_tests);
+        const verify_source = b.addRunArtifact(coverage_verifier);
+        verify_source.addDirectoryArg(source_output);
+        verify_source.addArg("/" ++ source[1]);
+        coverage_step.dependOn(&verify_source.step);
+    }
 
     const benchmark_coverage_tests = b.addTest(.{
         .name = "zpu-benchmark-coverage-tests",

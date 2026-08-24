@@ -1,0 +1,2 @@
+; Original ZPU fixture, CC0-1.0. Unsupported texture/sampling boundary.
+OpSampledImage %sampled_image %image %sampler
