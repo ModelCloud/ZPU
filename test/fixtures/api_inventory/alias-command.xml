@@ -1,0 +1,9 @@
+<registry>
+  <commands>
+    <command name="vkAlias" alias="vkCanonical"/>
+  </commands>
+  <types/>
+  <enums/>
+  <extensions/>
+  <feature api="vulkan" name="VK_BASE_VERSION_1_0" number="1.0"><require><command name="vkAlias"/></require></feature>
+</registry>

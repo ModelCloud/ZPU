@@ -8,6 +8,7 @@ ZPU targets Zig 0.16.0, the newest stable compiler at the time of this milestone
 
 ```sh
 zig build
+zig build api-inventory
 zig build test
 zig build coverage
 zig build smoke
@@ -21,6 +22,15 @@ zig build demo
 ```
 
 All repository gates must be run through the Linux physical-core limiter, for example `tools/limited-cpus.sh zig build test`. Benchmark methodology, stable JSON, controlled baseline capture/comparison, tolerances, reproducibility guidance, and the opt-in hardware guard are documented in [docs/benchmarking.md](docs/benchmarking.md). The deferred 3D metric and deterministic-scene contract is in [docs/3d-benchmark-todo.md](docs/3d-benchmark-todo.md); no 3D pipeline or fabricated 3D measurement was added.
+
+`tools/limited-cpus.sh zig build api-inventory` validates the pinned Vulkan
+1.4.360 registry and `VP_KHR_roadmap_2026` inputs, regenerates the complete
+cumulative core/profile target in memory, and rejects drift from the checked-in
+machine-readable inventory. It also runs negative fixtures for missing,
+duplicate, alias-only, wrongly scoped, wrongly pinned, stale, and unjustified
+entries. This is a future target inventory only: it does not change API
+advertising or imply Vulkan 1.4/profile support. See
+[the inventory contract](docs/api-inventory.md).
 
 To run four independent experiment or optimization commands at once, `tools/cpu-fanout.sh` partitions the effective cpuset into four pairwise-disjoint, equal-size groups of whole physical cores and launches each one through the same limiter; see the fanout section and its comparability rules in [docs/benchmarking.md](docs/benchmarking.md).
 
@@ -115,6 +125,7 @@ The gate is line coverage, because pinned Zig 0.16.0 exposes neither LLVM source
 
 ```sh
 tools/limited-cpus.sh zig fmt --check build.zig src tools
+tools/limited-cpus.sh zig build api-inventory
 tools/limited-cpus.sh zig build
 tools/limited-cpus.sh zig build test
 tools/limited-cpus.sh zig build behavior
