@@ -11,11 +11,11 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ORACLE_3D = "b63a7b2fb2f50601"
+ORACLE_3D = "37d978fe1c101415"
 COUNTERS = {
     "triangles_submitted": 12, "triangles_rasterized": 12,
-    "fragments_tested": 124360, "fragments_covered": 58608,
-    "depth_tests_passed": 29304, "color_writes": 29304,
+    "fragments_tested": 394880, "fragments_covered": 369024,
+    "depth_tests_passed": 184512, "color_writes": 184512,
 }
 
 def fail(message): raise SystemExit(f"evidence refusal: {message}")
@@ -32,15 +32,15 @@ def sha256(path):
 def run(*args): return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT)
 
 def validate_3d(report):
-    if report.get("schema_version") != 2 or report.get("workload_id") != "zpu-vkcube-cpu-3d-v2-320x240-cube12": fail("3D schema/workload mismatch")
+    if report.get("schema_version") != 3 or report.get("workload_id") != "zpu-vkcube-cpu-3d-v3-800x600-cube12": fail("3D schema/workload mismatch")
     if report.get("renderer_scope") != "existing vkcube-specific cpu_cube renderer; not general SPIR-V": fail("3D scope mismatch")
-    if report.get("resolution") != "320x240" or report.get("warmup_iterations") != 5 or report.get("sample_count") != 30: fail("3D resolution/sampling mismatch")
+    if report.get("resolution") != "800x600" or report.get("warmup_iterations") != 5 or report.get("sample_count") != 30: fail("3D resolution/sampling mismatch")
     m=report.get("metric",{})
     if m.get("name") != "vkcube_cpu_cube" or m.get("backend") != "vkcube-specific-cpu": fail("3D metric/backend mismatch")
     if m.get("checksum_hex") != ORACLE_3D or m.get("checksum") != int(ORACLE_3D,16): fail("3D checksum mismatch")
     if m.get("counters_per_frame") != COUNTERS: fail("3D exact counters mismatch")
     if not finite(m.get("fps"),True) or not finite(m.get("triangles_s"),True): fail("3D rates invalid")
-    f=m.get("frame",{}); values=[f.get(k) for k in ("p50_ns","p95_ns","p99_ns","max_ns")]
+    f=m.get("frame",{}); values=[f.get(k) for k in ("p50_ns","p95_ns","p99_ns","p999_ns","max_ns")]
     if not all(finite(v,True) for v in values) or values != sorted(values): fail("3D percentiles invalid")
     if not finite(f.get("cv")): fail("3D CV invalid")
     if abs(m["triangles_s"] - m["fps"]*12) > max(1e-7, m["triangles_s"]*1e-12): fail("3D triangle rate inconsistent")
@@ -64,13 +64,13 @@ def metric_rows(two, three, raw2d, raw3d, commit, utc, cadence=None, raw_cadence
     for measure,value,unit in (("key construction",p["key_construction_ns"],"ns"),("cache lookup",p["cache_lookup_ns"],"ns"),("cache hits",p["cache_hits"],"count"),("cache misses",p["cache_misses"],"count"),("cache hit rate",p["cache_hit_rate"],"ratio")):
         rows.append(["2D",two["workload_id"],"240x240","pipeline/cache",measure,value,unit,"—","100000 iterations",commit,utc,raw2d,notes2])
     m=three["metric"]; common=["3D",three["workload_id"],three["resolution"],f"{m['name']}/{m['backend']}"]
-    measures=[("FPS",m["fps"],"FPS"),("triangles/s",m["triangles_s"],"triangles/s"),("p50",m["frame"]["p50_ns"],"ns"),("p95",m["frame"]["p95_ns"],"ns"),("p99",m["frame"]["p99_ns"],"ns"),("max",m["frame"]["max_ns"],"ns"),("CV",m["frame"]["cv"],"ratio"),("checksum",m["checksum_hex"],"FNV-1a-64")]+[(k,v,"count/frame") for k,v in m["counters_per_frame"].items()]
+    measures=[("FPS",m["fps"],"FPS"),("triangles/s",m["triangles_s"],"triangles/s"),("p50",m["frame"]["p50_ns"],"ns"),("p95",m["frame"]["p95_ns"],"ns"),("p99",m["frame"]["p99_ns"],"ns"),("p99.9",m["frame"]["p999_ns"],"ns"),("max",m["frame"]["max_ns"],"ns"),("CV",m["frame"]["cv"],"ratio"),("checksum",m["checksum_hex"],"FNV-1a-64")]+[(k,v,"count/frame") for k,v in m["counters_per_frame"].items()]
     for measure,value,unit in measures: rows.append(common+[measure,value,unit,m["fps"],"5 warmups + 30 full samples",commit,utc,raw3d,"vkcube-specific cpu_cube; not general SPIR-V"])
     if cadence:
-        common=["pacing","zpu-xvfb-lossless-60hz-v1","640x480","visible-cadence/synthetic-xvfb"]
-        measures=[("visible FPS",cadence["visible_fps"],"FPS"),("p50",cadence["p50_ms"],"ms"),("p95",cadence["p95_ms"],"ms"),("p99",cadence["p99_ms"],"ms"),("worst",cadence["worst_ms"],"ms"),("interval CV",cadence["interval_cv"],"ratio"),("missed deadlines",cadence["missed_deadline_pct"],"percent"),("consecutive duplicates",cadence["consecutive_duplicate_pct"],"percent"),("packets",cadence["packets"],"packets"),("capture drops",cadence["capture_drops"],"frames")]
-        notes=f"synthetic Xvfb, not physical scanout; {cadence['affinity']}; monotonic PTS={cadence['monotonic_pts']}"
-        for measure,value,unit in measures: rows.append(common+[measure,value,unit,cadence["visible_fps"],"900 lossless FFV1 packets / 15 s",commit,cadence["utc"],raw_cadence,notes])
+        common=["pacing","zpu-xvfb-lossless-120hz-v2","800x600","visible-cadence/synthetic-xvfb"]
+        measures=[("visible FPS",cadence["visible_fps"],"FPS"),("mean",cadence["mean_ms"],"ms"),("p50",cadence["p50_ms"],"ms"),("p95",cadence["p95_ms"],"ms"),("p99",cadence["p99_ms"],"ms"),("p99.9",cadence["p999_ms"],"ms"),("worst",cadence["worst_ms"],"ms"),("interval CV",cadence["interval_cv"],"ratio"),("missed deadlines",cadence["missed_deadline_pct"],"percent"),("consecutive duplicates",cadence["consecutive_duplicate_pct"],"percent"),("packets",cadence["packets"],"packets"),("capture drops",cadence["capture_drops"],"frames")]
+        notes=f"synthetic Xvfb, not physical scanout; {cadence['affinity']}; monotonic PTS={cadence['monotonic_pts']}; context switches={cadence['context_switches']}; migrations={cadence['cpu_migrations']}; faults={cadence['minor_faults']}/{cadence['major_faults']}"
+        for measure,value,unit in measures: rows.append(common+[measure,value,unit,cadence["visible_fps"],"2400 lossless rawvideo packets / 20 s",commit,cadence["utc"],raw_cadence,notes])
     return sorted(rows,key=lambda r:(r[0],r[1],r[3],r[4]))
 
 def fmt(value): return f"{value:.9g}" if isinstance(value,float) else str(value)
@@ -115,9 +115,9 @@ def video(args):
     streams=probe.get("streams",[])
     if len(streams)!=1: fail("video must contain exactly one stream")
     s=streams[0]
-    if s.get("codec_name") != "vp9" or (s.get("width"),s.get("height")) != (640,480): fail("video codec/resolution mismatch")
+    if s.get("codec_name") != "vp9" or (s.get("width"),s.get("height")) != (800,600): fail("video codec/resolution mismatch")
     duration=float(probe["format"]["duration"]); frames=int(s.get("nb_read_frames","0")); num,den=map(int,s["avg_frame_rate"].split("/")); fps=num/den
-    if not 19.0 <= duration <= 21.5 or frames <= 0 or fps <= 0: fail("video duration/FPS/frame count invalid")
+    if not 19.0 <= duration <= 21.5 or frames != 2400 or not 119 <= fps <= 121: fail("video duration/FPS/frame count invalid")
     subprocess.check_call(["ffmpeg","-v","error","-i",str(video),"-f","null","-"])
     md5=run("ffmpeg","-v","error","-i",str(video),"-vf","fps=2","-f","framemd5","-")
     hashes={line.rsplit(",",1)[-1].strip() for line in md5.splitlines() if line and not line.startswith("#")}
@@ -127,8 +127,8 @@ def video(args):
     for shot in meta.get("screenshots",[]):
         p=Path(shot["path"])
         if not p.is_file() or p.stat().st_size == 0 or sha256(p)!=shot["sha256"]: fail("screenshot missing/stale/hash mismatch")
-        if (shot.get("width"),shot.get("height")) != (640,480) or shot.get("source_commit") != meta["source_commit"] or shot.get("utc") != meta["utc"] or not shot.get("capture_command"): fail("screenshot dimensions/provenance missing")
-    print(json.dumps({"duration":duration,"fps":fps,"frames":frames,"codec":"vp9","width":640,"height":480,"sha256":meta["sha256"],"size_bytes":meta["size_bytes"]},sort_keys=True))
+        if (shot.get("width"),shot.get("height")) != (800,600) or shot.get("source_commit") != meta["source_commit"] or shot.get("utc") != meta["utc"] or not shot.get("capture_command"): fail("screenshot dimensions/provenance missing")
+    print(json.dumps({"duration":duration,"fps":fps,"frames":frames,"codec":"vp9","width":800,"height":600,"sha256":meta["sha256"],"size_bytes":meta["size_bytes"]},sort_keys=True))
 
 def main():
     p=argparse.ArgumentParser(); sub=p.add_subparsers(dest="cmd",required=True)

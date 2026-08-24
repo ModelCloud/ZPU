@@ -14,7 +14,31 @@ pub const Transport = struct {
     gc: u32,
     width: u32,
     height: u32,
+    last: StageTimings = .{},
 };
+
+pub const StageTimings = struct {
+    queue_wait_ns: u64 = 0,
+    wake_error_ns: i64 = 0,
+    upload_ns: u64 = 0,
+    copy_ns: u64 = 0,
+    flush_ns: u64 = 0,
+    transport_total_ns: u64 = 0,
+    frame_total_ns: u64 = 0,
+    upload_requests: u32 = 0,
+    present_start_ns: u64 = 0,
+    upload_start_ns: u64 = 0,
+    upload_end_ns: u64 = 0,
+    copy_start_ns: u64 = 0,
+    copy_end_ns: u64 = 0,
+    flush_end_ns: u64 = 0,
+};
+
+fn monotonicNs() u64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
+    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+}
 
 /// Creates persistent X resources once per swapchain. Frames are uploaded to
 /// an off-screen pixmap and made visible by one CopyArea, so strip boundaries
@@ -40,7 +64,10 @@ pub fn deinit(transport: *Transport) void {
     _ = xcb_flush(transport.connection);
 }
 
-pub fn present(transport: *const Transport, pixels: []const u8) bool {
+pub fn upload(transport: *Transport, pixels: []const u8) bool {
+    const total_start = monotonicNs();
+    transport.last.present_start_ns = total_start;
+    transport.last.upload_requests = 0;
     const width = transport.width;
     const height = transport.height;
     if (builtin.is_test) return pixels.len == @as(usize, width) * height * 4;
@@ -53,14 +80,37 @@ pub fn present(transport: *const Transport, pixels: []const u8) bool {
     const payload_bytes = if (request_bytes > 64) request_bytes - 64 else 0;
     const rows_per_request = @max(@as(usize, 1), payload_bytes / row_bytes);
     var y: usize = 0;
+    const upload_start = monotonicNs();
+    transport.last.upload_start_ns = upload_start;
     while (y < height) {
         const rows = @min(rows_per_request, @as(usize, height) - y);
         const data = pixels[y * row_bytes ..][0 .. rows * row_bytes];
         _ = xcb_put_image(connection, 2, transport.pixmap, transport.gc, @intCast(width), @intCast(rows), 0, @intCast(y), 0, 24, @intCast(data.len), data.ptr);
+        transport.last.upload_requests += 1;
         y += rows;
     }
+    transport.last.upload_end_ns = monotonicNs();
+    transport.last.upload_ns = transport.last.upload_end_ns - upload_start;
+    return true;
+}
+
+pub fn commit(transport: *Transport, pixels: []const u8) bool {
+    const width = transport.width;
+    const height = transport.height;
+    if (builtin.is_test) return pixels.len == @as(usize, width) * height * 4;
+    const expected = std.math.mul(usize, @as(usize, width) * height, 4) catch return false;
+    if (pixels.len != expected) return false;
+    const connection = transport.connection;
+    const copy_start = monotonicNs();
+    transport.last.copy_start_ns = copy_start;
     _ = xcb_copy_area(connection, transport.pixmap, transport.window, transport.gc, 0, 0, 0, 0, @intCast(width), @intCast(height));
+    transport.last.copy_end_ns = monotonicNs();
+    transport.last.copy_ns = transport.last.copy_end_ns - copy_start;
+    const flush_start = monotonicNs();
     if (xcb_flush(connection) <= 0) return false;
+    transport.last.flush_end_ns = monotonicNs();
+    transport.last.flush_ns = transport.last.flush_end_ns - flush_start;
+    transport.last.transport_total_ns = transport.last.flush_end_ns - transport.last.present_start_ns;
     const verify = std.c.getenv("ZPU_VERIFY_PRESENT") orelse null;
     if (!verification_done and verify != null and verify.?[0] == '1') {
         verification_done = true;
@@ -73,6 +123,10 @@ pub fn present(transport: *const Transport, pixels: []const u8) bool {
         }
     }
     return true;
+}
+
+pub fn present(transport: *Transport, pixels: []const u8) bool {
+    return upload(transport, pixels) and commit(transport, pixels);
 }
 
 extern fn xcb_generate_id(connection: *Connection) u32;

@@ -1,30 +1,47 @@
 const std = @import("std");
 
-pub const hz: u64 = 60;
 pub const ns_per_second: u64 = 1_000_000_000;
+pub const default_hz: u64 = 120;
 
-/// Phase-locked rational 60 Hz clock. `next` is always strictly after `now`
-/// after the first deadline has been consumed. Late callers skip elapsed clock
-/// slots, never FIFO work, which prevents catch-up bursts without accumulating
-/// drift from rounded 16,666,667 ns sleeps.
-pub const Clock = struct {
-    epoch_ns: u64,
-    tick: u64 = 0,
+/// Phase-locked rational refresh clock. Late callers skip elapsed clock slots,
+/// never FIFO work, preventing catch-up bursts without rounded-period drift.
+pub const Rate = struct {
+    numerator: u64,
+    denominator: u64,
 
-    pub fn init(now_ns: u64) Clock {
-        return .{ .epoch_ns = now_ns };
+    pub fn init(numerator: u64, denominator: u64) ?Rate {
+        if (numerator == 0 or denominator == 0) return null;
+        const divisor = std.math.gcd(numerator, denominator);
+        return .{ .numerator = numerator / divisor, .denominator = denominator / divisor };
     }
 
+    pub fn hz120() Rate { return .{ .numerator = default_hz, .denominator = 1 }; }
+};
+
+pub const Clock = struct {
+    epoch_ns: u64,
+    tick: u64 = 1,
+    rate: Rate,
+
+    pub fn init(now_ns: u64, rate: Rate) Clock {
+        return .{ .epoch_ns = now_ns, .rate = rate };
+    }
+
+    pub fn init120(now_ns: u64) Clock { return init(now_ns, Rate.hz120()); }
+
     pub fn deadline(self: Clock) u64 {
-        return self.epoch_ns + @divFloor(self.tick * ns_per_second, hz);
+        const ticks_ns = std.math.mul(u128, self.tick, ns_per_second) catch return std.math.maxInt(u64);
+        const scaled = std.math.mul(u128, ticks_ns, self.rate.denominator) catch return std.math.maxInt(u64);
+        const offset = scaled / self.rate.numerator;
+        return std.math.cast(u64, @as(u128, self.epoch_ns) + offset) orelse std.math.maxInt(u64);
     }
 
     pub fn advance(self: *Clock, now_ns: u64) void {
-        self.tick += 1;
-        if (now_ns < self.epoch_ns) return;
-        const elapsed = now_ns - self.epoch_ns;
-        const first_future = @divFloor(elapsed * hz, ns_per_second) + 1;
-        self.tick = @max(self.tick, first_future);
+        if (self.tick != std.math.maxInt(u64)) self.tick += 1;
+        if (now_ns <= self.epoch_ns) return;
+        const elapsed: u128 = now_ns - self.epoch_ns;
+        const first_future = (elapsed * self.rate.numerator) / (@as(u128, ns_per_second) * self.rate.denominator) + 1;
+        self.tick = @max(self.tick, std.math.cast(u64, first_future) orelse std.math.maxInt(u64));
     }
 };
 
@@ -46,22 +63,45 @@ pub fn sleepUntil(deadline_ns: u64) void {
     }
 }
 
-test "rational deadlines do not drift" {
-    var clock = Clock.init(10_000);
-    try std.testing.expectEqual(@as(u64, 10_000), clock.deadline());
-    clock.advance(10_000);
-    try std.testing.expectEqual(@as(u64, 16_676_666), clock.deadline());
-    var index: usize = 1;
-    while (index < 60) : (index += 1) clock.advance(clock.deadline());
-    try std.testing.expectEqual(@as(u64, 1_000_010_000), clock.deadline());
+/// Absolute sleep remains the baseline; the final bounded interval is spun on
+/// an isolated driver CPU to remove ordinary ~50 us scheduler wake variance.
+/// The bound is deliberately tiny relative to an 8.333 ms slot.
+pub fn sleepUntilPrecise(deadline_ns: u64, spin_ns: u64) void {
+    const bounded_spin = @min(spin_ns, 100_000);
+    if (deadline_ns > bounded_spin) {
+        const sleep_deadline = deadline_ns - bounded_spin;
+        if (monotonicNs() < sleep_deadline) sleepUntil(sleep_deadline);
+    }
+    while (monotonicNs() < deadline_ns) std.atomic.spinLoopHint();
+}
+
+test "120 Hz rational deadlines are phase exact" {
+    var clock = Clock.init120(10_000);
+    try std.testing.expectEqual(@as(u64, 8_343_333), clock.deadline());
+    var index: usize = 0;
+    while (index < 120) : (index += 1) clock.advance(clock.deadline());
+    try std.testing.expectEqual(@as(u64, 1_008_343_333), clock.deadline());
 }
 
 test "lateness preserves phase and prevents catch-up bursts" {
-    var clock = Clock.init(0);
-    clock.advance(0);
-    try std.testing.expectEqual(@as(u64, 16_666_666), clock.deadline());
-    clock.advance(50_000_000);
-    try std.testing.expectEqual(@as(u64, 66_666_666), clock.deadline());
-    clock.advance(66_666_666);
-    try std.testing.expectEqual(@as(u64, 83_333_333), clock.deadline());
+    var clock = Clock.init120(0);
+    clock.advance(30_000_000);
+    try std.testing.expectEqual(@as(u64, 33_333_333), clock.deadline());
+    clock.advance(clock.deadline());
+    try std.testing.expectEqual(@as(u64, 41_666_666), clock.deadline());
+}
+
+test "clock arithmetic saturates instead of wrapping" {
+    var clock = Clock.init(std.math.maxInt(u64) - 10, Rate.init(1, std.math.maxInt(u64)).?);
+    clock.tick = std.math.maxInt(u64);
+    try std.testing.expectEqual(std.math.maxInt(u64), clock.deadline());
+    clock.advance(std.math.maxInt(u64));
+    try std.testing.expectEqual(std.math.maxInt(u64), clock.tick);
+}
+
+test "swapchain clocks have independent phases and rates" {
+    const a = Clock.init120(100);
+    const b = Clock.init(1_000, Rate.init(240, 1).?);
+    try std.testing.expectEqual(@as(u64, 8_333_433), a.deadline());
+    try std.testing.expectEqual(@as(u64, 4_167_666), b.deadline());
 }

@@ -203,6 +203,7 @@ const SwapchainObj = struct {
     retiring: bool,
     present_mutex: std.c.pthread_mutex_t,
     present_condition: std.c.pthread_cond_t,
+    cadence: ?frame_pacing.Clock,
     transport: xcb_present.Transport,
 };
 const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32 }, cube_draw: struct { framebuffer: *FramebufferObj, descriptors: *DescriptorSetObj, vertex_count: u32, viewport: Viewport, scissor: cpu_cube.Rect }, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 } };
@@ -250,6 +251,58 @@ var generic_handle: usize = 0x10000;
 var mutex: std.atomic.Mutex = .unlocked;
 
 const max_present_entries = 24;
+
+const TraceRecord = extern struct {
+    frame: u64,
+    render_complete_ns: u64,
+    deadline_ns: u64,
+    wake_ns: u64,
+    wake_error_ns: i64,
+    present_start_ns: u64,
+    upload_end_ns: u64,
+    copy_start_ns: u64,
+    copy_end_ns: u64,
+    flush_end_ns: u64,
+    frame_end_ns: u64,
+};
+const max_trace_frames = 7_200;
+var trace_records: [max_trace_frames]TraceRecord = undefined;
+var trace_count: usize = 0;
+var trace_written = false;
+
+extern fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int;
+extern fn write(fd: c_int, buffer: *const anyopaque, count: usize) isize;
+extern fn close(fd: c_int) c_int;
+
+fn traceLimit() usize {
+    const raw = std.c.getenv("ZPU_TRACE_FRAMES") orelse return 0;
+    return @min(std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 0, max_trace_frames);
+}
+
+fn recordTrace(record_value: TraceRecord) void {
+    const limit = traceLimit();
+    if (limit == 0 or trace_written or trace_count >= limit) return;
+    trace_records[trace_count] = record_value;
+    trace_count += 1;
+    if (trace_count != limit) return;
+    const path = std.c.getenv("ZPU_TRACE_PATH") orelse return;
+    const fd = open(path, 0x241, 0o600); // O_WRONLY | O_CREAT | O_TRUNC
+    if (fd < 0) return;
+    const bytes = std.mem.sliceAsBytes(trace_records[0..trace_count]);
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const amount = write(fd, bytes[offset..].ptr, bytes.len - offset);
+        if (amount <= 0) break;
+        offset += @intCast(amount);
+    }
+    _ = close(fd);
+    trace_written = offset == bytes.len;
+}
+
+fn synchronousOneCore() bool {
+    const value = std.c.getenv("ZPU_ONE_CORE") orelse return false;
+    return value[0] == '1';
+}
 
 fn releasePresented(context: *anyopaque, image_index: u32) void {
     const swapchain: *SwapchainObj = @ptrCast(@alignCast(context));
@@ -2054,19 +2107,19 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?*const anyop
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return;
-    for (list[0..write_count]) |write| {
-        const set = validDescriptorSetLocked(write.dst_set) orelse continue;
-        if (set.owner != d or write.descriptor_count == 0) continue;
-        if (write.descriptor_type == 6 and write.dst_binding == 0) {
-            const info = (write.buffer_info orelse continue)[0];
+    for (list[0..write_count]) |descriptor_write| {
+        const set = validDescriptorSetLocked(descriptor_write.dst_set) orelse continue;
+        if (set.owner != d or descriptor_write.descriptor_count == 0) continue;
+        if (descriptor_write.descriptor_type == 6 and descriptor_write.dst_binding == 0) {
+            const info = (descriptor_write.buffer_info orelse continue)[0];
             const buffer = validBufferLocked(info.buffer) orelse continue;
             if (buffer.owner == d and info.offset <= buffer.size) {
                 set.uniform = buffer;
                 set.uniform_offset = info.offset;
                 set.uniform_range = if (info.range == std.math.maxInt(u64)) buffer.size - info.offset else info.range;
             }
-        } else if (write.descriptor_type == 1 and write.dst_binding == 1) {
-            const info = (write.image_info orelse continue)[0];
+        } else if (descriptor_write.descriptor_type == 1 and descriptor_write.dst_binding == 1) {
+            const info = (descriptor_write.image_info orelse continue)[0];
             const view = validImageViewLocked(info.image_view) orelse continue;
             if (view.owner == d and info.image_layout == 5) set.texture = view.image;
         }
@@ -2163,6 +2216,7 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
             .retiring = false,
             .present_mutex = std.c.PTHREAD_MUTEX_INITIALIZER,
             .present_condition = std.c.PTHREAD_COND_INITIALIZER,
+            .cadence = null,
             .transport = transport,
         };
         var created: u32 = 0;
@@ -2287,7 +2341,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         mutex.unlock();
         return .error_initialization_failed;
     };
-    if (!validDeviceLocked(q.owner) or present.swapchain_count == 0 or present.swapchain_count > max_present_entries or present.swapchains == null or present.image_indices == null or (!builtin.is_test and !present_worker.ensureStarted())) {
+    if (!validDeviceLocked(q.owner) or present.swapchain_count == 0 or present.swapchain_count > max_present_entries or present.swapchains == null or present.image_indices == null or (!builtin.is_test and !synchronousOneCore() and !present_worker.ensureStarted())) {
         mutex.unlock();
         return .error_initialization_failed;
     }
@@ -2329,7 +2383,41 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
             const image: *ImageObj = @ptrFromInt(swapchain.images[index]);
             _ = xcb_present.present(&swapchain.transport, imageBytes(image));
             releasePresented(swapchain, index);
-        } else if (!present_worker.enqueue(.{ .transport = &swapchain.transport, .pixels = imageBytes(@ptrFromInt(swapchain.images[index])), .context = swapchain, .image_index = index, .release = releasePresented })) {
+        } else if (synchronousOneCore()) {
+            const before = frame_pacing.monotonicNs();
+            if (swapchain.cadence == null) swapchain.cadence = frame_pacing.Clock.init120(before);
+            const deadline = swapchain.cadence.?.deadline();
+            if (!xcb_present.upload(&swapchain.transport, imageBytes(@ptrFromInt(swapchain.images[index])))) {
+                releasePresented(swapchain, index);
+                mutex.unlock();
+                return .error_initialization_failed;
+            }
+            if (deadline > before) frame_pacing.sleepUntilPrecise(deadline, 100_000);
+            const woke = frame_pacing.monotonicNs();
+            swapchain.transport.last.wake_error_ns = @intCast(woke -| deadline);
+            if (!xcb_present.commit(&swapchain.transport, imageBytes(@ptrFromInt(swapchain.images[index])))) {
+                releasePresented(swapchain, index);
+                mutex.unlock();
+                return .error_initialization_failed;
+            }
+            const finished = frame_pacing.monotonicNs();
+            recordTrace(.{
+                .frame = trace_count,
+                .render_complete_ns = before,
+                .deadline_ns = deadline,
+                .wake_ns = woke,
+                .wake_error_ns = swapchain.transport.last.wake_error_ns,
+                .present_start_ns = swapchain.transport.last.present_start_ns,
+                .upload_end_ns = swapchain.transport.last.upload_end_ns,
+                .copy_start_ns = swapchain.transport.last.copy_start_ns,
+                .copy_end_ns = swapchain.transport.last.copy_end_ns,
+                .flush_end_ns = swapchain.transport.last.flush_end_ns,
+                .frame_end_ns = finished,
+            });
+            swapchain.cadence.?.advance(finished);
+            releasePresented(swapchain, index);
+        } else if (!present_worker.enqueue(.{ .transport = &swapchain.transport, .cadence = &swapchain.cadence, .pixels = imageBytes(@ptrFromInt(swapchain.images[index])), .context = swapchain, .image_index = index, .release = releasePresented })) {
+            releasePresented(swapchain, index);
             mutex.unlock();
             return .error_initialization_failed;
         }

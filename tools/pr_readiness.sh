@@ -3,10 +3,10 @@ set -euo pipefail
 root=$(git rev-parse --show-toplevel); cd "$root"
 raw2d=${ZPU_2D_REPORT:-scratch_tmp/benchmarks/2d.json}
 raw3d=${ZPU_3D_REPORT:-scratch_tmp/benchmarks/3d.json}
-metadata=${ZPU_VIDEO_METADATA:-scratch_tmp/video/zpu-vkcube-640x480-20s.json}
-video=${ZPU_VIDEO:-scratch_tmp/video/zpu-vkcube-640x480-20s.webm}
-cadence=${ZPU_CADENCE_VIDEO:-scratch_tmp/video/zpu-vkcube-640x480-60hz-15s.mkv}
-cadence_metadata=${ZPU_CADENCE_METADATA:-scratch_tmp/video/zpu-vkcube-640x480-60hz-15s.json}
+metadata=${ZPU_VIDEO_METADATA:-scratch_tmp/video/zpu-vkcube-800x600-120hz-vp9-20s.json}
+video=${ZPU_VIDEO:-scratch_tmp/video/zpu-vkcube-800x600-120hz-20s.webm}
+cadence=${ZPU_CADENCE_VIDEO:-scratch_tmp/video/zpu-vkcube-800x600-120hz-20s.nut}
+cadence_metadata=${ZPU_CADENCE_METADATA:-scratch_tmp/video/zpu-vkcube-800x600-120hz-raw-20s.json}
 [[ -f "$raw2d" && -f "$raw3d" && -f "$metadata" && -f "$video" && -f "$cadence" && -f "$cadence_metadata" ]] || { echo "PR readiness: missing raw benchmark/video/cadence evidence" >&2; exit 1; }
 source=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_commit"])' "$raw3d")
 utc=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["utc"])' "$raw3d")
