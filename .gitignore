@@ -1,3 +1,4 @@
 .zig-cache/
 zig-out/
+scratch_tmp/
 *.ppm
