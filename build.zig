@@ -107,6 +107,19 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&limited_cpus_topology_tests.step);
     test_step.dependOn(&test_api_inventory.step);
 
+    const shader_module_client = b.addExecutable(.{
+        .name = "zpu-vulkan-shader-module",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize }),
+    });
+    shader_module_client.root_module.addCSourceFile(.{ .file = b.path("test/vulkan_shader_module.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+    shader_module_client.root_module.link_libc = true;
+    shader_module_client.root_module.linkSystemLibrary("vulkan", .{});
+    const run_shader_module = b.addRunArtifact(shader_module_client);
+    run_shader_module.step.dependOn(&require_limited.step);
+    run_shader_module.setEnvironmentVariable("VK_DRIVER_FILES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_shader_module.step.dependOn(b.getInstallStep());
+    test_step.dependOn(&run_shader_module.step);
+
     const behavior_module = b.createModule(.{
         .root_source_file = b.path("src/vulkan/driver.zig"),
         .target = b.graph.host,
@@ -151,6 +164,21 @@ pub fn build(b: *std.Build) void {
     verify_coverage.addDirectoryArg(coverage_output);
     const coverage_step = b.step("coverage", "Require 100% executed-line coverage for ICD and benchmark core");
     coverage_step.dependOn(&verify_coverage.step);
+
+    const spirv_coverage_tests = b.addTest(.{
+        .name = "zpu-spirv-coverage-tests",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/vulkan/spirv.zig"), .target = b.graph.host, .optimize = .Debug }),
+        .use_llvm = true,
+    });
+    const spirv_path = b.pathFromRoot("src/vulkan/spirv.zig");
+    const collect_spirv_coverage = b.addSystemCommand(&.{ "kcov", "--clean", b.fmt("--include-path={s}", .{spirv_path}) });
+    collect_spirv_coverage.step.dependOn(&require_limited.step);
+    const spirv_coverage_output = collect_spirv_coverage.addOutputDirectoryArg("spirv-coverage");
+    collect_spirv_coverage.addArtifactArg(spirv_coverage_tests);
+    const verify_spirv_coverage = b.addRunArtifact(coverage_verifier);
+    verify_spirv_coverage.addDirectoryArg(spirv_coverage_output);
+    verify_spirv_coverage.addArg("/src/vulkan/spirv.zig");
+    coverage_step.dependOn(&verify_spirv_coverage.step);
 
     const benchmark_coverage_tests = b.addTest(.{
         .name = "zpu-benchmark-coverage-tests",

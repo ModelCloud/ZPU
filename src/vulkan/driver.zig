@@ -8,7 +8,8 @@ const xcb_present = @import("xcb_present.zig");
 const frame_pacing = @import("frame_pacing.zig");
 const frame_lifecycle = @import("frame_lifecycle.zig");
 const present_worker = @import("present_worker.zig");
-pub const Result = enum(i32) { success = 0, not_ready = 1, timeout = 2, incomplete = 5, error_out_of_host_memory = -1, error_initialization_failed = -3, error_memory_map_failed = -5, error_layer_not_present = -6, error_extension_not_present = -7, error_feature_not_present = -8, error_format_not_supported = -11 };
+const spirv = @import("spirv.zig");
+pub const Result = enum(i32) { success = 0, not_ready = 1, timeout = 2, incomplete = 5, error_out_of_host_memory = -1, error_initialization_failed = -3, error_memory_map_failed = -5, error_layer_not_present = -6, error_extension_not_present = -7, error_feature_not_present = -8, error_format_not_supported = -11, error_invalid_shader = -1_000_012_000 };
 pub const Fn = ?*const fn () callconv(.c) void;
 pub const Alloc = opaque {};
 pub const MAGIC: usize = 0x01CDC0DE;
@@ -170,6 +171,7 @@ pub const DescriptorImageInfo = extern struct { sampler: usize, image_view: usiz
 pub const WriteDescriptorSet = extern struct { s_type: i32, p_next: ?*const anyopaque, dst_set: usize, dst_binding: u32, dst_array_element: u32, descriptor_count: u32, descriptor_type: i32, image_info: ?[*]const DescriptorImageInfo, buffer_info: ?[*]const DescriptorBufferInfo, texel_buffer_view: ?[*]const usize };
 pub const Viewport = cpu_cube.Viewport;
 pub const PresentInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, wait_semaphore_count: u32, wait_semaphores: ?[*]const usize, swapchain_count: u32, swapchains: ?[*]const usize, image_indices: ?[*]const u32, results: ?[*]Result };
+pub const ShaderModuleCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, code_size: usize, p_code: ?*const anyopaque };
 const SetInstanceLoaderData = *const fn (Instance, *anyopaque) callconv(.c) Result;
 const SetDeviceLoaderData = *const fn (Device, *anyopaque) callconv(.c) Result;
 pub const InstanceObj = extern struct { loader_data: usize, set_loader_data: ?SetInstanceLoaderData };
@@ -190,6 +192,7 @@ const SurfaceObj = struct { owner: Instance, connection: *anyopaque, window: u32
 const ImageViewObj = struct { owner: Device, image: *ImageObj };
 const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj };
 const DescriptorSetObj = struct { owner: Device, uniform: ?*BufferObj = null, uniform_offset: u64 = 0, uniform_range: u64 = 0, texture: ?*ImageObj = null };
+const ShaderModuleObj = struct { owner: Device, module: spirv.Module };
 const SwapchainObj = struct {
     owner: Device,
     surface: *SurfaceObj,
@@ -245,6 +248,8 @@ var framebuffer_objects: [max_child_objects]FramebufferObj = undefined;
 var framebuffer_state = [_]SlotState{.never} ** max_child_objects;
 var descriptor_set_objects: [max_child_objects]DescriptorSetObj = undefined;
 var descriptor_set_state = [_]SlotState{.never} ** max_child_objects;
+var shader_module_objects: [max_child_objects]ShaderModuleObj = undefined;
+var shader_module_state = [_]SlotState{.never} ** max_child_objects;
 var swapchain_objects: [8]SwapchainObj = undefined;
 var swapchain_state = [_]SlotState{.never} ** 8;
 var generic_handle: usize = 0x10000;
@@ -375,6 +380,9 @@ const Requirement = enum(u6) {
     submission_atomicity,
     zero_fill_rejected,
     submitting_device_ownership,
+    shader_invalid,
+    shader_lifetime,
+    shader_exhaustion,
 };
 var requirement_hits: u64 = 0;
 var overlap_hold = std.atomic.Value(bool).init(false);
@@ -966,6 +974,10 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
         };
         for (&descriptor_set_objects, &descriptor_set_state) |*set, *child_state| if (child_state.* == .live and set.owner == d) {
             child_state.* = .tombstone;
+        };
+        for (&shader_module_objects, &shader_module_state) |*shader, *child_state| if (child_state.* == .live and shader.owner == d) {
+            child_state.* = .tombstone;
+            shader.module.deinit(allocator);
         };
         for (&swapchain_objects, &swapchain_state) |*swapchain, *child_state| if (child_state.* == .live and swapchain.owner == d) {
             child_state.* = .tombstone;
@@ -1996,6 +2008,68 @@ fn destroyOpaque(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(
     _ = handle;
     _ = alloc;
 }
+fn createShaderModule(device: ?Device, info: ?*const ShaderModuleCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    const d = device orelse return .error_initialization_failed;
+    const ci = info orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    if (alloc != null or ci.s_type != 16 or ci.p_next != null or ci.flags != 0) {
+        hit(.shader_invalid);
+        return .error_initialization_failed;
+    }
+    const word_count = spirv.validateByteSize(ci.code_size) catch {
+        hit(.shader_invalid);
+        return .error_invalid_shader;
+    };
+    const raw = ci.p_code orelse {
+        hit(.shader_invalid);
+        return .error_invalid_shader;
+    };
+    if (@intFromPtr(raw) % @alignOf(u32) != 0) {
+        hit(.shader_invalid);
+        return .error_invalid_shader;
+    }
+    const source: [*]const u32 = @ptrFromInt(@intFromPtr(raw));
+
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    var free_index: ?usize = null;
+    for (shader_module_state, 0..) |state, index| if (state == .never) {
+        free_index = index;
+        break;
+    };
+    const index = free_index orelse {
+        hit(.shader_exhaustion);
+        return .error_out_of_host_memory;
+    };
+    if (failTestAllocation()) return .error_out_of_host_memory;
+    var module = spirv.Module.parse(allocator, source[0..word_count]) catch |err| {
+        if (err != error.OutOfMemory) hit(.shader_invalid);
+        return if (err == error.OutOfMemory) .error_out_of_host_memory else .error_invalid_shader;
+    };
+    errdefer module.deinit(allocator);
+    shader_module_objects[index] = .{ .owner = d, .module = module };
+    shader_module_state[index] = .live;
+    out.* = @intFromPtr(&shader_module_objects[index]);
+    return .success;
+}
+fn destroyShaderModule(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+    if (alloc != null or handle == 0) return;
+    const d = device orelse return;
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d)) return;
+    for (&shader_module_objects, &shader_module_state) |*object, *state| if (@intFromPtr(object) == handle) {
+        if (state.* != .live or object.owner != d) {
+            hit(.shader_lifetime);
+            return;
+        }
+        object.module.deinit(allocator);
+        state.* = .tombstone;
+        return;
+    };
+    hit(.shader_lifetime);
+}
 fn createSemaphore(device: ?Device, info: ?*const anyopaque, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     _ = info orelse return .error_initialization_failed;
     if (alloc != null) return .error_initialization_failed;
@@ -2531,7 +2605,7 @@ fn instanceLookup(n: []const u8) Fn {
 fn deviceLookup(n: []const u8) Fn {
     const map = .{ .{ "vkGetDeviceProcAddr", getDeviceProcAddr }, .{ "vkDestroyDevice", destroyDevice }, .{ "vkGetDeviceQueue", getDeviceQueue }, .{ "vkAllocateMemory", allocateMemory }, .{ "vkFreeMemory", freeMemory }, .{ "vkMapMemory", mapMemory }, .{ "vkUnmapMemory", unmapMemory }, .{ "vkCreateBuffer", createBuffer }, .{ "vkDestroyBuffer", destroyBuffer }, .{ "vkGetBufferMemoryRequirements", getBufferMemoryRequirements }, .{ "vkBindBufferMemory", bindBufferMemory }, .{ "vkCreateImage", createImage }, .{ "vkDestroyImage", destroyImage }, .{ "vkGetImageMemoryRequirements", getImageMemoryRequirements }, .{ "vkBindImageMemory", bindImageMemory }, .{ "vkGetImageSubresourceLayout", getImageSubresourceLayout }, .{ "vkCreateFence", createFence }, .{ "vkDestroyFence", destroyFence }, .{ "vkGetFenceStatus", getFenceStatus }, .{ "vkResetFences", resetFences }, .{ "vkWaitForFences", waitForFences }, .{ "vkCreateCommandPool", createCommandPool }, .{ "vkDestroyCommandPool", destroyCommandPool }, .{ "vkAllocateCommandBuffers", allocateCommandBuffers }, .{ "vkFreeCommandBuffers", freeCommandBuffers }, .{ "vkBeginCommandBuffer", beginCommandBuffer }, .{ "vkEndCommandBuffer", endCommandBuffer }, .{ "vkResetCommandBuffer", resetCommandBuffer }, .{ "vkCmdFillBuffer", cmdFillBuffer }, .{ "vkCmdCopyBuffer", cmdCopyBuffer }, .{ "vkCmdClearColorImage", cmdClearColorImage }, .{ "vkCmdCopyBufferToImage", cmdCopyBufferToImage }, .{ "vkCmdCopyImageToBuffer", cmdCopyImageToBuffer }, .{ "vkCmdCopyImage", cmdCopyImage }, .{ "vkCmdPipelineBarrier", cmdPipelineBarrier }, .{ "vkQueueSubmit", queueSubmit }, .{ "vkQueueWaitIdle", queueWaitIdle }, .{ "vkDeviceWaitIdle", deviceWaitIdle } };
     inline for (map) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
-    const presentation = .{ .{ "vkCreateSemaphore", createSemaphore }, .{ "vkDestroySemaphore", destroySemaphore }, .{ "vkCreateImageView", createImageView }, .{ "vkDestroyImageView", destroyImageView }, .{ "vkCreateSampler", createOpaque }, .{ "vkDestroySampler", destroyOpaque }, .{ "vkCreateDescriptorSetLayout", createOpaque }, .{ "vkDestroyDescriptorSetLayout", destroyOpaque }, .{ "vkCreateDescriptorPool", createOpaque }, .{ "vkDestroyDescriptorPool", destroyOpaque }, .{ "vkCreateShaderModule", createOpaque }, .{ "vkDestroyShaderModule", destroyOpaque }, .{ "vkCreatePipelineCache", createOpaque }, .{ "vkDestroyPipelineCache", destroyOpaque }, .{ "vkCreatePipelineLayout", createOpaque }, .{ "vkDestroyPipelineLayout", destroyOpaque }, .{ "vkCreateRenderPass", createOpaque }, .{ "vkDestroyRenderPass", destroyOpaque }, .{ "vkCreateFramebuffer", createFramebuffer }, .{ "vkDestroyFramebuffer", destroyFramebuffer }, .{ "vkCreateGraphicsPipelines", createGraphicsPipelines }, .{ "vkDestroyPipeline", destroyOpaque }, .{ "vkAllocateDescriptorSets", allocateDescriptorSets }, .{ "vkUpdateDescriptorSets", updateDescriptorSets }, .{ "vkCmdBeginRenderPass", cmdBeginRenderPass }, .{ "vkCmdBindPipeline", cmdBindPipeline }, .{ "vkCmdBindDescriptorSets", cmdBindDescriptorSets }, .{ "vkCmdSetViewport", cmdSetViewport }, .{ "vkCmdSetScissor", cmdSetScissor }, .{ "vkCmdDraw", cmdDraw }, .{ "vkCmdEndRenderPass", cmdEndRenderPass }, .{ "vkCreateSwapchainKHR", createSwapchain }, .{ "vkDestroySwapchainKHR", destroySwapchain }, .{ "vkGetSwapchainImagesKHR", getSwapchainImages }, .{ "vkAcquireNextImageKHR", acquireNextImage }, .{ "vkQueuePresentKHR", queuePresent } };
+    const presentation = .{ .{ "vkCreateSemaphore", createSemaphore }, .{ "vkDestroySemaphore", destroySemaphore }, .{ "vkCreateImageView", createImageView }, .{ "vkDestroyImageView", destroyImageView }, .{ "vkCreateSampler", createOpaque }, .{ "vkDestroySampler", destroyOpaque }, .{ "vkCreateDescriptorSetLayout", createOpaque }, .{ "vkDestroyDescriptorSetLayout", destroyOpaque }, .{ "vkCreateDescriptorPool", createOpaque }, .{ "vkDestroyDescriptorPool", destroyOpaque }, .{ "vkCreateShaderModule", createShaderModule }, .{ "vkDestroyShaderModule", destroyShaderModule }, .{ "vkCreatePipelineCache", createOpaque }, .{ "vkDestroyPipelineCache", destroyOpaque }, .{ "vkCreatePipelineLayout", createOpaque }, .{ "vkDestroyPipelineLayout", destroyOpaque }, .{ "vkCreateRenderPass", createOpaque }, .{ "vkDestroyRenderPass", destroyOpaque }, .{ "vkCreateFramebuffer", createFramebuffer }, .{ "vkDestroyFramebuffer", destroyFramebuffer }, .{ "vkCreateGraphicsPipelines", createGraphicsPipelines }, .{ "vkDestroyPipeline", destroyOpaque }, .{ "vkAllocateDescriptorSets", allocateDescriptorSets }, .{ "vkUpdateDescriptorSets", updateDescriptorSets }, .{ "vkCmdBeginRenderPass", cmdBeginRenderPass }, .{ "vkCmdBindPipeline", cmdBindPipeline }, .{ "vkCmdBindDescriptorSets", cmdBindDescriptorSets }, .{ "vkCmdSetViewport", cmdSetViewport }, .{ "vkCmdSetScissor", cmdSetScissor }, .{ "vkCmdDraw", cmdDraw }, .{ "vkCmdEndRenderPass", cmdEndRenderPass }, .{ "vkCreateSwapchainKHR", createSwapchain }, .{ "vkDestroySwapchainKHR", destroySwapchain }, .{ "vkGetSwapchainImagesKHR", getSwapchainImages }, .{ "vkAcquireNextImageKHR", acquireNextImage }, .{ "vkQueuePresentKHR", queuePresent } };
     inline for (presentation) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
     return null;
 }
@@ -4275,6 +4349,123 @@ test "tombstone pool exhaustion returns out of host memory" {
         destroyInstance(next, null);
     }
     try std.testing.expect(exhausted);
+}
+
+test "shader modules use owned validated words and dedicated lifetime-safe ABI handles" {
+    instance_state = [_]SlotState{.never} ** max_objects;
+    device_state = [_]SlotState{.never} ** max_objects;
+    const first = try createTestDeviceContext();
+    const second = try createTestDeviceContext();
+    defer destroyDevice(second.device, null);
+    var caller_words = try std.testing.allocator.dupe(u32, &[_]u32{ spirv.magic, 0x0001_0000, 7, 4, 0, 0x0001_0000 });
+    const info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = caller_words.len * 4, .p_code = caller_words.ptr };
+    var handle: usize = 0;
+
+    const Create = *const fn (?Device, ?*const ShaderModuleCreateInfo, ?*const Alloc, ?*usize) callconv(.c) Result;
+    const Destroy = *const fn (?Device, usize, ?*const Alloc) callconv(.c) void;
+    const create: Create = @ptrCast(getDeviceProcAddr(first.device, "vkCreateShaderModule").?);
+    const destroy: Destroy = @ptrCast(getDeviceProcAddr(first.device, "vkDestroyShaderModule").?);
+    try std.testing.expectEqual(Result.success, create(first.device, &info, null, &handle));
+    caller_words[5] = 0x0001_0001;
+    std.testing.allocator.free(caller_words);
+    const object = findLiveHandle(ShaderModuleObj, handle, &shader_module_objects, &shader_module_state).?;
+    try std.testing.expectEqual(first.device, object.owner);
+    try std.testing.expectEqual(@as(u32, 0x0001_0000), object.module.words[5]);
+
+    destroy(second.device, handle, null);
+    try std.testing.expect(findLiveHandle(ShaderModuleObj, handle, &shader_module_objects, &shader_module_state) != null);
+    destroy(first.device, handle, @ptrFromInt(8));
+    try std.testing.expect(findLiveHandle(ShaderModuleObj, handle, &shader_module_objects, &shader_module_state) != null);
+    destroy(first.device, handle, null);
+    try std.testing.expect(findLiveHandle(ShaderModuleObj, handle, &shader_module_objects, &shader_module_state) == null);
+    destroy(first.device, handle, null);
+
+    const replacement_words = [_]u32{ spirv.magic, 0x0001_0000, 7, 4, 0 };
+    const replacement_info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = replacement_words.len * 4, .p_code = &replacement_words };
+    var replacement: usize = 0;
+    try std.testing.expectEqual(Result.success, create(first.device, &replacement_info, null, &replacement));
+    try std.testing.expect(replacement != handle);
+    destroy(null, replacement, null);
+    destroy(first.device, 0, null);
+    destroy(first.device, replacement, null);
+
+    var teardown_handle: usize = 0;
+    try std.testing.expectEqual(Result.success, create(first.device, &replacement_info, null, &teardown_handle));
+    destroyDevice(first.device, null);
+    try std.testing.expect(findLiveHandle(ShaderModuleObj, teardown_handle, &shader_module_objects, &shader_module_state) == null);
+    destroy(first.device, teardown_handle, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, create(first.device, &replacement_info, null, &teardown_handle));
+}
+
+test "shader module ABI rejects malformed and unsupported inputs without publishing handles" {
+    instance_state = [_]SlotState{.never} ** max_objects;
+    device_state = [_]SlotState{.never} ** max_objects;
+    const ctx = try createTestDeviceContext();
+    defer destroyDevice(ctx.device, null);
+    const valid = [_]u32{ spirv.magic, 0x0001_0000, 0, 1, 0 };
+    var info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = valid.len * 4, .p_code = &valid };
+    var output: usize = 0xfeed_face;
+    try std.testing.expectEqual(Result.error_initialization_failed, createShaderModule(null, &info, null, &output));
+    try std.testing.expectEqual(Result.error_initialization_failed, createShaderModule(ctx.device, null, null, &output));
+    try std.testing.expectEqual(Result.error_initialization_failed, createShaderModule(ctx.device, &info, null, null));
+    try std.testing.expectEqual(Result.error_initialization_failed, createShaderModule(ctx.device, &info, @ptrFromInt(8), &output));
+    info.s_type = 15;
+    try std.testing.expectEqual(Result.error_initialization_failed, createShaderModule(ctx.device, &info, null, &output));
+    info.s_type = 16;
+    info.p_next = @ptrFromInt(8);
+    try std.testing.expectEqual(Result.error_initialization_failed, createShaderModule(ctx.device, &info, null, &output));
+    info.p_next = null;
+    info.flags = 1;
+    try std.testing.expectEqual(Result.error_initialization_failed, createShaderModule(ctx.device, &info, null, &output));
+    info.flags = 0;
+
+    info.code_size = 0;
+    try std.testing.expectEqual(Result.error_invalid_shader, createShaderModule(ctx.device, &info, null, &output));
+    info.code_size = 5;
+    try std.testing.expectEqual(Result.error_invalid_shader, createShaderModule(ctx.device, &info, null, &output));
+    info.code_size = spirv.max_code_bytes + 4;
+    try std.testing.expectEqual(Result.error_invalid_shader, createShaderModule(ctx.device, &info, null, &output));
+    info.code_size = valid.len * 4;
+    info.p_code = null;
+    try std.testing.expectEqual(Result.error_invalid_shader, createShaderModule(ctx.device, &info, null, &output));
+    var bytes = [_]u8{0} ** 32;
+    info.p_code = &bytes[1];
+    try std.testing.expectEqual(Result.error_invalid_shader, createShaderModule(ctx.device, &info, null, &output));
+
+    const malformed = [_][]const u32{
+        &.{ spirv.magic, 0x0001_0000, 0, 1 },
+        &.{ 0, 0x0001_0000, 0, 1, 0 },
+        &.{ spirv.magic, 0x0001_0000, 0, 1, 1 },
+        &.{ spirv.magic, 0x0001_0000, 0, 0, 0 },
+        &.{ spirv.magic, 0x0001_0000, 0, 1, 0, 0 },
+        &.{ spirv.magic, 0x0001_0000, 0, 1, 0, 0x0002_0000 },
+    };
+    for (malformed) |words| {
+        info.code_size = words.len * 4;
+        info.p_code = words.ptr;
+        try std.testing.expectEqual(Result.error_invalid_shader, createShaderModule(ctx.device, &info, null, &output));
+        try std.testing.expectEqual(@as(usize, 0xfeed_face), output);
+    }
+
+    info.code_size = valid.len * 4;
+    info.p_code = &valid;
+    const never_before = std.mem.count(SlotState, &shader_module_state, &.{.never});
+    test_allocations_before_failure = 0;
+    try std.testing.expectEqual(Result.error_out_of_host_memory, createShaderModule(ctx.device, &info, null, &output));
+    test_allocations_before_failure = null;
+    try std.testing.expectEqual(never_before, std.mem.count(SlotState, &shader_module_state, &.{.never}));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), output);
+
+    var created: [max_child_objects]usize = undefined;
+    var created_count: usize = 0;
+    while (std.mem.count(SlotState, &shader_module_state, &.{.never}) != 0) {
+        try std.testing.expectEqual(Result.success, createShaderModule(ctx.device, &info, null, &created[created_count]));
+        created_count += 1;
+    }
+    output = 0xfeed_face;
+    try std.testing.expectEqual(Result.error_out_of_host_memory, createShaderModule(ctx.device, &info, null, &output));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), output);
+    destroyShaderModule(ctx.device, 0xdead_beef, null);
 }
 
 test "installed manifest contract" {
