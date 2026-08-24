@@ -172,6 +172,31 @@ pub const WriteDescriptorSet = extern struct { s_type: i32, p_next: ?*const anyo
 pub const Viewport = cpu_cube.Viewport;
 pub const PresentInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, wait_semaphore_count: u32, wait_semaphores: ?[*]const usize, swapchain_count: u32, swapchains: ?[*]const usize, image_indices: ?[*]const u32, results: ?[*]Result };
 pub const ShaderModuleCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, code_size: usize, p_code: ?*const anyopaque };
+pub const SpecializationMapEntry = extern struct { constant_id: u32, offset: u32, size: usize };
+pub const SpecializationInfo = extern struct { map_entry_count: u32, map_entries: ?[*]const SpecializationMapEntry, data_size: usize, data: ?*const anyopaque };
+pub const PipelineShaderStageCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, stage: u32, module: usize, name: ?[*:0]const u8, specialization_info: ?*const SpecializationInfo };
+pub const DescriptorSetLayoutBinding = extern struct { binding: u32, descriptor_type: i32, descriptor_count: u32, stage_flags: u32, immutable_samplers: ?[*]const usize };
+pub const DescriptorSetLayoutCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, binding_count: u32, bindings: ?[*]const DescriptorSetLayoutBinding };
+pub const PushConstantRange = extern struct { stage_flags: u32, offset: u32, size: u32 };
+pub const PipelineLayoutCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, set_layout_count: u32, set_layouts: ?[*]const usize, push_constant_range_count: u32, push_constant_ranges: ?[*]const PushConstantRange };
+pub const VertexInputBindingDescription = extern struct { binding: u32, stride: u32, input_rate: i32 };
+pub const VertexInputAttributeDescription = extern struct { location: u32, binding: u32, format: i32, offset: u32 };
+pub const PipelineVertexInputStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, binding_count: u32, bindings: ?[*]const VertexInputBindingDescription, attribute_count: u32, attributes: ?[*]const VertexInputAttributeDescription };
+pub const PipelineInputAssemblyStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, topology: i32, primitive_restart_enable: u32 };
+pub const PipelineViewportStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, viewport_count: u32, viewports: ?[*]const Viewport, scissor_count: u32, scissors: ?[*]const Rect2D };
+pub const PipelineRasterizationStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, depth_clamp_enable: u32, rasterizer_discard_enable: u32, polygon_mode: i32, cull_mode: u32, front_face: i32, depth_bias_enable: u32, depth_bias_constant_factor: f32, depth_bias_clamp: f32, depth_bias_slope_factor: f32, line_width: f32 };
+pub const PipelineMultisampleStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, rasterization_samples: u32, sample_shading_enable: u32, min_sample_shading: f32, sample_mask: ?[*]const u32, alpha_to_coverage_enable: u32, alpha_to_one_enable: u32 };
+pub const StencilOpState = extern struct { fail_op: i32, pass_op: i32, depth_fail_op: i32, compare_op: i32, compare_mask: u32, write_mask: u32, reference: u32 };
+pub const PipelineDepthStencilStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, depth_test_enable: u32, depth_write_enable: u32, depth_compare_op: i32, depth_bounds_test_enable: u32, stencil_test_enable: u32, front: StencilOpState, back: StencilOpState, min_depth_bounds: f32, max_depth_bounds: f32 };
+pub const PipelineColorBlendAttachmentState = extern struct { blend_enable: u32, src_color_blend_factor: i32, dst_color_blend_factor: i32, color_blend_op: i32, src_alpha_blend_factor: i32, dst_alpha_blend_factor: i32, alpha_blend_op: i32, color_write_mask: u32 };
+pub const PipelineColorBlendStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, logic_op_enable: u32, logic_op: i32, attachment_count: u32, attachments: ?[*]const PipelineColorBlendAttachmentState, blend_constants: [4]f32 };
+pub const PipelineDynamicStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, dynamic_state_count: u32, dynamic_states: ?[*]const i32 };
+pub const GraphicsPipelineCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, stage_count: u32, stages: ?[*]const PipelineShaderStageCreateInfo, vertex_input: ?*const PipelineVertexInputStateCreateInfo, input_assembly: ?*const PipelineInputAssemblyStateCreateInfo, tessellation: ?*const anyopaque, viewport: ?*const PipelineViewportStateCreateInfo, rasterization: ?*const PipelineRasterizationStateCreateInfo, multisample: ?*const PipelineMultisampleStateCreateInfo, depth_stencil: ?*const PipelineDepthStencilStateCreateInfo, color_blend: ?*const PipelineColorBlendStateCreateInfo, dynamic: ?*const PipelineDynamicStateCreateInfo, layout: usize, render_pass: usize, subpass: u32, base_pipeline: usize, base_pipeline_index: i32 };
+pub const AttachmentDescription = extern struct { flags: u32, format: i32, samples: u32, load_op: i32, store_op: i32, stencil_load_op: i32, stencil_store_op: i32, initial_layout: i32, final_layout: i32 };
+pub const AttachmentReference = extern struct { attachment: u32, layout: i32 };
+pub const SubpassDescription = extern struct { flags: u32, pipeline_bind_point: i32, input_attachment_count: u32, input_attachments: ?[*]const AttachmentReference, color_attachment_count: u32, color_attachments: ?[*]const AttachmentReference, resolve_attachments: ?[*]const AttachmentReference, depth_stencil_attachment: ?*const AttachmentReference, preserve_attachment_count: u32, preserve_attachments: ?[*]const u32 };
+pub const SubpassDependency = extern struct { src_subpass: u32, dst_subpass: u32, src_stage_mask: u32, dst_stage_mask: u32, src_access_mask: u32, dst_access_mask: u32, dependency_flags: u32 };
+pub const RenderPassCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, attachment_count: u32, attachments: ?[*]const AttachmentDescription, subpass_count: u32, subpasses: ?[*]const SubpassDescription, dependency_count: u32, dependencies: ?[*]const SubpassDependency };
 const SetInstanceLoaderData = *const fn (Instance, *anyopaque) callconv(.c) Result;
 const SetDeviceLoaderData = *const fn (Device, *anyopaque) callconv(.c) Result;
 pub const InstanceObj = extern struct { loader_data: usize, set_loader_data: ?SetInstanceLoaderData };
@@ -190,7 +215,7 @@ const SemaphoreObj = struct { owner: Device, signaled: bool };
 const CommandPoolObj = struct { owner: Device };
 const SurfaceObj = struct { owner: Instance, connection: *anyopaque, window: u32 };
 const ImageViewObj = struct { owner: Device, image: *ImageObj };
-const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj };
+const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj, render_compatibility: Canonical };
 const DescriptorSetObj = struct { owner: Device, uniform: ?*BufferObj = null, uniform_offset: u64 = 0, uniform_range: u64 = 0, texture: ?*ImageObj = null };
 const DeviceIdentity = struct {
     handle: Device,
@@ -205,6 +230,23 @@ const DeviceIdentity = struct {
     }
 };
 const ShaderModuleObj = struct { owner: DeviceIdentity, module: spirv.Module };
+const canonical_capacity = 32 * 1024;
+const Canonical = struct {
+    len: u16 = 0,
+    bytes: [canonical_capacity]u8 = undefined,
+    digest: [32]u8 = undefined,
+
+    fn finish(self: *Canonical) void {
+        std.crypto.hash.sha2.Sha256.hash(self.bytes[0..self.len], &self.digest, .{});
+    }
+    fn eql(a: *const Canonical, b: *const Canonical) bool {
+        return a.len == b.len and std.mem.eql(u8, a.bytes[0..a.len], b.bytes[0..b.len]);
+    }
+};
+const DescriptorSetLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical };
+const PipelineLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical };
+const RenderPassObj = struct { owner: DeviceIdentity, canonical: Canonical, compatibility: Canonical, subpass_count: u32 };
+const GraphicsPipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, render_compatibility: Canonical, subpass: u32, execution_abi: u32 };
 const SwapchainObj = struct {
     owner: Device,
     surface: *SurfaceObj,
@@ -222,7 +264,7 @@ const SwapchainObj = struct {
     transport: xcb_present.Transport,
 };
 const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32 }, cube_draw: struct { framebuffer: *FramebufferObj, descriptors: *DescriptorSetObj, vertex_count: u32, viewport: Viewport, scissor: cpu_cube.Rect }, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 } };
-const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, state: u8, invalid: bool, count: u16, active_framebuffer: ?*FramebufferObj, bound_descriptors: ?*DescriptorSetObj, viewport: Viewport, scissor: cpu_cube.Rect, commands: [256]Command };
+const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, state: u8, invalid: bool, count: u16, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, bound_pipeline: ?*GraphicsPipelineObj, bound_descriptors: ?*DescriptorSetObj, viewport: Viewport, scissor: cpu_cube.Rect, commands: [256]Command };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
 pub const CommandBuffer = *CommandBufferObj;
 
@@ -263,6 +305,14 @@ var descriptor_set_objects: [max_child_objects]DescriptorSetObj = undefined;
 var descriptor_set_state = [_]SlotState{.never} ** max_child_objects;
 var shader_module_objects: [max_child_objects]ShaderModuleObj = undefined;
 var shader_module_state = [_]SlotState{.never} ** max_child_objects;
+var descriptor_set_layout_objects: [max_child_objects]DescriptorSetLayoutObj = undefined;
+var descriptor_set_layout_state = [_]SlotState{.never} ** max_child_objects;
+var pipeline_layout_objects: [max_child_objects]PipelineLayoutObj = undefined;
+var pipeline_layout_state = [_]SlotState{.never} ** max_child_objects;
+var render_pass_objects: [max_child_objects]RenderPassObj = undefined;
+var render_pass_state = [_]SlotState{.never} ** max_child_objects;
+var graphics_pipeline_objects: [max_child_objects]GraphicsPipelineObj = undefined;
+var graphics_pipeline_state = [_]SlotState{.never} ** max_child_objects;
 var swapchain_objects: [8]SwapchainObj = undefined;
 var swapchain_state = [_]SlotState{.never} ** 8;
 var generic_handle: usize = 0x10000;
@@ -995,6 +1045,18 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
             child_state.* = .tombstone;
             shader.module.deinit(allocator);
         };
+        for (&descriptor_set_layout_objects, &descriptor_set_layout_state) |*object, *child_state| {
+            if (child_state.* == .live and object.owner.eql(d)) child_state.* = .tombstone;
+        }
+        for (&pipeline_layout_objects, &pipeline_layout_state) |*object, *child_state| {
+            if (child_state.* == .live and object.owner.eql(d)) child_state.* = .tombstone;
+        }
+        for (&render_pass_objects, &render_pass_state) |*object, *child_state| {
+            if (child_state.* == .live and object.owner.eql(d)) child_state.* = .tombstone;
+        }
+        for (&graphics_pipeline_objects, &graphics_pipeline_state) |*object, *child_state| {
+            if (child_state.* == .live and object.owner.eql(d)) child_state.* = .tombstone;
+        }
         for (&swapchain_objects, &swapchain_state) |*swapchain, *child_state| if (child_state.* == .live and swapchain.owner == d) {
             child_state.* = .tombstone;
         };
@@ -1098,6 +1160,18 @@ fn validFramebufferLocked(handle: usize) ?*FramebufferObj {
 }
 fn validDescriptorSetLocked(handle: usize) ?*DescriptorSetObj {
     return findLiveHandle(DescriptorSetObj, handle, &descriptor_set_objects, &descriptor_set_state);
+}
+fn validDescriptorSetLayoutLocked(handle: usize) ?*DescriptorSetLayoutObj {
+    return findLiveHandle(DescriptorSetLayoutObj, handle, &descriptor_set_layout_objects, &descriptor_set_layout_state);
+}
+fn validPipelineLayoutLocked(handle: usize) ?*PipelineLayoutObj {
+    return findLiveHandle(PipelineLayoutObj, handle, &pipeline_layout_objects, &pipeline_layout_state);
+}
+fn validRenderPassLocked(handle: usize) ?*RenderPassObj {
+    return findLiveHandle(RenderPassObj, handle, &render_pass_objects, &render_pass_state);
+}
+fn validGraphicsPipelineLocked(handle: usize) ?*GraphicsPipelineObj {
+    return findLiveHandle(GraphicsPipelineObj, handle, &graphics_pipeline_objects, &graphics_pipeline_state);
 }
 fn validSwapchainLocked(handle: usize) ?*SwapchainObj {
     if (handle == 0) return null;
@@ -1448,7 +1522,7 @@ fn allocateCommandBuffers(device: ?Device, info: ?*const CommandBufferAllocateIn
         };
         const cb = &command_buffer_objects[index];
         const impl = &command_buffer_impls[index];
-        impl.* = .{ .owner = d, .pool = pool, .state = 0, .invalid = false, .count = 0, .active_framebuffer = null, .bound_descriptors = null, .viewport = .{ .x = 0, .y = 0, .width = 0, .height = 0, .min_depth = 0, .max_depth = 1 }, .scissor = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, .commands = undefined };
+        impl.* = .{ .owner = d, .pool = pool, .state = 0, .invalid = false, .count = 0, .active_framebuffer = null, .active_render_pass = null, .bound_pipeline = null, .bound_descriptors = null, .viewport = .{ .x = 0, .y = 0, .width = 0, .height = 0, .min_depth = 0, .max_depth = 1 }, .scissor = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, .commands = undefined };
         cb.* = .{ .loader_data = MAGIC, .impl = impl };
         command_buffer_state[index] = .live;
         if (d.set_loader_data) |set| {
@@ -1497,6 +1571,8 @@ fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) 
     c.impl.invalid = false;
     c.impl.count = 0;
     c.impl.active_framebuffer = null;
+    c.impl.active_render_pass = null;
+    c.impl.bound_pipeline = null;
     c.impl.bound_descriptors = null;
     return .success;
 }
@@ -1517,6 +1593,8 @@ fn resetCommandBuffer(cb: ?CommandBuffer, flags: u32) callconv(.c) Result {
     c.impl.invalid = false;
     c.impl.count = 0;
     c.impl.active_framebuffer = null;
+    c.impl.active_render_pass = null;
+    c.impl.bound_pipeline = null;
     c.impl.bound_descriptors = null;
     return .success;
 }
@@ -2009,6 +2087,470 @@ fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy
     }
 }
 
+const CanonicalError = error{ Invalid, TooLarge };
+const CanonicalWriter = struct {
+    value: Canonical = .{},
+    fn raw(self: *CanonicalWriter, bytes: []const u8) CanonicalError!void {
+        if (bytes.len > canonical_capacity - self.value.len) return error.TooLarge;
+        @memcpy(self.value.bytes[self.value.len..][0..bytes.len], bytes);
+        self.value.len += @intCast(bytes.len);
+    }
+    fn u32le(self: *CanonicalWriter, value: u32) CanonicalError!void {
+        var bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &bytes, value, .little);
+        try self.raw(&bytes);
+    }
+    fn i32le(self: *CanonicalWriter, value: i32) CanonicalError!void {
+        try self.u32le(@bitCast(value));
+    }
+    fn u64le(self: *CanonicalWriter, value: u64) CanonicalError!void {
+        var bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &bytes, value, .little);
+        try self.raw(&bytes);
+    }
+    fn f32le(self: *CanonicalWriter, value: f32) CanonicalError!void {
+        if (!std.math.isFinite(value)) return error.Invalid;
+        try self.u32le(if (value == 0) 0 else @bitCast(value));
+    }
+    fn header(self: *CanonicalWriter, kind: u32) CanonicalError!void {
+        try self.raw("ZPUC");
+        try self.u32le(1);
+        try self.u32le(kind);
+        try self.u32le(spirv.ingestion_version);
+        try self.u32le(spirv.serialization_version);
+        try self.u32le(1); // canonical compiler policy
+        try self.u32le(1); // cpu_cube_v1 execution ABI
+        try self.u32le(0); // baseline CPU feature policy; no host-feature specialization
+    }
+    fn done(self: *CanonicalWriter) Canonical {
+        self.value.finish();
+        return self.value;
+    }
+};
+fn bool32(value: u32) CanonicalError!u32 {
+    if (value > 1) return error.Invalid;
+    return value;
+}
+fn appendCanonical(writer: *CanonicalWriter, value: *const Canonical) CanonicalError!void {
+    try writer.u32le(value.len);
+    try writer.raw(value.bytes[0..value.len]);
+}
+fn creationFailure(err: CanonicalError) Result {
+    return switch (err) {
+        error.TooLarge => .error_out_of_host_memory,
+        error.Invalid => .error_initialization_failed,
+    };
+}
+
+fn buildDescriptorSetLayout(ci: *const DescriptorSetLayoutCreateInfo) CanonicalError!Canonical {
+    if (ci.s_type != 32 or ci.p_next != null or ci.flags != 0 or ci.binding_count > 64 or (ci.binding_count != 0 and ci.bindings == null)) return error.Invalid;
+    var indices: [64]u8 = undefined;
+    for (0..ci.binding_count) |i| indices[i] = @intCast(i);
+    const bindings = if (ci.bindings) |p| p[0..ci.binding_count] else &.{};
+    std.mem.sort(u8, indices[0..ci.binding_count], bindings, struct {
+        fn less(items: []const DescriptorSetLayoutBinding, a: u8, b: u8) bool {
+            return items[a].binding < items[b].binding;
+        }
+    }.less);
+    var w: CanonicalWriter = .{};
+    try w.header(1);
+    try w.u32le(ci.binding_count);
+    var previous: ?u32 = null;
+    for (indices[0..ci.binding_count]) |index| {
+        const b = bindings[index];
+        if (previous == b.binding or b.descriptor_count == 0 or b.descriptor_type < 0 or b.descriptor_type > 10 or b.stage_flags == 0 or b.stage_flags & ~@as(u32, 0x7fff_ffff) != 0 or b.immutable_samplers != null) return error.Invalid;
+        previous = b.binding;
+        try w.u32le(b.binding);
+        try w.i32le(b.descriptor_type);
+        try w.u32le(b.descriptor_count);
+        try w.u32le(b.stage_flags);
+    }
+    return w.done();
+}
+fn createDescriptorSetLayout(device: ?Device, info: ?*const DescriptorSetLayoutCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    if (alloc != null) return .error_initialization_failed;
+    const d = device orelse return .error_initialization_failed;
+    const ci = info orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    const canonical = buildDescriptorSetLayout(ci) catch |err| return creationFailure(err);
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    for (&descriptor_set_layout_objects, &descriptor_set_layout_state) |*object, *state| if (state.* == .never) {
+        object.* = .{ .owner = DeviceIdentity.capture(d), .canonical = canonical };
+        state.* = .live;
+        out.* = @intFromPtr(object);
+        return .success;
+    };
+    return .error_out_of_host_memory;
+}
+fn destroyDescriptorSetLayout(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+    if (alloc != null) return;
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return;
+    const object = validDescriptorSetLayoutLocked(handle) orelse return;
+    if (validDeviceLocked(d) and object.owner.eql(d)) stateForObject(DescriptorSetLayoutObj, object, &descriptor_set_layout_objects, &descriptor_set_layout_state).?.* = .tombstone;
+}
+
+fn buildPipelineLayoutLocked(d: Device, ci: *const PipelineLayoutCreateInfo) CanonicalError!Canonical {
+    if (ci.s_type != 30 or ci.p_next != null or ci.flags != 0 or ci.set_layout_count > 4 or ci.push_constant_range_count > 16 or (ci.set_layout_count != 0 and ci.set_layouts == null) or (ci.push_constant_range_count != 0 and ci.push_constant_ranges == null)) return error.Invalid;
+    var w: CanonicalWriter = .{};
+    try w.header(2);
+    try w.u32le(ci.set_layout_count);
+    if (ci.set_layouts) |handles| for (handles[0..ci.set_layout_count]) |handle| {
+        const layout = validDescriptorSetLayoutLocked(handle) orelse return error.Invalid;
+        if (!layout.owner.eql(d)) return error.Invalid;
+        try appendCanonical(&w, &layout.canonical);
+    };
+    try w.u32le(ci.push_constant_range_count);
+    if (ci.push_constant_ranges) |ranges| for (ranges[0..ci.push_constant_range_count]) |range| {
+        if (range.stage_flags == 0 or range.offset % 4 != 0 or range.size == 0 or range.size % 4 != 0 or range.offset +| range.size > 128) return error.Invalid;
+        try w.u32le(range.stage_flags);
+        try w.u32le(range.offset);
+        try w.u32le(range.size);
+    };
+    return w.done();
+}
+fn createPipelineLayout(device: ?Device, info: ?*const PipelineLayoutCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    if (alloc != null) return .error_initialization_failed;
+    const d = device orelse return .error_initialization_failed;
+    const ci = info orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    const canonical = buildPipelineLayoutLocked(d, ci) catch |err| return creationFailure(err);
+    for (&pipeline_layout_objects, &pipeline_layout_state) |*object, *state| if (state.* == .never) {
+        object.* = .{ .owner = DeviceIdentity.capture(d), .canonical = canonical };
+        state.* = .live;
+        out.* = @intFromPtr(object);
+        return .success;
+    };
+    return .error_out_of_host_memory;
+}
+fn destroyPipelineLayout(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+    if (alloc != null) return;
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return;
+    const object = validPipelineLayoutLocked(handle) orelse return;
+    if (validDeviceLocked(d) and object.owner.eql(d)) stateForObject(PipelineLayoutObj, object, &pipeline_layout_objects, &pipeline_layout_state).?.* = .tombstone;
+}
+
+fn appendAttachmentRef(w: *CanonicalWriter, ref: AttachmentReference, count: u32) CanonicalError!void {
+    if (ref.attachment != 0xffff_ffff and ref.attachment >= count) return error.Invalid;
+    try w.u32le(ref.attachment);
+    try w.i32le(ref.layout);
+}
+fn buildRenderPass(ci: *const RenderPassCreateInfo, compatibility_only: bool) CanonicalError!Canonical {
+    if (ci.s_type != 38 or ci.p_next != null or ci.flags != 0 or ci.attachment_count > 16 or ci.subpass_count == 0 or ci.subpass_count > 8 or ci.dependency_count > 32 or (ci.attachment_count != 0 and ci.attachments == null) or ci.subpasses == null or (ci.dependency_count != 0 and ci.dependencies == null)) return error.Invalid;
+    var w: CanonicalWriter = .{};
+    try w.header(if (compatibility_only) 4 else 3);
+    try w.u32le(ci.attachment_count);
+    if (ci.attachments) |items| for (items[0..ci.attachment_count]) |a| {
+        if (a.flags != 0 or a.samples == 0 or a.samples & (a.samples - 1) != 0) return error.Invalid;
+        try w.i32le(a.format);
+        try w.u32le(a.samples);
+        if (!compatibility_only) {
+            try w.i32le(a.load_op);
+            try w.i32le(a.store_op);
+            try w.i32le(a.stencil_load_op);
+            try w.i32le(a.stencil_store_op);
+            try w.i32le(a.initial_layout);
+            try w.i32le(a.final_layout);
+        }
+    };
+    try w.u32le(ci.subpass_count);
+    for (ci.subpasses.?[0..ci.subpass_count]) |s| {
+        if (s.flags != 0 or s.pipeline_bind_point != 0 or s.input_attachment_count > 16 or s.color_attachment_count > 8 or s.preserve_attachment_count > 16 or (s.input_attachment_count != 0 and s.input_attachments == null) or (s.color_attachment_count != 0 and s.color_attachments == null) or (s.preserve_attachment_count != 0 and s.preserve_attachments == null)) return error.Invalid;
+        try w.u32le(s.input_attachment_count);
+        if (s.input_attachments) |refs| for (refs[0..s.input_attachment_count]) |ref| try appendAttachmentRef(&w, ref, ci.attachment_count);
+        try w.u32le(s.color_attachment_count);
+        if (s.color_attachments) |refs| for (refs[0..s.color_attachment_count]) |ref| try appendAttachmentRef(&w, ref, ci.attachment_count);
+        try w.u32le(if (s.resolve_attachments == null) 0 else 1);
+        if (s.resolve_attachments) |refs| for (refs[0..s.color_attachment_count]) |ref| try appendAttachmentRef(&w, ref, ci.attachment_count);
+        try w.u32le(if (s.depth_stencil_attachment == null) 0 else 1);
+        if (s.depth_stencil_attachment) |ref| try appendAttachmentRef(&w, ref.*, ci.attachment_count);
+        try w.u32le(s.preserve_attachment_count);
+        if (s.preserve_attachments) |refs| for (refs[0..s.preserve_attachment_count]) |ref| {
+            if (ref >= ci.attachment_count) return error.Invalid;
+            try w.u32le(ref);
+        };
+    }
+    if (!compatibility_only) {
+        try w.u32le(ci.dependency_count);
+        if (ci.dependencies) |deps| for (deps[0..ci.dependency_count]) |dep| {
+            if ((dep.src_subpass != 0xffff_ffff and dep.src_subpass >= ci.subpass_count) or (dep.dst_subpass != 0xffff_ffff and dep.dst_subpass >= ci.subpass_count) or dep.dependency_flags & ~@as(u32, 1) != 0) return error.Invalid;
+            try w.u32le(dep.src_subpass);
+            try w.u32le(dep.dst_subpass);
+            try w.u32le(dep.src_stage_mask);
+            try w.u32le(dep.dst_stage_mask);
+            try w.u32le(dep.src_access_mask);
+            try w.u32le(dep.dst_access_mask);
+            try w.u32le(dep.dependency_flags);
+        };
+    }
+    return w.done();
+}
+fn createRenderPass(device: ?Device, info: ?*const RenderPassCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    if (alloc != null) return .error_initialization_failed;
+    const d = device orelse return .error_initialization_failed;
+    const ci = info orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    const canonical = buildRenderPass(ci, false) catch |err| return creationFailure(err);
+    const compatibility = buildRenderPass(ci, true) catch |err| return creationFailure(err);
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    for (&render_pass_objects, &render_pass_state) |*object, *state| if (state.* == .never) {
+        object.* = .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .compatibility = compatibility, .subpass_count = ci.subpass_count };
+        state.* = .live;
+        out.* = @intFromPtr(object);
+        return .success;
+    };
+    return .error_out_of_host_memory;
+}
+fn destroyRenderPass(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+    if (alloc != null) return;
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return;
+    const object = validRenderPassLocked(handle) orelse return;
+    if (validDeviceLocked(d) and object.owner.eql(d)) stateForObject(RenderPassObj, object, &render_pass_objects, &render_pass_state).?.* = .tombstone;
+}
+
+fn appendSpecialization(w: *CanonicalWriter, info: ?*const SpecializationInfo) CanonicalError!void {
+    const spec = info orelse {
+        try w.u32le(0);
+        return;
+    };
+    if (spec.map_entry_count > 64 or (spec.map_entry_count != 0 and spec.map_entries == null) or (spec.data_size != 0 and spec.data == null)) return error.Invalid;
+    var indices: [64]u8 = undefined;
+    for (0..spec.map_entry_count) |i| indices[i] = @intCast(i);
+    const entries = if (spec.map_entries) |p| p[0..spec.map_entry_count] else &.{};
+    std.mem.sort(u8, indices[0..spec.map_entry_count], entries, struct {
+        fn less(items: []const SpecializationMapEntry, a: u8, b: u8) bool {
+            return items[a].constant_id < items[b].constant_id;
+        }
+    }.less);
+    for (entries, 0..) |a, ai| {
+        if (a.size == 0 or a.offset > spec.data_size or a.size > spec.data_size - a.offset) return error.Invalid;
+        for (entries[ai + 1 ..]) |b| if (a.offset < b.offset + b.size and b.offset < a.offset + a.size) return error.Invalid;
+    }
+    try w.u32le(spec.map_entry_count);
+    const data: [*]const u8 = @ptrCast(spec.data orelse @as(*const anyopaque, @ptrFromInt(1)));
+    var previous: ?u32 = null;
+    for (indices[0..spec.map_entry_count]) |index| {
+        const e = entries[index];
+        if (previous == e.constant_id) return error.Invalid;
+        previous = e.constant_id;
+        try w.u32le(e.constant_id);
+        try w.u64le(e.size);
+        try w.raw(data[e.offset..][0..e.size]);
+    }
+}
+
+test "pipeline canonical primitives are ordered, pointer independent, little endian, and collision safe" {
+    var bindings = [_]DescriptorSetLayoutBinding{
+        .{ .binding = 7, .descriptor_type = 1, .descriptor_count = 1, .stage_flags = 16, .immutable_samplers = null },
+        .{ .binding = 2, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null },
+    };
+    const first_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 2, .bindings = &bindings };
+    var first = try buildDescriptorSetLayout(&first_info);
+    const reversed = [_]DescriptorSetLayoutBinding{ bindings[1], bindings[0] };
+    var second_info = first_info;
+    second_info.bindings = &reversed;
+    var second = try buildDescriptorSetLayout(&second_info);
+    try std.testing.expect(first.eql(&second));
+    try std.testing.expectEqualSlices(u8, "ZPUC\x01\x00\x00\x00", first.bytes[0..8]);
+    bindings[0].descriptor_count = 2;
+    var changed = try buildDescriptorSetLayout(&first_info);
+    try std.testing.expect(!first.eql(&changed));
+    changed.digest = first.digest;
+    try std.testing.expectEqualSlices(u8, &first.digest, &changed.digest);
+    try std.testing.expect(!first.eql(&changed));
+}
+
+test "specialization canonicalization owns values and rejects bounds overlap and duplicate IDs" {
+    var data = [_]u8{ 9, 8, 7, 6, 5, 4, 3, 2 };
+    var entries = [_]SpecializationMapEntry{
+        .{ .constant_id = 8, .offset = 4, .size = 4 },
+        .{ .constant_id = 2, .offset = 0, .size = 4 },
+    };
+    var info = SpecializationInfo{ .map_entry_count = 2, .map_entries = &entries, .data_size = data.len, .data = &data };
+    var first: CanonicalWriter = .{};
+    try appendSpecialization(&first, &info);
+    const saved = first.value;
+    @memset(&data, 0xaa);
+    try std.testing.expectEqualSlices(u8, saved.bytes[0..saved.len], first.value.bytes[0..first.value.len]);
+    entries[1].constant_id = 8;
+    var duplicate: CanonicalWriter = .{};
+    try std.testing.expectError(error.Invalid, appendSpecialization(&duplicate, &info));
+    entries[1].constant_id = 2;
+    entries[1].offset = 3;
+    var overlap: CanonicalWriter = .{};
+    try std.testing.expectError(error.Invalid, appendSpecialization(&overlap, &info));
+    entries[1].offset = 7;
+    entries[1].size = 2;
+    var bounds: CanonicalWriter = .{};
+    try std.testing.expectError(error.Invalid, appendSpecialization(&bounds, &info));
+}
+
+test "Vulkan graphics pipeline ABI declarations match LP64 layouts" {
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(SpecializationInfo));
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(PipelineShaderStageCreateInfo));
+    try std.testing.expectEqual(@as(usize, 144), @sizeOf(GraphicsPipelineCreateInfo));
+    try std.testing.expectEqual(@as(usize, 104), @offsetOf(GraphicsPipelineCreateInfo, "layout"));
+    try std.testing.expectEqual(@as(usize, 136), @offsetOf(GraphicsPipelineCreateInfo, "base_pipeline_index"));
+}
+
+fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo) CanonicalError!GraphicsPipelineObj {
+    if (ci.s_type != 28 or ci.p_next != null or ci.flags != 0 or ci.stage_count != 2 or ci.stages == null or ci.tessellation != null or ci.base_pipeline != 0) return error.Invalid;
+    const layout = validPipelineLayoutLocked(ci.layout) orelse return error.Invalid;
+    const render_pass = validRenderPassLocked(ci.render_pass) orelse return error.Invalid;
+    if (!layout.owner.eql(d) or !render_pass.owner.eql(d) or ci.subpass >= render_pass.subpass_count) return error.Invalid;
+    var w: CanonicalWriter = .{};
+    try w.header(5);
+    try w.u32le(1); // cpu_cube_v1
+    try appendCanonical(&w, &layout.canonical);
+    try appendCanonical(&w, &render_pass.compatibility);
+    try w.u32le(ci.subpass);
+    var stage_indices: [2]u8 = .{ 0, 1 };
+    const stages = ci.stages.?[0..2];
+    if (stages[1].stage < stages[0].stage) stage_indices = .{ 1, 0 };
+    var stage_mask: u32 = 0;
+    for (stage_indices) |index| {
+        const stage = stages[index];
+        if (stage.s_type != 18 or stage.p_next != null or stage.flags != 0 or (stage.stage != 1 and stage.stage != 0x10) or stage_mask & stage.stage != 0 or stage.name == null) return error.Invalid;
+        const shader = findLiveHandle(ShaderModuleObj, stage.module, &shader_module_objects, &shader_module_state) orelse return error.Invalid;
+        if (!shader.owner.eql(d)) return error.Invalid;
+        const name = std.mem.span(stage.name.?);
+        if (name.len == 0 or name.len > 255) return error.Invalid;
+        stage_mask |= stage.stage;
+        try w.u32le(stage.stage);
+        try w.u32le(shader.module.identity.ingestion);
+        try w.u32le(shader.module.identity.serialization);
+        try w.raw(&shader.module.identity.digest);
+        try w.u32le(@intCast(name.len));
+        try w.raw(name);
+        try appendSpecialization(&w, stage.specialization_info);
+    }
+    if (stage_mask != 0x11) return error.Invalid;
+    const vi = ci.vertex_input orelse return error.Invalid;
+    if (vi.s_type != 19 or vi.p_next != null or vi.flags != 0 or vi.binding_count > 16 or vi.attribute_count > 32 or (vi.binding_count != 0 and vi.bindings == null) or (vi.attribute_count != 0 and vi.attributes == null)) return error.Invalid;
+    var binding_indices: [16]u8 = undefined;
+    for (0..vi.binding_count) |i| binding_indices[i] = @intCast(i);
+    const bindings = if (vi.bindings) |p| p[0..vi.binding_count] else &.{};
+    std.mem.sort(u8, binding_indices[0..vi.binding_count], bindings, struct {
+        fn less(items: []const VertexInputBindingDescription, a: u8, b: u8) bool {
+            return items[a].binding < items[b].binding;
+        }
+    }.less);
+    try w.u32le(vi.binding_count);
+    var prior_binding: ?u32 = null;
+    for (binding_indices[0..vi.binding_count]) |index| {
+        const b = bindings[index];
+        if (prior_binding == b.binding or b.input_rate < 0 or b.input_rate > 1) return error.Invalid;
+        prior_binding = b.binding;
+        try w.u32le(b.binding);
+        try w.u32le(b.stride);
+        try w.i32le(b.input_rate);
+    }
+    var attribute_indices: [32]u8 = undefined;
+    for (0..vi.attribute_count) |i| attribute_indices[i] = @intCast(i);
+    const attributes = if (vi.attributes) |p| p[0..vi.attribute_count] else &.{};
+    std.mem.sort(u8, attribute_indices[0..vi.attribute_count], attributes, struct {
+        fn less(items: []const VertexInputAttributeDescription, a: u8, b: u8) bool {
+            return items[a].location < items[b].location;
+        }
+    }.less);
+    try w.u32le(vi.attribute_count);
+    var prior_location: ?u32 = null;
+    for (attribute_indices[0..vi.attribute_count]) |index| {
+        const a = attributes[index];
+        if (prior_location == a.location or a.format <= 0) return error.Invalid;
+        prior_location = a.location;
+        var found = false;
+        for (bindings) |b| if (b.binding == a.binding) {
+            found = true;
+            break;
+        };
+        if (!found) return error.Invalid;
+        try w.u32le(a.location);
+        try w.u32le(a.binding);
+        try w.i32le(a.format);
+        try w.u32le(a.offset);
+    }
+    const ia = ci.input_assembly orelse return error.Invalid;
+    if (ia.s_type != 20 or ia.p_next != null or ia.flags != 0 or ia.topology != 3 or try bool32(ia.primitive_restart_enable) != 0) return error.Invalid;
+    try w.i32le(ia.topology);
+    var dynamic_viewport = false;
+    var dynamic_scissor = false;
+    var dynamic_indices: [16]u8 = undefined;
+    var dynamic_count: u32 = 0;
+    if (ci.dynamic) |dy| {
+        if (dy.s_type != 27 or dy.p_next != null or dy.flags != 0 or dy.dynamic_state_count > 16 or (dy.dynamic_state_count != 0 and dy.dynamic_states == null)) return error.Invalid;
+        dynamic_count = dy.dynamic_state_count;
+        for (0..dynamic_count) |i| dynamic_indices[i] = @intCast(i);
+        const states = dy.dynamic_states.?[0..dynamic_count];
+        std.mem.sort(u8, dynamic_indices[0..dynamic_count], states, struct {
+            fn less(items: []const i32, a: u8, b: u8) bool {
+                return items[a] < items[b];
+            }
+        }.less);
+        var prior: ?i32 = null;
+        for (dynamic_indices[0..dynamic_count]) |index| {
+            const state = states[index];
+            if (prior == state or (state != 0 and state != 1)) return error.Invalid;
+            prior = state;
+            if (state == 0) dynamic_viewport = true else dynamic_scissor = true;
+        }
+    }
+    try w.u32le(dynamic_count);
+    if (dynamic_viewport) try w.i32le(0);
+    if (dynamic_scissor) try w.i32le(1);
+    const vp = ci.viewport orelse return error.Invalid;
+    if (vp.s_type != 22 or vp.p_next != null or vp.flags != 0 or vp.viewport_count != 1 or vp.scissor_count != 1 or (!dynamic_viewport and vp.viewports == null) or (!dynamic_scissor and vp.scissors == null)) return error.Invalid;
+    try w.u32le(1);
+    if (!dynamic_viewport) {
+        const v = vp.viewports.?[0];
+        try w.f32le(v.x);
+        try w.f32le(v.y);
+        try w.f32le(v.width);
+        try w.f32le(v.height);
+        try w.f32le(v.min_depth);
+        try w.f32le(v.max_depth);
+    }
+    if (!dynamic_scissor) {
+        const s = vp.scissors.?[0];
+        try w.i32le(s.offset.x);
+        try w.i32le(s.offset.y);
+        try w.u32le(s.extent.width);
+        try w.u32le(s.extent.height);
+    }
+    const rs = ci.rasterization orelse return error.Invalid;
+    if (rs.s_type != 23 or rs.p_next != null or rs.flags != 0 or try bool32(rs.depth_clamp_enable) != 0 or try bool32(rs.rasterizer_discard_enable) != 0 or rs.polygon_mode != 0 or rs.cull_mode & ~@as(u32, 3) != 0 or (rs.front_face != 0 and rs.front_face != 1) or try bool32(rs.depth_bias_enable) != 0 or rs.line_width != 1) return error.Invalid;
+    try w.u32le(rs.cull_mode);
+    try w.i32le(rs.front_face);
+    try w.f32le(rs.line_width);
+    const ms = ci.multisample orelse return error.Invalid;
+    if (ms.s_type != 24 or ms.p_next != null or ms.flags != 0 or ms.rasterization_samples != 1 or try bool32(ms.sample_shading_enable) != 0 or ms.sample_mask != null or try bool32(ms.alpha_to_coverage_enable) != 0 or try bool32(ms.alpha_to_one_enable) != 0) return error.Invalid;
+    try w.u32le(1);
+    const ds = ci.depth_stencil orelse return error.Invalid;
+    if (ds.s_type != 25 or ds.p_next != null or ds.flags != 0 or try bool32(ds.depth_test_enable) != 1 or try bool32(ds.depth_write_enable) != 1 or ds.depth_compare_op != 3 or try bool32(ds.depth_bounds_test_enable) != 0 or try bool32(ds.stencil_test_enable) != 0) return error.Invalid;
+    try w.u32le(1);
+    try w.u32le(1);
+    try w.i32le(3);
+    const cb = ci.color_blend orelse return error.Invalid;
+    if (cb.s_type != 26 or cb.p_next != null or cb.flags != 0 or try bool32(cb.logic_op_enable) != 0 or cb.attachment_count != 1 or cb.attachments == null) return error.Invalid;
+    const attachment = cb.attachments.?[0];
+    if (try bool32(attachment.blend_enable) != 0 or attachment.color_write_mask != 0xf) return error.Invalid;
+    try w.u32le(1);
+    try w.u32le(0xf);
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = w.done(), .render_compatibility = render_pass.compatibility, .subpass = ci.subpass, .execution_abi = 1 };
+}
+
 fn createOpaque(device: ?Device, info: ?*const anyopaque, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     _ = info orelse return .error_initialization_failed;
     if (alloc != null) return .error_initialization_failed;
@@ -2140,11 +2682,13 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
     const out = output orelse return .error_initialization_failed;
     lock();
     defer mutex.unlock();
-    if (!validDeviceLocked(d) or ci.attachment_count == 0 or ci.attachments == null) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or ci.s_type != 37 or ci.p_next != null or ci.flags != 0 or ci.attachment_count == 0 or ci.attachments == null) return .error_initialization_failed;
+    const render_pass = validRenderPassLocked(ci.render_pass) orelse return .error_initialization_failed;
+    if (!render_pass.owner.eql(d)) return .error_initialization_failed;
     const view = validImageViewLocked(ci.attachments.?[0]) orelse return .error_initialization_failed;
     const depth = if (ci.attachment_count > 1) (validImageViewLocked(ci.attachments.?[1]) orelse return .error_initialization_failed).image else null;
     for (&framebuffer_objects, &framebuffer_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = d, .color_image = view.image, .depth_image = depth };
+        object.* = .{ .owner = d, .color_image = view.image, .depth_image = depth, .render_compatibility = render_pass.compatibility };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
@@ -2160,14 +2704,48 @@ fn destroyFramebuffer(device: ?Device, handle: usize, alloc: ?*const Alloc) call
 }
 fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?*const anyopaque, alloc: ?*const Alloc, outputs: ?[*]usize) callconv(.c) Result {
     _ = cache;
-    _ = infos orelse return .error_initialization_failed;
-    if (alloc != null or count == 0) return .error_initialization_failed;
+    const raw = infos orelse return .error_initialization_failed;
+    if (alloc != null or count == 0 or count > max_child_objects) return .error_initialization_failed;
     const out = outputs orelse return .error_initialization_failed;
     lock();
     defer mutex.unlock();
-    if (!validDeviceLocked(device orelse return .error_initialization_failed)) return .error_initialization_failed;
-    for (out[0..count]) |*handle| handle.* = allocateGenericHandle();
+    const d = device orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    const create_infos: [*]const GraphicsPipelineCreateInfo = @ptrCast(@alignCast(raw));
+    var built: [max_child_objects]GraphicsPipelineObj = undefined;
+    var slots: [max_child_objects]u8 = undefined;
+    var free_count: usize = 0;
+    for (graphics_pipeline_state, 0..) |state, index| if (state == .never) {
+        slots[free_count] = @intCast(index);
+        free_count += 1;
+    };
+    if (free_count < count) return .error_out_of_host_memory;
+    for (0..count) |index| built[index] = buildGraphicsPipelineLocked(d, &create_infos[index]) catch |err| {
+        if (std.c.getenv("ZPU_DEBUG_PIPELINE") != null) {
+            const ci = create_infos[index];
+            std.debug.print("pipeline reject {s}: flags={} stages={} layout={x} render={x} subpass={} base={x}/{}\n", .{ @errorName(err), ci.flags, ci.stage_count, ci.layout, ci.render_pass, ci.subpass, ci.base_pipeline, ci.base_pipeline_index });
+            if (ci.rasterization) |v| std.debug.print("raster dc={} discard={} polygon={} cull={} front={} bias={} line={}\n", .{ v.depth_clamp_enable, v.rasterizer_discard_enable, v.polygon_mode, v.cull_mode, v.front_face, v.depth_bias_enable, v.line_width });
+            if (ci.multisample) |v| std.debug.print("ms samples={} shading={} mask={*} a2c={} a2one={}\n", .{ v.rasterization_samples, v.sample_shading_enable, v.sample_mask, v.alpha_to_coverage_enable, v.alpha_to_one_enable });
+            if (ci.depth_stencil) |v| std.debug.print("depth test={} write={} compare={} bounds={} stencil={}\n", .{ v.depth_test_enable, v.depth_write_enable, v.depth_compare_op, v.depth_bounds_test_enable, v.stencil_test_enable });
+            if (ci.color_blend) |v| std.debug.print("blend logic={} count={}\n", .{ v.logic_op_enable, v.attachment_count });
+        }
+        return creationFailure(err);
+    };
+    for (0..count) |index| {
+        const slot = slots[index];
+        graphics_pipeline_objects[slot] = built[index];
+        graphics_pipeline_state[slot] = .live;
+        out[index] = @intFromPtr(&graphics_pipeline_objects[slot]);
+    }
     return .success;
+}
+fn destroyPipeline(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+    if (alloc != null) return;
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return;
+    const object = validGraphicsPipelineLocked(handle) orelse return;
+    if (validDeviceLocked(d) and object.owner.eql(d)) stateForObject(GraphicsPipelineObj, object, &graphics_pipeline_objects, &graphics_pipeline_state).?.* = .tombstone;
 }
 fn allocateDescriptorSets(device: ?Device, info: ?*const DescriptorSetAllocateInfo, outputs: ?[*]usize) callconv(.c) Result {
     const ci = info orelse return .error_initialization_failed;
@@ -2216,24 +2794,37 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?*const anyop
     }
 }
 fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, contents: i32) callconv(.c) void {
-    _ = contents;
     const begin = info orelse return;
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
     const framebuffer = validFramebufferLocked(begin.framebuffer) orelse return;
+    const render_pass = validRenderPassLocked(begin.render_pass) orelse return;
     const image = framebuffer.color_image orelse return;
-    if (command_buffer.impl.state != 1 or command_buffer.impl.count == command_buffer.impl.commands.len or begin.clear_value_count == 0 or begin.clear_values == null) return;
+    if (contents != 0 or command_buffer.impl.state != 1 or command_buffer.impl.active_framebuffer != null or command_buffer.impl.count == command_buffer.impl.commands.len or begin.clear_value_count == 0 or begin.clear_values == null or !render_pass.owner.eql(command_buffer.impl.owner) or !framebuffer.render_compatibility.eql(&render_pass.compatibility)) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
     const color = begin.clear_values.?[0].color.float32;
     const depth_value = if (begin.clear_value_count > 1) begin.clear_values.?[1].depth_stencil.depth else 1;
     command_buffer.impl.commands[command_buffer.impl.count] = .{ .render_clear = .{ .image = image, .depth = framebuffer.depth_image, .color = .{ @intFromFloat(std.math.clamp(color[2], 0, 1) * 255), @intFromFloat(std.math.clamp(color[1], 0, 1) * 255), @intFromFloat(std.math.clamp(color[0], 0, 1) * 255), @intFromFloat(std.math.clamp(color[3], 0, 1) * 255) }, .depth_value = depth_value } };
     command_buffer.impl.count += 1;
     command_buffer.impl.active_framebuffer = framebuffer;
+    command_buffer.impl.active_render_pass = render_pass;
 }
 fn cmdBindPipeline(cb: ?CommandBuffer, bind_point: i32, pipeline: usize) callconv(.c) void {
-    _ = cb;
-    _ = bind_point;
-    _ = pipeline;
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    const object = validGraphicsPipelineLocked(pipeline) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    if (bind_point != 0 or command_buffer.impl.state != 1 or !object.owner.eql(command_buffer.impl.owner)) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    command_buffer.impl.bound_pipeline = object;
 }
 fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, first_set: u32, count: u32, sets: ?[*]const usize, dynamic_count: u32, offsets: ?[*]const u32) callconv(.c) void {
     _ = bind_point;
@@ -2267,8 +2858,13 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
     const framebuffer = command_buffer.impl.active_framebuffer orelse return;
+    const render_pass = command_buffer.impl.active_render_pass orelse return;
+    const pipeline = command_buffer.impl.bound_pipeline orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
     const descriptors = command_buffer.impl.bound_descriptors orelse return;
-    if (instance_count != 1 or first_vertex != 0 or first_instance != 0 or vertex_count == 0) {
+    if (pipeline.execution_abi != 1 or pipeline.subpass != 0 or !pipeline.render_compatibility.eql(&render_pass.compatibility) or instance_count != 1 or first_vertex != 0 or first_instance != 0 or vertex_count == 0) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -2279,6 +2875,7 @@ fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
     command_buffer.impl.active_framebuffer = null;
+    command_buffer.impl.active_render_pass = null;
 }
 
 fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
@@ -2621,7 +3218,7 @@ fn instanceLookup(n: []const u8) Fn {
 fn deviceLookup(n: []const u8) Fn {
     const map = .{ .{ "vkGetDeviceProcAddr", getDeviceProcAddr }, .{ "vkDestroyDevice", destroyDevice }, .{ "vkGetDeviceQueue", getDeviceQueue }, .{ "vkAllocateMemory", allocateMemory }, .{ "vkFreeMemory", freeMemory }, .{ "vkMapMemory", mapMemory }, .{ "vkUnmapMemory", unmapMemory }, .{ "vkCreateBuffer", createBuffer }, .{ "vkDestroyBuffer", destroyBuffer }, .{ "vkGetBufferMemoryRequirements", getBufferMemoryRequirements }, .{ "vkBindBufferMemory", bindBufferMemory }, .{ "vkCreateImage", createImage }, .{ "vkDestroyImage", destroyImage }, .{ "vkGetImageMemoryRequirements", getImageMemoryRequirements }, .{ "vkBindImageMemory", bindImageMemory }, .{ "vkGetImageSubresourceLayout", getImageSubresourceLayout }, .{ "vkCreateFence", createFence }, .{ "vkDestroyFence", destroyFence }, .{ "vkGetFenceStatus", getFenceStatus }, .{ "vkResetFences", resetFences }, .{ "vkWaitForFences", waitForFences }, .{ "vkCreateCommandPool", createCommandPool }, .{ "vkDestroyCommandPool", destroyCommandPool }, .{ "vkAllocateCommandBuffers", allocateCommandBuffers }, .{ "vkFreeCommandBuffers", freeCommandBuffers }, .{ "vkBeginCommandBuffer", beginCommandBuffer }, .{ "vkEndCommandBuffer", endCommandBuffer }, .{ "vkResetCommandBuffer", resetCommandBuffer }, .{ "vkCmdFillBuffer", cmdFillBuffer }, .{ "vkCmdCopyBuffer", cmdCopyBuffer }, .{ "vkCmdClearColorImage", cmdClearColorImage }, .{ "vkCmdCopyBufferToImage", cmdCopyBufferToImage }, .{ "vkCmdCopyImageToBuffer", cmdCopyImageToBuffer }, .{ "vkCmdCopyImage", cmdCopyImage }, .{ "vkCmdPipelineBarrier", cmdPipelineBarrier }, .{ "vkQueueSubmit", queueSubmit }, .{ "vkQueueWaitIdle", queueWaitIdle }, .{ "vkDeviceWaitIdle", deviceWaitIdle } };
     inline for (map) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
-    const presentation = .{ .{ "vkCreateSemaphore", createSemaphore }, .{ "vkDestroySemaphore", destroySemaphore }, .{ "vkCreateImageView", createImageView }, .{ "vkDestroyImageView", destroyImageView }, .{ "vkCreateSampler", createOpaque }, .{ "vkDestroySampler", destroyOpaque }, .{ "vkCreateDescriptorSetLayout", createOpaque }, .{ "vkDestroyDescriptorSetLayout", destroyOpaque }, .{ "vkCreateDescriptorPool", createOpaque }, .{ "vkDestroyDescriptorPool", destroyOpaque }, .{ "vkCreateShaderModule", createShaderModule }, .{ "vkDestroyShaderModule", destroyShaderModule }, .{ "vkCreatePipelineCache", createOpaque }, .{ "vkDestroyPipelineCache", destroyOpaque }, .{ "vkCreatePipelineLayout", createOpaque }, .{ "vkDestroyPipelineLayout", destroyOpaque }, .{ "vkCreateRenderPass", createOpaque }, .{ "vkDestroyRenderPass", destroyOpaque }, .{ "vkCreateFramebuffer", createFramebuffer }, .{ "vkDestroyFramebuffer", destroyFramebuffer }, .{ "vkCreateGraphicsPipelines", createGraphicsPipelines }, .{ "vkDestroyPipeline", destroyOpaque }, .{ "vkAllocateDescriptorSets", allocateDescriptorSets }, .{ "vkUpdateDescriptorSets", updateDescriptorSets }, .{ "vkCmdBeginRenderPass", cmdBeginRenderPass }, .{ "vkCmdBindPipeline", cmdBindPipeline }, .{ "vkCmdBindDescriptorSets", cmdBindDescriptorSets }, .{ "vkCmdSetViewport", cmdSetViewport }, .{ "vkCmdSetScissor", cmdSetScissor }, .{ "vkCmdDraw", cmdDraw }, .{ "vkCmdEndRenderPass", cmdEndRenderPass }, .{ "vkCreateSwapchainKHR", createSwapchain }, .{ "vkDestroySwapchainKHR", destroySwapchain }, .{ "vkGetSwapchainImagesKHR", getSwapchainImages }, .{ "vkAcquireNextImageKHR", acquireNextImage }, .{ "vkQueuePresentKHR", queuePresent } };
+    const presentation = .{ .{ "vkCreateSemaphore", createSemaphore }, .{ "vkDestroySemaphore", destroySemaphore }, .{ "vkCreateImageView", createImageView }, .{ "vkDestroyImageView", destroyImageView }, .{ "vkCreateSampler", createOpaque }, .{ "vkDestroySampler", destroyOpaque }, .{ "vkCreateDescriptorSetLayout", createDescriptorSetLayout }, .{ "vkDestroyDescriptorSetLayout", destroyDescriptorSetLayout }, .{ "vkCreateDescriptorPool", createOpaque }, .{ "vkDestroyDescriptorPool", destroyOpaque }, .{ "vkCreateShaderModule", createShaderModule }, .{ "vkDestroyShaderModule", destroyShaderModule }, .{ "vkCreatePipelineCache", createOpaque }, .{ "vkDestroyPipelineCache", destroyOpaque }, .{ "vkCreatePipelineLayout", createPipelineLayout }, .{ "vkDestroyPipelineLayout", destroyPipelineLayout }, .{ "vkCreateRenderPass", createRenderPass }, .{ "vkDestroyRenderPass", destroyRenderPass }, .{ "vkCreateFramebuffer", createFramebuffer }, .{ "vkDestroyFramebuffer", destroyFramebuffer }, .{ "vkCreateGraphicsPipelines", createGraphicsPipelines }, .{ "vkDestroyPipeline", destroyPipeline }, .{ "vkAllocateDescriptorSets", allocateDescriptorSets }, .{ "vkUpdateDescriptorSets", updateDescriptorSets }, .{ "vkCmdBeginRenderPass", cmdBeginRenderPass }, .{ "vkCmdBindPipeline", cmdBindPipeline }, .{ "vkCmdBindDescriptorSets", cmdBindDescriptorSets }, .{ "vkCmdSetViewport", cmdSetViewport }, .{ "vkCmdSetScissor", cmdSetScissor }, .{ "vkCmdDraw", cmdDraw }, .{ "vkCmdEndRenderPass", cmdEndRenderPass }, .{ "vkCreateSwapchainKHR", createSwapchain }, .{ "vkDestroySwapchainKHR", destroySwapchain }, .{ "vkGetSwapchainImagesKHR", getSwapchainImages }, .{ "vkAcquireNextImageKHR", acquireNextImage }, .{ "vkQueuePresentKHR", queuePresent } };
     inline for (presentation) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
     return null;
 }
@@ -2867,15 +3464,65 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.success, createImageView(device, &texture_view_info, null, &texture_view));
 
     const attachments = [_]usize{ view, depth_view };
-    const framebuffer_info = FramebufferCreateInfo{ .s_type = 37, .p_next = null, .flags = 0, .render_pass = 1, .attachment_count = 2, .attachments = &attachments, .width = 8, .height = 8, .layers = 1 };
+    const attachment_descriptions = [_]AttachmentDescription{
+        .{ .flags = 0, .format = 44, .samples = 1, .load_op = 1, .store_op = 0, .stencil_load_op = 2, .stencil_store_op = 1, .initial_layout = 0, .final_layout = 1000001002 },
+        .{ .flags = 0, .format = 124, .samples = 1, .load_op = 1, .store_op = 1, .stencil_load_op = 2, .stencil_store_op = 1, .initial_layout = 0, .final_layout = 3 },
+    };
+    const color_ref = AttachmentReference{ .attachment = 0, .layout = 2 };
+    const depth_ref = AttachmentReference{ .attachment = 1, .layout = 3 };
+    const subpass = SubpassDescription{ .flags = 0, .pipeline_bind_point = 0, .input_attachment_count = 0, .input_attachments = null, .color_attachment_count = 1, .color_attachments = @ptrCast(&color_ref), .resolve_attachments = null, .depth_stencil_attachment = &depth_ref, .preserve_attachment_count = 0, .preserve_attachments = null };
+    const render_pass_info = RenderPassCreateInfo{ .s_type = 38, .p_next = null, .flags = 0, .attachment_count = 2, .attachments = &attachment_descriptions, .subpass_count = 1, .subpasses = @ptrCast(&subpass), .dependency_count = 0, .dependencies = null };
+    var render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(device, &render_pass_info, null, &render_pass));
+    var framebuffer_info = FramebufferCreateInfo{ .s_type = 37, .p_next = null, .flags = 0, .render_pass = render_pass, .attachment_count = 2, .attachments = &attachments, .width = 8, .height = 8, .layers = 1 };
     var framebuffer: usize = 0;
     try std.testing.expectEqual(Result.success, createFramebuffer(device, &framebuffer_info, null, &framebuffer));
 
     var opaque_handle: usize = 0;
     try std.testing.expectEqual(Result.success, createOpaque(device, @ptrCast(&framebuffer_info), null, &opaque_handle));
     destroyOpaque(device, opaque_handle, null);
+    const layout_bindings = [_]DescriptorSetLayoutBinding{
+        .{ .binding = 0, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null },
+        .{ .binding = 1, .descriptor_type = 1, .descriptor_count = 1, .stage_flags = 16, .immutable_samplers = null },
+    };
+    const descriptor_layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 2, .bindings = &layout_bindings };
+    var descriptor_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(device, &descriptor_layout_info, null, &descriptor_layout));
+    const pipeline_layout_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&descriptor_layout), .push_constant_range_count = 0, .push_constant_ranges = null };
+    var pipeline_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createPipelineLayout(device, &pipeline_layout_info, null, &pipeline_layout));
+    const shader_words = [_]u32{ spirv.magic, spirv.supported_spirv_version, 0, 1, 0 };
+    const shader_info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = @sizeOf(@TypeOf(shader_words)), .p_code = &shader_words };
+    var vertex_shader: usize = 0;
+    var fragment_shader: usize = 0;
+    try std.testing.expectEqual(Result.success, createShaderModule(device, &shader_info, null, &vertex_shader));
+    try std.testing.expectEqual(Result.success, createShaderModule(device, &shader_info, null, &fragment_shader));
+    const stages = [_]PipelineShaderStageCreateInfo{
+        .{ .s_type = 18, .p_next = null, .flags = 0, .stage = 1, .module = vertex_shader, .name = "main", .specialization_info = null },
+        .{ .s_type = 18, .p_next = null, .flags = 0, .stage = 16, .module = fragment_shader, .name = "main", .specialization_info = null },
+    };
+    const vertex_input = PipelineVertexInputStateCreateInfo{ .s_type = 19, .p_next = null, .flags = 0, .binding_count = 0, .bindings = null, .attribute_count = 0, .attributes = null };
+    const input_assembly = PipelineInputAssemblyStateCreateInfo{ .s_type = 20, .p_next = null, .flags = 0, .topology = 3, .primitive_restart_enable = 0 };
+    const viewport_state = PipelineViewportStateCreateInfo{ .s_type = 22, .p_next = null, .flags = 0, .viewport_count = 1, .viewports = null, .scissor_count = 1, .scissors = null };
+    const rasterization = PipelineRasterizationStateCreateInfo{ .s_type = 23, .p_next = null, .flags = 0, .depth_clamp_enable = 0, .rasterizer_discard_enable = 0, .polygon_mode = 0, .cull_mode = 2, .front_face = 0, .depth_bias_enable = 0, .depth_bias_constant_factor = 0, .depth_bias_clamp = 0, .depth_bias_slope_factor = 0, .line_width = 1 };
+    const multisample = PipelineMultisampleStateCreateInfo{ .s_type = 24, .p_next = null, .flags = 0, .rasterization_samples = 1, .sample_shading_enable = 0, .min_sample_shading = 0, .sample_mask = null, .alpha_to_coverage_enable = 0, .alpha_to_one_enable = 0 };
+    const stencil = std.mem.zeroes(StencilOpState);
+    const depth_stencil = PipelineDepthStencilStateCreateInfo{ .s_type = 25, .p_next = null, .flags = 0, .depth_test_enable = 1, .depth_write_enable = 1, .depth_compare_op = 3, .depth_bounds_test_enable = 0, .stencil_test_enable = 0, .front = stencil, .back = stencil, .min_depth_bounds = 0, .max_depth_bounds = 1 };
+    const blend_attachment = PipelineColorBlendAttachmentState{ .blend_enable = 0, .src_color_blend_factor = 1, .dst_color_blend_factor = 0, .color_blend_op = 0, .src_alpha_blend_factor = 1, .dst_alpha_blend_factor = 0, .alpha_blend_op = 0, .color_write_mask = 0xf };
+    const color_blend = PipelineColorBlendStateCreateInfo{ .s_type = 26, .p_next = null, .flags = 0, .logic_op_enable = 0, .logic_op = 0, .attachment_count = 1, .attachments = @ptrCast(&blend_attachment), .blend_constants = .{ 0, 0, 0, 0 } };
+    const dynamic_states = [_]i32{ 0, 1 };
+    const dynamic = PipelineDynamicStateCreateInfo{ .s_type = 27, .p_next = null, .flags = 0, .dynamic_state_count = 2, .dynamic_states = &dynamic_states };
+    const pipeline_info = GraphicsPipelineCreateInfo{ .s_type = 28, .p_next = null, .flags = 0, .stage_count = 2, .stages = &stages, .vertex_input = &vertex_input, .input_assembly = &input_assembly, .tessellation = null, .viewport = &viewport_state, .rasterization = &rasterization, .multisample = &multisample, .depth_stencil = &depth_stencil, .color_blend = &color_blend, .dynamic = &dynamic, .layout = pipeline_layout, .render_pass = render_pass, .subpass = 0, .base_pipeline = 0, .base_pipeline_index = -1 };
     var pipelines: [1]usize = undefined;
-    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&framebuffer_info), null, &pipelines));
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&pipeline_info), null, &pipelines));
+    var compatible_render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(device, &render_pass_info, null, &compatible_render_pass));
+    framebuffer_info.render_pass = compatible_render_pass;
+    destroyShaderModule(device, vertex_shader, null);
+    destroyShaderModule(device, fragment_shader, null);
+    destroyPipelineLayout(device, pipeline_layout, null);
+    destroyDescriptorSetLayout(device, descriptor_layout, null);
+    destroyRenderPass(device, render_pass, null);
     const set_info = DescriptorSetAllocateInfo{ .s_type = 34, .p_next = null, .descriptor_pool = opaque_handle, .descriptor_set_count = 1, .set_layouts = &attachments };
     var sets: [1]usize = undefined;
     try std.testing.expectEqual(Result.success, allocateDescriptorSets(device, &set_info, &sets));
@@ -2926,7 +3573,7 @@ test "vkcube presentation path records submits and presents two swapchain images
         .{ .color = .{ .float32 = .{ 0.2, 0.2, 0.2, 0.2 } } },
         .{ .depth_stencil = .{ .depth = 1, .stencil = 0 } },
     };
-    const render_info = RenderPassBeginInfo{ .s_type = 43, .p_next = null, .render_pass = opaque_handle, .framebuffer = framebuffer, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 8, .height = 8 } }, .clear_value_count = 2, .clear_values = &clears };
+    const render_info = RenderPassBeginInfo{ .s_type = 43, .p_next = null, .render_pass = compatible_render_pass, .framebuffer = framebuffer, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 8, .height = 8 } }, .clear_value_count = 2, .clear_values = &clears };
     cmdBeginRenderPass(commands[0], &render_info, 0);
     cmdBindPipeline(commands[0], 0, pipelines[0]);
     cmdBindDescriptorSets(commands[0], 0, opaque_handle, 0, 1, &sets, 0, null);
