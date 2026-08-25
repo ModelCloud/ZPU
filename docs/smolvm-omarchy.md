@@ -54,6 +54,16 @@ synthesize input, manipulate windows, and act as the host user toward other X11
 clients. This fallback is a powerful host credential; use it only with a fully
 trusted guest or a disposable nested X server.
 
+Modern Xwayland builds may omit the X SECURITY extension entirely; verify it
+with `xdpyinfo -queryExtensions | grep SECURITY`. The fail-closed launcher will
+not weaken the boundary on such a server. A disposable nested X server is a
+supported security boundary when it owns the expected `:0` socket, exposes
+SECURITY, and is run with `-noreset`; without `-noreset`, the server can discard
+the generated authorization as soon as `xauth` disconnects. This was validated
+with Xephyr presented through a headless Wayland compositor. It preserves the
+XCB-only ZPU path: the host compositor and nested X server display pixels but do
+not load or execute ZPU.
+
 `--gpu` is intentionally forbidden: SmolVM documents that option as
 virtio-gpu/Venus. ZPU is a CPU ICD, so there is no ZPU DRM/KMS device and no
 GPU passthrough. There is no OpenGL, EGL, GLX, ANGLE, virgl, or API translation
@@ -130,8 +140,10 @@ only in the guest. `package` creates `/var/lib/zpu-native-icd.tar.gz` inside the
 guest;
 `stage` installs that guest archive to `/opt/zpu`. Neither artifact is copied to
 the host. `launch` first checks `vulkaninfo --summary` names exactly `ZPU
-Experimental CPU`, opens a two-second 2D clear/present window whose pixel is
-read back and checked, then opens a 120-frame 3D `vkcube` window. The repo's
+Experimental CPU`, opens a two-second 2D clear/present window, then opens a
+120-frame 3D `vkcube` window. X SECURITY correctly denies `GetImage` to the
+untrusted guest, so this gate requires successful Vulkan presentation while the
+trusted deterministic `xcb-present` gate retains the exact pixel readback. The repo's
 deterministic `zpu-demo` is also built into `/opt/zpu/bin/zpu-demo` and may be
 run inside the guest. These windows separately exercise XCB 2D image transport
 and ZPU's vkcube-specific 3D CPU rasterizer.

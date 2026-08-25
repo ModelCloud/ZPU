@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-host_entry='0100 000c 686f73742d74727573746564 0002 3a30 0012 4d49542d4d414749432d434f4f4b49452d31 0010 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-guest_entry='0100 000c 686f73742d6f6d6172636879 0002 3a30 0012 4d49542d4d414749432d434f4f4b49452d31 0010 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+host_entry='0100 000c 686f73742d74727573746564 0001 30 0012 4d49542d4d414749432d434f4f4b49452d31 0010 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+guest_entry='0100 000c 686f73742d6f6d6172636879 0001 30 0012 4d49542d4d414749432d434f4f4b49452d31 0010 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 
 if [[ $1 == nlist ]]; then
     printf '%s\n' "$host_entry"

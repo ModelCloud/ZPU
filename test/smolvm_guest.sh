@@ -135,4 +135,6 @@ grep -Fq 'full-trust X11 fallback enabled' "$tmp/err"
 grep -Fq 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$guest_auth"
 grep -F 'guest Xauthority must contain exactly one entry' "$repo/smolvm/guest-validate.sh"
 grep -F 'guest cannot authenticate and open DISPLAY=:0' "$repo/smolvm/guest-validate.sh"
+grep -F 'ZPU_UNTRUSTED_X11=1' "$repo/smolvm/guest-validate.sh"
+grep -F 'X SECURITY correctly denies `GetImage`' "$repo/docs/smolvm-omarchy.md"
 printf '%s\n' 'SmolVM guest isolation contract passed'

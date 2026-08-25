@@ -26,6 +26,7 @@ test "$authority_entries" -eq 1 || {
 env -i \
     HOME="${HOME:-/root}" \
     PATH=/usr/bin:/bin \
+    XDG_RUNTIME_DIR=/tmp \
     DISPLAY=:0 \
     XAUTHORITY=/run/zpu-xauth/Xauthority \
     "$prefix/bin/zpu-xcb-connect" || {
@@ -38,6 +39,7 @@ env -i \
 env -i \
     HOME="${HOME:-/root}" \
     PATH=/usr/bin:/bin \
+    XDG_RUNTIME_DIR=/tmp \
     DISPLAY=:0 \
     XAUTHORITY=/run/zpu-xauth/Xauthority \
     VK_DRIVER_FILES="$manifest" \
@@ -50,12 +52,14 @@ env -i \
     DISPLAY=:0 \
     XAUTHORITY=/run/zpu-xauth/Xauthority \
     VK_DRIVER_FILES="$manifest" \
+    ZPU_UNTRUSTED_X11=1 \
     ZPU_WINDOW_HOLD_SECONDS=2 \
     "$prefix/bin/zpu-xcb-present"
 
 env -i \
     HOME="${HOME:-/root}" \
     PATH=/usr/bin:/bin \
+    XDG_RUNTIME_DIR=/tmp \
     DISPLAY=:0 \
     XAUTHORITY=/run/zpu-xauth/Xauthority \
     VK_DRIVER_FILES="$manifest" \
