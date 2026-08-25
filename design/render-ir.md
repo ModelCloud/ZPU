@@ -53,9 +53,15 @@ contraction, NaN rewriting, or signed-zero rewriting.
 
 The programs are attached independently to graphics-pipeline objects and own
 all of their memory after shader modules and caller buffers are destroyed.
-They are metadata only: `cpu_cube_v1` remains the sole execution ABI and
-`vkCmdDraw` does not interpret this IR, so existing pixels and command behavior
-are unchanged.
+Ordinary profile pipelines use the non-drawable `profile_v1_metadata` ABI.
+`vkCmdDraw` rejects them during recording and never records `cube_draw`.
+`cpu_cube_v1` remains the sole drawable ABI, so its pixels and command behavior
+are unchanged. A private `profile_v1_scalar_synthetic` test ABI may own one
+selected vertex or fragment `Executor`; it uses explicit interface indices,
+performs allocation-free warm execution, and is synthetic and non-conformant.
+It is not wired to vertex fetch, assembly, clipping, interpolation,
+rasterization, framebuffer/depth/blend writes, presentation, or public Vulkan
+advertising.
 
 Malformed or unsupported profile shaders fail graphics-pipeline creation with
 no object or cache publication. A separate exact-identity compatibility bridge
@@ -79,6 +85,11 @@ Accepted value operations are constants and specialization constants,
 composite construction/extraction, bounded vector shuffle, constant access
 chains, load, Output store, FNegate, IAdd, ISub, FAdd, FSub, FMul, FDiv,
 VectorTimesScalar, MatrixTimesVector, and exact 32-bit numeric/bit conversions.
+Every `OpAccessChain` index in profile v1 is a scalar `u32` ordinary or
+specialized constant after specialization. Runtime/dynamic indices are
+unsupported even when their value type is scalar `u32`; the canonical IR
+executor independently requires the same constant-index-only invariant at
+setup, before any execution or output publication.
 The implementation limits a module to 1 MiB, 16,384 decoded instructions,
 8,192 profile IDs, 4,096 canonical instructions, 64 interfaces, 64
 specialization entries, and 16 uniform-block members.
@@ -90,6 +101,34 @@ constants, storage writes, dynamic indexing, non-finite constants, duplicate
 interfaces and mismatched pipeline interfaces/descriptors. Structurally broken
 SPIR-V is classified as malformed; well-formed constructs beyond this list are
 classified as unsupported.
+
+### Scalar-executor property proof
+
+The bounded generated matrix uses operation, scalar class, and shape as
+independent axes. Shapes are scalar, vec2, vec3, vec4, and f32 mat4; scalar
+classes are bool where applicable and i32, u32, and f32. It generates 181
+valid cases across all 19 canonical operations, in enum order:
+`14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14`.
+Each generated valid case is initialized, executed twice, and required to
+retain its exact type, lane bits, and deterministic result.
+The nine extract cases are indexed scalar results from vec2, vec3, and vec4
+sources across i32, u32, and f32. Scalar identity extraction and mat4 indexed
+extraction are not claimed because neither is an accepted indexed-extract
+shape. Twelve frontend-generated constant-access cases span vec2–vec4, mat4,
+and one-/two-member blocks at every valid member index; each compiles and
+initializes the executor. Twelve corresponding computed scalar-u32 indices are rejected by
+the frontend before an executor program exists.
+
+Independent generated negative/runtime categories contain exactly 19 malformed
+arity programs (one per operation), 41 bounds failures (uniform-member,
+vector-component, extract, and shuffle axes), 14 input/output alias cases (one
+per accepted type), four rollback-after-late-numeric-failure vector widths,
+five runtime-NaN families, and five signed-zero families. The allocator matrix
+separately injects every encountered failure point: five direct
+`Program.clone` points, the same five clone-stage points through
+`Executor.init`, two later `Executor.init` points, and nine `ExecutableKey`
+points. Every injected failure is stable `OutOfMemory` with zero outstanding
+allocations and zero outstanding bytes.
 
 The separately exercised frontend sequence is decode, semantic validation,
 entry selection/reachability, specialization, lowering, canonicalization, and

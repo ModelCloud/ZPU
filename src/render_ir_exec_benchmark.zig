@@ -1,5 +1,5 @@
 const std = @import("std");
-const exec = @import("render_ir_exec.zig");
+const exec = @import("vulkan/render_ir_exec.zig");
 const ir = @import("vulkan/render_ir.zig");
 extern fn sched_getaffinity(pid: c_int, size: usize, mask: *anyopaque) c_int;
 
