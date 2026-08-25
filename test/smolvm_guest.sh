@@ -153,12 +153,39 @@ hermetic_out=$(env -i HOME="${HOME:-/tmp}" USER="${USER:-test}" PATH=/usr/bin:/b
 grep -F 'machine create' <<<"$hermetic_out" >/dev/null || { echo 'hermetic build dry-run omitted create' >&2; exit 1; }
 grep -F 'guest-validate.sh' <<<"$hermetic_out" >/dev/null || { echo 'hermetic build dry-run omitted launch validation' >&2; exit 1; }
 python3 "$repo/tools/check-smolfile-policy.py" "$repo/smolvm/Smolfile"
-for shadow in 'image = "bad"' 'network = true' '"image" = "bad"' '[machine]'$'\n''net = true'; do
+for shadow in \
+    'image = "bad"' \
+    'network = true' \
+    '"image" = "bad"' \
+    '[machine]'$'\n''net = true' \
+    '[[machine]]'$'\n''image = "bad"' \
+    'entries = [{ name = "ok", network = true }]' \
+    'entries = [{ nested = [{ deeper = { net = true } }] }]'; do
     printf '%s\n' "$shadow" > "$tmp/Smolfile.bad"
     if python3 "$repo/tools/check-smolfile-policy.py" "$tmp/Smolfile.bad" >"$tmp/out" 2>"$tmp/err"; then
         echo "Smolfile shadow unexpectedly passed: $shadow" >&2; exit 1
     fi
 done
+cat > "$tmp/Smolfile.allowed" <<'EOF'
+names = ["one", "two"]
+entries = [{ name = "ok", nested = [{ enabled = true }] }]
+[[machine]]
+label = "unrelated"
+features = ["xcb", "vulkan"]
+EOF
+python3 "$repo/tools/check-smolfile-policy.py" "$tmp/Smolfile.allowed"
+if python3 "$repo/tools/check-smolfile-policy.py" >"$tmp/out" 2>"$tmp/err"; then
+    echo 'Smolfile policy checker accepted missing path argument' >&2; exit 1
+fi
+grep -F 'usage: check-smolfile-policy.py <Smolfile>' "$tmp/err"
+if python3 "$repo/tools/check-smolfile-policy.py" "$tmp/does-not-exist" >"$tmp/out" 2>"$tmp/err"; then
+    echo 'Smolfile policy checker accepted absent path' >&2; exit 1
+fi
+grep -F 'Smolfile path does not exist' "$tmp/err"
+if python3 "$repo/tools/check-smolfile-policy.py" "$tmp" >"$tmp/out" 2>"$tmp/err"; then
+    echo 'Smolfile policy checker accepted directory path' >&2; exit 1
+fi
+grep -F 'Smolfile path is not a regular file' "$tmp/err"
 grep -F -- 'machine create' <<<"$out"
 create_line=$(grep -F -- 'machine create' <<<"$out")
 if grep -Eq -- '(^|[[:space:]])--net([[:space:]]|$)' <<<"$create_line"; then echo 'machine was created with networking enabled' >&2; exit 1; fi
