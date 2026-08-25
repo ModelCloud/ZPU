@@ -15,6 +15,11 @@ if PATH="$fake:$PATH" ZPU_SEARCH_TOOL=rg tools/check_evidence_dependencies.sh RE
 if PATH="$fake" ZPU_SEARCH_TOOL=grep tools/check_evidence_dependencies.sh README.md 2>/dev/null; then echo "missing grep override false-passed"; exit 1; fi
 if ZPU_SEARCH_TOOL=unknown tools/check_evidence_dependencies.sh README.md 2>/dev/null; then echo "unknown override false-passed"; exit 1; fi
 PATH="$fake:/usr/bin:/bin" ZPU_SEARCH_TOOL=grep tools/check_evidence_dependencies.sh README.md
+only_grep="$tmp/only-grep"; mkdir "$only_grep"; ln -s /usr/bin/grep "$only_grep/grep"
+if PATH="$only_grep" ZPU_SEARCH_TOOL=rg /bin/bash tools/check_evidence_dependencies.sh README.md 2>/dev/null; then echo "missing rg override false-passed"; exit 1; fi
+PATH="$only_grep" /bin/bash tools/check_evidence_dependencies.sh README.md
+printf '#!/bin/sh\nexit 2\n' >"$fake/grep"; chmod +x "$fake/grep"
+if PATH="$fake:$PATH" ZPU_SEARCH_TOOL=grep tools/check_evidence_dependencies.sh README.md 2>/dev/null; then echo "failing grep false-passed"; exit 1; fi
 "$bench2" --smoke --json --source-commit "$sha" --utc "$utc" --capture "$tmp/2d.json" >/dev/null
 "$bench3" --smoke --json --source-commit "$sha" --utc "$utc" --capture "$tmp/3d.json" >/dev/null
 python3 - "$tmp/2d.json" "$tmp/3d.json" <<'PY'
