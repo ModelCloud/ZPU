@@ -27,8 +27,8 @@ def main() -> int:
         pacing_fps = int(sys.argv[5]) if len(sys.argv) == 6 else target_fps
     except ValueError as error:
         raise SystemExit(f"width, height, and target Hz must be integers: {error}")
-    if not (1 <= width <= 4096 and 1 <= height <= 4096 and 1 <= target_fps <= pacing_fps <= 1000):
-        raise SystemExit("width/height must be 1..4096 and target Hz must be 1..pacing Hz..1000")
+    if not (1 <= width <= 8192 and 1 <= height <= 8192 and 1 <= target_fps <= pacing_fps <= 1000):
+        raise SystemExit("width/height must be 1..8192 and target Hz must be 1..pacing Hz..1000")
     frame_budget_ns = 1_000_000_000 // target_fps
     if not manifest.is_file():
         raise SystemExit(f"ZPU ICD manifest not found: {manifest}")

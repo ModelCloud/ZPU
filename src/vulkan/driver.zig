@@ -351,6 +351,7 @@ pub const CommandBuffer = *CommandBufferObj;
 const max_objects = 64;
 const max_child_objects = 64;
 const heap_size: u64 = 256 * 1024 * 1024;
+const max_2d_extent: u32 = 8192;
 const max_api_items: u32 = 256;
 const SlotState = enum(u8) { never, live, tombstone };
 var instance_objects: [max_objects]InstanceObj = undefined;
@@ -774,7 +775,7 @@ fn getSurfaceCapabilities(physical: ?Physical, handle: usize, output: ?*SurfaceC
     const out = output orelse return .error_initialization_failed;
     const surface = validSurfaceLocked(handle) orelse return .error_initialization_failed;
     if (!validPhysicalLocked(p) or surface.owner != p.owner) return .error_initialization_failed;
-    out.* = .{ .min_image_count = 2, .max_image_count = 3, .current_extent = .{ .width = std.math.maxInt(u32), .height = std.math.maxInt(u32) }, .min_image_extent = .{ .width = 1, .height = 1 }, .max_image_extent = .{ .width = 4096, .height = 4096 }, .max_image_array_layers = 1, .supported_transforms = 1, .current_transform = 1, .supported_composite_alpha = 1, .supported_usage_flags = 0x10 };
+    out.* = .{ .min_image_count = 2, .max_image_count = 3, .current_extent = .{ .width = std.math.maxInt(u32), .height = std.math.maxInt(u32) }, .min_image_extent = .{ .width = 1, .height = 1 }, .max_image_extent = .{ .width = max_2d_extent, .height = max_2d_extent }, .max_image_array_layers = 1, .supported_transforms = 1, .current_transform = 1, .supported_composite_alpha = 1, .supported_usage_flags = 0x10 };
     return .success;
 }
 fn getSurfaceFormats(physical: ?Physical, handle: usize, count: ?*u32, output: ?[*]SurfaceFormat) callconv(.c) Result {
@@ -860,8 +861,8 @@ fn getFeatures(physical: ?Physical, output: ?*Features) callconv(.c) void {
 }
 fn conservativeLimits() Limits {
     var v = std.mem.zeroes(Limits);
-    v.max_image_dimension_1d = 4096;
-    v.max_image_dimension_2d = 4096;
+    v.max_image_dimension_1d = max_2d_extent;
+    v.max_image_dimension_2d = max_2d_extent;
     v.max_image_dimension_3d = 256;
     v.max_image_dimension_cube = 4096;
     v.max_image_array_layers = 256;
@@ -908,7 +909,7 @@ fn conservativeLimits() Limits {
     v.max_sampler_lod_bias = 2;
     v.max_sampler_anisotropy = 1;
     v.max_viewports = 1;
-    v.max_viewport_dimensions = .{ 4096, 4096 };
+    v.max_viewport_dimensions = .{ max_2d_extent, max_2d_extent };
     v.viewport_bounds_range = .{ -32_768, 32_767 };
     v.min_memory_map_alignment = 64;
     v.min_texel_buffer_offset_alignment = 256;
@@ -916,8 +917,8 @@ fn conservativeLimits() Limits {
     v.min_storage_buffer_offset_alignment = 256;
     v.min_texel_offset = -8;
     v.max_texel_offset = 7;
-    v.max_framebuffer_width = 4096;
-    v.max_framebuffer_height = 4096;
+    v.max_framebuffer_width = max_2d_extent;
+    v.max_framebuffer_height = max_2d_extent;
     v.max_framebuffer_layers = 256;
     v.framebuffer_color_sample_counts = 1 | 4;
     v.framebuffer_depth_sample_counts = 1 | 4;
@@ -996,7 +997,7 @@ fn getImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, t
     if (!validPhysicalLocked(physical orelse return .error_initialization_failed)) return .error_initialization_failed;
     if (!supportedFormat(format) or image_type != 1 or (tiling != 0 and tiling != 1) or flags != 0 or usage == 0 or usage & ~@as(u32, 0x37) != 0) return .error_format_not_supported;
     const out: *extern struct { max_extent: Extent3D, max_mip_levels: u32, max_array_layers: u32, sample_counts: u32, max_resource_size: u64 } = @ptrCast(@alignCast(output orelse return .error_initialization_failed));
-    out.* = .{ .max_extent = .{ .width = 4096, .height = 4096, .depth = 1 }, .max_mip_levels = 1, .max_array_layers = 1, .sample_counts = 1, .max_resource_size = 256 * 1024 * 1024 };
+    out.* = .{ .max_extent = .{ .width = max_2d_extent, .height = max_2d_extent, .depth = 1 }, .max_mip_levels = 1, .max_array_layers = 1, .sample_counts = 1, .max_resource_size = heap_size };
     return .success;
 }
 fn getSparseImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, samples: u32, usage: u32, tiling: i32, count: ?*u32, output: ?*anyopaque) callconv(.c) void {
@@ -1480,7 +1481,7 @@ fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Al
         hit(.invalid_image_usage);
         return .error_initialization_failed;
     }
-    if (alloc != null or ci.s_type != 14 or ci.p_next != null or ci.flags != 0 or ci.image_type != 1 or !supportedFormat(ci.format) or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > 4096 or ci.extent.height > 4096 or ci.extent.depth != 1 or ci.mip_levels != 1 or ci.array_layers != 1 or ci.samples != 1 or (ci.tiling != 0 and ci.tiling != 1) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) return if (!supportedFormat(ci.format)) .error_format_not_supported else .error_initialization_failed;
+    if (alloc != null or ci.s_type != 14 or ci.p_next != null or ci.flags != 0 or ci.image_type != 1 or !supportedFormat(ci.format) or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or ci.mip_levels != 1 or ci.array_layers != 1 or ci.samples != 1 or (ci.tiling != 0 and ci.tiling != 1) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) return if (!supportedFormat(ci.format)) .error_format_not_supported else .error_initialization_failed;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
@@ -4011,7 +4012,7 @@ test "XCB surface lifecycle and physical presentation queries" {
     try std.testing.expectEqual(@as(u32, 3), capabilities.max_image_count);
     try std.testing.expectEqual(std.math.maxInt(u32), capabilities.current_extent.width);
     try std.testing.expectEqual(Extent2D{ .width = 1, .height = 1 }, capabilities.min_image_extent);
-    try std.testing.expectEqual(Extent2D{ .width = 4096, .height = 4096 }, capabilities.max_image_extent);
+    try std.testing.expectEqual(Extent2D{ .width = max_2d_extent, .height = max_2d_extent }, capabilities.max_image_extent);
     try std.testing.expectEqual(@as(u32, 0x10), capabilities.supported_usage_flags);
 
     var count: u32 = 0;
@@ -5212,8 +5213,8 @@ test "physical properties start with coherent conservative limits" {
     try std.testing.expectEqual(@as(u32, 1), properties.device_id);
     try std.testing.expectEqual(@as(u32, 4), properties.device_type);
     const l = properties.limits;
-    try std.testing.expect(l.max_image_dimension_1d >= 4096);
-    try std.testing.expect(l.max_image_dimension_2d >= 4096);
+    try std.testing.expectEqual(max_2d_extent, l.max_image_dimension_1d);
+    try std.testing.expectEqual(max_2d_extent, l.max_image_dimension_2d);
     try std.testing.expect(l.max_image_dimension_3d >= 256);
     try std.testing.expect(l.max_image_dimension_cube >= 4096);
     try std.testing.expect(l.max_image_array_layers >= 256);
@@ -5276,7 +5277,7 @@ test "physical properties start with coherent conservative limits" {
     try std.testing.expect(l.max_sampler_lod_bias >= 2);
     try std.testing.expectEqual(@as(f32, 1), l.max_sampler_anisotropy);
     try std.testing.expectEqual(@as(u32, 1), l.max_viewports);
-    try std.testing.expect(l.max_viewport_dimensions[0] >= l.max_framebuffer_width and l.max_viewport_dimensions[1] >= l.max_framebuffer_height);
+    try std.testing.expectEqual([2]u32{ max_2d_extent, max_2d_extent }, l.max_viewport_dimensions);
     try std.testing.expect(l.viewport_bounds_range[0] <= -32_768 and l.viewport_bounds_range[1] >= 32_767);
     try std.testing.expectEqual(@as(u32, 0), l.viewport_sub_pixel_bits);
     try std.testing.expect(l.min_memory_map_alignment <= 64 and std.math.isPowerOfTwo(l.min_memory_map_alignment));
@@ -5289,7 +5290,8 @@ test "physical properties start with coherent conservative limits" {
     try std.testing.expectEqual(@as(f32, 0), l.min_interpolation_offset);
     try std.testing.expectEqual(@as(f32, 0), l.max_interpolation_offset);
     try std.testing.expectEqual(@as(u32, 0), l.sub_pixel_interpolation_offset_bits);
-    try std.testing.expect(l.max_framebuffer_width >= 4096 and l.max_framebuffer_height >= 4096);
+    try std.testing.expectEqual(max_2d_extent, l.max_framebuffer_width);
+    try std.testing.expectEqual(max_2d_extent, l.max_framebuffer_height);
     const vulkan_1_0_min_framebuffer_layers: u32 = 256;
     try std.testing.expect(l.max_framebuffer_layers >= vulkan_1_0_min_framebuffer_layers);
     const samples_1_4: u32 = 1 | 4;
@@ -5636,7 +5638,7 @@ test "memory transfer objects execute against independently specified bytes" {
 
     var format_output: extern struct { max_extent: Extent3D, max_mip_levels: u32, max_array_layers: u32, sample_counts: u32, max_resource_size: u64 } = undefined;
     try std.testing.expectEqual(Result.success, getImageFormatProperties(physical[0], 37, 1, 1, 3, 0, &format_output));
-    try std.testing.expectEqual(@as(u32, 4096), format_output.max_extent.width);
+    try std.testing.expectEqual(max_2d_extent, format_output.max_extent.width);
     try std.testing.expectEqual(Result.error_initialization_failed, getImageFormatProperties(physical[0], 37, 1, 1, 3, 0, null));
     try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
     try std.testing.expectEqual(Result.error_initialization_failed, resetCommandBuffer(commands[0], 2));

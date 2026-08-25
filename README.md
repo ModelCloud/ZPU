@@ -178,6 +178,7 @@ tools/limited-cpus.sh zig build target-4k-30 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build target-4k-60 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build target-4k-120 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build target-4k-240 -Doptimize=ReleaseFast
+tools/limited-cpus.sh zig build target-8k-60 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build demo
 tools/limited-cpus.sh zig build -Doptimize=ReleaseFast
 ```
@@ -202,6 +203,10 @@ process-local `ZPU_REFRESH_HZ` cadence.
 and 252 Hz pacing
 guard bands so ordinary wake jitter cannot turn an exact nominal cadence into
 a dishonest sub-target 1% low.
+`target-8k-60` extends the same real-present p99 gate to 7680x4320: 1,000
+post-warmup frames must remain at or below 16,666,666 ns with the standard
+63 Hz pacing guard. ZPU advertises and enforces an 8192x8192 maximum 2D image,
+framebuffer, viewport, and XCB surface extent to support this workload.
 With the canonical eight-core gate, the harness dedicates one inherited CPU to
 Xvfb and confines vkcube plus ZPU to the other seven; neither process can escape
 the caller's original affinity budget.

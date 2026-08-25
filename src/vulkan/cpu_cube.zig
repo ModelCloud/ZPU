@@ -349,9 +349,12 @@ var parallel_active: ?ParallelJob = null;
 
 // A raster worker normally finishes less than one frame before its next job.
 // Keep it runnable across that short gap so the render thread is not exposed
-// to the millisecond-scale tail of a condition-variable wake. Idle workers
-// still sleep after this bounded interval.
-const parallel_idle_spin_ns: u64 = 5_000_000;
+// to the millisecond-scale tail of a condition-variable wake. The window only
+// grows when an observed inter-job gap requires it, remains capped, and idle
+// workers still sleep after that bounded interval.
+const parallel_initial_spin_ns: u64 = 5_000_000;
+const parallel_max_spin_ns: u64 = 16_000_000;
+const parallel_spin_margin_ns: u64 = 500_000;
 
 fn monotonicNs() u64 {
     var ts: std.c.timespec = undefined;
@@ -359,8 +362,9 @@ fn monotonicNs() u64 {
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 
-fn waitForParallelGeneration(observed_generation: u64) u64 {
-    const deadline = monotonicNs() +| parallel_idle_spin_ns;
+fn waitForParallelGeneration(observed_generation: u64, spin_budget_ns: *u64) u64 {
+    const wait_start = monotonicNs();
+    const deadline = wait_start +| spin_budget_ns.*;
     var spins: usize = 0;
     while (parallel_generation.load(.acquire) == observed_generation) {
         std.atomic.spinLoopHint();
@@ -368,12 +372,18 @@ fn waitForParallelGeneration(observed_generation: u64) u64 {
         if (spins % 1024 == 0 and monotonicNs() >= deadline) break;
     }
     const current_generation = parallel_generation.load(.acquire);
-    if (current_generation != observed_generation) return current_generation;
+    if (current_generation != observed_generation) {
+        const learned = monotonicNs() -| wait_start +| parallel_spin_margin_ns;
+        spin_budget_ns.* = @min(@max(spin_budget_ns.*, learned), parallel_max_spin_ns);
+        return current_generation;
+    }
 
     _ = std.c.pthread_mutex_lock(&parallel_mutex);
     while (parallel_generation.load(.acquire) == observed_generation) _ = std.c.pthread_cond_wait(&parallel_condition, &parallel_mutex);
     const next_generation = parallel_generation.load(.acquire);
     _ = std.c.pthread_mutex_unlock(&parallel_mutex);
+    const learned = monotonicNs() -| wait_start +| parallel_spin_margin_ns;
+    spin_budget_ns.* = @min(@max(spin_budget_ns.*, learned), parallel_max_spin_ns);
     return next_generation;
 }
 
@@ -424,9 +434,10 @@ fn parallelWorker(worker_index: usize) void {
     parallel_ready += 1;
     _ = std.c.pthread_cond_broadcast(&parallel_condition);
     var observed_generation = parallel_generation.load(.acquire);
+    var spin_budget_ns = parallel_initial_spin_ns;
     _ = std.c.pthread_mutex_unlock(&parallel_mutex);
     while (true) {
-        observed_generation = waitForParallelGeneration(observed_generation);
+        observed_generation = waitForParallelGeneration(observed_generation, &spin_budget_ns);
         const job = parallel_active.?;
         runParallelJob(job, worker_index + 1);
         _ = parallel_completed.fetchAdd(1, .release);
