@@ -79,7 +79,8 @@ in the validation path. XCB is ZPU's currently supported WSI and Xwayland is
 only the remote display server.
 
 The host launcher rejects driver selectors, all explicit/implicit Vulkan layer
-path and enable/disable/allow selectors, `LD_PRELOAD`, `LD_LIBRARY_PATH`,
+path selectors (including `VK_ADD_LAYER_PATH` and
+`VK_ADD_IMPLICIT_LAYER_PATH`) and enable/disable/allow selectors, `LD_PRELOAD`, `LD_LIBRARY_PATH`,
 `LD_AUDIT`, and `ZPU_REFRESH_HZ` in
 its own environment. The guest source archive is an export of tracked `HEAD`,
 not the live checkout, and cannot contain host `zig-out`. In the guest,
@@ -196,6 +197,13 @@ Run `zig build smolvm-guest-test` for the no-hardware command/isolation gate and
 `zig build smolvm-dry-run` for the generated lifecycle. A real Vulkan smoke is
 `tools/smolvm-zpu.sh launch` and cannot be claimed without KVM, SmolVM, and the
 active Omarchy display.
+
+`zig build smolvm-dry-run` invokes `test/smolvm_dry_run.sh`, which constructs a
+private socket/runtime and fixture-only `PATH`, then runs the launcher under
+`env -i`. It needs neither an installed SmolVM nor a live X server and cannot
+mutate a machine. Calling `tools/smolvm-zpu.sh dry-run` directly remains the
+production command preview; it is also non-mutating but uses production path
+defaults unless explicit test mode is selected.
 
 The no-hardware isolation gate does not inspect ambient `DISPLAY`,
 `XAUTHORITY`, or `/tmp/.X11-unix/X0`. It sets `ZPU_SMOLVM_TESTING=1` and a

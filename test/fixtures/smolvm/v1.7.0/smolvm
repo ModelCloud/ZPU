@@ -76,6 +76,7 @@ case $subcommand in
             exit 0
         fi
         if [[ " $* " == *' pacman -Syu '* ]]; then
+            [[ -z ${SMOLVM_FIXTURE_PACMAN_READY:-} ]] || : > "$SMOLVM_FIXTURE_PACMAN_READY"
             [[ -z ${SMOLVM_FIXTURE_PACMAN_SLEEP:-} ]] || sleep "$SMOLVM_FIXTURE_PACMAN_SLEEP"
             [[ ${SMOLVM_FIXTURE_FAIL_PACMAN:-0} != 1 ]] || fail 'injected pacman failure'
         fi

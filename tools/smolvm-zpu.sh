@@ -18,12 +18,13 @@ die() { printf 'zpu-smolvm: %s\n' "$*" >&2; exit 2; }
 if [[ $socket_root != /tmp/.X11-unix ]]; then
     [[ ${ZPU_SMOLVM_TESTING:-0} == 1 ]] || die 'ZPU_SMOLVM_TEST_SOCKET_ROOT is test-only and requires ZPU_SMOLVM_TESTING=1'
     [[ ! -L $socket_root && -d $socket_root && $(stat -c %u "$socket_root") == "$UID" && $(stat -c %a "$socket_root") == 700 ]] || die 'test socket root must be a real current-user directory with mode exactly 700'
+    [[ -S $host_socket ]] || die 'test socket root must contain a test-owned X0 Unix socket'
 fi
 run() { if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then printf '+ '; printf '%q ' "$@"; printf '\n'; else "$@"; fi; }
 reject_host_injection() {
     local name
     for name in VK_DRIVER_FILES VK_ICD_FILENAMES VK_ADD_DRIVER_FILES \
-        VK_LAYER_PATH VK_IMPLICIT_LAYER_PATH VK_INSTANCE_LAYERS \
+        VK_LAYER_PATH VK_ADD_LAYER_PATH VK_IMPLICIT_LAYER_PATH VK_ADD_IMPLICIT_LAYER_PATH VK_INSTANCE_LAYERS \
         VK_LOADER_LAYERS_ENABLE VK_LOADER_LAYERS_DISABLE VK_LOADER_LAYERS_ALLOW \
         VK_LOADER_DRIVERS_SELECT VK_LOADER_DRIVERS_DISABLE \
         LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT ZPU_REFRESH_HZ; do
@@ -200,8 +201,12 @@ prepare_source() {
 }
 create() {
     reject_host_injection
+    python3 "$repo/tools/check-smolfile-policy.py" "$repo/smolvm/Smolfile"
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
         printf 'DRY-RUN: preflight is not bypassed by real commands; run `tools/smolvm-zpu.sh preflight` on the launch host\n'
+    elif [[ ${ZPU_SMOLVM_TESTING:-0} == 1 ]]; then
+        require_smolvm_cli
+        require_display
     else
         preflight
     fi

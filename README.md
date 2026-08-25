@@ -66,6 +66,8 @@ through the host Xwayland socket without enabling SmolVM's Venus GPU path.
 The real graphical proof used a nested Xephyr display through headless
 Weston/Xwayland. No real Omarchy image or Hyprland session was available for
 that run, so native Omarchy/Hyprland confirmation remains an explicit gate.
+The `smolvm-dry-run` build gate uses a transcribed CLI fixture, private test
+socket, and `env -i`; it requires neither real SmolVM nor a live display.
 
 To ask a system Vulkan loader to discover only ZPU:
 
