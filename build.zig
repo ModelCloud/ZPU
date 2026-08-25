@@ -100,6 +100,11 @@ pub fn build(b: *std.Build) void {
     run_tests.step.dependOn(&require_limited.step);
     const test_step = b.step("test", "Run deterministic unit tests");
     test_step.dependOn(&run_tests.step);
+    const benchmark_ir_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/render_ir_exec_benchmark.zig"), .target = b.graph.host, .optimize = .Debug }) });
+    benchmark_ir_tests.root_module.link_libc = true;
+    const run_benchmark_ir_tests = b.addRunArtifact(benchmark_ir_tests);
+    run_benchmark_ir_tests.step.dependOn(&require_limited.step);
+    test_step.dependOn(&run_benchmark_ir_tests.step);
     const cadence_tests = b.addSystemCommand(&.{ "python3", "test/cadence.py" });
     cadence_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&cadence_tests.step);

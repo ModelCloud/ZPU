@@ -536,6 +536,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 for (w[3..]) |index_id| {
                     const index_node = nodes[try id(nodes, index_id)];
                     const index_shape = try valueShape(nodes, index_id);
+                    // Profile v1 deliberately forbids dynamic access-chain indices;
+                    // the scalar executor receives canonical constants only.
                     if (index_node.kind != .constant or !scalarClass(index_shape, .integer) or index_shape.columns != 1 or index_node.words.len != 1) return error.Unsupported;
                     const index = index_node.words[0];
                     current_type = try indexedType(nodes, current_type, index);

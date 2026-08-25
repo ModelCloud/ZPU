@@ -28,6 +28,23 @@ fn report(name: []const u8, original: [samples]u64) void {
     std.debug.print("{s}: p50={d}ns p95={d}ns p99={d}ns max={d}ns cv={d:.6}\n", .{ name, percentile(&values, 50), percentile(&a, 95), percentile(&b, 99), max, @sqrt(variance / samples) / mean });
 }
 
+fn benchmarkGuard(before: usize, after: usize, checksum: u64) !usize {
+    if (after < before) return error.InvalidAllocationCounter;
+    const observed = after - before;
+    if (observed != 0) return error.WarmAllocation;
+    if (checksum == 0) return error.UnobservableExecution;
+    return observed;
+}
+
+noinline fn executeObserved(executor: *exec.Executor, output: *[4]u8, checksum: *u64) !void {
+    try executor.execute(&.{}, &.{.{ .interface = 0, .bytes = output }});
+    var next = checksum.*;
+    for (output.*) |byte| next = (next ^ byte) *% 1099511628211;
+    checksum.* = next;
+    std.mem.doNotOptimizeAway(output);
+    std.mem.doNotOptimizeAway(checksum);
+}
+
 pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, init.environ_map.get("ZPU_LIMITED") orelse "", "physical-core-v1")) return error.MissingAffinityGate;
     const selected = init.environ_map.get("ZPU_SELECTED_CPUS") orelse return error.MissingAffinityGate;
@@ -67,20 +84,31 @@ pub fn main(init: std.process.Init) !void {
         executor.deinit();
         teardown[i] = @intCast(@max(deinit_start.untilNow(init.io, .boot).toNanoseconds(), 1));
     }
-    var executor = try exec.Executor.init(allocator, &program);
+    var warm_counter = std.testing.FailingAllocator.init(allocator, .{ .fail_index = std.math.maxInt(usize) });
+    var executor = try exec.Executor.init(warm_counter.allocator(), &program);
     defer executor.deinit();
-    for (0..warmups) |_| try executor.execute(&.{}, &.{.{ .interface = 0, .bytes = &output }});
+    for (0..warmups) |_| {
+        var ignored: u64 = 1;
+        try executeObserved(&executor, &output, &ignored);
+    }
+    const warm_allocations_before = warm_counter.allocations;
     var checksum: u64 = 14695981039346656037;
     for (0..samples) |i| {
         const start = std.Io.Clock.boot.now(init.io);
-        try executor.execute(&.{}, &.{.{ .interface = 0, .bytes = &output }});
+        try executeObserved(&executor, &output, &checksum);
         warm[i] = @intCast(@max(start.untilNow(init.io, .boot).toNanoseconds(), 1));
-        for (output) |byte| checksum = (checksum ^ byte) *% 1099511628211;
-        std.mem.doNotOptimizeAway(&output);
     }
+    const observed_warm_allocations = try benchmarkGuard(warm_allocations_before, warm_counter.allocations, checksum);
     report("scalar setup", setup);
     report("scalar warm execution", warm);
     report("scalar deinit", teardown);
-    std.debug.print("allocations: measured_setup_calls={d} warm_per_invocation=0 samples={d} warmups={d} checksum={x}\n", .{ setup_allocations, samples, warmups, checksum });
+    std.debug.print("allocations: measured_setup_calls={d} observed_warm_loop_calls={d} samples={d} warmups={d} checksum={x}\n", .{ setup_allocations, observed_warm_allocations, samples, warmups, checksum });
     std.debug.print("timer note: sub-microsecond execution tails include clock quantization, interrupts, and scheduler outliers; this is kernel latency, not frame stability\n", .{});
+}
+
+test "benchmark guard rejects allocations counter corruption and unobservable work" {
+    try std.testing.expectEqual(@as(usize, 0), try benchmarkGuard(7, 7, 1));
+    try std.testing.expectError(error.WarmAllocation, benchmarkGuard(7, 8, 1));
+    try std.testing.expectError(error.InvalidAllocationCounter, benchmarkGuard(8, 7, 1));
+    try std.testing.expectError(error.UnobservableExecution, benchmarkGuard(7, 7, 0));
 }

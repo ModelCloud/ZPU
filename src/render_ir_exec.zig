@@ -175,6 +175,11 @@ pub const Executor = struct {
                 const right_end = std.math.add(usize, right_start, right_size) catch return error.InvalidOutput;
                 if (left_start < right_end and right_start < left_end) return error.InvalidOutput;
             }
+            for (bindings) |binding| {
+                const binding_start = @intFromPtr(binding.bytes.ptr);
+                const binding_end = std.math.add(usize, binding_start, binding.bytes.len) catch return error.InvalidOperand;
+                if (left_start < binding_end and binding_start < left_end) return error.InvalidOutput;
+            }
         }
         @memset(self.output_scratch, 0);
         out_offset = 0;
@@ -537,6 +542,17 @@ test "key compares full bounded bytes and all execution fields" {
     b.ir_bytes[b.ir_bytes.len - 1] ^= 1;
     b.digest = a.digest;
     try std.testing.expect(!a.eql(b));
+    var changed_fields = fields;
+    changed_fields.isa += 1;
+    var determinant = try ExecutableKey.init(std.testing.allocator, &source, changed_fields);
+    defer determinant.deinit(std.testing.allocator);
+    try std.testing.expect(!a.eql(determinant));
+    instructions[0].ty.scalar = .u32;
+    try std.testing.expectError(error.InvalidProgram, ExecutableKey.init(std.testing.allocator, &source, fields));
+    instructions[0].ty.scalar = .f32;
+    interfaces[0].location = 9;
+    try std.testing.expectError(error.InvalidProgram, ExecutableKey.init(std.testing.allocator, &source, fields));
+    interfaces[0].location = 0;
     source.bytes[source.bytes.len - 1] ^= 1;
     source.identity = ir.identify(source.bytes);
     try std.testing.expectError(error.InvalidProgram, ExecutableKey.init(std.testing.allocator, &source, fields));
@@ -551,17 +567,36 @@ test "setup and key clean up every injected allocation failure" {
     var probe = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = std.math.maxInt(usize) });
     var complete = try Executor.init(probe.allocator(), &source);
     complete.deinit();
+    try std.testing.expectEqual(probe.allocated_bytes, probe.freed_bytes);
+    try std.testing.expectEqual(probe.allocations, probe.deallocations);
     const setup_allocations = probe.allocations;
     for (0..setup_allocations) |fail_index| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
         try std.testing.expectError(error.OutOfMemory, Executor.init(failing.allocator(), &source));
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        try std.testing.expectEqual(failing.allocations, failing.deallocations);
     }
     var key_probe = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = std.math.maxInt(usize) });
     var key = try ExecutableKey.init(key_probe.allocator(), &source, .{ .isa = 0, .render_state = .{0} ** 32 });
     key.deinit(key_probe.allocator());
+    try std.testing.expectEqual(key_probe.allocated_bytes, key_probe.freed_bytes);
+    try std.testing.expectEqual(key_probe.allocations, key_probe.deallocations);
     for (0..key_probe.allocations) |fail_index| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
         try std.testing.expectError(error.OutOfMemory, ExecutableKey.init(failing.allocator(), &source, .{ .isa = 0, .render_state = .{0} ** 32 }));
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        try std.testing.expectEqual(failing.allocations, failing.deallocations);
+    }
+    var clone_probe = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = std.math.maxInt(usize) });
+    var clone = try source.clone(clone_probe.allocator());
+    clone.deinit(clone_probe.allocator());
+    try std.testing.expectEqual(clone_probe.allocated_bytes, clone_probe.freed_bytes);
+    try std.testing.expectEqual(clone_probe.allocations, clone_probe.deallocations);
+    for (0..clone_probe.allocations) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, source.clone(failing.allocator()));
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        try std.testing.expectEqual(failing.allocations, failing.deallocations);
     }
 }
 
@@ -594,6 +629,9 @@ test "bool input and output aliases reject without mutation while NaNs canonical
     bad_bool[0] = 1;
     try executor.execute(&bindings, &.{ .{ .interface = 2, .bytes = &a }, .{ .interface = 3, .bytes = &b } });
     try std.testing.expectEqual(@as(u32, 0x7fc00000), std.mem.readInt(u32, &a, .little));
+    const before = a;
+    try std.testing.expectError(error.InvalidOutput, executor.execute(&.{ .{ .interface = 0, .bytes = &a }, .{ .interface = 1, .bytes = &nan } }, &.{ .{ .interface = 2, .bytes = &a }, .{ .interface = 3, .bytes = &b } }));
+    try std.testing.expectEqualSlices(u8, &before, &a);
 }
 
 test "late numeric rejection rolls back earlier output" {

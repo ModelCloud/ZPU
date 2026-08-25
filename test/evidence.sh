@@ -12,7 +12,8 @@ tools/check_evidence_dependencies.sh tools/evidence.py tools/capture_vkcube.sh t
 fake="$tmp/fake"; mkdir "$fake"
 printf '#!/bin/sh\nexit 2\n' >"$fake/rg"; chmod +x "$fake/rg"
 if PATH="$fake:$PATH" ZPU_SEARCH_TOOL=rg tools/check_evidence_dependencies.sh README.md 2>/dev/null; then echo "failing rg false-passed"; exit 1; fi
-if PATH="$fake" ZPU_SEARCH_TOOL=grep tools/check_evidence_dependencies.sh README.md 2>/dev/null; then echo "missing grep override false-passed"; exit 1; fi
+only_rg="$tmp/only-rg"; mkdir "$only_rg"; ln -s "$(command -v rg)" "$only_rg/rg"
+if PATH="$only_rg" ZPU_SEARCH_TOOL=grep /bin/bash tools/check_evidence_dependencies.sh README.md 2>/dev/null; then echo "missing grep override false-passed"; exit 1; fi
 if ZPU_SEARCH_TOOL=unknown tools/check_evidence_dependencies.sh README.md 2>/dev/null; then echo "unknown override false-passed"; exit 1; fi
 PATH="$fake:/usr/bin:/bin" ZPU_SEARCH_TOOL=grep tools/check_evidence_dependencies.sh README.md
 only_grep="$tmp/only-grep"; mkdir "$only_grep"; ln -s /usr/bin/grep "$only_grep/grep"
