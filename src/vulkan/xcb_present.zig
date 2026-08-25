@@ -7,6 +7,18 @@ const GenericError = extern struct { response_type: u8, error_code: u8, sequence
 const GetImageCookie = extern struct { sequence: u32 };
 const GetImageReply = opaque {};
 var verification_done = false;
+var previous_metric_present_ns: u64 = 0;
+
+fn recordFrameMetric() void {
+    const enabled = std.c.getenv("ZPU_FRAME_METRICS") orelse return;
+    if (enabled[0] != '1') return;
+    var timestamp: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.MONOTONIC, &timestamp) != 0) return;
+    const now: u64 = @as(u64, @intCast(timestamp.sec)) * std.time.ns_per_s + @as(u64, @intCast(timestamp.nsec));
+    if (previous_metric_present_ns != 0 and now > previous_metric_present_ns)
+        std.debug.print("zpu_vkcube_frame_ns={}\n", .{now - previous_metric_present_ns});
+    previous_metric_present_ns = now;
+}
 /// Uploads a tightly packed BGRA8 swapchain image into an existing XCB window.
 /// The X server owns the connection and window; this function owns only its
 /// temporary graphics context.
@@ -36,6 +48,7 @@ pub fn present(connection_opaque: *anyopaque, window: u32, width: u32, height: u
     }
     _ = xcb_free_gc(connection, gc);
     if (xcb_flush(connection) <= 0) return false;
+    recordFrameMetric();
     const verify = std.c.getenv("ZPU_VERIFY_PRESENT") orelse null;
     if (!verification_done and verify != null and verify.?[0] == '1') {
         verification_done = true;

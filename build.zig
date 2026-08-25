@@ -45,6 +45,13 @@ pub fn build(b: *std.Build) void {
     benchmark_step.dependOn(&run_benchmark.step);
     run_benchmark.step.dependOn(&require_limited.step);
 
+    const run_target_800x600 = b.addSystemCommand(&.{ "python3", "test/vkcube_benchmark.py" });
+    run_target_800x600.addArg(b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_target_800x600.step.dependOn(&require_limited.step);
+    run_target_800x600.step.dependOn(b.getInstallStep());
+    const target_800x600_step = b.step("target-800x600", "Require vkcube 800x600 presented-frame p99 at 240 FPS or better");
+    target_800x600_step.dependOn(&run_target_800x600.step);
+
     const tests = b.addTest(.{ .root_module = zpu });
     const run_tests = b.addRunArtifact(tests);
     run_tests.step.dependOn(&require_limited.step);

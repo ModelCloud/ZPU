@@ -125,8 +125,14 @@ tools/limited-cpus.sh zig build xcb-present
 tools/limited-cpus.sh zig build vkcube-visual
 tools/limited-cpus.sh zig build desktop-session
 tools/limited-cpus.sh zig build benchmark -Doptimize=ReleaseFast -- --smoke --json
+tools/limited-cpus.sh zig build target-800x600 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build demo
 tools/limited-cpus.sh zig build -Doptimize=ReleaseFast
 ```
 
 CI runs these commands on Linux. Generated PPM files and Zig build outputs are ignored.
+
+`target-800x600` runs the real `vkcube` XCB path at 800x600, discards 120 warmup
+frames, then times 1,000 consecutive presented frames. It fails unless p99 frame
+time is at most 4,166,666 ns, equivalent to a 240 FPS 1% low. The measurement
+includes command submission, ZPU's CPU cube rasterizer, and XCB image upload.
