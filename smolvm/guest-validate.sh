@@ -41,7 +41,7 @@ test ! -e /dev/dri || {
     echo 'guest /dev/dri exists: SmolVM GPU/DRM exposure is forbidden for this workflow' >&2
     exit 2
 }
-global_zpu=$(find /etc/vulkan /usr/local/share/vulkan /usr/share/vulkan -type f -name '*zpu*' -print -quit 2>/dev/null)
+global_zpu=$(find /etc/vulkan /usr/local/share/vulkan /usr/share/vulkan -type f -name '*zpu*' -print -quit 2>/dev/null || :)
 if test -n "$global_zpu"; then
     echo 'ZPU was installed into a guest-global Vulkan configuration directory' >&2
     exit 2
