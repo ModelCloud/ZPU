@@ -267,7 +267,7 @@ const PipelineLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical, 
 const AttachmentRole = enum(u8) { color, depth };
 const FramebufferAttachmentRequirement = struct { format: i32 = 0, samples: u32 = 0, role: AttachmentRole = .color };
 const RenderPassObj = struct { owner: DeviceIdentity, canonical: Canonical, compatibility: Canonical, subpass_count: u32, framebuffer_supported: bool, framebuffer_attachment_count: u32, framebuffer_attachments: [2]FramebufferAttachmentRequirement };
-const GraphicsPipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, layout: Canonical, set0: Canonical, render_compatibility: Canonical, vertex_program: ?render_ir.Program, fragment_program: ?render_ir.Program, subpass: u32, execution_abi: u32 };
+const GraphicsPipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, layout: Canonical, set0: Canonical, render_compatibility: Canonical, vertex_program: ?render_ir.Program, fragment_program: ?render_ir.Program, subpass: u32, execution_abi: u32, cull_mode: u32, front_face: i32 };
 const SwapchainObj = struct {
     owner: Device,
     surface: *SurfaceObj,
@@ -284,7 +284,7 @@ const SwapchainObj = struct {
     cadence: ?frame_pacing.Clock,
     transport: xcb_present.Transport,
 };
-const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32 }, cube_draw: struct { framebuffer: *FramebufferObj, descriptors: *DescriptorSetObj, vertex_count: u32, viewport: Viewport, scissor: cpu_cube.Rect }, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 } };
+const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32 }, cube_draw: struct { framebuffer: *FramebufferObj, descriptors: *DescriptorSetObj, vertex_count: u32, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32 }, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 } };
 const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, state: u8, invalid: bool, count: u16, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_descriptors: ?*DescriptorSetObj, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, viewport: Viewport, scissor: cpu_cube.Rect, commands: [256]Command };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
 pub const CommandBuffer = *CommandBufferObj;
@@ -2076,17 +2076,17 @@ fn executeValidatedCommand(command: Command) void {
         },
         .clear => |op| {
             const bytes = imageBytes(op.image);
-            var i: usize = 0;
-            while (i < bytes.len) : (i += 4) @memcpy(bytes[i..][0..4], &op.color);
+            const aligned: []align(4) u8 = @alignCast(bytes);
+            @memset(std.mem.bytesAsSlice(u32, aligned), @bitCast(op.color));
         },
         .render_clear => |op| {
             const bytes = imageBytes(op.image);
-            var i: usize = 0;
-            while (i < bytes.len) : (i += 4) @memcpy(bytes[i..][0..4], &op.color);
+            const aligned: []align(4) u8 = @alignCast(bytes);
+            @memset(std.mem.bytesAsSlice(u32, aligned), @bitCast(op.color));
             if (op.depth) |depth| {
                 const depth_bytes = imageBytes(depth);
-                i = 0;
-                while (i < depth_bytes.len) : (i += 4) std.mem.writeInt(u32, depth_bytes[i..][0..4], @bitCast(op.depth_value), .little);
+                const aligned_depth: []align(4) u8 = @alignCast(depth_bytes);
+                @memset(std.mem.bytesAsSlice(u32, aligned_depth), @bitCast(op.depth_value));
             }
         },
         .cube_draw => |op| {
@@ -2097,7 +2097,7 @@ fn executeValidatedCommand(command: Command) void {
             const uniform_length: usize = @intCast(@min(op.descriptors.uniform_range, uniform_buffer.size - op.descriptors.uniform_offset));
             const uniform_memory = uniform_buffer.memory.?.bytes;
             const texture = op.descriptors.texture.?;
-            _ = cpu_cube.draw(imageBytes(color), imageBytes(depth), color.width, color.height, uniform_memory[uniform_start..][0..uniform_length], imageBytes(texture), texture.width, texture.height, op.vertex_count, op.viewport, op.scissor);
+            _ = cpu_cube.draw(imageBytes(color), imageBytes(depth), color.width, color.height, uniform_memory[uniform_start..][0..uniform_length], imageBytes(texture), texture.width, texture.height, op.vertex_count, op.viewport, op.scissor, op.cull_mode, op.front_face);
         },
         .buffer_to_image => |op| {
             copyBufferImage(op.src, op.dst, op.region, true);
@@ -2796,7 +2796,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     if (test_fail_render_compatibility_clone) return error.OutOfMemory;
     var render_compatibility = try render_pass.compatibility.clone();
     errdefer render_compatibility.deinit();
-    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = 1 };
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = 1, .cull_mode = rs.cull_mode, .front_face = rs.front_face };
 }
 
 fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, set0: *const Canonical) bool {
@@ -3270,7 +3270,7 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
         command_buffer.impl.invalid = true;
         return;
     }
-    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .descriptors = descriptors, .vertex_count = vertex_count, .viewport = command_buffer.impl.viewport, .scissor = command_buffer.impl.scissor } });
+    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .descriptors = descriptors, .vertex_count = vertex_count, .viewport = command_buffer.impl.viewport, .scissor = command_buffer.impl.scissor, .cull_mode = pipeline.cull_mode, .front_face = pipeline.front_face } });
 }
 fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
     lock();
@@ -3485,7 +3485,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
                 mutex.unlock();
                 return .error_initialization_failed;
             }
-            if (deadline > before) frame_pacing.sleepUntilPrecise(deadline, 100_000);
+            if (deadline > before) frame_pacing.sleepUntilPrecise(deadline, frame_pacing.precision_spin_ns);
             const woke = frame_pacing.monotonicNs();
             swapchain.transport.last.wake_error_ns = @intCast(woke -| deadline);
             if (!xcb_present.commit(&swapchain.transport, imageBytes(@ptrFromInt(swapchain.images[index])))) {

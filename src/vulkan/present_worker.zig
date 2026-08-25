@@ -38,7 +38,7 @@ fn run() void {
             work.release(work.context, work.image_index);
             continue;
         }
-        if (deadline > before) frame_pacing.sleepUntilPrecise(deadline, 100_000);
+        if (deadline > before) frame_pacing.sleepUntilPrecise(deadline, frame_pacing.precision_spin_ns);
         const woke = frame_pacing.monotonicNs();
         work.transport.last.wake_error_ns = if (woke >= deadline) @intCast(woke - deadline) else -@as(i64, @intCast(deadline - woke));
         _ = xcb_present.commit(work.transport, work.pixels);

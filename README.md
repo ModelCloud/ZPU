@@ -162,6 +162,8 @@ tools/limited-cpus.sh zig build vkcube-visual
 tools/limited-cpus.sh zig build desktop-session
 tools/limited-cpus.sh zig build benchmark -Doptimize=ReleaseFast -- --smoke --json
 tools/limited-cpus.sh zig build target-800x600 -Doptimize=ReleaseFast
+tools/limited-cpus.sh zig build target-4k-30 -Doptimize=ReleaseFast
+tools/limited-cpus.sh zig build target-4k-60 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build demo
 tools/limited-cpus.sh zig build -Doptimize=ReleaseFast
 ```
@@ -178,6 +180,12 @@ ZPU also exposes `VK_EXT_present_timing`: applications can attach
 `VkPresentTimingsInfoEXT` to each `vkQueuePresentKHR` call and select an absolute
 monotonic or relative target time per swapchain. Untimed presents retain the
 process-local `ZPU_REFRESH_HZ` cadence.
+
+`target-4k-30` and `target-4k-60` apply the same individual-frame ultra-low
+1% timing gate to real 3840x2160 `vkcube`: after 120 warmup frames, p99 across
+1,000 frames must not exceed 33,333,333 ns and 16,666,666 ns respectively. The
+strict floors use explicit 31 Hz and 63 Hz pacing guard bands so ordinary wake
+jitter cannot turn an exact nominal cadence into a dishonest sub-target 1% low.
 
 `VK_GOOGLE_display_timing` is deliberately unsupported with no compatibility
 alias. Requests for that extension, its device procedures, or
