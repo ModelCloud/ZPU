@@ -3651,6 +3651,10 @@ test "EXT present timing selects absolute and relative deadlines" {
     var google_info = info;
     google_info.p_next = &google;
     try std.testing.expectError(error.GoogleDisplayTimingUnsupported, presentTarget(&google_info, 0, 1_000));
+    const ignored = ChainHeader{ .s_type = 99, .p_next = null };
+    var ignored_info = info;
+    ignored_info.p_next = &ignored;
+    try std.testing.expectEqual(@as(?u64, null), try presentTarget(&ignored_info, 0, 1_000));
 }
 
 test "Google display timing procedure names are detected without aliases" {
@@ -4651,6 +4655,27 @@ test "vkcube presentation path records submits and presents two swapchain images
     descriptor_set_state = saved_descriptor_state;
 
     const swapchain_object = validSwapchainLocked(swapchain).?;
+    var timing_counter: u64 = 0;
+    var timing_properties = SwapchainTimingPropertiesEXT{ .s_type = 1_000_208_001, .p_next = null, .refresh_duration = 0, .refresh_interval = 0 };
+    try std.testing.expectEqual(Result.success, getSwapchainTimingProperties(device, swapchain, &timing_properties, &timing_counter));
+    try std.testing.expect(timing_properties.refresh_duration > 0);
+    try std.testing.expectEqual(@as(u64, 1), timing_properties.refresh_interval);
+    try std.testing.expectEqual(@as(u64, 1), timing_counter);
+    var domains: [1]i32 = undefined;
+    var domain_ids: [1]u64 = undefined;
+    var domain_properties = SwapchainTimeDomainPropertiesEXT{ .s_type = 1_000_208_002, .p_next = null, .time_domain_count = 1, .time_domains = &domains, .time_domain_ids = &domain_ids };
+    try std.testing.expectEqual(Result.success, getSwapchainTimeDomainProperties(device, swapchain, &domain_properties, &timing_counter));
+    try std.testing.expectEqual(@as(u32, 1), domain_properties.time_domain_count);
+    try std.testing.expectEqual(@as(i32, 1), domains[0]);
+    try std.testing.expectEqual(@as(u64, 1), domain_ids[0]);
+    try std.testing.expectEqual(Result.not_ready, setSwapchainPresentTimingQueueSize(device, swapchain, 2));
+    const past_info = PastPresentationTimingInfoEXT{ .s_type = 1_000_208_005, .p_next = null, .flags = 0, .swapchain = swapchain };
+    var past_properties = PastPresentationTimingPropertiesEXT{ .s_type = 1_000_208_006, .p_next = null, .timing_properties_counter = 0, .time_domains_counter = 0, .presentation_timing_count = 1, .presentation_timings = @ptrFromInt(8) };
+    try std.testing.expectEqual(Result.success, getPastPresentationTiming(device, &past_info, &past_properties));
+    try std.testing.expectEqual(@as(u64, 1), past_properties.timing_properties_counter);
+    try std.testing.expectEqual(@as(u64, 1), past_properties.time_domains_counter);
+    try std.testing.expectEqual(@as(u32, 0), past_properties.presentation_timing_count);
+    try std.testing.expect(past_properties.presentation_timings == null);
     var lifecycle_index: u32 = undefined;
     try std.testing.expectEqual(Result.success, acquireNextImage(device, swapchain, 0, 0, 0, &lifecycle_index));
     try std.testing.expectEqual(Result.success, acquireNextImage(device, swapchain, 0, 0, 0, &lifecycle_index));
@@ -4687,6 +4712,11 @@ test "vkcube presentation path records submits and presents two swapchain images
     malformed_present.image_indices = @ptrCast(&bad_index);
     try std.testing.expectEqual(Result.error_initialization_failed, queuePresent(queue, &malformed_present));
     malformed_present.image_indices = @ptrCast(&lifecycle_index);
+    var bad_timing = PresentTimingInfoEXT{ .s_type = 1_000_208_004, .p_next = null, .flags = 0, .target_time = 0, .time_domain_id = 2, .present_stage_queries = 0, .target_time_domain_present_stage = 0 };
+    const bad_timings = PresentTimingsInfoEXT{ .s_type = 1_000_208_003, .p_next = null, .swapchain_count = 1, .timing_infos = @ptrCast(&bad_timing) };
+    malformed_present.p_next = &bad_timings;
+    try std.testing.expectEqual(Result.error_initialization_failed, queuePresent(queue, &malformed_present));
+    malformed_present.p_next = null;
     _ = std.c.pthread_mutex_lock(&swapchain_object.present_mutex);
     swapchain_object.image_states[lifecycle_index] = .available;
     _ = std.c.pthread_mutex_unlock(&swapchain_object.present_mutex);
@@ -5232,6 +5262,10 @@ test "creation rejects every supported invalid-input class" {
     di.layer_count = 0;
     di.extension_count = 1;
     try std.testing.expectEqual(Result.error_extension_not_present, createDevice(physical[0], &di, null, &device));
+    const google_extension = [_][*:0]const u8{google_display_timing_extension};
+    di.extensions = &google_extension;
+    try std.testing.expectEqual(Result.error_extension_not_present, createDevice(physical[0], &di, null, &device));
+    di.extensions = null;
     di.extension_count = 0;
     di.queue_info_count = 0;
     try std.testing.expectEqual(Result.error_initialization_failed, createDevice(physical[0], &di, null, &device));

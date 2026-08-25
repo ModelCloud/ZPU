@@ -76,7 +76,7 @@ def metric_rows(two, three, raw2d, raw3d, commit, utc, cadence=None, raw_cadence
 def fmt(value): return f"{value:.9g}" if isinstance(value,float) else str(value)
 def progress_text(two,three,raw2d,raw3d,commit,utc,evidence,cadence=None,raw_cadence=None):
     rows=metric_rows(two,three,raw2d,raw3d,commit,utc,cadence,raw_cadence)
-    out=["# Progress benchmarks","",f"Benchmarked source commit: `{commit}`  ","Evidence relationship: `source commit or one later progress_benchmarks.md-only commit`  ",f"UTC: `{utc}`","", "| category | workload/schema | resolution | metric/backend | measure | value | unit | FPS | sampling | commit | UTC | raw artifact | notes |", "|---|---|---|---|---|---:|---|---:|---|---|---|---|---|"]
+    out=["# Progress benchmarks","",f"Benchmarked source commit: `{commit}`","Evidence relationship: `source commit or one later progress_benchmarks.md-only commit`",f"UTC: `{utc}`","", "| category | workload/schema | resolution | metric/backend | measure | value | unit | FPS | sampling | commit | UTC | raw artifact | notes |", "|---|---|---|---|---|---:|---|---:|---|---|---|---|---|"]
     for r in rows: out.append("| " + " | ".join(fmt(x) for x in r) + " |")
     return "\n".join(out)+"\n"
 

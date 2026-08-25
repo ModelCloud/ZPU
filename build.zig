@@ -89,6 +89,12 @@ pub fn build(b: *std.Build) void {
     run_target_4k_60.step.dependOn(b.getInstallStep());
     const target_4k_60_step = b.step("target-4k-60", "Require vkcube 3840x2160 presented-frame p99 at 60 FPS or better");
     target_4k_60_step.dependOn(&run_target_4k_60.step);
+    const benchmark_ir = b.addExecutable(.{ .name = "zpu-render-ir-exec-benchmark", .root_module = b.createModule(.{ .root_source_file = b.path("src/render_ir_exec_benchmark.zig"), .target = target, .optimize = optimize }) });
+    benchmark_ir.root_module.link_libc = true;
+    const run_benchmark_ir = b.addRunArtifact(benchmark_ir);
+    run_benchmark_ir.step.dependOn(&require_limited.step);
+    const benchmark_ir_step = b.step("benchmark-render-ir", "Benchmark synthetic scalar render IR setup and warm execution");
+    benchmark_ir_step.dependOn(&run_benchmark_ir.step);
 
     const run_target_4k_120 = b.addSystemCommand(&.{ "python3", "test/vkcube_benchmark.py" });
     run_target_4k_120.addArg(b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
@@ -103,6 +109,11 @@ pub fn build(b: *std.Build) void {
     run_tests.step.dependOn(&require_limited.step);
     const test_step = b.step("test", "Run deterministic unit tests");
     test_step.dependOn(&run_tests.step);
+    const benchmark_ir_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/render_ir_exec_benchmark.zig"), .target = b.graph.host, .optimize = .Debug }) });
+    benchmark_ir_tests.root_module.link_libc = true;
+    const run_benchmark_ir_tests = b.addRunArtifact(benchmark_ir_tests);
+    run_benchmark_ir_tests.step.dependOn(&require_limited.step);
+    test_step.dependOn(&run_benchmark_ir_tests.step);
     const cadence_tests = b.addSystemCommand(&.{ "python3", "test/cadence.py" });
     cadence_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&cadence_tests.step);
@@ -232,6 +243,7 @@ pub fn build(b: *std.Build) void {
         .{ "spirv-decode", "src/vulkan/spirv_decode.zig" },
         .{ "spirv-frontend", "src/vulkan/spirv_frontend.zig" },
         .{ "render-ir", "src/vulkan/render_ir.zig" },
+        .{ "render-ir-exec", "src/render_ir_exec.zig" },
     }) |source| {
         const source_tests = b.addTest(.{
             .name = "zpu-" ++ source[0] ++ "-coverage-tests",

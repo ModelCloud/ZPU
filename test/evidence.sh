@@ -8,10 +8,21 @@ sha=$(git rev-parse HEAD); utc=2026-01-02T03:04:05Z
 grep -F 'b.step("benchmark-3d"' build.zig >/dev/null
 grep -F 'b.step("pr-readiness"' build.zig >/dev/null
 grep -F '`ffmpeg` and `ffprobe`' docs/pr-readiness.md >/dev/null
-if rg -n '\.github/workflows|GITHUB_TOKEN|workflow scope' tools/evidence.py tools/capture_vkcube.sh tools/pr_readiness.sh docs/pr-readiness.md; then
-  echo "evidence feature depends on GitHub workflow configuration" >&2
-  exit 1
-fi
+tools/check_evidence_dependencies.sh tools/evidence.py tools/capture_vkcube.sh tools/pr_readiness.sh docs/pr-readiness.md
+fake="$tmp/fake"; mkdir "$fake"
+printf '#!/bin/sh\nexit 2\n' >"$fake/rg"; chmod +x "$fake/rg"
+if PATH="$fake:$PATH" ZPU_SEARCH_TOOL=rg tools/check_evidence_dependencies.sh README.md 2>/dev/null; then echo "failing rg false-passed"; exit 1; fi
+only_rg="$tmp/only-rg"; mkdir "$only_rg"
+printf '#!/bin/sh\nexec /usr/bin/grep -E "$@"\n' >"$only_rg/rg"; chmod +x "$only_rg/rg"
+if PATH="$only_rg" ZPU_SEARCH_TOOL=grep /bin/bash tools/check_evidence_dependencies.sh README.md 2>/dev/null; then echo "missing grep override false-passed"; exit 1; fi
+if ZPU_SEARCH_TOOL=unknown tools/check_evidence_dependencies.sh README.md 2>/dev/null; then echo "unknown override false-passed"; exit 1; fi
+PATH="$fake:/usr/bin:/bin" ZPU_SEARCH_TOOL=grep tools/check_evidence_dependencies.sh README.md
+only_grep="$tmp/only-grep"; mkdir "$only_grep"
+printf '#!/bin/sh\nexec /usr/bin/grep "$@"\n' >"$only_grep/grep"; chmod +x "$only_grep/grep"
+if PATH="$only_grep" ZPU_SEARCH_TOOL=rg /bin/bash tools/check_evidence_dependencies.sh README.md 2>/dev/null; then echo "missing rg override false-passed"; exit 1; fi
+PATH="$only_grep" /bin/bash tools/check_evidence_dependencies.sh README.md
+printf '#!/bin/sh\nexit 2\n' >"$fake/grep"; chmod +x "$fake/grep"
+if PATH="$fake:$PATH" ZPU_SEARCH_TOOL=grep tools/check_evidence_dependencies.sh README.md 2>/dev/null; then echo "failing grep false-passed"; exit 1; fi
 "$bench2" --smoke --json --source-commit "$sha" --utc "$utc" --capture "$tmp/2d.json" >/dev/null
 "$bench3" --smoke --json --source-commit "$sha" --utc "$utc" --capture "$tmp/3d.json" >/dev/null
 python3 - "$tmp/2d.json" "$tmp/3d.json" <<'PY'
