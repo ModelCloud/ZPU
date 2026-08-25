@@ -19,6 +19,15 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 cd "$root"
 
+# Re-entry guard: this script runs as a build step, and its nested builds
+# include the same step; without this sentinel each nested build would recurse
+# into another regression run forever.
+if [[ "${ZPU_ISA_GATE_REGRESSION:-}" == "1" ]]; then
+  echo "isa-gate-regression: skipped (nested build)"
+  exit 0
+fi
+export ZPU_ISA_GATE_REGRESSION=1
+
 sysroot="$work/sysroot"
 mkdir -p "$sysroot"
 if [[ -d /usr/lib/aarch64-linux-gnu ]] && ls /usr/lib/aarch64-linux-gnu/libxcb.so* >/dev/null 2>&1 && [[ -f /usr/lib/aarch64-linux-gnu/libvulkan.so ]]; then
