@@ -560,6 +560,11 @@ test "key compares full bounded bytes and all execution fields" {
 }
 
 test "clone setup and key report every allocation failure without outstanding memory" {
+    const expected_clone_allocations: usize = 5;
+    const expected_executor_clone_stage_failures: usize = 5;
+    const expected_executor_later_allocations: usize = 2;
+    const expected_executor_allocations: usize = expected_executor_clone_stage_failures + expected_executor_later_allocations;
+    const expected_key_allocations: usize = 9;
     const one = f32bytes(1);
     var interfaces = [_]ir.Interface{.{ .storage = .output, .ty = .{ .scalar = .f32 }, .location = 0 }};
     var instructions = [_]ir.Instruction{.{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &one }};
@@ -570,57 +575,126 @@ test "clone setup and key report every allocation failure without outstanding me
     clone.deinit(clone_probe.allocator());
     try std.testing.expectEqual(clone_probe.allocated_bytes, clone_probe.freed_bytes);
     try std.testing.expectEqual(clone_probe.allocations, clone_probe.deallocations);
-    const clone_allocations = clone_probe.allocations;
-    for (0..clone_allocations) |fail_index| {
+    try std.testing.expectEqual(expected_clone_allocations, clone_probe.allocations);
+    for (0..expected_clone_allocations) |fail_index| {
         var direct = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
         try std.testing.expectError(error.OutOfMemory, source.clone(direct.allocator()));
-        try std.testing.expectEqual(@as(usize, 0), direct.allocated_bytes - direct.freed_bytes);
-        try std.testing.expectEqual(@as(usize, 0), direct.allocations - direct.deallocations);
+        try std.testing.expectEqual(direct.allocated_bytes, direct.freed_bytes);
+        try std.testing.expectEqual(direct.allocations, direct.deallocations);
 
         var through_init = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
         try std.testing.expectError(error.OutOfMemory, Executor.init(through_init.allocator(), &source));
-        try std.testing.expectEqual(@as(usize, 0), through_init.allocated_bytes - through_init.freed_bytes);
-        try std.testing.expectEqual(@as(usize, 0), through_init.allocations - through_init.deallocations);
+        try std.testing.expectEqual(through_init.allocated_bytes, through_init.freed_bytes);
+        try std.testing.expectEqual(through_init.allocations, through_init.deallocations);
     }
     var setup_probe = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = std.math.maxInt(usize) });
     var complete = try Executor.init(setup_probe.allocator(), &source);
     complete.deinit();
     try std.testing.expectEqual(setup_probe.allocated_bytes, setup_probe.freed_bytes);
     try std.testing.expectEqual(setup_probe.allocations, setup_probe.deallocations);
-    const setup_allocations = setup_probe.allocations;
-    for (clone_allocations..setup_allocations) |fail_index| {
+    try std.testing.expectEqual(expected_executor_allocations, setup_probe.allocations);
+    for (expected_executor_clone_stage_failures..expected_executor_allocations) |fail_index| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
         try std.testing.expectError(error.OutOfMemory, Executor.init(failing.allocator(), &source));
-        try std.testing.expectEqual(@as(usize, 0), failing.allocated_bytes - failing.freed_bytes);
-        try std.testing.expectEqual(@as(usize, 0), failing.allocations - failing.deallocations);
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        try std.testing.expectEqual(failing.allocations, failing.deallocations);
     }
     var key_probe = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = std.math.maxInt(usize) });
     var key = try ExecutableKey.init(key_probe.allocator(), &source, .{ .isa = 0, .render_state = .{0} ** 32 });
     key.deinit(key_probe.allocator());
     try std.testing.expectEqual(key_probe.allocated_bytes, key_probe.freed_bytes);
     try std.testing.expectEqual(key_probe.allocations, key_probe.deallocations);
-    for (0..key_probe.allocations) |fail_index| {
+    try std.testing.expectEqual(expected_key_allocations, key_probe.allocations);
+    for (0..expected_key_allocations) |fail_index| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
         try std.testing.expectError(error.OutOfMemory, ExecutableKey.init(failing.allocator(), &source, .{ .isa = 0, .render_state = .{0} ** 32 }));
-        try std.testing.expectEqual(@as(usize, 0), failing.allocated_bytes - failing.freed_bytes);
-        try std.testing.expectEqual(@as(usize, 0), failing.allocations - failing.deallocations);
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        try std.testing.expectEqual(failing.allocations, failing.deallocations);
     }
-    std.debug.print("allocation failure matrix: Program.clone={d} Executor.init.clone_stage={d} Executor.init.other={d} ExecutableKey={d} outstanding_allocations=0 outstanding_bytes=0\n", .{ clone_allocations, clone_allocations, setup_allocations - clone_allocations, key_probe.allocations });
+    std.debug.print("allocation failure matrix: Program.clone={d} Executor.init.clone_stage={d} Executor.init.other={d} ExecutableKey={d} outstanding_allocations=0 outstanding_bytes=0\n", .{ expected_clone_allocations, expected_executor_clone_stage_failures, expected_executor_later_allocations, expected_key_allocations });
 }
 
-test "profile v1 frontend admission satisfies executor constant-index setup rule" {
-    var program = try frontend.compile(std.testing.allocator, &frontend.uniform_vertex, .vertex, "main", &.{});
-    defer program.deinit(std.testing.allocator);
-    for (program.instructions) |instruction| if (instruction.op == .access) {
-        for (instruction.operands[1..]) |index_id| {
-            try std.testing.expectEqual(ir.Op.constant, program.instructions[index_id].op);
-            try std.testing.expectEqual(ir.Scalar.u32, program.instructions[index_id].ty.scalar);
-            try std.testing.expectEqual(@as(u3, 1), program.instructions[index_id].ty.columns);
-            try std.testing.expectEqual(@as(u3, 1), program.instructions[index_id].ty.rows);
-        }
+fn frontendOpcodeOffset(words: []const u32, opcode: u16, occurrence: usize) usize {
+    var cursor: usize = 5;
+    var seen: usize = 0;
+    while (cursor < words.len) : (cursor += words[cursor] >> 16) if (@as(u16, @truncate(words[cursor])) == opcode) {
+        if (seen == occurrence) return cursor;
+        seen += 1;
     };
-    var executor = try Executor.init(std.testing.allocator, &program);
-    executor.deinit();
+    return std.math.maxInt(usize);
+}
+
+fn frontendAccessVariant(allocator: std.mem.Allocator, width: u32, matrix: bool, member_count: u32, member_index: u32) ![]u32 {
+    var words: std.ArrayList(u32) = .empty;
+    try words.appendSlice(allocator, &frontend.uniform_vertex);
+    const output_decoration = frontendOpcodeOffset(words.items, 71, 0);
+    words.items[output_decoration + 2] = 30; // Location replaces BuiltIn.
+    words.items[frontendOpcodeOffset(words.items, 23, 0) + 3] = width;
+    const member_type: u32 = if (matrix) 8 else 7;
+    if (matrix) {
+        const structure = frontendOpcodeOffset(words.items, 30, 0);
+        try words.insertSlice(allocator, structure, &.{ (4 << 16) | 24, 8, 7, 4 });
+        words.items[frontendOpcodeOffset(words.items, 30, 0) + 2] = member_type;
+        words.items[frontendOpcodeOffset(words.items, 32, 0) + 3] = member_type;
+        words.items[frontendOpcodeOffset(words.items, 32, 2) + 3] = member_type;
+        words.items[frontendOpcodeOffset(words.items, 61, 0) + 1] = member_type;
+    }
+    if (member_count == 2) {
+        const structure = frontendOpcodeOffset(words.items, 30, 0);
+        try words.insertSlice(allocator, structure + 3, &.{member_type});
+        words.items[structure] += 1 << 16;
+        const first_member_decoration = frontendOpcodeOffset(words.items, 72, 0);
+        try words.insertSlice(allocator, first_member_decoration + 5, &.{ (5 << 16) | 72, 12, 1, 35, 64 });
+    }
+    words.items[frontendOpcodeOffset(words.items, 43, 0) + 3] = member_index;
+    return words.toOwnedSlice(allocator);
+}
+
+fn frontendDynamicAccessVariant(allocator: std.mem.Allocator, constant_words: []const u32) ![]u32 {
+    var words: std.ArrayList(u32) = .empty;
+    try words.appendSlice(allocator, constant_words);
+    const access = frontendOpcodeOffset(words.items, 65, 0);
+    try words.insertSlice(allocator, access, &.{ (5 << 16) | 128, 3, 44, 20, 20 });
+    words.items[frontendOpcodeOffset(words.items, 65, 0) + 4] = 44;
+    return words.toOwnedSlice(allocator);
+}
+
+test "generated profile v1 constant access admissions initialize executor and dynamic indices stop at frontend" {
+    const expected_constant_admissions: usize = 12;
+    const expected_dynamic_rejections: usize = 12;
+    var constant_admissions: usize = 0;
+    var dynamic_rejections: usize = 0;
+    try std.testing.expectEqual(std.math.maxInt(usize), frontendOpcodeOffset(&frontend.uniform_vertex, 999, 0));
+    for ([_]struct { width: u32, matrix: bool }{ .{ .width = 2, .matrix = false }, .{ .width = 3, .matrix = false }, .{ .width = 4, .matrix = false }, .{ .width = 4, .matrix = true } }) |composite| {
+        for ([_][2]u32{ .{ 1, 0 }, .{ 2, 0 }, .{ 2, 1 } }) |member_case| {
+            const words = try frontendAccessVariant(std.testing.allocator, composite.width, composite.matrix, member_case[0], member_case[1]);
+            defer std.testing.allocator.free(words);
+            var program = try frontend.compile(std.testing.allocator, words, .vertex, "main", &.{});
+            defer program.deinit(std.testing.allocator);
+            var access_seen: usize = 0;
+            for (program.instructions) |instruction| if (instruction.op == .access) {
+                access_seen += 1;
+                for (instruction.operands[1..]) |index_id| {
+                    try std.testing.expectEqual(ir.Op.constant, program.instructions[index_id].op);
+                    try std.testing.expectEqual(ir.Type{ .scalar = .u32 }, program.instructions[index_id].ty);
+                    try std.testing.expectEqual(member_case[1], std.mem.readInt(u32, program.instructions[index_id].literal[0..4], .little));
+                }
+            };
+            try std.testing.expectEqual(@as(usize, 1), access_seen);
+            try std.testing.expectEqual(@as(u3, @intCast(composite.width)), program.instructions[1].ty.columns);
+            try std.testing.expectEqual(@as(u3, if (composite.matrix) 4 else 1), program.instructions[1].ty.rows);
+            var executor = try Executor.init(std.testing.allocator, &program);
+            executor.deinit();
+            constant_admissions += 1;
+
+            const dynamic = try frontendDynamicAccessVariant(std.testing.allocator, words);
+            defer std.testing.allocator.free(dynamic);
+            try std.testing.expectError(error.Unsupported, frontend.compile(std.testing.allocator, dynamic, .vertex, "main", &.{}));
+            dynamic_rejections += 1;
+        }
+    }
+    try std.testing.expectEqual(expected_constant_admissions, constant_admissions);
+    try std.testing.expectEqual(expected_dynamic_rejections, dynamic_rejections);
 }
 
 test "executor setup rejects runtime scalar u32 access indices" {
@@ -753,7 +827,7 @@ fn propertyConstant(arena: std.mem.Allocator, list: *std.ArrayList(ir.Instructio
     return propertyInstruction(arena, list, .constant, ty, &.{}, try propertyLiteral(arena, ty));
 }
 
-fn runPropertyCase(op: ir.Op, result_ty: ir.Type, convert_from: ?ir.Scalar) !void {
+fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, convert_from: ?ir.Scalar) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -796,8 +870,10 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, convert_from: ?ir.Scalar) !voi
             result_id = try propertyInstruction(arena, &instructions, .access, result_ty, &.{ 0, index }, &.{});
         },
         .extract => {
-            const source = try propertyConstant(arena, &instructions, result_ty);
-            result_id = try propertyInstruction(arena, &instructions, .extract, result_ty, &.{source}, &.{});
+            const source_ty = source_ty_override orelse return error.InvalidType;
+            const source = try propertyConstant(arena, &instructions, source_ty);
+            const selector: u32 = source_ty.columns - 1;
+            result_id = try propertyInstruction(arena, &instructions, .extract, result_ty, &.{ source, selector }, &.{});
         },
         .shuffle => {
             const a = try propertyConstant(arena, &instructions, result_ty);
@@ -838,12 +914,27 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, convert_from: ?ir.Scalar) !voi
             output_count = 1;
         },
     }
+    try std.testing.expectEqual(op, instructions.items[result_id].op);
+    try std.testing.expectEqual(result_ty, instructions.items[result_id].ty);
+    if (op == .extract) {
+        const source_ty = source_ty_override.?;
+        try std.testing.expect(source_ty.rows == 1 and source_ty.columns >= 2 and source_ty.columns <= 4);
+        try std.testing.expectEqual(ir.Type{ .scalar = source_ty.scalar }, result_ty);
+        try std.testing.expectEqual(@as(usize, 2), instructions.items[result_id].operands.len);
+        try std.testing.expectEqual(@as(u32, source_ty.columns - 1), instructions.items[result_id].operands[1]);
+    }
     var source = try testProgram(interfaces[0..interface_count], instructions.items);
     defer std.testing.allocator.free(source.bytes);
     var executor = try Executor.init(std.testing.allocator, &source);
     defer executor.deinit();
     try executor.execute(bindings[0..binding_count], outputs[0..output_count]);
     const first = executor.values[result_id];
+    try std.testing.expectEqual(result_ty, first.ty);
+    try std.testing.expectEqual(try lanes(result_ty), first.lanes());
+    if (op == .extract) {
+        const expected_bits: u32 = if (result_ty.scalar == .f32) @bitCast(@as(f32, 1)) else 1;
+        try std.testing.expectEqual(expected_bits, first.bits[0]);
+    }
     try executor.execute(bindings[0..binding_count], outputs[0..output_count]);
     try std.testing.expectEqual(first.ty, executor.values[result_id].ty);
     try std.testing.expectEqualSlices(u32, first.bits[0..first.lanes()], executor.values[result_id].bits[0..first.lanes()]);
@@ -857,45 +948,49 @@ test "generated bounded operation by type-family property matrix is complete" {
         const is_float = ty.scalar == .f32;
         const is_vector = ty.rows == 1 and ty.columns > 1;
         const is_non_matrix = ty.rows == 1;
-        inline for ([_]ir.Op{ .constant, .input, .uniform, .access, .extract, .output }) |op| {
-            try runPropertyCase(op, ty, null);
+        inline for ([_]ir.Op{ .constant, .input, .uniform, .access, .output }) |op| {
+            try runPropertyCase(op, ty, null, null);
             totals[@intFromEnum(op)] += 1;
         }
         if (is_numeric and (is_vector or ty.rows == 4)) inline for ([_]ir.Op{ .constant_composite, .composite }) |op| {
-            try runPropertyCase(op, ty, null);
+            try runPropertyCase(op, ty, null, null);
             totals[@intFromEnum(op)] += 1;
         };
         if (is_non_matrix) {
-            try runPropertyCase(.shuffle, ty, null);
+            try runPropertyCase(.shuffle, ty, null, null);
             totals[@intFromEnum(ir.Op.shuffle)] += 1;
         }
         if (is_float) inline for ([_]ir.Op{ .fneg, .fadd, .fsub, .fmul, .fdiv }) |op| {
-            try runPropertyCase(op, ty, null);
+            try runPropertyCase(op, ty, null, null);
             totals[@intFromEnum(op)] += 1;
         };
         if (is_integer) inline for ([_]ir.Op{ .iadd, .isub }) |op| {
-            try runPropertyCase(op, ty, null);
+            try runPropertyCase(op, ty, null, null);
             totals[@intFromEnum(op)] += 1;
         };
         if (is_float and is_vector) {
-            try runPropertyCase(.vector_times_scalar, ty, null);
+            try runPropertyCase(.vector_times_scalar, ty, null, null);
             totals[@intFromEnum(ir.Op.vector_times_scalar)] += 1;
         }
         if (is_numeric and is_non_matrix) for ([_]ir.Scalar{ .i32, .u32, .f32 }) |from| if (from != ty.scalar) {
-            try runPropertyCase(.convert, ty, from);
+            try runPropertyCase(.convert, ty, null, from);
             totals[@intFromEnum(ir.Op.convert)] += 1;
         };
     }
-    try runPropertyCase(.matrix_times_vector, .{ .scalar = .f32, .columns = 4 }, null);
+    for (property_types) |source_ty| if (source_ty.scalar != .bool and source_ty.rows == 1 and source_ty.columns > 1) {
+        try runPropertyCase(.extract, .{ .scalar = source_ty.scalar }, source_ty, null);
+        totals[@intFromEnum(ir.Op.extract)] += 1;
+    };
+    try runPropertyCase(.matrix_times_vector, .{ .scalar = .f32, .columns = 4 }, null, null);
     totals[@intFromEnum(ir.Op.matrix_times_vector)] += 1;
-    const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 14, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14 };
+    const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14 };
     try std.testing.expectEqual(expected, totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 186), total);
+    try std.testing.expectEqual(@as(usize, 181), total);
     std.debug.print("generated property matrix: operations=19 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 

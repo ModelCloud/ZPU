@@ -100,11 +100,18 @@ classified as unsupported.
 
 The bounded generated matrix uses operation, scalar class, and shape as
 independent axes. Shapes are scalar, vec2, vec3, vec4, and f32 mat4; scalar
-classes are bool where applicable and i32, u32, and f32. It generates 186
+classes are bool where applicable and i32, u32, and f32. It generates 181
 valid cases across all 19 canonical operations, in enum order:
-`14, 10, 14, 14, 14, 10, 14, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14`.
+`14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14`.
 Each generated valid case is initialized, executed twice, and required to
 retain its exact type, lane bits, and deterministic result.
+The nine extract cases are indexed scalar results from vec2, vec3, and vec4
+sources across i32, u32, and f32. Scalar identity extraction and mat4 indexed
+extraction are not claimed because neither is an accepted indexed-extract
+shape. Twelve frontend-generated constant-access cases span vec2–vec4, mat4,
+and one-/two-member blocks at every valid member index; each compiles and
+initializes the executor. Twelve corresponding computed scalar-u32 indices are rejected by
+the frontend before an executor program exists.
 
 Independent generated negative/runtime categories contain exactly 19 malformed
 arity programs (one per operation), 41 bounds failures (uniform-member,
