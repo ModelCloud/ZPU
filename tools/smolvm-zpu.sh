@@ -26,11 +26,11 @@ require_smolvm_cli() {
     version=$(smolvm --version | sed -nE 's/.*[^0-9]([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -1)
     [[ -n $version ]] || die 'could not parse smolvm --version'
     [[ $(printf '%s\n' 1.7.0 "$version" | sort -V | head -1) == 1.7.0 ]] || die "smolvm $version is too old; require >= 1.7.0 for --mount-socket"
-    smolvm machine create --help | grep -Fq -- '--mount-socket <HOST_PATH:GUEST_PATH>' || die 'smolvm machine create lacks required --mount-socket HOST_PATH:GUEST_PATH'
-    smolvm machine create --help | grep -Fq -- '--smolfile <PATH>' || die 'smolvm machine create lacks required --smolfile support'
-    smolvm machine cp --help | grep -Fq -- 'machine cp <SRC> <DST>' || die 'smolvm lacks required machine cp SRC DST support'
-    smolvm machine stop --help | grep -Fq -- '--name <NAME>' || die 'smolvm lacks required machine stop --name support'
-    smolvm machine update --help | grep -Fq -- '--no-net' || die 'smolvm lacks required machine update --no-net support'
+    smolvm machine create --help | grep -F -- '--mount-socket <HOST_PATH:GUEST_PATH>' >/dev/null || die 'smolvm machine create lacks required --mount-socket HOST_PATH:GUEST_PATH'
+    smolvm machine create --help | grep -F -- '--smolfile <PATH>' >/dev/null || die 'smolvm machine create lacks required --smolfile support'
+    smolvm machine cp --help | grep -E -- 'machine cp (\[OPTIONS\] )?<SRC> <DST>' >/dev/null || die 'smolvm lacks required machine cp SRC DST support'
+    smolvm machine stop --help | grep -F -- '--name <NAME>' >/dev/null || die 'smolvm lacks required machine stop --name support'
+    smolvm machine update --help | grep -F -- '--no-net' >/dev/null || die 'smolvm lacks required machine update --no-net support'
 }
 require_host() {
     command -v xauth >/dev/null || die 'xauth not found'
