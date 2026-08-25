@@ -1,6 +1,5 @@
-# Mutable convenience default: override with an immutable digest for a
-# reproducible guest, e.g. ZPU_SMOLVM_IMAGE=archlinux@sha256:...
-image = "archlinux:base-devel"
+# The image is deliberately supplied only by tools/smolvm-zpu.sh --image so a
+# ZPU_SMOLVM_IMAGE immutable digest cannot be shadowed by this file.
 cpus = 8
 memory = 8192
 net = true

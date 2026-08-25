@@ -15,8 +15,9 @@ shift 2
 case $subcommand in
     create)
         if (($# == 1)) && [[ $1 == --help ]]; then
-            printf '%s\n' 'Usage: smolvm machine create [OPTIONS] [-- <COMMAND>...]' \
-                '      --mount-socket <HOST_PATH:GUEST_PATH>' '      --smolfile <PATH>'
+            printf '%s\n' 'Usage: smolvm machine create [OPTIONS] [-- <COMMAND>...]'
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == mount-socket ]] || printf '%s\n' '      --mount-socket <HOST_PATH:GUEST_PATH>'
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == smolfile ]] || printf '%s\n' '      --smolfile <PATH>'
             exit 0
         fi
         name= smolfile= image= cpus= mem= socket= net=0
@@ -39,6 +40,20 @@ case $subcommand in
     start)
         (($# == 2)) && [[ $1 == --name && -n $2 ]] || fail 'expected: machine start --name NAME'
         ;;
+    stop)
+        if (($# == 1)) && [[ $1 == --help ]]; then
+            echo 'Usage: smolvm machine stop [OPTIONS] --name <NAME>'
+            exit 0
+        fi
+        (($# == 2)) && [[ $1 == --name && -n $2 ]] || fail 'expected: machine stop --name NAME'
+        ;;
+    update)
+        if (($# == 1)) && [[ $1 == --help ]]; then
+            printf '%s\n' 'Usage: smolvm machine update [OPTIONS] --name <NAME>' '      --no-net'
+            exit 0
+        fi
+        (($# == 3)) && [[ $1 == --name && -n $2 && $3 == --no-net ]] || fail 'expected: machine update --name NAME --no-net'
+        ;;
     exec)
         (($# >= 4)) && [[ $1 == --name && -n $2 && $3 == -- ]] || fail 'expected: machine exec --name NAME -- COMMAND...'
         shift 3
@@ -46,6 +61,7 @@ case $subcommand in
         ;;
     cp)
         if (($# == 1)) && [[ $1 == --help ]]; then
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == cp ]] && { echo 'Usage: smolvm machine cp'; exit 0; }
             echo 'Usage: smolvm machine cp <SRC> <DST>'
             exit 0
         fi

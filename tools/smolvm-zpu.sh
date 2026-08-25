@@ -29,6 +29,8 @@ require_smolvm_cli() {
     smolvm machine create --help | grep -Fq -- '--mount-socket <HOST_PATH:GUEST_PATH>' || die 'smolvm machine create lacks required --mount-socket HOST_PATH:GUEST_PATH'
     smolvm machine create --help | grep -Fq -- '--smolfile <PATH>' || die 'smolvm machine create lacks required --smolfile support'
     smolvm machine cp --help | grep -Fq -- 'machine cp <SRC> <DST>' || die 'smolvm lacks required machine cp SRC DST support'
+    smolvm machine stop --help | grep -Fq -- '--name <NAME>' || die 'smolvm lacks required machine stop --name support'
+    smolvm machine update --help | grep -Fq -- '--no-net' || die 'smolvm lacks required machine update --no-net support'
 }
 require_host() {
     command -v xauth >/dev/null || die 'xauth not found'
@@ -48,8 +50,12 @@ preflight() {
 }
 prepare_auth() {
     local bootstrap_auth=$auth_dir/bootstrap-Xauthority
+    local before=$auth_dir/before.nlist
+    local after=$auth_dir/after.nlist
+    local selected=$auth_dir/selected.nlist
+    local generated_key
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
-        printf '+ prepare 300-second untrusted Xauthority cookie in %q for %q\n' "$auth_dir" "$display"
+        printf '+ prepare X SECURITY untrusted Xauthority cookie with 300-second idle timeout in %q for %q\n' "$auth_dir" "$display"
         return
     fi
     install -d -m 700 "$auth_dir"
@@ -57,19 +63,25 @@ prepare_auth() {
     chmod 600 "$bootstrap_auth"
     xauth nlist "$display" | sed -e 's/^..../ffff/' | xauth -f "$bootstrap_auth" nmerge -
     [[ -s $bootstrap_auth ]] || die "no Xauthority cookie for $display"
-    if xauth -f "$bootstrap_auth" generate "$display" . untrusted timeout 300 >/dev/null 2>&1; then
-        printf '%s\n' untrusted > "$auth_dir/mode"
-    elif [[ ${ZPU_SMOLVM_ALLOW_TRUSTED_X11:-0} == 1 ]]; then
-        printf '%s\n' trusted-fallback > "$auth_dir/mode"
-        printf 'zpu-smolvm: WARNING: X SECURITY untrusted cookie unavailable; explicit full-trust X11 fallback enabled\n' >&2
-    else
-        die 'X server could not generate a 300-second untrusted cookie; use a nested X server, or explicitly accept full X11 authority with ZPU_SMOLVM_ALLOW_TRUSTED_X11=1'
-    fi
+    xauth -f "$bootstrap_auth" nlist "$display" > "$before"
+    [[ $(awk 'NF { count++ } END { print count + 0 }' "$before") -eq 1 ]] || die "expected exactly one trusted bootstrap Xauthority entry for $display"
     : > "$auth_dir/Xauthority"
     chmod 600 "$auth_dir/Xauthority"
-    xauth -f "$bootstrap_auth" nlist "$display" | sed -e 's/^..../ffff/' | xauth -f "$auth_dir/Xauthority" nmerge -
-    [[ -s $auth_dir/Xauthority ]] || die "generated Xauthority cookie for $display is empty"
-    rm -f "$bootstrap_auth"
+    if XAUTHORITY="$bootstrap_auth" xauth -f "$bootstrap_auth" generate "$display" . untrusted timeout 300 >/dev/null 2>&1; then
+        xauth -f "$bootstrap_auth" nlist "$display" > "$after"
+        grep -Fvx -f "$before" "$after" > "$selected" || true
+        [[ $(awk 'NF { count++ } END { print count + 0 }' "$selected") -eq 1 ]] || die 'X SECURITY generation did not produce exactly one distinct untrusted authorization entry'
+        generated_key=$(awk 'NF { print $NF }' "$selected")
+        ! awk 'NF { print $NF }' "$before" | grep -Fxq "$generated_key" || die 'X SECURITY returned the original trusted authorization key'
+    elif [[ ${ZPU_SMOLVM_ALLOW_TRUSTED_X11:-0} == 1 ]]; then
+        cp "$before" "$selected"
+        printf 'zpu-smolvm: WARNING: X SECURITY untrusted cookie unavailable; explicit full-trust X11 fallback enabled\n' >&2
+    else
+        die 'X server could not generate an untrusted authorization with a 300-second idle timeout; use a nested X server, or explicitly accept full X11 authority with ZPU_SMOLVM_ALLOW_TRUSTED_X11=1'
+    fi
+    xauth -f "$auth_dir/Xauthority" nmerge - < "$selected"
+    [[ $(xauth -f "$auth_dir/Xauthority" nlist "$display" | awk 'NF { count++ } END { print count + 0 }') -eq 1 ]] || die 'guest Xauthority must contain exactly one entry'
+    rm -f "$bootstrap_auth" "$before" "$after" "$selected"
 }
 prepare_source() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
@@ -84,20 +96,23 @@ prepare_source() {
     fi
 }
 create() {
+    reject_host_injection
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
-        reject_host_injection
-        printf 'DRY-RUN: preflight is not bypassed by real commands; run `tools/smolvm-zpu preflight` on the launch host\n'
+        printf 'DRY-RUN: preflight is not bypassed by real commands; run `tools/smolvm-zpu.sh preflight` on the launch host\n'
     else
         preflight
     fi
-    prepare_auth
     run smolvm machine create --name "$machine" --smolfile "$repo/smolvm/Smolfile" --image "$image" --net \
         --cpus "$cpus" --mem "$memory" \
         --mount-socket /tmp/.X11-unix/X0:/tmp/.X11-unix/X0
 }
 bootstrap() {
+    reject_host_injection
     run smolvm machine start --name "$machine"
     run smolvm machine exec --name "$machine" -- pacman -Syu --noconfirm zig vulkan-headers vulkan-icd-loader vulkan-tools libxcb
+    run smolvm machine stop --name "$machine"
+    run smolvm machine update --name "$machine" --no-net
+    run smolvm machine start --name "$machine"
 }
 sync_source() {
     prepare_source
@@ -105,12 +120,14 @@ sync_source() {
     run smolvm machine cp "$source_archive" "$machine:/var/tmp/zpu-source.tar"
     run smolvm machine exec --name "$machine" -- tar -C /mnt/zpu-source -xf /var/tmp/zpu-source.tar
 }
-build_guest() { sync_source; run smolvm machine exec --name "$machine" -- /mnt/zpu-source/smolvm/guest-build.sh; }
+build_guest() { reject_host_injection; sync_source; run smolvm machine exec --name "$machine" -- /mnt/zpu-source/smolvm/guest-build.sh; }
 package_guest() {
+    reject_host_injection
     run smolvm machine exec --name "$machine" -- sh -ceu \
         "tar -C /opt -czf /var/lib/zpu-native-icd.tar.gz zpu && test -s /var/lib/zpu-native-icd.tar.gz"
 }
 stage_guest() {
+    reject_host_injection
     run smolvm machine exec --name "$machine" -- sh -ceu \
         "rm -rf /opt/zpu && mkdir -p /opt && tar -C /opt -xzf /var/lib/zpu-native-icd.tar.gz && test -r '$guest_manifest'"
 }

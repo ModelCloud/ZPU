@@ -21,25 +21,30 @@ X11 socket. It receives no host-directory mount, host `/dev/dri`, Vulkan files,
 libraries, loader variables, home directory, Wayland socket, or broad runtime
 directory.
 
-**Outbound networking remains enabled for the machine lifetime.** SmolVM 1.7.0
-persists the create-time `--net` setting and does not expose a documented
-in-place disable flag used by this workflow. A compromised guest can therefore
-make outbound connections, scan services reachable through SmolVM networking,
-and exfiltrate guest data or the X11 credential described below. Stop or delete
-the machine after validation; use host firewall/account isolation if the guest
-is not trusted.
+Networking is enabled only for bootstrap package installation. Immediately
+after `pacman` completes, the launcher stops the machine, runs the documented
+SmolVM 1.7.0 `machine update --name NAME --no-net` operation while it is
+stopped, and restarts it. Networking is therefore disabled before any source,
+build, package, stage, or launch work. Failure of stop, update, or restart aborts
+the bootstrap chain. The package transaction still has network authority and
+must be treated as a supply-chain boundary; inspect or pin the Arch repositories
+and image when reproducible inputs are required.
 
 The launcher copies the current MIT-MAGIC-COOKIE-1 entry into a private
 bootstrap authority database, then uses it to ask the X SECURITY extension for
-a separate **untrusted**, 300-second cookie. It reconstructs the guest authority
-file from that generated entry and never mounts the host authority file. An
+a separate **untrusted** cookie with a 300-second idle timeout. It computes the
+exact before/after entry difference, requires one newly generated key distinct
+from the trusted key, and constructs a fresh guest authority file containing
+exactly that one entry. It never mounts the host authority file. An
 untrusted X client can create and draw its own windows, which is enough
 for ZPU's XCB WSI, while the X server restricts access to resources belonging to
-trusted clients. Cookie expiry and X SECURITY support remain part of the host X
-server's enforcement, so a disposable nested X server is still the strongest
-choice for hostile code.
+trusted clients. The X SECURITY timeout purges an authorization after the
+configured period of disuse; it is not an absolute credential lifetime, and
+active use can keep it valid. X server enforcement and a disposable nested X
+server remain the strongest boundary for hostile code.
 
-If Xwayland cannot generate an untrusted cookie, launch fails closed. Setting
+If Xwayland cannot generate or uniquely identify an untrusted cookie, launch
+fails closed and does not copy the trusted bootstrap key. Setting
 `ZPU_SMOLVM_ALLOW_TRUSTED_X11=1` explicitly enables a fallback cookie with
 **full X11 client authority** for that display. A malicious guest with that
 credential may inspect other X11 windows, capture X11-visible content or input,
@@ -82,17 +87,19 @@ smolvm --version
 tools/smolvm-zpu.sh preflight
 ```
 
-The default OCI userspace tag is `archlinux:base-devel`, matching Omarchy's Arch
-base, but it is mutable and therefore non-deterministic. For reproducibility,
+The launcher default OCI userspace tag is `archlinux:base-devel`, matching
+Omarchy's Arch base, but it is mutable and therefore non-deterministic. For reproducibility,
 set `ZPU_SMOLVM_IMAGE` to an immutable `name@sha256:...` digest (preferably an
 organization-maintained Omarchy-derived OCI root filesystem). Record that
 digest with test evidence. Do not run Omarchy's interactive
 bare-metal installer in this ephemeral OCI workload: it assumes systemd boot,
 real seat/input devices, and ownership of the desktop. The checked-in
 `smolvm/Smolfile` is actually passed to `machine create --smolfile`; it records
-the default image, resources, network, and no-GPU policy. Explicit CLI values
-override its image/resource fields, and the X11 socket is supplied separately
-because its host path is session-specific.
+resources, bootstrap networking, and the no-GPU policy. It deliberately has no
+image field: the launcher is the sole image source and always passes
+`--image "$ZPU_SMOLVM_IMAGE"`, so an immutable digest cannot be shadowed by the
+Smolfile. The X11 socket is supplied separately because its host path is
+session-specific.
 
 ## Exact lifecycle
 
@@ -108,6 +115,10 @@ tools/smolvm-zpu.sh package
 tools/smolvm-zpu.sh stage
 tools/smolvm-zpu.sh launch
 ```
+
+`bootstrap` starts the machine, installs the required packages, stops it,
+persists `--no-net`, and restarts it. Do not proceed to `build` if that command
+fails.
 
 Commit the intended source first: `build` refuses a dirty index or worktree,
 exports tracked `HEAD` to a source-only tar archive, rejects binary/build
@@ -141,7 +152,8 @@ Preflight is fail-closed and reports the first remediation:
   Xauthority cookie;
 - no host graphics-loader injection variables, and no host build output in the
   immutable source export;
-- guest Arch package network access during bootstrap;
+- guest Arch package network access only during bootstrap, followed by a
+  successful stop/update-`--no-net`/restart sequence;
 - guest Zig exactly 0.16.0, `vulkan-headers`, Vulkan loader/tools, and `libxcb`
   packages, with readable Vulkan and XCB development headers (if the
   rolling Arch `zig` package has moved, install upstream's 0.16.0 archive in

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+host_entry='ffff 0000 0002 3a30 0012 4d49542d4d414749432d434f4f4b49452d31 0010 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+guest_entry='ffff 0000 0002 3a30 0012 4d49542d4d414749432d434f4f4b49452d31 0010 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+
+if [[ $1 == nlist ]]; then
+    printf '%s\n' "$host_entry"
+    exit 0
+fi
+[[ $1 == -f && $# -ge 3 ]] || { echo 'xauth fixture: unsupported argv' >&2; exit 64; }
+authority=$2
+command=$3
+case $command in
+    nmerge) cat > "$authority" ;;
+    nlist) test -f "$authority" && cat "$authority" ;;
+    generate)
+        [[ ${XAUTHORITY:-} == "$authority" ]] || { echo 'xauth fixture: generation did not use isolated bootstrap authority' >&2; exit 64; }
+        [[ ${SMOLVM_XAUTH_GENERATE_FAIL:-0} != 1 ]] || exit 1
+        printf '%s\n' "$guest_entry" >> "$authority"
+        ;;
+    *) echo "xauth fixture: unsupported command: $command" >&2; exit 64 ;;
+esac

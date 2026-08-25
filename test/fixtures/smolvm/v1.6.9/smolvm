@@ -4,4 +4,4 @@ if (($# == 1)) && [[ $1 == --version ]]; then
     echo 'smolvm 1.6.9'
     exit 0
 fi
-exec "$(dirname "$0")/smolvm" "$@"
+exec "$(dirname "$0")/../v1.7.0/smolvm" "$@"

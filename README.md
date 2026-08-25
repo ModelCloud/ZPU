@@ -176,7 +176,10 @@ tools/limited-cpus.sh zig build smolvm-guest-test
 tools/limited-cpus.sh zig build smolvm-dry-run
 ```
 
-CI runs these commands on Linux. Generated PPM files and Zig build outputs are ignored.
+These are the repository's Linux gates; the CI configuration is the exact
+authoritative list run by CI. The SmolVM isolation fixture and dry-run commands
+above are local review gates and are not currently CI jobs. Generated PPM files
+and Zig build outputs are ignored.
 
 `target-800x600` runs the real `vkcube` XCB path at 800x600, discards 120 warmup
 frames, then times 1,000 consecutive presented frames. It fails unless p99 frame
