@@ -13,6 +13,9 @@ fi
 (($# >= 2)) && [[ $1 == machine ]] || fail 'expected machine subcommand'
 subcommand=$2
 shift 2
+if [[ ${SMOLVM_FIXTURE_FAIL_HELP:-} == "$subcommand" && $# == 1 && $1 == --help ]]; then
+    fail "injected $subcommand help failure"
+fi
 
 case $subcommand in
     create)
@@ -59,6 +62,11 @@ case $subcommand in
             exit 0
         fi
         (($# == 2)) && [[ $1 == --name && -n $2 ]] || fail 'expected: machine stop --name NAME'
+        if [[ -n ${SMOLVM_FIXTURE_FAIL_STOP_ONCE_FILE:-} && ! -e $SMOLVM_FIXTURE_FAIL_STOP_ONCE_FILE ]]; then
+            : > "$SMOLVM_FIXTURE_FAIL_STOP_ONCE_FILE"
+            fail 'injected idempotent stop failure'
+        fi
+        [[ ${SMOLVM_FIXTURE_FAIL_STOP:-0} != 1 ]] || fail 'injected stop failure'
         ;;
     update)
         if (($# == 1)) && [[ $1 == --help ]]; then
@@ -109,6 +117,7 @@ case $subcommand in
             duplicate) printf '[{"name":"%s","network":false,"state":"stopped"},{"name":"%s","network":false,"state":"stopped"}]\n' "$name" "$name" ;;
             missing-network) printf '[{"name":"%s","state":"%s"}]\n' "$name" "$state" ;;
             missing-state) printf '[{"name":"%s","network":%s}]\n' "$name" "$net" ;;
+            malformed) printf '{not-json\n' ;;
             *) fail 'unknown SMOLVM_FIXTURE_JSON_MODE' ;;
         esac
         ;;

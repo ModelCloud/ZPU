@@ -6,6 +6,7 @@ unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT ZPU_REFRESH_HZ
 unset ZPU_SMOLVM_MACHINE ZPU_SMOLVM_IMAGE ZPU_SMOLVM_CPUS ZPU_SMOLVM_MEMORY ZPU_SMOLVM_ALLOW_TRUSTED_X11 ZPU_SMOLVM_DRY_RUN
 unset SMOLVM_FIXTURE_OMIT SMOLVM_FIXTURE_NETWORK SMOLVM_FIXTURE_STATE SMOLVM_FIXTURE_JSON_MODE SMOLVM_FIXTURE_FAIL_PACMAN
 unset SMOLVM_FIXTURE_LOG SMOLVM_FIXTURE_PACMAN_SLEEP SMOLVM_FIXTURE_PACMAN_READY SMOLVM_XAUTH_NLIST_FAIL SMOLVM_XAUTH_GENERATE_FAIL
+unset SMOLVM_FIXTURE_FAIL_STOP SMOLVM_FIXTURE_FAIL_STOP_ONCE_FILE SMOLVM_FIXTURE_FAIL_HELP
 unset SMOLVM_XAUTH_DUPLICATE_EQUIVALENT SMOLVM_XAUTH_EQUAL_KEY SMOLVM_XAUTH_MULTIPLE_NEW
 
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -104,13 +105,17 @@ done
 if SMOLVM_FIXTURE_JSON_MODE=missing-network "$repo/tools/smolvm-zpu.sh" package >"$tmp/out" 2>"$tmp/err"; then
     echo 'missing persisted network field was treated as false' >&2; exit 1
 fi
-grep -F 'persisted network must be exactly false' "$tmp/err"
+grep -F 'could not uniquely read persisted network' "$tmp/err"
 ln -sfn "$fixture" "$tmp/bin/smolvm"
 for capability in create-name image cpus mem start-name update-name update-net exec-name ls-json; do
     if SMOLVM_FIXTURE_OMIT=$capability "$repo/tools/smolvm-zpu.sh" cli-check >"$tmp/out" 2>"$tmp/err"; then
         echo "SmolVM missing capability unexpectedly passed: $capability" >&2; exit 1
     fi
 done
+if SMOLVM_FIXTURE_FAIL_HELP=create "$repo/tools/smolvm-zpu.sh" cli-check >"$tmp/out" 2>"$tmp/err"; then
+    echo 'failed CLI help capture unexpectedly passed' >&2; exit 1
+fi
+grep -F 'failed to capture smolvm machine create --help' "$tmp/err"
 if VK_DRIVER_FILES=/host/injection "$repo/tools/smolvm-zpu.sh" cli-check >"$tmp/out" 2>"$tmp/err"; then
     echo 'cli-check accepted host Vulkan injection' >&2; exit 1
 fi
@@ -157,7 +162,7 @@ pacman_line=$(unique_line_number 'bootstrap package install' 'pacman -Syu' "$out
 enable_line=$(unique_line_number 'network enable' 'machine update --name zpu-omarchy --net' "$out")
 stop_line=$(last_line_number 'machine stop' 'machine stop --name' "$out")
 update_line=$(unique_line_number 'network disable' 'machine update --name zpu-omarchy --no-net' "$out")
-stopped_proof_line=$(unique_line_number 'stopped-state proof' 'is stopped' "$out")
+stopped_proof_line=$(last_line_number 'stopped-state proof' 'is stopped' "$out")
 network_proof_line=$(first_line_number 'network=false proof' 'has network=false' "$out")
 restart_line=$(last_line_number 'machine restart' 'machine start --name zpu-omarchy' "$out")
 build_line=$(unique_line_number 'guest build' 'guest-build.sh' "$out")
@@ -207,16 +212,20 @@ done
 # Machine selection is exact: unrelated records are ignored, while zero or
 # duplicate matches and absent security fields fail closed.
 SMOLVM_FIXTURE_JSON_MODE=unrelated "$repo/tools/smolvm-zpu.sh" package >/dev/null
-for json_mode in zero duplicate missing-network; do
+for json_mode in zero duplicate missing-network malformed; do
     if SMOLVM_FIXTURE_JSON_MODE=$json_mode "$repo/tools/smolvm-zpu.sh" package >"$tmp/out" 2>"$tmp/err"; then
         echo "machine JSON mode unexpectedly passed: $json_mode" >&2; exit 1
     fi
-    grep -F 'persisted network must be exactly false' "$tmp/err" >/dev/null || { echo "missing actionable network diagnostic: $json_mode" >&2; exit 1; }
+    grep -F 'could not uniquely read persisted network' "$tmp/err" >/dev/null || { echo "missing actionable JSON diagnostic: $json_mode" >&2; exit 1; }
 done
 if SMOLVM_FIXTURE_JSON_MODE=missing-state "$repo/tools/smolvm-zpu.sh" bootstrap >"$tmp/out" 2>"$tmp/err"; then
     echo 'missing persisted state field unexpectedly passed bootstrap' >&2; exit 1
 fi
 grep -F 'could not prove machine stopped with persisted network=false' "$tmp/err" >/dev/null || { echo 'missing actionable state diagnostic' >&2; exit 1; }
+
+# A failed idempotent stop is tolerated only when persisted state proves the
+# machine is already stopped. Real state strings are accepted case-insensitively.
+SMOLVM_FIXTURE_FAIL_STOP_ONCE_FILE="$tmp/stop.failed" SMOLVM_FIXTURE_STATE=STOPPED "$repo/tools/smolvm-zpu.sh" bootstrap >/dev/null
 
 # A package-manager failure after network enable triggers stop + no-net update.
 : > "$tmp/lifecycle.log"
@@ -235,14 +244,30 @@ fi
 grep -F 'could not prove machine stopped with persisted network=false' "$tmp/err"
 
 : > "$tmp/signal.log"
-SMOLVM_FIXTURE_PACMAN_SLEEP=1 SMOLVM_FIXTURE_PACMAN_READY="$tmp/pacman.ready" SMOLVM_FIXTURE_LOG="$tmp/signal.log" "$repo/tools/smolvm-zpu.sh" bootstrap >"$tmp/out" 2>"$tmp/signal.err" &
-signal_pid=$!
-for _ in {1..200}; do [[ -e $tmp/pacman.ready ]] && break; sleep 0.01; done
-[[ -e $tmp/pacman.ready ]] || { echo 'bootstrap signal fixture never reached pacman readiness' >&2; exit 1; }
-kill -TERM "$signal_pid"
-if wait "$signal_pid"; then echo 'TERM-interrupted bootstrap unexpectedly passed' >&2; exit 1; fi
+SMOLVM_FIXTURE_PACMAN_SLEEP=30 SMOLVM_FIXTURE_PACMAN_READY="$tmp/pacman.ready" SMOLVM_FIXTURE_LOG="$tmp/signal.log" \
+python3 - "$repo/tools/smolvm-zpu.sh" "$tmp/pacman.ready" "$tmp/out" "$tmp/signal.err" <<'PY'
+import os, pathlib, signal, subprocess, sys, time
+with open(sys.argv[3], "wb") as stdout, open(sys.argv[4], "wb") as stderr:
+    child = subprocess.Popen([sys.argv[1], "bootstrap"], stdout=stdout, stderr=stderr, start_new_session=True)
+    for _ in range(400):
+        if pathlib.Path(sys.argv[2]).exists():
+            break
+        if child.poll() is not None:
+            raise SystemExit(f"bootstrap exited before readiness with status {child.returncode}")
+        time.sleep(0.01)
+    else:
+        child.terminate()
+        child.wait()
+        raise SystemExit("bootstrap signal fixture never reached pacman readiness")
+    os.killpg(child.pid, signal.SIGINT)
+    status = child.wait()
+    if status != 130:
+        raise SystemExit(f"Ctrl-C bootstrap status was {status}, expected 130")
+PY
 grep -F 'cleanup verified machine stopped with persisted network=false' "$tmp/signal.err"
 grep -F 'machine update --name zpu-omarchy --no-net' "$tmp/signal.log"
+# The fixture's final persisted record is the cleanup invariant.
+SMOLVM_FIXTURE_STATE=stopped SMOLVM_FIXTURE_NETWORK=false "$repo/tools/smolvm-zpu.sh" package >/dev/null
 
 # Any host loader/driver injection fails before smolvm executes.
 for command in create bootstrap build package stage launch; do
@@ -337,4 +362,25 @@ fi
 auto_out=$(env -u XDG_RUNTIME_DIR ZPU_SMOLVM_DRY_RUN=1 "$repo/tools/smolvm-zpu.sh" dry-run)
 auto_root=$(grep -Eo '/tmp/zpu-smolvm-runtime-[^/ ]+' <<<"$auto_out" | sed -n '1p')
 [[ -n $auto_root && ! -e $auto_root ]]
+
+# A pre-planted symlink at either launcher-owned path is rejected.
+symlink_base="$tmp/symlink-base"
+mkdir -m 700 "$symlink_base" "$tmp/symlink-target"
+ln -s "$tmp/symlink-target" "$symlink_base/zpu-smolvm"
+if XDG_RUNTIME_DIR="$symlink_base" ZPU_SMOLVM_DRY_RUN=1 "$repo/tools/smolvm-zpu.sh" dry-run >"$tmp/out" 2>"$tmp/err"; then
+    echo 'symlinked launcher runtime unexpectedly passed' >&2; exit 1
+fi
+grep -F 'runtime and authorization paths must not be symlinks' "$tmp/err"
+auth_symlink_base="$tmp/auth-symlink-base"
+mkdir -m 700 "$auth_symlink_base" "$auth_symlink_base/zpu-smolvm" "$tmp/auth-symlink-target"
+ln -s "$tmp/auth-symlink-target" "$auth_symlink_base/zpu-smolvm/xauth"
+if XDG_RUNTIME_DIR="$auth_symlink_base" ZPU_SMOLVM_DRY_RUN=1 "$repo/tools/smolvm-zpu.sh" dry-run >"$tmp/out" 2>"$tmp/err"; then
+    echo 'symlinked authorization runtime unexpectedly passed' >&2; exit 1
+fi
+grep -F 'runtime and authorization paths must not be symlinks' "$tmp/err"
+
+# Source transfer removes both transient copies after extraction.
+"$repo/tools/smolvm-zpu.sh" build >/dev/null
+[[ ! -e $tmp/runtime/zpu-smolvm/zpu-source.tar ]] || { echo 'host source archive remained after transfer' >&2; exit 1; }
+grep -F 'rm -f /var/tmp/zpu-source.tar' <<<"$out" >/dev/null || { echo 'dry-run omitted guest source archive cleanup' >&2; exit 1; }
 printf '%s\n' 'SmolVM guest isolation contract passed'

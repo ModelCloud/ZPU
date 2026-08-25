@@ -198,6 +198,11 @@ Run `zig build smolvm-guest-test` for the no-hardware command/isolation gate and
 `tools/smolvm-zpu.sh launch` and cannot be claimed without KVM, SmolVM, and the
 active Omarchy display.
 
+Image, networking, CPU, and memory are deliberately absent from
+`smolvm/Smolfile`. The launcher owns those settings, supplies explicit
+`--image`, `--cpus`, and `--mem` values, and preflight capability-gates each
+flag. This avoids relying on undocumented Smolfile/CLI precedence.
+
 `zig build smolvm-dry-run` invokes `test/smolvm_dry_run.sh`, which constructs a
 private socket/runtime and fixture-only `PATH`, then runs the launcher under
 `env -i`. It needs neither an installed SmolVM nor a live X server and cannot

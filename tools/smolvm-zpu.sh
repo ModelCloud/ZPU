@@ -49,6 +49,10 @@ init_runtime() {
     runtime=$base/zpu-smolvm
     auth_dir=$runtime/xauth
     source_archive=$runtime/zpu-source.tar
+    [[ ! -L $runtime && ! -L $auth_dir ]] || die 'runtime and authorization paths must not be symlinks'
+    if [[ -e $runtime ]]; then
+        [[ -d $runtime && $(stat -c %u "$runtime") == "$UID" && $(stat -c %a "$runtime") == 700 ]] || die 'existing ZPU runtime must be a current-user directory with mode exactly 700'
+    fi
     install -d -m 700 "$runtime"
 }
 cleanup_runtime() {
@@ -63,9 +67,13 @@ require_smolvm_cli() {
     version=$(printf '%s\n' "$version_output" | sed -nE 's/^[^0-9]*([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' | sed -n '1p')
     [[ -n $version ]] || die 'could not parse smolvm --version'
     [[ $(printf '%s\n' 1.7.0 "$version" | sort -V | head -1) == 1.7.0 ]] || die "smolvm $version is too old; require >= 1.7.0 for --mount-socket"
-    create_help=$(smolvm machine create --help); start_help=$(smolvm machine start --help)
-    stop_help=$(smolvm machine stop --help); update_help=$(smolvm machine update --help)
-    exec_help=$(smolvm machine exec --help); cp_help=$(smolvm machine cp --help); ls_help=$(smolvm machine ls --help)
+    create_help=$(smolvm machine create --help) || die 'failed to capture smolvm machine create --help'
+    start_help=$(smolvm machine start --help) || die 'failed to capture smolvm machine start --help'
+    stop_help=$(smolvm machine stop --help) || die 'failed to capture smolvm machine stop --help'
+    update_help=$(smolvm machine update --help) || die 'failed to capture smolvm machine update --help'
+    exec_help=$(smolvm machine exec --help) || die 'failed to capture smolvm machine exec --help'
+    cp_help=$(smolvm machine cp --help) || die 'failed to capture smolvm machine cp --help'
+    ls_help=$(smolvm machine ls --help) || die 'failed to capture smolvm machine ls --help'
     local flag
     for flag in '--name' '--smolfile' '--image' '--mount-socket'; do
         grep -F -- "$flag" <<<"$create_help" >/dev/null || die "smolvm machine create lacks required $flag support"
@@ -83,7 +91,7 @@ require_smolvm_cli() {
 }
 machine_state_matches() {
     local field=$1 expected=$2 state
-    command -v python3 >/dev/null || return 2
+    command -v python3 >/dev/null || return 3
     state=$(smolvm machine ls --json) || return 2
     SMOLVM_STATE=$state python3 - "$machine" "$field" "$expected" <<'PY'
 import json, os, sys
@@ -92,23 +100,39 @@ try:
     rows = data if isinstance(data, list) else data["machines"]
     matches = [row for row in rows if row.get("name") == sys.argv[1]]
     if len(matches) != 1 or sys.argv[2] not in matches[0]:
-        raise SystemExit(1)
+        raise SystemExit(2)
     expected = {"true": True, "false": False}.get(sys.argv[3], sys.argv[3])
-    raise SystemExit(0 if matches[0][sys.argv[2]] == expected else 1)
+    actual = matches[0][sys.argv[2]]
+    if sys.argv[2] == "state" and isinstance(actual, str):
+        actual = actual.lower()
+    raise SystemExit(0 if actual == expected else 1)
 except (KeyError, TypeError, ValueError):
     raise SystemExit(2)
 PY
+}
+state_error() {
+    local rc=$1 field=$2 expected=$3
+    case $rc in
+        1) die "machine $machine persisted $field must be exactly $expected" ;;
+        2) die "could not uniquely read persisted $field for machine $machine from smolvm machine ls --json" ;;
+        3) die 'python3 is required to evaluate persisted SmolVM JSON state' ;;
+        *) die "smolvm machine ls --json failed while checking persisted $field for machine $machine" ;;
+    esac
 }
 assert_network_disabled() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
         printf '+ verify persisted SmolVM state for %q has network=false\n' "$machine"
         return
     fi
-    machine_state_matches network false || die "machine $machine must exist and persisted network must be exactly false; run bootstrap or stop it and apply machine update --no-net"
+    local rc=0
+    machine_state_matches network false || rc=$?
+    [[ $rc -eq 0 ]] || state_error "$rc" network false
 }
 assert_machine_stopped() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then printf '+ verify persisted SmolVM state for %q is stopped\n' "$machine"; return; fi
-    machine_state_matches state stopped || die "machine $machine must be positively reported stopped"
+    local rc=0
+    machine_state_matches state stopped || rc=$?
+    [[ $rc -eq 0 ]] || state_error "$rc" state stopped
 }
 require_host() {
     local program
@@ -155,6 +179,10 @@ prepare_auth() (
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
         printf '+ prepare X SECURITY untrusted Xauthority cookie with 300-second idle timeout in %q for %q\n' "$auth_dir" "$display"
         return
+    fi
+    [[ ! -L $auth_dir ]] || die 'authorization path must not be a symlink'
+    if [[ -e $auth_dir ]]; then
+        [[ -d $auth_dir && $(stat -c %u "$auth_dir") == "$UID" && $(stat -c %a "$auth_dir") == 700 ]] || die 'existing authorization path must be a current-user directory with mode exactly 700'
     fi
     install -d -m 700 "$auth_dir"
     : > "$bootstrap_auth"
@@ -228,11 +256,9 @@ bootstrap_impl() {
                 printf 'zpu-smolvm: first emergency stop was not proven; retrying\n' >&2
                 smolvm machine stop --name "$machine" >/dev/null 2>&1 || true
             fi
-            if machine_state_matches state stopped; then
-                smolvm machine update --name "$machine" --no-net >/dev/null 2>&1 || cleanup_ok=0
-            else
-                cleanup_ok=0
-            fi
+            # Persist no-net even when a broken state report prevents proving
+            # the stop; the final checks below still report the truth.
+            smolvm machine update --name "$machine" --no-net >/dev/null 2>&1 || cleanup_ok=0
             if ! machine_state_matches state stopped || ! machine_state_matches network false; then cleanup_ok=0; fi
             if [[ $cleanup_ok -eq 0 ]]; then
                 printf 'zpu-smolvm: ERROR: could not prove machine stopped with persisted network=false after bootstrap failure\n' >&2
@@ -246,7 +272,10 @@ bootstrap_impl() {
     trap cleanup_bootstrap EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    run smolvm machine stop --name "$machine"
+    if ! run smolvm machine stop --name "$machine"; then
+        assert_machine_stopped
+    fi
+    assert_machine_stopped
     run smolvm machine update --name "$machine" --net
     run smolvm machine start --name "$machine"
     run smolvm machine exec --name "$machine" -- pacman -Syu --noconfirm zig vulkan-headers vulkan-icd-loader vulkan-tools libxcb xorg-xauth python git util-linux
@@ -259,22 +288,10 @@ bootstrap_impl() {
     trap - EXIT INT TERM
 }
 bootstrap() {
-    local child status interrupted=0 cleanup_status
-    (set -e; bootstrap_impl) &
-    child=$!
-    trap 'interrupted=130; kill -INT "$child" 2>/dev/null || true' INT
-    trap 'interrupted=143; kill -TERM "$child" 2>/dev/null || true' TERM
-    set +e
-    wait "$child"
-    status=$?
-    if [[ $interrupted -ne 0 ]]; then
-        wait "$child"
-        cleanup_status=$?
-        if [[ $cleanup_status -eq 2 ]]; then status=2; else status=$interrupted; fi
-    fi
-    set -e
-    trap - INT TERM
-    return "$status"
+    # Foreground execution lets the scoped traps secure the machine before
+    # returning conventional 130/143 status. No asynchronous child is left to
+    # inherit ignored SIGINT, and no second wait can race with reaping.
+    (set -e; bootstrap_impl)
 }
 sync_source() {
     assert_network_disabled
@@ -282,6 +299,8 @@ sync_source() {
     run smolvm machine exec --name "$machine" -- sh -ceu 'rm -rf /mnt/zpu-source && mkdir -p /mnt/zpu-source'
     run smolvm machine cp "$source_archive" "$machine:/var/tmp/zpu-source.tar"
     run smolvm machine exec --name "$machine" -- tar -C /mnt/zpu-source -xf /var/tmp/zpu-source.tar
+    run smolvm machine exec --name "$machine" -- rm -f /var/tmp/zpu-source.tar
+    if [[ ${ZPU_SMOLVM_DRY_RUN:-0} != 1 ]]; then rm -f -- "$source_archive"; fi
 }
 build_guest() { reject_host_injection; sync_source; run smolvm machine exec --name "$machine" -- /mnt/zpu-source/smolvm/guest-build.sh; }
 package_guest() {
@@ -296,7 +315,7 @@ stage_guest() {
     run smolvm machine exec --name "$machine" -- sh -ceu \
         "rm -rf /opt/zpu && mkdir -p /opt && tar -C /opt -xzf /var/lib/zpu-native-icd.tar.gz && test -r '$guest_manifest'"
 }
-launch() {
+launch() (
     reject_host_injection
     assert_network_disabled
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
@@ -305,13 +324,17 @@ launch() {
         rm -f "$auth_dir/Xauthority" "$auth_dir/mode"
         require_display
     fi
+    cleanup_host_auth() {
+        [[ ${ZPU_SMOLVM_TESTING:-0} == 1 ]] || rm -f -- "$auth_dir/Xauthority" "$auth_dir/mode"
+    }
+    trap cleanup_host_auth EXIT
     prepare_auth
     run smolvm machine exec --name "$machine" -- install -d -m 700 /run/zpu-xauth /run/zpu-runtime
     run smolvm machine cp "$auth_dir/Xauthority" "$machine:/run/zpu-xauth/Xauthority"
     run smolvm machine cp "$auth_dir/mode" "$machine:/run/zpu-xauth/mode"
     run smolvm machine exec --name "$machine" -- chmod 600 /run/zpu-xauth/Xauthority /run/zpu-xauth/mode
     run smolvm machine exec --name "$machine" -- /mnt/zpu-source/smolvm/guest-validate.sh
-}
+)
 dry_run() { ZPU_SMOLVM_DRY_RUN=1; export ZPU_SMOLVM_DRY_RUN; create; bootstrap; build_guest; package_guest; stage_guest; launch; }
 usage() { printf 'usage: tools/smolvm-zpu.sh {cli-check|preflight|create|bootstrap|build|package|stage|launch|dry-run}\n' >&2; exit 2; }
 
