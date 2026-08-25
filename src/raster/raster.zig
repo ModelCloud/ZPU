@@ -91,7 +91,7 @@ test "sprite draw validates source and clips while preserving source origin" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 255, 0, 255 }, pixels[0..4]);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 255, 255, 255 }, pixels[12..16]);
     const before = pixels;
-    drawSpriteWith(&surface, .{ .x = 0, .y = 0, .width = 1, .height = 2 }, &sprite, 2, 2, .avx2);
+    if (dispatch.available(.avx2)) drawSpriteWith(&surface, .{ .x = 0, .y = 0, .width = 1, .height = 2 }, &sprite, 2, 2, .avx2);
     drawSpriteWith(&surface, .{ .x = 0, .y = 0, .width = 2, .height = 2 }, sprite[0..4], 2, 2, .portable_vector);
     drawSpriteWith(&surface, .{ .x = 0, .y = 0, .width = std.math.maxInt(u32), .height = std.math.maxInt(u32) }, &.{}, std.math.maxInt(u32), std.math.maxInt(u32), .scalar);
     drawSpriteWith(&surface, .{ .x = 5, .y = 5, .width = 2, .height = 2 }, &sprite, 2, 2, .scalar);

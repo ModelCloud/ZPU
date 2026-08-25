@@ -198,6 +198,33 @@ test "semantic keys serialize hash and compare deterministically" {
     try std.testing.expect(a.hash() != c.hash());
 }
 
+test "backend tier identity mapping is stable" {
+    // Public cache identity: each dispatch backend must keep mapping to the
+    // same lanes and cpu feature bit so serialized keys stay compatible.
+    try std.testing.expectEqual(@as(u8, 1), Key.init(.rgba8_unorm, .fill, .scalar).lanes);
+    try std.testing.expectEqual(@as(u8, 4), Key.init(.rgba8_unorm, .fill, .portable_vector).lanes);
+    try std.testing.expectEqual(@as(u8, 8), Key.init(.rgba8_unorm, .fill, .avx2).lanes);
+    try std.testing.expect(!Key.init(.bgra8_unorm, .sprite, .scalar).cpu.avx2);
+    try std.testing.expect(!Key.init(.bgra8_unorm, .sprite, .portable_vector).cpu.avx2);
+    try std.testing.expect(Key.init(.bgra8_unorm, .sprite, .avx2).cpu.avx2);
+    try std.testing.expectEqual(@as(u8, 1), serialization_version);
+    try std.testing.expectEqual(@as(u16, 1), kernel_abi_version);
+}
+
+test "serialized key layout is pinned for compatibility across compiler versions" {
+    var key = Key.init(.rgba8_unorm, .source_over, .avx2);
+    key.compiler_major = 0;
+    key.compiler_minor = 16;
+    key.compiler_patch = 0;
+    const bytes = key.serialize();
+    try std.testing.expectEqual(Key.serialized_len, bytes.len);
+    // [0] serialization, [1] format, [2] operation, [3] source, [4] blend,
+    // [5] lanes, [6] cpu features, [7..13] compiler version LE u16s,
+    // [13..15] kernel ABI LE u16. Changing this layout requires bumping
+    // serialization_version (see design/isa-tiers.md).
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 0, 1, 0, 1, 8, 1, 0, 0, 16, 0, 0, 0, 1, 0 }, &bytes);
+}
+
 test "canonical IR folds removes normalizes and safely fuses" {
     var p = Program{};
     try p.append(.nop);
