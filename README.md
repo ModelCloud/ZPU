@@ -2,9 +2,10 @@
 
 ZPU includes the frontend-only, non-conformant
 `zpu_spirv_render_profile_v1`. It validates and lowers a small bounded SPIR-V
-1.0 subset to owned canonical render IR for pipeline metadata. It does not
-provide general SPIR-V/Vulkan shader execution: `cpu_cube_v1` remains the only
-active graphics execution ABI and draw pixels are unchanged.
+1.0 subset to owned canonical render IR for pipeline metadata. Public Vulkan
+profile drawing remains unsupported: profile pipelines fail closed at
+`vkCmdDraw`, while `cpu_cube_v1` remains the only drawable graphics ABI and its
+command representation and pixels are unchanged.
 
 The v1 frontend accepts only Shader + Logical GLSL450, a selected straight-line
 Vertex or Fragment entry, bounded scalar/vector/mat4 and read-only uniform data,
@@ -24,6 +25,13 @@ compatibility predicate for the immutable vertex/fragment module identities
 embedded by the readiness vkcube: both stages, `main`, exact word counts and
 full digests, and no specialization must match. This bridge does not create a
 frontend program and is not broader shader acceptance.
+
+Internally, the pipeline ABI is a typed choice among `cpu_cube_v1`,
+`profile_v1_metadata`, and `profile_v1_scalar_synthetic`. The last is a private,
+non-advertised, non-conformant test hook that owns one selected vertex or
+fragment scalar executor and accepts explicit interface-indexed byte bindings
+and outputs. It is never reached by Vulkan drawing and provides no Vulkan API,
+extension, feature, or profile-support claim.
 
 ZPU is a Zig-first experiment in a minimal-dependency, Vulkan-only userspace CPU graphics driver. This milestone adds an **experimental loader-compatible CPU transfer and vkcube rendering path**. It is not conformant Vulkan and is not yet sufficient for arbitrary Vulkan applications. The normative target for the API surface — the pinned core version, the profile ZPU builds toward, the loader–ICD interface requirement, and the gates that must pass before any advertised version changes — is [docs/api-policy.md](docs/api-policy.md). The driver, the ICD manifest, and CI advertise and assert Vulkan 1.0 today; the policy describes the target, not the present state.
 

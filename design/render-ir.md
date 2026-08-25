@@ -53,9 +53,15 @@ contraction, NaN rewriting, or signed-zero rewriting.
 
 The programs are attached independently to graphics-pipeline objects and own
 all of their memory after shader modules and caller buffers are destroyed.
-They are metadata only: `cpu_cube_v1` remains the sole execution ABI and
-`vkCmdDraw` does not interpret this IR, so existing pixels and command behavior
-are unchanged.
+Ordinary profile pipelines use the non-drawable `profile_v1_metadata` ABI.
+`vkCmdDraw` rejects them during recording and never records `cube_draw`.
+`cpu_cube_v1` remains the sole drawable ABI, so its pixels and command behavior
+are unchanged. A private `profile_v1_scalar_synthetic` test ABI may own one
+selected vertex or fragment `Executor`; it uses explicit interface indices,
+performs allocation-free warm execution, and is synthetic and non-conformant.
+It is not wired to vertex fetch, assembly, clipping, interpolation,
+rasterization, framebuffer/depth/blend writes, presentation, or public Vulkan
+advertising.
 
 Malformed or unsupported profile shaders fail graphics-pipeline creation with
 no object or cache publication. A separate exact-identity compatibility bridge

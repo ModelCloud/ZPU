@@ -11,6 +11,7 @@ const present_worker = @import("present_worker.zig");
 const spirv = @import("spirv.zig");
 const spirv_frontend = @import("spirv_frontend.zig");
 const render_ir = @import("render_ir.zig");
+const render_ir_exec = @import("render_ir_exec.zig");
 pub const Result = enum(i32) { success = 0, not_ready = 1, timeout = 2, incomplete = 5, error_out_of_host_memory = -1, error_initialization_failed = -3, error_memory_map_failed = -5, error_layer_not_present = -6, error_extension_not_present = -7, error_feature_not_present = -8, error_format_not_supported = -11, error_invalid_shader = -1_000_012_000 };
 pub const Fn = ?*const fn () callconv(.c) void;
 pub const Alloc = opaque {};
@@ -267,7 +268,64 @@ const PipelineLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical, 
 const AttachmentRole = enum(u8) { color, depth };
 const FramebufferAttachmentRequirement = struct { format: i32 = 0, samples: u32 = 0, role: AttachmentRole = .color };
 const RenderPassObj = struct { owner: DeviceIdentity, canonical: Canonical, compatibility: Canonical, subpass_count: u32, framebuffer_supported: bool, framebuffer_attachment_count: u32, framebuffer_attachments: [2]FramebufferAttachmentRequirement };
-const GraphicsPipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, layout: Canonical, set0: Canonical, render_compatibility: Canonical, vertex_program: ?render_ir.Program, fragment_program: ?render_ir.Program, subpass: u32, execution_abi: u32, cull_mode: u32, front_face: i32 };
+const SyntheticProfile = struct {
+    stage: render_ir.Stage,
+    executor: render_ir_exec.Executor,
+};
+const ExecutionAbi = union(enum) {
+    cpu_cube_v1,
+    profile_v1_metadata,
+    profile_v1_scalar_synthetic: SyntheticProfile,
+
+    fn deinit(self: *ExecutionAbi) void {
+        switch (self.*) {
+            .profile_v1_scalar_synthetic => |*synthetic| synthetic.executor.deinit(),
+            else => {},
+        }
+        self.* = .profile_v1_metadata;
+    }
+};
+const GraphicsPipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, layout: Canonical, set0: Canonical, render_compatibility: Canonical, vertex_program: ?render_ir.Program, fragment_program: ?render_ir.Program, subpass: u32, execution_abi: ExecutionAbi, cull_mode: u32, front_face: i32 };
+const SyntheticError = render_ir_exec.Error || error{ InvalidDevice, InvalidPipeline, InvalidAbi, InvalidStage };
+
+// Deliberately private: this scalar proof hook is not a Vulkan command, entry
+// point, extension, feature, or advertised capability.
+fn setupSyntheticProfile(
+    device: ?Device,
+    pipeline_handle: usize,
+    stage: render_ir.Stage,
+    direct_program: ?*const render_ir.Program,
+    executor_allocator: std.mem.Allocator,
+) SyntheticError!void {
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return error.InvalidDevice;
+    if (!validDeviceLocked(d)) return error.InvalidDevice;
+    const pipeline = validGraphicsPipelineLocked(pipeline_handle) orelse return error.InvalidPipeline;
+    if (!pipeline.owner.eql(d)) return error.InvalidPipeline;
+    if (pipeline.execution_abi != .profile_v1_metadata) return error.InvalidAbi;
+    const program = direct_program orelse switch (stage) {
+        .vertex => if (pipeline.vertex_program) |*value| value else return error.InvalidStage,
+        .fragment => if (pipeline.fragment_program) |*value| value else return error.InvalidStage,
+    };
+    if (program.stage != stage) return error.InvalidStage;
+    var executor = try render_ir_exec.Executor.init(executor_allocator, program);
+    errdefer executor.deinit();
+    pipeline.execution_abi = .{ .profile_v1_scalar_synthetic = .{ .stage = stage, .executor = executor } };
+}
+
+fn executeSyntheticProfile(device: ?Device, pipeline_handle: usize, bindings: []const render_ir_exec.Binding, outputs: []const render_ir_exec.Output) SyntheticError!void {
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return error.InvalidDevice;
+    if (!validDeviceLocked(d)) return error.InvalidDevice;
+    const pipeline = validGraphicsPipelineLocked(pipeline_handle) orelse return error.InvalidPipeline;
+    if (!pipeline.owner.eql(d)) return error.InvalidPipeline;
+    switch (pipeline.execution_abi) {
+        .profile_v1_scalar_synthetic => |*synthetic| try synthetic.executor.execute(bindings, outputs),
+        else => return error.InvalidAbi,
+    }
+}
 const SwapchainObj = struct {
     owner: Device,
     surface: *SurfaceObj,
@@ -1111,6 +1169,7 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
             object.compatibility.deinit();
         };
         for (&graphics_pipeline_objects, graphics_pipeline_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) {
+            object.execution_abi.deinit();
             object.canonical.deinit();
             object.layout.deinit();
             object.set0.deinit();
@@ -2796,7 +2855,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     if (test_fail_render_compatibility_clone) return error.OutOfMemory;
     var render_compatibility = try render_pass.compatibility.clone();
     errdefer render_compatibility.deinit();
-    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = 1, .cull_mode = rs.cull_mode, .front_face = rs.front_face };
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face };
 }
 
 fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, set0: *const Canonical) bool {
@@ -3073,6 +3132,7 @@ fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?*c
     for (0..count) |index| {
         built[index] = buildGraphicsPipelineLocked(d, &create_infos[index]) catch |err| {
             for (built[0..built_count]) |*prior| {
+                prior.execution_abi.deinit();
                 prior.canonical.deinit();
                 prior.layout.deinit();
                 prior.set0.deinit();
@@ -3098,7 +3158,10 @@ fn destroyPipeline(device: ?Device, handle: usize, alloc: ?*const Alloc) callcon
     defer mutex.unlock();
     const d = device orelse return;
     const object = validGraphicsPipelineLocked(handle) orelse return;
-    if (validDeviceLocked(d) and object.owner.eql(d)) stateForObject(GraphicsPipelineObj, object, &graphics_pipeline_objects, &graphics_pipeline_state).?.* = .tombstone;
+    if (validDeviceLocked(d) and object.owner.eql(d)) {
+        object.execution_abi.deinit();
+        stateForObject(GraphicsPipelineObj, object, &graphics_pipeline_objects, &graphics_pipeline_state).?.* = .tombstone;
+    }
 }
 fn allocateDescriptorSets(device: ?Device, info: ?*const DescriptorSetAllocateInfo, outputs: ?[*]usize) callconv(.c) Result {
     const ci = info orelse return .error_initialization_failed;
@@ -3266,7 +3329,7 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
         command_buffer.impl.invalid = true;
         return;
     };
-    if (pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or pipeline.execution_abi != 1 or pipeline.subpass != 0 or !pipeline.render_compatibility.eql(&render_pass.compatibility) or instance_count != 1 or first_vertex != 0 or first_instance != 0 or vertex_count == 0) {
+    if (pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or pipeline.execution_abi != .cpu_cube_v1 or pipeline.subpass != 0 or !pipeline.render_compatibility.eql(&render_pass.compatibility) or instance_count != 1 or first_vertex != 0 or first_instance != 0 or vertex_count == 0) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -4186,7 +4249,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     const profile_pipeline = validGraphicsPipelineLocked(profile_handle[0]).?;
     try std.testing.expect(profile_pipeline.vertex_program != null);
     try std.testing.expect(profile_pipeline.fragment_program != null);
-    try std.testing.expectEqual(@as(u32, 1), profile_pipeline.execution_abi);
+    try std.testing.expect(profile_pipeline.execution_abi == .profile_v1_metadata);
     const owned_vertex_digest = profile_pipeline.vertex_program.?.identity.digest;
     const owned_fragment_digest = profile_pipeline.fragment_program.?.identity.digest;
     var rejected_profile_batch = [_]GraphicsPipelineCreateInfo{ profile_pipeline_info, profile_pipeline_info };
@@ -4217,6 +4280,46 @@ test "vkcube presentation path records submits and presents two swapchain images
     @memset(&profile_fragment_words, 0);
     try std.testing.expectEqualSlices(u8, &owned_vertex_digest, &profile_pipeline.vertex_program.?.identity.digest);
     try std.testing.expectEqualSlices(u8, &owned_fragment_digest, &profile_pipeline.fragment_program.?.identity.digest);
+    const synthetic_setup_allocations: usize = 7;
+    for (0..synthetic_setup_allocations) |fail_index| {
+        var failure_probe = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, setupSyntheticProfile(device, profile_handle[0], .fragment, null, failure_probe.allocator()));
+        try std.testing.expect(profile_pipeline.execution_abi == .profile_v1_metadata);
+        try std.testing.expectEqual(failure_probe.allocated_bytes, failure_probe.freed_bytes);
+        try std.testing.expectEqual(failure_probe.allocations, failure_probe.deallocations);
+    }
+    var synthetic_probe = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = std.math.maxInt(usize) });
+    try setupSyntheticProfile(device, profile_handle[0], .fragment, null, synthetic_probe.allocator());
+    try std.testing.expect(profile_pipeline.execution_abi == .profile_v1_scalar_synthetic);
+    const synthetic_bindings: [0]render_ir_exec.Binding = .{};
+    var synthetic_outputs: [64]render_ir_exec.Output = undefined;
+    var synthetic_output_bytes = [_][64]u8{.{0xaa} ** 64} ** 64;
+    var synthetic_output_count: usize = 0;
+    for (profile_pipeline.fragment_program.?.interfaces, 0..) |interface, interface_index| {
+        if (interface.storage == .output) {
+            synthetic_outputs[synthetic_output_count] = .{ .interface = @intCast(interface_index), .bytes = &synthetic_output_bytes[synthetic_output_count] };
+            synthetic_output_count += 1;
+        }
+    }
+    const output_before_rejection = synthetic_output_bytes;
+    try std.testing.expectError(error.InvalidOutput, executeSyntheticProfile(device, profile_handle[0], &synthetic_bindings, synthetic_outputs[0 .. synthetic_output_count - 1]));
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&output_before_rejection), std.mem.asBytes(&synthetic_output_bytes));
+    const allocations_before_warm_execute = synthetic_probe.allocations;
+    try executeSyntheticProfile(device, profile_handle[0], &synthetic_bindings, synthetic_outputs[0..synthetic_output_count]);
+    try std.testing.expectEqual(allocations_before_warm_execute, synthetic_probe.allocations);
+    try std.testing.expectError(error.InvalidAbi, setupSyntheticProfile(device, profile_handle[0], .fragment, null, std.testing.allocator));
+    var direct_program = try profile_pipeline.vertex_program.?.clone(std.testing.allocator);
+    defer direct_program.deinit(std.testing.allocator);
+    var direct_probe = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = std.math.maxInt(usize) });
+    try std.testing.expectError(error.InvalidAbi, executeSyntheticProfile(device, pipelines[0], &.{}, &.{}));
+    var fragment_failure_probe = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, setupSyntheticProfile(device, pipelines[0], .vertex, null, fragment_failure_probe.allocator()));
+    try std.testing.expectError(error.InvalidStage, setupSyntheticProfile(device, pipelines[0], .fragment, &direct_program, std.testing.allocator));
+    try setupSyntheticProfile(device, pipelines[0], .vertex, &direct_program, direct_probe.allocator());
+    validGraphicsPipelineLocked(pipelines[0]).?.execution_abi.deinit();
+    try std.testing.expectEqual(direct_probe.allocated_bytes, direct_probe.freed_bytes);
+    try std.testing.expectEqual(direct_probe.allocations, direct_probe.deallocations);
+    std.debug.print("pipeline scalar ABI matrix: abi_kinds=3 stage_selectors=2 setup_failures={d} warm_allocations=0 rollback_leaks=0 destroy_leaks=0\n", .{synthetic_setup_allocations});
     const fragment_object = findLiveHandle(ShaderModuleObj, fragment_shader, &shader_module_objects, &shader_module_state).?;
     const original_bound = fragment_object.module.words[3];
     fragment_object.module.words[3] = original_bound + 1;
@@ -4496,6 +4599,12 @@ test "vkcube presentation path records submits and presents two swapchain images
     const viewport = Viewport{ .x = 0, .y = 0, .width = 8, .height = 8, .min_depth = 0, .max_depth = 1 };
     cmdSetViewport(commands[0], 0, 1, @ptrCast(&viewport));
     cmdSetScissor(commands[0], 0, 1, @ptrCast(&render_info.render_area));
+    const command_count_before_profile_draw = commands[0].impl.count;
+    cmdDraw(commands[0], 3, 1, 0, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(command_count_before_profile_draw, commands[0].impl.count);
+    commands[0].impl.invalid = false;
+    validGraphicsPipelineLocked(static_handle[0]).?.execution_abi = .cpu_cube_v1;
     cmdDraw(commands[0], 3, 1, 0, 0);
     cmdEndRenderPass(commands[0]);
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));

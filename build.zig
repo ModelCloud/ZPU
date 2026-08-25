@@ -233,7 +233,7 @@ pub fn build(b: *std.Build) void {
         .{ "spirv-decode", "src/vulkan/spirv_decode.zig" },
         .{ "spirv-frontend", "src/vulkan/spirv_frontend.zig" },
         .{ "render-ir", "src/vulkan/render_ir.zig" },
-        .{ "render-ir-exec", "src/render_ir_exec.zig" },
+        .{ "render-ir-exec", "src/vulkan/render_ir_exec.zig" },
     }) |source| {
         const source_tests = b.addTest(.{
             .name = "zpu-" ++ source[0] ++ "-coverage-tests",

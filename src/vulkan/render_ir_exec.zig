@@ -5,8 +5,8 @@
 //! order. NaN results are canonicalized to quiet `0x7fc00000`; signed zero is
 //! preserved except conversions to integer, which map both zeros to zero.
 const std = @import("std");
-const ir = @import("vulkan/render_ir.zig");
-const frontend = @import("vulkan/spirv_frontend.zig");
+const ir = @import("render_ir.zig");
+const frontend = @import("spirv_frontend.zig");
 
 pub const abi_version: u32 = 1;
 pub const backend_version: u32 = 1;
