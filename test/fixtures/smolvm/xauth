@@ -5,7 +5,9 @@ host_entry='0100 000c 686f73742d74727573746564 0001 30 0012 4d49542d4d414749432d
 guest_entry='0100 000c 686f73742d6f6d6172636879 0001 30 0012 4d49542d4d414749432d434f4f4b49452d31 0010 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 
 if [[ $1 == nlist ]]; then
+    [[ ${SMOLVM_XAUTH_NLIST_FAIL:-0} != 1 ]] || exit 1
     printf '%s\n' "$host_entry"
+    [[ ${SMOLVM_XAUTH_DUPLICATE_EQUIVALENT:-0} != 1 ]] || printf 'ffff%s\n' "${host_entry:4}"
     exit 0
 fi
 [[ $1 == -f && $# -ge 3 ]] || { echo 'xauth fixture: unsupported argv' >&2; exit 64; }
@@ -13,7 +15,10 @@ authority=$2
 command=$3
 case $command in
     nmerge) cat > "$authority" ;;
-    nlist) test -f "$authority" && cat "$authority" ;;
+    nlist)
+        [[ ${SMOLVM_XAUTH_NLIST_FAIL:-0} != 1 ]] || exit 1
+        test -f "$authority" && cat "$authority"
+        ;;
     generate)
         [[ ${XAUTHORITY:-} == "$authority" ]] || { echo 'xauth fixture: generation did not use isolated bootstrap authority' >&2; exit 64; }
         [[ ${SMOLVM_XAUTH_GENERATE_FAIL:-0} != 1 ]] || exit 1

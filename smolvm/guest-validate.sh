@@ -9,15 +9,25 @@ runtime=/run/zpu-runtime
 cleanup() { rm -f "$auth" "$auth_mode_file"; }
 trap cleanup EXIT HUP INT TERM
 
+for program in xauth stat find grep awk cat env id; do
+    command -v "$program" >/dev/null || { echo "required guest validation tool not found: $program" >&2; exit 2; }
+done
+
 test -r "$manifest"
 test -r "$prefix/lib/libvulkan_zpu.so"
 test -S /tmp/.X11-unix/X0
-test -r "$auth"
-test -r "$auth_mode_file"
-test -d "$runtime" && test "$(stat -c %u "$runtime")" -eq "$(id -u)" && test $((8#$(stat -c %a "$runtime") & 077)) -eq 0 || {
-    echo 'guest XDG_RUNTIME_DIR must exist, be owned by the guest user, and be inaccessible to group/other' >&2
+test -f "$auth" && test ! -L "$auth" && test -r "$auth"
+test -f "$auth_mode_file" && test ! -L "$auth_mode_file" && test -r "$auth_mode_file"
+test -d "$runtime" && test ! -L "$runtime" && test "$(stat -c %u "$runtime")" = "$(id -u)" && test "$(stat -c %a "$runtime")" = 700 || {
+    echo 'guest XDG_RUNTIME_DIR must be a real directory owned by the guest user with mode exactly 700' >&2
     exit 2
 }
+for protected in "$auth" "$auth_mode_file"; do
+    test "$(stat -c %u "$protected")" = "$(id -u)" && test "$(stat -c %a "$protected")" = 600 || {
+        echo "guest authorization metadata must be owned by the guest user with mode exactly 600: $protected" >&2
+        exit 2
+    }
+done
 test -x "$prefix/bin/zpu-xcb-connect"
 test ! -e /dev/dri || {
     echo 'guest /dev/dri exists: SmolVM GPU/DRM exposure is forbidden for this workflow' >&2

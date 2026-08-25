@@ -24,10 +24,13 @@ directory.
 Networking is enabled only for bootstrap package installation. Immediately
 after `pacman` completes, the launcher stops the machine, runs the documented
 SmolVM 1.7.0 `machine update --name NAME --no-net` operation while it is
-stopped, and restarts it. Every build, package, stage, and launch independently
+stopped, positively proves both `state: stopped` and `network: false`, and only
+then restarts it. Every build, package, stage, and launch independently
 reads `machine ls --json` and fails unless the unique persisted record has
 `network: false`. If package installation fails, an exit trap safely stops the
-machine and attempts the same `--no-net` update before returning failure.
+machine, rechecks its actual state, retries a safe stop when needed, applies the
+same `--no-net` update, and fails loudly unless both stopped state and disabled
+networking are proven. `INT` and `TERM` take the same cleanup path.
 Networking is therefore disabled before any source, build, package, stage, or
 launch work. The package transaction still has network authority and
 must be treated as a supply-chain boundary; inspect or pin the Arch repositories
@@ -75,8 +78,9 @@ GPU passthrough. There is no OpenGL, EGL, GLX, ANGLE, virgl, or API translation
 in the validation path. XCB is ZPU's currently supported WSI and Xwayland is
 only the remote display server.
 
-The host launcher rejects `VK_DRIVER_FILES`, legacy `VK_ICD_FILENAMES`,
-`VK_ADD_DRIVER_FILES`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, and `ZPU_REFRESH_HZ` in
+The host launcher rejects driver selectors, all explicit/implicit Vulkan layer
+path and enable/disable/allow selectors, `LD_PRELOAD`, `LD_LIBRARY_PATH`,
+`LD_AUDIT`, and `ZPU_REFRESH_HZ` in
 its own environment. The guest source archive is an export of tracked `HEAD`,
 not the live checkout, and cannot contain host `zig-out`. In the guest,
 `guest-validate.sh` starts each probe with `env -i` and sets
@@ -114,8 +118,9 @@ real seat/input devices, and ownership of the desktop. The checked-in
 `smolvm/Smolfile` is actually passed to `machine create --smolfile`; it records
 resources and the no-GPU policy. It deliberately has neither an image nor a
 network field: the launcher is the sole source of both creation-time settings.
-It always passes `--image "$ZPU_SMOLVM_IMAGE"` and `--net`, so an immutable
-digest cannot be shadowed by the Smolfile; bootstrap later persists `--no-net`.
+It always passes `--image "$ZPU_SMOLVM_IMAGE"`, so an immutable digest cannot
+be shadowed by the Smolfile. Creation is network-disabled; bootstrap alone
+persists a temporary `--net` window and then proves `--no-net` while stopped.
 The X11 socket is supplied separately because its host path is session-specific.
 
 ## Exact lifecycle
@@ -135,9 +140,9 @@ tools/smolvm-zpu.sh launch
 
 `bootstrap` stops the machine, explicitly persists `--net`, starts it, installs
 the required packages, stops it,
-persists `--no-net`, restarts it, and verifies the persisted JSON state. Do not
-proceed to `build` if that command fails; failure cleanup leaves the machine
-stopped if the emergency no-network update itself cannot be confirmed.
+persists `--no-net`, proves stopped/offline persisted JSON state, and only then
+restarts it. Do not proceed to `build` if that command fails; failure cleanup
+returns nonzero unless it can prove the machine is both stopped and offline.
 
 Commit the intended source first: `build` refuses a dirty index or worktree,
 exports tracked `HEAD` to a source-only tar archive, rejects binary/build
