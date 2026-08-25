@@ -113,6 +113,13 @@ general SPIR-V implementation.
 
 ## Architecture
 
+The end-to-end Linux boundary is mapped in
+[`docs/linux-userspace-driver.md`](docs/linux-userspace-driver.md). It includes
+component, loader-discovery, frame-sequence, memory/presentation, and CPU-thread
+diagrams, plus an explicit account of which work stays in the application
+process, which work crosses into the X server, and why ZPU is not a kernel
+DRM/KMS driver.
+
 - `src/surface.zig` owns RGBA8/BGRA8 memory layout, validation, colors, and clipping.
 - `src/raster/` implements clear/fill and straight-alpha Porter-Duff source-over rectangles.
 - `src/simd/` owns backend selection and scalar, portable four-pixel vector, and host-gated eight-pixel AVX2-oriented paths for constant-color spans and per-pixel RGBA source spans.

@@ -23,6 +23,8 @@ pub const Counters = struct {
 };
 
 const Vertex = struct { screen: [3]f32, clip_w: f32, uv: [2]f32 };
+const QuadFloat = @Vector(4, f32);
+const QuadClassification = struct { reject: bool, fully_covered: bool };
 const max_prepared_triangles = 12;
 const PreparedTriangle = struct {
     valid: bool = false,
@@ -47,6 +49,17 @@ fn edge(a: [2]f32, b: [2]f32, p: [2]f32) f32 {
     return (p[0] - a[0]) * (b[1] - a[1]) - (p[1] - a[1]) * (b[0] - a[0]);
 }
 
+fn classifyQuad(p0: [2]f32, p1: [2]f32, p2: [2]f32, inverse_area: f32, x: QuadFloat, y: QuadFloat) QuadClassification {
+    var result = QuadClassification{ .reject = false, .fully_covered = true };
+    inline for (.{ .{ p1, p2 }, .{ p2, p0 }, .{ p0, p1 } }) |segment| {
+        const values = ((x - @as(QuadFloat, @splat(segment[0][0]))) * @as(QuadFloat, @splat(segment[1][1] - segment[0][1])) - (y - @as(QuadFloat, @splat(segment[0][1]))) * @as(QuadFloat, @splat(segment[1][0] - segment[0][0]))) * @as(QuadFloat, @splat(inverse_area));
+        const outside = values < @as(QuadFloat, @splat(0));
+        result.reject = result.reject or @reduce(.And, outside);
+        result.fully_covered = result.fully_covered and !@reduce(.Or, outside);
+    }
+    return result;
+}
+
 fn srgbToLinear(value: f32) f32 {
     return if (value <= 0.04045) value / 12.92 else std.math.pow(f32, (value + 0.055) / 1.055, 2.4);
 }
@@ -59,10 +72,12 @@ fn transformedVertex(uniform: []const u8, index: u32, vertex_count: u32, viewpor
     const position_base = 64 + @as(usize, index) * 16;
     const attr_base = 64 + @as(usize, vertex_count) * 16 + @as(usize, index) * 16;
     const position = [4]f32{ readFloat(uniform, position_base), readFloat(uniform, position_base + 4), readFloat(uniform, position_base + 8), readFloat(uniform, position_base + 12) };
-    var clip = [_]f32{0} ** 4;
-    for (0..4) |row| for (0..4) |column| {
-        clip[row] += readFloat(uniform, (column * 4 + row) * 4) * position[column];
-    };
+    var clip_vector: QuadFloat = @splat(0);
+    for (0..4) |column| {
+        const matrix_column: QuadFloat = .{ readFloat(uniform, (column * 4) * 4), readFloat(uniform, (column * 4 + 1) * 4), readFloat(uniform, (column * 4 + 2) * 4), readFloat(uniform, (column * 4 + 3) * 4) };
+        clip_vector += matrix_column * @as(QuadFloat, @splat(position[column]));
+    }
+    const clip: [4]f32 = clip_vector;
     if (!std.math.isFinite(clip[3]) or @abs(clip[3]) < 0.000001) return null;
     const inverse_w = 1.0 / clip[3];
     const ndc = [3]f32{ clip[0] * inverse_w, clip[1] * inverse_w, clip[2] * inverse_w };
@@ -186,16 +201,8 @@ fn markPreparedDirtyTiles(prepared: *const PreparedDraw, width: u32, height: u32
                 const y0 = @as(f32, @floatFromInt(tile_y * dirty_tile_size)) + 0.5;
                 const x1 = @as(f32, @floatFromInt(@min((tile_x + 1) * dirty_tile_size, width) - 1)) + 0.5;
                 const y1 = @as(f32, @floatFromInt(@min((tile_y + 1) * dirty_tile_size, height) - 1)) + 0.5;
-                const corners = [4][2]f32{ .{ x0, y0 }, .{ x1, y0 }, .{ x0, y1 }, .{ x1, y1 } };
-                var reject = false;
-                inline for (.{ .{ p1, p2 }, .{ p2, p0 }, .{ p0, p1 } }) |segment| {
-                    const e0 = edge(segment[0], segment[1], corners[0]) * inverse_area;
-                    const e1 = edge(segment[0], segment[1], corners[1]) * inverse_area;
-                    const e2 = edge(segment[0], segment[1], corners[2]) * inverse_area;
-                    const e3 = edge(segment[0], segment[1], corners[3]) * inverse_area;
-                    if (e0 < 0 and e1 < 0 and e2 < 0 and e3 < 0) reject = true;
-                }
-                if (!reject) {
+                const classification = classifyQuad(p0, p1, p2, inverse_area, .{ x0, x1, x0, x1 }, .{ y0, y0, y1, y1 });
+                if (!classification.reject) {
                     const index = tile_y * columns + tile_x;
                     tiles[index / 8] |= @as(u8, 1) << @intCast(index % 8);
                 }
@@ -306,25 +313,13 @@ fn drawInternal(target: []u8, depth: []u8, width: u32, height: u32, uniform: []c
                 // Reject a tile when every one of its sample-space corners is
                 // outside the same edge. This is conservative and retains the
                 // original per-fragment coverage/depth/draw ordering.
-                const corners = [4][2]f32{
-                    .{ @as(f32, @floatFromInt(tile_x)) + 0.5, @as(f32, @floatFromInt(tile_y)) + 0.5 },
-                    .{ @as(f32, @floatFromInt(tile_max_x - 1)) + 0.5, @as(f32, @floatFromInt(tile_y)) + 0.5 },
-                    .{ @as(f32, @floatFromInt(tile_x)) + 0.5, @as(f32, @floatFromInt(tile_max_y - 1)) + 0.5 },
-                    .{ @as(f32, @floatFromInt(tile_max_x - 1)) + 0.5, @as(f32, @floatFromInt(tile_max_y - 1)) + 0.5 },
-                };
-                var reject = false;
-                var fully_covered = true;
-                inline for (.{ .{ p1, p2 }, .{ p2, p0 }, .{ p0, p1 } }) |segment| {
-                    const corner_edges = [4]f32{
-                        edge(segment[0], segment[1], corners[0]) * inverse_area,
-                        edge(segment[0], segment[1], corners[1]) * inverse_area,
-                        edge(segment[0], segment[1], corners[2]) * inverse_area,
-                        edge(segment[0], segment[1], corners[3]) * inverse_area,
-                    };
-                    if (corner_edges[0] < 0 and corner_edges[1] < 0 and corner_edges[2] < 0 and corner_edges[3] < 0) reject = true;
-                    if (corner_edges[0] < 0 or corner_edges[1] < 0 or corner_edges[2] < 0 or corner_edges[3] < 0) fully_covered = false;
-                }
-                if (optimized and reject) continue;
+                const x0 = @as(f32, @floatFromInt(tile_x)) + 0.5;
+                const y0 = @as(f32, @floatFromInt(tile_y)) + 0.5;
+                const x1 = @as(f32, @floatFromInt(tile_max_x - 1)) + 0.5;
+                const y1 = @as(f32, @floatFromInt(tile_max_y - 1)) + 0.5;
+                const classification = classifyQuad(p0, p1, p2, inverse_area, .{ x0, x1, x0, x1 }, .{ y0, y0, y1, y1 });
+                if (optimized and classification.reject) continue;
+                const fully_covered = classification.fully_covered;
                 var y = tile_y;
                 while (y < tile_max_y) : (y += 1) {
                     if (lane_count != 1 and row_lanes[@intCast(y)] != lane_index) continue;
