@@ -30,9 +30,20 @@
 # therefore naturally excluded.
 set -euo pipefail
 
-usage="usage: isa_disasm_gate.sh check (--clean|--kernelized|--no-kernel-symbols) FILE... [...]"
-[[ "${1:-}" == "check" ]] || { echo "$usage" >&2; exit 64; }
-shift
+usage="usage: isa_disasm_gate.sh check (--clean|--kernelized|--no-kernel-symbols|--kernels-linked) FILE... [...]
+       isa_disasm_gate.sh skip REASON..."
+command=${1:-}
+case "$command" in
+  check) shift ;;
+  skip)
+    shift
+    reason="$*"
+    [[ -n "$reason" ]] || { echo "isa-gate: skip requires a reason" >&2; exit 64; }
+    echo "isa-gate: SKIPPED ($reason)"
+    exit 0
+    ;;
+  *) echo "$usage" >&2; exit 64 ;;
+esac
 
 # Exact exported kernel symbols. Single source of truth is
 # src/simd/kernel_abi.zig, whose test asserts these names appear verbatim in
@@ -143,6 +154,7 @@ count_vex() {
       if (line !~ /^[0-9a-f]+:[ \t]/) next
       n = split(line, f, "\t")
       if (n < 3) next                       # continuation bytes, not an instruction start
+      instrs++
       addr_hex = f[1]
       sub(/:.*/, "", addr_hex)
       addr = 0
@@ -160,25 +172,31 @@ count_vex() {
         gsub(/^[ \t]+|[ \t]+$/, "", mnemonic)
         if (mnemonic == "") is_vex = 0      # paranoia: never count without a decoded instruction
       }
-      if (is_vex) {
-        lo = 1; hi = count; best = 0
-        while (lo <= hi) {
-          mid = int((lo + hi) / 2)
-          if (starts[mid] <= addr) { best = mid; lo = mid + 1 } else hi = mid - 1
-        }
-        total++
-        if (!(best && addr < starts[best] + sizes[best])) padding++
-        else {
-          name = names[best]
-          tail = name
-          sub(/^.*\./, "", tail)
-          if (tail ~ kernel_re) kernel++
-          else if (name !~ foreign_re) outside++
-          else foreign++
-        }
+      if (!is_vex) next
+      lo = 1; hi = count; best = 0
+      while (lo <= hi) {
+        mid = int((lo + hi) / 2)
+        if (starts[mid] <= addr) { best = mid; lo = mid + 1 } else hi = mid - 1
+      }
+      total++
+      if (!(best && addr < starts[best] + sizes[best])) padding++
+      else {
+        name = names[best]
+        tail = name
+        sub(/^.*\./, "", tail)
+        if (tail ~ kernel_re) kernel++
+        else if (name !~ foreign_re) outside++
+        else foreign++
       }
     }
     END {
+      # A stripped artifact without defined FUNC symbols cannot be attributed:
+      # fail closed rather than announcing zero VEX.
+      if (count + 0 == 0 && instrs + 0 > 0) {
+        printf "isa-gate: no FUNC symbols in artifact; cannot attribute %d instruction(s)\n", instrs > "/dev/stderr"
+        print "INVALID"
+        exit 0
+      }
       printf "%d %d %d %d %d\n", outside + 0, kernel + 0, padding + 0, foreign + 0, total + 0
     }
   ' "$workdir/stream.txt" >"$out" 2>"$workdir/awk.err"
@@ -192,7 +210,7 @@ count_vex() {
 }
 
 count_vex_file() {
-  local file=$1 result
+  local file=$1 out="$workdir/counters.txt" result rc
   if [[ "${file##*.}" == "a" ]]; then
     # Static archives restart addresses per member. Zig emits exactly one
     # object per kernel library, which readelf and objdump process natively;
@@ -206,12 +224,13 @@ count_vex_file() {
       return 1
     fi
   fi
-  result=$(count_vex "$file")
-  local rc=$?
-  if ((rc != 0)); then
+  # Capture output and status separately: command substitution in a `read`
+  # heredoc would swallow analyzer failures and look like zero counts.
+  if ! count_vex "$file" >"$out"; then
     echo "isa-gate: analysis failed for '$file'" >&2
     return 1
   fi
+  result=$(cat "$out")
   # Exactly five integer counters, or the analysis is invalid: fail closed.
   if [[ ! "$result" =~ ^[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+\ [0-9]+$ ]]; then
     echo "isa-gate: malformed analyzer output for '$file': '$result'" >&2
@@ -223,12 +242,20 @@ count_vex_file() {
 status=0
 check_file() {
   local file=$1 expect=$2 outside kernel padding foreign total present
+  local counters="$workdir/file_counters.txt"
   if [[ ! -f "$file" ]]; then
     echo "isa-gate: missing artifact '$file'" >&2
     status=1
     return
   fi
-  if ! read -r outside kernel padding foreign total <<< "$(count_vex_file "$file")"; then
+  # Capture output and status separately so analyzer failures fail closed.
+  if ! count_vex_file "$file" >"$counters"; then
+    status=1
+    return
+  fi
+  read -r outside kernel padding foreign total <<< "$(cat "$counters")"
+  if [[ ! "${outside:-}" =~ ^[0-9]+$ || ! "${kernel:-}" =~ ^[0-9]+$ || ! "${padding:-}" =~ ^[0-9]+$ || ! "${foreign:-}" =~ ^[0-9]+$ || ! "${total:-}" =~ ^[0-9]+$ ]]; then
+    echo "isa-gate FAILED: malformed counters for $(basename "$file")" >&2
     status=1
     return
   fi

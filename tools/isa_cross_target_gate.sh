@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Repository-local cross-target ISA tier evidence, appropriate to Zig 0.16.
 #
-# 1. Kernel-free baseline build (-Dv3-kernels=false, ReleaseFast): every
-#    shipped artifact must contain zero VEX-encoded instructions in any
-#    function and zero eight-lane kernel symbols.
+# 1. Kernel-free baseline build (-Dv3-kernels=false, ReleaseFast): the ICD
+#    must contain zero kernel export symbols; demo/benchmark must contain zero
+#    VEX-encoded instructions inside any project function (foreign library
+#    symbols on an explicit allowlist, and data tables, are reported but
+#    tolerated).
 # 2. Default build (baseline target + linked x86-64-v3 kernel objects,
 #    installed via the deterministic `install-v3-archive` step): the ICD stays
-#    kernel-free; demo/benchmark carry vectorized kernels exclusively inside
-#    `zpu_v3_*` functions with no VEX in any other project function.
+#    symbol-free of kernels; demo/benchmark carry vectorized kernels
+#    exclusively inside `zpu_v3_*` functions with no VEX in any other project
+#    function (foreign/data tolerance identical to phase 1).
 # 3. Explicit -Dcpu=x86_64_v3 opt-in build: must succeed. Its functional smoke
 #    run is host-gated: executed only when this host supports AVX2, otherwise
 #    explicitly skipped (or hard-failed with ZPU_REQUIRE_V3_RUN=1). No

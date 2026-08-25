@@ -12,13 +12,15 @@
 //! This file lives at the src/ root because a Zig module cannot import files
 //! outside its root path; the kernels need `surface.zig` and `simd/vector.zig`.
 //!
-//! Safety posture (documented justification for always-optimized builds):
-//! Debug-mode safety plumbing would drag std.debug/DWARF machinery into this
-//! v3-feature tier, so instead of relying on it, every wrapper validates its
-//! ABI inputs explicitly below; violations trap via `unreachable` (an illegal
-//! instruction) rather than corrupting pixels or reading out of bounds, and
-//! correctness is pinned by the differential oracle tests that compare every
-//! tier byte-for-byte against scalar.
+//! Safety posture: Debug-mode safety plumbing would drag std.debug/DWARF
+//! machinery into this v3-feature tier, so the library is always built
+//! optimized WITHOUT relying on optimizer-promised `unreachable` elision.
+//! Every ABI-input violation takes an explicit `@trap()` — a mandatory `ud2`
+//! instruction the optimizer must preserve — so malformed calls halt instead
+//! of corrupting pixels or reading out of bounds. `tools/kernel_guard_regression.sh`
+//! deterministically verifies those trap instructions survived compilation in
+//! the emitted kernel objects, and correctness is pinned by differential
+//! oracle tests that compare every tier byte-for-byte against scalar.
 const abi = @import("simd/kernel_abi.zig");
 const std = @import("std");
 const s = @import("surface.zig");
@@ -40,15 +42,15 @@ fn checkedFormat(format_tag: u8) s.Format {
         // Only dispatch.zig calls these wrappers; a tag outside the two known
         // formats means the ABI contract is broken. Trap loudly instead of
         // silently writing wrong pixels via an invalid enum value.
-        else => unreachable,
+        else => @trap(),
     };
 }
 
 /// Traps unless `row_len` covers `(start + count) * 4` bytes without overflow.
 inline fn checkSpanBounds(row_len: usize, start: usize, count: usize) void {
-    const pixels = std.math.add(usize, start, count) catch unreachable;
-    const bytes = std.math.mul(usize, pixels, 4) catch unreachable;
-    if (bytes > row_len) unreachable;
+    const pixels = std.math.add(usize, start, count) catch @trap();
+    const bytes = std.math.mul(usize, pixels, 4) catch @trap();
+    if (bytes > row_len) @trap();
 }
 
 fn fillImpl(row_ptr: [*]u8, row_len: usize, start: usize, count: usize, format_tag: u8, packed_color: u32) callconv(.c) void {
@@ -63,8 +65,8 @@ fn blendSpanImpl(row_ptr: [*]u8, row_len: usize, start: usize, count: usize, for
 
 fn blendPixelsImpl(row_ptr: [*]u8, row_len: usize, start: usize, source_ptr: [*]const u8, source_len: usize, count: usize, format_tag: u8) callconv(.c) void {
     checkSpanBounds(row_len, start, count);
-    const source_bytes = std.math.mul(usize, count, 4) catch unreachable;
-    if (source_bytes > source_len) unreachable;
+    const source_bytes = std.math.mul(usize, count, 4) catch @trap();
+    if (source_bytes > source_len) @trap();
     vector.blendPixels(8, row_ptr[0..row_len], start, source_ptr[0..source_len], count, checkedFormat(format_tag));
 }
 

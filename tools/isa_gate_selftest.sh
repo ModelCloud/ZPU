@@ -121,4 +121,42 @@ expect_fail "missing sibling exports rejected under --kernelized" check --kernel
 expect_ok "plain non-VEX project object passes --clean" check --clean "$work/plain.o"
 expect_ok "plain non-VEX project object passes --no-kernel-symbols" check --no-kernel-symbols "$work/plain.o"
 
+# BL-2 fail-closed coverage: malformed and stripped inputs must exit nonzero
+# rather than announcing zero VEX.
+printf 'not an elf file at all\n' >"$work/garbage.bin"
+: >"$work/empty.bin"
+expect_fail "malformed non-ELF input rejected under --clean" check --clean "$work/garbage.bin"
+expect_fail "empty input rejected under --clean" check --clean "$work/empty.bin"
+
+if command -v strip >/dev/null 2>&1; then
+  cp "$work/kernel.o" "$work/stripped.o"
+  if strip --strip-all -o "$work/stripped_stripped.o" "$work/stripped.o" 2>/dev/null && readelf -sW "$work/stripped_stripped.o" 2>/dev/null | awk '$4=="FUNC" && $7!="UND"' | grep -q .; then
+    # Relocatable objects keep their symbols after strip; only assert the
+    # stripped case when symbols are genuinely gone.
+    expect_fail "stripped no-symbol object rejected under --clean" check --clean "$work/stripped_stripped.o"
+  else
+    rm -f "$work/stripped_stripped.o"
+  fi
+  # A stripped shared object with instructions but zero defined FUNC symbols
+  # cannot be attributed and must fail closed.
+  if command -v ld >/dev/null 2>&1; then
+    cat >"$work/nosyms.S" <<'EOF'
+.text
+ xor %eax, %eax
+ ret
+EOF
+    as --64 -o "$work/nosyms.o" "$work/nosyms.S"
+    ld -shared -o "$work/libnosyms.so" "$work/nosyms.o"
+    strip --strip-all "$work/libnosyms.so"
+    defined_funcs=$(readelf -sW "$work/libnosyms.so" 2>/dev/null | awk '$4=="FUNC" && $7!="UND"' | wc -l)
+    instr_lines=$(objdump -d -M intel "$work/libnosyms.so" 2>/dev/null | grep -cE '^[ \t]*[0-9a-f]+:' || true)
+    if ((defined_funcs == 0 && instr_lines > 0)); then
+      expect_fail "stripped object without FUNC symbols rejected under --clean" check --clean "$work/libnosyms.so"
+    fi
+  fi
+fi
+
+# First-class skip path.
+expect_ok "explicit skip exits zero with reason" skip "selftest reason"
+
 echo "isa-gate-selftest: all controls behaved as required"

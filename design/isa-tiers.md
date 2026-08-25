@@ -62,12 +62,32 @@ baseline features, so a real boundary requires separate compilation:
    generated `zpu_config` options module, producing artifacts whose functions
    contain zero VEX instructions.
 
+Safety posture: Debug-mode safety plumbing would drag std.debug machinery
+into this v3-feature tier, so the kernel library is always built optimized
+WITHOUT relying on optimizer-promised `unreachable` elision. Every ABI-input
+violation (unknown format tag, span/length overflow or out-of-bounds) in
+`src/x86_64_v3_kernels.zig` executes an explicit `@trap()` — a mandatory
+`ud2` instruction the optimizer must preserve — so malformed calls halt
+instead of silently corrupting pixels or reading out of bounds.
+`tools/kernel_guard_regression.sh` disassembles the emitted kernel objects and
+requires at least one surviving trap inside each exported function, and
+correctness is pinned by differential oracle tests that compare every tier
+byte-for-byte against scalar.
+
 ## Enforcement: `zig build isa-gate`
 
 `tools/isa_disasm_gate.sh` performs deterministic disassembly analysis
 (binutils only, fixed patterns, no network or timestamps). Required tools are
-preflighted, intermediate steps check exit status, counters are validated to
-be exactly five integers, and any analyzer failure fails the gate closed.
+preflighted, intermediate steps check exit status, analyzer output is captured
+with its exit status separately from its content, counters are validated to be
+exactly five integers, and any analyzer failure fails the gate closed. A
+stripped artifact without defined FUNC symbols cannot be attributed and is
+rejected outright rather than reported as clean. Non-applicable configurations
+(non-x86_64 targets, `-Dxcb=false` with nothing scannable) take a first-class
+`skip REASON` path that exits 0 with an explicit reason; nested-build
+regressions in `tools/isa_gate_wiring_regression.sh` prove the aarch64
+`isa-gate` and `test` graphs plus the empty-configuration behave exactly that
+way.
 
 Detection is encoding-aware: objdump's raw byte column decides — an
 instruction is VEX/EVEX iff its first opcode byte is `c4`, `c5` or `62`
@@ -78,39 +98,47 @@ padding and data tables between functions are reported separately rather than
 misattributed, and legacy `verr`/`verw` mnemonics are excluded by
 construction. Modes:
 
-- **`--clean`**: zero VEX-encoded instructions inside any function.
-- **`--no-kernel-symbols`**: additionally requires that none of the eight-lane
-  kernel export symbols exist in the artifact — the deterministic half of the
-  linkage-consistency proof.
+- **`--clean`**: zero VEX-encoded instructions inside any *project* function.
+  Foreign (standard library / compiler-rt / libc plumbing) symbols matching an
+  explicit auditable root list, and unattributable padding/data tables, are
+  reported but tolerated; unknown symbols carrying VEX fail closed.
+- **`--no-kernel-symbols`**: pure linkage-consistency assertion — none of the
+  eight-lane kernel export symbols exist in the artifact. Pair with `--clean`
+  where VEX-freedom is also required.
 - **`--kernelized`**: all three kernel exports must be linked and genuinely
-  vectorized (>0 VEX), zero VEX may appear in project non-kernel functions,
-  and foreign (standard library/compiler-rt/libc) symbols are tolerated only
-  if they match an explicit auditable root list embedded in the script;
-  unknown symbols are treated as project code and fail the gate (fail closed).
+  vectorized (>0 VEX), zero VEX may appear in project non-kernel functions;
+  foreign-symbol and padding tolerance as above, failing closed for unknowns.
+- **`--kernels-linked`**: exports linked and vectorized only — used for
+  explicit `-Dcpu=` higher-tier artifacts where portable-tier VEX reflects the
+  user's chosen tier.
 
-The gate consumes ReleaseFast kernel-free twins of every shipped artifact
-(built in-graph with the boundary compiled out) under `--no-kernel-symbols`,
-plus the default-tree ICD; when the v3 tier applies (`x86_64` target and
-`-Dv3-kernels`, default on) demo/benchmark and the kernel archive run under
-`--kernelized`, otherwise demo/benchmark also prove kernel-freedom.
-`tools/isa_gate_selftest.sh` assembles deterministic fixture objects and
-proves both directions: a VEX leak inside a project-named function is
-rejected in every mode, and an exact full kernel export set is accepted only
-under `--kernelized`.
+Applicability wiring lives in `build.zig`: baseline-pinned x86_64 builds run
+the full contract (ReleaseFast kernel-free twins under `--clean` plus
+`--no-kernel-symbols`, default-tree ICD kernel-free, demo/benchmark/archive
+kernelized when the v3 tier applies, or fully kernel-free otherwise);
+explicit higher-tier opt-ins run `--kernels-linked`; non-x86_64 targets and
+empty configurations take the skip path. `tools/isa_gate_selftest.sh`
+assembles deterministic fixture objects and proves both directions: a VEX
+leak inside a project-named function is rejected under `--clean`/
+`--kernelized`, malformed/stripped inputs fail closed, and an exact full
+kernel export set passes only under `--kernelized`.
 
 `tools/isa_cross_target_gate.sh` (`zig build isa-cross`) collects the
-cross-target story: kernel-free ReleaseFast artifacts fully clean, default
-artifacts clean-outside/vectorized-inside with the archive installed at the
-deterministic path provided by `zig build install-v3-archive`, an explicit
-`-Dcpu=x86_64_v3` opt-in build whose functional smoke executes only on hosts
-that actually support AVX2 (explicitly skipped otherwise, fatal with
-`ZPU_REQUIRE_V3_RUN=1`), and a successful `aarch64-linux-gnu` build of the
-default install set (xcb-linked artifacts resolved via `-Dsearch-prefix`
+cross-target story. Phase 1 checks the ReleaseFast kernel-free twins: ICD via
+`--no-kernel-symbols` (no exports, no project-function VEX), demo/benchmark
+via `--clean` (no project-function VEX). Phase 2 installs the default tree
+plus the archive through the deterministic `install-v3-archive` step: ICD
+kernel-free, demo/benchmark/archive kernelized. Phase 3 builds the explicit
+`-Dcpu=x86_64_v3` opt-in whose functional smoke executes only on hosts that
+actually support AVX2 (explicitly skipped otherwise, fatal with
+`ZPU_REQUIRE_V3_RUN=1`). Phase 4 cross-compiles the default install set for
+`aarch64-linux-gnu` (xcb-linked artifacts resolved via `-Dsearch-prefix`
 against a multiarch sysroot), proving non-x86_64 targets never reference the
 kernel symbols.
 
 Both gates run under the canonical physical-core limiter like every other
-repository gate, and both participate in `zig build test`.
+repository gate, and isa-gate, its selftest, the wiring regression, and the
+kernel guard regression all participate in `zig build test`.
 
 ## Cache identity compatibility policy
 

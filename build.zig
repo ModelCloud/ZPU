@@ -175,7 +175,16 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
     run_tests.step.dependOn(&require_limited.step);
     const test_step = b.step("test", "Run deterministic unit tests");
-    test_step.dependOn(&run_tests.step);
+    // Cross-compiling: prove the test graph builds for the target without
+    // attempting to execute foreign binaries locally.
+    const cross_compiling = target.result.cpu.arch != b.graph.host.result.cpu.arch or
+        target.result.os.tag != b.graph.host.result.os.tag;
+    if (cross_compiling) {
+        tests.step.dependOn(&require_limited.step);
+        test_step.dependOn(&tests.step);
+    } else {
+        test_step.dependOn(&run_tests.step);
+    }
     const cadence_tests = b.addSystemCommand(&.{ "python3", "test/cadence.py" });
     cadence_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&cadence_tests.step);
@@ -198,16 +207,21 @@ pub fn build(b: *std.Build) void {
     benchmark_cli_tests.addFileArg(b.path("test/benchmark_cli.sh"));
     benchmark_cli_tests.addArtifactArg(benchmark);
     benchmark_cli_tests.step.dependOn(&require_limited.step);
-    test_step.dependOn(&benchmark_cli_tests.step);
     const benchmark_history_tests = b.addSystemCommand(&.{"test/benchmark_history.sh"});
     benchmark_history_tests.addArtifactArg(benchmark);
     benchmark_history_tests.step.dependOn(&require_limited.step);
-    test_step.dependOn(&benchmark_history_tests.step);
     const evidence_tests = b.addSystemCommand(&.{"test/evidence.sh"});
     evidence_tests.addArtifactArg(benchmark);
     evidence_tests.addArtifactArg(benchmark_3d);
     evidence_tests.step.dependOn(&require_limited.step);
-    test_step.dependOn(&evidence_tests.step);
+    if (!cross_compiling) {
+        // These integrations execute the built artifacts locally and are
+        // meaningless for foreign targets; the compile-only coverage above
+        // already proves the graph builds.
+        test_step.dependOn(&benchmark_cli_tests.step);
+        test_step.dependOn(&benchmark_history_tests.step);
+        test_step.dependOn(&evidence_tests.step);
+    }
     const cpu_fanout_tests = b.addSystemCommand(&.{"test/cpu_fanout.sh"});
     cpu_fanout_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&cpu_fanout_tests.step);
@@ -227,7 +241,12 @@ pub fn build(b: *std.Build) void {
     run_shader_module.step.dependOn(&require_limited.step);
     run_shader_module.setEnvironmentVariable("VK_DRIVER_FILES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
     run_shader_module.step.dependOn(b.getInstallStep());
-    test_step.dependOn(&run_shader_module.step);
+    if (cross_compiling) {
+        shader_module_client.step.dependOn(&require_limited.step);
+        test_step.dependOn(&shader_module_client.step);
+    } else {
+        test_step.dependOn(&run_shader_module.step);
+    }
 
     const reference_module = b.createModule(.{ .root_source_file = b.path("test/spirv_frontend_reference.zig"), .target = b.graph.host, .optimize = .Debug });
     reference_module.addImport("frontend", b.createModule(.{ .root_source_file = b.path("src/vulkan/spirv_frontend.zig"), .target = b.graph.host, .optimize = .Debug }));
@@ -535,24 +554,42 @@ pub fn build(b: *std.Build) void {
             }
         }
         if (gated_files == 0) {
-            const nothing = b.addSystemCommand(&.{ "echo", "isa-gate: no artifacts to scan (-Dxcb=false)" });
-            isa_gate.step.dependOn(&nothing.step);
+            // No artifacts to scan: run the gate's first-class skip path so
+            // the step still exercises the tool deterministically and exits 0.
+            const skip_reason = b.fmt("no scannable artifacts for cpu={s} -Dxcb={} -Dv3-kernels={}", .{ @tagName(target.result.cpu.arch), enable_xcb, v3_kernels_enabled });
+            isa_gate.argv.clearRetainingCapacity();
+            isa_gate.addArg(b.pathFromRoot("tools/isa_disasm_gate.sh"));
+            isa_gate.addArg("skip");
+            isa_gate.addArg(skip_reason);
         }
     } else {
-        const not_applicable = b.addSystemCommand(&.{ "echo", "isa-gate: skipped — ISA tier evidence is x86-specific for this target" });
-        isa_gate.step.dependOn(&not_applicable.step);
+        isa_gate.argv.clearRetainingCapacity();
+        isa_gate.addArg(b.pathFromRoot("tools/isa_disasm_gate.sh"));
+        isa_gate.addArg("skip");
+        isa_gate.addArg(b.fmt("ISA tier evidence is x86-specific; target arch is {s}", .{@tagName(target.result.cpu.arch)}));
     }
     isa_gate.step.dependOn(&require_limited.step);
 
     const isa_selftest = b.addSystemCommand(&.{ "bash", "tools/isa_gate_selftest.sh" });
     isa_selftest.step.dependOn(&require_limited.step);
 
+    const isa_wiring_regression = b.addSystemCommand(&.{ "bash", "tools/isa_gate_wiring_regression.sh" });
+    isa_wiring_regression.step.dependOn(&require_limited.step);
+
     const isa_gate_step = b.step("isa-gate", "Require baseline artifacts free of VEX instructions with a vectorized kernel positive control");
     isa_gate_step.dependOn(&isa_gate.step);
     isa_gate_step.dependOn(&isa_selftest.step);
+    isa_gate_step.dependOn(&isa_wiring_regression.step);
     test_step.dependOn(&isa_gate.step);
+    if (v3_kernels_main) |k| {
+        const kernel_guard_regression = b.addSystemCommand(&.{ "bash", "tools/kernel_guard_regression.sh" });
+        kernel_guard_regression.addArtifactArg(k);
+        kernel_guard_regression.step.dependOn(&require_limited.step);
+        isa_gate_step.dependOn(&kernel_guard_regression.step);
+        test_step.dependOn(&kernel_guard_regression.step);
+    }
     test_step.dependOn(&isa_selftest.step);
-
+    test_step.dependOn(&isa_wiring_regression.step);
     const isa_cross = b.addSystemCommand(&.{ "bash", "tools/isa_cross_target_gate.sh" });
     isa_cross.step.dependOn(&require_limited.step);
     const isa_cross_step = b.step("isa-cross", "Collect cross-target codegen evidence for the pinned ISA tiers");
