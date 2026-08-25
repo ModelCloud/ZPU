@@ -165,6 +165,7 @@ tools/limited-cpus.sh zig build target-800x600 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build target-4k-30 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build target-4k-60 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build target-4k-120 -Doptimize=ReleaseFast
+tools/limited-cpus.sh zig build target-4k-240 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build demo
 tools/limited-cpus.sh zig build -Doptimize=ReleaseFast
 ```
@@ -182,10 +183,11 @@ ZPU also exposes `VK_EXT_present_timing`: applications can attach
 monotonic or relative target time per swapchain. Untimed presents retain the
 process-local `ZPU_REFRESH_HZ` cadence.
 
-`target-4k-30`, `target-4k-60`, and `target-4k-120` apply the same individual-frame ultra-low
+`target-4k-30`, `target-4k-60`, `target-4k-120`, and `target-4k-240` apply the same individual-frame ultra-low
 1% timing gate to real 3840x2160 `vkcube`: after 120 warmup frames, p99 across
-1,000 frames must not exceed 33,333,333 ns, 16,666,666 ns, and 8,333,333 ns
-respectively. The strict floors use explicit 31 Hz, 63 Hz, and 126 Hz pacing
+1,000 frames must not exceed 33,333,333 ns, 16,666,666 ns, 8,333,333 ns, and
+4,166,666 ns respectively. The strict floors use explicit 31 Hz, 63 Hz, 126 Hz,
+and 252 Hz pacing
 guard bands so ordinary wake jitter cannot turn an exact nominal cadence into
 a dishonest sub-target 1% low.
 With the canonical eight-core gate, the harness dedicates one inherited CPU to

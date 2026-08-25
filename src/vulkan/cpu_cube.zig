@@ -101,6 +101,32 @@ fn prepareDraw(uniform: []const u8, vertex_count: u32, viewport: Viewport) Prepa
     return prepared;
 }
 
+fn preparedBounds(prepared: *const PreparedDraw, width: u32, height: u32, scissor: Rect) Rect {
+    var min_x: f32 = @floatFromInt(width);
+    var min_y: f32 = @floatFromInt(height);
+    var max_x: f32 = 0;
+    var max_y: f32 = 0;
+    var found = false;
+    for (prepared.triangles[0..prepared.count]) |triangle| {
+        if (!triangle.valid) continue;
+        for (triangle.vertices) |vertex| {
+            if (!std.math.isFinite(vertex.screen[0]) or !std.math.isFinite(vertex.screen[1])) continue;
+            min_x = @min(min_x, vertex.screen[0]);
+            min_y = @min(min_y, vertex.screen[1]);
+            max_x = @max(max_x, vertex.screen[0]);
+            max_y = @max(max_y, vertex.screen[1]);
+            found = true;
+        }
+    }
+    if (!found) return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+    const x0 = @max(@as(i32, @intFromFloat(@floor(std.math.clamp(min_x, 0, @as(f32, @floatFromInt(width)))))), scissor.x, 0);
+    const y0 = @max(@as(i32, @intFromFloat(@floor(std.math.clamp(min_y, 0, @as(f32, @floatFromInt(height)))))), scissor.y, 0);
+    const x1 = @min(@as(i32, @intFromFloat(@ceil(std.math.clamp(max_x, 0, @as(f32, @floatFromInt(width)))))), scissor.x + @as(i32, @intCast(scissor.width)), @as(i32, @intCast(width)));
+    const y1 = @min(@as(i32, @intFromFloat(@ceil(std.math.clamp(max_y, 0, @as(f32, @floatFromInt(height)))))), scissor.y + @as(i32, @intCast(scissor.height)), @as(i32, @intCast(height)));
+    if (x1 <= x0 or y1 <= y0) return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+    return .{ .x = x0, .y = y0, .width = @intCast(x1 - x0), .height = @intCast(y1 - y0) };
+}
+
 fn shade(texture: []const u8, texture_width: u32, texture_height: u32, u: f32, v: f32, table: *const [256]u8) [4]u8 {
     const clamped_u = std.math.clamp(u, 0, 0.999999);
     const clamped_v = std.math.clamp(v, 0, 0.999999);
@@ -309,7 +335,7 @@ const ParallelDraw = struct {
     prepared: PreparedDraw,
     bands: [parallel_band_count]ParallelBand = [_]ParallelBand{.{}} ** parallel_band_count,
 };
-const ParallelClear = struct { color: []u8, color_pattern: u32, depth: []u8, depth_pattern: u32 };
+const ParallelClear = struct { color: []u8, color_pattern: u32, depth: []u8, depth_pattern: u32, width: u32 = 0, rect: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 } };
 const ParallelJob = union(enum) { draw: *ParallelDraw, clear: *ParallelClear };
 
 var parallel_mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER;
@@ -317,9 +343,39 @@ var parallel_condition: std.c.pthread_cond_t = std.c.PTHREAD_COND_INITIALIZER;
 var parallel_started = false;
 var parallel_available = false;
 var parallel_ready: usize = 0;
-var parallel_generation: u64 = 0;
-var parallel_completed: usize = 0;
+var parallel_generation = std.atomic.Value(u64).init(0);
+var parallel_completed = std.atomic.Value(usize).init(0);
 var parallel_active: ?ParallelJob = null;
+
+// A raster worker normally finishes less than one frame before its next job.
+// Keep it runnable across that short gap so the render thread is not exposed
+// to the millisecond-scale tail of a condition-variable wake. Idle workers
+// still sleep after this bounded interval.
+const parallel_idle_spin_ns: u64 = 5_000_000;
+
+fn monotonicNs() u64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
+    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+}
+
+fn waitForParallelGeneration(observed_generation: u64) u64 {
+    const deadline = monotonicNs() +| parallel_idle_spin_ns;
+    var spins: usize = 0;
+    while (parallel_generation.load(.acquire) == observed_generation) {
+        std.atomic.spinLoopHint();
+        spins +%= 1;
+        if (spins % 1024 == 0 and monotonicNs() >= deadline) break;
+    }
+    const current_generation = parallel_generation.load(.acquire);
+    if (current_generation != observed_generation) return current_generation;
+
+    _ = std.c.pthread_mutex_lock(&parallel_mutex);
+    while (parallel_generation.load(.acquire) == observed_generation) _ = std.c.pthread_cond_wait(&parallel_condition, &parallel_mutex);
+    const next_generation = parallel_generation.load(.acquire);
+    _ = std.c.pthread_mutex_unlock(&parallel_mutex);
+    return next_generation;
+}
 
 fn runParallelBand(context: *ParallelDraw, band_index: usize) void {
     const band = &context.bands[band_index];
@@ -334,12 +390,30 @@ fn fillPatternLane(bytes: []u8, pattern: u32, lane_index: usize) void {
     @memset(words[start..end], pattern);
 }
 
+fn fillPatternRectLane(bytes: []u8, width: u32, rect: Rect, pattern: u32, lane_index: usize) void {
+    if (rect.width == 0 or rect.height == 0) return;
+    const aligned: []align(4) u8 = @alignCast(bytes);
+    const words = std.mem.bytesAsSlice(u32, aligned);
+    const first_row = @as(usize, @intCast(rect.y)) + @as(usize, rect.height) * lane_index / parallel_band_count;
+    const last_row = @as(usize, @intCast(rect.y)) + @as(usize, rect.height) * (lane_index + 1) / parallel_band_count;
+    const x: usize = @intCast(rect.x);
+    for (first_row..last_row) |y| {
+        const start = y * width + x;
+        @memset(words[start..][0..rect.width], pattern);
+    }
+}
+
 fn runParallelJob(job: ParallelJob, lane_index: usize) void {
     switch (job) {
         .draw => |context| runParallelBand(context, lane_index),
         .clear => |context| {
-            fillPatternLane(context.color, context.color_pattern, lane_index);
-            fillPatternLane(context.depth, context.depth_pattern, lane_index);
+            if (context.width == 0) {
+                fillPatternLane(context.color, context.color_pattern, lane_index);
+                fillPatternLane(context.depth, context.depth_pattern, lane_index);
+            } else {
+                fillPatternRectLane(context.color, context.width, context.rect, context.color_pattern, lane_index);
+                fillPatternRectLane(context.depth, context.width, context.rect, context.depth_pattern, lane_index);
+            }
         },
     }
 }
@@ -349,16 +423,13 @@ fn parallelWorker(worker_index: usize) void {
     _ = std.c.pthread_mutex_lock(&parallel_mutex);
     parallel_ready += 1;
     _ = std.c.pthread_cond_broadcast(&parallel_condition);
-    var observed_generation = parallel_generation;
+    var observed_generation = parallel_generation.load(.acquire);
+    _ = std.c.pthread_mutex_unlock(&parallel_mutex);
     while (true) {
-        while (parallel_generation == observed_generation) _ = std.c.pthread_cond_wait(&parallel_condition, &parallel_mutex);
-        observed_generation = parallel_generation;
+        observed_generation = waitForParallelGeneration(observed_generation);
         const job = parallel_active.?;
-        _ = std.c.pthread_mutex_unlock(&parallel_mutex);
         runParallelJob(job, worker_index + 1);
-        _ = std.c.pthread_mutex_lock(&parallel_mutex);
-        parallel_completed += 1;
-        _ = std.c.pthread_cond_broadcast(&parallel_condition);
+        _ = parallel_completed.fetchAdd(1, .release);
     }
 }
 
@@ -381,22 +452,24 @@ fn dispatchParallel(job: ParallelJob) bool {
     _ = std.c.pthread_mutex_lock(&parallel_mutex);
     while (parallel_active != null) _ = std.c.pthread_cond_wait(&parallel_condition, &parallel_mutex);
     parallel_active = job;
-    parallel_completed = 0;
-    parallel_generation +%= 1;
+    parallel_completed.store(0, .release);
+    _ = parallel_generation.fetchAdd(1, .release);
     _ = std.c.pthread_cond_broadcast(&parallel_condition);
     _ = std.c.pthread_mutex_unlock(&parallel_mutex);
 
     runParallelJob(job, 0);
+    while (parallel_completed.load(.acquire) != parallel_band_count - 1) std.atomic.spinLoopHint();
+
     _ = std.c.pthread_mutex_lock(&parallel_mutex);
-    while (parallel_completed != parallel_band_count - 1) _ = std.c.pthread_cond_wait(&parallel_condition, &parallel_mutex);
     parallel_active = null;
     _ = std.c.pthread_cond_broadcast(&parallel_condition);
     _ = std.c.pthread_mutex_unlock(&parallel_mutex);
     return true;
 }
 
-fn drawParallel(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, cull_mode: u32, front_face: i32) ?usize {
+fn drawParallel(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, cull_mode: u32, front_face: i32, bounds: ?*Rect) ?usize {
     var context = ParallelDraw{ .target = target, .depth = depth, .width = width, .height = height, .uniform = uniform, .texture = texture, .texture_width = texture_width, .texture_height = texture_height, .vertex_count = vertex_count, .viewport = viewport, .scissor = scissor, .cull_mode = cull_mode, .front_face = front_face, .prepared = prepareDraw(uniform, vertex_count, viewport) };
+    if (bounds) |output| output.* = preparedBounds(&context.prepared, width, height, scissor);
     if (!dispatchParallel(.{ .draw = &context })) return null;
 
     var pixels_written: usize = 0;
@@ -409,8 +482,21 @@ pub fn clearImagesParallel(color: []u8, color_pattern: u32, depth: []u8, depth_p
     return dispatchParallel(.{ .clear = &context });
 }
 
+pub fn clearImageRegionsParallel(color: []u8, color_pattern: u32, depth: []u8, depth_pattern: u32, width: u32, rect: Rect) bool {
+    var context = ParallelClear{ .color = color, .color_pattern = color_pattern, .depth = depth, .depth_pattern = depth_pattern, .width = width, .rect = rect };
+    return dispatchParallel(.{ .clear = &context });
+}
+
+pub fn drawTracked(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, cull_mode: u32, front_face: i32, bounds: *Rect) usize {
+    if (@as(u64, width) * height >= 1920 * 1080) if (drawParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, cull_mode, front_face, bounds)) |pixels_written| return pixels_written;
+    const prepared = prepareDraw(uniform, vertex_count, viewport);
+    bounds.* = preparedBounds(&prepared, width, height, scissor);
+    var counters = Counters{};
+    return drawInternal(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, &counters, true, cull_mode, front_face, 0, 1, 1, &prepared, false);
+}
+
 pub fn draw(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, cull_mode: u32, front_face: i32) usize {
-    if (@as(u64, width) * height >= 1920 * 1080) if (drawParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, cull_mode, front_face)) |pixels_written| return pixels_written;
+    if (@as(u64, width) * height >= 1920 * 1080) if (drawParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, cull_mode, front_face, null)) |pixels_written| return pixels_written;
     var counters = Counters{};
     return drawInternal(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, &counters, true, cull_mode, front_face, 0, 1, 1, null, false);
 }
@@ -505,4 +591,26 @@ test "interleaved parallel lanes are pixel exact with serial rendering" {
     try std.testing.expectEqual(serial_written, parallel_written);
     try std.testing.expectEqualSlices(u8, &serial, &parallel);
     try std.testing.expectEqualSlices(u8, &serial_depth, &parallel_depth);
+}
+
+test "prepared bounds conservatively cover transformed content" {
+    const vertex = Vertex{ .screen = .{ 3.25, 4.5, 0.5 }, .clip_w = 1, .uv = .{ 0, 0 } };
+    var prepared = PreparedDraw{ .count = 1 };
+    prepared.triangles[0] = .{ .valid = true, .vertices = .{
+        vertex,
+        .{ .screen = .{ 12.75, 5.25, 0.5 }, .clip_w = 1, .uv = .{ 0, 0 } },
+        .{ .screen = .{ 8.5, 15.75, 0.5 }, .clip_w = 1, .uv = .{ 0, 0 } },
+    }, .lighting = undefined };
+    try std.testing.expectEqual(Rect{ .x = 3, .y = 4, .width = 10, .height = 12 }, preparedBounds(&prepared, 20, 20, .{ .x = 0, .y = 0, .width = 20, .height = 20 }));
+    try std.testing.expectEqual(Rect{ .x = 5, .y = 6, .width = 5, .height = 4 }, preparedBounds(&prepared, 20, 20, .{ .x = 5, .y = 6, .width = 5, .height = 4 }));
+}
+
+test "regional clear changes only the requested rectangle" {
+    var bytes = [_]u8{0} ** (8 * 8 * 4);
+    for (0..parallel_band_count) |lane| fillPatternRectLane(&bytes, 8, .{ .x = 2, .y = 1, .width = 3, .height = 5 }, 0x44332211, lane);
+    const words = std.mem.bytesAsSlice(u32, @as([]align(4) u8, @alignCast(&bytes)));
+    for (0..8) |y| for (0..8) |x| {
+        const inside = x >= 2 and x < 5 and y >= 1 and y < 6;
+        try std.testing.expectEqual(if (inside) @as(u32, 0x44332211) else 0, words[y * 8 + x]);
+    };
 }

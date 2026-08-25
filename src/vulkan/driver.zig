@@ -218,7 +218,7 @@ pub const Device = *DeviceObj;
 pub const Queue = *QueueObj;
 const MemoryObj = struct { owner: Device, bytes: []align(64) u8, mapped: bool };
 const BufferObj = struct { owner: Device, size: u64, usage: u32, memory: ?*MemoryObj = null, offset: u64 = 0 };
-const ImageObj = struct { owner: Device, width: u32, height: u32, array_layers: u32, samples: u32, format: i32, usage: u32, layout: i32, memory: ?*MemoryObj = null, owned_bytes: ?[]align(64) u8 = null, shared_bytes: bool = false, offset: u64 = 0 };
+const ImageObj = struct { owner: Device, width: u32, height: u32, array_layers: u32, samples: u32, format: i32, usage: u32, layout: i32, memory: ?*MemoryObj = null, owned_bytes: ?[]align(64) u8 = null, shared_bytes: bool = false, offset: u64 = 0, clear_pattern: ?u32 = null, content_bounds: cpu_cube.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, force_full_present: bool = true };
 const FenceObj = struct { owner: Device, signaled: bool };
 const SemaphoreObj = struct { owner: Device, signaled: bool };
 const CommandPoolObj = struct { owner: Device };
@@ -1340,6 +1340,7 @@ fn mapMemory(device: ?Device, handle: usize, offset: u64, size: u64, flags: u32,
     const actual = if (size == std.math.maxInt(u64)) object.bytes.len - @as(usize, @intCast(offset)) else std.math.cast(usize, size) orelse return .error_memory_map_failed;
     if (actual > object.bytes.len - @as(usize, @intCast(offset))) return .error_memory_map_failed;
     object.mapped = true;
+    for (&image_objects, image_state) |*image, state| if (state == .live and image.memory == object) invalidateImageContents(image);
     out.* = object.bytes.ptr + @as(usize, @intCast(offset));
     return .success;
 }
@@ -2079,6 +2080,38 @@ fn fillImagePattern(bytes: []u8, pattern: u32) void {
     @memset(std.mem.bytesAsSlice(u32, aligned), pattern);
 }
 
+fn emptyRect() cpu_cube.Rect {
+    return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+}
+
+fn unionRect(a: cpu_cube.Rect, b: cpu_cube.Rect) cpu_cube.Rect {
+    if (a.width == 0 or a.height == 0) return b;
+    if (b.width == 0 or b.height == 0) return a;
+    const x0 = @min(a.x, b.x);
+    const y0 = @min(a.y, b.y);
+    const x1 = @max(a.x + @as(i32, @intCast(a.width)), b.x + @as(i32, @intCast(b.width)));
+    const y1 = @max(a.y + @as(i32, @intCast(a.height)), b.y + @as(i32, @intCast(b.height)));
+    return .{ .x = x0, .y = y0, .width = @intCast(x1 - x0), .height = @intCast(y1 - y0) };
+}
+
+fn fillImagePatternRect(bytes: []u8, width: u32, rect: cpu_cube.Rect, pattern: u32) void {
+    if (rect.width == 0 or rect.height == 0) return;
+    const aligned: []align(4) u8 = @alignCast(bytes);
+    const words = std.mem.bytesAsSlice(u32, aligned);
+    const x: usize = @intCast(rect.x);
+    const first_y: usize = @intCast(rect.y);
+    for (first_y..first_y + rect.height) |y| {
+        const start = y * width + x;
+        @memset(words[start..][0..rect.width], pattern);
+    }
+}
+
+fn invalidateImageContents(image: *ImageObj) void {
+    image.clear_pattern = null;
+    image.content_bounds = .{ .x = 0, .y = 0, .width = image.width, .height = image.height };
+    image.force_full_present = true;
+}
+
 fn executeValidatedCommand(command: Command) void {
     switch (command) {
         .fill => |op| {
@@ -2091,18 +2124,39 @@ fn executeValidatedCommand(command: Command) void {
             benchmarkHostMemoryCopy(dst, src);
         },
         .clear => |op| {
-            fillImagePattern(imageBytes(op.image), @bitCast(op.color));
+            const pattern: u32 = @bitCast(op.color);
+            fillImagePattern(imageBytes(op.image), pattern);
+            op.image.clear_pattern = pattern;
+            op.image.content_bounds = emptyRect();
+            op.image.force_full_present = true;
         },
         .render_clear => |op| {
             const bytes = imageBytes(op.image);
             if (op.depth) |depth| {
                 const depth_bytes = imageBytes(depth);
-                if (bytes.len < 8 * 1024 * 1024 or !cpu_cube.clearImagesParallel(bytes, @bitCast(op.color), depth_bytes, @bitCast(op.depth_value))) {
-                    fillImagePattern(bytes, @bitCast(op.color));
-                    fillImagePattern(depth_bytes, @bitCast(op.depth_value));
+                const color_pattern: u32 = @bitCast(op.color);
+                const depth_pattern: u32 = @bitCast(op.depth_value);
+                const sparse = bytes.len >= 8 * 1024 * 1024 and op.image.width == depth.width and op.image.height == depth.height and op.image.clear_pattern == color_pattern and depth.clear_pattern == depth_pattern and depth.memory != null and !depth.memory.?.mapped;
+                if (sparse) {
+                    const rect = unionRect(op.image.content_bounds, depth.content_bounds);
+                    if (rect.width != 0 and rect.height != 0 and !cpu_cube.clearImageRegionsParallel(bytes, color_pattern, depth_bytes, depth_pattern, op.image.width, rect)) {
+                        fillImagePatternRect(bytes, op.image.width, rect, color_pattern);
+                        fillImagePatternRect(depth_bytes, depth.width, rect, depth_pattern);
+                    }
+                } else if (bytes.len < 8 * 1024 * 1024 or !cpu_cube.clearImagesParallel(bytes, color_pattern, depth_bytes, depth_pattern)) {
+                    fillImagePattern(bytes, color_pattern);
+                    fillImagePattern(depth_bytes, depth_pattern);
                 }
+                op.image.clear_pattern = color_pattern;
+                depth.clear_pattern = depth_pattern;
+                op.image.content_bounds = emptyRect();
+                depth.content_bounds = emptyRect();
+                if (!sparse) op.image.force_full_present = true;
             } else {
                 fillImagePattern(bytes, @bitCast(op.color));
+                op.image.clear_pattern = @bitCast(op.color);
+                op.image.content_bounds = emptyRect();
+                op.image.force_full_present = true;
             }
         },
         .cube_draw => |op| {
@@ -2113,10 +2167,14 @@ fn executeValidatedCommand(command: Command) void {
             const uniform_length: usize = @intCast(@min(op.descriptors.uniform_range, uniform_buffer.size - op.descriptors.uniform_offset));
             const uniform_memory = uniform_buffer.memory.?.bytes;
             const texture = op.descriptors.texture.?;
-            _ = cpu_cube.draw(imageBytes(color), imageBytes(depth), color.width, color.height, uniform_memory[uniform_start..][0..uniform_length], imageBytes(texture), texture.width, texture.height, op.vertex_count, op.viewport, op.scissor, op.cull_mode, op.front_face);
+            var bounds = emptyRect();
+            _ = cpu_cube.drawTracked(imageBytes(color), imageBytes(depth), color.width, color.height, uniform_memory[uniform_start..][0..uniform_length], imageBytes(texture), texture.width, texture.height, op.vertex_count, op.viewport, op.scissor, op.cull_mode, op.front_face, &bounds);
+            color.content_bounds = unionRect(color.content_bounds, bounds);
+            depth.content_bounds = unionRect(depth.content_bounds, bounds);
         },
         .buffer_to_image => |op| {
             copyBufferImage(op.src, op.dst, op.region, true);
+            invalidateImageContents(op.dst);
         },
         .image_to_buffer => |op| {
             copyBufferImage(op.dst, op.src, op.region, false);
@@ -2131,6 +2189,7 @@ fn executeValidatedCommand(command: Command) void {
                 const len = @as(usize, op.region.extent.width) * 4;
                 std.mem.copyForwards(u8, dst[do..][0..len], src[so..][0..len]);
             }
+            invalidateImageContents(op.dst);
         },
         .transition => |op| {
             op.image.layout = op.new_layout;
@@ -3493,15 +3552,18 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         }
         swapchain.pending += 1;
         _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+        const image: *ImageObj = @ptrFromInt(swapchain.images[index]);
+        const content = xcb_present.Region{ .x = @intCast(@max(image.content_bounds.x, 0)), .y = @intCast(@max(image.content_bounds.y, 0)), .width = image.content_bounds.width, .height = image.content_bounds.height };
+        const force_full = image.force_full_present;
         if (builtin.is_test) {
-            const image: *ImageObj = @ptrFromInt(swapchain.images[index]);
             _ = xcb_present.present(&swapchain.transport, imageBytes(image));
+            image.force_full_present = false;
             releasePresented(swapchain, index);
         } else if (synchronousOneCore()) {
             const before = frame_pacing.monotonicNs();
             if (swapchain.cadence == null) swapchain.cadence = frame_pacing.Clock.init(before, frame_pacing.configuredRate());
             const deadline = target_ns orelse swapchain.cadence.?.deadline();
-            if (!xcb_present.upload(&swapchain.transport, imageBytes(@ptrFromInt(swapchain.images[index])))) {
+            if (!xcb_present.upload(&swapchain.transport, imageBytes(image), content, force_full)) {
                 releasePresented(swapchain, index);
                 mutex.unlock();
                 return .error_initialization_failed;
@@ -3509,7 +3571,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
             if (deadline > before) frame_pacing.sleepUntilPrecise(deadline, frame_pacing.precision_spin_ns);
             const woke = frame_pacing.monotonicNs();
             swapchain.transport.last.wake_error_ns = @intCast(woke -| deadline);
-            if (!xcb_present.commit(&swapchain.transport, imageBytes(@ptrFromInt(swapchain.images[index])))) {
+            if (!xcb_present.commit(&swapchain.transport, imageBytes(image))) {
                 releasePresented(swapchain, index);
                 mutex.unlock();
                 return .error_initialization_failed;
@@ -3529,12 +3591,13 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
                 .frame_end_ns = finished,
             });
             swapchain.cadence.?.advance(finished);
+            image.force_full_present = false;
             releasePresented(swapchain, index);
-        } else if (!present_worker.enqueue(.{ .transport = &swapchain.transport, .cadence = &swapchain.cadence, .pixels = imageBytes(@ptrFromInt(swapchain.images[index])), .context = swapchain, .image_index = index, .release = releasePresented, .target_ns = target_ns })) {
+        } else if (!present_worker.enqueue(.{ .transport = &swapchain.transport, .cadence = &swapchain.cadence, .pixels = imageBytes(image), .content = content, .force_full = force_full, .context = swapchain, .image_index = index, .release = releasePresented, .target_ns = target_ns })) {
             releasePresented(swapchain, index);
             mutex.unlock();
             return .error_initialization_failed;
-        }
+        } else image.force_full_present = false;
         if (present.results) |results| results[i] = .success;
     }
     mutex.unlock();
