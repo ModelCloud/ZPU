@@ -89,6 +89,7 @@ pub fn build(b: *std.Build) void {
     const target_4k_60_step = b.step("target-4k-60", "Require vkcube 3840x2160 presented-frame p99 at 60 FPS or better");
     target_4k_60_step.dependOn(&run_target_4k_60.step);
     const benchmark_ir = b.addExecutable(.{ .name = "zpu-render-ir-exec-benchmark", .root_module = b.createModule(.{ .root_source_file = b.path("src/render_ir_exec_benchmark.zig"), .target = target, .optimize = optimize }) });
+    benchmark_ir.root_module.link_libc = true;
     const run_benchmark_ir = b.addRunArtifact(benchmark_ir);
     run_benchmark_ir.step.dependOn(&require_limited.step);
     const benchmark_ir_step = b.step("benchmark-render-ir", "Benchmark synthetic scalar render IR setup and warm execution");

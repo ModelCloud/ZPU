@@ -1,8 +1,10 @@
 const std = @import("std");
 const exec = @import("render_ir_exec.zig");
 const ir = @import("vulkan/render_ir.zig");
+extern fn sched_getaffinity(pid: c_int, size: usize, mask: *anyopaque) c_int;
 
-const samples = 1000;
+const samples = 10_000;
+const warmups = 2_000;
 fn percentile(values: []u64, n: usize) u64 {
     std.mem.sort(u64, values, {}, std.sort.asc(u64));
     return values[((values.len * n + 99) / 100) - 1];
@@ -28,6 +30,19 @@ fn report(name: []const u8, original: [samples]u64) void {
 
 pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, init.environ_map.get("ZPU_LIMITED") orelse "", "physical-core-v1")) return error.MissingAffinityGate;
+    const selected = init.environ_map.get("ZPU_SELECTED_CPUS") orelse return error.MissingAffinityGate;
+    var actual: [128]u8 = .{0} ** 128;
+    if (sched_getaffinity(0, actual.len, &actual) != 0) return error.AffinityQueryFailed;
+    var expected: [128]u8 = .{0} ** 128;
+    var parts = std.mem.splitScalar(u8, selected, ',');
+    var count: usize = 0;
+    while (parts.next()) |part| {
+        const cpu = try std.fmt.parseInt(usize, part, 10);
+        if (cpu >= expected.len * 8) return error.InvalidAffinity;
+        expected[cpu / 8] |= @as(u8, 1) << @intCast(cpu % 8);
+        count += 1;
+    }
+    if (count == 0 or !std.mem.eql(u8, &actual, &expected)) return error.AffinityMismatch;
     const allocator = std.heap.page_allocator;
     var literal: [4]u8 = undefined;
     std.mem.writeInt(u32, &literal, @bitCast(@as(f32, 1)), .little);
@@ -36,23 +51,36 @@ pub fn main(init: std.process.Init) !void {
     const bytes = try ir.serialize(allocator, .fragment, "main", &interfaces, &instructions);
     defer allocator.free(bytes);
     var program = ir.Program{ .stage = .fragment, .entry_name = @constCast("main"), .interfaces = &interfaces, .instructions = &instructions, .bytes = bytes, .identity = ir.identify(bytes) };
-    var cold: [samples]u64 = undefined;
+    var setup: [samples]u64 = undefined;
+    var teardown: [samples]u64 = undefined;
     var warm: [samples]u64 = undefined;
     var output: [4]u8 = undefined;
+    var allocation_probe = std.testing.FailingAllocator.init(allocator, .{ .fail_index = std.math.maxInt(usize) });
+    var counted = try exec.Executor.init(allocation_probe.allocator(), &program);
+    counted.deinit();
+    const setup_allocations = allocation_probe.allocations;
     for (0..samples) |i| {
         const start = std.Io.Clock.boot.now(init.io);
         var executor = try exec.Executor.init(allocator, &program);
-        cold[i] = @intCast(@max(start.untilNow(init.io, .boot).toNanoseconds(), 1));
+        setup[i] = @intCast(@max(start.untilNow(init.io, .boot).toNanoseconds(), 1));
+        const deinit_start = std.Io.Clock.boot.now(init.io);
         executor.deinit();
+        teardown[i] = @intCast(@max(deinit_start.untilNow(init.io, .boot).toNanoseconds(), 1));
     }
     var executor = try exec.Executor.init(allocator, &program);
     defer executor.deinit();
+    for (0..warmups) |_| try executor.execute(&.{}, &.{.{ .interface = 0, .bytes = &output }});
+    var checksum: u64 = 14695981039346656037;
     for (0..samples) |i| {
         const start = std.Io.Clock.boot.now(init.io);
         try executor.execute(&.{}, &.{.{ .interface = 0, .bytes = &output }});
         warm[i] = @intCast(@max(start.untilNow(init.io, .boot).toNanoseconds(), 1));
+        for (output) |byte| checksum = (checksum ^ byte) *% 1099511628211;
+        std.mem.doNotOptimizeAway(&output);
     }
-    report("scalar cold/setup", cold);
+    report("scalar setup", setup);
     report("scalar warm execution", warm);
-    std.debug.print("allocations: setup_calls=10 warm_per_invocation=0 samples={d}\n", .{samples});
+    report("scalar deinit", teardown);
+    std.debug.print("allocations: measured_setup_calls={d} warm_per_invocation=0 samples={d} warmups={d} checksum={x}\n", .{ setup_allocations, samples, warmups, checksum });
+    std.debug.print("timer note: sub-microsecond execution tails include clock quantization, interrupts, and scheduler outliers; this is kernel latency, not frame stability\n", .{});
 }

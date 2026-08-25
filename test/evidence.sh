@@ -8,25 +8,13 @@ sha=$(git rev-parse HEAD); utc=2026-01-02T03:04:05Z
 grep -F 'b.step("benchmark-3d"' build.zig >/dev/null
 grep -F 'b.step("pr-readiness"' build.zig >/dev/null
 grep -F '`ffmpeg` and `ffprobe`' docs/pr-readiness.md >/dev/null
-search=${ZPU_SEARCH_TOOL:-}
-if [[ -z "$search" ]]; then
-  if command -v rg >/dev/null 2>&1; then search=rg
-  elif command -v grep >/dev/null 2>&1; then search=grep
-  else echo "evidence dependency check requires rg or grep" >&2; exit 1
-  fi
-fi
-if [[ "$search" == rg ]]; then
-  dependency_hit=$(rg -n '\.github/workflows|GITHUB_TOKEN|workflow scope' tools/evidence.py tools/capture_vkcube.sh tools/pr_readiness.sh docs/pr-readiness.md || true)
-elif [[ "$search" == grep ]]; then
-  dependency_hit=$(grep -En '\.github/workflows|GITHUB_TOKEN|workflow scope' tools/evidence.py tools/capture_vkcube.sh tools/pr_readiness.sh docs/pr-readiness.md || true)
-else
-  echo "unsupported ZPU_SEARCH_TOOL: $search" >&2; exit 1
-fi
-if [[ -n "$dependency_hit" ]]; then
-  printf '%s\n' "$dependency_hit"
-  echo "evidence feature depends on GitHub workflow configuration" >&2
-  exit 1
-fi
+tools/check_evidence_dependencies.sh tools/evidence.py tools/capture_vkcube.sh tools/pr_readiness.sh docs/pr-readiness.md
+fake="$tmp/fake"; mkdir "$fake"
+printf '#!/bin/sh\nexit 2\n' >"$fake/rg"; chmod +x "$fake/rg"
+if PATH="$fake:$PATH" ZPU_SEARCH_TOOL=rg tools/check_evidence_dependencies.sh README.md 2>/dev/null; then echo "failing rg false-passed"; exit 1; fi
+if PATH="$fake" ZPU_SEARCH_TOOL=grep tools/check_evidence_dependencies.sh README.md 2>/dev/null; then echo "missing grep override false-passed"; exit 1; fi
+if ZPU_SEARCH_TOOL=unknown tools/check_evidence_dependencies.sh README.md 2>/dev/null; then echo "unknown override false-passed"; exit 1; fi
+PATH="$fake:/usr/bin:/bin" ZPU_SEARCH_TOOL=grep tools/check_evidence_dependencies.sh README.md
 "$bench2" --smoke --json --source-commit "$sha" --utc "$utc" --capture "$tmp/2d.json" >/dev/null
 "$bench3" --smoke --json --source-commit "$sha" --utc "$utc" --capture "$tmp/3d.json" >/dev/null
 python3 - "$tmp/2d.json" "$tmp/3d.json" <<'PY'

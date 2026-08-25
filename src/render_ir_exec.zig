@@ -51,6 +51,13 @@ pub const ExecutableKey = struct {
 
     pub fn init(allocator: std.mem.Allocator, program: *const ir.Program, fields: KeyFields) Error!ExecutableKey {
         if (program.bytes.len > max_key_ir_bytes) return error.LimitExceeded;
+        try validate(program);
+        const canonical = ir.canonicalize(allocator, program.instructions) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidProgram;
+        defer freeInstructions(allocator, canonical);
+        const structural = ir.serialize(allocator, program.stage, program.entry_name, program.interfaces, canonical) catch return error.OutOfMemory;
+        defer allocator.free(structural);
+        const identity = ir.identify(program.bytes);
+        if (!std.mem.eql(u8, structural, program.bytes) or !program.identity.eql(identity)) return error.InvalidProgram;
         const bytes = allocator.dupe(u8, program.bytes) catch return error.OutOfMemory;
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
         hash.update(std.mem.asBytes(&fields.abi));
@@ -94,7 +101,14 @@ fn readValue(ty: ir.Type, bytes: []const u8) Error!Value {
     const size = try byteSize(ty);
     if (bytes.len < size) return error.Bounds;
     var result = Value{ .ty = ty };
-    for (0..try lanes(ty)) |i| result.bits[i] = std.mem.readInt(u32, bytes[i * 4 ..][0..4], .little);
+    for (0..try lanes(ty)) |i| {
+        const bits = std.mem.readInt(u32, bytes[i * 4 ..][0..4], .little);
+        result.bits[i] = switch (ty.scalar) {
+            .bool => if (bits <= 1) bits else return error.NumericDomain,
+            .f32 => canonicalFloat(bits),
+            else => bits,
+        };
+    }
     return result;
 }
 fn findBinding(bindings: []const Binding, index: u32) Error![]const u8 {
@@ -150,6 +164,17 @@ pub const Executor = struct {
         };
         for (outputs) |output| {
             if (output.interface >= self.program.interfaces.len or self.program.interfaces[output.interface].storage != .output) return error.InvalidOutput;
+        }
+        for (outputs, 0..) |left, i| {
+            const left_size = try byteSize(self.program.interfaces[left.interface].ty);
+            const left_start = @intFromPtr(left.bytes.ptr);
+            const left_end = std.math.add(usize, left_start, left_size) catch return error.InvalidOutput;
+            for (outputs[i + 1 ..]) |right| {
+                const right_size = try byteSize(self.program.interfaces[right.interface].ty);
+                const right_start = @intFromPtr(right.bytes.ptr);
+                const right_end = std.math.add(usize, right_start, right_size) catch return error.InvalidOutput;
+                if (left_start < right_end and right_start < left_end) return error.InvalidOutput;
+            }
         }
         @memset(self.output_scratch, 0);
         out_offset = 0;
@@ -327,6 +352,7 @@ fn validate(program: *const ir.Program) Error!void {
             const x = instruction.operands[0];
             const expected: ir.Storage = if (instruction.op == .input) .input else .uniform;
             if (x >= program.interfaces.len or program.interfaces[x].storage != expected) return error.InvalidStorage;
+            if (!same(instruction.ty, program.interfaces[x].ty)) return error.InvalidType;
         }
         if (instruction.op == .output) {
             const x = instruction.operands[0];
@@ -347,6 +373,39 @@ fn validate(program: *const ir.Program) Error!void {
                 else => {},
             }
         };
+        switch (instruction.op) {
+            .access => {
+                const interface_index = instruction.operands[0];
+                if (interface_index >= program.interfaces.len or program.interfaces[interface_index].storage != .uniform) return error.InvalidStorage;
+                const interface = program.interfaces[interface_index];
+                for (instruction.operands[1..]) |index_id| {
+                    const index_ty = program.instructions[index_id].ty;
+                    if (index_ty.scalar != .u32 or try lanes(index_ty) != 1 or program.instructions[index_id].op != .constant) return error.InvalidType;
+                }
+                const member_id = std.mem.readInt(u32, program.instructions[instruction.operands[1]].literal[0..4], .little);
+                if (member_id >= interface.member_count) return error.Bounds;
+                const member_ty = interface.members[member_id].ty;
+                if (instruction.operands.len == 2) {
+                    if (!same(instruction.ty, member_ty)) return error.InvalidType;
+                } else if (member_ty.rows != 1 or instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != member_ty.scalar) return error.InvalidType else {
+                    const component = std.mem.readInt(u32, program.instructions[instruction.operands[2]].literal[0..4], .little);
+                    if (component >= member_ty.columns) return error.Bounds;
+                }
+            },
+            .extract => {
+                const source = program.instructions[instruction.operands[0]].ty;
+                if (instruction.operands.len == 1) {
+                    if (!same(source, instruction.ty)) return error.InvalidType;
+                } else if (source.rows != 1 or instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != source.scalar) return error.InvalidType else if (instruction.operands[1] >= source.columns) return error.Bounds;
+            },
+            .shuffle => {
+                const a = program.instructions[instruction.operands[0]].ty;
+                const b = program.instructions[instruction.operands[1]].ty;
+                if (a.rows != 1 or b.rows != 1 or instruction.ty.rows != 1 or a.scalar != b.scalar or instruction.ty.scalar != a.scalar) return error.InvalidType;
+                for (instruction.operands[2..]) |selector| if (selector >= @as(u32, a.columns) + b.columns) return error.Bounds;
+            },
+            else => {},
+        }
         if (instruction.op == .constant_composite or instruction.op == .composite) {
             var total: usize = 0;
             for (instruction.operands) |operand| {
@@ -368,6 +427,13 @@ fn validate(program: *const ir.Program) Error!void {
             if (from == .bool or to == .bool or (from == to)) return error.InvalidType;
         }
     }
+}
+fn freeInstructions(allocator: std.mem.Allocator, items: []ir.Instruction) void {
+    for (items) |item| {
+        allocator.free(item.operands);
+        allocator.free(item.literal);
+    }
+    allocator.free(items);
 }
 fn isValueOperand(op: ir.Op, i: usize) bool {
     return switch (op) {
@@ -396,7 +462,7 @@ test "every profile operation executes with owned allocation-free warm state" {
     const zero: [4]u8 = .{0} ** 4;
     var interfaces = [_]ir.Interface{
         .{ .storage = .input, .ty = .{ .scalar = .f32, .columns = 4 }, .location = 0 },
-        .{ .storage = .uniform, .ty = .{ .scalar = .u32 }, .descriptor_set = 0, .binding = 0, .block = true, .member_count = 1 },
+        .{ .storage = .uniform, .ty = .{ .scalar = .f32, .columns = 4 }, .descriptor_set = 0, .binding = 0, .block = true, .member_count = 1 },
         .{ .storage = .output, .ty = .{ .scalar = .f32, .columns = 4 }, .builtin_position = true },
     };
     interfaces[1].members[0] = .{ .ty = .{ .scalar = .f32, .columns = 4 }, .offset = 0 };
@@ -471,6 +537,9 @@ test "key compares full bounded bytes and all execution fields" {
     b.ir_bytes[b.ir_bytes.len - 1] ^= 1;
     b.digest = a.digest;
     try std.testing.expect(!a.eql(b));
+    source.bytes[source.bytes.len - 1] ^= 1;
+    source.identity = ir.identify(source.bytes);
+    try std.testing.expectError(error.InvalidProgram, ExecutableKey.init(std.testing.allocator, &source, fields));
 }
 
 test "setup and key clean up every injected allocation failure" {
@@ -479,21 +548,71 @@ test "setup and key clean up every injected allocation failure" {
     var instructions = [_]ir.Instruction{.{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &one }};
     var source = try testProgram(&interfaces, &instructions);
     defer std.testing.allocator.free(source.bytes);
-    var saw_success = false;
-    var fail_index: usize = 0;
-    while (fail_index < 32) : (fail_index += 1) {
+    var probe = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = std.math.maxInt(usize) });
+    var complete = try Executor.init(probe.allocator(), &source);
+    complete.deinit();
+    const setup_allocations = probe.allocations;
+    for (0..setup_allocations) |fail_index| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
-        var executor = Executor.init(failing.allocator(), &source) catch |err| {
-            try std.testing.expectEqual(error.OutOfMemory, err);
-            continue;
-        };
-        executor.deinit();
-        saw_success = true;
-        break;
+        try std.testing.expectError(error.OutOfMemory, Executor.init(failing.allocator(), &source));
     }
-    try std.testing.expect(saw_success);
-    var failing_key = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    try std.testing.expectError(error.OutOfMemory, ExecutableKey.init(failing_key.allocator(), &source, .{ .isa = 0, .render_state = .{0} ** 32 }));
+    var key_probe = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = std.math.maxInt(usize) });
+    var key = try ExecutableKey.init(key_probe.allocator(), &source, .{ .isa = 0, .render_state = .{0} ** 32 });
+    key.deinit(key_probe.allocator());
+    for (0..key_probe.allocations) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, ExecutableKey.init(failing.allocator(), &source, .{ .isa = 0, .render_state = .{0} ** 32 }));
+    }
+}
+
+test "bool input and output aliases reject without mutation while NaNs canonicalize" {
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .input, .ty = .{ .scalar = .bool }, .location = 0 },
+        .{ .storage = .input, .ty = .{ .scalar = .f32 }, .location = 1 },
+        .{ .storage = .output, .ty = .{ .scalar = .f32 }, .location = 0 },
+        .{ .storage = .output, .ty = .{ .scalar = .f32 }, .location = 1 },
+    };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .input, .ty = .{ .scalar = .bool }, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .input, .ty = .{ .scalar = .f32 }, .operands = &.{1}, .literal = &.{} },
+        .{ .op = .output, .ty = .{ .scalar = .f32 }, .operands = &.{ 2, 1 }, .literal = &.{} },
+        .{ .op = .output, .ty = .{ .scalar = .f32 }, .operands = &.{ 3, 1 }, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    var bad_bool = [_]u8{ 2, 0, 0, 0 };
+    var nan = [_]u8{ 1, 0, 0xc0, 0x7f };
+    var target = [_]u8{0x5a} ** 8;
+    const bindings = [_]Binding{ .{ .interface = 0, .bytes = &bad_bool }, .{ .interface = 1, .bytes = &nan } };
+    try std.testing.expectError(error.InvalidOutput, executor.execute(&bindings, &.{ .{ .interface = 2, .bytes = target[0..4] }, .{ .interface = 3, .bytes = target[2..6] } }));
+    try std.testing.expectEqualSlices(u8, &([_]u8{0x5a} ** 8), &target);
+    var a: [4]u8 = .{0} ** 4;
+    var b: [4]u8 = .{0} ** 4;
+    try std.testing.expectError(error.NumericDomain, executor.execute(&bindings, &.{ .{ .interface = 2, .bytes = &a }, .{ .interface = 3, .bytes = &b } }));
+    bad_bool[0] = 1;
+    try executor.execute(&bindings, &.{ .{ .interface = 2, .bytes = &a }, .{ .interface = 3, .bytes = &b } });
+    try std.testing.expectEqual(@as(u32, 0x7fc00000), std.mem.readInt(u32, &a, .little));
+}
+
+test "late numeric rejection rolls back earlier output" {
+    const one = f32bytes(1);
+    var interfaces = [_]ir.Interface{ .{ .storage = .output, .ty = .{ .scalar = .f32 }, .location = 0 }, .{ .storage = .input, .ty = .{ .scalar = .f32 }, .location = 0 } };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &one },
+        .{ .op = .output, .ty = .{ .scalar = .f32 }, .operands = &.{ 0, 0 }, .literal = &.{} },
+        .{ .op = .input, .ty = .{ .scalar = .f32 }, .operands = &.{1}, .literal = &.{} },
+        .{ .op = .convert, .ty = .{ .scalar = .u32 }, .operands = &.{2}, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    var nan = [_]u8{ 1, 0, 0xc0, 0x7f };
+    var output = [_]u8{0xa5} ** 4;
+    try std.testing.expectError(error.NumericDomain, executor.execute(&.{.{ .interface = 1, .bytes = &nan }}, &.{.{ .interface = 0, .bytes = &output }}));
+    try std.testing.expectEqualSlices(u8, &([_]u8{0xa5} ** 4), &output);
 }
 
 test "uniform component bounds and numeric conversion domains are explicit" {
@@ -564,5 +683,35 @@ test "generated valid scalar DAGs are total and stable" {
         const b = try ir.serialize(std.testing.allocator, .vertex, "main", &.{}, again);
         defer std.testing.allocator.free(b);
         try std.testing.expectEqualSlices(u8, a, b);
+    }
+}
+
+test "generated float type-family DAGs preserve canonical NaN and signed zero policy" {
+    var prng = std.Random.DefaultPrng.init(0x6633325f444147);
+    for (0..64) |case| {
+        const x: f32 = if (case == 0) -0.0 else @floatFromInt(@as(i16, @bitCast(prng.random().int(u16))));
+        const y: f32 = if (case == 1) 0.0 else @floatFromInt(@as(i16, @bitCast(prng.random().int(u16))));
+        var xb = f32bytes(x);
+        var yb = f32bytes(y);
+        var instructions = [_]ir.Instruction{
+            .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &xb },
+            .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &yb },
+            .{ .op = .fadd, .ty = .{ .scalar = .f32 }, .operands = &.{ 0, 1 }, .literal = &.{} },
+            .{ .op = .fsub, .ty = .{ .scalar = .f32 }, .operands = &.{ 2, 1 }, .literal = &.{} },
+            .{ .op = .fmul, .ty = .{ .scalar = .f32 }, .operands = &.{ 3, 0 }, .literal = &.{} },
+            .{ .op = .fdiv, .ty = .{ .scalar = .f32 }, .operands = &.{ 4, 1 }, .literal = &.{} },
+            .{ .op = .fneg, .ty = .{ .scalar = .f32 }, .operands = &.{5}, .literal = &.{} },
+        };
+        var interfaces = [_]ir.Interface{};
+        var source = try testProgram(&interfaces, &instructions);
+        defer std.testing.allocator.free(source.bytes);
+        var executor = try Executor.init(std.testing.allocator, &source);
+        defer executor.deinit();
+        try executor.execute(&.{}, &.{});
+        const bits = executor.values[6].bits[0];
+        const value: f32 = @bitCast(bits);
+        if (std.math.isNan(value)) try std.testing.expectEqual(@as(u32, 0x7fc00000), bits);
+        try executor.execute(&.{}, &.{});
+        try std.testing.expectEqual(bits, executor.values[6].bits[0]);
     }
 }
