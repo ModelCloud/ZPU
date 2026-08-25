@@ -62,6 +62,9 @@ case $subcommand in
             exit 0
         fi
         (($# == 2)) && [[ $1 == --name && -n $2 ]] || fail 'expected: machine stop --name NAME'
+        if [[ -n ${SMOLVM_FIXTURE_CLEANUP_READY:-} && -n ${SMOLVM_FIXTURE_PACMAN_READY:-} && -e $SMOLVM_FIXTURE_PACMAN_READY ]]; then
+            : > "$SMOLVM_FIXTURE_CLEANUP_READY"
+        fi
         if [[ -n ${SMOLVM_FIXTURE_FAIL_STOP_ONCE_FILE:-} && ! -e $SMOLVM_FIXTURE_FAIL_STOP_ONCE_FILE ]]; then
             : > "$SMOLVM_FIXTURE_FAIL_STOP_ONCE_FILE"
             fail 'injected idempotent stop failure'
@@ -100,6 +103,12 @@ case $subcommand in
         fi
         (($# == 2)) || fail 'expected: machine cp SRC DST'
         [[ $1 != -* && $2 != -* ]] || fail 'cp paths may not be flags'
+        if [[ -n ${SMOLVM_FIXTURE_CAPTURE_AUTH_DIR:-} ]]; then
+            case $2 in
+                *:/run/zpu-xauth/Xauthority) /bin/cp -- "$1" "$SMOLVM_FIXTURE_CAPTURE_AUTH_DIR/Xauthority" ;;
+                *:/run/zpu-xauth/mode) /bin/cp -- "$1" "$SMOLVM_FIXTURE_CAPTURE_AUTH_DIR/mode" ;;
+            esac
+        fi
         ;;
     ls)
         if (($# == 1)) && [[ $1 == --help ]]; then
@@ -118,6 +127,8 @@ case $subcommand in
             missing-network) printf '[{"name":"%s","state":"%s"}]\n' "$name" "$state" ;;
             missing-state) printf '[{"name":"%s","network":%s}]\n' "$name" "$net" ;;
             malformed) printf '{not-json\n' ;;
+            non-dict-row) printf '[1,{"name":"%s","network":false,"state":"stopped"}]\n' "$name" ;;
+            network-string) printf '[{"name":"%s","network":"false","state":"stopped"}]\n' "$name" ;;
             *) fail 'unknown SMOLVM_FIXTURE_JSON_MODE' ;;
         esac
         ;;

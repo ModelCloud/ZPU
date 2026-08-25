@@ -15,6 +15,8 @@ runtime_is_temporary=0
 guest_manifest=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json
 
 die() { printf 'zpu-smolvm: %s\n' "$*" >&2; exit 2; }
+[[ $machine =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'ZPU_SMOLVM_MACHINE must be 1-64 letters, digits, dots, underscores, or hyphens and start alphanumeric'
+[[ ! -L $host_socket ]] || die "host X11 socket must not be a symlink: $host_socket"
 if [[ $socket_root != /tmp/.X11-unix ]]; then
     [[ ${ZPU_SMOLVM_TESTING:-0} == 1 ]] || die 'ZPU_SMOLVM_TEST_SOCKET_ROOT is test-only and requires ZPU_SMOLVM_TESTING=1'
     [[ ! -L $socket_root && -d $socket_root && $(stat -c %u "$socket_root") == "$UID" && $(stat -c %a "$socket_root") == 700 ]] || die 'test socket root must be a real current-user directory with mode exactly 700'
@@ -56,6 +58,16 @@ init_runtime() {
     install -d -m 700 "$runtime"
 }
 cleanup_runtime() {
+    trap - EXIT
+    trap '' HUP INT TERM QUIT
+    if [[ -n ${runtime:-} && ! -L $runtime && -d $runtime ]]; then
+        rm -f -- "$runtime/source-list" "$runtime/untracked-list" "$runtime/zpu-source.tar"
+        if [[ -n ${auth_dir:-} && ! -L $auth_dir && -d $auth_dir ]]; then
+            rm -f -- "$auth_dir/bootstrap-Xauthority" "$auth_dir/before.nlist" "$auth_dir/after.nlist" \
+                "$auth_dir/selected.nlist" "$auth_dir/host-raw.nlist" "$auth_dir/after-raw.nlist" \
+                "$auth_dir/Xauthority" "$auth_dir/mode"
+        fi
+    fi
     if [[ $runtime_is_temporary == 1 && -n $runtime_base && ! -L $runtime_base && -d $runtime_base ]]; then
         rm -rf -- "$runtime_base"
     fi
@@ -64,8 +76,8 @@ require_smolvm_cli() {
     local version version_output create_help start_help stop_help update_help exec_help cp_help ls_help
     command -v smolvm >/dev/null || die 'smolvm not found (requires smol-machines/smolvm >= 1.7.0)'
     version_output=$(smolvm --version)
-    version=$(printf '%s\n' "$version_output" | sed -nE 's/^[^0-9]*([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' | sed -n '1p')
-    [[ -n $version ]] || die 'could not parse smolvm --version'
+    [[ $version_output =~ ([0-9]+\.[0-9]+\.[0-9]+) ]] || die 'could not parse smolvm --version'
+    version=${BASH_REMATCH[1]}
     [[ $(printf '%s\n' 1.7.0 "$version" | sort -V | head -1) == 1.7.0 ]] || die "smolvm $version is too old; require >= 1.7.0 for --mount-socket"
     create_help=$(smolvm machine create --help) || die 'failed to capture smolvm machine create --help'
     start_help=$(smolvm machine start --help) || die 'failed to capture smolvm machine start --help'
@@ -78,45 +90,56 @@ require_smolvm_cli() {
     for flag in '--name' '--smolfile' '--image' '--mount-socket'; do
         grep -F -- "$flag" <<<"$create_help" >/dev/null || die "smolvm machine create lacks required $flag support"
     done
-    grep -E -- '--cpus[[:space:]]+<[^>]+>' <<<"$create_help" >/dev/null || die 'smolvm machine create lacks required --cpus VALUE support'
-    grep -E -- '--mem[[:space:]]+<[^>]+>' <<<"$create_help" >/dev/null || die 'smolvm machine create lacks required --mem VALUE support'
-    grep -E -- '--name([=[:space:]]|$)' <<<"$start_help" >/dev/null || die 'smolvm machine start lacks required --name support'
-    grep -E -- '--name([=[:space:]]|$)' <<<"$stop_help" >/dev/null || die 'smolvm machine stop lacks required --name support'
-    grep -E -- '--name([=[:space:]]|$)' <<<"$update_help" >/dev/null || die 'smolvm machine update lacks required --name support'
+    grep -F -- '--cpus' <<<"$create_help" >/dev/null || die 'smolvm machine create lacks required --cpus support'
+    grep -F -- '--mem' <<<"$create_help" >/dev/null || die 'smolvm machine create lacks required --mem support'
+    grep -F -- '--name' <<<"$start_help" >/dev/null || die 'smolvm machine start lacks required --name support'
+    grep -F -- '--name' <<<"$stop_help" >/dev/null || die 'smolvm machine stop lacks required --name support'
+    grep -F -- '--name' <<<"$update_help" >/dev/null || die 'smolvm machine update lacks required --name support'
     grep -F -- '--net' <<<"$update_help" >/dev/null || die 'smolvm machine update lacks required --net support'
     grep -F -- '--no-net' <<<"$update_help" >/dev/null || die 'smolvm machine update lacks required --no-net support'
-    grep -E -- '--name([=[:space:]]|$)' <<<"$exec_help" >/dev/null || die 'smolvm machine exec lacks required --name support'
-    grep -E -- 'machine cp.*<SRC>.*<DST>' <<<"$cp_help" >/dev/null || die 'smolvm lacks required machine cp SRC DST support'
+    grep -F -- '--name' <<<"$exec_help" >/dev/null || die 'smolvm machine exec lacks required --name support'
+    grep -F -- 'SRC' <<<"$cp_help" >/dev/null && grep -F -- 'DST' <<<"$cp_help" >/dev/null || die 'smolvm lacks required machine cp source/destination support'
     grep -F -- '--json' <<<"$ls_help" >/dev/null || die 'smolvm machine ls lacks required --json support'
 }
 machine_state_matches() {
     local field=$1 expected=$2 state
     command -v python3 >/dev/null || return 3
-    state=$(smolvm machine ls --json) || return 2
+    state=$(smolvm machine ls --json) || return 4
     SMOLVM_STATE=$state python3 - "$machine" "$field" "$expected" <<'PY'
 import json, os, sys
 try:
     data = json.loads(os.environ["SMOLVM_STATE"])
+except (json.JSONDecodeError, ValueError):
+    raise SystemExit(5)
+try:
     rows = data if isinstance(data, list) else data["machines"]
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise SystemExit(6)
     matches = [row for row in rows if row.get("name") == sys.argv[1]]
     if len(matches) != 1 or sys.argv[2] not in matches[0]:
-        raise SystemExit(2)
+        raise SystemExit(6)
     expected = {"true": True, "false": False}.get(sys.argv[3], sys.argv[3])
     actual = matches[0][sys.argv[2]]
     if sys.argv[2] == "state" and isinstance(actual, str):
         actual = actual.lower()
+    if sys.argv[2] == "state" and not isinstance(actual, str):
+        raise SystemExit(6)
+    if sys.argv[2] == "network" and not isinstance(actual, bool):
+        raise SystemExit(6)
     raise SystemExit(0 if actual == expected else 1)
-except (KeyError, TypeError, ValueError):
-    raise SystemExit(2)
+except (KeyError, TypeError):
+    raise SystemExit(6)
 PY
 }
 state_error() {
     local rc=$1 field=$2 expected=$3
     case $rc in
         1) die "machine $machine persisted $field must be exactly $expected" ;;
-        2) die "could not uniquely read persisted $field for machine $machine from smolvm machine ls --json" ;;
+        4) die "smolvm machine ls --json failed while checking persisted $field for machine $machine" ;;
+        5) die "smolvm machine ls --json returned invalid JSON while checking persisted $field" ;;
+        6) die "smolvm machine ls --json returned an invalid schema for persisted $field on machine $machine" ;;
         3) die 'python3 is required to evaluate persisted SmolVM JSON state' ;;
-        *) die "smolvm machine ls --json failed while checking persisted $field for machine $machine" ;;
+        *) die "unexpected SmolVM state evaluation failure $rc while checking persisted $field" ;;
     esac
 }
 assert_network_disabled() {
@@ -167,15 +190,22 @@ prepare_auth() (
     local selected=$auth_dir/selected.nlist
     local host_raw=$auth_dir/host-raw.nlist
     local after_raw=$auth_dir/after-raw.nlist
+    local trusted_keys=$auth_dir/trusted-keys
     local generated_key
     local auth_mode
     local auth_complete=0
     umask 077
     cleanup_auth_files() {
-        rm -f "$bootstrap_auth" "$before" "$after" "$selected" "$host_raw" "$after_raw"
+        trap - EXIT
+        trap '' HUP INT TERM QUIT
+        rm -f "$bootstrap_auth" "$before" "$after" "$selected" "$host_raw" "$after_raw" "$trusted_keys"
         [[ $auth_complete == 1 ]] || rm -f "$auth_dir/Xauthority" "$auth_dir/mode"
     }
     trap cleanup_auth_files EXIT
+    trap 'trap "" HUP INT TERM QUIT; exit 129' HUP
+    trap 'trap "" HUP INT TERM QUIT; exit 130' INT
+    trap 'trap "" HUP INT TERM QUIT; exit 143' TERM
+    trap 'trap "" HUP INT TERM QUIT; exit 131' QUIT
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
         printf '+ prepare X SECURITY untrusted Xauthority cookie with 300-second idle timeout in %q for %q\n' "$auth_dir" "$display"
         return
@@ -200,7 +230,10 @@ prepare_auth() (
         comm -13 "$before" "$after" > "$selected" || die 'failed to compare trusted and generated Xauthority entries'
         [[ $(awk 'NF { count++ } END { print count + 0 }' "$selected") -eq 1 ]] || die 'X SECURITY generation did not produce exactly one distinct untrusted authorization entry'
         generated_key=$(awk 'NF { print $NF }' "$selected")
-        ! awk 'NF { print $NF }' "$before" | grep -Fxq "$generated_key" || die 'X SECURITY returned the original trusted authorization key'
+        awk 'NF { print $NF }' "$before" > "$trusted_keys" || die 'failed to extract trusted Xauthority key'
+        if grep -Fx "$generated_key" "$trusted_keys" >/dev/null; then
+            die 'X SECURITY returned the original trusted authorization key'
+        fi
         auth_mode=untrusted
     elif [[ ${ZPU_SMOLVM_ALLOW_TRUSTED_X11:-0} == 1 ]]; then
         cp "$before" "$selected"
@@ -216,16 +249,29 @@ prepare_auth() (
     auth_complete=1
 )
 prepare_source() {
+    local source_list=$runtime/source-list untracked_list=$runtime/untracked-list
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
         printf '+ export tracked HEAD source archive without build outputs to %q\n' "$source_archive"
         return
     fi
     git -C "$repo" diff --quiet && git -C "$repo" diff --cached --quiet || die 'commit changes before creating the immutable guest source mount'
     install -d -m 700 "$runtime"
+    git -C "$repo" ls-files --others --exclude-standard > "$untracked_list" || { rm -f "$untracked_list"; die 'failed to inspect untracked source files'; }
+    if [[ -s $untracked_list ]]; then
+        rm -f "$untracked_list"
+        die 'untracked files are forbidden when creating the immutable guest source mount; add, ignore, or remove them first'
+    fi
+    rm -f "$untracked_list"
     git -C "$repo" archive --format=tar --output="$source_archive" HEAD
-    if tar -tf "$source_archive" | grep -Eq '(^|/)zig-out/|\.smolmachine$|\.(so|a|o)$'; then
+    if ! tar -tf "$source_archive" > "$source_list"; then
+        rm -f "$source_list" "$source_archive"
+        die 'failed to inspect guest source archive'
+    fi
+    if grep -Eq '(^|/)zig-out/|\.smolmachine$|\.(so|a|o)$' "$source_list"; then
+        rm -f "$source_list" "$source_archive"
         die 'source export unexpectedly contains a build artifact'
     fi
+    rm -f "$source_list"
 }
 create() {
     reject_host_injection
@@ -245,10 +291,10 @@ create() {
 bootstrap_impl() {
     reject_host_injection
     local secured=0
-    cleanup_bootstrap() {
-        local status=$?
+    cleanup_bootstrap_inner() (
+        local status=$1
         local cleanup_ok=1
-        trap - EXIT INT TERM
+        trap '' INT TERM HUP QUIT
         if [[ $secured -eq 0 && ${ZPU_SMOLVM_DRY_RUN:-0} != 1 ]]; then
             printf 'zpu-smolvm: securing machine after interrupted/failed bootstrap\n' >&2
             smolvm machine stop --name "$machine" >/dev/null 2>&1 || true
@@ -267,11 +313,22 @@ bootstrap_impl() {
                 printf 'zpu-smolvm: cleanup verified machine stopped with persisted network=false\n' >&2
             fi
         fi
-        exit "$status"
+        return "$status"
+    )
+    cleanup_bootstrap() {
+        local status=$?
+        trap - EXIT
+        trap '' INT TERM HUP QUIT
+        # The cleanup worker inherits ignored lifecycle signals before it runs,
+        # so a repeated signal cannot interrupt stop/no-net/proof operations.
+        cleanup_bootstrap_inner "$status"
+        exit $?
     }
     trap cleanup_bootstrap EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+    trap 'trap "" HUP INT TERM QUIT; exit 129' HUP
+    trap 'trap "" HUP INT TERM QUIT; exit 130' INT
+    trap 'trap "" HUP INT TERM QUIT; exit 143' TERM
+    trap 'trap "" HUP INT TERM QUIT; exit 131' QUIT
     if ! run smolvm machine stop --name "$machine"; then
         assert_machine_stopped
     fi
@@ -284,8 +341,9 @@ bootstrap_impl() {
     assert_machine_stopped
     assert_network_disabled
     run smolvm machine start --name "$machine"
+    assert_network_disabled
     secured=1
-    trap - EXIT INT TERM
+    trap - EXIT HUP INT TERM QUIT
 }
 bootstrap() {
     # Foreground execution lets the scoped traps secure the machine before
@@ -325,9 +383,15 @@ launch() (
         require_display
     fi
     cleanup_host_auth() {
-        [[ ${ZPU_SMOLVM_TESTING:-0} == 1 ]] || rm -f -- "$auth_dir/Xauthority" "$auth_dir/mode"
+        trap - EXIT
+        trap '' HUP INT TERM QUIT
+        rm -f -- "$auth_dir/Xauthority" "$auth_dir/mode"
     }
     trap cleanup_host_auth EXIT
+    trap 'trap "" HUP INT TERM QUIT; exit 129' HUP
+    trap 'trap "" HUP INT TERM QUIT; exit 130' INT
+    trap 'trap "" HUP INT TERM QUIT; exit 143' TERM
+    trap 'trap "" HUP INT TERM QUIT; exit 131' QUIT
     prepare_auth
     run smolvm machine exec --name "$machine" -- install -d -m 700 /run/zpu-xauth /run/zpu-runtime
     run smolvm machine cp "$auth_dir/Xauthority" "$machine:/run/zpu-xauth/Xauthority"
@@ -340,7 +404,14 @@ usage() { printf 'usage: tools/smolvm-zpu.sh {cli-check|preflight|create|bootstr
 
 command=${1:-}
 case $command in
-    build|launch|dry-run) init_runtime; trap cleanup_runtime EXIT ;;
+    build|launch|dry-run)
+        init_runtime
+        trap cleanup_runtime EXIT
+        trap 'trap "" HUP INT TERM QUIT; exit 129' HUP
+        trap 'trap "" HUP INT TERM QUIT; exit 130' INT
+        trap 'trap "" HUP INT TERM QUIT; exit 143' TERM
+        trap 'trap "" HUP INT TERM QUIT; exit 131' QUIT
+        ;;
 esac
 case $command in
     cli-check) reject_host_injection; require_smolvm_cli ;;

@@ -24,6 +24,8 @@ case $command in
     generate)
         [[ ${XAUTHORITY:-} == "$authority" ]] || { echo 'xauth fixture: generation did not use isolated bootstrap authority' >&2; exit 64; }
         [[ $# == 8 && $4 == :0 && $5 == . && $6 == untrusted && $7 == timeout && $8 == 300 ]] || { echo 'xauth fixture: expected literal generate :0 . untrusted timeout 300' >&2; exit 64; }
+        [[ -z ${SMOLVM_XAUTH_READY:-} ]] || : > "$SMOLVM_XAUTH_READY"
+        [[ -z ${SMOLVM_XAUTH_SLEEP:-} ]] || sleep "$SMOLVM_XAUTH_SLEEP"
         [[ ${SMOLVM_XAUTH_GENERATE_FAIL:-0} != 1 ]] || exit 1
         if [[ ${SMOLVM_XAUTH_EQUAL_KEY:-0} == 1 ]]; then
             printf '%s\n' "$equal_key_entry" >> "$authority"

@@ -6,8 +6,16 @@ manifest=$prefix/share/vulkan/icd.d/zpu_icd.x86_64.json
 auth=/run/zpu-xauth/Xauthority
 auth_mode_file=/run/zpu-xauth/mode
 runtime=/run/zpu-runtime
-cleanup() { rm -f "$auth" "$auth_mode_file"; }
-trap cleanup EXIT HUP INT TERM
+cleanup() {
+    trap - EXIT
+    trap '' HUP INT TERM QUIT
+    rm -f "$auth" "$auth_mode_file" /tmp/zpu-vulkaninfo.txt
+}
+trap cleanup EXIT
+trap 'trap "" HUP INT TERM QUIT; exit 129' HUP
+trap 'trap "" HUP INT TERM QUIT; exit 130' INT
+trap 'trap "" HUP INT TERM QUIT; exit 143' TERM
+trap 'trap "" HUP INT TERM QUIT; exit 131' QUIT
 
 for program in xauth stat find grep awk cat env id; do
     command -v "$program" >/dev/null || { echo "required guest validation tool not found: $program" >&2; exit 2; }
@@ -33,7 +41,8 @@ test ! -e /dev/dri || {
     echo 'guest /dev/dri exists: SmolVM GPU/DRM exposure is forbidden for this workflow' >&2
     exit 2
 }
-if find /etc/vulkan /usr/local/share/vulkan /usr/share/vulkan -type f -name '*zpu*' -print -quit 2>/dev/null | grep -q .; then
+global_zpu=$(find /etc/vulkan /usr/local/share/vulkan /usr/share/vulkan -type f -name '*zpu*' -print -quit 2>/dev/null)
+if test -n "$global_zpu"; then
     echo 'ZPU was installed into a guest-global Vulkan configuration directory' >&2
     exit 2
 fi

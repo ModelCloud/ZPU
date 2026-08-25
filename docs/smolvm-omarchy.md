@@ -202,6 +202,14 @@ Image, networking, CPU, and memory are deliberately absent from
 `smolvm/Smolfile`. The launcher owns those settings, supplies explicit
 `--image`, `--cpus`, and `--mem` values, and preflight capability-gates each
 flag. This avoids relying on undocumented Smolfile/CLI precedence.
+The source transfer is commit-bound: staged or unstaged changes and untracked
+files are rejected, archive contents are fully materialized before artifact
+checks, and both host and guest transfer archives are removed after use.
+
+During bootstrap, INT, TERM, HUP, and QUIT synchronously enter an
+interrupt-resistant cleanup that attempts stop, persists `--no-net`, and proves
+both stopped state and `network=false`. Credential preparation and launch handle
+the same signals and remove all temporary host authority material.
 
 `zig build smolvm-dry-run` invokes `test/smolvm_dry_run.sh`, which constructs a
 private socket/runtime and fixture-only `PATH`, then runs the launcher under
