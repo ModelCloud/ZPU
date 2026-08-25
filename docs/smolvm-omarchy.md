@@ -197,6 +197,12 @@ Run `zig build smolvm-guest-test` for the no-hardware command/isolation gate and
 `tools/smolvm-zpu.sh launch` and cannot be claimed without KVM, SmolVM, and the
 active Omarchy display.
 
+The no-hardware isolation gate does not inspect ambient `DISPLAY`,
+`XAUTHORITY`, or `/tmp/.X11-unix/X0`. It sets `ZPU_SMOLVM_TESTING=1` and a
+private `ZPU_SMOLVM_TEST_SOCKET_ROOT` containing a test-owned Unix socket. That
+override is rejected outside explicit test mode; production preflight and
+launch remain fixed to the real `/tmp/.X11-unix/X0` boundary.
+
 ## Current compositor limitation and roadmap
 
 This does **not** run Hyprland or the complete Omarchy compositor inside the

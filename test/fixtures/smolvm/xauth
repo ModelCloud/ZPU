@@ -3,6 +3,8 @@ set -euo pipefail
 
 host_entry='0100 000c 686f73742d74727573746564 0001 30 0012 4d49542d4d414749432d434f4f4b49452d31 0010 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 guest_entry='0100 000c 686f73742d6f6d6172636879 0001 30 0012 4d49542d4d414749432d434f4f4b49452d31 0010 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+guest_entry_two='0100 000d 686f73742d6f6d617263687932 0001 30 0012 4d49542d4d414749432d434f4f4b49452d31 0010 cccccccccccccccccccccccccccccccc'
+equal_key_entry='0100 000d 686f73742d6f6d617263687933 0001 30 0012 4d49542d4d414749432d434f4f4b49452d31 0010 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 
 if [[ $1 == nlist ]]; then
     [[ ${SMOLVM_XAUTH_NLIST_FAIL:-0} != 1 ]] || exit 1
@@ -21,8 +23,14 @@ case $command in
         ;;
     generate)
         [[ ${XAUTHORITY:-} == "$authority" ]] || { echo 'xauth fixture: generation did not use isolated bootstrap authority' >&2; exit 64; }
+        [[ $# == 8 && $4 == :0 && $5 == . && $6 == untrusted && $7 == timeout && $8 == 300 ]] || { echo 'xauth fixture: expected literal generate :0 . untrusted timeout 300' >&2; exit 64; }
         [[ ${SMOLVM_XAUTH_GENERATE_FAIL:-0} != 1 ]] || exit 1
-        printf '%s\n' "$guest_entry" >> "$authority"
+        if [[ ${SMOLVM_XAUTH_EQUAL_KEY:-0} == 1 ]]; then
+            printf '%s\n' "$equal_key_entry" >> "$authority"
+        else
+            printf '%s\n' "$guest_entry" >> "$authority"
+        fi
+        [[ ${SMOLVM_XAUTH_MULTIPLE_NEW:-0} != 1 ]] || printf '%s\n' "$guest_entry_two" >> "$authority"
         ;;
     *) echo "xauth fixture: unsupported command: $command" >&2; exit 64 ;;
 esac

@@ -5,9 +5,26 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const require_limited = b.addSystemCommand(&.{"tools/require-limited.sh"});
     const smolvm_guest_test = b.addSystemCommand(&.{"test/smolvm_guest.sh"});
+    smolvm_guest_test.step.dependOn(&require_limited.step);
     const smolvm_guest_step = b.step("smolvm-guest-test", "Test fail-closed SmolVM guest isolation and launch commands");
     smolvm_guest_step.dependOn(&smolvm_guest_test.step);
-    const smolvm_dry_run = b.addSystemCommand(&.{ "env", "ZPU_SMOLVM_DRY_RUN=1", "tools/smolvm-zpu.sh", "dry-run" });
+    const smolvm_dry_run = b.addSystemCommand(&.{ "tools/smolvm-zpu.sh", "dry-run" });
+    smolvm_dry_run.setEnvironmentVariable("ZPU_SMOLVM_DRY_RUN", "1");
+    smolvm_dry_run.step.dependOn(&require_limited.step);
+    const smolvm_untrusted_environment = [_][]const u8{
+        "VK_DRIVER_FILES",            "VK_ICD_FILENAMES",            "VK_ADD_DRIVER_FILES",      "VK_LAYER_PATH",              "VK_IMPLICIT_LAYER_PATH",
+        "VK_INSTANCE_LAYERS",         "VK_LOADER_LAYERS_ENABLE",     "VK_LOADER_LAYERS_DISABLE", "VK_LOADER_LAYERS_ALLOW",     "VK_LOADER_DRIVERS_SELECT",
+        "VK_LOADER_DRIVERS_DISABLE",  "LD_PRELOAD",                  "LD_LIBRARY_PATH",          "LD_AUDIT",                   "ZPU_REFRESH_HZ",
+        "ZPU_SMOLVM_MACHINE",         "ZPU_SMOLVM_IMAGE",            "ZPU_SMOLVM_CPUS",          "ZPU_SMOLVM_MEMORY",          "ZPU_SMOLVM_ALLOW_TRUSTED_X11",
+        "ZPU_SMOLVM_TESTING",         "ZPU_SMOLVM_TEST_SOCKET_ROOT", "DISPLAY",                  "XAUTHORITY",                 "XDG_RUNTIME_DIR",
+        "SMOLVM_FIXTURE_LOG",         "SMOLVM_FIXTURE_OMIT",         "SMOLVM_FIXTURE_NETWORK",   "SMOLVM_FIXTURE_STATE",       "SMOLVM_FIXTURE_JSON_MODE",
+        "SMOLVM_FIXTURE_FAIL_PACMAN", "SMOLVM_FIXTURE_PACMAN_SLEEP", "SMOLVM_XAUTH_NLIST_FAIL",  "SMOLVM_XAUTH_GENERATE_FAIL", "SMOLVM_XAUTH_DUPLICATE_EQUIVALENT",
+        "SMOLVM_XAUTH_EQUAL_KEY",     "SMOLVM_XAUTH_MULTIPLE_NEW",
+    };
+    for (smolvm_untrusted_environment) |name| {
+        smolvm_guest_test.removeEnvironmentVariable(name);
+        smolvm_dry_run.removeEnvironmentVariable(name);
+    }
     const smolvm_dry_run_step = b.step("smolvm-dry-run", "Print the complete guest lifecycle without changing host or VM state");
     smolvm_dry_run_step.dependOn(&smolvm_dry_run.step);
     const validate_api_inventory = b.addSystemCommand(&.{ "python3", "tools/api_inventory.py" });

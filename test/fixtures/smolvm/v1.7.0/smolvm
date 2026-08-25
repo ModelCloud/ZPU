@@ -42,7 +42,8 @@ case $subcommand in
             esac
         done
         [[ -n $name && -n $smolfile && -n $image && -n $cpus && -n $mem && -n $socket && $net == 0 ]] || fail 'create omitted a required audited option or enabled networking'
-        [[ $socket == /tmp/.X11-unix/X0:/tmp/.X11-unix/X0 ]] || fail 'unexpected mount-socket mapping'
+        expected_socket=${ZPU_SMOLVM_TEST_SOCKET_ROOT:-/tmp/.X11-unix}/X0:/tmp/.X11-unix/X0
+        [[ $socket == "$expected_socket" ]] || fail 'unexpected mount-socket mapping'
         ;;
     start)
         if (($# == 1)) && [[ $1 == --help ]]; then
@@ -97,13 +98,18 @@ case $subcommand in
             exit 0
         fi
         (($# == 1)) && [[ $1 == --json ]] || fail 'expected: machine ls --json'
+        name=${ZPU_SMOLVM_MACHINE:-zpu-omarchy}
         if [[ ${SMOLVM_FIXTURE_NETWORK:-false} == true ]]; then net=true; else net=false; fi
         state=${SMOLVM_FIXTURE_STATE:-stopped}
-        if [[ ${SMOLVM_FIXTURE_OMIT_NETWORK_FIELD:-0} == 1 ]]; then
-            printf '[{"name":"%s","state":"%s"}]\n' "${ZPU_SMOLVM_MACHINE:-zpu-omarchy}" "$state"
-        else
-            printf '[{"name":"%s","network":%s,"state":"%s"}]\n' "${ZPU_SMOLVM_MACHINE:-zpu-omarchy}" "$net" "$state"
-        fi
+        case ${SMOLVM_FIXTURE_JSON_MODE:-valid} in
+            valid) printf '[{"name":"%s","network":%s,"state":"%s"}]\n' "$name" "$net" "$state" ;;
+            unrelated) printf '[{"name":"other","network":true,"state":"running"},{"name":"%s","network":%s,"state":"%s"}]\n' "$name" "$net" "$state" ;;
+            zero) printf '[{"name":"other","network":false,"state":"stopped"}]\n' ;;
+            duplicate) printf '[{"name":"%s","network":false,"state":"stopped"},{"name":"%s","network":false,"state":"stopped"}]\n' "$name" "$name" ;;
+            missing-network) printf '[{"name":"%s","state":"%s"}]\n' "$name" "$state" ;;
+            missing-state) printf '[{"name":"%s","network":%s}]\n' "$name" "$net" ;;
+            *) fail 'unknown SMOLVM_FIXTURE_JSON_MODE' ;;
+        esac
         ;;
     *) fail "unsupported machine subcommand: $subcommand" ;;
 esac

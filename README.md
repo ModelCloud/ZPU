@@ -63,6 +63,9 @@ For the hardware-isolated Omarchy workflow, [the SmolVM guest guide](docs/smolvm
 builds and stages ZPU wholly inside a real `smol-machines/smolvm` guest, rejects
 host ICD injection, and displays the guest's native XCB Vulkan validation window
 through the host Xwayland socket without enabling SmolVM's Venus GPU path.
+The real graphical proof used a nested Xephyr display through headless
+Weston/Xwayland. No real Omarchy image or Hyprland session was available for
+that run, so native Omarchy/Hyprland confirmation remains an explicit gate.
 
 To ask a system Vulkan loader to discover only ZPU:
 

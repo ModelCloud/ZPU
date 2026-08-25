@@ -7,12 +7,18 @@ image=${ZPU_SMOLVM_IMAGE:-archlinux:base-devel}
 cpus=${ZPU_SMOLVM_CPUS:-8}
 memory=${ZPU_SMOLVM_MEMORY:-8192}
 display=${DISPLAY:-:0}
+socket_root=${ZPU_SMOLVM_TEST_SOCKET_ROOT:-/tmp/.X11-unix}
+host_socket=$socket_root/X0
 runtime=
 runtime_base=
 runtime_is_temporary=0
 guest_manifest=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json
 
 die() { printf 'zpu-smolvm: %s\n' "$*" >&2; exit 2; }
+if [[ $socket_root != /tmp/.X11-unix ]]; then
+    [[ ${ZPU_SMOLVM_TESTING:-0} == 1 ]] || die 'ZPU_SMOLVM_TEST_SOCKET_ROOT is test-only and requires ZPU_SMOLVM_TESTING=1'
+    [[ ! -L $socket_root && -d $socket_root && $(stat -c %u "$socket_root") == "$UID" && $(stat -c %a "$socket_root") == 700 ]] || die 'test socket root must be a real current-user directory with mode exactly 700'
+fi
 run() { if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then printf '+ '; printf '%q ' "$@"; printf '\n'; else "$@"; fi; }
 reject_host_injection() {
     local name
@@ -118,7 +124,7 @@ require_auth_tools() {
 require_display() {
     require_auth_tools
     [[ $display == :0 ]] || die 'current socket mapping supports DISPLAY=:0 only'
-    [[ -S /tmp/.X11-unix/X0 ]] || die 'host X11/Xwayland socket /tmp/.X11-unix/X0 is absent'
+    [[ -S $host_socket ]] || die "host X11/Xwayland socket $host_socket is absent"
     xauth nlist "$display" >/dev/null || die "cannot read host Xauthority for $display"
 }
 preflight() {
@@ -138,8 +144,12 @@ prepare_auth() (
     local after_raw=$auth_dir/after-raw.nlist
     local generated_key
     local auth_mode
+    local auth_complete=0
     umask 077
-    cleanup_auth_files() { rm -f "$bootstrap_auth" "$before" "$after" "$selected" "$host_raw" "$after_raw"; }
+    cleanup_auth_files() {
+        rm -f "$bootstrap_auth" "$before" "$after" "$selected" "$host_raw" "$after_raw"
+        [[ $auth_complete == 1 ]] || rm -f "$auth_dir/Xauthority" "$auth_dir/mode"
+    }
     trap cleanup_auth_files EXIT
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
         printf '+ prepare X SECURITY untrusted Xauthority cookie with 300-second idle timeout in %q for %q\n' "$auth_dir" "$display"
@@ -174,6 +184,7 @@ prepare_auth() (
     printf '%s\n' "$auth_mode" > "$auth_dir/mode"
     chmod 600 "$auth_dir/mode"
     [[ $(xauth -f "$auth_dir/Xauthority" nlist "$display" | awk 'NF { count++ } END { print count + 0 }') -eq 1 ]] || die 'guest Xauthority must contain exactly one entry'
+    auth_complete=1
 )
 prepare_source() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
@@ -196,7 +207,7 @@ create() {
     fi
     run smolvm machine create --name "$machine" --smolfile "$repo/smolvm/Smolfile" --image "$image" \
         --cpus "$cpus" --mem "$memory" \
-        --mount-socket /tmp/.X11-unix/X0:/tmp/.X11-unix/X0
+        --mount-socket "$host_socket:/tmp/.X11-unix/X0"
 }
 bootstrap_impl() {
     reject_host_injection
@@ -286,6 +297,7 @@ launch() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
         printf '+ revalidate host DISPLAY=:0, X11 socket, and Xauthority\n'
     else
+        rm -f "$auth_dir/Xauthority" "$auth_dir/mode"
         require_display
     fi
     prepare_auth

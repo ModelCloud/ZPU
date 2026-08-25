@@ -1,6 +1,6 @@
 # SmolVM CLI contract fixture
 
-This strict argv fixture was transcribed from the published upstream
+This strict argv/help/state fixture is a test double transcribed from the published upstream
 `smol-machines/smolvm` **v1.7.0** Linux x86-64 release on 2026-08-25.
 
 - release archive: `smolvm-1.7.0-linux-x86_64.tar.gz`
@@ -9,7 +9,9 @@ This strict argv fixture was transcribed from the published upstream
   `1e71774772e5a8684a92841e3b424c6883e4c806b1f8a017ccd5a2dc731c2919`
 - captured commands: `smolvm --version`; `smolvm machine create --help`;
   `smolvm machine exec --help`; and `smolvm machine cp`, `stop`, `start`, and
-  `update --help`
+  `update --help`; and `machine ls --help`/`--json`. Synthetic JSON variants
+  exercise selection and fail-closed behavior; they are not claimed as captured
+  runtime records. The fixture never invokes SmolVM or mutates a real machine.
 
 The relevant published forms are:
 
