@@ -1,0 +1,3 @@
+; Original ZPU fixture, CC0-1.0. Unsupported control-flow boundary.
+; Derived from vertex_position.spvasm by replacing OpReturn with OpBranch.
+OpBranch %label

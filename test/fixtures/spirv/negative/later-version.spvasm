@@ -1,0 +1,2 @@
+; Original ZPU fixture, CC0-1.0. Malformed-for-profile header boundary.
+; Header version word: 0x00010100 (SPIR-V 1.1), rejected before semantics.
