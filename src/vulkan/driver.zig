@@ -219,7 +219,7 @@ pub const Device = *DeviceObj;
 pub const Queue = *QueueObj;
 const MemoryObj = struct { owner: Device, bytes: []align(64) u8, mapped: bool };
 const BufferObj = struct { owner: Device, size: u64, usage: u32, memory: ?*MemoryObj = null, offset: u64 = 0 };
-const ImageObj = struct { owner: Device, width: u32, height: u32, array_layers: u32, samples: u32, format: i32, usage: u32, layout: i32, memory: ?*MemoryObj = null, owned_bytes: ?[]align(64) u8 = null, shared_bytes: bool = false, offset: u64 = 0, clear_pattern: ?u32 = null, content_bounds: cpu_cube.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, force_full_present: bool = true };
+const ImageObj = struct { owner: Device, width: u32, height: u32, array_layers: u32, samples: u32, format: i32, usage: u32, layout: i32, memory: ?*MemoryObj = null, owned_bytes: ?[]align(64) u8 = null, shared_bytes: bool = false, offset: u64 = 0, clear_pattern: ?u32 = null, content_bounds: cpu_cube.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, force_full_present: bool = true, complex_3d_content: bool = false, last_clear_ns: u64 = 0, last_draw_ns: u64 = 0 };
 const FenceObj = struct { owner: Device, signaled: bool };
 const SemaphoreObj = struct { owner: Device, signaled: bool };
 const CommandPoolObj = struct { owner: Device };
@@ -333,8 +333,8 @@ const SwapchainObj = struct {
     width: u32,
     height: u32,
     image_count: u32,
-    images: [3]usize,
-    image_states: [3]frame_lifecycle.State,
+    images: [4]usize,
+    image_states: [4]frame_lifecycle.State,
     next_image: u32,
     pending: u32,
     retiring: bool,
@@ -412,6 +412,8 @@ const TraceRecord = extern struct {
     copy_start_ns: u64,
     copy_end_ns: u64,
     flush_end_ns: u64,
+    render_clear_ns: u64,
+    render_draw_ns: u64,
     frame_end_ns: u64,
 };
 const max_trace_frames = 7_200;
@@ -448,9 +450,31 @@ fn recordTrace(record_value: TraceRecord) void {
     trace_written = offset == bytes.len;
 }
 
+fn recordPresentWorkerTrace(record_value: present_worker.Trace) void {
+    recordTrace(.{
+        .frame = trace_count,
+        .render_complete_ns = record_value.render_complete_ns,
+        .deadline_ns = record_value.deadline_ns,
+        .wake_ns = record_value.wake_ns,
+        .wake_error_ns = record_value.wake_error_ns,
+        .present_start_ns = record_value.present_start_ns,
+        .upload_end_ns = record_value.upload_end_ns,
+        .copy_start_ns = record_value.copy_start_ns,
+        .copy_end_ns = record_value.copy_end_ns,
+        .flush_end_ns = record_value.flush_end_ns,
+        .render_clear_ns = record_value.render_clear_ns,
+        .render_draw_ns = record_value.render_draw_ns,
+        .frame_end_ns = record_value.frame_end_ns,
+    });
+}
+
 fn synchronousOneCore() bool {
     const value = std.c.getenv("ZPU_ONE_CORE") orelse return false;
     return value[0] == '1';
+}
+
+fn usePresentWorker(complex_3d_content: bool, force_one_core: bool) bool {
+    return complex_3d_content and !force_one_core;
 }
 
 fn releasePresented(context: *anyopaque, image_index: u32) void {
@@ -775,7 +799,7 @@ fn getSurfaceCapabilities(physical: ?Physical, handle: usize, output: ?*SurfaceC
     const out = output orelse return .error_initialization_failed;
     const surface = validSurfaceLocked(handle) orelse return .error_initialization_failed;
     if (!validPhysicalLocked(p) or surface.owner != p.owner) return .error_initialization_failed;
-    out.* = .{ .min_image_count = 2, .max_image_count = 3, .current_extent = .{ .width = std.math.maxInt(u32), .height = std.math.maxInt(u32) }, .min_image_extent = .{ .width = 1, .height = 1 }, .max_image_extent = .{ .width = max_2d_extent, .height = max_2d_extent }, .max_image_array_layers = 1, .supported_transforms = 1, .current_transform = 1, .supported_composite_alpha = 1, .supported_usage_flags = 0x10 };
+    out.* = .{ .min_image_count = 2, .max_image_count = 4, .current_extent = .{ .width = std.math.maxInt(u32), .height = std.math.maxInt(u32) }, .min_image_extent = .{ .width = 1, .height = 1 }, .max_image_extent = .{ .width = max_2d_extent, .height = max_2d_extent }, .max_image_array_layers = 1, .supported_transforms = 1, .current_transform = 1, .supported_composite_alpha = 1, .supported_usage_flags = 0x10 };
     return .success;
 }
 fn getSurfaceFormats(physical: ?Physical, handle: usize, count: ?*u32, output: ?[*]SurfaceFormat) callconv(.c) Result {
@@ -1206,6 +1230,14 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
         state.* = .tombstone;
         d.loader_data = 0;
         q.loader_data = 0;
+        var devices_remain = false;
+        for (device_state) |candidate_state| if (candidate_state == .live) {
+            devices_remain = true;
+        };
+        if (!devices_remain) {
+            present_worker.shutdown();
+            cpu_cube.shutdownParallelWorkers();
+        }
         return;
     };
 }
@@ -2170,6 +2202,7 @@ fn invalidateImageContents(image: *ImageObj) void {
     image.clear_pattern = null;
     image.content_bounds = .{ .x = 0, .y = 0, .width = image.width, .height = image.height };
     image.force_full_present = true;
+    image.complex_3d_content = false;
 }
 
 fn executeValidatedCommand(command: Command) void {
@@ -2189,8 +2222,10 @@ fn executeValidatedCommand(command: Command) void {
             op.image.clear_pattern = pattern;
             op.image.content_bounds = emptyRect();
             op.image.force_full_present = true;
+            op.image.complex_3d_content = false;
         },
         .render_clear => |op| {
+            const operation_start = frame_pacing.monotonicNs();
             const bytes = imageBytes(op.image);
             if (op.depth) |depth| {
                 const depth_bytes = imageBytes(depth);
@@ -2212,14 +2247,18 @@ fn executeValidatedCommand(command: Command) void {
                 op.image.content_bounds = emptyRect();
                 depth.content_bounds = emptyRect();
                 if (!sparse) op.image.force_full_present = true;
+                op.image.complex_3d_content = false;
             } else {
                 fillImagePattern(bytes, @bitCast(op.color));
                 op.image.clear_pattern = @bitCast(op.color);
                 op.image.content_bounds = emptyRect();
                 op.image.force_full_present = true;
+                op.image.complex_3d_content = false;
             }
+            op.image.last_clear_ns = frame_pacing.monotonicNs() - operation_start;
         },
         .cube_draw => |op| {
+            const operation_start = frame_pacing.monotonicNs();
             const color = op.framebuffer.color_image.?;
             const depth = op.framebuffer.depth_image.?;
             const uniform_buffer = op.descriptors.uniform.?;
@@ -2231,6 +2270,8 @@ fn executeValidatedCommand(command: Command) void {
             _ = cpu_cube.drawTracked(imageBytes(color), imageBytes(depth), color.width, color.height, uniform_memory[uniform_start..][0..uniform_length], imageBytes(texture), texture.width, texture.height, op.vertex_count, op.viewport, op.scissor, op.cull_mode, op.front_face, &bounds);
             color.content_bounds = unionRect(color.content_bounds, bounds);
             depth.content_bounds = unionRect(depth.content_bounds, bounds);
+            color.complex_3d_content = true;
+            color.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
         },
         .buffer_to_image => |op| {
             copyBufferImage(op.src, op.dst, op.region, true);
@@ -2268,6 +2309,13 @@ pub fn benchmarkHostMemoryFill(bytes: []u8, data: u32) void {
 /// CPU implementation shared by vkCmdCopyBuffer execution and its benchmark.
 pub fn benchmarkHostMemoryCopy(dst: []u8, src: []const u8) void {
     host_memory.copy(dst, src);
+}
+
+test "2D presentation stays one-core and only complex 3D enables the auxiliary worker" {
+    try std.testing.expect(!usePresentWorker(false, false));
+    try std.testing.expect(!usePresentWorker(false, true));
+    try std.testing.expect(!usePresentWorker(true, true));
+    try std.testing.expect(usePresentWorker(true, false));
 }
 
 test "Vulkan host-memory benchmark helpers implement exact command byte semantics" {
@@ -3424,22 +3472,24 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (ci.min_image_count < 2 or ci.min_image_count > 3 or ci.image_extent.width == 0 or ci.image_extent.height == 0 or ci.present_mode != 2) return .error_initialization_failed;
+    if (ci.min_image_count < 2 or ci.min_image_count > 4 or ci.image_extent.width == 0 or ci.image_extent.height == 0 or ci.present_mode != 2) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     const surface = validSurfaceLocked(ci.surface) orelse return .error_initialization_failed;
     if (!validDeviceLocked(d) or surface.owner != d.physical.owner) return .error_initialization_failed;
     _ = cpu_locality.pinCurrent(.render);
     for (&swapchain_objects, &swapchain_state) |*swapchain, *state| if (state.* == .never) {
-        const transport = xcb_present.init(surface.connection, surface.window, ci.image_extent.width, ci.image_extent.height, ci.min_image_count) orelse return .error_initialization_failed;
+        const pixels = @as(u64, ci.image_extent.width) * ci.image_extent.height;
+        const image_count = if (pixels >= @as(u64, 3840) * 2160 and ci.min_image_count < 4) ci.min_image_count + 1 else ci.min_image_count;
+        const transport = xcb_present.init(surface.connection, surface.window, ci.image_extent.width, ci.image_extent.height, image_count) orelse return .error_initialization_failed;
         swapchain.* = .{
             .owner = d,
             .surface = surface,
             .width = ci.image_extent.width,
             .height = ci.image_extent.height,
-            .image_count = ci.min_image_count,
-            .images = .{ 0, 0, 0 },
-            .image_states = .{ .available, .available, .available },
+            .image_count = image_count,
+            .images = .{ 0, 0, 0, 0 },
+            .image_states = .{ .available, .available, .available, .available },
             .next_image = 0,
             .pending = 0,
             .retiring = false,
@@ -3449,7 +3499,7 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
             .transport = transport,
         };
         var created: u32 = 0;
-        while (created < ci.min_image_count) : (created += 1) {
+        while (created < image_count) : (created += 1) {
             var found = false;
             for (&image_objects, &image_state) |*image, *image_slot_state| if (!found and image_slot_state.* == .never) {
                 const byte_count = @as(usize, ci.image_extent.width) * ci.image_extent.height * 4;
@@ -3574,7 +3624,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         mutex.unlock();
         return .error_initialization_failed;
     };
-    if (!validDeviceLocked(q.owner) or present.swapchain_count == 0 or present.swapchain_count > max_present_entries or present.swapchains == null or present.image_indices == null or (!builtin.is_test and !synchronousOneCore() and !present_worker.ensureStarted())) {
+    if (!validDeviceLocked(q.owner) or present.swapchain_count == 0 or present.swapchain_count > max_present_entries or present.swapchains == null or present.image_indices == null) {
         mutex.unlock();
         return .error_initialization_failed;
     }
@@ -3623,7 +3673,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
             _ = xcb_present.present(&swapchain.transport, imageBytes(image));
             image.force_full_present = false;
             releasePresented(swapchain, index);
-        } else if (synchronousOneCore()) {
+        } else if (!usePresentWorker(image.complex_3d_content, synchronousOneCore())) {
             const before = frame_pacing.monotonicNs();
             if (swapchain.cadence == null) swapchain.cadence = frame_pacing.Clock.init(before, frame_pacing.configuredRate());
             const deadline = target_ns orelse swapchain.cadence.?.deadline();
@@ -3632,7 +3682,8 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
                 mutex.unlock();
                 return .error_initialization_failed;
             }
-            if (deadline > before) frame_pacing.sleepUntilPrecise(deadline, frame_pacing.precision_spin_ns);
+            const commit_deadline = deadline -| frame_pacing.present_commit_lead_ns;
+            if (commit_deadline > before) frame_pacing.sleepUntilPrecise(commit_deadline, frame_pacing.precision_spin_ns);
             const woke = frame_pacing.monotonicNs();
             swapchain.transport.last.wake_error_ns = @intCast(woke -| deadline);
             if (!xcb_present.commit(&swapchain.transport, imageBytes(image))) {
@@ -3652,12 +3703,14 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
                 .copy_start_ns = swapchain.transport.last.copy_start_ns,
                 .copy_end_ns = swapchain.transport.last.copy_end_ns,
                 .flush_end_ns = swapchain.transport.last.flush_end_ns,
+                .render_clear_ns = image.last_clear_ns,
+                .render_draw_ns = image.last_draw_ns,
                 .frame_end_ns = finished,
             });
             swapchain.cadence.?.advance(finished);
             image.force_full_present = false;
             releasePresented(swapchain, index);
-        } else if (!present_worker.enqueue(.{ .transport = &swapchain.transport, .cadence = &swapchain.cadence, .pixels = imageBytes(image), .content = content, .force_full = force_full, .context = swapchain, .image_index = index, .release = releasePresented, .target_ns = target_ns })) {
+        } else if (!present_worker.ensureStarted() or !present_worker.enqueue(.{ .transport = &swapchain.transport, .cadence = &swapchain.cadence, .pixels = imageBytes(image), .content = content, .force_full = force_full, .context = swapchain, .image_index = index, .release = releasePresented, .trace = if (traceLimit() != 0) recordPresentWorkerTrace else null, .render_clear_ns = image.last_clear_ns, .render_draw_ns = image.last_draw_ns, .target_ns = target_ns })) {
             releasePresented(swapchain, index);
             mutex.unlock();
             return .error_initialization_failed;
@@ -4009,7 +4062,7 @@ test "XCB surface lifecycle and physical presentation queries" {
     var capabilities: SurfaceCapabilities = undefined;
     try std.testing.expectEqual(Result.success, getSurfaceCapabilities(physicals[0], surface, &capabilities));
     try std.testing.expectEqual(@as(u32, 2), capabilities.min_image_count);
-    try std.testing.expectEqual(@as(u32, 3), capabilities.max_image_count);
+    try std.testing.expectEqual(@as(u32, 4), capabilities.max_image_count);
     try std.testing.expectEqual(std.math.maxInt(u32), capabilities.current_extent.width);
     try std.testing.expectEqual(Extent2D{ .width = 1, .height = 1 }, capabilities.min_image_extent);
     try std.testing.expectEqual(Extent2D{ .width = max_2d_extent, .height = max_2d_extent }, capabilities.max_image_extent);

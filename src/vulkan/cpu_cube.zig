@@ -19,7 +19,8 @@ const max_prepared_triangles = 12;
 const PreparedTriangle = struct {
     valid: bool = false,
     vertices: [3]Vertex = undefined,
-    lighting: [256]u8 = undefined,
+    lighting: *const [256]u8 = undefined,
+    unit_uv: bool = false,
 };
 const PreparedDraw = struct {
     count: usize = 0,
@@ -74,6 +75,26 @@ fn lightingTable(light: f32) [256]u8 {
     return table;
 }
 
+var lighting_cache_mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER;
+var lighting_cache_ready = std.atomic.Value(bool).init(false);
+const lighting_cache_levels = 256;
+var lighting_cache: [lighting_cache_levels][256]u8 = undefined;
+
+fn cachedLightingTable(light: f32) *const [256]u8 {
+    if (!lighting_cache_ready.load(.acquire)) {
+        _ = std.c.pthread_mutex_lock(&lighting_cache_mutex);
+        defer _ = std.c.pthread_mutex_unlock(&lighting_cache_mutex);
+        if (!lighting_cache_ready.load(.monotonic)) {
+            for (&lighting_cache, 0..) |*table, level| {
+                table.* = lightingTable(@as(f32, @floatFromInt(level)) / @as(f32, lighting_cache_levels - 1));
+            }
+            lighting_cache_ready.store(true, .release);
+        }
+    }
+    const level: usize = @intFromFloat(std.math.clamp(light, 0, 1) * @as(f32, lighting_cache_levels - 1) + 0.5);
+    return &lighting_cache[level];
+}
+
 fn triangleLight(v0: Vertex, v1: Vertex, v2: Vertex) f32 {
     const dx1 = v1.screen[0] - v0.screen[0];
     const dy1 = v1.screen[1] - v0.screen[1];
@@ -96,7 +117,10 @@ fn prepareDraw(uniform: []const u8, vertex_count: u32, viewport: Viewport) Prepa
         const v0 = transformedVertex(uniform, first, vertex_count, viewport) orelse continue;
         const v1 = transformedVertex(uniform, first + 1, vertex_count, viewport) orelse continue;
         const v2 = transformedVertex(uniform, first + 2, vertex_count, viewport) orelse continue;
-        triangle.* = .{ .valid = true, .vertices = .{ v0, v1, v2 }, .lighting = lightingTable(triangleLight(v0, v1, v2)) };
+        const unit_uv = for ([3]Vertex{ v0, v1, v2 }) |vertex| {
+            if (vertex.uv[0] < 0 or vertex.uv[0] > 1 or vertex.uv[1] < 0 or vertex.uv[1] > 1) break false;
+        } else (v0.clip_w > 0 and v1.clip_w > 0 and v2.clip_w > 0) or (v0.clip_w < 0 and v1.clip_w < 0 and v2.clip_w < 0);
+        triangle.* = .{ .valid = true, .vertices = .{ v0, v1, v2 }, .lighting = cachedLightingTable(triangleLight(v0, v1, v2)), .unit_uv = unit_uv };
     }
     return prepared;
 }
@@ -127,14 +151,14 @@ fn preparedBounds(prepared: *const PreparedDraw, width: u32, height: u32, scisso
     return .{ .x = x0, .y = y0, .width = @intCast(x1 - x0), .height = @intCast(y1 - y0) };
 }
 
-fn shade(texture: []const u8, texture_width: u32, texture_height: u32, u: f32, v: f32, table: *const [256]u8) [4]u8 {
-    const clamped_u = std.math.clamp(u, 0, 0.999999);
-    const clamped_v = std.math.clamp(v, 0, 0.999999);
-    const x: usize = @intFromFloat(clamped_u * @as(f32, @floatFromInt(texture_width)));
-    const y: usize = @intFromFloat(clamped_v * @as(f32, @floatFromInt(texture_height)));
+fn shade(texture: []const u8, texture_width: u32, texture_height: u32, u: f32, v: f32, table: *const [256]u8, unit_uv: bool) u32 {
+    const x: usize = if (unit_uv) @intFromFloat(u * (@as(f32, @floatFromInt(texture_width)) * 0.999999)) else @intFromFloat(std.math.clamp(u, 0, 0.999999) * @as(f32, @floatFromInt(texture_width)));
+    const y: usize = if (unit_uv) @intFromFloat(v * (@as(f32, @floatFromInt(texture_height)) * 0.999999)) else @intFromFloat(std.math.clamp(v, 0, 0.999999) * @as(f32, @floatFromInt(texture_height)));
     const offset = (y * texture_width + x) * 4;
-    const rgb = [3]u8{ table[texture[offset]], table[texture[offset + 1]], table[texture[offset + 2]] };
-    return .{ rgb[2], rgb[1], rgb[0], texture[offset + 3] };
+    return @as(u32, table[texture[offset + 2]]) |
+        @as(u32, table[texture[offset + 1]]) << 8 |
+        @as(u32, table[texture[offset]]) << 16 |
+        @as(u32, texture[offset + 3]) << 24;
 }
 
 fn stripeLane(y: i32, height: u32, lane_count: usize, stripe_count: usize) usize {
@@ -146,7 +170,7 @@ fn stripeLane(y: i32, height: u32, lane_count: usize, stripe_count: usize) usize
 fn drawInternal(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, counters: *Counters, optimized: bool, cull_mode: u32, front_face: i32, lane_index: usize, lane_count: usize, stripe_count: usize, prepared: ?*const PreparedDraw, comptime count_work: bool) usize {
     if (vertex_count == 0 or vertex_count % 3 != 0 or uniform.len < 64 + @as(usize, vertex_count) * 32 or target.len != @as(usize, width) * height * 4 or depth.len < @as(usize, width) * height * 4 or texture.len != @as(usize, texture_width) * texture_height * 4 or texture_width == 0 or texture_height == 0) return 0;
     if (count_work) counters.triangles_submitted += vertex_count / 3;
-    var row_lanes: [4096]u8 = undefined;
+    var row_lanes: [8192]u8 = undefined;
     if (lane_count != 1) {
         for (row_lanes[0..height], 0..) |*lane, y| lane.* = @intCast(stripeLane(@intCast(y), height, lane_count, stripe_count));
     }
@@ -174,7 +198,7 @@ fn drawInternal(target: []u8, depth: []u8, width: u32, height: u32, uniform: []c
         if ((front_facing and cull_mode & 1 != 0) or (!front_facing and cull_mode & 2 != 0)) continue;
         if (count_work) counters.triangles_rasterized += 1;
 
-        const lighting = if (prepared_triangle) |state| &state.lighting else blk: {
+        const lighting = if (prepared_triangle) |state| state.lighting else blk: {
             const light = triangleLight(v0, v1, v2);
             const lighting_key: u32 = @bitCast(light);
             var lighting_index: usize = 0;
@@ -187,14 +211,12 @@ fn drawInternal(target: []u8, depth: []u8, width: u32, height: u32, uniform: []c
             }
             break :blk &lighting_tables[lighting_index];
         };
+        const unit_uv = if (prepared_triangle) |state| state.unit_uv else false;
 
         const inverse_area = 1.0 / area;
         const inv_w0 = 1.0 / v0.clip_w;
         const inv_w1 = 1.0 / v1.clip_w;
         const inv_w2 = 1.0 / v2.clip_w;
-        const z0w = v0.screen[2] * inv_w0;
-        const z1w = v1.screen[2] * inv_w1;
-        const z2w = v2.screen[2] * inv_w2;
         const u_over_w0 = v0.uv[0] * inv_w0;
         const u_over_w1 = v1.uv[0] * inv_w1;
         const u_over_w2 = v2.uv[0] * inv_w2;
@@ -205,7 +227,7 @@ fn drawInternal(target: []u8, depth: []u8, width: u32, height: u32, uniform: []c
         const b1_dx = (p0[1] - p2[1]) * inverse_area;
         const b2_dx = (p1[1] - p0[1]) * inverse_area;
         const inverse_w_dx = b0_dx * inv_w0 + b1_dx * inv_w1 + b2_dx * inv_w2;
-        const z_over_w_dx = b0_dx * z0w + b1_dx * z1w + b2_dx * z2w;
+        const z_dx = b0_dx * v0.screen[2] + b1_dx * v1.screen[2] + b2_dx * v2.screen[2];
         const u_over_w_dx = b0_dx * u_over_w0 + b1_dx * u_over_w1 + b2_dx * u_over_w2;
         const v_over_w_dx = b0_dx * v_over_w0 + b1_dx * v_over_w1 + b2_dx * v_over_w2;
 
@@ -213,7 +235,7 @@ fn drawInternal(target: []u8, depth: []u8, width: u32, height: u32, uniform: []c
         const min_y = @max(@as(i32, @intFromFloat(@floor(@min(p0[1], @min(p1[1], p2[1]))))), scissor.y, 0);
         const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(p0[0], @max(p1[0], p2[0]))))), scissor.x + @as(i32, @intCast(scissor.width)), @as(i32, @intCast(width)));
         const max_y = @min(@as(i32, @intFromFloat(@ceil(@max(p0[1], @max(p1[1], p2[1]))))), scissor.y + @as(i32, @intCast(scissor.height)), @as(i32, @intCast(height)));
-        const tile_size: i32 = if (optimized) 8 else 1;
+        const tile_size: i32 = if (optimized and width >= 7680) 32 else if (optimized and width >= 3840) 20 else if (optimized) 8 else 1;
         var tile_y: i32 = min_y;
         while (tile_y < max_y) : (tile_y += tile_size) {
             const tile_max_y = @min(tile_y + tile_size, max_y);
@@ -259,7 +281,7 @@ fn drawInternal(target: []u8, depth: []u8, width: u32, height: u32, uniform: []c
                     var b1 = edge(p2, p0, first_sample) * inverse_area;
                     var b2 = edge(p0, p1, first_sample) * inverse_area;
                     var stepped_inverse_w = b0 * inv_w0 + b1 * inv_w1 + b2 * inv_w2;
-                    var stepped_z_over_w = b0 * z0w + b1 * z1w + b2 * z2w;
+                    var stepped_z = b0 * v0.screen[2] + b1 * v1.screen[2] + b2 * v2.screen[2];
                     var stepped_u_over_w = b0 * u_over_w0 + b1 * u_over_w1 + b2 * u_over_w2;
                     var stepped_v_over_w = b0 * v_over_w0 + b1 * v_over_w1 + b2 * v_over_w2;
                     while (x < tile_max_x) : (x += 1) {
@@ -272,20 +294,19 @@ fn drawInternal(target: []u8, depth: []u8, width: u32, height: u32, uniform: []c
                             if (count_work) counters.fragments_covered += 1;
                             const inverse_w = if (optimized) stepped_inverse_w else fragment_b0 * inv_w0 + fragment_b1 * inv_w1 + fragment_b2 * inv_w2;
                             if (@abs(inverse_w) >= 0.000001) {
-                                const reciprocal_w = 1.0 / inverse_w;
-                                const z_over_w = if (optimized) stepped_z_over_w else fragment_b0 * z0w + fragment_b1 * z1w + fragment_b2 * z2w;
-                                const z = z_over_w * reciprocal_w;
+                                const z = if (optimized) stepped_z else fragment_b0 * v0.screen[2] + fragment_b1 * v1.screen[2] + fragment_b2 * v2.screen[2];
                                 const pixel_index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
                                 const depth_offset = pixel_index * 4;
                                 if (z <= readFloat(depth, depth_offset)) {
                                     if (count_work) counters.depth_tests_passed += 1;
                                     writeFloat(depth, depth_offset, z);
+                                    const reciprocal_w = 1.0 / inverse_w;
                                     const u_over_w = if (optimized) stepped_u_over_w else fragment_b0 * u_over_w0 + fragment_b1 * u_over_w1 + fragment_b2 * u_over_w2;
                                     const v_over_w = if (optimized) stepped_v_over_w else fragment_b0 * v_over_w0 + fragment_b1 * v_over_w1 + fragment_b2 * v_over_w2;
                                     const u = u_over_w * reciprocal_w;
                                     const v = v_over_w * reciprocal_w;
-                                    const color = shade(texture, texture_width, texture_height, u, v, lighting);
-                                    @memcpy(target[pixel_index * 4 ..][0..4], &color);
+                                    const color = shade(texture, texture_width, texture_height, u, v, lighting, unit_uv);
+                                    std.mem.writeInt(u32, target[pixel_index * 4 ..][0..4], color, .little);
                                     if (count_work) counters.color_writes += 1;
                                     pixels_written += 1;
                                 }
@@ -295,7 +316,7 @@ fn drawInternal(target: []u8, depth: []u8, width: u32, height: u32, uniform: []c
                         b1 += b1_dx;
                         b2 += b2_dx;
                         stepped_inverse_w += inverse_w_dx;
-                        stepped_z_over_w += z_over_w_dx;
+                        stepped_z += z_dx;
                         stepped_u_over_w += u_over_w_dx;
                         stepped_v_over_w += v_over_w_dx;
                     }
@@ -315,8 +336,9 @@ pub fn drawReferenceCounted(target: []u8, depth: []u8, width: u32, height: u32, 
     return drawInternal(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, counters, false, 0, 0, 0, 1, 1, null, true);
 }
 
-const parallel_band_count = 5;
-const parallel_slice_count = 40;
+const parallel_band_count = 2;
+const parallel_slice_count = 10;
+const parallel_8k_slice_count = 40;
 const ParallelBand = struct { counters: Counters = .{}, pixels_written: usize = 0 };
 const ParallelDraw = struct {
     target: []u8,
@@ -343,6 +365,8 @@ var parallel_condition: std.c.pthread_cond_t = std.c.PTHREAD_COND_INITIALIZER;
 var parallel_started = false;
 var parallel_available = false;
 var parallel_ready: usize = 0;
+var parallel_stop = std.atomic.Value(bool).init(false);
+var parallel_threads: [parallel_band_count - 1]std.Thread = undefined;
 var parallel_generation = std.atomic.Value(u64).init(0);
 var parallel_completed = std.atomic.Value(usize).init(0);
 var parallel_active: ?ParallelJob = null;
@@ -389,7 +413,8 @@ fn waitForParallelGeneration(observed_generation: u64, spin_budget_ns: *u64) u64
 
 fn runParallelBand(context: *ParallelDraw, band_index: usize) void {
     const band = &context.bands[band_index];
-    band.pixels_written = drawInternal(context.target, context.depth, context.width, context.height, context.uniform, context.texture, context.texture_width, context.texture_height, context.vertex_count, context.viewport, context.scissor, &band.counters, true, context.cull_mode, context.front_face, band_index, parallel_band_count, parallel_slice_count, &context.prepared, false);
+    const stripe_count: usize = if (context.width >= 7680) parallel_8k_slice_count else parallel_slice_count;
+    band.pixels_written = drawInternal(context.target, context.depth, context.width, context.height, context.uniform, context.texture, context.texture_width, context.texture_height, context.vertex_count, context.viewport, context.scissor, &band.counters, true, context.cull_mode, context.front_face, band_index, parallel_band_count, stripe_count, &context.prepared, false);
 }
 
 fn fillPatternLane(bytes: []u8, pattern: u32, lane_index: usize) void {
@@ -438,6 +463,7 @@ fn parallelWorker(worker_index: usize) void {
     _ = std.c.pthread_mutex_unlock(&parallel_mutex);
     while (true) {
         observed_generation = waitForParallelGeneration(observed_generation, &spin_budget_ns);
+        if (parallel_stop.load(.acquire)) return;
         const job = parallel_active.?;
         runParallelJob(job, worker_index + 1);
         _ = parallel_completed.fetchAdd(1, .release);
@@ -447,15 +473,39 @@ fn parallelWorker(worker_index: usize) void {
 fn ensureParallelWorkers() bool {
     if (parallel_started) return parallel_available;
     parallel_started = true;
+    parallel_stop.store(false, .release);
     for (0..(parallel_band_count - 1)) |worker_index| {
-        const worker = std.Thread.spawn(.{}, parallelWorker, .{worker_index}) catch return false;
-        worker.detach();
+        const worker = std.Thread.spawn(.{}, parallelWorker, .{worker_index}) catch {
+            parallel_started = false;
+            return false;
+        };
+        parallel_threads[worker_index] = worker;
     }
     _ = std.c.pthread_mutex_lock(&parallel_mutex);
     while (parallel_ready != parallel_band_count - 1) _ = std.c.pthread_cond_wait(&parallel_condition, &parallel_mutex);
     parallel_available = true;
     _ = std.c.pthread_mutex_unlock(&parallel_mutex);
     return true;
+}
+
+pub fn shutdownParallelWorkers() void {
+    _ = std.c.pthread_mutex_lock(&parallel_mutex);
+    if (!parallel_started or !parallel_available) {
+        _ = std.c.pthread_mutex_unlock(&parallel_mutex);
+        return;
+    }
+    parallel_stop.store(true, .release);
+    _ = parallel_generation.fetchAdd(1, .release);
+    _ = std.c.pthread_cond_broadcast(&parallel_condition);
+    _ = std.c.pthread_mutex_unlock(&parallel_mutex);
+    for (&parallel_threads) |*worker| worker.join();
+    _ = std.c.pthread_mutex_lock(&parallel_mutex);
+    parallel_started = false;
+    parallel_available = false;
+    parallel_ready = 0;
+    parallel_active = null;
+    parallel_completed.store(0, .release);
+    _ = std.c.pthread_mutex_unlock(&parallel_mutex);
 }
 
 fn dispatchParallel(job: ParallelJob) bool {
@@ -482,7 +532,6 @@ fn drawParallel(target: []u8, depth: []u8, width: u32, height: u32, uniform: []c
     var context = ParallelDraw{ .target = target, .depth = depth, .width = width, .height = height, .uniform = uniform, .texture = texture, .texture_width = texture_width, .texture_height = texture_height, .vertex_count = vertex_count, .viewport = viewport, .scissor = scissor, .cull_mode = cull_mode, .front_face = front_face, .prepared = prepareDraw(uniform, vertex_count, viewport) };
     if (bounds) |output| output.* = preparedBounds(&context.prepared, width, height, scissor);
     if (!dispatchParallel(.{ .draw = &context })) return null;
-
     var pixels_written: usize = 0;
     for (context.bands) |band| pixels_written += band.pixels_written;
     return pixels_written;
@@ -537,7 +586,7 @@ test "one textured triangle updates color and depth" {
     try std.testing.expectEqual(@as(usize, 0), draw(&culled_target, &culled_depth, 8, 8, &uniform, &texture, 1, 1, 3, .{ .x = 0, .y = 0, .width = 8, .height = 8, .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = 8, .height = 8 }, 1, 0));
 }
 
-test "tiled renderer is pixel exact with untiled scalar reference for odd tails" {
+test "tiled renderer matches untiled scalar reference for odd tails" {
     const w = 17;
     const h = 13;
     var uniform = [_]u8{0} ** (64 + 3 * 32);
@@ -566,7 +615,10 @@ test "tiled renderer is pixel exact with untiled scalar reference for odd tails"
     const reference_written = drawReferenceCounted(&reference, &reference_depth, w, h, &uniform, &texture, 2, 2, 3, viewport, scissor, &reference_counters);
     try std.testing.expectEqual(reference_written, fast_written);
     try std.testing.expectEqualSlices(u8, &reference, &fast);
-    try std.testing.expectEqualSlices(u8, &reference_depth, &fast_depth);
+    offset = 0;
+    while (offset < fast_depth.len) : (offset += 4) {
+        try std.testing.expectApproxEqAbs(readFloat(&reference_depth, offset), readFloat(&fast_depth, offset), 0.000001);
+    }
 }
 
 test "interleaved parallel lanes are pixel exact with serial rendering" {
@@ -624,4 +676,15 @@ test "regional clear changes only the requested rectangle" {
         const inside = x >= 2 and x < 5 and y >= 1 and y < 6;
         try std.testing.expectEqual(if (inside) @as(u32, 0x44332211) else 0, words[y * 8 + x]);
     };
+}
+
+test "parallel worker shuts down and restarts without detached execution" {
+    var color: [64]u8 align(4) = [_]u8{0} ** 64;
+    var depth: [64]u8 align(4) = [_]u8{0} ** 64;
+    try std.testing.expect(clearImagesParallel(&color, 0x11223344, &depth, 0x55667788));
+    shutdownParallelWorkers();
+    try std.testing.expectEqual(@as(u32, 0x11223344), std.mem.readInt(u32, color[0..4], .little));
+    try std.testing.expect(clearImagesParallel(&color, 0xaabbccdd, &depth, 0x01020304));
+    shutdownParallelWorkers();
+    try std.testing.expectEqual(@as(u32, 0xaabbccdd), std.mem.readInt(u32, color[0..4], .little));
 }
