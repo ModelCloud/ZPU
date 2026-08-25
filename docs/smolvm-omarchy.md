@@ -14,8 +14,9 @@ session, Xwayland enabled, `DISPLAY=:0`, an Xauthority cookie, and
 KVM, the host kernel, libkrun/libkrunfw, SmolVM, Xwayland, Hyprland, and the X11
 socket relay are in the trusted computing base. The guest receives read-only
 access to this repository and the one-cookie Xauthority directory, plus the
-single X11 socket. Network is enabled only while Arch packages are installed.
-It receives no host `/dev/dri`, Vulkan files, libraries, loader variables,
+single X11 socket. The current SmolVM CLI records networking at machine creation, so this machine
+continues to have outbound networking after bootstrap; stop it when validation
+is complete. It receives no host `/dev/dri`, Vulkan files, libraries, loader variables,
 credentials, home directory, Wayland socket, or broad runtime directory.
 
 `--gpu` is intentionally forbidden: SmolVM documents that option as
@@ -31,7 +32,10 @@ its own environment. The read-only guest source mount is an export of tracked
 `guest-validate.sh` starts each probe with `env -i` and sets
 `VK_DRIVER_FILES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json` for that
 process only. It does not change `/etc`, `/usr/share/vulkan`, the Omarchy login
-session, or the compositor environment.
+session, or the compositor environment. Validation also fails if `/dev/dri`
+exists, if ZPU appears in a guest-global Vulkan directory, if loader output
+contains a second device, or if it names Venus, virtio, virgl, ANGLE, software
+translation ICDs, or OpenGL-family APIs.
 
 ## Omarchy host preparation
 

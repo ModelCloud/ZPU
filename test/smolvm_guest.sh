@@ -32,7 +32,9 @@ grep -F -- 'guest-validate.sh' <<<"$out"
 if grep -Eq -- '(^|[[:space:]])--gpu([[:space:]]|$)' <<<"$out"; then echo 'forbidden --gpu reached smolvm' >&2; exit 1; fi
 grep -F 'env -i' "$repo/smolvm/guest-validate.sh"
 grep -F "VK_DRIVER_FILES=\"\$manifest\"" "$repo/smolvm/guest-validate.sh"
-! rg -i 'venus|virgl|opengl|egl|glx|/dev/dri|--gpu' "$repo/smolvm/guest-build.sh" "$repo/smolvm/guest-validate.sh"
+grep -F 'test ! -e /dev/dri' "$repo/smolvm/guest-validate.sh"
+grep -Fq "'venus|virtio|virgl|angle|llvmpipe|lavapipe|swiftshader|opengl|egl|glx'" "$repo/smolvm/guest-validate.sh"
+! rg -i 'venus|virgl|opengl|egl|glx|/dev/dri|--gpu' "$repo/smolvm/guest-build.sh"
 
 # Any host loader/driver injection fails before smolvm executes.
 for injected in VK_DRIVER_FILES VK_ICD_FILENAMES VK_ADD_DRIVER_FILES LD_PRELOAD LD_LIBRARY_PATH ZPU_REFRESH_HZ; do
