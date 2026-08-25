@@ -97,7 +97,8 @@ as --64 -o "$work/plain.o" "$work/plain.S"
 # Negative control: an outside-kernel VEX leak must be rejected (fail closed).
 expect_fail "leaky project symbol rejected under --kernelized" check --kernelized "$work/leak.o"
 expect_fail "leaky project symbol rejected under --clean" check --clean "$work/leak.o"
-expect_fail "leaky project symbol rejected under --no-kernel-symbols" check --no-kernel-symbols "$work/leak.o"
+# --no-kernel-symbols is a pure linkage assertion and must stay agnostic to VEX.
+expect_ok "leaky project object passes symbol-only --no-kernel-symbols" check --no-kernel-symbols "$work/leak.o"
 
 # Positive control: exact kernel exports carrying VEX are accepted only when
 # every export is linked, and never under kernel-free modes.

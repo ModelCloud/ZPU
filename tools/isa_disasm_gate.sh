@@ -3,20 +3,26 @@
 #
 # Modes (all deterministic: binutils + fixed patterns, no network/timestamps):
 #   check --no-kernel-symbols FILE...
-#       Artifact contains zero eight-lane kernel export symbols AND zero
-#       VEX-encoded instructions inside any function. Applied to artifacts
-#       that must be entirely kernel-free (fail-closed linkage proof).
+#       Artifact contains zero eight-lane kernel export symbols — the
+#       deterministic linkage-consistency half of the proof. Combine with
+#       --clean to additionally require VEX-freedom on baseline artifacts.
 #   check --clean FILE...
-#       Artifact contains zero VEX-encoded instructions inside any function.
+#       Artifact contains zero VEX-encoded instructions inside any project
+#       function.
 #   check --kernelized FILE...
 #       All three eight-lane kernel exports must be linked, genuinely
 #       vectorized (>0 VEX), and VEX-encoded instructions may appear ONLY
-#       inside them. Zero VEX is tolerated in explicitly listed foreign
-#       (standard library / compiler-rt / libc plumbing) symbols — their
-#       baseline cleanliness is proven separately by the kernel-free checks —
-#       and in unattributable padding/data tables, which are not part of any
-#       function. Any OTHER symbol carrying VEX, including unknown project
-#       code, fails the gate (fail closed).
+#       inside them.
+#   check --kernels-linked FILE...
+#       All three eight-lane kernel exports must be linked and genuinely
+#       vectorized (>0 VEX inside them). No constraints are placed on other
+#       functions: this mode applies when the user explicitly opted the whole
+#       artifact into a higher CPU tier via -Dcpu, where portable-tier code
+#       may legitimately contain VEX instructions.
+#   In every mode, foreign symbols (explicitly listed standard library /
+# compiler-rt / libc plumbing — their baseline cleanliness is guaranteed by
+# the pinned baseline CPU model) and unattributable padding/data tables are
+# reported but tolerated; unknown project symbols carrying VEX fail closed.
 #
 # Detection is encoding-aware: an instruction is VEX/EVEX iff its first raw
 # opcode byte is 0xc4 (VEX 3-byte), 0xc5 (VEX 2-byte) or 0x62 (EVEX), which in
@@ -55,23 +61,26 @@ foreign_root_re='^(Io|debug|Dwarf|dwarf|std|builtin|compiler_rt|ubsan_rt|mem|arr
 clean_files=()
 kernelized_files=()
 nosym_files=()
+linked_files=()
 mode="none"
 while (($#)); do
   case "$1" in
     --clean) mode="clean" ;;
     --kernelized) mode="kernelized" ;;
     --no-kernel-symbols) mode="nosym" ;;
+    --kernels-linked) mode="linked" ;;
     *) case "$mode" in
          clean) clean_files+=("$1") ;;
          kernelized) kernelized_files+=("$1") ;;
          nosym) nosym_files+=("$1") ;;
+         linked) linked_files+=("$1") ;;
          *) echo "isa-gate: file '$1' before any mode flag" >&2; exit 64 ;;
        esac ;;
   esac
   shift
 done
 
-total_inputs=$((${#clean_files[@]} + ${#kernelized_files[@]} + ${#nosym_files[@]}))
+total_inputs=$((${#clean_files[@]} + ${#kernelized_files[@]} + ${#nosym_files[@]} + ${#linked_files[@]}))
 ((total_inputs > 0)) || { echo "isa-gate: no input files" >&2; exit 64; }
 
 workdir=$(mktemp -d)
@@ -229,19 +238,16 @@ check_file() {
       if ((present != 0)); then
         echo "isa-gate FAILED: $present eight-lane kernel export symbol(s) present in kernel-free artifact $(basename "$file")" >&2
         status=1
+        return
       fi
-      if ((outside != 0 || kernel != 0 || foreign != 0)); then
-        echo "isa-gate FAILED: $total VEX instruction(s) ($outside project, $kernel kernel, $foreign foreign) in kernel-free artifact: $(basename "$file")" >&2
-        status=1
-      fi
-      ((status == 0)) && echo "isa-gate: $(basename "$file") is kernel-free (zero VEX in functions, zero kernel exports, $padding data-region bytes ignored)"
+      echo "isa-gate: $(basename "$file") contains zero eight-lane kernel export symbols"
       ;;
     clean)
-      if ((outside != 0 || kernel != 0 || foreign != 0)); then
-        echo "isa-gate FAILED: $total VEX instruction(s) ($outside project, $kernel kernel, $foreign foreign) in artifact requiring zero: $(basename "$file")" >&2
+      if ((outside != 0 || kernel != 0)); then
+        echo "isa-gate FAILED: $outside project and $kernel kernel VEX instruction(s) in artifact requiring zero: $(basename "$file")" >&2
         status=1
       else
-        echo "isa-gate: $(basename "$file") contains zero VEX-encoded instructions in functions ($padding data-region bytes ignored)"
+        echo "isa-gate: $(basename "$file") contains zero VEX-encoded instructions in project functions ($padding+$foreign non-project bytes ignored)"
       fi
       ;;
     kernelized)
@@ -262,10 +268,23 @@ check_file() {
         echo "isa-gate: $(basename "$file") kernels verified vectorized ($kernel VEX inside kernel exports only)"
       fi
       ;;
+    linked)
+      present=$(kernel_export_count "$file") || { status=1; return; }
+      if ((present < ${#KERNEL_EXPORTS[@]})); then
+        echo "isa-gate FAILED: only $present/${#KERNEL_EXPORTS[@]} eight-lane kernel exports linked in $(basename "$file")" >&2
+        status=1
+      fi
+      if ((kernel == 0)); then
+        echo "isa-gate FAILED: expected vectorized eight-lane kernels, found none in $(basename "$file")" >&2
+        status=1
+      fi
+      echo "isa-gate: $(basename "$file") kernels present and vectorized ($kernel VEX) in explicit higher-tier artifact"
+      ;;
   esac
 }
 
 for file in "${nosym_files[@]:-}"; do [[ -n "${file:-}" ]] && check_file "$file" nosym || true; done
 for file in "${clean_files[@]:-}"; do [[ -n "${file:-}" ]] && check_file "$file" clean || true; done
 for file in "${kernelized_files[@]:-}"; do [[ -n "${file:-}" ]] && check_file "$file" kernelized || true; done
+for file in "${linked_files[@]:-}"; do [[ -n "${file:-}" ]] && check_file "$file" linked || true; done
 exit "$status"

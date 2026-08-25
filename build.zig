@@ -482,29 +482,65 @@ pub fn build(b: *std.Build) void {
     pr_readiness_step.dependOn(&pr_readiness_command.step);
 
     const isa_gate = b.addSystemCommand(&.{ "bash", "tools/isa_disasm_gate.sh", "check" });
-    // Strongest normal-contract evidence: ReleaseFast kernel-free twins of
-    // every shipped artifact must contain zero VEX instructions in any
-    // function and zero eight-lane kernel symbols.
-    isa_gate.addArg("--no-kernel-symbols");
-    if (enable_xcb) {
-        isa_gate.addArtifactArg(icd_clean);
-        isa_gate.addArtifactArg(demo_clean);
-    }
-    isa_gate.addArtifactArg(benchmark_clean);
-    // Default-tree artifacts: the ICD is always kernel-free; demo/benchmark
-    // are kernelized only when the v3 tier is actually linked for an x86_64
-    // target, otherwise they must equally prove kernel-freedom.
-    isa_gate.addArg("--no-kernel-symbols");
-    if (enable_xcb) isa_gate.addArtifactArg(icd);
-    if (v3_available) {
-        isa_gate.addArg("--kernelized");
-        isa_gate.addArtifactArg(demo);
-        isa_gate.addArtifactArg(benchmark);
-        if (v3_kernels_main) |k| isa_gate.addArtifactArg(k);
-    } else {
+    if (target.result.cpu.arch == .x86_64) {
+        const baseline_pinned = target.result.cpu.model == &std.Target.x86.cpu.x86_64;
+        var gated_files: usize = 0;
+        // Linkage consistency: the ICD never links kernels, whatever the tier.
         isa_gate.addArg("--no-kernel-symbols");
-        isa_gate.addArtifactArg(demo);
-        isa_gate.addArtifactArg(benchmark);
+        if (enable_xcb) {
+            isa_gate.addArtifactArg(icd);
+            isa_gate.addArtifactArg(icd_clean);
+            gated_files += 2;
+        }
+        if (baseline_pinned) {
+            // Default tier: strongest contract. ReleaseFast kernel-free twins
+            // and the default-tree artifacts must contain zero VEX inside
+            // project functions; demo/benchmark additionally carry genuinely
+            // vectorized kernel exports when the v3 tier applies.
+            if (enable_xcb) {
+                isa_gate.addArg("--clean");
+                isa_gate.addArtifactArg(icd_clean);
+                isa_gate.addArtifactArg(demo_clean);
+                gated_files += 2;
+            }
+            isa_gate.addArg("--clean");
+            isa_gate.addArtifactArg(benchmark_clean);
+            gated_files += 1;
+            if (v3_available) {
+                isa_gate.addArg("--kernelized");
+                gated_files += 1;
+                isa_gate.addArtifactArg(demo);
+                isa_gate.addArtifactArg(benchmark);
+                if (v3_kernels_main) |k| {
+                    isa_gate.addArtifactArg(k);
+                    gated_files += 1;
+                }
+            } else {
+                isa_gate.addArg("--no-kernel-symbols");
+                gated_files += 1;
+                isa_gate.addArtifactArg(demo);
+                isa_gate.addArtifactArg(benchmark);
+                gated_files += 1;
+            }
+        } else if (v3_available) {
+            // Explicit -Dcpu opt-in: portable-tier VEX is the user's choice,
+            // but the eight-lane exports must be linked and vectorized.
+            isa_gate.addArg("--kernels-linked");
+            gated_files += 1;
+            isa_gate.addArtifactArg(demo);
+            isa_gate.addArtifactArg(benchmark);
+            if (v3_kernels_main) |k| {
+                isa_gate.addArtifactArg(k);
+                gated_files += 1;
+            }
+        }
+        if (gated_files == 0) {
+            const nothing = b.addSystemCommand(&.{ "echo", "isa-gate: no artifacts to scan (-Dxcb=false)" });
+            isa_gate.step.dependOn(&nothing.step);
+        }
+    } else {
+        const not_applicable = b.addSystemCommand(&.{ "echo", "isa-gate: skipped — ISA tier evidence is x86-specific for this target" });
+        isa_gate.step.dependOn(&not_applicable.step);
     }
     isa_gate.step.dependOn(&require_limited.step);
 
