@@ -3,6 +3,7 @@ const std = @import("std");
 pub const ns_per_second: u64 = 1_000_000_000;
 pub const default_hz: u64 = 120;
 pub const max_hz: u64 = 1000;
+pub const precision_spin_ns: u64 = 1_000_000;
 
 /// Phase-locked rational refresh clock. Late callers skip elapsed clock slots,
 /// never FIFO work, preventing catch-up bursts without rounded-period drift.
@@ -80,10 +81,10 @@ pub fn sleepUntil(deadline_ns: u64) void {
 }
 
 /// Absolute sleep remains the baseline; the final bounded interval is spun on
-/// an isolated driver CPU to remove ordinary ~50 us scheduler wake variance.
-/// The bound is deliberately tiny relative to an 8.333 ms slot.
+/// the driver presentation thread to remove ordinary scheduler wake variance. The
+/// one-millisecond ceiling remains bounded relative to supported frame slots.
 pub fn sleepUntilPrecise(deadline_ns: u64, spin_ns: u64) void {
-    const bounded_spin = @min(spin_ns, 100_000);
+    const bounded_spin = @min(spin_ns, precision_spin_ns);
     if (deadline_ns > bounded_spin) {
         const sleep_deadline = deadline_ns - bounded_spin;
         if (monotonicNs() < sleep_deadline) sleepUntil(sleep_deadline);

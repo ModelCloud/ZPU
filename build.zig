@@ -67,10 +67,27 @@ pub fn build(b: *std.Build) void {
 
     const run_target_800x600 = b.addSystemCommand(&.{ "python3", "test/vkcube_benchmark.py" });
     run_target_800x600.addArg(b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_target_800x600.addArgs(&.{ "800", "600", "240", "241" });
     run_target_800x600.step.dependOn(&require_limited.step);
     run_target_800x600.step.dependOn(b.getInstallStep());
     const target_800x600_step = b.step("target-800x600", "Require vkcube 800x600 presented-frame p99 at 240 FPS or better");
     target_800x600_step.dependOn(&run_target_800x600.step);
+
+    const run_target_4k_30 = b.addSystemCommand(&.{ "python3", "test/vkcube_benchmark.py" });
+    run_target_4k_30.addArg(b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_target_4k_30.addArgs(&.{ "3840", "2160", "30", "31" });
+    run_target_4k_30.step.dependOn(&require_limited.step);
+    run_target_4k_30.step.dependOn(b.getInstallStep());
+    const target_4k_30_step = b.step("target-4k-30", "Require vkcube 3840x2160 presented-frame p99 at 30 FPS or better");
+    target_4k_30_step.dependOn(&run_target_4k_30.step);
+
+    const run_target_4k_60 = b.addSystemCommand(&.{ "python3", "test/vkcube_benchmark.py" });
+    run_target_4k_60.addArg(b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_target_4k_60.addArgs(&.{ "3840", "2160", "60", "63" });
+    run_target_4k_60.step.dependOn(&require_limited.step);
+    run_target_4k_60.step.dependOn(b.getInstallStep());
+    const target_4k_60_step = b.step("target-4k-60", "Require vkcube 3840x2160 presented-frame p99 at 60 FPS or better");
+    target_4k_60_step.dependOn(&run_target_4k_60.step);
 
     const tests = b.addTest(.{ .root_module = zpu });
     const run_tests = b.addRunArtifact(tests);

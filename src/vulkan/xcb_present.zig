@@ -8,12 +8,51 @@ const GetImageCookie = extern struct { sequence: u32 };
 const GetImageReply = opaque {};
 var verification_done = false;
 var previous_metric_present_ns: u64 = 0;
+const max_frame_metrics = 7_200;
+var frame_metrics: [max_frame_metrics]u64 = undefined;
+var frame_metric_count: usize = 0;
+var frame_metrics_written = false;
+
+extern fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int;
+extern fn write(fd: c_int, buffer: *const anyopaque, count: usize) isize;
+extern fn close(fd: c_int) c_int;
+
+fn frameMetricLimit() usize {
+    const raw = std.c.getenv("ZPU_FRAME_METRICS_COUNT") orelse return 0;
+    return @min(std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 0, max_frame_metrics);
+}
+
+fn writeFrameMetrics() void {
+    if (frame_metrics_written) return;
+    const path = std.c.getenv("ZPU_FRAME_METRICS_PATH") orelse return;
+    const fd = open(path, 0x241, 0o600); // O_WRONLY | O_CREAT | O_TRUNC
+    if (fd < 0) return;
+    const bytes = std.mem.sliceAsBytes(frame_metrics[0..frame_metric_count]);
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const amount = write(fd, bytes[offset..].ptr, bytes.len - offset);
+        if (amount <= 0) break;
+        offset += @intCast(amount);
+    }
+    _ = close(fd);
+    frame_metrics_written = offset == bytes.len;
+}
 
 fn recordFrameMetric(now: u64) void {
     const enabled = std.c.getenv("ZPU_FRAME_METRICS") orelse return;
     if (enabled[0] != '1') return;
-    if (previous_metric_present_ns != 0 and now > previous_metric_present_ns)
-        std.debug.print("zpu_vkcube_frame_ns={}\n", .{now - previous_metric_present_ns});
+    if (previous_metric_present_ns != 0 and now > previous_metric_present_ns) {
+        const limit = frameMetricLimit();
+        if (limit != 0 and std.c.getenv("ZPU_FRAME_METRICS_PATH") != null) {
+            if (frame_metric_count < limit) {
+                frame_metrics[frame_metric_count] = now - previous_metric_present_ns;
+                frame_metric_count += 1;
+                if (frame_metric_count == limit) writeFrameMetrics();
+            }
+        } else {
+            std.debug.print("zpu_vkcube_frame_ns={}\n", .{now - previous_metric_present_ns});
+        }
+    }
     previous_metric_present_ns = now;
 }
 pub const Transport = struct {

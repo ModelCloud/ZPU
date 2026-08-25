@@ -2,17 +2,14 @@
 import math
 import os
 import pathlib
-import re
 import shutil
+import struct
 import subprocess
 import sys
+import tempfile
 
-WIDTH = 800
-HEIGHT = 600
 WARMUP_FRAMES = 120
 SAMPLE_FRAMES = 1000
-TARGET_FPS = 240
-FRAME_BUDGET_NS = 1_000_000_000 // TARGET_FPS
 
 
 def percentile(values: list[int], percent: int) -> int:
@@ -21,9 +18,17 @@ def percentile(values: list[int], percent: int) -> int:
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        raise SystemExit(f"usage: {sys.argv[0]} <installed-icd-manifest>")
+    if len(sys.argv) not in (5, 6):
+        raise SystemExit(f"usage: {sys.argv[0]} <installed-icd-manifest> <width> <height> <target-hz> [pacing-hz]")
     manifest = pathlib.Path(sys.argv[1])
+    try:
+        width, height, target_fps = map(int, sys.argv[2:5])
+        pacing_fps = int(sys.argv[5]) if len(sys.argv) == 6 else target_fps
+    except ValueError as error:
+        raise SystemExit(f"width, height, and target Hz must be integers: {error}")
+    if not (1 <= width <= 4096 and 1 <= height <= 4096 and 1 <= target_fps <= pacing_fps <= 1000):
+        raise SystemExit("width/height must be 1..4096 and target Hz must be 1..pacing Hz..1000")
+    frame_budget_ns = 1_000_000_000 // target_fps
     if not manifest.is_file():
         raise SystemExit(f"ZPU ICD manifest not found: {manifest}")
     for program in ("timeout", "xvfb-run", "vkcube"):
@@ -33,21 +38,28 @@ def main() -> int:
     presented_frames = WARMUP_FRAMES + SAMPLE_FRAMES + 1
     command = [
         "timeout", "180s", "xvfb-run", "-a", "-s",
-        f"-screen 0 {WIDTH}x{HEIGHT}x24 -nolisten tcp",
+        f"-screen 0 {width}x{height}x24 -nolisten tcp -fakescreenfps 240",
         "vkcube", "--wsi", "xcb", "--c", str(presented_frames),
-        "--width", str(WIDTH), "--height", str(HEIGHT), "--suppress_popups",
+        "--width", str(width), "--height", str(height), "--suppress_popups",
     ]
-    environment = os.environ.copy()
-    environment["VK_DRIVER_FILES"] = str(manifest)
-    environment["ZPU_FRAME_METRICS"] = "1"
-    environment["ZPU_REFRESH_HZ"] = str(TARGET_FPS)
-    result = subprocess.run(command, env=environment, text=True, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, timeout=190)
+    with tempfile.TemporaryDirectory(prefix="zpu-vkcube-") as temporary_directory:
+        metrics_path = pathlib.Path(temporary_directory) / "frame-metrics.bin"
+        environment = os.environ.copy()
+        environment["VK_DRIVER_FILES"] = str(manifest)
+        environment["ZPU_FRAME_METRICS"] = "1"
+        environment["ZPU_FRAME_METRICS_COUNT"] = str(WARMUP_FRAMES + SAMPLE_FRAMES)
+        environment["ZPU_FRAME_METRICS_PATH"] = str(metrics_path)
+        environment["ZPU_REFRESH_HZ"] = str(pacing_fps)
+        result = subprocess.run(command, env=environment, text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, timeout=190)
+        metric_bytes = metrics_path.read_bytes() if metrics_path.is_file() else b""
     if result.returncode != 0:
         sys.stdout.write(result.stdout[-8000:])
         raise SystemExit(f"vkcube benchmark failed with status {result.returncode}")
 
-    timings = [int(value) for value in re.findall(r"^zpu_vkcube_frame_ns=(\d+)$", result.stdout, re.MULTILINE)]
+    if len(metric_bytes) % 8 != 0:
+        raise SystemExit(f"frame timing file has invalid size {len(metric_bytes)}")
+    timings = list(struct.unpack(f"={len(metric_bytes) // 8}Q", metric_bytes))
     if len(timings) != WARMUP_FRAMES + SAMPLE_FRAMES:
         raise SystemExit(f"expected {WARMUP_FRAMES + SAMPLE_FRAMES} frame timings, got {len(timings)}")
     samples = timings[WARMUP_FRAMES:]
@@ -56,11 +68,11 @@ def main() -> int:
     p99_ns = percentile(samples, 99)
     median_fps = 1_000_000_000 / p50_ns
     one_percent_low_fps = 1_000_000_000 / p99_ns
-    print(f"ZPU vkcube {WIDTH}x{HEIGHT}: median={median_fps:.1f} FPS, "
+    print(f"ZPU vkcube {width}x{height} target={target_fps} pacing={pacing_fps} Hz: median={median_fps:.1f} FPS, "
           f"1%-low={one_percent_low_fps:.1f} FPS, "
-          f"p50/p95/p99={p50_ns}/{p95_ns}/{p99_ns} ns, budget={FRAME_BUDGET_NS} ns")
-    if p99_ns > FRAME_BUDGET_NS:
-        raise SystemExit("vkcube 800x600 p99 frame-time target missed")
+          f"p50/p95/p99={p50_ns}/{p95_ns}/{p99_ns} ns, budget={frame_budget_ns} ns")
+    if p99_ns > frame_budget_ns:
+        raise SystemExit(f"vkcube {width}x{height} target={target_fps} pacing={pacing_fps} Hz p99 frame-time target missed")
     return 0
 
 
