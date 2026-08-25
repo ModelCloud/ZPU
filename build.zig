@@ -4,6 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const require_limited = b.addSystemCommand(&.{"tools/require-limited.sh"});
+    const smolvm_guest_test = b.addSystemCommand(&.{"test/smolvm_guest.sh"});
+    const smolvm_guest_step = b.step("smolvm-guest-test", "Test fail-closed SmolVM guest isolation and launch commands");
+    smolvm_guest_step.dependOn(&smolvm_guest_test.step);
+    const smolvm_dry_run = b.addSystemCommand(&.{ "env", "ZPU_SMOLVM_DRY_RUN=1", "tools/smolvm-zpu.sh", "dry-run" });
+    const smolvm_dry_run_step = b.step("smolvm-dry-run", "Print the complete guest lifecycle without changing host or VM state");
+    smolvm_dry_run_step.dependOn(&smolvm_dry_run.step);
     const validate_api_inventory = b.addSystemCommand(&.{ "python3", "tools/api_inventory.py" });
     validate_api_inventory.step.dependOn(&require_limited.step);
     const test_api_inventory = b.addSystemCommand(&.{"test/api_inventory.sh"});

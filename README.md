@@ -59,6 +59,11 @@ To run four independent experiment or optimization commands at once, `tools/cpu-
 
 The build installs `zig-out/lib/libvulkan_zpu.so` and `zig-out/share/vulkan/icd.d/zpu_icd.x86_64.json`. The manifest's relative path resolves back to that installed library. XCB presentation links the shared object to libc, libm, the ELF interpreter, and libxcb. The loader-independent smoke test uses `dlopen` to resolve the three private loader entry points, negotiate interface version 7, create an instance, and enumerate the CPU device.
 
+For the hardware-isolated Omarchy workflow, [the SmolVM guest guide](docs/smolvm-omarchy.md)
+builds and stages ZPU wholly inside a real `smol-machines/smolvm` guest, rejects
+host ICD injection, and displays the guest's native XCB Vulkan validation window
+through the host Xwayland socket without enabling SmolVM's Venus GPU path.
+
 To ask a system Vulkan loader to discover only ZPU:
 
 ```sh
@@ -167,6 +172,8 @@ tools/limited-cpus.sh zig build target-4k-60 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build target-4k-120 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build demo
 tools/limited-cpus.sh zig build -Doptimize=ReleaseFast
+tools/limited-cpus.sh zig build smolvm-guest-test
+tools/limited-cpus.sh zig build smolvm-dry-run
 ```
 
 CI runs these commands on Linux. Generated PPM files and Zig build outputs are ignored.

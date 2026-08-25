@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define CHECK_VK(expr) do { VkResult r_ = (expr); if (r_ != VK_SUCCESS) { fprintf(stderr, "%s failed: %d\n", #expr, r_); return 1; } } while (0)
 #define CHECK_TRUE(expr) do { if (!(expr)) { fprintf(stderr, "check failed: %s\n", #expr); return 1; } } while (0)
@@ -162,6 +163,12 @@ int main(void) {
     CHECK_TRUE(pixel[0] == 223 && pixel[1] == 127 && pixel[2] == 31);
     printf("xcb_present_pixel=BGRA(%u,%u,%u,%u)\n", pixel[0], pixel[1], pixel[2], pixel[3]);
     free(image_reply);
+    const char *hold = getenv("ZPU_WINDOW_HOLD_SECONDS");
+    if (hold != NULL) {
+        unsigned long seconds = strtoul(hold, NULL, 10);
+        if (seconds > 10) seconds = 10;
+        sleep((unsigned int)seconds);
+    }
 
     vkDestroySemaphore(device, rendered, NULL);
     vkDestroySemaphore(device, acquired, NULL);
