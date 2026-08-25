@@ -7,6 +7,15 @@ const GenericError = extern struct { response_type: u8, error_code: u8, sequence
 const GetImageCookie = extern struct { sequence: u32 };
 const GetImageReply = opaque {};
 var verification_done = false;
+var previous_metric_present_ns: u64 = 0;
+
+fn recordFrameMetric(now: u64) void {
+    const enabled = std.c.getenv("ZPU_FRAME_METRICS") orelse return;
+    if (enabled[0] != '1') return;
+    if (previous_metric_present_ns != 0 and now > previous_metric_present_ns)
+        std.debug.print("zpu_vkcube_frame_ns={}\n", .{now - previous_metric_present_ns});
+    previous_metric_present_ns = now;
+}
 pub const Transport = struct {
     connection: *Connection,
     window: u32,
@@ -111,6 +120,7 @@ pub fn commit(transport: *Transport, pixels: []const u8) bool {
     transport.last.flush_end_ns = monotonicNs();
     transport.last.flush_ns = transport.last.flush_end_ns - flush_start;
     transport.last.transport_total_ns = transport.last.flush_end_ns - transport.last.present_start_ns;
+    recordFrameMetric(transport.last.flush_end_ns);
     const verify = std.c.getenv("ZPU_VERIFY_PRESENT") orelse null;
     if (!verification_done and verify != null and verify.?[0] == '1') {
         verification_done = true;

@@ -173,6 +173,12 @@ pub const DescriptorImageInfo = extern struct { sampler: usize, image_view: usiz
 pub const WriteDescriptorSet = extern struct { s_type: i32, p_next: ?*const anyopaque, dst_set: usize, dst_binding: u32, dst_array_element: u32, descriptor_count: u32, descriptor_type: i32, image_info: ?[*]const DescriptorImageInfo, buffer_info: ?[*]const DescriptorBufferInfo, texel_buffer_view: ?[*]const usize };
 pub const Viewport = cpu_cube.Viewport;
 pub const PresentInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, wait_semaphore_count: u32, wait_semaphores: ?[*]const usize, swapchain_count: u32, swapchains: ?[*]const usize, image_indices: ?[*]const u32, results: ?[*]Result };
+pub const PresentTimingsInfoEXT = extern struct { s_type: i32, p_next: ?*const anyopaque, swapchain_count: u32, timing_infos: ?[*]const PresentTimingInfoEXT };
+pub const PresentTimingInfoEXT = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, target_time: u64, time_domain_id: u64, present_stage_queries: u32, target_time_domain_present_stage: u32 };
+pub const SwapchainTimingPropertiesEXT = extern struct { s_type: i32, p_next: ?*anyopaque, refresh_duration: u64, refresh_interval: u64 };
+pub const SwapchainTimeDomainPropertiesEXT = extern struct { s_type: i32, p_next: ?*anyopaque, time_domain_count: u32, time_domains: ?[*]i32, time_domain_ids: ?[*]u64 };
+pub const PastPresentationTimingInfoEXT = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, swapchain: usize };
+pub const PastPresentationTimingPropertiesEXT = extern struct { s_type: i32, p_next: ?*anyopaque, timing_properties_counter: u64, time_domains_counter: u64, presentation_timing_count: u32, presentation_timings: ?*anyopaque };
 pub const ShaderModuleCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, code_size: usize, p_code: ?*const anyopaque };
 pub const SpecializationMapEntry = extern struct { constant_id: u32, offset: u32, size: usize };
 pub const SpecializationInfo = extern struct { map_entry_count: u32, map_entries: ?[*]const SpecializationMapEntry, data_size: usize, data: ?*const anyopaque };
@@ -943,14 +949,18 @@ fn enumerateDeviceExtensions(physical: ?Physical, layer: ?[*:0]const u8, count: 
     if (!validPhysicalLocked(physical orelse return .error_initialization_failed)) return .error_initialization_failed;
     const n = count orelse return .error_initialization_failed;
     if (layer != null) return .error_extension_not_present;
+    const extensions = [_]struct { name: []const u8, version: u32 }{ .{ .name = "VK_KHR_swapchain", .version = 70 }, .{ .name = "VK_EXT_present_timing", .version = 3 } };
     if (props) |items| {
-        if (n.* == 0) return .incomplete;
-        items[0] = std.mem.zeroes(ExtensionProperties);
-        const name = "VK_KHR_swapchain";
-        @memcpy(items[0].name[0..name.len], name);
-        items[0].spec_version = 70;
-        n.* = 1;
-    } else n.* = 1;
+        const written = @min(n.*, extensions.len);
+        for (extensions[0..written], 0..) |extension, i| {
+            items[i] = std.mem.zeroes(ExtensionProperties);
+            @memcpy(items[i].name[0..extension.name.len], extension.name);
+            items[i].spec_version = extension.version;
+        }
+        n.* = @intCast(written);
+        return if (written < extensions.len) .incomplete else .success;
+    }
+    n.* = extensions.len;
     return .success;
 }
 fn createDevice(physical: ?Physical, info: ?*const DeviceInfo, alloc: ?*const Alloc, output: ?*Device) callconv(.c) Result {
@@ -960,7 +970,10 @@ fn createDevice(physical: ?Physical, info: ?*const DeviceInfo, alloc: ?*const Al
     if (ci.layer_count != 0) return .error_layer_not_present;
     if (ci.extension_count != 0) {
         const extensions = ci.extensions orelse return .error_extension_not_present;
-        for (extensions[0..ci.extension_count]) |extension| if (!std.mem.eql(u8, std.mem.span(extension), "VK_KHR_swapchain")) return .error_extension_not_present;
+        for (extensions[0..ci.extension_count]) |extension| {
+            const name = std.mem.span(extension);
+            if (!std.mem.eql(u8, name, "VK_KHR_swapchain") and !std.mem.eql(u8, name, "VK_EXT_present_timing")) return .error_extension_not_present;
+        }
     }
     if (alloc != null) {
         hit(.device_allocator);
@@ -3425,6 +3438,10 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         }
     }
     for (present.swapchains.?[0..present.swapchain_count], present.image_indices.?[0..present.swapchain_count], 0..) |handle, index, i| {
+        const target_ns = presentTarget(present, i, frame_pacing.monotonicNs()) catch {
+            mutex.unlock();
+            return .error_initialization_failed;
+        };
         const swapchain = validSwapchainLocked(handle) orelse {
             mutex.unlock();
             return .error_initialization_failed;
@@ -3447,8 +3464,8 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
             releasePresented(swapchain, index);
         } else if (synchronousOneCore()) {
             const before = frame_pacing.monotonicNs();
-            if (swapchain.cadence == null) swapchain.cadence = frame_pacing.Clock.init120(before);
-            const deadline = swapchain.cadence.?.deadline();
+            if (swapchain.cadence == null) swapchain.cadence = frame_pacing.Clock.init(before, frame_pacing.configuredRate());
+            const deadline = target_ns orelse swapchain.cadence.?.deadline();
             if (!xcb_present.upload(&swapchain.transport, imageBytes(@ptrFromInt(swapchain.images[index])))) {
                 releasePresented(swapchain, index);
                 mutex.unlock();
@@ -3478,7 +3495,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
             });
             swapchain.cadence.?.advance(finished);
             releasePresented(swapchain, index);
-        } else if (!present_worker.enqueue(.{ .transport = &swapchain.transport, .cadence = &swapchain.cadence, .pixels = imageBytes(@ptrFromInt(swapchain.images[index])), .context = swapchain, .image_index = index, .release = releasePresented })) {
+        } else if (!present_worker.enqueue(.{ .transport = &swapchain.transport, .cadence = &swapchain.cadence, .pixels = imageBytes(@ptrFromInt(swapchain.images[index])), .context = swapchain, .image_index = index, .release = releasePresented, .target_ns = target_ns })) {
             releasePresented(swapchain, index);
             mutex.unlock();
             return .error_initialization_failed;
@@ -3563,6 +3580,93 @@ fn queueWaitIdle(queue: ?Queue) callconv(.c) Result {
     }
     return .success;
 }
+fn presentTarget(info: *const PresentInfo, index: usize, now_ns: u64) !?u64 {
+    var next = info.p_next;
+    var depth: usize = 0;
+    while (next) |raw| : (depth += 1) {
+        if (depth == 16) return error.InvalidPresentTiming;
+        const header: *const ChainHeader = @ptrCast(@alignCast(raw));
+        if (header.s_type == 1_000_208_003) {
+            const timings: *const PresentTimingsInfoEXT = @ptrCast(@alignCast(raw));
+            if (timings.swapchain_count != info.swapchain_count or timings.timing_infos == null) return error.InvalidPresentTiming;
+            const timing = timings.timing_infos.?[index];
+            if (timing.s_type != 1_000_208_004 or timing.p_next != null or timing.flags & ~@as(u32, 3) != 0 or timing.time_domain_id != 1 or timing.present_stage_queries != 0 or timing.target_time_domain_present_stage != 0) return error.InvalidPresentTiming;
+            return if (timing.flags & 1 != 0) std.math.add(u64, now_ns, timing.target_time) catch return error.InvalidPresentTiming else timing.target_time;
+        }
+        next = @ptrCast(header.p_next);
+    }
+    return null;
+}
+
+test "EXT present timing selects absolute and relative deadlines" {
+    var timing = PresentTimingInfoEXT{ .s_type = 1_000_208_004, .p_next = null, .flags = 0, .target_time = 9_000, .time_domain_id = 1, .present_stage_queries = 0, .target_time_domain_present_stage = 0 };
+    const timings = PresentTimingsInfoEXT{ .s_type = 1_000_208_003, .p_next = null, .swapchain_count = 1, .timing_infos = @ptrCast(&timing) };
+    const info = PresentInfo{ .s_type = 1_000_001_001, .p_next = &timings, .wait_semaphore_count = 0, .wait_semaphores = null, .swapchain_count = 1, .swapchains = null, .image_indices = null, .results = null };
+    try std.testing.expectEqual(@as(?u64, 9_000), try presentTarget(&info, 0, 1_000));
+    timing.flags = 1;
+    timing.target_time = 250;
+    try std.testing.expectEqual(@as(?u64, 1_250), try presentTarget(&info, 0, 1_000));
+    timing.time_domain_id = 2;
+    try std.testing.expectError(error.InvalidPresentTiming, presentTarget(&info, 0, 1_000));
+}
+
+fn getSwapchainTimingProperties(device: ?Device, handle: usize, output: ?*SwapchainTimingPropertiesEXT, counter: ?*u64) callconv(.c) Result {
+    lock();
+    defer mutex.unlock();
+    const swapchain = validSwapchainLocked(handle) orelse return .error_initialization_failed;
+    const d = device orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or swapchain.owner != d) return .error_initialization_failed;
+    const properties = output orelse return .error_initialization_failed;
+    if (properties.s_type != 1_000_208_001 or properties.p_next != null) return .error_initialization_failed;
+    const rate = frame_pacing.configuredRate();
+    properties.refresh_duration = frame_pacing.ns_per_second / rate.numerator;
+    properties.refresh_interval = 1;
+    if (counter) |value| value.* = 1;
+    return .success;
+}
+
+fn getSwapchainTimeDomainProperties(device: ?Device, handle: usize, output: ?*SwapchainTimeDomainPropertiesEXT, counter: ?*u64) callconv(.c) Result {
+    lock();
+    defer mutex.unlock();
+    const swapchain = validSwapchainLocked(handle) orelse return .error_initialization_failed;
+    const d = device orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or swapchain.owner != d) return .error_initialization_failed;
+    const properties = output orelse return .error_initialization_failed;
+    if (properties.s_type != 1_000_208_002 or properties.p_next != null) return .error_initialization_failed;
+    if (properties.time_domain_count != 0 and properties.time_domains != null and properties.time_domain_ids != null) {
+        properties.time_domains.?[0] = 1;
+        properties.time_domain_ids.?[0] = 1;
+    }
+    properties.time_domain_count = 1;
+    if (counter) |value| value.* = 1;
+    return .success;
+}
+
+fn setSwapchainPresentTimingQueueSize(device: ?Device, handle: usize, size: u32) callconv(.c) Result {
+    _ = size;
+    lock();
+    defer mutex.unlock();
+    const swapchain = validSwapchainLocked(handle) orelse return .error_initialization_failed;
+    const d = device orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or swapchain.owner != d) return .error_initialization_failed;
+    return .not_ready;
+}
+
+fn getPastPresentationTiming(device: ?Device, info: ?*const PastPresentationTimingInfoEXT, output: ?*PastPresentationTimingPropertiesEXT) callconv(.c) Result {
+    lock();
+    defer mutex.unlock();
+    const query = info orelse return .error_initialization_failed;
+    const properties = output orelse return .error_initialization_failed;
+    const swapchain = validSwapchainLocked(query.swapchain) orelse return .error_initialization_failed;
+    const d = device orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or swapchain.owner != d or query.s_type != 1_000_208_005 or query.p_next != null or query.flags != 0 or properties.s_type != 1_000_208_006 or properties.p_next != null) return .error_initialization_failed;
+    properties.timing_properties_counter = 1;
+    properties.time_domains_counter = 1;
+    properties.presentation_timing_count = 0;
+    properties.presentation_timings = null;
+    return .success;
+}
+
 fn deviceWaitIdle(device: ?Device) callconv(.c) Result {
     const d = device orelse return .error_initialization_failed;
     lock();
@@ -3593,6 +3697,8 @@ fn instanceLookup(n: []const u8) Fn {
 fn deviceLookup(n: []const u8) Fn {
     const map = .{ .{ "vkGetDeviceProcAddr", getDeviceProcAddr }, .{ "vkDestroyDevice", destroyDevice }, .{ "vkGetDeviceQueue", getDeviceQueue }, .{ "vkAllocateMemory", allocateMemory }, .{ "vkFreeMemory", freeMemory }, .{ "vkMapMemory", mapMemory }, .{ "vkUnmapMemory", unmapMemory }, .{ "vkCreateBuffer", createBuffer }, .{ "vkDestroyBuffer", destroyBuffer }, .{ "vkGetBufferMemoryRequirements", getBufferMemoryRequirements }, .{ "vkBindBufferMemory", bindBufferMemory }, .{ "vkCreateImage", createImage }, .{ "vkDestroyImage", destroyImage }, .{ "vkGetImageMemoryRequirements", getImageMemoryRequirements }, .{ "vkBindImageMemory", bindImageMemory }, .{ "vkGetImageSubresourceLayout", getImageSubresourceLayout }, .{ "vkCreateFence", createFence }, .{ "vkDestroyFence", destroyFence }, .{ "vkGetFenceStatus", getFenceStatus }, .{ "vkResetFences", resetFences }, .{ "vkWaitForFences", waitForFences }, .{ "vkCreateCommandPool", createCommandPool }, .{ "vkDestroyCommandPool", destroyCommandPool }, .{ "vkAllocateCommandBuffers", allocateCommandBuffers }, .{ "vkFreeCommandBuffers", freeCommandBuffers }, .{ "vkBeginCommandBuffer", beginCommandBuffer }, .{ "vkEndCommandBuffer", endCommandBuffer }, .{ "vkResetCommandBuffer", resetCommandBuffer }, .{ "vkCmdFillBuffer", cmdFillBuffer }, .{ "vkCmdCopyBuffer", cmdCopyBuffer }, .{ "vkCmdClearColorImage", cmdClearColorImage }, .{ "vkCmdCopyBufferToImage", cmdCopyBufferToImage }, .{ "vkCmdCopyImageToBuffer", cmdCopyImageToBuffer }, .{ "vkCmdCopyImage", cmdCopyImage }, .{ "vkCmdPipelineBarrier", cmdPipelineBarrier }, .{ "vkQueueSubmit", queueSubmit }, .{ "vkQueueWaitIdle", queueWaitIdle }, .{ "vkDeviceWaitIdle", deviceWaitIdle } };
     inline for (map) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
+    const timing = .{ .{ "vkSetSwapchainPresentTimingQueueSizeEXT", setSwapchainPresentTimingQueueSize }, .{ "vkGetSwapchainTimingPropertiesEXT", getSwapchainTimingProperties }, .{ "vkGetSwapchainTimeDomainPropertiesEXT", getSwapchainTimeDomainProperties }, .{ "vkGetPastPresentationTimingEXT", getPastPresentationTiming } };
+    inline for (timing) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
     const presentation = .{ .{ "vkCreateSemaphore", createSemaphore }, .{ "vkDestroySemaphore", destroySemaphore }, .{ "vkCreateImageView", createImageView }, .{ "vkDestroyImageView", destroyImageView }, .{ "vkCreateSampler", createOpaque }, .{ "vkDestroySampler", destroyOpaque }, .{ "vkCreateDescriptorSetLayout", createDescriptorSetLayout }, .{ "vkDestroyDescriptorSetLayout", destroyDescriptorSetLayout }, .{ "vkCreateDescriptorPool", createOpaque }, .{ "vkDestroyDescriptorPool", destroyOpaque }, .{ "vkCreateShaderModule", createShaderModule }, .{ "vkDestroyShaderModule", destroyShaderModule }, .{ "vkCreatePipelineCache", createOpaque }, .{ "vkDestroyPipelineCache", destroyOpaque }, .{ "vkCreatePipelineLayout", createPipelineLayout }, .{ "vkDestroyPipelineLayout", destroyPipelineLayout }, .{ "vkCreateRenderPass", createRenderPass }, .{ "vkDestroyRenderPass", destroyRenderPass }, .{ "vkCreateFramebuffer", createFramebuffer }, .{ "vkDestroyFramebuffer", destroyFramebuffer }, .{ "vkCreateGraphicsPipelines", createGraphicsPipelines }, .{ "vkDestroyPipeline", destroyPipeline }, .{ "vkAllocateDescriptorSets", allocateDescriptorSets }, .{ "vkUpdateDescriptorSets", updateDescriptorSets }, .{ "vkCmdBeginRenderPass", cmdBeginRenderPass }, .{ "vkCmdBindPipeline", cmdBindPipeline }, .{ "vkCmdBindDescriptorSets", cmdBindDescriptorSets }, .{ "vkCmdSetViewport", cmdSetViewport }, .{ "vkCmdSetScissor", cmdSetScissor }, .{ "vkCmdDraw", cmdDraw }, .{ "vkCmdEndRenderPass", cmdEndRenderPass }, .{ "vkCreateSwapchainKHR", createSwapchain }, .{ "vkDestroySwapchainKHR", destroySwapchain }, .{ "vkGetSwapchainImagesKHR", getSwapchainImages }, .{ "vkAcquireNextImageKHR", acquireNextImage }, .{ "vkQueuePresentKHR", queuePresent } };
     inline for (presentation) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
     return null;
@@ -5004,14 +5110,16 @@ test "all physical queries cover success boundaries and invalid handles" {
     try std.testing.expectEqual(@as(u32, 0), sparse_count);
     var extension_count: u32 = 9;
     try std.testing.expectEqual(Result.success, enumerateDeviceExtensions(p, null, &extension_count, null));
-    try std.testing.expectEqual(@as(u32, 1), extension_count);
-    var device_extensions: [1]ExtensionProperties = undefined;
+    try std.testing.expectEqual(@as(u32, 2), extension_count);
+    var device_extensions: [2]ExtensionProperties = undefined;
     extension_count = 0;
     try std.testing.expectEqual(Result.incomplete, enumerateDeviceExtensions(p, null, &extension_count, &device_extensions));
-    extension_count = 1;
+    extension_count = 2;
     try std.testing.expectEqual(Result.success, enumerateDeviceExtensions(p, null, &extension_count, &device_extensions));
     try std.testing.expectEqualStrings("VK_KHR_swapchain", std.mem.sliceTo(&device_extensions[0].name, 0));
     try std.testing.expectEqual(@as(u32, 70), device_extensions[0].spec_version);
+    try std.testing.expectEqualStrings("VK_EXT_present_timing", std.mem.sliceTo(&device_extensions[1].name, 0));
+    try std.testing.expectEqual(@as(u32, 3), device_extensions[1].spec_version);
     try std.testing.expectEqual(Result.error_extension_not_present, enumerateDeviceExtensions(p, "layer", &extension_count, null));
     try std.testing.expectEqual(Result.error_initialization_failed, enumerateDeviceExtensions(p, null, null, null));
     try std.testing.expect(vk_icdGetInstanceProcAddr(instance, "notAnEntryPoint") == null);
