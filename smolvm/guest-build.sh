@@ -5,11 +5,17 @@ src=/mnt/zpu-source
 work=/var/tmp/zpu-build
 prefix=/opt/zpu
 
-test -r "$src/build.zig"
+for program in zig vulkaninfo vkcube tar; do
+    command -v "$program" >/dev/null || { echo "required guest tool not found: $program" >&2; exit 2; }
+done
+for header in /usr/include/vulkan/vulkan.h /usr/include/vulkan/vulkan_xcb.h /usr/include/xcb/xcb.h; do
+    test -r "$header" || { echo "required guest development header not found: $header (install vulkan-headers and libxcb)" >&2; exit 2; }
+done
 test "$(zig version)" = 0.16.0 || {
     echo 'guest Zig must be exactly 0.16.0; install the pinned compiler before build' >&2
     exit 2
 }
+test -r "$src/build.zig" || { echo "guest source was not staged at $src" >&2; exit 2; }
 rm -rf "$work"
 mkdir -p "$work" "$prefix"
 cp -a "$src/." "$work/"

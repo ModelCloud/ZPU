@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if (($# == 1)) && [[ $1 == --version ]]; then
+    echo 'smolvm 1.6.9'
+    exit 0
+fi
+exec "$(dirname "$0")/smolvm" "$@"

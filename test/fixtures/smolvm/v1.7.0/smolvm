@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail() { printf 'strict SmolVM v1.7.0 fixture: %s\n' "$*" >&2; exit 64; }
+take_value() { (($# >= 2)) || fail "$1 requires a value"; }
+
+if (($# == 1)) && [[ $1 == --version ]]; then
+    echo 'smolvm 1.7.0'
+    exit 0
+fi
+(($# >= 2)) && [[ $1 == machine ]] || fail 'expected machine subcommand'
+subcommand=$2
+shift 2
+
+case $subcommand in
+    create)
+        if (($# == 1)) && [[ $1 == --help ]]; then
+            printf '%s\n' 'Usage: smolvm machine create [OPTIONS] [-- <COMMAND>...]' \
+                '      --mount-socket <HOST_PATH:GUEST_PATH>' '      --smolfile <PATH>'
+            exit 0
+        fi
+        name= smolfile= image= cpus= mem= socket= net=0
+        while (($#)); do
+            case $1 in
+                --name) take_value "$@"; name=$2; shift 2 ;;
+                --smolfile) take_value "$@"; smolfile=$2; shift 2 ;;
+                --image) take_value "$@"; image=$2; shift 2 ;;
+                --cpus) take_value "$@"; cpus=$2; shift 2 ;;
+                --mem) take_value "$@"; mem=$2; shift 2 ;;
+                --mount-socket) take_value "$@"; socket=$2; shift 2 ;;
+                --net) net=1; shift ;;
+                --|--volume|-v|--stream) fail "forbidden create token: $1" ;;
+                *) fail "unknown machine create flag/token: $1" ;;
+            esac
+        done
+        [[ -n $name && -n $smolfile && -n $image && -n $cpus && -n $mem && -n $socket && $net == 1 ]] || fail 'create omitted a required audited option'
+        [[ $socket == /tmp/.X11-unix/X0:/tmp/.X11-unix/X0 ]] || fail 'unexpected mount-socket mapping'
+        ;;
+    start)
+        (($# == 2)) && [[ $1 == --name && -n $2 ]] || fail 'expected: machine start --name NAME'
+        ;;
+    exec)
+        (($# >= 4)) && [[ $1 == --name && -n $2 && $3 == -- ]] || fail 'expected: machine exec --name NAME -- COMMAND...'
+        shift 3
+        (($#)) || fail 'exec command is empty'
+        ;;
+    cp)
+        if (($# == 1)) && [[ $1 == --help ]]; then
+            echo 'Usage: smolvm machine cp <SRC> <DST>'
+            exit 0
+        fi
+        (($# == 2)) || fail 'expected: machine cp SRC DST'
+        [[ $1 != -* && $2 != -* ]] || fail 'cp paths may not be flags'
+        ;;
+    *) fail "unsupported machine subcommand: $subcommand" ;;
+esac

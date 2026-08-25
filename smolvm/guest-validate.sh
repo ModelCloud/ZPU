@@ -3,7 +3,6 @@ set -eu
 
 prefix=/opt/zpu
 manifest=$prefix/share/vulkan/icd.d/zpu_icd.x86_64.json
-expected='ZPU Experimental CPU'
 
 test -r "$manifest"
 test -r "$prefix/lib/libvulkan_zpu.so"
@@ -27,12 +26,7 @@ env -i \
     XAUTHORITY=/run/zpu-xauth/Xauthority \
     VK_DRIVER_FILES="$manifest" \
     vulkaninfo --summary > /tmp/zpu-vulkaninfo.txt
-grep -F "$expected" /tmp/zpu-vulkaninfo.txt
-test "$(grep -cE 'deviceName[[:space:]]*=' /tmp/zpu-vulkaninfo.txt)" -eq 1
-if grep -Eqi 'venus|virtio|virgl|angle|llvmpipe|lavapipe|swiftshader|opengl|egl|glx' /tmp/zpu-vulkaninfo.txt; then
-    echo 'non-ZPU or translated graphics implementation entered the validation process' >&2
-    exit 2
-fi
+"$(dirname "$0")/validate-vulkaninfo.sh" /tmp/zpu-vulkaninfo.txt
 
 env -i \
     HOME="${HOME:-/root}" \

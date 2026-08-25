@@ -1,0 +1,4 @@
+GPU0:
+    deviceName = ZPU Experimental CPU
+GPU1:
+    deviceName = ZPU Experimental CPU

@@ -10,14 +10,42 @@ does not build, install, discover, load, or execute ZPU.
 
 The supported host is Omarchy on x86-64 Linux with KVM, its normal Hyprland
 session, Xwayland enabled, `DISPLAY=:0`, an Xauthority cookie, and
-`smol-machines/smolvm` 1.6.6 or newer. SmolVM runs as the invoking host user;
+`smol-machines/smolvm` 1.7.0 or newer. Version 1.7.0 is the pinned capability
+floor because its published CLI provides `--mount-socket
+HOST_PATH:GUEST_PATH`, `--smolfile`, and `machine cp`. SmolVM runs as the
+invoking host user;
 KVM, the host kernel, libkrun/libkrunfw, SmolVM, Xwayland, Hyprland, and the X11
-socket relay are in the trusted computing base. The guest receives read-only
-access to this repository and the one-cookie Xauthority directory, plus the
-single X11 socket. The current SmolVM CLI records networking at machine creation, so this machine
-continues to have outbound networking after bootstrap; stop it when validation
-is complete. It receives no host `/dev/dri`, Vulkan files, libraries, loader variables,
-credentials, home directory, Wayland socket, or broad runtime directory.
+socket relay are in the trusted computing base. The guest receives a copied
+tracked-source archive, a copied short-lived Xauthority entry, and the single
+X11 socket. It receives no host-directory mount, host `/dev/dri`, Vulkan files,
+libraries, loader variables, home directory, Wayland socket, or broad runtime
+directory.
+
+**Outbound networking remains enabled for the machine lifetime.** SmolVM 1.7.0
+persists the create-time `--net` setting and does not expose a documented
+in-place disable flag used by this workflow. A compromised guest can therefore
+make outbound connections, scan services reachable through SmolVM networking,
+and exfiltrate guest data or the X11 credential described below. Stop or delete
+the machine after validation; use host firewall/account isolation if the guest
+is not trusted.
+
+The launcher copies the current MIT-MAGIC-COOKIE-1 entry into a private
+bootstrap authority database, then uses it to ask the X SECURITY extension for
+a separate **untrusted**, 300-second cookie. It reconstructs the guest authority
+file from that generated entry and never mounts the host authority file. An
+untrusted X client can create and draw its own windows, which is enough
+for ZPU's XCB WSI, while the X server restricts access to resources belonging to
+trusted clients. Cookie expiry and X SECURITY support remain part of the host X
+server's enforcement, so a disposable nested X server is still the strongest
+choice for hostile code.
+
+If Xwayland cannot generate an untrusted cookie, launch fails closed. Setting
+`ZPU_SMOLVM_ALLOW_TRUSTED_X11=1` explicitly enables a fallback cookie with
+**full X11 client authority** for that display. A malicious guest with that
+credential may inspect other X11 windows, capture X11-visible content or input,
+synthesize input, manipulate windows, and act as the host user toward other X11
+clients. This fallback is a powerful host credential; use it only with a fully
+trusted guest or a disposable nested X server.
 
 `--gpu` is intentionally forbidden: SmolVM documents that option as
 virtio-gpu/Venus. ZPU is a CPU ICD, so there is no ZPU DRM/KMS device and no
@@ -27,8 +55,8 @@ only the remote display server.
 
 The host launcher rejects `VK_DRIVER_FILES`, legacy `VK_ICD_FILENAMES`,
 `VK_ADD_DRIVER_FILES`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, and `ZPU_REFRESH_HZ` in
-its own environment. The read-only guest source mount is an export of tracked
-`HEAD`, not the live checkout, and cannot contain host `zig-out`. In the guest,
+its own environment. The guest source archive is an export of tracked `HEAD`,
+not the live checkout, and cannot contain host `zig-out`. In the guest,
 `guest-validate.sh` starts each probe with `env -i` and sets
 `VK_DRIVER_FILES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json` for that
 process only. It does not change `/etc`, `/usr/share/vulkan`, the Omarchy login
@@ -54,13 +82,17 @@ smolvm --version
 tools/smolvm-zpu.sh preflight
 ```
 
-The default OCI userspace is `archlinux:base-devel`, matching Omarchy's Arch
-base. For an organization-maintained Omarchy-derived OCI root filesystem, set
-`ZPU_SMOLVM_IMAGE` to its immutable digest. Do not run Omarchy's interactive
+The default OCI userspace tag is `archlinux:base-devel`, matching Omarchy's Arch
+base, but it is mutable and therefore non-deterministic. For reproducibility,
+set `ZPU_SMOLVM_IMAGE` to an immutable `name@sha256:...` digest (preferably an
+organization-maintained Omarchy-derived OCI root filesystem). Record that
+digest with test evidence. Do not run Omarchy's interactive
 bare-metal installer in this ephemeral OCI workload: it assumes systemd boot,
 real seat/input devices, and ownership of the desktop. The checked-in
-`smolvm/Smolfile` records the resource and no-GPU policy; the launcher supplies
-the dynamic absolute mounts that a portable Smolfile cannot.
+`smolvm/Smolfile` is actually passed to `machine create --smolfile`; it records
+the default image, resources, network, and no-GPU policy. Explicit CLI values
+override its image/resource fields, and the X11 socket is supplied separately
+because its host path is session-specific.
 
 ## Exact lifecycle
 
@@ -77,10 +109,12 @@ tools/smolvm-zpu.sh stage
 tools/smolvm-zpu.sh launch
 ```
 
-Commit the intended source first: `create` refuses a dirty index or worktree and
-exports tracked `HEAD` without ignored build output. `build` copies that
-read-only source mount to guest-private storage and invokes
-Zig there. `package` creates `/var/lib/zpu-native-icd.tar.gz` inside the guest;
+Commit the intended source first: `build` refuses a dirty index or worktree,
+exports tracked `HEAD` to a source-only tar archive, rejects binary/build
+entries, copies the archive with `smolvm machine cp`, and extracts it into
+guest-private storage. There is no host-directory volume mount. Zig then runs
+only in the guest. `package` creates `/var/lib/zpu-native-icd.tar.gz` inside the
+guest;
 `stage` installs that guest archive to `/opt/zpu`. Neither artifact is copied to
 the host. `launch` first checks `vulkaninfo --summary` names exactly `ZPU
 Experimental CPU`, opens a two-second 2D clear/present window whose pixel is
@@ -101,13 +135,15 @@ Preflight is fail-closed and reports the first remediation:
 
 - Linux x86-64, because the checked-in ICD manifest is x86-64;
 - `/dev/kvm` readable and writable by the invoking user;
-- SmolVM 1.6.6 or newer available as `smolvm`;
+- SmolVM 1.7.0 or newer available as `smolvm`, with help output proving
+  `--mount-socket HOST_PATH:GUEST_PATH`, `--smolfile`, and `machine cp`;
 - Omarchy's Xwayland socket at `/tmp/.X11-unix/X0`, `DISPLAY=:0`, and a usable
   Xauthority cookie;
 - no host graphics-loader injection variables, and no host build output in the
   immutable source export;
 - guest Arch package network access during bootstrap;
-- guest Zig exactly 0.16.0, Vulkan loader/tools, and `libxcb` packages (if the
+- guest Zig exactly 0.16.0, `vulkan-headers`, Vulkan loader/tools, and `libxcb`
+  packages, with readable Vulkan and XCB development headers (if the
   rolling Arch `zig` package has moved, install upstream's 0.16.0 archive in
   the guest and place it first on `PATH` before `build`);
 - guest-installed ZPU manifest/library and exact device-name discovery;
