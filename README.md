@@ -13,6 +13,10 @@ and the small arithmetic/composite operation list documented in
 control flow, calls, derivatives, discard, atomics, barriers, push constants,
 storage writes, dynamic indexing, undefined/non-finite values, and all later
 SPIR-V versions are rejected rather than interpreted.
+In particular, every profile-v1 access-chain index must be a scalar `u32`
+ordinary or specialized constant after specialization. A runtime scalar `u32`
+index is dynamic indexing and is rejected by both the frontend and canonical
+IR executor setup.
 
 Pipeline creation treats that rejection as pipeline failure and publishes no
 pipeline or cache result. The only exception is an exact `cpu_cube_v1`
