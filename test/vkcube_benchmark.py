@@ -40,6 +40,7 @@ def main() -> int:
     environment = os.environ.copy()
     environment["VK_DRIVER_FILES"] = str(manifest)
     environment["ZPU_FRAME_METRICS"] = "1"
+    environment["ZPU_REFRESH_HZ"] = str(TARGET_FPS)
     result = subprocess.run(command, env=environment, text=True, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, timeout=190)
     if result.returncode != 0:

@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const ns_per_second: u64 = 1_000_000_000;
 pub const default_hz: u64 = 120;
+pub const max_hz: u64 = 1000;
 
 /// Phase-locked rational refresh clock. Late callers skip elapsed clock slots,
 /// never FIFO work, preventing catch-up bursts without rounded-period drift.
@@ -19,6 +20,17 @@ pub const Rate = struct {
         return .{ .numerator = default_hz, .denominator = 1 };
     }
 };
+
+pub fn parseRefreshRate(value: []const u8) ?Rate {
+    const hz = std.fmt.parseInt(u64, value, 10) catch return null;
+    if (hz == 0 or hz > max_hz) return null;
+    return Rate.init(hz, 1);
+}
+
+pub fn configuredRate() Rate {
+    const value = std.c.getenv("ZPU_REFRESH_HZ") orelse return Rate.hz120();
+    return parseRefreshRate(std.mem.span(value)) orelse Rate.hz120();
+}
 
 pub const Clock = struct {
     epoch_ns: u64,
@@ -108,4 +120,11 @@ test "swapchain clocks have independent phases and rates" {
     const b = Clock.init(1_000, Rate.init(240, 1).?);
     try std.testing.expectEqual(@as(u64, 8_333_433), a.deadline());
     try std.testing.expectEqual(@as(u64, 4_167_666), b.deadline());
+}
+
+test "refresh rate configuration validates display-like whole hertz" {
+    try std.testing.expectEqual(Rate{ .numerator = 240, .denominator = 1 }, parseRefreshRate("240").?);
+    try std.testing.expect(parseRefreshRate("0") == null);
+    try std.testing.expect(parseRefreshRate("1001") == null);
+    try std.testing.expect(parseRefreshRate("59.94") == null);
 }

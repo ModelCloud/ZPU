@@ -31,7 +31,7 @@ fn run() void {
 
         const before = frame_pacing.monotonicNs();
         work.transport.last.queue_wait_ns = before - work.enqueued_ns;
-        if (work.cadence.* == null) work.cadence.* = frame_pacing.Clock.init120(before);
+        if (work.cadence.* == null) work.cadence.* = frame_pacing.Clock.init(before, frame_pacing.configuredRate());
         const deadline = work.cadence.*.?.deadline();
         if (!xcb_present.upload(work.transport, work.pixels)) {
             work.release(work.context, work.image_index);

@@ -3447,7 +3447,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
             releasePresented(swapchain, index);
         } else if (synchronousOneCore()) {
             const before = frame_pacing.monotonicNs();
-            if (swapchain.cadence == null) swapchain.cadence = frame_pacing.Clock.init120(before);
+            if (swapchain.cadence == null) swapchain.cadence = frame_pacing.Clock.init(before, frame_pacing.configuredRate());
             const deadline = swapchain.cadence.?.deadline();
             if (!xcb_present.upload(&swapchain.transport, imageBytes(@ptrFromInt(swapchain.images[index])))) {
                 releasePresented(swapchain, index);

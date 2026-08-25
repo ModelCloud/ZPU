@@ -172,3 +172,5 @@ CI runs these commands on Linux. Generated PPM files and Zig build outputs are i
 frames, then times 1,000 consecutive presented frames. It fails unless p99 frame
 time is at most 4,166,666 ns, equivalent to a 240 FPS 1% low. The measurement
 includes command submission, ZPU's CPU cube rasterizer, and XCB image upload.
+Presentation pacing defaults to 120 Hz and follows the validated
+`ZPU_REFRESH_HZ=1..1000` setting; this target explicitly selects 240 Hz.
