@@ -178,6 +178,7 @@ tools/limited-cpus.sh zig build target-4k-30 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build target-4k-60 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build target-4k-120 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build target-4k-240 -Doptimize=ReleaseFast
+tools/limited-cpus.sh zig build target-8k-60 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build demo
 tools/limited-cpus.sh zig build -Doptimize=ReleaseFast
 ```
@@ -198,19 +199,32 @@ process-local `ZPU_REFRESH_HZ` cadence.
 `target-4k-30`, `target-4k-60`, `target-4k-120`, and `target-4k-240` apply the same individual-frame ultra-low
 1% timing gate to real 3840x2160 `vkcube`: after 120 warmup frames, p99 across
 1,000 frames must not exceed 33,333,333 ns, 16,666,666 ns, 8,333,333 ns, and
-4,166,666 ns respectively. The strict floors use explicit 31 Hz, 63 Hz, 126 Hz,
-and 252 Hz pacing
-guard bands so ordinary wake jitter cannot turn an exact nominal cadence into
-a dishonest sub-target 1% low.
+4,166,666 ns respectively. The strict floors use explicit 31 Hz, 63 Hz, 122 Hz,
+and 255 Hz pacing guard bands so ordinary wake jitter cannot turn an exact
+nominal cadence into a dishonest sub-target 1% low.
+`target-8k-60` extends the same real-present p99 gate to 7680x4320: 1,000
+post-warmup frames must remain at or below 16,666,666 ns with the standard
+63 Hz pacing guard. ZPU advertises and enforces an 8192x8192 maximum 2D image,
+framebuffer, viewport, and XCB surface extent to support this workload.
 With the canonical eight-core gate, the harness dedicates one inherited CPU to
-Xvfb and confines vkcube plus ZPU to the other seven; neither process can escape
-the caller's original affinity budget.
+Xvfb and confines the client process to the other seven; ZPU itself selects at
+most two of those CPUs and never escapes the caller's original affinity budget.
+The vkcube-specific rasterizer uses 32x32 tiles at 4K and 8K to reduce
+classification overhead without removing per-pixel coverage or depth tests.
+It conservatively records every tile touched by transformed, non-culled
+triangles and clears only those dirty tiles before the next draw, preserving
+unchanged background tiles without weakening color or depth correctness. The
+4K and 8K paths add one swapchain image, within the advertised four-image
+limit, to absorb rare producer stalls without expanding the CPU set.
 
-ZPU ranks CPUs within the process's inherited affinity mask once, pins its
-persistent render and presentation workers to CPUs on one NUMA node, and keeps
-those assignments for the process lifetime. Large color, depth, and XCB SHM
-caches are bound before first touch to that node and receive transparent
-huge-page advice; ZPU never expands the CPU mask supplied by the caller.
+ZPU ranks CPUs within the process's inherited affinity mask once and keeps all
+assignments on one NUMA node for the process lifetime. Every 2D path executes
+only on the pinned render CPU. A complex 3D pipeline may use one additional
+pinned raster CPU; presentation may migrate only between those same two
+cache-local CPUs, and ZPU never schedules work on a third CPU. Large color,
+depth, and XCB SHM caches are bound before first touch to the selected node and
+receive transparent huge-page advice; ZPU never expands the CPU mask supplied
+by the caller.
 
 `VK_GOOGLE_display_timing` is deliberately unsupported with no compatibility
 alias. Requests for that extension, its device procedures, or
