@@ -71,6 +71,16 @@ To run four independent experiment or optimization commands at once, `tools/cpu-
 
 The build installs `zig-out/lib/libvulkan_zpu.so` and `zig-out/share/vulkan/icd.d/zpu_icd.x86_64.json`. The manifest's relative path resolves back to that installed library. XCB presentation links the shared object to libc, libm, the ELF interpreter, and libxcb. The loader-independent smoke test uses `dlopen` to resolve the three private loader entry points, negotiate interface version 7, create an instance, and enumerate the CPU device.
 
+For the hardware-isolated Omarchy workflow, [the SmolVM guest guide](docs/smolvm-omarchy.md)
+builds and stages ZPU wholly inside a real `smol-machines/smolvm` guest, rejects
+host ICD injection, and displays the guest's native XCB Vulkan validation window
+through the host Xwayland socket without enabling SmolVM's Venus GPU path.
+The real graphical proof used a nested Xephyr display through headless
+Weston/Xwayland. No real Omarchy image or Hyprland session was available for
+that run, so native Omarchy/Hyprland confirmation remains an explicit gate.
+The `smolvm-dry-run` build gate uses a transcribed CLI fixture, private test
+socket, and `env -i`; it requires neither real SmolVM nor a live display.
+
 To ask a system Vulkan loader to discover only ZPU:
 
 ```sh
@@ -188,9 +198,14 @@ tools/limited-cpus.sh zig build target-4k-240 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build target-8k-60 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build demo
 tools/limited-cpus.sh zig build -Doptimize=ReleaseFast
+tools/limited-cpus.sh zig build smolvm-guest-test
+tools/limited-cpus.sh zig build smolvm-dry-run
 ```
 
-CI runs these commands on Linux. Generated PPM files and Zig build outputs are ignored.
+These are the repository's Linux gates; the CI configuration is the exact
+authoritative list run by CI. The SmolVM isolation fixture and dry-run commands
+above are local review gates and are not currently CI jobs. Generated PPM files
+and Zig build outputs are ignored.
 
 `target-800x600` runs the real `vkcube` XCB path at 800x600, discards 120 warmup
 frames, then times 1,000 consecutive presented frames. It fails unless p99 frame

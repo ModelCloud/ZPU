@@ -3,3 +3,5 @@ zig-out/
 scratch_tmp/
 __pycache__/
 *.ppm
+*.smolmachine
+smolvm-stage/

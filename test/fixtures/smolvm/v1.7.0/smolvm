@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail() { printf 'strict SmolVM v1.7.0 fixture: %s\n' "$*" >&2; exit 64; }
+take_value() { (($# >= 2)) || fail "$1 requires a value"; }
+[[ -z ${SMOLVM_FIXTURE_LOG:-} ]] || printf '%q ' "$@" >> "$SMOLVM_FIXTURE_LOG"
+[[ -z ${SMOLVM_FIXTURE_LOG:-} ]] || printf '\n' >> "$SMOLVM_FIXTURE_LOG"
+
+if (($# == 1)) && [[ $1 == --version ]]; then
+    echo 'smolvm 1.7.0'
+    exit 0
+fi
+(($# >= 2)) && [[ $1 == machine ]] || fail 'expected machine subcommand'
+subcommand=$2
+shift 2
+if [[ ${SMOLVM_FIXTURE_FAIL_HELP:-} == "$subcommand" && $# == 1 && $1 == --help ]]; then
+    fail "injected $subcommand help failure"
+fi
+
+case $subcommand in
+    create)
+        if (($# == 1)) && [[ $1 == --help ]]; then
+            printf '%s\n' 'Usage: smolvm machine create [OPTIONS] [-- <COMMAND>...]'
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == mount-socket ]] || printf '%s\n' '      --mount-socket <HOST_PATH:GUEST_PATH>'
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == smolfile ]] || printf '%s\n' '      --smolfile <PATH>'
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == create-name ]] || printf '%s\n' '      --name <NAME>'
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == image ]] || printf '%s\n' '      --image <IMAGE>'
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == net ]] || printf '%s\n' '      --net'
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == cpus ]] || printf '%s\n' '      --cpus <CPUS>'
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == mem ]] || printf '%s\n' '      --mem <MEM>'
+            exit 0
+        fi
+        name= smolfile= image= cpus= mem= socket= net=0
+        while (($#)); do
+            case $1 in
+                --name) take_value "$@"; name=$2; shift 2 ;;
+                --smolfile) take_value "$@"; smolfile=$2; shift 2 ;;
+                --image) take_value "$@"; image=$2; shift 2 ;;
+                --cpus) take_value "$@"; cpus=$2; shift 2 ;;
+                --mem) take_value "$@"; mem=$2; shift 2 ;;
+                --mount-socket) take_value "$@"; socket=$2; shift 2 ;;
+                --net) net=1; shift ;;
+                --|--volume|-v|--stream) fail "forbidden create token: $1" ;;
+                *) fail "unknown machine create flag/token: $1" ;;
+            esac
+        done
+        [[ -n $name && -n $smolfile && -n $image && -n $cpus && -n $mem && -n $socket && $net == 0 ]] || fail 'create omitted a required audited option or enabled networking'
+        expected_socket=${ZPU_SMOLVM_TEST_SOCKET_ROOT:-/tmp/.X11-unix}/X0:/tmp/.X11-unix/X0
+        [[ $socket == "$expected_socket" ]] || fail 'unexpected mount-socket mapping'
+        ;;
+    start)
+        if (($# == 1)) && [[ $1 == --help ]]; then
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == start-name ]] || echo 'Usage: smolvm machine start [OPTIONS] --name <NAME>'
+            exit 0
+        fi
+        (($# == 2)) && [[ $1 == --name && -n $2 ]] || fail 'expected: machine start --name NAME'
+        ;;
+    stop)
+        if (($# == 1)) && [[ $1 == --help ]]; then
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == stop-name ]] && { echo 'Usage: smolvm machine stop [OPTIONS]'; exit 0; }
+            echo 'Usage: smolvm machine stop [OPTIONS] --name <NAME>'
+            exit 0
+        fi
+        (($# == 2)) && [[ $1 == --name && -n $2 ]] || fail 'expected: machine stop --name NAME'
+        if [[ -n ${SMOLVM_FIXTURE_CLEANUP_READY:-} && -n ${SMOLVM_FIXTURE_PACMAN_READY:-} && -e $SMOLVM_FIXTURE_PACMAN_READY ]]; then
+            : > "$SMOLVM_FIXTURE_CLEANUP_READY"
+        fi
+        if [[ -n ${SMOLVM_FIXTURE_FAIL_STOP_ONCE_FILE:-} && ! -e $SMOLVM_FIXTURE_FAIL_STOP_ONCE_FILE ]]; then
+            : > "$SMOLVM_FIXTURE_FAIL_STOP_ONCE_FILE"
+            fail 'injected idempotent stop failure'
+        fi
+        [[ ${SMOLVM_FIXTURE_FAIL_STOP:-0} != 1 ]] || fail 'injected stop failure'
+        ;;
+    update)
+        if (($# == 1)) && [[ $1 == --help ]]; then
+            printf '%s\n' 'Usage: smolvm machine update [OPTIONS]'
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == update-name ]] || printf '%s\n' '      --name <NAME>'
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == update-no-net ]] || printf '%s\n' '      --no-net'
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == update-net ]] || printf '%s\n' '      --net'
+            exit 0
+        fi
+        (($# == 3)) && [[ $1 == --name && -n $2 && ( $3 == --net || $3 == --no-net ) ]] || fail 'expected: machine update --name NAME --net|--no-net'
+        ;;
+    exec)
+        if (($# == 1)) && [[ $1 == --help ]]; then
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == exec-name ]] || echo 'Usage: smolvm machine exec [OPTIONS] --name <NAME> -- <COMMAND>...'
+            exit 0
+        fi
+        if [[ " $* " == *' pacman -Syu '* ]]; then
+            [[ -z ${SMOLVM_FIXTURE_PACMAN_READY:-} ]] || : > "$SMOLVM_FIXTURE_PACMAN_READY"
+            [[ -z ${SMOLVM_FIXTURE_PACMAN_SLEEP:-} ]] || sleep "$SMOLVM_FIXTURE_PACMAN_SLEEP"
+            [[ ${SMOLVM_FIXTURE_FAIL_PACMAN:-0} != 1 ]] || fail 'injected pacman failure'
+        fi
+        (($# >= 4)) && [[ $1 == --name && -n $2 && $3 == -- ]] || fail 'expected: machine exec --name NAME -- COMMAND...'
+        shift 3
+        (($#)) || fail 'exec command is empty'
+        ;;
+    cp)
+        if (($# == 1)) && [[ $1 == --help ]]; then
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == cp ]] && { echo 'Usage: smolvm machine cp'; exit 0; }
+            echo 'Usage: smolvm machine cp <SRC> <DST>'
+            exit 0
+        fi
+        (($# == 2)) || fail 'expected: machine cp SRC DST'
+        [[ $1 != -* && $2 != -* ]] || fail 'cp paths may not be flags'
+        if [[ -n ${SMOLVM_FIXTURE_CAPTURE_AUTH_DIR:-} ]]; then
+            case $2 in
+                *:/run/zpu-xauth/Xauthority) /bin/cp -- "$1" "$SMOLVM_FIXTURE_CAPTURE_AUTH_DIR/Xauthority" ;;
+                *:/run/zpu-xauth/mode) /bin/cp -- "$1" "$SMOLVM_FIXTURE_CAPTURE_AUTH_DIR/mode" ;;
+            esac
+        fi
+        ;;
+    ls)
+        if (($# == 1)) && [[ $1 == --help ]]; then
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == ls-json ]] || echo 'Usage: smolvm machine ls [OPTIONS] --json'
+            exit 0
+        fi
+        (($# == 1)) && [[ $1 == --json ]] || fail 'expected: machine ls --json'
+        name=${ZPU_SMOLVM_MACHINE:-zpu-omarchy}
+        if [[ ${SMOLVM_FIXTURE_NETWORK:-false} == true ]]; then net=true; else net=false; fi
+        state=${SMOLVM_FIXTURE_STATE:-stopped}
+        case ${SMOLVM_FIXTURE_JSON_MODE:-valid} in
+            valid) printf '[{"name":"%s","network":%s,"state":"%s"}]\n' "$name" "$net" "$state" ;;
+            unrelated) printf '[{"name":"other","network":true,"state":"running"},{"name":"%s","network":%s,"state":"%s"}]\n' "$name" "$net" "$state" ;;
+            zero) printf '[{"name":"other","network":false,"state":"stopped"}]\n' ;;
+            duplicate) printf '[{"name":"%s","network":false,"state":"stopped"},{"name":"%s","network":false,"state":"stopped"}]\n' "$name" "$name" ;;
+            missing-network) printf '[{"name":"%s","state":"%s"}]\n' "$name" "$state" ;;
+            missing-state) printf '[{"name":"%s","network":%s}]\n' "$name" "$net" ;;
+            malformed) printf '{not-json\n' ;;
+            non-dict-row) printf '[1,{"name":"%s","network":false,"state":"stopped"}]\n' "$name" ;;
+            network-string) printf '[{"name":"%s","network":"false","state":"stopped"}]\n' "$name" ;;
+            *) fail 'unknown SMOLVM_FIXTURE_JSON_MODE' ;;
+        esac
+        ;;
+    *) fail "unsupported machine subcommand: $subcommand" ;;
+esac

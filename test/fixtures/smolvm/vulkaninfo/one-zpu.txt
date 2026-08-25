@@ -1,0 +1,7 @@
+Vulkan Instance Version: 1.4.341
+
+Devices:
+========
+GPU0:
+    deviceName        = ZPU Experimental CPU
+    deviceType        = PHYSICAL_DEVICE_TYPE_CPU

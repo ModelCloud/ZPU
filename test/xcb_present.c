@@ -1,10 +1,12 @@
 #include <vulkan/vulkan.h>
 #include <xcb/xcb.h>
 #include <vulkan/vulkan_xcb.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define CHECK_VK(expr) do { VkResult r_ = (expr); if (r_ != VK_SUCCESS) { fprintf(stderr, "%s failed: %d\n", #expr, r_); return 1; } } while (0)
 #define CHECK_TRUE(expr) do { if (!(expr)) { fprintf(stderr, "check failed: %s\n", #expr); return 1; } } while (0)
@@ -155,13 +157,34 @@ int main(void) {
     CHECK_VK(vkQueuePresentKHR(queue, &present));
     CHECK_VK(vkQueueWaitIdle(queue));
 
-    xcb_get_image_cookie_t image_cookie = xcb_get_image(connection, XCB_IMAGE_FORMAT_Z_PIXMAP, window, width / 2, height / 2, 1, 1, UINT32_MAX);
-    xcb_get_image_reply_t *image_reply = xcb_get_image_reply(connection, image_cookie, NULL);
-    CHECK_TRUE(image_reply != NULL && xcb_get_image_data_length(image_reply) >= 4);
-    const uint8_t *pixel = xcb_get_image_data(image_reply);
-    CHECK_TRUE(pixel[0] == 223 && pixel[1] == 127 && pixel[2] == 31);
-    printf("xcb_present_pixel=BGRA(%u,%u,%u,%u)\n", pixel[0], pixel[1], pixel[2], pixel[3]);
-    free(image_reply);
+    const char *untrusted_x11 = getenv("ZPU_UNTRUSTED_X11");
+    if (untrusted_x11 != NULL && strcmp(untrusted_x11, "1") == 0) {
+        /* X SECURITY deliberately forbids GetImage, even on this client's
+         * window. Successful queue presentation is the strongest guest-side
+         * check; trusted deterministic gates retain the exact pixel oracle. */
+        puts("xcb_present_submission_complete=1");
+        puts("xcb_present_expected_pixel=BGRA(223,127,31,255)");
+        puts("xcb_present_readback=not_attempted_untrusted_x11");
+    } else {
+        xcb_get_image_cookie_t image_cookie = xcb_get_image(connection, XCB_IMAGE_FORMAT_Z_PIXMAP, window, width / 2, height / 2, 1, 1, UINT32_MAX);
+        xcb_get_image_reply_t *image_reply = xcb_get_image_reply(connection, image_cookie, NULL);
+        CHECK_TRUE(image_reply != NULL && xcb_get_image_data_length(image_reply) >= 4);
+        const uint8_t *pixel = xcb_get_image_data(image_reply);
+        CHECK_TRUE(pixel[0] == 223 && pixel[1] == 127 && pixel[2] == 31);
+        printf("xcb_present_pixel=BGRA(%u,%u,%u,%u)\n", pixel[0], pixel[1], pixel[2], pixel[3]);
+        free(image_reply);
+    }
+    const char *hold = getenv("ZPU_WINDOW_HOLD_SECONDS");
+    if (hold != NULL) {
+        char *end = NULL;
+        errno = 0;
+        unsigned long seconds = strtoul(hold, &end, 10);
+        if (errno != 0 || end == hold || *end != '\0' || seconds > 10) {
+            fprintf(stderr, "ZPU_WINDOW_HOLD_SECONDS must be an integer from 0 through 10\n");
+            return 2;
+        }
+        sleep((unsigned int)seconds);
+    }
 
     vkDestroySemaphore(device, rendered, NULL);
     vkDestroySemaphore(device, acquired, NULL);

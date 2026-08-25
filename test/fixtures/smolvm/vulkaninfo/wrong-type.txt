@@ -1,0 +1,3 @@
+GPU0:
+    deviceName = ZPU Experimental CPU
+    deviceType = PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU
