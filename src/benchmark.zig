@@ -3,10 +3,11 @@ const builtin = @import("builtin");
 const s = @import("surface.zig");
 const raster = @import("raster/raster.zig");
 const dispatch = @import("simd/dispatch.zig");
+const pipeline = @import("render_pipeline.zig");
 const host_memory = @import("vulkan/host_memory.zig");
 
-pub const schema_version: u32 = 3;
-pub const workload_id = "zpu-2d-host-memory-v3-240x240-seed-151521030";
+pub const schema_version: u32 = 4;
+pub const workload_id = "zpu-2d-kernels-v4-240x240-seed-151521030";
 pub const default_rate_tolerance_fraction = 0.20;
 pub const default_latency_tolerance_fraction = 1.50;
 // Per-run timings are intentionally noisy. Keep a catastrophic-route guard,
@@ -18,10 +19,11 @@ const surface_bytes = width * height * 4;
 const canonical_iteration = 7;
 const transfer_copy_initial_checksum: u64 = 0xd7373ee7d7183725;
 
-pub const Percentiles = struct { p50_ns: u64, p95_ns: u64, p99_ns: u64 };
+pub const Percentiles = struct { p50_ns: u64, p95_ns: u64, p99_ns: u64, max_ns: u64, cv: f64 };
 pub const Metric = struct { name: []const u8, backend: []const u8, iterations: u64, checksum: u64, checksum_hex: []const u8, mpix_s: f64, bytes_s: f64, effective_gib_s: f64, draws_s: f64, fps: f64, frame: Percentiles };
+pub const PipelineMetric = struct { iterations: u64, key_construction_ns: u64, cache_lookup_ns: u64, cache_hits: u64, cache_misses: u64, cache_hit_rate: f64 };
 pub const Fingerprint = struct { arch: []const u8, os: []const u8, cpu_model: []const u8, selected_cpus: []const u8, topology: []const u8, compiler: []const u8, build_mode: []const u8, max_threads: u8, limited_gate: []const u8 = "" };
-pub const Report = struct { schema_version: u32, workload_id: []const u8, fingerprint: Fingerprint, warmup_iterations: u32, sample_count: u32, rate_tolerance_fraction: f64 = default_rate_tolerance_fraction, latency_tolerance_fraction: f64 = default_latency_tolerance_fraction, metrics: []const Metric };
+pub const Report = struct { schema_version: u32, workload_id: []const u8, source_commit: []const u8, utc: []const u8, fingerprint: Fingerprint, warmup_iterations: u32, sample_count: u32, rate_tolerance_fraction: f64 = default_rate_tolerance_fraction, latency_tolerance_fraction: f64 = default_latency_tolerance_fraction, pipeline: PipelineMetric, metrics: []const Metric };
 
 const Op = enum { clear, pixel_write, clipped_rectangle, vulkan_host_memory_fill, vulkan_host_memory_copy, source_over_blend, sprite_draw, frame };
 const raster_ops = [_]Op{ .clear, .pixel_write, .clipped_rectangle, .source_over_blend, .sprite_draw, .frame };
@@ -45,7 +47,52 @@ pub fn summarize(values: []const u64) !Percentiles {
     @memcpy(a[0..values.len], values);
     var b = a;
     var c = a;
-    return .{ .p50_ns = try percentile(a[0..values.len], 50, 100), .p95_ns = try percentile(b[0..values.len], 95, 100), .p99_ns = try percentile(c[0..values.len], 99, 100) };
+    var total: f64 = 0;
+    var maximum: u64 = 0;
+    for (values) |value| {
+        total += @floatFromInt(value);
+        maximum = @max(maximum, value);
+    }
+    const mean = total / @as(f64, @floatFromInt(values.len));
+    var squared: f64 = 0;
+    for (values) |value| {
+        const delta = @as(f64, @floatFromInt(value)) - mean;
+        squared += delta * delta;
+    }
+    return .{ .p50_ns = try percentile(a[0..values.len], 50, 100), .p95_ns = try percentile(b[0..values.len], 95, 100), .p99_ns = try percentile(c[0..values.len], 99, 100), .max_ns = maximum, .cv = @sqrt(squared / @as(f64, @floatFromInt(values.len))) / mean };
+}
+
+pub fn benchmarkPipeline(io: std.Io, smoke: bool) !PipelineMetric {
+    const iterations: u64 = if (smoke) 1_000 else 100_000;
+    var sink: u64 = 0;
+    const key_start = std.Io.Clock.boot.now(io);
+    for (0..iterations) |i| {
+        const operation: pipeline.Operation = switch (i % 3) {
+            0 => .fill,
+            1 => .source_over,
+            else => .sprite,
+        };
+        const format: s.Format = if (i & 1 == 0) .rgba8_unorm else .bgra8_unorm;
+        sink ^= pipeline.Key.init(format, operation, .portable_vector).hash();
+    }
+    const key_elapsed: u64 = @intCast(@max(key_start.untilNow(io, .boot).toNanoseconds(), 1));
+    std.mem.doNotOptimizeAway(sink);
+
+    var cache = pipeline.Cache{};
+    const key = pipeline.Key.init(.rgba8_unorm, .source_over, .portable_vector);
+    _ = try cache.get(key); // one deterministic cold miss outside the timed hits
+    const lookup_start = std.Io.Clock.boot.now(io);
+    for (0..iterations) |_| std.mem.doNotOptimizeAway(try cache.get(key));
+    const lookup_elapsed: u64 = @intCast(@max(lookup_start.untilNow(io, .boot).toNanoseconds(), 1));
+    const accesses = cache.hits + cache.misses;
+    return .{
+        .iterations = iterations,
+        .key_construction_ns = @max(key_elapsed / iterations, 1),
+        .cache_lookup_ns = @max(lookup_elapsed / iterations, 1),
+        .cache_hits = cache.hits,
+        .cache_misses = cache.misses,
+        .cache_hit_rate = @as(f64, @floatFromInt(cache.hits)) / @as(f64, @floatFromInt(accesses)),
+    };
 }
 pub fn checksum(bytes: []const u8) u64 {
     var hash: u64 = 14695981039346656037;
@@ -89,22 +136,31 @@ fn transferCopy(dst: []u8, src: []const u8) void {
     host_memory.copy(dst, src);
 }
 
+fn fillRect(surface: *s.Surface, rect: s.Rect, color: s.Color, backend: ?dispatch.Backend) void {
+    if (backend) |b| raster.fillRectWith(surface, rect, color, b) else raster.fillRect(surface, rect, color);
+}
+fn blendRect(surface: *s.Surface, rect: s.Rect, color: s.Color, backend: ?dispatch.Backend) void {
+    if (backend) |b| raster.blendRectWith(surface, rect, color, b) else raster.blendRect(surface, rect, color);
+}
+fn drawSprite(surface: *s.Surface, rect: s.Rect, source: []const u8, source_width: u32, source_height: u32, backend: ?dispatch.Backend) void {
+    if (backend) |b| raster.drawSpriteWith(surface, rect, source, source_width, source_height, b) else raster.drawSprite(surface, rect, source, source_width, source_height);
+}
+
 fn runOpWithCopy(op: Op, backend: ?dispatch.Backend, dst: []u8, src: []const u8, surface: *s.Surface, iteration: usize, copy: TransferCopyFn) void {
-    const b = backend orelse dispatch.best();
     switch (op) {
-        .clear => raster.fillRectWith(surface, .{ .x = 0, .y = 0, .width = width, .height = height }, .rgba(11, 37, @truncate(iteration), 255), b),
-        .pixel_write => for (0..512) |i| raster.fillRectWith(surface, .{ .x = @intCast((i * 37 + iteration) % width), .y = @intCast((i * 73 + iteration) % height), .width = 1, .height = 1 }, .rgba(@truncate(i), 91, 17, 255), b),
-        .clipped_rectangle => for (0..32) |i| raster.fillRectWith(surface, .{ .x = @as(i32, @intCast((i * 19) % 240)) - 10, .y = @as(i32, @intCast((i * 31) % 240)) - 10, .width = 20, .height = 20 }, .rgba(@truncate(i * 7), 23, 201, 255), b),
+        .clear => fillRect(surface, .{ .x = 0, .y = 0, .width = width, .height = height }, .rgba(11, 37, @truncate(iteration), 255), backend),
+        .pixel_write => for (0..512) |i| fillRect(surface, .{ .x = @intCast((i * 37 + iteration) % width), .y = @intCast((i * 73 + iteration) % height), .width = 1, .height = 1 }, .rgba(@truncate(i), 91, 17, 255), backend),
+        .clipped_rectangle => for (0..32) |i| fillRect(surface, .{ .x = @as(i32, @intCast((i * 19) % 240)) - 10, .y = @as(i32, @intCast((i * 31) % 240)) - 10, .width = 20, .height = 20 }, .rgba(@truncate(i * 7), 23, 201, 255), backend),
         .vulkan_host_memory_fill => {
             const byte: u8 = @truncate(iteration *% 17 +% 3);
             host_memory.fill(dst, @as(u32, byte) * 0x01010101);
         },
         .vulkan_host_memory_copy => copy(dst, src),
-        .source_over_blend => raster.blendRectWith(surface, .{ .x = 0, .y = 0, .width = width, .height = height }, .rgba(220, 31, 77, 128), b),
-        .sprite_draw => for (0..128) |i| raster.drawSpriteWith(surface, .{ .x = @as(i32, @intCast((i * 29 + iteration) % 248)) - 4, .y = @as(i32, @intCast((i * 43) % 248)) - 4, .width = 8, .height = 8 }, src[0..256], 8, 8, b),
+        .source_over_blend => blendRect(surface, .{ .x = 0, .y = 0, .width = width, .height = height }, .rgba(220, 31, 77, 128), backend),
+        .sprite_draw => for (0..128) |i| drawSprite(surface, .{ .x = @as(i32, @intCast((i * 29 + iteration) % 248)) - 4, .y = @as(i32, @intCast((i * 43) % 248)) - 4, .width = 8, .height = 8 }, src[0..256], 8, 8, backend),
         .frame => {
-            raster.fillRectWith(surface, .{ .x = 0, .y = 0, .width = width, .height = height }, .rgba(8, 12, 20, 255), b);
-            for (0..64) |i| raster.blendRectWith(surface, .{ .x = @intCast((i * 17) % 224), .y = @intCast((i * 41) % 224), .width = 16, .height = 16 }, .rgba(@truncate(i * 5), 140, 60, 180), b);
+            fillRect(surface, .{ .x = 0, .y = 0, .width = width, .height = height }, .rgba(8, 12, 20, 255), backend);
+            for (0..64) |i| blendRect(surface, .{ .x = @intCast((i * 17) % 224), .y = @intCast((i * 41) % 224), .width = 16, .height = 16 }, .rgba(@truncate(i * 5), 140, 60, 180), backend);
         },
     }
 }
@@ -199,27 +255,24 @@ fn isRaster(op: Op) bool {
     return op != .vulkan_host_memory_fill and op != .vulkan_host_memory_copy;
 }
 fn expectedMetricCount() usize {
-    var n: usize = all_ops.len + raster_ops.len;
+    var n: usize = all_ops.len + raster_ops.len + raster_ops.len;
     if (dispatch.available(.avx2)) n += raster_ops.len;
-    if (dispatch.available(.avx512)) n += raster_ops.len;
     return n;
 }
-fn expectedAtFor(index: usize, has_avx2: bool, has_avx512: bool) MetricKey {
+fn expectedAtFor(index: usize, has_avx2: bool) MetricKey {
     var i = index;
     if (i < all_ops.len) return .{ .op = all_ops[i], .backend = "scalar" };
     i -= all_ops.len;
+    if (i < raster_ops.len) return .{ .op = raster_ops[i], .backend = "portable_vector" };
+    i -= raster_ops.len;
     if (has_avx2) {
         if (i < raster_ops.len) return .{ .op = raster_ops[i], .backend = "avx2" };
-        i -= raster_ops.len;
-    }
-    if (has_avx512) {
-        if (i < raster_ops.len) return .{ .op = raster_ops[i], .backend = "avx512" };
         i -= raster_ops.len;
     }
     return .{ .op = raster_ops[i], .backend = "runtime" };
 }
 fn expectedAt(index: usize) MetricKey {
-    return expectedAtFor(index, dispatch.available(.avx2), dispatch.available(.avx512));
+    return expectedAtFor(index, dispatch.available(.avx2));
 }
 fn validFingerprint(f: Fingerprint) bool {
     return f.arch.len > 0 and f.os.len > 0 and f.cpu_model.len > 0 and f.selected_cpus.len > 0 and f.topology.len > 0 and f.compiler.len > 0 and f.build_mode.len > 0 and f.max_threads > 0 and f.max_threads <= 8 and std.mem.eql(u8, f.limited_gate, "physical-core-v1");
@@ -238,8 +291,10 @@ pub fn validate(report: Report) !void {
     for (report.metrics, 0..) |m, index| {
         const expected = expectedAt(index);
         if (!std.mem.eql(u8, m.name, @tagName(expected.op)) or !std.mem.eql(u8, m.backend, expected.backend)) return error.MetricSetMismatch;
-        if (m.iterations == 0 or m.checksum != oracle(expected.op) or !std.mem.eql(u8, m.checksum_hex, oracleHex(expected.op)) or !std.math.isFinite(m.mpix_s) or !std.math.isFinite(m.bytes_s) or !std.math.isFinite(m.effective_gib_s) or !std.math.isFinite(m.draws_s) or !std.math.isFinite(m.fps) or m.mpix_s < 0 or m.bytes_s < 0 or m.effective_gib_s < 0 or m.draws_s < 0 or m.fps < 0 or !applicable(expected.op, m) or m.frame.p50_ns == 0 or m.frame.p50_ns > m.frame.p95_ns or m.frame.p95_ns > m.frame.p99_ns) return error.MalformedMetric;
+        if (m.iterations == 0 or m.checksum != oracle(expected.op) or !std.mem.eql(u8, m.checksum_hex, oracleHex(expected.op)) or !std.math.isFinite(m.mpix_s) or !std.math.isFinite(m.bytes_s) or !std.math.isFinite(m.effective_gib_s) or !std.math.isFinite(m.draws_s) or !std.math.isFinite(m.fps) or m.mpix_s < 0 or m.bytes_s < 0 or m.effective_gib_s < 0 or m.draws_s < 0 or m.fps < 0 or !applicable(expected.op, m) or m.frame.p50_ns == 0 or m.frame.p50_ns > m.frame.p95_ns or m.frame.p95_ns > m.frame.p99_ns or m.frame.p99_ns > m.frame.max_ns or !std.math.isFinite(m.frame.cv) or m.frame.cv < 0) return error.MalformedMetric;
     }
+    const p = report.pipeline;
+    if (p.iterations == 0 or p.key_construction_ns == 0 or p.cache_lookup_ns == 0 or p.cache_hits != p.iterations or p.cache_misses != 1 or !std.math.isFinite(p.cache_hit_rate) or p.cache_hit_rate <= 0 or p.cache_hit_rate >= 1) return error.MalformedPipelineMetric;
 }
 pub fn compatible(a: Fingerprint, b: Fingerprint) bool {
     return std.mem.eql(u8, a.arch, b.arch) and std.mem.eql(u8, a.os, b.os) and std.mem.eql(u8, a.cpu_model, b.cpu_model) and std.mem.eql(u8, a.selected_cpus, b.selected_cpus) and std.mem.eql(u8, a.topology, b.topology) and std.mem.eql(u8, a.compiler, b.compiler) and std.mem.eql(u8, a.build_mode, b.build_mode) and a.max_threads == b.max_threads;
@@ -255,13 +310,14 @@ fn latencyRegressed(now: u64, old: u64, tolerance: f64) bool {
     return @as(f64, @floatFromInt(now - old)) / @as(f64, @floatFromInt(old)) > tolerance;
 }
 fn compareMetric(now: Metric, old: Metric, rate_tol: f64, latency_tol: f64) !void {
-    if (latencyRegressed(now.frame.p50_ns, old.frame.p50_ns, latency_tol) or latencyRegressed(now.frame.p95_ns, old.frame.p95_ns, latency_tol) or latencyRegressed(now.frame.p99_ns, old.frame.p99_ns, latency_tol)) return error.LatencyRegression;
+    if (latencyRegressed(now.frame.p50_ns, old.frame.p50_ns, latency_tol) or latencyRegressed(now.frame.p95_ns, old.frame.p95_ns, latency_tol) or latencyRegressed(now.frame.p99_ns, old.frame.p99_ns, latency_tol) or latencyRegressed(now.frame.max_ns, old.frame.max_ns, latency_tol)) return error.LatencyRegression;
     if (regressed(now.mpix_s, old.mpix_s, rate_tol) or regressed(now.bytes_s, old.bytes_s, rate_tol) or regressed(now.effective_gib_s, old.effective_gib_s, rate_tol) or regressed(now.draws_s, old.draws_s, rate_tol) or regressed(now.fps, old.fps, rate_tol)) return error.PerformanceRegression;
 }
 pub fn compare(current: Report, baseline: Report) !void {
     try validate(current);
     try validate(baseline);
     if (!compatible(current.fingerprint, baseline.fingerprint)) return error.IncompatibleFingerprint;
+    if (latencyRegressed(current.pipeline.key_construction_ns, baseline.pipeline.key_construction_ns, default_latency_tolerance_fraction) or latencyRegressed(current.pipeline.cache_lookup_ns, baseline.pipeline.cache_lookup_ns, default_latency_tolerance_fraction)) return error.LatencyRegression;
     for (current.metrics) |now| {
         var found: ?Metric = null;
         for (baseline.metrics) |old| if (std.mem.eql(u8, now.name, old.name) and std.mem.eql(u8, now.backend, old.backend)) {
@@ -290,7 +346,7 @@ pub fn benchmark(io: std.Io, metrics: []Metric, smoke: bool) !usize {
     sourceBytes(&src);
     var surface = try s.Surface.init(&dst, width, height, width * 4, .rgba8_unorm);
     var used: usize = 0;
-    const backends = [_]?dispatch.Backend{ .scalar, .avx2, .avx512, null };
+    const backends = [_]?dispatch.Backend{ .scalar, .portable_vector, .avx2, null };
     for (backends) |backend| {
         if (backend) |b| if (!dispatch.available(b) and b != .scalar) continue;
         for (all_ops) |op| {
@@ -327,7 +383,7 @@ fn fingerprint() Fingerprint {
     return .{ .arch = @tagName(builtin.cpu.arch), .os = @tagName(builtin.os.tag), .cpu_model = "cpu", .selected_cpus = "2", .topology = "0:0@2", .compiler = builtin.zig_version_string, .build_mode = @tagName(builtin.mode), .max_threads = 1, .limited_gate = "physical-core-v1" };
 }
 fn reportFor(metrics: []const Metric) Report {
-    return .{ .schema_version = schema_version, .workload_id = workload_id, .fingerprint = fingerprint(), .warmup_iterations = 1, .sample_count = 3, .metrics = metrics };
+    return .{ .schema_version = schema_version, .workload_id = workload_id, .source_commit = "unbound", .utc = "unbound", .fingerprint = fingerprint(), .warmup_iterations = 1, .sample_count = 3, .pipeline = .{ .iterations = 3, .key_construction_ns = 1, .cache_lookup_ns = 1, .cache_hits = 3, .cache_misses = 1, .cache_hit_rate = 0.75 }, .metrics = metrics };
 }
 
 test "percentile index is overflow safe and nearest rank is exact" {
@@ -336,7 +392,11 @@ test "percentile index is overflow safe and nearest rank is exact" {
     try std.testing.expectError(error.InvalidPercentile, percentileIndex(0, 50, 100));
     var v = [_]u64{ 9, 1, 8, 2, 7, 3, 6, 4, 5, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 };
     const p = try summarize(&v);
-    try std.testing.expectEqualDeep(Percentiles{ .p50_ns = 10, .p95_ns = 19, .p99_ns = 20 }, p);
+    try std.testing.expectEqual(@as(u64, 10), p.p50_ns);
+    try std.testing.expectEqual(@as(u64, 19), p.p95_ns);
+    try std.testing.expectEqual(@as(u64, 20), p.p99_ns);
+    try std.testing.expectEqual(@as(u64, 20), p.max_ns);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5491696473652761), p.cv, 0.000000001);
 }
 test "modeled byte traffic has exact hand computed cases" {
     try std.testing.expectEqual(@as(u64, 230400), try modeledBytes("clear"));
@@ -391,9 +451,9 @@ test "benchmark validates every available SIMD runtime and oracle" {
     try guardInRun(r, false);
 }
 test "canonical metric ordering independently covers optional SIMD sets" {
-    try std.testing.expectEqualStrings("avx512", expectedAtFor(all_ops.len, false, true).backend);
-    try std.testing.expectEqualStrings("avx512", expectedAtFor(all_ops.len + raster_ops.len, true, true).backend);
-    try std.testing.expectEqualStrings("runtime", expectedAtFor(all_ops.len, false, false).backend);
+    try std.testing.expectEqualStrings("portable_vector", expectedAtFor(all_ops.len, false).backend);
+    try std.testing.expectEqualStrings("avx2", expectedAtFor(all_ops.len + raster_ops.len, true).backend);
+    try std.testing.expectEqualStrings("runtime", expectedAtFor(all_ops.len + raster_ops.len, false).backend);
 }
 
 test "full-run guard tolerates noisy timing but rejects catastrophic routes" {
@@ -448,7 +508,7 @@ test "full validation rejects noncanonical sets fields and callers cannot bypass
 }
 
 fn metricForTest(op: Op, backend: []const u8) !Metric {
-    return .{ .name = @tagName(op), .backend = backend, .iterations = 3, .checksum = oracle(op), .checksum_hex = oracleHex(op), .mpix_s = if (op == .sprite_draw or op == .frame) 0 else 100, .bytes_s = 107374182400, .effective_gib_s = 100, .draws_s = if (op == .sprite_draw) 100 else 0, .fps = if (op == .frame) 100 else 0, .frame = .{ .p50_ns = 100, .p95_ns = 100, .p99_ns = 100 } };
+    return .{ .name = @tagName(op), .backend = backend, .iterations = 3, .checksum = oracle(op), .checksum_hex = oracleHex(op), .mpix_s = if (op == .sprite_draw or op == .frame) 0 else 100, .bytes_s = 107374182400, .effective_gib_s = 100, .draws_s = if (op == .sprite_draw) 100 else 0, .fps = if (op == .frame) 100 else 0, .frame = .{ .p50_ns = 100, .p95_ns = 100, .p99_ns = 100, .max_ns = 100, .cv = 0 } };
 }
 
 fn canonicalForTest(storage: []Metric) !Report {
@@ -476,11 +536,11 @@ test "baseline compares every applicable rate and every latency independently" {
         try std.testing.expectError(error.PerformanceRegression, compare(current, baseline));
         now_storage[index] = old_storage[index];
     }
-    now_storage[0].frame = .{ .p50_ns = 300, .p95_ns = 300, .p99_ns = 300 };
+    now_storage[0].frame = .{ .p50_ns = 300, .p95_ns = 300, .p99_ns = 300, .max_ns = 300, .cv = 0 };
     try std.testing.expectError(error.LatencyRegression, compare(current, baseline));
-    now_storage[0].frame = .{ .p50_ns = 100, .p95_ns = 300, .p99_ns = 300 };
+    now_storage[0].frame = .{ .p50_ns = 100, .p95_ns = 300, .p99_ns = 300, .max_ns = 300, .cv = 0 };
     try std.testing.expectError(error.LatencyRegression, compare(current, baseline));
-    now_storage[0].frame = .{ .p50_ns = 100, .p95_ns = 100, .p99_ns = 300 };
+    now_storage[0].frame = .{ .p50_ns = 100, .p95_ns = 100, .p99_ns = 300, .max_ns = 300, .cv = 0 };
     try std.testing.expectError(error.LatencyRegression, compare(current, baseline));
     now_storage[0] = old_storage[0];
     current.fingerprint.cpu_model = "other";

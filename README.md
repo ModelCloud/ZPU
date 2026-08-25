@@ -1,6 +1,27 @@
 # ZPU
 
-ZPU is a Zig-first experiment in a minimal-dependency, Vulkan-only userspace CPU graphics driver. This milestone adds an **experimental loader-compatible CPU transfer and vkcube rendering path**. It is not conformant Vulkan and is not yet sufficient for arbitrary Vulkan applications.
+ZPU includes the frontend-only, non-conformant
+`zpu_spirv_render_profile_v1`. It validates and lowers a small bounded SPIR-V
+1.0 subset to owned canonical render IR for pipeline metadata. It does not
+provide general SPIR-V/Vulkan shader execution: `cpu_cube_v1` remains the only
+active graphics execution ABI and draw pixels are unchanged.
+
+The v1 frontend accepts only Shader + Logical GLSL450, a selected straight-line
+Vertex or Fragment entry, bounded scalar/vector/mat4 and read-only uniform data,
+and the small arithmetic/composite operation list documented in
+[`design/render-ir.md`](design/render-ir.md). Textures, sampling, ExtInst,
+control flow, calls, derivatives, discard, atomics, barriers, push constants,
+storage writes, dynamic indexing, undefined/non-finite values, and all later
+SPIR-V versions are rejected rather than interpreted.
+
+Pipeline creation treats that rejection as pipeline failure and publishes no
+pipeline or cache result. The only exception is an exact `cpu_cube_v1`
+compatibility predicate for the immutable vertex/fragment module identities
+embedded by the readiness vkcube: both stages, `main`, exact word counts and
+full digests, and no specialization must match. This bridge does not create a
+frontend program and is not broader shader acceptance.
+
+ZPU is a Zig-first experiment in a minimal-dependency, Vulkan-only userspace CPU graphics driver. This milestone adds an **experimental loader-compatible CPU transfer and vkcube rendering path**. It is not conformant Vulkan and is not yet sufficient for arbitrary Vulkan applications. The normative target for the API surface — the pinned core version, the profile ZPU builds toward, the loader–ICD interface requirement, and the gates that must pass before any advertised version changes — is [docs/api-policy.md](docs/api-policy.md). The driver, the ICD manifest, and CI advertise and assert Vulkan 1.0 today; the policy describes the target, not the present state.
 
 ## Build and run
 
@@ -8,6 +29,7 @@ ZPU targets Zig 0.16.0, the newest stable compiler at the time of this milestone
 
 ```sh
 zig build
+zig build api-inventory
 zig build test
 zig build coverage
 zig build smoke
@@ -18,9 +40,22 @@ zig build xcb-present
 zig build vkcube-visual
 zig build desktop-session
 zig build demo
+zig build benchmark-3d
+zig build pr-readiness
 ```
 
-All repository gates must be run through the Linux physical-core limiter, for example `tools/limited-cpus.sh zig build test`. Benchmark methodology, stable JSON, controlled baseline capture/comparison, tolerances, reproducibility guidance, and the opt-in hardware guard are documented in [docs/benchmarking.md](docs/benchmarking.md). The deferred 3D metric and deterministic-scene contract is in [docs/3d-benchmark-todo.md](docs/3d-benchmark-todo.md); no 3D pipeline or fabricated 3D measurement was added.
+All repository gates must be run through the Linux physical-core limiter, for example `tools/limited-cpus.sh zig build test`. Benchmark methodology, stable JSON, controlled baseline capture/comparison, tolerances, reproducibility guidance, and the opt-in hardware guard are documented in [docs/benchmarking.md](docs/benchmarking.md). The deterministic vkcube-specific 3D benchmark, real 20-second capture, progress table, and commit-bound gate are documented in [docs/pr-readiness.md](docs/pr-readiness.md); this narrow workload is not general SPIR-V.
+
+`tools/limited-cpus.sh zig build api-inventory` validates the pinned Vulkan
+1.4.360 registry and `VP_KHR_roadmap_2026` inputs, regenerates the complete
+cumulative core/profile target in memory, and rejects drift from the checked-in
+machine-readable inventory. It also runs negative fixtures for missing,
+duplicate, alias-only, wrongly scoped, wrongly pinned, stale, and unjustified
+entries. This is a future target inventory only: it does not change API
+advertising or imply Vulkan 1.4/profile support. See
+[the inventory contract](docs/api-inventory.md).
+
+To run four independent experiment or optimization commands at once, `tools/cpu-fanout.sh` partitions the effective cpuset into four pairwise-disjoint, equal-size groups of whole physical cores and launches each one through the same limiter; see the fanout section and its comparability rules in [docs/benchmarking.md](docs/benchmarking.md).
 
 The build installs `zig-out/lib/libvulkan_zpu.so` and `zig-out/share/vulkan/icd.d/zpu_icd.x86_64.json`. The manifest's relative path resolves back to that installed library. XCB presentation links the shared object to libc, libm, the ELF interpreter, and libxcb. The loader-independent smoke test uses `dlopen` to resolve the three private loader entry points, negotiate interface version 7, create an instance, and enumerate the CPU device.
 
@@ -32,7 +67,7 @@ VK_DRIVER_FILES="$PWD/zig-out/share/vulkan/icd.d/zpu_icd.x86_64.json" vulkaninfo
 
 Loader discovery is an authoritative CI gate: CI installs Ubuntu's system `libvulkan1` and `vulkan-tools`, runs this command, and asserts the reported API, CPU type, IDs, and device name. The loader-independent C-ABI smoke remains useful but is not a substitute for real loader integration. These packages are test-host tools, not project dependencies.
 
-Loader 1.4.341 and `vulkaninfo` 1.4.341 were also tested with that exact command (and `XDG_RUNTIME_DIR=/tmp` in the headless test environment). It exited 0 and reported:
+Vulkan-Loader and `vulkaninfo` 1.4.341 were also tested with that exact command (and `XDG_RUNTIME_DIR=/tmp` in the headless test environment). That 1.4.341 is the upstream release version of those two host tools, which tracks the Vulkan header revision they were built against; it is neither an API version ZPU advertises — ZPU reports 1.0.0, below — nor the Ubuntu `libvulkan1`/`vulkan-tools` package versions, which CI records separately with `dpkg-query`. The run exited 0 and reported:
 
 ```text
 GPU0:
@@ -68,12 +103,12 @@ general SPIR-V implementation.
 
 - `src/surface.zig` owns RGBA8/BGRA8 memory layout, validation, colors, and clipping.
 - `src/raster/` implements clear/fill and straight-alpha Porter-Duff source-over rectangles.
-- `src/simd/` owns backend selection and scalar, 8-pixel AVX2-oriented, and 16-pixel AVX-512-oriented paths for constant-color spans and per-pixel RGBA source spans.
+- `src/simd/` owns backend selection and scalar, portable four-pixel vector, and host-gated eight-pixel AVX2-oriented paths for constant-color spans and per-pixel RGBA source spans.
 - `src/command/` decouples command recording semantics from raster execution.
 - `src/platform/` owns presentation; today that is a headless PPM sink.
 - `src/vulkan/` contains original minimal Vulkan 1.0 ABI declarations, private loader entry points, object lifetime handling, and the ICD manifest.
 
-The x86 dispatcher checks CPUID AVX/OSXSAVE, XCR0 state, AVX2, and AVX-512F before selecting a backend, so unsupported systems fall back to scalar. The width-oriented kernels use Zig `@Vector` rather than handwritten intrinsics. Zig/LLVM may legalize or scalarize these operations according to the compilation target; therefore we do not claim a particular emitted instruction sequence. This is intentional: forced-backend correctness tests remain safe on machines without those ISAs, while automatic dispatch never advertises unsupported CPU/OS state. Release builds should be inspected and benchmarked before making code-generation claims.
+The x86 dispatcher checks CPUID AVX/OSXSAVE, XCR0 state, and AVX2 before selecting the host-gated eight-lane backend; other hosts use the portable four-lane family. The width-oriented kernels use Zig `@Vector` rather than handwritten intrinsics. Zig/LLVM may legalize or scalarize these operations according to the compilation target, so the backend names describe kernel families rather than promising emitted instructions. AVX-512 is intentionally excluded until controlled measurements show a tail-latency benefit. Automatic dispatch never advertises unsupported CPU/OS state.
 
 Tests compare every backend byte-for-byte with scalar for both formats, deliberately misaligned surface starts and padded strides, clipping and off-screen rectangles and sprites, odd widths and vector tails, alpha 0/1/128/254/255, and deterministic randomized content and operations.
 
@@ -81,9 +116,9 @@ Tests compare every backend byte-for-byte with scalar for both formats, delibera
 
 ZPU borrows only high-level lessons from studying mature projects such as Mesa and SwiftShader: keep API translation separate from execution, make formats explicit, centralize CPU capability policy, and test optimized paths against a reference. No source code was copied from those or other projects; this implementation is original.
 
-The ICD's XCB WSI path has a runtime dependency on libxcb (plus the normal C/math runtime). It is Vulkan-only by design: compatibility with OpenGL, legacy APIs, or historical driver ABIs is not a goal, and future interfaces may change incompatibly while the ICD takes shape. ABI declarations are an original narrow transcription traceable to the [Vulkan 1.0 specification](https://registry.khronos.org/vulkan/specs/1.0/html/vkspec.html) and [Khronos loader/driver interface](https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderDriverInterface.md); no Mesa, SwiftShader, Vulkan-Loader, or Vulkan-Headers source is copied.
+The ICD's XCB WSI path has a runtime dependency on libxcb (plus the normal C/math runtime). It is Vulkan-only by design: compatibility with OpenGL, legacy APIs, or historical driver ABIs is not a goal, and future interfaces may change incompatibly while the ICD takes shape. ZPU carries no legacy-specific paths, compatibility shims, or deprecated, vendor, or promoted aliases kept alive solely for old clients; [docs/api-policy.md](docs/api-policy.md) states that rule normatively, along with the narrow case where a present-day client still requires a promoted extension by name. ABI declarations are an original narrow transcription traceable to the [Vulkan 1.0 specification](https://registry.khronos.org/vulkan/specs/1.0/html/vkspec.html) and [Khronos loader/driver interface](https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderDriverInterface.md); no Mesa, SwiftShader, Vulkan-Loader, or Vulkan-Headers source is copied.
 
-The current ICD exposes one stable CPU physical device and one serial graphics+transfer queue. It advertises Vulkan 1.0, no extensions, no optional features, one conservative 256 MiB unified host-visible/coherent non-device-local memory heap/type, and the Vulkan 1.0 mandatory minimum physical-device limits. The heap backs device memory, buffers, and tightly packed linear 2D `VK_FORMAT_R8G8B8A8_UNORM`/`VK_FORMAT_B8G8R8A8_UNORM` images. Vulkan copy/fill commands preserve their API semantics, but on ZPU they operate on unified host memory and are not discrete-VRAM uploads. Custom allocation callbacks and unsupported direct application extension chains are rejected; documented loader-owned instance/device chains are parsed only while their structure type remains loader-owned, and opaque application tails are not traversed.
+The current ICD exposes one stable CPU physical device and one serial graphics+transfer queue. It advertises Vulkan 1.0, the instance extensions `VK_KHR_surface` and `VK_KHR_xcb_surface`, the single device extension `VK_KHR_swapchain`, no optional features, one conservative 256 MiB unified host-visible/coherent non-device-local memory heap/type, and the Vulkan 1.0 mandatory minimum physical-device limits. The heap backs device memory, buffers, and tightly packed linear 2D `VK_FORMAT_R8G8B8A8_UNORM`/`VK_FORMAT_B8G8R8A8_UNORM` images. Vulkan copy/fill commands preserve their API semantics, but on ZPU they operate on unified host memory and are not discrete-VRAM uploads. Custom allocation callbacks and unsupported direct application extension chains are rejected; documented loader-owned instance/device chains are parsed only while their structure type remains loader-owned, and opaque application tails are not traversed.
 
 Mutable ICD entry points are globally serialized. This intentionally simple experimental lifetime protocol keeps validation and use inside the same critical section. External loader callbacks temporarily release the lock, operate only on permanent slot storage, and are followed by locked lifetime revalidation before a handle is returned. Instance, device, memory, buffer, image, fence, command-pool, and command-buffer storage uses 64 slots per type with monotonic `never → live → tombstone` state: destroyed addresses are never reused, stale values are checked without dereferencing them, and recorded references are revalidated at submission. Exhaustion returns `VK_ERROR_OUT_OF_HOST_MEMORY`. This bound is a development limitation, not a production allocation strategy. Device-memory allocations are charged against the advertised 256 MiB heap and returned to its budget only after a valid unbound allocation is freed.
 
@@ -107,12 +142,13 @@ The gate is line coverage, because pinned Zig 0.16.0 exposes neither LLVM source
 2. **Minimal Vulkan ICD:** loader negotiation and instance/device discovery with no conformance claim.
 3. **CPU memory transfers (this milestone):** coherent memory, buffers, linear images, command submission, fences, and exact loader-level validation.
 4. **First visible 3D path (this milestone):** XCB swapchain transport plus vkcube-specific vertex processing, sampling, rasterization, and depth.
-5. **General 3D:** SPIR-V execution, broader pipeline state, tiling, increasingly capable shaders, performance work, and eventual conformance investigation.
+5. **General 3D:** SPIR-V execution, broader pipeline state, tiling, increasingly capable shaders, performance work, and eventual conformance investigation against the version and profile pinned in [docs/api-policy.md](docs/api-policy.md). That target is Vulkan core 1.4.360 with `VP_KHR_roadmap_2026`; neither is claimed today, and the advertised version does not move until the gates in that document pass.
 
 ## Development gates
 
 ```sh
 tools/limited-cpus.sh zig fmt --check build.zig src tools
+tools/limited-cpus.sh zig build api-inventory
 tools/limited-cpus.sh zig build
 tools/limited-cpus.sh zig build test
 tools/limited-cpus.sh zig build behavior

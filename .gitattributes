@@ -1,0 +1,3 @@
+# Preserve byte-exact Khronos snapshots; upstream JSON contains trailing spaces.
+api/registry/VP_KHR_roadmap.json -whitespace
+api/registry/vk.xml -whitespace

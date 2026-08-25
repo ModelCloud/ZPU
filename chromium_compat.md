@@ -12,6 +12,15 @@ goal. The X11 and Wayland ozone platforms require strictly more (see
 
 Status legend: `[ ]` not started · `[~]` partial · `[x]` done.
 
+This document tracks one **consumer's** requirements. It does not set ZPU's API
+target. The normative target — Vulkan core **1.4.360**, the
+**`VP_KHR_roadmap_2026`** profile, loader–ICD interface 7, and the gates that
+must pass before any advertised version changes — lives in
+[docs/api-policy.md](docs/api-policy.md). Chromium's requirements are a floor
+that the pinned target subsumes; where Chromium asks for something the target
+does not mandate, that item is optional surface and stays justified by the
+citation next to it.
+
 ---
 
 ## 0. Blocking gate — Chromium will not enumerate ZPU today
@@ -23,8 +32,18 @@ Status legend: `[ ]` not started · `[~]` partial · `[x]` done.
       `apiVersion` is skipped in `vulkan_device_queue.cc`
       (`if (device_properties.apiVersion < info.used_api_version) continue;`).
 
-      ZPU currently reports `1.0.0`. **Until this changes, nothing else on this
-      list can be tested against real Chromium.**
+      ZPU currently reports `1.0.0` — in the driver, in the ICD manifest, and in
+      the CI loader-discovery assertion. **Until this changes, nothing else on
+      this list can be tested against real Chromium.**
+
+`VK_API_VERSION_1_1` is Chromium's floor, not ZPU's destination. The pinned
+target is Vulkan **1.4.360**, whose mandatory core is cumulative and already
+subsumes everything 1.1 requires, so nothing below is dropped by aiming higher —
+1.1 is simply not a separate milestone to advertise. Per
+[docs/api-policy.md](docs/api-policy.md), the reported version does not move
+until the mandatory core of the claimed version is complete and the behavioral,
+independent-verification, and loader-discovery gates pass; the version is never
+raised to satisfy this check on its own.
 
 Promoting to 1.1 is a feature-set commitment, not a version-number change. It
 folds in the following as core, all of which must actually work:
@@ -88,6 +107,13 @@ From `ui/ozone/platform/headless/vulkan_implementation_headless.cc`,
 > that does not also *enumerate* them from
 > `vkEnumerateInstanceExtensionProperties` will fail instance creation. Enumerate
 > them explicitly.
+>
+> This is not a legacy alias. [docs/api-policy.md](docs/api-policy.md) forbids
+> keeping deprecated, vendor, or promoted names alive solely for old clients;
+> these two are required by a **current** consumer at `main`, cited above, which
+> is the explicit exception. Enumerating the promoted name is the whole
+> obligation — the core entry points remain the implementation, and no
+> pre-promotion code path is added behind them.
 
 `VK_EXT_headless_surface` is the single highest-leverage item on this whole
 document: it is nearly free for a CPU driver and it is what makes the CPU-only VM

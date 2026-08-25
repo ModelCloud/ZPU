@@ -7,7 +7,8 @@ trap 'rm -rf "$tmp"' EXIT
 sha=$(git rev-parse HEAD)
 json="$tmp/report.json"
 history="$tmp/history.md"
-tools/limited-cpus.sh "$benchmark" --smoke --json --capture "$json" >/dev/null
+utc=2026-01-02T03:04:05Z
+tools/limited-cpus.sh "$benchmark" --smoke --json --source-commit "$sha" --utc "$utc" --capture "$json" >/dev/null
 python3 tools/benchmark_history.py "$json" "$history" --commit "$sha" --comparison-result passed --observed-threads 8
 grep -F "### $sha" "$history" >/dev/null
 if python3 tools/benchmark_history.py "$json" "$history" --commit "$sha" --observed-threads 8 2>/dev/null; then exit 1; fi

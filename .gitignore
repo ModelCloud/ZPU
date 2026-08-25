@@ -1,3 +1,5 @@
 .zig-cache/
 zig-out/
+scratch_tmp/
+__pycache__/
 *.ppm

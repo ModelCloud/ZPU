@@ -1,0 +1,18 @@
+; Original ZPU fixture, CC0-1.0. SPIR-V 1.0.
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Vertex %main "main" %position
+OpDecorate %position BuiltIn Position
+%void = OpTypeVoid
+%float = OpTypeFloat 32
+%v4float = OpTypeVector %float 4
+%out_v4float = OpTypePointer Output %v4float
+%fn = OpTypeFunction %void
+%position = OpVariable %out_v4float Output
+%one = OpConstant %float 1
+%value = OpConstantComposite %v4float %one %one %one %one
+%main = OpFunction %void None %fn
+%label = OpLabel
+OpStore %position %value
+OpReturn
+OpFunctionEnd
