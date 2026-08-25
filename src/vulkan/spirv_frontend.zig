@@ -1071,6 +1071,14 @@ test "uniform block constant access chain is read only and descriptor identity i
     try std.testing.expectEqual(ir.Op.extract, program.instructions[2].op);
 }
 
+test "profile v1 rejects runtime scalar u32 access chain index" {
+    const access_offset = testOpcodeOffset(&uniform_vertex, 65, 0).?;
+    var dynamic = uniform_vertex;
+    // Replace the constant member index with the loaded scalar-u32 result.
+    dynamic[access_offset + 4] = 43;
+    try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, &dynamic, .vertex, "main", &.{}));
+}
+
 test "boolean true and false constants retain exact frontend values" {
     var truth = try compile(std.testing.allocator, &bool_fragment, .fragment, "main", &.{});
     defer truth.deinit(std.testing.allocator);

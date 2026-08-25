@@ -79,6 +79,11 @@ Accepted value operations are constants and specialization constants,
 composite construction/extraction, bounded vector shuffle, constant access
 chains, load, Output store, FNegate, IAdd, ISub, FAdd, FSub, FMul, FDiv,
 VectorTimesScalar, MatrixTimesVector, and exact 32-bit numeric/bit conversions.
+Every `OpAccessChain` index in profile v1 is a scalar `u32` ordinary or
+specialized constant after specialization. Runtime/dynamic indices are
+unsupported even when their value type is scalar `u32`; the canonical IR
+executor independently requires the same constant-index-only invariant at
+setup, before any execution or output publication.
 The implementation limits a module to 1 MiB, 16,384 decoded instructions,
 8,192 profile IDs, 4,096 canonical instructions, 64 interfaces, 64
 specialization entries, and 16 uniform-block members.
@@ -90,6 +95,27 @@ constants, storage writes, dynamic indexing, non-finite constants, duplicate
 interfaces and mismatched pipeline interfaces/descriptors. Structurally broken
 SPIR-V is classified as malformed; well-formed constructs beyond this list are
 classified as unsupported.
+
+### Scalar-executor property proof
+
+The bounded generated matrix uses operation, scalar class, and shape as
+independent axes. Shapes are scalar, vec2, vec3, vec4, and f32 mat4; scalar
+classes are bool where applicable and i32, u32, and f32. It generates 186
+valid cases across all 19 canonical operations, in enum order:
+`14, 10, 14, 14, 14, 10, 14, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14`.
+Each generated valid case is initialized, executed twice, and required to
+retain its exact type, lane bits, and deterministic result.
+
+Independent generated negative/runtime categories contain exactly 19 malformed
+arity programs (one per operation), 41 bounds failures (uniform-member,
+vector-component, extract, and shuffle axes), 14 input/output alias cases (one
+per accepted type), four rollback-after-late-numeric-failure vector widths,
+five runtime-NaN families, and five signed-zero families. The allocator matrix
+separately injects every encountered failure point: five direct
+`Program.clone` points, the same five clone-stage points through
+`Executor.init`, two later `Executor.init` points, and nine `ExecutableKey`
+points. Every injected failure is stable `OutOfMemory` with zero outstanding
+allocations and zero outstanding bytes.
 
 The separately exercised frontend sequence is decode, semantic validation,
 entry selection/reachability, specialization, lowering, canonicalization, and
