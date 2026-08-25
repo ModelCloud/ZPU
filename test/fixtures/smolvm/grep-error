@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $* == *-Fvx* ]]; then
+    exit 2
+fi
+exec /usr/bin/grep "$@"

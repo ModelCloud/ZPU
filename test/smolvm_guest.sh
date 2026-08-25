@@ -13,13 +13,17 @@ if PATH="$tmp/runtime:$PATH" "$repo/tools/smolvm-zpu.sh" cli-check >"$tmp/out" 2
     echo 'SmolVM 1.6.9 unexpectedly satisfied the minimum' >&2; exit 1
 fi
 grep -F 'require >= 1.7.0 for --mount-socket' "$tmp/err"
-for capability in missing-mount-socket missing-smolfile missing-cp; do
+for capability in missing-mount-socket missing-smolfile missing-cp missing-stop-name missing-update-no-net; do
     ln -sfn "$repo/test/fixtures/smolvm/negative/$capability" "$tmp/runtime/smolvm"
     if PATH="$tmp/runtime:$PATH" "$repo/tools/smolvm-zpu.sh" cli-check >"$tmp/out" 2>"$tmp/err"; then
         echo "SmolVM missing capability unexpectedly passed: $capability" >&2; exit 1
     fi
 done
 ln -sfn "$fixture" "$tmp/runtime/smolvm"
+if VK_DRIVER_FILES=/host/injection PATH="$tmp/runtime:$PATH" "$repo/tools/smolvm-zpu.sh" cli-check >"$tmp/out" 2>"$tmp/err"; then
+    echo 'cli-check accepted host Vulkan injection' >&2; exit 1
+fi
+grep -F 'refusing host graphics injection: unset VK_DRIVER_FILES' "$tmp/err"
 
 # Static contract: guest-only build/install, no GPU flag, process-only ICD.
 out=$(XDG_RUNTIME_DIR="$tmp/runtime" ZPU_SMOLVM_DRY_RUN=1 "$repo/tools/smolvm-zpu.sh" dry-run)
@@ -61,7 +65,7 @@ grep -F 'Networking is therefore disabled before any source' "$repo/docs/smolvm-
 grep -F 'full X11 client authority' "$repo/docs/smolvm-omarchy.md"
 grep -F 'untrusted timeout 300' "$repo/tools/smolvm-zpu.sh"
 grep -F 'bootstrap-Xauthority' "$repo/tools/smolvm-zpu.sh"
-grep -F 'never mounts the host authority file' "$repo/docs/smolvm-omarchy.md"
+grep -F 'It never mounts' "$repo/docs/smolvm-omarchy.md"
 grep -F 'ZPU_SMOLVM_ALLOW_TRUSTED_X11=1' "$repo/docs/smolvm-omarchy.md"
 grep -F 'env -i' "$repo/smolvm/guest-validate.sh"
 grep -F "VK_DRIVER_FILES=\"\$manifest\"" "$repo/smolvm/guest-validate.sh"
@@ -97,16 +101,38 @@ ln -sfn "$repo/test/fixtures/smolvm/xauth" "$tmp/runtime/xauth"
 PATH="$tmp/runtime:$PATH" XDG_RUNTIME_DIR="$tmp/runtime" "$repo/tools/smolvm-zpu.sh" launch >/dev/null
 guest_auth="$tmp/runtime/zpu-smolvm-$UID/xauth/Xauthority"
 [[ $(awk 'NF { count++ } END { print count + 0 }' "$guest_auth") -eq 1 ]]
+grep -Eq '^ffff[[:space:]]' "$guest_auth"
 grep -Fq 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$guest_auth"
 if grep -Fq 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$guest_auth"; then echo 'trusted host Xauthority key leaked to guest' >&2; exit 1; fi
+
+# A scanner execution error is not treated like the legitimate "no new line"
+# status, and every temporary file that held the trusted key is removed.
+mkdir -p "$tmp/grep-error"
+ln -s "$fixture" "$tmp/grep-error/smolvm"
+ln -s "$repo/test/fixtures/smolvm/xauth" "$tmp/grep-error/xauth"
+ln -s "$repo/test/fixtures/smolvm/grep-error" "$tmp/grep-error/grep"
+if PATH="$tmp/grep-error:$PATH" XDG_RUNTIME_DIR="$tmp/runtime" "$repo/tools/smolvm-zpu.sh" launch >"$tmp/out" 2>"$tmp/err"; then
+    echo 'Xauthority set-difference scanner error unexpectedly passed' >&2; exit 1
+fi
+grep -F 'failed to compare trusted and generated Xauthority entries (grep exit 2)' "$tmp/err"
+for secret_tmp in bootstrap-Xauthority before.nlist after.nlist selected.nlist; do
+    test ! -e "$tmp/runtime/zpu-smolvm-$UID/xauth/$secret_tmp"
+done
+if grep -Fq 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$guest_auth"; then echo 'trusted key survived auth error cleanup' >&2; exit 1; fi
 
 # Failure is closed unless the separately documented trusted fallback is
 # explicit; that fallback copies exactly the original trusted authorization.
 if PATH="$tmp/runtime:$PATH" XDG_RUNTIME_DIR="$tmp/runtime" SMOLVM_XAUTH_GENERATE_FAIL=1 "$repo/tools/smolvm-zpu.sh" launch >"$tmp/out" 2>"$tmp/err"; then
     echo 'X SECURITY failure unexpectedly fell back to trusted authority' >&2; exit 1
 fi
+for secret_tmp in bootstrap-Xauthority before.nlist after.nlist selected.nlist; do
+    test ! -e "$tmp/runtime/zpu-smolvm-$UID/xauth/$secret_tmp"
+done
+if grep -Fq 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$guest_auth"; then echo 'trusted key survived fail-closed auth cleanup' >&2; exit 1; fi
 PATH="$tmp/runtime:$PATH" XDG_RUNTIME_DIR="$tmp/runtime" SMOLVM_XAUTH_GENERATE_FAIL=1 ZPU_SMOLVM_ALLOW_TRUSTED_X11=1 "$repo/tools/smolvm-zpu.sh" launch >"$tmp/out" 2>"$tmp/err"
 grep -Fq 'full-trust X11 fallback enabled' "$tmp/err"
 [[ $(awk 'NF { count++ } END { print count + 0 }' "$guest_auth") -eq 1 ]]
 grep -Fq 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$guest_auth"
+grep -F 'guest Xauthority must contain exactly one entry' "$repo/smolvm/guest-validate.sh"
+grep -F 'guest cannot authenticate and open DISPLAY=:0' "$repo/smolvm/guest-validate.sh"
 printf '%s\n' 'SmolVM guest isolation contract passed'

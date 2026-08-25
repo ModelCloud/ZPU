@@ -42,6 +42,7 @@ case $subcommand in
         ;;
     stop)
         if (($# == 1)) && [[ $1 == --help ]]; then
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == stop-name ]] && { echo 'Usage: smolvm machine stop [OPTIONS]'; exit 0; }
             echo 'Usage: smolvm machine stop [OPTIONS] --name <NAME>'
             exit 0
         fi
@@ -49,7 +50,8 @@ case $subcommand in
         ;;
     update)
         if (($# == 1)) && [[ $1 == --help ]]; then
-            printf '%s\n' 'Usage: smolvm machine update [OPTIONS] --name <NAME>' '      --no-net'
+            printf '%s\n' 'Usage: smolvm machine update [OPTIONS] --name <NAME>'
+            [[ ${SMOLVM_FIXTURE_OMIT:-} == update-no-net ]] || printf '%s\n' '      --no-net'
             exit 0
         fi
         (($# == 3)) && [[ $1 == --name && -n $2 && $3 == --no-net ]] || fail 'expected: machine update --name NAME --no-net'

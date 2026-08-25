@@ -34,8 +34,10 @@ The launcher copies the current MIT-MAGIC-COOKIE-1 entry into a private
 bootstrap authority database, then uses it to ask the X SECURITY extension for
 a separate **untrusted** cookie with a 300-second idle timeout. It computes the
 exact before/after entry difference, requires one newly generated key distinct
-from the trusted key, and constructs a fresh guest authority file containing
-exactly that one entry. It never mounts the host authority file. An
+from the trusted key, normalizes only that selected entry to Xauthority
+`FamilyWild` so it remains valid when the guest hostname differs, and constructs
+a fresh guest authority file containing exactly that one entry. It never mounts
+the host authority file. An
 untrusted X client can create and draw its own windows, which is enough
 for ZPU's XCB WSI, while the X server restricts access to resources belonging to
 trusted clients. The X SECURITY timeout purges an authorization after the
@@ -95,11 +97,11 @@ digest with test evidence. Do not run Omarchy's interactive
 bare-metal installer in this ephemeral OCI workload: it assumes systemd boot,
 real seat/input devices, and ownership of the desktop. The checked-in
 `smolvm/Smolfile` is actually passed to `machine create --smolfile`; it records
-resources, bootstrap networking, and the no-GPU policy. It deliberately has no
-image field: the launcher is the sole image source and always passes
-`--image "$ZPU_SMOLVM_IMAGE"`, so an immutable digest cannot be shadowed by the
-Smolfile. The X11 socket is supplied separately because its host path is
-session-specific.
+resources and the no-GPU policy. It deliberately has neither an image nor a
+network field: the launcher is the sole source of both creation-time settings.
+It always passes `--image "$ZPU_SMOLVM_IMAGE"` and `--net`, so an immutable
+digest cannot be shadowed by the Smolfile; bootstrap later persists `--no-net`.
+The X11 socket is supplied separately because its host path is session-specific.
 
 ## Exact lifecycle
 
@@ -154,12 +156,14 @@ Preflight is fail-closed and reports the first remediation:
   immutable source export;
 - guest Arch package network access only during bootstrap, followed by a
   successful stop/update-`--no-net`/restart sequence;
-- guest Zig exactly 0.16.0, `vulkan-headers`, Vulkan loader/tools, and `libxcb`
-  packages, with readable Vulkan and XCB development headers (if the
+- guest Zig exactly 0.16.0, `vulkan-headers`, Vulkan loader/tools, `libxcb`, and
+  `xorg-xauth` packages, with readable Vulkan and XCB development headers (if the
   rolling Arch `zig` package has moved, install upstream's 0.16.0 archive in
   the guest and place it first on `PATH` before `build`);
 - guest-installed ZPU manifest/library and exact device-name discovery;
-- an XCB surface capable of displaying the validation window.
+- exactly one guest Xauthority entry that successfully opens `DISPLAY=:0`
+  through a Vulkan-independent XCB probe, followed by an XCB surface capable of
+  displaying the validation window.
 
 Run `zig build smolvm-guest-test` for the no-hardware command/isolation gate and
 `zig build smolvm-dry-run` for the generated lifecycle. A real Vulkan smoke is

@@ -22,6 +22,7 @@ cp -a "$src/." "$work/"
 cd "$work"
 zig fmt --check build.zig src tools
 zig build -Doptimize=ReleaseSafe --prefix "$prefix"
+zig cc -O2 -std=c11 -Wall -Wextra -Werror smolvm/xcb-connect.c -lxcb -o "$prefix/bin/zpu-xcb-connect"
 zig cc -O2 -std=c11 -Wall -Wextra -Werror test/xcb_present.c -lvulkan -lxcb -o "$prefix/bin/zpu-xcb-present"
 test -x /usr/bin/vulkaninfo
 test -x /usr/bin/vkcube

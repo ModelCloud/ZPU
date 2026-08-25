@@ -48,12 +48,15 @@ preflight() {
     printf 'READY: Linux x86_64, KVM, X11 socket, xauth, clean host Vulkan environment\n'
     printf 'NOTE: launch never passes --gpu; ZPU/Venus coexistence is rejected by construction\n'
 }
-prepare_auth() {
+prepare_auth() (
     local bootstrap_auth=$auth_dir/bootstrap-Xauthority
     local before=$auth_dir/before.nlist
     local after=$auth_dir/after.nlist
     local selected=$auth_dir/selected.nlist
     local generated_key
+    umask 077
+    cleanup_auth_files() { rm -f "$bootstrap_auth" "$before" "$after" "$selected"; }
+    trap cleanup_auth_files EXIT
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
         printf '+ prepare X SECURITY untrusted Xauthority cookie with 300-second idle timeout in %q for %q\n' "$auth_dir" "$display"
         return
@@ -69,10 +72,16 @@ prepare_auth() {
     chmod 600 "$auth_dir/Xauthority"
     if XAUTHORITY="$bootstrap_auth" xauth -f "$bootstrap_auth" generate "$display" . untrusted timeout 300 >/dev/null 2>&1; then
         xauth -f "$bootstrap_auth" nlist "$display" > "$after"
-        grep -Fvx -f "$before" "$after" > "$selected" || true
+        if grep -Fvx -f "$before" "$after" > "$selected"; then
+            :
+        else
+            status=$?
+            [[ $status -eq 1 ]] || die "failed to compare trusted and generated Xauthority entries (grep exit $status)"
+        fi
         [[ $(awk 'NF { count++ } END { print count + 0 }' "$selected") -eq 1 ]] || die 'X SECURITY generation did not produce exactly one distinct untrusted authorization entry'
         generated_key=$(awk 'NF { print $NF }' "$selected")
         ! awk 'NF { print $NF }' "$before" | grep -Fxq "$generated_key" || die 'X SECURITY returned the original trusted authorization key'
+        sed -i 's/^..../ffff/' "$selected"
     elif [[ ${ZPU_SMOLVM_ALLOW_TRUSTED_X11:-0} == 1 ]]; then
         cp "$before" "$selected"
         printf 'zpu-smolvm: WARNING: X SECURITY untrusted cookie unavailable; explicit full-trust X11 fallback enabled\n' >&2
@@ -81,8 +90,7 @@ prepare_auth() {
     fi
     xauth -f "$auth_dir/Xauthority" nmerge - < "$selected"
     [[ $(xauth -f "$auth_dir/Xauthority" nlist "$display" | awk 'NF { count++ } END { print count + 0 }') -eq 1 ]] || die 'guest Xauthority must contain exactly one entry'
-    rm -f "$bootstrap_auth" "$before" "$after" "$selected"
-}
+)
 prepare_source() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
         printf '+ export tracked HEAD source archive without build outputs to %q\n' "$source_archive"
@@ -109,7 +117,7 @@ create() {
 bootstrap() {
     reject_host_injection
     run smolvm machine start --name "$machine"
-    run smolvm machine exec --name "$machine" -- pacman -Syu --noconfirm zig vulkan-headers vulkan-icd-loader vulkan-tools libxcb
+    run smolvm machine exec --name "$machine" -- pacman -Syu --noconfirm zig vulkan-headers vulkan-icd-loader vulkan-tools libxcb xorg-xauth
     run smolvm machine stop --name "$machine"
     run smolvm machine update --name "$machine" --no-net
     run smolvm machine start --name "$machine"
@@ -142,7 +150,7 @@ dry_run() { ZPU_SMOLVM_DRY_RUN=1; export ZPU_SMOLVM_DRY_RUN; create; bootstrap; 
 usage() { printf 'usage: tools/smolvm-zpu.sh {cli-check|preflight|create|bootstrap|build|package|stage|launch|dry-run}\n' >&2; exit 2; }
 
 case ${1:-} in
-    cli-check) require_smolvm_cli ;;
+    cli-check) reject_host_injection; require_smolvm_cli ;;
     preflight) preflight ;;
     create) create ;;
     bootstrap) bootstrap ;;

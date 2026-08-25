@@ -2,7 +2,6 @@
 # ZPU_SMOLVM_IMAGE immutable digest cannot be shadowed by this file.
 cpus = 8
 memory = 8192
-net = true
 
 # Deliberately absent: gpu=true. ZPU is built and executed in the guest; enabling
 # SmolVM GPU would add virtio-gpu/Venus to a path whose isolation is the point.
