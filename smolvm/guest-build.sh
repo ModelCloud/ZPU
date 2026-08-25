@@ -5,7 +5,7 @@ src=/mnt/zpu-source
 work=/var/tmp/zpu-build
 prefix=/opt/zpu
 
-for program in zig vulkaninfo vkcube tar; do
+for program in zig vulkaninfo vkcube tar python3 git taskset lscpu; do
     command -v "$program" >/dev/null || { echo "required guest tool not found: $program" >&2; exit 2; }
 done
 for header in /usr/include/vulkan/vulkan.h /usr/include/vulkan/vulkan_xcb.h /usr/include/xcb/xcb.h; do
@@ -17,11 +17,11 @@ test "$(zig version)" = 0.16.0 || {
 }
 test -r "$src/build.zig" || { echo "guest source was not staged at $src" >&2; exit 2; }
 rm -rf "$work"
-mkdir -p "$work" "$prefix"
+mkdir -p "$work" "$prefix/bin"
 cp -a "$src/." "$work/"
 cd "$work"
-zig fmt --check build.zig src tools
-zig build -Doptimize=ReleaseSafe --prefix "$prefix"
+tools/limited-cpus.sh zig fmt --check build.zig src tools
+tools/limited-cpus.sh zig build -Doptimize=ReleaseSafe --prefix "$prefix"
 zig cc -O2 -std=c11 -Wall -Wextra -Werror smolvm/xcb-connect.c -lxcb -o "$prefix/bin/zpu-xcb-connect"
 zig cc -O2 -std=c11 -Wall -Wextra -Werror test/xcb_present.c -lvulkan -lxcb -o "$prefix/bin/zpu-xcb-present"
 test -x /usr/bin/vulkaninfo

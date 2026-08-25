@@ -24,9 +24,12 @@ directory.
 Networking is enabled only for bootstrap package installation. Immediately
 after `pacman` completes, the launcher stops the machine, runs the documented
 SmolVM 1.7.0 `machine update --name NAME --no-net` operation while it is
-stopped, and restarts it. Networking is therefore disabled before any source,
-build, package, stage, or launch work. Failure of stop, update, or restart aborts
-the bootstrap chain. The package transaction still has network authority and
+stopped, and restarts it. Every build, package, stage, and launch independently
+reads `machine ls --json` and fails unless the unique persisted record has
+`network: false`. If package installation fails, an exit trap safely stops the
+machine and attempts the same `--no-net` update before returning failure.
+Networking is therefore disabled before any source, build, package, stage, or
+launch work. The package transaction still has network authority and
 must be treated as a supply-chain boundary; inspect or pin the Arch repositories
 and image when reproducible inputs are required.
 
@@ -34,7 +37,7 @@ The launcher copies the current MIT-MAGIC-COOKIE-1 entry into a private
 bootstrap authority database, then uses it to ask the X SECURITY extension for
 a separate **untrusted** cookie with a 300-second idle timeout. It computes the
 exact before/after entry difference, requires one newly generated key distinct
-from the trusted key, normalizes only that selected entry to Xauthority
+from the trusted key, normalizes that selected entry's address family to Xauthority
 `FamilyWild` so it remains valid when the guest hostname differs, and constructs
 a fresh guest authority file containing exactly that one entry. It never mounts
 the host authority file. An
@@ -51,7 +54,9 @@ fails closed and does not copy the trusted bootstrap key. Setting
 **full X11 client authority** for that display. A malicious guest with that
 credential may inspect other X11 windows, capture X11-visible content or input,
 synthesize input, manipulate windows, and act as the host user toward other X11
-clients. This fallback is a powerful host credential; use it only with a fully
+clients. The fallback entry is also normalized to `FamilyWild` for the hostname
+boundary, but retains the original trusted key and is labeled `trusted` for the
+guest validator. This fallback is a powerful host credential; use it only with a fully
 trusted guest or a disposable nested X server.
 
 Modern Xwayland builds may omit the X SECURITY extension entirely; verify it
@@ -128,9 +133,11 @@ tools/smolvm-zpu.sh stage
 tools/smolvm-zpu.sh launch
 ```
 
-`bootstrap` starts the machine, installs the required packages, stops it,
-persists `--no-net`, and restarts it. Do not proceed to `build` if that command
-fails.
+`bootstrap` stops the machine, explicitly persists `--net`, starts it, installs
+the required packages, stops it,
+persists `--no-net`, restarts it, and verifies the persisted JSON state. Do not
+proceed to `build` if that command fails; failure cleanup leaves the machine
+stopped if the emergency no-network update itself cannot be confirmed.
 
 Commit the intended source first: `build` refuses a dirty index or worktree,
 exports tracked `HEAD` to a source-only tar archive, rejects binary/build
@@ -142,8 +149,10 @@ guest;
 the host. `launch` first checks `vulkaninfo --summary` names exactly `ZPU
 Experimental CPU`, opens a two-second 2D clear/present window, then opens a
 120-frame 3D `vkcube` window. X SECURITY correctly denies `GetImage` to the
-untrusted guest, so this gate requires successful Vulkan presentation while the
-trusted deterministic `xcb-present` gate retains the exact pixel readback. The repo's
+untrusted guest, so that mode reports unambiguous submitted-pixel evidence but
+does not claim readback. The explicit trusted fallback retains exact pixel
+readback. Guest authorization files are deleted on validation success or
+failure. The repo's
 deterministic `zpu-demo` is also built into `/opt/zpu/bin/zpu-demo` and may be
 run inside the guest. These windows separately exercise XCB 2D image transport
 and ZPU's vkcube-specific 3D CPU rasterizer.
@@ -171,7 +180,8 @@ Preflight is fail-closed and reports the first remediation:
 - guest Zig exactly 0.16.0, `vulkan-headers`, Vulkan loader/tools, `libxcb`, and
   `xorg-xauth` packages, with readable Vulkan and XCB development headers (if the
   rolling Arch `zig` package has moved, install upstream's 0.16.0 archive in
-  the guest and place it first on `PATH` before `build`);
+  the guest and place it first on `PATH` before `build`), plus Python, Git, and
+  util-linux (`taskset`/`lscpu`) required by the repository CPU limiter;
 - guest-installed ZPU manifest/library and exact device-name discovery;
 - exactly one guest Xauthority entry that successfully opens `DISPLAY=:0`
   through a Vulkan-independent XCB probe, followed by an XCB surface capable of
@@ -189,6 +199,12 @@ guest. With SmolVM's GPU device disabled there is no DRM/KMS device on which a
 Wayland compositor can own a seat or scan out, and enabling it would introduce
 Venus in violation of this boundary. The supported graphical milestone is an
 Omarchy-host-visible guest XCB Vulkan application window through Xwayland.
+
+No real Omarchy image or Hyprland session was available in the reference test
+environment. The tested substitute was an Arch guest displaying through nested
+Xephyr on headless Weston/Xwayland; this validates the Vulkan/XCB and security
+assumptions, but the real Omarchy/Hyprland host session remains an explicit
+hardware/session integration gate.
 
 The roadmap stays Vulkan-only: generalize ZPU's SPIR-V and pipeline execution,
 broaden Vulkan WSI beyond XCB when a guest-display transport can preserve the

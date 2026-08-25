@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset VK_DRIVER_FILES VK_ICD_FILENAMES VK_ADD_DRIVER_FILES LD_PRELOAD LD_LIBRARY_PATH ZPU_REFRESH_HZ
 
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/runtime"
+chmod 700 "$tmp/runtime"
 fixture=$repo/test/fixtures/smolvm/v1.7.0/smolvm
 ln -s "$fixture" "$tmp/runtime/smolvm"
 PATH="$tmp/runtime:$PATH" "$repo/tools/smolvm-zpu.sh" cli-check
@@ -20,6 +22,11 @@ for capability in missing-mount-socket missing-smolfile missing-cp missing-stop-
     fi
 done
 ln -sfn "$fixture" "$tmp/runtime/smolvm"
+for capability in create-name image net cpus mem start-name update-name update-net exec-name ls-json; do
+    if SMOLVM_FIXTURE_OMIT=$capability PATH="$tmp/runtime:$PATH" "$repo/tools/smolvm-zpu.sh" cli-check >"$tmp/out" 2>"$tmp/err"; then
+        echo "SmolVM missing capability unexpectedly passed: $capability" >&2; exit 1
+    fi
+done
 if VK_DRIVER_FILES=/host/injection PATH="$tmp/runtime:$PATH" "$repo/tools/smolvm-zpu.sh" cli-check >"$tmp/out" 2>"$tmp/err"; then
     echo 'cli-check accepted host Vulkan injection' >&2; exit 1
 fi
@@ -47,13 +54,15 @@ done <<<"$out"
 grep -F -- '--net' <<<"$out"
 grep -F -- 'machine stop --name' <<<"$out"
 grep -F -- 'machine update --name zpu-omarchy --no-net' <<<"$out"
+grep -F -- 'verify persisted SmolVM state' <<<"$out"
 pacman_line=$(grep -nF 'pacman -Syu' <<<"$out" | cut -d: -f1)
-stop_line=$(grep -nF 'machine stop --name' <<<"$out" | cut -d: -f1)
+enable_line=$(grep -nF 'machine update --name zpu-omarchy --net' <<<"$out" | cut -d: -f1)
+stop_line=$(grep -nF 'machine stop --name' <<<"$out" | tail -1 | cut -d: -f1)
 update_line=$(grep -nF 'machine update --name zpu-omarchy --no-net' <<<"$out" | cut -d: -f1)
 restart_line=$(grep -nF 'machine start --name zpu-omarchy' <<<"$out" | tail -1 | cut -d: -f1)
 build_line=$(grep -nF 'guest-build.sh' <<<"$out" | cut -d: -f1)
 [[ $(grep -cF 'machine start --name zpu-omarchy' <<<"$out") -eq 2 ]]
-((pacman_line < stop_line && stop_line < update_line && update_line < restart_line && restart_line < build_line)) || { echo 'network teardown ordering is unsafe' >&2; exit 1; }
+((enable_line < pacman_line && pacman_line < stop_line && stop_line < update_line && update_line < restart_line && restart_line < build_line)) || { echo 'network lifecycle ordering is unsafe' >&2; exit 1; }
 grep -F -- 'Xauthority' <<<"$out"
 [[ $(grep -cF 'prepare X SECURITY untrusted Xauthority' <<<"$out") -eq 1 ]]
 auth_line=$(grep -nF 'prepare X SECURITY untrusted Xauthority' <<<"$out" | cut -d: -f1)
@@ -61,6 +70,8 @@ stage_line=$(grep -nF '/var/lib/zpu-native-icd.tar.gz' <<<"$out" | tail -1 | cut
 ((stage_line < auth_line)) || { echo 'create-time Xauthority generation returned' >&2; exit 1; }
 grep -F 'vulkan-headers' "$repo/tools/smolvm-zpu.sh"
 grep -F '/usr/include/vulkan/vulkan.h' "$repo/smolvm/guest-build.sh"
+grep -F 'tools/limited-cpus.sh zig build' "$repo/smolvm/guest-build.sh"
+grep -F 'python git util-linux' "$repo/tools/smolvm-zpu.sh"
 grep -F 'Networking is therefore disabled before any source' "$repo/docs/smolvm-omarchy.md"
 grep -F 'full X11 client authority' "$repo/docs/smolvm-omarchy.md"
 grep -F 'untrusted timeout 300' "$repo/tools/smolvm-zpu.sh"
@@ -79,11 +90,27 @@ fi
 # additional devices fail, including the translation/Venus fixture.
 validator=$repo/smolvm/validate-vulkaninfo.sh
 "$validator" "$repo/test/fixtures/smolvm/vulkaninfo/one-zpu.txt"
-for bad in zero.txt duplicate-zpu.txt additional.txt; do
+for bad in zero.txt duplicate-zpu.txt additional.txt wrong-type.txt; do
     if "$validator" "$repo/test/fixtures/smolvm/vulkaninfo/$bad" >"$tmp/out" 2>"$tmp/err"; then
         echo "vulkaninfo fixture unexpectedly passed: $bad" >&2; exit 1
     fi
 done
+
+# Every mutating post-bootstrap command fails closed on persisted network=true.
+for command in build package stage launch; do
+    if SMOLVM_FIXTURE_NETWORK=true PATH="$tmp/runtime:$PATH" XDG_RUNTIME_DIR="$tmp/runtime" "$repo/tools/smolvm-zpu.sh" "$command" >"$tmp/out" 2>"$tmp/err"; then
+        echo "$command accepted persisted network=true" >&2; exit 1
+    fi
+    grep -F 'persisted network must be exactly false' "$tmp/err"
+done
+
+# A package-manager failure after network enable triggers stop + no-net update.
+: > "$tmp/lifecycle.log"
+if SMOLVM_FIXTURE_FAIL_PACMAN=1 SMOLVM_FIXTURE_LOG="$tmp/lifecycle.log" PATH="$tmp/runtime:$PATH" XDG_RUNTIME_DIR="$tmp/runtime" "$repo/tools/smolvm-zpu.sh" bootstrap >"$tmp/out" 2>"$tmp/err"; then
+    echo 'injected bootstrap failure unexpectedly passed' >&2; exit 1
+fi
+grep -F 'machine stop --name zpu-omarchy' "$tmp/lifecycle.log"
+grep -F 'machine update --name zpu-omarchy --no-net' "$tmp/lifecycle.log"
 
 # Any host loader/driver injection fails before smolvm executes.
 for command in create bootstrap build package stage launch; do
@@ -99,10 +126,11 @@ done
 # one entry and never receives the trusted bootstrap key.
 ln -sfn "$repo/test/fixtures/smolvm/xauth" "$tmp/runtime/xauth"
 PATH="$tmp/runtime:$PATH" XDG_RUNTIME_DIR="$tmp/runtime" "$repo/tools/smolvm-zpu.sh" launch >/dev/null
-guest_auth="$tmp/runtime/zpu-smolvm-$UID/xauth/Xauthority"
+guest_auth="$tmp/runtime/zpu-smolvm/xauth/Xauthority"
 [[ $(awk 'NF { count++ } END { print count + 0 }' "$guest_auth") -eq 1 ]]
 grep -Eq '^ffff[[:space:]]' "$guest_auth"
 grep -Fq 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$guest_auth"
+grep -Fxq untrusted "$tmp/runtime/zpu-smolvm/xauth/mode"
 if grep -Fq 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$guest_auth"; then echo 'trusted host Xauthority key leaked to guest' >&2; exit 1; fi
 
 # A scanner execution error is not treated like the legitimate "no new line"
@@ -116,7 +144,7 @@ if PATH="$tmp/grep-error:$PATH" XDG_RUNTIME_DIR="$tmp/runtime" "$repo/tools/smol
 fi
 grep -F 'failed to compare trusted and generated Xauthority entries (grep exit 2)' "$tmp/err"
 for secret_tmp in bootstrap-Xauthority before.nlist after.nlist selected.nlist; do
-    test ! -e "$tmp/runtime/zpu-smolvm-$UID/xauth/$secret_tmp"
+    test ! -e "$tmp/runtime/zpu-smolvm/xauth/$secret_tmp"
 done
 if grep -Fq 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$guest_auth"; then echo 'trusted key survived auth error cleanup' >&2; exit 1; fi
 
@@ -126,15 +154,19 @@ if PATH="$tmp/runtime:$PATH" XDG_RUNTIME_DIR="$tmp/runtime" SMOLVM_XAUTH_GENERAT
     echo 'X SECURITY failure unexpectedly fell back to trusted authority' >&2; exit 1
 fi
 for secret_tmp in bootstrap-Xauthority before.nlist after.nlist selected.nlist; do
-    test ! -e "$tmp/runtime/zpu-smolvm-$UID/xauth/$secret_tmp"
+    test ! -e "$tmp/runtime/zpu-smolvm/xauth/$secret_tmp"
 done
 if grep -Fq 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$guest_auth"; then echo 'trusted key survived fail-closed auth cleanup' >&2; exit 1; fi
 PATH="$tmp/runtime:$PATH" XDG_RUNTIME_DIR="$tmp/runtime" SMOLVM_XAUTH_GENERATE_FAIL=1 ZPU_SMOLVM_ALLOW_TRUSTED_X11=1 "$repo/tools/smolvm-zpu.sh" launch >"$tmp/out" 2>"$tmp/err"
 grep -Fq 'full-trust X11 fallback enabled' "$tmp/err"
 [[ $(awk 'NF { count++ } END { print count + 0 }' "$guest_auth") -eq 1 ]]
 grep -Fq 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$guest_auth"
+grep -Fxq trusted "$tmp/runtime/zpu-smolvm/xauth/mode"
 grep -F 'guest Xauthority must contain exactly one entry' "$repo/smolvm/guest-validate.sh"
 grep -F 'guest cannot authenticate and open DISPLAY=:0' "$repo/smolvm/guest-validate.sh"
 grep -F 'ZPU_UNTRUSTED_X11=1' "$repo/smolvm/guest-validate.sh"
+grep -F 'trap cleanup EXIT HUP INT TERM' "$repo/smolvm/guest-validate.sh"
+grep -F 'xcb_present_readback=not_attempted_untrusted_x11' "$repo/test/xcb_present.c"
+grep -F 'ZPU_WINDOW_HOLD_SECONDS must be an integer from 0 through 10' "$repo/test/xcb_present.c"
 grep -F 'X SECURITY correctly denies `GetImage`' "$repo/docs/smolvm-omarchy.md"
 printf '%s\n' 'SmolVM guest isolation contract passed'

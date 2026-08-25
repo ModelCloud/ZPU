@@ -1,6 +1,7 @@
 #include <vulkan/vulkan.h>
 #include <xcb/xcb.h>
 #include <vulkan/vulkan_xcb.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -161,7 +162,9 @@ int main(void) {
         /* X SECURITY deliberately forbids GetImage, even on this client's
          * window. Successful queue presentation is the strongest guest-side
          * check; trusted deterministic gates retain the exact pixel oracle. */
-        puts("xcb_present_submitted=BGRA(223,127,31,255)");
+        puts("xcb_present_submission_complete=1");
+        puts("xcb_present_expected_pixel=BGRA(223,127,31,255)");
+        puts("xcb_present_readback=not_attempted_untrusted_x11");
     } else {
         xcb_get_image_cookie_t image_cookie = xcb_get_image(connection, XCB_IMAGE_FORMAT_Z_PIXMAP, window, width / 2, height / 2, 1, 1, UINT32_MAX);
         xcb_get_image_reply_t *image_reply = xcb_get_image_reply(connection, image_cookie, NULL);
@@ -173,8 +176,13 @@ int main(void) {
     }
     const char *hold = getenv("ZPU_WINDOW_HOLD_SECONDS");
     if (hold != NULL) {
-        unsigned long seconds = strtoul(hold, NULL, 10);
-        if (seconds > 10) seconds = 10;
+        char *end = NULL;
+        errno = 0;
+        unsigned long seconds = strtoul(hold, &end, 10);
+        if (errno != 0 || end == hold || *end != '\0' || seconds > 10) {
+            fprintf(stderr, "ZPU_WINDOW_HOLD_SECONDS must be an integer from 0 through 10\n");
+            return 2;
+        }
         sleep((unsigned int)seconds);
     }
 
