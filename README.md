@@ -178,3 +178,8 @@ ZPU also exposes `VK_EXT_present_timing`: applications can attach
 `VkPresentTimingsInfoEXT` to each `vkQueuePresentKHR` call and select an absolute
 monotonic or relative target time per swapchain. Untimed presents retain the
 process-local `ZPU_REFRESH_HZ` cadence.
+
+`VK_GOOGLE_display_timing` is deliberately unsupported with no compatibility
+alias. Requests for that extension, its device procedures, or
+`VkPresentTimesInfoGOOGLE` emit an explicit driver error directing applications
+to `VK_EXT_present_timing` and `ZPU_REFRESH_HZ`.

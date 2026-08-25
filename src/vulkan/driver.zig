@@ -480,6 +480,16 @@ fn lock() void {
 }
 
 const ChainHeader = extern struct { s_type: i32, p_next: ?*const ChainHeader };
+const google_display_timing_extension = "VK_GOOGLE_display_timing";
+const google_present_times_info_stype: i32 = 1_000_092_000;
+
+fn googleDisplayTimingProc(name: []const u8) bool {
+    return std.mem.eql(u8, name, "vkGetRefreshCycleDurationGOOGLE") or std.mem.eql(u8, name, "vkGetPastPresentationTimingGOOGLE");
+}
+
+fn logGoogleDisplayTimingRejected(context: []const u8) void {
+    std.debug.print("ZPU error: unsupported VK_GOOGLE_display_timing usage detected ({s}); switch to VK_EXT_present_timing for runtime scheduling and ZPU_REFRESH_HZ for the process display cadence. No Google timing compatibility is provided.\n", .{context});
+}
 const LoaderInstanceInfo = extern struct {
     s_type: i32,
     p_next: ?*const anyopaque,
@@ -972,6 +982,10 @@ fn createDevice(physical: ?Physical, info: ?*const DeviceInfo, alloc: ?*const Al
         const extensions = ci.extensions orelse return .error_extension_not_present;
         for (extensions[0..ci.extension_count]) |extension| {
             const name = std.mem.span(extension);
+            if (std.mem.eql(u8, name, google_display_timing_extension)) {
+                logGoogleDisplayTimingRejected("device extension request");
+                return .error_extension_not_present;
+            }
             if (!std.mem.eql(u8, name, "VK_KHR_swapchain") and !std.mem.eql(u8, name, "VK_EXT_present_timing")) return .error_extension_not_present;
         }
     }
@@ -3586,6 +3600,10 @@ fn presentTarget(info: *const PresentInfo, index: usize, now_ns: u64) !?u64 {
     while (next) |raw| : (depth += 1) {
         if (depth == 16) return error.InvalidPresentTiming;
         const header: *const ChainHeader = @ptrCast(@alignCast(raw));
+        if (header.s_type == google_present_times_info_stype) {
+            logGoogleDisplayTimingRejected("VkPresentTimesInfoGOOGLE in vkQueuePresentKHR");
+            return error.GoogleDisplayTimingUnsupported;
+        }
         if (header.s_type == 1_000_208_003) {
             const timings: *const PresentTimingsInfoEXT = @ptrCast(@alignCast(raw));
             if (timings.swapchain_count != info.swapchain_count or timings.timing_infos == null) return error.InvalidPresentTiming;
@@ -3608,6 +3626,17 @@ test "EXT present timing selects absolute and relative deadlines" {
     try std.testing.expectEqual(@as(?u64, 1_250), try presentTarget(&info, 0, 1_000));
     timing.time_domain_id = 2;
     try std.testing.expectError(error.InvalidPresentTiming, presentTarget(&info, 0, 1_000));
+    const google = ChainHeader{ .s_type = google_present_times_info_stype, .p_next = null };
+    var google_info = info;
+    google_info.p_next = &google;
+    try std.testing.expectError(error.GoogleDisplayTimingUnsupported, presentTarget(&google_info, 0, 1_000));
+}
+
+test "Google display timing procedure names are detected without aliases" {
+    try std.testing.expect(googleDisplayTimingProc("vkGetRefreshCycleDurationGOOGLE"));
+    try std.testing.expect(googleDisplayTimingProc("vkGetPastPresentationTimingGOOGLE"));
+    try std.testing.expect(!googleDisplayTimingProc("vkGetSwapchainTimingPropertiesEXT"));
+    try std.testing.expect(deviceLookup("vkGetRefreshCycleDurationGOOGLE") == null);
 }
 
 fn getSwapchainTimingProperties(device: ?Device, handle: usize, output: ?*SwapchainTimingPropertiesEXT, counter: ?*u64) callconv(.c) Result {
@@ -3695,6 +3724,10 @@ fn instanceLookup(n: []const u8) Fn {
     return deviceLookup(n);
 }
 fn deviceLookup(n: []const u8) Fn {
+    if (googleDisplayTimingProc(n)) {
+        logGoogleDisplayTimingRejected("device procedure lookup");
+        return null;
+    }
     const map = .{ .{ "vkGetDeviceProcAddr", getDeviceProcAddr }, .{ "vkDestroyDevice", destroyDevice }, .{ "vkGetDeviceQueue", getDeviceQueue }, .{ "vkAllocateMemory", allocateMemory }, .{ "vkFreeMemory", freeMemory }, .{ "vkMapMemory", mapMemory }, .{ "vkUnmapMemory", unmapMemory }, .{ "vkCreateBuffer", createBuffer }, .{ "vkDestroyBuffer", destroyBuffer }, .{ "vkGetBufferMemoryRequirements", getBufferMemoryRequirements }, .{ "vkBindBufferMemory", bindBufferMemory }, .{ "vkCreateImage", createImage }, .{ "vkDestroyImage", destroyImage }, .{ "vkGetImageMemoryRequirements", getImageMemoryRequirements }, .{ "vkBindImageMemory", bindImageMemory }, .{ "vkGetImageSubresourceLayout", getImageSubresourceLayout }, .{ "vkCreateFence", createFence }, .{ "vkDestroyFence", destroyFence }, .{ "vkGetFenceStatus", getFenceStatus }, .{ "vkResetFences", resetFences }, .{ "vkWaitForFences", waitForFences }, .{ "vkCreateCommandPool", createCommandPool }, .{ "vkDestroyCommandPool", destroyCommandPool }, .{ "vkAllocateCommandBuffers", allocateCommandBuffers }, .{ "vkFreeCommandBuffers", freeCommandBuffers }, .{ "vkBeginCommandBuffer", beginCommandBuffer }, .{ "vkEndCommandBuffer", endCommandBuffer }, .{ "vkResetCommandBuffer", resetCommandBuffer }, .{ "vkCmdFillBuffer", cmdFillBuffer }, .{ "vkCmdCopyBuffer", cmdCopyBuffer }, .{ "vkCmdClearColorImage", cmdClearColorImage }, .{ "vkCmdCopyBufferToImage", cmdCopyBufferToImage }, .{ "vkCmdCopyImageToBuffer", cmdCopyImageToBuffer }, .{ "vkCmdCopyImage", cmdCopyImage }, .{ "vkCmdPipelineBarrier", cmdPipelineBarrier }, .{ "vkQueueSubmit", queueSubmit }, .{ "vkQueueWaitIdle", queueWaitIdle }, .{ "vkDeviceWaitIdle", deviceWaitIdle } };
     inline for (map) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
     const timing = .{ .{ "vkSetSwapchainPresentTimingQueueSizeEXT", setSwapchainPresentTimingQueueSize }, .{ "vkGetSwapchainTimingPropertiesEXT", getSwapchainTimingProperties }, .{ "vkGetSwapchainTimeDomainPropertiesEXT", getSwapchainTimeDomainProperties }, .{ "vkGetPastPresentationTimingEXT", getPastPresentationTiming } };
