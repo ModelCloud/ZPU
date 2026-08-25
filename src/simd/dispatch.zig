@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const config = @import("zpu_config");
+const abi = @import("kernel_abi.zig");
 const s = @import("../surface.zig");
 const scalar = @import("../raster/scalar.zig");
 const vector = @import("vector.zig");
@@ -67,10 +68,31 @@ pub fn best() Backend {
 }
 
 const v3 = struct {
-    extern fn zpu_v3_fill_span_8([*]u8, usize, usize, usize, u8, u32) void;
-    extern fn zpu_v3_blend_span_8([*]u8, usize, usize, usize, u8, u32) void;
-    extern fn zpu_v3_blend_pixels_8([*]u8, usize, usize, [*]const u8, usize, usize, u8) void;
+    const fill_span_8: abi.FillSpan8Fn = @extern(abi.FillSpan8Fn, .{ .name = abi.fill_span_8_name });
+    const blend_span_8: abi.BlendSpan8Fn = @extern(abi.BlendSpan8Fn, .{ .name = abi.blend_span_8_name });
+    const blend_pixels_8: abi.BlendPixels8Fn = @extern(abi.BlendPixels8Fn, .{ .name = abi.blend_pixels_8_name });
 };
+
+/// Linkage consistency proof (build-time): an artifact whose comptime
+/// configuration claims eight-lane capability must physically contain the
+/// kernel objects. Materializing the extern function pointers as runtime data
+/// forces symbol resolution, making a missing or misconfigured kernel library
+/// a hard link error instead of a latent unsupported-instruction fault.
+/// Conversely, when this flag is false the symbols are never referenced, so
+/// kernel-free artifacts cannot carry them (asserted by the disassembly
+/// gate's `--no-kernel-symbols` mode).
+const linkage_proof = if (eight_lane_boundary)
+    [3]*const anyopaque{
+        @ptrCast(v3.fill_span_8),
+        @ptrCast(v3.blend_span_8),
+        @ptrCast(v3.blend_pixels_8),
+    }
+else
+    [0]*const anyopaque{};
+
+test "boundary claim matches linked kernel symbols" {
+    try std.testing.expectEqual(eight_lane_boundary, linkage_proof.len != 0);
+}
 
 fn packColor(color: s.Color) u32 {
     return @as(u32, color.r) | (@as(u32, color.g) << 8) | (@as(u32, color.b) << 16) | (@as(u32, color.a) << 24);
@@ -89,7 +111,7 @@ pub fn fillSpan(backend: Backend, row: []u8, start: usize, count: usize, format:
         .portable_vector => vector.fill(4, row, start, count, format, color),
         .avx2 => if (comptime eight_lane_boundary) {
             requireEightLaneSupport();
-            v3.zpu_v3_fill_span_8(row.ptr, row.len, start, count, @intFromEnum(format), packColor(color));
+            v3.fill_span_8(row.ptr, row.len, start, count, @intFromEnum(format), packColor(color));
         } else @panic("eight-lane kernels require an x86_64 artifact target"),
     }
 }
@@ -99,7 +121,7 @@ pub fn blendSpan(backend: Backend, row: []u8, start: usize, count: usize, format
         .portable_vector => vector.blend(4, row, start, count, format, color),
         .avx2 => if (comptime eight_lane_boundary) {
             requireEightLaneSupport();
-            v3.zpu_v3_blend_span_8(row.ptr, row.len, start, count, @intFromEnum(format), packColor(color));
+            v3.blend_span_8(row.ptr, row.len, start, count, @intFromEnum(format), packColor(color));
         } else @panic("eight-lane kernels require an x86_64 artifact target"),
     }
 }
@@ -109,7 +131,7 @@ pub fn blendPixels(backend: Backend, row: []u8, start: usize, source: []const u8
         .portable_vector => vector.blendPixels(4, row, start, source, count, format),
         .avx2 => if (comptime eight_lane_boundary) {
             requireEightLaneSupport();
-            v3.zpu_v3_blend_pixels_8(row.ptr, row.len, start, source.ptr, source.len, count, @intFromEnum(format));
+            v3.blend_pixels_8(row.ptr, row.len, start, source.ptr, source.len, count, @intFromEnum(format));
         } else @panic("eight-lane kernels require an x86_64 artifact target"),
     }
 }

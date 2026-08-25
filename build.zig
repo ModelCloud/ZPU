@@ -3,20 +3,38 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     // Default shipped artifacts to the x86-64 baseline CPU model so LLVM can
     // never emit AVX2/AVX-512 (or any VEX-encoded) instruction into them.
-    // `-Dcpu` remains an explicit opt into higher artifact tiers. The
+    // `-Dcpu` remains an explicit opt into a higher artifact tier. The
     // eight-lane kernels live in a separate x86_64_v3 library; building with
     // `-Dv3-kernels=false` produces fully kernel-free baseline artifacts for
     // the ISA disassembly evidence gates.
     const v3_kernels_enabled = b.option(bool, "v3-kernels", "Link the separately compiled x86-64-v3 eight-lane kernel objects") orelse true;
+    const enable_xcb = b.option(bool, "xcb", "Build the xcb-dependent artifacts (ICD, demo)") orelse true;
     const target = b.standardTargetOptions(.{ .default_target = .{ .cpu_model = .baseline } });
     const optimize = b.standardOptimizeOption(.{});
+    if (b.option([]const u8, "search-prefix", "Extra library search prefix for cross builds (e.g. /usr/lib/aarch64-linux-gnu)")) |prefix| {
+        b.addSearchPrefix(prefix);
+    }
+
+    const v3_tier_applicable = target.result.cpu.arch == .x86_64;
+    const v3_available = v3_kernels_enabled and v3_tier_applicable;
 
     const build_config = b.addOptions();
-    build_config.addOption(bool, "v3_kernels", v3_kernels_enabled);
+    build_config.addOption(bool, "v3_kernels", v3_available);
     const build_config_module = build_config.createModule();
 
-    const v3_kernels_main = if (v3_kernels_enabled) addV3Kernels(b, target, "zpu-x86-64-v3-kernels") else null;
-    const v3_kernels_host = if (v3_kernels_enabled) addV3Kernels(b, b.graph.host, "zpu-host-x86-64-v3-kernels") else null;
+    // Kernel-free twin configuration: identical sources and flags except the
+    // eight-lane boundary is compiled out. ReleaseFast copies of every
+    // shipped artifact are gated with zero-VEX expectations in `isa-gate`,
+    // keeping the strongest evidence inside the normal test contract.
+    const clean_config = b.addOptions();
+    clean_config.addOption(bool, "v3_kernels", false);
+    const clean_config_module = clean_config.createModule();
+    const release_fast = .ReleaseFast;
+
+    const v3_kernels_main: ?*std.Build.Step.Compile =
+        if (v3_available) addV3Kernels(b, target, "zpu-x86-64-v3-kernels") else null;
+    const v3_kernels_host: ?*std.Build.Step.Compile =
+        if (v3_available) addV3Kernels(b, b.graph.host, "zpu-host-x86-64-v3-kernels") else null;
 
     const require_limited = b.addSystemCommand(&.{"tools/require-limited.sh"});
     const validate_api_inventory = b.addSystemCommand(&.{ "python3", "tools/api_inventory.py" });
@@ -32,7 +50,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     zpu.link_libc = true;
-    zpu.linkSystemLibrary("xcb", .{});
+    if (enable_xcb) zpu.linkSystemLibrary("xcb", .{});
     zpu.addImport("zpu_config", build_config_module);
     if (v3_kernels_main) |k| zpu.linkLibrary(k);
     const icd = b.addLibrary(.{
@@ -45,8 +63,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     icd.root_module.link_libc = true;
-    icd.root_module.linkSystemLibrary("xcb", .{});
-    b.installArtifact(icd);
+    if (enable_xcb) icd.root_module.linkSystemLibrary("xcb", .{});
+    if (enable_xcb) b.installArtifact(icd);
     const install_manifest = b.addInstallFile(b.path("src/vulkan/zpu_icd.x86_64.json"), "share/vulkan/icd.d/zpu_icd.x86_64.json");
     b.getInstallStep().dependOn(&install_manifest.step);
     const demo = b.addExecutable(.{
@@ -58,7 +76,38 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "zpu", .module = zpu }},
         }),
     });
-    b.installArtifact(demo);
+    if (enable_xcb) b.installArtifact(demo);
+
+    // Kernel-free ReleaseFast twins used by the isa-gate as the strongest
+    // normal-contract evidence: identical sources, boundary compiled out.
+    const zpu_clean = b.addModule("zpu-clean", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = release_fast,
+    });
+    zpu_clean.link_libc = true;
+    if (enable_xcb) zpu_clean.linkSystemLibrary("xcb", .{});
+    zpu_clean.addImport("zpu_config", clean_config_module);
+    const icd_clean = b.addLibrary(.{
+        .name = "vulkan_zpu_clean",
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vulkan/driver.zig"),
+            .target = target,
+            .optimize = release_fast,
+        }),
+    });
+    icd_clean.root_module.link_libc = true;
+    if (enable_xcb) icd_clean.root_module.linkSystemLibrary("xcb", .{});
+    const demo_clean = b.addExecutable(.{
+        .name = "zpu-demo-clean",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/demo/main.zig"),
+            .target = target,
+            .optimize = release_fast,
+            .imports = &.{.{ .name = "zpu", .module = zpu_clean }},
+        }),
+    });
 
     const benchmark = b.addExecutable(.{
         .name = "zpu-benchmark",
@@ -67,6 +116,11 @@ pub fn build(b: *std.Build) void {
     benchmark.root_module.addImport("zpu_config", build_config_module);
     if (v3_kernels_main) |k| benchmark.root_module.linkLibrary(k);
     b.installArtifact(benchmark);
+    const benchmark_clean = b.addExecutable(.{
+        .name = "zpu-benchmark-clean",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_main.zig"), .target = target, .optimize = release_fast }),
+    });
+    benchmark_clean.root_module.addImport("zpu_config", clean_config_module);
     const run_benchmark = b.addRunArtifact(benchmark);
     if (b.args) |args| run_benchmark.addArgs(args);
     const benchmark_step = b.step("benchmark", "Run deterministic 2D benchmark and optional baseline guard");
@@ -427,33 +481,60 @@ pub fn build(b: *std.Build) void {
     const pr_readiness_step = b.step("pr-readiness", "Validate fresh complete benchmark, screenshot, and video evidence");
     pr_readiness_step.dependOn(&pr_readiness_command.step);
 
-    const isa_gate = b.addSystemCommand(&.{ "bash", "tools/isa_disasm_gate.sh" });
-    isa_gate.addArg("check");
-    isa_gate.addArg("--clean");
-    isa_gate.addArtifactArg(icd);
-    isa_gate.addArg("--kernelized");
-    isa_gate.addArtifactArg(demo);
-    isa_gate.addArtifactArg(benchmark);
-    if (v3_kernels_main) |k| {
+    const isa_gate = b.addSystemCommand(&.{ "bash", "tools/isa_disasm_gate.sh", "check" });
+    // Strongest normal-contract evidence: ReleaseFast kernel-free twins of
+    // every shipped artifact must contain zero VEX instructions in any
+    // function and zero eight-lane kernel symbols.
+    isa_gate.addArg("--no-kernel-symbols");
+    if (enable_xcb) {
+        isa_gate.addArtifactArg(icd_clean);
+        isa_gate.addArtifactArg(demo_clean);
+    }
+    isa_gate.addArtifactArg(benchmark_clean);
+    // Default-tree artifacts: the ICD is always kernel-free; demo/benchmark
+    // are kernelized only when the v3 tier is actually linked for an x86_64
+    // target, otherwise they must equally prove kernel-freedom.
+    isa_gate.addArg("--no-kernel-symbols");
+    if (enable_xcb) isa_gate.addArtifactArg(icd);
+    if (v3_available) {
         isa_gate.addArg("--kernelized");
-        isa_gate.addArtifactArg(k);
+        isa_gate.addArtifactArg(demo);
+        isa_gate.addArtifactArg(benchmark);
+        if (v3_kernels_main) |k| isa_gate.addArtifactArg(k);
+    } else {
+        isa_gate.addArg("--no-kernel-symbols");
+        isa_gate.addArtifactArg(demo);
+        isa_gate.addArtifactArg(benchmark);
     }
     isa_gate.step.dependOn(&require_limited.step);
+
+    const isa_selftest = b.addSystemCommand(&.{ "bash", "tools/isa_gate_selftest.sh" });
+    isa_selftest.step.dependOn(&require_limited.step);
+
     const isa_gate_step = b.step("isa-gate", "Require baseline artifacts free of VEX instructions with a vectorized kernel positive control");
     isa_gate_step.dependOn(&isa_gate.step);
+    isa_gate_step.dependOn(&isa_selftest.step);
     test_step.dependOn(&isa_gate.step);
+    test_step.dependOn(&isa_selftest.step);
 
     const isa_cross = b.addSystemCommand(&.{ "bash", "tools/isa_cross_target_gate.sh" });
     isa_cross.step.dependOn(&require_limited.step);
     const isa_cross_step = b.step("isa-cross", "Collect cross-target codegen evidence for the pinned ISA tiers");
     isa_cross_step.dependOn(&isa_cross.step);
 
-    // Cross-compiling the full tree requires a target sysroot with libxcb;
-    // this step installs only the xcb-free benchmark executable so
-    // tools/isa_cross_target_gate.sh can prove boundary-free cross linkage.
-    const install_benchmark_step = b.step("install-benchmark", "Install only the xcb-free benchmark executable");
-    const install_benchmark = b.addInstallArtifact(benchmark, .{});
-    install_benchmark_step.dependOn(&install_benchmark.step);
+    // Deterministic install path for the kernel archive (used by
+    // tools/isa_cross_target_gate.sh); hard-fails when the tier is absent.
+    const install_v3_step = b.step("install-v3-archive", "Install the x86-64-v3 eight-lane kernel archive");
+    if (v3_kernels_main) |k| {
+        const install_archive = b.addInstallArtifact(k, .{
+            .dest_dir = .{ .override = .{ .custom = "isa" } },
+            .dest_sub_path = "libzpu-x86-64-v3-kernels.a",
+        });
+        install_v3_step.dependOn(&install_archive.step);
+    } else {
+        const unavailable = b.addFail("install-v3-archive requires the x86-64-v3 tier (x86_64 target and -Dv3-kernels=true)");
+        install_v3_step.dependOn(&unavailable.step);
+    }
 }
 
 /// Builds the eight-lane kernel objects as their own static library compiled

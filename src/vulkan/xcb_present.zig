@@ -49,9 +49,9 @@ fn loadShmApi() ?ShmApi {
         _ = std.c.dlclose(handle);
         return null;
     };
-    const attach_checked: ShmAttachFn = @ptrCast(attach_symbol);
-    const detach: ShmDetachFn = @ptrCast(detach_symbol);
-    const put_image: ShmPutImageFn = @ptrCast(put_image_symbol);
+    const attach_checked: ShmAttachFn = @ptrCast(@alignCast(attach_symbol));
+    const detach: ShmDetachFn = @ptrCast(@alignCast(detach_symbol));
+    const put_image: ShmPutImageFn = @ptrCast(@alignCast(put_image_symbol));
     loaded_shm_api = .{ .attach_checked = attach_checked, .detach = detach, .put_image = put_image };
     return loaded_shm_api;
 }
