@@ -7,6 +7,8 @@ pub const Work = struct {
     transport: *xcb_present.Transport,
     cadence: *?frame_pacing.Clock,
     pixels: []const u8,
+    content: xcb_present.Region,
+    force_full: bool,
     context: *anyopaque,
     image_index: u32,
     release: *const fn (*anyopaque, u32) void,
@@ -36,7 +38,7 @@ fn run() void {
         work.transport.last.queue_wait_ns = before - work.enqueued_ns;
         if (work.cadence.* == null) work.cadence.* = frame_pacing.Clock.init(before, frame_pacing.configuredRate());
         const deadline = work.target_ns orelse work.cadence.*.?.deadline();
-        if (!xcb_present.upload(work.transport, work.pixels)) {
+        if (!xcb_present.upload(work.transport, work.pixels, work.content, work.force_full)) {
             work.release(work.context, work.image_index);
             continue;
         }
@@ -79,7 +81,7 @@ test "bounded FIFO rejects overflow without corrupting queued entries" {
     defer count = saved_count;
     var transport: xcb_present.Transport = undefined;
     var cadence: ?frame_pacing.Clock = null;
-    try std.testing.expect(!enqueue(.{ .transport = &transport, .cadence = &cadence, .pixels = "", .context = @ptrFromInt(8), .image_index = 0, .release = struct {
+    try std.testing.expect(!enqueue(.{ .transport = &transport, .cadence = &cadence, .pixels = "", .content = .{}, .force_full = false, .context = @ptrFromInt(8), .image_index = 0, .release = struct {
         fn f(_: *anyopaque, _: u32) void {}
     }.f }));
 }
