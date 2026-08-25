@@ -2,6 +2,7 @@
 import math
 import os
 import pathlib
+import shlex
 import shutil
 import struct
 import subprocess
@@ -31,14 +32,20 @@ def main() -> int:
     frame_budget_ns = 1_000_000_000 // target_fps
     if not manifest.is_file():
         raise SystemExit(f"ZPU ICD manifest not found: {manifest}")
-    for program in ("timeout", "xvfb-run", "vkcube"):
+    for program in ("taskset", "timeout", "Xvfb", "xvfb-run", "vkcube"):
         if shutil.which(program) is None:
             raise SystemExit(f"required program not found: {program}")
+
+    allowed_cpus = sorted(os.sched_getaffinity(0))
+    isolate_xvfb = len(allowed_cpus) >= 8
+    client_cpus = allowed_cpus[:-1] if isolate_xvfb else allowed_cpus
+    xvfb_cpu = allowed_cpus[-1] if isolate_xvfb else None
 
     presented_frames = WARMUP_FRAMES + SAMPLE_FRAMES + 1
     command = [
         "timeout", "180s", "xvfb-run", "-a", "-s",
         f"-screen 0 {width}x{height}x24 -nolisten tcp -fakescreenfps 240",
+        "taskset", "-c", ",".join(map(str, client_cpus)),
         "vkcube", "--wsi", "xcb", "--c", str(presented_frames),
         "--width", str(width), "--height", str(height), "--suppress_popups",
     ]
@@ -50,6 +57,19 @@ def main() -> int:
         environment["ZPU_FRAME_METRICS_COUNT"] = str(WARMUP_FRAMES + SAMPLE_FRAMES)
         environment["ZPU_FRAME_METRICS_PATH"] = str(metrics_path)
         environment["ZPU_REFRESH_HZ"] = str(pacing_fps)
+        if xvfb_cpu is not None:
+            wrapper = pathlib.Path(temporary_directory) / "Xvfb"
+            wrapper.write_text(
+                "#!/bin/sh\nexec "
+                + shlex.quote(shutil.which("taskset"))
+                + " -c "
+                + str(xvfb_cpu)
+                + " "
+                + shlex.quote(shutil.which("Xvfb"))
+                + " \"$@\"\n"
+            )
+            wrapper.chmod(0o700)
+            environment["PATH"] = temporary_directory + os.pathsep + environment["PATH"]
         result = subprocess.run(command, env=environment, text=True, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, timeout=190)
         metric_bytes = metrics_path.read_bytes() if metrics_path.is_file() else b""
