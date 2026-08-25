@@ -58,6 +58,7 @@ pub fn build(b: *std.Build) void {
         .name = "zpu-benchmark-3d",
         .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_3d.zig"), .target = target, .optimize = optimize }),
     });
+    benchmark_3d.root_module.link_libc = true;
     b.installArtifact(benchmark_3d);
     const run_benchmark_3d = b.addRunArtifact(benchmark_3d);
     if (b.args) |args| run_benchmark_3d.addArgs(args);
@@ -89,6 +90,14 @@ pub fn build(b: *std.Build) void {
     const target_4k_60_step = b.step("target-4k-60", "Require vkcube 3840x2160 presented-frame p99 at 60 FPS or better");
     target_4k_60_step.dependOn(&run_target_4k_60.step);
 
+    const run_target_4k_120 = b.addSystemCommand(&.{ "python3", "test/vkcube_benchmark.py" });
+    run_target_4k_120.addArg(b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_target_4k_120.addArgs(&.{ "3840", "2160", "120", "126" });
+    run_target_4k_120.step.dependOn(&require_limited.step);
+    run_target_4k_120.step.dependOn(b.getInstallStep());
+    const target_4k_120_step = b.step("target-4k-120", "Require vkcube 3840x2160 presented-frame p99 at 120 FPS or better");
+    target_4k_120_step.dependOn(&run_target_4k_120.step);
+
     const tests = b.addTest(.{ .root_module = zpu });
     const run_tests = b.addRunArtifact(tests);
     run_tests.step.dependOn(&require_limited.step);
@@ -106,6 +115,7 @@ pub fn build(b: *std.Build) void {
     const benchmark_3d_tests = b.addTest(.{
         .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_3d.zig"), .target = b.graph.host, .optimize = .Debug }),
     });
+    benchmark_3d_tests.root_module.link_libc = true;
     const run_benchmark_3d_tests = b.addRunArtifact(benchmark_3d_tests);
     run_benchmark_3d_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&run_benchmark_3d_tests.step);

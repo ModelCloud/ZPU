@@ -2,6 +2,7 @@
 //! Khronos loader/driver interface documentation. This is an experimental ICD.
 const std = @import("std");
 const builtin = @import("builtin");
+const cpu_locality = @import("cpu_locality.zig");
 const cpu_cube = @import("cpu_cube.zig");
 const host_memory = @import("host_memory.zig");
 const xcb_present = @import("xcb_present.zig");
@@ -217,7 +218,7 @@ pub const Device = *DeviceObj;
 pub const Queue = *QueueObj;
 const MemoryObj = struct { owner: Device, bytes: []align(64) u8, mapped: bool };
 const BufferObj = struct { owner: Device, size: u64, usage: u32, memory: ?*MemoryObj = null, offset: u64 = 0 };
-const ImageObj = struct { owner: Device, width: u32, height: u32, array_layers: u32, samples: u32, format: i32, usage: u32, layout: i32, memory: ?*MemoryObj = null, owned_bytes: ?[]align(64) u8 = null, offset: u64 = 0 };
+const ImageObj = struct { owner: Device, width: u32, height: u32, array_layers: u32, samples: u32, format: i32, usage: u32, layout: i32, memory: ?*MemoryObj = null, owned_bytes: ?[]align(64) u8 = null, shared_bytes: bool = false, offset: u64 = 0 };
 const FenceObj = struct { owner: Device, signaled: bool };
 const SemaphoreObj = struct { owner: Device, signaled: bool };
 const CommandPoolObj = struct { owner: Device };
@@ -1061,6 +1062,12 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
     lock();
     defer mutex.unlock();
     for (&device_objects, &queue_objects, &device_state) |*d, *q, *state| if (state.* == .live and d == h) {
+        for (&swapchain_objects, swapchain_state) |*swapchain, child_state| if (child_state == .live and swapchain.owner == d) {
+            swapchain.retiring = true;
+            _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
+            while (swapchain.pending != 0) _ = std.c.pthread_cond_wait(&swapchain.present_condition, &swapchain.present_mutex);
+            _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+        };
         for (&command_buffer_objects, &command_buffer_state) |*cb, *child_state| if (child_state.* == .live and cb.impl.owner == d) {
             child_state.* = .tombstone;
             cb.loader_data = 0;
@@ -1119,6 +1126,7 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
             if (object.fragment_program) |*program| program.deinit(allocator);
         };
         for (&swapchain_objects, &swapchain_state) |*swapchain, *child_state| if (child_state.* == .live and swapchain.owner == d) {
+            xcb_present.deinit(&swapchain.transport);
             child_state.* = .tombstone;
         };
         for (&buffer_objects, &buffer_state) |*buffer, *child_state| if (child_state.* == .live and buffer.owner == d) {
@@ -1126,7 +1134,7 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
         };
         for (&image_objects, &image_state) |*image, *child_state| if (child_state.* == .live and image.owner == d) {
             child_state.* = .tombstone;
-            if (image.owned_bytes) |bytes| allocator.free(bytes);
+            if (!image.shared_bytes) if (image.owned_bytes) |bytes| allocator.free(bytes);
             image.owned_bytes = null;
         };
         for (&memory_objects, &memory_state) |*memory, *child_state| if (child_state.* == .live and memory.owner == d) {
@@ -1182,7 +1190,9 @@ fn failTestAllocation() bool {
 }
 fn allocateBytes(size: usize) error{OutOfMemory}![]align(64) u8 {
     if (failTestAllocation()) return error.OutOfMemory;
-    return allocator.alignedAlloc(u8, .@"64", size);
+    const bytes = try allocator.alignedAlloc(u8, .@"64", size);
+    cpu_locality.prepareMemory(bytes);
+    return bytes;
 }
 fn validOwner(device: Device, owner: Device) bool {
     return device == owner;
@@ -1285,6 +1295,7 @@ fn allocateMemory(device: ?Device, info: ?*const MemoryAllocateInfo, alloc: ?*co
         hit(.heap_exhaustion);
         return .error_out_of_host_memory;
     }
+    _ = cpu_locality.pinCurrent(.render);
     const bytes = allocateBytes(std.math.cast(usize, ci.allocation_size) orelse return .error_out_of_host_memory) catch return .error_out_of_host_memory;
     @memset(bytes, 0);
     for (&memory_objects, &memory_state) |*object, *state| if (state.* == .never) {
@@ -1431,7 +1442,7 @@ fn destroyImage(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.
     const object = validImageLocked(handle) orelse return;
     if (validDeviceLocked(d) and validOwner(d, object.owner)) {
         stateForObject(ImageObj, object, &image_objects, &image_state).?.* = .tombstone;
-        if (object.owned_bytes) |bytes| allocator.free(bytes);
+        if (!object.shared_bytes) if (object.owned_bytes) |bytes| allocator.free(bytes);
         object.owned_bytes = null;
     }
 }
@@ -2063,6 +2074,11 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
     }
     return true;
 }
+fn fillImagePattern(bytes: []u8, pattern: u32) void {
+    const aligned: []align(4) u8 = @alignCast(bytes);
+    @memset(std.mem.bytesAsSlice(u32, aligned), pattern);
+}
+
 fn executeValidatedCommand(command: Command) void {
     switch (command) {
         .fill => |op| {
@@ -2075,18 +2091,18 @@ fn executeValidatedCommand(command: Command) void {
             benchmarkHostMemoryCopy(dst, src);
         },
         .clear => |op| {
-            const bytes = imageBytes(op.image);
-            const aligned: []align(4) u8 = @alignCast(bytes);
-            @memset(std.mem.bytesAsSlice(u32, aligned), @bitCast(op.color));
+            fillImagePattern(imageBytes(op.image), @bitCast(op.color));
         },
         .render_clear => |op| {
             const bytes = imageBytes(op.image);
-            const aligned: []align(4) u8 = @alignCast(bytes);
-            @memset(std.mem.bytesAsSlice(u32, aligned), @bitCast(op.color));
             if (op.depth) |depth| {
                 const depth_bytes = imageBytes(depth);
-                const aligned_depth: []align(4) u8 = @alignCast(depth_bytes);
-                @memset(std.mem.bytesAsSlice(u32, aligned_depth), @bitCast(op.depth_value));
+                if (bytes.len < 8 * 1024 * 1024 or !cpu_cube.clearImagesParallel(bytes, @bitCast(op.color), depth_bytes, @bitCast(op.depth_value))) {
+                    fillImagePattern(bytes, @bitCast(op.color));
+                    fillImagePattern(depth_bytes, @bitCast(op.depth_value));
+                }
+            } else {
+                fillImagePattern(bytes, @bitCast(op.color));
             }
         },
         .cube_draw => |op| {
@@ -3290,8 +3306,9 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
     defer mutex.unlock();
     const surface = validSurfaceLocked(ci.surface) orelse return .error_initialization_failed;
     if (!validDeviceLocked(d) or surface.owner != d.physical.owner) return .error_initialization_failed;
+    _ = cpu_locality.pinCurrent(.render);
     for (&swapchain_objects, &swapchain_state) |*swapchain, *state| if (state.* == .never) {
-        const transport = xcb_present.init(surface.connection, surface.window, ci.image_extent.width, ci.image_extent.height) orelse return .error_initialization_failed;
+        const transport = xcb_present.init(surface.connection, surface.window, ci.image_extent.width, ci.image_extent.height, ci.min_image_count) orelse return .error_initialization_failed;
         swapchain.* = .{
             .owner = d,
             .surface = surface,
@@ -3313,9 +3330,13 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
             var found = false;
             for (&image_objects, &image_state) |*image, *image_slot_state| if (!found and image_slot_state.* == .never) {
                 const byte_count = @as(usize, ci.image_extent.width) * ci.image_extent.height * 4;
-                const bytes = allocateBytes(byte_count) catch return .error_out_of_host_memory;
+                const shared_image_bytes = xcb_present.swapchainImageBytes(&swapchain.transport, created);
+                const shared_bytes = shared_image_bytes != null;
+                const bytes = shared_image_bytes orelse blk: {
+                    break :blk allocateBytes(byte_count) catch return .error_out_of_host_memory;
+                };
                 @memset(bytes, 0);
-                image.* = .{ .owner = d, .width = ci.image_extent.width, .height = ci.image_extent.height, .array_layers = ci.image_array_layers, .samples = 1, .format = ci.image_format, .usage = ci.image_usage, .layout = 0, .owned_bytes = bytes };
+                image.* = .{ .owner = d, .width = ci.image_extent.width, .height = ci.image_extent.height, .array_layers = ci.image_array_layers, .samples = 1, .format = ci.image_format, .usage = ci.image_usage, .layout = 0, .owned_bytes = bytes, .shared_bytes = shared_bytes };
                 image_slot_state.* = .live;
                 swapchain.images[created] = @intFromPtr(image);
                 found = true;
@@ -3352,7 +3373,7 @@ fn destroySwapchain(device: ?Device, handle: usize, alloc: ?*const Alloc) callco
     xcb_present.deinit(&swapchain.transport);
     for (swapchain.images[0..swapchain.image_count]) |image_handle| if (validImageLocked(image_handle)) |image| {
         stateForObject(ImageObj, image, &image_objects, &image_state).?.* = .tombstone;
-        if (image.owned_bytes) |bytes| allocator.free(bytes);
+        if (!image.shared_bytes) if (image.owned_bytes) |bytes| allocator.free(bytes);
         image.owned_bytes = null;
     };
     for (&swapchain_objects, &swapchain_state) |*candidate, *state| if (candidate == swapchain) {

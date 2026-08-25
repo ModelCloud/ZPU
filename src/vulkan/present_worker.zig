@@ -1,4 +1,5 @@
 const std = @import("std");
+const cpu_locality = @import("cpu_locality.zig");
 const frame_pacing = @import("frame_pacing.zig");
 const xcb_present = @import("xcb_present.zig");
 
@@ -22,6 +23,7 @@ var condition: std.c.pthread_cond_t = std.c.PTHREAD_COND_INITIALIZER;
 var started = false;
 
 fn run() void {
+    _ = cpu_locality.pinCurrent(.present);
     while (true) {
         _ = std.c.pthread_mutex_lock(&mutex);
         while (count == 0) _ = std.c.pthread_cond_wait(&condition, &mutex);

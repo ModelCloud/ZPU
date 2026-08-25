@@ -1,8 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const cpu_locality = @import("cpu_locality.zig");
 
 const Connection = opaque {};
 const VoidCookie = extern struct { sequence: u32 };
+const InputFocusCookie = extern struct { sequence: u32 };
+const InputFocusReply = opaque {};
 const GenericError = extern struct { response_type: u8, error_code: u8, sequence: u16, resource_id: u32, minor_code: u16, major_code: u8, pad0: u8, pad: [5]u32, full_sequence: u32 };
 const GetImageCookie = extern struct { sequence: u32 };
 const GetImageReply = opaque {};
@@ -12,6 +15,75 @@ const max_frame_metrics = 7_200;
 var frame_metrics: [max_frame_metrics]u64 = undefined;
 var frame_metric_count: usize = 0;
 var frame_metrics_written = false;
+
+const ShmAttachFn = *const fn (*Connection, u32, u32, u8) callconv(.c) VoidCookie;
+const ShmDetachFn = *const fn (*Connection, u32) callconv(.c) VoidCookie;
+const ShmPutImageFn = *const fn (*Connection, u32, u32, u16, u16, u16, u16, u16, u16, i16, i16, u8, u8, u8, u32, u32) callconv(.c) VoidCookie;
+const ShmApi = struct { attach_checked: ShmAttachFn, detach: ShmDetachFn, put_image: ShmPutImageFn };
+
+const SharedUpload = struct {
+    api: ShmApi,
+    address: []align(std.heap.page_size_min) u8,
+    segment: u32,
+    image_size: usize,
+    image_stride: usize,
+};
+
+var shm_load_attempted = false;
+var loaded_shm_api: ?ShmApi = null;
+
+fn loadShmApi() ?ShmApi {
+    if (shm_load_attempted) return loaded_shm_api;
+    shm_load_attempted = true;
+    if (builtin.os.tag != .linux) return null;
+    const handle = std.c.dlopen("libxcb-shm.so.0", .{ .NOW = true }) orelse return null;
+    const attach_symbol = std.c.dlsym(handle, "xcb_shm_attach_checked") orelse {
+        _ = std.c.dlclose(handle);
+        return null;
+    };
+    const detach_symbol = std.c.dlsym(handle, "xcb_shm_detach") orelse {
+        _ = std.c.dlclose(handle);
+        return null;
+    };
+    const put_image_symbol = std.c.dlsym(handle, "xcb_shm_put_image") orelse {
+        _ = std.c.dlclose(handle);
+        return null;
+    };
+    const attach_checked: ShmAttachFn = @ptrCast(attach_symbol);
+    const detach: ShmDetachFn = @ptrCast(detach_symbol);
+    const put_image: ShmPutImageFn = @ptrCast(put_image_symbol);
+    loaded_shm_api = .{ .attach_checked = attach_checked, .detach = detach, .put_image = put_image };
+    return loaded_shm_api;
+}
+
+fn initSharedUpload(connection: *Connection, image_size: usize, image_count: u32) ?SharedUpload {
+    const api = loadShmApi() orelse return null;
+    const image_stride = std.mem.alignForward(usize, image_size, std.heap.page_size_min);
+    const size = std.math.mul(usize, image_stride, image_count) catch return null;
+    const shmid = shmget(0, size, 0o1600);
+    if (shmid < 0) return null;
+    const raw_address = shmat(shmid, null, 0);
+    if (@intFromPtr(raw_address) == std.math.maxInt(usize)) {
+        _ = shmctl(shmid, 0, null);
+        return null;
+    }
+    const address: [*]align(std.heap.page_size_min) u8 = @ptrCast(@alignCast(raw_address));
+    cpu_locality.prepareMemory(address[0..size]);
+    const segment = xcb_generate_id(connection);
+    if (segment == 0) {
+        _ = shmdt(raw_address);
+        _ = shmctl(shmid, 0, null);
+        return null;
+    }
+    if (xcb_request_check(connection, api.attach_checked(connection, segment, @intCast(shmid), 0))) |xcb_error| {
+        std.c.free(xcb_error);
+        _ = shmdt(raw_address);
+        _ = shmctl(shmid, 0, null);
+        return null;
+    }
+    _ = shmctl(shmid, 0, null);
+    return .{ .api = api, .address = address[0..size], .segment = segment, .image_size = image_size, .image_stride = image_stride };
+}
 
 extern fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int;
 extern fn write(fd: c_int, buffer: *const anyopaque, count: usize) isize;
@@ -62,6 +134,7 @@ pub const Transport = struct {
     gc: u32,
     width: u32,
     height: u32,
+    shared_upload: ?SharedUpload = null,
     last: StageTimings = .{},
 };
 
@@ -91,9 +164,9 @@ fn monotonicNs() u64 {
 /// Creates persistent X resources once per swapchain. Frames are uploaded to
 /// an off-screen pixmap and made visible by one CopyArea, so strip boundaries
 /// can never become partially exposed window contents.
-pub fn init(connection_opaque: *anyopaque, window: u32, width: u32, height: u32) ?Transport {
-    if (builtin.is_test) return if (window == 0 or width == 0 or height == 0) null else .{ .connection = @ptrFromInt(8), .window = window, .pixmap = 2, .gc = 3, .width = width, .height = height };
-    if (width == 0 or height == 0 or width > std.math.maxInt(u16) or height > std.math.maxInt(u16)) return null;
+pub fn init(connection_opaque: *anyopaque, window: u32, width: u32, height: u32, image_count: u32) ?Transport {
+    if (builtin.is_test) return if (window == 0 or width == 0 or height == 0 or image_count == 0) null else .{ .connection = @ptrFromInt(8), .window = window, .pixmap = 2, .gc = 3, .width = width, .height = height };
+    if (width == 0 or height == 0 or image_count == 0 or width > std.math.maxInt(u16) or height > std.math.maxInt(u16)) return null;
     const connection: *Connection = @ptrCast(connection_opaque);
     if (xcb_connection_has_error(connection) != 0) return null;
     const pixmap = xcb_generate_id(connection);
@@ -102,11 +175,26 @@ pub fn init(connection_opaque: *anyopaque, window: u32, width: u32, height: u32)
     _ = xcb_create_pixmap(connection, 24, pixmap, window, @intCast(width), @intCast(height));
     _ = xcb_create_gc(connection, gc, pixmap, 0, null);
     if (xcb_flush(connection) <= 0) return null;
-    return .{ .connection = connection, .window = window, .pixmap = pixmap, .gc = gc, .width = width, .height = height };
+    const byte_count = @as(usize, width) * height * 4;
+    return .{ .connection = connection, .window = window, .pixmap = pixmap, .gc = gc, .width = width, .height = height, .shared_upload = initSharedUpload(connection, byte_count, image_count) };
+}
+
+pub fn swapchainImageBytes(transport: *Transport, image_index: u32) ?[]align(64) u8 {
+    const shared = transport.shared_upload orelse return null;
+    const offset = std.math.mul(usize, image_index, shared.image_stride) catch return null;
+    if (offset > shared.address.len or shared.image_size > shared.address.len - offset) return null;
+    const pointer: [*]align(64) u8 = @ptrCast(@alignCast(shared.address.ptr + offset));
+    return pointer[0..shared.image_size];
 }
 
 pub fn deinit(transport: *Transport) void {
     if (builtin.is_test) return;
+    if (transport.shared_upload) |shared| {
+        _ = shared.api.detach(transport.connection, shared.segment);
+        _ = xcb_flush(transport.connection);
+        _ = shmdt(shared.address.ptr);
+        transport.shared_upload = null;
+    }
     _ = xcb_free_gc(transport.connection, transport.gc);
     _ = xcb_free_pixmap(transport.connection, transport.pixmap);
     _ = xcb_flush(transport.connection);
@@ -130,12 +218,23 @@ pub fn upload(transport: *Transport, pixels: []const u8) bool {
     var y: usize = 0;
     const upload_start = monotonicNs();
     transport.last.upload_start_ns = upload_start;
-    while (y < height) {
-        const rows = @min(rows_per_request, @as(usize, height) - y);
-        const data = pixels[y * row_bytes ..][0 .. rows * row_bytes];
-        _ = xcb_put_image(connection, 2, transport.pixmap, transport.gc, @intCast(width), @intCast(rows), 0, @intCast(y), 0, 24, @intCast(data.len), data.ptr);
-        transport.last.upload_requests += 1;
-        y += rows;
+    if (transport.shared_upload) |shared| {
+        const shared_start = @intFromPtr(shared.address.ptr);
+        const pixel_start = @intFromPtr(pixels.ptr);
+        if (pixels.len > shared.address.len or pixel_start < shared_start or pixel_start - shared_start > shared.address.len - pixels.len) return false;
+        const offset: u32 = @intCast(pixel_start - shared_start);
+        _ = shared.api.put_image(connection, transport.pixmap, transport.gc, @intCast(width), @intCast(height), 0, 0, @intCast(width), @intCast(height), 0, 0, 24, 2, 0, shared.segment, offset);
+        transport.last.upload_requests = 1;
+        const reply = xcb_get_input_focus_reply(connection, xcb_get_input_focus(connection), null) orelse return false;
+        std.c.free(reply);
+    } else {
+        while (y < height) {
+            const rows = @min(rows_per_request, @as(usize, height) - y);
+            const data = pixels[y * row_bytes ..][0 .. rows * row_bytes];
+            _ = xcb_put_image(connection, 2, transport.pixmap, transport.gc, @intCast(width), @intCast(rows), 0, @intCast(y), 0, 24, @intCast(data.len), data.ptr);
+            transport.last.upload_requests += 1;
+            y += rows;
+        }
     }
     transport.last.upload_end_ns = monotonicNs();
     transport.last.upload_ns = transport.last.upload_end_ns - upload_start;
@@ -181,6 +280,9 @@ pub fn present(transport: *Transport, pixels: []const u8) bool {
 extern fn xcb_generate_id(connection: *Connection) u32;
 extern fn xcb_connection_has_error(connection: *Connection) i32;
 extern fn xcb_get_maximum_request_length(connection: *Connection) u32;
+extern fn xcb_request_check(connection: *Connection, cookie: VoidCookie) ?*GenericError;
+extern fn xcb_get_input_focus(connection: *Connection) InputFocusCookie;
+extern fn xcb_get_input_focus_reply(connection: *Connection, cookie: InputFocusCookie, error_out: ?*?*GenericError) ?*InputFocusReply;
 extern fn xcb_create_pixmap(connection: *Connection, depth: u8, pixmap: u32, drawable: u32, width: u16, height: u16) VoidCookie;
 extern fn xcb_free_pixmap(connection: *Connection, pixmap: u32) VoidCookie;
 extern fn xcb_create_gc(connection: *Connection, gc: u32, drawable: u32, value_mask: u32, values: ?[*]const u32) VoidCookie;
@@ -191,12 +293,16 @@ extern fn xcb_flush(connection: *Connection) i32;
 extern fn xcb_get_image(connection: *Connection, format: u8, drawable: u32, x: i16, y: i16, width: u16, height: u16, plane_mask: u32) GetImageCookie;
 extern fn xcb_get_image_reply(connection: *Connection, cookie: GetImageCookie, error_out: ?*?*GenericError) ?*GetImageReply;
 extern fn xcb_get_image_data(reply: *const GetImageReply) [*]u8;
+extern fn shmget(key: c_int, size: usize, flags: c_int) c_int;
+extern fn shmat(shmid: c_int, address: ?*const anyopaque, flags: c_int) *anyopaque;
+extern fn shmdt(address: *const anyopaque) c_int;
+extern fn shmctl(shmid: c_int, command: c_int, buffer: ?*anyopaque) c_int;
 
 test "test-mode presentation validates the image envelope without touching XCB" {
     var pixels = [_]u8{0} ** 16;
-    var transport = init(@ptrFromInt(8), 1, 2, 2).?;
+    var transport = init(@ptrFromInt(8), 1, 2, 2, 1).?;
     try std.testing.expect(present(&transport, &pixels));
-    try std.testing.expect(init(@ptrFromInt(8), 0, 2, 2) == null);
+    try std.testing.expect(init(@ptrFromInt(8), 0, 2, 2, 1) == null);
     try std.testing.expect(!present(&transport, pixels[0..4]));
 }
 
@@ -204,6 +310,6 @@ test "transport exposes a complete frame after all upload chunks" {
     // The production ordering is deliberately structural: every PutImage
     // targets the invisible pixmap and exactly one CopyArea follows the loop.
     var pixels = [_]u8{0} ** 64;
-    var transport = init(@ptrFromInt(8), 1, 4, 4).?;
+    var transport = init(@ptrFromInt(8), 1, 4, 4, 1).?;
     try std.testing.expect(present(&transport, &pixels));
 }
