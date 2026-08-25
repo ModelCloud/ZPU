@@ -5,6 +5,7 @@ pub const default_hz: u64 = 120;
 pub const max_hz: u64 = 1000;
 pub const precision_spin_ns: u64 = 1_000_000;
 pub const present_commit_lead_ns: u64 = 500_000;
+pub const present_spin_ns: u64 = 50_000;
 
 /// Phase-locked rational refresh clock. Late callers skip elapsed clock slots,
 /// never FIFO work, preventing catch-up bursts without rounded-period drift.

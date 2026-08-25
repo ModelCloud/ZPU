@@ -67,7 +67,7 @@ fn run() void {
             continue;
         }
         const commit_deadline = deadline -| frame_pacing.present_commit_lead_ns;
-        if (commit_deadline > before) frame_pacing.sleepUntilPrecise(commit_deadline, frame_pacing.precision_spin_ns);
+        if (commit_deadline > before) frame_pacing.sleepUntilPrecise(commit_deadline, frame_pacing.present_spin_ns);
         const woke = frame_pacing.monotonicNs();
         work.transport.last.wake_error_ns = if (woke >= deadline) @intCast(woke - deadline) else -@as(i64, @intCast(deadline - woke));
         _ = xcb_present.commit(work.transport, work.pixels);

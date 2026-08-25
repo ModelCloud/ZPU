@@ -40,6 +40,15 @@ def main() -> int:
     isolate_xvfb = len(allowed_cpus) >= 8
     client_cpus = allowed_cpus[:-1] if isolate_xvfb else allowed_cpus
     xvfb_cpu = allowed_cpus[-1] if isolate_xvfb else None
+    requested_client_cpus = os.environ.get("ZPU_BENCH_CLIENT_CPUS")
+    if requested_client_cpus:
+        try:
+            requested = [int(cpu) for cpu in requested_client_cpus.split(",")]
+        except ValueError as error:
+            raise SystemExit(f"ZPU_BENCH_CLIENT_CPUS must be a comma-separated CPU list: {error}")
+        if not requested or len(set(requested)) != len(requested) or any(cpu not in client_cpus for cpu in requested):
+            raise SystemExit("ZPU_BENCH_CLIENT_CPUS must be a unique, non-empty subset of the client affinity")
+        client_cpus = requested
 
     presented_frames = WARMUP_FRAMES + SAMPLE_FRAMES + 1
     command = [

@@ -209,8 +209,12 @@ pub fn pinCurrent(role: Role) bool {
     defer _ = std.c.pthread_mutex_unlock(&mutex);
     if (selected_count == 0) return false;
     const role_index = roleCpuIndex(role, selected_count);
-    const one = singleton(selected_cpus[role_index]);
-    std.os.linux.sched_setaffinity(0, &one) catch return false;
+    var role_mask = singleton(selected_cpus[role_index]);
+    if (role == .present and selected_count >= 2) {
+        const render_cpu = selected_cpus[0];
+        role_mask[render_cpu / bits_per_word] |= @as(usize, 1) << @intCast(render_cpu % bits_per_word);
+    }
+    std.os.linux.sched_setaffinity(0, &role_mask) catch return false;
     return true;
 }
 

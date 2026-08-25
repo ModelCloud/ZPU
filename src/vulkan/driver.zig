@@ -219,7 +219,7 @@ pub const Device = *DeviceObj;
 pub const Queue = *QueueObj;
 const MemoryObj = struct { owner: Device, bytes: []align(64) u8, mapped: bool };
 const BufferObj = struct { owner: Device, size: u64, usage: u32, memory: ?*MemoryObj = null, offset: u64 = 0 };
-const ImageObj = struct { owner: Device, width: u32, height: u32, array_layers: u32, samples: u32, format: i32, usage: u32, layout: i32, memory: ?*MemoryObj = null, owned_bytes: ?[]align(64) u8 = null, shared_bytes: bool = false, offset: u64 = 0, clear_pattern: ?u32 = null, content_bounds: cpu_cube.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, force_full_present: bool = true, complex_3d_content: bool = false, last_clear_ns: u64 = 0, last_draw_ns: u64 = 0 };
+const ImageObj = struct { owner: Device, width: u32, height: u32, array_layers: u32, samples: u32, format: i32, usage: u32, layout: i32, memory: ?*MemoryObj = null, owned_bytes: ?[]align(64) u8 = null, shared_bytes: bool = false, offset: u64 = 0, clear_pattern: ?u32 = null, content_bounds: cpu_cube.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, force_full_present: bool = true, complex_3d_content: bool = false, last_clear_ns: u64 = 0, last_draw_ns: u64 = 0, dirty_tiles: ?[]align(64) u8 = null };
 const FenceObj = struct { owner: Device, signaled: bool };
 const SemaphoreObj = struct { owner: Device, signaled: bool };
 const CommandPoolObj = struct { owner: Device };
@@ -1219,7 +1219,9 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
         for (&image_objects, &image_state) |*image, *child_state| if (child_state.* == .live and image.owner == d) {
             child_state.* = .tombstone;
             if (!image.shared_bytes) if (image.owned_bytes) |bytes| allocator.free(bytes);
+            if (image.dirty_tiles) |tiles| allocator.free(tiles);
             image.owned_bytes = null;
+            image.dirty_tiles = null;
         };
         for (&memory_objects, &memory_state) |*memory, *child_state| if (child_state.* == .live and memory.owner == d) {
             child_state.* = .tombstone;
@@ -1536,7 +1538,9 @@ fn destroyImage(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.
     if (validDeviceLocked(d) and validOwner(d, object.owner)) {
         stateForObject(ImageObj, object, &image_objects, &image_state).?.* = .tombstone;
         if (!object.shared_bytes) if (object.owned_bytes) |bytes| allocator.free(bytes);
+        if (object.dirty_tiles) |tiles| allocator.free(tiles);
         object.owned_bytes = null;
+        object.dirty_tiles = null;
     }
 }
 fn getImageMemoryRequirements(device: ?Device, handle: usize, output: ?*MemoryRequirements) callconv(.c) void {
@@ -2203,6 +2207,17 @@ fn invalidateImageContents(image: *ImageObj) void {
     image.content_bounds = .{ .x = 0, .y = 0, .width = image.width, .height = image.height };
     image.force_full_present = true;
     image.complex_3d_content = false;
+    if (image.dirty_tiles) |tiles| @memset(tiles, 0);
+}
+
+fn ensureDirtyTiles(image: *ImageObj) ?[]align(64) u8 {
+    if (image.dirty_tiles) |tiles| return tiles;
+    const byte_count = cpu_cube.dirtyTileByteCount(image.width, image.height);
+    if (byte_count == 0 or byte_count > cpu_cube.max_dirty_tile_bytes) return null;
+    const tiles = allocateBytes(byte_count) catch return null;
+    @memset(tiles, 0);
+    image.dirty_tiles = tiles;
+    return tiles;
 }
 
 fn executeValidatedCommand(command: Command) void {
@@ -2233,15 +2248,25 @@ fn executeValidatedCommand(command: Command) void {
                 const depth_pattern: u32 = @bitCast(op.depth_value);
                 const sparse = bytes.len >= 8 * 1024 * 1024 and op.image.width == depth.width and op.image.height == depth.height and op.image.clear_pattern == color_pattern and depth.clear_pattern == depth_pattern and depth.memory != null and !depth.memory.?.mapped;
                 if (sparse) {
-                    const rect = unionRect(op.image.content_bounds, depth.content_bounds);
-                    if (rect.width != 0 and rect.height != 0 and !cpu_cube.clearImageRegionsParallel(bytes, color_pattern, depth_bytes, depth_pattern, op.image.width, rect)) {
-                        fillImagePatternRect(bytes, op.image.width, rect, color_pattern);
-                        fillImagePatternRect(depth_bytes, depth.width, rect, depth_pattern);
+                    if (op.image.dirty_tiles) |tiles| {
+                        if (!cpu_cube.clearDirtyTilesParallel(bytes, color_pattern, depth_bytes, depth_pattern, op.image.width, op.image.height, tiles)) {
+                            const rect = unionRect(op.image.content_bounds, depth.content_bounds);
+                            fillImagePatternRect(bytes, op.image.width, rect, color_pattern);
+                            fillImagePatternRect(depth_bytes, depth.width, rect, depth_pattern);
+                        }
+                        @memset(tiles, 0);
+                    } else {
+                        const rect = unionRect(op.image.content_bounds, depth.content_bounds);
+                        if (rect.width != 0 and rect.height != 0 and !cpu_cube.clearImageRegionsParallel(bytes, color_pattern, depth_bytes, depth_pattern, op.image.width, rect)) {
+                            fillImagePatternRect(bytes, op.image.width, rect, color_pattern);
+                            fillImagePatternRect(depth_bytes, depth.width, rect, depth_pattern);
+                        }
                     }
                 } else if (bytes.len < 8 * 1024 * 1024 or !cpu_cube.clearImagesParallel(bytes, color_pattern, depth_bytes, depth_pattern)) {
                     fillImagePattern(bytes, color_pattern);
                     fillImagePattern(depth_bytes, depth_pattern);
                 }
+                if (!sparse) if (op.image.dirty_tiles) |tiles| @memset(tiles, 0);
                 op.image.clear_pattern = color_pattern;
                 depth.clear_pattern = depth_pattern;
                 op.image.content_bounds = emptyRect();
@@ -2267,7 +2292,8 @@ fn executeValidatedCommand(command: Command) void {
             const uniform_memory = uniform_buffer.memory.?.bytes;
             const texture = op.descriptors.texture.?;
             var bounds = emptyRect();
-            _ = cpu_cube.drawTracked(imageBytes(color), imageBytes(depth), color.width, color.height, uniform_memory[uniform_start..][0..uniform_length], imageBytes(texture), texture.width, texture.height, op.vertex_count, op.viewport, op.scissor, op.cull_mode, op.front_face, &bounds);
+            const dirty_tiles = if (@as(u64, color.width) * color.height >= 3840 * 2160) ensureDirtyTiles(color) else null;
+            _ = cpu_cube.drawTrackedTiles(imageBytes(color), imageBytes(depth), color.width, color.height, uniform_memory[uniform_start..][0..uniform_length], imageBytes(texture), texture.width, texture.height, op.vertex_count, op.viewport, op.scissor, op.cull_mode, op.front_face, &bounds, dirty_tiles);
             color.content_bounds = unionRect(color.content_bounds, bounds);
             depth.content_bounds = unionRect(depth.content_bounds, bounds);
             color.complex_3d_content = true;
@@ -3547,7 +3573,9 @@ fn destroySwapchain(device: ?Device, handle: usize, alloc: ?*const Alloc) callco
     for (swapchain.images[0..swapchain.image_count]) |image_handle| if (validImageLocked(image_handle)) |image| {
         stateForObject(ImageObj, image, &image_objects, &image_state).?.* = .tombstone;
         if (!image.shared_bytes) if (image.owned_bytes) |bytes| allocator.free(bytes);
+        if (image.dirty_tiles) |tiles| allocator.free(tiles);
         image.owned_bytes = null;
+        image.dirty_tiles = null;
     };
     for (&swapchain_objects, &swapchain_state) |*candidate, *state| if (candidate == swapchain) {
         state.* = .tombstone;
@@ -3683,7 +3711,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
                 return .error_initialization_failed;
             }
             const commit_deadline = deadline -| frame_pacing.present_commit_lead_ns;
-            if (commit_deadline > before) frame_pacing.sleepUntilPrecise(commit_deadline, frame_pacing.precision_spin_ns);
+            if (commit_deadline > before) frame_pacing.sleepUntilPrecise(commit_deadline, frame_pacing.present_spin_ns);
             const woke = frame_pacing.monotonicNs();
             swapchain.transport.last.wake_error_ns = @intCast(woke -| deadline);
             if (!xcb_present.commit(&swapchain.transport, imageBytes(image))) {
