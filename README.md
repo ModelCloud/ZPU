@@ -174,3 +174,7 @@ time is at most 4,166,666 ns, equivalent to a 240 FPS 1% low. The measurement
 includes command submission, ZPU's CPU cube rasterizer, and XCB image upload.
 Presentation pacing defaults to 120 Hz and follows the validated
 `ZPU_REFRESH_HZ=1..1000` setting; this target explicitly selects 240 Hz.
+ZPU also exposes `VK_EXT_present_timing`: applications can attach
+`VkPresentTimingsInfoEXT` to each `vkQueuePresentKHR` call and select an absolute
+monotonic or relative target time per swapchain. Untimed presents retain the
+process-local `ZPU_REFRESH_HZ` cadence.
