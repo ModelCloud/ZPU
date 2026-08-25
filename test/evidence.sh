@@ -8,7 +8,22 @@ sha=$(git rev-parse HEAD); utc=2026-01-02T03:04:05Z
 grep -F 'b.step("benchmark-3d"' build.zig >/dev/null
 grep -F 'b.step("pr-readiness"' build.zig >/dev/null
 grep -F '`ffmpeg` and `ffprobe`' docs/pr-readiness.md >/dev/null
-if rg -n '\.github/workflows|GITHUB_TOKEN|workflow scope' tools/evidence.py tools/capture_vkcube.sh tools/pr_readiness.sh docs/pr-readiness.md; then
+search=${ZPU_SEARCH_TOOL:-}
+if [[ -z "$search" ]]; then
+  if command -v rg >/dev/null 2>&1; then search=rg
+  elif command -v grep >/dev/null 2>&1; then search=grep
+  else echo "evidence dependency check requires rg or grep" >&2; exit 1
+  fi
+fi
+if [[ "$search" == rg ]]; then
+  dependency_hit=$(rg -n '\.github/workflows|GITHUB_TOKEN|workflow scope' tools/evidence.py tools/capture_vkcube.sh tools/pr_readiness.sh docs/pr-readiness.md || true)
+elif [[ "$search" == grep ]]; then
+  dependency_hit=$(grep -En '\.github/workflows|GITHUB_TOKEN|workflow scope' tools/evidence.py tools/capture_vkcube.sh tools/pr_readiness.sh docs/pr-readiness.md || true)
+else
+  echo "unsupported ZPU_SEARCH_TOOL: $search" >&2; exit 1
+fi
+if [[ -n "$dependency_hit" ]]; then
+  printf '%s\n' "$dependency_hit"
   echo "evidence feature depends on GitHub workflow configuration" >&2
   exit 1
 fi
