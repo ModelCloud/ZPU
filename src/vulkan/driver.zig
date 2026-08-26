@@ -14,7 +14,7 @@ const spirv_frontend = @import("spirv_frontend.zig");
 const render_ir = @import("render_ir.zig");
 const render_ir_exec = @import("render_ir_exec.zig");
 const core_command_inventory = @import("core_command_inventory.zig");
-pub const Result = enum(i32) { success = 0, not_ready = 1, timeout = 2, event_set = 3, event_reset = 4, incomplete = 5, error_out_of_host_memory = -1, error_initialization_failed = -3, error_memory_map_failed = -5, error_layer_not_present = -6, error_extension_not_present = -7, error_feature_not_present = -8, error_format_not_supported = -11, error_validation_failed = -1_000_011_001, error_out_of_pool_memory = -1_000_069_000, error_invalid_shader = -1_000_012_000 };
+pub const Result = enum(i32) { success = 0, not_ready = 1, timeout = 2, event_set = 3, event_reset = 4, incomplete = 5, error_out_of_host_memory = -1, error_initialization_failed = -3, error_memory_map_failed = -5, error_layer_not_present = -6, error_extension_not_present = -7, error_feature_not_present = -8, error_format_not_supported = -11, error_validation_failed = -1_000_011_001, error_out_of_pool_memory = -1_000_069_000, error_invalid_shader = -1_000_012_000, error_present_timing_queue_full = -1_000_208_000 };
 pub const Fn = ?*const fn () callconv(.c) void;
 pub const Alloc = opaque {};
 pub const MAGIC: usize = 0x01CDC0DE;
@@ -425,7 +425,19 @@ pub const PresentTimingInfoEXT = extern struct { s_type: i32, p_next: ?*const an
 pub const SwapchainTimingPropertiesEXT = extern struct { s_type: i32, p_next: ?*anyopaque, refresh_duration: u64, refresh_interval: u64 };
 pub const SwapchainTimeDomainPropertiesEXT = extern struct { s_type: i32, p_next: ?*anyopaque, time_domain_count: u32, time_domains: ?[*]i32, time_domain_ids: ?[*]u64 };
 pub const PastPresentationTimingInfoEXT = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, swapchain: usize };
-pub const PastPresentationTimingPropertiesEXT = extern struct { s_type: i32, p_next: ?*anyopaque, timing_properties_counter: u64, time_domains_counter: u64, presentation_timing_count: u32, presentation_timings: ?*anyopaque };
+pub const PresentStageTimeEXT = extern struct { stage: u32, time: u64 };
+pub const PastPresentationTimingEXT = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    present_id: u64,
+    target_time: u64,
+    present_stage_count: u32,
+    present_stages: ?[*]PresentStageTimeEXT,
+    time_domain: i32,
+    time_domain_id: u64,
+    report_complete: u32,
+};
+pub const PastPresentationTimingPropertiesEXT = extern struct { s_type: i32, p_next: ?*anyopaque, timing_properties_counter: u64, time_domains_counter: u64, presentation_timing_count: u32, presentation_timings: ?[*]PastPresentationTimingEXT };
 pub const ShaderModuleCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, code_size: usize, p_code: ?*const anyopaque };
 pub const PipelineCacheCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, initial_data_size: usize, initial_data: ?*const anyopaque };
 pub const SpecializationMapEntry = extern struct { constant_id: u32, offset: u32, size: usize };
@@ -778,7 +790,19 @@ const SwapchainObj = struct {
     present_timing_enabled: bool,
     present_timing_queue_size: u32,
     present_timing_outstanding: u32,
+    present_timing_history_count: u32,
+    present_timing_next_id: u64,
+    present_timing_history: [max_present_entries]PresentTimingRecord,
     transport: xcb_present.Transport,
+};
+const PresentTimingRecord = struct {
+    present_id: u64 = 0,
+    target_time: u64 = 0,
+    requested_stages: u32 = 0,
+    queue_operations_end_ns: u64 = 0,
+    request_dequeued_ns: u64 = 0,
+    image_first_pixel_out_ns: u64 = 0,
+    image_first_pixel_visible_ns: u64 = 0,
 };
 const QueryCommand = struct { pool: *QueryPoolObj, index: u32 };
 const QueryCopyCommand = struct { pool: *QueryPoolObj, first: u32, count: u32, destination: *BufferObj, offset: u64, stride: u64, flags: u32 };
@@ -11573,6 +11597,9 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
             .present_timing_enabled = ci.flags & swapchain_present_timing_bit != 0,
             .present_timing_queue_size = 0,
             .present_timing_outstanding = 0,
+            .present_timing_history_count = 0,
+            .present_timing_next_id = 1,
+            .present_timing_history = undefined,
             .transport = transport,
         };
         var created: u32 = 0;
@@ -11737,8 +11764,9 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
     // consuming wait semaphores or queuing any image.  PresentInfo is a batch;
     // a malformed later entry must not leave an earlier entry queued.
     var targets: [max_present_entries]?u64 = [_]?u64{null} ** max_present_entries;
+    var timing_requests: [max_present_entries]?PresentTimingRequest = [_]?PresentTimingRequest{null} ** max_present_entries;
     for (present.swapchains.?[0..present.swapchain_count], present.image_indices.?[0..present.swapchain_count], 0..) |handle, index, i| {
-        const target_ns = presentTarget(present, i, frame_pacing.monotonicNs()) catch {
+        const target_request = presentTimingRequest(present, i, frame_pacing.monotonicNs()) catch {
             mutex.unlock();
             return .error_initialization_failed;
         };
@@ -11749,6 +11777,15 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         if (swapchain.owner != q.owner or index >= swapchain.image_count or swapchain.retiring or (timing_info_present and !swapchain.present_timing_enabled)) {
             mutex.unlock();
             return .error_initialization_failed;
+        }
+        if (target_request != null and swapchain.present_timing_queue_size != 0) {
+            _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
+            const full = swapchain.present_timing_outstanding >= swapchain.present_timing_queue_size;
+            _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+            if (full) {
+                mutex.unlock();
+                return .error_present_timing_queue_full;
+            }
         }
         for (present.swapchains.?[0..i]) |prior| if (prior == handle) {
             mutex.unlock();
@@ -11761,7 +11798,8 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
             mutex.unlock();
             return .error_initialization_failed;
         }
-        targets[i] = target_ns;
+        timing_requests[i] = target_request;
+        targets[i] = if (target_request) |request| request.target_ns else null;
     }
     if (present.wait_semaphore_count != 0) {
         const waits = present.wait_semaphores orelse {
@@ -11812,11 +11850,34 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         }
         swapchain.pending += 1;
         _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+        var timing_payload: ?present_worker.Timing = null;
+        if (timing_requests[i] != null and swapchain.present_timing_queue_size != 0) {
+            _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
+            const present_id = swapchain.present_timing_next_id;
+            swapchain.present_timing_next_id +%= 1;
+            swapchain.present_timing_outstanding += 1;
+            _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+            timing_payload = .{
+                .present_id = present_id,
+                .target_time = target_ns orelse 0,
+                .requested_stages = timing_requests[i].?.requested_stages,
+                .queue_operations_end_ns = frame_pacing.monotonicNs(),
+            };
+        }
         const image: *ImageObj = @ptrFromInt(swapchain.images[index]);
         const content = xcb_present.Region{ .x = @intCast(@max(image.content_bounds.x, 0)), .y = @intCast(@max(image.content_bounds.y, 0)), .width = image.content_bounds.width, .height = image.content_bounds.height };
         const force_full = image.force_full_present;
         if (builtin.is_test) {
-            _ = xcb_present.present(&swapchain.transport, imageBytes(image));
+            const dequeued = frame_pacing.monotonicNs();
+            const presented = xcb_present.present(&swapchain.transport, imageBytes(image));
+            if (timing_payload) |timing| {
+                var completed = timing;
+                completed.completed = presented;
+                completed.request_dequeued_ns = dequeued;
+                completed.image_first_pixel_out_ns = if (presented) frame_pacing.monotonicNs() else 0;
+                completed.image_first_pixel_visible_ns = completed.image_first_pixel_out_ns;
+                recordPresentTiming(@ptrCast(swapchain), completed);
+            }
             image.force_full_present = false;
             releasePresented(swapchain, index);
         } else if (!usePresentWorker(image.complex_3d_content, synchronousOneCore())) {
@@ -11824,6 +11885,11 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
             if (swapchain.cadence == null) swapchain.cadence = frame_pacing.Clock.init(before, frame_pacing.configuredRate());
             const deadline = target_ns orelse swapchain.cadence.?.deadline();
             if (!xcb_present.upload(&swapchain.transport, imageBytes(image), content, force_full)) {
+                if (timing_payload) |timing| {
+                    var failed = timing;
+                    failed.completed = false;
+                    recordPresentTiming(@ptrCast(swapchain), failed);
+                }
                 releasePresented(swapchain, index);
                 mutex.unlock();
                 return .error_initialization_failed;
@@ -11833,6 +11899,11 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
             const woke = frame_pacing.monotonicNs();
             swapchain.transport.last.wake_error_ns = @intCast(woke -| deadline);
             if (!xcb_present.commit(&swapchain.transport, imageBytes(image))) {
+                if (timing_payload) |timing| {
+                    var failed = timing;
+                    failed.completed = false;
+                    recordPresentTiming(@ptrCast(swapchain), failed);
+                }
                 releasePresented(swapchain, index);
                 mutex.unlock();
                 return .error_initialization_failed;
@@ -11854,9 +11925,21 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
                 .frame_end_ns = finished,
             });
             swapchain.cadence.?.advance(finished);
+            if (timing_payload) |timing| {
+                var completed = timing;
+                completed.request_dequeued_ns = before;
+                completed.image_first_pixel_out_ns = finished;
+                completed.image_first_pixel_visible_ns = finished;
+                recordPresentTiming(@ptrCast(swapchain), completed);
+            }
             image.force_full_present = false;
             releasePresented(swapchain, index);
-        } else if (!present_worker.ensureStarted() or !present_worker.enqueue(.{ .transport = &swapchain.transport, .cadence = &swapchain.cadence, .pixels = imageBytes(image), .content = content, .force_full = force_full, .context = swapchain, .image_index = index, .release = releasePresented, .trace = if (traceLimit() != 0) recordPresentWorkerTrace else null, .render_clear_ns = image.last_clear_ns, .render_draw_ns = image.last_draw_ns, .target_ns = target_ns })) {
+        } else if (!present_worker.ensureStarted() or !present_worker.enqueue(.{ .transport = &swapchain.transport, .cadence = &swapchain.cadence, .pixels = imageBytes(image), .content = content, .force_full = force_full, .context = swapchain, .image_index = index, .release = releasePresented, .trace = if (traceLimit() != 0) recordPresentWorkerTrace else null, .render_clear_ns = image.last_clear_ns, .render_draw_ns = image.last_draw_ns, .target_ns = target_ns, .timing = timing_payload, .timing_context = @ptrCast(swapchain), .timing_record = recordPresentTiming })) {
+            if (timing_payload) |timing| {
+                var failed = timing;
+                failed.completed = false;
+                recordPresentTiming(@ptrCast(swapchain), failed);
+            }
             releasePresented(swapchain, index);
             mutex.unlock();
             return .error_initialization_failed;
@@ -12074,11 +12157,13 @@ fn queueWaitIdle(queue: ?Queue) callconv(.c) Result {
     }
     return .success;
 }
-fn presentTarget(info: *const PresentInfo, index: usize, now_ns: u64) !?u64 {
+const PresentTimingRequest = struct { target_ns: u64, requested_stages: u32 };
+
+fn presentTimingRequest(info: *const PresentInfo, index: usize, now_ns: u64) !?PresentTimingRequest {
     var next = info.p_next;
     var depth: usize = 0;
     var seen_timings = false;
-    var target: ?u64 = null;
+    var request: ?PresentTimingRequest = null;
     while (next) |raw| : (depth += 1) {
         if (depth == 16) return error.InvalidPresentTiming;
         const header: *const ChainHeader = @ptrCast(@alignCast(raw));
@@ -12092,14 +12177,53 @@ fn presentTarget(info: *const PresentInfo, index: usize, now_ns: u64) !?u64 {
             const timings: *const PresentTimingsInfoEXT = @ptrCast(@alignCast(raw));
             if (timings.swapchain_count != info.swapchain_count or timings.timing_infos == null) return error.InvalidPresentTiming;
             const timing = timings.timing_infos.?[index];
-            if (timing.s_type != 1_000_208_004 or timing.p_next != null or timing.flags & ~@as(u32, 3) != 0 or timing.time_domain_id != 1 or timing.present_stage_queries != 0 or timing.target_time_domain_present_stage != 0) return error.InvalidPresentTiming;
-            target = if (timing.flags & 1 != 0) std.math.add(u64, now_ns, timing.target_time) catch return error.InvalidPresentTiming else timing.target_time;
+            if (timing.s_type != 1_000_208_004 or timing.p_next != null or timing.flags & ~@as(u32, 3) != 0 or timing.flags == 3 or timing.time_domain_id != 1 or timing.present_stage_queries & ~@as(u32, 0xf) != 0 or timing.target_time_domain_present_stage & ~@as(u32, 0xf) != 0) return error.InvalidPresentTiming;
+            var target = if (timing.flags & 1 != 0) std.math.add(u64, now_ns, timing.target_time) catch return error.InvalidPresentTiming else timing.target_time;
+            if (timing.flags & 2 != 0) {
+                const rate = frame_pacing.configuredRate();
+                const period = std.math.cast(u64, (@as(u128, frame_pacing.ns_per_second) * rate.denominator) / rate.numerator) orelse return error.InvalidPresentTiming;
+                if (period == 0) return error.InvalidPresentTiming;
+                const delta = target -| now_ns;
+                const cycles = std.math.add(u64, delta, period / 2) catch return error.InvalidPresentTiming;
+                const rounded = (cycles / period) * period;
+                target = std.math.add(u64, now_ns, rounded) catch return error.InvalidPresentTiming;
+            }
+            request = .{ .target_ns = target, .requested_stages = timing.present_stage_queries };
             next = @ptrCast(header.p_next);
             continue;
         }
         return error.InvalidPresentTiming;
     }
-    return target;
+    return request;
+}
+
+fn presentTarget(info: *const PresentInfo, index: usize, now_ns: u64) !?u64 {
+    return if (try presentTimingRequest(info, index, now_ns)) |request| request.target_ns else null;
+}
+
+fn recordPresentTiming(context: *anyopaque, timing: present_worker.Timing) void {
+    const swapchain: *SwapchainObj = @ptrCast(@alignCast(context));
+    _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
+    defer _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+    if (!timing.completed) {
+        if (swapchain.present_timing_outstanding != 0) swapchain.present_timing_outstanding -= 1;
+        return;
+    }
+    if (swapchain.present_timing_history_count >= max_present_entries) {
+        if (swapchain.present_timing_outstanding != 0) swapchain.present_timing_outstanding -= 1;
+        return;
+    }
+    const slot = swapchain.present_timing_history_count;
+    swapchain.present_timing_history[slot] = .{
+        .present_id = timing.present_id,
+        .target_time = timing.target_time,
+        .requested_stages = timing.requested_stages,
+        .queue_operations_end_ns = timing.queue_operations_end_ns,
+        .request_dequeued_ns = timing.request_dequeued_ns,
+        .image_first_pixel_out_ns = timing.image_first_pixel_out_ns,
+        .image_first_pixel_visible_ns = timing.image_first_pixel_visible_ns,
+    };
+    swapchain.present_timing_history_count += 1;
 }
 
 test "EXT present timing selects absolute and relative deadlines" {
@@ -12133,6 +12257,21 @@ test "Google display timing procedure names are detected without aliases" {
     try std.testing.expect(googleDisplayTimingProc("vkGetPastPresentationTimingGOOGLE"));
     try std.testing.expect(!googleDisplayTimingProc("vkGetSwapchainTimingPropertiesEXT"));
     try std.testing.expect(deviceLookup("vkGetRefreshCycleDurationGOOGLE") == null);
+}
+
+test "EXT present timing returned-only ABI and nearest-cycle targets are exact" {
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(PresentStageTimeEXT));
+    try std.testing.expectEqual(@as(usize, 72), @sizeOf(PastPresentationTimingEXT));
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(PastPresentationTimingPropertiesEXT));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(PastPresentationTimingInfoEXT));
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(PresentTimingInfoEXT));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(PresentTimingsInfoEXT));
+    var timing = PresentTimingInfoEXT{ .s_type = 1_000_208_004, .p_next = null, .flags = 2, .target_time = 10_000_000, .time_domain_id = 1, .present_stage_queries = 0, .target_time_domain_present_stage = 0 };
+    const timings = PresentTimingsInfoEXT{ .s_type = 1_000_208_003, .p_next = null, .swapchain_count = 1, .timing_infos = @ptrCast(&timing) };
+    const info = PresentInfo{ .s_type = 1_000_001_001, .p_next = &timings, .wait_semaphore_count = 0, .wait_semaphores = null, .swapchain_count = 1, .swapchains = null, .image_indices = null, .results = null };
+    const nearest = try presentTarget(&info, 0, 1_000);
+    try std.testing.expect(nearest.? >= 1_000);
+    try std.testing.expectEqual(@as(u64, 8_334_333), nearest.?);
 }
 
 fn getSwapchainTimingProperties(device: ?Device, handle: usize, output: ?*SwapchainTimingPropertiesEXT, counter: ?*u64) callconv(.c) Result {
@@ -12181,6 +12320,7 @@ fn setSwapchainPresentTimingQueueSize(device: ?Device, handle: usize, size: u32)
     const d = device orelse return .error_initialization_failed;
     if (!validDeviceLocked(d) or swapchain.owner != d) return .error_initialization_failed;
     if (!swapchain.present_timing_enabled) return .error_initialization_failed;
+    if (size > max_present_entries) return .error_initialization_failed;
     if (size < swapchain.present_timing_outstanding) return .not_ready;
     swapchain.present_timing_queue_size = size;
     return .success;
@@ -12193,12 +12333,64 @@ fn getPastPresentationTiming(device: ?Device, info: ?*const PastPresentationTimi
     const properties = output orelse return .error_initialization_failed;
     const swapchain = validSwapchainLocked(query.swapchain) orelse return .error_initialization_failed;
     const d = device orelse return .error_initialization_failed;
-    if (!validDeviceLocked(d) or swapchain.owner != d or query.s_type != 1_000_208_005 or query.p_next != null or query.flags != 0 or properties.s_type != 1_000_208_006 or properties.p_next != null) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or swapchain.owner != d or query.s_type != 1_000_208_005 or query.p_next != null or query.flags & ~@as(u32, 3) != 0 or properties.s_type != 1_000_208_006 or properties.p_next != null) return .error_initialization_failed;
+    _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
+    defer _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+    const available = swapchain.present_timing_history_count;
+    if (available == 0) {
+        properties.timing_properties_counter = 1;
+        properties.time_domains_counter = 1;
+        properties.presentation_timing_count = 0;
+        properties.presentation_timings = null;
+        return .success;
+    }
+    const output_count = properties.presentation_timing_count;
+    const outputs = properties.presentation_timings orelse {
+        if (output_count != 0) return .error_initialization_failed;
+        properties.timing_properties_counter = 1;
+        properties.time_domains_counter = 1;
+        properties.presentation_timing_count = available;
+        return .success;
+    };
+    if (output_count == 0) return .error_initialization_failed;
+    const write_count = @min(available, output_count);
+    for (0..write_count) |index| {
+        const timing_record = swapchain.present_timing_history[index];
+        const destination = &outputs[index];
+        const stage_pointer = destination.present_stages;
+        destination.* = .{
+            .s_type = 1_000_208_007,
+            .p_next = null,
+            .present_id = timing_record.present_id,
+            .target_time = timing_record.target_time,
+            .present_stage_count = @popCount(timing_record.requested_stages),
+            .present_stages = stage_pointer,
+            .time_domain = 1_000_208_000,
+            .time_domain_id = 1,
+            .report_complete = if (timing_record.requested_stages == 0 or stage_pointer != null) 1 else 0,
+        };
+        if (stage_pointer) |stages| {
+            var written: usize = 0;
+            const times = [_]u64{ timing_record.queue_operations_end_ns, timing_record.request_dequeued_ns, timing_record.image_first_pixel_out_ns, timing_record.image_first_pixel_visible_ns };
+            inline for ([_]u32{ 1, 2, 4, 8 }, 0..) |bit, stage_index| {
+                if (timing_record.requested_stages & bit != 0) {
+                    stages[written] = .{ .stage = bit, .time = times[stage_index] };
+                    written += 1;
+                }
+            }
+        }
+    }
+    if (write_count != 0) {
+        const remaining = available - write_count;
+        if (remaining != 0) std.mem.copyForwards(PresentTimingRecord, swapchain.present_timing_history[0..remaining], swapchain.present_timing_history[write_count..available]);
+        swapchain.present_timing_history_count = remaining;
+        swapchain.present_timing_outstanding -= @intCast(write_count);
+    }
     properties.timing_properties_counter = 1;
     properties.time_domains_counter = 1;
-    properties.presentation_timing_count = 0;
-    properties.presentation_timings = null;
-    return .success;
+    properties.presentation_timing_count = write_count;
+    properties.presentation_timings = outputs;
+    return if (write_count < available) .incomplete else .success;
 }
 
 fn deviceWaitIdle(device: ?Device) callconv(.c) Result {
@@ -14139,7 +14331,61 @@ test "vkcube presentation path records submits and presents two swapchain images
     timing_swapchain_info.flags = swapchain_present_timing_bit;
     var timing_swapchain: usize = 0;
     try std.testing.expectEqual(Result.success, createSwapchain(device, &timing_swapchain_info, null, &timing_swapchain));
-    try std.testing.expectEqual(Result.success, setSwapchainPresentTimingQueueSize(device, timing_swapchain, 2));
+    try std.testing.expectEqual(Result.success, setSwapchainPresentTimingQueueSize(device, timing_swapchain, 4));
+    var timing_index: u32 = undefined;
+    try std.testing.expectEqual(Result.success, acquireNextImage(device, timing_swapchain, 0, 0, 0, &timing_index));
+    var timing_target = PresentTimingInfoEXT{ .s_type = 1_000_208_004, .p_next = null, .flags = 0, .target_time = 9_000, .time_domain_id = 1, .present_stage_queries = 0xf, .target_time_domain_present_stage = 0 };
+    const timing_chain = PresentTimingsInfoEXT{ .s_type = 1_000_208_003, .p_next = null, .swapchain_count = 1, .timing_infos = @ptrCast(&timing_target) };
+    const timing_present = PresentInfo{ .s_type = 1_000_001_001, .p_next = &timing_chain, .wait_semaphore_count = 0, .wait_semaphores = null, .swapchain_count = 1, .swapchains = @ptrCast(&timing_swapchain), .image_indices = @ptrCast(&timing_index), .results = null };
+    try std.testing.expectEqual(Result.success, queuePresent(queue, &timing_present));
+    var timing_index_second: u32 = undefined;
+    try std.testing.expectEqual(Result.success, acquireNextImage(device, timing_swapchain, 0, 0, 0, &timing_index_second));
+    var timing_present_second = timing_present;
+    timing_present_second.image_indices = @ptrCast(&timing_index_second);
+    try std.testing.expectEqual(Result.success, queuePresent(queue, &timing_present_second));
+    try std.testing.expectEqual(Result.success, queueWaitIdle(queue));
+    var timing_count_query = PastPresentationTimingPropertiesEXT{ .s_type = 1_000_208_006, .p_next = null, .timing_properties_counter = 0, .time_domains_counter = 0, .presentation_timing_count = 0, .presentation_timings = null };
+    const timing_past_info = PastPresentationTimingInfoEXT{ .s_type = 1_000_208_005, .p_next = null, .flags = 0, .swapchain = timing_swapchain };
+    try std.testing.expectEqual(Result.success, getPastPresentationTiming(device, &timing_past_info, &timing_count_query));
+    try std.testing.expectEqual(@as(u32, 2), timing_count_query.presentation_timing_count);
+    var timing_stages: [4]PresentStageTimeEXT = undefined;
+    var timing_output = PastPresentationTimingEXT{ .s_type = 0, .p_next = null, .present_id = 0, .target_time = 0, .present_stage_count = 0, .present_stages = &timing_stages, .time_domain = 0, .time_domain_id = 0, .report_complete = 0 };
+    var timing_past_properties = PastPresentationTimingPropertiesEXT{ .s_type = 1_000_208_006, .p_next = null, .timing_properties_counter = 0, .time_domains_counter = 0, .presentation_timing_count = 1, .presentation_timings = @ptrCast(&timing_output) };
+    try std.testing.expectEqual(Result.incomplete, getPastPresentationTiming(device, &timing_past_info, &timing_past_properties));
+    try std.testing.expectEqual(@as(u32, 1), timing_past_properties.presentation_timing_count);
+    try std.testing.expectEqual(@as(u64, 1), timing_output.present_id);
+    try std.testing.expectEqual(@as(u64, 9_000), timing_output.target_time);
+    try std.testing.expectEqual(@as(u32, 4), timing_output.present_stage_count);
+    try std.testing.expectEqual(@as(u32, 0xf), timing_output.present_stages.?[3].stage | timing_output.present_stages.?[2].stage | timing_output.present_stages.?[1].stage | timing_output.present_stages.?[0].stage);
+    try std.testing.expectEqual(@as(u32, 1), timing_output.report_complete);
+    timing_output = .{ .s_type = 0, .p_next = null, .present_id = 0, .target_time = 0, .present_stage_count = 0, .present_stages = &timing_stages, .time_domain = 0, .time_domain_id = 0, .report_complete = 0 };
+    timing_past_properties.presentation_timing_count = 1;
+    timing_past_properties.presentation_timings = @ptrCast(&timing_output);
+    try std.testing.expectEqual(Result.success, getPastPresentationTiming(device, &timing_past_info, &timing_past_properties));
+    try std.testing.expectEqual(@as(u64, 2), timing_output.present_id);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        var empty_past = PastPresentationTimingPropertiesEXT{ .s_type = 1_000_208_006, .p_next = null, .timing_properties_counter = 0, .time_domains_counter = 0, .presentation_timing_count = 0, .presentation_timings = null };
+        try std.testing.expectEqual(Result.success, getPastPresentationTiming(device, &timing_past_info, &empty_past));
+    }
+    test_allocations_before_failure = null;
+    try std.testing.expectEqual(Result.success, setSwapchainPresentTimingQueueSize(device, timing_swapchain, 1));
+    var full_index: u32 = undefined;
+    try std.testing.expectEqual(Result.success, acquireNextImage(device, timing_swapchain, 0, 0, 0, &full_index));
+    var full_present = timing_present;
+    full_present.image_indices = @ptrCast(&full_index);
+    try std.testing.expectEqual(Result.success, queuePresent(queue, &full_present));
+    var rejected_full_index: u32 = undefined;
+    try std.testing.expectEqual(Result.success, acquireNextImage(device, timing_swapchain, 0, 0, 0, &rejected_full_index));
+    full_present.image_indices = @ptrCast(&rejected_full_index);
+    try std.testing.expectEqual(Result.error_present_timing_queue_full, queuePresent(queue, &full_present));
+    _ = std.c.pthread_mutex_lock(&validSwapchainLocked(timing_swapchain).?.present_mutex);
+    validSwapchainLocked(timing_swapchain).?.image_states[rejected_full_index] = .available;
+    _ = std.c.pthread_mutex_unlock(&validSwapchainLocked(timing_swapchain).?.present_mutex);
+    var drain_output = PastPresentationTimingEXT{ .s_type = 0, .p_next = null, .present_id = 0, .target_time = 0, .present_stage_count = 0, .present_stages = null, .time_domain = 0, .time_domain_id = 0, .report_complete = 0 };
+    timing_past_properties.presentation_timing_count = 1;
+    timing_past_properties.presentation_timings = @ptrCast(&drain_output);
+    try std.testing.expectEqual(Result.success, getPastPresentationTiming(device, &timing_past_info, &timing_past_properties));
     try std.testing.expectEqual(Result.success, setSwapchainPresentTimingQueueSize(device, timing_swapchain, 0));
     const past_info = PastPresentationTimingInfoEXT{ .s_type = 1_000_208_005, .p_next = null, .flags = 0, .swapchain = swapchain };
     var past_properties = PastPresentationTimingPropertiesEXT{ .s_type = 1_000_208_006, .p_next = null, .timing_properties_counter = 0, .time_domains_counter = 0, .presentation_timing_count = 1, .presentation_timings = @ptrFromInt(8) };

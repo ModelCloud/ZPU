@@ -41,6 +41,11 @@ fixed eight-entry subpass-layout table, so advancing beyond the advertised
 maximum is a failure-atomic, allocation-free invalidation rather than an
 out-of-bounds access. Ending a traditional render pass before its final
 subpass is likewise rejected without recording or closing the active scope.
+`VK_EXT_present_timing` now retains a bounded per-swapchain FIFO when its
+timing queue is enabled: each completed present receives a stable process-local
+ID, requested stage timestamps, and completion metadata through
+`vkGetPastPresentationTimingEXT`; count/incomplete behavior, queue-full
+backpressure, and the allocation-free warm path are covered by direct tests.
 Compute command recording now requires an owned bound compute
 pipeline, carries pipeline/layout/descriptor lifetime snapshots through
 submission prevalidation, and has a 4096-iteration allocation-free warm path.

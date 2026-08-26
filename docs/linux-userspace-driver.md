@@ -215,6 +215,10 @@ Presentation cadence is process-local:
 - `VK_EXT_present_timing` lets the application choose absolute monotonic or
   relative targets per `vkQueuePresentKHR` call and can change timing throughout
   the process lifetime.
+- Its opt-in timing queue also exposes bounded FIFO history through
+  `vkGetPastPresentationTimingEXT`, including the queue/dequeue and pixel
+  visibility stages requested by the application. Count queries and queue-full
+  backpressure do not allocate on the hot path.
 - Untimed presents continue on the process's configured cadence.
 - `VK_GOOGLE_display_timing` is unsupported and diagnosed with an error that
   directs callers to the sanctioned controls above.
