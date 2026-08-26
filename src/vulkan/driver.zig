@@ -6047,7 +6047,11 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
         .next_subpass => {},
         .cube_draw => |op| {
             if (op.pipeline.execution_abi == .profile_v1_scalar_graphics) {
-                executeProfileDraw(op, query_context);
+                var draw = op;
+                const instance_count = draw.instance_count;
+                draw.instance_count = 1;
+                var instance: u32 = 0;
+                while (instance < instance_count) : (instance += 1) executeProfileDraw(draw, query_context);
                 return;
             }
             const operation_start = frame_pacing.monotonicNs();
@@ -9171,7 +9175,7 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     for (0..16) |index| std.mem.writeInt(u32, depth_bytes[index * 4 ..][0..4], 0x3f80_0000, .little);
     var indirect_bytes: [16]u8 align(64) = [_]u8{0} ** 16;
     std.mem.writeInt(u32, indirect_bytes[0..4], 3, .little);
-    std.mem.writeInt(u32, indirect_bytes[4..8], 1, .little);
+    std.mem.writeInt(u32, indirect_bytes[4..8], 2, .little);
     var indirect_memory = MemoryObj{ .owner = undefined, .bytes = indirect_bytes[0..], .mapped = true };
     var indirect_buffer = BufferObj{ .owner = undefined, .size = indirect_bytes.len, .usage = 0x100, .memory = &indirect_memory };
     const indirect_command = Command{ .indirect_draw = .{
