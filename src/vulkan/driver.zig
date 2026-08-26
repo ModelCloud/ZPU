@@ -7637,7 +7637,7 @@ fn getPipelineCacheData(device: ?Device, handle: usize, size: ?*usize, data: ?*a
 }
 fn mergePipelineCaches(device: ?Device, dst_handle: usize, count: u32, src_handles: ?[*]const usize) callconv(.c) Result {
     const d = device orelse return .error_initialization_failed;
-    if (count > max_api_items or (count != 0 and src_handles == null)) return .error_initialization_failed;
+    if (count == 0 or count > max_api_items or src_handles == null) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     const dst = validPipelineCacheLocked(dst_handle) orelse return .error_initialization_failed;
@@ -14985,7 +14985,7 @@ test "pipeline cache header lifecycle merge and partial reads are exact" {
     var unchanged_size: usize = 0;
     try std.testing.expectEqual(Result.success, getPipelineCacheData(ctx.device, caches[0], &unchanged_size, null));
     try std.testing.expectEqual(@as(usize, 40), unchanged_size);
-    try std.testing.expectEqual(Result.success, mergePipelineCaches(ctx.device, caches[0], 0, null));
+    try std.testing.expectEqual(Result.error_initialization_failed, mergePipelineCaches(ctx.device, caches[0], 0, null));
     try std.testing.expectEqual(Result.error_initialization_failed, mergePipelineCaches(ctx.device, caches[0], 1, @ptrCast(&caches[0])));
     seeded[8] ^= 1;
     var unpublished: usize = 0xfeed_face;
