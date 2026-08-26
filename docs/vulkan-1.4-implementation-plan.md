@@ -309,9 +309,11 @@ Each slice must land with all of the following:
 
 - [ ] Extensible `*2` feature/property/format/memory/queue queries and complete
   recognized output `pNext` chains.
-- [ ] Device groups, external capability queries, bind-memory2 and
-  requirements2, queue2, descriptor update templates, YCbCr conversion, and
-  the remaining 1.1 commands and mandatory feature/property structures.
+- [ ] Device groups, bind-memory2 and requirements2, queue2, descriptor update
+  templates, YCbCr conversion, and the remaining 1.1 commands and mandatory
+  feature/property structures. External capability queries now have a
+  failure-atomic zero-capability contract; native external-handle support
+  remains intentionally unadvertised.
 
 ### C. Vulkan 1.2 core
 
