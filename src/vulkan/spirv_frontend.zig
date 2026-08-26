@@ -1222,7 +1222,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             78 => .vector_insert_dynamic,
             82 => .composite_insert,
             84 => .transpose,
-            109, 110, 111, 112, 124 => .convert,
+            109, 110, 111, 112 => .convert,
+            124 => .bitcast,
             126 => .ineg,
             127 => .fneg,
             128 => .iadd,
@@ -2175,6 +2176,37 @@ test "profile lowers static vector composite insertion" {
     defer program.deinit(std.testing.allocator);
     var found = false;
     for (program.instructions) |instruction| found = found or instruction.op == .composite_insert;
+    try std.testing.expect(found);
+}
+
+test "profile lowers OpBitcast with payload-preserving IR semantics" {
+    const type_insert_at = testOpcodeOffset(&compute_store, 43, 0).?;
+    var words = try testInsertWords(std.testing.allocator, &compute_store, type_insert_at, &.{
+        (3 << 16) | 22,
+        10,
+        32,
+        (4 << 16) | 43,
+        10,
+        11,
+        0x3f80_0000,
+    });
+    const bitcast_insert_at = testOpcodeOffset(words, 62, 0).?;
+    const with_bitcast = try testInsertWords(std.testing.allocator, words, bitcast_insert_at, &.{
+        (4 << 16) | 124,
+        2,
+        12,
+        11,
+    });
+    std.testing.allocator.free(words);
+    words = with_bitcast;
+    defer std.testing.allocator.free(words);
+    words[3] = 13;
+    const store_offset = testOpcodeOffset(words, 62, 0).?;
+    words[store_offset + 2] = 12;
+    var program = try compile(std.testing.allocator, words, .compute, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var found = false;
+    for (program.instructions) |instruction| found = found or instruction.op == .bitcast;
     try std.testing.expect(found);
 }
 

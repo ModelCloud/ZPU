@@ -59,7 +59,8 @@ boolean logical expressions, signed integer negation, component-wise integer
 multiply, bitwise operations, bounded integer bit reversal and population count,
 bit-field insertion and signed/unsigned extraction, integer division/remainder,
 dynamic vector component extraction/insertion, integer division/remainder, and
-static vector composite insertion, integer division/remainder, and bounded
+static vector composite insertion, raw numeric bitcasts preserving payload bits,
+integer division/remainder, and bounded
 integer shifts, floating remainder/modulo
 with truncating/flooring quotient, dynamic scalar integer comparisons, ordered/unordered scalar
 floating-point comparisons with NaN semantics, and dynamic scalar boolean
@@ -453,7 +454,8 @@ Each slice must land with all of the following:
   multiply, bitwise operations, bounded integer bit reversal and population count,
   bit-field insertion and signed/unsigned extraction, integer division/remainder,
   dynamic vector component extraction/insertion, and bounded integer shifts,
-  static vector composite insertion, and executes bounded floating
+  static vector composite insertion, raw numeric bitcasts preserving payload bits,
+  and executes bounded floating
   remainder/modulo and dynamic scalar integer comparisons,
   ordered/unordered scalar floating-point comparisons with NaN semantics, and
   dynamic scalar boolean logical operations, bounded f32 4x4 column-major
