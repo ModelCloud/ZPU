@@ -10746,13 +10746,13 @@ fn graphicsDrawExecutionAllowed(abi: ExecutionAbi) bool {
 }
 fn dynamicPipelineRenderingCompatible(command_buffer: *const CommandBufferImpl, pipeline: *const GraphicsPipelineObj) bool {
     if (!pipeline.dynamic_rendering) return true;
-    const color = command_buffer.dynamic_color_image orelse return false;
-    if (color.format != pipeline.rendering_color_format) return false;
-    const depth = command_buffer.dynamic_depth_image;
+    const color_format = if (command_buffer.dynamic_inheritance) command_buffer.inherited_dynamic_color_format else (command_buffer.dynamic_color_image orelse return false).format;
+    if (color_format != pipeline.rendering_color_format) return false;
+    const depth_format = if (command_buffer.dynamic_inheritance) command_buffer.inherited_dynamic_depth_format else if (command_buffer.dynamic_depth_image) |depth| depth.format else 0;
     if (pipeline.rendering_depth_format == 0) {
-        if (depth != null) return false;
+        if (depth_format != 0) return false;
     } else {
-        if (depth == null or depth.?.format != pipeline.rendering_depth_format) return false;
+        if (depth_format != pipeline.rendering_depth_format) return false;
     }
     return pipeline.rendering_stencil_format == 0;
 }
@@ -13407,6 +13407,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(dynamic_pipeline_object.dynamic_rendering);
     try std.testing.expectEqual(@as(i32, 44), dynamic_pipeline_object.rendering_color_format);
     try std.testing.expectEqual(@as(i32, 126), dynamic_pipeline_object.rendering_depth_format);
+    dynamic_pipeline_object.execution_abi = .cpu_cube_v1;
     dynamic_pipeline_formats[0] = 37;
     const dynamic_pipeline_states_before_rejection = graphics_pipeline_state;
     var invalid_dynamic_pipeline = [_]usize{0xfeed_face};
@@ -13414,7 +13415,6 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(@as(usize, 0xfeed_face), invalid_dynamic_pipeline[0]);
     try std.testing.expectEqualSlices(SlotState, &dynamic_pipeline_states_before_rejection, &graphics_pipeline_state);
     dynamic_pipeline_formats[0] = 44;
-    destroyPipeline(device, dynamic_pipeline[0], null);
     var graphics_flags2 = PipelineCreateFlags2CreateInfo{ .s_type = pipeline_create_flags2_stype, .p_next = null, .flags = 0 };
     var graphics_flags2_info = pipeline_info;
     graphics_flags2_info.p_next = @ptrCast(&graphics_flags2);
@@ -14304,7 +14304,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     cmdPipelineBarrier(multi_commands[0], 1, 0x100, 0, 0, null, 0, null, 1, @ptrCast(&dynamic_depth_transition));
     resetQueryPool(device, occlusion_pool, 0, 1);
     cmdBeginRendering(multi_commands[0], &dynamic_rendering);
-    cmdBindPipeline(multi_commands[0], 0, pipelines[0]);
+    cmdBindPipeline(multi_commands[0], 0, dynamic_pipeline[0]);
     cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
     cmdBindIndexBuffer(multi_commands[0], index_buffer, 0, 0);
     cmdSetViewport(multi_commands[0], 0, 1, @ptrCast(&viewport));
@@ -14344,7 +14344,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     dynamic_secondary_inheritance.p_next = &dynamic_secondary_rendering;
     const dynamic_secondary_begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 2, .inheritance_info = &dynamic_secondary_inheritance };
     try std.testing.expectEqual(Result.success, beginCommandBuffer(render_secondary[0], &dynamic_secondary_begin));
-    cmdBindPipeline(render_secondary[0], 0, pipelines[0]);
+    cmdBindPipeline(render_secondary[0], 0, dynamic_pipeline[0]);
     cmdBindDescriptorSets(render_secondary[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
     cmdBindIndexBuffer(render_secondary[0], index_buffer, 0, 0);
     cmdSetViewport(render_secondary[0], 0, 1, @ptrCast(&viewport));
@@ -14598,6 +14598,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     cmdBindPipeline(commands[0], 0, pipelines[0]);
     cmdBindDescriptorSets(commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
     destroyPipeline(device, pipelines[0], null);
+    destroyPipeline(device, dynamic_pipeline[0], null);
     cmdDraw(commands[0], 3, 1, 0, 0);
     try std.testing.expect(commands[0].impl.invalid);
 
