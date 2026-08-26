@@ -97,6 +97,14 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 169, .operands = .{ .min = 5, .max = 5 } },
     .{ .opcode = 170, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 171, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 172, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 173, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 174, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 175, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 176, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 177, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 178, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 179, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 248, .operands = .{ .min = 1, .max = 1 } },
     .{ .opcode = 253, .operands = .{ .min = 0, .max = 0 } },
     .{ .opcode = 71, .operands = .{ .min = 2, .max = 3 } },
@@ -216,8 +224,8 @@ fn scalarClass(shape: ir.Type, class: ScalarClass) bool {
 }
 
 /// Resolve the bounded static boolean conditions used by compute control
-/// flow. Integer equality/inequality is admitted only when both operands are
-/// literal scalar constants; dynamic comparisons remain outside the profile.
+/// flow. Integer comparisons are admitted only when both operands are literal
+/// scalar constants; dynamic comparisons remain outside the profile.
 fn staticCondition(nodes: []const Node, value_id: u32) Error!?bool {
     const node = nodes[try id(nodes, value_id)];
     if (node.kind == .constant) return switch (node.opcode) {
@@ -225,7 +233,7 @@ fn staticCondition(nodes: []const Node, value_id: u32) Error!?bool {
         42 => false,
         else => null,
     };
-    if (node.kind != .function_value or (node.opcode != 170 and node.opcode != 171)) return null;
+    if (node.kind != .function_value or node.opcode < 170 or node.opcode > 179) return null;
     if (node.words.len != 2) return error.Malformed;
     const left = nodes[try id(nodes, node.words[0])];
     const right = nodes[try id(nodes, node.words[1])];
@@ -233,8 +241,23 @@ fn staticCondition(nodes: []const Node, value_id: u32) Error!?bool {
     const left_shape = try resultShape(nodes, left.type_id);
     const right_shape = try resultShape(nodes, right.type_id);
     if (!sameShape(left_shape, right_shape) or !scalarClass(left_shape, .integer) or left_shape.columns != 1 or left_shape.rows != 1 or left.words.len != 1 or right.words.len != 1) return error.Malformed;
-    const equal = left.words[0] == right.words[0];
-    return if (node.opcode == 170) equal else !equal;
+    const unsigned_left = left.words[0];
+    const unsigned_right = right.words[0];
+    const signed_left: i32 = @bitCast(unsigned_left);
+    const signed_right: i32 = @bitCast(unsigned_right);
+    return switch (node.opcode) {
+        170 => unsigned_left == unsigned_right,
+        171 => unsigned_left != unsigned_right,
+        172 => unsigned_left > unsigned_right,
+        173 => unsigned_left >= unsigned_right,
+        174 => unsigned_left < unsigned_right,
+        175 => unsigned_left <= unsigned_right,
+        176 => signed_left > signed_right,
+        177 => signed_left >= signed_right,
+        178 => signed_left < signed_right,
+        179 => signed_left <= signed_right,
+        else => unreachable,
+    };
 }
 
 fn define(nodes: []Node, result_id: u32, node: Node) Error!void {
@@ -511,7 +534,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     }
                 } else if (instruction.opcode == 250) {
                     const condition = nodes[try id(nodes, w[0])];
-                    if (!((condition.kind == .constant and (condition.opcode == 41 or condition.opcode == 42)) or (condition.kind == .function_value and (condition.opcode == 170 or condition.opcode == 171)))) return error.Unsupported;
+                    if (!((condition.kind == .constant and (condition.opcode == 41 or condition.opcode == 42)) or (condition.kind == .function_value and condition.opcode >= 170 and condition.opcode <= 179))) return error.Unsupported;
                 }
                 if (instruction.opcode == 249) {
                     _ = try id(nodes, w[0]);
@@ -521,7 +544,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 }
                 block_terminated = true;
             },
-            61, 62, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 133, 136, 142, 145, 169, 170, 171 => {
+            61, 62, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 133, 136, 142, 145, 169, 170...179 => {
                 if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
                 const valid_arity = switch (instruction.opcode) {
                     61 => w.len == 3,
@@ -531,7 +554,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     80 => w.len >= 3,
                     81 => w.len >= 4,
                     109, 110, 111, 112, 124, 127 => w.len == 3,
-                    128, 129, 130, 131, 133, 136, 142, 145, 170, 171 => w.len == 4,
+                    128, 129, 130, 131, 133, 136, 142, 145, 170...179 => w.len == 4,
                     169 => w.len == 5,
                     else => unreachable,
                 };
@@ -684,11 +707,17 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const when_false = try valueShape(nodes, w[4]);
                 if (condition.scalar != .bool or condition.columns != 1 or condition.rows != 1 or !sameShape(result, when_true) or !sameShape(result, when_false)) return error.Malformed;
             },
-            170, 171 => {
+            170...179 => {
                 const result = try resultShape(nodes, w[0]);
                 const left = try valueShape(nodes, w[2]);
                 const right = try valueShape(nodes, w[3]);
-                if (result.scalar != .bool or result.columns != 1 or result.rows != 1 or !scalarClass(left, .integer) or !sameShape(left, right)) return error.Malformed;
+                const scalar_ok = switch (instruction.opcode) {
+                    170, 171 => scalarClass(left, .integer),
+                    172, 173, 174, 175 => left.scalar == .u32,
+                    176, 177, 178, 179 => left.scalar == .i32,
+                    else => unreachable,
+                };
+                if (result.scalar != .bool or result.columns != 1 or result.rows != 1 or !scalar_ok or !sameShape(left, right)) return error.Malformed;
             },
             else => {},
         }
@@ -849,13 +878,13 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 131, 133, 136, 142, 145, 169, 170, 171, 245 => w[1],
+                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 131, 133, 136, 142, 145, 169, 170...179, 245 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
             if (!needed[try id(nodes, result)]) continue;
             const first_operand: usize = switch (instruction.opcode) {
-                41, 42, 43, 48, 49, 50, 170, 171 => continue,
+                41, 42, 43, 48, 49, 50, 170...179 => continue,
                 else => 2,
             };
             if (instruction.opcode == 245) {
@@ -948,7 +977,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 133, 136, 142, 145, 169, 170, 171, 245 => w[1],
+            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 133, 136, 142, 145, 169, 170...179, 245 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
@@ -978,7 +1007,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             142 => .vector_times_scalar,
             145 => .matrix_times_vector,
             169 => .select,
-            170, 171 => .constant,
+            170...179 => .constant,
             else => unreachable,
         };
         var operands: std.ArrayList(u32) = .empty;
@@ -1009,7 +1038,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             } else if (!specialized and (node.opcode == 42 or node.opcode == 49)) {
                 literal[0] = 0;
                 literal_len = 1;
-            } else if (!specialized and (node.opcode == 170 or node.opcode == 171)) {
+            } else if (!specialized and node.opcode >= 170 and node.opcode <= 179) {
                 literal[0] = @intFromBool(try staticCondition(nodes, rid) orelse return error.Unsupported);
                 literal_len = 1;
             } else if (!specialized) {
@@ -1657,6 +1686,22 @@ test "compute profile folds constant integer comparisons for branch phi" {
     var not_equal_program = try compile(std.testing.allocator, &not_equal, .compute, "main", &.{});
     defer not_equal_program.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 99), std.mem.readInt(u32, not_equal_program.instructions[0].literal[0..4], .little));
+
+    const comparison_opcodes = [_]u16{ 170, 171, 172, 173, 174, 175, 176, 177, 178, 179 };
+    const expected_true = [_]bool{ true, false, false, true, false, true, false, true, false, true };
+    for (comparison_opcodes, expected_true) |opcode, expected| {
+        var candidate = compute_static_compare_phi_store;
+        const candidate_compare = testOpcodeOffset(&candidate, 170, 0).?;
+        candidate[candidate_compare] = (@as(u32, 5) << 16) | opcode;
+        if (opcode >= 176) {
+            const integer_type = testOpcodeOffset(&candidate, 21, 0).?;
+            candidate[integer_type + 3] = 1;
+        }
+        var candidate_program = try compile(std.testing.allocator, &candidate, .compute, "main", &.{});
+        defer candidate_program.deinit(std.testing.allocator);
+        const expected_value: u32 = if (expected) 42 else 99;
+        try std.testing.expectEqual(expected_value, std.mem.readInt(u32, candidate_program.instructions[0].literal[0..4], .little));
+    }
 
     var unsupported = compute_static_compare_phi_store;
     const branch = testOpcodeOffset(&unsupported, 250, 0).?;
