@@ -4948,6 +4948,13 @@ fn cmdCopyImageToBuffer2(cb: ?CommandBuffer, info: ?*const CopyImageToBufferInfo
 fn supportedLayout(layout: i32) bool {
     return layout == 0 or layout == 8 or layout == 1 or layout == 2 or layout == 3 or layout == 5 or layout == 6 or layout == 7 or layout == 1_000_001_002;
 }
+fn renderingAttachmentLayoutValid(layout: i32, aspect_mask: u32) bool {
+    // The narrow CPU render path supports GENERAL plus the matching legacy
+    // color/depth attachment layouts.  Undefined, transfer, shader, present,
+    // preinitialized, and cross-aspect layouts are never valid while an
+    // attachment is accessed by dynamic rendering.
+    return layout == 1 or (aspect_mask == 1 and layout == 2) or (aspect_mask == 2 and layout == 3);
+}
 fn dependencyInfoShapeValid(info: ?*const DependencyInfo) bool {
     const ci = info orelse return false;
     if (ci.s_type != 1000314003 or ci.p_next != null or ci.dependency_flags & ~@as(u32, 1) != 0 or ci.memory_barrier_count > max_api_items or ci.buffer_memory_barrier_count > max_api_items or ci.image_memory_barrier_count > max_api_items) return false;
@@ -8791,7 +8798,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
         return;
     }
     const color_attachment = ci.color_attachments.?[0];
-    if (color_attachment.s_type != 1000044000 or color_attachment.p_next != null or color_attachment.resolve_mode != 0 or color_attachment.resolve_image_view != 0 or color_attachment.load_op < 0 or color_attachment.load_op > 2 or color_attachment.store_op < 0 or color_attachment.store_op > 1 or !supportedLayout(color_attachment.image_layout)) {
+    if (color_attachment.s_type != 1000044000 or color_attachment.p_next != null or color_attachment.resolve_mode != 0 or color_attachment.resolve_image_view != 0 or color_attachment.load_op < 0 or color_attachment.load_op > 2 or color_attachment.store_op < 0 or color_attachment.store_op > 1 or !supportedLayout(color_attachment.image_layout) or !renderingAttachmentLayoutValid(color_attachment.image_layout, 1)) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -8800,13 +8807,13 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
         return;
     };
     const color = color_view.image;
-    if (color.owner != command_buffer.impl.owner or color_view.aspect_mask != 1 or color.format != 44 or ci.render_area.offset.x < 0 or ci.render_area.offset.y < 0 or ci.render_area.extent.width == 0 or ci.render_area.extent.height == 0 or @as(u64, @intCast(ci.render_area.offset.x)) + ci.render_area.extent.width > color.width or @as(u64, @intCast(ci.render_area.offset.y)) + ci.render_area.extent.height > color.height) {
+    if (color.owner != command_buffer.impl.owner or color_view.aspect_mask != 1 or color_view.usage & 0x10 == 0 or color.format != 44 or color.layout != color_attachment.image_layout or ci.render_area.offset.x < 0 or ci.render_area.offset.y < 0 or ci.render_area.extent.width == 0 or ci.render_area.extent.height == 0 or @as(u64, @intCast(ci.render_area.offset.x)) + ci.render_area.extent.width > color.width or @as(u64, @intCast(ci.render_area.offset.y)) + ci.render_area.extent.height > color.height) {
         command_buffer.impl.invalid = true;
         return;
     }
     var depth: ?*ImageObj = null;
     if (ci.depth_attachment) |depth_attachment| {
-        if (depth_attachment.s_type != 1000044000 or depth_attachment.p_next != null or depth_attachment.resolve_mode != 0 or depth_attachment.resolve_image_view != 0 or depth_attachment.load_op < 0 or depth_attachment.load_op > 2 or depth_attachment.store_op < 0 or depth_attachment.store_op > 1 or !supportedLayout(depth_attachment.image_layout)) {
+        if (depth_attachment.s_type != 1000044000 or depth_attachment.p_next != null or depth_attachment.resolve_mode != 0 or depth_attachment.resolve_image_view != 0 or depth_attachment.load_op < 0 or depth_attachment.load_op > 2 or depth_attachment.store_op < 0 or depth_attachment.store_op > 1 or !supportedLayout(depth_attachment.image_layout) or !renderingAttachmentLayoutValid(depth_attachment.image_layout, 2)) {
             command_buffer.impl.invalid = true;
             return;
         }
@@ -8814,7 +8821,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
             command_buffer.impl.invalid = true;
             return;
         };
-        if (depth_view.owner != command_buffer.impl.owner or depth_view.aspect_mask != 2 or depth_view.image.format != 126 or depth_view.image.width != color.width or depth_view.image.height != color.height) {
+        if (depth_view.owner != command_buffer.impl.owner or depth_view.aspect_mask != 2 or depth_view.usage & 0x20 == 0 or depth_view.image.format != 126 or depth_view.image.layout != depth_attachment.image_layout or depth_view.image.width != color.width or depth_view.image.height != color.height) {
             command_buffer.impl.invalid = true;
             return;
         }
@@ -12351,6 +12358,8 @@ test "vkcube presentation path records submits and presents two swapchain images
     };
     try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    validImageLocked(images[0]).?.layout = 1;
+    validImageLocked(depth_image).?.layout = 3;
     cmdBeginRendering(multi_commands[0], &dynamic_rendering);
     cmdBindPipeline(multi_commands[0], 0, pipelines[0]);
     cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
@@ -14507,6 +14516,7 @@ test "dynamic rendering begin and end own attachment scope" {
     var memory: usize = 0;
     try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &memory));
     try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, image, memory, 0));
+    validImageLocked(image).?.layout = 1;
     const view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = image, .view_type = 1, .format = 44, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
     var view: usize = 0;
     try std.testing.expectEqual(Result.success, createImageView(ctx.device, &view_info, null, &view));
@@ -14516,6 +14526,13 @@ test "dynamic rendering begin and end own attachment scope" {
     var usage_view: usize = 0;
     try std.testing.expectEqual(Result.success, createImageView(ctx.device, &usage_view_info, null, &usage_view));
     try std.testing.expectEqual(@as(u32, 0x10), validImageViewLocked(usage_view).?.usage);
+    var no_attachment_usage = usage_info;
+    no_attachment_usage.usage = 0;
+    var no_attachment_view_info = view_info;
+    no_attachment_view_info.p_next = &no_attachment_usage;
+    var no_attachment_view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(ctx.device, &no_attachment_view_info, null, &no_attachment_view));
+    try std.testing.expectEqual(@as(u32, 0), validImageViewLocked(no_attachment_view).?.usage);
     test_allocations_before_failure = 0;
     for (0..4096) |_| try std.testing.expect(imageViewCreatePNextState(&usage_info).valid);
     test_allocations_before_failure = null;
@@ -14592,6 +14609,26 @@ test "dynamic rendering begin and end own attachment scope" {
     try std.testing.expectEqual(@as(u32, 0), commands[1].impl.rendering_location_count);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    var stale_rendering = rendering;
+    validImageLocked(image).?.layout = 0;
+    stale_rendering.color_attachments = @ptrCast(&attachment);
+    cmdBeginRendering(commands[1], &stale_rendering);
+    try std.testing.expect(commands[1].impl.invalid);
+    try std.testing.expect(!commands[1].impl.dynamic_rendering);
+    try std.testing.expectEqual(@as(u16, 0), commands[1].impl.count);
+    validImageLocked(image).?.layout = 1;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    var missing_usage_attachment = attachment;
+    missing_usage_attachment.image_view = no_attachment_view;
+    var missing_usage_rendering = rendering;
+    missing_usage_rendering.color_attachments = @ptrCast(&missing_usage_attachment);
+    cmdBeginRendering(commands[1], &missing_usage_rendering);
+    try std.testing.expect(commands[1].impl.invalid);
+    try std.testing.expect(!commands[1].impl.dynamic_rendering);
+    try std.testing.expectEqual(@as(u16, 0), commands[1].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
     var bad_attachment = attachment;
     bad_attachment.clear_value.color.float32[0] = std.math.nan(f32);
     var bad_rendering = rendering;
@@ -14658,6 +14695,7 @@ test "dynamic rendering begin and end own attachment scope" {
     destroyCommandPool(ctx.device, pool, null);
     destroyImageView(ctx.device, view, null);
     destroyImageView(ctx.device, usage_view, null);
+    destroyImageView(ctx.device, no_attachment_view, null);
     destroyImage(ctx.device, image, null);
     freeMemory(ctx.device, memory, null);
     destroyDevice(ctx.device, null);
