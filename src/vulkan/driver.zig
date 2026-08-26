@@ -3675,20 +3675,24 @@ fn queryResultElementSize(flags: u32) usize {
     return scalar_size * (if (flags & 4 != 0) @as(usize, 2) else 1);
 }
 fn getQueryPoolResults(device: ?Device, handle: usize, first: u32, count: u32, data_size: usize, data: ?*anyopaque, stride: u64, flags: u32) callconv(.c) Result {
-    if (count == 0 or flags & ~@as(u32, 0xf) != 0) return .error_initialization_failed;
+    if (flags & ~@as(u32, 0xf) != 0 or data_size == 0 or data == null) return .error_initialization_failed;
     const use_64 = flags & 1 != 0;
     const element_size = queryResultElementSize(flags);
-    if (stride < element_size or stride % (if (use_64) @as(u64, 8) else 4) != 0) return .error_initialization_failed;
-    const required = std.math.add(u64, std.math.mul(u64, count - 1, stride) catch return .error_initialization_failed, element_size) catch return .error_initialization_failed;
-    if (required > data_size or data == null) return .error_initialization_failed;
+    // Vulkan only constrains stride when more than one query is returned:
+    // a single result (and an empty range) never advances to a second slot,
+    // so stride may legitimately be zero or smaller than the element size.
+    if (count > 1 and (stride < element_size or stride == 0 or stride % (if (use_64) @as(u64, 8) else 4) != 0)) return .error_initialization_failed;
+    const required: u64 = if (count == 0) 0 else std.math.add(u64, std.math.mul(u64, count - 1, stride) catch return .error_initialization_failed, element_size) catch return .error_initialization_failed;
+    if (required > data_size) return .error_initialization_failed;
     const d = device orelse return .error_initialization_failed;
     lock();
     var mutex_held = true;
     defer if (mutex_held) mutex.unlock();
     const pool = validQueryPoolLocked(handle) orelse return .error_initialization_failed;
-    if (!validDeviceLocked(d) or !pool.owner.eql(d) or first > pool.slots.len or count > pool.slots.len - first or (pool.query_type == 2 and flags & 8 != 0)) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or !pool.owner.eql(d) or first >= pool.slots.len or count > pool.slots.len - first or (pool.query_type == 2 and flags & 8 != 0)) return .error_initialization_failed;
     mutex.unlock();
     mutex_held = false;
+    if (count == 0) return .success;
     const bytes: [*]u8 = @ptrCast(data.?);
     var unavailable = false;
     for (pool.slots[first .. first + count], 0..) |*slot, index| {
@@ -4135,7 +4139,7 @@ fn cmdCopyBuffer(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize, count
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
     if (count == 0) {
-        hit(.zero_count_noop);
+        c.impl.invalid = true;
         return;
     }
     if (count > max_api_items) {
@@ -4405,11 +4409,7 @@ fn cmdBlitImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_hand
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
-    if (count == 0) {
-        hit(.zero_count_noop);
-        return;
-    }
-    if (count > max_api_items or regions == null or filter < 0 or filter > 1) {
+    if (count == 0 or count > max_api_items or regions == null or filter < 0 or filter > 1) {
         c.impl.invalid = true;
         return;
     }
@@ -4435,11 +4435,7 @@ fn cmdResolveImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_h
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
-    if (count == 0) {
-        hit(.zero_count_noop);
-        return;
-    }
-    if (count > max_api_items or regions == null) {
+    if (count == 0 or count > max_api_items or regions == null) {
         c.impl.invalid = true;
         return;
     }
@@ -4538,7 +4534,7 @@ fn cmdCopyBufferToImage(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
     if (count == 0) {
-        hit(.zero_count_noop);
+        c.impl.invalid = true;
         return;
     }
     if (count > max_api_items) {
@@ -4584,7 +4580,7 @@ fn cmdCopyImageToBuffer(cb: ?CommandBuffer, src_handle: usize, layout: i32, dst_
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
     if (count == 0) {
-        hit(.zero_count_noop);
+        c.impl.invalid = true;
         return;
     }
     if (count > max_api_items) {
@@ -4630,7 +4626,7 @@ fn cmdCopyImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_hand
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
     if (count == 0) {
-        hit(.zero_count_noop);
+        c.impl.invalid = true;
         return;
     }
     if (count > max_api_items) {
@@ -5173,6 +5169,12 @@ fn cmdWaitEvents(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const usize,
 fn validQueryRange(pool: *const QueryPoolObj, first: u32, count: u32) bool {
     return count != 0 and first <= pool.slots.len and count <= pool.slots.len - first;
 }
+fn validQueryCopyRange(pool: *const QueryPoolObj, first: u32, count: u32) bool {
+    // Vulkan requires firstQuery to identify an actual query even when the
+    // requested range is empty.  Keep reset/begin validation strict while
+    // allowing the copy/get-results no-op form.
+    return first < pool.slots.len and count <= pool.slots.len - first;
+}
 fn cmdResetQueryPool(cb: ?CommandBuffer, handle: usize, first: u32, count: u32) callconv(.c) void {
     lock();
     defer mutex.unlock();
@@ -5257,10 +5259,14 @@ fn cmdCopyQueryPoolResults(cb: ?CommandBuffer, pool_handle: usize, first: u32, c
         return;
     };
     const element_size = queryResultElementSize(flags);
-    const required = std.math.add(u64, std.math.mul(u64, count -| 1, stride) catch std.math.maxInt(u64), element_size) catch std.math.maxInt(u64);
     const alignment: u64 = if (flags & 1 != 0) 8 else 4;
-    if (flags & ~@as(u32, 0xf) != 0 or !pool.owner.eql(c.impl.owner) or !validQueryRange(pool, first, count) or (pool.query_type == 2 and flags & 8 != 0) or destination.owner != c.impl.owner or destination.usage & 0x2 == 0 or destination.memory == null or stride < element_size or stride % alignment != 0 or offset % alignment != 0 or offset > destination.size or required > destination.size - offset) {
+    const required: u64 = if (count == 0) 0 else std.math.add(u64, std.math.mul(u64, count - 1, stride) catch std.math.maxInt(u64), element_size) catch std.math.maxInt(u64);
+    if (flags & ~@as(u32, 0xf) != 0 or !pool.owner.eql(c.impl.owner) or !validQueryCopyRange(pool, first, count) or (pool.query_type == 2 and flags & 8 != 0) or destination.owner != c.impl.owner or destination.usage & 0x2 == 0 or destination.memory == null or (count > 1 and (stride == 0 or stride < element_size or stride % alignment != 0)) or offset % alignment != 0 or offset >= destination.size or required > destination.size - offset) {
         c.impl.invalid = true;
+        return;
+    }
+    if (count == 0) {
+        hit(.zero_count_noop);
         return;
     }
     record(c, .{ .query_copy = .{ .pool = pool, .first = first, .count = count, .destination = destination, .offset = offset, .stride = stride, .flags = flags } });
@@ -9693,12 +9699,14 @@ fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64
         };
     }
     var invalid_index_state = false;
-    if (indexed) {
+    if (indexed and draw_count != 0) {
         if (index_buffer) |bound_index| {
             invalid_index_state = bound_index.owner != command_buffer.impl.owner or bound_index.usage & 0x40 == 0 or bound_index.memory == null or !liveMemoryObject(bound_index.memory.?);
         } else invalid_index_state = true;
     }
-    if (!graphicsDescriptorBindingValid(command_buffer.impl) or pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or indirect_buffer.owner != command_buffer.impl.owner or indirect_buffer.usage & 0x100 == 0 or indirect_buffer.memory == null or !liveMemoryObject(indirect_buffer.memory.?) or offset % 4 != 0 or stride < indirect_size or stride % 4 != 0 or offset > indirect_buffer.size or required > indirect_buffer.size - offset or invalid_index_state) {
+    const range_valid = if (draw_count == 0) true else required <= indirect_buffer.size -| offset;
+    const stride_valid = draw_count <= 1 or (stride >= indirect_size and stride % 4 == 0);
+    if (!graphicsDescriptorBindingValid(command_buffer.impl) or pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or indirect_buffer.owner != command_buffer.impl.owner or indirect_buffer.usage & 0x100 == 0 or indirect_buffer.memory == null or !liveMemoryObject(indirect_buffer.memory.?) or offset % 4 != 0 or !stride_valid or (draw_count != 0 and offset > indirect_buffer.size) or !range_valid or invalid_index_state) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -11806,6 +11814,11 @@ test "vkcube presentation path records submits and presents two swapchain images
     cmdDrawIndirectCount(commands[0], indirect_buffer, 0, indirect_buffer, 0, 1, 20);
     try std.testing.expect(!commands[0].impl.invalid);
     try std.testing.expect(commands[0].impl.commands[commands[0].impl.count - 1].indirect_draw.count_source != null);
+    const zero_indirect_count = commands[0].impl.count;
+    cmdDrawIndirect(commands[0], indirect_buffer, 20, 0, 0);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(zero_indirect_count + 1, commands[0].impl.count);
+    try std.testing.expectEqual(@as(u32, 0), commands[0].impl.commands[commands[0].impl.count - 1].indirect_draw.draw_count);
     cmdDraw(commands[0], 3, 1, 0, 0);
     try std.testing.expect(!commands[0].impl.invalid);
     cmdDraw(commands[0], 3, 2, 1, 7);
@@ -14662,7 +14675,7 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     cmdCopyImageToBuffer(cbs[0], 0, 1, 0, 0, null);
     cmdCopyImage(cbs[0], 0, 1, 0, 1, 0, null);
     cmdPipelineBarrier(cbs[0], 1, 0x1000, 0, 0, @ptrFromInt(8), 0, @ptrFromInt(8), 0, null);
-    try std.testing.expectEqual(Result.success, endCommandBuffer(cbs[0]));
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(cbs[0]));
     try std.testing.expectEqual(Result.success, resetCommandBuffer(cbs[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(cbs[0], &begin));
     cmdCopyBuffer(cbs[0], 0, 0, max_api_items + 1, null);
@@ -16259,6 +16272,10 @@ test "query pools expose exact availability timestamps copies and lifecycle" {
     try std.testing.expectEqual(Result.not_ready, getQueryPoolResults(ctx.device, occlusion_pool, 0, 1, @sizeOf(@TypeOf(unavailable)), &unavailable, 16, 1 | 4));
     try std.testing.expectEqual(@as(u64, 0xaaaa), unavailable[0]);
     try std.testing.expectEqual(@as(u64, 0), unavailable[1]);
+    var empty_query_data: u64 = 0xfeed_face_cafe_beef;
+    try std.testing.expectEqual(Result.success, getQueryPoolResults(ctx.device, occlusion_pool, 0, 0, @sizeOf(u64), &empty_query_data, 0, 0));
+    try std.testing.expectEqual(@as(u64, 0xfeed_face_cafe_beef), empty_query_data);
+    try std.testing.expectEqual(Result.error_initialization_failed, getQueryPoolResults(ctx.device, occlusion_pool, 2, 0, @sizeOf(u64), &empty_query_data, 0, 0));
     var partial: u64 = 0xcccc;
     try std.testing.expectEqual(Result.success, getQueryPoolResults(ctx.device, occlusion_pool, 0, 1, @sizeOf(u64), &partial, 8, 1 | 8));
     try std.testing.expectEqual(@as(u64, 0), partial);
@@ -16279,6 +16296,19 @@ test "query pools expose exact availability timestamps copies and lifecycle" {
     try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &commands));
     const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    const empty_copy_count = commands[0].impl.count;
+    cmdCopyQueryPoolResults(commands[0], timestamp_pool, 0, 0, buffer, 0, 0, 0);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(empty_copy_count, commands[0].impl.count);
+    cmdCopyQueryPoolResults(commands[0], timestamp_pool, 0, 1, buffer, 0, 0, 0);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(empty_copy_count + 1, commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdCopyQueryPoolResults(commands[0], timestamp_pool, 2, 0, buffer, 0, 0, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdResetQueryPool(commands[0], timestamp_pool, 0, 2);
     cmdWriteTimestamp(commands[0], 1, timestamp_pool, 0);
     cmdWriteTimestamp(commands[0], 0x2000, timestamp_pool, 1);
@@ -16289,6 +16319,9 @@ test "query pools expose exact availability timestamps copies and lifecycle" {
     var timestamps = [_]u64{ 0, 0 };
     try std.testing.expectEqual(Result.success, getQueryPoolResults(ctx.device, timestamp_pool, 0, 2, @sizeOf(@TypeOf(timestamps)), &timestamps, 8, 1 | 2));
     try std.testing.expect(timestamps[0] != 0 and timestamps[1] >= timestamps[0]);
+    var single_timestamp: u64 = 0;
+    try std.testing.expectEqual(Result.success, getQueryPoolResults(ctx.device, timestamp_pool, 0, 1, @sizeOf(u64), &single_timestamp, 0, 1 | 2));
+    try std.testing.expectEqual(timestamps[0], single_timestamp);
     var mapped: ?*anyopaque = null;
     try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memory, 0, 32, 0, &mapped));
     const copied: [*]const u64 = @ptrCast(@alignCast(mapped.?));
