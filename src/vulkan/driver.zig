@@ -5030,6 +5030,12 @@ fn dependencyInfoShapeValid(info: ?*const DependencyInfo) bool {
     if (ci.image_memory_barriers) |items| for (items[0..ci.image_memory_barrier_count]) |barrier| if (barrier.s_type != 1000314002 or barrier.p_next != null) return false;
     return true;
 }
+fn eventDependencyInfoFlagsValid(info: *const DependencyInfo) bool {
+    // BY_REGION is valid for pipeline barriers but explicitly forbidden for
+    // event2 signal/wait dependencies.  The optional asymmetric-event bit is
+    // not advertised by this device, so only the core zero form is accepted.
+    return info.dependency_flags == 0;
+}
 fn eventSetDependencyStagesValid(info: *const DependencyInfo) bool {
     if (info.memory_barriers) |items| for (items[0..info.memory_barrier_count]) |barrier| if (barrier.src_stage_mask & 0x4000 != 0 or barrier.dst_stage_mask & 0x4000 != 0) return false;
     if (info.buffer_memory_barriers) |items| for (items[0..info.buffer_memory_barrier_count]) |barrier| if (barrier.src_stage_mask & 0x4000 != 0 or barrier.dst_stage_mask & 0x4000 != 0) return false;
@@ -5228,7 +5234,7 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
     cmdPipelineBarrier(cb, src_stage, dst_stage, ci.dependency_flags, ci.memory_barrier_count, if (ci.memory_barrier_count == 0) null else @ptrCast(&memories), ci.buffer_memory_barrier_count, if (ci.buffer_memory_barrier_count == 0) null else @ptrCast(&buffers), ci.image_memory_barrier_count, if (ci.image_memory_barrier_count == 0) null else @ptrCast(&images));
 }
 fn cmdSetEvent2(cb: ?CommandBuffer, event: usize, info: ?*const DependencyInfo) callconv(.c) void {
-    if (!dependencyInfoShapeValid(info) or !eventSetDependencyStagesValid(info.?)) {
+    if (!dependencyInfoShapeValid(info) or !eventDependencyInfoFlagsValid(info.?) or !eventSetDependencyStagesValid(info.?)) {
         markCommandBufferInvalid(cb);
         return;
     }
@@ -5294,7 +5300,7 @@ fn cmdWaitEvents2(cb: ?CommandBuffer, event_count: u32, events: ?[*]const usize,
         markCommandBufferInvalid(cb);
         return;
     }
-    for (infos.?[0..event_count]) |info| if (!dependencyInfoShapeValid(&info)) {
+    for (infos.?[0..event_count]) |info| if (!dependencyInfoShapeValid(&info) or !eventDependencyInfoFlagsValid(&info)) {
         markCommandBufferInvalid(cb);
         return;
     };
@@ -14564,7 +14570,7 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expect(!stagesSupportAccess(0x1_0000, 0x8000));
     try std.testing.expect(sync2StageMaskToLegacy(0x8000_0000_0000_0000) == null);
     const ctx = try createTestDeviceContext();
-    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 0, .queue_family_index = 0 };
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
     var pool: usize = 0;
     try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
     const allocate = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
@@ -14585,6 +14591,10 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, image, image_memory, 0));
     const memory_barrier = MemoryBarrier2{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 1, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0 };
     const dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 1, .memory_barriers = @ptrCast(&memory_barrier), .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
+    var by_region_dependency = dependency;
+    by_region_dependency.dependency_flags = 1;
+    try std.testing.expect(eventDependencyInfoFlagsValid(&dependency));
+    try std.testing.expect(!eventDependencyInfoFlagsValid(&by_region_dependency));
     const attachment_memory_barrier = MemoryBarrier2{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 0x400, .dst_stage_mask = 0x400, .src_access_mask = 0x80, .dst_access_mask = 0x100 };
     const attachment_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 1, .memory_barriers = @ptrCast(&attachment_memory_barrier), .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
     try std.testing.expect(dynamicRenderingDependencyValid(&attachment_dependency));
@@ -14695,10 +14705,24 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     var rollback_commands: [1]CommandBuffer = undefined;
     try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &rollback_commands));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(rollback_commands[0], &begin));
+    var by_region_event_dependency = empty_dependency;
+    by_region_event_dependency.dependency_flags = 1;
+    const rollback_flags_before = rollback_commands[0].impl.count;
+    cmdWaitEvents2(rollback_commands[0], 1, @ptrCast(&event), @ptrCast(&by_region_event_dependency));
+    try std.testing.expect(rollback_commands[0].impl.invalid);
+    try std.testing.expectEqual(rollback_flags_before, rollback_commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(rollback_commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(rollback_commands[0], &begin));
     const bad_wait_barrier = ImageMemoryBarrier2{ .s_type = 1000314002, .p_next = null, .src_stage_mask = 1, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = 0, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
     const bad_wait_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 0, .memory_barriers = null, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 1, .image_memory_barriers = @ptrCast(&bad_wait_barrier) };
     var set_rollback_commands: [1]CommandBuffer = undefined;
     try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &set_rollback_commands));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(set_rollback_commands[0], &begin));
+    const set_flags_before = set_rollback_commands[0].impl.count;
+    cmdSetEvent2(set_rollback_commands[0], event, &by_region_event_dependency);
+    try std.testing.expect(set_rollback_commands[0].impl.invalid);
+    try std.testing.expectEqual(set_flags_before, set_rollback_commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(set_rollback_commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(set_rollback_commands[0], &begin));
     const set_rollback_before = set_rollback_commands[0].impl.count;
     cmdSetEvent2(set_rollback_commands[0], event, &bad_wait_dependency);
