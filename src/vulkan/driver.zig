@@ -921,7 +921,6 @@ const Requirement = enum(u6) {
     invalid_barrier,
     child_registry_exhaustion,
     bound_memory_retained,
-    zero_submit_rejected,
     invalid_clear_color,
     submission_atomicity,
     zero_fill_rejected,
@@ -4938,13 +4937,12 @@ fn cmdSetEvent2(cb: ?CommandBuffer, event: usize, info: ?*const DependencyInfo) 
     if (info.?.memory_barrier_count != 0 or info.?.buffer_memory_barrier_count != 0 or info.?.image_memory_barrier_count != 0) cmdPipelineBarrier2(cb, info);
     cmdSetEvent(cb, event, 0x1_0000);
 }
-fn cmdResetEvent2(cb: ?CommandBuffer, event: usize, info: ?*const DependencyInfo) callconv(.c) void {
-    if (!dependencyInfoShapeValid(info)) {
+fn cmdResetEvent2(cb: ?CommandBuffer, event: usize, stage_mask: u64) callconv(.c) void {
+    const legacy_stage = sync2StageMaskToLegacy(stage_mask) orelse {
         markCommandBufferInvalid(cb);
         return;
-    }
-    if (info.?.memory_barrier_count != 0 or info.?.buffer_memory_barrier_count != 0 or info.?.image_memory_barrier_count != 0) cmdPipelineBarrier2(cb, info);
-    cmdResetEvent(cb, event, 0x1_0000);
+    };
+    cmdResetEvent(cb, event, legacy_stage);
 }
 fn cmdWaitEvents2(cb: ?CommandBuffer, event_count: u32, events: ?[*]const usize, infos: ?[*]const DependencyInfo) callconv(.c) void {
     if (event_count == 0 or event_count > max_api_items or events == null or infos == null) {
@@ -5170,7 +5168,9 @@ fn cmdWaitEvents(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const usize,
     for (barriers) |barrier| record(c, .{ .transition = .{ .image = validImageLocked(barrier.image).?, .old_layout = barrier.old_layout, .new_layout = barrier.new_layout } });
 }
 fn validQueryRange(pool: *const QueryPoolObj, first: u32, count: u32) bool {
-    return count != 0 and first <= pool.slots.len and count <= pool.slots.len - first;
+    // Reset commands permit an empty range, but firstQuery must still name an
+    // existing query and the range arithmetic must remain bounded.
+    return first < pool.slots.len and count <= pool.slots.len - first;
 }
 fn validQueryCopyRange(pool: *const QueryPoolObj, first: u32, count: u32) bool {
     // Vulkan requires firstQuery to identify an actual query even when the
@@ -5191,6 +5191,7 @@ fn cmdResetQueryPool(cb: ?CommandBuffer, handle: usize, first: u32, count: u32) 
         c.impl.invalid = true;
         return;
     }
+    if (count == 0) return;
     record(c, .{ .query_reset = .{ .pool = pool, .first = first, .count = count } });
 }
 fn resetQueryPool(device: ?Device, handle: usize, first: u32, count: u32) callconv(.c) void {
@@ -8702,11 +8703,12 @@ fn cmdBindIndexBuffer(cb: ?CommandBuffer, handle: usize, offset: u64, index_type
     const size = if (offset <= buffer.size) buffer.size - offset else 0;
     bindIndexBufferLocked(command_buffer, handle, offset, size, index_type);
 }
-fn bindVertexBuffersLocked(command_buffer: *CommandBufferObj, first_binding: u32, binding_count: u32, handles: ?[*]const usize, offsets: ?[*]const u64, sizes: ?[*]const u64, strides: ?[*]const u64) void {
-    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or binding_count == 0 or first_binding >= 16 or binding_count > 16 - first_binding or handles == null or offsets == null) {
+fn bindVertexBuffersLocked(command_buffer: *CommandBufferObj, first_binding: u32, binding_count: u32, handles: ?[*]const usize, offsets: ?[*]const u64, sizes: ?[*]const u64, strides: ?[*]const u64, allow_empty: bool) void {
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or first_binding >= 16 or binding_count > 16 - first_binding or (binding_count == 0 and (!allow_empty or sizes != null or strides != null)) or (binding_count != 0 and (handles == null or offsets == null))) {
         command_buffer.impl.invalid = true;
         return;
     }
+    if (binding_count == 0) return;
     const buffer_handles = handles.?[0..binding_count];
     const buffer_offsets = offsets.?[0..binding_count];
     const buffer_sizes = if (sizes) |items| items[0..binding_count] else null;
@@ -8741,7 +8743,7 @@ fn cmdBindVertexBuffers(cb: ?CommandBuffer, first_binding: u32, binding_count: u
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    bindVertexBuffersLocked(command_buffer, first_binding, binding_count, handles, offsets, null, null);
+    bindVertexBuffersLocked(command_buffer, first_binding, binding_count, handles, offsets, null, null, false);
 }
 fn cmdSetViewport(cb: ?CommandBuffer, first: u32, count: u32, values: ?*const anyopaque) callconv(.c) void {
     lock();
@@ -9934,7 +9936,7 @@ fn cmdBindVertexBuffers2(cb: ?CommandBuffer, first_binding: u32, binding_count: 
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    bindVertexBuffersLocked(command_buffer, first_binding, binding_count, buffers, offsets, sizes, strides);
+    bindVertexBuffersLocked(command_buffer, first_binding, binding_count, buffers, offsets, sizes, strides, true);
 }
 fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
     lock();
@@ -10274,11 +10276,18 @@ fn queueBindSparse(queue: ?Queue, count: u32, infos: ?*const anyopaque, fence_ha
 }
 fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_handle: usize) callconv(.c) Result {
     const q = queue orelse return .error_initialization_failed;
-    if (count == 0) {
-        hit(.zero_submit_rejected);
-        return .error_initialization_failed;
-    }
     if (count > max_api_items) return .error_initialization_failed;
+    if (count == 0) {
+        lock();
+        defer mutex.unlock();
+        if (!validDeviceLocked(q.owner)) return .error_initialization_failed;
+        const fence = if (fence_handle == 0) null else validFenceLocked(fence_handle) orelse return .error_initialization_failed;
+        if (fence) |item| {
+            if (!validOwner(q.owner, item.owner) or item.signaled.load(.acquire)) return .error_initialization_failed;
+            item.signaled.store(true, .release);
+        }
+        return .success;
+    }
     const list = submits orelse return .error_initialization_failed;
     lock();
     var mutex_held = true;
@@ -10395,7 +10404,8 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
     return .success;
 }
 fn queueSubmit2(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo2, fence_handle: usize) callconv(.c) Result {
-    if (count == 0 or count > max_api_items) return .error_initialization_failed;
+    if (count > max_api_items) return .error_initialization_failed;
+    if (count == 0) return queueSubmit(queue, 0, null, fence_handle);
     const list = submits orelse return .error_initialization_failed;
     var converted: [max_api_items]SubmitInfo = undefined;
     var wait_handles: [max_api_items][max_api_items]usize = undefined;
@@ -13772,7 +13782,7 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     const image_barrier = ImageMemoryBarrier2{ .s_type = 1000314002, .p_next = null, .src_stage_mask = 1, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0x1800, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
     const image_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 0, .memory_barriers = null, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 1, .image_memory_barriers = @ptrCast(&image_barrier) };
     cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&image_dependency));
-    cmdResetEvent2(commands[0], event, &dependency);
+    cmdResetEvent2(commands[0], event, 0x1_0000);
     const empty_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 0, .memory_barriers = null, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
     const before_empty_barrier = commands[0].impl.count;
     cmdPipelineBarrier2(commands[0], &empty_dependency);
@@ -13786,7 +13796,7 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expectEqual(before_none_barrier, commands[0].impl.count);
     cmdSetEvent2(commands[0], event, &empty_dependency);
     cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&empty_dependency));
-    cmdResetEvent2(commands[0], event, &empty_dependency);
+    cmdResetEvent2(commands[0], event, 0x1_0000);
     cmdWriteTimestamp2(commands[0], 0x1000, query, 0);
     cmdWriteTimestamp2(commands[0], 0x1000_0000_0, query, 1);
     try std.testing.expect(!commands[0].impl.invalid);
@@ -13795,6 +13805,7 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     try std.testing.expectEqual(@as(i32, 1), validImageLocked(image).?.layout);
     try std.testing.expect(!validEventLocked(event).?.signaled.load(.acquire));
+    try std.testing.expectEqual(Result.success, queueSubmit2(ctx.queue, 0, null, 0));
     const submit2 = SubmitInfo2{ .s_type = 1000314004, .p_next = null, .flags = 0, .wait_semaphore_info_count = 0, .wait_semaphore_infos = null, .command_buffer_info_count = 0, .command_buffer_infos = null, .signal_semaphore_info_count = 0, .signal_semaphore_infos = null };
     try std.testing.expectEqual(Result.success, queueSubmit2(ctx.queue, 1, @ptrCast(&submit2), 0));
     var signal_semaphore: usize = 0;
@@ -13810,6 +13821,8 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
         try std.testing.expectEqual(@as(?u32, 0x20), sync2AccessMaskToLegacy(0x2_0000_0000));
     }
     test_allocations_before_failure = null;
+    cmdResetEvent2(commands[0], event, 0x8000_0000_0000_0000);
+    try std.testing.expect(commands[0].impl.invalid);
     destroyQueryPool(ctx.device, query, null);
     destroyEvent(ctx.device, event, null);
     destroyImage(ctx.device, image, null);
@@ -14773,8 +14786,9 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     const fci = FenceCreateInfo{ .s_type = 8, .p_next = null, .flags = 0 };
     var fence: usize = 0;
     try std.testing.expectEqual(Result.success, createFence(ctx.device, &fci, null, &fence));
-    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 0, null, fence));
-    try std.testing.expectEqual(Result.not_ready, getFenceStatus(ctx.device, fence));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 0, null, fence));
+    try std.testing.expectEqual(Result.success, getFenceStatus(ctx.device, fence));
+    try std.testing.expectEqual(Result.success, resetFences(ctx.device, 1, @ptrCast(&fence)));
     var empty = submit;
     empty.command_buffer_count = 0;
     empty.command_buffers = null;
@@ -15645,6 +15659,17 @@ test "vertex and index bindings are typed atomic lifecycle state and allocation 
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBindVertexBuffers2(commands[0], 0, 0, null, null, null, null);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 0), commands[0].impl.vertex_bindings.set);
+    cmdBindVertexBuffers2(commands[0], 0, 0, null, null, &offsets, null);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBindVertexBuffers2(commands[0], 16, 0, null, null, null, null);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdBindVertexBuffers(commands[0], 15, 2, &buffers, &offsets);
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
@@ -16341,6 +16366,9 @@ test "query pools expose exact availability timestamps copies and lifecycle" {
     cmdCopyQueryPoolResults(commands[0], timestamp_pool, 0, 0, buffer, 0, 0, 0);
     try std.testing.expect(!commands[0].impl.invalid);
     try std.testing.expectEqual(empty_copy_count, commands[0].impl.count);
+    cmdResetQueryPool(commands[0], timestamp_pool, 0, 0);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(empty_copy_count, commands[0].impl.count);
     cmdCopyQueryPoolResults(commands[0], timestamp_pool, 0, 1, buffer, 0, 0, 0);
     try std.testing.expect(!commands[0].impl.invalid);
     try std.testing.expectEqual(empty_copy_count + 1, commands[0].impl.count);
@@ -16378,6 +16406,7 @@ test "query pools expose exact availability timestamps copies and lifecycle" {
     try std.testing.expectEqual(Result.success, getQueryPoolResults(ctx.device, timestamp_pool, 0, 1, @sizeOf(u32), &timestamp32, 4, 0));
     try std.testing.expect(timestamp32 != 0);
     resetQueryPool(ctx.device, timestamp_pool, 0, 2);
+    resetQueryPool(ctx.device, timestamp_pool, 0, 0);
     try std.testing.expectEqual(Result.not_ready, getQueryPoolResults(ctx.device, timestamp_pool, 0, 1, @sizeOf(u64), &timestamps[0], 8, 1));
 
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
