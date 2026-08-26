@@ -921,7 +921,6 @@ const Requirement = enum(u6) {
     invalid_barrier,
     child_registry_exhaustion,
     bound_memory_retained,
-    zero_submit_rejected,
     invalid_clear_color,
     submission_atomicity,
     zero_fill_rejected,
@@ -10274,11 +10273,18 @@ fn queueBindSparse(queue: ?Queue, count: u32, infos: ?*const anyopaque, fence_ha
 }
 fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_handle: usize) callconv(.c) Result {
     const q = queue orelse return .error_initialization_failed;
-    if (count == 0) {
-        hit(.zero_submit_rejected);
-        return .error_initialization_failed;
-    }
     if (count > max_api_items) return .error_initialization_failed;
+    if (count == 0) {
+        lock();
+        defer mutex.unlock();
+        if (!validDeviceLocked(q.owner)) return .error_initialization_failed;
+        const fence = if (fence_handle == 0) null else validFenceLocked(fence_handle) orelse return .error_initialization_failed;
+        if (fence) |item| {
+            if (!validOwner(q.owner, item.owner) or item.signaled.load(.acquire)) return .error_initialization_failed;
+            item.signaled.store(true, .release);
+        }
+        return .success;
+    }
     const list = submits orelse return .error_initialization_failed;
     lock();
     var mutex_held = true;
@@ -10395,7 +10401,8 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
     return .success;
 }
 fn queueSubmit2(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo2, fence_handle: usize) callconv(.c) Result {
-    if (count == 0 or count > max_api_items) return .error_initialization_failed;
+    if (count > max_api_items) return .error_initialization_failed;
+    if (count == 0) return queueSubmit(queue, 0, null, fence_handle);
     const list = submits orelse return .error_initialization_failed;
     var converted: [max_api_items]SubmitInfo = undefined;
     var wait_handles: [max_api_items][max_api_items]usize = undefined;
@@ -13795,6 +13802,7 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     try std.testing.expectEqual(@as(i32, 1), validImageLocked(image).?.layout);
     try std.testing.expect(!validEventLocked(event).?.signaled.load(.acquire));
+    try std.testing.expectEqual(Result.success, queueSubmit2(ctx.queue, 0, null, 0));
     const submit2 = SubmitInfo2{ .s_type = 1000314004, .p_next = null, .flags = 0, .wait_semaphore_info_count = 0, .wait_semaphore_infos = null, .command_buffer_info_count = 0, .command_buffer_infos = null, .signal_semaphore_info_count = 0, .signal_semaphore_infos = null };
     try std.testing.expectEqual(Result.success, queueSubmit2(ctx.queue, 1, @ptrCast(&submit2), 0));
     var signal_semaphore: usize = 0;
@@ -14773,8 +14781,9 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     const fci = FenceCreateInfo{ .s_type = 8, .p_next = null, .flags = 0 };
     var fence: usize = 0;
     try std.testing.expectEqual(Result.success, createFence(ctx.device, &fci, null, &fence));
-    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 0, null, fence));
-    try std.testing.expectEqual(Result.not_ready, getFenceStatus(ctx.device, fence));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 0, null, fence));
+    try std.testing.expectEqual(Result.success, getFenceStatus(ctx.device, fence));
+    try std.testing.expectEqual(Result.success, resetFences(ctx.device, 1, @ptrCast(&fence)));
     var empty = submit;
     empty.command_buffer_count = 0;
     empty.command_buffers = null;

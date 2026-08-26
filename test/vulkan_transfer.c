@@ -651,9 +651,9 @@ int main(void) {
     CHECK_TRUE(vkQueueSubmit(queue, 1, &rejected_submit, fence) == VK_ERROR_INITIALIZATION_FAILED);
     CHECK_TRUE(vkGetFenceStatus(device, fence) == VK_NOT_READY);
     CHECK_VK(check_bytes(device, staging_memory, expected, "zero-size vkCmdFillBuffer rejection"));
-    CHECK_TRUE(vkQueueSubmit(queue, 0, NULL, fence) == VK_ERROR_INITIALIZATION_FAILED);
-    CHECK_TRUE(vkGetFenceStatus(device, fence) == VK_NOT_READY);
-    CHECK_TRUE(vkWaitForFences(device, 1, &fence, VK_TRUE, 0) == VK_TIMEOUT);
+    CHECK_VK(vkQueueSubmit(queue, 0, NULL, fence));
+    CHECK_VK(vkGetFenceStatus(device, fence));
+    CHECK_VK(vkWaitForFences(device, 1, &fence, VK_TRUE, 0));
 
     free(expected);
     vkDestroyPipelineCache(device, pipeline_caches[1], NULL);
