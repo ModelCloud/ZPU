@@ -4042,7 +4042,7 @@ fn cmdExecuteCommands(cb: ?CommandBuffer, count: u32, buffers: ?[*]const Command
     lock();
     defer mutex.unlock();
     const primary = validCommandBufferLocked(cb) orelse return;
-    if (count == 0 or count > max_api_items or buffers == null or primary.impl.level != 0 or primary.impl.state != 1 or primary.impl.invalid) {
+    if (count == 0 or count > max_api_items or buffers == null or primary.impl.level != 0 or primary.impl.state != 1 or primary.impl.invalid or @as(usize, count) > primary.impl.secondaries.len -| @as(usize, primary.impl.secondary_count)) {
         primary.impl.invalid = true;
         return;
     }
@@ -16210,6 +16210,25 @@ test "secondary command buffers inherit lifetime and execute in exact primary or
         try std.testing.expectEqual(@as(u16, 0), secondary[0].impl.primary_ref_count);
     }
     test_allocations_before_failure = null;
+
+    // Retained secondary references have their own fixed-capacity registry.
+    // Zero-command simultaneous-use secondaries do not consume command slots,
+    // so exercise the reference boundary independently and verify that one
+    // more execution fails without mutating the already-full primary.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(secondary[0], 0));
+    secondary_begin.flags = 4;
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(secondary[0], &secondary_begin));
+    try std.testing.expectEqual(Result.success, endCommandBuffer(secondary[0]));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &primary_begin));
+    const retained_secondaries = [_]CommandBuffer{secondary[0]} ** 64;
+    for (0..4) |_| cmdExecuteCommands(primary[0], retained_secondaries.len, &retained_secondaries);
+    try std.testing.expectEqual(@as(u16, 256), primary[0].impl.secondary_count);
+    try std.testing.expectEqual(@as(u16, 0), primary[0].impl.count);
+    const retained_before_overflow = primary[0].impl.secondary_count;
+    cmdExecuteCommands(primary[0], 1, &secondary);
+    try std.testing.expect(primary[0].impl.invalid);
+    try std.testing.expectEqual(retained_before_overflow, primary[0].impl.secondary_count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
 
     try std.testing.expectEqual(Result.success, resetCommandBuffer(secondary[0], 0));
     secondary_begin.flags = 1;
