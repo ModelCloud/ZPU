@@ -12,9 +12,27 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+      - name: Enable arm64 APT multiarch sources
+        run: |
+          # GitHub's Ubuntu 24.04 Azure mirror does not publish arm64 indexes,
+          # so restrict the default deb822 sources to amd64 and add the official
+          # Ubuntu ports mirror for arm64 packages. Refs:
+          # https://github.com/actions/runner-images/issues/10901
+          # https://github.com/actions/runner-images/issues/12878
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            sudo sed -i '/^Types: deb$/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources
+          fi
+          codename=$(lsb_release -cs)
+          printf '%s\n' \
+            "Types: deb" \
+            "URIs: http://azure.ports.ubuntu.com/ubuntu-ports/" \
+            "Suites: ${codename} ${codename}-updates ${codename}-security" \
+            "Components: main restricted universe" \
+            "Architectures: arm64" \
+            | sudo tee /etc/apt/sources.list.d/arm64.sources >/dev/null
+          sudo dpkg --add-architecture arm64
       - name: Install reproducible Ubuntu coverage and Vulkan-loader tools
         run: |
-          sudo dpkg --add-architecture arm64
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends kcov libvulkan1 libvulkan-dev libxcb1-dev libxcb1-dev:arm64 libvulkan-dev:arm64 twm vulkan-tools xauth xvfb
           dpkg-query -W -f='${Package}=${Version}\n' kcov libvulkan1 libvulkan-dev libxcb1-dev libxcb1-dev:arm64 libvulkan-dev:arm64 twm vulkan-tools xauth xvfb
