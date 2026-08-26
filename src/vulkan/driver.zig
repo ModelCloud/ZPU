@@ -5308,23 +5308,40 @@ fn cmdWaitEvents2(cb: ?CommandBuffer, event_count: u32, events: ?[*]const usize,
     const command_buffer = blk: {
         lock();
         defer mutex.unlock();
-        break :blk validCommandBufferLocked(cb) orelse return;
+        const c = validCommandBufferLocked(cb) orelse return;
+        if (c.impl.state != 1 or c.impl.invalid) {
+            c.impl.invalid = true;
+            return;
+        }
+        break :blk c;
     };
     const before_count = command_buffer.impl.count;
-    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid) {
-        command_buffer.impl.invalid = true;
-        return;
-    }
     for (0..event_count) |index| {
-        cmdWaitEvents(cb, 1, events.? + index, 0x1_0000, 0x1_0000, 0, null, 0, null, 0, null);
         const info = &infos.?[index];
-        if (info.memory_barrier_count != 0 or info.buffer_memory_barrier_count != 0 or info.image_memory_barrier_count != 0) cmdPipelineBarrier2(cb, info);
         lock();
         const current = validCommandBufferLocked(cb) orelse {
             mutex.unlock();
             return;
         };
-        const failed = current.impl.invalid;
+        const scope_valid = if (current.impl.dynamic_rendering)
+            dynamicRenderingDependencyValid(info)
+        else
+            renderPassDependencyValid(current, info);
+        const still_recording = current.impl.state == 1 and !current.impl.invalid;
+        if (!scope_valid or !still_recording) {
+            current.impl.invalid = true;
+            mutex.unlock();
+            return;
+        }
+        mutex.unlock();
+        cmdWaitEvents(cb, 1, events.? + index, 0x1_0000, 0x1_0000, 0, null, 0, null, 0, null);
+        if (info.memory_barrier_count != 0 or info.buffer_memory_barrier_count != 0 or info.image_memory_barrier_count != 0) cmdPipelineBarrier2(cb, info);
+        lock();
+        const after = validCommandBufferLocked(cb) orelse {
+            mutex.unlock();
+            return;
+        };
+        const failed = after.impl.invalid;
         mutex.unlock();
         if (failed) {
             lock();
@@ -14673,6 +14690,11 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(before_event_scope, commands[0].impl.count);
     commands[0].impl.invalid = false;
+    const before_dynamic_wait_scope = commands[0].impl.count;
+    cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&dependency));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_dynamic_wait_scope, commands[0].impl.count);
+    commands[0].impl.invalid = false;
     commands[0].impl.dynamic_rendering = false;
     commands[0].impl.active_render_pass = @ptrFromInt(@as(usize, @alignOf(RenderPassObj)));
     var traditional_attachment_dependency = attachment_dependency;
@@ -14682,6 +14704,11 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     cmdPipelineBarrier2(commands[0], &dependency);
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(before_traditional_scope, commands[0].impl.count);
+    commands[0].impl.invalid = false;
+    const before_traditional_wait_scope = commands[0].impl.count;
+    cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&image_dependency));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_traditional_wait_scope, commands[0].impl.count);
     commands[0].impl.invalid = false;
     commands[0].impl.active_render_pass = null;
     cmdWriteTimestamp2(commands[0], 0x1000, query, 0);
