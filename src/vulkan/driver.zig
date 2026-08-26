@@ -563,12 +563,22 @@ const ProfileVertexInput = struct {
     offset: u32,
     stride: u32,
 };
+const ProfileVarying = struct {
+    vertex_interface: u32,
+    fragment_interface: u32,
+    vertex_slot: u8,
+};
 const ProfileGraphics = struct {
     vertex: render_ir_exec.Executor,
     fragment: render_ir_exec.Executor,
     inputs: [16]ProfileVertexInput = undefined,
     input_count: u8 = 0,
     vertex_output: u32,
+    vertex_outputs: [16]u32 = [_]u32{0} ** 16,
+    vertex_output_count: u8 = 1,
+    vertex_position_slot: u8 = 0,
+    varyings: [8]ProfileVarying = undefined,
+    varying_count: u8 = 0,
     fragment_output: u32,
     fragment_bool: bool,
 };
@@ -576,6 +586,11 @@ const ProfileGraphicsContract = struct {
     inputs: [16]ProfileVertexInput = undefined,
     input_count: u8 = 0,
     vertex_output: u32,
+    vertex_outputs: [16]u32 = [_]u32{0} ** 16,
+    vertex_output_count: u8 = 1,
+    vertex_position_slot: u8 = 0,
+    varyings: [8]ProfileVarying = undefined,
+    varying_count: u8 = 0,
     fragment_output: u32,
     fragment_bool: bool,
 };
@@ -5714,7 +5729,7 @@ fn executeComputeDispatch(op: DispatchCommand) void {
         executor.execute(bindings[0..binding_count], outputs[0..output_count]) catch return;
     }
 }
-const ProfileScreenVertex = struct { x: f32, y: f32, z: f32 };
+const ProfileScreenVertex = struct { x: f32, y: f32, z: f32, w: f32 };
 
 fn profileEdge(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) f32 {
     return (px - ax) * (by - ay) - (py - ay) * (bx - ax);
@@ -5777,8 +5792,12 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext) void {
     var pixels_written: usize = 0;
     var vertex_bindings: [16]render_ir_exec.Binding = undefined;
     var vertex_binding_storage: [16][16]u8 = undefined;
-    var vertex_output_bytes: [16]u8 = undefined;
-    var vertex_outputs = [_]render_ir_exec.Output{.{ .interface = profile.vertex_output, .bytes = &vertex_output_bytes }};
+    var vertex_output_bytes: [16][16]u8 = undefined;
+    var vertex_outputs: [16]render_ir_exec.Output = undefined;
+    for (profile.vertex_outputs[0..profile.vertex_output_count], 0..) |interface, slot| vertex_outputs[slot] = .{ .interface = interface, .bytes = &vertex_output_bytes[slot] };
+    var varying_bytes: [3][8][16]u8 = undefined;
+    var fragment_bindings: [8]render_ir_exec.Binding = undefined;
+    var fragment_binding_storage: [8][16]u8 = undefined;
     var fragment_output_bytes: [16]u8 = undefined;
     var fragment_outputs = [_]render_ir_exec.Output{.{ .interface = profile.fragment_output, .bytes = &fragment_output_bytes }};
     var vertices: [3]ProfileScreenVertex = undefined;
@@ -5799,8 +5818,8 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext) void {
                 vertex_bindings[binding_count] = .{ .interface = input.interface, .bytes = &vertex_binding_storage[binding_count] };
                 binding_count += 1;
             }
-            profile.vertex.execute(vertex_bindings[0..binding_count], vertex_outputs[0..]) catch return;
-            const clip = profileReadClip(&vertex_output_bytes) orelse return;
+            profile.vertex.execute(vertex_bindings[0..binding_count], vertex_outputs[0..profile.vertex_output_count]) catch return;
+            const clip = profileReadClip(&vertex_output_bytes[profile.vertex_position_slot]) orelse return;
             if (@abs(clip[3]) < 0.000001) return;
             const inverse_w = 1.0 / clip[3];
             const ndc_x = clip[0] * inverse_w;
@@ -5810,13 +5829,14 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext) void {
             const y = op.viewport.y + (ndc_y * 0.5 + 0.5) * op.viewport.height;
             const z = op.viewport.min_depth + ndc_z * (op.viewport.max_depth - op.viewport.min_depth);
             if (!std.math.isFinite(x) or !std.math.isFinite(y) or !std.math.isFinite(z)) return;
-            vertices[corner] = .{ .x = x, .y = y, .z = z };
+            vertices[corner] = .{ .x = x, .y = y, .z = z, .w = clip[3] };
+            for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| @memcpy(varying_bytes[corner][varying_index][0..16], vertex_output_bytes[varying.vertex_slot][0..16]);
         }
         const area = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, vertices[2].x, vertices[2].y);
         if (!std.math.isFinite(area) or @abs(area) < 0.00001) continue;
         const front_facing = if (op.front_face == 0) area < 0 else area > 0;
         if ((front_facing and op.cull_mode & 1 != 0) or (!front_facing and op.cull_mode & 2 != 0)) continue;
-        profile.fragment.execute(&.{}, fragment_outputs[0..]) catch return;
+        if (profile.varying_count == 0) profile.fragment.execute(&.{}, fragment_outputs[0..]) catch return;
         const inverse_area = 1.0 / area;
         const min_x = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].x, @min(vertices[1].x, vertices[2].x))))), op.scissor.x, 0);
         const min_y = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].y, @min(vertices[1].y, vertices[2].y))))), op.scissor.y, 0);
@@ -5830,6 +5850,25 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext) void {
             const b1 = profileEdge(vertices[2].x, vertices[2].y, vertices[0].x, vertices[0].y, px, py) * inverse_area;
             const b2 = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, px, py) * inverse_area;
             if (b0 < 0 or b1 < 0 or b2 < 0) continue;
+            if (profile.varying_count != 0) {
+                const q0 = b0 / vertices[0].w;
+                const q1 = b1 / vertices[1].w;
+                const q2 = b2 / vertices[2].w;
+                const denominator = q0 + q1 + q2;
+                if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
+                for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| {
+                    for (0..4) |lane| {
+                        const a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][varying_index][lane * 4 ..][0..4], .little));
+                        const b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][varying_index][lane * 4 ..][0..4], .little));
+                        const c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][varying_index][lane * 4 ..][0..4], .little));
+                        const value = (q0 * a + q1 * b + q2 * c) / denominator;
+                        if (!std.math.isFinite(value)) return;
+                        std.mem.writeInt(u32, fragment_binding_storage[varying_index][lane * 4 ..][0..4], @bitCast(value), .little);
+                    }
+                    fragment_bindings[varying_index] = .{ .interface = varying.fragment_interface, .bytes = &fragment_binding_storage[varying_index] };
+                }
+                profile.fragment.execute(fragment_bindings[0..profile.varying_count], fragment_outputs[0..]) catch return;
+            }
             const depth_value = b0 * vertices[0].z + b1 * vertices[1].z + b2 * vertices[2].z;
             if (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1) continue;
             const offset = (@as(usize, @intCast(y)) * color.width + @as(usize, @intCast(x))) * 4;
@@ -7153,7 +7192,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
             error.OutOfMemory => error.OutOfMemory,
             else => error.Invalid,
         };
-        profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
+        profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     }
     return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .viewport = baked_viewport, .scissor = baked_scissor };
 }
@@ -7202,7 +7241,7 @@ fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *con
 /// arbitrary SPIR-V remains metadata-only and is never silently emulated.
 fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const render_ir.Program, vi: *const PipelineVertexInputStateCreateInfo) ?ProfileGraphicsContract {
     if (vi.s_type != 19 or vi.p_next != null or vi.flags != 0 or vi.binding_count > 16 or vi.attribute_count > 16 or (vi.binding_count != 0 and vi.bindings == null) or (vi.attribute_count != 0 and vi.attributes == null)) return null;
-    var result = ProfileGraphicsContract{ .vertex_output = 0, .fragment_output = 0, .fragment_bool = false };
+    var result = ProfileGraphicsContract{ .vertex_output = 0, .vertex_output_count = 0, .fragment_output = 0, .fragment_bool = false };
     var vertex_inputs: u32 = 0;
     for (vertex.interfaces, 0..) |interface, index| switch (interface.storage) {
         .input => {
@@ -7212,17 +7251,38 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             vertex_inputs += 1;
         },
         .output => {
-            if (!interface.builtin_position or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or result.vertex_output != 0) return null;
-            result.vertex_output = @intCast(index + 1);
+            if (interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or result.vertex_output_count == 16) return null;
+            const slot = result.vertex_output_count;
+            result.vertex_outputs[slot] = @intCast(index);
+            result.vertex_output_count += 1;
+            if (interface.builtin_position) {
+                if (result.vertex_output != 0) return null;
+                result.vertex_output = @intCast(index + 1);
+                result.vertex_position_slot = @intCast(slot);
+            } else if (interface.location == null) return null;
         },
         .uniform => return null,
     };
     if (result.vertex_output == 0 or vertex_inputs == 0) return null;
     var fragment_outputs: u32 = 0;
     for (fragment.interfaces, 0..) |interface, index| switch (interface.storage) {
-        .input, .uniform => return null,
+        .input => {
+            if (interface.location == null or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or result.varying_count == 8) return null;
+            var matched = false;
+            for (result.vertex_outputs[0..result.vertex_output_count], 0..) |vertex_interface_index, vertex_slot| {
+                const vertex_interface = vertex.interfaces[vertex_interface_index];
+                if (!vertex_interface.builtin_position and vertex_interface.location == interface.location) {
+                    if (matched) return null;
+                    result.varyings[result.varying_count] = .{ .vertex_interface = vertex_interface_index, .fragment_interface = @intCast(index), .vertex_slot = @intCast(vertex_slot) };
+                    result.varying_count += 1;
+                    matched = true;
+                }
+            }
+            if (!matched) return null;
+        },
+        .uniform => return null,
         .output => {
-            if (fragment_outputs != 0 or (interface.ty.scalar != .bool and !(interface.ty.scalar == .f32 and interface.ty.columns == 4 and interface.ty.rows == 1))) return null;
+            if (fragment_outputs != 0 or interface.location == null or interface.location.? != 0 or (interface.ty.scalar != .bool and !(interface.ty.scalar == .f32 and interface.ty.columns == 4 and interface.ty.rows == 1))) return null;
             result.fragment_output = @intCast(index);
             result.fragment_bool = interface.ty.scalar == .bool;
             fragment_outputs += 1;
@@ -8999,31 +9059,39 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     const vertex_interfaces = [_]render_ir.Interface{
         .{ .storage = .input, .ty = vec4, .location = 0 },
         .{ .storage = .output, .ty = vec4, .builtin_position = true },
+        .{ .storage = .output, .ty = vec4, .location = 0 },
     };
     const vertex_input_operands = [_]u32{0};
     const vertex_output_operands = [_]u32{ 1, 0 };
+    const vertex_varying_operands = [_]u32{ 2, 0 };
     const vertex_instructions = [_]render_ir.Instruction{
         .{ .op = .input, .ty = vec4, .operands = &vertex_input_operands, .literal = &.{} },
         .{ .op = .output, .ty = vec4, .operands = &vertex_output_operands, .literal = &.{} },
+        .{ .op = .output, .ty = vec4, .operands = &vertex_varying_operands, .literal = &.{} },
     };
     const vertex_name = [_]u8{ 'm', 'a', 'i', 'n' };
     const vertex_program = render_ir.Program{ .stage = .vertex, .entry_name = @constCast(&vertex_name), .interfaces = @constCast(&vertex_interfaces), .instructions = @constCast(&vertex_instructions), .bytes = &.{}, .identity = .{ .digest = .{0} ** 32, .bytes = &.{} } };
-    const fragment_interfaces = [_]render_ir.Interface{.{ .storage = .output, .ty = vec4, .location = 0 }};
-    const fragment_constant_operands = [_]u32{};
-    const fragment_output_operands = [_]u32{ 0, 0 };
-    const white = [_]u8{ 0, 0, 128, 63, 0, 0, 128, 63, 0, 0, 128, 63, 0, 0, 128, 63 };
+    const fragment_interfaces = [_]render_ir.Interface{
+        .{ .storage = .input, .ty = vec4, .location = 0 },
+        .{ .storage = .output, .ty = vec4, .location = 0 },
+    };
+    const fragment_input_operands = [_]u32{0};
+    const fragment_output_operands = [_]u32{ 1, 0 };
     const fragment_instructions = [_]render_ir.Instruction{
-        .{ .op = .constant, .ty = vec4, .operands = &fragment_constant_operands, .literal = &white },
+        .{ .op = .input, .ty = vec4, .operands = &fragment_input_operands, .literal = &.{} },
         .{ .op = .output, .ty = vec4, .operands = &fragment_output_operands, .literal = &.{} },
     };
     const fragment_name = [_]u8{ 'm', 'a', 'i', 'n' };
     const fragment_program = render_ir.Program{ .stage = .fragment, .entry_name = @constCast(&fragment_name), .interfaces = @constCast(&fragment_interfaces), .instructions = @constCast(&fragment_instructions), .bytes = &.{}, .identity = .{ .digest = .{0} ** 32, .bytes = &.{} } };
+    const binding = VertexInputBindingDescription{ .binding = 0, .stride = 16, .input_rate = 0 };
+    const attribute = VertexInputAttributeDescription{ .location = 0, .binding = 0, .format = 109, .offset = 0 };
+    const vi = PipelineVertexInputStateCreateInfo{ .s_type = 19, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding), .attribute_count = 1, .attributes = @ptrCast(&attribute) };
+    const contract = profileGraphicsContract(&vertex_program, &fragment_program, &vi).?;
     var vertex_executor = try render_ir_exec.Executor.init(std.testing.allocator, &vertex_program);
     defer vertex_executor.deinit();
     var fragment_executor = try render_ir_exec.Executor.init(std.testing.allocator, &fragment_program);
     defer fragment_executor.deinit();
-    var profile = ProfileGraphics{ .vertex = vertex_executor, .fragment = fragment_executor, .input_count = 1, .vertex_output = 1, .fragment_output = 0, .fragment_bool = false };
-    profile.inputs[0] = .{ .interface = 0, .location = 0, .binding = 0, .offset = 0, .stride = 16 };
+    const profile = ProfileGraphics{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     var pipeline: GraphicsPipelineObj = undefined;
     pipeline.execution_abi = .{ .profile_v1_scalar_graphics = profile };
     var vertex_bytes: [48]u8 align(64) = [_]u8{0} ** 48;

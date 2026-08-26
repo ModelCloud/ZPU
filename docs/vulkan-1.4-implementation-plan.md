@@ -143,8 +143,9 @@ record and submit time, and the output is written synchronously. Generic
 SPIR-V compute control flow, dynamic loads, atomics,
 shared memory, and general arbitrary graphics execution remain explicitly
 deferred. A bounded scalar graphics profile now executes f32x4 vertex-input
-triangles with builtin-position output and constant bool/f32x4 fragment output;
-the unrestricted SPIR-V graphics space is still intentionally deferred.
+triangles with builtin-position output, perspective-correct f32x4 fragment
+varyings, and bool/f32x4 fragment output; the unrestricted SPIR-V graphics
+space is still intentionally deferred.
 Indirect dispatch now retains its argument buffer and consumes the three group
 counts at submission, including post-record writes and failure-atomic invalid
 group rejection.
