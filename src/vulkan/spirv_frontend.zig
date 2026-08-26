@@ -87,6 +87,7 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 110, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 111, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 112, .operands = .{ .min = 3, .max = 3 } },
+    .{ .opcode = 116, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 124, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 126, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 127, .operands = .{ .min = 3, .max = 3 } },
@@ -627,7 +628,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 }
                 block_terminated = true;
             },
-            61, 62, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 154...163, 164...169, 170...179, 182...205 => {
+            61, 62, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 154...163, 164...169, 170...179, 182...205 => {
                 if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
                 const valid_arity = switch (instruction.opcode) {
                     61, 84 => w.len == 3,
@@ -639,7 +640,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     80 => w.len >= 3,
                     81 => w.len >= 4,
                     82 => w.len == 5,
-                    83, 109, 110, 111, 112, 124, 126, 127, 154, 155, 156, 157, 158, 159, 160 => w.len == 3,
+                    83, 109, 110, 111, 112, 116, 124, 126, 127, 154, 155, 156, 157, 158, 159, 160 => w.len == 3,
                     128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 161, 162, 163, 164...167, 170...179, 182...199 => w.len == 4,
                     201 => w.len == 6,
                     202, 203 => w.len == 5,
@@ -794,10 +795,15 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     110 => result.scalar == .i32 and source.scalar == .f32,
                     111 => result.scalar == .f32 and source.scalar == .i32,
                     112 => result.scalar == .f32 and source.scalar == .u32,
-                    124 => result.scalar != .bool and source.scalar != .bool,
+                    124 => result.scalar != .bool and source.scalar != .bool and result.scalar != source.scalar,
                     else => unreachable,
                 };
                 if (!supported) return error.Unsupported;
+            },
+            116 => {
+                const result = try resultShape(nodes, w[0]);
+                const source = try valueShape(nodes, w[2]);
+                if (result.scalar != .f32 or source.scalar != .f32 or result.rows != 1 or source.rows != 1 or result.columns != source.columns or result.columns < 1 or result.columns > 4) return error.Malformed;
             },
             127 => {
                 const result = try resultShape(nodes, w[0]);
@@ -1102,7 +1108,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
+                41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
@@ -1205,7 +1211,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
+            41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
@@ -1230,6 +1236,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             83 => .copy_object,
             84 => .transpose,
             109, 110, 111, 112 => .convert,
+            116 => .quantize_f16,
             124 => .bitcast,
             126 => .ineg,
             127 => .fneg,
@@ -2233,6 +2240,30 @@ test "compute profile lowers OpCopyObject as an exact value copy" {
     defer program.deinit(std.testing.allocator);
     var found = false;
     for (program.instructions) |instruction| found = found or instruction.op == .copy_object;
+    try std.testing.expect(found);
+}
+
+test "compute profile lowers OpQuantizeToF16 for bounded f32 values" {
+    const integer_type = testOpcodeOffset(&compute_store, 21, 0).?;
+    var words = try testRemoveWord(std.testing.allocator, &compute_store, integer_type + 3);
+    words[integer_type] = (3 << 16) | 22;
+    const store_offset = testOpcodeOffset(words, 62, 0).?;
+    const with_quantize = try testInsertWords(std.testing.allocator, words, store_offset, &.{
+        (4 << 16) | 116,
+        2,
+        10,
+        7,
+    });
+    std.testing.allocator.free(words);
+    words = with_quantize;
+    defer std.testing.allocator.free(words);
+    words[3] = 11;
+    const rewritten_store = testOpcodeOffset(words, 62, 0).?;
+    words[rewritten_store + 2] = 10;
+    var program = try compile(std.testing.allocator, words, .compute, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var found = false;
+    for (program.instructions) |instruction| found = found or instruction.op == .quantize_f16;
     try std.testing.expect(found);
 }
 

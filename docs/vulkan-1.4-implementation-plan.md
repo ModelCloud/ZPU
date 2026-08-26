@@ -61,6 +61,7 @@ bit-field insertion and signed/unsigned extraction, integer division/remainder,
 dynamic vector component extraction/insertion, integer division/remainder, and
 static vector composite insertion, raw numeric bitcasts preserving payload bits,
 and exact `OpCopyObject` value copies,
+and bounded `OpQuantizeToF16` f32 precision rounding,
 integer division/remainder, and bounded
 integer shifts, floating remainder/modulo
 with truncating/flooring quotient, dynamic scalar integer comparisons, ordered/unordered scalar
@@ -457,6 +458,7 @@ Each slice must land with all of the following:
   dynamic vector component extraction/insertion, and bounded integer shifts,
   static vector composite insertion, raw numeric bitcasts preserving payload bits,
   and exact `OpCopyObject` value copies,
+  and bounded `OpQuantizeToF16` f32 precision rounding,
   and executes bounded floating
   remainder/modulo and dynamic scalar integer comparisons,
   ordered/unordered scalar floating-point comparisons with NaN semantics, and

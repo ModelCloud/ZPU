@@ -98,6 +98,14 @@ fn canonicalFloat(bits: u32) u32 {
     const x: f32 = @bitCast(bits);
     return if (std.math.isNan(x)) 0x7fc00000 else bits;
 }
+
+fn quantizeF16(bits: u32) u32 {
+    const value: f32 = @bitCast(bits);
+    if (std.math.isNan(value)) return 0x7fc00000;
+    const half: f16 = @floatCast(value);
+    const widened: f32 = @floatCast(half);
+    return canonicalFloat(@bitCast(widened));
+}
 fn readValue(ty: ir.Type, bytes: []const u8) Error!Value {
     const size = try byteSize(ty);
     if (bytes.len < size) return error.Bounds;
@@ -589,6 +597,10 @@ pub const Executor = struct {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
                     for (0..result.lanes()) |i| result.bits[i] = a.bits[i];
                 },
+                .quantize_f16 => {
+                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    for (0..result.lanes()) |i| result.bits[i] = quantizeF16(a.bits[i]);
+                },
                 .output => {
                     const interface_index = instruction.operands[0];
                     const source = try valueRef(self.values, pc, instruction.operands[1]);
@@ -650,7 +662,7 @@ fn validate(program: *const ir.Program) Error!void {
             .vector_insert_dynamic => n == 3,
             .composite_insert => n == 3,
             .shuffle => n == 2 + try lanes(instruction.ty),
-            .fneg, .ineg, .bit_not, .logical_not, .transpose, .any, .all, .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set, .bit_reverse, .bit_count, .convert, .bitcast, .copy_object => n == 1,
+            .fneg, .ineg, .bit_not, .logical_not, .transpose, .any, .all, .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set, .bit_reverse, .bit_count, .convert, .bitcast, .copy_object, .quantize_f16 => n == 1,
             .bit_field_insert => n == 4,
             .bit_field_s_extract, .bit_field_u_extract => n == 3,
             .select => n == 3,
@@ -724,6 +736,7 @@ fn validate(program: *const ir.Program) Error!void {
                 },
                 .convert, .bitcast => if (try lanes(source_ty) != try lanes(instruction.ty)) return error.InvalidShape,
                 .copy_object => if (!same(source_ty, instruction.ty)) return error.InvalidType,
+                .quantize_f16 => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 else => {},
             }
         };
@@ -817,7 +830,11 @@ fn validate(program: *const ir.Program) Error!void {
             .vector_extract_dynamic => if (instruction.ty.scalar == .bool or instruction.ty.columns != 1 or instruction.ty.rows != 1) return error.InvalidType,
             .vector_insert_dynamic => if (instruction.ty.scalar == .bool or instruction.ty.rows != 1 or instruction.ty.columns < 2 or instruction.ty.columns > 4) return error.InvalidType,
             .composite_insert => if (instruction.ty.scalar == .bool or instruction.ty.rows != 1 or instruction.ty.columns < 2 or instruction.ty.columns > 4) return error.InvalidType,
-            .bitcast => if (instruction.ty.scalar == .bool or program.instructions[instruction.operands[0]].ty.scalar == .bool) return error.InvalidType,
+            .bitcast => {
+                const source = program.instructions[instruction.operands[0]].ty;
+                if (instruction.ty.scalar == .bool or source.scalar == .bool or instruction.ty.scalar == source.scalar) return error.InvalidType;
+            },
+            .quantize_f16 => if (instruction.ty.scalar != .f32 or instruction.ty.rows != 1 or instruction.ty.columns < 1 or instruction.ty.columns > 4) return error.InvalidType,
             .outer_product => {
                 if (instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 4) return error.InvalidType;
                 const left = program.instructions[instruction.operands[0]].ty;
@@ -852,6 +869,10 @@ fn validate(program: *const ir.Program) Error!void {
             const from = program.instructions[instruction.operands[0]].ty.scalar;
             const to = instruction.ty.scalar;
             if (from == .bool or to == .bool or (from == to)) return error.InvalidType;
+        }
+        if (instruction.op == .bitcast) {
+            const from = program.instructions[instruction.operands[0]].ty.scalar;
+            if (from == instruction.ty.scalar) return error.InvalidType;
         }
     }
 }
@@ -1527,6 +1548,27 @@ test "copy object preserves exact value type and lanes on warm path" {
     try std.testing.expectEqual(@as(u32, 0x1234_5678), executor.values[1].bits[0]);
 }
 
+test "quantize to f16 rounds f32 values and preserves signed zero on warm path" {
+    const rounded = f32bytes(1.0003);
+    const negative_zero = [_]u8{ 0, 0, 0, 0x80 };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &rounded },
+        .{ .op = .quantize_f16, .ty = .{ .scalar = .f32 }, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &negative_zero },
+        .{ .op = .quantize_f16, .ty = .{ .scalar = .f32 }, .operands = &.{2}, .literal = &.{} },
+    };
+    var source = try testProgram(&.{}, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    try executor.execute(&.{}, &.{});
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 1))), executor.values[1].bits[0]);
+    try std.testing.expectEqual(@as(u32, 0x8000_0000), executor.values[3].bits[0]);
+    for (0..4096) |_| try executor.execute(&.{}, &.{});
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 1))), executor.values[1].bits[0]);
+    try std.testing.expectEqual(@as(u32, 0x8000_0000), executor.values[3].bits[0]);
+}
+
 test "rejection is explicit and output transactional" {
     const one = f32bytes(1);
     var interfaces = [_]ir.Interface{.{ .storage = .output, .ty = .{ .scalar = .f32 }, .location = 0 }};
@@ -1925,7 +1967,7 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
             const when_false = try propertyConstant(arena, &instructions, result_ty);
             result_id = try propertyInstruction(arena, &instructions, .select, result_ty, &.{ condition, when_true, when_false }, &.{});
         },
-        .fneg, .ineg, .bit_not, .bit_reverse, .bit_count, .convert, .bitcast, .copy_object => {
+        .fneg, .ineg, .bit_not, .bit_reverse, .bit_count, .convert, .bitcast, .copy_object, .quantize_f16 => {
             var source_ty = result_ty;
             if (convert_from) |scalar| source_ty.scalar = scalar;
             const source = try propertyConstant(arena, &instructions, source_ty);
@@ -2146,6 +2188,10 @@ test "generated bounded operation by type-family property matrix is complete" {
             try runPropertyCase(.vector_times_scalar, ty, null, null);
             totals[@intFromEnum(ir.Op.vector_times_scalar)] += 1;
         }
+        if (is_float and is_non_matrix) {
+            try runPropertyCase(.quantize_f16, ty, null, null);
+            totals[@intFromEnum(ir.Op.quantize_f16)] += 1;
+        }
         if (is_numeric and is_non_matrix) for ([_]ir.Scalar{ .i32, .u32, .f32 }) |from| if (from != ty.scalar) {
             try runPropertyCase(.convert, ty, null, from);
             totals[@intFromEnum(ir.Op.convert)] += 1;
@@ -2198,15 +2244,15 @@ test "generated bounded operation by type-family property matrix is complete" {
         totals[@intFromEnum(op)] += 1;
     }
     const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14, 8, 4, 8, 8, 8, 8, 4, 4, 4, 4, 4, 8, 8, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14};
+    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4};
     try std.testing.expectEqualSlices(usize, expected_full[0..totals.len], &totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 438), total);
-    std.debug.print("generated property matrix: operations=90 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 442), total);
+    std.debug.print("generated property matrix: operations=91 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -2338,13 +2384,13 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 90), malformed);
+    try std.testing.expectEqual(@as(usize, 91), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
     try std.testing.expectEqual(@as(usize, 5), runtime_nan);
     try std.testing.expectEqual(@as(usize, 5), signed_zero);
-    std.debug.print("generated property categories: malformed=90 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
+    std.debug.print("generated property categories: malformed=91 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
 }
 
 test "generated valid scalar DAGs are total and stable" {
