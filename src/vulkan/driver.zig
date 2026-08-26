@@ -4354,7 +4354,7 @@ fn cmdExecuteCommands(cb: ?CommandBuffer, count: u32, buffers: ?[*]const Command
                 return;
             }
         } else if (primary.impl.dynamic_rendering) {
-            if (!secondary.impl.render_pass_continue or !secondary.impl.dynamic_inheritance or secondary.impl.inherited_dynamic_view_mask != 0 or secondary.impl.inherited_dynamic_color_format != primary.impl.dynamic_color_image.?.format or secondary.impl.inherited_dynamic_depth_format != (if (primary.impl.dynamic_depth_image) |depth| depth.format else 0) or secondary.impl.inherited_dynamic_stencil_format != 0 or secondary.impl.inherited_dynamic_samples != primary.impl.dynamic_color_image.?.samples) {
+            if (!secondary.impl.render_pass_continue or !secondary.impl.dynamic_inheritance or primary.impl.active_query_pool != null or secondary.impl.inherited_dynamic_view_mask != 0 or secondary.impl.inherited_dynamic_color_format != primary.impl.dynamic_color_image.?.format or secondary.impl.inherited_dynamic_depth_format != (if (primary.impl.dynamic_depth_image) |depth| depth.format else 0) or secondary.impl.inherited_dynamic_stencil_format != 0 or secondary.impl.inherited_dynamic_samples != primary.impl.dynamic_color_image.?.samples) {
                 primary.impl.invalid = true;
                 return;
             }
@@ -12642,6 +12642,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
     validImageLocked(images[0]).?.layout = 1;
     validImageLocked(depth_image).?.layout = 3;
+    resetQueryPool(device, occlusion_pool, 0, 1);
     cmdBeginRendering(multi_commands[0], &dynamic_rendering);
     cmdBindPipeline(multi_commands[0], 0, pipelines[0]);
     cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
@@ -12703,6 +12704,16 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.success, endCommandBuffer(multi_commands[0]));
     try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&dynamic_submit), 0));
     try std.testing.expect(!std.mem.eql(u8, &[_]u8{ 0, 0, 0, 255 }, imageBytes(validImageLocked(images[0]).?)[4 * (4 * 8 + 4) ..][0..4]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    validImageLocked(images[0]).?.layout = 1;
+    validImageLocked(depth_image).?.layout = 3;
+    cmdBeginRendering(multi_commands[0], &dynamic_rendering);
+    cmdBeginQuery(multi_commands[0], occlusion_pool, 0, 0);
+    try std.testing.expect(!multi_commands[0].impl.invalid);
+    cmdExecuteCommands(multi_commands[0], 1, &render_secondary);
+    try std.testing.expect(multi_commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
     test_allocations_before_failure = 0;
     for (0..4096) |_| {
         try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
