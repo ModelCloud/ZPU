@@ -260,10 +260,13 @@ Vulkan 1.0 until the broader feature, CTS, and performance gates below pass.
 Bounded 2D array images are now backed by per-layer memory (up to 256 layers),
 with matching image-format limits, requirements, subresource-layout offsets,
 2D-array views, host copies, clear ranges, buffer/image copies, image copies,
-and blit/resolve layer selection. Invalid layer ranges fail before recording,
-and the array path has a positive isolation/rollback test plus an allocation-free
-warm path. Swapchain images remain explicitly single-layer because the surface
-capability reports one layer.
+and blit/resolve layer selection. Core buffer/image copies, image copies,
+blits, and resolves now execute matching multi-layer regions, with checked
+per-layer buffer strides honoring row length and image height. Invalid layer
+ranges fail before recording, and the array path has a positive
+isolation/rollback test plus an allocation-free warm path. Swapchain images
+remain explicitly single-layer because the surface capability reports one
+layer.
 The Vulkan 1.4 host-image-copy layout queries now also consume the promoted
 `VkSubresourceHostMemcpySize` output chain.  The chain is ABI-checked, links are
 preserved, the reported byte count matches the exact selected subresource, and

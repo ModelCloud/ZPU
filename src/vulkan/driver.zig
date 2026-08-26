@@ -4580,7 +4580,7 @@ fn colorBytes(image: *const ImageObj, value: *const ClearColorValue) ?[4]u8 {
     return rgba;
 }
 fn validLayers(l: ImageSubresourceLayers) bool {
-    return l.aspect_mask == 1 and l.mip_level == 0 and l.layer_count == 1;
+    return l.aspect_mask == 1 and l.mip_level == 0 and l.layer_count != 0 and l.layer_count <= max_image_array_layers;
 }
 fn validRange(r: ImageSubresourceRange) bool {
     return r.aspect_mask == 1 and r.base_mip_level == 0 and r.level_count == 1 and r.layer_count != 0 and r.base_array_layer < max_image_array_layers and r.layer_count <= max_image_array_layers - r.base_array_layer;
@@ -4590,7 +4590,7 @@ fn validRangeForImage(image: *const ImageObj, r: ImageSubresourceRange) bool {
     return r.aspect_mask == aspect and r.base_mip_level == 0 and r.level_count == 1 and r.layer_count != 0 and r.base_array_layer < image.array_layers and r.layer_count <= image.array_layers - r.base_array_layer;
 }
 fn validLayersForImage(image: *const ImageObj, layers: ImageSubresourceLayers) bool {
-    return validLayers(layers) and layers.base_array_layer < image.array_layers;
+    return validLayers(layers) and layers.base_array_layer < image.array_layers and layers.layer_count <= image.array_layers - layers.base_array_layer;
 }
 fn imageLayerOffset(image: *const ImageObj, layer: u32) ?usize {
     if (layer >= image.array_layers) return null;
@@ -4786,7 +4786,7 @@ fn blitSpan(a: i32, b: i32, limit: u32) ?u32 {
     return @intCast(if (a < b) b - a else a - b);
 }
 fn validBlitRegion(src: *const ImageObj, dst: *const ImageObj, region: ImageBlit) bool {
-    if (!validLayersForImage(src, region.src_subresource) or !validLayersForImage(dst, region.dst_subresource)) return false;
+    if (!validLayersForImage(src, region.src_subresource) or !validLayersForImage(dst, region.dst_subresource) or region.src_subresource.layer_count != region.dst_subresource.layer_count) return false;
     if (blitSpan(region.src_offsets[0].x, region.src_offsets[1].x, src.width) == null or blitSpan(region.src_offsets[0].y, region.src_offsets[1].y, src.height) == null or blitSpan(region.dst_offsets[0].x, region.dst_offsets[1].x, dst.width) == null or blitSpan(region.dst_offsets[0].y, region.dst_offsets[1].y, dst.height) == null) return false;
     return region.src_offsets[0].z == 0 and region.src_offsets[1].z == 1 and region.dst_offsets[0].z == 0 and region.dst_offsets[1].z == 1;
 }
@@ -4836,7 +4836,7 @@ fn cmdResolveImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_h
         c.impl.invalid = true;
         return;
     }
-    for (regions.?[0..count]) |region| if (!validLayersForImage(src, region.src_subresource) or !validLayersForImage(dst, region.dst_subresource) or !validImageRegion(src, region.src_offset, region.extent, region.src_subresource) or !validImageRegion(dst, region.dst_offset, region.extent, region.dst_subresource)) {
+    for (regions.?[0..count]) |region| if (!validLayersForImage(src, region.src_subresource) or !validLayersForImage(dst, region.dst_subresource) or region.src_subresource.layer_count != region.dst_subresource.layer_count or !validImageRegion(src, region.src_offset, region.extent, region.src_subresource) or !validImageRegion(dst, region.dst_offset, region.extent, region.dst_subresource)) {
         c.impl.invalid = true;
         return;
     };
@@ -4866,15 +4866,24 @@ fn checkedBufferImageAdd(a: u64, b: u64) ?u64 {
         return null;
     };
 }
+fn bufferImageLayerStride(region: BufferImageCopy) ?u64 {
+    const row = if (region.buffer_row_length == 0) region.image_extent.width else region.buffer_row_length;
+    const height = if (region.buffer_image_height == 0) region.image_extent.height else region.buffer_image_height;
+    const row_height = checkedBufferImageMul(row, height) orelse return null;
+    return checkedBufferImageMul(row_height, 4);
+}
 fn bufferImageEnd(region: BufferImageCopy) ?u64 {
     const row = if (region.buffer_row_length == 0) region.image_extent.width else region.buffer_row_length;
     const height = if (region.buffer_image_height == 0) region.image_extent.height else region.buffer_image_height;
-    if (row < region.image_extent.width or height < region.image_extent.height or region.buffer_offset % 4 != 0) return null;
+    if (region.image_subresource.layer_count == 0 or row < region.image_extent.width or height < region.image_extent.height or region.buffer_offset % 4 != 0) return null;
+    const layer_stride = bufferImageLayerStride(region) orelse return null;
+    const prior_layers = checkedBufferImageMul(@as(u64, region.image_subresource.layer_count) - 1, layer_stride) orelse return null;
     const rows_before_last = checkedBufferImageSub(region.image_extent.height, 1) orelse return null;
     const prior_rows = checkedBufferImageMul(rows_before_last, row) orelse return null;
     const texels = checkedBufferImageAdd(prior_rows, region.image_extent.width) orelse return null;
     const bytes = checkedBufferImageMul(texels, 4) orelse return null;
-    return checkedBufferImageAdd(region.buffer_offset, bytes);
+    const last_layer = checkedBufferImageAdd(prior_layers, bytes) orelse return null;
+    return checkedBufferImageAdd(region.buffer_offset, last_layer);
 }
 fn rowSequencesOverlap(a_base: u64, a_stride: u64, a_rows: u32, a_width: u64, b_base: u64, b_stride: u64, b_rows: u32, b_width: u64) bool {
     var a_y: u32 = 0;
@@ -4889,30 +4898,58 @@ fn rowSequencesOverlap(a_base: u64, a_stride: u64, a_rows: u32, a_width: u64, b_
 }
 fn bufferImageMemoryOverlap(buffer: *const BufferObj, buffer_region: BufferImageCopy, image: *const ImageObj, image_region: BufferImageCopy) bool {
     const buffer_row = if (buffer_region.buffer_row_length == 0) buffer_region.image_extent.width else buffer_region.buffer_row_length;
-    const buffer_base = buffer.offset + buffer_region.buffer_offset;
+    const buffer_layer_stride = bufferImageLayerStride(buffer_region) orelse return true;
     const image_layer = imageLayerByteSize(image) orelse return true;
-    const image_base = image.offset + image_layer * image_region.image_subresource.base_array_layer + (@as(u64, @intCast(image_region.image_offset.y)) * image.width + @as(u64, @intCast(image_region.image_offset.x))) * 4;
-    return rowSequencesOverlap(buffer_base, @as(u64, buffer_row) * 4, buffer_region.image_extent.height, @as(u64, buffer_region.image_extent.width) * 4, image_base, @as(u64, image.width) * 4, image_region.image_extent.height, @as(u64, image_region.image_extent.width) * 4);
+    const image_row_offset = (@as(u64, @intCast(image_region.image_offset.y)) * image.width + @as(u64, @intCast(image_region.image_offset.x))) * 4;
+    for (0..buffer_region.image_subresource.layer_count) |buffer_layer| {
+        const buffer_base = std.math.add(u64, buffer.offset + buffer_region.buffer_offset, buffer_layer_stride * buffer_layer) catch return true;
+        for (0..image_region.image_subresource.layer_count) |image_layer_index| {
+            const image_base = std.math.add(u64, image.offset + image_layer * (image_region.image_subresource.base_array_layer + image_layer_index), image_row_offset) catch return true;
+            if (rowSequencesOverlap(buffer_base, @as(u64, buffer_row) * 4, buffer_region.image_extent.height, @as(u64, buffer_region.image_extent.width) * 4, image_base, @as(u64, image.width) * 4, image_region.image_extent.height, @as(u64, image_region.image_extent.width) * 4)) return true;
+        }
+    }
+    return false;
 }
 fn bufferRegionsOverlap(a: BufferImageCopy, b: BufferImageCopy) bool {
     const a_row = if (a.buffer_row_length == 0) a.image_extent.width else a.buffer_row_length;
     const b_row = if (b.buffer_row_length == 0) b.image_extent.width else b.buffer_row_length;
-    return rowSequencesOverlap(a.buffer_offset, @as(u64, a_row) * 4, a.image_extent.height, @as(u64, a.image_extent.width) * 4, b.buffer_offset, @as(u64, b_row) * 4, b.image_extent.height, @as(u64, b.image_extent.width) * 4);
+    const a_layer_stride = bufferImageLayerStride(a) orelse return true;
+    const b_layer_stride = bufferImageLayerStride(b) orelse return true;
+    for (0..a.image_subresource.layer_count) |a_layer| {
+        const a_base = std.math.add(u64, a.buffer_offset, a_layer_stride * a_layer) catch return true;
+        for (0..b.image_subresource.layer_count) |b_layer| {
+            const b_base = std.math.add(u64, b.buffer_offset, b_layer_stride * b_layer) catch return true;
+            if (rowSequencesOverlap(a_base, @as(u64, a_row) * 4, a.image_extent.height, @as(u64, a.image_extent.width) * 4, b_base, @as(u64, b_row) * 4, b.image_extent.height, @as(u64, b.image_extent.width) * 4)) return true;
+        }
+    }
+    return false;
 }
 fn imageRegionsOverlap(image: *const ImageObj, a_layers: ImageSubresourceLayers, a_offset: Offset3D, a_extent: Extent3D, b_layers: ImageSubresourceLayers, b_offset: Offset3D, b_extent: Extent3D) bool {
-    if (a_layers.base_array_layer != b_layers.base_array_layer) return false;
     const layer = imageLayerByteSize(image) orelse return true;
-    const a_base = image.offset + layer * a_layers.base_array_layer + (@as(u64, @intCast(a_offset.y)) * image.width + @as(u64, @intCast(a_offset.x))) * 4;
-    const b_base = image.offset + layer * b_layers.base_array_layer + (@as(u64, @intCast(b_offset.y)) * image.width + @as(u64, @intCast(b_offset.x))) * 4;
-    return rowSequencesOverlap(a_base, @as(u64, image.width) * 4, a_extent.height, @as(u64, a_extent.width) * 4, b_base, @as(u64, image.width) * 4, b_extent.height, @as(u64, b_extent.width) * 4);
+    const a_row_offset = (@as(u64, @intCast(a_offset.y)) * image.width + @as(u64, @intCast(a_offset.x))) * 4;
+    const b_row_offset = (@as(u64, @intCast(b_offset.y)) * image.width + @as(u64, @intCast(b_offset.x))) * 4;
+    for (0..a_layers.layer_count) |a_layer| {
+        const a_base = std.math.add(u64, image.offset + layer * (a_layers.base_array_layer + a_layer), a_row_offset) catch return true;
+        for (0..b_layers.layer_count) |b_layer| {
+            const b_base = std.math.add(u64, image.offset + layer * (b_layers.base_array_layer + b_layer), b_row_offset) catch return true;
+            if (rowSequencesOverlap(a_base, @as(u64, image.width) * 4, a_extent.height, @as(u64, a_extent.width) * 4, b_base, @as(u64, image.width) * 4, b_extent.height, @as(u64, b_extent.width) * 4)) return true;
+        }
+    }
+    return false;
 }
 fn imageCopyMemoryOverlap(src: *const ImageObj, source: ImageCopy, dst: *const ImageObj, destination: ImageCopy) bool {
-    if (src == dst and source.src_subresource.base_array_layer != destination.dst_subresource.base_array_layer) return false;
     const source_layer = imageLayerByteSize(src) orelse return true;
     const destination_layer = imageLayerByteSize(dst) orelse return true;
-    const source_base = src.offset + source_layer * source.src_subresource.base_array_layer + (@as(u64, @intCast(source.src_offset.y)) * src.width + @as(u64, @intCast(source.src_offset.x))) * 4;
-    const destination_base = dst.offset + destination_layer * destination.dst_subresource.base_array_layer + (@as(u64, @intCast(destination.dst_offset.y)) * dst.width + @as(u64, @intCast(destination.dst_offset.x))) * 4;
-    return rowSequencesOverlap(source_base, @as(u64, src.width) * 4, source.extent.height, @as(u64, source.extent.width) * 4, destination_base, @as(u64, dst.width) * 4, destination.extent.height, @as(u64, destination.extent.width) * 4);
+    const source_row_offset = (@as(u64, @intCast(source.src_offset.y)) * src.width + @as(u64, @intCast(source.src_offset.x))) * 4;
+    const destination_row_offset = (@as(u64, @intCast(destination.dst_offset.y)) * dst.width + @as(u64, @intCast(destination.dst_offset.x))) * 4;
+    for (0..source.src_subresource.layer_count) |source_index| {
+        const source_base = std.math.add(u64, src.offset + source_layer * (source.src_subresource.base_array_layer + source_index), source_row_offset) catch return true;
+        for (0..destination.dst_subresource.layer_count) |destination_index| {
+            const destination_base = std.math.add(u64, dst.offset + destination_layer * (destination.dst_subresource.base_array_layer + destination_index), destination_row_offset) catch return true;
+            if (rowSequencesOverlap(source_base, @as(u64, src.width) * 4, source.extent.height, @as(u64, source.extent.width) * 4, destination_base, @as(u64, dst.width) * 4, destination.extent.height, @as(u64, destination.extent.width) * 4)) return true;
+        }
+    }
+    return false;
 }
 fn cmdCopyBufferToImage(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize, layout: i32, count: u32, regions: ?[*]const BufferImageCopy) callconv(.c) void {
     lock();
@@ -5036,7 +5073,7 @@ fn cmdCopyImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_hand
         return;
     }
     for (list[0..count]) |region| {
-        if (src.owner != c.impl.owner or dst.owner != c.impl.owner or src.usage & 0x1 == 0 or dst.usage & 0x2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 7) or (src == dst and (src_layout != 1 or dst_layout != 1)) or !validImageRegion(src, region.src_offset, region.extent, region.src_subresource) or !validImageRegion(dst, region.dst_offset, region.extent, region.dst_subresource)) {
+        if (src.owner != c.impl.owner or dst.owner != c.impl.owner or src.usage & 0x1 == 0 or dst.usage & 0x2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 7) or (src == dst and (src_layout != 1 or dst_layout != 1)) or region.src_subresource.layer_count != region.dst_subresource.layer_count or !validImageRegion(src, region.src_offset, region.extent, region.src_subresource) or !validImageRegion(dst, region.dst_offset, region.extent, region.dst_subresource)) {
             c.impl.invalid = true;
             return;
         }
@@ -6423,34 +6460,37 @@ fn sampleLinear(bytes: []const u8, width: u32, height: u32, x: f32, y: f32) [4]u
 fn executeBlitImage(item: BlitImageCommand) void {
     const src = imageBytes(item.src);
     const dst = imageBytes(item.dst);
-    const src_layer_offset = imageLayerOffset(item.src, item.region.src_subresource.base_array_layer).?;
-    const dst_layer_offset = imageLayerOffset(item.dst, item.region.dst_subresource.base_array_layer).?;
     const src_layer_size: usize = @intCast(imageLayerByteSize(item.src).?);
     const src_width = blitSpan(item.region.src_offsets[0].x, item.region.src_offsets[1].x, item.src.width).?;
     const src_height = blitSpan(item.region.src_offsets[0].y, item.region.src_offsets[1].y, item.src.height).?;
     const dst_width = blitSpan(item.region.dst_offsets[0].x, item.region.dst_offsets[1].x, item.dst.width).?;
     const dst_height = blitSpan(item.region.dst_offsets[0].y, item.region.dst_offsets[1].y, item.dst.height).?;
-    var y: u32 = 0;
-    while (y < dst_height) : (y += 1) {
-        const sy = blitCoordinate(item.region.src_offsets[0].y, item.region.src_offsets[1].y, y, dst_height, src_height);
-        const dy = if (item.region.dst_offsets[0].y < item.region.dst_offsets[1].y) @as(usize, @intCast(item.region.dst_offsets[0].y)) + y else @as(usize, @intCast(item.region.dst_offsets[0].y)) - y - 1;
-        var x: u32 = 0;
-        while (x < dst_width) : (x += 1) {
-            const dx = if (item.region.dst_offsets[0].x < item.region.dst_offsets[1].x) @as(usize, @intCast(item.region.dst_offsets[0].x)) + x else @as(usize, @intCast(item.region.dst_offsets[0].x)) - x - 1;
-            const destination = dst_layer_offset + (dy * item.dst.width + dx) * 4;
-            if (item.filter == 1) {
-                const u = (@as(f32, @floatFromInt(x)) + 0.5) / @as(f32, @floatFromInt(dst_width));
-                const t = u * @as(f32, @floatFromInt(src_width)) - 0.5;
-                const sx = if (item.region.src_offsets[0].x < item.region.src_offsets[1].x) @as(f32, @floatFromInt(item.region.src_offsets[0].x)) + t else @as(f32, @floatFromInt(item.region.src_offsets[0].x - 1)) - t;
-                const v = (@as(f32, @floatFromInt(y)) + 0.5) / @as(f32, @floatFromInt(dst_height));
-                const ty = v * @as(f32, @floatFromInt(src_height)) - 0.5;
-                const syf = if (item.region.src_offsets[0].y < item.region.src_offsets[1].y) @as(f32, @floatFromInt(item.region.src_offsets[0].y)) + ty else @as(f32, @floatFromInt(item.region.src_offsets[0].y - 1)) - ty;
-                const sample = sampleLinear(src[src_layer_offset..][0..src_layer_size], item.src.width, item.src.height, sx, syf);
-                @memcpy(dst[destination..][0..4], &sample);
-            } else {
-                const sx = blitCoordinate(item.region.src_offsets[0].x, item.region.src_offsets[1].x, x, dst_width, src_width);
-                const source = src_layer_offset + (sy * item.src.width + sx) * 4;
-                std.mem.copyForwards(u8, dst[destination..][0..4], src[source..][0..4]);
+    var layer: u32 = 0;
+    while (layer < item.region.src_subresource.layer_count) : (layer += 1) {
+        const src_layer_offset = imageLayerOffset(item.src, item.region.src_subresource.base_array_layer + layer).?;
+        const dst_layer_offset = imageLayerOffset(item.dst, item.region.dst_subresource.base_array_layer + layer).?;
+        var y: u32 = 0;
+        while (y < dst_height) : (y += 1) {
+            const sy = blitCoordinate(item.region.src_offsets[0].y, item.region.src_offsets[1].y, y, dst_height, src_height);
+            const dy = if (item.region.dst_offsets[0].y < item.region.dst_offsets[1].y) @as(usize, @intCast(item.region.dst_offsets[0].y)) + y else @as(usize, @intCast(item.region.dst_offsets[0].y)) - y - 1;
+            var x: u32 = 0;
+            while (x < dst_width) : (x += 1) {
+                const dx = if (item.region.dst_offsets[0].x < item.region.dst_offsets[1].x) @as(usize, @intCast(item.region.dst_offsets[0].x)) + x else @as(usize, @intCast(item.region.dst_offsets[0].x)) - x - 1;
+                const destination = dst_layer_offset + (dy * item.dst.width + dx) * 4;
+                if (item.filter == 1) {
+                    const u = (@as(f32, @floatFromInt(x)) + 0.5) / @as(f32, @floatFromInt(dst_width));
+                    const t = u * @as(f32, @floatFromInt(src_width)) - 0.5;
+                    const sx = if (item.region.src_offsets[0].x < item.region.src_offsets[1].x) @as(f32, @floatFromInt(item.region.src_offsets[0].x)) + t else @as(f32, @floatFromInt(item.region.src_offsets[0].x - 1)) - t;
+                    const v = (@as(f32, @floatFromInt(y)) + 0.5) / @as(f32, @floatFromInt(dst_height));
+                    const ty = v * @as(f32, @floatFromInt(src_height)) - 0.5;
+                    const syf = if (item.region.src_offsets[0].y < item.region.src_offsets[1].y) @as(f32, @floatFromInt(item.region.src_offsets[0].y)) + ty else @as(f32, @floatFromInt(item.region.src_offsets[0].y - 1)) - ty;
+                    const sample = sampleLinear(src[src_layer_offset..][0..src_layer_size], item.src.width, item.src.height, sx, syf);
+                    @memcpy(dst[destination..][0..4], &sample);
+                } else {
+                    const sx = blitCoordinate(item.region.src_offsets[0].x, item.region.src_offsets[1].x, x, dst_width, src_width);
+                    const source = src_layer_offset + (sy * item.src.width + sx) * 4;
+                    std.mem.copyForwards(u8, dst[destination..][0..4], src[source..][0..4]);
+                }
             }
         }
     }
@@ -6460,14 +6500,17 @@ fn executeBlitImage(item: BlitImageCommand) void {
 fn executeResolveImage(item: ResolveImageCommand) void {
     const src = imageBytes(item.src);
     const dst = imageBytes(item.dst);
-    const src_layer_offset = imageLayerOffset(item.src, item.region.src_subresource.base_array_layer).?;
-    const dst_layer_offset = imageLayerOffset(item.dst, item.region.dst_subresource.base_array_layer).?;
-    var y: u32 = 0;
-    while (y < item.region.extent.height) : (y += 1) {
-        const source = src_layer_offset + ((@as(usize, @intCast(item.region.src_offset.y)) + y) * item.src.width + @as(usize, @intCast(item.region.src_offset.x))) * 4;
-        const destination = dst_layer_offset + ((@as(usize, @intCast(item.region.dst_offset.y)) + y) * item.dst.width + @as(usize, @intCast(item.region.dst_offset.x))) * 4;
-        const bytes = @as(usize, item.region.extent.width) * 4;
-        std.mem.copyForwards(u8, dst[destination..][0..bytes], src[source..][0..bytes]);
+    var layer: u32 = 0;
+    while (layer < item.region.src_subresource.layer_count) : (layer += 1) {
+        const src_layer_offset = imageLayerOffset(item.src, item.region.src_subresource.base_array_layer + layer).?;
+        const dst_layer_offset = imageLayerOffset(item.dst, item.region.dst_subresource.base_array_layer + layer).?;
+        var y: u32 = 0;
+        while (y < item.region.extent.height) : (y += 1) {
+            const source = src_layer_offset + ((@as(usize, @intCast(item.region.src_offset.y)) + y) * item.src.width + @as(usize, @intCast(item.region.src_offset.x))) * 4;
+            const destination = dst_layer_offset + ((@as(usize, @intCast(item.region.dst_offset.y)) + y) * item.dst.width + @as(usize, @intCast(item.region.dst_offset.x))) * 4;
+            const bytes = @as(usize, item.region.extent.width) * 4;
+            std.mem.copyForwards(u8, dst[destination..][0..bytes], src[source..][0..bytes]);
+        }
     }
     invalidateImageContents(item.dst);
 }
@@ -7007,14 +7050,18 @@ test "Vulkan host-memory benchmark helpers implement exact command byte semantic
 fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy, to_image: bool) void {
     const b = bufferBytes(buffer);
     const pixels = imageBytes(image);
-    const image_layer_offset = imageLayerOffset(image, region.image_subresource.base_array_layer).?;
     const row = if (region.buffer_row_length == 0) region.image_extent.width else region.buffer_row_length;
-    var y: u32 = 0;
-    while (y < region.image_extent.height) : (y += 1) {
-        const bo = @as(usize, @intCast(region.buffer_offset)) + @as(usize, y) * row * 4;
-        const io = image_layer_offset + ((@as(usize, @intCast(region.image_offset.y)) + y) * image.width + @as(usize, @intCast(region.image_offset.x))) * 4;
-        const len = @as(usize, region.image_extent.width) * 4;
-        if (to_image) std.mem.copyForwards(u8, pixels[io..][0..len], b[bo..][0..len]) else std.mem.copyForwards(u8, b[bo..][0..len], pixels[io..][0..len]);
+    const layer_stride = bufferImageLayerStride(region).?;
+    var layer: u32 = 0;
+    while (layer < region.image_subresource.layer_count) : (layer += 1) {
+        const image_layer_offset = imageLayerOffset(image, region.image_subresource.base_array_layer + layer).?;
+        var y: u32 = 0;
+        while (y < region.image_extent.height) : (y += 1) {
+            const bo = @as(usize, @intCast(region.buffer_offset + layer_stride * layer + @as(u64, y) * row * 4));
+            const io = image_layer_offset + ((@as(usize, @intCast(region.image_offset.y)) + y) * image.width + @as(usize, @intCast(region.image_offset.x))) * 4;
+            const len = @as(usize, region.image_extent.width) * 4;
+            if (to_image) std.mem.copyForwards(u8, pixels[io..][0..len], b[bo..][0..len]) else std.mem.copyForwards(u8, b[bo..][0..len], pixels[io..][0..len]);
+        }
     }
 }
 
@@ -16024,20 +16071,21 @@ test "bounded 2D array images isolate layers across views clears and transfers" 
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, imageBytes(validImageLocked(image).?)[0..4], .little));
     validImageLocked(image).?.layout = 1;
 
-    const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 16, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var host_layers = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3, 0xb0, 0xb1, 0xb2, 0xb3, 0xc0, 0xc1, 0xc2, 0xc3, 0xd0, 0xd1, 0xd2, 0xd3, 0x10, 0x11, 0x12, 0x13, 0x20, 0x21, 0x22, 0x23, 0x30, 0x31, 0x32, 0x33, 0x40, 0x41, 0x42, 0x43 };
+    const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 32, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
     var source_buffer: usize = 0;
     var destination_buffer: usize = 0;
     try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &source_buffer));
     try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &destination_buffer));
     var source_memory: usize = 0;
     var destination_memory: usize = 0;
-    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 16, .memory_type_index = 0 }, null, &source_memory));
-    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 16, .memory_type_index = 0 }, null, &destination_memory));
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 32, .memory_type_index = 0 }, null, &source_memory));
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 32, .memory_type_index = 0 }, null, &destination_memory));
     try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, source_buffer, source_memory, 0));
     try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, destination_buffer, destination_memory, 0));
     var mapped: ?*anyopaque = null;
-    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, source_memory, 0, 16, 0, &mapped));
-    @memcpy(@as([*]u8, @ptrCast(mapped.?))[0..16], &host_layer);
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, source_memory, 0, 32, 0, &mapped));
+    @memcpy(@as([*]u8, @ptrCast(mapped.?))[0..32], &host_layers);
     unmapMemory(ctx.device, source_memory);
 
     const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
@@ -16048,29 +16096,28 @@ test "bounded 2D array images isolate layers across views clears and transfers" 
     try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate_info, @ptrCast(&command)));
     const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command, &begin));
-    const transfer_region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = layer_one, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    const transfer_region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = .{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 2 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
     cmdCopyBufferToImage(command, source_buffer, image, 1, 1, @ptrCast(&transfer_region));
     const layer_zero_range = ImageSubresourceRange{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
     var clear = std.mem.zeroes(ClearColorValue);
     clear.float32 = .{ 1, 0, 0, 1 };
     cmdClearColorImage(command, image, 1, &clear, 1, @ptrCast(&layer_zero_range));
-    const copied_layer_zero = ImageSubresourceLayers{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 };
-    const image_copy_region = ImageCopy{ .src_subresource = layer_one, .src_offset = .{ .x = 0, .y = 0, .z = 0 }, .dst_subresource = copied_layer_zero, .dst_offset = .{ .x = 0, .y = 0, .z = 0 }, .extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    const image_copy_region = ImageCopy{ .src_subresource = transfer_region.image_subresource, .src_offset = .{ .x = 0, .y = 0, .z = 0 }, .dst_subresource = transfer_region.image_subresource, .dst_offset = .{ .x = 0, .y = 0, .z = 0 }, .extent = .{ .width = 2, .height = 2, .depth = 1 } };
     validImageLocked(copied_image).?.layout = 1;
     cmdCopyImage(command, image, 1, copied_image, 1, 1, @ptrCast(&image_copy_region));
-    const image_blit_region = ImageBlit{ .src_subresource = layer_one, .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 2, .y = 2, .z = 1 } }, .dst_subresource = layer_one, .dst_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 2, .y = 2, .z = 1 } } };
+    const image_blit_region = ImageBlit{ .src_subresource = transfer_region.image_subresource, .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 2, .y = 2, .z = 1 } }, .dst_subresource = transfer_region.image_subresource, .dst_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 2, .y = 2, .z = 1 } } };
     cmdBlitImage(command, image, 1, copied_image, 1, 1, @ptrCast(&image_blit_region), 0);
-    const image_resolve_region = ImageResolve{ .src_subresource = layer_one, .src_offset = .{ .x = 0, .y = 0, .z = 0 }, .dst_subresource = copied_layer_zero, .dst_offset = .{ .x = 0, .y = 0, .z = 0 }, .extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    const image_resolve_region = ImageResolve{ .src_subresource = transfer_region.image_subresource, .src_offset = .{ .x = 0, .y = 0, .z = 0 }, .dst_subresource = transfer_region.image_subresource, .dst_offset = .{ .x = 0, .y = 0, .z = 0 }, .extent = .{ .width = 2, .height = 2, .depth = 1 } };
     cmdResolveImage(command, image, 1, copied_image, 1, 1, @ptrCast(&image_resolve_region));
-    const copied_buffer_region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = copied_layer_zero, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    const copied_buffer_region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = transfer_region.image_subresource, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
     cmdCopyImageToBuffer(command, copied_image, 1, destination_buffer, 1, @ptrCast(&copied_buffer_region));
     try std.testing.expectEqual(Result.success, endCommandBuffer(command));
     const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = @ptrCast(&command), .signal_semaphore_count = 0, .signal_semaphores = null };
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
-    try std.testing.expectEqualSlices(u8, &host_layer, imageBytes(validImageLocked(image).?)[16..32]);
+    try std.testing.expectEqualSlices(u8, host_layers[16..32], imageBytes(validImageLocked(image).?)[16..32]);
     try std.testing.expectEqual(@as(u32, 0xffff0000), std.mem.readInt(u32, imageBytes(validImageLocked(image).?)[0..4], .little));
-    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, destination_memory, 0, 16, 0, &mapped));
-    try std.testing.expectEqualSlices(u8, &host_layer, @as([*]const u8, @ptrCast(mapped.?))[0..16]);
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, destination_memory, 0, 32, 0, &mapped));
+    try std.testing.expectEqualSlices(u8, imageBytes(validImageLocked(copied_image).?)[0..32], @as([*]const u8, @ptrCast(mapped.?))[0..32]);
     unmapMemory(ctx.device, destination_memory);
 
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command, 0));
