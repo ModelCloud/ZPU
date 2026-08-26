@@ -199,6 +199,12 @@ indirect draws. A set discard value suppresses CPU raster work at submission,
 while an unset value rejects recording when the pipeline declares the dynamic
 state; static discard is retained in the pipeline identity and follows the
 same no-raster execution path.
+Depth-test enable, depth-write enable, and depth-compare-op dynamic values are
+also decoded and required before recording. The scalar graphics profile applies
+the Vulkan NEVER/LESS/EQUAL/LESS_OR_EQUAL/GREATER/NOT_EQUAL/GREATER_OR_EQUAL/
+ALWAYS comparisons and independently controls depth writes; the legacy
+CPU-cube path rejects non-default depth modes rather than silently changing its
+fixed depth behavior.
 The memory and sampler handle registries now meet the required 4096 and 4000
 allocation limits respectively. The generated command matrix is a
 234/234 dispatch/name-coverage artifact, not a Vulkan-conformance claim:
