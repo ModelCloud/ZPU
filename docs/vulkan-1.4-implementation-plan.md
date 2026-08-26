@@ -228,8 +228,9 @@ selected layer, while rejecting command-buffer completion while a rendering
 scope remains open. Color attachments are optional for depth-only/no-target
 scopes; depth clears and attachment clears remain executable while color draws
 are rejected without a color target. Dynamic pipeline declarations may also
-set `colorAttachmentCount` to zero when rasterizer discard is enabled; those
-attachmentless draws remain a validated no-op while pipeline, descriptor,
+set `colorAttachmentCount` to zero for rasterizer-discard or depth-only bounded
+draws; discard draws remain a validated no-op while depth-only draws update
+the D32 attachment without a color target. In both cases pipeline, descriptor,
 depth, index, and indirect resources are checked for ownership/liveness.
 Attachment layouts are snapshotted when dynamic commands
 are recorded (including transitions earlier in the same command buffer) and

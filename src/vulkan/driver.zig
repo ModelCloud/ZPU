@@ -6687,7 +6687,11 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 if (op.layer_count == 0 or op.depth_base_layer >= depth_image.array_layers or op.layer_count > depth_image.array_layers - op.depth_base_layer) return false;
             } else if (op.expected_depth_layout >= 0) return false;
             if (color_image == null) {
-                if (op.rasterizer_discard_enable == 0) return deadResource();
+                // Attachmentless non-discard draws are valid when a depth
+                // image is present; the bounded CPU rasterizer updates depth
+                // without requiring a color target. Profile shaders still
+                // require a color attachment and are rejected atomically.
+                if (op.rasterizer_discard_enable == 0 and (depth == null or profile_draw)) return deadResource();
                 if (!profile_draw) {
                     const uniform_buffer = uniform orelse return deadResource();
                     const texture_image = texture orelse return deadResource();
@@ -6774,7 +6778,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 if (op.layer_count == 0 or op.depth_base_layer >= depth_image.array_layers or op.layer_count > depth_image.array_layers - op.depth_base_layer) return false;
             } else if (op.expected_depth_layout >= 0) return false;
             if (color_image == null) {
-                if (op.rasterizer_discard_enable == 0) return deadResource();
+                if (op.rasterizer_discard_enable == 0 and (depth == null or profile_draw)) return deadResource();
                 if (!profile_draw) {
                     const uniform_buffer = uniform orelse return deadResource();
                     const texture_image = texture orelse return deadResource();
@@ -7459,7 +7463,13 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
         .next_subpass => {},
         .cube_draw => |op| {
             if (op.rasterizer_discard_enable != 0) return;
+            const color = op.color_image orelse if (op.framebuffer) |fb| fb.color_image else null;
+            const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
             if (op.pipeline.execution_abi == .profile_v1_scalar_graphics) {
+                // The profile shader path currently writes a fragment color;
+                // attachmentless profile draws are rejected during submit
+                // prevalidation and must not reach its color dereference.
+                if (color == null) return;
                 var draw = op;
                 const instance_count = draw.instance_count;
                 draw.instance_count = 1;
@@ -7472,32 +7482,49 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
             }
             if (op.depth_test_enable != 1 or op.depth_write_enable != 1 or op.depth_compare_op != 3 or op.depth_bounds_test_enable != 0 or op.depth_bounds[0] != 0 or op.depth_bounds[1] != 1) return;
             const operation_start = frame_pacing.monotonicNs();
-            const color = op.color_image orelse op.framebuffer.?.color_image.?;
-            const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
             const uniform_buffer = op.descriptors.uniform.?;
             const uniform_start: usize = @intCast(uniform_buffer.offset + op.descriptors.uniform_offset);
             const uniform_length: usize = @intCast(@min(op.descriptors.uniform_range, uniform_buffer.size - op.descriptors.uniform_offset));
             const uniform_memory = uniform_buffer.memory.?.bytes;
             const texture = op.descriptors.texture.?;
             var bounds = emptyRect();
-            const dirty_tiles = if (op.layer_count == 1 and @as(u64, color.width) * color.height >= 3840 * 2160) ensureDirtyTiles(color) else null;
             var pixels_written: usize = 0;
+            if (color == null) {
+                const depth_image = depth orelse return;
+                for (0..op.layer_count) |layer| {
+                    const depth_layer = imageLayerBytes(depth_image, op.depth_base_layer + @as(u32, @intCast(layer)));
+                    for (0..op.instance_count) |_| {
+                        pixels_written += if (op.indexed) |indexed| blk: {
+                            const bytes = bufferBytes(indexed.buffer)[@intCast(indexed.offset)..][0..@intCast(indexed.byte_count)];
+                            const stream = cpu_cube.IndexStream.init(bytes, indexed.index_type, indexed.vertex_offset) orelse break :blk 0;
+                            break :blk cpu_cube.drawIndexedDepthOnlyTracked(depth_layer, depth_image.width, depth_image.height, uniform_memory[uniform_start..][0..uniform_length], imageBytes(texture), texture.width, texture.height, op.vertex_count, op.viewport, op.scissor, op.cull_mode, op.front_face, &bounds, stream);
+                        } else cpu_cube.drawDepthOnlyTracked(depth_layer, depth_image.width, depth_image.height, uniform_memory[uniform_start..][0..uniform_length], imageBytes(texture), texture.width, texture.height, op.vertex_count, op.base_vertex, op.viewport, op.scissor, op.cull_mode, op.front_face, &bounds);
+                    }
+                }
+                if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(pixels_written, .monotonic);
+                depth_image.content_bounds = unionRect(depth_image.content_bounds, bounds);
+                depth_image.complex_3d_content = true;
+                depth_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+                return;
+            }
+            const color_image = color.?;
+            const dirty_tiles = if (op.layer_count == 1 and @as(u64, color_image.width) * color_image.height >= 3840 * 2160) ensureDirtyTiles(color_image) else null;
             for (0..op.layer_count) |layer| {
-                const color_layer = imageLayerBytes(color, op.color_base_layer + @as(u32, @intCast(layer)));
+                const color_layer = imageLayerBytes(color_image, op.color_base_layer + @as(u32, @intCast(layer)));
                 const depth_layer = if (depth) |depth_image| imageLayerBytes(depth_image, op.depth_base_layer + @as(u32, @intCast(layer))) else null;
                 for (0..op.instance_count) |_| {
                     pixels_written += if (op.indexed) |indexed| blk: {
                         const bytes = bufferBytes(indexed.buffer)[@intCast(indexed.offset)..][0..@intCast(indexed.byte_count)];
                         const stream = cpu_cube.IndexStream.init(bytes, indexed.index_type, indexed.vertex_offset) orelse break :blk 0;
-                        break :blk cpu_cube.drawIndexedTrackedTiles(color_layer, depth_layer, color.width, color.height, uniform_memory[uniform_start..][0..uniform_length], imageBytes(texture), texture.width, texture.height, op.vertex_count, op.viewport, op.scissor, op.cull_mode, op.front_face, &bounds, dirty_tiles, stream);
-                    } else cpu_cube.drawTrackedTilesBase(color_layer, depth_layer, color.width, color.height, uniform_memory[uniform_start..][0..uniform_length], imageBytes(texture), texture.width, texture.height, op.vertex_count, op.base_vertex, op.viewport, op.scissor, op.cull_mode, op.front_face, &bounds, dirty_tiles);
+                        break :blk cpu_cube.drawIndexedTrackedTiles(color_layer, depth_layer, color_image.width, color_image.height, uniform_memory[uniform_start..][0..uniform_length], imageBytes(texture), texture.width, texture.height, op.vertex_count, op.viewport, op.scissor, op.cull_mode, op.front_face, &bounds, dirty_tiles, stream);
+                    } else cpu_cube.drawTrackedTilesBase(color_layer, depth_layer, color_image.width, color_image.height, uniform_memory[uniform_start..][0..uniform_length], imageBytes(texture), texture.width, texture.height, op.vertex_count, op.base_vertex, op.viewport, op.scissor, op.cull_mode, op.front_face, &bounds, dirty_tiles);
                 }
             }
             if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(pixels_written, .monotonic);
-            color.content_bounds = unionRect(color.content_bounds, bounds);
+            color_image.content_bounds = unionRect(color_image.content_bounds, bounds);
             if (depth) |depth_image| depth_image.content_bounds = unionRect(depth_image.content_bounds, bounds);
-            color.complex_3d_content = true;
-            color.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+            color_image.complex_3d_content = true;
+            color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
         },
         .indirect_draw => |op| {
             const bytes = bufferBytes(op.indirect_buffer);
@@ -13650,6 +13677,19 @@ test "vkcube presentation path records submits and presents two swapchain images
     // The fixture's shader pair is intentionally promoted to the executable
     // CPU-cube ABI just like the color-bearing dynamic pipeline above.
     no_color_pipeline_object.execution_abi = .cpu_cube_v1;
+    // Keep a non-discard variant to exercise attachmentless depth-only
+    // execution through the same dynamic-rendering ABI.
+    var depth_only_rasterization = rasterization;
+    depth_only_rasterization.rasterizer_discard_enable = 0;
+    var depth_only_pipeline_info = no_color_pipeline_info;
+    depth_only_pipeline_info.rasterization = &depth_only_rasterization;
+    var depth_only_pipeline: [1]usize = .{0xfeed_face};
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&depth_only_pipeline_info), null, &depth_only_pipeline));
+    const depth_only_pipeline_object = validGraphicsPipelineLocked(depth_only_pipeline[0]).?;
+    try std.testing.expectEqual(@as(i32, 0), depth_only_pipeline_object.rendering_color_format);
+    try std.testing.expectEqual(@as(i32, 126), depth_only_pipeline_object.rendering_depth_format);
+    try std.testing.expectEqual(@as(u32, 0), depth_only_pipeline_object.rasterizer_discard_enable);
+    depth_only_pipeline_object.execution_abi = .cpu_cube_v1;
     var graphics_flags2 = PipelineCreateFlags2CreateInfo{ .s_type = pipeline_create_flags2_stype, .p_next = null, .flags = 0 };
     var graphics_flags2_info = pipeline_info;
     graphics_flags2_info.p_next = @ptrCast(&graphics_flags2);
@@ -14655,6 +14695,24 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.success, endCommandBuffer(multi_commands[0]));
     try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&dynamic_submit), 0));
 
+    // A non-discard, attachmentless draw updates depth in place.  The clear
+    // load-op establishes a known 1.0 value and the triangle's z=0.2 must
+    // replace it, proving the color target is genuinely optional at execute.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    validImageLocked(depth_image).?.layout = 3;
+    cmdBeginRendering(multi_commands[0], &depth_only_rendering);
+    cmdBindPipeline(multi_commands[0], 0, depth_only_pipeline[0]);
+    cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    setCoreDynamicGraphicsStateForTest(multi_commands[0], &viewport, &render_info.render_area);
+    cmdDraw(multi_commands[0], 3, 1, 0, 0);
+    try std.testing.expect(!multi_commands[0].impl.invalid);
+    cmdEndRendering(multi_commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(multi_commands[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&dynamic_submit), 0));
+    const depth_after_draw: []const f32 = @alignCast(std.mem.bytesAsSlice(f32, imageBytes(validImageLocked(depth_image).?)));
+    try std.testing.expect(depth_after_draw[4 * 8 + 4] < 1);
+
     // A discard-only draw still snapshots the depth layout.  Mutating that
     // layout after recording must reject the whole submit before execution.
     try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
@@ -14672,6 +14730,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     validImageLocked(depth_image).?.layout = 3;
     try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
     destroyPipeline(device, no_color_pipeline[0], null);
+    destroyPipeline(device, depth_only_pipeline[0], null);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(render_secondary[0], 0));
     dynamic_secondary_inheritance.p_next = &dynamic_secondary_rendering;
     try std.testing.expectEqual(Result.success, beginCommandBuffer(render_secondary[0], &dynamic_secondary_begin));
