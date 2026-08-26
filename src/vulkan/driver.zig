@@ -4473,7 +4473,7 @@ fn record(cb: CommandBuffer, command: Command) void {
     cb.impl.commands[cb.impl.count] = owned;
     cb.impl.count += 1;
 }
-fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj, dynamic_color: ?*ImageObj, dynamic_depth: ?*ImageObj, dynamic_color_layout: i32, dynamic_depth_layout: i32, dynamic_color_base_layer: u32, dynamic_depth_base_layer: u32, dynamic_layer_count: u32) Command {
+fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj, dynamic_color: ?*ImageObj, dynamic_depth: ?*ImageObj, color_layout: i32, depth_layout: i32, dynamic_color_base_layer: u32, dynamic_depth_base_layer: u32, dynamic_layer_count: u32) Command {
     var result = command;
     switch (result) {
         .cube_draw => |*draw| if (draw.framebuffer == null) {
@@ -4483,10 +4483,12 @@ fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj,
                 draw.color_base_layer = dynamic_color_base_layer;
                 draw.depth_base_layer = dynamic_depth_base_layer;
                 draw.layer_count = dynamic_layer_count;
-                draw.expected_color_layout = dynamic_color_layout;
-                draw.expected_depth_layout = dynamic_depth_layout;
+                draw.expected_color_layout = color_layout;
+                draw.expected_depth_layout = depth_layout;
             } else {
                 draw.framebuffer = framebuffer;
+                draw.expected_color_layout = color_layout;
+                draw.expected_depth_layout = depth_layout;
             }
         },
         .indirect_draw => |*draw| if (draw.framebuffer == null) {
@@ -4496,10 +4498,12 @@ fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj,
                 draw.color_base_layer = dynamic_color_base_layer;
                 draw.depth_base_layer = dynamic_depth_base_layer;
                 draw.layer_count = dynamic_layer_count;
-                draw.expected_color_layout = dynamic_color_layout;
-                draw.expected_depth_layout = dynamic_depth_layout;
+                draw.expected_color_layout = color_layout;
+                draw.expected_depth_layout = depth_layout;
             } else {
                 draw.framebuffer = framebuffer;
+                draw.expected_color_layout = color_layout;
+                draw.expected_depth_layout = depth_layout;
             }
         },
         else => {},
@@ -4551,12 +4555,12 @@ fn cmdExecuteCommands(cb: ?CommandBuffer, count: u32, buffers: ?[*]const Command
             return;
         }
     }
-    const dynamic_color_layout = if (execute_dynamic) commandBufferImageLayout(primary, primary.impl.dynamic_color_image.?) else -1;
-    const dynamic_depth_layout = if (execute_dynamic) (if (primary.impl.dynamic_depth_image) |depth| commandBufferImageLayout(primary, depth) else -1) else -1;
+    const color_layout = if (execute_dynamic) commandBufferImageLayout(primary, primary.impl.dynamic_color_image.?) else renderPassAttachmentLayout(primary, true);
+    const depth_layout = if (execute_dynamic) (if (primary.impl.dynamic_depth_image) |depth| commandBufferImageLayout(primary, depth) else -1) else renderPassAttachmentLayout(primary, false);
     for (list) |raw| {
         const secondary = raw;
         for (secondary.impl.commands[0..secondary.impl.count]) |command| {
-            primary.impl.commands[primary.impl.count] = commandForSecondaryExecution(command, primary.impl.active_framebuffer, if (execute_dynamic) primary.impl.dynamic_color_image else null, if (execute_dynamic) primary.impl.dynamic_depth_image else null, dynamic_color_layout, dynamic_depth_layout, if (execute_dynamic) primary.impl.dynamic_color_base_layer else 0, if (execute_dynamic) primary.impl.dynamic_depth_base_layer else 0, if (execute_dynamic) primary.impl.dynamic_layer_count else 1);
+            primary.impl.commands[primary.impl.count] = commandForSecondaryExecution(command, primary.impl.active_framebuffer, if (execute_dynamic) primary.impl.dynamic_color_image else null, if (execute_dynamic) primary.impl.dynamic_depth_image else null, color_layout, depth_layout, if (execute_dynamic) primary.impl.dynamic_color_base_layer else 0, if (execute_dynamic) primary.impl.dynamic_depth_base_layer else 0, if (execute_dynamic) primary.impl.dynamic_layer_count else 1);
             primary.impl.count += 1;
         }
         primary.impl.secondaries[primary.impl.secondary_count] = secondary;
@@ -4860,8 +4864,8 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
             }
         }
     }
-    const expected_color_layout = if (dynamic_rendering) commandBufferImageLayout(c, color_image) else -1;
-    const expected_depth_layout = if (dynamic_rendering) (if (depth_image) |depth| commandBufferImageLayout(c, depth) else -1) else -1;
+    const expected_color_layout = recordedAttachmentLayout(c, true);
+    const expected_depth_layout = if (depth_image != null) recordedAttachmentLayout(c, false) else -1;
     for (attachments.?[0..attachment_count]) |attachment| for (rects.?[0..rect_count]) |rect| {
         const image = if (attachment.aspect_mask == 1) color_image else depth_image.?;
         const bytes = if (attachment.aspect_mask == 1) colorBytes(color_image, &attachment.clear_value.color).? else .{ 0, 0, 0, 0 };
@@ -5431,6 +5435,18 @@ fn commandBufferImageLayout(command_buffer: *const CommandBufferObj, image: *con
 }
 fn dynamicAttachmentLayout(command_buffer: *const CommandBufferObj, image: ?*ImageObj) i32 {
     return if (image) |value| commandBufferImageLayout(command_buffer, value) else -1;
+}
+fn renderPassAttachmentLayout(command_buffer: *const CommandBufferObj, color: bool) i32 {
+    return if (command_buffer.impl.active_render_pass) |render_pass|
+        if (color) render_pass.subpass_color_layouts[command_buffer.impl.active_subpass] else render_pass.subpass_depth_layouts[command_buffer.impl.active_subpass]
+    else
+        -1;
+}
+fn recordedAttachmentLayout(command_buffer: *const CommandBufferObj, color: bool) i32 {
+    return if (command_buffer.impl.dynamic_rendering)
+        dynamicAttachmentLayout(command_buffer, if (color) command_buffer.impl.dynamic_color_image else command_buffer.impl.dynamic_depth_image)
+    else
+        renderPassAttachmentLayout(command_buffer, color);
 }
 fn dynamicRenderingDependencyValid(info: *const DependencyInfo) bool {
     // ZPU does not expose dynamicRenderingLocalRead.  Vulkan therefore only
@@ -9645,7 +9661,7 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     command_buffer.impl.render_contents = contents;
     if (color_old_layout != first_color_layout) record(command_buffer, .{ .transition = .{ .image = image, .old_layout = color_old_layout, .new_layout = first_color_layout } });
     if (depth) |depth_image| if (depth_old_layout != first_depth_layout) record(command_buffer, .{ .transition = .{ .image = depth_image, .old_layout = depth_old_layout, .new_layout = first_depth_layout } });
-    if (clear_color or clear_depth) record(command_buffer, .{ .render_clear = .{ .image = image, .depth = depth, .color = .{ @intFromFloat(std.math.clamp(color[2], 0, 1) * 255), @intFromFloat(std.math.clamp(color[1], 0, 1) * 255), @intFromFloat(std.math.clamp(color[0], 0, 1) * 255), @intFromFloat(std.math.clamp(color[3], 0, 1) * 255) }, .depth_value = depth_value, .clear_color = clear_color, .clear_depth = clear_depth } });
+    if (clear_color or clear_depth) record(command_buffer, .{ .render_clear = .{ .image = image, .depth = depth, .color = .{ @intFromFloat(std.math.clamp(color[2], 0, 1) * 255), @intFromFloat(std.math.clamp(color[1], 0, 1) * 255), @intFromFloat(std.math.clamp(color[0], 0, 1) * 255), @intFromFloat(std.math.clamp(color[3], 0, 1) * 255) }, .depth_value = depth_value, .expected_color_layout = first_color_layout, .expected_depth_layout = if (depth != null) first_depth_layout else -1, .clear_color = clear_color, .clear_depth = clear_depth } });
 }
 fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.c) void {
     lock();
@@ -11080,7 +11096,7 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
         command_buffer.impl.invalid = true;
         return;
     };
-    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = if (dynamic_rendering) dynamicAttachmentLayout(command_buffer, command_buffer.impl.dynamic_color_image) else -1, .expected_depth_layout = if (dynamic_rendering) dynamicAttachmentLayout(command_buffer, command_buffer.impl.dynamic_depth_image) else -1, .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = vertex_count, .base_vertex = first_vertex, .instance_count = instance_count, .indexed = null, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .primitive_restart_enable = raster.primitive_restart_enable, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .vertex_bindings = command_buffer.impl.vertex_bindings } });
+    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = recordedAttachmentLayout(command_buffer, true), .expected_depth_layout = recordedAttachmentLayout(command_buffer, false), .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = vertex_count, .base_vertex = first_vertex, .instance_count = instance_count, .indexed = null, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .primitive_restart_enable = raster.primitive_restart_enable, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .vertex_bindings = command_buffer.impl.vertex_bindings } });
 }
 fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32, first_instance: u32) callconv(.c) void {
     _ = first_instance;
@@ -11143,7 +11159,7 @@ fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, fir
         command_buffer.impl.invalid = true;
         return;
     };
-    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = if (dynamic_rendering) dynamicAttachmentLayout(command_buffer, command_buffer.impl.dynamic_color_image) else -1, .expected_depth_layout = if (dynamic_rendering) dynamicAttachmentLayout(command_buffer, command_buffer.impl.dynamic_depth_image) else -1, .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = index_count, .base_vertex = 0, .instance_count = instance_count, .indexed = .{ .buffer = index_buffer, .offset = start, .byte_count = byte_count, .index_type = command_buffer.impl.index_type, .vertex_offset = vertex_offset }, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .primitive_restart_enable = raster.primitive_restart_enable, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .vertex_bindings = command_buffer.impl.vertex_bindings } });
+    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = recordedAttachmentLayout(command_buffer, true), .expected_depth_layout = recordedAttachmentLayout(command_buffer, false), .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = index_count, .base_vertex = 0, .instance_count = instance_count, .indexed = .{ .buffer = index_buffer, .offset = start, .byte_count = byte_count, .index_type = command_buffer.impl.index_type, .vertex_offset = vertex_offset }, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .primitive_restart_enable = raster.primitive_restart_enable, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .vertex_bindings = command_buffer.impl.vertex_bindings } });
 }
 fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64, draw_count: u32, stride: u64, indexed: bool, count_source: ?IndirectCountState) void {
     lock();
@@ -11220,7 +11236,7 @@ fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64
         command_buffer.impl.invalid = true;
         return;
     };
-    record(command_buffer, .{ .indirect_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = if (dynamic_rendering) dynamicAttachmentLayout(command_buffer, command_buffer.impl.dynamic_color_image) else -1, .expected_depth_layout = if (dynamic_rendering) dynamicAttachmentLayout(command_buffer, command_buffer.impl.dynamic_depth_image) else -1, .pipeline = pipeline, .descriptors = descriptor_snapshot, .indirect_buffer = indirect_buffer, .offset = offset, .draw_count = draw_count, .stride = stride, .indexed = indexed, .index_buffer = index_buffer, .index_offset = command_buffer.impl.index_offset, .index_type = command_buffer.impl.index_type, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .vertex_bindings = command_buffer.impl.vertex_bindings, .count_source = count_source } });
+    record(command_buffer, .{ .indirect_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = recordedAttachmentLayout(command_buffer, true), .expected_depth_layout = recordedAttachmentLayout(command_buffer, false), .pipeline = pipeline, .descriptors = descriptor_snapshot, .indirect_buffer = indirect_buffer, .offset = offset, .draw_count = draw_count, .stride = stride, .indexed = indexed, .index_buffer = index_buffer, .index_offset = command_buffer.impl.index_offset, .index_type = command_buffer.impl.index_type, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .vertex_bindings = command_buffer.impl.vertex_bindings, .count_source = count_source } });
 }
 fn cmdDrawIndirect(cb: ?CommandBuffer, indirect: usize, offset: u64, draw_count: u32, stride: u64) callconv(.c) void {
     cmdDrawIndirectCommon(cb, indirect, offset, draw_count, stride, false, null);
