@@ -5431,8 +5431,11 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
     for (image_list) |barrier| record(c, .{ .transition = .{ .image = validImageLocked(barrier.image).?, .old_layout = barrier.old_layout, .new_layout = barrier.new_layout } });
 }
 fn validEventStageMask(stage_mask: u32) bool {
-    // The only queue family advertises graphics and transfer, not compute.
-    return stage_mask != 0 and stage_mask & ~@as(u32, 0x1_b7ff) == 0;
+    // The only queue family advertises graphics and transfer.  Tessellation,
+    // geometry, and compute stages are not enabled by the device profile, and
+    // HOST is forbidden for event/timestamp/semaphore-wait stage masks.
+    const supported: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x80 | 0x100 | 0x200 | 0x400 | 0x1000 | 0x2000 | 0x8000 | 0x1_0000;
+    return stage_mask != 0 and stage_mask & ~supported == 0;
 }
 fn stagesSupportAccess(stage_mask: u32, access_mask: u32) bool {
     if (access_mask & ~@as(u32, 0x7fff) != 0) return false;
@@ -14564,6 +14567,10 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expectEqual(@as(?u32, 0x1000), sync2StageMaskToLegacy(0x1000_0000_0));
     try std.testing.expectEqual(@as(?u32, 0x1_0000), sync2BarrierStageMaskToLegacy(0, 0));
     try std.testing.expect(sync2BarrierStageMaskToLegacy(0, 1) == null);
+    try std.testing.expect(sync2StageMaskToLegacy(0x40) == null);
+    try std.testing.expect(sync2StageMaskToLegacy(0x800) == null);
+    try std.testing.expect(validEventStageMask(0x1000));
+    try std.testing.expect(!validEventStageMask(0x4000));
     try std.testing.expectEqual(@as(?u32, 0x20), sync2AccessMaskToLegacy(0x2_0000_0000));
     try std.testing.expect(sync2AccessMaskToLegacy(0x8000) == null);
     try std.testing.expect(sync2AccessMaskToLegacy(0x1_0000) == null);
@@ -17634,6 +17641,11 @@ test "binary semaphores chain ordered submissions with allocation-free warm stat
     var missing_wait_stage = unsignaled_wait;
     missing_wait_stage.wait_dst_stage_mask = null;
     try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&missing_wait_stage), 0));
+    var unsupported_wait_stage = unsignaled_wait;
+    unsupported_wait_stage.wait_dst_stage_mask = @ptrCast(&[_]u32{0x40});
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&unsupported_wait_stage), 0));
+    unsupported_wait_stage.wait_dst_stage_mask = @ptrCast(&[_]u32{0x800});
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&unsupported_wait_stage), 0));
     const signal_first = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 1, .signal_semaphores = @ptrCast(&semaphores[0]) };
     const wait_first_signal_second = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 1, .wait_semaphores = @ptrCast(&semaphores[0]), .wait_dst_stage_mask = @ptrCast(&wait_stage), .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 1, .signal_semaphores = @ptrCast(&semaphores[1]) };
     const chain = [_]SubmitInfo{ signal_first, wait_first_signal_second };
