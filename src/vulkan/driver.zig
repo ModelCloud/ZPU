@@ -9852,13 +9852,15 @@ fn cmdSetRenderingAttachmentLocations(cb: ?CommandBuffer, info: ?*const Renderin
         return;
     };
     const inside_render_pass = command_buffer.impl.active_render_pass != null or command_buffer.impl.dynamic_rendering;
-    if (ci.s_type != 1000232001 or ci.p_next != null or command_buffer.impl.state != 1 or command_buffer.impl.invalid or !inside_render_pass or ci.color_attachment_count > 4 or (ci.color_attachment_count != 0 and ci.color_attachment_locations == null)) {
+    const dynamic_profile = command_buffer.impl.dynamic_rendering;
+    if (ci.s_type != 1000232001 or ci.p_next != null or command_buffer.impl.state != 1 or command_buffer.impl.invalid or !inside_render_pass or ci.color_attachment_count > 4 or (dynamic_profile and ci.color_attachment_count != 1) or (ci.color_attachment_count != 0 and ci.color_attachment_locations == null)) {
         command_buffer.impl.invalid = true;
         return;
     }
     var locations: [8]u32 = undefined;
     if (ci.color_attachment_locations) |values| {
-        for (values[0..ci.color_attachment_count]) |location| if (location >= 4) {
+        const location_limit: u32 = if (dynamic_profile) 1 else 4;
+        for (values[0..ci.color_attachment_count]) |location| if (location >= location_limit) {
             command_buffer.impl.invalid = true;
             return;
         };
@@ -9876,13 +9878,15 @@ fn cmdSetRenderingInputAttachmentIndices(cb: ?CommandBuffer, info: ?*const Rende
         return;
     };
     const inside_render_pass = command_buffer.impl.active_render_pass != null or command_buffer.impl.dynamic_rendering;
-    if (ci.s_type != 1000232002 or ci.p_next != null or command_buffer.impl.state != 1 or command_buffer.impl.invalid or !inside_render_pass or ci.color_attachment_count > 4 or (ci.color_attachment_count != 0 and ci.color_attachment_input_indices == null)) {
+    const dynamic_profile = command_buffer.impl.dynamic_rendering;
+    if (ci.s_type != 1000232002 or ci.p_next != null or command_buffer.impl.state != 1 or command_buffer.impl.invalid or !inside_render_pass or ci.color_attachment_count > 4 or (dynamic_profile and (ci.color_attachment_count != 1 or ci.depth_input_attachment_index != null or ci.stencil_input_attachment_index != null)) or (ci.color_attachment_count != 0 and ci.color_attachment_input_indices == null)) {
         command_buffer.impl.invalid = true;
         return;
     }
     var input_indices: [8]u32 = undefined;
     if (ci.color_attachment_input_indices) |values| {
-        for (values[0..ci.color_attachment_count]) |index| if (index >= 4) {
+        const input_limit: u32 = if (dynamic_profile) 1 else 4;
+        for (values[0..ci.color_attachment_count]) |index| if (index >= input_limit) {
             command_buffer.impl.invalid = true;
             return;
         };
@@ -13870,6 +13874,24 @@ test "dynamic rendering begin and end own attachment scope" {
     cmdBeginRendering(commands[1], &rendering);
     try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[1]));
     try std.testing.expect(commands[1].impl.dynamic_rendering);
+    var unavailable_location = [_]u32{1};
+    var unavailable_location_info = location_info;
+    unavailable_location_info.color_attachment_locations = &unavailable_location;
+    cmdSetRenderingAttachmentLocations(commands[1], &unavailable_location_info);
+    try std.testing.expect(commands[1].impl.invalid);
+    try std.testing.expectEqual(@as(u32, 0), commands[1].impl.rendering_location_count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    cmdBeginRendering(commands[1], &rendering);
+    var unavailable_input = [_]u32{1};
+    var unavailable_input_info = input_info;
+    unavailable_input_info.color_attachment_input_indices = &unavailable_input;
+    cmdSetRenderingInputAttachmentIndices(commands[1], &unavailable_input_info);
+    try std.testing.expect(commands[1].impl.invalid);
+    try std.testing.expectEqual(@as(u32, 0), commands[1].impl.rendering_input_count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    cmdBeginRendering(commands[1], &rendering);
     cmdSetRenderingAttachmentLocations(commands[1], &location_info);
     var bad_locations = [_]u32{ 0, 8 };
     var bad_location_info = location_info;
