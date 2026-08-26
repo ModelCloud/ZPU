@@ -4331,7 +4331,7 @@ fn cmdFillBuffer(cb: ?CommandBuffer, dst_handle: usize, offset: u64, size: u64, 
     const actual = if (size == std.math.maxInt(u64)) dst.size -| offset else size;
     if (dst.usage & 0x2 == 0) hit(.missing_transfer_usage);
     if (actual == 0) hit(.zero_fill_rejected);
-    if (c.impl.active_render_pass != null or dst.owner != c.impl.owner or dst.usage & 0x2 == 0 or dst.memory == null or actual == 0 or offset % 4 != 0 or actual % 4 != 0 or offset > dst.size or actual > dst.size - offset) {
+    if (c.impl.active_render_pass != null or c.impl.dynamic_rendering or dst.owner != c.impl.owner or dst.usage & 0x2 == 0 or dst.memory == null or actual == 0 or offset % 4 != 0 or actual % 4 != 0 or offset > dst.size or actual > dst.size - offset) {
         c.impl.invalid = true;
         return;
     }
@@ -4352,7 +4352,7 @@ fn cmdUpdateBuffer(cb: ?CommandBuffer, dst_handle: usize, offset: u64, size: u64
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.active_render_pass != null or c.impl.count == c.impl.commands.len or dst.owner != c.impl.owner or dst.usage & 0x2 == 0 or dst.memory == null or size == 0 or size > 65_536 or size % 4 != 0 or offset % 4 != 0 or offset > dst.size or size > dst.size - offset or data == null) {
+    if (c.impl.state != 1 or c.impl.active_render_pass != null or c.impl.dynamic_rendering or c.impl.count == c.impl.commands.len or dst.owner != c.impl.owner or dst.usage & 0x2 == 0 or dst.memory == null or size == 0 or size > 65_536 or size % 4 != 0 or offset % 4 != 0 or offset > dst.size or size > dst.size - offset or data == null) {
         c.impl.invalid = true;
         return;
     }
@@ -4390,7 +4390,7 @@ fn cmdCopyBuffer(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize, count
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.count > c.impl.commands.len or count > c.impl.commands.len - c.impl.count) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or c.impl.count > c.impl.commands.len or count > c.impl.commands.len - c.impl.count) {
         c.impl.invalid = true;
         return;
     }
@@ -4464,7 +4464,7 @@ fn cmdClearColorImage(cb: ?CommandBuffer, image_handle: usize, layout: i32, colo
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.count == c.impl.commands.len or image.owner != c.impl.owner or image.usage & 0x2 == 0 or image.memory == null or (layout != 1 and layout != 7)) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or c.impl.count == c.impl.commands.len or image.owner != c.impl.owner or image.usage & 0x2 == 0 or image.memory == null or (layout != 1 and layout != 7)) {
         c.impl.invalid = true;
         return;
     }
@@ -4512,7 +4512,7 @@ fn cmdClearDepthStencilImage(cb: ?CommandBuffer, image_handle: usize, layout: i3
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.count == c.impl.commands.len or image.owner != c.impl.owner or image.format != 126 or image.usage & 0x2 == 0 or image.memory == null or (layout != 1 and layout != 7) or !std.math.isFinite(value.?.depth) or value.?.depth < 0 or value.?.depth > 1) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or c.impl.count == c.impl.commands.len or image.owner != c.impl.owner or image.format != 126 or image.usage & 0x2 == 0 or image.memory == null or (layout != 1 and layout != 7) or !std.math.isFinite(value.?.depth) or value.?.depth < 0 or value.?.depth > 1) {
         c.impl.invalid = true;
         return;
     }
@@ -4652,7 +4652,7 @@ fn cmdBlitImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_hand
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or @as(usize, c.impl.count) + count > c.impl.commands.len or src == dst or src.owner != c.impl.owner or dst.owner != c.impl.owner or src.format != dst.format or src.format != 44 or src.usage & 1 == 0 or dst.usage & 2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 1 and dst_layout != 7)) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or @as(usize, c.impl.count) + count > c.impl.commands.len or src == dst or src.owner != c.impl.owner or dst.owner != c.impl.owner or src.format != dst.format or src.format != 44 or src.usage & 1 == 0 or dst.usage & 2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 1 and dst_layout != 7)) {
         c.impl.invalid = true;
         return;
     }
@@ -4678,7 +4678,7 @@ fn cmdResolveImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_h
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or @as(usize, c.impl.count) + count > c.impl.commands.len or src == dst or src.owner != c.impl.owner or dst.owner != c.impl.owner or src.format != dst.format or src.format != 44 or src.usage & 1 == 0 or dst.usage & 2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 7)) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or @as(usize, c.impl.count) + count > c.impl.commands.len or src == dst or src.owner != c.impl.owner or dst.owner != c.impl.owner or src.format != dst.format or src.format != 44 or src.usage & 1 == 0 or dst.usage & 2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 7)) {
         c.impl.invalid = true;
         return;
     }
@@ -4785,7 +4785,7 @@ fn cmdCopyBufferToImage(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.count > c.impl.commands.len or count > c.impl.commands.len - c.impl.count) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or c.impl.count > c.impl.commands.len or count > c.impl.commands.len - c.impl.count) {
         c.impl.invalid = true;
         return;
     }
@@ -4831,7 +4831,7 @@ fn cmdCopyImageToBuffer(cb: ?CommandBuffer, src_handle: usize, layout: i32, dst_
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.count > c.impl.commands.len or count > c.impl.commands.len - c.impl.count) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or c.impl.count > c.impl.commands.len or count > c.impl.commands.len - c.impl.count) {
         c.impl.invalid = true;
         return;
     }
@@ -4877,7 +4877,7 @@ fn cmdCopyImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_hand
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.count > c.impl.commands.len or count > c.impl.commands.len - c.impl.count) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or c.impl.count > c.impl.commands.len or count > c.impl.commands.len - c.impl.count) {
         c.impl.invalid = true;
         return;
     }
@@ -15360,6 +15360,19 @@ test "memory transfer objects execute against independently specified bytes" {
     device.set_loader_data = null;
     try std.testing.expectEqual(Result.success, allocateCommandBuffers(device, &alloc_info, &commands));
     const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.dynamic_rendering = true;
+    cmdFillBuffer(commands[0], buffer_b, 0, 64, 0xdeadbeef);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 0), commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.dynamic_rendering = true;
+    const dynamic_copy = BufferCopy{ .src_offset = 0, .dst_offset = 0, .size = 4 };
+    cmdCopyBuffer(commands[0], buffer_a, buffer_b, 1, @ptrCast(&dynamic_copy));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 0), commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdFillBuffer(commands[0], buffer_b, 0, 64, 0xdeadbeef);
     const copy = BufferCopy{ .src_offset = 4, .dst_offset = 8, .size = 32 };
