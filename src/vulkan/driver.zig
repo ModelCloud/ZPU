@@ -10233,7 +10233,13 @@ fn cmdDrawIndexedIndirectCount(cb: ?CommandBuffer, indirect: usize, offset: u64,
     cmdDrawIndirectCommon(cb, indirect, offset, if (max_draw_count != 0) 1 else 0, stride, true, source);
 }
 fn dispatchGroupsValid(groups: [3]u32) bool {
-    for (groups) |value| if (value == 0 or value > 65_535) return false;
+    for (groups) |value| if (value > 65_535) return false;
+    return true;
+}
+fn dispatchBaseValid(base: [3]u32, groups: [3]u32) bool {
+    for (0..3) |index| {
+        if (base[index] >= 65_535 or groups[index] > 65_535 - base[index]) return false;
+    }
     return true;
 }
 fn recordDispatchLocked(command_buffer: *CommandBufferObj, base: [3]u32, groups: [3]u32) void {
@@ -10279,7 +10285,7 @@ fn cmdDispatchBaseCommon(cb: ?CommandBuffer, base: [3]u32, groups: [3]u32) void 
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or command_buffer.impl.active_render_pass != null or command_buffer.impl.count == command_buffer.impl.commands.len or !dispatchGroupsValid(groups) or base[0] > 65_535 - groups[0] or base[1] > 65_535 - groups[1] or base[2] > 65_535 - groups[2]) {
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or command_buffer.impl.active_render_pass != null or command_buffer.impl.count == command_buffer.impl.commands.len or !dispatchGroupsValid(groups) or !dispatchBaseValid(base, groups)) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -17744,6 +17750,18 @@ test "compute dispatch command envelopes validate indirect groups and device mas
     cmdDispatch(commands[0], 1, 2, 3);
     cmdDispatchBase(commands[0], 2, 3, 4, 1, 1, 1);
     try std.testing.expectEqual(@as(usize, 2), commands[0].impl.count);
+    cmdDispatch(commands[0], 0, 1, 1);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(@as(usize, 3), commands[0].impl.count);
+    try std.testing.expect(dispatchGroupsValid(.{ 0, 1, 1 }));
+    try std.testing.expect(!dispatchBaseValid(.{ 65_535, 0, 0 }, .{ 0, 1, 1 }));
+    cmdDispatchBase(commands[0], 65_535, 0, 0, 0, 1, 1);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBindPipeline(commands[0], 1, compute_pipeline);
+    cmdDispatch(commands[0], 0, 1, 1);
+    try std.testing.expect(!commands[0].impl.invalid);
     const info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 12, .usage = 0x100, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
     var buffer: usize = 0;
     try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &info, null, &buffer));
@@ -17754,7 +17772,7 @@ test "compute dispatch command envelopes validate indirect groups and device mas
     var mapped: ?*anyopaque = null;
     try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memory, 0, 12, 0, &mapped));
     const words: [*]u32 = @ptrCast(@alignCast(mapped.?));
-    words[0..3].* = .{ 2, 2, 2 };
+    words[0..3].* = .{ 0, 2, 2 };
     unmapMemory(ctx.device, memory);
     cmdDispatchIndirect(commands[0], buffer, 0);
     try std.testing.expect(!commands[0].impl.invalid);
