@@ -51,6 +51,11 @@ path are covered by direct tests.
 Compute command recording now requires an owned bound compute
 pipeline, carries pipeline/layout/descriptor lifetime snapshots through
 submission prevalidation, and has a 4096-iteration allocation-free warm path.
+Pipeline creation also accepts the promoted Vulkan 1.4
+`VkPipelineCreateFlags2CreateInfo` pNext ABI: zero flags are accepted for
+both graphics and compute pipelines, and the compute dispatch-base bit is
+honored through the same canonical, failure-atomic path as the legacy flag;
+unsupported or high flag bits leave outputs and registries unchanged.
 The bounded compute profile now also admits direct scalar StorageBuffer
 `OpLoad` reads (including read/write aliasing of the descriptor range) with
 transactional output commits; static access-chain reads share the same

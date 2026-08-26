@@ -446,6 +446,7 @@ pub const SpecializationMapEntry = extern struct { constant_id: u32, offset: u32
 pub const SpecializationInfo = extern struct { map_entry_count: u32, map_entries: ?[*]const SpecializationMapEntry, data_size: usize, data: ?*const anyopaque };
 pub const PipelineShaderStageCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, stage: u32, module: usize, name: ?[*:0]const u8, specialization_info: ?*const SpecializationInfo };
 pub const ComputePipelineCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, stage: PipelineShaderStageCreateInfo, layout: usize, base_pipeline: usize, base_pipeline_index: i32 };
+pub const PipelineCreateFlags2CreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u64 };
 pub const DescriptorSetLayoutBinding = extern struct { binding: u32, descriptor_type: i32, descriptor_count: u32, stage_flags: u32, immutable_samplers: ?[*]const usize };
 pub const DescriptorSetLayoutCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, binding_count: u32, bindings: ?[*]const DescriptorSetLayoutBinding };
 pub const DescriptorSetLayoutBindingFlagsCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, binding_count: u32, binding_flags: ?[*]const u32 };
@@ -833,6 +834,7 @@ const max_image_array_layers: u32 = 256;
 const max_api_items: u32 = 256;
 const swapchain_present_timing_bit: u32 = 1 << 9;
 const pipeline_create_dispatch_base_bit: u32 = 0x00000010;
+const pipeline_create_flags2_stype: i32 = 1_000_470_005;
 const dynamic_state_cull_mode: i32 = 1000267000;
 const dynamic_state_line_stipple: i32 = 1000259000;
 const dynamic_state_front_face: i32 = 1000267001;
@@ -1088,6 +1090,38 @@ const ChainHeader = extern struct { s_type: i32, p_next: ?*const ChainHeader };
 const google_display_timing_extension = "VK_GOOGLE_display_timing";
 const google_present_times_info_stype: i32 = 1_000_092_000;
 const memory_dedicated_requirements_stype: i32 = 1_000_127_000;
+
+// VK_KHR_maintenance5 promotes VkPipelineCreateFlags2CreateInfo into the
+// core 1.4 pipeline-create pNext chain.  The CPU backend has one supported
+// flag (dispatch base); validate the chain before any pipeline state or cache
+// bytes are published so unsupported/high bits remain failure-atomic.
+fn pipelineCreateFlags2(raw: ?*const anyopaque, legacy: u32, allow_dispatch_base: bool) ?u32 {
+    if (raw == null) {
+        if (!allow_dispatch_base and legacy != 0) return null;
+        if (legacy & ~pipeline_create_dispatch_base_bit != 0) return null;
+        return legacy;
+    }
+    var next = raw;
+    var depth: usize = 0;
+    var effective: u32 = 0;
+    while (next) |item| {
+        if (depth == 16) return null;
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (header.s_type != pipeline_create_flags2_stype) return null;
+        const flags2: *const PipelineCreateFlags2CreateInfo = @ptrCast(@alignCast(item));
+        // This bounded implementation accepts exactly one promoted node.  The
+        // promoted flags replace the legacy field (including when the legacy
+        // field contains a supported dispatch-base bit), as specified by the
+        // Vulkan 1.4 promotion rules.
+        if (flags2.p_next != null) return null;
+        if (flags2.flags & ~@as(u64, pipeline_create_dispatch_base_bit) != 0) return null;
+        effective = @truncate(flags2.flags);
+        if (!allow_dispatch_base and effective != 0) return null;
+        next = header.p_next;
+        depth += 1;
+    }
+    return effective;
+}
 
 const SemaphoreCreatePNextState = struct { timeline: bool = false, initial_value: u64 = 0 };
 
@@ -8216,6 +8250,25 @@ test "Vulkan graphics pipeline ABI declarations match LP64 layouts" {
     try std.testing.expectEqual(@as(usize, 40), @offsetOf(FramebufferCreateInfo, "attachments"));
     try std.testing.expectEqual(@as(usize, 96), @sizeOf(ComputePipelineCreateInfo));
     try std.testing.expectEqual(@as(usize, 72), @offsetOf(ComputePipelineCreateInfo, "layout"));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PipelineCreateFlags2CreateInfo));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PipelineCreateFlags2CreateInfo, "flags"));
+}
+
+test "pipeline flags2 validation is bounded and allocation-free" {
+    var node = PipelineCreateFlags2CreateInfo{ .s_type = pipeline_create_flags2_stype, .p_next = null, .flags = pipeline_create_dispatch_base_bit };
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..4096) |_| try std.testing.expectEqual(@as(?u32, pipeline_create_dispatch_base_bit), pipelineCreateFlags2(@ptrCast(&node), 0, true));
+    try std.testing.expectEqual(@as(?u32, null), pipelineCreateFlags2(@ptrCast(&node), 0, false));
+    node.flags = @as(u64, 1) << 40;
+    try std.testing.expectEqual(@as(?u32, null), pipelineCreateFlags2(@ptrCast(&node), 0, true));
+    node.flags = 0;
+    node.p_next = @ptrCast(&node);
+    try std.testing.expectEqual(@as(?u32, null), pipelineCreateFlags2(@ptrCast(&node), 0, true));
+    node.p_next = null;
+    try std.testing.expectEqual(@as(?u32, pipeline_create_dispatch_base_bit), pipelineCreateFlags2(null, pipeline_create_dispatch_base_bit, true));
+    try std.testing.expectEqual(@as(?u32, null), pipelineCreateFlags2(null, pipeline_create_dispatch_base_bit, false));
+    try std.testing.expectEqual(@as(?u32, 0), pipelineCreateFlags2(@ptrCast(&node), pipeline_create_dispatch_base_bit, true));
 }
 
 test "compute pipeline creation validates ownership, publishes typed handles, and rolls back" {
@@ -8246,6 +8299,23 @@ test "compute pipeline creation validates ownership, publishes typed handles, an
     const pipeline = pipelines[0];
     try std.testing.expect(pipeline != 0xfeed_face);
     try std.testing.expect(validComputePipelineLocked(pipeline) != null);
+    var flags2 = PipelineCreateFlags2CreateInfo{ .s_type = pipeline_create_flags2_stype, .p_next = null, .flags = 0 };
+    var flags2_info = info;
+    flags2_info.flags = pipeline_create_dispatch_base_bit;
+    flags2_info.p_next = @ptrCast(&flags2);
+    var zero_flags2_pipeline = [_]usize{0xfeed_face};
+    try std.testing.expectEqual(Result.success, createComputePipelines(first.device, 0, 1, @ptrCast(&flags2_info), null, &zero_flags2_pipeline));
+    try std.testing.expect(!validComputePipelineLocked(zero_flags2_pipeline[0]).?.dispatch_base);
+    flags2.flags = pipeline_create_dispatch_base_bit;
+    var dispatch_flags2_pipeline = [_]usize{0xfeed_face};
+    try std.testing.expectEqual(Result.success, createComputePipelines(first.device, 0, 1, @ptrCast(&flags2_info), null, &dispatch_flags2_pipeline));
+    try std.testing.expect(validComputePipelineLocked(dispatch_flags2_pipeline[0]).?.dispatch_base);
+    flags2.flags = @as(u64, 1) << 40;
+    var invalid_flags2_output = [_]usize{0xfeed_face};
+    const states_before_flags2_rejection = compute_pipeline_state;
+    try std.testing.expectEqual(Result.error_initialization_failed, createComputePipelines(first.device, 0, 1, @ptrCast(&flags2_info), null, &invalid_flags2_output));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), invalid_flags2_output[0]);
+    try std.testing.expectEqualSlices(SlotState, &states_before_flags2_rejection, &compute_pipeline_state);
     var invalid_flags = info;
     invalid_flags.flags = 0x20;
     var invalid_output = [_]usize{0xfeed_face};
@@ -8279,6 +8349,8 @@ test "compute pipeline creation validates ownership, publishes typed handles, an
     test_allocations_before_failure = null;
     try std.testing.expectEqual(@as(usize, 0xfeed_face), unchanged[0]);
     try std.testing.expectEqualSlices(SlotState, &states_before, &compute_pipeline_state);
+    destroyPipeline(first.device, dispatch_flags2_pipeline[0], null);
+    destroyPipeline(first.device, zero_flags2_pipeline[0], null);
     destroyPipeline(first.device, pipeline, null);
     destroyPipelineCache(first.device, cache, null);
     try std.testing.expect(validComputePipelineLocked(pipeline) == null);
@@ -8293,7 +8365,8 @@ test "compute uniform profile dispatch executes static arithmetic" {
 }
 
 fn buildComputePipelineLocked(d: Device, ci: *const ComputePipelineCreateInfo) CanonicalError!ComputePipelineObj {
-    if (ci.s_type != 29 or ci.p_next != null or ci.flags & ~pipeline_create_dispatch_base_bit != 0 or ci.base_pipeline != 0 or (ci.base_pipeline_index != -1 and ci.base_pipeline_index != 0)) return error.Invalid;
+    const effective_flags = pipelineCreateFlags2(ci.p_next, ci.flags, true) orelse return error.Invalid;
+    if (ci.s_type != 29 or ci.base_pipeline != 0 or (ci.base_pipeline_index != -1 and ci.base_pipeline_index != 0)) return error.Invalid;
     const layout = validPipelineLayoutLocked(ci.layout) orelse return error.Invalid;
     if (!layout.owner.eql(d)) return error.Invalid;
     const stage = ci.stage;
@@ -8306,7 +8379,7 @@ fn buildComputePipelineLocked(d: Device, ci: *const ComputePipelineCreateInfo) C
     var w: CanonicalWriter = .{};
     defer w.deinit();
     try w.header(6);
-    try w.u32le(ci.flags);
+    try w.u32le(effective_flags);
     try w.u32le(stage.stage);
     try w.u32le(shader.module.identity.ingestion);
     try w.u32le(shader.module.identity.serialization);
@@ -8343,7 +8416,7 @@ fn buildComputePipelineLocked(d: Device, ci: *const ComputePipelineCreateInfo) C
         };
     };
     program.deinit(allocator);
-    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .executor = executor, .dispatch_base = ci.flags & pipeline_create_dispatch_base_bit != 0 };
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .executor = executor, .dispatch_base = effective_flags & pipeline_create_dispatch_base_bit != 0 };
 }
 
 fn validViewportDomain(viewport: Viewport) bool {
@@ -8355,7 +8428,7 @@ fn validScissorDomain(scissor: Rect2D) bool {
 }
 
 fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo) CanonicalError!GraphicsPipelineObj {
-    if (ci.s_type != 28 or ci.p_next != null or ci.flags != 0 or ci.stage_count != 2 or ci.stages == null or ci.tessellation != null or ci.base_pipeline != 0 or (ci.base_pipeline_index != -1 and ci.base_pipeline_index != 0)) return error.Invalid;
+    if (ci.s_type != 28 or pipelineCreateFlags2(ci.p_next, ci.flags, false) == null or ci.stage_count != 2 or ci.stages == null or ci.tessellation != null or ci.base_pipeline != 0 or (ci.base_pipeline_index != -1 and ci.base_pipeline_index != 0)) return error.Invalid;
     const layout = validPipelineLayoutLocked(ci.layout) orelse return error.Invalid;
     const render_pass = validRenderPassLocked(ci.render_pass) orelse return error.Invalid;
     if (!layout.owner.eql(d) or !render_pass.owner.eql(d) or ci.subpass >= render_pass.subpass_count) return error.Invalid;
@@ -13183,6 +13256,19 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(baseline_pipeline.dynamic_stencil_compare_mask);
     try std.testing.expect(baseline_pipeline.dynamic_stencil_write_mask);
     try std.testing.expect(baseline_pipeline.dynamic_stencil_reference);
+    var graphics_flags2 = PipelineCreateFlags2CreateInfo{ .s_type = pipeline_create_flags2_stype, .p_next = null, .flags = 0 };
+    var graphics_flags2_info = pipeline_info;
+    graphics_flags2_info.p_next = @ptrCast(&graphics_flags2);
+    var zero_flags2_graphics = [_]usize{0xfeed_face};
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&graphics_flags2_info), null, &zero_flags2_graphics));
+    try std.testing.expect(zero_flags2_graphics[0] != 0xfeed_face);
+    destroyPipeline(device, zero_flags2_graphics[0], null);
+    graphics_flags2.flags = @as(u64, 1) << 40;
+    var invalid_flags2_graphics = [_]usize{0xfeed_face};
+    const graphics_states_before_flags2_rejection = graphics_pipeline_state;
+    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&graphics_flags2_info), null, &invalid_flags2_graphics));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), invalid_flags2_graphics[0]);
+    try std.testing.expectEqualSlices(SlotState, &graphics_states_before_flags2_rejection, &graphics_pipeline_state);
     const extended_dynamic_states = [_]i32{ dynamic_state_cull_mode, dynamic_state_front_face, dynamic_state_primitive_topology, dynamic_state_viewport_with_count, dynamic_state_scissor_with_count, dynamic_state_vertex_input_binding_stride, dynamic_state_depth_test_enable, dynamic_state_depth_write_enable, dynamic_state_depth_compare_op, 5, dynamic_state_depth_bounds_test_enable, dynamic_state_stencil_test_enable, dynamic_state_stencil_op, dynamic_state_rasterizer_discard_enable, dynamic_state_depth_bias_enable, dynamic_state_primitive_restart_enable };
     const extended_dynamic = PipelineDynamicStateCreateInfo{ .s_type = 27, .p_next = null, .flags = 0, .dynamic_state_count = extended_dynamic_states.len, .dynamic_states = &extended_dynamic_states };
     var extended_dynamic_pipeline_info = pipeline_info;
