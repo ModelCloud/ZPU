@@ -10528,6 +10528,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                     if (values.wait_semaphore_values == null) return .error_initialization_failed;
                     _ = values.wait_semaphore_values.?[wait_index];
                 } else {
+                    if (timeline_info) |values| if (values.wait_semaphore_values) |wait_values| if (wait_values[wait_index] != 0) return .error_initialization_failed;
                     // The synchronous single-queue executor has no other
                     // producer that can make an unsignaled binary semaphore
                     // ready.  Require a signal already visible or produced
@@ -10552,6 +10553,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                     if (signal_values[signal_index] < timeline_states[slot]) return .error_initialization_failed;
                     timeline_states[slot] = signal_values[signal_index];
                 } else {
+                    if (timeline_info) |values| if (values.signal_semaphore_values) |signal_values| if (signal_values[signal_index] != 0) return .error_initialization_failed;
                     if (semaphore_states[slot]) return .error_initialization_failed;
                     semaphore_states[slot] = true;
                 }
@@ -14257,8 +14259,12 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     var signal_semaphore: usize = 0;
     const semaphore_info = SemaphoreCreateInfo{ .s_type = 9, .p_next = null, .flags = 0 };
     try std.testing.expectEqual(Result.success, createSemaphore(ctx.device, &semaphore_info, null, &signal_semaphore));
-    const signal_info = SemaphoreSubmitInfo{ .s_type = 1000314005, .p_next = null, .semaphore = signal_semaphore, .value = 0, .stage_mask = 0, .device_index = 0 };
+    var signal_info = SemaphoreSubmitInfo{ .s_type = 1000314005, .p_next = null, .semaphore = signal_semaphore, .value = 0, .stage_mask = 0, .device_index = 0 };
     const signal_submit2 = SubmitInfo2{ .s_type = 1000314004, .p_next = null, .flags = 0, .wait_semaphore_info_count = 0, .wait_semaphore_infos = null, .command_buffer_info_count = 0, .command_buffer_infos = null, .signal_semaphore_info_count = 1, .signal_semaphore_infos = @ptrCast(&signal_info) };
+    signal_info.value = 1;
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit2(ctx.queue, 1, @ptrCast(&signal_submit2), 0));
+    try std.testing.expect(!validSemaphoreLocked(signal_semaphore).?.signaled.load(.acquire));
+    signal_info.value = 0;
     try std.testing.expectEqual(Result.success, queueSubmit2(ctx.queue, 1, @ptrCast(&signal_submit2), 0));
     destroySemaphore(ctx.device, signal_semaphore, null);
     test_allocations_before_failure = 0;
