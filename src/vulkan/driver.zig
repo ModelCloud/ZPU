@@ -15435,6 +15435,11 @@ test "push descriptors own layout state, template decoding, rollback, and warm p
     destroyInstance(ctx.instance, null);
 }
 
+test "descriptor template push command retains pinned Vulkan ABI arity" {
+    const info = @typeInfo(@TypeOf(cmdPushDescriptorSetWithTemplate)).@"fn";
+    try std.testing.expectEqual(@as(usize, 5), info.params.len);
+}
+
 test "descriptor pool registry exhaustion preserves the output handle" {
     const ctx = try createTestDeviceContext();
     const info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 0, .max_sets = 1, .pool_size_count = 0, .pool_sizes = null };
