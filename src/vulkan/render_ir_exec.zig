@@ -779,16 +779,20 @@ fn validate(program: *const ir.Program) Error!void {
                 const interface_index = instruction.operands[0];
                 if (interface_index >= program.interfaces.len or (program.interfaces[interface_index].storage != .uniform and program.interfaces[interface_index].storage != .output)) return error.InvalidStorage;
                 const interface = program.interfaces[interface_index];
-                for (instruction.operands[1..]) |index_id| {
+                for (instruction.operands[1..], 0..) |index_id, index_position| {
                     const index_ty = program.instructions[index_id].ty;
-                    if (index_ty.scalar != .u32 or try lanes(index_ty) != 1 or program.instructions[index_id].op != .constant) return error.InvalidType;
+                    if (index_ty.scalar != .u32 or try lanes(index_ty) != 1) return error.InvalidType;
+                    // The member selector must remain static so the backing
+                    // interface offset is deterministic. A second selector
+                    // may be dynamic only when it addresses a vector lane.
+                    if (index_position == 0 and program.instructions[index_id].op != .constant) return error.InvalidType;
                 }
                 const member_id = std.mem.readInt(u32, program.instructions[instruction.operands[1]].literal[0..4], .little);
                 if (member_id >= interface.member_count) return error.Bounds;
                 const member_ty = interface.members[member_id].ty;
                 if (instruction.operands.len == 2) {
                     if (!same(instruction.ty, member_ty)) return error.InvalidType;
-                } else if (member_ty.rows != 1 or instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != member_ty.scalar) return error.InvalidType else {
+                } else if (instruction.operands.len != 3 or member_ty.rows != 1 or instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != member_ty.scalar) return error.InvalidType else if (program.instructions[instruction.operands[2]].op == .constant) {
                     const component = std.mem.readInt(u32, program.instructions[instruction.operands[2]].literal[0..4], .little);
                     if (component >= member_ty.columns) return error.Bounds;
                 }
@@ -1843,6 +1847,44 @@ test "executor setup rejects runtime scalar u32 access indices" {
     var source = try testProgram(&interfaces, &instructions);
     defer std.testing.allocator.free(source.bytes);
     try std.testing.expectError(error.InvalidType, Executor.init(std.testing.allocator, &source));
+}
+
+test "executor accepts a runtime vector access-chain component on the warm path" {
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .uniform, .ty = .{ .scalar = .f32, .columns = 4 }, .descriptor_set = 0, .binding = 0, .block = true, .member_count = 1 },
+        .{ .storage = .input, .ty = .{ .scalar = .u32 }, .location = 0 },
+    };
+    interfaces[0].members[0] = .{ .ty = .{ .scalar = .f32, .columns = 4 }, .offset = 0 };
+    const member_zero = [_]u8{ 0, 0, 0, 0 };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .input, .ty = .{ .scalar = .u32 }, .operands = &.{1}, .literal = &.{} },
+        .{ .op = .constant, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &member_zero },
+        .{ .op = .access, .ty = .{ .scalar = .f32 }, .operands = &.{ 0, 1, 0 }, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    var uniform: [16]u8 = .{0} ** 16;
+    std.mem.writeInt(u32, uniform[0..4], @bitCast(@as(f32, 1.25)), .little);
+    std.mem.writeInt(u32, uniform[4..8], @bitCast(@as(f32, -2.5)), .little);
+    std.mem.writeInt(u32, uniform[8..12], @bitCast(@as(f32, 3.75)), .little);
+    std.mem.writeInt(u32, uniform[12..16], @bitCast(@as(f32, 4.5)), .little);
+    var index_bytes = [_]u8{ 2, 0, 0, 0 };
+    const bindings = [_]Binding{ .{ .interface = 0, .bytes = &uniform }, .{ .interface = 1, .bytes = &index_bytes } };
+    for (0..4096) |iteration| {
+        index_bytes[0] = @intCast(iteration & 3);
+        try executor.execute(&bindings, &.{});
+        const expected: f32 = switch (index_bytes[0]) {
+            0 => 1.25,
+            1 => -2.5,
+            2 => 3.75,
+            else => 4.5,
+        };
+        try std.testing.expectEqual(@as(u32, @bitCast(expected)), executor.values[2].bits[0]);
+    }
+    index_bytes[0] = 4;
+    try std.testing.expectError(error.Bounds, executor.execute(&bindings, &.{}));
 }
 
 test "bool input and output aliases reject without mutation while NaNs canonicalize" {

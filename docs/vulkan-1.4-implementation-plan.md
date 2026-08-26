@@ -187,7 +187,10 @@ invocation multiplication is bounded, uniform/storage ranges are validated at
 record and submit time, and the output is written synchronously. Generic
 SPIR-V compute control flow, dynamic loads, atomics,
 shared memory, and general arbitrary graphics execution remain explicitly
-deferred. A bounded scalar graphics profile now executes f32x4 vertex-input
+deferred. A final dynamic vector component in an access chain is now lowered
+with runtime bounds checks; dynamic structure, matrix, aggregate, and
+descriptor-array indexing remain deferred. A bounded scalar graphics profile
+now executes f32x4 vertex-input
 triangles with builtin-position output, perspective-correct f32x4 fragment
 varyings, bool/f32x4 fragment output, and descriptor-backed set-0 binding-0
 uniform blocks for direct, indexed, and bounded single-draw indirect commands;
@@ -473,7 +476,7 @@ Each slice must land with all of the following:
   predecessor-selected `OpPhi` values at static
   acyclic branch joins, preserving only the incoming value from the selected
   predecessor before lowering to straight-line canonical IR. Generic SPIR-V
-  dynamic control flow, dynamic indexing, atomics, shared-memory execution,
+  dynamic control flow, aggregate/descriptor-array indexing, atomics, shared-memory execution,
   and complete compute memory-visibility semantics remain.
 - [ ] **A8 — secondary command buffers:** inheritance, execution, reset, and
   lifetime rules. Traditional render-pass inheritance and the bounded dynamic

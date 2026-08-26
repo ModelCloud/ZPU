@@ -749,14 +749,22 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const base_pointer = nodes[try id(nodes, base.type_id)];
                 if (result_pointer.kind != .pointer or base_pointer.kind != .pointer or result_pointer.a != base_pointer.a) return error.Malformed;
                 var current_type = base_pointer.b;
-                for (w[3..]) |index_id| {
+                for (w[3..], 0..) |index_id, index_position| {
                     const index_node = nodes[try id(nodes, index_id)];
                     const index_shape = try valueShape(nodes, index_id);
-                    // Profile v1 deliberately forbids dynamic access-chain indices;
-                    // the scalar executor receives canonical constants only.
-                    if (index_node.kind != .constant or !scalarClass(index_shape, .integer) or index_shape.columns != 1 or index_node.words.len != 1) return error.Unsupported;
-                    const index = index_node.words[0];
-                    current_type = try indexedType(nodes, current_type, index);
+                    if (!scalarClass(index_shape, .integer) or index_shape.columns != 1) return error.Unsupported;
+                    if (index_node.kind == .constant) {
+                        if (index_node.words.len != 1) return error.Malformed;
+                        current_type = try indexedType(nodes, current_type, index_node.words[0]);
+                    } else {
+                        // A dynamic index is admitted only for a final vector
+                        // component. Structure, matrix, and nested aggregate
+                        // indices remain statically resolved so offsets and
+                        // ABI ranges stay deterministic.
+                        const aggregate = nodes[try id(nodes, current_type)];
+                        if (index_position + 1 != w[3..].len or aggregate.kind != .vector or index_shape.scalar != .u32) return error.Unsupported;
+                        current_type = aggregate.a;
+                    }
                 }
                 if (current_type != result_pointer.b) return error.Malformed;
             },
@@ -2017,6 +2025,37 @@ fn testInsertWords(allocator: std.mem.Allocator, source: []const u32, offset: us
     return result;
 }
 
+fn testDynamicVectorAccessVariant(allocator: std.mem.Allocator) ![]u32 {
+    var words: std.ArrayList(u32) = .empty;
+    try words.appendSlice(allocator, &uniform_vertex);
+
+    // Reserve otherwise-unused IDs for a uniform scalar result pointer, an
+    // input scalar pointer, the loaded runtime index, and its input variable.
+    // The fixture's bound is already large enough for IDs 15, 16, 44, and 45.
+    const function = testOpcodeOffset(words.items, 54, 0).?;
+    try words.insertSlice(allocator, function, &.{
+        (4 << 16) | 32, 15, 2, 5, // OpTypePointer Uniform f32
+        (4 << 16) | 32, 16, 1, 3, // OpTypePointer Input u32
+        (4 << 16) | 59, 16, 45, 1, // OpVariable Input
+        (4 << 16) | 71, 45, 30, 1, // OpDecorate Location 1
+    });
+    const entry_point = testOpcodeOffset(words.items, 15, 0).?;
+    words.items[entry_point] += 1 << 16;
+    try words.insertSlice(allocator, entry_point + 7, &.{45}); // expose runtime index input
+
+    const output_pointer = testOpcodeOffset(words.items, 32, 0).?;
+    words.items[output_pointer + 3] = 5; // output pointer becomes scalar f32
+    words.items[testOpcodeOffset(words.items, 71, 0).? + 2] = 30; // BuiltIn Position -> Location 0
+    const access = testOpcodeOffset(words.items, 65, 0).?;
+    words.items[access + 1] = 15; // scalar result pointer
+    words.items[access] += 1 << 16;
+    try words.insertSlice(allocator, access + 5, &.{44}); // dynamic vector lane
+    try words.insertSlice(allocator, access, &.{ (4 << 16) | 61, 3, 44, 45 }); // runtime u32 index
+    const load = testOpcodeOffset(words.items, 61, 1).?;
+    words.items[load + 1] = 5; // load the selected scalar lane
+    return words.toOwnedSlice(allocator);
+}
+
 fn testRemoveWord(allocator: std.mem.Allocator, source: []const u32, offset: usize) ![]u32 {
     const result = try allocator.alloc(u32, source.len - 1);
     std.mem.copyForwards(u32, result[0..offset], source[0..offset]);
@@ -2888,6 +2927,22 @@ test "profile v1 rejects runtime scalar u32 access chain index" {
     defer std.testing.allocator.free(dynamic);
     dynamic[testOpcodeOffset(dynamic, 65, 0).? + 4] = 44;
     try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, dynamic, .vertex, "main", &.{}));
+}
+
+test "profile admits a runtime vector component in a final access-chain index" {
+    const dynamic = try testDynamicVectorAccessVariant(std.testing.allocator);
+    defer std.testing.allocator.free(dynamic);
+    var program = try compile(std.testing.allocator, dynamic, .vertex, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), program.interfaces.len);
+    var access_seen: usize = 0;
+    for (program.instructions) |instruction| if (instruction.op == ir.Op.access) {
+        access_seen += 1;
+        try std.testing.expectEqual(@as(usize, 3), instruction.operands.len);
+        try std.testing.expectEqual(ir.Op.constant, program.instructions[instruction.operands[1]].op);
+        try std.testing.expectEqual(ir.Op.input, program.instructions[instruction.operands[2]].op);
+    };
+    try std.testing.expectEqual(@as(usize, 1), access_seen);
 }
 
 test "boolean true and false constants retain exact frontend values" {
