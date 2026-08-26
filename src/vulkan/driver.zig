@@ -11618,11 +11618,21 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (ci.s_type != 1_000_001_000 or ci.p_next != null or ci.flags & ~swapchain_present_timing_bit != 0 or ci.min_image_count < 2 or ci.min_image_count > 4 or ci.image_format != 44 or ci.image_color_space != 0 or ci.image_extent.width == 0 or ci.image_extent.height == 0 or ci.image_extent.width > max_2d_extent or ci.image_extent.height > max_2d_extent or ci.image_array_layers != 1 or ci.image_usage != 0x10 or ci.image_sharing_mode != 0 or ci.queue_family_index_count != 0 or ci.queue_family_indices != null or ci.pre_transform != 1 or ci.composite_alpha != 1 or ci.present_mode != 2 or (ci.clipped != 0 and ci.clipped != 1) or ci.old_swapchain != 0) return .error_initialization_failed;
+    if (ci.s_type != 1_000_001_000 or ci.p_next != null or ci.flags & ~swapchain_present_timing_bit != 0 or ci.min_image_count < 2 or ci.min_image_count > 4 or ci.image_format != 44 or ci.image_color_space != 0 or ci.image_extent.width == 0 or ci.image_extent.height == 0 or ci.image_extent.width > max_2d_extent or ci.image_extent.height > max_2d_extent or ci.image_array_layers != 1 or ci.image_usage != 0x10 or ci.image_sharing_mode != 0 or ci.queue_family_index_count != 0 or ci.queue_family_indices != null or ci.pre_transform != 1 or ci.composite_alpha != 1 or ci.present_mode != 2 or (ci.clipped != 0 and ci.clipped != 1)) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     const surface = validSurfaceLocked(ci.surface) orelse return .error_initialization_failed;
     if (!validDeviceLocked(d) or surface.owner != d.physical.owner) return .error_initialization_failed;
+    // VK_KHR_swapchain permits replacing a live swapchain by passing it as
+    // oldSwapchain.  The old object remains destroyable, but is retired only
+    // after the replacement has been fully allocated and published.  That
+    // ordering keeps failures (including registry exhaustion) atomic for the
+    // old swapchain and its acquired images.
+    const old_swapchain = if (ci.old_swapchain == 0) null else blk: {
+        const old = validSwapchainLocked(ci.old_swapchain) orelse return .error_initialization_failed;
+        if (old.owner != d or old.surface != surface or old.retiring) return .error_initialization_failed;
+        break :blk old;
+    };
     _ = cpu_locality.pinCurrent(.render);
     for (&swapchain_objects, &swapchain_state) |*swapchain, *state| if (state.* == .never) {
         const pixels = @as(u64, ci.image_extent.width) * ci.image_extent.height;
@@ -11669,6 +11679,7 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
             };
             if (!found) return .error_out_of_host_memory;
         }
+        if (old_swapchain) |old| old.retiring = true;
         state.* = .live;
         out.* = @intFromPtr(swapchain);
         return .success;
@@ -11732,7 +11743,7 @@ fn acquireNextImage(device: ?Device, handle: usize, timeout_ns: u64, semaphore_h
     if (!validDeviceLocked(device orelse {
         mutex.unlock();
         return .error_initialization_failed;
-    }) or swapchain.owner != device.?) {
+    }) or swapchain.owner != device.? or swapchain.retiring) {
         mutex.unlock();
         return .error_initialization_failed;
     }
@@ -12823,7 +12834,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     malformed_swapchain_info.image_usage = 0x20;
     try std.testing.expectEqual(Result.error_initialization_failed, createSwapchain(device, &malformed_swapchain_info, null, &unchanged_swapchain));
     malformed_swapchain_info = swapchain_info;
-    malformed_swapchain_info.old_swapchain = swapchain;
+    malformed_swapchain_info.old_swapchain = 0xdead_beef;
     try std.testing.expectEqual(Result.error_initialization_failed, createSwapchain(device, &malformed_swapchain_info, null, &unchanged_swapchain));
     try std.testing.expectEqual(@as(usize, 0xfeed_face), unchanged_swapchain);
     var image_count: u32 = 0;
@@ -14578,6 +14589,21 @@ test "vkcube presentation path records submits and presents two swapchain images
     freeMemory(device, index_memory, null);
     freeMemory(device, indirect_memory, null);
     destroyBuffer(device, uniform_buffer, null);
+    // A valid oldSwapchain is retired only after the replacement has been
+    // fully created.  Retired objects remain destroyable, but acquisition and
+    // presentation must reject them for the rest of their lifetime.
+    var replacement_swapchain: usize = 0;
+    var replacement_info = swapchain_info;
+    replacement_info.old_swapchain = swapchain;
+    try std.testing.expectEqual(Result.success, createSwapchain(device, &replacement_info, null, &replacement_swapchain));
+    try std.testing.expect(replacement_swapchain != 0 and replacement_swapchain != swapchain);
+    try std.testing.expect(validSwapchainLocked(swapchain).?.retiring);
+    var retired_index: u32 = 0;
+    try std.testing.expectEqual(Result.error_initialization_failed, acquireNextImage(device, swapchain, 0, 0, 0, &retired_index));
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| try std.testing.expectEqual(Result.error_initialization_failed, acquireNextImage(device, swapchain, 0, 0, 0, &retired_index));
+    test_allocations_before_failure = null;
+    destroySwapchain(device, replacement_swapchain, null);
     destroySwapchain(device, swapchain, null);
     destroySwapchain(device, timing_swapchain, null);
     destroyCommandPool(device, pool, null);

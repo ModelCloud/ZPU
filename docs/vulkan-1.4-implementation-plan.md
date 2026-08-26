@@ -271,6 +271,11 @@ semaphores and unsignaled fences, while present rejects foreign or timeline
 wait semaphores and duplicate wait entries. Rejected synchronization leaves
 the acquired image and semaphore state unchanged, with a 4096-call warm
 rejection path covered.
+Swapchain replacement now honors a valid same-device, same-surface
+`oldSwapchain`: the replacement is published before the old object is retired,
+so allocation or registry failures leave the old swapchain usable. Retired
+swapchains remain destroyable but reject new image acquisition and presentation,
+with lifecycle coverage in the presentation fixture.
 The memory and sampler handle registries now meet the required 4096 and 4000
 allocation limits respectively. The generated command matrix is a
 234/234 dispatch/name-coverage artifact, not a Vulkan-conformance claim:
