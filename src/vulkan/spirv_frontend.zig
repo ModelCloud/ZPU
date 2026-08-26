@@ -961,6 +961,29 @@ pub const compute_scalar_load_store = [_]u32{
     10,             (1 << 16) | 253, (1 << 16) | 56,
 };
 
+/// Compute profile variant using a statically indexed struct member access
+/// chain before loading and writing the same StorageBuffer binding.
+pub const compute_access_load_store = [_]u32{
+    0x0723_0203,     0x0001_0000,     0,              14,             0,
+    (2 << 16) | 17,  1,               (3 << 16) | 14, 0,              1,
+    (6 << 16) | 15,  5,               8,              0x6e69616d,     0,
+    5,               (6 << 16) | 16,  8,              17,             1,
+    1,               1,               (3 << 16) | 71, 3,              2,
+    (5 << 16) | 72,  3,               0,              35,             0,
+    (4 << 16) | 71,  5,               33,             0,              (4 << 16) | 71,
+    5,               34,              0,              (2 << 16) | 19, 1,
+    (4 << 16) | 21,  2,               32,             0,              (3 << 16) | 30,
+    3,               2,               (4 << 16) | 32, 4,              12,
+    3,               (4 << 16) | 32,  10,             12,             2,
+    (4 << 16) | 59,  4,               5,              12,             (3 << 16) | 33,
+    6,               1,               (4 << 16) | 43, 2,              11,
+    0,               (5 << 16) | 54,  1,              8,              0,
+    6,               (2 << 16) | 248, 9,              (5 << 16) | 65, 10,
+    12,              5,               11,             (4 << 16) | 61, 2,
+    13,              12,              (3 << 16) | 62, 5,              13,
+    (1 << 16) | 253, (1 << 16) | 56,
+};
+
 /// Compute profile variant using a scalar boolean select before the storage
 /// write. This is the first non-straight-line value operation admitted by the
 /// bounded frontend; it remains side-effect free and fully SSA-bounded.
@@ -1222,6 +1245,21 @@ test "compute profile lowers a scalar storage-buffer load" {
     try std.testing.expectEqual(@as(usize, 2), program.instructions.len);
     try std.testing.expectEqual(ir.Op.storage, program.instructions[0].op);
     try std.testing.expectEqual(ir.Op.output, program.instructions[1].op);
+}
+
+test "compute profile lowers a static storage-buffer access-chain load" {
+    var program = try compile(std.testing.allocator, &compute_access_load_store, .compute, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), program.interfaces.len);
+    var saw_access = false;
+    var saw_extract = false;
+    var saw_output = false;
+    for (program.instructions) |instruction| {
+        saw_access = saw_access or instruction.op == .access;
+        saw_extract = saw_extract or instruction.op == .extract;
+        saw_output = saw_output or instruction.op == .output;
+    }
+    try std.testing.expect(saw_access and saw_extract and saw_output);
 }
 
 test "compute profile lowers a boolean select into storage output" {
