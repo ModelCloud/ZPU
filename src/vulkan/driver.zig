@@ -17900,12 +17900,12 @@ fn computeStorageProfileTest() !void {
     try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
     const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &command, .signal_semaphore_count = 0, .signal_semaphores = null };
     // Indirect arguments are consumed at submit time, not frozen while the
-    // command is recorded. A post-record zero dimension is a valid no-op,
-    // then a corrected write executes normally.
+    // command is recorded. An out-of-range post-record write is rejected,
+    // while zero-valued dimensions remain valid no-ops and a corrected write executes normally.
     try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memory, 0, 16, 0, &mapped));
     @as(*u32, @ptrCast(@alignCast(mapped.?))).* = 65_536;
     unmapMemory(ctx.device, memory);
-    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memory, 0, 16, 0, &mapped));
     const corrected_groups: [*]u32 = @ptrCast(@alignCast(mapped.?));
     corrected_groups[0..3].* = .{ 1, 1, 1 };
