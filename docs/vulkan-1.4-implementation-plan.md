@@ -54,7 +54,7 @@ submission prevalidation, and has a 4096-iteration allocation-free warm path.
 The bounded compute profile now also admits direct scalar StorageBuffer
 `OpLoad` reads (including read/write aliasing of the descriptor range) with
 transactional output commits; static access-chain reads share the same
-validated interface path. Constant-folded scalar integer equality plus
+validated interface path. Constant-folded scalar integer equality/inequality plus
 statically resolved, acyclic `OpBranch`,
 `OpBranchConditional`, and constant-selector `OpSwitch` paths now prune
 unselected blocks before lowering, while dynamic conditions, loops, dynamic

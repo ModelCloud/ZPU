@@ -216,8 +216,8 @@ fn scalarClass(shape: ir.Type, class: ScalarClass) bool {
 }
 
 /// Resolve the bounded static boolean conditions used by compute control
-/// flow. Integer equality is admitted only when both operands are literal
-/// scalar constants; dynamic comparisons remain outside the profile.
+/// flow. Integer equality/inequality is admitted only when both operands are
+/// literal scalar constants; dynamic comparisons remain outside the profile.
 fn staticCondition(nodes: []const Node, value_id: u32) Error!?bool {
     const node = nodes[try id(nodes, value_id)];
     if (node.kind == .constant) return switch (node.opcode) {
@@ -1651,6 +1651,12 @@ test "compute profile folds constant integer comparisons for branch phi" {
     var false_program = try compile(std.testing.allocator, &false_compare, .compute, "main", &.{});
     defer false_program.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 99), std.mem.readInt(u32, false_program.instructions[0].literal[0..4], .little));
+
+    var not_equal = compute_static_compare_phi_store;
+    not_equal[compare] = (5 << 16) | 171;
+    var not_equal_program = try compile(std.testing.allocator, &not_equal, .compute, "main", &.{});
+    defer not_equal_program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 99), std.mem.readInt(u32, not_equal_program.instructions[0].literal[0..4], .little));
 
     var unsupported = compute_static_compare_phi_store;
     const branch = testOpcodeOffset(&unsupported, 250, 0).?;
