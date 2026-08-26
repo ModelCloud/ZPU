@@ -1129,17 +1129,23 @@ fn renderPassBeginPNextValid(raw: ?*const anyopaque) bool {
 fn submitPNextValid(raw: ?*const anyopaque, wait_count: u32, command_count: u32, signal_count: u32) bool {
     var next = raw;
     var depth: usize = 0;
+    var saw_timeline = false;
+    var saw_group = false;
+    var saw_protected = false;
     while (next) |item| {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
         if (depth == 16) return false;
         switch (header.s_type) {
             1000207003 => {
+                if (saw_timeline) return false;
                 const timeline: *const TimelineSemaphoreSubmitInfo = @ptrCast(@alignCast(item));
                 if (timeline.wait_semaphore_value_count != wait_count or timeline.signal_semaphore_value_count != signal_count or
                     (wait_count != 0 and timeline.wait_semaphore_values == null) or
                     (signal_count != 0 and timeline.signal_semaphore_values == null)) return false;
+                saw_timeline = true;
             },
             1000060005 => {
+                if (saw_group) return false;
                 const group: *const DeviceGroupSubmitInfo = @ptrCast(@alignCast(item));
                 if (group.wait_semaphore_count != wait_count or group.command_buffer_count != command_count or group.signal_semaphore_count != signal_count or
                     (group.wait_semaphore_count != 0 and group.wait_semaphore_device_indices == null) or
@@ -1148,10 +1154,13 @@ fn submitPNextValid(raw: ?*const anyopaque, wait_count: u32, command_count: u32,
                 if (group.wait_semaphore_device_indices) |indices| for (indices[0..group.wait_semaphore_count]) |index| if (index != 0) return false;
                 if (group.command_buffer_device_masks) |masks| for (masks[0..group.command_buffer_count]) |mask| if (mask != 1) return false;
                 if (group.signal_semaphore_device_indices) |indices| for (indices[0..group.signal_semaphore_count]) |index| if (index != 0) return false;
+                saw_group = true;
             },
             1000145000 => {
+                if (saw_protected) return false;
                 const protected_submit: *const ProtectedSubmitInfo = @ptrCast(@alignCast(item));
                 if (protected_submit.protected_submit != 0) return false;
+                saw_protected = true;
             },
             else => return false,
         }
@@ -4935,13 +4944,35 @@ fn cmdSetEvent2(cb: ?CommandBuffer, event: usize, info: ?*const DependencyInfo) 
         markCommandBufferInvalid(cb);
         return;
     }
+    const before_count: u16 = blk: {
+        lock();
+        defer mutex.unlock();
+        const command_buffer = validCommandBufferLocked(cb) orelse return;
+        break :blk command_buffer.impl.count;
+    };
     // An empty dependency is valid for event2 commands.  There is no barrier
     // command to lower in that case, but the event operation itself must still
     // be recorded.  For non-empty dependencies, lower the image/buffer state
     // before recording the event so layout tracking and stale-resource
     // validation observe the dependency.
     if (info.?.memory_barrier_count != 0 or info.?.buffer_memory_barrier_count != 0 or info.?.image_memory_barrier_count != 0) cmdPipelineBarrier2(cb, info);
+    lock();
+    const after_barrier = validCommandBufferLocked(cb) orelse {
+        mutex.unlock();
+        return;
+    };
+    if (after_barrier.impl.invalid) {
+        after_barrier.impl.count = before_count;
+        mutex.unlock();
+        return;
+    }
+    mutex.unlock();
     cmdSetEvent(cb, event, 0x1_0000);
+    lock();
+    if (validCommandBufferLocked(cb)) |command_buffer| {
+        if (command_buffer.impl.invalid) command_buffer.impl.count = before_count;
+    }
+    mutex.unlock();
 }
 fn cmdResetEvent2(cb: ?CommandBuffer, event: usize, stage_mask: u64) callconv(.c) void {
     if (stage_mask & 0x4000 != 0) {
@@ -13448,6 +13479,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
         var group_submit = DeviceGroupSubmitInfo{ .s_type = 1000060005, .p_next = &protected_submit, .wait_semaphore_count = 0, .wait_semaphore_device_indices = null, .command_buffer_count = 0, .command_buffer_device_masks = null, .signal_semaphore_count = 0, .signal_semaphore_device_indices = null };
         var submit = SubmitInfo{ .s_type = 4, .p_next = &group_submit, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 0, .signal_semaphores = null };
         try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+        var duplicate_protected = protected_submit;
+        protected_submit.p_next = @ptrCast(&duplicate_protected);
+        try std.testing.expect(!submitPNextValid(&group_submit, 0, 0, 0));
+        protected_submit.p_next = null;
         group_submit.command_buffer_count = 1;
         var bad_submit = submit;
         bad_submit.command_buffer_count = 0;
@@ -13881,6 +13916,14 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expectEqual(Result.success, beginCommandBuffer(rollback_commands[0], &begin));
     const bad_wait_barrier = ImageMemoryBarrier2{ .s_type = 1000314002, .p_next = null, .src_stage_mask = 1, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = 0, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
     const bad_wait_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 0, .memory_barriers = null, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 1, .image_memory_barriers = @ptrCast(&bad_wait_barrier) };
+    var set_rollback_commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &set_rollback_commands));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(set_rollback_commands[0], &begin));
+    const set_rollback_before = set_rollback_commands[0].impl.count;
+    cmdSetEvent2(set_rollback_commands[0], event, &bad_wait_dependency);
+    try std.testing.expect(set_rollback_commands[0].impl.invalid);
+    try std.testing.expectEqual(set_rollback_before, set_rollback_commands[0].impl.count);
+    freeCommandBuffers(ctx.device, pool, 1, &set_rollback_commands);
     const rollback_before = rollback_commands[0].impl.count;
     cmdWaitEvents2(rollback_commands[0], 1, @ptrCast(&event), @ptrCast(&bad_wait_dependency));
     try std.testing.expect(rollback_commands[0].impl.invalid);
@@ -16700,6 +16743,14 @@ test "timeline semaphores expose monotonic counter wait signal and submit ABI" {
     const timeline_wait_stage: u32 = 0x1000;
     const submit = SubmitInfo{ .s_type = 4, .p_next = &timeline_submit_info, .wait_semaphore_count = 1, .wait_semaphores = &wait_handles, .wait_dst_stage_mask = @ptrCast(&timeline_wait_stage), .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 1, .signal_semaphores = &wait_handles };
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(Result.success, getSemaphoreCounterValue(ctx.device, timeline, &counter));
+    try std.testing.expectEqual(@as(u64, 7), counter);
+    var duplicate_timeline = timeline_submit_info;
+    var duplicate_chain = timeline_submit_info;
+    duplicate_chain.p_next = &duplicate_timeline;
+    var duplicate_submit = submit;
+    duplicate_submit.p_next = &duplicate_chain;
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&duplicate_submit), 0));
     try std.testing.expectEqual(Result.success, getSemaphoreCounterValue(ctx.device, timeline, &counter));
     try std.testing.expectEqual(@as(u64, 7), counter);
     const any_info = SemaphoreWaitInfo{ .s_type = 1000207004, .p_next = null, .flags = 1, .semaphore_count = 1, .semaphores = &wait_handles, .values = &[_]u64{7} };
