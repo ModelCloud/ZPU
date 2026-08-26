@@ -220,13 +220,13 @@ explicitly deferred. The driver executes only the bounded scalar graphics
 profile described above, with the same failure-atomic and allocation-free warm
 path guarantees as the other advertised subsets.
 
-| Core revision | Mandatory commands | Names present before slice 1 | Missing names |
+| Core revision | Mandatory commands | Names dispatched now | Missing names |
 | --- | ---: | ---: | ---: |
-| 1.0 | 137 | 83 | 54 |
-| 1.1 | 28 | 0 | 28 |
-| 1.2 | 13 | 0 | 13 |
-| 1.3 | 37 | 0 | 37 |
-| 1.4 | 19 | 0 | 19 |
+| 1.0 | 137 | 137 | 0 |
+| 1.1 | 28 | 28 | 0 |
+| 1.2 | 13 | 13 | 0 |
+| 1.3 | 37 | 37 | 0 |
+| 1.4 | 19 | 19 | 0 |
 
 ## Required proof for every slice
 
