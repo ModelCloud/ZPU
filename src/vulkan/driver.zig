@@ -2141,6 +2141,16 @@ fn enumeratePhysicalDeviceGroups(instance: ?Instance, count: ?*u32, output: ?[*]
     n.* = 1;
     return .success;
 }
+fn getFeaturesLocked(h: Physical, out: *Features) bool {
+    if (!validPhysicalLocked(h)) return false;
+    if (@import("builtin").is_test and overlap_hold.load(.acquire)) {
+        overlap_entered.store(true, .release);
+        while (overlap_hold.load(.acquire)) std.atomic.spinLoopHint();
+        hit(.concurrent_overlap);
+    }
+    out.* = .{ .values = [_]u32{0} ** 55 };
+    return true;
+}
 fn getFeatures(physical: ?Physical, output: ?*Features) callconv(.c) void {
     const h = physical orelse return;
     const out = output orelse {
@@ -2149,13 +2159,7 @@ fn getFeatures(physical: ?Physical, output: ?*Features) callconv(.c) void {
     };
     lock();
     defer mutex.unlock();
-    if (!validPhysicalLocked(h)) return;
-    if (@import("builtin").is_test and overlap_hold.load(.acquire)) {
-        overlap_entered.store(true, .release);
-        while (overlap_hold.load(.acquire)) std.atomic.spinLoopHint();
-        hit(.concurrent_overlap);
-    }
-    out.* = .{ .values = [_]u32{0} ** 55 };
+    _ = getFeaturesLocked(h, out);
 }
 fn conservativeLimits() Limits {
     var v = std.mem.zeroes(Limits);
@@ -2242,12 +2246,8 @@ fn conservativeLimits() Limits {
     v.non_coherent_atom_size = 256;
     return v;
 }
-fn getProperties(physical: ?Physical, output: ?*Properties) callconv(.c) void {
-    const h = physical orelse return;
-    const out = output orelse return;
-    lock();
-    defer mutex.unlock();
-    if (!validPhysicalLocked(h)) return;
+fn getPropertiesLocked(h: Physical, out: *Properties) bool {
+    if (!validPhysicalLocked(h)) return false;
     out.* = std.mem.zeroes(Properties);
     out.api_version = API_1_0;
     out.driver_version = 1;
@@ -2258,6 +2258,14 @@ fn getProperties(physical: ?Physical, output: ?*Properties) callconv(.c) void {
     @memcpy(out.device_name[0..name.len], name);
     out.pipeline_cache_uuid = pipeline_cache_uuid;
     out.limits = conservativeLimits();
+    return true;
+}
+fn getProperties(physical: ?Physical, output: ?*Properties) callconv(.c) void {
+    const h = physical orelse return;
+    const out = output orelse return;
+    lock();
+    defer mutex.unlock();
+    _ = getPropertiesLocked(h, out);
 }
 fn getQueueProperties(physical: ?Physical, count: ?*u32, output: ?[*]QueueProperties) callconv(.c) void {
     lock();
@@ -2327,13 +2335,19 @@ fn getSparseImageFormatProperties(physical: ?Physical, format: i32, image_type: 
 }
 fn getPhysicalDeviceFeatures2(physical: ?Physical, output: ?*PhysicalDeviceFeatures2) callconv(.c) void {
     const out = output orelse return;
-    if (out.s_type != 1000059000 or !populateCoreFeatureChain(out.p_next)) return;
-    getFeatures(physical, &out.features);
+    const h = physical orelse return;
+    lock();
+    defer mutex.unlock();
+    if (out.s_type != 1000059000 or !validPhysicalLocked(h) or !populateCoreFeatureChain(out.p_next)) return;
+    _ = getFeaturesLocked(h, &out.features);
 }
 fn getPhysicalDeviceProperties2(physical: ?Physical, output: ?*PhysicalDeviceProperties2) callconv(.c) void {
     const out = output orelse return;
-    if (out.s_type != 1000059001 or !populateCorePropertyChain(out.p_next)) return;
-    getProperties(physical, &out.properties);
+    const h = physical orelse return;
+    lock();
+    defer mutex.unlock();
+    if (out.s_type != 1000059001 or !validPhysicalLocked(h) or !populateCorePropertyChain(out.p_next)) return;
+    _ = getPropertiesLocked(h, &out.properties);
 }
 fn getPhysicalDeviceFormatProperties2(physical: ?Physical, format: i32, output: ?*PhysicalDeviceFormatProperties2) callconv(.c) void {
     const out = output orelse return;
@@ -13187,6 +13201,12 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expect(std.mem.allEqual(u32, &line_features.values, 0));
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&descriptor_features)), storage_features.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&line_features)), descriptor_features.p_next);
+    features.features.values[0] = 0xdead_beef;
+    storage_features.values[0] = 0xcafe_f00d;
+    getPhysicalDeviceFeatures2(@ptrFromInt(8), &features);
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), features.features.values[0]);
+    try std.testing.expectEqual(@as(u32, 0xcafe_f00d), storage_features.values[0]);
+    features.p_next = null;
     var vulkan11_properties = PhysicalDeviceVulkan11Properties{ .s_type = 50, .p_next = null, .payload = [_]u8{0xff} ** 96 };
     var vulkan12_properties = PhysicalDeviceVulkan12Properties{ .s_type = 52, .p_next = @ptrCast(&vulkan11_properties), .payload = [_]u8{0xff} ** 720 };
     var vulkan13_properties = PhysicalDeviceVulkan13Properties{ .s_type = 54, .p_next = @ptrCast(&vulkan12_properties), .payload = [_]u8{0xff} ** 200 };
@@ -13209,6 +13229,12 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan11_properties)), vulkan12_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan12_properties)), vulkan13_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan13_properties)), vulkan14_properties.p_next);
+    properties.properties.api_version = 0xdead_beef;
+    vulkan14_properties.payload[0] = 0xca;
+    getPhysicalDeviceProperties2(@ptrFromInt(8), &properties);
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), properties.properties.api_version);
+    try std.testing.expectEqual(@as(u8, 0xca), vulkan14_properties.payload[0]);
+    properties.p_next = null;
     test_allocations_before_failure = 0;
     for (0..4096) |_| getPhysicalDeviceProperties2(ctx.physical, &properties);
     test_allocations_before_failure = null;
