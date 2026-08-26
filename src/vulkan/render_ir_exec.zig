@@ -260,9 +260,9 @@ pub const Executor = struct {
                         result.bits[i] = if (selector < a.lanes()) a.bits[selector] else b.bits[selector - a.lanes()];
                     }
                 },
-                .fneg => {
+                .fneg, .ineg => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    for (0..result.lanes()) |i| result.bits[i] = canonicalFloat(a.bits[i] ^ 0x80000000);
+                    for (0..result.lanes()) |i| result.bits[i] = if (instruction.op == .fneg) canonicalFloat(a.bits[i] ^ 0x80000000) else 0 -% a.bits[i];
                 },
                 .iadd, .isub, .imul => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
@@ -373,7 +373,7 @@ fn validate(program: *const ir.Program) Error!void {
             .access => n >= 2 and n <= 3,
             .extract => n == 1 or n == 2,
             .shuffle => n == 2 + try lanes(instruction.ty),
-            .fneg, .convert => n == 1,
+            .fneg, .ineg, .convert => n == 1,
             .select => n == 3,
             .iadd, .isub, .imul, .fadd, .fsub, .fmul, .fdiv, .vector_times_scalar, .matrix_times_vector => n == 2,
             .output => n == 2,
@@ -405,7 +405,7 @@ fn validate(program: *const ir.Program) Error!void {
             const source_ty = program.instructions[operand].ty;
             switch (instruction.op) {
                 .constant_composite, .composite => if (source_ty.scalar != instruction.ty.scalar) return error.InvalidType,
-                .fneg, .iadd, .isub, .imul, .fadd, .fsub, .fmul, .fdiv => if (!same(source_ty, instruction.ty)) return error.InvalidType,
+                .fneg, .ineg, .iadd, .isub, .imul, .fadd, .fsub, .fmul, .fdiv => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .select => if (oi == 0) {
                     if (source_ty.scalar != .bool or try lanes(source_ty) != 1) return error.InvalidType;
                 } else if (!same(source_ty, instruction.ty)) return error.InvalidType,
@@ -461,6 +461,7 @@ fn validate(program: *const ir.Program) Error!void {
         }
         switch (instruction.op) {
             .fneg, .fadd, .fsub, .fmul, .fdiv, .vector_times_scalar, .matrix_times_vector => if (instruction.ty.scalar != .f32) return error.InvalidType,
+            .ineg => if (instruction.ty.scalar != .i32) return error.InvalidType,
             .iadd, .isub, .imul => if (instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32) return error.InvalidType,
             else => {},
         }
@@ -593,6 +594,23 @@ test "integer multiply is component-wise and wraps at 32 bits on the warm path" 
     try std.testing.expectEqual(@as(u32, 0xffff_fffd), std.mem.readInt(u32, &output, .little));
     for (0..4096) |_| try executor.execute(&.{}, &.{.{ .interface = 0, .bytes = &output }});
     try std.testing.expectEqual(@as(u32, 0xffff_fffd), std.mem.readInt(u32, &output, .little));
+}
+
+test "signed integer negation preserves two's-complement semantics" {
+    const minimum = [_]u8{ 0, 0, 0, 0x80 };
+    var interfaces = [_]ir.Interface{.{ .storage = .output, .ty = .{ .scalar = .i32 }, .location = 0 }};
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = .{ .scalar = .i32 }, .operands = &.{}, .literal = &minimum },
+        .{ .op = .ineg, .ty = .{ .scalar = .i32 }, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .output, .ty = .{ .scalar = .i32 }, .operands = &.{ 0, 1 }, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    var output = [_]u8{0} ** 4;
+    try executor.execute(&.{}, &.{.{ .interface = 0, .bytes = &output }});
+    try std.testing.expectEqual(@as(u32, 0x8000_0000), std.mem.readInt(u32, &output, .little));
 }
 
 test "rejection is explicit and output transactional" {
@@ -976,7 +994,7 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
             const when_false = try propertyConstant(arena, &instructions, result_ty);
             result_id = try propertyInstruction(arena, &instructions, .select, result_ty, &.{ condition, when_true, when_false }, &.{});
         },
-        .fneg, .convert => {
+        .fneg, .ineg, .convert => {
             var source_ty = result_ty;
             if (convert_from) |scalar| source_ty.scalar = scalar;
             const source = try propertyConstant(arena, &instructions, source_ty);
@@ -1060,6 +1078,10 @@ test "generated bounded operation by type-family property matrix is complete" {
             try runPropertyCase(op, ty, null, null);
             totals[@intFromEnum(op)] += 1;
         };
+        if (ty.scalar == .i32) {
+            try runPropertyCase(.ineg, ty, null, null);
+            totals[@intFromEnum(ir.Op.ineg)] += 1;
+        }
         if (is_float and is_vector) {
             try runPropertyCase(.vector_times_scalar, ty, null, null);
             totals[@intFromEnum(ir.Op.vector_times_scalar)] += 1;
@@ -1077,15 +1099,15 @@ test "generated bounded operation by type-family property matrix is complete" {
     totals[@intFromEnum(ir.Op.matrix_times_vector)] += 1;
     try runPropertyCase(.select, .{ .scalar = .u32 }, null, null);
     totals[@intFromEnum(ir.Op.select)] += 1;
-    const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14, 8 };
+    const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14, 8, 4 };
     try std.testing.expectEqual(expected, totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 204), total);
-    std.debug.print("generated property matrix: operations=22 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 208), total);
+    std.debug.print("generated property matrix: operations=23 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -1217,13 +1239,13 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 22), malformed);
+    try std.testing.expectEqual(@as(usize, 23), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
     try std.testing.expectEqual(@as(usize, 5), runtime_nan);
     try std.testing.expectEqual(@as(usize, 5), signed_zero);
-    std.debug.print("generated property categories: malformed=22 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
+    std.debug.print("generated property categories: malformed=23 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
 }
 
 test "generated valid scalar DAGs are total and stable" {

@@ -85,6 +85,7 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 111, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 112, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 124, .operands = .{ .min = 3, .max = 3 } },
+    .{ .opcode = 126, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 127, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 128, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 129, .operands = .{ .min = 4, .max = 4 } },
@@ -575,7 +576,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 }
                 block_terminated = true;
             },
-            61, 62, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 132, 133, 136, 142, 145, 164...169, 170...179 => {
+            61, 62, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 136, 142, 145, 164...169, 170...179 => {
                 if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
                 const valid_arity = switch (instruction.opcode) {
                     61 => w.len == 3,
@@ -584,7 +585,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     79 => w.len >= 5,
                     80 => w.len >= 3,
                     81 => w.len >= 4,
-                    109, 110, 111, 112, 124, 127 => w.len == 3,
+                    109, 110, 111, 112, 124, 126, 127 => w.len == 3,
                     128, 129, 130, 131, 132, 133, 136, 142, 145, 164...167, 170...179 => w.len == 4,
                     168 => w.len == 3,
                     169 => w.len == 5,
@@ -715,10 +716,14 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const result = try resultShape(nodes, w[0]);
                 if (!scalarClass(result, .float) or !sameShape(result, try valueShape(nodes, w[2]))) return error.Malformed;
             },
-            128, 130, 132, 129, 131, 133, 136 => {
+            126, 128, 130, 132, 129, 131, 133, 136 => {
                 const result = try resultShape(nodes, w[0]);
-                const class: ScalarClass = if (instruction.opcode == 128 or instruction.opcode == 130 or instruction.opcode == 132) .integer else .float;
-                if (!scalarClass(result, class) or !sameShape(result, try valueShape(nodes, w[2])) or !sameShape(result, try valueShape(nodes, w[3]))) return error.Malformed;
+                if (instruction.opcode == 126) {
+                    if (result.scalar != .i32 or !sameShape(result, try valueShape(nodes, w[2]))) return error.Malformed;
+                } else {
+                    const class: ScalarClass = if (instruction.opcode == 128 or instruction.opcode == 130 or instruction.opcode == 132) .integer else .float;
+                    if (!scalarClass(result, class) or !sameShape(result, try valueShape(nodes, w[2])) or !sameShape(result, try valueShape(nodes, w[3]))) return error.Malformed;
+                }
             },
             142 => {
                 const result = try resultShape(nodes, w[0]);
@@ -921,7 +926,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 132, 133, 136, 142, 145, 164...169, 170...179, 245 => w[1],
+                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 136, 142, 145, 164...169, 170...179, 245 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
@@ -1020,7 +1025,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 132, 133, 136, 142, 145, 164...169, 170...179, 245 => w[1],
+            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 136, 142, 145, 164...169, 170...179, 245 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
@@ -1040,6 +1045,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             79 => .shuffle,
             81 => .extract,
             109, 110, 111, 112, 124 => .convert,
+            126 => .ineg,
             127 => .fneg,
             128 => .iadd,
             129 => .fadd,
@@ -1224,6 +1230,26 @@ pub const compute_mul_store = [_]u32{
     (5 << 16) | 54,  1,              8,               0,          6,
     (2 << 16) | 248, 9,              (5 << 16) | 132, 2,          11,
     7,               10,             (3 << 16) | 62,  5,          11,
+    (1 << 16) | 253, (1 << 16) | 56,
+};
+
+/// Compute profile variant exercising signed integer negation before the
+/// StorageBuffer write. The signedness bit on `OpTypeInt` is set explicitly;
+/// unsigned input is rejected by the frontend rather than reinterpreted.
+pub const compute_ineg_store = [_]u32{
+    0x0723_0203,     0x0001_0000,     0,              11,              0,
+    (2 << 16) | 17,  1,               (3 << 16) | 14, 0,               1,
+    (6 << 16) | 15,  5,               8,              0x6e69616d,      0,
+    5,               (6 << 16) | 16,  8,              17,              1,
+    1,               1,               (4 << 16) | 71, 5,               33,
+    0,               (4 << 16) | 71,  5,              34,              0,
+    (2 << 16) | 19,  1,               (4 << 16) | 21, 2,               32,
+    1,               (4 << 16) | 32,  4,              12,              2,
+    (4 << 16) | 59,  4,               5,              12,              (3 << 16) | 33,
+    6,               1,               (4 << 16) | 43, 2,               7,
+    42,              (5 << 16) | 54,  1,              8,               0,
+    6,               (2 << 16) | 248, 9,              (4 << 16) | 126, 2,
+    10,              7,               (3 << 16) | 62, 5,               10,
     (1 << 16) | 253, (1 << 16) | 56,
 };
 
@@ -1648,6 +1674,20 @@ test "compute profile lowers integer multiply before storage output" {
     var signed_program = try compile(std.testing.allocator, &signed, .compute, "main", &.{});
     defer signed_program.deinit(std.testing.allocator);
     try std.testing.expectEqual(ir.Scalar.i32, signed_program.instructions[2].ty.scalar);
+}
+
+test "compute profile lowers signed integer negation and rejects unsigned form" {
+    var program = try compile(std.testing.allocator, &compute_ineg_store, .compute, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), program.instructions.len);
+    try std.testing.expectEqual(ir.Op.ineg, program.instructions[1].op);
+    try std.testing.expectEqual(ir.Scalar.i32, program.instructions[1].ty.scalar);
+    try std.testing.expectEqual(ir.Op.output, program.instructions[2].op);
+
+    var unsigned = compute_ineg_store;
+    const integer_type = testOpcodeOffset(&unsigned, 21, 0).?;
+    unsigned[integer_type + 3] = 0;
+    try std.testing.expectError(error.Malformed, compile(std.testing.allocator, &unsigned, .compute, "main", &.{}));
 }
 
 test "compute profile accepts a scalar storage-buffer pointer" {

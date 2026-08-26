@@ -33,6 +33,9 @@ pub const Op = enum(u8) {
     /// Component-wise two's-complement integer multiplication. Appended to
     /// preserve the serialized numeric values of existing operations.
     imul,
+    /// Component-wise two's-complement signed integer negation. Appended to
+    /// preserve the serialized numeric values of existing operations.
+    ineg,
 };
 
 pub const Instruction = struct {
@@ -185,7 +188,7 @@ fn valueOperand(op: Op, operand_index: usize) bool {
         .composite => true,
         .extract => operand_index == 0,
         .shuffle => operand_index < 2,
-        .fneg, .convert => operand_index == 0,
+        .fneg, .ineg, .convert => operand_index == 0,
         .select => operand_index < 3,
         .iadd, .isub, .imul, .fadd, .fsub, .fmul, .fdiv, .vector_times_scalar, .matrix_times_vector => operand_index < 2,
         .output => operand_index == 1,
