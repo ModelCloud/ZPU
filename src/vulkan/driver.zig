@@ -1304,6 +1304,7 @@ fn deviceCreatePNextValid(raw: ?*const anyopaque) bool {
     var next = raw;
     var depth: usize = 0;
     var saw_loader = false;
+    var saw_group = false;
     while (next) |item| {
         if (depth == 48) return false;
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
@@ -1314,11 +1315,13 @@ fn deviceCreatePNextValid(raw: ?*const anyopaque) bool {
             continue;
         }
         if (header.s_type == 1000070001) {
+            if (saw_group) return false;
             const group: *const DeviceGroupDeviceCreateInfo = @ptrCast(@alignCast(item));
             // ZPU exposes one physical device.  A device-group chain is still
             // accepted for ABI compatibility, but only the single-member
             // form can be represented by this implementation.
             if (group.physical_device_count > 1 or (group.physical_device_count != 0 and group.physical_devices == null)) return false;
+            saw_group = true;
             next = header.p_next;
             depth += 1;
             continue;
@@ -1381,12 +1384,14 @@ fn deviceGroupPhysicalsValidLocked(p: Physical, raw: ?*const anyopaque) bool {
 fn deviceQueuePNextValid(raw: ?*const anyopaque) bool {
     var next = raw;
     var depth: usize = 0;
+    var saw_priority = false;
     while (next) |item| {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
-        if (depth == 16 or header.s_type != 1000174000) return false;
+        if (depth == 16 or header.s_type != 1000174000 or saw_priority) return false;
         const priority: *const DeviceQueueGlobalPriorityCreateInfo = @ptrCast(@alignCast(item));
         // The single ZPU queue is exposed at the ordinary medium priority.
         if (priority.global_priority != 256) return false;
+        saw_priority = true;
         next = header.p_next;
         depth += 1;
     }
@@ -1738,19 +1743,28 @@ fn imageViewCreatePNextState(raw: ?*const anyopaque) ImageViewCreatePNextState {
 fn imageCreatePNextValid(raw: ?*const anyopaque, format: i32) bool {
     var next = raw;
     var depth: usize = 0;
+    var saw_format_list = false;
+    var saw_stencil = false;
+    var saw_external = false;
     while (next) |item| {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
         switch (header.s_type) {
             1000147000 => {
+                if (saw_format_list) return false;
+                saw_format_list = true;
                 const formats: *const ImageFormatListCreateInfo = @ptrCast(@alignCast(item));
                 if (formats.view_format_count > max_api_items or (formats.view_format_count != 0 and formats.view_formats == null)) return false;
                 if (formats.view_formats) |items| for (items[0..formats.view_format_count]) |view_format| if (view_format != format) return false;
             },
             1000246000 => {
+                if (saw_stencil) return false;
+                saw_stencil = true;
                 const stencil: *const ImageStencilUsageCreateInfo = @ptrCast(@alignCast(item));
                 if (stencil.stencil_usage != 0) return false;
             },
             1000072001 => {
+                if (saw_external) return false;
+                saw_external = true;
                 const external: *const ExternalMemoryImageCreateInfo = @ptrCast(@alignCast(item));
                 if (external.handle_types != 0) return false;
             },
@@ -13290,6 +13304,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     test_allocations_before_failure = null;
     var queue_priority = DeviceQueueGlobalPriorityCreateInfo{ .s_type = 1000174000, .p_next = null, .global_priority = 256 };
     try std.testing.expect(deviceQueuePNextValid(&queue_priority));
+    var duplicate_queue_priority = DeviceQueueGlobalPriorityCreateInfo{ .s_type = 1000174000, .p_next = null, .global_priority = 256 };
+    queue_priority.p_next = @ptrCast(&duplicate_queue_priority);
+    try std.testing.expect(!deviceQueuePNextValid(&queue_priority));
+    queue_priority.p_next = null;
     queue_priority.global_priority = 512;
     try std.testing.expect(!deviceQueuePNextValid(&queue_priority));
     var unknown_feature_chain = ChainHeader{ .s_type = 999, .p_next = null };
@@ -13603,7 +13621,7 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     var image: usize = 0;
     try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info_create, null, &image));
     var create_view_formats = [_]i32{37};
-    const create_format_list = ImageFormatListCreateInfo{ .s_type = 1000147000, .p_next = null, .view_format_count = 1, .view_formats = &create_view_formats };
+    var create_format_list = ImageFormatListCreateInfo{ .s_type = 1000147000, .p_next = null, .view_format_count = 1, .view_formats = &create_view_formats };
     var image_info_with_chain = image_info_create;
     image_info_with_chain.p_next = @ptrCast(&create_format_list);
     var image_with_chain: usize = 0;
@@ -13613,6 +13631,20 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(Result.error_initialization_failed, createImage(ctx.device, &image_info_with_chain, null, &rejected_image));
     try std.testing.expectEqual(@as(usize, 0xdead_beef), rejected_image);
     create_view_formats[0] = 37;
+    var duplicate_format_list = create_format_list;
+    create_format_list.p_next = @ptrCast(&duplicate_format_list);
+    try std.testing.expect(!imageCreatePNextValid(&create_format_list, 37));
+    create_format_list.p_next = null;
+    var duplicate_test_stencil = ImageStencilUsageCreateInfo{ .s_type = 1000246000, .p_next = null, .stencil_usage = 0 };
+    var duplicate_test_stencil_tail = duplicate_test_stencil;
+    duplicate_test_stencil.p_next = @ptrCast(&duplicate_test_stencil_tail);
+    try std.testing.expect(!imageCreatePNextValid(&duplicate_test_stencil, 37));
+    duplicate_test_stencil.p_next = null;
+    var duplicate_test_external = ExternalMemoryImageCreateInfo{ .s_type = 1000072001, .p_next = null, .handle_types = 0 };
+    var duplicate_test_external_tail = duplicate_test_external;
+    duplicate_test_external.p_next = @ptrCast(&duplicate_test_external_tail);
+    try std.testing.expect(!imageCreatePNextValid(&duplicate_test_external, 37));
+    duplicate_test_external.p_next = null;
     const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 64, .memory_type_index = 0 };
     var memory: usize = 0;
     try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &memory));
@@ -13790,6 +13822,12 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
         var grouped_device: Device = undefined;
         try std.testing.expectEqual(Result.success, createDevice(ctx.physical, &device_info, null, &grouped_device));
         destroyDevice(grouped_device, null);
+        var duplicate_group_create = group_create;
+        group_create.p_next = @ptrCast(&duplicate_group_create);
+        var duplicate_group_device: Device = @ptrFromInt(0xfeed_0000);
+        try std.testing.expectEqual(Result.error_initialization_failed, createDevice(ctx.physical, &device_info, null, &duplicate_group_device));
+        try std.testing.expectEqual(@as(Device, @ptrFromInt(0xfeed_0000)), duplicate_group_device);
+        group_create.p_next = null;
         group_physical[0] = @ptrFromInt(0x8);
         var unchanged_device: Device = @ptrFromInt(0xfeed_0000);
         try std.testing.expectEqual(Result.error_initialization_failed, createDevice(ctx.physical, &device_info, null, &unchanged_device));
