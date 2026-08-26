@@ -5809,11 +5809,11 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
     for (image_list) |barrier| record(c, .{ .transition = .{ .image = validImageLocked(barrier.image).?, .old_layout = barrier.old_layout, .new_layout = barrier.new_layout } });
 }
 fn validPipelineStageMask(stage_mask: u32) bool {
-    // The only queue family advertises graphics and transfer.  Tessellation,
-    // geometry, and compute stages are not enabled by the device profile.
+    // The only queue family advertises graphics, compute, and transfer.
+    // Tessellation and geometry stages are not enabled by the device profile.
     // HOST remains valid for pipeline barriers as a host synchronization
     // source/sink, subject to the barrier queue-family rules.
-    const supported: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x80 | 0x100 | 0x200 | 0x400 | 0x1000 | 0x2000 | 0x4000 | 0x8000 | 0x1_0000;
+    const supported: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x80 | 0x100 | 0x200 | 0x400 | 0x800 | 0x1000 | 0x2000 | 0x4000 | 0x8000 | 0x1_0000;
     return stage_mask != 0 and stage_mask & ~supported == 0;
 }
 fn validEventStageMask(stage_mask: u32) bool {
@@ -15813,19 +15813,22 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expectEqual(@as(?u32, 0x1_0000), sync2BarrierStageMaskToLegacy(0, 0));
     try std.testing.expect(sync2BarrierStageMaskToLegacy(0, 1) == null);
     try std.testing.expect(sync2StageMaskToLegacy(0x40) == null);
-    try std.testing.expect(sync2StageMaskToLegacy(0x800) == null);
+    try std.testing.expectEqual(@as(?u32, 0x800), sync2StageMaskToLegacy(0x800));
     try std.testing.expectEqual(@as(?u32, 0x4000), sync2StageMaskToLegacy(0x4000));
     try std.testing.expect(validEventStageMask(0x1000));
+    try std.testing.expect(validEventStageMask(0x800));
     try std.testing.expect(validPipelineStageMask(0x4000));
     try std.testing.expect(!validEventStageMask(0x4000));
     try std.testing.expectEqual(@as(?u32, 0x20), sync2AccessMaskToLegacy(0x2_0000_0000));
     try std.testing.expectEqual(@as(?u32, 0x8000), sync2AccessMaskToLegacy(0x8000));
     try std.testing.expectEqual(@as(?u32, 0x1_0000), sync2AccessMaskToLegacy(0x1_0000));
     try std.testing.expectEqual(@as(?u32, 0x1000), sync2TimestampStageToLegacy(0x1000));
+    try std.testing.expectEqual(@as(?u32, 0x800), sync2TimestampStageToLegacy(0x800));
     try std.testing.expectEqual(@as(?u32, 0x1000), sync2TimestampStageToLegacy(0x1000_0000_0));
     try std.testing.expect(sync2TimestampStageToLegacy(0) == null);
     try std.testing.expect(sync2TimestampStageToLegacy(0x1000 | 0x2000) == null);
     try std.testing.expect(stagesSupportAccess(0x1_0000, 0x8000));
+    try std.testing.expect(stagesSupportAccess(0x800, 0x20 | 0x40));
     try std.testing.expect(stagesSupportAccess(0x1, 0x1_0000));
     try std.testing.expect(sync2StageMaskToLegacy(0x8000_0000_0000_0000) == null);
     const ctx = try createTestDeviceContext();
