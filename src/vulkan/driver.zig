@@ -678,6 +678,9 @@ const SwapchainObj = struct {
     present_mutex: std.c.pthread_mutex_t,
     present_condition: std.c.pthread_cond_t,
     cadence: ?frame_pacing.Clock,
+    present_timing_enabled: bool,
+    present_timing_queue_size: u32,
+    present_timing_outstanding: u32,
     transport: xcb_present.Transport,
 };
 const QueryCommand = struct { pool: *QueryPoolObj, index: u32 };
@@ -705,6 +708,7 @@ const heap_size: u64 = 256 * 1024 * 1024;
 const max_2d_extent: u32 = 8192;
 const max_image_array_layers: u32 = 256;
 const max_api_items: u32 = 256;
+const swapchain_present_timing_bit: u32 = 1 << 9;
 const pipeline_cache_uuid = [_]u8{ 0x5a, 0x50, 0x55, 0x2d, 0x49, 0x43, 0x44, 0x2d, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31 };
 // Stable identity values are derived from the ZPU ICD name and are kept
 // distinct from the pipeline-cache UUID.  They make promoted identity
@@ -10188,7 +10192,7 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (ci.s_type != 1_000_001_000 or ci.p_next != null or ci.flags != 0 or ci.min_image_count < 2 or ci.min_image_count > 4 or ci.image_format != 44 or ci.image_color_space != 0 or ci.image_extent.width == 0 or ci.image_extent.height == 0 or ci.image_extent.width > max_2d_extent or ci.image_extent.height > max_2d_extent or ci.image_array_layers != 1 or ci.image_usage != 0x10 or ci.image_sharing_mode != 0 or ci.queue_family_index_count != 0 or ci.queue_family_indices != null or ci.pre_transform != 1 or ci.composite_alpha != 1 or ci.present_mode != 2 or (ci.clipped != 0 and ci.clipped != 1) or ci.old_swapchain != 0) return .error_initialization_failed;
+    if (ci.s_type != 1_000_001_000 or ci.p_next != null or ci.flags & ~swapchain_present_timing_bit != 0 or ci.min_image_count < 2 or ci.min_image_count > 4 or ci.image_format != 44 or ci.image_color_space != 0 or ci.image_extent.width == 0 or ci.image_extent.height == 0 or ci.image_extent.width > max_2d_extent or ci.image_extent.height > max_2d_extent or ci.image_array_layers != 1 or ci.image_usage != 0x10 or ci.image_sharing_mode != 0 or ci.queue_family_index_count != 0 or ci.queue_family_indices != null or ci.pre_transform != 1 or ci.composite_alpha != 1 or ci.present_mode != 2 or (ci.clipped != 0 and ci.clipped != 1) or ci.old_swapchain != 0) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     const surface = validSurfaceLocked(ci.surface) orelse return .error_initialization_failed;
@@ -10212,6 +10216,9 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
             .present_mutex = std.c.PTHREAD_MUTEX_INITIALIZER,
             .present_condition = std.c.PTHREAD_COND_INITIALIZER,
             .cadence = null,
+            .present_timing_enabled = ci.flags & swapchain_present_timing_bit != 0,
+            .present_timing_queue_size = 0,
+            .present_timing_outstanding = 0,
             .transport = transport,
         };
         var created: u32 = 0;
@@ -10336,8 +10343,21 @@ fn acquireNextImage(device: ?Device, handle: usize, timeout_ns: u64, semaphore_h
         } else if (std.c.pthread_cond_timedwait(&swapchain.present_condition, &swapchain.present_mutex, &realtime_deadline) != .SUCCESS) return .timeout;
     }
 }
+fn presentTimingInfoPresent(info: *const PresentInfo) bool {
+    var next = info.p_next;
+    var depth: usize = 0;
+    while (next) |raw| : (depth += 1) {
+        if (depth == 16) return false;
+        const header: *const ChainHeader = @ptrCast(@alignCast(raw));
+        if (header.s_type == 1_000_208_003) return true;
+        next = header.p_next;
+    }
+    return false;
+}
+
 fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
     const present = info orelse return .error_initialization_failed;
+    const timing_info_present = presentTimingInfoPresent(present);
     lock();
     const q = queue orelse {
         mutex.unlock();
@@ -10360,7 +10380,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
             mutex.unlock();
             return .error_initialization_failed;
         };
-        if (swapchain.owner != q.owner or index >= swapchain.image_count or swapchain.retiring) {
+        if (swapchain.owner != q.owner or index >= swapchain.image_count or swapchain.retiring or (timing_info_present and !swapchain.present_timing_enabled)) {
             mutex.unlock();
             return .error_initialization_failed;
         }
@@ -10771,13 +10791,15 @@ fn getSwapchainTimeDomainProperties(device: ?Device, handle: usize, output: ?*Sw
 }
 
 fn setSwapchainPresentTimingQueueSize(device: ?Device, handle: usize, size: u32) callconv(.c) Result {
-    _ = size;
     lock();
     defer mutex.unlock();
     const swapchain = validSwapchainLocked(handle) orelse return .error_initialization_failed;
     const d = device orelse return .error_initialization_failed;
     if (!validDeviceLocked(d) or swapchain.owner != d) return .error_initialization_failed;
-    return .not_ready;
+    if (!swapchain.present_timing_enabled) return .error_initialization_failed;
+    if (size < swapchain.present_timing_outstanding) return .not_ready;
+    swapchain.present_timing_queue_size = size;
+    return .success;
 }
 
 fn getPastPresentationTiming(device: ?Device, info: ?*const PastPresentationTimingInfoEXT, output: ?*PastPresentationTimingPropertiesEXT) callconv(.c) Result {
@@ -12519,7 +12541,13 @@ test "vkcube presentation path records submits and presents two swapchain images
     var zero_capacity_domains = SwapchainTimeDomainPropertiesEXT{ .s_type = 1_000_208_002, .p_next = null, .time_domain_count = 0, .time_domains = &domains, .time_domain_ids = &domain_ids };
     try std.testing.expectEqual(Result.error_initialization_failed, getSwapchainTimeDomainProperties(device, swapchain, &zero_capacity_domains, &timing_counter));
     try std.testing.expectEqual(@as(u32, 0), zero_capacity_domains.time_domain_count);
-    try std.testing.expectEqual(Result.not_ready, setSwapchainPresentTimingQueueSize(device, swapchain, 2));
+    try std.testing.expectEqual(Result.error_initialization_failed, setSwapchainPresentTimingQueueSize(device, swapchain, 2));
+    var timing_swapchain_info = swapchain_info;
+    timing_swapchain_info.flags = swapchain_present_timing_bit;
+    var timing_swapchain: usize = 0;
+    try std.testing.expectEqual(Result.success, createSwapchain(device, &timing_swapchain_info, null, &timing_swapchain));
+    try std.testing.expectEqual(Result.success, setSwapchainPresentTimingQueueSize(device, timing_swapchain, 2));
+    try std.testing.expectEqual(Result.success, setSwapchainPresentTimingQueueSize(device, timing_swapchain, 0));
     const past_info = PastPresentationTimingInfoEXT{ .s_type = 1_000_208_005, .p_next = null, .flags = 0, .swapchain = swapchain };
     var past_properties = PastPresentationTimingPropertiesEXT{ .s_type = 1_000_208_006, .p_next = null, .timing_properties_counter = 0, .time_domains_counter = 0, .presentation_timing_count = 1, .presentation_timings = @ptrFromInt(8) };
     try std.testing.expectEqual(Result.success, getPastPresentationTiming(device, &past_info, &past_properties));
@@ -12600,6 +12628,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     freeMemory(device, indirect_memory, null);
     destroyBuffer(device, uniform_buffer, null);
     destroySwapchain(device, swapchain, null);
+    destroySwapchain(device, timing_swapchain, null);
     destroyCommandPool(device, pool, null);
     destroyPipelineCache(device, graphics_cache, null);
     destroyDevice(device, null);
