@@ -8220,13 +8220,13 @@ fn allocateDescriptorSets(device: ?Device, info: ?*const DescriptorSetAllocateIn
     return .success;
 }
 fn freeDescriptorSets(device: ?Device, pool_handle: usize, count: u32, handles: ?[*]const usize) callconv(.c) Result {
-    if (count != 0 and handles == null) return .error_initialization_failed;
+    if (count == 0 or count > max_api_items or handles == null) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     const d = device orelse return .error_initialization_failed;
     const pool = validDescriptorPoolLocked(pool_handle) orelse return .error_initialization_failed;
     if (!validDeviceLocked(d) or !pool.owner.eql(d) or pool.flags & 1 == 0) return .error_initialization_failed;
-    const set_handles = if (handles) |p| p[0..count] else &.{};
+    const set_handles = handles.?[0..count];
     for (set_handles, 0..) |handle, index| {
         const set = validDescriptorSetLocked(handle) orelse return .error_initialization_failed;
         if (!set.owner.eql(d) or set.pool != pool) return .error_initialization_failed;
@@ -15144,7 +15144,7 @@ test "descriptor pool empty control operations are allocation free and bounded" 
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     for (0..4096) |_| {
-        try std.testing.expectEqual(Result.success, freeDescriptorSets(ctx.device, pool, 0, null));
+        try std.testing.expectEqual(Result.error_initialization_failed, freeDescriptorSets(ctx.device, pool, 0, null));
         try std.testing.expectEqual(Result.success, resetDescriptorPool(ctx.device, pool, 0));
     }
     destroyDescriptorPool(ctx.device, pool, null);
