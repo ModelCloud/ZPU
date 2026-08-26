@@ -8583,6 +8583,10 @@ fn waitSemaphores(device: ?Device, info: ?*const SemaphoreWaitInfo, timeout_ns: 
         return .error_initialization_failed;
     }
     for (wait.semaphores.?[0..wait.semaphore_count], wait.values.?[0..wait.semaphore_count], 0..) |handle, value, index| {
+        for (wait.semaphores.?[0..index]) |prior| if (prior == handle) {
+            mutex.unlock();
+            return .error_initialization_failed;
+        };
         const semaphore = validSemaphoreLocked(handle) orelse {
             mutex.unlock();
             return .error_initialization_failed;
@@ -11464,6 +11468,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
             const waits = submit.wait_semaphores orelse return .error_initialization_failed;
             for (submit.wait_dst_stage_mask.?[0..submit.wait_semaphore_count]) |stage| if (!validEventStageMask(stage)) return .error_initialization_failed;
             for (waits[0..submit.wait_semaphore_count], 0..) |handle, wait_index| {
+                for (waits[0..wait_index]) |prior| if (prior == handle) return .error_initialization_failed;
                 const semaphore = validSemaphoreLocked(handle) orelse return .error_initialization_failed;
                 if (semaphore.owner != q.owner) return .error_initialization_failed;
                 if (semaphore.timeline) {
@@ -11487,6 +11492,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
         if (submit.signal_semaphore_count != 0) {
             const signals = submit.signal_semaphores orelse return .error_initialization_failed;
             for (signals[0..submit.signal_semaphore_count], 0..) |handle, signal_index| {
+                for (signals[0..signal_index]) |prior| if (prior == handle) return .error_initialization_failed;
                 const semaphore = validSemaphoreLocked(handle) orelse return .error_initialization_failed;
                 const slot = semaphoreSlot(semaphore);
                 if (semaphore.owner != q.owner) return .error_initialization_failed;
@@ -18652,6 +18658,18 @@ test "binary semaphores chain ordered submissions with allocation-free warm stat
     const unsignaled_wait = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 1, .wait_semaphores = @ptrCast(&semaphores[0]), .wait_dst_stage_mask = @ptrCast(&wait_stage), .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 0, .signal_semaphores = null };
     try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&unsignaled_wait), 0));
     try std.testing.expect(!validSemaphoreLocked(semaphores[0]).?.signaled.load(.acquire));
+    const duplicate_wait_handles = [_]usize{ semaphores[0], semaphores[0] };
+    const duplicate_wait_stages = [_]u32{ wait_stage, wait_stage };
+    var duplicate_wait = unsignaled_wait;
+    duplicate_wait.wait_semaphore_count = duplicate_wait_handles.len;
+    duplicate_wait.wait_semaphores = &duplicate_wait_handles;
+    duplicate_wait.wait_dst_stage_mask = &duplicate_wait_stages;
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&duplicate_wait), 0));
+    try std.testing.expect(!validSemaphoreLocked(semaphores[0]).?.signaled.load(.acquire));
+    const duplicate_signal_handles = [_]usize{ semaphores[0], semaphores[0] };
+    var duplicate_signal = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = duplicate_signal_handles.len, .signal_semaphores = &duplicate_signal_handles };
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&duplicate_signal), 0));
+    try std.testing.expect(!validSemaphoreLocked(semaphores[0]).?.signaled.load(.acquire));
     var missing_wait_stage = unsignaled_wait;
     missing_wait_stage.wait_dst_stage_mask = null;
     try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&missing_wait_stage), 0));
@@ -18696,6 +18714,10 @@ test "timeline semaphores expose monotonic counter wait signal and submit ABI" {
     const wait_values = [_]u64{5};
     const wait_info = SemaphoreWaitInfo{ .s_type = 1000207004, .p_next = null, .flags = 0, .semaphore_count = 1, .semaphores = &wait_handles, .values = &wait_values };
     try std.testing.expectEqual(Result.timeout, waitSemaphores(ctx.device, &wait_info, 0));
+    const duplicate_host_wait_handles = [_]usize{ timeline, timeline };
+    const duplicate_host_wait_values = [_]u64{ 4, 4 };
+    const duplicate_host_wait = SemaphoreWaitInfo{ .s_type = 1000207004, .p_next = null, .flags = 0, .semaphore_count = duplicate_host_wait_handles.len, .semaphores = &duplicate_host_wait_handles, .values = &duplicate_host_wait_values };
+    try std.testing.expectEqual(Result.error_initialization_failed, waitSemaphores(ctx.device, &duplicate_host_wait, 0));
     const signal_info = SemaphoreSignalInfo{ .s_type = 1000207005, .p_next = null, .semaphore = timeline, .value = 5 };
     try std.testing.expectEqual(Result.success, signalSemaphore(ctx.device, &signal_info));
     try std.testing.expectEqual(Result.success, waitSemaphores(ctx.device, &wait_info, 0));
@@ -18704,6 +18726,19 @@ test "timeline semaphores expose monotonic counter wait signal and submit ABI" {
     const timeline_wait_stage: u32 = 0x1000;
     const submit = SubmitInfo{ .s_type = 4, .p_next = &timeline_submit_info, .wait_semaphore_count = 1, .wait_semaphores = &wait_handles, .wait_dst_stage_mask = @ptrCast(&timeline_wait_stage), .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 1, .signal_semaphores = &wait_handles };
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(Result.success, getSemaphoreCounterValue(ctx.device, timeline, &counter));
+    try std.testing.expectEqual(@as(u64, 7), counter);
+    const duplicate_timeline_wait_handles = [_]usize{ timeline, timeline };
+    const duplicate_timeline_wait_values = [_]u64{ 7, 7 };
+    const duplicate_timeline_wait_stages = [_]u32{ timeline_wait_stage, timeline_wait_stage };
+    const duplicate_timeline_wait_info = TimelineSemaphoreSubmitInfo{ .s_type = 1000207003, .p_next = null, .wait_semaphore_value_count = duplicate_timeline_wait_values.len, .wait_semaphore_values = &duplicate_timeline_wait_values, .signal_semaphore_value_count = 0, .signal_semaphore_values = null };
+    const duplicate_timeline_wait_submit = SubmitInfo{ .s_type = 4, .p_next = &duplicate_timeline_wait_info, .wait_semaphore_count = duplicate_timeline_wait_handles.len, .wait_semaphores = &duplicate_timeline_wait_handles, .wait_dst_stage_mask = &duplicate_timeline_wait_stages, .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&duplicate_timeline_wait_submit), 0));
+    const duplicate_timeline_signal_handles = [_]usize{ timeline, timeline };
+    const duplicate_timeline_signal_values = [_]u64{ 8, 9 };
+    const duplicate_timeline_signal_info = TimelineSemaphoreSubmitInfo{ .s_type = 1000207003, .p_next = null, .wait_semaphore_value_count = 0, .wait_semaphore_values = null, .signal_semaphore_value_count = duplicate_timeline_signal_values.len, .signal_semaphore_values = &duplicate_timeline_signal_values };
+    const duplicate_timeline_signal_submit = SubmitInfo{ .s_type = 4, .p_next = &duplicate_timeline_signal_info, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = duplicate_timeline_signal_handles.len, .signal_semaphores = &duplicate_timeline_signal_handles };
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&duplicate_timeline_signal_submit), 0));
     try std.testing.expectEqual(Result.success, getSemaphoreCounterValue(ctx.device, timeline, &counter));
     try std.testing.expectEqual(@as(u64, 7), counter);
     var duplicate_timeline = timeline_submit_info;

@@ -295,6 +295,12 @@ cover the conversion path. `vkCmdSetEvent2`, `vkCmdResetEvent2`, and
 record the event operation without inventing a barrier; non-empty nodes still
 lower through the canonical barrier path.
 
+Queue submission and host timeline waits now reject duplicate semaphore handles
+within each wait or signal array before consuming or publishing synchronization
+state. The duplicate path is failure-atomic for binary and timeline semaphores,
+and `vkQueueSubmit2` inherits the same validation through its canonical submit
+conversion.
+
 The next execution-semantic checkpoint adds `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC`
 for the bounded descriptor path. Descriptor writes and update templates preserve
 the dynamic type, require the advertised 256-byte uniform-buffer alignment, and
