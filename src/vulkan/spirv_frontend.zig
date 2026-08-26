@@ -94,6 +94,11 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 136, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 142, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 145, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 164, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 165, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 166, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 167, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 168, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 169, .operands = .{ .min = 5, .max = 5 } },
     .{ .opcode = 170, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 171, .operands = .{ .min = 4, .max = 4 } },
@@ -227,13 +232,33 @@ fn scalarClass(shape: ir.Type, class: ScalarClass) bool {
 /// flow. Integer comparisons are admitted only when both operands are literal
 /// scalar constants; dynamic comparisons remain outside the profile.
 fn staticCondition(nodes: []const Node, value_id: u32) Error!?bool {
+    return staticConditionAt(nodes, value_id, 0);
+}
+
+fn staticConditionAt(nodes: []const Node, value_id: u32, depth: u8) Error!?bool {
+    if (depth >= 64) return error.Unsupported;
     const node = nodes[try id(nodes, value_id)];
     if (node.kind == .constant) return switch (node.opcode) {
         41 => true,
         42 => false,
         else => null,
     };
-    if (node.kind != .function_value or node.opcode < 170 or node.opcode > 179) return null;
+    if (node.kind != .function_value) return null;
+    if (node.opcode >= 164 and node.opcode <= 168) {
+        const operand_count: usize = if (node.opcode == 168) 1 else 2;
+        if (node.words.len != operand_count) return error.Malformed;
+        const left = try staticConditionAt(nodes, node.words[0], depth + 1) orelse return null;
+        if (node.opcode == 168) return !left;
+        const right = try staticConditionAt(nodes, node.words[1], depth + 1) orelse return null;
+        return switch (node.opcode) {
+            164 => left == right,
+            165 => left != right,
+            166 => left or right,
+            167 => left and right,
+            else => unreachable,
+        };
+    }
+    if (node.opcode < 170 or node.opcode > 179) return null;
     if (node.words.len != 2) return error.Malformed;
     const left = nodes[try id(nodes, node.words[0])];
     const right = nodes[try id(nodes, node.words[1])];
@@ -534,7 +559,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     }
                 } else if (instruction.opcode == 250) {
                     const condition = nodes[try id(nodes, w[0])];
-                    if (!((condition.kind == .constant and (condition.opcode == 41 or condition.opcode == 42)) or (condition.kind == .function_value and condition.opcode >= 170 and condition.opcode <= 179))) return error.Unsupported;
+                    if (!((condition.kind == .constant and (condition.opcode == 41 or condition.opcode == 42)) or (condition.kind == .function_value and ((condition.opcode >= 164 and condition.opcode <= 168) or (condition.opcode >= 170 and condition.opcode <= 179))))) return error.Unsupported;
                 }
                 if (instruction.opcode == 249) {
                     _ = try id(nodes, w[0]);
@@ -544,7 +569,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 }
                 block_terminated = true;
             },
-            61, 62, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 133, 136, 142, 145, 169, 170...179 => {
+            61, 62, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 133, 136, 142, 145, 164...169, 170...179 => {
                 if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
                 const valid_arity = switch (instruction.opcode) {
                     61 => w.len == 3,
@@ -554,7 +579,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     80 => w.len >= 3,
                     81 => w.len >= 4,
                     109, 110, 111, 112, 124, 127 => w.len == 3,
-                    128, 129, 130, 131, 133, 136, 142, 145, 170...179 => w.len == 4,
+                    128, 129, 130, 131, 133, 136, 142, 145, 164...167, 170...179 => w.len == 4,
+                    168 => w.len == 3,
                     169 => w.len == 5,
                     else => unreachable,
                 };
@@ -699,6 +725,17 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const matrix = try valueShape(nodes, w[2]);
                 const vector = try valueShape(nodes, w[3]);
                 if (matrix.scalar != .f32 or matrix.columns != 4 or matrix.rows != 4 or result.scalar != .f32 or result.columns != 4 or result.rows != 1 or !sameShape(result, vector)) return error.Malformed;
+            },
+            164...167 => {
+                const result = try resultShape(nodes, w[0]);
+                const left = try valueShape(nodes, w[2]);
+                const right = try valueShape(nodes, w[3]);
+                if (result.scalar != .bool or result.columns != 1 or result.rows != 1 or left.scalar != .bool or left.columns != 1 or left.rows != 1 or !sameShape(left, right)) return error.Malformed;
+            },
+            168 => {
+                const result = try resultShape(nodes, w[0]);
+                const operand = try valueShape(nodes, w[2]);
+                if (result.scalar != .bool or result.columns != 1 or result.rows != 1 or operand.scalar != .bool or operand.columns != 1 or operand.rows != 1) return error.Malformed;
             },
             169 => {
                 const result = try resultShape(nodes, w[0]);
@@ -878,13 +915,13 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 131, 133, 136, 142, 145, 169, 170...179, 245 => w[1],
+                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 133, 136, 142, 145, 164...169, 170...179, 245 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
             if (!needed[try id(nodes, result)]) continue;
             const first_operand: usize = switch (instruction.opcode) {
-                41, 42, 43, 48, 49, 50, 170...179 => continue,
+                41, 42, 43, 48, 49, 50, 164...168, 170...179 => continue,
                 else => 2,
             };
             if (instruction.opcode == 245) {
@@ -977,7 +1014,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 133, 136, 142, 145, 169, 170...179, 245 => w[1],
+            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 133, 136, 142, 145, 164...169, 170...179, 245 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
@@ -1007,7 +1044,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             142 => .vector_times_scalar,
             145 => .matrix_times_vector,
             169 => .select,
-            170...179 => .constant,
+            164...168, 170...179 => .constant,
             else => unreachable,
         };
         var operands: std.ArrayList(u32) = .empty;
@@ -1038,7 +1075,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             } else if (!specialized and (node.opcode == 42 or node.opcode == 49)) {
                 literal[0] = 0;
                 literal_len = 1;
-            } else if (!specialized and node.opcode >= 170 and node.opcode <= 179) {
+            } else if (!specialized and ((node.opcode >= 164 and node.opcode <= 168) or (node.opcode >= 170 and node.opcode <= 179))) {
                 literal[0] = @intFromBool(try staticCondition(nodes, rid) orelse return error.Unsupported);
                 literal_len = 1;
             } else if (!specialized) {
@@ -1707,6 +1744,34 @@ test "compute profile folds constant integer comparisons for branch phi" {
     const branch = testOpcodeOffset(&unsupported, 250, 0).?;
     unsupported[branch + 1] = 7;
     try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, &unsupported, .compute, "main", &.{}));
+}
+
+test "compute profile folds nested static logical conditions" {
+    const branch_offset = testOpcodeOffset(&compute_static_compare_phi_store, 250, 0).?;
+    const binary_words = [_]u32{ (5 << 16) | 166, 14, 18, 17, 15 };
+    var binary = try testInsertWords(std.testing.allocator, &compute_static_compare_phi_store, branch_offset, &binary_words);
+    defer std.testing.allocator.free(binary);
+    binary[3] = 19;
+    const binary_branch = testOpcodeOffset(binary, 250, 0).?;
+    binary[binary_branch + 1] = 18;
+    const logical = testOpcodeOffset(binary, 166, 0).?;
+    const logical_opcodes = [_]u16{ 164, 165, 166, 167 };
+    const logical_expected = [_]u32{ 42, 99, 42, 42 };
+    for (logical_opcodes, logical_expected) |opcode, expected| {
+        binary[logical] = (@as(u32, 5) << 16) | opcode;
+        var program = try compile(std.testing.allocator, binary, .compute, "main", &.{});
+        defer program.deinit(std.testing.allocator);
+        try std.testing.expectEqual(expected, std.mem.readInt(u32, program.instructions[0].literal[0..4], .little));
+    }
+
+    var unary = try testInsertWords(std.testing.allocator, &compute_static_compare_phi_store, branch_offset, &.{ (4 << 16) | 168, 14, 18, 17 });
+    defer std.testing.allocator.free(unary);
+    unary[3] = 19;
+    const unary_branch = testOpcodeOffset(unary, 250, 0).?;
+    unary[unary_branch + 1] = 18;
+    var unary_program = try compile(std.testing.allocator, unary, .compute, "main", &.{});
+    defer unary_program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 99), std.mem.readInt(u32, unary_program.instructions[0].literal[0..4], .little));
 }
 
 test "compute profile lowers a boolean select into storage output" {
