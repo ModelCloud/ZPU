@@ -622,7 +622,7 @@ const ExecutionAbi = union(enum) {
     }
 };
 const GraphicsPipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, layout: Canonical, set0: Canonical, render_compatibility: Canonical, vertex_program: ?render_ir.Program, fragment_program: ?render_ir.Program, subpass: u32, execution_abi: ExecutionAbi, cull_mode: u32, front_face: i32, dynamic_viewport: bool, dynamic_scissor: bool, viewport: Viewport, scissor: cpu_cube.Rect };
-const ComputePipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, layout: Canonical, executor: ?render_ir_exec.Executor = null };
+const ComputePipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, layout: Canonical, executor: ?render_ir_exec.Executor = null, dispatch_base: bool = false };
 const SyntheticError = render_ir_exec.Error || error{ InvalidDevice, InvalidPipeline, InvalidAbi, InvalidStage };
 
 // Deliberately private: this scalar proof hook is not a Vulkan command, entry
@@ -709,6 +709,7 @@ const max_2d_extent: u32 = 8192;
 const max_image_array_layers: u32 = 256;
 const max_api_items: u32 = 256;
 const swapchain_present_timing_bit: u32 = 1 << 9;
+const pipeline_create_dispatch_base_bit: u32 = 0x00000010;
 const pipeline_cache_uuid = [_]u8{ 0x5a, 0x50, 0x55, 0x2d, 0x49, 0x43, 0x44, 0x2d, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31 };
 // Stable identity values are derived from the ZPU ICD name and are kept
 // distinct from the pipeline-cache UUID.  They make promoted identity
@@ -7485,6 +7486,11 @@ test "compute pipeline creation validates ownership, publishes typed handles, an
     const pipeline = pipelines[0];
     try std.testing.expect(pipeline != 0xfeed_face);
     try std.testing.expect(validComputePipelineLocked(pipeline) != null);
+    var invalid_flags = info;
+    invalid_flags.flags = 0x20;
+    var invalid_output = [_]usize{0xfeed_face};
+    try std.testing.expectEqual(Result.error_initialization_failed, createComputePipelines(first.device, 0, 1, @ptrCast(&invalid_flags), null, &invalid_output));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), invalid_output[0]);
     var cache_size: usize = 0;
     try std.testing.expectEqual(Result.success, getPipelineCacheData(first.device, cache, &cache_size, null));
     try std.testing.expect(cache_size > pipelineCacheHeader().len);
@@ -7527,7 +7533,7 @@ test "compute uniform profile dispatch executes static arithmetic" {
 }
 
 fn buildComputePipelineLocked(d: Device, ci: *const ComputePipelineCreateInfo) CanonicalError!ComputePipelineObj {
-    if (ci.s_type != 29 or ci.p_next != null or ci.flags != 0 or ci.base_pipeline != 0 or (ci.base_pipeline_index != -1 and ci.base_pipeline_index != 0)) return error.Invalid;
+    if (ci.s_type != 29 or ci.p_next != null or ci.flags & ~pipeline_create_dispatch_base_bit != 0 or ci.base_pipeline != 0 or (ci.base_pipeline_index != -1 and ci.base_pipeline_index != 0)) return error.Invalid;
     const layout = validPipelineLayoutLocked(ci.layout) orelse return error.Invalid;
     if (!layout.owner.eql(d)) return error.Invalid;
     const stage = ci.stage;
@@ -7540,6 +7546,7 @@ fn buildComputePipelineLocked(d: Device, ci: *const ComputePipelineCreateInfo) C
     var w: CanonicalWriter = .{};
     defer w.deinit();
     try w.header(6);
+    try w.u32le(ci.flags);
     try w.u32le(stage.stage);
     try w.u32le(shader.module.identity.ingestion);
     try w.u32le(shader.module.identity.serialization);
@@ -7576,7 +7583,7 @@ fn buildComputePipelineLocked(d: Device, ci: *const ComputePipelineCreateInfo) C
         };
     };
     program.deinit(allocator);
-    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .executor = executor };
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .executor = executor, .dispatch_base = ci.flags & pipeline_create_dispatch_base_bit != 0 };
 }
 
 fn validViewportDomain(viewport: Viewport) bool {
@@ -10285,7 +10292,8 @@ fn cmdDispatchBaseCommon(cb: ?CommandBuffer, base: [3]u32, groups: [3]u32) void 
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or command_buffer.impl.active_render_pass != null or command_buffer.impl.count == command_buffer.impl.commands.len or !dispatchGroupsValid(groups) or !dispatchBaseValid(base, groups)) {
+    const non_zero_base = base[0] != 0 or base[1] != 0 or base[2] != 0;
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or command_buffer.impl.active_render_pass != null or command_buffer.impl.count == command_buffer.impl.commands.len or !dispatchGroupsValid(groups) or !dispatchBaseValid(base, groups) or (non_zero_base and (command_buffer.impl.bound_compute_pipeline == null or !command_buffer.impl.bound_compute_pipeline.?.dispatch_base))) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -17731,6 +17739,10 @@ test "compute dispatch command envelopes validate indirect groups and device mas
     const compute_info = ComputePipelineCreateInfo{ .s_type = 29, .p_next = null, .flags = 0, .stage = compute_stage, .layout = pipeline_layout, .base_pipeline = 0, .base_pipeline_index = -1 };
     var compute_pipeline: usize = 0;
     try std.testing.expectEqual(Result.success, createComputePipelines(ctx.device, 0, 1, @ptrCast(&compute_info), null, @ptrCast(&compute_pipeline)));
+    var dispatch_base_info = compute_info;
+    dispatch_base_info.flags = pipeline_create_dispatch_base_bit;
+    var dispatch_pipeline: usize = 0;
+    try std.testing.expectEqual(Result.success, createComputePipelines(ctx.device, 0, 1, @ptrCast(&dispatch_base_info), null, @ptrCast(&dispatch_pipeline)));
     const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
     var pool: usize = 0;
     try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
@@ -17747,6 +17759,13 @@ test "compute dispatch command envelopes validate indirect groups and device mas
     for (0..4096) |_| cmdSetDeviceMask(commands[0], 1);
     test_allocations_before_failure = null;
     try std.testing.expect(!commands[0].impl.invalid);
+    cmdDispatch(commands[0], 1, 2, 3);
+    cmdDispatchBase(commands[0], 2, 3, 4, 1, 1, 1);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(@as(usize, 1), commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBindPipeline(commands[0], 1, dispatch_pipeline);
     cmdDispatch(commands[0], 1, 2, 3);
     cmdDispatchBase(commands[0], 2, 3, 4, 1, 1, 1);
     try std.testing.expectEqual(@as(usize, 2), commands[0].impl.count);
@@ -17814,6 +17833,7 @@ test "compute dispatch command envelopes validate indirect groups and device mas
     freeMemory(ctx.device, memory, null);
     destroyCommandPool(ctx.device, pool, null);
     destroyPipeline(ctx.device, compute_pipeline, null);
+    destroyPipeline(ctx.device, dispatch_pipeline, null);
     destroyShaderModule(ctx.device, shader, null);
     destroyPipelineLayout(ctx.device, pipeline_layout, null);
     destroyDescriptorSetLayout(ctx.device, set_layout, null);
