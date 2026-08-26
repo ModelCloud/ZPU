@@ -16148,6 +16148,13 @@ test "bounded 2D array images isolate layers across views clears and transfers" 
 
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command, 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command, &begin));
+    var mismatched_copy = image_copy_region;
+    mismatched_copy.dst_subresource.layer_count = 1;
+    cmdCopyImage(command, image, 1, copied_image, 1, 1, @ptrCast(&mismatched_copy));
+    try std.testing.expect(command.impl.invalid);
+    try std.testing.expectEqual(@as(u16, 0), command.impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command, 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command, &begin));
     var invalid_region = transfer_region;
     invalid_region.image_subresource.base_array_layer = 2;
     cmdCopyBufferToImage(command, source_buffer, image, 1, 1, @ptrCast(&invalid_region));
