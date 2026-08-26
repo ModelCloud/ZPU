@@ -58,6 +58,12 @@ pub const Op = enum(u8) {
     srem,
     /// Component-wise signed modulo with divisor sign.
     smod,
+    /// Component-wise logical left shift.
+    shl_logical,
+    /// Component-wise logical right shift.
+    shr_logical,
+    /// Component-wise arithmetic right shift.
+    shr_arithmetic,
 };
 
 pub const Instruction = struct {
@@ -212,7 +218,7 @@ fn valueOperand(op: Op, operand_index: usize) bool {
         .shuffle => operand_index < 2,
         .fneg, .ineg, .bit_not, .convert => operand_index == 0,
         .select => operand_index < 3,
-        .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .fadd, .fsub, .fmul, .fdiv, .vector_times_scalar, .matrix_times_vector => operand_index < 2,
+        .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .fadd, .fsub, .fmul, .fdiv, .vector_times_scalar, .matrix_times_vector => operand_index < 2,
         .output => operand_index == 1,
     };
 }

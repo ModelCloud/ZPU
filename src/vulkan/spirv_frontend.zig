@@ -117,6 +117,9 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 177, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 178, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 179, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 194, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 195, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 196, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 197, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 198, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 199, .operands = .{ .min = 4, .max = 4 } },
@@ -585,7 +588,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 }
                 block_terminated = true;
             },
-            61, 62, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...169, 170...179, 197...200 => {
+            61, 62, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...169, 170...179, 194...200 => {
                 if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
                 const valid_arity = switch (instruction.opcode) {
                     61 => w.len == 3,
@@ -595,7 +598,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     80 => w.len >= 3,
                     81 => w.len >= 4,
                     109, 110, 111, 112, 124, 126, 127 => w.len == 3,
-                    128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...167, 170...179, 197...199 => w.len == 4,
+                    128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...167, 170...179, 194...199 => w.len == 4,
                     200 => w.len == 3,
                     168 => w.len == 3,
                     169 => w.len == 5,
@@ -768,6 +771,13 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const when_true = try valueShape(nodes, w[3]);
                 const when_false = try valueShape(nodes, w[4]);
                 if (condition.scalar != .bool or condition.columns != 1 or condition.rows != 1 or !sameShape(result, when_true) or !sameShape(result, when_false)) return error.Malformed;
+            },
+            194...196 => {
+                const result = try resultShape(nodes, w[0]);
+                const left = try valueShape(nodes, w[2]);
+                const right = try valueShape(nodes, w[3]);
+                if (!scalarClass(result, .integer) or !sameShape(result, left) or !sameShape(result, right)) return error.Malformed;
+                if (instruction.opcode == 195 and result.scalar != .i32) return error.Malformed;
             },
             197...199 => {
                 const result = try resultShape(nodes, w[0]);
@@ -951,7 +961,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...169, 170...179, 197...200, 245 => w[1],
+                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...169, 170...179, 194...200, 245 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
@@ -1050,7 +1060,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...169, 170...179, 197...200, 245 => w[1],
+            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...169, 170...179, 194...200, 245 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
@@ -1084,6 +1094,9 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             137 => .umod,
             138 => .srem,
             139 => .smod,
+            194 => .shr_logical,
+            195 => .shr_arithmetic,
+            196 => .shl_logical,
             197 => .bit_or,
             198 => .bit_xor,
             199 => .bit_and,
@@ -1329,6 +1342,29 @@ pub const compute_integer_div_store = [_]u32{
     (5 << 16) | 54,  1,              8,               0,          6,
     (2 << 16) | 248, 9,              (5 << 16) | 134, 2,          11,
     7,               10,             (5 << 16) | 137, 2,          12,
+    7,               10,             (5 << 16) | 128, 2,          13,
+    11,              12,             (3 << 16) | 62,  5,          13,
+    (1 << 16) | 253, (1 << 16) | 56,
+};
+
+/// Compute profile variant exercising logical left/right shifts. The frontend
+/// regression switches the left-shift instruction to arithmetic right shift
+/// under a signed `OpTypeInt` to cover all three opcode mappings.
+pub const compute_shift_store = [_]u32{
+    0x0723_0203,     0x0001_0000,    0,               14,         0,
+    (2 << 16) | 17,  1,              (3 << 16) | 14,  0,          1,
+    (6 << 16) | 15,  5,              8,               0x6e69616d, 0,
+    5,               (6 << 16) | 16, 8,               17,         1,
+    1,               1,              (4 << 16) | 71,  5,          33,
+    0,               (4 << 16) | 71, 5,               34,         0,
+    (2 << 16) | 19,  1,              (4 << 16) | 21,  2,          32,
+    0,               (4 << 16) | 32, 4,               12,         2,
+    (4 << 16) | 59,  4,              5,               12,         (3 << 16) | 33,
+    6,               1,              (4 << 16) | 43,  2,          7,
+    0x8000_0001,     (4 << 16) | 43, 2,               10,         1,
+    (5 << 16) | 54,  1,              8,               0,          6,
+    (2 << 16) | 248, 9,              (5 << 16) | 196, 2,          11,
+    7,               10,             (5 << 16) | 194, 2,          12,
     7,               10,             (5 << 16) | 128, 2,          13,
     11,              12,             (3 << 16) | 62,  5,          13,
     (1 << 16) | 253, (1 << 16) | 56,
@@ -1824,6 +1860,29 @@ test "compute profile lowers integer division and remainder with exact signednes
         for (remainder_program.instructions) |instruction| saw_remainder = saw_remainder or (opcode == 138 and instruction.op == .srem) or (opcode == 139 and instruction.op == .smod);
         try std.testing.expect(saw_remainder);
     }
+}
+
+test "compute profile lowers logical and arithmetic integer shifts" {
+    var program = try compile(std.testing.allocator, &compute_shift_store, .compute, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var saw_left = false;
+    var saw_logical_right = false;
+    for (program.instructions) |instruction| {
+        saw_left = saw_left or instruction.op == .shl_logical;
+        saw_logical_right = saw_logical_right or instruction.op == .shr_logical;
+    }
+    try std.testing.expect(saw_left and saw_logical_right);
+
+    var arithmetic = compute_shift_store;
+    const shift = testOpcodeOffset(&arithmetic, 196, 0).?;
+    const integer_type = testOpcodeOffset(&arithmetic, 21, 0).?;
+    arithmetic[shift] = (5 << 16) | 195;
+    arithmetic[integer_type + 3] = 1;
+    var arithmetic_program = try compile(std.testing.allocator, &arithmetic, .compute, "main", &.{});
+    defer arithmetic_program.deinit(std.testing.allocator);
+    var saw_arithmetic = false;
+    for (arithmetic_program.instructions) |instruction| saw_arithmetic = saw_arithmetic or instruction.op == .shr_arithmetic;
+    try std.testing.expect(saw_arithmetic);
 }
 
 test "compute profile accepts a scalar storage-buffer pointer" {
