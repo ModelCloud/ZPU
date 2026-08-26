@@ -14,7 +14,7 @@ const spirv_frontend = @import("spirv_frontend.zig");
 const render_ir = @import("render_ir.zig");
 const render_ir_exec = @import("render_ir_exec.zig");
 const core_command_inventory = @import("core_command_inventory.zig");
-pub const Result = enum(i32) { success = 0, not_ready = 1, timeout = 2, event_set = 3, event_reset = 4, incomplete = 5, error_out_of_host_memory = -1, error_initialization_failed = -3, error_memory_map_failed = -5, error_layer_not_present = -6, error_extension_not_present = -7, error_feature_not_present = -8, error_format_not_supported = -11, error_out_of_pool_memory = -1_000_069_000, error_invalid_shader = -1_000_012_000 };
+pub const Result = enum(i32) { success = 0, not_ready = 1, timeout = 2, event_set = 3, event_reset = 4, incomplete = 5, error_out_of_host_memory = -1, error_initialization_failed = -3, error_memory_map_failed = -5, error_layer_not_present = -6, error_extension_not_present = -7, error_feature_not_present = -8, error_format_not_supported = -11, error_validation_failed = -1_000_011_001, error_out_of_pool_memory = -1_000_069_000, error_invalid_shader = -1_000_012_000 };
 pub const Fn = ?*const fn () callconv(.c) void;
 pub const Alloc = opaque {};
 pub const MAGIC: usize = 0x01CDC0DE;
@@ -2936,6 +2936,9 @@ fn validFramebufferLocked(handle: usize) ?*FramebufferObj {
 fn validPipelineCacheLocked(handle: usize) ?*PipelineCacheObj {
     return findLiveHandle(PipelineCacheObj, handle, &pipeline_cache_objects, &pipeline_cache_state);
 }
+fn validShaderModuleLocked(handle: usize) ?*ShaderModuleObj {
+    return findLiveHandle(ShaderModuleObj, handle, &shader_module_objects, &shader_module_state);
+}
 fn validDescriptorPoolLocked(handle: usize) ?*DescriptorPoolObj {
     return findLiveHandle(DescriptorPoolObj, handle, &descriptor_pool_objects, &descriptor_pool_state);
 }
@@ -2959,6 +2962,68 @@ fn validComputePipelineLocked(handle: usize) ?*ComputePipelineObj {
 }
 fn validPrivateDataSlotLocked(handle: usize) ?*PrivateDataSlotObj {
     return findLiveHandle(PrivateDataSlotObj, handle, &private_data_slot_objects, &private_data_slot_state);
+}
+fn privateDataObjectHandleUsize(object_handle: u64) ?usize {
+    const max_usize: u64 = std.math.maxInt(usize);
+    if (object_handle > max_usize) return null;
+    return @intCast(object_handle);
+}
+// VK_EXT_private_data and Vulkan 1.3 require the object handle to be the
+// device itself or a live child created by that device.  Keep this check
+// registry-backed so stale handles and handles from another device cannot
+// leave metadata behind in a private-data slot.
+fn privateDataObjectOwnedLocked(device: Device, object_type: i32, object_handle: u64) bool {
+    if (!validDeviceLocked(device) or object_handle == 0) return false;
+    const handle = privateDataObjectHandleUsize(object_handle) orelse return false;
+    switch (object_type) {
+        3 => return object_handle == @intFromPtr(device), // VK_OBJECT_TYPE_DEVICE
+        4 => { // VK_OBJECT_TYPE_QUEUE
+            for (&device_objects, &queue_objects, device_state) |*candidate, *queue, state| {
+                if (state == .live and candidate == device and @intFromPtr(queue) == handle) return true;
+            }
+            return false;
+        },
+        5 => return if (validSemaphoreLocked(handle)) |object| object.owner == device else false,
+        6 => { // VK_OBJECT_TYPE_COMMAND_BUFFER (dispatchable handle)
+            const command_buffer: CommandBuffer = @ptrFromInt(handle);
+            if (validCommandBufferLocked(command_buffer)) |object| return object.impl.owner == device;
+            return false;
+        },
+        7 => return if (validFenceLocked(handle)) |object| object.owner == device else false,
+        8 => return if (validMemoryLocked(handle)) |object| object.owner == device else false,
+        9 => return if (validBufferLocked(handle)) |object| object.owner == device else false,
+        10 => return if (validImageLocked(handle)) |object| object.owner == device else false,
+        11 => return if (validEventLocked(handle)) |object| object.owner == device else false,
+        12 => return if (validQueryPoolLocked(handle)) |object| object.owner.eql(device) else false,
+        13 => return if (validBufferViewLocked(handle)) |object| object.owner == device else false,
+        14 => return if (validImageViewLocked(handle)) |object| object.owner == device else false,
+        15 => return if (validShaderModuleLocked(handle)) |object| object.owner.eql(device) else false,
+        16 => return if (validPipelineCacheLocked(handle)) |object| object.owner.eql(device) else false,
+        17 => return if (validPipelineLayoutLocked(handle)) |object| object.owner.eql(device) else false,
+        18 => return if (validRenderPassLocked(handle)) |object| object.owner.eql(device) else false,
+        19 => {
+            if (validGraphicsPipelineLocked(handle)) |object| return object.owner.eql(device);
+            if (validComputePipelineLocked(handle)) |object| return object.owner.eql(device);
+            return false;
+        },
+        20 => return if (validDescriptorSetLayoutLocked(handle)) |object| object.owner.eql(device) else false,
+        21 => return if (validSamplerLocked(handle)) |object| object.owner == device else false,
+        22 => return if (validDescriptorPoolLocked(handle)) |object| object.owner.eql(device) else false,
+        23 => return if (validDescriptorSetLocked(handle)) |object| object.owner.eql(device) else false,
+        24 => return if (validFramebufferLocked(handle)) |object| object.owner == device else false,
+        25 => return if (validCommandPoolLocked(handle)) |object| object.owner == device else false,
+        1, 2 => return false, // instance and physical device are not device children
+        1000001000 => { // VK_OBJECT_TYPE_SWAPCHAIN_KHR
+            if (validSwapchainLocked(handle)) |object| return object.owner == device;
+            return false;
+        },
+        1000085000 => return if (validDescriptorUpdateTemplateLocked(handle)) |object| object.owner.eql(device) else false,
+        1000295000 => { // VK_OBJECT_TYPE_PRIVATE_DATA_SLOT
+            if (validPrivateDataSlotLocked(handle)) |object| return object.owner == device;
+            return false;
+        },
+        else => return false,
+    }
 }
 fn validDescriptorUpdateTemplateLocked(handle: usize) ?*DescriptorUpdateTemplateObj {
     return findLiveHandle(DescriptorUpdateTemplateObj, handle, &descriptor_update_template_objects, &descriptor_update_template_state);
@@ -8467,22 +8532,24 @@ fn destroyPrivateDataSlot(device: ?Device, handle: usize, alloc: ?*const Alloc) 
     const slot = validPrivateDataSlotLocked(handle) orelse return;
     if (validDeviceLocked(d) and slot.owner == d) stateForObject(PrivateDataSlotObj, slot, &private_data_slot_objects, &private_data_slot_state).?.* = .tombstone;
 }
-fn setPrivateData(device: ?Device, object_type: i32, object_handle: u64, slot_handle: usize, data: u64) callconv(.c) void {
-    const d = device orelse return;
+fn setPrivateData(device: ?Device, object_type: i32, object_handle: u64, slot_handle: usize, data: u64) callconv(.c) Result {
+    const d = device orelse return .error_initialization_failed;
     lock();
     defer mutex.unlock();
-    const slot = validPrivateDataSlotLocked(slot_handle) orelse return;
-    if (!validDeviceLocked(d) or slot.owner != d or object_handle == 0) return;
+    const slot = validPrivateDataSlotLocked(slot_handle) orelse return .error_validation_failed;
+    if (!validDeviceLocked(d) or slot.owner != d) return .error_validation_failed;
+    if (!privateDataObjectOwnedLocked(d, object_type, object_handle)) return .error_validation_failed;
     for (&slot.entries) |*entry| if (entry.object == object_handle and entry.object_type == object_type) {
         entry.data = data;
         if (data == 0) entry.* = .{};
-        return;
+        return .success;
     };
-    if (data == 0) return;
+    if (data == 0) return .success;
     for (&slot.entries) |*entry| if (entry.object == 0) {
         entry.* = .{ .object_type = object_type, .object = object_handle, .data = data };
-        return;
+        return .success;
     };
+    return .error_out_of_host_memory;
 }
 fn getPrivateData(device: ?Device, object_type: i32, object_handle: u64, slot_handle: usize, output: ?*u64) callconv(.c) void {
     const out = output orelse return;
@@ -8491,7 +8558,7 @@ fn getPrivateData(device: ?Device, object_type: i32, object_handle: u64, slot_ha
     lock();
     defer mutex.unlock();
     const slot = validPrivateDataSlotLocked(slot_handle) orelse return;
-    if (!validDeviceLocked(d) or slot.owner != d or object_handle == 0) return;
+    if (!validDeviceLocked(d) or slot.owner != d or !privateDataObjectOwnedLocked(d, object_type, object_handle)) return;
     for (slot.entries) |entry| if (entry.object == object_handle and entry.object_type == object_type) {
         out.* = entry.data;
         return;
@@ -13529,13 +13596,42 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     const private_info = PrivateDataSlotCreateInfo{ .s_type = 1000295000, .p_next = null, .flags = 0 };
     try std.testing.expectEqual(Result.success, createPrivateDataSlot(ctx.device, &private_info, null, &private_slot));
     const private_object = @as(u64, @intFromPtr(ctx.device));
-    setPrivateData(ctx.device, 3, private_object, private_slot, 0xfeed_face);
+    try std.testing.expectEqual(Result.success, setPrivateData(ctx.device, 3, private_object, private_slot, 0xfeed_face));
     var private_value: u64 = 0;
     getPrivateData(ctx.device, 3, private_object, private_slot, &private_value);
     try std.testing.expectEqual(@as(u64, 0xfeed_face), private_value);
-    setPrivateData(ctx.device, 3, private_object, private_slot, 0);
+    try std.testing.expectEqual(Result.success, setPrivateData(ctx.device, 3, private_object, private_slot, 0));
     getPrivateData(ctx.device, 3, private_object, private_slot, &private_value);
     try std.testing.expectEqual(@as(u64, 0), private_value);
+
+    const private_buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 16, .usage = 2, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var private_buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &private_buffer_info, null, &private_buffer));
+    const private_queue = @as(u64, @intFromPtr(ctx.queue));
+    try std.testing.expectEqual(Result.success, setPrivateData(ctx.device, 4, private_queue, private_slot, 0x1111));
+    getPrivateData(ctx.device, 4, private_queue, private_slot, &private_value);
+    try std.testing.expectEqual(@as(u64, 0x1111), private_value);
+    try std.testing.expectEqual(Result.success, setPrivateData(ctx.device, 9, @as(u64, private_buffer), private_slot, 0x2222));
+    getPrivateData(ctx.device, 9, @as(u64, private_buffer), private_slot, &private_value);
+    try std.testing.expectEqual(@as(u64, 0x2222), private_value);
+    // A live handle is still invalid when its VkObjectType does not match.
+    try std.testing.expectEqual(Result.error_validation_failed, setPrivateData(ctx.device, 10, @as(u64, private_buffer), private_slot, 0x3333));
+    getPrivateData(ctx.device, 9, @as(u64, private_buffer), private_slot, &private_value);
+    try std.testing.expectEqual(@as(u64, 0x2222), private_value);
+    try std.testing.expectEqual(Result.error_validation_failed, setPrivateData(ctx.device, 0, private_object, private_slot, 0x4444));
+    try std.testing.expectEqual(Result.error_validation_failed, setPrivateData(ctx.device, 9, 0, private_slot, 0x5555));
+    destroyBuffer(ctx.device, private_buffer, null);
+    getPrivateData(ctx.device, 9, @as(u64, private_buffer), private_slot, &private_value);
+    try std.testing.expectEqual(@as(u64, 0), private_value);
+    try std.testing.expectEqual(Result.error_validation_failed, setPrivateData(ctx.device, 9, @as(u64, private_buffer), private_slot, 0x6666));
+    // Private-data updates are bounded registry operations and must not take
+    // the allocator on the warm path.
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, setPrivateData(ctx.device, 4, private_queue, private_slot, 0x7777));
+        getPrivateData(ctx.device, 4, private_queue, private_slot, &private_value);
+    }
+    test_allocations_before_failure = null;
     destroyPrivateDataSlot(ctx.device, private_slot, null);
 
     var vulkan11_features = PhysicalDeviceVulkan11Features{ .s_type = 49, .p_next = null, .values = [_]u32{0xffff_ffff} ** 12 };
