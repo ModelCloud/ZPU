@@ -6655,7 +6655,7 @@ fn destroyPipelineLayout(device: ?Device, handle: usize, alloc: ?*const Alloc) c
 }
 
 fn appendAttachmentRef(w: *CanonicalWriter, ref: AttachmentReference, count: u32) CanonicalError!void {
-    if (ref.attachment != 0xffff_ffff and ref.attachment >= count) return error.Invalid;
+    if ((ref.attachment != 0xffff_ffff and ref.attachment >= count) or !supportedLayout(ref.layout)) return error.Invalid;
     try w.u32le(ref.attachment);
     try w.i32le(ref.layout);
 }
@@ -6720,7 +6720,7 @@ fn buildRenderPass(ci: *const RenderPassCreateInfo, compatibility_only: bool) Ca
     try w.header(if (compatibility_only) 4 else 3);
     try w.u32le(ci.attachment_count);
     if (ci.attachments) |items| for (items[0..ci.attachment_count]) |a| {
-        if (a.flags != 0 or a.samples == 0 or a.samples & (a.samples - 1) != 0) return error.Invalid;
+        if (a.flags != 0 or a.samples == 0 or a.samples & (a.samples - 1) != 0 or a.load_op < 0 or a.load_op > 2 or a.store_op < 0 or a.store_op > 1 or a.stencil_load_op < 0 or a.stencil_load_op > 2 or a.stencil_store_op < 0 or a.stencil_store_op > 1 or !supportedLayout(a.initial_layout) or !supportedLayout(a.final_layout)) return error.Invalid;
         try w.i32le(a.format);
         try w.u32le(a.samples);
         if (!compatibility_only) {
@@ -8529,7 +8529,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
         return;
     }
     const color_attachment = ci.color_attachments.?[0];
-    if (color_attachment.s_type != 1000044000 or color_attachment.p_next != null or color_attachment.resolve_mode != 0 or color_attachment.resolve_image_view != 0 or color_attachment.load_op > 2 or color_attachment.store_op > 1 or !supportedLayout(color_attachment.image_layout)) {
+    if (color_attachment.s_type != 1000044000 or color_attachment.p_next != null or color_attachment.resolve_mode != 0 or color_attachment.resolve_image_view != 0 or color_attachment.load_op < 0 or color_attachment.load_op > 2 or color_attachment.store_op < 0 or color_attachment.store_op > 1 or !supportedLayout(color_attachment.image_layout)) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -8544,7 +8544,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
     }
     var depth: ?*ImageObj = null;
     if (ci.depth_attachment) |depth_attachment| {
-        if (depth_attachment.s_type != 1000044000 or depth_attachment.p_next != null or depth_attachment.resolve_mode != 0 or depth_attachment.resolve_image_view != 0 or !supportedLayout(depth_attachment.image_layout)) {
+        if (depth_attachment.s_type != 1000044000 or depth_attachment.p_next != null or depth_attachment.resolve_mode != 0 or depth_attachment.resolve_image_view != 0 or depth_attachment.load_op < 0 or depth_attachment.load_op > 2 or depth_attachment.store_op < 0 or depth_attachment.store_op > 1 or !supportedLayout(depth_attachment.image_layout)) {
             command_buffer.impl.invalid = true;
             return;
         }
@@ -11476,6 +11476,21 @@ test "vkcube presentation path records submits and presents two swapchain images
     bad_dependency.dependency_flags = 2;
     extended_render_info.dependencies = @ptrCast(&bad_dependency);
     try std.testing.expectError(error.Invalid, buildRenderPass(&extended_render_info, false));
+    var bad_attachment_descriptions = attachment_descriptions;
+    bad_attachment_descriptions[0].load_op = -1;
+    var bad_attachment_render_info = render_pass_info;
+    bad_attachment_render_info.attachments = &bad_attachment_descriptions;
+    try std.testing.expectEqual(Result.error_initialization_failed, createRenderPass(device, &bad_attachment_render_info, null, &unchanged[0]));
+    bad_attachment_descriptions[0] = attachment_descriptions[0];
+    bad_attachment_descriptions[0].final_layout = -1;
+    try std.testing.expectEqual(Result.error_initialization_failed, createRenderPass(device, &bad_attachment_render_info, null, &unchanged[0]));
+    var bad_reference = color_ref;
+    bad_reference.layout = -1;
+    var bad_reference_subpass = subpass;
+    bad_reference_subpass.color_attachments = @ptrCast(&bad_reference);
+    var bad_reference_render_info = render_pass_info;
+    bad_reference_render_info.subpasses = @ptrCast(&bad_reference_subpass);
+    try std.testing.expectEqual(Result.error_initialization_failed, createRenderPass(device, &bad_reference_render_info, null, &unchanged[0]));
     const saved_dsl_state = descriptor_set_layout_state;
     @memset(&descriptor_set_layout_state, .tombstone);
     try std.testing.expectEqual(Result.error_out_of_host_memory, createDescriptorSetLayout(device, &descriptor_layout_info, null, &unchanged[0]));
@@ -14043,6 +14058,24 @@ test "dynamic rendering begin and end own attachment scope" {
     bad_attachment.clear_value.color.float32[0] = std.math.nan(f32);
     var bad_rendering = rendering;
     bad_rendering.color_attachments = @ptrCast(&bad_attachment);
+    cmdBeginRendering(commands[1], &bad_rendering);
+    try std.testing.expect(commands[1].impl.invalid);
+    try std.testing.expect(!commands[1].impl.dynamic_rendering);
+    try std.testing.expectEqual(@as(u16, 0), commands[1].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    var negative_attachment = attachment;
+    negative_attachment.load_op = -1;
+    bad_rendering.color_attachments = @ptrCast(&negative_attachment);
+    cmdBeginRendering(commands[1], &bad_rendering);
+    try std.testing.expect(commands[1].impl.invalid);
+    try std.testing.expect(!commands[1].impl.dynamic_rendering);
+    try std.testing.expectEqual(@as(u16, 0), commands[1].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    negative_attachment = attachment;
+    negative_attachment.store_op = -1;
+    bad_rendering.color_attachments = @ptrCast(&negative_attachment);
     cmdBeginRendering(commands[1], &bad_rendering);
     try std.testing.expect(commands[1].impl.invalid);
     try std.testing.expect(!commands[1].impl.dynamic_rendering);
