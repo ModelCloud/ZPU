@@ -185,6 +185,11 @@ recorded; snapshots carry the resolved state into direct and indirect CPU
 raster execution, while pipelines that do not declare the state continue to
 use their baked values. Missing-state and 4096-call resolution coverage is
 failure-atomic and allocation-free.
+Primitive-topology and primitive-restart dynamic states now follow the same
+pipeline-owned requirement and snapshot path. The bounded executor accepts
+only the triangle-list/no-restart combination it can execute; missing state,
+non-triangle topology, and enabled restart are rejected before command
+recording rather than being silently rendered with different semantics.
 The memory and sampler handle registries now meet the required 4096 and 4000
 allocation limits respectively. The generated command matrix is a
 234/234 dispatch/name-coverage artifact, not a Vulkan-conformance claim:
