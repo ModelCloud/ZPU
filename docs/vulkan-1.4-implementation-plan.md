@@ -178,6 +178,13 @@ rejects ranges outside the bound buffer, while `vkCmdBindVertexBuffers2`
 records per-binding sizes and strides and rejects ranges or strides outside
 the reported limits. The legacy binding commands retain the corresponding
 buffer-to-end ranges.
+The Vulkan 1.3 extended dynamic-state values for cull mode and front face are
+now decoded when graphics pipelines are created. A pipeline that declares
+either state requires the matching command-buffer value before a draw can be
+recorded; snapshots carry the resolved state into direct and indirect CPU
+raster execution, while pipelines that do not declare the state continue to
+use their baked values. Missing-state and 4096-call resolution coverage is
+failure-atomic and allocation-free.
 The memory and sampler handle registries now meet the required 4096 and 4000
 allocation limits respectively. The generated command matrix is a
 234/234 dispatch/name-coverage artifact, not a Vulkan-conformance claim:

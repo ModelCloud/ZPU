@@ -647,7 +647,25 @@ const ExecutionAbi = union(enum) {
         self.* = .profile_v1_metadata;
     }
 };
-const GraphicsPipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, layout: Canonical, set0: Canonical, render_compatibility: Canonical, vertex_program: ?render_ir.Program, fragment_program: ?render_ir.Program, subpass: u32, execution_abi: ExecutionAbi, cull_mode: u32, front_face: i32, dynamic_viewport: bool, dynamic_scissor: bool, viewport: Viewport, scissor: cpu_cube.Rect };
+const GraphicsPipelineObj = struct {
+    owner: DeviceIdentity,
+    canonical: Canonical,
+    layout: Canonical,
+    set0: Canonical,
+    render_compatibility: Canonical,
+    vertex_program: ?render_ir.Program,
+    fragment_program: ?render_ir.Program,
+    subpass: u32,
+    execution_abi: ExecutionAbi,
+    cull_mode: u32,
+    front_face: i32,
+    dynamic_viewport: bool,
+    dynamic_scissor: bool,
+    dynamic_cull_mode: bool = false,
+    dynamic_front_face: bool = false,
+    viewport: Viewport,
+    scissor: cpu_cube.Rect,
+};
 const ComputePipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, layout: Canonical, executor: ?render_ir_exec.Executor = null, dispatch_base: bool = false };
 const SyntheticError = render_ir_exec.Error || error{ InvalidDevice, InvalidPipeline, InvalidAbi, InvalidStage };
 
@@ -736,6 +754,8 @@ const max_image_array_layers: u32 = 256;
 const max_api_items: u32 = 256;
 const swapchain_present_timing_bit: u32 = 1 << 9;
 const pipeline_create_dispatch_base_bit: u32 = 0x00000010;
+const dynamic_state_cull_mode: i32 = 1000267000;
+const dynamic_state_front_face: i32 = 1000267001;
 const pipeline_cache_uuid = [_]u8{ 0x5a, 0x50, 0x55, 0x2d, 0x49, 0x43, 0x44, 0x2d, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31 };
 // Stable identity values are derived from the ZPU ICD name and are kept
 // distinct from the pipeline-cache UUID.  They make promoted identity
@@ -7875,6 +7895,8 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     try w.i32le(ia.topology);
     var dynamic_viewport = false;
     var dynamic_scissor = false;
+    var dynamic_cull_mode = false;
+    var dynamic_front_face = false;
     var dynamic_line_width = false;
     var dynamic_depth_bias = false;
     var dynamic_indices: [16]u8 = undefined;
@@ -7893,10 +7915,11 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         var prior: ?i32 = null;
         for (dynamic_indices[0..dynamic_count]) |index| {
             const state = states[index];
-            if (prior == state or state < 0 or state > 8) return error.Invalid;
+            if (prior == state or state < 0 or (state > 8 and state != dynamic_state_cull_mode and state != dynamic_state_front_face)) return error.Invalid;
             prior = state;
             if (state == 0) dynamic_viewport = true else if (state == 1) dynamic_scissor = true else if (state == 2) dynamic_line_width = true;
             if (state == 3) dynamic_depth_bias = true;
+            if (state == dynamic_state_cull_mode) dynamic_cull_mode = true else if (state == dynamic_state_front_face) dynamic_front_face = true;
             try w.i32le(state);
         }
     }
@@ -7975,7 +7998,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         };
         profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     }
-    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .viewport = baked_viewport, .scissor = baked_scissor };
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .viewport = baked_viewport, .scissor = baked_scissor };
 }
 
 fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, set0: *const Canonical) bool {
@@ -9853,7 +9876,7 @@ fn cmdPushDescriptorSetWithTemplate2(cb: ?CommandBuffer, info: ?*const PushDescr
     };
     cmdPushDescriptorSetWithTemplateLocked(command_buffer, ci.descriptor_update_template, template.pipeline_bind_point, ci.layout, ci.set, ci.data);
 }
-const DrawRasterState = struct { viewport: Viewport, scissor: cpu_cube.Rect };
+const DrawRasterState = struct { viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32 };
 fn graphicsDrawExecutionAllowed(abi: ExecutionAbi) bool {
     return switch (abi) {
         .cpu_cube_v1, .profile_v1_scalar_graphics => true,
@@ -9861,10 +9884,12 @@ fn graphicsDrawExecutionAllowed(abi: ExecutionAbi) bool {
     };
 }
 fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsPipelineObj) ?DrawRasterState {
-    if ((pipeline.dynamic_viewport and !command_buffer.impl.viewport_set) or (pipeline.dynamic_scissor and !command_buffer.impl.scissor_set)) return null;
+    if ((pipeline.dynamic_viewport and !command_buffer.impl.viewport_set) or (pipeline.dynamic_scissor and !command_buffer.impl.scissor_set) or (pipeline.dynamic_cull_mode and command_buffer.impl.dynamic.cull_mode == std.math.maxInt(u32)) or (pipeline.dynamic_front_face and command_buffer.impl.dynamic.front_face < 0)) return null;
     return .{
         .viewport = if (pipeline.dynamic_viewport) command_buffer.impl.viewport else pipeline.viewport,
         .scissor = if (pipeline.dynamic_scissor) command_buffer.impl.scissor else pipeline.scissor,
+        .cull_mode = if (pipeline.dynamic_cull_mode) command_buffer.impl.dynamic.cull_mode else pipeline.cull_mode,
+        .front_face = if (pipeline.dynamic_front_face) command_buffer.impl.dynamic.front_face else pipeline.front_face,
     };
 }
 test "draw raster state selects baked and dynamic viewport scissor without allocation" {
@@ -9875,6 +9900,10 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     var pipeline: GraphicsPipelineObj = undefined;
     pipeline.viewport = baked_viewport;
     pipeline.scissor = baked_scissor;
+    pipeline.cull_mode = 2;
+    pipeline.front_face = 0;
+    pipeline.dynamic_cull_mode = false;
+    pipeline.dynamic_front_face = false;
     var impl: CommandBufferImpl = undefined;
     impl.viewport = dynamic_viewport;
     impl.scissor = dynamic_scissor;
@@ -9900,6 +9929,8 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     var resolved = drawRasterState(&command_buffer, &pipeline).?;
     try std.testing.expectEqual(baked_viewport, resolved.viewport);
     try std.testing.expectEqual(baked_scissor, resolved.scissor);
+    try std.testing.expectEqual(@as(u32, 2), resolved.cull_mode);
+    try std.testing.expectEqual(@as(i32, 0), resolved.front_face);
 
     pipeline.dynamic_viewport = true;
     pipeline.dynamic_scissor = true;
@@ -9909,11 +9940,29 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     impl.scissor_set = false;
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
     impl.scissor_set = true;
+    impl.dynamic.cull_mode = 1;
+    impl.dynamic.front_face = 1;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
     try std.testing.expectEqual(dynamic_viewport, resolved.viewport);
     try std.testing.expectEqual(dynamic_scissor, resolved.scissor);
+    try std.testing.expectEqual(@as(u32, 2), resolved.cull_mode);
+    try std.testing.expectEqual(@as(i32, 0), resolved.front_face);
+
+    pipeline.dynamic_cull_mode = true;
+    pipeline.dynamic_front_face = true;
+    resolved = drawRasterState(&command_buffer, &pipeline).?;
+    try std.testing.expectEqual(@as(u32, 1), resolved.cull_mode);
+    try std.testing.expectEqual(@as(i32, 1), resolved.front_face);
+    impl.dynamic.cull_mode = std.math.maxInt(u32);
+    try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
+    impl.dynamic.cull_mode = 1;
+    impl.dynamic.front_face = -1;
+    try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
+    impl.dynamic.front_face = 1;
 
     pipeline.dynamic_viewport = false;
+    pipeline.dynamic_cull_mode = false;
+    pipeline.dynamic_front_face = false;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
     try std.testing.expectEqual(baked_viewport, resolved.viewport);
     try std.testing.expectEqual(dynamic_scissor, resolved.scissor);
@@ -10255,13 +10304,11 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
         return;
     };
     if (vertex_count == 0 or instance_count == 0) return;
-    const cull_mode = if (command_buffer.impl.dynamic.cull_mode == std.math.maxInt(u32)) pipeline.cull_mode else command_buffer.impl.dynamic.cull_mode;
-    const front_face = if (command_buffer.impl.dynamic.front_face < 0) pipeline.front_face else command_buffer.impl.dynamic.front_face;
     const descriptor_snapshot = snapshotDescriptorSet(command_buffer, descriptors) orelse {
         command_buffer.impl.invalid = true;
         return;
     };
-    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = vertex_count, .base_vertex = first_vertex, .instance_count = instance_count, .indexed = null, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = cull_mode, .front_face = front_face, .vertex_bindings = command_buffer.impl.vertex_bindings } });
+    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = vertex_count, .base_vertex = first_vertex, .instance_count = instance_count, .indexed = null, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .vertex_bindings = command_buffer.impl.vertex_bindings } });
 }
 fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32, first_instance: u32) callconv(.c) void {
     _ = first_instance;
@@ -10320,13 +10367,11 @@ fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, fir
         return;
     };
     if (index_count == 0 or instance_count == 0) return;
-    const cull_mode = if (command_buffer.impl.dynamic.cull_mode == std.math.maxInt(u32)) pipeline.cull_mode else command_buffer.impl.dynamic.cull_mode;
-    const front_face = if (command_buffer.impl.dynamic.front_face < 0) pipeline.front_face else command_buffer.impl.dynamic.front_face;
     const descriptor_snapshot = snapshotDescriptorSet(command_buffer, descriptors) orelse {
         command_buffer.impl.invalid = true;
         return;
     };
-    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = index_count, .base_vertex = 0, .instance_count = instance_count, .indexed = .{ .buffer = index_buffer, .offset = start, .byte_count = byte_count, .index_type = command_buffer.impl.index_type, .vertex_offset = vertex_offset }, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = cull_mode, .front_face = front_face, .vertex_bindings = command_buffer.impl.vertex_bindings } });
+    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = index_count, .base_vertex = 0, .instance_count = instance_count, .indexed = .{ .buffer = index_buffer, .offset = start, .byte_count = byte_count, .index_type = command_buffer.impl.index_type, .vertex_offset = vertex_offset }, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .vertex_bindings = command_buffer.impl.vertex_bindings } });
 }
 fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64, draw_count: u32, stride: u64, indexed: bool, count_source: ?IndirectCountState) void {
     lock();
@@ -10399,13 +10444,11 @@ fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64
         command_buffer.impl.invalid = true;
         return;
     };
-    const cull_mode = if (command_buffer.impl.dynamic.cull_mode == std.math.maxInt(u32)) pipeline.cull_mode else command_buffer.impl.dynamic.cull_mode;
-    const front_face = if (command_buffer.impl.dynamic.front_face < 0) pipeline.front_face else command_buffer.impl.dynamic.front_face;
     const descriptor_snapshot = snapshotDescriptorSet(command_buffer, descriptors) orelse {
         command_buffer.impl.invalid = true;
         return;
     };
-    record(command_buffer, .{ .indirect_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .pipeline = pipeline, .descriptors = descriptor_snapshot, .indirect_buffer = indirect_buffer, .offset = offset, .draw_count = draw_count, .stride = stride, .indexed = indexed, .index_buffer = index_buffer, .index_offset = command_buffer.impl.index_offset, .index_type = command_buffer.impl.index_type, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = cull_mode, .front_face = front_face, .vertex_bindings = command_buffer.impl.vertex_bindings, .count_source = count_source } });
+    record(command_buffer, .{ .indirect_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .pipeline = pipeline, .descriptors = descriptor_snapshot, .indirect_buffer = indirect_buffer, .offset = offset, .draw_count = draw_count, .stride = stride, .indexed = indexed, .index_buffer = index_buffer, .index_offset = command_buffer.impl.index_offset, .index_type = command_buffer.impl.index_type, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .vertex_bindings = command_buffer.impl.vertex_bindings, .count_source = count_source } });
 }
 fn cmdDrawIndirect(cb: ?CommandBuffer, indirect: usize, offset: u64, draw_count: u32, stride: u64) callconv(.c) void {
     cmdDrawIndirectCommon(cb, indirect, offset, draw_count, stride, false, null);
@@ -11938,6 +11981,15 @@ test "vkcube presentation path records submits and presents two swapchain images
     var pipelines: [1]usize = undefined;
     try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, graphics_cache, 1, @ptrCast(&pipeline_info), null, &pipelines));
     const baseline_pipeline = validGraphicsPipelineLocked(pipelines[0]).?;
+    const extended_dynamic_states = [_]i32{ 0, 1, dynamic_state_cull_mode, dynamic_state_front_face };
+    const extended_dynamic = PipelineDynamicStateCreateInfo{ .s_type = 27, .p_next = null, .flags = 0, .dynamic_state_count = extended_dynamic_states.len, .dynamic_states = &extended_dynamic_states };
+    var extended_dynamic_pipeline_info = pipeline_info;
+    extended_dynamic_pipeline_info.dynamic = &extended_dynamic;
+    var extended_dynamic_pipeline: [1]usize = undefined;
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&extended_dynamic_pipeline_info), null, &extended_dynamic_pipeline));
+    try std.testing.expect(validGraphicsPipelineLocked(extended_dynamic_pipeline[0]).?.dynamic_cull_mode);
+    try std.testing.expect(validGraphicsPipelineLocked(extended_dynamic_pipeline[0]).?.dynamic_front_face);
+    destroyPipeline(device, extended_dynamic_pipeline[0], null);
     var graphics_cache_size: usize = 0;
     try std.testing.expectEqual(Result.success, getPipelineCacheData(device, graphics_cache, &graphics_cache_size, null));
     try std.testing.expect(graphics_cache_size > pipelineCacheHeader().len);
