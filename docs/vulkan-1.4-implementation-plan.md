@@ -144,9 +144,10 @@ SPIR-V compute control flow, dynamic loads, atomics,
 shared memory, and general arbitrary graphics execution remain explicitly
 deferred. A bounded scalar graphics profile now executes f32x4 vertex-input
 triangles with builtin-position output, perspective-correct f32x4 fragment
-varyings, and bool/f32x4 fragment output for direct, indexed, and bounded
-single-draw indirect commands; indirect profile bindings are snapshotted at
-record time and their post-record argument ranges are revalidated at submit.
+varyings, bool/f32x4 fragment output, and descriptor-backed set-0 binding-0
+uniform blocks for direct, indexed, and bounded single-draw indirect commands;
+indirect profile bindings are snapshotted at record time and their post-record
+argument ranges are revalidated at submit.
 The unrestricted SPIR-V graphics space is still intentionally deferred.
 Indirect dispatch now retains its argument buffer and consumes the three group
 counts at submission, including post-record writes and failure-atomic invalid
