@@ -8529,7 +8529,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
         return;
     }
     const color_attachment = ci.color_attachments.?[0];
-    if (color_attachment.s_type != 1000044000 or color_attachment.p_next != null or color_attachment.resolve_mode != 0 or color_attachment.resolve_image_view != 0 or color_attachment.load_op > 2 or color_attachment.store_op > 1 or !supportedLayout(color_attachment.image_layout)) {
+    if (color_attachment.s_type != 1000044000 or color_attachment.p_next != null or color_attachment.resolve_mode != 0 or color_attachment.resolve_image_view != 0 or color_attachment.load_op < 0 or color_attachment.load_op > 2 or color_attachment.store_op < 0 or color_attachment.store_op > 1 or !supportedLayout(color_attachment.image_layout)) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -8544,7 +8544,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
     }
     var depth: ?*ImageObj = null;
     if (ci.depth_attachment) |depth_attachment| {
-        if (depth_attachment.s_type != 1000044000 or depth_attachment.p_next != null or depth_attachment.resolve_mode != 0 or depth_attachment.resolve_image_view != 0 or !supportedLayout(depth_attachment.image_layout)) {
+        if (depth_attachment.s_type != 1000044000 or depth_attachment.p_next != null or depth_attachment.resolve_mode != 0 or depth_attachment.resolve_image_view != 0 or depth_attachment.load_op < 0 or depth_attachment.load_op > 2 or depth_attachment.store_op < 0 or depth_attachment.store_op > 1 or !supportedLayout(depth_attachment.image_layout)) {
             command_buffer.impl.invalid = true;
             return;
         }
@@ -14043,6 +14043,24 @@ test "dynamic rendering begin and end own attachment scope" {
     bad_attachment.clear_value.color.float32[0] = std.math.nan(f32);
     var bad_rendering = rendering;
     bad_rendering.color_attachments = @ptrCast(&bad_attachment);
+    cmdBeginRendering(commands[1], &bad_rendering);
+    try std.testing.expect(commands[1].impl.invalid);
+    try std.testing.expect(!commands[1].impl.dynamic_rendering);
+    try std.testing.expectEqual(@as(u16, 0), commands[1].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    var negative_attachment = attachment;
+    negative_attachment.load_op = -1;
+    bad_rendering.color_attachments = @ptrCast(&negative_attachment);
+    cmdBeginRendering(commands[1], &bad_rendering);
+    try std.testing.expect(commands[1].impl.invalid);
+    try std.testing.expect(!commands[1].impl.dynamic_rendering);
+    try std.testing.expectEqual(@as(u16, 0), commands[1].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    negative_attachment = attachment;
+    negative_attachment.store_op = -1;
+    bad_rendering.color_attachments = @ptrCast(&negative_attachment);
     cmdBeginRendering(commands[1], &bad_rendering);
     try std.testing.expect(commands[1].impl.invalid);
     try std.testing.expect(!commands[1].impl.dynamic_rendering);
