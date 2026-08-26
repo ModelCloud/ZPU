@@ -14665,6 +14665,13 @@ test "vkcube presentation path records submits and presents two swapchain images
     dynamic_secondary_inheritance.p_next = &depth_only_secondary_rendering;
     try std.testing.expectEqual(Result.success, resetCommandBuffer(render_secondary[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(render_secondary[0], &dynamic_secondary_begin));
+    cmdBindPipeline(render_secondary[0], 0, depth_only_pipeline[0]);
+    cmdBindDescriptorSets(render_secondary[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    cmdSetViewport(render_secondary[0], 0, 1, @ptrCast(&viewport));
+    cmdSetScissor(render_secondary[0], 0, 1, @ptrCast(&render_info.render_area));
+    setCoreDynamicGraphicsStateForTest(render_secondary[0], &viewport, &render_info.render_area);
+    cmdDraw(render_secondary[0], 3, 1, 0, 0);
+    try std.testing.expect(!render_secondary[0].impl.invalid);
     try std.testing.expectEqual(Result.success, endCommandBuffer(render_secondary[0]));
     try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
@@ -14678,6 +14685,8 @@ test "vkcube presentation path records submits and presents two swapchain images
     cmdEndRendering(multi_commands[0]);
     try std.testing.expectEqual(Result.success, endCommandBuffer(multi_commands[0]));
     try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&dynamic_submit), 0));
+    const depth_after_secondary: []const f32 = @alignCast(std.mem.bytesAsSlice(f32, imageBytes(validImageLocked(depth_image).?)));
+    try std.testing.expect(depth_after_secondary[4 * 8 + 4] < 1);
 
     // A dynamic graphics pipeline may legally declare zero color attachments
     // when rasterizer discard is enabled.  It records a draw envelope without
