@@ -29,6 +29,7 @@ pub const Op = enum(u8) {
     convert,
     output,
     select,
+    storage,
 };
 
 pub const Instruction = struct {
@@ -175,7 +176,7 @@ pub fn identify(bytes: []const u8) Identity {
 
 fn valueOperand(op: Op, operand_index: usize) bool {
     return switch (op) {
-        .constant, .input, .uniform => false,
+        .constant, .input, .uniform, .storage => false,
         .constant_composite => true,
         .access => operand_index != 0,
         .composite => true,

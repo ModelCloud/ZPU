@@ -522,7 +522,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const pointer_value = nodes[try id(nodes, w[2])];
                 const pointer = nodes[try id(nodes, pointer_value.type_id)];
                 if (pointer.kind != .pointer or !sameShape(try resultShape(nodes, w[0]), try resultShape(nodes, pointer.b))) return error.Malformed;
-                if (pointer.a != 1 and pointer.a != 2) return error.Unsupported;
+                if (pointer.a != 1 and pointer.a != 2 and !(requested_stage == .compute and pointer.a == 12)) return error.Unsupported;
             },
             62 => {
                 const pointer_value = nodes[try id(nodes, w[0])];
@@ -829,8 +829,13 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                         if (pointer_node.kind != .variable) return error.Unsupported;
                         const decoration = decorations[source_index];
                         var semantic_index: ?u32 = null;
+                        const expected_storage: ir.Storage = switch (pointer_node.a) {
+                            2 => .uniform,
+                            12 => .output,
+                            else => .input,
+                        };
                         for (interfaces.items, 0..) |item, interface_index| {
-                            if (item.storage == (if (pointer_node.a == 2) ir.Storage.uniform else ir.Storage.input) and item.location == decoration.location and item.binding == decoration.binding and item.descriptor_set == decoration.descriptor_set)
+                            if (item.storage == expected_storage and item.location == decoration.location and item.binding == decoration.binding and item.descriptor_set == decoration.descriptor_set)
                                 semantic_index = @intCast(interface_index);
                         }
                         try operands.append(allocator, semantic_index orelse return error.Unsupported);
@@ -843,7 +848,11 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             if (instruction.opcode == 61) {
                 const pointer_id = node.words[0];
                 const pointer_node = nodes[try id(nodes, pointer_id)];
-                op = if (pointer_node.kind == .variable) (if (pointer_node.a == 2) .uniform else .input) else .extract;
+                op = if (pointer_node.kind == .variable) switch (pointer_node.a) {
+                    2 => .uniform,
+                    12 => .storage,
+                    else => .input,
+                } else .extract;
             }
         }
         const owned_operands = allocator.dupe(u32, operands.items) catch return error.OutOfMemory;
@@ -931,6 +940,25 @@ pub const compute_scalar_store = [_]u32{
     42,             (5 << 16) | 54,  1,              8,              0,
     6,              (2 << 16) | 248, 9,              (3 << 16) | 62, 5,
     7,              (1 << 16) | 253, (1 << 16) | 56,
+};
+
+/// Compute profile variant that reads and writes the same scalar StorageBuffer
+/// binding. This exercises the direct OpLoad lowering path and keeps the
+/// descriptor as a transactional read/write interface.
+pub const compute_scalar_load_store = [_]u32{
+    0x0723_0203,    0x0001_0000,     0,               11,             0,
+    (2 << 16) | 17, 1,               (3 << 16) | 14,  0,              1,
+    (6 << 16) | 15, 5,               8,               0x6e69616d,     0,
+    5,              (6 << 16) | 16,  8,               17,             1,
+    1,              1,               (4 << 16) | 71,  5,              33,
+    0,              (4 << 16) | 71,  5,               34,             0,
+    (2 << 16) | 19, 1,               (4 << 16) | 21,  2,              32,
+    0,              (4 << 16) | 32,  4,               12,             2,
+    (4 << 16) | 59, 4,               5,               12,             (3 << 16) | 33,
+    6,              1,               (5 << 16) | 54,  1,              8,
+    0,              6,               (2 << 16) | 248, 9,              (4 << 16) | 61,
+    2,              10,              5,               (3 << 16) | 62, 5,
+    10,             (1 << 16) | 253, (1 << 16) | 56,
 };
 
 /// Compute profile variant using a scalar boolean select before the storage
@@ -1183,6 +1211,16 @@ test "compute profile accepts a scalar storage-buffer pointer" {
     try std.testing.expectEqual(@as(usize, 1), program.interfaces.len);
     try std.testing.expectEqual(ir.Storage.output, program.interfaces[0].storage);
     try std.testing.expectEqual(@as(u8, 0), program.interfaces[0].member_count);
+    try std.testing.expectEqual(ir.Op.output, program.instructions[1].op);
+}
+
+test "compute profile lowers a scalar storage-buffer load" {
+    var program = try compile(std.testing.allocator, &compute_scalar_load_store, .compute, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), program.interfaces.len);
+    try std.testing.expectEqual(ir.Storage.output, program.interfaces[0].storage);
+    try std.testing.expectEqual(@as(usize, 2), program.instructions.len);
+    try std.testing.expectEqual(ir.Op.storage, program.instructions[0].op);
     try std.testing.expectEqual(ir.Op.output, program.instructions[1].op);
 }
 

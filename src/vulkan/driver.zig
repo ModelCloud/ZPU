@@ -6846,6 +6846,13 @@ fn executeComputeDispatch(op: DispatchCommand) void {
             const storage_bytes = bufferBytes(storage)[@intCast(descriptors.storage_offset)..][0..@intCast(descriptors.storage_range)];
             const required = computeTypeByteSize(interface.ty);
             if (required == 0 or required > storage_bytes.len) return;
+            if (binding_count == bindings.len) return;
+            // StorageBuffer interfaces are read/write. Expose the same
+            // descriptor range to the executor as an input binding and an
+            // output target so static OpLoad/OpAccessChain reads observe the
+            // current contents while writes remain transactional.
+            bindings[binding_count] = .{ .interface = @intCast(interface_index), .bytes = storage_bytes };
+            binding_count += 1;
             outputs[output_count] = .{ .interface = @intCast(interface_index), .bytes = storage_bytes };
             output_count += 1;
         }

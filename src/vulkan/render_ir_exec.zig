@@ -152,6 +152,12 @@ pub const Executor = struct {
     }
 
     pub fn execute(self: *Executor, bindings: []const Binding, outputs: []const Output) Error!void {
+        for (bindings, 0..) |binding, i| {
+            if (binding.interface >= self.program.interfaces.len) return error.InvalidOperand;
+            const storage = self.program.interfaces[binding.interface].storage;
+            if (storage != .input and storage != .uniform and storage != .output) return error.InvalidStorage;
+            for (bindings[0..i]) |prior| if (prior.interface == binding.interface) return error.InvalidOperand;
+        }
         var out_offset: usize = 0;
         for (self.program.interfaces, 0..) |interface, i| if (interface.storage == .output) {
             var found: ?[]u8 = null;
@@ -179,6 +185,11 @@ pub const Executor = struct {
             for (bindings) |binding| {
                 const binding_start = @intFromPtr(binding.bytes.ptr);
                 const binding_end = std.math.add(usize, binding_start, binding.bytes.len) catch return error.InvalidOperand;
+                // Compute StorageBuffer interfaces are read/write bindings. The
+                // same descriptor range is intentionally supplied as both a
+                // binding and an output, so permit that exact interface/range
+                // pair while retaining overlap rejection for all other inputs.
+                if (left.interface == binding.interface and left_start == binding_start) continue;
                 if (left_start < binding_end and binding_start < left_end) return error.InvalidOutput;
             }
         }
@@ -202,11 +213,16 @@ pub const Executor = struct {
                 },
                 .input => result = try readValue(instruction.ty, try findBinding(bindings, instruction.operands[0])),
                 .uniform => result = try readValue(instruction.ty, try findBinding(bindings, instruction.operands[0])),
+                .storage => {
+                    const interface_index = instruction.operands[0];
+                    if (interface_index >= self.program.interfaces.len or self.program.interfaces[interface_index].storage != .output) return error.InvalidStorage;
+                    result = try readValue(instruction.ty, try findBinding(bindings, interface_index));
+                },
                 .access => {
                     const interface_index = instruction.operands[0];
                     if (interface_index >= self.program.interfaces.len) return error.InvalidOperand;
                     const interface = self.program.interfaces[interface_index];
-                    if (interface.storage != .uniform) return error.InvalidStorage;
+                    if (interface.storage != .uniform and interface.storage != .output) return error.InvalidStorage;
                     const member_index = (try valueRef(self.values, pc, instruction.operands[1])).bits[0];
                     if (member_index >= interface.member_count) return error.Bounds;
                     const bytes = try findBinding(bindings, interface_index);
@@ -348,7 +364,7 @@ fn validate(program: *const ir.Program) Error!void {
         const arity_ok = switch (instruction.op) {
             .constant => n == 0,
             .constant_composite, .composite => n > 0,
-            .input, .uniform => n == 1,
+            .input, .uniform, .storage => n == 1,
             .access => n >= 2 and n <= 3,
             .extract => n == 1 or n == 2,
             .shuffle => n == 2 + try lanes(instruction.ty),
@@ -362,9 +378,14 @@ fn validate(program: *const ir.Program) Error!void {
         if (instruction.op == .constant and instruction.ty.scalar == .bool and instruction.literal[0] > 1) return error.InvalidOperand;
         if (instruction.op == .constant and instruction.ty.scalar == .f32) for (0..try lanes(instruction.ty)) |i| if (!std.math.isFinite(@as(f32, @bitCast(std.mem.readInt(u32, instruction.literal[i * 4 ..][0..4], .little))))) return error.NumericDomain;
         if (instruction.op != .constant and instruction.literal.len != 0) return error.InvalidOperand;
-        if (instruction.op == .input or instruction.op == .uniform) {
+        if (instruction.op == .input or instruction.op == .uniform or instruction.op == .storage) {
             const x = instruction.operands[0];
-            const expected: ir.Storage = if (instruction.op == .input) .input else .uniform;
+            const expected: ir.Storage = switch (instruction.op) {
+                .input => .input,
+                .uniform => .uniform,
+                .storage => .output,
+                else => unreachable,
+            };
             if (x >= program.interfaces.len or program.interfaces[x].storage != expected) return error.InvalidStorage;
             if (!same(instruction.ty, program.interfaces[x].ty)) return error.InvalidType;
         }
@@ -393,7 +414,7 @@ fn validate(program: *const ir.Program) Error!void {
         switch (instruction.op) {
             .access => {
                 const interface_index = instruction.operands[0];
-                if (interface_index >= program.interfaces.len or program.interfaces[interface_index].storage != .uniform) return error.InvalidStorage;
+                if (interface_index >= program.interfaces.len or (program.interfaces[interface_index].storage != .uniform and program.interfaces[interface_index].storage != .output)) return error.InvalidStorage;
                 const interface = program.interfaces[interface_index];
                 for (instruction.operands[1..]) |index_id| {
                     const index_ty = program.instructions[index_id].ty;
@@ -454,7 +475,7 @@ fn freeInstructions(allocator: std.mem.Allocator, items: []ir.Instruction) void 
 }
 fn isValueOperand(op: ir.Op, i: usize) bool {
     return switch (op) {
-        .constant, .input, .uniform => false,
+        .constant, .input, .uniform, .storage => false,
         .access => i != 0,
         .extract => i == 0,
         .shuffle => i < 2,
@@ -523,6 +544,29 @@ test "every profile operation executes with owned allocation-free warm state" {
     _ = fixed; // execute accepts no allocator and cannot allocate
     try executor.execute(&.{ .{ .interface = 0, .bytes = &input }, .{ .interface = 1, .bytes = &uniform } }, &.{.{ .interface = 2, .bytes = &output }});
     try std.testing.expect(!std.mem.allEqual(u8, &output, 0xaa));
+}
+
+test "storage-buffer access reads descriptor contents before transactional write" {
+    const five = [_]u8{ 5, 0, 0, 0 };
+    const zero = [_]u8{ 0, 0, 0, 0 };
+    var interfaces = [_]ir.Interface{.{ .storage = .output, .ty = .{ .scalar = .u32 }, .descriptor_set = 0, .binding = 1, .block = true, .member_count = 1 }};
+    interfaces[0].members[0] = .{ .ty = .{ .scalar = .u32 }, .offset = 0 };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &five },
+        .{ .op = .constant, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &zero },
+        .{ .op = .access, .ty = .{ .scalar = .u32 }, .operands = &.{ 0, 1 }, .literal = &.{} },
+        .{ .op = .iadd, .ty = .{ .scalar = .u32 }, .operands = &.{ 2, 0 }, .literal = &.{} },
+        .{ .op = .output, .ty = .{ .scalar = .u32 }, .operands = &.{ 0, 3 }, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    var storage = [_]u8{ 37, 0, 0, 0 };
+    try executor.execute(&.{.{ .interface = 0, .bytes = &storage }}, &.{.{ .interface = 0, .bytes = &storage }});
+    try std.testing.expectEqual(@as(u32, 42), std.mem.readInt(u32, &storage, .little));
+    for (0..4096) |_| try executor.execute(&.{.{ .interface = 0, .bytes = &storage }}, &.{.{ .interface = 0, .bytes = &storage }});
+    try std.testing.expectEqual(@as(u32, 42 + 4096 * 5), std.mem.readInt(u32, &storage, .little));
 }
 
 test "rejection is explicit and output transactional" {
@@ -863,13 +907,18 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
             for (0..part_count) |i| parts[i] = try propertyConstant(arena, &instructions, part_ty);
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, parts[0..part_count], &.{});
         },
-        .input, .uniform => {
+        .input, .uniform, .storage => {
             interfaces[0] = .{ .storage = if (op == .input) .input else .uniform, .ty = result_ty, .location = if (op == .input) 0 else null, .descriptor_set = if (op == .uniform) 0 else null, .binding = if (op == .uniform) 0 else null, .block = op == .uniform, .member_count = if (op == .uniform) 1 else 0 };
+            if (op == .storage) interfaces[0] = .{ .storage = .output, .ty = result_ty, .descriptor_set = 0, .binding = 0 };
             if (op == .uniform) interfaces[0].members[0] = .{ .ty = result_ty, .offset = 0 };
             interface_count = 1;
             bindings[0] = .{ .interface = 0, .bytes = input_bytes[0..try byteSize(result_ty)] };
             binding_count = 1;
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{0}, &.{});
+            if (op == .storage) {
+                outputs[0] = .{ .interface = 0, .bytes = output_bytes[0..try byteSize(result_ty)] };
+                output_count = 1;
+            }
         },
         .access => {
             interfaces[0] = .{ .storage = .uniform, .ty = result_ty, .descriptor_set = 0, .binding = 0, .block = true, .member_count = 1 };
@@ -965,7 +1014,7 @@ test "generated bounded operation by type-family property matrix is complete" {
         const is_float = ty.scalar == .f32;
         const is_vector = ty.rows == 1 and ty.columns > 1;
         const is_non_matrix = ty.rows == 1;
-        inline for ([_]ir.Op{ .constant, .input, .uniform, .access, .output }) |op| {
+        inline for ([_]ir.Op{ .constant, .input, .uniform, .storage, .access, .output }) |op| {
             try runPropertyCase(op, ty, null, null);
             totals[@intFromEnum(op)] += 1;
         }
@@ -1002,15 +1051,15 @@ test "generated bounded operation by type-family property matrix is complete" {
     totals[@intFromEnum(ir.Op.matrix_times_vector)] += 1;
     try runPropertyCase(.select, .{ .scalar = .u32 }, null, null);
     totals[@intFromEnum(ir.Op.select)] += 1;
-    const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1 };
+    const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14 };
     try std.testing.expectEqual(expected, totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 182), total);
-    std.debug.print("generated property matrix: operations=20 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 196), total);
+    std.debug.print("generated property matrix: operations=21 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -1142,13 +1191,13 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 20), malformed);
+    try std.testing.expectEqual(@as(usize, 21), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
     try std.testing.expectEqual(@as(usize, 5), runtime_nan);
     try std.testing.expectEqual(@as(usize, 5), signed_zero);
-    std.debug.print("generated property categories: malformed=20 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
+    std.debug.print("generated property categories: malformed=21 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
 }
 
 test "generated valid scalar DAGs are total and stable" {
