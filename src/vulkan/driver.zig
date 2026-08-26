@@ -5094,6 +5094,27 @@ fn dynamicRenderingDependencyValid(info: *const DependencyInfo) bool {
     };
     return true;
 }
+fn renderPassDependencyValid(command_buffer: *const CommandBufferObj, info: *const DependencyInfo) bool {
+    if (command_buffer.impl.active_render_pass == null) return true;
+    // Render-pass self dependencies cannot contain buffer barriers. Image
+    // barriers remain attachment-local and cannot perform a layout or queue
+    // family ownership transition inside the pass instance.
+    if (info.buffer_memory_barrier_count != 0) return false;
+    const graphics_stages: u64 = 0x8000 | 0x7ff; // ALL_GRAPHICS plus graphics stages
+    if (info.memory_barriers) |items| for (items[0..info.memory_barrier_count]) |barrier| {
+        if (barrier.src_stage_mask & ~graphics_stages != 0 or barrier.dst_stage_mask & ~graphics_stages != 0) return false;
+        if (barrier.src_stage_mask & 0x700 != 0 and (barrier.dst_stage_mask & ~@as(u64, 0x700) != 0 or info.dependency_flags & 1 == 0)) return false;
+    };
+    const framebuffer = command_buffer.impl.active_framebuffer orelse if (info.image_memory_barrier_count == 0) return true else return false;
+    if (info.image_memory_barriers) |items| for (items[0..info.image_memory_barrier_count]) |barrier| {
+        if (barrier.src_stage_mask & ~graphics_stages != 0 or barrier.dst_stage_mask & ~graphics_stages != 0 or
+            (barrier.src_stage_mask & 0x700 != 0 and (barrier.dst_stage_mask & ~@as(u64, 0x700) != 0 or info.dependency_flags & 1 == 0)) or
+            barrier.old_layout != barrier.new_layout or barrier.src_queue_family_index != barrier.dst_queue_family_index) return false;
+        const image = validImageLocked(barrier.image) orelse return false;
+        if (image.owner != command_buffer.impl.owner or (framebuffer.color_image != image and framebuffer.depth_image != image)) return false;
+    };
+    return true;
+}
 
 fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callconv(.c) void {
     if (!dependencyInfoShapeValid(info)) {
@@ -5108,7 +5129,10 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
             return;
         };
         const in_dynamic_rendering = command_buffer.impl.dynamic_rendering;
-        if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or (in_dynamic_rendering and !dynamicRenderingDependencyValid(ci))) {
+        if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or
+            (in_dynamic_rendering and !dynamicRenderingDependencyValid(ci)) or
+            (!in_dynamic_rendering and !renderPassDependencyValid(command_buffer, ci)))
+        {
             command_buffer.impl.invalid = true;
             mutex.unlock();
             return;
@@ -14609,6 +14633,16 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expectEqual(before_event_scope, commands[0].impl.count);
     commands[0].impl.invalid = false;
     commands[0].impl.dynamic_rendering = false;
+    commands[0].impl.active_render_pass = @ptrFromInt(@as(usize, @alignOf(RenderPassObj)));
+    var traditional_attachment_dependency = attachment_dependency;
+    traditional_attachment_dependency.dependency_flags = 1;
+    try std.testing.expect(renderPassDependencyValid(commands[0], &traditional_attachment_dependency));
+    const before_traditional_scope = commands[0].impl.count;
+    cmdPipelineBarrier2(commands[0], &dependency);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_traditional_scope, commands[0].impl.count);
+    commands[0].impl.invalid = false;
+    commands[0].impl.active_render_pass = null;
     cmdWriteTimestamp2(commands[0], 0x1000, query, 0);
     cmdWriteTimestamp2(commands[0], 0x1000_0000_0, query, 1);
     try std.testing.expect(!commands[0].impl.invalid);
