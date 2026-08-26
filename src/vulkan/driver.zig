@@ -6758,7 +6758,7 @@ fn buildRenderPass(ci: *const RenderPassCreateInfo, compatibility_only: bool) Ca
     if (!compatibility_only) {
         try w.u32le(ci.dependency_count);
         if (ci.dependencies) |deps| for (deps[0..ci.dependency_count]) |dep| {
-            if ((dep.src_subpass != 0xffff_ffff and dep.src_subpass >= ci.subpass_count) or (dep.dst_subpass != 0xffff_ffff and dep.dst_subpass >= ci.subpass_count) or dep.dependency_flags & ~@as(u32, 1) != 0) return error.Invalid;
+            if ((dep.src_subpass != 0xffff_ffff and dep.src_subpass >= ci.subpass_count) or (dep.dst_subpass != 0xffff_ffff and dep.dst_subpass >= ci.subpass_count) or dep.dependency_flags & ~@as(u32, 1) != 0 or !validEventStageMask(dep.src_stage_mask) or !validEventStageMask(dep.dst_stage_mask) or !stagesSupportAccess(dep.src_stage_mask, dep.src_access_mask) or !stagesSupportAccess(dep.dst_stage_mask, dep.dst_access_mask)) return error.Invalid;
             try w.u32le(dep.src_subpass);
             try w.u32le(dep.dst_subpass);
             try w.u32le(dep.src_stage_mask);
@@ -11461,7 +11461,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     var extended_subpass = subpass;
     extended_subpass.preserve_attachment_count = 1;
     extended_subpass.preserve_attachments = &preserve;
-    const dependency = SubpassDependency{ .src_subpass = 0xffff_ffff, .dst_subpass = 0, .src_stage_mask = 1, .dst_stage_mask = 2, .src_access_mask = 4, .dst_access_mask = 8, .dependency_flags = 1 };
+    const dependency = SubpassDependency{ .src_subpass = 0xffff_ffff, .dst_subpass = 0, .src_stage_mask = 4, .dst_stage_mask = 4, .src_access_mask = 4, .dst_access_mask = 4, .dependency_flags = 1 };
     var extended_render_info = render_pass_info;
     extended_render_info.subpasses = @ptrCast(&extended_subpass);
     extended_render_info.dependency_count = 1;
@@ -11476,6 +11476,25 @@ test "vkcube presentation path records submits and presents two swapchain images
     bad_dependency.dependency_flags = 2;
     extended_render_info.dependencies = @ptrCast(&bad_dependency);
     try std.testing.expectError(error.Invalid, buildRenderPass(&extended_render_info, false));
+    bad_dependency = dependency;
+    bad_dependency.src_stage_mask = 0x4000;
+    extended_render_info.dependencies = @ptrCast(&bad_dependency);
+    try std.testing.expectError(error.Invalid, buildRenderPass(&extended_render_info, false));
+    bad_dependency = dependency;
+    bad_dependency.dst_access_mask = 0x8000;
+    extended_render_info.dependencies = @ptrCast(&bad_dependency);
+    try std.testing.expectError(error.Invalid, buildRenderPass(&extended_render_info, false));
+    var dependency2 = SubpassDependency2{ .s_type = 1000109003, .p_next = null, .src_subpass = 0xffff_ffff, .dst_subpass = 0, .src_stage_mask = 4, .dst_stage_mask = 4, .src_access_mask = 4, .dst_access_mask = 4, .dependency_flags = 1, .view_offset = 0 };
+    var dependency_render_info2 = render_pass_info2;
+    dependency_render_info2.dependency_count = 1;
+    dependency_render_info2.dependencies = @ptrCast(&dependency2);
+    var dependency_render_pass2: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass2(device, &dependency_render_info2, null, &dependency_render_pass2));
+    destroyRenderPass(device, dependency_render_pass2, null);
+    dependency2.src_stage_mask = 0x4000;
+    var unchanged_dependency_render_pass2: usize = 0xfeed_face;
+    try std.testing.expectEqual(Result.error_initialization_failed, createRenderPass2(device, &dependency_render_info2, null, &unchanged_dependency_render_pass2));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), unchanged_dependency_render_pass2);
     var bad_attachment_descriptions = attachment_descriptions;
     bad_attachment_descriptions[0].load_op = -1;
     var bad_attachment_render_info = render_pass_info;
