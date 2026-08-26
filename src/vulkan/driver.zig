@@ -1098,6 +1098,12 @@ const memory_dedicated_requirements_stype: i32 = 1_000_127_000;
 const pipeline_rendering_create_info_stype: i32 = 1_000_044_002;
 const attachment_store_op_none: i32 = 1_000_301_000;
 const attachment_load_op_none: i32 = 1_000_400_000;
+fn validAttachmentLoadOp(op: i32) bool {
+    return op == 0 or op == 1 or op == 2 or op == attachment_load_op_none;
+}
+fn validAttachmentStoreOp(op: i32) bool {
+    return op == 0 or op == 1 or op == attachment_store_op_none;
+}
 
 // VK_KHR_maintenance5 promotes VkPipelineCreateFlags2CreateInfo into the
 // core 1.4 pipeline-create pNext chain.  The CPU backend has one supported
@@ -7987,7 +7993,7 @@ fn buildRenderPass(ci: *const RenderPassCreateInfo, compatibility_only: bool) Ca
     try w.header(if (compatibility_only) 4 else 3);
     try w.u32le(ci.attachment_count);
     if (ci.attachments) |items| for (items[0..ci.attachment_count]) |a| {
-        if (a.flags != 0 or a.samples == 0 or a.samples & (a.samples - 1) != 0 or a.load_op < 0 or a.load_op > 2 or a.store_op < 0 or a.store_op > 1 or a.stencil_load_op < 0 or a.stencil_load_op > 2 or a.stencil_store_op < 0 or a.stencil_store_op > 1 or !supportedLayout(a.initial_layout) or !supportedLayout(a.final_layout)) return error.Invalid;
+        if (a.flags != 0 or a.samples == 0 or a.samples & (a.samples - 1) != 0 or !validAttachmentLoadOp(a.load_op) or !validAttachmentStoreOp(a.store_op) or !validAttachmentLoadOp(a.stencil_load_op) or !validAttachmentStoreOp(a.stencil_store_op) or !supportedLayout(a.initial_layout) or !supportedLayout(a.final_layout)) return error.Invalid;
         try w.i32le(a.format);
         try w.u32le(a.samples);
         if (!compatibility_only) {
@@ -10032,7 +10038,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
         return;
     }
     const color_attachment = ci.color_attachments.?[0];
-    if (color_attachment.s_type != 1000044000 or color_attachment.p_next != null or color_attachment.resolve_mode != 0 or color_attachment.resolve_image_view != 0 or color_attachment.load_op < 0 or (color_attachment.load_op > 2 and color_attachment.load_op != attachment_load_op_none) or color_attachment.store_op < 0 or (color_attachment.store_op > 1 and color_attachment.store_op != attachment_store_op_none) or !supportedLayout(color_attachment.image_layout) or !renderingAttachmentLayoutValid(color_attachment.image_layout, 1)) {
+    if (color_attachment.s_type != 1000044000 or color_attachment.p_next != null or color_attachment.resolve_mode != 0 or color_attachment.resolve_image_view != 0 or !validAttachmentLoadOp(color_attachment.load_op) or !validAttachmentStoreOp(color_attachment.store_op) or !supportedLayout(color_attachment.image_layout) or !renderingAttachmentLayoutValid(color_attachment.image_layout, 1)) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -10048,7 +10054,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
     }
     var depth: ?*ImageObj = null;
     if (ci.depth_attachment) |depth_attachment| {
-        if (depth_attachment.s_type != 1000044000 or depth_attachment.p_next != null or depth_attachment.resolve_mode != 0 or depth_attachment.resolve_image_view != 0 or depth_attachment.load_op < 0 or (depth_attachment.load_op > 2 and depth_attachment.load_op != attachment_load_op_none) or depth_attachment.store_op < 0 or (depth_attachment.store_op > 1 and depth_attachment.store_op != attachment_store_op_none) or !supportedLayout(depth_attachment.image_layout) or !renderingAttachmentLayoutValid(depth_attachment.image_layout, 2)) {
+        if (depth_attachment.s_type != 1000044000 or depth_attachment.p_next != null or depth_attachment.resolve_mode != 0 or depth_attachment.resolve_image_view != 0 or !validAttachmentLoadOp(depth_attachment.load_op) or !validAttachmentStoreOp(depth_attachment.store_op) or !supportedLayout(depth_attachment.image_layout) or !renderingAttachmentLayoutValid(depth_attachment.image_layout, 2)) {
             command_buffer.impl.invalid = true;
             return;
         }
@@ -11885,11 +11891,16 @@ fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
     const depth_subpass_layout = render_pass.?.subpass_depth_layouts[active_subpass];
     const color_transition = color_subpass_layout != render_pass.?.color_final_layout;
     const depth_transition = depth != null and depth_subpass_layout != render_pass.?.depth_final_layout;
+    const color_discard = render_pass.?.color_store_op == attachment_store_op_none;
+    const depth_discard = depth != null and render_pass.?.depth_store_op == attachment_store_op_none;
     const transition_count: usize = @as(usize, @intFromBool(color_transition)) + @as(usize, @intFromBool(depth_transition));
-    if (@as(usize, command_buffer.impl.count) + transition_count > command_buffer.impl.commands.len) {
+    const discard_count: usize = @as(usize, @intFromBool(color_discard)) + @as(usize, @intFromBool(depth_discard));
+    if (@as(usize, command_buffer.impl.count) + transition_count + discard_count > command_buffer.impl.commands.len) {
         command_buffer.impl.invalid = true;
         return;
     }
+    if (color_discard) record(command_buffer, .{ .discard_image = .{ .image = image, .layer_count = framebuffer.?.layers } });
+    if (depth) |depth_image| if (depth_discard) record(command_buffer, .{ .discard_image = .{ .image = depth_image, .layer_count = framebuffer.?.layers } });
     if (color_transition) record(command_buffer, .{ .transition = .{ .image = image, .old_layout = color_subpass_layout, .new_layout = render_pass.?.color_final_layout } });
     if (depth) |depth_image| if (depth_transition) record(command_buffer, .{ .transition = .{ .image = depth_image, .old_layout = depth_subpass_layout, .new_layout = render_pass.?.depth_final_layout } });
     command_buffer.impl.active_framebuffer = null;
@@ -21257,6 +21268,39 @@ test "traditional render passes honor load operations and image layout transitio
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     try std.testing.expectEqual(@as(u32, 0xa1b2c3d4), std.mem.readInt(u32, imageBytes(image_object)[0..4], .little));
     try std.testing.expectEqual(@as(i32, 1), image_object.layout);
+
+    // Vulkan 1.3's promoted store-none operation is also valid for a
+    // traditional render pass.  It records a bounded discard at end-of-pass
+    // while preserving the bytes until submission executes that discard.
+    attachment.store_op = attachment_store_op_none;
+    render_info.attachments = @ptrCast(&attachment);
+    var none_render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(ctx.device, &render_info, null, &none_render_pass));
+    var none_framebuffer_info = framebuffer_info;
+    none_framebuffer_info.render_pass = none_render_pass;
+    var none_framebuffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createFramebuffer(ctx.device, &none_framebuffer_info, null, &none_framebuffer));
+    render_begin.render_pass = none_render_pass;
+    render_begin.framebuffer = none_framebuffer;
+    render_begin.clear_value_count = 0;
+    render_begin.clear_values = null;
+    const none_bytes_before = std.mem.readInt(u32, imageBytes(image_object)[0..4], .little);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdBeginRenderPass(command[0], &render_begin, 0);
+    try std.testing.expect(!command[0].impl.invalid);
+    cmdEndRenderPass(command[0]);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 3), command[0].impl.count);
+    try std.testing.expectEqual(@as(std.meta.Tag(Command), .discard_image), std.meta.activeTag(command[0].impl.commands[1]));
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(none_bytes_before, std.mem.readInt(u32, imageBytes(image_object)[0..4], .little));
+    try std.testing.expect(image_object.force_full_present);
+    destroyFramebuffer(ctx.device, none_framebuffer, null);
+    destroyRenderPass(ctx.device, none_render_pass, null);
+    attachment.store_op = 0;
+    render_info.attachments = @ptrCast(&attachment);
 
     // A CLEAR attachment needs the corresponding indexed clear value.  The
     // rejected begin must not publish a render scope or a command.

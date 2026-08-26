@@ -366,7 +366,9 @@ submission-time validation. A failure-atomic positive/negative, two-subpass,
 and 4096-iteration allocation-free test covers the path. Clear and draw
 commands also snapshot the active subpass layouts, rejecting host-side layout
 changes after recording and propagating those expectations into secondary
-command-buffer execution.
+command-buffer execution. The promoted LOAD_OP_NONE/STORE_OP_NONE enum values
+are accepted as well; store-none records a bounded content discard at
+end-of-pass while retaining bytes until submission.
 
 The Vulkan 1.4 host-image-copy layout queries now also consume the promoted
 `VkSubresourceHostMemcpySize` output chain.  The chain is ABI-checked, links are
