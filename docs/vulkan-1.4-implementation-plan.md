@@ -210,6 +210,9 @@ requirement. Ordered finite bounds are snapshotted into direct and indirect
 draws, the scalar profile applies the inclusive Vulkan depth-bounds test, and
 the legacy CPU-cube path rejects non-default bounds instead of silently
 ignoring them.
+The promoted depth-bounds-test-enable state is likewise initialized, resolved,
+and snapshotted for direct and indirect draws, so a dynamic pipeline cannot
+silently fall back to its static enable value.
 The memory and sampler handle registries now meet the required 4096 and 4000
 allocation limits respectively. The generated command matrix is a
 234/234 dispatch/name-coverage artifact, not a Vulkan-conformance claim:

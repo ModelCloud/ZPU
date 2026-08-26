@@ -678,6 +678,7 @@ const GraphicsPipelineObj = struct {
     dynamic_depth_write_enable: bool = false,
     dynamic_depth_compare_op: bool = false,
     dynamic_depth_bounds: bool = false,
+    dynamic_depth_bounds_test_enable: bool = false,
     viewport: Viewport,
     scissor: cpu_cube.Rect,
 };
@@ -777,6 +778,7 @@ const dynamic_state_scissor_with_count: i32 = 1000267004;
 const dynamic_state_depth_test_enable: i32 = 1000267006;
 const dynamic_state_depth_write_enable: i32 = 1000267007;
 const dynamic_state_depth_compare_op: i32 = 1000267008;
+const dynamic_state_depth_bounds_test_enable: i32 = 1000267009;
 const dynamic_state_rasterizer_discard_enable: i32 = 1000377001;
 const dynamic_state_primitive_restart_enable: i32 = 1000377004;
 const pipeline_cache_uuid = [_]u8{ 0x5a, 0x50, 0x55, 0x2d, 0x49, 0x43, 0x44, 0x2d, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31 };
@@ -7943,6 +7945,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     var dynamic_depth_write_enable = false;
     var dynamic_depth_compare_op = false;
     var dynamic_depth_bounds = false;
+    var dynamic_depth_bounds_test_enable = false;
     var dynamic_line_width = false;
     var dynamic_depth_bias = false;
     var dynamic_indices: [16]u8 = undefined;
@@ -7961,11 +7964,11 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         var prior: ?i32 = null;
         for (dynamic_indices[0..dynamic_count]) |index| {
             const state = states[index];
-            if (prior == state or state < 0 or (state > 8 and state != dynamic_state_cull_mode and state != dynamic_state_front_face and state != dynamic_state_primitive_topology and state != dynamic_state_viewport_with_count and state != dynamic_state_scissor_with_count and state != dynamic_state_depth_test_enable and state != dynamic_state_depth_write_enable and state != dynamic_state_depth_compare_op and state != dynamic_state_rasterizer_discard_enable and state != dynamic_state_primitive_restart_enable)) return error.Invalid;
+            if (prior == state or state < 0 or (state > 8 and state != dynamic_state_cull_mode and state != dynamic_state_front_face and state != dynamic_state_primitive_topology and state != dynamic_state_viewport_with_count and state != dynamic_state_scissor_with_count and state != dynamic_state_depth_test_enable and state != dynamic_state_depth_write_enable and state != dynamic_state_depth_compare_op and state != dynamic_state_depth_bounds_test_enable and state != dynamic_state_rasterizer_discard_enable and state != dynamic_state_primitive_restart_enable)) return error.Invalid;
             prior = state;
             if (state == 0 or state == dynamic_state_viewport_with_count) dynamic_viewport = true else if (state == 1 or state == dynamic_state_scissor_with_count) dynamic_scissor = true else if (state == 2) dynamic_line_width = true;
             if (state == 3) dynamic_depth_bias = true;
-            if (state == dynamic_state_cull_mode) dynamic_cull_mode = true else if (state == dynamic_state_front_face) dynamic_front_face = true else if (state == dynamic_state_primitive_topology) dynamic_primitive_topology = true else if (state == dynamic_state_depth_test_enable) dynamic_depth_test_enable = true else if (state == dynamic_state_depth_write_enable) dynamic_depth_write_enable = true else if (state == dynamic_state_depth_compare_op) dynamic_depth_compare_op = true else if (state == 5) dynamic_depth_bounds = true else if (state == dynamic_state_rasterizer_discard_enable) dynamic_rasterizer_discard_enable = true else if (state == dynamic_state_primitive_restart_enable) dynamic_primitive_restart_enable = true;
+            if (state == dynamic_state_cull_mode) dynamic_cull_mode = true else if (state == dynamic_state_front_face) dynamic_front_face = true else if (state == dynamic_state_primitive_topology) dynamic_primitive_topology = true else if (state == dynamic_state_depth_test_enable) dynamic_depth_test_enable = true else if (state == dynamic_state_depth_write_enable) dynamic_depth_write_enable = true else if (state == dynamic_state_depth_compare_op) dynamic_depth_compare_op = true else if (state == 5) dynamic_depth_bounds = true else if (state == dynamic_state_depth_bounds_test_enable) dynamic_depth_bounds_test_enable = true else if (state == dynamic_state_rasterizer_discard_enable) dynamic_rasterizer_discard_enable = true else if (state == dynamic_state_primitive_restart_enable) dynamic_primitive_restart_enable = true;
             try w.i32le(state);
         }
     }
@@ -8052,7 +8055,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         };
         profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     }
-    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .viewport = baked_viewport, .scissor = baked_scissor };
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .viewport = baked_viewport, .scissor = baked_scissor };
 }
 
 fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, set0: *const Canonical) bool {
@@ -9643,6 +9646,7 @@ fn cmdSetDepthBoundsTestEnable(cb: ?CommandBuffer, enable: u32) callconv(.c) voi
         return;
     }
     c.impl.dynamic.depth_bounds_test_enable = enable;
+    c.impl.dynamic.depth_bounds_test_enable_set = true;
 }
 fn cmdSetStencilTestEnable(cb: ?CommandBuffer, enable: u32) callconv(.c) void {
     lock();
@@ -9944,7 +9948,7 @@ fn graphicsDrawExecutionAllowed(abi: ExecutionAbi) bool {
     };
 }
 fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsPipelineObj) ?DrawRasterState {
-    if ((pipeline.dynamic_viewport and !command_buffer.impl.viewport_set) or (pipeline.dynamic_scissor and !command_buffer.impl.scissor_set) or (pipeline.dynamic_cull_mode and command_buffer.impl.dynamic.cull_mode == std.math.maxInt(u32)) or (pipeline.dynamic_front_face and command_buffer.impl.dynamic.front_face < 0) or (pipeline.dynamic_primitive_topology and !command_buffer.impl.dynamic.primitive_topology_set) or (pipeline.dynamic_primitive_restart_enable and !command_buffer.impl.dynamic.primitive_restart_enable_set) or (pipeline.dynamic_rasterizer_discard_enable and !command_buffer.impl.dynamic.rasterizer_discard_enable_set) or (pipeline.dynamic_depth_test_enable and !command_buffer.impl.dynamic.depth_test_enable_set) or (pipeline.dynamic_depth_write_enable and !command_buffer.impl.dynamic.depth_write_enable_set) or (pipeline.dynamic_depth_compare_op and !command_buffer.impl.dynamic.depth_compare_op_set) or (pipeline.dynamic_depth_bounds and !command_buffer.impl.depth_bounds_set)) return null;
+    if ((pipeline.dynamic_viewport and !command_buffer.impl.viewport_set) or (pipeline.dynamic_scissor and !command_buffer.impl.scissor_set) or (pipeline.dynamic_cull_mode and command_buffer.impl.dynamic.cull_mode == std.math.maxInt(u32)) or (pipeline.dynamic_front_face and command_buffer.impl.dynamic.front_face < 0) or (pipeline.dynamic_primitive_topology and !command_buffer.impl.dynamic.primitive_topology_set) or (pipeline.dynamic_primitive_restart_enable and !command_buffer.impl.dynamic.primitive_restart_enable_set) or (pipeline.dynamic_rasterizer_discard_enable and !command_buffer.impl.dynamic.rasterizer_discard_enable_set) or (pipeline.dynamic_depth_test_enable and !command_buffer.impl.dynamic.depth_test_enable_set) or (pipeline.dynamic_depth_write_enable and !command_buffer.impl.dynamic.depth_write_enable_set) or (pipeline.dynamic_depth_compare_op and !command_buffer.impl.dynamic.depth_compare_op_set) or (pipeline.dynamic_depth_bounds and !command_buffer.impl.depth_bounds_set) or (pipeline.dynamic_depth_bounds_test_enable and !command_buffer.impl.dynamic.depth_bounds_test_enable_set)) return null;
     const primitive_topology = if (pipeline.dynamic_primitive_topology) command_buffer.impl.dynamic.primitive_topology else pipeline.primitive_topology;
     const primitive_restart_enable = if (pipeline.dynamic_primitive_restart_enable) command_buffer.impl.dynamic.primitive_restart_enable else pipeline.primitive_restart_enable;
     const rasterizer_discard_enable = if (pipeline.dynamic_rasterizer_discard_enable) command_buffer.impl.dynamic.rasterizer_discard_enable else pipeline.rasterizer_discard_enable;
@@ -9952,6 +9956,7 @@ fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsP
     const depth_write_enable = if (pipeline.dynamic_depth_write_enable) command_buffer.impl.dynamic.depth_write_enable else pipeline.depth_write_enable;
     const depth_compare_op = if (pipeline.dynamic_depth_compare_op) command_buffer.impl.dynamic.depth_compare_op else pipeline.depth_compare_op;
     const depth_bounds = if (pipeline.dynamic_depth_bounds) command_buffer.impl.depth_bounds else pipeline.depth_bounds;
+    const depth_bounds_test_enable = if (pipeline.dynamic_depth_bounds_test_enable) command_buffer.impl.dynamic.depth_bounds_test_enable else pipeline.depth_bounds_test_enable;
     if (primitive_topology != 3 or primitive_restart_enable != 0) return null;
     return .{
         .viewport = if (pipeline.dynamic_viewport) command_buffer.impl.viewport else pipeline.viewport,
@@ -9964,7 +9969,7 @@ fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsP
         .depth_test_enable = depth_test_enable,
         .depth_write_enable = depth_write_enable,
         .depth_compare_op = depth_compare_op,
-        .depth_bounds_test_enable = pipeline.depth_bounds_test_enable,
+        .depth_bounds_test_enable = depth_bounds_test_enable,
         .depth_bounds = depth_bounds,
     };
 }
@@ -9995,6 +10000,7 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     pipeline.dynamic_depth_write_enable = false;
     pipeline.dynamic_depth_compare_op = false;
     pipeline.dynamic_depth_bounds = false;
+    pipeline.dynamic_depth_bounds_test_enable = false;
     var impl: CommandBufferImpl = undefined;
     impl.viewport = dynamic_viewport;
     impl.scissor = dynamic_scissor;
@@ -10118,6 +10124,13 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     resolved = drawRasterState(&command_buffer, &pipeline).?;
     try std.testing.expectEqual([2]f32{ 0.25, 0.75 }, resolved.depth_bounds);
     pipeline.dynamic_depth_bounds = false;
+    pipeline.dynamic_depth_bounds_test_enable = true;
+    try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
+    impl.dynamic.depth_bounds_test_enable = 1;
+    impl.dynamic.depth_bounds_test_enable_set = true;
+    resolved = drawRasterState(&command_buffer, &pipeline).?;
+    try std.testing.expectEqual(@as(u32, 1), resolved.depth_bounds_test_enable);
+    pipeline.dynamic_depth_bounds_test_enable = false;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
     try std.testing.expectEqual(baked_viewport, resolved.viewport);
     try std.testing.expectEqual(dynamic_scissor, resolved.scissor);
@@ -12166,7 +12179,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     var pipelines: [1]usize = undefined;
     try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, graphics_cache, 1, @ptrCast(&pipeline_info), null, &pipelines));
     const baseline_pipeline = validGraphicsPipelineLocked(pipelines[0]).?;
-    const extended_dynamic_states = [_]i32{ dynamic_state_cull_mode, dynamic_state_front_face, dynamic_state_primitive_topology, dynamic_state_viewport_with_count, dynamic_state_scissor_with_count, dynamic_state_depth_test_enable, dynamic_state_depth_write_enable, dynamic_state_depth_compare_op, 5, dynamic_state_rasterizer_discard_enable, dynamic_state_primitive_restart_enable };
+    const extended_dynamic_states = [_]i32{ dynamic_state_cull_mode, dynamic_state_front_face, dynamic_state_primitive_topology, dynamic_state_viewport_with_count, dynamic_state_scissor_with_count, dynamic_state_depth_test_enable, dynamic_state_depth_write_enable, dynamic_state_depth_compare_op, 5, dynamic_state_depth_bounds_test_enable, dynamic_state_rasterizer_discard_enable, dynamic_state_primitive_restart_enable };
     const extended_dynamic = PipelineDynamicStateCreateInfo{ .s_type = 27, .p_next = null, .flags = 0, .dynamic_state_count = extended_dynamic_states.len, .dynamic_states = &extended_dynamic_states };
     var extended_dynamic_pipeline_info = pipeline_info;
     extended_dynamic_pipeline_info.dynamic = &extended_dynamic;
@@ -12183,6 +12196,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(validGraphicsPipelineLocked(extended_dynamic_pipeline[0]).?.dynamic_depth_write_enable);
     try std.testing.expect(validGraphicsPipelineLocked(extended_dynamic_pipeline[0]).?.dynamic_depth_compare_op);
     try std.testing.expect(validGraphicsPipelineLocked(extended_dynamic_pipeline[0]).?.dynamic_depth_bounds);
+    try std.testing.expect(validGraphicsPipelineLocked(extended_dynamic_pipeline[0]).?.dynamic_depth_bounds_test_enable);
     destroyPipeline(device, extended_dynamic_pipeline[0], null);
     var graphics_cache_size: usize = 0;
     try std.testing.expectEqual(Result.success, getPipelineCacheData(device, graphics_cache, &graphics_cache_size, null));
@@ -17604,6 +17618,8 @@ test "core dynamic scalar blend depth and stencil states are exact and allocatio
         try std.testing.expectEqual(@as(u32, 0), commands[0].impl.dynamic.rasterizer_discard_enable);
         try std.testing.expect(commands[0].impl.dynamic.rasterizer_discard_enable_set);
         try std.testing.expectEqual(@as(u32, 1), commands[0].impl.dynamic.depth_test_enable);
+        try std.testing.expectEqual(@as(u32, 0), commands[0].impl.dynamic.depth_bounds_test_enable);
+        try std.testing.expect(commands[0].impl.dynamic.depth_bounds_test_enable_set);
         try std.testing.expect(commands[0].impl.dynamic.depth_test_enable_set);
         try std.testing.expectEqual(@as(u32, 1), commands[0].impl.dynamic.depth_write_enable);
         try std.testing.expect(commands[0].impl.dynamic.depth_write_enable_set);
@@ -17630,6 +17646,8 @@ test "core dynamic scalar blend depth and stencil states are exact and allocatio
         try std.testing.expect(!commands[0].impl.dynamic.rasterizer_discard_enable_set);
         try std.testing.expectEqual(@as(u32, 1), commands[0].impl.dynamic.depth_test_enable);
         try std.testing.expect(!commands[0].impl.dynamic.depth_test_enable_set);
+        try std.testing.expectEqual(@as(u32, 0), commands[0].impl.dynamic.depth_bounds_test_enable);
+        try std.testing.expect(!commands[0].impl.dynamic.depth_bounds_test_enable_set);
         try std.testing.expectEqual(@as(u32, 1), commands[0].impl.dynamic.depth_write_enable);
         try std.testing.expect(!commands[0].impl.dynamic.depth_write_enable_set);
         try std.testing.expectEqual(@as(i32, 3), commands[0].impl.dynamic.depth_compare_op);
