@@ -495,7 +495,7 @@ const descriptor_type_count = 11;
 const DescriptorCounts = [descriptor_type_count]u32;
 const DescriptorPoolObj = struct { owner: DeviceIdentity, flags: u32, max_sets: u32, allocated_sets: u32, capacity: DescriptorCounts, used: DescriptorCounts };
 const DescriptorSetObj = struct { owner: DeviceIdentity = undefined, pool: *DescriptorPoolObj = undefined, counts: DescriptorCounts = [_]u32{0} ** descriptor_type_count, layout: Canonical = .{}, binding_types: [2]i32 = .{ -1, -1 }, uniform: ?*BufferObj = null, uniform_offset: u64 = 0, uniform_range: u64 = 0, uniform_dynamic: bool = false, storage: ?*BufferObj = null, storage_binding: u32 = 0, storage_offset: u64 = 0, storage_range: u64 = 0, texture: ?*ImageObj = null, synthetic: bool = false };
-const DescriptorUpdateTemplateObj = struct { owner: DeviceIdentity, layout: *DescriptorSetLayoutObj, pipeline_bind_point: i32 = 0, pipeline_layout: usize = 0, entry_count: u32, entries: [32]DescriptorUpdateTemplateEntry };
+const DescriptorUpdateTemplateObj = struct { owner: DeviceIdentity, layout: *DescriptorSetLayoutObj, template_type: i32 = 0, pipeline_bind_point: i32 = 0, pipeline_layout: usize = 0, entry_count: u32, entries: [32]DescriptorUpdateTemplateEntry };
 const DeviceIdentity = struct {
     handle: Device,
     generation: u64,
@@ -8297,15 +8297,21 @@ fn createDescriptorUpdateTemplate(device: ?Device, info: ?*const DescriptorUpdat
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (alloc != null or ci.s_type != 1000085000 or ci.p_next != null or ci.flags != 0 or ci.template_type != 0 or (ci.pipeline_bind_point != 0 and ci.pipeline_bind_point != 1) or ci.set != 0 or ci.descriptor_update_entry_count > 32 or (ci.descriptor_update_entry_count != 0 and ci.descriptor_update_entries == null)) return .error_initialization_failed;
+    if (alloc != null or ci.s_type != 1000085000 or ci.p_next != null or ci.flags != 0 or (ci.template_type != 0 and ci.template_type != 1) or (ci.pipeline_bind_point != 0 and ci.pipeline_bind_point != 1) or ci.set != 0 or ci.descriptor_update_entry_count > 32 or (ci.descriptor_update_entry_count != 0 and ci.descriptor_update_entries == null)) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
     const layout = validDescriptorSetLayoutLocked(ci.descriptor_set_layout) orelse return .error_initialization_failed;
     if (!layout.owner.eql(d)) return .error_initialization_failed;
+    var pipeline_layout: ?*PipelineLayoutObj = null;
+    if (ci.template_type == 1) {
+        if (layout.flags & 1 == 0 or ci.pipeline_layout == 0) return .error_initialization_failed;
+        pipeline_layout = validPipelineLayoutLocked(ci.pipeline_layout) orelse return .error_initialization_failed;
+        if (!pipeline_layout.?.owner.eql(d) or !pipeline_layout.?.push_descriptor or !pipeline_layout.?.set0.eql(&layout.canonical)) return .error_initialization_failed;
+    }
     if (ci.descriptor_update_entries) |entries| for (entries[0..ci.descriptor_update_entry_count]) |entry| if (entry.dst_array_element != 0 or entry.descriptor_count != 1 or (entry.descriptor_type != 6 and entry.descriptor_type != 7 and entry.descriptor_type != 8 and entry.descriptor_type != 1) or entry.stride == 0 or (entry.descriptor_type == 8 and (entry.dst_binding != 0 or layout.binding_types[0] != 8)) or (entry.descriptor_type == 7 and (entry.dst_binding > 1 or layout.binding_types[entry.dst_binding] != 7)) or (entry.descriptor_type == 6 and entry.dst_binding == 0 and layout.binding_types[0] != 6) or (entry.descriptor_type == 1 and (entry.dst_binding != 1 or layout.binding_types[1] != 1))) return .error_initialization_failed;
     for (&descriptor_update_template_objects, &descriptor_update_template_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = DeviceIdentity.capture(d), .layout = layout, .pipeline_bind_point = ci.pipeline_bind_point, .pipeline_layout = ci.pipeline_layout, .entry_count = ci.descriptor_update_entry_count, .entries = [_]DescriptorUpdateTemplateEntry{std.mem.zeroes(DescriptorUpdateTemplateEntry)} ** 32 };
+        object.* = .{ .owner = DeviceIdentity.capture(d), .layout = layout, .template_type = ci.template_type, .pipeline_bind_point = ci.pipeline_bind_point, .pipeline_layout = if (pipeline_layout != null) ci.pipeline_layout else 0, .entry_count = ci.descriptor_update_entry_count, .entries = [_]DescriptorUpdateTemplateEntry{std.mem.zeroes(DescriptorUpdateTemplateEntry)} ** 32 };
         if (ci.descriptor_update_entries) |entries| @memcpy(object.entries[0..ci.descriptor_update_entry_count], entries[0..ci.descriptor_update_entry_count]);
         state.* = .live;
         out.* = @intFromPtr(object);
@@ -8327,7 +8333,7 @@ fn updateDescriptorSetWithTemplate(device: ?Device, set_handle: usize, template_
     const d = device orelse return;
     const set = validDescriptorSetLocked(set_handle) orelse return;
     const template = validDescriptorUpdateTemplateLocked(template_handle) orelse return;
-    if (!validDeviceLocked(d) or !set.owner.eql(d) or !template.owner.eql(d) or !template.layout.owner.eql(d) or !set.layout.eql(&template.layout.canonical)) return;
+    if (!validDeviceLocked(d) or !set.owner.eql(d) or !template.owner.eql(d) or !template.layout.owner.eql(d) or template.template_type != 0 or !set.layout.eql(&template.layout.canonical)) return;
     if (template.entry_count != 0 and data == null) return;
     const Update = struct {
         uniform: ?*BufferObj,
@@ -9098,7 +9104,7 @@ fn cmdPushDescriptorSetWithTemplateLocked(command_buffer: *CommandBufferObj, tem
         command_buffer.impl.invalid = true;
         return;
     };
-    if ((bind_point != 0 and bind_point != 1) or set != 0 or data == null or command_buffer.impl.state != 1 or command_buffer.impl.invalid or !layout_object.owner.eql(command_buffer.impl.owner) or !template.owner.eql(command_buffer.impl.owner) or !template.layout.canonical.eql(&layout_object.set0) or (template.pipeline_layout != 0 and template.pipeline_layout != layout)) {
+    if ((bind_point != 0 and bind_point != 1) or template.template_type != 1 or set != 0 or data == null or command_buffer.impl.state != 1 or command_buffer.impl.invalid or !layout_object.owner.eql(command_buffer.impl.owner) or !template.owner.eql(command_buffer.impl.owner) or !template.layout.canonical.eql(&layout_object.set0) or (template.pipeline_layout != 0 and template.pipeline_layout != layout)) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -15359,14 +15365,20 @@ test "push descriptors own layout state, template decoding, rollback, and warm p
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
     descriptor_write.descriptor_count = 1;
     const template_entry = DescriptorUpdateTemplateEntry{ .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 6, .offset = 0, .stride = @sizeOf(DescriptorBufferInfo) };
-    const template_info = DescriptorUpdateTemplateCreateInfo{ .s_type = 1000085000, .p_next = null, .flags = 0, .descriptor_update_entry_count = 1, .descriptor_update_entries = @ptrCast(&template_entry), .template_type = 0, .descriptor_set_layout = push_set_layout, .pipeline_bind_point = 0, .pipeline_layout = pipeline_layout, .set = 0 };
+    const template_info = DescriptorUpdateTemplateCreateInfo{ .s_type = 1000085000, .p_next = null, .flags = 0, .descriptor_update_entry_count = 1, .descriptor_update_entries = @ptrCast(&template_entry), .template_type = 1, .descriptor_set_layout = push_set_layout, .pipeline_bind_point = 0, .pipeline_layout = pipeline_layout, .set = 0 };
     var descriptor_template: usize = 0;
     try std.testing.expectEqual(Result.success, createDescriptorUpdateTemplate(ctx.device, &template_info, null, &descriptor_template));
+    try std.testing.expectEqual(@as(i32, 1), validDescriptorUpdateTemplateLocked(descriptor_template).?.template_type);
     var unsupported_template_info = template_info;
     unsupported_template_info.pipeline_bind_point = 2;
     var unsupported_template: usize = 0xfeed_face;
     try std.testing.expectEqual(Result.error_initialization_failed, createDescriptorUpdateTemplate(ctx.device, &unsupported_template_info, null, &unsupported_template));
     try std.testing.expectEqual(@as(usize, 0xfeed_face), unsupported_template);
+    var unsupported_template_type_info = template_info;
+    unsupported_template_type_info.template_type = 2;
+    var unsupported_template_type: usize = 0xfeed_face;
+    try std.testing.expectEqual(Result.error_initialization_failed, createDescriptorUpdateTemplate(ctx.device, &unsupported_template_type_info, null, &unsupported_template_type));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), unsupported_template_type);
     cmdPushDescriptorSetWithTemplate(command[0], descriptor_template, pipeline_layout, 0, &descriptor_buffer);
     try std.testing.expect(!command[0].impl.invalid);
     try std.testing.expectEqual(@as(u64, 4), command[0].impl.push_descriptor.uniform_offset);
