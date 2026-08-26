@@ -272,9 +272,9 @@ Traditional render-pass begin/end now honor the canonical attachment load
 operation and image-layout contract: LOAD preserves existing pixels, CLEAR
 requires only the indexed clear values it consumes, UNDEFINED captures the
 tracked prior layout as a discard transition, and begin/end record the
-subpass and final layout transitions for submission-time validation. A
-failure-atomic positive/negative and 4096-iteration allocation-free test
-covers the path.
+subpass, each declared inter-subpass, and final layout transitions for
+submission-time validation. A failure-atomic positive/negative, two-subpass,
+and 4096-iteration allocation-free test covers the path.
 
 The Vulkan 1.4 host-image-copy layout queries now also consume the promoted
 `VkSubresourceHostMemcpySize` output chain.  The chain is ABI-checked, links are
