@@ -64,6 +64,26 @@ pub const Op = enum(u8) {
     shr_logical,
     /// Component-wise arithmetic right shift.
     shr_arithmetic,
+    /// Scalar integer equality comparison producing a boolean.
+    ieq,
+    /// Scalar integer inequality comparison producing a boolean.
+    ine,
+    /// Scalar unsigned greater-than comparison producing a boolean.
+    ugt,
+    /// Scalar unsigned greater-than-or-equal comparison producing a boolean.
+    uge,
+    /// Scalar unsigned less-than comparison producing a boolean.
+    ult,
+    /// Scalar unsigned less-than-or-equal comparison producing a boolean.
+    ule,
+    /// Scalar signed greater-than comparison producing a boolean.
+    sgt,
+    /// Scalar signed greater-than-or-equal comparison producing a boolean.
+    sge,
+    /// Scalar signed less-than comparison producing a boolean.
+    slt,
+    /// Scalar signed less-than-or-equal comparison producing a boolean.
+    sle,
 };
 
 pub const Instruction = struct {
@@ -218,7 +238,7 @@ fn valueOperand(op: Op, operand_index: usize) bool {
         .shuffle => operand_index < 2,
         .fneg, .ineg, .bit_not, .convert => operand_index == 0,
         .select => operand_index < 3,
-        .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .fadd, .fsub, .fmul, .fdiv, .vector_times_scalar, .matrix_times_vector => operand_index < 2,
+        .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .fadd, .fsub, .fmul, .fdiv, .vector_times_scalar, .matrix_times_vector => operand_index < 2,
         .output => operand_index == 1,
     };
 }

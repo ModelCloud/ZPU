@@ -967,7 +967,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const result = result_id orelse continue;
             if (!needed[try id(nodes, result)]) continue;
             const first_operand: usize = switch (instruction.opcode) {
-                41, 42, 43, 48, 49, 50, 164...168, 170...179 => continue,
+                41, 42, 43, 48, 49, 50, 164...168 => continue,
+                170...179 => if (try staticCondition(nodes, result) != null) continue else 2,
                 else => 2,
             };
             if (instruction.opcode == 245) {
@@ -1104,7 +1105,20 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             142 => .vector_times_scalar,
             145 => .matrix_times_vector,
             169 => .select,
-            164...168, 170...179 => .constant,
+            164...168 => .constant,
+            170...179 => if ((try staticCondition(nodes, rid)) != null) .constant else switch (instruction.opcode) {
+                170 => .ieq,
+                171 => .ine,
+                172 => .ugt,
+                173 => .uge,
+                174 => .ult,
+                175 => .ule,
+                176 => .sgt,
+                177 => .sge,
+                178 => .slt,
+                179 => .sle,
+                else => unreachable,
+            },
             else => unreachable,
         };
         var operands: std.ArrayList(u32) = .empty;
@@ -1368,6 +1382,30 @@ pub const compute_shift_store = [_]u32{
     7,               10,             (5 << 16) | 128, 2,          13,
     11,              12,             (3 << 16) | 62,  5,          13,
     (1 << 16) | 253, (1 << 16) | 56,
+};
+
+/// Compute profile variant that compares a runtime StorageBuffer load before
+/// selecting one of two scalar values for the same buffer. This exercises the
+/// dynamic integer-comparison lowering while keeping execution straight-line.
+pub const compute_dynamic_compare_store = [_]u32{
+    0x0723_0203,     0x0001_0000,    0,               17,         0,
+    (2 << 16) | 17,  1,              (3 << 16) | 14,  0,          1,
+    (6 << 16) | 15,  5,              8,               0x6e69616d, 0,
+    5,               (6 << 16) | 16, 8,               17,         1,
+    1,               1,              (4 << 16) | 71,  5,          33,
+    0,               (4 << 16) | 71, 5,               34,         0,
+    (2 << 16) | 19,  1,              (4 << 16) | 21,  2,          32,
+    0,               (2 << 16) | 20, 12,              (4 << 16) | 32,
+    4,               12,             2,               (4 << 16) | 59, 4,
+    5,               12,             (3 << 16) | 33, 6,           1,
+    (4 << 16) | 43,  2,              11,              42,          (4 << 16) | 43,
+    2,               14,              1,               (4 << 16) | 43, 2,
+    15,              0,              (5 << 16) | 54,  1,           8,
+    0,               6,              (2 << 16) | 248, 9,           (4 << 16) | 61,
+    2,               10,              5,               (5 << 16) | 170, 12,
+    13,              10,             11,              (6 << 16) | 169, 2,
+    16,              13,              14,              15,             (3 << 16) | 62,
+    5,               16,              (1 << 16) | 253, (1 << 16) | 56,
 };
 
 /// Scalar-pointer form of the bounded compute store profile.  Unlike the
@@ -1883,6 +1921,29 @@ test "compute profile lowers logical and arithmetic integer shifts" {
     var saw_arithmetic = false;
     for (arithmetic_program.instructions) |instruction| saw_arithmetic = saw_arithmetic or instruction.op == .shr_arithmetic;
     try std.testing.expect(saw_arithmetic);
+}
+
+test "compute profile lowers dynamic integer comparison before select" {
+    var program = try compile(std.testing.allocator, &compute_dynamic_compare_store, .compute, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var saw_load = false;
+    var saw_compare = false;
+    var saw_select = false;
+    for (program.instructions) |instruction| {
+        saw_load = saw_load or instruction.op == .storage;
+        saw_compare = saw_compare or instruction.op == .ieq;
+        saw_select = saw_select or instruction.op == .select;
+    }
+    try std.testing.expect(saw_load and saw_compare and saw_select);
+
+    var not_equal = compute_dynamic_compare_store;
+    const compare = testOpcodeOffset(&not_equal, 170, 0).?;
+    not_equal[compare] = (5 << 16) | 171;
+    var unequal_program = try compile(std.testing.allocator, &not_equal, .compute, "main", &.{});
+    defer unequal_program.deinit(std.testing.allocator);
+    var saw_ine = false;
+    for (unequal_program.instructions) |instruction| saw_ine = saw_ine or instruction.op == .ine;
+    try std.testing.expect(saw_ine);
 }
 
 test "compute profile accepts a scalar storage-buffer pointer" {

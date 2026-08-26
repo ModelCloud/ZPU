@@ -57,7 +57,7 @@ transactional output commits; static access-chain reads share the same
 validated interface path. Constant-folded scalar integer comparisons and nested
 boolean logical expressions, signed integer negation, component-wise integer
 multiply, bitwise operations, integer division/remainder, and bounded integer
-shifts, plus
+shifts and dynamic scalar integer comparisons, plus
 statically resolved, acyclic `OpBranch`,
 `OpBranchConditional`, and constant-selector `OpSwitch` paths now prune
 unselected blocks before lowering, while dynamic conditions, loops, dynamic
@@ -440,7 +440,8 @@ Each slice must land with all of the following:
   Indirect dispatch arguments are consumed at submission. The bounded compute
   profile now also supports signed integer negation, component-wise integer
   multiply, bitwise operations, integer division/remainder, and bounded integer
-  shifts, constant-folds scalar integer equality and resolves
+  shifts, executes bounded dynamic scalar integer comparisons, constant-folds
+  scalar integer equality, and resolves
   predecessor-selected `OpPhi` values at static
   acyclic branch joins, preserving only the incoming value from the selected
   predecessor before lowering to straight-line canonical IR. Generic SPIR-V
