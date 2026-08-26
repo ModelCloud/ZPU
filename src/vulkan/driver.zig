@@ -6314,6 +6314,25 @@ fn prevalidateIndirectProfileDraw(op: IndirectDrawState, owner: *DeviceObj) bool
     return prevalidateProfileVertexBindings(cube.cube_draw, owner);
 }
 
+fn indirectFirstInstanceValid(op: IndirectDrawState) bool {
+    // The advertised feature set leaves drawIndirectFirstInstance disabled.
+    // Indirect arguments are read at submission time, so this check must run
+    // after recording and before any command in the batch executes.  A zero
+    // draw count has no argument to validate and remains a legal no-op.
+    const bytes = bufferBytes(op.indirect_buffer);
+    const draw_count = if (op.count_source) |count| blk: {
+        const count_bytes = bufferBytes(count.buffer);
+        break :blk @min(std.mem.readInt(u32, count_bytes[@intCast(count.offset)..][0..4], .little), count.max_draw_count);
+    } else op.draw_count;
+    if (draw_count == 0) return true;
+    if (draw_count > 1) return false;
+    const base = @as(usize, @intCast(op.offset));
+    const indirect_size: usize = if (op.indexed) 20 else 16;
+    if (base > bytes.len or indirect_size > bytes.len - base) return false;
+    const first_instance_offset: usize = if (op.indexed) 16 else 12;
+    return std.mem.readInt(u32, bytes[base + first_instance_offset ..][0..4], .little) == 0;
+}
+
 fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_objects]i32) bool {
     switch (command) {
         .fill => |op| {
@@ -6561,6 +6580,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 if (count.buffer.owner != owner or count.buffer.memory.?.owner != owner) return wrongSubmittingDevice();
                 if (count.max_draw_count > 1 or count.offset % 4 != 0 or count.offset > count.buffer.size or count.buffer.size - count.offset < 4) return false;
             }
+            if (!indirectFirstInstanceValid(op)) return false;
             if (profile_draw and !prevalidateIndirectProfileDraw(op, owner)) return false;
             if (profile_draw and !prevalidateProfileUniforms(op, owner)) return false;
             if (op.descriptors.sampler) |sampler| {
@@ -7329,6 +7349,33 @@ test "Vulkan host-memory benchmark helpers implement exact command byte semantic
     benchmarkHostMemoryCopy(&copied, &filled);
     try std.testing.expectEqualSlices(u8, &filled, &copied);
     try std.testing.expect(!rowSequencesOverlap(0, 8, 2, 4, 32, 8, 2, 4));
+}
+
+test "indirect draws honor the disabled first-instance feature at submission" {
+    var storage: [20]u8 align(64) = .{0} ** 20;
+    var memory = MemoryObj{ .owner = @ptrFromInt(8), .bytes = storage[0..], .mapped = true };
+    var buffer = BufferObj{ .owner = @ptrFromInt(8), .size = storage.len, .usage = 0x100, .memory = &memory };
+    var op: IndirectDrawState = undefined;
+    op.indirect_buffer = &buffer;
+    op.offset = 0;
+    op.draw_count = 1;
+    op.stride = 16;
+    op.indexed = false;
+    op.count_source = null;
+    try std.testing.expect(indirectFirstInstanceValid(op));
+    std.mem.writeInt(u32, storage[12..16], 1, .little);
+    try std.testing.expect(!indirectFirstInstanceValid(op));
+    std.mem.writeInt(u32, storage[12..16], 0, .little);
+    op.indexed = true;
+    op.stride = 20;
+    try std.testing.expect(indirectFirstInstanceValid(op));
+    std.mem.writeInt(u32, storage[16..20], 1, .little);
+    try std.testing.expect(!indirectFirstInstanceValid(op));
+    op.draw_count = 0;
+    try std.testing.expect(indirectFirstInstanceValid(op));
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| try std.testing.expect(indirectFirstInstanceValid(op));
+    test_allocations_before_failure = null;
 }
 
 test "clear attachment regions execute across array layers" {
@@ -13552,7 +13599,10 @@ test "vkcube presentation path records submits and presents two swapchain images
     var mapped_indirect: ?*anyopaque = null;
     try std.testing.expectEqual(Result.success, mapMemory(device, indirect_memory, 0, 20, 0, &mapped_indirect));
     const indirect_words: [*]u32 = @ptrCast(@alignCast(mapped_indirect.?));
-    indirect_words[0..5].* = .{ 3, 2, 1, @bitCast(@as(i32, -1)), 0 };
+    // Keep both the non-indexed and indexed command interpretations valid:
+    // the fourth word is firstInstance for the former and vertexOffset for
+    // the latter, while the advertised profile disables indirect firstInstance.
+    indirect_words[0..5].* = .{ 3, 2, 1, 0, 0 };
     unmapMemory(device, indirect_memory);
     const draw_sampler_info = SamplerCreateInfo{ .s_type = 31, .p_next = null, .flags = 0, .mag_filter = 0, .min_filter = 0, .mipmap_mode = 0, .address_mode_u = 0, .address_mode_v = 0, .address_mode_w = 0, .mip_lod_bias = 0, .anisotropy_enable = 0, .max_anisotropy = 0, .compare_enable = 0, .compare_op = 0, .min_lod = 0, .max_lod = 0, .border_color = 0, .unnormalized_coordinates = 0 };
     var draw_sampler: usize = 0;
@@ -13859,6 +13909,16 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.success, acquireNextImage(device, swapchain, std.math.maxInt(u64), acquired, 0, &image_index));
     const wait_stage: u32 = 0x400;
     const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 1, .wait_semaphores = @ptrCast(&acquired), .wait_dst_stage_mask = @ptrCast(&wait_stage), .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 1, .signal_semaphores = @ptrCast(&rendered) };
+    try std.testing.expectEqual(Result.success, mapMemory(device, indirect_memory, 0, 20, 0, &mapped_indirect));
+    const remapped_indirect_words: [*]u32 = @ptrCast(@alignCast(mapped_indirect.?));
+    remapped_indirect_words[3] = 1;
+    unmapMemory(device, indirect_memory);
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expect(validSemaphoreLocked(acquired).?.signaled.load(.acquire));
+    try std.testing.expectEqual(Result.success, mapMemory(device, indirect_memory, 0, 20, 0, &mapped_indirect));
+    const restored_indirect_words: [*]u32 = @ptrCast(@alignCast(mapped_indirect.?));
+    restored_indirect_words[3] = 0;
+    unmapMemory(device, indirect_memory);
     try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&submit), 0));
     var occlusion_result: u64 = 0;
     try std.testing.expectEqual(Result.success, getQueryPoolResults(device, occlusion_pool, 0, 1, @sizeOf(u64), &occlusion_result, @sizeOf(u64), 1 | 2));
