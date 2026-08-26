@@ -4937,13 +4937,12 @@ fn cmdSetEvent2(cb: ?CommandBuffer, event: usize, info: ?*const DependencyInfo) 
     if (info.?.memory_barrier_count != 0 or info.?.buffer_memory_barrier_count != 0 or info.?.image_memory_barrier_count != 0) cmdPipelineBarrier2(cb, info);
     cmdSetEvent(cb, event, 0x1_0000);
 }
-fn cmdResetEvent2(cb: ?CommandBuffer, event: usize, info: ?*const DependencyInfo) callconv(.c) void {
-    if (!dependencyInfoShapeValid(info)) {
+fn cmdResetEvent2(cb: ?CommandBuffer, event: usize, stage_mask: u64) callconv(.c) void {
+    const legacy_stage = sync2StageMaskToLegacy(stage_mask) orelse {
         markCommandBufferInvalid(cb);
         return;
-    }
-    if (info.?.memory_barrier_count != 0 or info.?.buffer_memory_barrier_count != 0 or info.?.image_memory_barrier_count != 0) cmdPipelineBarrier2(cb, info);
-    cmdResetEvent(cb, event, 0x1_0000);
+    };
+    cmdResetEvent(cb, event, legacy_stage);
 }
 fn cmdWaitEvents2(cb: ?CommandBuffer, event_count: u32, events: ?[*]const usize, infos: ?[*]const DependencyInfo) callconv(.c) void {
     if (event_count == 0 or event_count > max_api_items or events == null or infos == null) {
@@ -13783,7 +13782,7 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     const image_barrier = ImageMemoryBarrier2{ .s_type = 1000314002, .p_next = null, .src_stage_mask = 1, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0x1800, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
     const image_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 0, .memory_barriers = null, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 1, .image_memory_barriers = @ptrCast(&image_barrier) };
     cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&image_dependency));
-    cmdResetEvent2(commands[0], event, &dependency);
+    cmdResetEvent2(commands[0], event, 0x1_0000);
     const empty_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 0, .memory_barriers = null, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
     const before_empty_barrier = commands[0].impl.count;
     cmdPipelineBarrier2(commands[0], &empty_dependency);
@@ -13797,7 +13796,7 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expectEqual(before_none_barrier, commands[0].impl.count);
     cmdSetEvent2(commands[0], event, &empty_dependency);
     cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&empty_dependency));
-    cmdResetEvent2(commands[0], event, &empty_dependency);
+    cmdResetEvent2(commands[0], event, 0x1_0000);
     cmdWriteTimestamp2(commands[0], 0x1000, query, 0);
     cmdWriteTimestamp2(commands[0], 0x1000_0000_0, query, 1);
     try std.testing.expect(!commands[0].impl.invalid);
@@ -13822,6 +13821,8 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
         try std.testing.expectEqual(@as(?u32, 0x20), sync2AccessMaskToLegacy(0x2_0000_0000));
     }
     test_allocations_before_failure = null;
+    cmdResetEvent2(commands[0], event, 0x8000_0000_0000_0000);
+    try std.testing.expect(commands[0].impl.invalid);
     destroyQueryPool(ctx.device, query, null);
     destroyEvent(ctx.device, event, null);
     destroyImage(ctx.device, image, null);
