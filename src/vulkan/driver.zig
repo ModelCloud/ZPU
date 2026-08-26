@@ -693,7 +693,7 @@ const DispatchIndirectCommand = struct { buffer: *BufferObj, offset: u64, pipeli
 const PrivateDataEntry = struct { object_type: i32 = 0, object: u64 = 0, data: u64 = 0 };
 const PrivateDataSlotObj = struct { owner: Device, entries: [max_api_items]PrivateDataEntry };
 const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: struct { image: *ImageObj, layout: i32, depth: f32, base_layer: u32 = 0, layer_count: u32 = 1 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, clear_color: bool = true, clear_depth: bool = true }, clear_attachments: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32 }, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, vertex_bindings: VertexBindingState = .{} }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 }, event_set: *EventObj, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
-const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_descriptor_bind_point: i32 = 0, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, push_descriptor_bind_point: i32 = 0, descriptor_snapshots: [256]DescriptorSetObj = undefined, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: [256]Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
+const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_descriptor_bind_point: i32 = 0, bound_descriptor_stage_flags: u32 = 0, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, push_descriptor_bind_point: i32 = 0, push_descriptor_stage_flags: u32 = 0, descriptor_snapshots: [256]DescriptorSetObj = undefined, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: [256]Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
 pub const CommandBuffer = *CommandBufferObj;
 
@@ -3757,7 +3757,7 @@ fn allocateCommandBuffers(device: ?Device, info: ?*const CommandBufferAllocateIn
         };
         const cb = &command_buffer_objects[index];
         const impl = &command_buffer_impls[index];
-        impl.* = .{ .owner = d, .pool = pool, .level = @intCast(ci.level), .state = 0, .invalid = false, .begin_flags = 0, .count = 0, .owned_update_count = 0, .secondary_count = 0, .primary_ref_count = 0, .render_pass_continue = false, .render_contents = 0, .inherited_occlusion = false, .inherited_subpass = 0, .active_subpass = 0, .active_framebuffer = null, .active_render_pass = null, .active_query_pool = null, .active_query_index = 0, .bound_pipeline = null, .bound_pipeline_handle = 0, .bound_descriptors = null, .bound_descriptor_bind_point = 0, .bound_layout = null, .bound_layout_handle = 0, .dynamic = .{}, .vertex_bindings = .{}, .index_buffer = null, .index_buffer_handle = 0, .index_offset = 0, .index_size = 0, .index_type = 0, .index_buffer_set = false, .viewport = .{ .x = 0, .y = 0, .width = 0, .height = 0, .min_depth = 0, .max_depth = 1 }, .viewport_set = false, .scissor = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, .scissor_set = false, .line_width = 1, .line_width_set = false, .blend_constants = .{ 0, 0, 0, 0 }, .blend_constants_set = false, .depth_bias = .{ 0, 0, 0 }, .depth_bias_set = false, .depth_bounds = .{ 0, 1 }, .depth_bounds_set = false, .stencil_compare_mask = .{ 0, 0 }, .stencil_compare_mask_set = 0, .stencil_write_mask = .{ 0, 0 }, .stencil_write_mask_set = 0, .stencil_reference = .{ 0, 0 }, .stencil_reference_set = 0, .push_constants = .{}, .commands = undefined, .owned_updates = undefined, .secondaries = undefined };
+        impl.* = .{ .owner = d, .pool = pool, .level = @intCast(ci.level), .state = 0, .invalid = false, .begin_flags = 0, .count = 0, .owned_update_count = 0, .secondary_count = 0, .primary_ref_count = 0, .render_pass_continue = false, .render_contents = 0, .inherited_occlusion = false, .inherited_subpass = 0, .active_subpass = 0, .active_framebuffer = null, .active_render_pass = null, .active_query_pool = null, .active_query_index = 0, .bound_pipeline = null, .bound_pipeline_handle = 0, .bound_descriptors = null, .bound_descriptor_bind_point = 0, .bound_descriptor_stage_flags = 0, .bound_layout = null, .bound_layout_handle = 0, .dynamic = .{}, .vertex_bindings = .{}, .index_buffer = null, .index_buffer_handle = 0, .index_offset = 0, .index_size = 0, .index_type = 0, .index_buffer_set = false, .viewport = .{ .x = 0, .y = 0, .width = 0, .height = 0, .min_depth = 0, .max_depth = 1 }, .viewport_set = false, .scissor = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, .scissor_set = false, .line_width = 1, .line_width_set = false, .blend_constants = .{ 0, 0, 0, 0 }, .blend_constants_set = false, .depth_bias = .{ 0, 0, 0 }, .depth_bias_set = false, .depth_bounds = .{ 0, 1 }, .depth_bounds_set = false, .stencil_compare_mask = .{ 0, 0 }, .stencil_compare_mask_set = 0, .stencil_write_mask = .{ 0, 0 }, .stencil_write_mask_set = 0, .stencil_reference = .{ 0, 0 }, .stencil_reference_set = 0, .push_constants = .{}, .commands = undefined, .owned_updates = undefined, .secondaries = undefined };
         cb.* = .{ .loader_data = MAGIC, .impl = impl };
         command_buffer_state[index] = .live;
         if (d.set_loader_data) |set| {
@@ -3847,12 +3847,14 @@ fn resetCommandBufferState(c: *CommandBufferObj) void {
     c.impl.bound_compute_pipeline_handle = 0;
     c.impl.bound_descriptors = null;
     c.impl.bound_descriptor_bind_point = 0;
+    c.impl.bound_descriptor_stage_flags = 0;
     c.impl.bound_layout = null;
     c.impl.bound_layout_handle = 0;
     c.impl.dynamic_uniform_offset = 0;
     c.impl.push_descriptor = .{};
     c.impl.push_descriptor_active = false;
     c.impl.push_descriptor_bind_point = 0;
+    c.impl.push_descriptor_stage_flags = 0;
     c.impl.dynamic = .{};
     c.impl.vertex_bindings = .{};
     c.impl.index_buffer = null;
@@ -3962,12 +3964,14 @@ fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) 
     c.impl.bound_compute_pipeline_handle = 0;
     c.impl.bound_descriptors = null;
     c.impl.bound_descriptor_bind_point = 0;
+    c.impl.bound_descriptor_stage_flags = 0;
     c.impl.bound_layout = null;
     c.impl.bound_layout_handle = 0;
     c.impl.dynamic_uniform_offset = 0;
     c.impl.push_descriptor = .{};
     c.impl.push_descriptor_active = false;
     c.impl.push_descriptor_bind_point = 0;
+    c.impl.push_descriptor_stage_flags = 0;
     c.impl.dynamic = .{};
     c.impl.vertex_bindings = .{};
     c.impl.index_buffer = null;
@@ -4379,10 +4383,12 @@ fn cmdNextSubpass(cb: ?CommandBuffer, contents: i32) callconv(.c) void {
     c.impl.bound_pipeline_handle = 0;
     c.impl.bound_descriptors = null;
     c.impl.bound_descriptor_bind_point = 0;
+    c.impl.bound_descriptor_stage_flags = 0;
     c.impl.bound_layout = null;
     c.impl.bound_layout_handle = 0;
     c.impl.push_descriptor_active = false;
     c.impl.push_descriptor_bind_point = 0;
+    c.impl.push_descriptor_stage_flags = 0;
     c.impl.render_contents = contents;
     record(c, .{ .next_subpass = {} });
 }
@@ -8612,11 +8618,13 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
     }
     command_buffer.impl.bound_descriptors = descriptor;
     command_buffer.impl.bound_descriptor_bind_point = bind_point;
+    command_buffer.impl.bound_descriptor_stage_flags = if (bind_point == 1) 0x20 else 0x1f;
     command_buffer.impl.bound_layout = layout_object;
     command_buffer.impl.bound_layout_handle = layout;
     command_buffer.impl.dynamic_uniform_offset = dynamic_offset;
     command_buffer.impl.push_descriptor_active = false;
     command_buffer.impl.push_descriptor_bind_point = 0;
+    command_buffer.impl.push_descriptor_stage_flags = 0;
 }
 fn cmdBindDescriptorSets2(cb: ?CommandBuffer, info: ?*const BindDescriptorSetsInfo) callconv(.c) void {
     const ci = info orelse {
@@ -8632,10 +8640,15 @@ fn cmdBindDescriptorSets2(cb: ?CommandBuffer, info: ?*const BindDescriptorSetsIn
         return;
     }
     // Maintenance-6 replaces the old bind-point parameter with stage flags.
-    // Keep the command-local descriptor state shared, but preserve the
-    // compute-only routing for validation and future bind-point-specific state.
+    // Keep the command-local descriptor state shared, while retaining the
+    // normalized mask so combined graphics/compute visibility is preserved.
     const bind_point: i32 = if (stages == 0x20) 1 else 0;
     cmdBindDescriptorSets(cb, bind_point, ci.layout, ci.first_set, ci.descriptor_set_count, ci.descriptor_sets, ci.dynamic_offset_count, ci.dynamic_offsets);
+    lock();
+    defer mutex.unlock();
+    if (validCommandBufferLocked(cb)) |command_buffer| {
+        if (!command_buffer.impl.invalid) command_buffer.impl.bound_descriptor_stage_flags = stages;
+    }
 }
 fn bindIndexBufferLocked(command_buffer: *CommandBufferObj, handle: usize, offset: u64, size: u64, index_type: i32) void {
     const buffer = validBufferLocked(handle) orelse {
@@ -9035,6 +9048,7 @@ fn applyPushDescriptorWritesLocked(command_buffer: *CommandBufferObj, layout: *P
     command_buffer.impl.push_descriptor_active = true;
     command_buffer.impl.bound_descriptors = null;
     command_buffer.impl.bound_descriptor_bind_point = 0;
+    command_buffer.impl.bound_descriptor_stage_flags = 0;
     return true;
 }
 fn cmdPushDescriptorSet(cb: ?CommandBuffer, bind_point: i32, layout: usize, set: u32, write_count: u32, writes: ?[*]const WriteDescriptorSet) callconv(.c) void {
@@ -9052,6 +9066,7 @@ fn cmdPushDescriptorSet(cb: ?CommandBuffer, bind_point: i32, layout: usize, set:
     command_buffer.impl.bound_layout = layout_object;
     command_buffer.impl.bound_layout_handle = layout;
     command_buffer.impl.push_descriptor_bind_point = bind_point;
+    command_buffer.impl.push_descriptor_stage_flags = if (bind_point == 1) 0x20 else 0x1f;
 }
 fn cmdPushDescriptorSet2(cb: ?CommandBuffer, info: ?*const PushDescriptorSetInfo) callconv(.c) void {
     const ci = info orelse {
@@ -9068,6 +9083,11 @@ fn cmdPushDescriptorSet2(cb: ?CommandBuffer, info: ?*const PushDescriptorSetInfo
     }
     const bind_point: i32 = if (stages == 0x20) 1 else 0;
     cmdPushDescriptorSet(cb, bind_point, ci.layout, ci.set, ci.descriptor_write_count, ci.descriptor_writes);
+    lock();
+    defer mutex.unlock();
+    if (validCommandBufferLocked(cb)) |command_buffer| {
+        if (!command_buffer.impl.invalid) command_buffer.impl.push_descriptor_stage_flags = stages;
+    }
 }
 fn cmdPushDescriptorSetWithTemplateLocked(command_buffer: *CommandBufferObj, template_handle: usize, bind_point: i32, layout: usize, set: u32, data: ?*const anyopaque) void {
     const layout_object = validPipelineLayoutLocked(layout) orelse {
@@ -9106,6 +9126,7 @@ fn cmdPushDescriptorSetWithTemplateLocked(command_buffer: *CommandBufferObj, tem
     command_buffer.impl.bound_layout = layout_object;
     command_buffer.impl.bound_layout_handle = layout;
     command_buffer.impl.push_descriptor_bind_point = bind_point;
+    command_buffer.impl.push_descriptor_stage_flags = if (bind_point == 1) 0x20 else 0x1f;
 }
 fn cmdPushDescriptorSetWithTemplate(cb: ?CommandBuffer, template_handle: usize, bind_point: i32, layout: usize, set: u32, data: ?*const anyopaque) callconv(.c) void {
     lock();
@@ -9472,7 +9493,7 @@ fn activeDescriptorSet(command_buffer: *CommandBufferObj) ?*DescriptorSetObj {
     return if (command_buffer.impl.push_descriptor_active) &command_buffer.impl.push_descriptor else command_buffer.impl.bound_descriptors;
 }
 fn graphicsDescriptorBindingValid(command_buffer: *const CommandBufferImpl) bool {
-    return if (command_buffer.push_descriptor_active) command_buffer.push_descriptor_bind_point == 0 else command_buffer.bound_descriptor_bind_point == 0;
+    return if (command_buffer.push_descriptor_active) command_buffer.push_descriptor_stage_flags & 0x1f != 0 else command_buffer.bound_descriptor_stage_flags & 0x1f != 0;
 }
 fn snapshotDescriptorSet(command_buffer: *CommandBufferObj, descriptors: *const DescriptorSetObj) ?*DescriptorSetObj {
     if (command_buffer.impl.count >= command_buffer.impl.commands.len) return null;
@@ -9736,8 +9757,8 @@ fn recordDispatchLocked(command_buffer: *CommandBufferObj, base: [3]u32, groups:
         break :blk value;
     } else null;
     const descriptors: ?*DescriptorSetObj = if (command_buffer.impl.push_descriptor_active)
-        (if (command_buffer.impl.push_descriptor_bind_point == 1) &command_buffer.impl.push_descriptor else null)
-    else if (command_buffer.impl.bound_descriptor_bind_point == 1) command_buffer.impl.bound_descriptors else null;
+        (if (command_buffer.impl.push_descriptor_stage_flags & 0x20 != 0) &command_buffer.impl.push_descriptor else null)
+    else if (command_buffer.impl.bound_descriptor_stage_flags & 0x20 != 0) command_buffer.impl.bound_descriptors else null;
     if (descriptors) |value| {
         if (!liveDescriptorObject(value) or !value.owner.eql(command_buffer.impl.owner) or (layout != null and !value.layout.eql(&layout.?.set0))) {
             command_buffer.impl.invalid = true;
@@ -15232,7 +15253,17 @@ test "dynamic uniform descriptors apply aligned per-bind offsets transactionally
     try std.testing.expect(!command[0].impl.invalid);
     try std.testing.expectEqual(@as(u64, 256), command[0].impl.dynamic_uniform_offset);
     try std.testing.expectEqual(@as(i32, 1), command[0].impl.bound_descriptor_bind_point);
+    try std.testing.expectEqual(@as(u32, 0x20), command[0].impl.bound_descriptor_stage_flags);
     try std.testing.expect(!graphicsDescriptorBindingValid(command[0].impl));
+    var all_bind2 = bind2;
+    all_bind2.stage_flags = 0x7fff_ffff;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdBindDescriptorSets2(command[0], &all_bind2);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(@as(i32, 0), command[0].impl.bound_descriptor_bind_point);
+    try std.testing.expectEqual(@as(u32, 0x3f), command[0].impl.bound_descriptor_stage_flags);
+    try std.testing.expect(graphicsDescriptorBindingValid(command[0].impl));
     var unsupported_bind2 = bind2;
     unsupported_bind2.stage_flags = 0x40;
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
@@ -15354,6 +15385,7 @@ test "push descriptors own layout state, template decoding, rollback, and warm p
     cmdPushDescriptorSet2(command[0], &compute_push2);
     try std.testing.expect(!command[0].impl.invalid);
     try std.testing.expectEqual(@as(i32, 1), command[0].impl.push_descriptor_bind_point);
+    try std.testing.expectEqual(@as(u32, 0x20), command[0].impl.push_descriptor_stage_flags);
     var template2 = PushDescriptorSetWithTemplateInfo{ .s_type = 1000545006, .p_next = null, .descriptor_update_template = descriptor_template, .layout = pipeline_layout, .set = 0, .data = @ptrCast(&descriptor_buffer) };
     cmdPushDescriptorSetWithTemplate2(command[0], &template2);
     try std.testing.expect(!command[0].impl.invalid);
@@ -15369,6 +15401,7 @@ test "push descriptors own layout state, template decoding, rollback, and warm p
     try std.testing.expect(!command[0].impl.invalid);
     try std.testing.expect(command[0].impl.push_descriptor_active);
     try std.testing.expectEqual(@as(i32, 1), command[0].impl.push_descriptor_bind_point);
+    try std.testing.expectEqual(@as(u32, 0x20), command[0].impl.push_descriptor_stage_flags);
     try std.testing.expect(!graphicsDescriptorBindingValid(command[0].impl));
 
     test_allocations_before_failure = 0;
@@ -16731,9 +16764,10 @@ fn computeUniformStorageTest() !void {
     const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
     cmdBindPipeline(command[0], 1, pipeline);
-    const compute_bind = BindDescriptorSetsInfo{ .s_type = 1000545003, .p_next = null, .stage_flags = 32, .layout = pipeline_layout, .first_set = 0, .descriptor_set_count = 1, .descriptor_sets = @ptrCast(&descriptor_set), .dynamic_offset_count = 0, .dynamic_offsets = null };
+    const compute_bind = BindDescriptorSetsInfo{ .s_type = 1000545003, .p_next = null, .stage_flags = 0x7fff_ffff, .layout = pipeline_layout, .first_set = 0, .descriptor_set_count = 1, .descriptor_sets = @ptrCast(&descriptor_set), .dynamic_offset_count = 0, .dynamic_offsets = null };
     cmdBindDescriptorSets2(command[0], &compute_bind);
-    try std.testing.expectEqual(@as(i32, 1), command[0].impl.bound_descriptor_bind_point);
+    try std.testing.expectEqual(@as(i32, 0), command[0].impl.bound_descriptor_bind_point);
+    try std.testing.expectEqual(@as(u32, 0x3f), command[0].impl.bound_descriptor_stage_flags);
     cmdDispatchIndirect(command[0], storage_buffer, 0);
     try std.testing.expect(!command[0].impl.invalid);
     try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
@@ -16750,9 +16784,10 @@ fn computeUniformStorageTest() !void {
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
     cmdBindPipeline(command[0], 1, pipeline);
-    const compute_push = PushDescriptorSetInfo{ .s_type = 1000545005, .p_next = null, .stage_flags = 32, .layout = pipeline_layout, .set = 0, .descriptor_write_count = writes.len, .descriptor_writes = @ptrCast(&writes) };
+    const compute_push = PushDescriptorSetInfo{ .s_type = 1000545005, .p_next = null, .stage_flags = 0x7fff_ffff, .layout = pipeline_layout, .set = 0, .descriptor_write_count = writes.len, .descriptor_writes = @ptrCast(&writes) };
     cmdPushDescriptorSet2(command[0], &compute_push);
-    try std.testing.expectEqual(@as(i32, 1), command[0].impl.push_descriptor_bind_point);
+    try std.testing.expectEqual(@as(i32, 0), command[0].impl.push_descriptor_bind_point);
+    try std.testing.expectEqual(@as(u32, 0x3f), command[0].impl.push_descriptor_stage_flags);
     cmdDispatchIndirect(command[0], storage_buffer, 0);
     try std.testing.expect(!command[0].impl.invalid);
     try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
