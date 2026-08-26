@@ -4963,10 +4963,37 @@ fn cmdWaitEvents2(cb: ?CommandBuffer, event_count: u32, events: ?[*]const usize,
         markCommandBufferInvalid(cb);
         return;
     };
-    cmdWaitEvents(cb, event_count, events, 0x1_0000, 0x1_0000, 0, null, 0, null, 0, null);
-    // Empty dependency records are valid and require no additional command;
-    // lower only entries that actually carry barrier state.
-    for (infos.?[0..event_count]) |*info| if (info.memory_barrier_count != 0 or info.buffer_memory_barrier_count != 0 or info.image_memory_barrier_count != 0) cmdPipelineBarrier2(cb, info);
+    const command_buffer = blk: {
+        lock();
+        defer mutex.unlock();
+        break :blk validCommandBufferLocked(cb) orelse return;
+    };
+    const before_count = command_buffer.impl.count;
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    for (0..event_count) |index| {
+        cmdWaitEvents(cb, 1, events.? + index, 0x1_0000, 0x1_0000, 0, null, 0, null, 0, null);
+        const info = &infos.?[index];
+        if (info.memory_barrier_count != 0 or info.buffer_memory_barrier_count != 0 or info.image_memory_barrier_count != 0) cmdPipelineBarrier2(cb, info);
+        lock();
+        const current = validCommandBufferLocked(cb) orelse {
+            mutex.unlock();
+            return;
+        };
+        const failed = current.impl.invalid;
+        mutex.unlock();
+        if (failed) {
+            lock();
+            if (validCommandBufferLocked(cb)) |restored| {
+                restored.impl.count = before_count;
+                restored.impl.invalid = true;
+            }
+            mutex.unlock();
+            return;
+        }
+    }
 }
 fn cmdWriteTimestamp2(cb: ?CommandBuffer, stage: u64, pool: usize, index: u32) callconv(.c) void {
     const legacy_stage = sync2StageMaskToLegacy(stage) orelse {
@@ -13791,7 +13818,17 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     cmdPipelineBarrier2(commands[0], &high_stage_dependency);
     const image_barrier = ImageMemoryBarrier2{ .s_type = 1000314002, .p_next = null, .src_stage_mask = 1, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0x1800, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
     const image_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 0, .memory_barriers = null, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 1, .image_memory_barriers = @ptrCast(&image_barrier) };
+    const wait_before = commands[0].impl.count;
     cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&image_dependency));
+    try std.testing.expectEqual(wait_before + 2, commands[0].impl.count);
+    try std.testing.expect(switch (commands[0].impl.commands[wait_before]) {
+        .event_wait => true,
+        else => false,
+    });
+    try std.testing.expect(switch (commands[0].impl.commands[wait_before + 1]) {
+        .transition => true,
+        else => false,
+    });
     cmdResetEvent2(commands[0], event, 0x1_0000);
     const empty_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 0, .memory_barriers = null, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
     const before_empty_barrier = commands[0].impl.count;
@@ -13839,6 +13876,16 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     const host_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 1, .memory_barriers = @ptrCast(&host_barrier), .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
     cmdSetEvent2(commands[0], event, &host_dependency);
     try std.testing.expect(commands[0].impl.invalid);
+    var rollback_commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &rollback_commands));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(rollback_commands[0], &begin));
+    const bad_wait_barrier = ImageMemoryBarrier2{ .s_type = 1000314002, .p_next = null, .src_stage_mask = 1, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = 0, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    const bad_wait_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 0, .memory_barriers = null, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 1, .image_memory_barriers = @ptrCast(&bad_wait_barrier) };
+    const rollback_before = rollback_commands[0].impl.count;
+    cmdWaitEvents2(rollback_commands[0], 1, @ptrCast(&event), @ptrCast(&bad_wait_dependency));
+    try std.testing.expect(rollback_commands[0].impl.invalid);
+    try std.testing.expectEqual(rollback_before, rollback_commands[0].impl.count);
+    freeCommandBuffers(ctx.device, pool, 1, &rollback_commands);
     destroyQueryPool(ctx.device, query, null);
     destroyEvent(ctx.device, event, null);
     destroyImage(ctx.device, image, null);
