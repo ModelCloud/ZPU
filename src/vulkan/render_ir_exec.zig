@@ -252,6 +252,9 @@ pub const Executor = struct {
                         result.bits[0] = source.bits[selector];
                     }
                 },
+                .copy_object => {
+                    result = try valueRef(self.values, pc, instruction.operands[0]);
+                },
                 .vector_extract_dynamic => {
                     const source = try valueRef(self.values, pc, instruction.operands[0]);
                     const selector = try valueRef(self.values, pc, instruction.operands[1]);
@@ -647,7 +650,7 @@ fn validate(program: *const ir.Program) Error!void {
             .vector_insert_dynamic => n == 3,
             .composite_insert => n == 3,
             .shuffle => n == 2 + try lanes(instruction.ty),
-            .fneg, .ineg, .bit_not, .logical_not, .transpose, .any, .all, .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set, .bit_reverse, .bit_count, .convert, .bitcast => n == 1,
+            .fneg, .ineg, .bit_not, .logical_not, .transpose, .any, .all, .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set, .bit_reverse, .bit_count, .convert, .bitcast, .copy_object => n == 1,
             .bit_field_insert => n == 4,
             .bit_field_s_extract, .bit_field_u_extract => n == 3,
             .select => n == 3,
@@ -720,6 +723,7 @@ fn validate(program: *const ir.Program) Error!void {
                     if (!same(source_ty, instruction.ty)) return error.InvalidType;
                 },
                 .convert, .bitcast => if (try lanes(source_ty) != try lanes(instruction.ty)) return error.InvalidShape,
+                .copy_object => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 else => {},
             }
         };
@@ -866,6 +870,7 @@ fn isValueOperand(op: ir.Op, i: usize) bool {
         .shuffle => i < 2,
         .composite_insert => i < 2,
         .bitcast => i == 0,
+        .copy_object => i == 0,
         .output => i == 1,
         else => true,
     };
@@ -1505,6 +1510,23 @@ test "bitcast preserves payload bits across numeric scalar types on warm path" {
     try std.testing.expectEqual(@as(u32, 0x8000_0000), executor.values[3].bits[0]);
 }
 
+test "copy object preserves exact value type and lanes on warm path" {
+    const literal = [_]u8{ 0x78, 0x56, 0x34, 0x12 };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &literal },
+        .{ .op = .copy_object, .ty = .{ .scalar = .u32 }, .operands = &.{0}, .literal = &.{} },
+    };
+    var source = try testProgram(&.{}, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    try executor.execute(&.{}, &.{});
+    try std.testing.expectEqual(ir.Type{ .scalar = .u32 }, executor.values[1].ty);
+    try std.testing.expectEqual(@as(u32, 0x1234_5678), executor.values[1].bits[0]);
+    for (0..4096) |_| try executor.execute(&.{}, &.{});
+    try std.testing.expectEqual(@as(u32, 0x1234_5678), executor.values[1].bits[0]);
+}
+
 test "rejection is explicit and output transactional" {
     const one = f32bytes(1);
     var interfaces = [_]ir.Interface{.{ .storage = .output, .ty = .{ .scalar = .f32 }, .location = 0 }};
@@ -1903,7 +1925,7 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
             const when_false = try propertyConstant(arena, &instructions, result_ty);
             result_id = try propertyInstruction(arena, &instructions, .select, result_ty, &.{ condition, when_true, when_false }, &.{});
         },
-        .fneg, .ineg, .bit_not, .bit_reverse, .bit_count, .convert, .bitcast => {
+        .fneg, .ineg, .bit_not, .bit_reverse, .bit_count, .convert, .bitcast, .copy_object => {
             var source_ty = result_ty;
             if (convert_from) |scalar| source_ty.scalar = scalar;
             const source = try propertyConstant(arena, &instructions, source_ty);
@@ -2049,6 +2071,8 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
 test "generated bounded operation by type-family property matrix is complete" {
     var totals = [_]usize{0} ** @typeInfo(ir.Op).@"enum".fields.len;
     for (property_types) |ty| {
+        try runPropertyCase(.copy_object, ty, null, null);
+        totals[@intFromEnum(ir.Op.copy_object)] += 1;
         const is_numeric = ty.scalar != .bool;
         const is_integer = ty.scalar == .i32 or ty.scalar == .u32;
         const is_float = ty.scalar == .f32;
@@ -2174,15 +2198,15 @@ test "generated bounded operation by type-family property matrix is complete" {
         totals[@intFromEnum(op)] += 1;
     }
     const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14, 8, 4, 8, 8, 8, 8, 4, 4, 4, 4, 4, 8, 8, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24};
+    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14};
     try std.testing.expectEqualSlices(usize, expected_full[0..totals.len], &totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 424), total);
-    std.debug.print("generated property matrix: operations=89 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 438), total);
+    std.debug.print("generated property matrix: operations=90 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -2314,13 +2338,13 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 89), malformed);
+    try std.testing.expectEqual(@as(usize, 90), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
     try std.testing.expectEqual(@as(usize, 5), runtime_nan);
     try std.testing.expectEqual(@as(usize, 5), signed_zero);
-    std.debug.print("generated property categories: malformed=89 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
+    std.debug.print("generated property categories: malformed=90 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
 }
 
 test "generated valid scalar DAGs are total and stable" {
