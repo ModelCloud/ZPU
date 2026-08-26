@@ -73,6 +73,11 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 79, .operands = .{ .min = 5, .max = 8 } },
     .{ .opcode = 80, .operands = .{ .min = 3, .max = 18 } },
     .{ .opcode = 81, .operands = .{ .min = 4, .max = 4 } },
+    // Branch widths are checked by the stage-aware function parser below so
+    // non-compute profiles classify the entire family as unsupported rather
+    // than exposing a misleading schema-arity error.
+    .{ .opcode = 249, .operands = .{ .min = 0, .max = max_entry_point_operands } },
+    .{ .opcode = 250, .operands = .{ .min = 0, .max = max_entry_point_operands } },
     .{ .opcode = 109, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 110, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 111, .operands = .{ .min = 3, .max = 3 } },
@@ -279,6 +284,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
     var in_function = false;
     var label_seen = false;
     var terminated = false;
+    var block_terminated = true;
     var current_function: u32 = 0;
     const instruction_functions = allocator.alloc(u32, module.instructions.len) catch return error.OutOfMemory;
     defer allocator.free(instruction_functions);
@@ -426,24 +432,40 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 instruction_functions[instruction_index] = current_function;
                 label_seen = false;
                 terminated = false;
+                block_terminated = true;
                 function_count += 1;
             },
             248 => {
-                if (!in_function or label_seen or w.len != 1) return error.Malformed;
+                if (!in_function or (label_seen and !block_terminated) or w.len != 1) return error.Malformed;
                 try define(nodes, w[0], .{ .kind = .label });
                 label_seen = true;
+                block_terminated = false;
             },
             253 => {
-                if (!in_function or !label_seen or terminated or w.len != 0) return error.Malformed;
+                if (!in_function or !label_seen or terminated or block_terminated or w.len != 0) return error.Malformed;
                 terminated = true;
+                block_terminated = true;
             },
             56 => {
-                if (!in_function or !label_seen or !terminated or w.len != 0) return error.Malformed;
+                if (!in_function or !label_seen or !terminated or !block_terminated or w.len != 0) return error.Malformed;
                 in_function = false;
                 current_function = 0;
             },
+            249, 250 => {
+                if (requested_stage != .compute) return error.Unsupported;
+                if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
+                const valid_arity = if (instruction.opcode == 249) w.len == 1 else w.len == 3;
+                if (!valid_arity) return error.Malformed;
+                if (instruction.opcode == 250) {
+                    const condition = nodes[try id(nodes, w[0])];
+                    if (condition.kind != .constant or (condition.opcode != 41 and condition.opcode != 42)) return error.Unsupported;
+                }
+                _ = try id(nodes, if (instruction.opcode == 249) w[0] else w[1]);
+                if (instruction.opcode == 250) _ = try id(nodes, w[2]);
+                block_terminated = true;
+            },
             61, 62, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 133, 136, 142, 145, 169 => {
-                if (!in_function or !label_seen or terminated) return error.Malformed;
+                if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
                 const valid_arity = switch (instruction.opcode) {
                     61 => w.len == 3,
                     62 => w.len == 2,
@@ -666,11 +688,76 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
     std.mem.sort(ir.Interface, interfaces.items, {}, interfaceLess);
     if (!interfacesUnique(interfaces.items)) return error.Unsupported;
 
+    // Resolve the bounded control-flow slice before SSA lowering. Only
+    // statically selected, acyclic branches are admitted; this keeps the
+    // canonical IR straight-line while ensuring that writes in an unselected
+    // block cannot become observable side effects.
+    const reachable = allocator.alloc(bool, module.instructions.len) catch return error.OutOfMemory;
+    defer allocator.free(reachable);
+    @memset(reachable, false);
+    var first_label: ?usize = null;
+    for (module.instructions, instruction_functions, 0..) |instruction, instruction_function, instruction_index| {
+        if (instruction_function == entry.function and instruction.opcode == 248) {
+            first_label = instruction_index;
+            break;
+        }
+    }
+    var current_block = first_label orelse return error.Malformed;
+    const visited_labels = allocator.alloc(bool, module.bound) catch return error.OutOfMemory;
+    defer allocator.free(visited_labels);
+    @memset(visited_labels, false);
+    while (true) {
+        if (current_block >= module.instructions.len or module.instructions[current_block].opcode != 248) return error.Malformed;
+        const label_id = module.instructions[current_block].words[0];
+        const label_index = try id(nodes, label_id);
+        if (nodes[label_index].kind != .label or visited_labels[label_index]) return error.Unsupported;
+        visited_labels[label_index] = true;
+        var cursor = current_block;
+        var next_label: ?u32 = null;
+        var block_done = false;
+        while (cursor < module.instructions.len and instruction_functions[cursor] == entry.function) : (cursor += 1) {
+            const instruction = module.instructions[cursor];
+            if (cursor != current_block and instruction.opcode == 248) return error.Malformed;
+            reachable[cursor] = true;
+            switch (instruction.opcode) {
+                249 => {
+                    next_label = instruction.words[0];
+                    block_done = true;
+                },
+                250 => {
+                    const condition = nodes[try id(nodes, instruction.words[0])];
+                    if (condition.kind != .constant or (condition.opcode != 41 and condition.opcode != 42)) return error.Unsupported;
+                    next_label = if (condition.opcode == 41) instruction.words[1] else instruction.words[2];
+                    block_done = true;
+                },
+                253 => block_done = true,
+                56 => return error.Malformed,
+                else => {},
+            }
+            if (block_done) break;
+        }
+        if (!block_done) return error.Malformed;
+        if (next_label) |target| {
+            const target_index = try id(nodes, target);
+            if (nodes[target_index].kind != .label) return error.Malformed;
+            current_block = 0;
+            var found = false;
+            for (module.instructions, instruction_functions, 0..) |candidate, candidate_function, candidate_index| {
+                if (candidate_function == entry.function and candidate.opcode == 248 and candidate.words[0] == target) {
+                    current_block = candidate_index;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return error.Malformed;
+        } else break;
+    }
+
     const needed = allocator.alloc(bool, module.bound) catch return error.OutOfMemory;
     defer allocator.free(needed);
     @memset(needed, false);
-    for (module.instructions, instruction_functions) |instruction, instruction_function| {
-        if (instruction_function == entry.function and instruction.opcode == 62)
+    for (module.instructions, instruction_functions, reachable) |instruction, instruction_function, is_reachable| {
+        if (is_reachable and instruction_function == entry.function and instruction.opcode == 62)
             needed[try id(nodes, instruction.words[1])] = true;
     }
     var changed = true;
@@ -719,8 +806,9 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         }
         lowered.deinit(allocator);
     }
-    for (module.instructions, instruction_functions) |instruction, instruction_function| {
+    for (module.instructions, instruction_functions, reachable) |instruction, instruction_function, is_reachable| {
         if (instruction_function != 0 and instruction_function != entry.function) continue;
+        if (instruction_function == entry.function and !is_reachable) continue;
         const w = instruction.words;
         if (instruction.opcode == 62) {
             const target = nodes[try id(nodes, w[0])];
@@ -982,6 +1070,30 @@ pub const compute_access_load_store = [_]u32{
     12,              5,               11,             (4 << 16) | 61, 2,
     13,              12,              (3 << 16) | 62, 5,              13,
     (1 << 16) | 253, (1 << 16) | 56,
+};
+
+/// Compute profile variant with a statically resolved conditional branch. The
+/// unselected block writes a different value and must not become observable in
+/// the canonical straight-line program.
+pub const compute_static_branch_store = [_]u32{
+    0x0723_0203,     0x0001_0000,     0,               16,              0,
+    (2 << 16) | 17,  1,               (3 << 16) | 14,  0,               1,
+    (6 << 16) | 15,  5,               8,               0x6e69616d,      0,
+    5,               (6 << 16) | 16,  8,               17,              1,
+    1,               1,               (4 << 16) | 71,  5,               33,
+    0,               (4 << 16) | 71,  5,               34,              0,
+    (2 << 16) | 19,  1,               (4 << 16) | 21,  2,               32,
+    0,               (4 << 16) | 32,  4,               12,              2,
+    (2 << 16) | 20,  14,              (4 << 16) | 59,  4,               5,
+    12,              (3 << 16) | 33,  6,               1,               (4 << 16) | 43,
+    2,               7,               42,              (4 << 16) | 43,  2,
+    13,              99,              (3 << 16) | 41,  14,              15,
+    (5 << 16) | 54,  1,               8,               0,               6,
+    (2 << 16) | 248, 9,               (4 << 16) | 250, 15,              10,
+    11,              (2 << 16) | 248, 10,              (3 << 16) | 62,  5,
+    7,               (2 << 16) | 249, 12,              (2 << 16) | 248, 11,
+    (3 << 16) | 62,  5,               13,              (2 << 16) | 249, 12,
+    (2 << 16) | 248, 12,              (1 << 16) | 253, (1 << 16) | 56,
 };
 
 /// Compute profile variant using a scalar boolean select before the storage
@@ -1260,6 +1372,26 @@ test "compute profile lowers a static storage-buffer access-chain load" {
         saw_output = saw_output or instruction.op == .output;
     }
     try std.testing.expect(saw_access and saw_extract and saw_output);
+}
+
+test "compute profile resolves a static conditional branch" {
+    var program = try compile(std.testing.allocator, &compute_static_branch_store, .compute, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), program.interfaces.len);
+    try std.testing.expectEqual(@as(usize, 2), program.instructions.len);
+    try std.testing.expectEqual(ir.Op.constant, program.instructions[0].op);
+    try std.testing.expectEqual(ir.Op.output, program.instructions[1].op);
+    try std.testing.expectEqual(@as(u32, 42), std.mem.readInt(u32, program.instructions[0].literal[0..4], .little));
+    var dynamic = compute_static_branch_store;
+    const branch = testOpcodeOffset(&dynamic, 250, 0).?;
+    dynamic[branch + 1] = 7;
+    try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, &dynamic, .compute, "main", &.{}));
+    var false_branch = compute_static_branch_store;
+    const condition = testOpcodeOffset(&false_branch, 41, 0).?;
+    false_branch[condition] = (3 << 16) | 42;
+    var false_program = try compile(std.testing.allocator, &false_branch, .compute, "main", &.{});
+    defer false_program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 99), std.mem.readInt(u32, false_program.instructions[0].literal[0..4], .little));
 }
 
 test "compute profile lowers a boolean select into storage output" {

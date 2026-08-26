@@ -54,8 +54,10 @@ submission prevalidation, and has a 4096-iteration allocation-free warm path.
 The bounded compute profile now also admits direct scalar StorageBuffer
 `OpLoad` reads (including read/write aliasing of the descriptor range) with
 transactional output commits; static access-chain reads share the same
-validated interface path. General control flow, dynamic indexing, atomics,
-shared memory, and complete memory-visibility semantics remain deferred.
+validated interface path. A statically resolved, acyclic `OpBranch`/
+`OpBranchConditional` path now prunes unselected blocks before lowering, while
+dynamic conditions, loops, dynamic indexing, atomics, shared memory, and
+complete memory-visibility semantics remain deferred.
 The `vkGetPhysicalDeviceFeatures2` query also accepts promoted Vulkan
 1.1/1.2/1.3/1.4 feature-chain structures, preserving caller-owned links and
 writing the truthful all-false feature payloads instead of rejecting every
@@ -428,10 +430,11 @@ Each slice must land with all of the following:
 - [ ] **A7 — compute:** compute pipeline records, dispatch envelopes, and the
   bounded straight-line storage-buffer read/write profile are implemented with
   ownership, submit-time validation, transactional descriptor aliasing, and
-  end-to-end write tests. Indirect dispatch arguments are consumed at
-  submission. Generic SPIR-V control flow, dynamic indexing, atomics,
-  shared-memory execution, and complete compute memory-visibility semantics
-  remain.
+  end-to-end write tests. A static acyclic branch profile is also lowered with
+  unselected side-effect blocks removed. Indirect dispatch arguments are
+  consumed at submission. Generic SPIR-V dynamic control flow, dynamic
+  indexing, atomics, shared-memory execution, and complete compute
+  memory-visibility semantics remain.
 - [ ] **A8 — secondary command buffers:** inheritance, execution, reset, and
   lifetime rules. Traditional render-pass inheritance and the bounded dynamic
   rendering inheritance chain are covered; unrestricted secondary state

@@ -8231,7 +8231,7 @@ test "compute pipeline creation validates ownership, publishes typed handles, an
     var pipeline_layout: usize = 0;
     const pipeline_layout_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&set_layout), .push_constant_range_count = 0, .push_constant_ranges = null };
     try std.testing.expectEqual(Result.success, createPipelineLayout(first.device, &pipeline_layout_info, null, &pipeline_layout));
-    const words = spirv_frontend.compute_select_store;
+    const words = spirv_frontend.compute_store;
     const shader_info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = @sizeOf(@TypeOf(words)), .p_code = &words };
     var shader: usize = 0;
     try std.testing.expectEqual(Result.success, createShaderModule(first.device, &shader_info, null, &shader));
@@ -19960,7 +19960,7 @@ fn computeStorageProfileTest() !void {
     var pipeline_layout: usize = 0;
     try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &pipeline_layout_info, null, &pipeline_layout));
 
-    const words = spirv_frontend.compute_select_store;
+    const words = spirv_frontend.compute_static_branch_store;
     const shader_info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = @sizeOf(@TypeOf(words)), .p_code = &words };
     var shader: usize = 0;
     try std.testing.expectEqual(Result.success, createShaderModule(ctx.device, &shader_info, null, &shader));
