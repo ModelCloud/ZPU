@@ -4139,7 +4139,7 @@ fn cmdCopyBuffer(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize, count
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
     if (count == 0) {
-        hit(.zero_count_noop);
+        c.impl.invalid = true;
         return;
     }
     if (count > max_api_items) {
@@ -4409,11 +4409,7 @@ fn cmdBlitImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_hand
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
-    if (count == 0) {
-        hit(.zero_count_noop);
-        return;
-    }
-    if (count > max_api_items or regions == null or filter < 0 or filter > 1) {
+    if (count == 0 or count > max_api_items or regions == null or filter < 0 or filter > 1) {
         c.impl.invalid = true;
         return;
     }
@@ -4439,11 +4435,7 @@ fn cmdResolveImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_h
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
-    if (count == 0) {
-        hit(.zero_count_noop);
-        return;
-    }
-    if (count > max_api_items or regions == null) {
+    if (count == 0 or count > max_api_items or regions == null) {
         c.impl.invalid = true;
         return;
     }
@@ -4542,7 +4534,7 @@ fn cmdCopyBufferToImage(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
     if (count == 0) {
-        hit(.zero_count_noop);
+        c.impl.invalid = true;
         return;
     }
     if (count > max_api_items) {
@@ -4588,7 +4580,7 @@ fn cmdCopyImageToBuffer(cb: ?CommandBuffer, src_handle: usize, layout: i32, dst_
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
     if (count == 0) {
-        hit(.zero_count_noop);
+        c.impl.invalid = true;
         return;
     }
     if (count > max_api_items) {
@@ -4634,7 +4626,7 @@ fn cmdCopyImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_hand
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
     if (count == 0) {
-        hit(.zero_count_noop);
+        c.impl.invalid = true;
         return;
     }
     if (count > max_api_items) {
@@ -14683,7 +14675,7 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     cmdCopyImageToBuffer(cbs[0], 0, 1, 0, 0, null);
     cmdCopyImage(cbs[0], 0, 1, 0, 1, 0, null);
     cmdPipelineBarrier(cbs[0], 1, 0x1000, 0, 0, @ptrFromInt(8), 0, @ptrFromInt(8), 0, null);
-    try std.testing.expectEqual(Result.success, endCommandBuffer(cbs[0]));
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(cbs[0]));
     try std.testing.expectEqual(Result.success, resetCommandBuffer(cbs[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(cbs[0], &begin));
     cmdCopyBuffer(cbs[0], 0, 0, max_api_items + 1, null);
