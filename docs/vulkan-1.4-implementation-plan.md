@@ -197,6 +197,13 @@ Descriptor-update-template writes now stage every decoded descriptor in a local
 candidate before publishing it to the destination set. Invalid handles, ranges,
 alignment, or a null data pointer therefore leave all prior bindings untouched;
 the valid path remains allocation-free and is exercised for 4096 updates.
+Combined-image-sampler descriptors now retain the typed sampler state and the
+sampler object identity in every ordinary, template, push-descriptor, and
+recorded-draw snapshot. Submit-time validation rejects a destroyed or
+cross-device sampler without publishing a replacement descriptor; direct
+filter/address-state, stale-lifetime, and allocation-free warm-path coverage
+exercise the bounded behavior. General sampler filtering remains outside the
+CPU raster profile.
 
 Synchronization2 now normalizes the promoted 64-bit stage/access aliases that
 have exact meaning in the bounded CPU backend: copy/resolve/blit/clear stages,

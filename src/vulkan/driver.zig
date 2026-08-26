@@ -499,13 +499,28 @@ const SemaphoreObj = struct { owner: Device, signaled: std.atomic.Value(bool), t
 const CommandPoolObj = struct { owner: Device, flags: u32 };
 const SurfaceObj = struct { owner: Instance, connection: *anyopaque, window: u32 };
 const ImageViewObj = struct { owner: Device, image: *ImageObj, format: i32, usage: u32, aspect_mask: u32, base_array_layer: u32, layer_count: u32 };
-const SamplerObj = struct { owner: Device };
+const SamplerObj = struct {
+    owner: Device,
+    mag_filter: i32 = 0,
+    min_filter: i32 = 0,
+    mipmap_mode: i32 = 0,
+    address_mode_u: i32 = 0,
+    address_mode_v: i32 = 0,
+    address_mode_w: i32 = 0,
+    mip_lod_bias: f32 = 0,
+    max_anisotropy: f32 = 1,
+    compare_op: i32 = 0,
+    min_lod: f32 = 0,
+    max_lod: f32 = 0,
+    border_color: i32 = 0,
+    unnormalized_coordinates: bool = false,
+};
 const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj, render_compatibility: Canonical };
 const PipelineCacheObj = struct { owner: DeviceIdentity, data: Canonical = .{} };
 const descriptor_type_count = 11;
 const DescriptorCounts = [descriptor_type_count]u32;
 const DescriptorPoolObj = struct { owner: DeviceIdentity, flags: u32, max_sets: u32, allocated_sets: u32, capacity: DescriptorCounts, used: DescriptorCounts };
-const DescriptorSetObj = struct { owner: DeviceIdentity = undefined, pool: *DescriptorPoolObj = undefined, counts: DescriptorCounts = [_]u32{0} ** descriptor_type_count, layout: Canonical = .{}, binding_types: [2]i32 = .{ -1, -1 }, uniform: ?*BufferObj = null, uniform_offset: u64 = 0, uniform_range: u64 = 0, uniform_dynamic: bool = false, storage: ?*BufferObj = null, storage_binding: u32 = 0, storage_offset: u64 = 0, storage_range: u64 = 0, texture: ?*ImageObj = null, synthetic: bool = false };
+const DescriptorSetObj = struct { owner: DeviceIdentity = undefined, pool: *DescriptorPoolObj = undefined, counts: DescriptorCounts = [_]u32{0} ** descriptor_type_count, layout: Canonical = .{}, binding_types: [2]i32 = .{ -1, -1 }, uniform: ?*BufferObj = null, uniform_offset: u64 = 0, uniform_range: u64 = 0, uniform_dynamic: bool = false, storage: ?*BufferObj = null, storage_binding: u32 = 0, storage_offset: u64 = 0, storage_range: u64 = 0, texture: ?*ImageObj = null, sampler: ?*SamplerObj = null, synthetic: bool = false };
 const DescriptorUpdateTemplateObj = struct { owner: DeviceIdentity, layout: *DescriptorSetLayoutObj, template_type: i32 = 0, pipeline_bind_point: i32 = 0, pipeline_layout: usize = 0, entry_count: u32, entries: [32]DescriptorUpdateTemplateEntry };
 const DeviceIdentity = struct {
     handle: Device,
@@ -6052,6 +6067,10 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                     if (!liveImageObject(texture) or texture.memory == null or !liveMemoryObject(texture.memory.?)) return deadResource();
                     if (texture.owner != owner or texture.memory.?.owner != owner) return wrongSubmittingDevice();
                 }
+                if (descriptors.sampler) |sampler| {
+                    if ((stateForObject(SamplerObj, sampler, &sampler_objects, &sampler_state) orelse return deadResource()).* != .live) return deadResource();
+                    if (sampler.owner != owner) return wrongSubmittingDevice();
+                }
             }
         },
         .dispatch_indirect => |op| {
@@ -6078,6 +6097,10 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 if (descriptors.texture) |texture| {
                     if (!liveImageObject(texture) or texture.memory == null or !liveMemoryObject(texture.memory.?)) return deadResource();
                     if (texture.owner != owner or texture.memory.?.owner != owner) return wrongSubmittingDevice();
+                }
+                if (descriptors.sampler) |sampler| {
+                    if ((stateForObject(SamplerObj, sampler, &sampler_objects, &sampler_state) orelse return deadResource()).* != .live) return deadResource();
+                    if (sampler.owner != owner) return wrongSubmittingDevice();
                 }
             }
             if (!liveBufferObject(op.buffer) or op.buffer.memory == null or !liveMemoryObject(op.buffer.memory.?)) return deadResource();
@@ -6131,6 +6154,10 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             }
             if (profile_draw and !prevalidateProfileVertexBindings(op, owner)) return false;
             if (profile_draw and !prevalidateProfileUniforms(op, owner)) return false;
+            if (op.descriptors.sampler) |sampler| {
+                if ((stateForObject(SamplerObj, sampler, &sampler_objects, &sampler_state) orelse return deadResource()).* != .live) return deadResource();
+                if (sampler.owner != owner) return wrongSubmittingDevice();
+            }
             if (op.indexed) |indexed| {
                 if (!liveBufferObject(indexed.buffer) or indexed.buffer.memory == null or !liveMemoryObject(indexed.buffer.memory.?)) return deadResource();
                 if (indexed.buffer.owner != owner or indexed.buffer.memory.?.owner != owner) return wrongSubmittingDevice();
@@ -6179,6 +6206,10 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             }
             if (profile_draw and !prevalidateIndirectProfileDraw(op, owner)) return false;
             if (profile_draw and !prevalidateProfileUniforms(op, owner)) return false;
+            if (op.descriptors.sampler) |sampler| {
+                if ((stateForObject(SamplerObj, sampler, &sampler_objects, &sampler_state) orelse return deadResource()).* != .live) return deadResource();
+                if (sampler.owner != owner) return wrongSubmittingDevice();
+            }
             if (op.indexed) {
                 const index_buffer = op.index_buffer orelse return deadResource();
                 if (!liveBufferObject(index_buffer) or index_buffer.memory == null or !liveMemoryObject(index_buffer.memory.?)) {
@@ -8114,7 +8145,22 @@ fn createSampler(device: ?Device, raw_info: ?*const anyopaque, alloc: ?*const Al
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
     for (&sampler_objects, &sampler_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = d };
+        object.* = .{
+            .owner = d,
+            .mag_filter = info.mag_filter,
+            .min_filter = info.min_filter,
+            .mipmap_mode = info.mipmap_mode,
+            .address_mode_u = info.address_mode_u,
+            .address_mode_v = info.address_mode_v,
+            .address_mode_w = info.address_mode_w,
+            .mip_lod_bias = info.mip_lod_bias,
+            .max_anisotropy = info.max_anisotropy,
+            .compare_op = info.compare_op,
+            .min_lod = info.min_lod,
+            .max_lod = info.max_lod,
+            .border_color = info.border_color,
+            .unnormalized_coordinates = info.unnormalized_coordinates != 0,
+        };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
@@ -8754,6 +8800,8 @@ fn releaseDescriptorSetLocked(set: *DescriptorSetObj) void {
     for (&pool.used, set.counts) |*used, count| used.* -= count;
     set.layout.deinit();
     set.counts = [_]u32{0} ** descriptor_type_count;
+    set.sampler = null;
+    set.texture = null;
     stateForObject(DescriptorSetObj, set, &descriptor_set_objects, &descriptor_set_state).?.* = .tombstone;
 }
 fn releaseDescriptorPoolSetsLocked(pool: *DescriptorPoolObj) void {
@@ -8861,13 +8909,13 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?*const anyop
     if (write_count == 0) return;
     const raw = writes orelse return;
     const list: [*]const WriteDescriptorSet = @ptrCast(@alignCast(raw));
-    const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, writes_texture: bool };
+    const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, sampler: ?*SamplerObj, writes_texture: bool };
     var updates: [max_api_items]Update = undefined;
     for (list[0..write_count], 0..) |descriptor_write, index| {
         if (descriptor_write.s_type != 35 or descriptor_write.p_next != null or descriptor_write.dst_array_element != 0 or descriptor_write.descriptor_count != 1 or descriptor_write.texel_buffer_view != null) return;
         const set = validDescriptorSetLocked(descriptor_write.dst_set) orelse return;
         if (!set.owner.eql(d)) return;
-        var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .writes_texture = false };
+        var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .sampler = null, .writes_texture = false };
         if ((descriptor_write.descriptor_type == 6 or descriptor_write.descriptor_type == 8) and descriptor_write.dst_binding == 0 and set.binding_types[0] == descriptor_write.descriptor_type and descriptor_write.buffer_info != null and descriptor_write.image_info == null) {
             const info = descriptor_write.buffer_info.?[0];
             const buffer = validBufferLocked(info.buffer) orelse return;
@@ -8896,6 +8944,7 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?*const anyop
             const view = validImageViewLocked(info.image_view) orelse return;
             if (sampler.owner != d or view.owner != d or view.usage & 0x4 == 0 or info.image_layout != 5) return;
             update.texture = view.image;
+            update.sampler = sampler;
             update.writes_texture = true;
         } else return;
         updates[index] = update;
@@ -8913,7 +8962,10 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?*const anyop
             update.set.storage_offset = update.storage_offset;
             update.set.storage_range = update.storage_range;
         }
-        if (update.writes_texture) update.set.texture = update.texture;
+        if (update.writes_texture) {
+            update.set.texture = update.texture;
+            update.set.sampler = update.sampler;
+        }
     }
 }
 fn createDescriptorUpdateTemplate(device: ?Device, info: ?*const DescriptorUpdateTemplateCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
@@ -8968,8 +9020,9 @@ fn updateDescriptorSetWithTemplate(device: ?Device, set_handle: usize, template_
         storage_offset: u64,
         storage_range: u64,
         texture: ?*ImageObj,
+        sampler: ?*SamplerObj,
     };
-    var update = Update{ .uniform = set.uniform, .uniform_offset = set.uniform_offset, .uniform_range = set.uniform_range, .uniform_dynamic = set.uniform_dynamic, .storage = set.storage, .storage_binding = set.storage_binding, .storage_offset = set.storage_offset, .storage_range = set.storage_range, .texture = set.texture };
+    var update = Update{ .uniform = set.uniform, .uniform_offset = set.uniform_offset, .uniform_range = set.uniform_range, .uniform_dynamic = set.uniform_dynamic, .storage = set.storage, .storage_binding = set.storage_binding, .storage_offset = set.storage_offset, .storage_range = set.storage_range, .texture = set.texture, .sampler = set.sampler };
     const source: [*]const u8 = @ptrCast(data orelse return);
     for (template.entries[0..template.entry_count]) |entry| {
         const item: [*]const u8 = source + entry.offset;
@@ -8999,6 +9052,7 @@ fn updateDescriptorSetWithTemplate(device: ?Device, set_handle: usize, template_
             const view = validImageViewLocked(descriptor.image_view) orelse return;
             if (sampler.owner != d or view.owner != d or descriptor.image_layout != 5) return;
             update.texture = view.image;
+            update.sampler = sampler;
         }
     }
     set.uniform = update.uniform;
@@ -9010,6 +9064,7 @@ fn updateDescriptorSetWithTemplate(device: ?Device, set_handle: usize, template_
     set.storage_offset = update.storage_offset;
     set.storage_range = update.storage_range;
     set.texture = update.texture;
+    set.sampler = update.sampler;
 }
 fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, contents: i32) callconv(.c) void {
     lock();
@@ -9673,6 +9728,7 @@ fn applyPushDescriptorWritesLocked(command_buffer: *CommandBufferObj, layout: *P
             const view = validImageViewLocked(info.image_view) orelse return false;
             if (sampler.owner != command_buffer.impl.owner or view.owner != command_buffer.impl.owner or view.usage & 0x4 == 0 or view.image.owner != command_buffer.impl.owner or !liveImageObject(view.image) or info.image_layout != 5) return false;
             candidate.texture = view.image;
+            candidate.sampler = sampler;
         } else return false;
     };
     command_buffer.impl.push_descriptor = candidate;
@@ -12350,6 +12406,9 @@ test "vkcube presentation path records submits and presents two swapchain images
         .{ .s_type = 35, .p_next = null, .dst_set = sets[0], .dst_binding = 1, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 1, .image_info = @ptrCast(&descriptor_image), .buffer_info = null, .texel_buffer_view = null },
     };
     updateDescriptorSets(device, descriptor_writes.len, @ptrCast(&descriptor_writes), 0, null);
+    try std.testing.expectEqual(validSamplerLocked(draw_sampler).?, validDescriptorSetLocked(sets[0]).?.sampler.?);
+    try std.testing.expectEqual(draw_sampler_info.mag_filter, validSamplerLocked(draw_sampler).?.mag_filter);
+    try std.testing.expectEqual(draw_sampler_info.address_mode_u, validSamplerLocked(draw_sampler).?.address_mode_u);
 
     const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
     var pool: usize = 0;
@@ -12876,6 +12935,20 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(static_viewport, static_draw.viewport);
     try std.testing.expectEqual(cpu_cube.Rect{ .x = 0, .y = 0, .width = 8, .height = 8 }, static_draw.scissor);
     try std.testing.expectEqual(@as(u32, 2), static_draw.instance_count);
+    // A recorded draw retains the sampler object identity.  Destroying that
+    // sampler after recording must make submit-time validation fail without
+    // mutating the descriptor set or publishing a replacement handle.
+    var stale_sampler: usize = 0;
+    try std.testing.expectEqual(Result.success, createSampler(device, @ptrCast(&draw_sampler_info), null, &stale_sampler));
+    const stale_descriptor_snapshot = static_draw.descriptors;
+    const saved_sampler = stale_descriptor_snapshot.sampler;
+    stale_descriptor_snapshot.sampler = validSamplerLocked(stale_sampler).?;
+    const stale_sampler_command = Command{ .cube_draw = static_draw };
+    destroySampler(device, stale_sampler, null);
+    try std.testing.expect(validSamplerLocked(stale_sampler) == null);
+    var stale_sampler_layouts = [_]i32{0} ** max_child_objects;
+    try std.testing.expect(!prevalidateCommand(stale_sampler_command, device, &stale_sampler_layouts));
+    stale_descriptor_snapshot.sampler = saved_sampler;
     cmdEndRenderPass(commands[0]);
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
     try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&secondary_submit), 0));
