@@ -10046,12 +10046,23 @@ fn cmdEndRenderPass2(cb: ?CommandBuffer, end: ?*const SubpassEndInfo) callconv(.
     cmdEndRenderPass(cb);
 }
 
+fn rollbackSwapchainCreation(swapchain: *SwapchainObj, created: u32) void {
+    for (swapchain.images[0..created]) |image_handle| if (validImageLocked(image_handle)) |image| {
+        stateForObject(ImageObj, image, &image_objects, &image_state).?.* = .tombstone;
+        if (!image.shared_bytes) if (image.owned_bytes) |bytes| allocator.free(bytes);
+        if (image.dirty_tiles) |tiles| allocator.free(tiles);
+        image.owned_bytes = null;
+        image.dirty_tiles = null;
+    };
+    xcb_present.deinit(&swapchain.transport);
+}
+
 fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     if (alloc != null) return .error_initialization_failed;
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (ci.min_image_count < 2 or ci.min_image_count > 4 or ci.image_extent.width == 0 or ci.image_extent.height == 0 or ci.image_array_layers != 1 or ci.present_mode != 2) return .error_initialization_failed;
+    if (ci.s_type != 1_000_001_000 or ci.p_next != null or ci.flags != 0 or ci.min_image_count < 2 or ci.min_image_count > 4 or ci.image_format != 44 or ci.image_color_space != 0 or ci.image_extent.width == 0 or ci.image_extent.height == 0 or ci.image_extent.width > max_2d_extent or ci.image_extent.height > max_2d_extent or ci.image_array_layers != 1 or ci.image_usage != 0x10 or ci.image_sharing_mode != 0 or ci.queue_family_index_count != 0 or ci.queue_family_indices != null or ci.pre_transform != 1 or ci.composite_alpha != 1 or ci.present_mode != 2 or (ci.clipped != 0 and ci.clipped != 1) or ci.old_swapchain != 0) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     const surface = validSurfaceLocked(ci.surface) orelse return .error_initialization_failed;
@@ -10078,6 +10089,7 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
             .transport = transport,
         };
         var created: u32 = 0;
+        errdefer rollbackSwapchainCreation(swapchain, created);
         while (created < image_count) : (created += 1) {
             var found = false;
             for (&image_objects, &image_state) |*image, *image_slot_state| if (!found and image_slot_state.* == .never) {
@@ -10205,7 +10217,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         mutex.unlock();
         return .error_initialization_failed;
     };
-    if (!validDeviceLocked(q.owner) or present.swapchain_count == 0 or present.swapchain_count > max_present_entries or present.swapchains == null or present.image_indices == null) {
+    if (!validDeviceLocked(q.owner) or present.s_type != 1_000_001_001 or present.swapchain_count == 0 or present.swapchain_count > max_present_entries or present.swapchains == null or present.image_indices == null or present.wait_semaphore_count > max_present_entries or (present.wait_semaphore_count != 0 and present.wait_semaphores == null)) {
         mutex.unlock();
         return .error_initialization_failed;
     }
@@ -10533,6 +10545,8 @@ fn queueWaitIdle(queue: ?Queue) callconv(.c) Result {
 fn presentTarget(info: *const PresentInfo, index: usize, now_ns: u64) !?u64 {
     var next = info.p_next;
     var depth: usize = 0;
+    var seen_timings = false;
+    var target: ?u64 = null;
     while (next) |raw| : (depth += 1) {
         if (depth == 16) return error.InvalidPresentTiming;
         const header: *const ChainHeader = @ptrCast(@alignCast(raw));
@@ -10541,15 +10555,19 @@ fn presentTarget(info: *const PresentInfo, index: usize, now_ns: u64) !?u64 {
             return error.GoogleDisplayTimingUnsupported;
         }
         if (header.s_type == 1_000_208_003) {
+            if (seen_timings) return error.InvalidPresentTiming;
+            seen_timings = true;
             const timings: *const PresentTimingsInfoEXT = @ptrCast(@alignCast(raw));
             if (timings.swapchain_count != info.swapchain_count or timings.timing_infos == null) return error.InvalidPresentTiming;
             const timing = timings.timing_infos.?[index];
             if (timing.s_type != 1_000_208_004 or timing.p_next != null or timing.flags & ~@as(u32, 3) != 0 or timing.time_domain_id != 1 or timing.present_stage_queries != 0 or timing.target_time_domain_present_stage != 0) return error.InvalidPresentTiming;
-            return if (timing.flags & 1 != 0) std.math.add(u64, now_ns, timing.target_time) catch return error.InvalidPresentTiming else timing.target_time;
+            target = if (timing.flags & 1 != 0) std.math.add(u64, now_ns, timing.target_time) catch return error.InvalidPresentTiming else timing.target_time;
+            next = @ptrCast(header.p_next);
+            continue;
         }
-        next = @ptrCast(header.p_next);
+        return error.InvalidPresentTiming;
     }
-    return null;
+    return target;
 }
 
 test "EXT present timing selects absolute and relative deadlines" {
@@ -10562,6 +10580,12 @@ test "EXT present timing selects absolute and relative deadlines" {
     try std.testing.expectEqual(@as(?u64, 1_250), try presentTarget(&info, 0, 1_000));
     timing.time_domain_id = 2;
     try std.testing.expectError(error.InvalidPresentTiming, presentTarget(&info, 0, 1_000));
+    timing.time_domain_id = 1;
+    var duplicate_timings = timings;
+    duplicate_timings.p_next = @ptrCast(&timings);
+    var duplicate_info = info;
+    duplicate_info.p_next = @ptrCast(&duplicate_timings);
+    try std.testing.expectError(error.InvalidPresentTiming, presentTarget(&duplicate_info, 0, 1_000));
     const google = ChainHeader{ .s_type = google_present_times_info_stype, .p_next = null };
     var google_info = info;
     google_info.p_next = &google;
@@ -10569,7 +10593,7 @@ test "EXT present timing selects absolute and relative deadlines" {
     const ignored = ChainHeader{ .s_type = 99, .p_next = null };
     var ignored_info = info;
     ignored_info.p_next = &ignored;
-    try std.testing.expectEqual(@as(?u64, null), try presentTarget(&ignored_info, 0, 1_000));
+    try std.testing.expectError(error.InvalidPresentTiming, presentTarget(&ignored_info, 0, 1_000));
 }
 
 test "Google display timing procedure names are detected without aliases" {
@@ -10990,6 +11014,17 @@ test "vkcube presentation path records submits and presents two swapchain images
     const swapchain_info = SwapchainCreateInfo{ .s_type = 1_000_001_000, .p_next = null, .flags = 0, .surface = surface, .min_image_count = 2, .image_format = 44, .image_color_space = 0, .image_extent = .{ .width = 8, .height = 8 }, .image_array_layers = 1, .image_usage = 0x10, .image_sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .pre_transform = 1, .composite_alpha = 1, .present_mode = 2, .clipped = 1, .old_swapchain = 0 };
     var swapchain: usize = 0;
     try std.testing.expectEqual(Result.success, createSwapchain(device, &swapchain_info, null, &swapchain));
+    var unchanged_swapchain: usize = 0xfeed_face;
+    var malformed_swapchain_info = swapchain_info;
+    malformed_swapchain_info.s_type = 0;
+    try std.testing.expectEqual(Result.error_initialization_failed, createSwapchain(device, &malformed_swapchain_info, null, &unchanged_swapchain));
+    malformed_swapchain_info = swapchain_info;
+    malformed_swapchain_info.image_usage = 0x20;
+    try std.testing.expectEqual(Result.error_initialization_failed, createSwapchain(device, &malformed_swapchain_info, null, &unchanged_swapchain));
+    malformed_swapchain_info = swapchain_info;
+    malformed_swapchain_info.old_swapchain = swapchain;
+    try std.testing.expectEqual(Result.error_initialization_failed, createSwapchain(device, &malformed_swapchain_info, null, &unchanged_swapchain));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), unchanged_swapchain);
     var image_count: u32 = 0;
     try std.testing.expectEqual(Result.success, getSwapchainImages(device, swapchain, &image_count, null));
     try std.testing.expectEqual(@as(u32, 2), image_count);
@@ -12139,6 +12174,13 @@ test "vkcube presentation path records submits and presents two swapchain images
     const present = PresentInfo{ .s_type = 1_000_001_001, .p_next = null, .wait_semaphore_count = 1, .wait_semaphores = @ptrCast(&rendered), .swapchain_count = 1, .swapchains = @ptrCast(&swapchain), .image_indices = @ptrCast(&image_index), .results = &present_result };
     try std.testing.expectEqual(Result.success, queuePresent(queue, &present));
     try std.testing.expectEqual(Result.success, present_result[0]);
+    var bad_header_present = present;
+    bad_header_present.s_type = 0;
+    try std.testing.expectEqual(Result.error_initialization_failed, queuePresent(queue, &bad_header_present));
+    bad_header_present = present;
+    bad_header_present.wait_semaphore_count = max_present_entries + 1;
+    bad_header_present.wait_semaphores = null;
+    try std.testing.expectEqual(Result.error_initialization_failed, queuePresent(queue, &bad_header_present));
 
     // A later malformed batch entry must not queue the earlier image.
     var batch_index: u32 = undefined;
