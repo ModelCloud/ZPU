@@ -2267,15 +2267,19 @@ fn getProperties(physical: ?Physical, output: ?*Properties) callconv(.c) void {
     defer mutex.unlock();
     _ = getPropertiesLocked(h, out);
 }
-fn getQueueProperties(physical: ?Physical, count: ?*u32, output: ?[*]QueueProperties) callconv(.c) void {
-    lock();
-    defer mutex.unlock();
-    if (!validPhysicalLocked(physical orelse return)) return;
-    const n = count orelse return;
+fn getQueuePropertiesLocked(h: Physical, n: *u32, output: ?[*]QueueProperties) bool {
+    if (!validPhysicalLocked(h)) return false;
     if (output) |items| {
         if (n.* > 0) items[0] = .{ .flags = 0x1 | 0x4, .count = 1, .timestamp_bits = 64, .granularity = .{ .width = 1, .height = 1, .depth = 1 } };
         n.* = @min(n.*, 1);
     } else n.* = 1;
+    return true;
+}
+fn getQueueProperties(physical: ?Physical, count: ?*u32, output: ?[*]QueueProperties) callconv(.c) void {
+    const n = count orelse return;
+    lock();
+    defer mutex.unlock();
+    _ = getQueuePropertiesLocked(physical orelse return, n, output);
 }
 fn getMemoryProperties(physical: ?Physical, output: ?*MemoryProperties) callconv(.c) void {
     lock();
@@ -2395,9 +2399,13 @@ fn getPhysicalDeviceQueueFamilyProperties2(physical: ?Physical, count: ?*u32, ou
     const n = count orelse return;
     if (output) |items| {
         if (n.* == 0) return;
+        const h = physical orelse return;
+        lock();
+        defer mutex.unlock();
+        if (!validPhysicalLocked(h)) return;
         var properties: [1]QueueProperties = undefined;
         var property_count: u32 = 1;
-        getQueueProperties(physical, &property_count, &properties);
+        _ = getQueuePropertiesLocked(h, &property_count, &properties);
         if (property_count != 1 or items[0].s_type != 1000059005 or !queueFamilyProperties2ChainValid(items[0].p_next)) return;
         const chain = items[0].p_next;
         items[0] = std.mem.zeroes(PhysicalDeviceQueueFamilyProperties2);
@@ -13366,6 +13374,11 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(u32, 1), global_priorities.priority_count);
     try std.testing.expectEqual(@as(i32, 256), global_priorities.priorities[0]);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&global_priorities)), queue_properties[0].p_next);
+    queue_properties[0].queue_family_properties.timestamp_bits = 0xdead_beef;
+    global_priorities.priority_count = 0xcafe_f00d;
+    getPhysicalDeviceQueueFamilyProperties2(@ptrFromInt(8), &queue_count, &queue_properties);
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), queue_properties[0].queue_family_properties.timestamp_bits);
+    try std.testing.expectEqual(@as(u32, 0xcafe_f00d), global_priorities.priority_count);
     var unknown_queue_chain = ChainHeader{ .s_type = 999, .p_next = null };
     global_priorities.p_next = @ptrCast(&unknown_queue_chain);
     global_priorities.priority_count = 5;
