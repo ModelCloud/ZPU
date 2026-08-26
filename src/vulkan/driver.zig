@@ -5123,6 +5123,25 @@ fn renderPassDependencyValid(command_buffer: *const CommandBufferObj, info: *con
     };
     return true;
 }
+fn legacyWaitDependencyScopeValid(command_buffer: *const CommandBufferObj, src_stage_mask: u32, dst_stage_mask: u32, memory_list: []const MemoryBarrier, buffer_list: []const BufferMemoryBarrier, image_list: []const ImageMemoryBarrier) bool {
+    if (command_buffer.impl.dynamic_rendering) {
+        if (buffer_list.len != 0 or image_list.len != 0 or src_stage_mask & ~@as(u32, 0x700) != 0 or dst_stage_mask & ~@as(u32, 0x700) != 0) return false;
+        for (memory_list) |barrier| if (barrier.src_access_mask & ~@as(u32, 0x780) != 0 or barrier.dst_access_mask & ~@as(u32, 0x780) != 0) return false;
+        return true;
+    }
+    if (command_buffer.impl.active_render_pass == null) return true;
+    if (buffer_list.len != 0) return false;
+    const graphics_stages: u32 = 0x8000 | 0x7ff;
+    if (src_stage_mask & ~graphics_stages != 0 or dst_stage_mask & ~graphics_stages != 0) return false;
+    if (src_stage_mask & 0x700 != 0 and dst_stage_mask & ~@as(u32, 0x700) != 0) return false;
+    const framebuffer = command_buffer.impl.active_framebuffer orelse if (image_list.len == 0) return true else return false;
+    for (image_list) |barrier| {
+        if (barrier.old_layout != barrier.new_layout or barrier.src_queue_family_index != barrier.dst_queue_family_index) return false;
+        const image = validImageLocked(barrier.image) orelse return false;
+        if (image.owner != command_buffer.impl.owner or (framebuffer.color_image != image and framebuffer.depth_image != image)) return false;
+    }
+    return true;
+}
 
 fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callconv(.c) void {
     if (!dependencyInfoShapeValid(info)) {
@@ -5566,6 +5585,10 @@ fn cmdWaitEvents(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const usize,
             c.impl.invalid = true;
             return;
         }
+    }
+    if (!legacyWaitDependencyScopeValid(c, src_stage_mask, dst_stage_mask, memory_list, buffer_list, barriers)) {
+        c.impl.invalid = true;
+        return;
     }
     for (events) |handle| record(c, .{ .event_wait = validEventLocked(handle).? });
     for (buffer_list) |barrier| record(c, .{ .buffer_barrier = validBufferLocked(barrier.buffer).? });
@@ -14649,6 +14672,7 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     cmdPipelineBarrier2(commands[0], &high_stage_dependency);
     const image_barrier = ImageMemoryBarrier2{ .s_type = 1000314002, .p_next = null, .src_stage_mask = 1, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0x1800, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
     const image_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 0, .memory_barriers = null, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 1, .image_memory_barriers = @ptrCast(&image_barrier) };
+    const legacy_image_barrier = ImageMemoryBarrier{ .s_type = 45, .p_next = null, .src_access_mask = 0, .dst_access_mask = 0x1800, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
     const wait_before = commands[0].impl.count;
     cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&image_dependency));
     try std.testing.expectEqual(wait_before + 2, commands[0].impl.count);
@@ -14709,6 +14733,11 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&image_dependency));
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(before_traditional_wait_scope, commands[0].impl.count);
+    commands[0].impl.invalid = false;
+    const before_traditional_legacy_wait = commands[0].impl.count;
+    cmdWaitEvents(commands[0], 1, @ptrCast(&event), 1, 0x1000, 0, null, 0, null, 1, @ptrCast(&legacy_image_barrier));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_traditional_legacy_wait, commands[0].impl.count);
     commands[0].impl.invalid = false;
     commands[0].impl.active_render_pass = null;
     cmdWriteTimestamp2(commands[0], 0x1000, query, 0);
