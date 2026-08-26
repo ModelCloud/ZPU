@@ -112,6 +112,10 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 146, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 147, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 148, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 149, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 150, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 151, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 152, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 154, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 155, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 156, .operands = .{ .min = 3, .max = 3 } },
@@ -259,6 +263,19 @@ fn resultShape(nodes: []const Node, type_id: u32) Error!ir.Type {
             const column = try resultShape(nodes, node.a);
             if (column.scalar != .f32 or column.columns != 4 or column.rows != 1) return error.Unsupported;
             break :blk .{ .scalar = .f32, .columns = 4, .rows = 4 };
+        },
+        // The bounded arithmetic profile represents the two scalar members
+        // returned by OpIAddCarry/OpISubBorrow/OpUMulExtended/OpSMulExtended
+        // as a two-lane value.  General arrays and structures remain outside
+        // the profile; only this exact pair shape is admitted.
+        .structure => blk: {
+            if (node.words.len != 2) return error.Unsupported;
+            const first = try resultShape(nodes, node.words[0]);
+            const second = try resultShape(nodes, node.words[1]);
+            if (!sameShape(first, second) or first.columns != 1 or first.rows != 1 or (first.scalar != .i32 and first.scalar != .u32)) return error.Unsupported;
+            var pair = first;
+            pair.columns = 2;
+            break :blk pair;
         },
         else => error.Unsupported,
     };
@@ -628,7 +645,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 }
                 block_terminated = true;
             },
-            61, 62, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 154...163, 164...169, 170...179, 182...205 => {
+            61, 62, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...179, 182...205 => {
                 if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
                 const valid_arity = switch (instruction.opcode) {
                     61, 84 => w.len == 3,
@@ -641,7 +658,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     81 => w.len >= 4,
                     82 => w.len == 5,
                     83, 109, 110, 111, 112, 116, 124, 126, 127, 154, 155, 156, 157, 158, 159, 160 => w.len == 3,
-                    128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 161, 162, 163, 164...167, 170...179, 182...199 => w.len == 4,
+                    128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 161, 162, 163, 164...167, 170...179, 182...199 => w.len == 4,
                     201 => w.len == 6,
                     202, 203 => w.len == 5,
                     204, 205 => w.len == 3,
@@ -863,6 +880,18 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const left = try valueShape(nodes, w[2]);
                 const right = try valueShape(nodes, w[3]);
                 if (result.scalar != .f32 or result.columns != 1 or result.rows != 1 or left.scalar != .f32 or right.scalar != .f32 or left.columns < 2 or left.columns > 4 or left.rows != 1 or !sameShape(left, right)) return error.Malformed;
+            },
+            149...152 => {
+                const result_node = nodes[try id(nodes, w[0])];
+                const result = try resultShape(nodes, w[0]);
+                const left = try valueShape(nodes, w[2]);
+                const right = try valueShape(nodes, w[3]);
+                if (result_node.kind != .structure or result_node.words.len != 2 or result.columns != 2 or result.rows != 1 or left.columns != 1 or left.rows != 1 or !sameShape(left, right)) return error.Malformed;
+                const member = try resultShape(nodes, result_node.words[0]);
+                if (!sameShape(member, left)) return error.Malformed;
+                if (instruction.opcode == 152) {
+                    if (left.scalar != .i32) return error.Malformed;
+                } else if (left.scalar != .u32) return error.Malformed;
             },
             154, 155 => {
                 const result = try resultShape(nodes, w[0]);
@@ -1108,7 +1137,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
+                41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
@@ -1211,7 +1240,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
+            41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
@@ -1273,6 +1302,10 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             146 => .matrix_times_matrix,
             147 => .outer_product,
             148 => .dot,
+            149 => .iadd_carry,
+            150 => .isub_borrow,
+            151 => .umul_extended,
+            152 => .smul_extended,
             154 => .any,
             155 => .all,
             156 => .is_nan,
@@ -2265,6 +2298,70 @@ test "compute profile lowers OpQuantizeToF16 for bounded f32 values" {
     var found = false;
     for (program.instructions) |instruction| found = found or instruction.op == .quantize_f16;
     try std.testing.expect(found);
+}
+
+test "compute profile lowers scalar extended integer arithmetic and extracts the low member" {
+    var words = compute_store;
+    words[3] = 14;
+    const struct_offset = testOpcodeOffset(&words, 30, 0).?;
+    const with_second_member = try testInsertWords(std.testing.allocator, &words, struct_offset + 3, &.{
+        (4 << 16) | 30,
+        10,
+        2,
+        2,
+    });
+    defer std.testing.allocator.free(with_second_member);
+
+    const constant_offset = testOpcodeOffset(with_second_member, 43, 0).?;
+    const with_second_constant = try testInsertWords(std.testing.allocator, with_second_member, constant_offset + 4, &.{
+        (4 << 16) | 43,
+        2,
+        11,
+        5,
+    });
+    defer std.testing.allocator.free(with_second_constant);
+    const label_offset = testOpcodeOffset(with_second_constant, 248, 0).?;
+    const with_extended = try testInsertWords(std.testing.allocator, with_second_constant, label_offset + 2, &.{
+        (5 << 16) | 149,
+        10,
+        12,
+        7,
+        11,
+        (5 << 16) | 81,
+        2,
+        13,
+        12,
+        0,
+    });
+    defer std.testing.allocator.free(with_extended);
+    const store_offset = testOpcodeOffset(with_extended, 62, 0).?;
+    with_extended[store_offset + 2] = 13;
+    const extended_offset = testOpcodeOffset(with_extended, 149, 0).?;
+    for ([_]u16{ 149, 150, 151, 152 }) |opcode| {
+        var candidate = try std.testing.allocator.dupe(u32, with_extended);
+        defer std.testing.allocator.free(candidate);
+        candidate[extended_offset] = (@as(u32, 5) << 16) | opcode;
+        if (opcode == 152) {
+            const integer_type = testOpcodeOffset(candidate, 21, 0).?;
+            candidate[integer_type + 3] = 1;
+        }
+        const expected_op: ir.Op = switch (opcode) {
+            149 => .iadd_carry,
+            150 => .isub_borrow,
+            151 => .umul_extended,
+            152 => .smul_extended,
+            else => unreachable,
+        };
+        var program = try compile(std.testing.allocator, candidate, .compute, "main", &.{});
+        defer program.deinit(std.testing.allocator);
+        var saw_extended = false;
+        var saw_extract = false;
+        for (program.instructions) |instruction| {
+            saw_extended = saw_extended or instruction.op == expected_op;
+            saw_extract = saw_extract or instruction.op == .extract;
+        }
+        try std.testing.expect(saw_extended and saw_extract);
+    }
 }
 
 test "compute profile lowers integer division and remainder with exact signedness" {
