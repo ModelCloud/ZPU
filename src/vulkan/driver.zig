@@ -10289,11 +10289,13 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
     for (list[0..count]) |submit| {
         if (submit.s_type != 4 or submit.wait_semaphore_count > max_api_items or submit.command_buffer_count > max_api_items or submit.signal_semaphore_count > max_api_items or
             (submit.wait_semaphore_count != 0 and submit.wait_semaphores == null) or
+            (submit.wait_semaphore_count != 0 and submit.wait_dst_stage_mask == null) or
             (submit.signal_semaphore_count != 0 and submit.signal_semaphores == null) or
             !submitPNextValid(submit.p_next, submit.wait_semaphore_count, submit.command_buffer_count, submit.signal_semaphore_count)) return .error_initialization_failed;
         const timeline_info = submitPNextTimeline(submit.p_next);
         if (submit.wait_semaphore_count != 0) {
             const waits = submit.wait_semaphores orelse return .error_initialization_failed;
+            for (submit.wait_dst_stage_mask.?[0..submit.wait_semaphore_count]) |stage| if (!validEventStageMask(stage)) return .error_initialization_failed;
             for (waits[0..submit.wait_semaphore_count], 0..) |handle, wait_index| {
                 const semaphore = validSemaphoreLocked(handle) orelse return .error_initialization_failed;
                 if (semaphore.owner != q.owner) return .error_initialization_failed;
@@ -16455,6 +16457,9 @@ test "binary semaphores chain ordered submissions with allocation-free warm stat
     const unsignaled_wait = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 1, .wait_semaphores = @ptrCast(&semaphores[0]), .wait_dst_stage_mask = @ptrCast(&wait_stage), .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 0, .signal_semaphores = null };
     try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&unsignaled_wait), 0));
     try std.testing.expect(!validSemaphoreLocked(semaphores[0]).?.signaled.load(.acquire));
+    var missing_wait_stage = unsignaled_wait;
+    missing_wait_stage.wait_dst_stage_mask = null;
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&missing_wait_stage), 0));
     const signal_first = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 1, .signal_semaphores = @ptrCast(&semaphores[0]) };
     const wait_first_signal_second = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 1, .wait_semaphores = @ptrCast(&semaphores[0]), .wait_dst_stage_mask = @ptrCast(&wait_stage), .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 1, .signal_semaphores = @ptrCast(&semaphores[1]) };
     const chain = [_]SubmitInfo{ signal_first, wait_first_signal_second };
@@ -16496,7 +16501,8 @@ test "timeline semaphores expose monotonic counter wait signal and submit ABI" {
     try std.testing.expectEqual(Result.success, waitSemaphores(ctx.device, &wait_info, 0));
     const signal_values = [_]u64{7};
     const timeline_submit_info = TimelineSemaphoreSubmitInfo{ .s_type = 1000207003, .p_next = null, .wait_semaphore_value_count = 1, .wait_semaphore_values = &wait_values, .signal_semaphore_value_count = 1, .signal_semaphore_values = &signal_values };
-    const submit = SubmitInfo{ .s_type = 4, .p_next = &timeline_submit_info, .wait_semaphore_count = 1, .wait_semaphores = &wait_handles, .wait_dst_stage_mask = null, .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 1, .signal_semaphores = &wait_handles };
+    const timeline_wait_stage: u32 = 0x1000;
+    const submit = SubmitInfo{ .s_type = 4, .p_next = &timeline_submit_info, .wait_semaphore_count = 1, .wait_semaphores = &wait_handles, .wait_dst_stage_mask = @ptrCast(&timeline_wait_stage), .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 1, .signal_semaphores = &wait_handles };
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     try std.testing.expectEqual(Result.success, getSemaphoreCounterValue(ctx.device, timeline, &counter));
     try std.testing.expectEqual(@as(u64, 7), counter);
