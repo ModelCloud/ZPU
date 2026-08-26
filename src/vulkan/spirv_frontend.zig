@@ -78,6 +78,7 @@ const opcode_schema = [_]OpcodeMeta{
     // than exposing a misleading schema-arity error.
     .{ .opcode = 249, .operands = .{ .min = 0, .max = max_entry_point_operands } },
     .{ .opcode = 250, .operands = .{ .min = 0, .max = max_entry_point_operands } },
+    .{ .opcode = 251, .operands = .{ .min = 0, .max = max_entry_point_operands } },
     .{ .opcode = 109, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 110, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 111, .operands = .{ .min = 3, .max = 3 } },
@@ -451,17 +452,33 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 in_function = false;
                 current_function = 0;
             },
-            249, 250 => {
+            249, 250, 251 => {
                 if (requested_stage != .compute) return error.Unsupported;
                 if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
-                const valid_arity = if (instruction.opcode == 249) w.len == 1 else w.len == 3;
-                if (!valid_arity) return error.Malformed;
-                if (instruction.opcode == 250) {
+                if (instruction.opcode == 249 and w.len != 1) return error.Malformed;
+                if (instruction.opcode == 250 and w.len != 3) return error.Malformed;
+                if (instruction.opcode == 251) {
+                    if (w.len < 2 or (w.len - 2) % 2 != 0) return error.Malformed;
+                    const selector = nodes[try id(nodes, w[0])];
+                    const selector_shape = try valueShape(nodes, w[0]);
+                    if (selector.kind != .constant or selector.opcode != 43 or !scalarClass(selector_shape, .integer) or selector_shape.columns != 1 or selector_shape.rows != 1 or selector.words.len != 1) return error.Unsupported;
+                    _ = try id(nodes, w[1]);
+                    var pair_index: usize = 2;
+                    while (pair_index < w.len) : (pair_index += 2) {
+                        _ = try id(nodes, w[pair_index + 1]);
+                        var prior_pair: usize = 2;
+                        while (prior_pair < pair_index) : (prior_pair += 2) if (w[prior_pair] == w[pair_index]) return error.Malformed;
+                    }
+                } else if (instruction.opcode == 250) {
                     const condition = nodes[try id(nodes, w[0])];
                     if (condition.kind != .constant or (condition.opcode != 41 and condition.opcode != 42)) return error.Unsupported;
                 }
-                _ = try id(nodes, if (instruction.opcode == 249) w[0] else w[1]);
-                if (instruction.opcode == 250) _ = try id(nodes, w[2]);
+                if (instruction.opcode == 249) {
+                    _ = try id(nodes, w[0]);
+                } else if (instruction.opcode == 250) {
+                    _ = try id(nodes, w[1]);
+                    _ = try id(nodes, w[2]);
+                }
                 block_terminated = true;
             },
             61, 62, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 133, 136, 142, 145, 169 => {
@@ -728,6 +745,18 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     const condition = nodes[try id(nodes, instruction.words[0])];
                     if (condition.kind != .constant or (condition.opcode != 41 and condition.opcode != 42)) return error.Unsupported;
                     next_label = if (condition.opcode == 41) instruction.words[1] else instruction.words[2];
+                    block_done = true;
+                },
+                251 => {
+                    const selector = nodes[try id(nodes, instruction.words[0])];
+                    const selector_shape = try valueShape(nodes, instruction.words[0]);
+                    if (selector.kind != .constant or selector.opcode != 43 or !scalarClass(selector_shape, .integer) or selector_shape.columns != 1 or selector_shape.rows != 1 or selector.words.len != 1) return error.Unsupported;
+                    next_label = instruction.words[1];
+                    var pair_index: usize = 2;
+                    while (pair_index < instruction.words.len) : (pair_index += 2) if (instruction.words[pair_index] == selector.words[0]) {
+                        next_label = instruction.words[pair_index + 1];
+                        break;
+                    };
                     block_done = true;
                 },
                 253 => block_done = true,
@@ -1096,6 +1125,31 @@ pub const compute_static_branch_store = [_]u32{
     (2 << 16) | 248, 12,              (1 << 16) | 253, (1 << 16) | 56,
 };
 
+/// Compute profile variant with a statically resolved switch. The selector
+/// chooses the first case, while the default and second case write a different
+/// value that must remain unreachable in the canonical straight-line program.
+pub const compute_static_switch_store = [_]u32{
+    0x0723_0203,     0x0001_0000,     0,               16,              0,
+    (2 << 16) | 17,  1,               (3 << 16) | 14,  0,               1,
+    (6 << 16) | 15,  5,               8,               0x6e69616d,      0,
+    5,               (6 << 16) | 16,  8,               17,              1,
+    1,               1,               (4 << 16) | 71,  5,               33,
+    0,               (4 << 16) | 71,  5,               34,              0,
+    (2 << 16) | 19,  1,               (4 << 16) | 21,  2,               32,
+    0,               (4 << 16) | 32,  4,               12,              2,
+    (2 << 16) | 20,  14,              (4 << 16) | 59,  4,               5,
+    12,              (3 << 16) | 33,  6,               1,               (4 << 16) | 43,
+    2,               7,               42,              (4 << 16) | 43,  2,
+    13,              99,              (3 << 16) | 41,  14,              15,
+    (5 << 16) | 54,  1,               8,               0,               6,
+    (2 << 16) | 248, 9,               (7 << 16) | 251, 7,               11,
+    42,              10,              13,              11,              (2 << 16) | 248,
+    10,              (3 << 16) | 62,  5,               7,               (2 << 16) | 249,
+    12,              (2 << 16) | 248, 11,              (3 << 16) | 62,  5,
+    13,              (2 << 16) | 249, 12,              (2 << 16) | 248, 12,
+    (1 << 16) | 253, (1 << 16) | 56,
+};
+
 /// Compute profile variant using a scalar boolean select before the storage
 /// write. This is the first non-straight-line value operation admitted by the
 /// bounded frontend; it remains side-effect free and fully SSA-bounded.
@@ -1392,6 +1446,28 @@ test "compute profile resolves a static conditional branch" {
     var false_program = try compile(std.testing.allocator, &false_branch, .compute, "main", &.{});
     defer false_program.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 99), std.mem.readInt(u32, false_program.instructions[0].literal[0..4], .little));
+}
+
+test "compute profile resolves a static switch and rejects dynamic or duplicate cases" {
+    var program = try compile(std.testing.allocator, &compute_static_switch_store, .compute, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), program.instructions.len);
+    try std.testing.expectEqual(@as(u32, 42), std.mem.readInt(u32, program.instructions[0].literal[0..4], .little));
+
+    var dynamic = compute_static_switch_store;
+    const switch_offset = testOpcodeOffset(&dynamic, 251, 0).?;
+    dynamic[switch_offset + 1] = 15;
+    try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, &dynamic, .compute, "main", &.{}));
+
+    var duplicate = compute_static_switch_store;
+    duplicate[switch_offset + 5] = 42;
+    try std.testing.expectError(error.Malformed, compile(std.testing.allocator, &duplicate, .compute, "main", &.{}));
+
+    var default_case = compute_static_switch_store;
+    default_case[switch_offset + 3] = 7;
+    var default_program = try compile(std.testing.allocator, &default_case, .compute, "main", &.{});
+    defer default_program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 99), std.mem.readInt(u32, default_program.instructions[0].literal[0..4], .little));
 }
 
 test "compute profile lowers a boolean select into storage output" {
