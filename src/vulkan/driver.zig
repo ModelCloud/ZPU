@@ -556,14 +556,42 @@ const SyntheticProfile = struct {
     stage: render_ir.Stage,
     executor: render_ir_exec.Executor,
 };
+const ProfileVertexInput = struct {
+    interface: u32,
+    location: u32,
+    binding: u32,
+    offset: u32,
+    stride: u32,
+};
+const ProfileGraphics = struct {
+    vertex: render_ir_exec.Executor,
+    fragment: render_ir_exec.Executor,
+    inputs: [16]ProfileVertexInput = undefined,
+    input_count: u8 = 0,
+    vertex_output: u32,
+    fragment_output: u32,
+    fragment_bool: bool,
+};
+const ProfileGraphicsContract = struct {
+    inputs: [16]ProfileVertexInput = undefined,
+    input_count: u8 = 0,
+    vertex_output: u32,
+    fragment_output: u32,
+    fragment_bool: bool,
+};
 const ExecutionAbi = union(enum) {
     cpu_cube_v1,
     profile_v1_metadata,
     profile_v1_scalar_synthetic: SyntheticProfile,
+    profile_v1_scalar_graphics: ProfileGraphics,
 
     fn deinit(self: *ExecutionAbi) void {
         switch (self.*) {
             .profile_v1_scalar_synthetic => |*synthetic| synthetic.executor.deinit(),
+            .profile_v1_scalar_graphics => |*graphics| {
+                graphics.vertex.deinit();
+                graphics.fragment.deinit();
+            },
             else => {},
         }
         self.* = .profile_v1_metadata;
@@ -640,7 +668,7 @@ const DispatchCommand = struct { base: [3]u32, groups: [3]u32, pipeline: *Comput
 const DispatchIndirectCommand = struct { buffer: *BufferObj, offset: u64, pipeline: *ComputePipelineObj, layout: ?*PipelineLayoutObj, descriptors: ?*DescriptorSetObj };
 const PrivateDataEntry = struct { object_type: i32 = 0, object: u64 = 0, data: u64 = 0 };
 const PrivateDataSlotObj = struct { owner: Device, entries: [max_api_items]PrivateDataEntry };
-const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: struct { image: *ImageObj, layout: i32, depth: f32, base_layer: u32 = 0, layer_count: u32 = 1 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, clear_color: bool = true, clear_depth: bool = true }, clear_attachments: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32 }, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32 }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 }, event_set: *EventObj, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
+const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: struct { image: *ImageObj, layout: i32, depth: f32, base_layer: u32 = 0, layer_count: u32 = 1 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, clear_color: bool = true, clear_depth: bool = true }, clear_attachments: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32 }, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, vertex_bindings: VertexBindingState = .{} }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 }, event_set: *EventObj, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
 const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, descriptor_snapshots: [256]DescriptorSetObj = undefined, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: [256]Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
 pub const CommandBuffer = *CommandBufferObj;
@@ -5223,6 +5251,26 @@ fn wrongSubmittingDevice() bool {
     hit(.submitting_device_ownership);
     return false;
 }
+fn prevalidateProfileVertexBindings(op: anytype, owner: *DeviceObj) bool {
+    const profile = switch (op.pipeline.execution_abi) {
+        .profile_v1_scalar_graphics => |*value| value,
+        else => return true,
+    };
+    if (op.indexed != null or op.vertex_count == 0) return false;
+    const last_vertex = std.math.add(u64, op.base_vertex, @as(u64, op.vertex_count) - 1) catch return false;
+    for (profile.inputs[0..profile.input_count]) |input| {
+        if (input.binding >= 16 or op.vertex_bindings.set & (@as(u16, 1) << @intCast(input.binding)) == 0) return false;
+        const buffer = op.vertex_bindings.buffers[input.binding] orelse return deadResource();
+        if (!liveBufferObject(buffer) or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) return deadResource();
+        if (buffer.owner != owner or buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+        const stride = if (op.vertex_bindings.strides[input.binding] == 0) input.stride else op.vertex_bindings.strides[input.binding];
+        const relative = std.math.add(u64, input.offset, std.math.mul(u64, last_vertex, stride) catch return false) catch return false;
+        const end = std.math.add(u64, relative, 16) catch return false;
+        const offset = op.vertex_bindings.offsets[input.binding];
+        if (offset > buffer.size or end > buffer.size - offset or end > op.vertex_bindings.sizes[input.binding]) return false;
+    }
+    return true;
+}
 fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_objects]i32) bool {
     switch (command) {
         .fill => |op| {
@@ -5359,14 +5407,25 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             const framebuffer = op.framebuffer;
             const color = op.color_image orelse (framebuffer orelse return deadResource()).color_image orelse return deadResource();
             const depth = op.depth_image orelse (framebuffer orelse return deadResource()).depth_image orelse return deadResource();
-            const uniform = op.descriptors.uniform orelse return deadResource();
-            const texture = op.descriptors.texture orelse return deadResource();
             if (framebuffer) |fb| if ((stateForObject(FramebufferObj, fb, &framebuffer_objects, &framebuffer_state) orelse return deadResource()).* != .live) return deadResource();
             if ((stateForObject(GraphicsPipelineObj, op.pipeline, &graphics_pipeline_objects, &graphics_pipeline_state) orelse return deadResource()).* != .live or !liveDescriptorObject(op.descriptors)) return deadResource();
-            if (color.owner != owner or depth.owner != owner or uniform.owner != owner or texture.owner != owner or (color.memory == null and color.owned_bytes == null) or (depth.memory == null and depth.owned_bytes == null) or uniform.memory == null or texture.memory == null) return wrongSubmittingDevice();
-            if (!liveImageObject(color) or !liveImageObject(depth) or !liveImageObject(texture)) return deadResource();
+            const profile_draw = switch (op.pipeline.execution_abi) {
+                .profile_v1_scalar_graphics => true,
+                else => false,
+            };
+            const uniform = if (op.descriptors.uniform) |value| value else null;
+            const texture = if (op.descriptors.texture) |value| value else null;
+            if (color.owner != owner or depth.owner != owner or !op.descriptors.owner.eql(owner) or (color.memory == null and color.owned_bytes == null) or (depth.memory == null and depth.owned_bytes == null)) return wrongSubmittingDevice();
+            if (!liveImageObject(color) or !liveImageObject(depth)) return deadResource();
             if (!op.pipeline.owner.eql(owner)) return wrongSubmittingDevice();
-            if ((depth.memory != null and !liveMemoryObject(depth.memory.?)) or !liveMemoryObject(uniform.memory.?) or !liveMemoryObject(texture.memory.?)) return deadResource();
+            if (depth.memory != null and !liveMemoryObject(depth.memory.?)) return deadResource();
+            if (!profile_draw) {
+                const uniform_buffer = uniform orelse return deadResource();
+                const texture_image = texture orelse return deadResource();
+                if (uniform_buffer.owner != owner or texture_image.owner != owner or uniform_buffer.memory == null or texture_image.memory == null) return wrongSubmittingDevice();
+                if (!liveImageObject(texture_image) or !liveMemoryObject(uniform_buffer.memory.?) or !liveMemoryObject(texture_image.memory.?)) return deadResource();
+            }
+            if (profile_draw and !prevalidateProfileVertexBindings(op, owner)) return false;
             if (op.indexed) |indexed| {
                 if (!liveBufferObject(indexed.buffer) or indexed.buffer.memory == null or !liveMemoryObject(indexed.buffer.memory.?)) return deadResource();
                 if (indexed.buffer.owner != owner or indexed.buffer.memory.?.owner != owner) return wrongSubmittingDevice();
@@ -5638,6 +5697,127 @@ fn executeComputeDispatch(op: DispatchCommand) void {
         executor.execute(bindings[0..binding_count], outputs[0..output_count]) catch return;
     }
 }
+const ProfileScreenVertex = struct { x: f32, y: f32, z: f32 };
+
+fn profileEdge(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) f32 {
+    return (px - ax) * (by - ay) - (py - ay) * (bx - ax);
+}
+
+fn profileReadClip(bytes: []const u8) ?[4]f32 {
+    if (bytes.len < 16) return null;
+    var result: [4]f32 = undefined;
+    for (&result, 0..) |*value, index| {
+        value.* = @bitCast(std.mem.readInt(u32, bytes[index * 4 ..][0..4], .little));
+        if (!std.math.isFinite(value.*)) return null;
+    }
+    return result;
+}
+
+fn profileWriteColor(bytes: []u8, fragment_bool: bool, output: []const u8) ?u32 {
+    if (fragment_bool) {
+        if (output.len < 4) return null;
+        const value = std.mem.readInt(u32, output[0..4], .little) != 0;
+        bytes[0] = if (value) 255 else 0;
+        bytes[1] = if (value) 255 else 0;
+        bytes[2] = if (value) 255 else 0;
+        bytes[3] = 255;
+        return 1;
+    }
+    if (output.len < 16) return null;
+    var rgba: [4]u8 = undefined;
+    for (&rgba, 0..) |*value, index| {
+        const component: f32 = @bitCast(std.mem.readInt(u32, output[index * 4 ..][0..4], .little));
+        if (!std.math.isFinite(component)) return null;
+        value.* = @intFromFloat(std.math.clamp(component, 0, 1) * 255.0);
+    }
+    bytes[0] = rgba[2];
+    bytes[1] = rgba[1];
+    bytes[2] = rgba[0];
+    bytes[3] = rgba[3];
+    return 1;
+}
+
+fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext) void {
+    const profile = switch (op.pipeline.execution_abi) {
+        .profile_v1_scalar_graphics => |*value| value,
+        else => return,
+    };
+    const color = op.color_image orelse op.framebuffer.?.color_image.?;
+    const depth = op.depth_image orelse op.framebuffer.?.depth_image.?;
+    if (op.vertex_count < 3 or op.vertex_count % 3 != 0 or op.vertex_count > 4096 or op.instance_count == 0) return;
+    var bounds = emptyRect();
+    var pixels_written: usize = 0;
+    var vertex_bindings: [16]render_ir_exec.Binding = undefined;
+    var vertex_binding_storage: [16][16]u8 = undefined;
+    var vertex_output_bytes: [16]u8 = undefined;
+    var vertex_outputs = [_]render_ir_exec.Output{.{ .interface = profile.vertex_output, .bytes = &vertex_output_bytes }};
+    var fragment_output_bytes: [16]u8 = undefined;
+    var fragment_outputs = [_]render_ir_exec.Output{.{ .interface = profile.fragment_output, .bytes = &fragment_output_bytes }};
+    var vertices: [3]ProfileScreenVertex = undefined;
+    var triangle_start: u32 = 0;
+    while (triangle_start < op.vertex_count) : (triangle_start += 3) {
+        for (0..3) |corner| {
+            var binding_count: usize = 0;
+            for (profile.inputs[0..profile.input_count]) |input| {
+                const buffer = op.vertex_bindings.buffers[input.binding] orelse return;
+                const stride = if (op.vertex_bindings.strides[input.binding] == 0) input.stride else op.vertex_bindings.strides[input.binding];
+                const vertex_index = std.math.add(u64, op.base_vertex, triangle_start + @as(u32, @intCast(corner))) catch return;
+                const relative = std.math.add(u64, input.offset, std.math.mul(u64, vertex_index, stride) catch return) catch return;
+                const start = std.math.add(u64, op.vertex_bindings.offsets[input.binding], relative) catch return;
+                const source = bufferBytes(buffer);
+                if (start > source.len or source.len - start < 16 or binding_count == vertex_bindings.len) return;
+                @memcpy(vertex_binding_storage[binding_count][0..16], source[@intCast(start)..][0..16]);
+                vertex_bindings[binding_count] = .{ .interface = input.interface, .bytes = &vertex_binding_storage[binding_count] };
+                binding_count += 1;
+            }
+            profile.vertex.execute(vertex_bindings[0..binding_count], vertex_outputs[0..]) catch return;
+            const clip = profileReadClip(&vertex_output_bytes) orelse return;
+            if (@abs(clip[3]) < 0.000001) return;
+            const inverse_w = 1.0 / clip[3];
+            const ndc_x = clip[0] * inverse_w;
+            const ndc_y = clip[1] * inverse_w;
+            const ndc_z = clip[2] * inverse_w;
+            const x = op.viewport.x + (ndc_x * 0.5 + 0.5) * op.viewport.width;
+            const y = op.viewport.y + (ndc_y * 0.5 + 0.5) * op.viewport.height;
+            const z = op.viewport.min_depth + ndc_z * (op.viewport.max_depth - op.viewport.min_depth);
+            if (!std.math.isFinite(x) or !std.math.isFinite(y) or !std.math.isFinite(z)) return;
+            vertices[corner] = .{ .x = x, .y = y, .z = z };
+        }
+        const area = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, vertices[2].x, vertices[2].y);
+        if (!std.math.isFinite(area) or @abs(area) < 0.00001) continue;
+        const front_facing = if (op.front_face == 0) area < 0 else area > 0;
+        if ((front_facing and op.cull_mode & 1 != 0) or (!front_facing and op.cull_mode & 2 != 0)) continue;
+        profile.fragment.execute(&.{}, fragment_outputs[0..]) catch return;
+        const inverse_area = 1.0 / area;
+        const min_x = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].x, @min(vertices[1].x, vertices[2].x))))), op.scissor.x, 0);
+        const min_y = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].y, @min(vertices[1].y, vertices[2].y))))), op.scissor.y, 0);
+        const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].x, @max(vertices[1].x, vertices[2].x))))), op.scissor.x + @as(i32, @intCast(op.scissor.width)), @as(i32, @intCast(color.width)));
+        const max_y = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].y, @max(vertices[1].y, vertices[2].y))))), op.scissor.y + @as(i32, @intCast(op.scissor.height)), @as(i32, @intCast(color.height)));
+        if (max_x <= min_x or max_y <= min_y) continue;
+        for (@intCast(min_y)..@intCast(max_y)) |y| for (@intCast(min_x)..@intCast(max_x)) |x| {
+            const px = @as(f32, @floatFromInt(x)) + 0.5;
+            const py = @as(f32, @floatFromInt(y)) + 0.5;
+            const b0 = profileEdge(vertices[1].x, vertices[1].y, vertices[2].x, vertices[2].y, px, py) * inverse_area;
+            const b1 = profileEdge(vertices[2].x, vertices[2].y, vertices[0].x, vertices[0].y, px, py) * inverse_area;
+            const b2 = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, px, py) * inverse_area;
+            if (b0 < 0 or b1 < 0 or b2 < 0) continue;
+            const depth_value = b0 * vertices[0].z + b1 * vertices[1].z + b2 * vertices[2].z;
+            if (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1) continue;
+            const offset = (@as(usize, @intCast(y)) * color.width + @as(usize, @intCast(x))) * 4;
+            const stored_depth: f32 = @bitCast(std.mem.readInt(u32, imageBytes(depth)[offset..][0..4], .little));
+            if (std.math.isFinite(stored_depth) and depth_value > stored_depth) continue;
+            if (profileWriteColor(imageBytes(color)[offset..][0..4], profile.fragment_bool, &fragment_output_bytes) == null) return;
+            std.mem.writeInt(u32, imageBytes(depth)[offset..][0..4], @bitCast(depth_value), .little);
+            bounds = unionRect(bounds, .{ .x = @intCast(x), .y = @intCast(y), .width = 1, .height = 1 });
+            pixels_written += 1;
+        };
+    }
+    if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(pixels_written, .monotonic);
+    color.content_bounds = unionRect(color.content_bounds, bounds);
+    depth.content_bounds = unionRect(depth.content_bounds, bounds);
+    color.complex_3d_content = true;
+    color.force_full_present = true;
+}
 fn executeValidatedCommand(command: Command, query_context: *QueryExecutionContext) void {
     switch (command) {
         .fill => |op| {
@@ -5751,6 +5931,10 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
         },
         .next_subpass => {},
         .cube_draw => |op| {
+            if (op.pipeline.execution_abi == .profile_v1_scalar_graphics) {
+                executeProfileDraw(op, query_context);
+                return;
+            }
             const operation_start = frame_pacing.monotonicNs();
             const color = op.color_image orelse op.framebuffer.?.color_image.?;
             const depth = op.depth_image orelse op.framebuffer.?.depth_image.?;
@@ -6836,6 +7020,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         try w.i32le(a.format);
         try w.u32le(a.offset);
     }
+    const profile_contract = if (profile_pair) profileGraphicsContract(&vertex_program.?, &fragment_program.?, vi) else null;
     const ia = ci.input_assembly orelse return error.Invalid;
     if (ia.s_type != 20 or ia.p_next != null or ia.flags != 0 or ia.topology != 3 or try bool32(ia.primitive_restart_enable) != 0) return error.Invalid;
     try w.i32le(ia.topology);
@@ -6928,7 +7113,20 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     if (test_fail_render_compatibility_clone) return error.OutOfMemory;
     var render_compatibility = try render_pass.compatibility.clone();
     errdefer render_compatibility.deinit();
-    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .viewport = baked_viewport, .scissor = baked_scissor };
+    var profile_execution: ?ProfileGraphics = null;
+    if (profile_contract) |contract| {
+        var vertex_executor = render_ir_exec.Executor.init(allocator, &vertex_program.?) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.Invalid,
+        };
+        errdefer vertex_executor.deinit();
+        const fragment_executor = render_ir_exec.Executor.init(allocator, &fragment_program.?) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.Invalid,
+        };
+        profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
+    }
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .viewport = baked_viewport, .scissor = baked_scissor };
 }
 
 fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, set0: *const Canonical) bool {
@@ -6967,6 +7165,63 @@ fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *con
         if (!found) return false;
     };
     return true;
+}
+
+/// The Vulkan draw bridge intentionally accepts only a small, fully bounded
+/// graphics profile.  It is enough to execute ordinary scalar vertex-input
+/// and constant-output fragment programs through the validated render IR;
+/// arbitrary SPIR-V remains metadata-only and is never silently emulated.
+fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const render_ir.Program, vi: *const PipelineVertexInputStateCreateInfo) ?ProfileGraphicsContract {
+    if (vi.s_type != 19 or vi.p_next != null or vi.flags != 0 or vi.binding_count > 16 or vi.attribute_count > 16 or (vi.binding_count != 0 and vi.bindings == null) or (vi.attribute_count != 0 and vi.attributes == null)) return null;
+    var result = ProfileGraphicsContract{ .vertex_output = 0, .fragment_output = 0, .fragment_bool = false };
+    var vertex_inputs: u32 = 0;
+    for (vertex.interfaces, 0..) |interface, index| switch (interface.storage) {
+        .input => {
+            if (vertex_inputs == 16 or interface.location == null or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1) return null;
+            result.inputs[vertex_inputs].interface = @intCast(index);
+            result.inputs[vertex_inputs].location = interface.location.?;
+            vertex_inputs += 1;
+        },
+        .output => {
+            if (!interface.builtin_position or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or result.vertex_output != 0) return null;
+            result.vertex_output = @intCast(index + 1);
+        },
+        .uniform => return null,
+    };
+    if (result.vertex_output == 0 or vertex_inputs == 0) return null;
+    var fragment_outputs: u32 = 0;
+    for (fragment.interfaces, 0..) |interface, index| switch (interface.storage) {
+        .input, .uniform => return null,
+        .output => {
+            if (fragment_outputs != 0 or (interface.ty.scalar != .bool and !(interface.ty.scalar == .f32 and interface.ty.columns == 4 and interface.ty.rows == 1))) return null;
+            result.fragment_output = @intCast(index);
+            result.fragment_bool = interface.ty.scalar == .bool;
+            fragment_outputs += 1;
+        },
+    };
+    if (fragment_outputs != 1) return null;
+    const bindings = if (vi.bindings) |items| items[0..vi.binding_count] else &.{};
+    const attributes = if (vi.attributes) |items| items[0..vi.attribute_count] else &.{};
+    if (attributes.len != vertex_inputs) return null;
+    for (0..vertex_inputs) |input_index| {
+        var found = false;
+        for (attributes) |attribute| if (attribute.location == result.inputs[input_index].location) {
+            if (found or attribute.binding >= 16 or attribute.format != 109 or attribute.offset > 2047) return null;
+            var binding_found = false;
+            for (bindings) |binding| if (binding.binding == attribute.binding) {
+                if (binding_found or binding.input_rate != 0 or binding.stride < 16 or binding.stride > 2048) return null;
+                result.inputs[input_index].binding = attribute.binding;
+                result.inputs[input_index].offset = attribute.offset;
+                result.inputs[input_index].stride = binding.stride;
+                binding_found = true;
+            };
+            if (!binding_found) return null;
+            found = true;
+        };
+        if (!found) return null;
+    }
+    result.input_count = @intCast(vertex_inputs);
+    return result;
 }
 
 /// Exact bridge for the immutable distro-vkcube shader pair used by the
@@ -8638,6 +8893,12 @@ fn cmdPushDescriptorSetWithTemplate2(cb: ?CommandBuffer, info: ?*const PushDescr
     cmdPushDescriptorSetWithTemplate(cb, ci.descriptor_update_template, 0, ci.layout, ci.set, ci.data);
 }
 const DrawRasterState = struct { viewport: Viewport, scissor: cpu_cube.Rect };
+fn graphicsDrawExecutionAllowed(abi: ExecutionAbi) bool {
+    return switch (abi) {
+        .cpu_cube_v1, .profile_v1_scalar_graphics => true,
+        else => false,
+    };
+}
 fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsPipelineObj) ?DrawRasterState {
     if ((pipeline.dynamic_viewport and !command_buffer.impl.viewport_set) or (pipeline.dynamic_scissor and !command_buffer.impl.scissor_set)) return null;
     return .{
@@ -8704,6 +8965,83 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
         try std.testing.expectEqual(dynamic_scissor, warm.scissor);
     }
 }
+test "scalar graphics profile executes vertex input triangle allocation free" {
+    const vec4 = render_ir.Type{ .scalar = .f32, .columns = 4 };
+    const vertex_interfaces = [_]render_ir.Interface{
+        .{ .storage = .input, .ty = vec4, .location = 0 },
+        .{ .storage = .output, .ty = vec4, .builtin_position = true },
+    };
+    const vertex_input_operands = [_]u32{0};
+    const vertex_output_operands = [_]u32{ 1, 0 };
+    const vertex_instructions = [_]render_ir.Instruction{
+        .{ .op = .input, .ty = vec4, .operands = &vertex_input_operands, .literal = &.{} },
+        .{ .op = .output, .ty = vec4, .operands = &vertex_output_operands, .literal = &.{} },
+    };
+    const vertex_name = [_]u8{ 'm', 'a', 'i', 'n' };
+    const vertex_program = render_ir.Program{ .stage = .vertex, .entry_name = @constCast(&vertex_name), .interfaces = @constCast(&vertex_interfaces), .instructions = @constCast(&vertex_instructions), .bytes = &.{}, .identity = .{ .digest = .{0} ** 32, .bytes = &.{} } };
+    const fragment_interfaces = [_]render_ir.Interface{.{ .storage = .output, .ty = vec4, .location = 0 }};
+    const fragment_constant_operands = [_]u32{};
+    const fragment_output_operands = [_]u32{ 0, 0 };
+    const white = [_]u8{ 0, 0, 128, 63, 0, 0, 128, 63, 0, 0, 128, 63, 0, 0, 128, 63 };
+    const fragment_instructions = [_]render_ir.Instruction{
+        .{ .op = .constant, .ty = vec4, .operands = &fragment_constant_operands, .literal = &white },
+        .{ .op = .output, .ty = vec4, .operands = &fragment_output_operands, .literal = &.{} },
+    };
+    const fragment_name = [_]u8{ 'm', 'a', 'i', 'n' };
+    const fragment_program = render_ir.Program{ .stage = .fragment, .entry_name = @constCast(&fragment_name), .interfaces = @constCast(&fragment_interfaces), .instructions = @constCast(&fragment_instructions), .bytes = &.{}, .identity = .{ .digest = .{0} ** 32, .bytes = &.{} } };
+    var vertex_executor = try render_ir_exec.Executor.init(std.testing.allocator, &vertex_program);
+    defer vertex_executor.deinit();
+    var fragment_executor = try render_ir_exec.Executor.init(std.testing.allocator, &fragment_program);
+    defer fragment_executor.deinit();
+    var profile = ProfileGraphics{ .vertex = vertex_executor, .fragment = fragment_executor, .input_count = 1, .vertex_output = 1, .fragment_output = 0, .fragment_bool = false };
+    profile.inputs[0] = .{ .interface = 0, .location = 0, .binding = 0, .offset = 0, .stride = 16 };
+    var pipeline: GraphicsPipelineObj = undefined;
+    pipeline.execution_abi = .{ .profile_v1_scalar_graphics = profile };
+    var vertex_bytes: [48]u8 align(64) = [_]u8{0} ** 48;
+    const positions = [_][4]f32{ .{ -0.8, -0.8, 0.5, 1 }, .{ 0.8, -0.8, 0.5, 1 }, .{ 0, 0.8, 0.5, 1 } };
+    for (positions, 0..) |position, vertex| for (position, 0..) |value, component| std.mem.writeInt(u32, vertex_bytes[vertex * 16 + component * 4 ..][0..4], @bitCast(value), .little);
+    var vertex_memory = MemoryObj{ .owner = undefined, .bytes = vertex_bytes[0..], .mapped = true };
+    var vertex_buffer = BufferObj{ .owner = undefined, .size = vertex_bytes.len, .usage = 0x80, .memory = &vertex_memory };
+    var color_bytes: [64]u8 align(64) = [_]u8{0} ** 64;
+    var depth_bytes: [64]u8 align(64) = [_]u8{0} ** 64;
+    for (0..16) |index| std.mem.writeInt(u32, depth_bytes[index * 4 ..][0..4], 0x3f80_0000, .little);
+    var color_memory = MemoryObj{ .owner = undefined, .bytes = color_bytes[0..], .mapped = true };
+    var depth_memory = MemoryObj{ .owner = undefined, .bytes = depth_bytes[0..], .mapped = true };
+    var color = ImageObj{ .owner = undefined, .width = 4, .height = 4, .array_layers = 1, .samples = 1, .format = 44, .usage = 0x2, .layout = 1, .memory = &color_memory };
+    var depth = ImageObj{ .owner = undefined, .width = 4, .height = 4, .array_layers = 1, .samples = 1, .format = 126, .usage = 0x2, .layout = 1, .memory = &depth_memory };
+    var descriptors = DescriptorSetObj{};
+    const command = Command{ .cube_draw = .{ .framebuffer = null, .color_image = &color, .depth_image = &depth, .pipeline = &pipeline, .descriptors = &descriptors, .vertex_count = 3, .base_vertex = 0, .instance_count = 1, .indexed = null, .viewport = .{ .x = 0, .y = 0, .width = 4, .height = 4, .min_depth = 0, .max_depth = 1 }, .scissor = .{ .x = 0, .y = 0, .width = 4, .height = 4 }, .cull_mode = 0, .front_face = 1, .vertex_bindings = .{ .buffers = .{&vertex_buffer} ** 16, .offsets = .{0} ** 16, .sizes = .{48} ** 16, .strides = .{16} ** 16, .set = 1 } } };
+    var context = QueryExecutionContext{ .pool = null, .index = 0 };
+    executeValidatedCommand(command, &context);
+    try std.testing.expect(std.mem.readInt(u32, color_bytes[0..4], .little) != 0 or std.mem.readInt(u32, color_bytes[4..8], .little) != 0);
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..4096) |_| executeValidatedCommand(command, &context);
+}
+
+test "scalar graphics profile contract is explicit and allocation free" {
+    var vertex = try spirv_frontend.compile(std.testing.allocator, &spirv_frontend.rich_vertex, .vertex, "main", &.{});
+    defer vertex.deinit(std.testing.allocator);
+    var fragment = try spirv_frontend.compile(std.testing.allocator, &spirv_frontend.bool_fragment, .fragment, "main", &.{});
+    defer fragment.deinit(std.testing.allocator);
+    const binding = VertexInputBindingDescription{ .binding = 0, .stride = 16, .input_rate = 0 };
+    const attribute = VertexInputAttributeDescription{ .location = 0, .binding = 0, .format = 109, .offset = 0 };
+    const vi = PipelineVertexInputStateCreateInfo{ .s_type = 19, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding), .attribute_count = 1, .attributes = @ptrCast(&attribute) };
+    const contract = profileGraphicsContract(&vertex, &fragment, &vi).?;
+    try std.testing.expectEqual(@as(u8, 1), contract.input_count);
+    try std.testing.expectEqual(@as(u32, 0), contract.inputs[0].interface);
+    try std.testing.expectEqual(@as(u32, 0), contract.inputs[0].binding);
+    try std.testing.expect(contract.fragment_bool);
+    var invalid_format = attribute;
+    invalid_format.format = 44;
+    var invalid_vi = vi;
+    invalid_vi.attributes = @ptrCast(&invalid_format);
+    try std.testing.expect(profileGraphicsContract(&vertex, &fragment, &invalid_vi) == null);
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..4096) |_| try std.testing.expect(profileGraphicsContract(&vertex, &fragment, &vi) != null);
+}
+
 fn activeDescriptorSet(command_buffer: *CommandBufferObj) ?*DescriptorSetObj {
     return if (command_buffer.impl.push_descriptor_active) &command_buffer.impl.push_descriptor else command_buffer.impl.bound_descriptors;
 }
@@ -8757,7 +9095,7 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
         command_buffer.impl.invalid = true;
         return;
     };
-    if (pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or pipeline.execution_abi != .cpu_cube_v1 or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or vertex_count == 0) {
+    if (pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or vertex_count == 0) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -8772,7 +9110,7 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
         command_buffer.impl.invalid = true;
         return;
     };
-    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = vertex_count, .base_vertex = first_vertex, .instance_count = instance_count, .indexed = null, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = cull_mode, .front_face = front_face } });
+    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = vertex_count, .base_vertex = first_vertex, .instance_count = instance_count, .indexed = null, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = cull_mode, .front_face = front_face, .vertex_bindings = command_buffer.impl.vertex_bindings } });
 }
 fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32, first_instance: u32) callconv(.c) void {
     _ = first_instance;

@@ -141,7 +141,10 @@ select, then apply scalar arithmetic before writing through a
 invocation multiplication is bounded, uniform/storage ranges are validated at
 record and submit time, and the output is written synchronously. Generic
 SPIR-V compute control flow, dynamic loads, atomics,
-shared memory, and arbitrary graphics execution remain explicitly deferred.
+shared memory, and general arbitrary graphics execution remain explicitly
+deferred. A bounded scalar graphics profile now executes f32x4 vertex-input
+triangles with builtin-position output and constant bool/f32x4 fragment output;
+the unrestricted SPIR-V graphics space is still intentionally deferred.
 Indirect dispatch now retains its argument buffer and consumes the three group
 counts at submission, including post-record writes and failure-atomic invalid
 group rejection.
@@ -208,8 +211,10 @@ dynamic-offset test covers rejected count/null/alignment cases, rollback, effect
 range bounds, snapshot isolation, and a 4096-iteration warm path. The bounded
 compute execution slice is also covered by an end-to-end dispatch that writes a
 mapped storage buffer and verifies the result after queue submission. General
-SPIR-V compute execution and arbitrary graphics execution remain explicitly
-deferred.
+SPIR-V compute execution and unrestricted arbitrary graphics execution remain
+explicitly deferred. The driver executes only the bounded scalar graphics
+profile described above, with the same failure-atomic and allocation-free warm
+path guarantees as the other advertised subsets.
 
 | Core revision | Mandatory commands | Names present before slice 1 | Missing names |
 | --- | ---: | ---: | ---: |
