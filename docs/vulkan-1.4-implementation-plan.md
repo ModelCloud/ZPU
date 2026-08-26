@@ -62,6 +62,11 @@ external-image input and external-image/YCbCr output chains, reports the
 truthful no-external-handle/no-YCbCr policy, and rejects unknown chains without
 mutating the base result.  The external-buffer query now uses its correct
 promoted sTypes rather than the adjacent image-query values.
+The Vulkan 1.1 external-buffer, external-fence, and external-semaphore
+capability queries now validate reserved flags, usage domains, handle-type
+bits, ownership, and output chains before publishing their explicit zero
+capability result. Malformed inputs leave every output field untouched, and a
+4096-iteration warm path covers the allocation-free query behavior.
 The same query now handles core image-format-list and separate-stencil input
 chains and the Vulkan 1.4 host-image-copy performance output, reporting the
 CPU-local layout policy without mutating results on rejected chains.

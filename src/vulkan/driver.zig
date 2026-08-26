@@ -2569,11 +2569,21 @@ fn getPhysicalDeviceToolProperties(physical: ?Physical, count: ?*u32, output: ?[
     n.* = 0;
     return .success;
 }
+
+// ZPU does not export/import native handles, but the external-capability
+// queries still have a real ABI contract: valid queries return the exact
+// zero-capability result, while malformed input must not partially overwrite
+// the caller's output.  Keep the accepted handle domain bounded to the
+// currently assigned Vulkan external-handle bits and reject reserved bits.
+const external_handle_type_mask: u32 = 0x0000_3fff;
+fn validExternalHandleType(handle_type: u32) bool {
+    return handle_type == 0 or (handle_type & ~external_handle_type_mask == 0 and (handle_type & (handle_type - 1)) == 0);
+}
 fn getPhysicalDeviceExternalBufferProperties(physical: ?Physical, info: ?*const PhysicalDeviceExternalBufferInfo, output: ?*ExternalBufferProperties) callconv(.c) void {
     const h = physical orelse return;
     const i = info orelse return;
     const out = output orelse return;
-    if (i.s_type != 1000071002 or i.p_next != null or out.s_type != 1000071003 or out.p_next != null) return;
+    if (i.s_type != 1000071002 or i.p_next != null or i.flags != 0 or i.usage & ~@as(u32, 0x1f7) != 0 or !validExternalHandleType(i.handle_type) or out.s_type != 1000071003 or out.p_next != null) return;
     lock();
     defer mutex.unlock();
     if (!validPhysicalLocked(h)) return;
@@ -2583,7 +2593,7 @@ fn getPhysicalDeviceExternalFenceProperties(physical: ?Physical, info: ?*const P
     const h = physical orelse return;
     const i = info orelse return;
     const out = output orelse return;
-    if (i.s_type != 1000112000 or i.p_next != null or out.s_type != 1000112001 or out.p_next != null) return;
+    if (i.s_type != 1000112000 or i.p_next != null or !validExternalHandleType(i.handle_type) or out.s_type != 1000112001 or out.p_next != null) return;
     lock();
     defer mutex.unlock();
     if (!validPhysicalLocked(h)) return;
@@ -2595,7 +2605,7 @@ fn getPhysicalDeviceExternalSemaphoreProperties(physical: ?Physical, info: ?*con
     const h = physical orelse return;
     const i = info orelse return;
     const out = output orelse return;
-    if (i.s_type != 1000076000 or i.p_next != null or out.s_type != 1000076001 or out.p_next != null) return;
+    if (i.s_type != 1000076000 or i.p_next != null or !validExternalHandleType(i.handle_type) or out.s_type != 1000076001 or out.p_next != null) return;
     lock();
     defer mutex.unlock();
     if (!validPhysicalLocked(h)) return;
@@ -14252,14 +14262,64 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     var external_buffer = ExternalBufferProperties{ .s_type = 1000071003, .p_next = null, .external_memory_properties = .{ .external_memory_features = 0xffff_ffff, .export_from_imported_handle_types = 0xffff_ffff, .compatible_handle_types = 0xffff_ffff } };
     getPhysicalDeviceExternalBufferProperties(ctx.physical, &external_buffer_info, &external_buffer);
     try std.testing.expectEqual(@as(u32, 0), external_buffer.external_memory_properties.external_memory_features);
+    external_buffer = .{ .s_type = 1000071003, .p_next = null, .external_memory_properties = .{ .external_memory_features = 0xaaaa_aaaa, .export_from_imported_handle_types = 0xbbbb_bbbb, .compatible_handle_types = 0xcccc_cccc } };
+    var malformed_external_buffer_info = external_buffer_info;
+    malformed_external_buffer_info.flags = 1;
+    getPhysicalDeviceExternalBufferProperties(ctx.physical, &malformed_external_buffer_info, &external_buffer);
+    try std.testing.expectEqual(@as(u32, 0xaaaa_aaaa), external_buffer.external_memory_properties.external_memory_features);
+    malformed_external_buffer_info = external_buffer_info;
+    malformed_external_buffer_info.handle_type = 0x8000_0000;
+    getPhysicalDeviceExternalBufferProperties(ctx.physical, &malformed_external_buffer_info, &external_buffer);
+    try std.testing.expectEqual(@as(u32, 0xaaaa_aaaa), external_buffer.external_memory_properties.external_memory_features);
+    malformed_external_buffer_info = external_buffer_info;
+    malformed_external_buffer_info.usage = 0x8000_0000;
+    getPhysicalDeviceExternalBufferProperties(ctx.physical, &malformed_external_buffer_info, &external_buffer);
+    try std.testing.expectEqual(@as(u32, 0xaaaa_aaaa), external_buffer.external_memory_properties.external_memory_features);
+    external_buffer_info.handle_type = 1;
+    getPhysicalDeviceExternalBufferProperties(ctx.physical, &external_buffer_info, &external_buffer);
+    try std.testing.expectEqual(@as(u32, 0), external_buffer.external_memory_properties.external_memory_features);
+    external_buffer_info.handle_type = 0;
     var external_fence_info = PhysicalDeviceExternalFenceInfo{ .s_type = 1000112000, .p_next = null, .handle_type = 0 };
     var external_fence = ExternalFenceProperties{ .s_type = 1000112001, .p_next = null, .export_from_imported_handle_types = 0xffff_ffff, .compatible_handle_types = 0xffff_ffff, .external_fence_features = 0xffff_ffff };
     getPhysicalDeviceExternalFenceProperties(ctx.physical, &external_fence_info, &external_fence);
     try std.testing.expectEqual(@as(u32, 0), external_fence.external_fence_features);
+    external_fence = .{ .s_type = 1000112001, .p_next = null, .export_from_imported_handle_types = 0xaaaa_aaaa, .compatible_handle_types = 0xbbbb_bbbb, .external_fence_features = 0xcccc_cccc };
+    var malformed_external_fence_info = external_fence_info;
+    malformed_external_fence_info.handle_type = 0x8000_0000;
+    getPhysicalDeviceExternalFenceProperties(ctx.physical, &malformed_external_fence_info, &external_fence);
+    try std.testing.expectEqual(@as(u32, 0xcccc_cccc), external_fence.external_fence_features);
+    malformed_external_fence_info = external_fence_info;
+    malformed_external_fence_info.p_next = @ptrCast(&unknown_feature_chain);
+    getPhysicalDeviceExternalFenceProperties(ctx.physical, &malformed_external_fence_info, &external_fence);
+    try std.testing.expectEqual(@as(u32, 0xcccc_cccc), external_fence.external_fence_features);
+    external_fence_info.handle_type = 1;
+    getPhysicalDeviceExternalFenceProperties(ctx.physical, &external_fence_info, &external_fence);
+    try std.testing.expectEqual(@as(u32, 0), external_fence.external_fence_features);
+    external_fence_info.handle_type = 0;
     var external_semaphore_info = PhysicalDeviceExternalSemaphoreInfo{ .s_type = 1000076000, .p_next = null, .handle_type = 0 };
     var external_semaphore = ExternalSemaphoreProperties{ .s_type = 1000076001, .p_next = null, .export_from_imported_handle_types = 0xffff_ffff, .compatible_handle_types = 0xffff_ffff, .external_semaphore_features = 0xffff_ffff };
     getPhysicalDeviceExternalSemaphoreProperties(ctx.physical, &external_semaphore_info, &external_semaphore);
     try std.testing.expectEqual(@as(u32, 0), external_semaphore.external_semaphore_features);
+    external_semaphore = .{ .s_type = 1000076001, .p_next = null, .export_from_imported_handle_types = 0xaaaa_aaaa, .compatible_handle_types = 0xbbbb_bbbb, .external_semaphore_features = 0xcccc_cccc };
+    var malformed_external_semaphore_info = external_semaphore_info;
+    malformed_external_semaphore_info.handle_type = 0x8000_0000;
+    getPhysicalDeviceExternalSemaphoreProperties(ctx.physical, &malformed_external_semaphore_info, &external_semaphore);
+    try std.testing.expectEqual(@as(u32, 0xcccc_cccc), external_semaphore.external_semaphore_features);
+    malformed_external_semaphore_info = external_semaphore_info;
+    malformed_external_semaphore_info.p_next = @ptrCast(&unknown_feature_chain);
+    getPhysicalDeviceExternalSemaphoreProperties(ctx.physical, &malformed_external_semaphore_info, &external_semaphore);
+    try std.testing.expectEqual(@as(u32, 0xcccc_cccc), external_semaphore.external_semaphore_features);
+    external_semaphore_info.handle_type = 1;
+    getPhysicalDeviceExternalSemaphoreProperties(ctx.physical, &external_semaphore_info, &external_semaphore);
+    try std.testing.expectEqual(@as(u32, 0), external_semaphore.external_semaphore_features);
+    external_semaphore_info.handle_type = 0;
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        getPhysicalDeviceExternalBufferProperties(ctx.physical, &external_buffer_info, &external_buffer);
+        getPhysicalDeviceExternalFenceProperties(ctx.physical, &external_fence_info, &external_fence);
+        getPhysicalDeviceExternalSemaphoreProperties(ctx.physical, &external_semaphore_info, &external_semaphore);
+    }
+    test_allocations_before_failure = null;
 
     var queue: Queue = undefined;
     const queue_info = DeviceQueueInfo2{ .s_type = 1000145003, .p_next = null, .flags = 0, .queue_family_index = 0, .queue_index = 0 };
