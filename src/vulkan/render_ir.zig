@@ -126,6 +126,12 @@ pub const Op = enum(u8) {
     vector_times_matrix,
     /// Column-major 4x4 matrix multiplied by a column-major 4x4 matrix.
     matrix_times_matrix,
+    /// Transpose of a column-major 4x4 matrix.
+    transpose,
+    /// Outer product of two f32x4 vectors, producing a column-major 4x4 matrix.
+    outer_product,
+    /// Dot product of equal-length f32 vectors, producing a scalar.
+    dot,
 };
 
 pub const Instruction = struct {
@@ -280,7 +286,8 @@ fn valueOperand(op: Op, operand_index: usize) bool {
         .shuffle => operand_index < 2,
         .fneg, .ineg, .bit_not, .convert => operand_index == 0,
         .select => operand_index < 3,
-        .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge, .logical_eq, .logical_ne, .logical_or, .logical_and, .fadd, .fsub, .fmul, .fdiv, .frem, .vector_times_scalar, .matrix_times_vector, .matrix_times_scalar, .vector_times_matrix, .matrix_times_matrix => operand_index < 2,
+        .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge, .logical_eq, .logical_ne, .logical_or, .logical_and, .fadd, .fsub, .fmul, .fdiv, .frem, .vector_times_scalar, .matrix_times_vector, .matrix_times_scalar, .vector_times_matrix, .matrix_times_matrix, .outer_product, .dot => operand_index < 2,
+        .transpose => operand_index == 0,
         .logical_not => operand_index == 0,
         .output => operand_index == 1,
     };

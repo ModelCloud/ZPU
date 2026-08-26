@@ -73,6 +73,7 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 79, .operands = .{ .min = 5, .max = 8 } },
     .{ .opcode = 80, .operands = .{ .min = 3, .max = 18 } },
     .{ .opcode = 81, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 84, .operands = .{ .min = 3, .max = 3 } },
     // Branch widths are checked by the stage-aware function parser below so
     // non-compute profiles classify the entire family as unsupported rather
     // than exposing a misleading schema-arity error.
@@ -105,6 +106,8 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 144, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 145, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 146, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 147, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 148, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 164, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 165, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 166, .operands = .{ .min = 4, .max = 4 } },
@@ -604,17 +607,17 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 }
                 block_terminated = true;
             },
-            61, 62, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 142, 143, 144, 145, 146, 164...169, 170...179, 182...200 => {
+            61, 62, 65, 79, 80, 81, 84, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 142, 143, 144, 145, 146, 147, 148, 164...169, 170...179, 182...200 => {
                 if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
                 const valid_arity = switch (instruction.opcode) {
-                    61 => w.len == 3,
+                    61, 84 => w.len == 3,
                     62 => w.len == 2,
                     65 => w.len >= 4,
                     79 => w.len >= 5,
                     80 => w.len >= 3,
                     81 => w.len >= 4,
                     109, 110, 111, 112, 124, 126, 127 => w.len == 3,
-                    128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 142, 143, 144, 145, 146, 164...167, 170...179, 182...199 => w.len == 4,
+                    128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 142, 143, 144, 145, 146, 147, 148, 164...167, 170...179, 182...199 => w.len == 4,
                     200 => w.len == 3,
                     168 => w.len == 3,
                     169 => w.len == 5,
@@ -727,6 +730,11 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 expected.columns = 1;
                 if (!sameShape(expected, try resultShape(nodes, w[0]))) return error.Malformed;
             },
+            84 => {
+                const result = try resultShape(nodes, w[0]);
+                const source = try valueShape(nodes, w[2]);
+                if (result.scalar != .f32 or result.columns != 4 or result.rows != 4 or !sameShape(result, source)) return error.Malformed;
+            },
             109, 110, 111, 112, 124 => {
                 const result = try resultShape(nodes, w[0]);
                 const source = try valueShape(nodes, w[2]);
@@ -787,6 +795,18 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const left = try valueShape(nodes, w[2]);
                 const right = try valueShape(nodes, w[3]);
                 if (result.scalar != .f32 or result.columns != 4 or result.rows != 4 or !sameShape(result, left) or !sameShape(result, right)) return error.Malformed;
+            },
+            147 => {
+                const result = try resultShape(nodes, w[0]);
+                const left = try valueShape(nodes, w[2]);
+                const right = try valueShape(nodes, w[3]);
+                if (result.scalar != .f32 or result.columns != 4 or result.rows != 4 or left.scalar != .f32 or right.scalar != .f32 or left.columns != 4 or right.columns != 4 or left.rows != 1 or right.rows != 1 or !sameShape(left, right)) return error.Malformed;
+            },
+            148 => {
+                const result = try resultShape(nodes, w[0]);
+                const left = try valueShape(nodes, w[2]);
+                const right = try valueShape(nodes, w[3]);
+                if (result.scalar != .f32 or result.columns != 1 or result.rows != 1 or left.scalar != .f32 or right.scalar != .f32 or left.columns < 2 or left.columns > 4 or left.rows != 1 or !sameShape(left, right)) return error.Malformed;
             },
             164...167 => {
                 const result = try resultShape(nodes, w[0]);
@@ -1001,7 +1021,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 142, 143, 144, 145, 146, 164...169, 170...179, 182...200, 245 => w[1],
+                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 84, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 142, 143, 144, 145, 146, 147, 148, 164...169, 170...179, 182...200, 245 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
@@ -1103,7 +1123,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 142, 143, 144, 145, 146, 164...169, 170...179, 182...200, 245 => w[1],
+            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 84, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 142, 143, 144, 145, 146, 147, 148, 164...169, 170...179, 182...200, 245 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
@@ -1122,6 +1142,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             65 => .access,
             79 => .shuffle,
             81 => .extract,
+            84 => .transpose,
             109, 110, 111, 112, 124 => .convert,
             126 => .ineg,
             127 => .fneg,
@@ -1150,6 +1171,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             144 => .vector_times_matrix,
             145 => .matrix_times_vector,
             146 => .matrix_times_matrix,
+            147 => .outer_product,
+            148 => .dot,
             169 => .select,
             164...168 => if ((try staticCondition(nodes, rid)) != null) .constant else switch (instruction.opcode) {
                 164 => .logical_eq,
@@ -2359,6 +2382,30 @@ test "profile lowers the complete bounded matrix arithmetic family" {
     var seen = [_]bool{false} ** @typeInfo(ir.Op).@"enum".fields.len;
     for (program.instructions) |instruction| seen[@intFromEnum(instruction.op)] = true;
     for ([_]ir.Op{ .matrix_times_scalar, .vector_times_matrix, .matrix_times_matrix, .matrix_times_vector, .output }) |op|
+        try std.testing.expect(seen[@intFromEnum(op)]);
+}
+
+test "profile lowers transpose outer product and dot through a live value chain" {
+    const output_offset = testOpcodeOffset(&rich_vertex, 62, 0).?;
+    var extended = try testInsertWords(std.testing.allocator, &rich_vertex, output_offset, &.{
+        (4 << 16) | 84,  8,               60,              28,
+        (5 << 16) | 147, 8,               61,              45,
+        45,              (5 << 16) | 146, 8,               62,
+        60,              61,              (5 << 16) | 145, 7,
+        63,              62,              45,              (5 << 16) | 148,
+        5,               64,              45,              45,
+        (5 << 16) | 142, 7,               65,              63,
+        64,
+    });
+    defer std.testing.allocator.free(extended);
+    extended[3] = 128;
+    const new_output_offset = testOpcodeOffset(extended, 62, 0).?;
+    extended[new_output_offset + 2] = 65;
+    var program = try compile(std.testing.allocator, extended, .vertex, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var seen = [_]bool{false} ** @typeInfo(ir.Op).@"enum".fields.len;
+    for (program.instructions) |instruction| seen[@intFromEnum(instruction.op)] = true;
+    for ([_]ir.Op{ .transpose, .outer_product, .matrix_times_matrix, .matrix_times_vector, .dot, .vector_times_scalar, .output }) |op|
         try std.testing.expect(seen[@intFromEnum(op)]);
 }
 

@@ -447,6 +447,27 @@ pub const Executor = struct {
                         result.bits[col * 4 + row] = canonicalFloat(@bitCast(sum));
                     };
                 },
+                .transpose => {
+                    const matrix = try valueRef(self.values, pc, instruction.operands[0]);
+                    for (0..4) |col| for (0..4) |row| {
+                        result.bits[col * 4 + row] = matrix.bits[row * 4 + col];
+                    };
+                },
+                .outer_product => {
+                    const left = try valueRef(self.values, pc, instruction.operands[0]);
+                    const right = try valueRef(self.values, pc, instruction.operands[1]);
+                    for (0..4) |col| for (0..4) |row| {
+                        const product = @as(f32, @bitCast(left.bits[row])) * @as(f32, @bitCast(right.bits[col]));
+                        result.bits[col * 4 + row] = canonicalFloat(@bitCast(product));
+                    };
+                },
+                .dot => {
+                    const left = try valueRef(self.values, pc, instruction.operands[0]);
+                    const right = try valueRef(self.values, pc, instruction.operands[1]);
+                    var sum: f32 = 0;
+                    for (0..left.lanes()) |i| sum += @as(f32, @bitCast(left.bits[i])) * @as(f32, @bitCast(right.bits[i]));
+                    result.bits[0] = canonicalFloat(@bitCast(sum));
+                },
                 .convert => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
                     for (0..result.lanes()) |i| result.bits[i] = try convert(a.ty.scalar, instruction.ty.scalar, a.bits[i]);
@@ -509,9 +530,9 @@ fn validate(program: *const ir.Program) Error!void {
             .access => n >= 2 and n <= 3,
             .extract => n == 1 or n == 2,
             .shuffle => n == 2 + try lanes(instruction.ty),
-            .fneg, .ineg, .bit_not, .logical_not, .convert => n == 1,
+            .fneg, .ineg, .bit_not, .logical_not, .transpose, .convert => n == 1,
             .select => n == 3,
-            .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge, .logical_eq, .logical_ne, .logical_or, .logical_and, .fadd, .fsub, .fmul, .fdiv, .frem, .vector_times_scalar, .matrix_times_vector, .matrix_times_scalar, .vector_times_matrix, .matrix_times_matrix => n == 2,
+            .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge, .logical_eq, .logical_ne, .logical_or, .logical_and, .fadd, .fsub, .fmul, .fdiv, .frem, .vector_times_scalar, .matrix_times_vector, .matrix_times_scalar, .vector_times_matrix, .matrix_times_matrix, .outer_product, .dot => n == 2,
             .output => n == 2,
         };
         if (!arity_ok) return error.InvalidOperand;
@@ -541,7 +562,7 @@ fn validate(program: *const ir.Program) Error!void {
             const source_ty = program.instructions[operand].ty;
             switch (instruction.op) {
                 .constant_composite, .composite => if (source_ty.scalar != instruction.ty.scalar) return error.InvalidType,
-                .fneg, .ineg, .bit_not, .logical_not, .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .fadd, .fsub, .fmul, .fdiv, .frem => if (!same(source_ty, instruction.ty)) return error.InvalidType,
+                .fneg, .ineg, .bit_not, .logical_not, .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .fadd, .fsub, .fmul, .fdiv, .frem, .transpose => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle => if (source_ty.scalar != .i32 and source_ty.scalar != .u32 or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
                 .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge => if (source_ty.scalar != .f32 or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
                 .logical_eq, .logical_ne, .logical_or, .logical_and => if (source_ty.scalar != .bool or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
@@ -554,6 +575,8 @@ fn validate(program: *const ir.Program) Error!void {
                 .matrix_times_scalar => if ((oi == 0 and (!(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 4) or !same(source_ty, instruction.ty))) or (oi == 1 and (source_ty.scalar != .f32 or try lanes(source_ty) != 1))) return error.InvalidType,
                 .vector_times_matrix => if ((oi == 0 and (!(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 1) or !same(source_ty, instruction.ty))) or (oi == 1 and !(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 4))) return error.InvalidType,
                 .matrix_times_matrix => if (!(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 4) or !same(source_ty, instruction.ty)) return error.InvalidType,
+                .outer_product => if (!(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 1) or (oi == 0 and instruction.ty.scalar != .f32) or (oi == 0 and (instruction.ty.columns != 4 or instruction.ty.rows != 4))) return error.InvalidType,
+                .dot => if (!(source_ty.scalar == .f32 and source_ty.columns >= 2 and source_ty.columns <= 4 and source_ty.rows == 1) or (oi == 0 and (instruction.ty.scalar != .f32 or instruction.ty.columns != 1 or instruction.ty.rows != 1))) return error.InvalidType,
                 .convert => if (try lanes(source_ty) != try lanes(instruction.ty)) return error.InvalidShape,
                 else => {},
             }
@@ -638,6 +661,21 @@ fn validate(program: *const ir.Program) Error!void {
                 if (source.scalar != .bool or source.columns != 1 or source.rows != 1) return error.InvalidType;
             },
             .iadd, .isub, .imul => if (instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32) return error.InvalidType,
+            .transpose => {
+                if (instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 4) return error.InvalidType;
+            },
+            .outer_product => {
+                if (instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 4) return error.InvalidType;
+                const left = program.instructions[instruction.operands[0]].ty;
+                const right = program.instructions[instruction.operands[1]].ty;
+                if (!same(left, right) or left.columns != 4 or left.rows != 1 or left.scalar != .f32) return error.InvalidType;
+            },
+            .dot => {
+                if (instruction.ty.scalar != .f32 or instruction.ty.columns != 1 or instruction.ty.rows != 1) return error.InvalidType;
+                const left = program.instructions[instruction.operands[0]].ty;
+                const right = program.instructions[instruction.operands[1]].ty;
+                if (!same(left, right) or left.columns < 2 or left.columns > 4 or left.rows != 1 or left.scalar != .f32) return error.InvalidType;
+            },
             else => {},
         }
         if (instruction.op == .convert) {
@@ -1065,6 +1103,52 @@ test "four by four matrix arithmetic preserves column-major Vulkan semantics" {
     }
     for (0..4) |i| try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, @floatFromInt(i + 1)))), std.mem.readInt(u32, transformed[i * 4 ..][0..4], .little));
     for (0..4096) |_| try executor.execute(&.{}, &.{ .{ .interface = 0, .bytes = &scaled }, .{ .interface = 1, .bytes = &transformed }, .{ .interface = 2, .bytes = &multiplied } });
+}
+
+test "matrix transpose outer product and vector dot preserve bounded shapes" {
+    const matrix_ty = ir.Type{ .scalar = .f32, .columns = 4, .rows = 4 };
+    const vector_ty = ir.Type{ .scalar = .f32, .columns = 4 };
+    var matrix: [64]u8 = undefined;
+    var left: [16]u8 = undefined;
+    var right: [16]u8 = undefined;
+    for (0..16) |i| std.mem.writeInt(u32, matrix[i * 4 ..][0..4], @bitCast(@as(f32, @floatFromInt(i + 1))), .little);
+    for (0..4) |i| {
+        std.mem.writeInt(u32, left[i * 4 ..][0..4], @bitCast(@as(f32, @floatFromInt(i + 1))), .little);
+        std.mem.writeInt(u32, right[i * 4 ..][0..4], @bitCast(@as(f32, @floatFromInt(i + 2))), .little);
+    }
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .output, .ty = matrix_ty, .location = 0 },
+        .{ .storage = .output, .ty = matrix_ty, .location = 1 },
+        .{ .storage = .output, .ty = .{ .scalar = .f32 }, .location = 2 },
+    };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = matrix_ty, .operands = &.{}, .literal = &matrix },
+        .{ .op = .constant, .ty = vector_ty, .operands = &.{}, .literal = &left },
+        .{ .op = .constant, .ty = vector_ty, .operands = &.{}, .literal = &right },
+        .{ .op = .transpose, .ty = matrix_ty, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .outer_product, .ty = matrix_ty, .operands = &.{ 1, 2 }, .literal = &.{} },
+        .{ .op = .dot, .ty = .{ .scalar = .f32 }, .operands = &.{ 1, 2 }, .literal = &.{} },
+        .{ .op = .output, .ty = matrix_ty, .operands = &.{ 0, 3 }, .literal = &.{} },
+        .{ .op = .output, .ty = matrix_ty, .operands = &.{ 1, 4 }, .literal = &.{} },
+        .{ .op = .output, .ty = .{ .scalar = .f32 }, .operands = &.{ 2, 5 }, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    var transposed: [64]u8 = undefined;
+    var outer: [64]u8 = undefined;
+    var dot_output: [4]u8 = undefined;
+    const outputs = [_]Output{ .{ .interface = 0, .bytes = &transposed }, .{ .interface = 1, .bytes = &outer }, .{ .interface = 2, .bytes = &dot_output } };
+    try executor.execute(&.{}, &outputs);
+    for (0..4) |col| for (0..4) |row| {
+        const transposed_value = @as(f32, @floatFromInt(row * 4 + col + 1));
+        const outer_value = @as(f32, @floatFromInt((row + 1) * (col + 2)));
+        try std.testing.expectEqual(@as(u32, @bitCast(transposed_value)), std.mem.readInt(u32, transposed[(col * 4 + row) * 4 ..][0..4], .little));
+        try std.testing.expectEqual(@as(u32, @bitCast(outer_value)), std.mem.readInt(u32, outer[(col * 4 + row) * 4 ..][0..4], .little));
+    };
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 40))), std.mem.readInt(u32, &dot_output, .little));
+    for (0..4096) |_| try executor.execute(&.{}, &outputs);
 }
 
 test "rejection is explicit and output transactional" {
@@ -1510,6 +1594,20 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
             const right = try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 4, .rows = 4 });
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ left, right }, &.{});
         },
+        .transpose => {
+            const matrix = try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 4, .rows = 4 });
+            result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{matrix}, &.{});
+        },
+        .outer_product => {
+            const left = try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 4 });
+            const right = try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 4 });
+            result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ left, right }, &.{});
+        },
+        .dot => {
+            const left = try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 4 });
+            const right = try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 4 });
+            result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ left, right }, &.{});
+        },
         .output => {
             interfaces[0] = .{ .storage = .output, .ty = result_ty, .location = 0 };
             interface_count = 1;
@@ -1622,6 +1720,12 @@ test "generated bounded operation by type-family property matrix is complete" {
     totals[@intFromEnum(ir.Op.vector_times_matrix)] += 1;
     try runPropertyCase(.matrix_times_matrix, .{ .scalar = .f32, .columns = 4, .rows = 4 }, null, null);
     totals[@intFromEnum(ir.Op.matrix_times_matrix)] += 1;
+    try runPropertyCase(.transpose, .{ .scalar = .f32, .columns = 4, .rows = 4 }, null, null);
+    totals[@intFromEnum(ir.Op.transpose)] += 1;
+    try runPropertyCase(.outer_product, .{ .scalar = .f32, .columns = 4, .rows = 4 }, null, null);
+    totals[@intFromEnum(ir.Op.outer_product)] += 1;
+    try runPropertyCase(.dot, .{ .scalar = .f32 }, null, null);
+    totals[@intFromEnum(ir.Op.dot)] += 1;
     try runPropertyCase(.select, .{ .scalar = .u32 }, null, null);
     totals[@intFromEnum(ir.Op.select)] += 1;
     inline for ([_]ir.Op{ .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle }) |op| {
@@ -1637,15 +1741,15 @@ test "generated bounded operation by type-family property matrix is complete" {
         totals[@intFromEnum(op)] += 1;
     }
     const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14, 8, 4, 8, 8, 8, 8, 4, 4, 4, 4, 4, 8, 8, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 3;
+    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 6;
     try std.testing.expectEqualSlices(usize, expected_full[0..totals.len], &totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 315), total);
-    std.debug.print("generated property matrix: operations=66 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 318), total);
+    std.debug.print("generated property matrix: operations=69 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -1777,13 +1881,13 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 66), malformed);
+    try std.testing.expectEqual(@as(usize, 69), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
     try std.testing.expectEqual(@as(usize, 5), runtime_nan);
     try std.testing.expectEqual(@as(usize, 5), signed_zero);
-    std.debug.print("generated property categories: malformed=66 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
+    std.debug.print("generated property categories: malformed=69 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
 }
 
 test "generated valid scalar DAGs are total and stable" {
