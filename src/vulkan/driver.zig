@@ -10740,8 +10740,11 @@ fn getSwapchainTimingProperties(device: ?Device, handle: usize, output: ?*Swapch
     const properties = output orelse return .error_initialization_failed;
     if (properties.s_type != 1_000_208_001 or properties.p_next != null) return .error_initialization_failed;
     const rate = frame_pacing.configuredRate();
-    properties.refresh_duration = frame_pacing.ns_per_second / rate.numerator;
-    properties.refresh_interval = 1;
+    const duration = std.math.cast(u64, (@as(u128, frame_pacing.ns_per_second) * rate.denominator) / rate.numerator) orelse return .error_initialization_failed;
+    properties.refresh_duration = duration;
+    // ZPU exposes a fixed-refresh-rate presentation engine.  Vulkan defines
+    // FRR by making refreshInterval equal to refreshDuration.
+    properties.refresh_interval = duration;
     if (counter) |value| value.* = 1;
     return .success;
 }
@@ -12491,7 +12494,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     var timing_properties = SwapchainTimingPropertiesEXT{ .s_type = 1_000_208_001, .p_next = null, .refresh_duration = 0, .refresh_interval = 0 };
     try std.testing.expectEqual(Result.success, getSwapchainTimingProperties(device, swapchain, &timing_properties, &timing_counter));
     try std.testing.expect(timing_properties.refresh_duration > 0);
-    try std.testing.expectEqual(@as(u64, 1), timing_properties.refresh_interval);
+    try std.testing.expectEqual(timing_properties.refresh_duration, timing_properties.refresh_interval);
     try std.testing.expectEqual(@as(u64, 1), timing_counter);
     var domains: [1]i32 = undefined;
     var domain_ids: [1]u64 = undefined;
