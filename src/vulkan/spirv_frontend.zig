@@ -112,6 +112,10 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 177, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 178, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 179, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 197, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 198, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 199, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 200, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 248, .operands = .{ .min = 1, .max = 1 } },
     .{ .opcode = 253, .operands = .{ .min = 0, .max = 0 } },
     .{ .opcode = 71, .operands = .{ .min = 2, .max = 3 } },
@@ -576,7 +580,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 }
                 block_terminated = true;
             },
-            61, 62, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 136, 142, 145, 164...169, 170...179 => {
+            61, 62, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 136, 142, 145, 164...169, 170...179, 197...200 => {
                 if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
                 const valid_arity = switch (instruction.opcode) {
                     61 => w.len == 3,
@@ -586,7 +590,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     80 => w.len >= 3,
                     81 => w.len >= 4,
                     109, 110, 111, 112, 124, 126, 127 => w.len == 3,
-                    128, 129, 130, 131, 132, 133, 136, 142, 145, 164...167, 170...179 => w.len == 4,
+                    128, 129, 130, 131, 132, 133, 136, 142, 145, 164...167, 170...179, 197...199 => w.len == 4,
+                    200 => w.len == 3,
                     168 => w.len == 3,
                     169 => w.len == 5,
                     else => unreachable,
@@ -754,6 +759,17 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const when_true = try valueShape(nodes, w[3]);
                 const when_false = try valueShape(nodes, w[4]);
                 if (condition.scalar != .bool or condition.columns != 1 or condition.rows != 1 or !sameShape(result, when_true) or !sameShape(result, when_false)) return error.Malformed;
+            },
+            197...199 => {
+                const result = try resultShape(nodes, w[0]);
+                const left = try valueShape(nodes, w[2]);
+                const right = try valueShape(nodes, w[3]);
+                if (!scalarClass(result, .integer) or !sameShape(result, left) or !sameShape(result, right)) return error.Malformed;
+            },
+            200 => {
+                const result = try resultShape(nodes, w[0]);
+                const operand = try valueShape(nodes, w[2]);
+                if (!scalarClass(result, .integer) or !sameShape(result, operand)) return error.Malformed;
             },
             170...179 => {
                 const result = try resultShape(nodes, w[0]);
@@ -926,7 +942,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 136, 142, 145, 164...169, 170...179, 245 => w[1],
+                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 136, 142, 145, 164...169, 170...179, 197...200, 245 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
@@ -1025,7 +1041,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 136, 142, 145, 164...169, 170...179, 245 => w[1],
+            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 136, 142, 145, 164...169, 170...179, 197...200, 245 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
@@ -1054,6 +1070,10 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             132 => .imul,
             133 => .fmul,
             136 => .fdiv,
+            197 => .bit_or,
+            198 => .bit_xor,
+            199 => .bit_and,
+            200 => .bit_not,
             142 => .vector_times_scalar,
             145 => .matrix_times_vector,
             169 => .select,
@@ -1251,6 +1271,30 @@ pub const compute_ineg_store = [_]u32{
     6,               (2 << 16) | 248, 9,              (4 << 16) | 126, 2,
     10,              7,               (3 << 16) | 62, 5,               10,
     (1 << 16) | 253, (1 << 16) | 56,
+};
+
+/// Compute profile variant exercising the integer bitwise family. The four
+/// operations remain component-wise and straight-line, making their canonical
+/// execution bounded while validating every SPIR-V opcode mapping.
+pub const compute_bitwise_store = [_]u32{
+    0x0723_0203,     0x0001_0000,    0,               15,         0,
+    (2 << 16) | 17,  1,              (3 << 16) | 14,  0,          1,
+    (6 << 16) | 15,  5,              8,               0x6e69616d, 0,
+    5,               (6 << 16) | 16, 8,               17,         1,
+    1,               1,              (4 << 16) | 71,  5,          33,
+    0,               (4 << 16) | 71, 5,               34,         0,
+    (2 << 16) | 19,  1,              (4 << 16) | 21,  2,          32,
+    0,               (4 << 16) | 32, 4,               12,         2,
+    (4 << 16) | 59,  4,              5,               12,         (3 << 16) | 33,
+    6,               1,              (4 << 16) | 43,  2,          7,
+    0xf0f0_f0f0,     (4 << 16) | 43, 2,               10,         0x0ff0_0ff0,
+    (5 << 16) | 54,  1,              8,               0,          6,
+    (2 << 16) | 248, 9,              (5 << 16) | 199, 2,          11,
+    7,               10,             (5 << 16) | 197, 2,          12,
+    11,              10,             (5 << 16) | 198, 2,          13,
+    12,              7,              (4 << 16) | 200, 2,          14,
+    13,              (3 << 16) | 62, 5,               14,         (1 << 16) | 253,
+    (1 << 16) | 56,
 };
 
 /// Scalar-pointer form of the bounded compute store profile.  Unlike the
@@ -1688,6 +1732,24 @@ test "compute profile lowers signed integer negation and rejects unsigned form" 
     const integer_type = testOpcodeOffset(&unsigned, 21, 0).?;
     unsigned[integer_type + 3] = 0;
     try std.testing.expectError(error.Malformed, compile(std.testing.allocator, &unsigned, .compute, "main", &.{}));
+}
+
+test "compute profile lowers the integer bitwise operation family" {
+    var program = try compile(std.testing.allocator, &compute_bitwise_store, .compute, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var saw_or = false;
+    var saw_xor = false;
+    var saw_and = false;
+    var saw_not = false;
+    for (program.instructions) |instruction| {
+        saw_or = saw_or or instruction.op == .bit_or;
+        saw_xor = saw_xor or instruction.op == .bit_xor;
+        saw_and = saw_and or instruction.op == .bit_and;
+        saw_not = saw_not or instruction.op == .bit_not;
+    }
+    try std.testing.expect(saw_or and saw_xor and saw_and and saw_not);
+    try std.testing.expectEqual(ir.Op.output, program.instructions[program.instructions.len - 1].op);
+    try std.testing.expectEqual(ir.Scalar.u32, program.instructions[program.instructions.len - 1].ty.scalar);
 }
 
 test "compute profile accepts a scalar storage-buffer pointer" {

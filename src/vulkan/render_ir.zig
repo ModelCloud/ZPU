@@ -36,6 +36,18 @@ pub const Op = enum(u8) {
     /// Component-wise two's-complement signed integer negation. Appended to
     /// preserve the serialized numeric values of existing operations.
     ineg,
+    /// Component-wise integer bitwise OR. Appended to preserve existing
+    /// serialized operation values.
+    bit_or,
+    /// Component-wise integer bitwise XOR. Appended to preserve existing
+    /// serialized operation values.
+    bit_xor,
+    /// Component-wise integer bitwise AND. Appended to preserve existing
+    /// serialized operation values.
+    bit_and,
+    /// Component-wise integer bitwise NOT. Appended to preserve existing
+    /// serialized operation values.
+    bit_not,
 };
 
 pub const Instruction = struct {
@@ -188,9 +200,9 @@ fn valueOperand(op: Op, operand_index: usize) bool {
         .composite => true,
         .extract => operand_index == 0,
         .shuffle => operand_index < 2,
-        .fneg, .ineg, .convert => operand_index == 0,
+        .fneg, .ineg, .bit_not, .convert => operand_index == 0,
         .select => operand_index < 3,
-        .iadd, .isub, .imul, .fadd, .fsub, .fmul, .fdiv, .vector_times_scalar, .matrix_times_vector => operand_index < 2,
+        .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .fadd, .fsub, .fmul, .fdiv, .vector_times_scalar, .matrix_times_vector => operand_index < 2,
         .output => operand_index == 1,
     };
 }
