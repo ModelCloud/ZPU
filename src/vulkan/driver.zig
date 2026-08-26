@@ -10754,8 +10754,12 @@ fn getSwapchainTimeDomainProperties(device: ?Device, handle: usize, output: ?*Sw
     if (!validDeviceLocked(d) or swapchain.owner != d) return .error_initialization_failed;
     const properties = output orelse return .error_initialization_failed;
     if (properties.s_type != 1_000_208_002 or properties.p_next != null) return .error_initialization_failed;
-    if (properties.time_domain_count != 0 and properties.time_domains != null and properties.time_domain_ids != null) {
-        properties.time_domains.?[0] = 1;
+    const has_domains = properties.time_domains != null;
+    const has_ids = properties.time_domain_ids != null;
+    if (has_domains != has_ids) return .error_initialization_failed;
+    if (has_domains and properties.time_domain_count == 0) return .error_initialization_failed;
+    if (has_domains) {
+        properties.time_domains.?[0] = 1_000_208_000;
         properties.time_domain_ids.?[0] = 1;
     }
     properties.time_domain_count = 1;
@@ -12494,8 +12498,24 @@ test "vkcube presentation path records submits and presents two swapchain images
     var domain_properties = SwapchainTimeDomainPropertiesEXT{ .s_type = 1_000_208_002, .p_next = null, .time_domain_count = 1, .time_domains = &domains, .time_domain_ids = &domain_ids };
     try std.testing.expectEqual(Result.success, getSwapchainTimeDomainProperties(device, swapchain, &domain_properties, &timing_counter));
     try std.testing.expectEqual(@as(u32, 1), domain_properties.time_domain_count);
-    try std.testing.expectEqual(@as(i32, 1), domains[0]);
+    try std.testing.expectEqual(@as(i32, 1_000_208_000), domains[0]);
     try std.testing.expectEqual(@as(u64, 1), domain_ids[0]);
+    var malformed_domains = SwapchainTimeDomainPropertiesEXT{ .s_type = 1_000_208_002, .p_next = null, .time_domain_count = 1, .time_domains = null, .time_domain_ids = &domain_ids };
+    timing_counter = 0xfeed_beef;
+    try std.testing.expectEqual(Result.error_initialization_failed, getSwapchainTimeDomainProperties(device, swapchain, &malformed_domains, &timing_counter));
+    try std.testing.expectEqual(@as(u32, 1), malformed_domains.time_domain_count);
+    try std.testing.expectEqual(@as(u64, 0xfeed_beef), timing_counter);
+    malformed_domains.time_domains = &domains;
+    malformed_domains.time_domain_ids = null;
+    try std.testing.expectEqual(Result.error_initialization_failed, getSwapchainTimeDomainProperties(device, swapchain, &malformed_domains, &timing_counter));
+    try std.testing.expectEqual(@as(u32, 1), malformed_domains.time_domain_count);
+    try std.testing.expectEqual(@as(u64, 0xfeed_beef), timing_counter);
+    var count_only_domains = SwapchainTimeDomainPropertiesEXT{ .s_type = 1_000_208_002, .p_next = null, .time_domain_count = 0, .time_domains = null, .time_domain_ids = null };
+    try std.testing.expectEqual(Result.success, getSwapchainTimeDomainProperties(device, swapchain, &count_only_domains, &timing_counter));
+    try std.testing.expectEqual(@as(u32, 1), count_only_domains.time_domain_count);
+    var zero_capacity_domains = SwapchainTimeDomainPropertiesEXT{ .s_type = 1_000_208_002, .p_next = null, .time_domain_count = 0, .time_domains = &domains, .time_domain_ids = &domain_ids };
+    try std.testing.expectEqual(Result.error_initialization_failed, getSwapchainTimeDomainProperties(device, swapchain, &zero_capacity_domains, &timing_counter));
+    try std.testing.expectEqual(@as(u32, 0), zero_capacity_domains.time_domain_count);
     try std.testing.expectEqual(Result.not_ready, setSwapchainPresentTimingQueueSize(device, swapchain, 2));
     const past_info = PastPresentationTimingInfoEXT{ .s_type = 1_000_208_005, .p_next = null, .flags = 0, .swapchain = swapchain };
     var past_properties = PastPresentationTimingPropertiesEXT{ .s_type = 1_000_208_006, .p_next = null, .timing_properties_counter = 0, .time_domains_counter = 0, .presentation_timing_count = 1, .presentation_timings = @ptrFromInt(8) };
