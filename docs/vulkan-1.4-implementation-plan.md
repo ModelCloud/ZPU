@@ -190,6 +190,10 @@ pipeline-owned requirement and snapshot path. The bounded executor accepts
 only the triangle-list/no-restart combination it can execute; missing state,
 non-triangle topology, and enabled restart are rejected before command
 recording rather than being silently rendered with different semantics.
+The promoted viewport-with-count and scissor-with-count dynamic enum values
+are also decoded as aliases of the one-viewport/one-scissor count-aware
+commands, so their pipeline declarations enforce the same initialized state
+and bounded domain checks.
 The memory and sampler handle registries now meet the required 4096 and 4000
 allocation limits respectively. The generated command matrix is a
 234/234 dispatch/name-coverage artifact, not a Vulkan-conformance claim:

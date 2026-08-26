@@ -761,6 +761,8 @@ const pipeline_create_dispatch_base_bit: u32 = 0x00000010;
 const dynamic_state_cull_mode: i32 = 1000267000;
 const dynamic_state_front_face: i32 = 1000267001;
 const dynamic_state_primitive_topology: i32 = 1000267002;
+const dynamic_state_viewport_with_count: i32 = 1000267003;
+const dynamic_state_scissor_with_count: i32 = 1000267004;
 const dynamic_state_primitive_restart_enable: i32 = 1000377004;
 const pipeline_cache_uuid = [_]u8{ 0x5a, 0x50, 0x55, 0x2d, 0x49, 0x43, 0x44, 0x2d, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31 };
 // Stable identity values are derived from the ZPU ICD name and are kept
@@ -7923,9 +7925,9 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         var prior: ?i32 = null;
         for (dynamic_indices[0..dynamic_count]) |index| {
             const state = states[index];
-            if (prior == state or state < 0 or (state > 8 and state != dynamic_state_cull_mode and state != dynamic_state_front_face and state != dynamic_state_primitive_topology and state != dynamic_state_primitive_restart_enable)) return error.Invalid;
+            if (prior == state or state < 0 or (state > 8 and state != dynamic_state_cull_mode and state != dynamic_state_front_face and state != dynamic_state_primitive_topology and state != dynamic_state_viewport_with_count and state != dynamic_state_scissor_with_count and state != dynamic_state_primitive_restart_enable)) return error.Invalid;
             prior = state;
-            if (state == 0) dynamic_viewport = true else if (state == 1) dynamic_scissor = true else if (state == 2) dynamic_line_width = true;
+            if (state == 0 or state == dynamic_state_viewport_with_count) dynamic_viewport = true else if (state == 1 or state == dynamic_state_scissor_with_count) dynamic_scissor = true else if (state == 2) dynamic_line_width = true;
             if (state == 3) dynamic_depth_bias = true;
             if (state == dynamic_state_cull_mode) dynamic_cull_mode = true else if (state == dynamic_state_front_face) dynamic_front_face = true else if (state == dynamic_state_primitive_topology) dynamic_primitive_topology = true else if (state == dynamic_state_primitive_restart_enable) dynamic_primitive_restart_enable = true;
             try w.i32le(state);
@@ -12023,7 +12025,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     var pipelines: [1]usize = undefined;
     try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, graphics_cache, 1, @ptrCast(&pipeline_info), null, &pipelines));
     const baseline_pipeline = validGraphicsPipelineLocked(pipelines[0]).?;
-    const extended_dynamic_states = [_]i32{ 0, 1, dynamic_state_cull_mode, dynamic_state_front_face, dynamic_state_primitive_topology, dynamic_state_primitive_restart_enable };
+    const extended_dynamic_states = [_]i32{ dynamic_state_cull_mode, dynamic_state_front_face, dynamic_state_primitive_topology, dynamic_state_viewport_with_count, dynamic_state_scissor_with_count, dynamic_state_primitive_restart_enable };
     const extended_dynamic = PipelineDynamicStateCreateInfo{ .s_type = 27, .p_next = null, .flags = 0, .dynamic_state_count = extended_dynamic_states.len, .dynamic_states = &extended_dynamic_states };
     var extended_dynamic_pipeline_info = pipeline_info;
     extended_dynamic_pipeline_info.dynamic = &extended_dynamic;
@@ -12033,6 +12035,8 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(validGraphicsPipelineLocked(extended_dynamic_pipeline[0]).?.dynamic_front_face);
     try std.testing.expect(validGraphicsPipelineLocked(extended_dynamic_pipeline[0]).?.dynamic_primitive_topology);
     try std.testing.expect(validGraphicsPipelineLocked(extended_dynamic_pipeline[0]).?.dynamic_primitive_restart_enable);
+    try std.testing.expect(validGraphicsPipelineLocked(extended_dynamic_pipeline[0]).?.dynamic_viewport);
+    try std.testing.expect(validGraphicsPipelineLocked(extended_dynamic_pipeline[0]).?.dynamic_scissor);
     destroyPipeline(device, extended_dynamic_pipeline[0], null);
     var graphics_cache_size: usize = 0;
     try std.testing.expectEqual(Result.success, getPipelineCacheData(device, graphics_cache, &graphics_cache_size, null));
