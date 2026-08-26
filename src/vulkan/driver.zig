@@ -10374,9 +10374,8 @@ fn cmdSetRenderingAttachmentLocations(cb: ?CommandBuffer, info: ?*const Renderin
         command_buffer.impl.invalid = true;
         return;
     };
-    const inside_render_pass = command_buffer.impl.active_render_pass != null or command_buffer.impl.dynamic_rendering;
     const dynamic_profile = command_buffer.impl.dynamic_rendering;
-    if (ci.s_type != 1000232001 or ci.p_next != null or command_buffer.impl.state != 1 or command_buffer.impl.invalid or !inside_render_pass or ci.color_attachment_count > 4 or (dynamic_profile and ci.color_attachment_count != 1) or (ci.color_attachment_count != 0 and ci.color_attachment_locations == null)) {
+    if (ci.s_type != 1000232001 or ci.p_next != null or command_buffer.impl.state != 1 or command_buffer.impl.invalid or !dynamic_profile or ci.color_attachment_count > 4 or ci.color_attachment_count != 1 or ci.color_attachment_locations == null) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -10400,9 +10399,8 @@ fn cmdSetRenderingInputAttachmentIndices(cb: ?CommandBuffer, info: ?*const Rende
         command_buffer.impl.invalid = true;
         return;
     };
-    const inside_render_pass = command_buffer.impl.active_render_pass != null or command_buffer.impl.dynamic_rendering;
     const dynamic_profile = command_buffer.impl.dynamic_rendering;
-    if (ci.s_type != 1000232002 or ci.p_next != null or command_buffer.impl.state != 1 or command_buffer.impl.invalid or !inside_render_pass or ci.color_attachment_count > 4 or (dynamic_profile and (ci.color_attachment_count != 1 or ci.depth_input_attachment_index != null or ci.stencil_input_attachment_index != null)) or (ci.color_attachment_count != 0 and ci.color_attachment_input_indices == null)) {
+    if (ci.s_type != 1000232002 or ci.p_next != null or command_buffer.impl.state != 1 or command_buffer.impl.invalid or !dynamic_profile or ci.color_attachment_count > 4 or ci.color_attachment_count != 1 or ci.color_attachment_input_indices == null or ci.depth_input_attachment_index != null or ci.stencil_input_attachment_index != null) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -14866,6 +14864,13 @@ test "dynamic rendering begin and end own attachment scope" {
     cmdSetRenderingAttachmentLocations(commands[1], &location_info);
     try std.testing.expect(commands[1].impl.invalid);
     try std.testing.expectEqual(@as(u32, 0), commands[1].impl.rendering_location_count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    commands[1].impl.active_render_pass = @ptrFromInt(@as(usize, @alignOf(RenderPassObj)));
+    cmdSetRenderingAttachmentLocations(commands[1], &location_info);
+    cmdSetRenderingInputAttachmentIndices(commands[1], &input_info);
+    try std.testing.expect(commands[1].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 0), commands[1].impl.count);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
     var stale_rendering = rendering;
