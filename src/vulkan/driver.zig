@@ -3561,10 +3561,17 @@ fn hostCopyLayoutValid(layout: i32) bool {
     return layout == 1 or layout == 6 or layout == 7;
 }
 fn hostCopy2DRegionValid(image: *const ImageObj, aspect: u32, mip_level: u32, base_array_layer: u32, layer_count: u32, offset: Offset3D, extent: Extent3D) bool {
-    return aspect == 1 and mip_level == 0 and layer_count == 1 and base_array_layer < image.array_layers and offset.x >= 0 and offset.y >= 0 and offset.z == 0 and extent.width != 0 and extent.height != 0 and extent.depth == 1 and @as(u64, @intCast(offset.x)) + extent.width <= image.width and @as(u64, @intCast(offset.y)) + extent.height <= image.height;
+    return aspect == 1 and mip_level == 0 and layer_count != 0 and base_array_layer < image.array_layers and layer_count <= image.array_layers - base_array_layer and offset.x >= 0 and offset.y >= 0 and offset.z == 0 and extent.width != 0 and extent.height != 0 and extent.depth == 1 and @as(u64, @intCast(offset.x)) + extent.width <= image.width and @as(u64, @intCast(offset.y)) + extent.height <= image.height;
 }
 fn hostCopyRowsValid(row_length: u32, image_height: u32, width: u32, height: u32) bool {
     return (row_length == 0 or row_length >= width) and (image_height == 0 or image_height >= height);
+}
+fn hostCopyLayerStride(row_length: u32, image_height: u32, width: u32, height: u32) ?usize {
+    const row = if (row_length == 0) width else row_length;
+    const rows = if (image_height == 0) height else image_height;
+    const texels = std.math.mul(u64, row, rows) catch return null;
+    const bytes = std.math.mul(u64, texels, 4) catch return null;
+    return std.math.cast(usize, bytes);
 }
 fn hostImageMemoryRangesOverlap(a: *const ImageObj, b: *const ImageObj) bool {
     if (a.memory != b.memory) return false;
@@ -3575,14 +3582,15 @@ fn hostImageMemoryRangesOverlap(a: *const ImageObj, b: *const ImageObj) bool {
 fn hostImageCopyRegionsOverlap(a: ImageCopy2, b: ImageCopy2, source: bool) bool {
     const a_subresource = if (source) a.src_subresource else a.dst_subresource;
     const b_subresource = if (source) b.src_subresource else b.dst_subresource;
-    if (a_subresource.base_array_layer != b_subresource.base_array_layer) return false;
     const a_offset = if (source) a.src_offset else a.dst_offset;
     const b_offset = if (source) b.src_offset else b.dst_offset;
     const ax1 = @as(i64, a_offset.x) + @as(i64, a.extent.width);
     const ay1 = @as(i64, a_offset.y) + @as(i64, a.extent.height);
     const bx1 = @as(i64, b_offset.x) + @as(i64, b.extent.width);
     const by1 = @as(i64, b_offset.y) + @as(i64, b.extent.height);
-    return @as(i64, a_offset.x) < bx1 and @as(i64, b_offset.x) < ax1 and @as(i64, a_offset.y) < by1 and @as(i64, b_offset.y) < ay1;
+    if (!(@as(i64, a_offset.x) < bx1 and @as(i64, b_offset.x) < ax1 and @as(i64, a_offset.y) < by1 and @as(i64, b_offset.y) < ay1)) return false;
+    for (0..a_subresource.layer_count) |a_layer| for (0..b_subresource.layer_count) |b_layer| if (a_subresource.base_array_layer + a_layer == b_subresource.base_array_layer + b_layer) return true;
+    return false;
 }
 fn validMemoryToImageRegion(image: *const ImageObj, region: MemoryToImageCopy) bool {
     return region.s_type == 1000270000 and region.p_next == null and region.host_pointer != null and hostCopy2DRegionValid(image, region.image_subresource.aspect_mask, region.image_subresource.mip_level, region.image_subresource.base_array_layer, region.image_subresource.layer_count, region.image_offset, region.image_extent) and hostCopyRowsValid(region.memory_row_length, region.memory_image_height, region.image_extent.width, region.image_extent.height);
@@ -3604,12 +3612,17 @@ fn copyMemoryToImage(device: ?Device, info: ?*const CopyMemoryToImageInfo) callc
     }
     for (ci.regions.?[0..ci.region_count]) |region| {
         const row_length = if (region.memory_row_length == 0) region.image_extent.width else region.memory_row_length;
+        const image_height = if (region.memory_image_height == 0) region.image_extent.height else region.memory_image_height;
+        const layer_stride = hostCopyLayerStride(row_length, image_height, region.image_extent.width, region.image_extent.height) orelse return .error_initialization_failed;
         const source: [*]const u8 = @ptrCast(region.host_pointer.?);
-        const layer_offset = imageLayerOffset(image, region.image_subresource.base_array_layer) orelse return .error_initialization_failed;
-        for (0..region.image_extent.height) |row| {
-            const src = source[row * @as(usize, row_length) * 4 ..][0 .. @as(usize, region.image_extent.width) * 4];
-            const dst_offset = layer_offset + ((@as(usize, @intCast(region.image_offset.y)) + row) * image.width + @as(usize, @intCast(region.image_offset.x))) * 4;
-            std.mem.copyForwards(u8, dst[dst_offset..][0..src.len], src);
+        for (0..region.image_subresource.layer_count) |layer| {
+            const layer_offset = imageLayerOffset(image, region.image_subresource.base_array_layer + @as(u32, @intCast(layer))) orelse return .error_initialization_failed;
+            const source_layer = source[layer * layer_stride ..];
+            for (0..region.image_extent.height) |row| {
+                const src = source_layer[row * @as(usize, row_length) * 4 ..][0 .. @as(usize, region.image_extent.width) * 4];
+                const dst_offset = layer_offset + ((@as(usize, @intCast(region.image_offset.y)) + row) * image.width + @as(usize, @intCast(region.image_offset.x))) * 4;
+                std.mem.copyForwards(u8, dst[dst_offset..][0..src.len], src);
+            }
         }
     }
     invalidateImageContents(image);
@@ -3629,12 +3642,17 @@ fn copyImageToMemory(device: ?Device, info: ?*const CopyImageToMemoryInfo) callc
     }
     for (ci.regions.?[0..ci.region_count]) |region| {
         const row_length = if (region.memory_row_length == 0) region.image_extent.width else region.memory_row_length;
+        const image_height = if (region.memory_image_height == 0) region.image_extent.height else region.memory_image_height;
+        const layer_stride = hostCopyLayerStride(row_length, image_height, region.image_extent.width, region.image_extent.height) orelse return .error_initialization_failed;
         const destination: [*]u8 = @ptrCast(region.host_pointer.?);
-        const layer_offset = imageLayerOffset(image, region.image_subresource.base_array_layer) orelse return .error_initialization_failed;
-        for (0..region.image_extent.height) |row| {
-            const dst = destination[row * @as(usize, row_length) * 4 ..][0 .. @as(usize, region.image_extent.width) * 4];
-            const src_offset = layer_offset + ((@as(usize, @intCast(region.image_offset.y)) + row) * image.width + @as(usize, @intCast(region.image_offset.x))) * 4;
-            std.mem.copyForwards(u8, dst, src[src_offset..][0..dst.len]);
+        for (0..region.image_subresource.layer_count) |layer| {
+            const layer_offset = imageLayerOffset(image, region.image_subresource.base_array_layer + @as(u32, @intCast(layer))) orelse return .error_initialization_failed;
+            const destination_layer = destination[layer * layer_stride ..];
+            for (0..region.image_extent.height) |row| {
+                const dst = destination_layer[row * @as(usize, row_length) * 4 ..][0 .. @as(usize, region.image_extent.width) * 4];
+                const src_offset = layer_offset + ((@as(usize, @intCast(region.image_offset.y)) + row) * image.width + @as(usize, @intCast(region.image_offset.x))) * 4;
+                std.mem.copyForwards(u8, dst, src[src_offset..][0..dst.len]);
+            }
         }
     }
     return .success;
@@ -3651,19 +3669,21 @@ fn copyImageToImage(device: ?Device, info: ?*const CopyImageToImageInfo) callcon
     const src = imageBytes(src_image);
     const dst = imageBytes(dst_image);
     for (ci.regions.?[0..ci.region_count]) |region| {
-        if (region.s_type != 1000337003 or region.p_next != null or !hostCopy2DRegionValid(src_image, region.src_subresource.aspect_mask, region.src_subresource.mip_level, region.src_subresource.base_array_layer, region.src_subresource.layer_count, region.src_offset, region.extent) or !hostCopy2DRegionValid(dst_image, region.dst_subresource.aspect_mask, region.dst_subresource.mip_level, region.dst_subresource.base_array_layer, region.dst_subresource.layer_count, region.dst_offset, region.extent)) return .error_initialization_failed;
+        if (region.s_type != 1000337003 or region.p_next != null or region.src_subresource.layer_count != region.dst_subresource.layer_count or !hostCopy2DRegionValid(src_image, region.src_subresource.aspect_mask, region.src_subresource.mip_level, region.src_subresource.base_array_layer, region.src_subresource.layer_count, region.src_offset, region.extent) or !hostCopy2DRegionValid(dst_image, region.dst_subresource.aspect_mask, region.dst_subresource.mip_level, region.dst_subresource.base_array_layer, region.dst_subresource.layer_count, region.dst_offset, region.extent)) return .error_initialization_failed;
     }
     for (ci.regions.?[0..ci.region_count], 0..) |region, index| for (ci.regions.?[0..index]) |prior| {
         if (hostImageCopyRegionsOverlap(region, prior, true) or hostImageCopyRegionsOverlap(region, prior, false)) return .error_initialization_failed;
     };
     for (ci.regions.?[0..ci.region_count]) |region| {
-        const src_layer_offset = imageLayerOffset(src_image, region.src_subresource.base_array_layer) orelse return .error_initialization_failed;
-        const dst_layer_offset = imageLayerOffset(dst_image, region.dst_subresource.base_array_layer) orelse return .error_initialization_failed;
-        for (0..region.extent.height) |row| {
-            const src_offset = src_layer_offset + ((@as(usize, @intCast(region.src_offset.y)) + row) * src_image.width + @as(usize, @intCast(region.src_offset.x))) * 4;
-            const dst_offset = dst_layer_offset + ((@as(usize, @intCast(region.dst_offset.y)) + row) * dst_image.width + @as(usize, @intCast(region.dst_offset.x))) * 4;
-            const bytes = @as(usize, region.extent.width) * 4;
-            std.mem.copyForwards(u8, dst[dst_offset..][0..bytes], src[src_offset..][0..bytes]);
+        for (0..region.src_subresource.layer_count) |layer| {
+            const src_layer_offset = imageLayerOffset(src_image, region.src_subresource.base_array_layer + @as(u32, @intCast(layer))) orelse return .error_initialization_failed;
+            const dst_layer_offset = imageLayerOffset(dst_image, region.dst_subresource.base_array_layer + @as(u32, @intCast(layer))) orelse return .error_initialization_failed;
+            for (0..region.extent.height) |row| {
+                const src_offset = src_layer_offset + ((@as(usize, @intCast(region.src_offset.y)) + row) * src_image.width + @as(usize, @intCast(region.src_offset.x))) * 4;
+                const dst_offset = dst_layer_offset + ((@as(usize, @intCast(region.dst_offset.y)) + row) * dst_image.width + @as(usize, @intCast(region.dst_offset.x))) * 4;
+                const bytes = @as(usize, region.extent.width) * 4;
+                std.mem.copyForwards(u8, dst[dst_offset..][0..bytes], src[src_offset..][0..bytes]);
+            }
         }
     }
     invalidateImageContents(dst_image);
@@ -15930,14 +15950,14 @@ test "dynamic rendering begin and end own attachment scope" {
 
 test "Vulkan 1.4 host image copies transitions and layout queries are bounded" {
     const ctx = try createTestDeviceContext();
-    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 44, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x10, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 44, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 2, .samples = 1, .tiling = 0, .usage = 0x10, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
     var src: usize = 0;
     var dst: usize = 0;
     var unbound: usize = 0;
     try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &src));
     try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &dst));
     try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &unbound));
-    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 16, .memory_type_index = 0 };
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 32, .memory_type_index = 0 };
     var src_memory: usize = 0;
     var dst_memory: usize = 0;
     try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &src_memory));
@@ -15946,8 +15966,8 @@ test "Vulkan 1.4 host image copies transitions and layout queries are bounded" {
     try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, dst, dst_memory, 0));
     validImageLocked(src).?.layout = 1;
     validImageLocked(dst).?.layout = 1;
-    var source = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
-    const layers = ImageSubresourceLayers{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 };
+    var source = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116 };
+    const layers = ImageSubresourceLayers{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 2 };
     const to_image_region = MemoryToImageCopy{ .s_type = 1000270000, .p_next = null, .host_pointer = &source, .memory_row_length = 0, .memory_image_height = 0, .image_subresource = layers, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
     const to_image = CopyMemoryToImageInfo{ .s_type = 1000270005, .p_next = null, .flags = 0, .dst_image = src, .dst_image_layout = 1, .region_count = 1, .regions = @ptrCast(&to_image_region) };
     try std.testing.expectEqual(Result.success, copyMemoryToImage(ctx.device, &to_image));
@@ -15963,7 +15983,7 @@ test "Vulkan 1.4 host image copies transitions and layout queries are bounded" {
     var to_unbound = to_image;
     to_unbound.dst_image = unbound;
     try std.testing.expectEqual(Result.error_initialization_failed, copyMemoryToImage(ctx.device, &to_unbound));
-    var destination = [_]u8{0} ** 16;
+    var destination = [_]u8{0} ** 32;
     const from_image_region = ImageToMemoryCopy{ .s_type = 1000270001, .p_next = null, .host_pointer = &destination, .memory_row_length = 0, .memory_image_height = 0, .image_subresource = layers, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
     const from_image = CopyImageToMemoryInfo{ .s_type = 1000270004, .p_next = null, .flags = 0, .src_image = src, .src_image_layout = 1, .region_count = 1, .regions = @ptrCast(&from_image_region) };
     try std.testing.expectEqual(Result.success, copyImageToMemory(ctx.device, &from_image));
