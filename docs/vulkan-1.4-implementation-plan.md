@@ -57,7 +57,7 @@ transactional output commits; static access-chain reads share the same
 validated interface path. Constant-folded scalar integer comparisons and nested
 boolean logical expressions, signed integer negation, component-wise integer
 multiply, bitwise operations, integer division/remainder, and bounded integer
-shifts, floating remainder with truncating quotient, dynamic scalar integer comparisons, ordered/unordered scalar
+shifts, floating remainder/modulo with truncating/flooring quotient, dynamic scalar integer comparisons, ordered/unordered scalar
 floating-point comparisons with NaN semantics, and dynamic scalar boolean
 logical operations, bounded f32 4x4 column-major matrix/vector arithmetic
 (`OpMatrixTimesScalar`, `OpVectorTimesMatrix`, `OpMatrixTimesMatrix`,
@@ -447,7 +447,7 @@ Each slice must land with all of the following:
   Indirect dispatch arguments are consumed at submission. The bounded compute
   profile now also supports signed integer negation, component-wise integer
   multiply, bitwise operations, integer division/remainder, and bounded integer
-  shifts, executes bounded floating remainder and dynamic scalar integer comparisons,
+  shifts, executes bounded floating remainder/modulo and dynamic scalar integer comparisons,
   ordered/unordered scalar floating-point comparisons with NaN semantics, and
   dynamic scalar boolean logical operations, bounded f32 4x4 column-major
   matrix/vector arithmetic (including transpose, outer-product, and vector
