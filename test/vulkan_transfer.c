@@ -4,6 +4,45 @@
 #include <stdlib.h>
 #include <string.h>
 
+// The transfer test exercises Vulkan 1.4 host-image-copy / subresource-layout
+// commands. System headers older than 1.4 do not declare these types, so define
+// the small subset the test needs when they are missing.
+#ifndef VK_VERSION_1_4
+# ifndef VK_STRUCTURE_TYPE_IMAGE_SUBRESOURCE_2
+#  define VK_STRUCTURE_TYPE_IMAGE_SUBRESOURCE_2 1000338003
+# endif
+# ifndef VK_STRUCTURE_TYPE_SUBRESOURCE_LAYOUT_2
+#  define VK_STRUCTURE_TYPE_SUBRESOURCE_LAYOUT_2 1000338002
+# endif
+# ifndef VK_STRUCTURE_TYPE_SUBRESOURCE_HOST_MEMCPY_SIZE
+#  define VK_STRUCTURE_TYPE_SUBRESOURCE_HOST_MEMCPY_SIZE 1000270008
+# endif
+# ifndef VkImageSubresource2
+ typedef struct VkImageSubresource2 {
+     VkStructureType       sType;
+     void*                 pNext;
+     VkImageSubresource    imageSubresource;
+ } VkImageSubresource2;
+# endif
+# ifndef VkSubresourceLayout2
+ typedef struct VkSubresourceLayout2 {
+     VkStructureType    sType;
+     void*              pNext;
+     VkSubresourceLayout subresourceLayout;
+ } VkSubresourceLayout2;
+# endif
+# ifndef VkSubresourceHostMemcpySize
+ typedef struct VkSubresourceHostMemcpySize {
+     VkStructureType    sType;
+     void*              pNext;
+     VkDeviceSize       size;
+ } VkSubresourceHostMemcpySize;
+# endif
+#endif
+#ifndef VK_VERSION_1_4
+typedef void (VKAPI_PTR *PFN_vkGetImageSubresourceLayout2)(VkDevice device, VkImage image, const VkImageSubresource2* pSubresource, VkSubresourceLayout2* pLayout);
+#endif
+
 #define CHECK_VK(expr) do { VkResult r_ = (expr); if (r_ != VK_SUCCESS) { fprintf(stderr, "%s failed: %d\n", #expr, r_); return 1; } } while (0)
 #define CHECK_TRUE(expr) do { if (!(expr)) { fprintf(stderr, "check failed: %s\n", #expr); return 1; } } while (0)
 enum { WIDTH = 240, HEIGHT = 240, BYTES = WIDTH * HEIGHT * 4 };
@@ -199,6 +238,8 @@ int main(void) {
     CHECK_TRUE(vkGetDeviceProcAddr(device, "vkGetEventStatus") != NULL);
     CHECK_TRUE(vkGetDeviceProcAddr(device, "vkSetEvent") != NULL);
     CHECK_TRUE(vkGetDeviceProcAddr(device, "vkResetEvent") != NULL);
+    PFN_vkGetImageSubresourceLayout2 vkGetImageSubresourceLayout2_fn = (PFN_vkGetImageSubresourceLayout2)vkGetDeviceProcAddr(device, "vkGetImageSubresourceLayout2");
+    CHECK_TRUE(vkGetImageSubresourceLayout2_fn != NULL);
     CHECK_TRUE(vkGetDeviceProcAddr(device, "vkCmdSetEvent") != NULL);
     CHECK_TRUE(vkGetDeviceProcAddr(device, "vkCmdResetEvent") != NULL);
     CHECK_TRUE(vkGetDeviceProcAddr(device, "vkCmdWaitEvents") != NULL);
@@ -323,7 +364,7 @@ int main(void) {
     VkSubresourceHostMemcpySize host_memcpy_size = { .sType = VK_STRUCTURE_TYPE_SUBRESOURCE_HOST_MEMCPY_SIZE, .size = UINT64_MAX };
     VkSubresourceLayout2 layout2 = { .sType = VK_STRUCTURE_TYPE_SUBRESOURCE_LAYOUT_2, .pNext = &host_memcpy_size };
     VkImageSubresource2 subresource2 = { .sType = VK_STRUCTURE_TYPE_IMAGE_SUBRESOURCE_2, .imageSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .arrayLayer = 0 } };
-    vkGetImageSubresourceLayout2(device, first, &subresource2, &layout2);
+    vkGetImageSubresourceLayout2_fn(device, first, &subresource2, &layout2);
     CHECK_TRUE(layout2.subresourceLayout.offset == 0 && layout2.subresourceLayout.size == BYTES && layout2.subresourceLayout.rowPitch == WIDTH * 4 && host_memcpy_size.size == BYTES);
     CHECK_VK(allocate_bind_depth_image(device, physical, &depth_transfer, &depth_transfer_memory));
     uint32_t sparse_requirement_count = 1;
