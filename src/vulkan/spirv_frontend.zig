@@ -73,6 +73,7 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 79, .operands = .{ .min = 5, .max = 8 } },
     .{ .opcode = 80, .operands = .{ .min = 3, .max = 18 } },
     .{ .opcode = 81, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 82, .operands = .{ .min = 5, .max = 5 } },
     .{ .opcode = 84, .operands = .{ .min = 3, .max = 3 } },
     // Branch widths are checked by the stage-aware function parser below so
     // non-compute profiles classify the entire family as unsupported rather
@@ -625,7 +626,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 }
                 block_terminated = true;
             },
-            61, 62, 65, 77, 78, 79, 80, 81, 84, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 154...163, 164...169, 170...179, 182...205 => {
+            61, 62, 65, 77, 78, 79, 80, 81, 82, 84, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 154...163, 164...169, 170...179, 182...205 => {
                 if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
                 const valid_arity = switch (instruction.opcode) {
                     61, 84 => w.len == 3,
@@ -636,6 +637,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     79 => w.len >= 5,
                     80 => w.len >= 3,
                     81 => w.len >= 4,
+                    82 => w.len == 5,
                     109, 110, 111, 112, 124, 126, 127, 154, 155, 156, 157, 158, 159, 160 => w.len == 3,
                     128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 161, 162, 163, 164...167, 170...179, 182...199 => w.len == 4,
                     201 => w.len == 6,
@@ -752,6 +754,12 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 var expected = source;
                 expected.columns = 1;
                 if (!sameShape(expected, try resultShape(nodes, w[0]))) return error.Malformed;
+            },
+            82 => {
+                const result = try resultShape(nodes, w[0]);
+                const object = try valueShape(nodes, w[2]);
+                const composite = try valueShape(nodes, w[3]);
+                if (result.rows != 1 or result.columns < 2 or result.columns > 4 or !sameShape(result, composite) or object.scalar != result.scalar or object.columns != 1 or object.rows != 1 or w[4] >= result.columns) return error.Malformed;
             },
             77 => {
                 const result = try resultShape(nodes, w[0]);
@@ -1088,7 +1096,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 84, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
+                41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 84, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
@@ -1120,6 +1128,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const operand_end: usize = switch (instruction.opcode) {
                 79 => 4,
                 81 => 3,
+                82 => 4,
                 else => w.len,
             };
             for (w[first_operand..operand_end]) |operand| {
@@ -1190,7 +1199,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 84, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
+            41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 84, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
@@ -1211,6 +1220,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             81 => .extract,
             77 => .vector_extract_dynamic,
             78 => .vector_insert_dynamic,
+            82 => .composite_insert,
             84 => .transpose,
             109, 110, 111, 112, 124 => .convert,
             126 => .ineg,
@@ -1336,6 +1346,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const value_operand_count: usize = switch (instruction.opcode) {
                 79 => 2,
                 81 => 1,
+                82 => 2,
                 else => source_operands.len,
             };
             for (source_operands, 0..) |source_id, operand_index| {
@@ -2145,6 +2156,26 @@ test "profile lowers dynamic vector extract and insert" {
     var saw_insert = false;
     for (insert_program.instructions) |instruction| saw_insert = saw_insert or instruction.op == .vector_insert_dynamic;
     try std.testing.expect(saw_insert);
+}
+
+test "profile lowers static vector composite insertion" {
+    var words = try testInsertWords(std.testing.allocator, &rich_vertex, rich_vertex.len, &.{});
+    defer std.testing.allocator.free(words);
+    const shuffle_offset = testOpcodeOffset(words, 79, 0).?;
+    for (0..3) |_| {
+        const shorter = try testRemoveWord(std.testing.allocator, words, shuffle_offset + 6);
+        std.testing.allocator.free(words);
+        words = shorter;
+    }
+    words[shuffle_offset] = (6 << 16) | 82;
+    words[shuffle_offset + 3] = 20;
+    words[shuffle_offset + 4] = 42;
+    words[shuffle_offset + 5] = 2;
+    var program = try compile(std.testing.allocator, words, .vertex, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var found = false;
+    for (program.instructions) |instruction| found = found or instruction.op == .composite_insert;
+    try std.testing.expect(found);
 }
 
 test "compute profile lowers integer division and remainder with exact signedness" {

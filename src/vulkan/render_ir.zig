@@ -168,6 +168,8 @@ pub const Op = enum(u8) {
     vector_extract_dynamic,
     /// Dynamic replacement of one component in a vector.
     vector_insert_dynamic,
+    /// Static replacement of one component in a vector composite.
+    composite_insert,
 };
 
 pub const Instruction = struct {
@@ -328,6 +330,7 @@ fn valueOperand(op: Op, operand_index: usize) bool {
         .bit_field_s_extract, .bit_field_u_extract => operand_index < 3,
         .vector_extract_dynamic => operand_index < 2,
         .vector_insert_dynamic => operand_index < 3,
+        .composite_insert => operand_index < 2,
         .logical_not => operand_index == 0,
         .output => operand_index == 1,
     };
