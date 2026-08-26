@@ -2940,8 +2940,9 @@ fn mapMemory(device: ?Device, handle: usize, offset: u64, size: u64, flags: u32,
     lock();
     defer mutex.unlock();
     const object = validMemoryLocked(handle) orelse return .error_memory_map_failed;
-    if (!validDeviceLocked(d) or !validOwner(d, object.owner) or flags != 0 or object.mapped or offset > object.bytes.len) return .error_memory_map_failed;
+    if (!validDeviceLocked(d) or !validOwner(d, object.owner) or flags != 0 or object.mapped or offset >= object.bytes.len) return .error_memory_map_failed;
     const actual = if (size == std.math.maxInt(u64)) object.bytes.len - @as(usize, @intCast(offset)) else std.math.cast(usize, size) orelse return .error_memory_map_failed;
+    if (size != std.math.maxInt(u64) and actual == 0) return .error_memory_map_failed;
     if (actual > object.bytes.len - @as(usize, @intCast(offset))) return .error_memory_map_failed;
     object.mapped = true;
     for (&image_objects, image_state) |*image, state| if (state == .live and image.memory == object) invalidateImageContents(image);
@@ -14184,6 +14185,8 @@ test "memory transfer objects execute against independently specified bytes" {
     for (0..64) |i| source[i] = @intCast(i * 3);
     try std.testing.expectEqual(Result.error_memory_map_failed, mapMemory(device, memory_a, 0, 1, 0, &mapped));
     unmapMemory(device, memory_a);
+    try std.testing.expectEqual(Result.error_memory_map_failed, mapMemory(device, memory_a, bai.allocation_size, std.math.maxInt(u64), 0, &mapped));
+    try std.testing.expectEqual(Result.error_memory_map_failed, mapMemory(device, memory_a, 0, 0, 0, &mapped));
 
     const bci = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 64, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
     var buffer_a: usize = 0;
