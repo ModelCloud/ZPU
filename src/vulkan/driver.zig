@@ -8704,11 +8704,12 @@ fn cmdBindIndexBuffer(cb: ?CommandBuffer, handle: usize, offset: u64, index_type
     const size = if (offset <= buffer.size) buffer.size - offset else 0;
     bindIndexBufferLocked(command_buffer, handle, offset, size, index_type);
 }
-fn bindVertexBuffersLocked(command_buffer: *CommandBufferObj, first_binding: u32, binding_count: u32, handles: ?[*]const usize, offsets: ?[*]const u64, sizes: ?[*]const u64, strides: ?[*]const u64) void {
-    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or binding_count == 0 or first_binding >= 16 or binding_count > 16 - first_binding or handles == null or offsets == null) {
+fn bindVertexBuffersLocked(command_buffer: *CommandBufferObj, first_binding: u32, binding_count: u32, handles: ?[*]const usize, offsets: ?[*]const u64, sizes: ?[*]const u64, strides: ?[*]const u64, allow_empty: bool) void {
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or first_binding >= 16 or binding_count > 16 - first_binding or (binding_count == 0 and (!allow_empty or sizes != null or strides != null)) or (binding_count != 0 and (handles == null or offsets == null))) {
         command_buffer.impl.invalid = true;
         return;
     }
+    if (binding_count == 0) return;
     const buffer_handles = handles.?[0..binding_count];
     const buffer_offsets = offsets.?[0..binding_count];
     const buffer_sizes = if (sizes) |items| items[0..binding_count] else null;
@@ -8743,7 +8744,7 @@ fn cmdBindVertexBuffers(cb: ?CommandBuffer, first_binding: u32, binding_count: u
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    bindVertexBuffersLocked(command_buffer, first_binding, binding_count, handles, offsets, null, null);
+    bindVertexBuffersLocked(command_buffer, first_binding, binding_count, handles, offsets, null, null, false);
 }
 fn cmdSetViewport(cb: ?CommandBuffer, first: u32, count: u32, values: ?*const anyopaque) callconv(.c) void {
     lock();
@@ -9936,7 +9937,7 @@ fn cmdBindVertexBuffers2(cb: ?CommandBuffer, first_binding: u32, binding_count: 
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    bindVertexBuffersLocked(command_buffer, first_binding, binding_count, buffers, offsets, sizes, strides);
+    bindVertexBuffersLocked(command_buffer, first_binding, binding_count, buffers, offsets, sizes, strides, true);
 }
 fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
     lock();
@@ -15654,6 +15655,17 @@ test "vertex and index bindings are typed atomic lifecycle state and allocation 
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdBindVertexBuffers(commands[0], 0, 0, &buffers, &offsets);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBindVertexBuffers2(commands[0], 0, 0, null, null, null, null);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 0), commands[0].impl.vertex_bindings.set);
+    cmdBindVertexBuffers2(commands[0], 0, 0, null, null, &offsets, null);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBindVertexBuffers2(commands[0], 16, 0, null, null, null, null);
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
