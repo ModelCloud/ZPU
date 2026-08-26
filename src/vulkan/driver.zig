@@ -3397,8 +3397,7 @@ fn getImageSparseMemoryRequirements2(device: ?Device, info: ?*const ImageSparseM
 }
 fn bindBufferMemory2(device: ?Device, count: u32, infos: ?[*]const BindBufferMemoryInfo) callconv(.c) Result {
     const d = device orelse return .error_initialization_failed;
-    if (count > max_api_items or (count != 0 and infos == null)) return .error_initialization_failed;
-    if (count == 0) return .success;
+    if (count == 0 or count > max_api_items or infos == null) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
@@ -3420,8 +3419,7 @@ fn bindBufferMemory2(device: ?Device, count: u32, infos: ?[*]const BindBufferMem
 }
 fn bindImageMemory2(device: ?Device, count: u32, infos: ?[*]const BindImageMemoryInfo) callconv(.c) Result {
     const d = device orelse return .error_initialization_failed;
-    if (count > max_api_items or (count != 0 and infos == null)) return .error_initialization_failed;
-    if (count == 0) return .success;
+    if (count == 0 or count > max_api_items or infos == null) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
@@ -13259,8 +13257,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 0xdead_beef), rejected_memory);
     const buffer_bind = BindBufferMemoryInfo{ .s_type = 1000157000, .p_next = null, .buffer = buffer, .memory = memory, .memory_offset = 0 };
     try std.testing.expectEqual(Result.success, bindBufferMemory2(ctx.device, 1, @ptrCast(&buffer_bind)));
+    try std.testing.expectEqual(Result.error_initialization_failed, bindBufferMemory2(ctx.device, 0, null));
     const image_bind = BindImageMemoryInfo{ .s_type = 1000157001, .p_next = null, .image = image, .memory = memory, .memory_offset = 16 };
     try std.testing.expectEqual(Result.success, bindImageMemory2(ctx.device, 1, @ptrCast(&image_bind)));
+    try std.testing.expectEqual(Result.error_initialization_failed, bindImageMemory2(ctx.device, 0, null));
     var requirements = MemoryRequirements2{ .s_type = 1000146003, .p_next = null, .memory_requirements = std.mem.zeroes(MemoryRequirements) };
     const buffer_requirements = BufferMemoryRequirementsInfo2{ .s_type = 1000146000, .p_next = null, .buffer = buffer };
     getBufferMemoryRequirements2(ctx.device, &buffer_requirements, &requirements);
