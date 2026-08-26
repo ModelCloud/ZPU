@@ -402,6 +402,7 @@ pub const CommandBufferSubmitInfo = extern struct { s_type: i32, p_next: ?*const
 pub const SubmitInfo2 = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, wait_semaphore_info_count: u32, wait_semaphore_infos: ?[*]const SemaphoreSubmitInfo, command_buffer_info_count: u32, command_buffer_infos: ?[*]const CommandBufferSubmitInfo, signal_semaphore_info_count: u32, signal_semaphore_infos: ?[*]const SemaphoreSubmitInfo };
 pub const Extent2D = extern struct { width: u32, height: u32 };
 pub const XcbSurfaceCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, connection: ?*anyopaque, window: u32 };
+pub const HeadlessSurfaceCreateInfoEXT = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32 };
 pub const SurfaceCapabilities = extern struct { min_image_count: u32, max_image_count: u32, current_extent: Extent2D, min_image_extent: Extent2D, max_image_extent: Extent2D, max_image_array_layers: u32, supported_transforms: u32, current_transform: u32, supported_composite_alpha: u32, supported_usage_flags: u32 };
 pub const SurfaceFormat = extern struct { format: i32, color_space: i32 };
 pub const SwapchainCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, surface: usize, min_image_count: u32, image_format: i32, image_color_space: i32, image_extent: Extent2D, image_array_layers: u32, image_usage: u32, image_sharing_mode: i32, queue_family_index_count: u32, queue_family_indices: ?[*]const u32, pre_transform: u32, composite_alpha: u32, present_mode: i32, clipped: u32, old_swapchain: usize };
@@ -510,7 +511,7 @@ const QuerySlot = struct { state: std.atomic.Value(u8), value: std.atomic.Value(
 const QueryPoolObj = struct { owner: DeviceIdentity, query_type: i32, slots: []QuerySlot };
 const SemaphoreObj = struct { owner: Device, signaled: std.atomic.Value(bool), timeline: bool, timeline_value: std.atomic.Value(u64) };
 const CommandPoolObj = struct { owner: Device, flags: u32 };
-const SurfaceObj = struct { owner: Instance, connection: *anyopaque, window: u32 };
+const SurfaceObj = struct { owner: Instance, connection: *anyopaque, window: u32, headless: bool = false };
 const ImageViewObj = struct { owner: Device, image: *ImageObj, format: i32, usage: u32, aspect_mask: u32, base_array_layer: u32, layer_count: u32 };
 const SamplerObj = struct {
     owner: Device,
@@ -2162,10 +2163,10 @@ fn enumerateInstanceExtensions(layer: ?[*:0]const u8, count: ?*u32, props: ?[*]E
     if (layer != null) return .error_extension_not_present;
     // Chromium's headless Vulkan bootstrap enables the two promoted
     // external-capability names by string even when the driver reports a
-    // Vulkan 1.0 API version.  They are capability-query aliases only: ZPU
-    // still exposes no import/export handles or external-memory features.
-    const names = [_][]const u8{ "VK_KHR_surface", "VK_KHR_xcb_surface", "VK_KHR_external_memory_capabilities", "VK_KHR_external_semaphore_capabilities" };
-    const versions = [_]u32{ 25, 6, 1, 1 };
+    // Vulkan 1.0 API version.  The headless name is a real offscreen surface
+    // path; the capability names remain zero-handle query aliases only.
+    const names = [_][]const u8{ "VK_KHR_surface", "VK_KHR_xcb_surface", "VK_EXT_headless_surface", "VK_KHR_external_memory_capabilities", "VK_KHR_external_semaphore_capabilities" };
+    const versions = [_]u32{ 25, 6, 1, 1, 1 };
     if (props) |items| {
         const available = n.*;
         const written = @min(available, names.len);
@@ -2182,7 +2183,8 @@ fn enumerateInstanceExtensions(layer: ?[*:0]const u8, count: ?*u32, props: ?[*]E
 }
 fn supportedInstanceExtension(name: [*:0]const u8) bool {
     const value = std.mem.span(name);
-    return std.mem.eql(u8, value, "VK_KHR_external_memory_capabilities") or
+    return std.mem.eql(u8, value, "VK_EXT_headless_surface") or
+        std.mem.eql(u8, value, "VK_KHR_external_memory_capabilities") or
         std.mem.eql(u8, value, "VK_KHR_external_semaphore_capabilities") or
         std.mem.eql(u8, value, "VK_KHR_surface") or
         std.mem.eql(u8, value, "VK_KHR_xcb_surface");
@@ -2248,6 +2250,25 @@ fn createXcbSurface(instance: ?Instance, info: ?*const XcbSurfaceCreateInfo, all
     if (!validInstanceLocked(h)) return .error_initialization_failed;
     for (&surface_objects, &surface_state) |*surface, *state| if (state.* == .never) {
         surface.* = .{ .owner = h, .connection = ci.connection.?, .window = ci.window };
+        state.* = .live;
+        out.* = @intFromPtr(surface);
+        return .success;
+    };
+    return .error_out_of_host_memory;
+}
+fn createHeadlessSurface(instance: ?Instance, info: ?*const HeadlessSurfaceCreateInfoEXT, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    if (alloc != null) return .error_initialization_failed;
+    const h = instance orelse return .error_initialization_failed;
+    const ci = info orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    if (ci.s_type != 1_000_256_000 or ci.p_next != null or ci.flags != 0) return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    if (!validInstanceLocked(h)) return .error_initialization_failed;
+    for (&surface_objects, &surface_state) |*surface, *state| if (state.* == .never) {
+        // The non-null sentinel keeps the existing SurfaceObj ABI compact;
+        // headless transports never dereference it.
+        surface.* = .{ .owner = h, .connection = @ptrFromInt(8), .window = 0, .headless = true };
         state.* = .live;
         out.* = @intFromPtr(surface);
         return .success;
@@ -11644,7 +11665,10 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
     for (&swapchain_objects, &swapchain_state) |*swapchain, *state| if (state.* == .never) {
         const pixels = @as(u64, ci.image_extent.width) * ci.image_extent.height;
         const image_count = if (pixels >= @as(u64, 3840) * 2160 and ci.min_image_count < 4) ci.min_image_count + 1 else ci.min_image_count;
-        const transport = xcb_present.init(surface.connection, surface.window, ci.image_extent.width, ci.image_extent.height, image_count) orelse return .error_initialization_failed;
+        const transport = if (surface.headless)
+            xcb_present.initHeadless(ci.image_extent.width, ci.image_extent.height, image_count) orelse return .error_initialization_failed
+        else
+            xcb_present.init(surface.connection, surface.window, ci.image_extent.width, ci.image_extent.height, image_count) orelse return .error_initialization_failed;
         swapchain.* = .{
             .owner = d,
             .surface = surface,
@@ -12502,7 +12526,7 @@ fn globalLookup(n: []const u8) Fn {
 }
 fn instanceLookup(n: []const u8) Fn {
     if (globalLookup(n)) |f| return f;
-    const map = .{ .{ "vkDestroyInstance", destroyInstance }, .{ "vkEnumeratePhysicalDevices", enumeratePhysicalDevices }, .{ "vkEnumeratePhysicalDeviceGroups", enumeratePhysicalDeviceGroups }, .{ "vkGetPhysicalDeviceFeatures", getFeatures }, .{ "vkGetPhysicalDeviceFeatures2", getPhysicalDeviceFeatures2 }, .{ "vkGetPhysicalDeviceProperties", getProperties }, .{ "vkGetPhysicalDeviceProperties2", getPhysicalDeviceProperties2 }, .{ "vkGetPhysicalDeviceQueueFamilyProperties", getQueueProperties }, .{ "vkGetPhysicalDeviceQueueFamilyProperties2", getPhysicalDeviceQueueFamilyProperties2 }, .{ "vkGetPhysicalDeviceMemoryProperties", getMemoryProperties }, .{ "vkGetPhysicalDeviceMemoryProperties2", getPhysicalDeviceMemoryProperties2 }, .{ "vkGetPhysicalDeviceFormatProperties", getFormatProperties }, .{ "vkGetPhysicalDeviceFormatProperties2", getPhysicalDeviceFormatProperties2 }, .{ "vkGetPhysicalDeviceImageFormatProperties", getImageFormatProperties }, .{ "vkGetPhysicalDeviceImageFormatProperties2", getPhysicalDeviceImageFormatProperties2 }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties", getSparseImageFormatProperties }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties2", getPhysicalDeviceSparseImageFormatProperties2 }, .{ "vkGetPhysicalDeviceToolProperties", getPhysicalDeviceToolProperties }, .{ "vkGetPhysicalDeviceExternalBufferProperties", getPhysicalDeviceExternalBufferProperties }, .{ "vkGetPhysicalDeviceExternalBufferPropertiesKHR", getPhysicalDeviceExternalBufferProperties }, .{ "vkGetPhysicalDeviceExternalFenceProperties", getPhysicalDeviceExternalFenceProperties }, .{ "vkGetPhysicalDeviceExternalSemaphoreProperties", getPhysicalDeviceExternalSemaphoreProperties }, .{ "vkGetPhysicalDeviceExternalSemaphorePropertiesKHR", getPhysicalDeviceExternalSemaphoreProperties }, .{ "vkEnumerateDeviceExtensionProperties", enumerateDeviceExtensions }, .{ "vkEnumerateDeviceLayerProperties", enumerateDeviceLayers }, .{ "vkCreateDevice", createDevice }, .{ "vkGetDeviceProcAddr", getDeviceProcAddr }, .{ "vkDestroyDevice", destroyDevice }, .{ "vkGetDeviceQueue", getDeviceQueue }, .{ "vkGetDeviceQueue2", getDeviceQueue2 }, .{ "vkCreateXcbSurfaceKHR", createXcbSurface }, .{ "vkDestroySurfaceKHR", destroySurface }, .{ "vkGetPhysicalDeviceSurfaceSupportKHR", getSurfaceSupport }, .{ "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", getSurfaceCapabilities }, .{ "vkGetPhysicalDeviceSurfaceFormatsKHR", getSurfaceFormats }, .{ "vkGetPhysicalDeviceSurfacePresentModesKHR", getSurfacePresentModes } };
+    const map = .{ .{ "vkDestroyInstance", destroyInstance }, .{ "vkEnumeratePhysicalDevices", enumeratePhysicalDevices }, .{ "vkEnumeratePhysicalDeviceGroups", enumeratePhysicalDeviceGroups }, .{ "vkGetPhysicalDeviceFeatures", getFeatures }, .{ "vkGetPhysicalDeviceFeatures2", getPhysicalDeviceFeatures2 }, .{ "vkGetPhysicalDeviceProperties", getProperties }, .{ "vkGetPhysicalDeviceProperties2", getPhysicalDeviceProperties2 }, .{ "vkGetPhysicalDeviceQueueFamilyProperties", getQueueProperties }, .{ "vkGetPhysicalDeviceQueueFamilyProperties2", getPhysicalDeviceQueueFamilyProperties2 }, .{ "vkGetPhysicalDeviceMemoryProperties", getMemoryProperties }, .{ "vkGetPhysicalDeviceMemoryProperties2", getPhysicalDeviceMemoryProperties2 }, .{ "vkGetPhysicalDeviceFormatProperties", getFormatProperties }, .{ "vkGetPhysicalDeviceFormatProperties2", getPhysicalDeviceFormatProperties2 }, .{ "vkGetPhysicalDeviceImageFormatProperties", getImageFormatProperties }, .{ "vkGetPhysicalDeviceImageFormatProperties2", getPhysicalDeviceImageFormatProperties2 }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties", getSparseImageFormatProperties }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties2", getPhysicalDeviceSparseImageFormatProperties2 }, .{ "vkGetPhysicalDeviceToolProperties", getPhysicalDeviceToolProperties }, .{ "vkGetPhysicalDeviceExternalBufferProperties", getPhysicalDeviceExternalBufferProperties }, .{ "vkGetPhysicalDeviceExternalBufferPropertiesKHR", getPhysicalDeviceExternalBufferProperties }, .{ "vkGetPhysicalDeviceExternalFenceProperties", getPhysicalDeviceExternalFenceProperties }, .{ "vkGetPhysicalDeviceExternalSemaphoreProperties", getPhysicalDeviceExternalSemaphoreProperties }, .{ "vkGetPhysicalDeviceExternalSemaphorePropertiesKHR", getPhysicalDeviceExternalSemaphoreProperties }, .{ "vkEnumerateDeviceExtensionProperties", enumerateDeviceExtensions }, .{ "vkEnumerateDeviceLayerProperties", enumerateDeviceLayers }, .{ "vkCreateDevice", createDevice }, .{ "vkGetDeviceProcAddr", getDeviceProcAddr }, .{ "vkDestroyDevice", destroyDevice }, .{ "vkGetDeviceQueue", getDeviceQueue }, .{ "vkGetDeviceQueue2", getDeviceQueue2 }, .{ "vkCreateXcbSurfaceKHR", createXcbSurface }, .{ "vkCreateHeadlessSurfaceEXT", createHeadlessSurface }, .{ "vkDestroySurfaceKHR", destroySurface }, .{ "vkGetPhysicalDeviceSurfaceSupportKHR", getSurfaceSupport }, .{ "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", getSurfaceCapabilities }, .{ "vkGetPhysicalDeviceSurfaceFormatsKHR", getSurfaceFormats }, .{ "vkGetPhysicalDeviceSurfacePresentModesKHR", getSurfacePresentModes } };
     inline for (map) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
     return deviceLookup(n);
 }
@@ -12598,21 +12622,24 @@ test "enumeration lifecycle and unsupported features" {
     try std.testing.expect(vk_icdGetPhysicalDeviceProcAddr(instance, "vkDestroyInstance") == null);
     var extension_count: u32 = 9;
     try std.testing.expectEqual(Result.success, enumerateInstanceExtensions(null, &extension_count, null));
-    try std.testing.expectEqual(@as(u32, 4), extension_count);
-    var extension_properties: [4]ExtensionProperties = undefined;
+    try std.testing.expectEqual(@as(u32, 5), extension_count);
+    var extension_properties: [5]ExtensionProperties = undefined;
     extension_count = 1;
     try std.testing.expectEqual(Result.incomplete, enumerateInstanceExtensions(null, &extension_count, &extension_properties));
     try std.testing.expectEqual(@as(u32, 1), extension_count);
     try std.testing.expectEqualStrings("VK_KHR_surface", std.mem.sliceTo(&extension_properties[0].name, 0));
     try std.testing.expectEqual(@as(u32, 25), extension_properties[0].spec_version);
-    extension_count = 4;
+    extension_count = 5;
     try std.testing.expectEqual(Result.success, enumerateInstanceExtensions(null, &extension_count, &extension_properties));
     try std.testing.expectEqualStrings("VK_KHR_xcb_surface", std.mem.sliceTo(&extension_properties[1].name, 0));
     try std.testing.expectEqual(@as(u32, 6), extension_properties[1].spec_version);
-    try std.testing.expectEqualStrings("VK_KHR_external_memory_capabilities", std.mem.sliceTo(&extension_properties[2].name, 0));
+    try std.testing.expectEqualStrings("VK_EXT_headless_surface", std.mem.sliceTo(&extension_properties[2].name, 0));
     try std.testing.expectEqual(@as(u32, 1), extension_properties[2].spec_version);
-    try std.testing.expectEqualStrings("VK_KHR_external_semaphore_capabilities", std.mem.sliceTo(&extension_properties[3].name, 0));
+    try std.testing.expectEqualStrings("VK_KHR_external_memory_capabilities", std.mem.sliceTo(&extension_properties[3].name, 0));
     try std.testing.expectEqual(@as(u32, 1), extension_properties[3].spec_version);
+    try std.testing.expectEqualStrings("VK_KHR_external_semaphore_capabilities", std.mem.sliceTo(&extension_properties[4].name, 0));
+    try std.testing.expectEqual(@as(u32, 1), extension_properties[4].spec_version);
+    try std.testing.expect(vk_icdGetInstanceProcAddr(instance, "vkCreateHeadlessSurfaceEXT") != null);
     try std.testing.expect(vk_icdGetPhysicalDeviceProcAddr(instance, "vkGetPhysicalDeviceExternalBufferPropertiesKHR") != null);
     try std.testing.expect(vk_icdGetPhysicalDeviceProcAddr(instance, "vkGetPhysicalDeviceExternalSemaphorePropertiesKHR") != null);
     try std.testing.expectEqual(Result.error_extension_not_present, enumerateInstanceExtensions("layer", &extension_count, null));
@@ -12666,7 +12693,7 @@ test "enumeration lifecycle and unsupported features" {
     ci.extension_count = 1;
     ci.extensions = &unsupported_extensions;
     try std.testing.expectEqual(Result.error_extension_not_present, createInstance(&ci, null, &instance));
-    const supported_extensions = [_][*:0]const u8{ "VK_KHR_surface", "VK_KHR_xcb_surface", "VK_KHR_external_memory_capabilities", "VK_KHR_external_semaphore_capabilities" };
+    const supported_extensions = [_][*:0]const u8{ "VK_KHR_surface", "VK_KHR_xcb_surface", "VK_EXT_headless_surface", "VK_KHR_external_memory_capabilities", "VK_KHR_external_semaphore_capabilities" };
     ci.extension_count = supported_extensions.len;
     ci.extensions = &supported_extensions;
     try std.testing.expectEqual(Result.success, createInstance(&ci, null, &instance));
@@ -12688,17 +12715,17 @@ test "core instance physical and device enumeration is bounded and allocation fr
     var physical_count: u32 = 1;
     var physical: [1]Physical = undefined;
     try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &physical_count, &physical));
-    var instance_extensions: [4]ExtensionProperties = undefined;
+    var instance_extensions: [5]ExtensionProperties = undefined;
     var device_extensions: [2]ExtensionProperties = undefined;
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     for (0..4096) |_| {
         var count: u32 = 0;
         try std.testing.expectEqual(Result.success, enumerateInstanceExtensions(null, &count, null));
-        try std.testing.expectEqual(@as(u32, 4), count);
+        try std.testing.expectEqual(@as(u32, 5), count);
         count = instance_extensions.len;
         try std.testing.expectEqual(Result.success, enumerateInstanceExtensions(null, &count, &instance_extensions));
-        try std.testing.expectEqual(@as(u32, 4), count);
+        try std.testing.expectEqual(@as(u32, 5), count);
         count = 0;
         try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &count, null));
         try std.testing.expectEqual(@as(u32, 1), count);
@@ -12738,8 +12765,8 @@ test "core instance physical and device enumeration is bounded and allocation fr
     destroyInstance(instance, null);
 }
 
-test "XCB surface lifecycle and physical presentation queries" {
-    const extensions = [_][*:0]const u8{ "VK_KHR_surface", "VK_KHR_xcb_surface" };
+test "XCB and headless surface lifecycle and physical presentation queries" {
+    const extensions = [_][*:0]const u8{ "VK_KHR_surface", "VK_KHR_xcb_surface", "VK_EXT_headless_surface" };
     const ci = InstanceInfo{ .s_type = 1, .p_next = null, .flags = 0, .app_info = null, .layer_count = 0, .layers = null, .extension_count = extensions.len, .extensions = &extensions };
     var instance: Instance = undefined;
     try std.testing.expectEqual(Result.success, createInstance(&ci, null, &instance));
@@ -12792,6 +12819,32 @@ test "XCB surface lifecycle and physical presentation queries" {
     const device_info = DeviceInfo{ .s_type = 3, .p_next = null, .flags = 0, .queue_info_count = 1, .queue_infos = @ptrCast(&queue_info), .layer_count = 0, .layers = null, .extension_count = 1, .extensions = &device_extensions, .features = null };
     var device: Device = undefined;
     try std.testing.expectEqual(Result.success, createDevice(physicals[0], &device_info, null, &device));
+    var queue: Queue = undefined;
+    getDeviceQueue(device, 0, 0, &queue);
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(HeadlessSurfaceCreateInfoEXT));
+    const headless_info = HeadlessSurfaceCreateInfoEXT{ .s_type = 1_000_256_000, .p_next = null, .flags = 0 };
+    var headless_surface: usize = 0;
+    try std.testing.expectEqual(Result.success, createHeadlessSurface(instance, &headless_info, null, &headless_surface));
+    try std.testing.expect(validSurfaceLocked(headless_surface).?.headless);
+    var headless_supported: u32 = 0;
+    try std.testing.expectEqual(Result.success, getSurfaceSupport(physicals[0], 0, headless_surface, &headless_supported));
+    const headless_swapchain_info = SwapchainCreateInfo{ .s_type = 1_000_001_000, .p_next = null, .flags = 0, .surface = headless_surface, .min_image_count = 2, .image_format = 44, .image_color_space = 0, .image_extent = .{ .width = 2, .height = 2 }, .image_array_layers = 1, .image_usage = 0x10, .image_sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .pre_transform = 1, .composite_alpha = 1, .present_mode = 2, .clipped = 1, .old_swapchain = 0 };
+    var headless_swapchain: usize = 0;
+    try std.testing.expectEqual(Result.success, createSwapchain(device, &headless_swapchain_info, null, &headless_swapchain));
+    try std.testing.expect(validSwapchainLocked(headless_swapchain).?.transport.headless);
+    var headless_image_index: u32 = 99;
+    try std.testing.expectEqual(Result.success, acquireNextImage(device, headless_swapchain, 0, 0, 0, &headless_image_index));
+    const headless_indices = [_]u32{headless_image_index};
+    const headless_present = PresentInfo{ .s_type = 1_000_001_001, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .swapchain_count = 1, .swapchains = @ptrCast(&headless_swapchain), .image_indices = @ptrCast(&headless_indices), .results = null };
+    try std.testing.expectEqual(Result.success, queuePresent(queue, &headless_present));
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        var warm_supported: u32 = 0;
+        try std.testing.expectEqual(Result.success, getSurfaceSupport(physicals[0], 0, headless_surface, &warm_supported));
+    }
+    test_allocations_before_failure = null;
+    destroySwapchain(device, headless_swapchain, null);
+    destroySurface(instance, headless_surface, null);
     destroyDevice(device, null);
 
     var bad_info = surface_info;

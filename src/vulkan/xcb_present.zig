@@ -154,6 +154,10 @@ pub const Transport = struct {
     gc: u32,
     width: u32,
     height: u32,
+    /// A headless surface has no X11 drawable.  Keep the same transport ABI
+    /// so the swapchain and timing paths remain shared, but make upload and
+    /// commit pure offscreen operations.
+    headless: bool = false,
     shared_upload: ?SharedUpload = null,
     visible_region: Region = .{},
     visible_valid: bool = false,
@@ -203,6 +207,14 @@ pub fn init(connection_opaque: *anyopaque, window: u32, width: u32, height: u32,
     return .{ .connection = connection, .window = window, .pixmap = pixmap, .gc = gc, .width = width, .height = height, .shared_upload = initSharedUpload(connection, byte_count, image_count) };
 }
 
+/// Creates an offscreen transport for VK_EXT_headless_surface.  Headless
+/// presentation still validates the complete pixel envelope and records the
+/// frame cadence, but never opens or touches an X11 connection.
+pub fn initHeadless(width: u32, height: u32, image_count: u32) ?Transport {
+    if (width == 0 or height == 0 or image_count == 0) return null;
+    return .{ .connection = @ptrFromInt(8), .window = 0, .pixmap = 0, .gc = 0, .width = width, .height = height, .headless = true };
+}
+
 pub fn swapchainImageBytes(transport: *Transport, image_index: u32) ?[]align(64) u8 {
     const shared = transport.shared_upload orelse return null;
     const offset = std.math.mul(usize, image_index, shared.image_stride) catch return null;
@@ -212,7 +224,7 @@ pub fn swapchainImageBytes(transport: *Transport, image_index: u32) ?[]align(64)
 }
 
 pub fn deinit(transport: *Transport) void {
-    if (builtin.is_test) return;
+    if (builtin.is_test or transport.headless) return;
     if (transport.shared_upload) |shared| {
         _ = shared.api.detach(transport.connection, shared.segment);
         _ = xcb_flush(transport.connection);
@@ -230,6 +242,14 @@ pub fn upload(transport: *Transport, pixels: []const u8, content: Region, force_
     transport.last.upload_requests = 0;
     const width = transport.width;
     const height = transport.height;
+    if (transport.headless) {
+        transport.last.upload_start_ns = total_start;
+        transport.last.upload_end_ns = total_start;
+        transport.last.upload_ns = 0;
+        transport.pending_region = .{ .width = width, .height = height };
+        transport.pending_content = clampRegion(content, width, height);
+        return pixels.len == @as(usize, width) * height * 4;
+    }
     if (builtin.is_test) return pixels.len == @as(usize, width) * height * 4;
     const expected = std.math.mul(usize, @as(usize, width) * height, 4) catch return false;
     if (pixels.len != expected or pixels.len > std.math.maxInt(u32)) return false;
@@ -275,6 +295,18 @@ pub fn upload(transport: *Transport, pixels: []const u8, content: Region, force_
 pub fn commit(transport: *Transport, pixels: []const u8) bool {
     const width = transport.width;
     const height = transport.height;
+    if (transport.headless) {
+        if (pixels.len != @as(usize, width) * height * 4) return false;
+        const now = monotonicNs();
+        transport.last.copy_start_ns = now;
+        transport.last.copy_end_ns = now;
+        transport.last.flush_end_ns = now;
+        transport.last.transport_total_ns = now -| transport.last.present_start_ns;
+        transport.visible_region = transport.pending_content;
+        transport.visible_valid = true;
+        recordFrameMetric(now);
+        return true;
+    }
     if (builtin.is_test) return pixels.len == @as(usize, width) * height * 4;
     const expected = std.math.mul(usize, @as(usize, width) * height, 4) catch return false;
     if (pixels.len != expected) return false;
@@ -338,6 +370,18 @@ test "test-mode presentation validates the image envelope without touching XCB" 
     try std.testing.expect(present(&transport, &pixels));
     try std.testing.expect(init(@ptrFromInt(8), 0, 2, 2, 1) == null);
     try std.testing.expect(!present(&transport, pixels[0..4]));
+}
+
+test "headless transport presents offscreen without XCB" {
+    var pixels = [_]u8{0} ** 16;
+    var transport = initHeadless(2, 2, 2).?;
+    try std.testing.expect(transport.headless);
+    try std.testing.expect(swapchainImageBytes(&transport, 0) == null);
+    try std.testing.expect(present(&transport, &pixels));
+    try std.testing.expect(transport.visible_valid);
+    try std.testing.expect(!present(&transport, pixels[0..4]));
+    deinit(&transport);
+    try std.testing.expect(initHeadless(0, 2, 1) == null);
 }
 
 test "transport exposes a complete frame after all upload chunks" {

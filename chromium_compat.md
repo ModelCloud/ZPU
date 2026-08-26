@@ -99,8 +99,8 @@ From `ui/ozone/platform/headless/vulkan_implementation_headless.cc`,
 
 - [x] `VK_KHR_external_memory_capabilities` — always required (enumerated and accepted; promoted capability query is exposed with zero external-handle support)
 - [x] `VK_KHR_external_semaphore_capabilities` — always required (enumerated and accepted; promoted capability query is exposed with zero external-handle support)
-- [ ] `VK_KHR_surface` — required when `using_surface`
-- [ ] `VK_EXT_headless_surface` — required when `using_surface`
+- [x] `VK_KHR_surface` — required when `using_surface` (enumerated and accepted)
+- [x] `VK_EXT_headless_surface` — required when `using_surface` (offscreen surface and swapchain path is implemented)
 
 > **Gotcha.** The two `_capabilities` extensions were promoted into Vulkan 1.1
 > core, but Chromium passes them **by name** to `vkCreateInstance`. A 1.1 driver
@@ -115,9 +115,11 @@ From `ui/ozone/platform/headless/vulkan_implementation_headless.cc`,
 > obligation — the core entry points remain the implementation, and no
 > pre-promotion code path is added behind them.
 
-`VK_EXT_headless_surface` is the single highest-leverage item on this whole
-document: it is nearly free for a CPU driver and it is what makes the CPU-only VM
-case work without X11 or Wayland.
+`VK_EXT_headless_surface` is implemented as an offscreen surface and swapchain:
+the ICD validates its exact create-info ABI, allocates ordinary CPU-local image
+backing, and routes presentation/timing through a no-XCB transport. This makes
+the CPU-only VM case work without X11 or Wayland while retaining the same
+swapchain lifecycle and failure-atomic validation as XCB surfaces.
 
 ---
 

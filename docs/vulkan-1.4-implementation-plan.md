@@ -287,6 +287,10 @@ bootstrap, `VK_KHR_external_memory_capabilities` and
 `VK_KHR_external_semaphore_capabilities`, are now enumerated and accepted;
 their KHR physical-device query aliases resolve to the same zero-capability
 core implementations, without adding external-handle support.
+`VK_EXT_headless_surface` is now also enumerated and accepted. Its exact
+create-info ABI produces a CPU-backed offscreen surface; swapchains created
+from it use the shared lifecycle/timing path with a no-XCB transport, so
+headless presentation is usable without an X11 connection.
 The single queue family now reports graphics, compute, and transfer capability,
 matching the bounded compute pipeline and dispatch commands that can be
 submitted through it; queue count, timestamp, and granularity limits are
