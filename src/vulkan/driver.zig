@@ -5256,8 +5256,25 @@ fn prevalidateProfileVertexBindings(op: anytype, owner: *DeviceObj) bool {
         .profile_v1_scalar_graphics => |*value| value,
         else => return true,
     };
-    if (op.indexed != null or op.vertex_count == 0) return false;
-    const last_vertex = std.math.add(u64, op.base_vertex, @as(u64, op.vertex_count) - 1) catch return false;
+    if (op.vertex_count == 0) return false;
+    var last_vertex: u64 = 0;
+    if (op.indexed) |indexed| {
+        if (!liveBufferObject(indexed.buffer) or indexed.buffer.memory == null or !liveMemoryObject(indexed.buffer.memory.?)) return deadResource();
+        if (indexed.buffer.owner != owner or indexed.buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+        const index_size: u64 = if (indexed.index_type == 0) 2 else if (indexed.index_type == 1) 4 else return false;
+        if (indexed.byte_count == 0 or indexed.byte_count % index_size != 0 or indexed.byte_count / index_size < op.vertex_count) return false;
+        const index_bytes = bufferBytes(indexed.buffer);
+        if (indexed.offset > index_bytes.len or indexed.byte_count > index_bytes.len - indexed.offset) return false;
+        for (0..op.vertex_count) |emitted| {
+            const at = @as(usize, @intCast(indexed.offset + @as(u64, @intCast(emitted)) * index_size));
+            const raw: u32 = if (index_size == 2) std.mem.readInt(u16, index_bytes[at..][0..2], .little) else std.mem.readInt(u32, index_bytes[at..][0..4], .little);
+            const adjusted = @as(i64, raw) + indexed.vertex_offset;
+            if (adjusted < 0 or adjusted > std.math.maxInt(u32)) return false;
+            last_vertex = @max(last_vertex, @as(u64, @intCast(adjusted)));
+        }
+    } else {
+        last_vertex = std.math.add(u64, op.base_vertex, @as(u64, op.vertex_count) - 1) catch return false;
+    }
     for (profile.inputs[0..profile.input_count]) |input| {
         if (input.binding >= 16 or op.vertex_bindings.set & (@as(u16, 1) << @intCast(input.binding)) == 0) return false;
         const buffer = op.vertex_bindings.buffers[input.binding] orelse return deadResource();
@@ -5737,6 +5754,17 @@ fn profileWriteColor(bytes: []u8, fragment_bool: bool, output: []const u8) ?u32 
     return 1;
 }
 
+fn profileIndexValue(indexed: IndexedDrawState, emitted: u32) ?u32 {
+    const index_size: usize = if (indexed.index_type == 0) 2 else if (indexed.index_type == 1) 4 else return null;
+    const at = std.math.add(usize, @intCast(indexed.offset), std.math.mul(usize, emitted, index_size) catch return null) catch return null;
+    const bytes = bufferBytes(indexed.buffer);
+    if (at > bytes.len or index_size > bytes.len - at) return null;
+    const raw: u32 = if (index_size == 2) std.mem.readInt(u16, bytes[at..][0..2], .little) else std.mem.readInt(u32, bytes[at..][0..4], .little);
+    const adjusted = @as(i64, raw) + indexed.vertex_offset;
+    if (adjusted < 0 or adjusted > std.math.maxInt(u32)) return null;
+    return @intCast(adjusted);
+}
+
 fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext) void {
     const profile = switch (op.pipeline.execution_abi) {
         .profile_v1_scalar_graphics => |*value| value,
@@ -5761,7 +5789,8 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext) void {
             for (profile.inputs[0..profile.input_count]) |input| {
                 const buffer = op.vertex_bindings.buffers[input.binding] orelse return;
                 const stride = if (op.vertex_bindings.strides[input.binding] == 0) input.stride else op.vertex_bindings.strides[input.binding];
-                const vertex_index = std.math.add(u64, op.base_vertex, triangle_start + @as(u32, @intCast(corner))) catch return;
+                const emitted = triangle_start + @as(u32, @intCast(corner));
+                const vertex_index = if (op.indexed) |indexed| @as(u64, profileIndexValue(indexed, emitted) orelse return) else std.math.add(u64, op.base_vertex, emitted) catch return;
                 const relative = std.math.add(u64, input.offset, std.math.mul(u64, vertex_index, stride) catch return) catch return;
                 const start = std.math.add(u64, op.vertex_bindings.offsets[input.binding], relative) catch return;
                 const source = bufferBytes(buffer);
@@ -9014,6 +9043,15 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     var context = QueryExecutionContext{ .pool = null, .index = 0 };
     executeValidatedCommand(command, &context);
     try std.testing.expect(std.mem.readInt(u32, color_bytes[0..4], .little) != 0 or std.mem.readInt(u32, color_bytes[4..8], .little) != 0);
+    var index_bytes: [6]u8 align(64) = .{ 0, 0, 1, 0, 2, 0 };
+    var index_memory = MemoryObj{ .owner = undefined, .bytes = index_bytes[0..], .mapped = true };
+    var index_buffer = BufferObj{ .owner = undefined, .size = index_bytes.len, .usage = 0x40, .memory = &index_memory };
+    @memset(color_bytes[0..], 0);
+    for (0..16) |index| std.mem.writeInt(u32, depth_bytes[index * 4 ..][0..4], 0x3f80_0000, .little);
+    var indexed_command = command;
+    indexed_command.cube_draw.indexed = .{ .buffer = &index_buffer, .offset = 0, .byte_count = 6, .index_type = 0, .vertex_offset = 0 };
+    executeValidatedCommand(indexed_command, &context);
+    try std.testing.expect(std.mem.readInt(u32, color_bytes[0..4], .little) != 0 or std.mem.readInt(u32, color_bytes[4..8], .little) != 0);
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     for (0..4096) |_| executeValidatedCommand(command, &context);
@@ -9160,7 +9198,7 @@ fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, fir
     const relative_start = @as(u64, first_index) * index_size;
     const start = command_buffer.impl.index_offset + relative_start;
     const byte_count = @as(u64, index_count) * index_size;
-    if (pipeline != pipeline_pointer or layout != layout_pointer or index_buffer != index_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or index_buffer.owner != command_buffer.impl.owner or index_buffer.memory == null or !liveMemoryObject(index_buffer.memory.?) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or pipeline.execution_abi != .cpu_cube_v1 or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or start > index_buffer.size or byte_count > index_buffer.size - start or byte_count > command_buffer.impl.index_size -| (start -| command_buffer.impl.index_offset)) {
+    if (pipeline != pipeline_pointer or layout != layout_pointer or index_buffer != index_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or index_buffer.owner != command_buffer.impl.owner or index_buffer.memory == null or !liveMemoryObject(index_buffer.memory.?) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or start > index_buffer.size or byte_count > index_buffer.size - start or byte_count > command_buffer.impl.index_size -| (start -| command_buffer.impl.index_offset)) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -9175,7 +9213,7 @@ fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, fir
         command_buffer.impl.invalid = true;
         return;
     };
-    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = index_count, .base_vertex = 0, .instance_count = instance_count, .indexed = .{ .buffer = index_buffer, .offset = start, .byte_count = byte_count, .index_type = command_buffer.impl.index_type, .vertex_offset = vertex_offset }, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = cull_mode, .front_face = front_face } });
+    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = index_count, .base_vertex = 0, .instance_count = instance_count, .indexed = .{ .buffer = index_buffer, .offset = start, .byte_count = byte_count, .index_type = command_buffer.impl.index_type, .vertex_offset = vertex_offset }, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = cull_mode, .front_face = front_face, .vertex_bindings = command_buffer.impl.vertex_bindings } });
 }
 fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64, draw_count: u32, stride: u64, indexed: bool, count_source: ?IndirectCountState) void {
     lock();
