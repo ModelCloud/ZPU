@@ -4835,9 +4835,12 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
         if (c.impl.state != 1 or c.impl.invalid) c.impl.invalid = true;
         return;
     }
-    var src_stage: u32 = 0x1_0000;
-    var dst_stage: u32 = 0x1_0000;
-    var have_stage = false;
+    // The legacy lowering uses ALL_COMMANDS for the compact backend's single
+    // synchronous execution stream. Each sync2 barrier is still validated
+    // against its own converted stage/access pair below; Vulkan does not
+    // require all barriers in one VkDependencyInfo to share stage masks.
+    const src_stage: u32 = 0x1_0000;
+    const dst_stage: u32 = 0x1_0000;
     var memories: [max_api_items]MemoryBarrier = undefined;
     if (ci.memory_barriers) |items| for (items[0..ci.memory_barrier_count], 0..) |barrier, index| {
         const converted_src_stage = sync2StageMaskToLegacy(barrier.src_stage_mask) orelse {
@@ -4856,11 +4859,7 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
             markCommandBufferInvalid(cb);
             return;
         };
-        if (!have_stage) {
-            src_stage = converted_src_stage;
-            dst_stage = converted_dst_stage;
-            have_stage = true;
-        } else if (src_stage != converted_src_stage or dst_stage != converted_dst_stage) {
+        if (!stagesSupportAccess(converted_src_stage, converted_src_access) or !stagesSupportAccess(converted_dst_stage, converted_dst_access)) {
             markCommandBufferInvalid(cb);
             return;
         }
@@ -4884,11 +4883,7 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
             markCommandBufferInvalid(cb);
             return;
         };
-        if (!have_stage) {
-            src_stage = converted_src_stage;
-            dst_stage = converted_dst_stage;
-            have_stage = true;
-        } else if (src_stage != converted_src_stage or dst_stage != converted_dst_stage) {
+        if (!stagesSupportAccess(converted_src_stage, converted_src_access) or !stagesSupportAccess(converted_dst_stage, converted_dst_access)) {
             markCommandBufferInvalid(cb);
             return;
         }
@@ -4912,11 +4907,7 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
             markCommandBufferInvalid(cb);
             return;
         };
-        if (!have_stage) {
-            src_stage = converted_src_stage;
-            dst_stage = converted_dst_stage;
-            have_stage = true;
-        } else if (src_stage != converted_src_stage or dst_stage != converted_dst_stage) {
+        if (!stagesSupportAccess(converted_src_stage, converted_src_access) or !stagesSupportAccess(converted_dst_stage, converted_dst_access)) {
             markCommandBufferInvalid(cb);
             return;
         }
@@ -13752,8 +13743,15 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, image, image_memory, 0));
     const memory_barrier = MemoryBarrier2{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 1, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0 };
     const dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 1, .memory_barriers = @ptrCast(&memory_barrier), .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
+    const mixed_memory_barriers = [_]MemoryBarrier2{
+        .{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 1, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0 },
+        .{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 0x2000, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0 },
+    };
+    const mixed_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = mixed_memory_barriers.len, .memory_barriers = &mixed_memory_barriers, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
     const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdPipelineBarrier2(commands[0], &mixed_dependency);
+    try std.testing.expect(!commands[0].impl.invalid);
     cmdPipelineBarrier2(commands[0], &dependency);
     cmdSetEvent2(commands[0], event, &dependency);
     const high_stage_barrier = MemoryBarrier2{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 0x1000_0000_0, .dst_stage_mask = 0x1_0000, .src_access_mask = 0, .dst_access_mask = 0 };
