@@ -54,7 +54,8 @@ submission prevalidation, and has a 4096-iteration allocation-free warm path.
 The bounded compute profile now also admits direct scalar StorageBuffer
 `OpLoad` reads (including read/write aliasing of the descriptor range) with
 transactional output commits; static access-chain reads share the same
-validated interface path. Statically resolved, acyclic `OpBranch`,
+validated interface path. Constant-folded scalar integer equality plus
+statically resolved, acyclic `OpBranch`,
 `OpBranchConditional`, and constant-selector `OpSwitch` paths now prune
 unselected blocks before lowering, while dynamic conditions, loops, dynamic
 indexing, atomics, shared memory, and complete memory-visibility semantics
@@ -434,7 +435,8 @@ Each slice must land with all of the following:
   end-to-end write tests. Static acyclic branch and constant-selector switch
   profiles are also lowered with unselected side-effect blocks removed.
   Indirect dispatch arguments are consumed at submission. The bounded compute
-  profile now also resolves predecessor-selected `OpPhi` values at static
+  profile now also constant-folds scalar integer equality and resolves
+  predecessor-selected `OpPhi` values at static
   acyclic branch joins, preserving only the incoming value from the selected
   predecessor before lowering to straight-line canonical IR. Generic SPIR-V
   dynamic control flow, dynamic indexing, atomics, shared-memory execution,
