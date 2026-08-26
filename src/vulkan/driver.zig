@@ -17903,7 +17903,7 @@ fn computeStorageProfileTest() !void {
     // command is recorded. A post-record zero dimension is a valid no-op,
     // then a corrected write executes normally.
     try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memory, 0, 16, 0, &mapped));
-    @as(*u32, @ptrCast(@alignCast(mapped.?))).* = 0;
+    @as(*u32, @ptrCast(@alignCast(mapped.?))).* = 65_536;
     unmapMemory(ctx.device, memory);
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memory, 0, 16, 0, &mapped));
