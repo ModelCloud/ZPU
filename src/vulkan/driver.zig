@@ -10046,12 +10046,23 @@ fn cmdEndRenderPass2(cb: ?CommandBuffer, end: ?*const SubpassEndInfo) callconv(.
     cmdEndRenderPass(cb);
 }
 
+fn rollbackSwapchainCreation(swapchain: *SwapchainObj, created: u32) void {
+    for (swapchain.images[0..created]) |image_handle| if (validImageLocked(image_handle)) |image| {
+        stateForObject(ImageObj, image, &image_objects, &image_state).?.* = .tombstone;
+        if (!image.shared_bytes) if (image.owned_bytes) |bytes| allocator.free(bytes);
+        if (image.dirty_tiles) |tiles| allocator.free(tiles);
+        image.owned_bytes = null;
+        image.dirty_tiles = null;
+    };
+    xcb_present.deinit(&swapchain.transport);
+}
+
 fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     if (alloc != null) return .error_initialization_failed;
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (ci.min_image_count < 2 or ci.min_image_count > 4 or ci.image_extent.width == 0 or ci.image_extent.height == 0 or ci.image_array_layers != 1 or ci.present_mode != 2) return .error_initialization_failed;
+    if (ci.s_type != 1_000_001_000 or ci.p_next != null or ci.flags != 0 or ci.min_image_count < 2 or ci.min_image_count > 4 or ci.image_format != 44 or ci.image_color_space != 0 or ci.image_extent.width == 0 or ci.image_extent.height == 0 or ci.image_extent.width > max_2d_extent or ci.image_extent.height > max_2d_extent or ci.image_array_layers != 1 or ci.image_usage != 0x10 or ci.image_sharing_mode != 0 or ci.queue_family_index_count != 0 or ci.queue_family_indices != null or ci.pre_transform != 1 or ci.composite_alpha != 1 or ci.present_mode != 2 or (ci.clipped != 0 and ci.clipped != 1) or ci.old_swapchain != 0) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     const surface = validSurfaceLocked(ci.surface) orelse return .error_initialization_failed;
@@ -10078,6 +10089,7 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
             .transport = transport,
         };
         var created: u32 = 0;
+        errdefer rollbackSwapchainCreation(swapchain, created);
         while (created < image_count) : (created += 1) {
             var found = false;
             for (&image_objects, &image_state) |*image, *image_slot_state| if (!found and image_slot_state.* == .never) {
@@ -11002,6 +11014,17 @@ test "vkcube presentation path records submits and presents two swapchain images
     const swapchain_info = SwapchainCreateInfo{ .s_type = 1_000_001_000, .p_next = null, .flags = 0, .surface = surface, .min_image_count = 2, .image_format = 44, .image_color_space = 0, .image_extent = .{ .width = 8, .height = 8 }, .image_array_layers = 1, .image_usage = 0x10, .image_sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .pre_transform = 1, .composite_alpha = 1, .present_mode = 2, .clipped = 1, .old_swapchain = 0 };
     var swapchain: usize = 0;
     try std.testing.expectEqual(Result.success, createSwapchain(device, &swapchain_info, null, &swapchain));
+    var unchanged_swapchain: usize = 0xfeed_face;
+    var malformed_swapchain_info = swapchain_info;
+    malformed_swapchain_info.s_type = 0;
+    try std.testing.expectEqual(Result.error_initialization_failed, createSwapchain(device, &malformed_swapchain_info, null, &unchanged_swapchain));
+    malformed_swapchain_info = swapchain_info;
+    malformed_swapchain_info.image_usage = 0x20;
+    try std.testing.expectEqual(Result.error_initialization_failed, createSwapchain(device, &malformed_swapchain_info, null, &unchanged_swapchain));
+    malformed_swapchain_info = swapchain_info;
+    malformed_swapchain_info.old_swapchain = swapchain;
+    try std.testing.expectEqual(Result.error_initialization_failed, createSwapchain(device, &malformed_swapchain_info, null, &unchanged_swapchain));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), unchanged_swapchain);
     var image_count: u32 = 0;
     try std.testing.expectEqual(Result.success, getSwapchainImages(device, swapchain, &image_count, null));
     try std.testing.expectEqual(@as(u32, 2), image_count);
