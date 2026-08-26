@@ -4419,24 +4419,33 @@ fn record(cb: CommandBuffer, command: Command) void {
         return;
     }
     var owned = command;
-    if (cb.impl.dynamic_rendering) switch (owned) {
-        .render_clear => |*clear| {
-            clear.color_base_layer = cb.impl.dynamic_color_base_layer;
-            clear.depth_base_layer = cb.impl.dynamic_depth_base_layer;
-            clear.layer_count = cb.impl.dynamic_layer_count;
-        },
-        .cube_draw => |*draw| {
-            draw.color_base_layer = cb.impl.dynamic_color_base_layer;
-            draw.depth_base_layer = cb.impl.dynamic_depth_base_layer;
-            draw.layer_count = cb.impl.dynamic_layer_count;
-        },
-        .indirect_draw => |*draw| {
-            draw.color_base_layer = cb.impl.dynamic_color_base_layer;
-            draw.depth_base_layer = cb.impl.dynamic_depth_base_layer;
-            draw.layer_count = cb.impl.dynamic_layer_count;
-        },
-        else => {},
-    };
+    if (cb.impl.dynamic_rendering) {
+        switch (owned) {
+            .render_clear => |*clear| {
+                clear.color_base_layer = cb.impl.dynamic_color_base_layer;
+                clear.depth_base_layer = cb.impl.dynamic_depth_base_layer;
+                clear.layer_count = cb.impl.dynamic_layer_count;
+            },
+            .cube_draw => |*draw| {
+                draw.color_base_layer = cb.impl.dynamic_color_base_layer;
+                draw.depth_base_layer = cb.impl.dynamic_depth_base_layer;
+                draw.layer_count = cb.impl.dynamic_layer_count;
+            },
+            .indirect_draw => |*draw| {
+                draw.color_base_layer = cb.impl.dynamic_color_base_layer;
+                draw.depth_base_layer = cb.impl.dynamic_depth_base_layer;
+                draw.layer_count = cb.impl.dynamic_layer_count;
+            },
+            else => {},
+        }
+    } else if (cb.impl.active_framebuffer) |framebuffer| {
+        switch (owned) {
+            .render_clear => |*clear| clear.layer_count = framebuffer.layers,
+            .cube_draw => |*draw| draw.layer_count = framebuffer.layers,
+            .indirect_draw => |*draw| draw.layer_count = framebuffer.layers,
+            else => {},
+        }
+    }
     cb.impl.commands[cb.impl.count] = owned;
     cb.impl.count += 1;
 }
@@ -9436,12 +9445,11 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
         command_buffer.impl.invalid = true;
         return;
     }
-    command_buffer.impl.commands[command_buffer.impl.count] = .{ .render_clear = .{ .image = image, .depth = framebuffer.depth_image, .color = .{ @intFromFloat(std.math.clamp(color[2], 0, 1) * 255), @intFromFloat(std.math.clamp(color[1], 0, 1) * 255), @intFromFloat(std.math.clamp(color[0], 0, 1) * 255), @intFromFloat(std.math.clamp(color[3], 0, 1) * 255) }, .depth_value = depth_value } };
-    command_buffer.impl.count += 1;
     command_buffer.impl.active_framebuffer = framebuffer;
     command_buffer.impl.active_render_pass = render_pass;
     command_buffer.impl.active_subpass = 0;
     command_buffer.impl.render_contents = contents;
+    record(command_buffer, .{ .render_clear = .{ .image = image, .depth = framebuffer.depth_image, .color = .{ @intFromFloat(std.math.clamp(color[2], 0, 1) * 255), @intFromFloat(std.math.clamp(color[1], 0, 1) * 255), @intFromFloat(std.math.clamp(color[0], 0, 1) * 255), @intFromFloat(std.math.clamp(color[3], 0, 1) * 255) }, .depth_value = depth_value } });
 }
 fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.c) void {
     lock();
