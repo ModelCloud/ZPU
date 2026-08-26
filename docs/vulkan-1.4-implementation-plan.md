@@ -245,6 +245,11 @@ must be inside a traditional or dynamic render-pass instance, while timestamp
 writes must be outside one. The existing reset-history, availability,
 submission-lifetime, exact result, rollback, and allocation-free warm paths
 remain covered.
+Swapchain acquisition and presentation now validate synchronization ownership
+and type before mutating image state: acquire accepts only same-device binary
+semaphores and unsignaled fences, while present rejects foreign or timeline
+wait semaphores. Rejected synchronization leaves the acquired image and
+semaphore state unchanged, with a 4096-call warm rejection path covered.
 The memory and sampler handle registries now meet the required 4096 and 4000
 allocation limits respectively. The generated command matrix is a
 234/234 dispatch/name-coverage artifact, not a Vulkan-conformance claim:

@@ -11210,6 +11210,18 @@ fn acquireNextImage(device: ?Device, handle: usize, timeout_ns: u64, semaphore_h
         mutex.unlock();
         return .error_initialization_failed;
     } else null;
+    // Swapchain acquisition signals a binary semaphore or fence owned by the
+    // same logical device.  A timeline semaphore, foreign synchronization
+    // object, or already-signaled fence must be rejected before touching the
+    // swapchain image state.
+    if (semaphore) |item| if (item.owner != device.? or item.timeline) {
+        mutex.unlock();
+        return .error_initialization_failed;
+    };
+    if (fence) |item| if (item.owner != device.? or item.signaled.load(.acquire)) {
+        mutex.unlock();
+        return .error_initialization_failed;
+    };
     const out = output orelse {
         mutex.unlock();
         return .error_initialization_failed;
@@ -11302,7 +11314,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
                 mutex.unlock();
                 return .error_initialization_failed;
             };
-            if (!semaphore.signaled.load(.acquire)) {
+            if (semaphore.owner != q.owner or semaphore.timeline or !semaphore.signaled.load(.acquire)) {
                 mutex.unlock();
                 return .error_initialization_failed;
             }
@@ -13652,6 +13664,37 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.success, createDevice(physicals[0], &device_info, null, &wrong_device));
     destroySwapchain(wrong_device, swapchain, null);
     try std.testing.expectEqual(Result.error_initialization_failed, acquireNextImage(wrong_device, swapchain, 0, 0, 0, &lifecycle_index));
+    var foreign_acquire_semaphore: usize = 0;
+    try std.testing.expectEqual(Result.success, createSemaphore(wrong_device, &semaphore_info, null, &foreign_acquire_semaphore));
+    const acquire_before_foreign = validSwapchainLocked(swapchain).?.image_states[lifecycle_index];
+    try std.testing.expectEqual(Result.error_initialization_failed, acquireNextImage(device, swapchain, 0, foreign_acquire_semaphore, 0, &lifecycle_index));
+    try std.testing.expectEqual(acquire_before_foreign, validSwapchainLocked(swapchain).?.image_states[lifecycle_index]);
+    const acquire_fence_info = FenceCreateInfo{ .s_type = 8, .p_next = null, .flags = 0 };
+    var foreign_acquire_fence: usize = 0;
+    try std.testing.expectEqual(Result.success, createFence(wrong_device, &acquire_fence_info, null, &foreign_acquire_fence));
+    try std.testing.expectEqual(Result.error_initialization_failed, acquireNextImage(device, swapchain, 0, 0, foreign_acquire_fence, &lifecycle_index));
+    var signaled_acquire_fence: usize = 0;
+    const signaled_fence_info = FenceCreateInfo{ .s_type = 8, .p_next = null, .flags = 1 };
+    try std.testing.expectEqual(Result.success, createFence(device, &signaled_fence_info, null, &signaled_acquire_fence));
+    try std.testing.expectEqual(Result.error_initialization_failed, acquireNextImage(device, swapchain, 0, 0, signaled_acquire_fence, &lifecycle_index));
+    var foreign_present_semaphore: usize = 0;
+    try std.testing.expectEqual(Result.success, createSemaphore(wrong_device, &semaphore_info, null, &foreign_present_semaphore));
+    validSemaphoreLocked(foreign_present_semaphore).?.signaled.store(true, .release);
+    try std.testing.expectEqual(Result.success, acquireNextImage(device, swapchain, 0, 0, 0, &lifecycle_index));
+    var foreign_present = PresentInfo{ .s_type = 1_000_001_001, .p_next = null, .wait_semaphore_count = 1, .wait_semaphores = @ptrCast(&foreign_present_semaphore), .swapchain_count = 1, .swapchains = @ptrCast(&swapchain), .image_indices = @ptrCast(&lifecycle_index), .results = null };
+    try std.testing.expectEqual(Result.error_initialization_failed, queuePresent(queue, &foreign_present));
+    try std.testing.expectEqual(frame_lifecycle.State.acquired, validSwapchainLocked(swapchain).?.image_states[lifecycle_index]);
+    validSemaphoreLocked(foreign_present_semaphore).?.signaled.store(false, .release);
+    _ = std.c.pthread_mutex_lock(&validSwapchainLocked(swapchain).?.present_mutex);
+    validSwapchainLocked(swapchain).?.image_states[lifecycle_index] = .available;
+    _ = std.c.pthread_mutex_unlock(&validSwapchainLocked(swapchain).?.present_mutex);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| try std.testing.expectEqual(Result.error_initialization_failed, acquireNextImage(device, swapchain, 0, foreign_acquire_semaphore, 0, &lifecycle_index));
+    test_allocations_before_failure = null;
+    destroySemaphore(wrong_device, foreign_acquire_semaphore, null);
+    destroySemaphore(wrong_device, foreign_present_semaphore, null);
+    destroyFence(wrong_device, foreign_acquire_fence, null);
+    destroyFence(device, signaled_acquire_fence, null);
     destroyDevice(wrong_device, null);
     destroySwapchain(null, swapchain, null);
     destroySwapchain(device, 0xdead_beef, null);
