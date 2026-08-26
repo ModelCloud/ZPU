@@ -178,6 +178,14 @@ rejects ranges outside the bound buffer, while `vkCmdBindVertexBuffers2`
 records per-binding sizes and strides and rejects ranges or strides outside
 the reported limits. The legacy binding commands retain the corresponding
 buffer-to-end ranges.
+`VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE` is now decoded as a per-binding
+draw requirement. A pipeline records the bindings used by its vertex
+attributes; each such binding must receive a non-NULL `pStrides` update through
+`vkCmdBindVertexBuffers2` before a draw, and the profile executor uses the
+supplied stride bit-for-bit, including an explicit zero, rather than falling
+back to the pipeline's static stride. The stride initialization mask and
+values are copied into direct, indexed, and indirect draw snapshots, with
+missing-state rejection and allocation-free warm coverage.
 The Vulkan 1.3 extended dynamic-state values for cull mode and front face are
 now decoded when graphics pipelines are created. A pipeline that declares
 either state requires the matching command-buffer value before a draw can be

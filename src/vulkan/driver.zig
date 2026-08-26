@@ -572,6 +572,9 @@ const VertexBindingState = struct {
     offsets: [16]u64 = [_]u64{0} ** 16,
     sizes: [16]u64 = [_]u64{0} ** 16,
     strides: [16]u64 = [_]u64{0} ** 16,
+    // VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE is initialized per
+    // binding by vkCmdBindVertexBuffers2 when pStrides is non-NULL.
+    stride_set: u16 = 0,
     set: u16 = 0,
 };
 const PipelineLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical, set0: Canonical, set0_layout: *DescriptorSetLayoutObj, push_descriptor: bool, push_ranges: [core_shader_stage_bits.len]PushConstantRange };
@@ -668,6 +671,7 @@ const GraphicsPipelineObj = struct {
     depth_bounds_test_enable: u32 = 0,
     depth_bounds: [2]f32 = .{ 0, 1 },
     depth_bias_enable: u32 = 0,
+    vertex_input_binding_mask: u16 = 0,
     dynamic_viewport: bool,
     dynamic_scissor: bool,
     dynamic_cull_mode: bool = false,
@@ -683,6 +687,7 @@ const GraphicsPipelineObj = struct {
     dynamic_stencil_test_enable: bool = false,
     dynamic_stencil_op: bool = false,
     dynamic_depth_bias_enable: bool = false,
+    dynamic_vertex_input_binding_stride: bool = false,
     stencil_test_enable: u32 = 0,
     viewport: Viewport,
     scissor: cpu_cube.Rect,
@@ -780,6 +785,7 @@ const dynamic_state_front_face: i32 = 1000267001;
 const dynamic_state_primitive_topology: i32 = 1000267002;
 const dynamic_state_viewport_with_count: i32 = 1000267003;
 const dynamic_state_scissor_with_count: i32 = 1000267004;
+const dynamic_state_vertex_input_binding_stride: i32 = 1000267005;
 const dynamic_state_depth_test_enable: i32 = 1000267006;
 const dynamic_state_depth_write_enable: i32 = 1000267007;
 const dynamic_state_depth_compare_op: i32 = 1000267008;
@@ -5995,10 +6001,11 @@ fn prevalidateProfileVertexBindings(op: anytype, owner: *DeviceObj) bool {
     }
     for (profile.inputs[0..profile.input_count]) |input| {
         if (input.binding >= 16 or op.vertex_bindings.set & (@as(u16, 1) << @intCast(input.binding)) == 0) return false;
+        if (op.pipeline.dynamic_vertex_input_binding_stride and op.vertex_bindings.stride_set & (@as(u16, 1) << @intCast(input.binding)) == 0) return false;
         const buffer = op.vertex_bindings.buffers[input.binding] orelse return deadResource();
         if (!liveBufferObject(buffer) or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) return deadResource();
         if (buffer.owner != owner or buffer.memory.?.owner != owner) return wrongSubmittingDevice();
-        const stride = if (op.vertex_bindings.strides[input.binding] == 0) input.stride else op.vertex_bindings.strides[input.binding];
+        const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[input.binding] else if (op.vertex_bindings.strides[input.binding] == 0) input.stride else op.vertex_bindings.strides[input.binding];
         const relative = std.math.add(u64, input.offset, std.math.mul(u64, last_vertex, stride) catch return false) catch return false;
         const end = std.math.add(u64, relative, 16) catch return false;
         const offset = op.vertex_bindings.offsets[input.binding];
@@ -6622,7 +6629,7 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext) void {
             var binding_count: usize = 0;
             for (profile.inputs[0..profile.input_count]) |input| {
                 const buffer = op.vertex_bindings.buffers[input.binding] orelse return;
-                const stride = if (op.vertex_bindings.strides[input.binding] == 0) input.stride else op.vertex_bindings.strides[input.binding];
+                const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[input.binding] else if (op.vertex_bindings.strides[input.binding] == 0) input.stride else op.vertex_bindings.strides[input.binding];
                 const emitted = triangle_start + @as(u32, @intCast(corner));
                 const vertex_index = if (op.indexed) |indexed| @as(u64, profileIndexValue(indexed, emitted) orelse return) else std.math.add(u64, op.base_vertex, emitted) catch return;
                 const relative = std.math.add(u64, input.offset, std.math.mul(u64, vertex_index, stride) catch return) catch return;
@@ -7923,6 +7930,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     }.less);
     try w.u32le(vi.attribute_count);
     var prior_location: ?u32 = null;
+    var vertex_input_binding_mask: u16 = 0;
     for (attribute_indices[0..vi.attribute_count]) |index| {
         const a = attributes[index];
         if (prior_location == a.location or a.location >= 16 or a.offset > 2047 or a.format <= 0) return error.Invalid;
@@ -7933,6 +7941,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
             break;
         };
         if (!found) return error.Invalid;
+        vertex_input_binding_mask |= @as(u16, 1) << @intCast(a.binding);
         try w.u32le(a.location);
         try w.u32le(a.binding);
         try w.i32le(a.format);
@@ -7957,6 +7966,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     var dynamic_stencil_test_enable = false;
     var dynamic_stencil_op = false;
     var dynamic_depth_bias_enable = false;
+    var dynamic_vertex_input_binding_stride = false;
     var dynamic_line_width = false;
     var dynamic_depth_bias = false;
     var dynamic_indices: [16]u8 = undefined;
@@ -7975,11 +7985,11 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         var prior: ?i32 = null;
         for (dynamic_indices[0..dynamic_count]) |index| {
             const state = states[index];
-            if (prior == state or state < 0 or (state > 8 and state != dynamic_state_cull_mode and state != dynamic_state_front_face and state != dynamic_state_primitive_topology and state != dynamic_state_viewport_with_count and state != dynamic_state_scissor_with_count and state != dynamic_state_depth_test_enable and state != dynamic_state_depth_write_enable and state != dynamic_state_depth_compare_op and state != dynamic_state_depth_bounds_test_enable and state != dynamic_state_stencil_test_enable and state != dynamic_state_stencil_op and state != dynamic_state_rasterizer_discard_enable and state != dynamic_state_depth_bias_enable and state != dynamic_state_primitive_restart_enable)) return error.Invalid;
+            if (prior == state or state < 0 or (state > 8 and state != dynamic_state_cull_mode and state != dynamic_state_front_face and state != dynamic_state_primitive_topology and state != dynamic_state_viewport_with_count and state != dynamic_state_scissor_with_count and state != dynamic_state_vertex_input_binding_stride and state != dynamic_state_depth_test_enable and state != dynamic_state_depth_write_enable and state != dynamic_state_depth_compare_op and state != dynamic_state_depth_bounds_test_enable and state != dynamic_state_stencil_test_enable and state != dynamic_state_stencil_op and state != dynamic_state_rasterizer_discard_enable and state != dynamic_state_depth_bias_enable and state != dynamic_state_primitive_restart_enable)) return error.Invalid;
             prior = state;
             if (state == 0 or state == dynamic_state_viewport_with_count) dynamic_viewport = true else if (state == 1 or state == dynamic_state_scissor_with_count) dynamic_scissor = true else if (state == 2) dynamic_line_width = true;
             if (state == 3) dynamic_depth_bias = true;
-            if (state == dynamic_state_cull_mode) dynamic_cull_mode = true else if (state == dynamic_state_front_face) dynamic_front_face = true else if (state == dynamic_state_primitive_topology) dynamic_primitive_topology = true else if (state == dynamic_state_depth_test_enable) dynamic_depth_test_enable = true else if (state == dynamic_state_depth_write_enable) dynamic_depth_write_enable = true else if (state == dynamic_state_depth_compare_op) dynamic_depth_compare_op = true else if (state == 5) dynamic_depth_bounds = true else if (state == dynamic_state_depth_bounds_test_enable) dynamic_depth_bounds_test_enable = true else if (state == dynamic_state_stencil_test_enable) dynamic_stencil_test_enable = true else if (state == dynamic_state_stencil_op) dynamic_stencil_op = true else if (state == dynamic_state_rasterizer_discard_enable) dynamic_rasterizer_discard_enable = true else if (state == dynamic_state_depth_bias_enable) dynamic_depth_bias_enable = true else if (state == dynamic_state_primitive_restart_enable) dynamic_primitive_restart_enable = true;
+            if (state == dynamic_state_cull_mode) dynamic_cull_mode = true else if (state == dynamic_state_front_face) dynamic_front_face = true else if (state == dynamic_state_primitive_topology) dynamic_primitive_topology = true else if (state == dynamic_state_vertex_input_binding_stride) dynamic_vertex_input_binding_stride = true else if (state == dynamic_state_depth_test_enable) dynamic_depth_test_enable = true else if (state == dynamic_state_depth_write_enable) dynamic_depth_write_enable = true else if (state == dynamic_state_depth_compare_op) dynamic_depth_compare_op = true else if (state == 5) dynamic_depth_bounds = true else if (state == dynamic_state_depth_bounds_test_enable) dynamic_depth_bounds_test_enable = true else if (state == dynamic_state_stencil_test_enable) dynamic_stencil_test_enable = true else if (state == dynamic_state_stencil_op) dynamic_stencil_op = true else if (state == dynamic_state_rasterizer_discard_enable) dynamic_rasterizer_discard_enable = true else if (state == dynamic_state_depth_bias_enable) dynamic_depth_bias_enable = true else if (state == dynamic_state_primitive_restart_enable) dynamic_primitive_restart_enable = true;
             try w.i32le(state);
         }
     }
@@ -8068,7 +8078,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         };
         profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     }
-    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .depth_bias_enable = pipeline_depth_bias_enable, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .viewport = baked_viewport, .scissor = baked_scissor };
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .depth_bias_enable = pipeline_depth_bias_enable, .vertex_input_binding_mask = vertex_input_binding_mask, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .dynamic_vertex_input_binding_stride = dynamic_vertex_input_binding_stride, .viewport = baked_viewport, .scissor = baked_scissor };
 }
 
 fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, set0: *const Canonical) bool {
@@ -9509,6 +9519,7 @@ fn bindVertexBuffersLocked(command_buffer: *CommandBufferObj, first_binding: u32
         command_buffer.impl.vertex_bindings.sizes[binding] = effective_sizes[relative];
         command_buffer.impl.vertex_bindings.strides[binding] = if (buffer_strides) |items| items[relative] else 0;
         command_buffer.impl.vertex_bindings.set |= @as(u16, 1) << @intCast(binding);
+        if (buffer_strides != null) command_buffer.impl.vertex_bindings.stride_set |= @as(u16, 1) << @intCast(binding);
     }
 }
 fn cmdBindVertexBuffers(cb: ?CommandBuffer, first_binding: u32, binding_count: u32, handles: ?[*]const usize, offsets: ?[*]const u64) callconv(.c) void {
@@ -9964,7 +9975,7 @@ fn graphicsDrawExecutionAllowed(abi: ExecutionAbi) bool {
     };
 }
 fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsPipelineObj) ?DrawRasterState {
-    if ((pipeline.dynamic_viewport and !command_buffer.impl.viewport_set) or (pipeline.dynamic_scissor and !command_buffer.impl.scissor_set) or (pipeline.dynamic_cull_mode and command_buffer.impl.dynamic.cull_mode == std.math.maxInt(u32)) or (pipeline.dynamic_front_face and command_buffer.impl.dynamic.front_face < 0) or (pipeline.dynamic_primitive_topology and !command_buffer.impl.dynamic.primitive_topology_set) or (pipeline.dynamic_primitive_restart_enable and !command_buffer.impl.dynamic.primitive_restart_enable_set) or (pipeline.dynamic_rasterizer_discard_enable and !command_buffer.impl.dynamic.rasterizer_discard_enable_set) or (pipeline.dynamic_depth_test_enable and !command_buffer.impl.dynamic.depth_test_enable_set) or (pipeline.dynamic_depth_write_enable and !command_buffer.impl.dynamic.depth_write_enable_set) or (pipeline.dynamic_depth_compare_op and !command_buffer.impl.dynamic.depth_compare_op_set) or (pipeline.dynamic_depth_bounds and !command_buffer.impl.depth_bounds_set) or (pipeline.dynamic_depth_bounds_test_enable and !command_buffer.impl.dynamic.depth_bounds_test_enable_set) or (pipeline.dynamic_stencil_test_enable and !command_buffer.impl.dynamic.stencil_test_enable_set) or (pipeline.dynamic_stencil_op and !command_buffer.impl.dynamic.stencil_op_set) or (pipeline.dynamic_depth_bias_enable and !command_buffer.impl.dynamic.depth_bias_enable_set)) return null;
+    if ((pipeline.dynamic_viewport and !command_buffer.impl.viewport_set) or (pipeline.dynamic_scissor and !command_buffer.impl.scissor_set) or (pipeline.dynamic_vertex_input_binding_stride and pipeline.vertex_input_binding_mask & command_buffer.impl.vertex_bindings.stride_set != pipeline.vertex_input_binding_mask) or (pipeline.dynamic_cull_mode and command_buffer.impl.dynamic.cull_mode == std.math.maxInt(u32)) or (pipeline.dynamic_front_face and command_buffer.impl.dynamic.front_face < 0) or (pipeline.dynamic_primitive_topology and !command_buffer.impl.dynamic.primitive_topology_set) or (pipeline.dynamic_primitive_restart_enable and !command_buffer.impl.dynamic.primitive_restart_enable_set) or (pipeline.dynamic_rasterizer_discard_enable and !command_buffer.impl.dynamic.rasterizer_discard_enable_set) or (pipeline.dynamic_depth_test_enable and !command_buffer.impl.dynamic.depth_test_enable_set) or (pipeline.dynamic_depth_write_enable and !command_buffer.impl.dynamic.depth_write_enable_set) or (pipeline.dynamic_depth_compare_op and !command_buffer.impl.dynamic.depth_compare_op_set) or (pipeline.dynamic_depth_bounds and !command_buffer.impl.depth_bounds_set) or (pipeline.dynamic_depth_bounds_test_enable and !command_buffer.impl.dynamic.depth_bounds_test_enable_set) or (pipeline.dynamic_stencil_test_enable and !command_buffer.impl.dynamic.stencil_test_enable_set) or (pipeline.dynamic_stencil_op and !command_buffer.impl.dynamic.stencil_op_set) or (pipeline.dynamic_depth_bias_enable and !command_buffer.impl.dynamic.depth_bias_enable_set)) return null;
     const primitive_topology = if (pipeline.dynamic_primitive_topology) command_buffer.impl.dynamic.primitive_topology else pipeline.primitive_topology;
     const primitive_restart_enable = if (pipeline.dynamic_primitive_restart_enable) command_buffer.impl.dynamic.primitive_restart_enable else pipeline.primitive_restart_enable;
     const rasterizer_discard_enable = if (pipeline.dynamic_rasterizer_discard_enable) command_buffer.impl.dynamic.rasterizer_discard_enable else pipeline.rasterizer_discard_enable;
@@ -10011,6 +10022,7 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     pipeline.depth_bounds = .{ 0, 1 };
     pipeline.stencil_test_enable = 0;
     pipeline.depth_bias_enable = 0;
+    pipeline.vertex_input_binding_mask = 0;
     pipeline.dynamic_cull_mode = false;
     pipeline.dynamic_front_face = false;
     pipeline.dynamic_primitive_topology = false;
@@ -10024,11 +10036,13 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     pipeline.dynamic_stencil_test_enable = false;
     pipeline.dynamic_stencil_op = false;
     pipeline.dynamic_depth_bias_enable = false;
+    pipeline.dynamic_vertex_input_binding_stride = false;
     var impl: CommandBufferImpl = undefined;
     impl.viewport = dynamic_viewport;
     impl.scissor = dynamic_scissor;
     impl.viewport_set = true;
     impl.scissor_set = true;
+    impl.vertex_bindings = .{};
     impl.dynamic.rasterizer_discard_enable_set = false;
     impl.dynamic.depth_test_enable_set = false;
     impl.dynamic.depth_write_enable_set = false;
@@ -10173,6 +10187,14 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
     pipeline.dynamic_depth_bias_enable = false;
     pipeline.dynamic_depth_bounds_test_enable = false;
+    pipeline.dynamic_vertex_input_binding_stride = true;
+    pipeline.vertex_input_binding_mask = 1;
+    try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
+    impl.vertex_bindings.strides[0] = 0;
+    impl.vertex_bindings.stride_set = 1;
+    resolved = drawRasterState(&command_buffer, &pipeline).?;
+    try std.testing.expectEqual(@as(u16, 1), impl.vertex_bindings.stride_set);
+    pipeline.dynamic_vertex_input_binding_stride = false;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
     try std.testing.expectEqual(baked_viewport, resolved.viewport);
     try std.testing.expectEqual(dynamic_scissor, resolved.scissor);
@@ -10229,6 +10251,7 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     const profile = ProfileGraphics{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     var pipeline: GraphicsPipelineObj = undefined;
     pipeline.execution_abi = .{ .profile_v1_scalar_graphics = profile };
+    pipeline.dynamic_vertex_input_binding_stride = false;
     var vertex_bytes: [48]u8 align(64) = [_]u8{0} ** 48;
     const positions = [_][4]f32{ .{ -0.8, -0.8, 0.5, 1 }, .{ 0.8, -0.8, 0.5, 1 }, .{ 0, 0.8, 0.5, 1 } };
     for (positions, 0..) |position, vertex| for (position, 0..) |value, component| std.mem.writeInt(u32, vertex_bytes[vertex * 16 + component * 4 ..][0..4], @bitCast(value), .little);
@@ -10246,6 +10269,23 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     var context = QueryExecutionContext{ .pool = null, .index = 0 };
     executeValidatedCommand(command, &context);
     try std.testing.expect(std.mem.readInt(u32, color_bytes[0..4], .little) != 0 or std.mem.readInt(u32, color_bytes[4..8], .little) != 0);
+    // Dynamic vertex-input stride overrides the pipeline stride exactly.  A
+    // supplied zero is not treated as "use the baked stride" and therefore
+    // produces a degenerate triangle in this bounded profile.
+    var dynamic_pipeline = pipeline;
+    dynamic_pipeline.dynamic_vertex_input_binding_stride = true;
+    var dynamic_command = command;
+    dynamic_command.cube_draw.pipeline = &dynamic_pipeline;
+    dynamic_command.cube_draw.vertex_bindings.stride_set = 1;
+    dynamic_command.cube_draw.vertex_bindings.strides[0] = 16;
+    @memset(color_bytes[0..], 0);
+    for (0..16) |index| std.mem.writeInt(u32, depth_bytes[index * 4 ..][0..4], 0x3f80_0000, .little);
+    executeValidatedCommand(dynamic_command, &context);
+    try std.testing.expect(std.mem.readInt(u32, color_bytes[0..4], .little) != 0 or std.mem.readInt(u32, color_bytes[4..8], .little) != 0);
+    dynamic_command.cube_draw.vertex_bindings.strides[0] = 0;
+    @memset(color_bytes[0..], 0);
+    executeValidatedCommand(dynamic_command, &context);
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, color_bytes[0..4], .little));
     @memset(color_bytes[0..], 0);
     for (0..16) |index| std.mem.writeInt(u32, depth_bytes[index * 4 ..][0..4], 0x3f80_0000, .little);
     var discarded_command = command;
@@ -10386,6 +10426,7 @@ test "scalar graphics profile executes descriptor uniform blocks" {
     const profile = ProfileGraphics{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     var pipeline: GraphicsPipelineObj = undefined;
     pipeline.execution_abi = .{ .profile_v1_scalar_graphics = profile };
+    pipeline.dynamic_vertex_input_binding_stride = false;
     var vertex_bytes: [48]u8 align(64) = [_]u8{0} ** 48;
     const positions = [_][4]f32{ .{ -0.8, -0.8, 0.5, 1 }, .{ 0.8, -0.8, 0.5, 1 }, .{ 0, 0.8, 0.5, 1 } };
     for (positions, 0..) |position, vertex| for (position, 0..) |value, component| std.mem.writeInt(u32, vertex_bytes[vertex * 16 + component * 4 ..][0..4], @bitCast(value), .little);
@@ -12221,7 +12262,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     var pipelines: [1]usize = undefined;
     try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, graphics_cache, 1, @ptrCast(&pipeline_info), null, &pipelines));
     const baseline_pipeline = validGraphicsPipelineLocked(pipelines[0]).?;
-    const extended_dynamic_states = [_]i32{ dynamic_state_cull_mode, dynamic_state_front_face, dynamic_state_primitive_topology, dynamic_state_viewport_with_count, dynamic_state_scissor_with_count, dynamic_state_depth_test_enable, dynamic_state_depth_write_enable, dynamic_state_depth_compare_op, 5, dynamic_state_depth_bounds_test_enable, dynamic_state_stencil_test_enable, dynamic_state_stencil_op, dynamic_state_rasterizer_discard_enable, dynamic_state_depth_bias_enable, dynamic_state_primitive_restart_enable };
+    const extended_dynamic_states = [_]i32{ dynamic_state_cull_mode, dynamic_state_front_face, dynamic_state_primitive_topology, dynamic_state_viewport_with_count, dynamic_state_scissor_with_count, dynamic_state_vertex_input_binding_stride, dynamic_state_depth_test_enable, dynamic_state_depth_write_enable, dynamic_state_depth_compare_op, 5, dynamic_state_depth_bounds_test_enable, dynamic_state_stencil_test_enable, dynamic_state_stencil_op, dynamic_state_rasterizer_discard_enable, dynamic_state_depth_bias_enable, dynamic_state_primitive_restart_enable };
     const extended_dynamic = PipelineDynamicStateCreateInfo{ .s_type = 27, .p_next = null, .flags = 0, .dynamic_state_count = extended_dynamic_states.len, .dynamic_states = &extended_dynamic_states };
     var extended_dynamic_pipeline_info = pipeline_info;
     extended_dynamic_pipeline_info.dynamic = &extended_dynamic;
@@ -12233,6 +12274,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(validGraphicsPipelineLocked(extended_dynamic_pipeline[0]).?.dynamic_primitive_restart_enable);
     try std.testing.expect(validGraphicsPipelineLocked(extended_dynamic_pipeline[0]).?.dynamic_viewport);
     try std.testing.expect(validGraphicsPipelineLocked(extended_dynamic_pipeline[0]).?.dynamic_scissor);
+    try std.testing.expect(validGraphicsPipelineLocked(extended_dynamic_pipeline[0]).?.dynamic_vertex_input_binding_stride);
     try std.testing.expect(validGraphicsPipelineLocked(extended_dynamic_pipeline[0]).?.dynamic_rasterizer_discard_enable);
     try std.testing.expect(validGraphicsPipelineLocked(extended_dynamic_pipeline[0]).?.dynamic_depth_test_enable);
     try std.testing.expect(validGraphicsPipelineLocked(extended_dynamic_pipeline[0]).?.dynamic_depth_write_enable);
@@ -17380,6 +17422,7 @@ test "vertex and index bindings are typed atomic lifecycle state and allocation 
     try std.testing.expectEqual([2]u64{ 4, 8 }, commands[0].impl.vertex_bindings.offsets[2..4].*);
     try std.testing.expectEqual([2]u64{ 60, 56 }, commands[0].impl.vertex_bindings.sizes[2..4].*);
     try std.testing.expectEqual([2]u64{ 0, 0 }, commands[0].impl.vertex_bindings.strides[2..4].*);
+    try std.testing.expectEqual(@as(u16, 0), commands[0].impl.vertex_bindings.stride_set);
     const invalid_handles = [_]usize{ buffers[1], transfer_buffer };
     const before_handles = commands[0].impl.vertex_bindings.handles;
     cmdBindVertexBuffers(commands[0], 2, 2, &invalid_handles, &offsets);
@@ -17394,6 +17437,7 @@ test "vertex and index bindings are typed atomic lifecycle state and allocation 
     try std.testing.expect(!commands[0].impl.invalid);
     try std.testing.expectEqual([2]u64{ 16, 24 }, commands[0].impl.vertex_bindings.sizes[2..4].*);
     try std.testing.expectEqual([2]u64{ 8, 16 }, commands[0].impl.vertex_bindings.strides[2..4].*);
+    try std.testing.expectEqual(@as(u16, 0x000c), commands[0].impl.vertex_bindings.stride_set);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     const whole_sizes = [_]u64{ std.math.maxInt(u64), std.math.maxInt(u64) };
