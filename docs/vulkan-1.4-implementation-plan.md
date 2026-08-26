@@ -156,7 +156,11 @@ Dynamic rendering now records finite
 `loadOp=CLEAR` attachment values for submission, validates clear domains, and
 accepts framebuffer-free indexed CPU-cube draws against the active color/depth
 views, while rejecting command-buffer completion while a rendering scope
-remains open. Device
+remains open. Secondary command buffers can now carry the bounded
+`VkCommandBufferInheritanceRenderingInfo` chain; execution validates the
+inherited color/depth formats and sample count against the active primary
+scope, then binds the primary's live attachment images into the copied draw
+records. Malformed chains and mismatched scopes remain failure-atomic. Device
 limits now also match the bounded
 execution profile: one sample, one indirect draw, and four color attachments;
 vertex-input binding/attribute stride, location, and offset bounds are checked
@@ -276,7 +280,9 @@ Each slice must land with all of the following:
   flow/load/atomic/shared-memory execution and complete compute memory-
   visibility semantics remain.
 - [ ] **A8 — secondary command buffers:** inheritance, execution, reset, and
-  lifetime rules.
+  lifetime rules. Traditional render-pass inheritance and the bounded dynamic
+  rendering inheritance chain are covered; unrestricted secondary state
+  inheritance and full command-scope rules remain.
 - [ ] **A9 — sparse-disabled core contracts:** sparse-requirement queries and
   zero-bind queue behavior remain truthful while sparse features stay false.
 - [ ] **A10 — replace opaque placeholders:** samplers, descriptor pools,

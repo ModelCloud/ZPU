@@ -338,6 +338,17 @@ pub const CommandPoolCreateInfo = extern struct { s_type: i32, p_next: ?*const a
 pub const CommandBufferAllocateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, command_pool: usize, level: i32, command_buffer_count: u32 };
 pub const CommandBufferBeginInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, inheritance_info: ?*const anyopaque };
 pub const CommandBufferInheritanceInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, render_pass: usize, subpass: u32, framebuffer: usize, occlusion_query_enable: u32, query_flags: u32, pipeline_statistics: u32 };
+pub const CommandBufferInheritanceRenderingInfo = extern struct {
+    s_type: i32,
+    p_next: ?*const anyopaque,
+    flags: u32,
+    view_mask: u32,
+    color_attachment_count: u32,
+    color_attachment_formats: ?[*]const i32,
+    depth_attachment_format: i32,
+    stencil_attachment_format: i32,
+    rasterization_samples: u32,
+};
 pub const SubpassBeginInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, contents: i32 };
 pub const SubpassEndInfo = extern struct { s_type: i32, p_next: ?*const anyopaque };
 pub const SubmitInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, wait_semaphore_count: u32, wait_semaphores: ?[*]const usize, wait_dst_stage_mask: ?[*]const u32, command_buffer_count: u32, command_buffers: ?[*]const CommandBuffer, signal_semaphore_count: u32, signal_semaphores: ?[*]const usize };
@@ -696,7 +707,7 @@ const DispatchIndirectCommand = struct { buffer: *BufferObj, offset: u64, pipeli
 const PrivateDataEntry = struct { object_type: i32 = 0, object: u64 = 0, data: u64 = 0 };
 const PrivateDataSlotObj = struct { owner: Device, entries: [max_api_items]PrivateDataEntry };
 const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: struct { image: *ImageObj, layout: i32, depth: f32, base_layer: u32 = 0, layer_count: u32 = 1 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, clear_color: bool = true, clear_depth: bool = true }, clear_attachments: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32 }, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, vertex_bindings: VertexBindingState = .{} }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 }, event_set: *EventObj, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
-const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_descriptor_bind_point: i32 = 0, bound_descriptor_stage_flags: u32 = 0, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, push_descriptor_bind_point: i32 = 0, push_descriptor_stage_flags: u32 = 0, descriptor_snapshots: [256]DescriptorSetObj = undefined, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: [256]Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
+const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_inheritance: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, inherited_dynamic_view_mask: u32 = 0, inherited_dynamic_color_format: i32 = 0, inherited_dynamic_depth_format: i32 = 0, inherited_dynamic_stencil_format: i32 = 0, inherited_dynamic_samples: u32 = 0, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_descriptor_bind_point: i32 = 0, bound_descriptor_stage_flags: u32 = 0, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, push_descriptor_bind_point: i32 = 0, push_descriptor_stage_flags: u32 = 0, descriptor_snapshots: [256]DescriptorSetObj = undefined, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: [256]Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
 pub const CommandBuffer = *CommandBufferObj;
 
@@ -4067,8 +4078,14 @@ fn resetCommandBufferState(c: *CommandBufferObj) void {
     c.impl.active_framebuffer = null;
     c.impl.active_render_pass = null;
     c.impl.dynamic_rendering = false;
+    c.impl.dynamic_inheritance = false;
     c.impl.dynamic_color_image = null;
     c.impl.dynamic_depth_image = null;
+    c.impl.inherited_dynamic_view_mask = 0;
+    c.impl.inherited_dynamic_color_format = 0;
+    c.impl.inherited_dynamic_depth_format = 0;
+    c.impl.inherited_dynamic_stencil_format = 0;
+    c.impl.inherited_dynamic_samples = 0;
     c.impl.rendering_location_count = 0;
     c.impl.rendering_input_count = 0;
     c.impl.rendering_depth_input_index = null;
@@ -4156,13 +4173,30 @@ fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) 
     var inherited_framebuffer: ?*FramebufferObj = null;
     var inherited_subpass: u32 = 0;
     var inherited_occlusion = false;
+    var inherited_dynamic = false;
+    var inherited_dynamic_view_mask: u32 = 0;
+    var inherited_dynamic_color_format: i32 = 0;
+    var inherited_dynamic_depth_format: i32 = 0;
+    var inherited_dynamic_stencil_format: i32 = 0;
+    var inherited_dynamic_samples: u32 = 0;
     if (c.impl.level == 1) {
         const raw = bi.inheritance_info orelse return .error_initialization_failed;
         const inheritance: *const CommandBufferInheritanceInfo = @ptrCast(@alignCast(raw));
-        if (inheritance.s_type != 41 or inheritance.p_next != null or inheritance.occlusion_query_enable > 1 or inheritance.occlusion_query_enable != 0 or inheritance.query_flags != 0 or inheritance.pipeline_statistics != 0) return .error_initialization_failed;
+        if (inheritance.s_type != 41 or inheritance.occlusion_query_enable > 1 or inheritance.occlusion_query_enable != 0 or inheritance.query_flags != 0 or inheritance.pipeline_statistics != 0) return .error_initialization_failed;
         inherited_occlusion = inheritance.occlusion_query_enable != 0;
         inherited_subpass = inheritance.subpass;
-        if (bi.flags & 2 != 0) {
+        if (inheritance.p_next) |raw_dynamic| {
+            const header: *const ChainHeader = @ptrCast(@alignCast(raw_dynamic));
+            if (header.s_type != 1000044004 or header.p_next != null or bi.flags & 2 == 0 or inheritance.render_pass != 0 or inheritance.subpass != 0 or inheritance.framebuffer != 0) return .error_initialization_failed;
+            const dynamic_info: *const CommandBufferInheritanceRenderingInfo = @ptrCast(@alignCast(raw_dynamic));
+            if (dynamic_info.flags != 0 or dynamic_info.view_mask != 0 or dynamic_info.color_attachment_count != 1 or dynamic_info.color_attachment_formats == null or dynamic_info.color_attachment_formats.?[0] != 44 or (dynamic_info.depth_attachment_format != 0 and dynamic_info.depth_attachment_format != 126) or dynamic_info.stencil_attachment_format != 0 or dynamic_info.rasterization_samples != 1) return .error_initialization_failed;
+            inherited_dynamic = true;
+            inherited_dynamic_view_mask = dynamic_info.view_mask;
+            inherited_dynamic_color_format = dynamic_info.color_attachment_formats.?[0];
+            inherited_dynamic_depth_format = dynamic_info.depth_attachment_format;
+            inherited_dynamic_stencil_format = dynamic_info.stencil_attachment_format;
+            inherited_dynamic_samples = dynamic_info.rasterization_samples;
+        } else if (bi.flags & 2 != 0) {
             inherited_render_pass = validRenderPassLocked(inheritance.render_pass) orelse return .error_initialization_failed;
             if (!inherited_render_pass.?.owner.eql(c.impl.owner) or inherited_subpass >= inherited_render_pass.?.subpass_count) return .error_initialization_failed;
             if (inheritance.framebuffer != 0) {
@@ -4183,9 +4217,15 @@ fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) 
     c.impl.active_subpass = inherited_subpass;
     c.impl.active_framebuffer = inherited_framebuffer;
     c.impl.active_render_pass = inherited_render_pass;
-    c.impl.dynamic_rendering = false;
+    c.impl.dynamic_rendering = inherited_dynamic;
+    c.impl.dynamic_inheritance = inherited_dynamic;
     c.impl.dynamic_color_image = null;
     c.impl.dynamic_depth_image = null;
+    c.impl.inherited_dynamic_view_mask = inherited_dynamic_view_mask;
+    c.impl.inherited_dynamic_color_format = inherited_dynamic_color_format;
+    c.impl.inherited_dynamic_depth_format = inherited_dynamic_depth_format;
+    c.impl.inherited_dynamic_stencil_format = inherited_dynamic_stencil_format;
+    c.impl.inherited_dynamic_samples = inherited_dynamic_samples;
     c.impl.rendering_location_count = 0;
     c.impl.rendering_input_count = 0;
     c.impl.rendering_depth_input_index = null;
@@ -4240,7 +4280,7 @@ fn endCommandBuffer(cb: ?CommandBuffer) callconv(.c) Result {
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return .error_initialization_failed;
-    if (!validDeviceLocked(c.impl.owner) or c.impl.state != 1 or c.impl.invalid or c.impl.active_query_pool != null or c.impl.dynamic_rendering or (c.impl.active_render_pass != null and !c.impl.render_pass_continue)) return .error_initialization_failed;
+    if (!validDeviceLocked(c.impl.owner) or c.impl.state != 1 or c.impl.invalid or c.impl.active_query_pool != null or (c.impl.dynamic_rendering and !c.impl.dynamic_inheritance) or (c.impl.active_render_pass != null and !c.impl.render_pass_continue)) return .error_initialization_failed;
     c.impl.state = 2;
     return .success;
 }
@@ -4261,11 +4301,24 @@ fn record(cb: CommandBuffer, command: Command) void {
     cb.impl.commands[cb.impl.count] = command;
     cb.impl.count += 1;
 }
-fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj) Command {
+fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj, dynamic_color: ?*ImageObj, dynamic_depth: ?*ImageObj) Command {
     var result = command;
     switch (result) {
         .cube_draw => |*draw| if (draw.framebuffer == null) {
-            draw.framebuffer = framebuffer;
+            if (dynamic_color != null) {
+                draw.color_image = dynamic_color;
+                draw.depth_image = dynamic_depth;
+            } else {
+                draw.framebuffer = framebuffer;
+            }
+        },
+        .indirect_draw => |*draw| if (draw.framebuffer == null) {
+            if (dynamic_color != null) {
+                draw.color_image = dynamic_color;
+                draw.depth_image = dynamic_depth;
+            } else {
+                draw.framebuffer = framebuffer;
+            }
         },
         else => {},
     }
@@ -4281,6 +4334,7 @@ fn cmdExecuteCommands(cb: ?CommandBuffer, count: u32, buffers: ?[*]const Command
     }
     const list = buffers.?[0..count];
     var command_count: usize = 0;
+    var execute_dynamic = false;
     for (list, 0..) |raw, index| {
         const secondary = validCommandBufferLocked(raw) orelse {
             primary.impl.invalid = true;
@@ -4299,6 +4353,12 @@ fn cmdExecuteCommands(cb: ?CommandBuffer, count: u32, buffers: ?[*]const Command
                 primary.impl.invalid = true;
                 return;
             }
+        } else if (primary.impl.dynamic_rendering) {
+            if (!secondary.impl.render_pass_continue or !secondary.impl.dynamic_inheritance or secondary.impl.inherited_dynamic_view_mask != 0 or secondary.impl.inherited_dynamic_color_format != primary.impl.dynamic_color_image.?.format or secondary.impl.inherited_dynamic_depth_format != (if (primary.impl.dynamic_depth_image) |depth| depth.format else 0) or secondary.impl.inherited_dynamic_stencil_format != 0 or secondary.impl.inherited_dynamic_samples != primary.impl.dynamic_color_image.?.samples) {
+                primary.impl.invalid = true;
+                return;
+            }
+            execute_dynamic = true;
         } else if (secondary.impl.render_pass_continue) {
             primary.impl.invalid = true;
             return;
@@ -4312,7 +4372,7 @@ fn cmdExecuteCommands(cb: ?CommandBuffer, count: u32, buffers: ?[*]const Command
     for (list) |raw| {
         const secondary = raw;
         for (secondary.impl.commands[0..secondary.impl.count]) |command| {
-            primary.impl.commands[primary.impl.count] = commandForSecondaryExecution(command, primary.impl.active_framebuffer);
+            primary.impl.commands[primary.impl.count] = commandForSecondaryExecution(command, primary.impl.active_framebuffer, if (execute_dynamic) primary.impl.dynamic_color_image else null, if (execute_dynamic) primary.impl.dynamic_depth_image else null);
             primary.impl.count += 1;
         }
         primary.impl.secondaries[primary.impl.secondary_count] = secondary;
@@ -9009,7 +9069,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
         command_buffer.impl.invalid = true;
         return;
     };
-    if (ci.s_type != 1000044001 or ci.p_next != null or ci.flags != 0 or ci.layer_count != 1 or ci.view_mask != 0 or ci.color_attachment_count != 1 or ci.color_attachments == null or command_buffer.impl.state != 1 or command_buffer.impl.invalid or command_buffer.impl.active_render_pass != null or command_buffer.impl.active_framebuffer != null or command_buffer.impl.dynamic_rendering) {
+    if (ci.s_type != 1000044001 or ci.p_next != null or ci.flags != 0 or ci.layer_count != 1 or ci.view_mask != 0 or ci.color_attachment_count != 1 or ci.color_attachments == null or command_buffer.impl.state != 1 or command_buffer.impl.invalid or command_buffer.impl.active_render_pass != null or command_buffer.impl.active_framebuffer != null or command_buffer.impl.dynamic_rendering or command_buffer.impl.dynamic_inheritance) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -9078,6 +9138,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
     }
     if (clear_color or clear_depth) record(command_buffer, .{ .render_clear = .{ .image = color, .depth = depth, .color = clear_color_value, .depth_value = clear_depth_value, .clear_color = clear_color, .clear_depth = clear_depth } });
     command_buffer.impl.dynamic_rendering = true;
+    command_buffer.impl.dynamic_inheritance = false;
     command_buffer.impl.dynamic_color_image = color;
     command_buffer.impl.dynamic_depth_image = depth;
 }
@@ -9085,7 +9146,7 @@ fn cmdEndRendering(cb: ?CommandBuffer) callconv(.c) void {
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or !command_buffer.impl.dynamic_rendering) {
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or !command_buffer.impl.dynamic_rendering or command_buffer.impl.dynamic_inheritance) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -12595,6 +12656,68 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&dynamic_submit), 0));
     const dynamic_rendered_bytes = imageBytes(validImageLocked(images[0]).?);
     try std.testing.expect(!std.mem.eql(u8, &[_]u8{ 0, 0, 0, 255 }, dynamic_rendered_bytes[4 * (4 * 8 + 4) ..][0..4]));
+
+    // Secondary command buffers can inherit a dynamic-rendering scope through
+    // VkCommandBufferInheritanceRenderingInfo.  The inherited formats and
+    // sample count must match the primary before its recorded draws are
+    // rebound to the primary's live attachment images.
+    var dynamic_secondary_formats = [_]i32{44};
+    var dynamic_secondary_rendering = CommandBufferInheritanceRenderingInfo{
+        .s_type = 1000044004,
+        .p_next = null,
+        .flags = 0,
+        .view_mask = 0,
+        .color_attachment_count = 1,
+        .color_attachment_formats = &dynamic_secondary_formats,
+        .depth_attachment_format = 126,
+        .stencil_attachment_format = 0,
+        .rasterization_samples = 1,
+    };
+    var dynamic_secondary_inheritance = CommandBufferInheritanceInfo{ .s_type = 41, .p_next = &dynamic_secondary_rendering, .render_pass = 0, .subpass = 0, .framebuffer = 0, .occlusion_query_enable = 0, .query_flags = 0, .pipeline_statistics = 0 };
+    var malformed_dynamic_secondary = dynamic_secondary_rendering;
+    malformed_dynamic_secondary.color_attachment_formats = null;
+    dynamic_secondary_inheritance.p_next = &malformed_dynamic_secondary;
+    const malformed_dynamic_secondary_begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 2, .inheritance_info = &dynamic_secondary_inheritance };
+    try std.testing.expectEqual(Result.error_initialization_failed, beginCommandBuffer(render_secondary[0], &malformed_dynamic_secondary_begin));
+    dynamic_secondary_inheritance.p_next = &dynamic_secondary_rendering;
+    const dynamic_secondary_begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 2, .inheritance_info = &dynamic_secondary_inheritance };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(render_secondary[0], &dynamic_secondary_begin));
+    cmdBindPipeline(render_secondary[0], 0, pipelines[0]);
+    cmdBindDescriptorSets(render_secondary[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    cmdBindIndexBuffer(render_secondary[0], index_buffer, 0, 0);
+    cmdSetViewport(render_secondary[0], 0, 1, @ptrCast(&viewport));
+    cmdSetScissor(render_secondary[0], 0, 1, @ptrCast(&render_info.render_area));
+    cmdDrawIndexed(render_secondary[0], 3, 1, 1, -1, 7);
+    try std.testing.expect(!render_secondary[0].impl.invalid);
+    try std.testing.expect(render_secondary[0].impl.dynamic_inheritance);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(render_secondary[0]));
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    validImageLocked(images[0]).?.layout = 1;
+    validImageLocked(depth_image).?.layout = 3;
+    cmdBeginRendering(multi_commands[0], &dynamic_rendering);
+    cmdExecuteCommands(multi_commands[0], 1, &render_secondary);
+    try std.testing.expect(!multi_commands[0].impl.invalid);
+    cmdEndRendering(multi_commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(multi_commands[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&dynamic_submit), 0));
+    try std.testing.expect(!std.mem.eql(u8, &[_]u8{ 0, 0, 0, 255 }, imageBytes(validImageLocked(images[0]).?)[4 * (4 * 8 + 4) ..][0..4]));
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+        validImageLocked(images[0]).?.layout = 1;
+        validImageLocked(depth_image).?.layout = 3;
+        cmdBeginRendering(multi_commands[0], &dynamic_rendering);
+        cmdExecuteCommands(multi_commands[0], 1, &render_secondary);
+        try std.testing.expect(!multi_commands[0].impl.invalid);
+        cmdEndRendering(multi_commands[0]);
+        try std.testing.expectEqual(Result.success, endCommandBuffer(multi_commands[0]));
+    }
+    test_allocations_before_failure = null;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(render_secondary[0], 0));
 
     // The promoted render-pass2 entry points must preserve the same
     // subpass/pipeline lifecycle as their Vulkan 1.0 counterparts.
@@ -17176,6 +17299,9 @@ test "secondary command buffers inherit lifetime and execute in exact primary or
     try std.testing.expectEqual(@as(usize, 56), @sizeOf(CommandBufferInheritanceInfo));
     try std.testing.expectEqual(@as(usize, 8), @alignOf(CommandBufferInheritanceInfo));
     try std.testing.expectEqual(@as(usize, 32), @offsetOf(CommandBufferInheritanceInfo, "framebuffer"));
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(CommandBufferInheritanceRenderingInfo));
+    try std.testing.expectEqual(@as(usize, 8), @alignOf(CommandBufferInheritanceRenderingInfo));
+    try std.testing.expectEqual(@as(usize, 48), @offsetOf(CommandBufferInheritanceRenderingInfo, "rasterization_samples"));
     const ctx = try createTestDeviceContext();
     const memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 64, .memory_type_index = 0 };
     var memory: usize = 0;
