@@ -1231,9 +1231,15 @@ fn coreFeaturePayloadWords(s_type: i32) ?usize {
 fn coreFeatureChainValid(raw: ?*anyopaque) bool {
     var next = raw;
     var depth: usize = 0;
+    var seen: [16]i32 = undefined;
+    var seen_count: usize = 0;
     while (next) |item| {
-        if (depth == 16 or coreFeaturePayloadWords(@as(*const ChainHeader, @ptrCast(@alignCast(item))).s_type) == null) return false;
-        next = if (@as(*const ChainHeader, @ptrCast(@alignCast(item))).p_next) |p| @ptrCast(@constCast(p)) else null;
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (depth == 16 or coreFeaturePayloadWords(header.s_type) == null) return false;
+        for (seen[0..seen_count]) |prior| if (prior == header.s_type) return false;
+        seen[seen_count] = header.s_type;
+        seen_count += 1;
+        next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
         depth += 1;
     }
     return true;
@@ -1526,9 +1532,15 @@ fn populatePromotedPropertyPayload(s_type: i32, bytes: []u8) void {
 fn corePropertyChainValid(raw: ?*anyopaque) bool {
     var next = raw;
     var depth: usize = 0;
+    var seen: [16]i32 = undefined;
+    var seen_count: usize = 0;
     while (next) |item| {
-        if (depth == 16 or corePropertyPayloadBytes(@as(*const ChainHeader, @ptrCast(@alignCast(item))).s_type) == null) return false;
-        next = if (@as(*const ChainHeader, @ptrCast(@alignCast(item))).p_next) |p| @ptrCast(@constCast(p)) else null;
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (depth == 16 or corePropertyPayloadBytes(header.s_type) == null) return false;
+        for (seen[0..seen_count]) |prior| if (prior == header.s_type) return false;
+        seen[seen_count] = header.s_type;
+        seen_count += 1;
+        next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
         depth += 1;
     }
     return true;
@@ -13257,6 +13269,16 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expect(std.mem.allEqual(u32, &line_features.values, 0));
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&descriptor_features)), storage_features.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&line_features)), descriptor_features.p_next);
+    var duplicate_line_features = PhysicalDeviceLineRasterizationFeatures{ .s_type = 1000259000, .p_next = null, .values = [_]u32{0xaaaa_aaaa} ** 6 };
+    line_features.p_next = @ptrCast(&duplicate_line_features);
+    features.features.values[0] = 0x1111_1111;
+    storage_features.values[0] = 0x2222_2222;
+    try std.testing.expectEqual(@as(u32, 0xaaaa_aaaa), duplicate_line_features.values[0]);
+    getPhysicalDeviceFeatures2(ctx.physical, &features);
+    try std.testing.expectEqual(@as(u32, 0x1111_1111), features.features.values[0]);
+    try std.testing.expectEqual(@as(u32, 0x2222_2222), storage_features.values[0]);
+    try std.testing.expectEqual(@as(u32, 0xaaaa_aaaa), duplicate_line_features.values[0]);
+    line_features.p_next = null;
     features.features.values[0] = 0xdead_beef;
     storage_features.values[0] = 0xcafe_f00d;
     getPhysicalDeviceFeatures2(@ptrFromInt(8), &features);
@@ -13285,6 +13307,16 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan11_properties)), vulkan12_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan12_properties)), vulkan13_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan13_properties)), vulkan14_properties.p_next);
+    var duplicate_vulkan11_properties = PhysicalDeviceVulkan11Properties{ .s_type = 50, .p_next = null, .payload = [_]u8{0xee} ** 96 };
+    vulkan11_properties.p_next = @ptrCast(&duplicate_vulkan11_properties);
+    properties.properties.api_version = 0x1111_1111;
+    vulkan14_properties.payload[0] = 0x22;
+    try std.testing.expectEqual(@as(u8, 0xee), duplicate_vulkan11_properties.payload[0]);
+    getPhysicalDeviceProperties2(ctx.physical, &properties);
+    try std.testing.expectEqual(@as(u32, 0x1111_1111), properties.properties.api_version);
+    try std.testing.expectEqual(@as(u8, 0x22), vulkan14_properties.payload[0]);
+    try std.testing.expectEqual(@as(u8, 0xee), duplicate_vulkan11_properties.payload[0]);
+    vulkan11_properties.p_next = null;
     properties.properties.api_version = 0xdead_beef;
     vulkan14_properties.payload[0] = 0xca;
     getPhysicalDeviceProperties2(@ptrFromInt(8), &properties);
