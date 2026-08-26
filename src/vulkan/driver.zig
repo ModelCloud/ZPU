@@ -8614,11 +8614,19 @@ fn cmdBindDescriptorSets2(cb: ?CommandBuffer, info: ?*const BindDescriptorSetsIn
         markCommandBufferInvalid(cb);
         return;
     };
-    if (ci.s_type != 1000545003 or ci.p_next != null or normalizeCoreShaderStages(ci.stage_flags) == null) {
+    const stages = normalizeCoreShaderStages(ci.stage_flags) orelse {
+        markCommandBufferInvalid(cb);
+        return;
+    };
+    if (ci.s_type != 1000545003 or ci.p_next != null) {
         markCommandBufferInvalid(cb);
         return;
     }
-    cmdBindDescriptorSets(cb, 0, ci.layout, ci.first_set, ci.descriptor_set_count, ci.descriptor_sets, ci.dynamic_offset_count, ci.dynamic_offsets);
+    // Maintenance-6 replaces the old bind-point parameter with stage flags.
+    // Keep the command-local descriptor state shared, but preserve the
+    // compute-only routing for validation and future bind-point-specific state.
+    const bind_point: i32 = if (stages == 0x20) 1 else 0;
+    cmdBindDescriptorSets(cb, bind_point, ci.layout, ci.first_set, ci.descriptor_set_count, ci.descriptor_sets, ci.dynamic_offset_count, ci.dynamic_offsets);
 }
 fn bindIndexBufferLocked(command_buffer: *CommandBufferObj, handle: usize, offset: u64, size: u64, index_type: i32) void {
     const buffer = validBufferLocked(handle) orelse {
@@ -9039,11 +9047,16 @@ fn cmdPushDescriptorSet2(cb: ?CommandBuffer, info: ?*const PushDescriptorSetInfo
         markCommandBufferInvalid(cb);
         return;
     };
-    if (ci.s_type != 1000545005 or ci.p_next != null or normalizeCoreShaderStages(ci.stage_flags) == null) {
+    const stages = normalizeCoreShaderStages(ci.stage_flags) orelse {
+        markCommandBufferInvalid(cb);
+        return;
+    };
+    if (ci.s_type != 1000545005 or ci.p_next != null) {
         markCommandBufferInvalid(cb);
         return;
     }
-    cmdPushDescriptorSet(cb, 0, ci.layout, ci.set, ci.descriptor_write_count, ci.descriptor_writes);
+    const bind_point: i32 = if (stages == 0x20) 1 else 0;
+    cmdPushDescriptorSet(cb, bind_point, ci.layout, ci.set, ci.descriptor_write_count, ci.descriptor_writes);
 }
 fn cmdPushDescriptorSetWithTemplate(cb: ?CommandBuffer, template_handle: usize, bind_point: i32, layout: usize, set: u32, data: ?*const anyopaque) callconv(.c) void {
     lock();
@@ -15184,6 +15197,13 @@ test "dynamic uniform descriptors apply aligned per-bind offsets transactionally
     cmdBindDescriptorSets2(command[0], &bind2);
     try std.testing.expect(!command[0].impl.invalid);
     try std.testing.expectEqual(@as(u64, 256), command[0].impl.dynamic_uniform_offset);
+    var compute_bind2 = bind2;
+    compute_bind2.stage_flags = 32;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdBindDescriptorSets2(command[0], &compute_bind2);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(@as(u64, 256), command[0].impl.dynamic_uniform_offset);
     var unsupported_bind2 = bind2;
     unsupported_bind2.stage_flags = 0x40;
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
@@ -15292,6 +15312,12 @@ test "push descriptors own layout state, template decoding, rollback, and warm p
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
     cmdPushDescriptorSet2(command[0], &push2);
+    try std.testing.expect(!command[0].impl.invalid);
+    var compute_push2 = push2;
+    compute_push2.stage_flags = 32;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdPushDescriptorSet2(command[0], &compute_push2);
     try std.testing.expect(!command[0].impl.invalid);
     const template2 = PushDescriptorSetWithTemplateInfo{ .s_type = 1000545006, .p_next = null, .descriptor_update_template = descriptor_template, .layout = pipeline_layout, .set = 0, .data = @ptrCast(&descriptor_buffer) };
     cmdPushDescriptorSetWithTemplate2(command[0], &template2);
