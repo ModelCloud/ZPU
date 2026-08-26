@@ -5125,7 +5125,9 @@ fn renderPassDependencyValid(command_buffer: *const CommandBufferObj, info: *con
 }
 fn legacyWaitDependencyScopeValid(command_buffer: *const CommandBufferObj, src_stage_mask: u32, dst_stage_mask: u32, memory_list: []const MemoryBarrier, buffer_list: []const BufferMemoryBarrier, image_list: []const ImageMemoryBarrier) bool {
     if (command_buffer.impl.dynamic_rendering) {
-        if (buffer_list.len != 0 or image_list.len != 0 or src_stage_mask & ~@as(u32, 0x700) != 0 or dst_stage_mask & ~@as(u32, 0x700) != 0) return false;
+        if (buffer_list.len != 0 or image_list.len != 0) return false;
+        if (memory_list.len == 0) return true;
+        if (src_stage_mask & ~@as(u32, 0x700) != 0 or dst_stage_mask & ~@as(u32, 0x700) != 0) return false;
         for (memory_list) |barrier| if (barrier.src_access_mask & ~@as(u32, 0x780) != 0 or barrier.dst_access_mask & ~@as(u32, 0x780) != 0) return false;
         return true;
     }
