@@ -2301,11 +2301,9 @@ fn imageFormatUsage(format: i32) u32 {
         else => 0,
     };
 }
-fn getFormatProperties(physical: ?Physical, format: i32, output: ?*FormatProperties) callconv(.c) void {
-    lock();
-    defer mutex.unlock();
-    if (!validPhysicalLocked(physical orelse return)) return;
-    const out = output orelse return;
+fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatProperties) bool {
+    if (!validPhysicalLocked(physical)) return false;
+    const out = output orelse return false;
     out.* = switch (format) {
         37 => .{ .linear_tiling_features = 0x4000 | 0x8000, .optimal_tiling_features = 0x4000 | 0x8000, .buffer_features = 0 },
         43 => .{ .linear_tiling_features = 0x1, .optimal_tiling_features = 0x1, .buffer_features = 0 },
@@ -2313,6 +2311,12 @@ fn getFormatProperties(physical: ?Physical, format: i32, output: ?*FormatPropert
         126 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
         else => std.mem.zeroes(FormatProperties),
     };
+    return true;
+}
+fn getFormatProperties(physical: ?Physical, format: i32, output: ?*FormatProperties) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    _ = getFormatPropertiesLocked(physical orelse return, format, output);
 }
 fn getImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, tiling: i32, usage: u32, flags: u32, output: ?*ImageFormatProperties) callconv(.c) Result {
     lock();
@@ -2358,10 +2362,8 @@ fn getPhysicalDeviceFormatProperties2(physical: ?Physical, format: i32, output: 
     if (out.s_type != 1000059002 or !formatProperties3ChainValid(out.p_next)) return;
     const h = physical orelse return;
     lock();
-    const valid = validPhysicalLocked(h);
-    mutex.unlock();
-    if (!valid) return;
-    getFormatProperties(physical, format, &out.format_properties);
+    defer mutex.unlock();
+    if (!getFormatPropertiesLocked(h, format, &out.format_properties)) return;
     populateFormatProperties3Chain(out.p_next, out.format_properties);
 }
 fn getPhysicalDeviceImageFormatProperties2(physical: ?Physical, info: ?*const PhysicalDeviceImageFormatInfo2, output: ?*ImageFormatProperties2) callconv(.c) Result {
@@ -13296,6 +13298,20 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     getPhysicalDeviceFormatProperties2(ctx.physical, 37, &format);
     try std.testing.expectEqual(@as(u64, 0xc000), format3.optimal_tiling_features);
     try std.testing.expectEqual(@as(u64, 0xc000), format3.linear_tiling_features);
+    format.format_properties = .{ .linear_tiling_features = 0x1111, .optimal_tiling_features = 0x2222, .buffer_features = 0x3333 };
+    format3.linear_tiling_features = 0x4444;
+    format3.optimal_tiling_features = 0x5555;
+    format3.buffer_features = 0x6666;
+    getPhysicalDeviceFormatProperties2(@ptrFromInt(8), 37, &format);
+    try std.testing.expectEqual(@as(u64, 0x1111), format.format_properties.linear_tiling_features);
+    try std.testing.expectEqual(@as(u64, 0x2222), format.format_properties.optimal_tiling_features);
+    try std.testing.expectEqual(@as(u64, 0x3333), format.format_properties.buffer_features);
+    try std.testing.expectEqual(@as(u64, 0x4444), format3.linear_tiling_features);
+    try std.testing.expectEqual(@as(u64, 0x5555), format3.optimal_tiling_features);
+    try std.testing.expectEqual(@as(u64, 0x6666), format3.buffer_features);
+    format3.linear_tiling_features = 0xffff_ffff_ffff_ffff;
+    format3.optimal_tiling_features = 0xffff_ffff_ffff_ffff;
+    format3.buffer_features = 0xffff_ffff_ffff_ffff;
     test_allocations_before_failure = 0;
     for (0..4096) |_| getPhysicalDeviceFormatProperties2(ctx.physical, 37, &format);
     test_allocations_before_failure = null;
