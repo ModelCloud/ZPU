@@ -117,6 +117,18 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 177, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 178, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 179, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 182, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 183, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 184, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 185, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 186, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 187, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 188, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 189, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 190, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 191, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 192, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 193, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 194, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 195, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 196, .operands = .{ .min = 4, .max = 4 } },
@@ -588,7 +600,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 }
                 block_terminated = true;
             },
-            61, 62, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...169, 170...179, 194...200 => {
+            61, 62, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...169, 170...179, 182...200 => {
                 if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
                 const valid_arity = switch (instruction.opcode) {
                     61 => w.len == 3,
@@ -598,7 +610,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     80 => w.len >= 3,
                     81 => w.len >= 4,
                     109, 110, 111, 112, 124, 126, 127 => w.len == 3,
-                    128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...167, 170...179, 194...199 => w.len == 4,
+                    128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...167, 170...179, 182...199 => w.len == 4,
                     200 => w.len == 3,
                     168 => w.len == 3,
                     169 => w.len == 5,
@@ -802,6 +814,12 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 };
                 if (result.scalar != .bool or result.columns != 1 or result.rows != 1 or !scalar_ok or !sameShape(left, right)) return error.Malformed;
             },
+            182...193 => {
+                const result = try resultShape(nodes, w[0]);
+                const left = try valueShape(nodes, w[2]);
+                const right = try valueShape(nodes, w[3]);
+                if (result.scalar != .bool or result.columns != 1 or result.rows != 1 or left.scalar != .f32 or left.columns != 1 or left.rows != 1 or !sameShape(left, right)) return error.Malformed;
+            },
             else => {},
         }
     }
@@ -961,7 +979,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...169, 170...179, 194...200, 245 => w[1],
+                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...169, 170...179, 182...200, 245 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
@@ -969,6 +987,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const first_operand: usize = switch (instruction.opcode) {
                 41, 42, 43, 48, 49, 50, 164...168 => continue,
                 170...179 => if (try staticCondition(nodes, result) != null) continue else 2,
+                182...193 => 2,
                 else => 2,
             };
             if (instruction.opcode == 245) {
@@ -1061,7 +1080,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...169, 170...179, 194...200, 245 => w[1],
+            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...169, 170...179, 182...200, 245 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
@@ -1119,6 +1138,18 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 179 => .sle,
                 else => unreachable,
             },
+            182 => .ford_eq,
+            183 => .funord_eq,
+            184 => .ford_ne,
+            185 => .funord_ne,
+            186 => .ford_lt,
+            187 => .funord_lt,
+            188 => .ford_gt,
+            189 => .funord_gt,
+            190 => .ford_le,
+            191 => .funord_le,
+            192 => .ford_ge,
+            193 => .funord_ge,
             else => unreachable,
         };
         var operands: std.ArrayList(u32) = .empty;
@@ -1406,6 +1437,30 @@ pub const compute_dynamic_compare_store = [_]u32{
     10,             11,              (6 << 16) | 169, 2,              16,
     13,             14,              15,              (3 << 16) | 62, 5,
     16,             (1 << 16) | 253, (1 << 16) | 56,
+};
+
+/// Compute profile variant that compares a runtime f32 StorageBuffer load and
+/// selects between two float values. The test mutates the comparison opcode to
+/// cover every ordered and unordered floating-point predicate mapping.
+pub const compute_dynamic_float_compare_store = [_]u32{
+    0x0723_0203,     0x0001_0000,    0,               17,         0,
+    (2 << 16) | 17,  1,              (3 << 16) | 14,  0,          1,
+    (6 << 16) | 15,  5,              8,               0x6e69616d, 0,
+    5,               (6 << 16) | 16, 8,               17,         1,
+    1,               1,              (4 << 16) | 71,  5,          33,
+    0,               (4 << 16) | 71, 5,               34,         0,
+    (2 << 16) | 19,  1,              (3 << 16) | 22,  2,          32,
+    (2 << 16) | 20,  12,             (4 << 16) | 32, 4,           12,
+    2,               (4 << 16) | 59, 4,               5,           12,
+    (3 << 16) | 33,  6,              1,               (4 << 16) | 43,
+    2,               11,              0x3f80_0000,    (4 << 16) | 43, 2,
+    14,              0x4000_0000,    (4 << 16) | 43, 2,           15,
+    0,               (5 << 16) | 54, 1,               8,           0,
+    6,               (2 << 16) | 248, 9,               (4 << 16) | 61, 2,
+    10,              5,               (5 << 16) | 188, 12,         13,
+    10,              11,              (6 << 16) | 169, 2,          16,
+    13,              14,              15,              (3 << 16) | 62, 5,
+    16,              (1 << 16) | 253, (1 << 16) | 56,
 };
 
 /// Scalar-pointer form of the bounded compute store profile.  Unlike the
@@ -1944,6 +1999,21 @@ test "compute profile lowers dynamic integer comparison before select" {
     var saw_ine = false;
     for (unequal_program.instructions) |instruction| saw_ine = saw_ine or instruction.op == .ine;
     try std.testing.expect(saw_ine);
+}
+
+test "compute profile lowers ordered and unordered float comparisons" {
+    const opcodes = [_]u16{ 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193 };
+    const expected = [_]ir.Op{ .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge };
+    for (opcodes, expected) |opcode, expected_op| {
+        var words = compute_dynamic_float_compare_store;
+        const comparison = testOpcodeOffset(&words, 188, 0).?;
+        words[comparison] = (@as(u32, 5) << 16) | opcode;
+        var program = try compile(std.testing.allocator, &words, .compute, "main", &.{});
+        defer program.deinit(std.testing.allocator);
+        var found = false;
+        for (program.instructions) |instruction| found = found or instruction.op == expected_op;
+        try std.testing.expect(found);
+    }
 }
 
 test "compute profile accepts a scalar storage-buffer pointer" {
