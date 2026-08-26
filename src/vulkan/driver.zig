@@ -10091,6 +10091,13 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
     command_buffer.impl.dynamic_color_base_layer = color_view.base_array_layer;
     command_buffer.impl.dynamic_depth_base_layer = if (ci.depth_attachment) |attachment| (validImageViewLocked(attachment.image_view).?).base_array_layer else 0;
     command_buffer.impl.dynamic_layer_count = ci.layer_count;
+    // VK_KHR_dynamic_rendering_local_read state is scoped to the active
+    // rendering instance; a later begin starts with the attachment identity
+    // mappings reset rather than inheriting stale locations or input indices.
+    command_buffer.impl.rendering_location_count = 0;
+    command_buffer.impl.rendering_input_count = 0;
+    command_buffer.impl.rendering_depth_input_index = null;
+    command_buffer.impl.rendering_stencil_input_index = null;
 }
 fn cmdEndRendering(cb: ?CommandBuffer) callconv(.c) void {
     lock();
@@ -10106,6 +10113,10 @@ fn cmdEndRendering(cb: ?CommandBuffer) callconv(.c) void {
     command_buffer.impl.dynamic_color_base_layer = 0;
     command_buffer.impl.dynamic_depth_base_layer = 0;
     command_buffer.impl.dynamic_layer_count = 1;
+    command_buffer.impl.rendering_location_count = 0;
+    command_buffer.impl.rendering_input_count = 0;
+    command_buffer.impl.rendering_depth_input_index = null;
+    command_buffer.impl.rendering_stencil_input_index = null;
 }
 fn markCommandBufferInvalid(cb: ?CommandBuffer) void {
     lock();
@@ -16983,8 +16994,16 @@ test "dynamic rendering begin and end own attachment scope" {
     try std.testing.expectEqual(@as(i32, 1), validImageLocked(image).?.layout);
     @memset(imageBytes(validImageLocked(image).?), 0);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+    commands[0].impl.rendering_location_count = 1;
+    commands[0].impl.rendering_input_count = 1;
+    commands[0].impl.rendering_depth_input_index = 0;
+    commands[0].impl.rendering_stencil_input_index = 0;
     cmdBeginRendering(commands[0], &rendering);
     try std.testing.expect(commands[0].impl.dynamic_rendering);
+    try std.testing.expectEqual(@as(u32, 0), commands[0].impl.rendering_location_count);
+    try std.testing.expectEqual(@as(u32, 0), commands[0].impl.rendering_input_count);
+    try std.testing.expect(commands[0].impl.rendering_depth_input_index == null);
+    try std.testing.expect(commands[0].impl.rendering_stencil_input_index == null);
     const dynamic_clear_attachment = ClearAttachment{ .aspect_mask = 1, .color_attachment = 0, .clear_value = clear_value };
     const dynamic_clear_rect = ClearRect{ .rect = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 1, .height = 1 } }, .base_array_layer = 0, .layer_count = 1 };
     const before_dynamic_clear = commands[0].impl.count;
@@ -17010,6 +17029,10 @@ test "dynamic rendering begin and end own attachment scope" {
     try std.testing.expect(!commands[0].impl.invalid);
     cmdEndRendering(commands[0]);
     try std.testing.expect(!commands[0].impl.dynamic_rendering);
+    try std.testing.expectEqual(@as(u32, 0), commands[0].impl.rendering_location_count);
+    try std.testing.expectEqual(@as(u32, 0), commands[0].impl.rendering_input_count);
+    try std.testing.expect(commands[0].impl.rendering_depth_input_index == null);
+    try std.testing.expect(commands[0].impl.rendering_stencil_input_index == null);
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
     const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
     // Dynamic rendering has no implicit layout transition.  A host-side
