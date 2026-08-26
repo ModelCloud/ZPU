@@ -1002,9 +1002,12 @@ fn semaphoreCreatePNextState(raw: ?*const anyopaque) ?SemaphoreCreatePNextState 
 fn memoryRequirements2ChainValid(raw: ?*anyopaque) bool {
     var next = raw;
     var depth: usize = 0;
+    var seen_dedicated = false;
     while (next) |item| {
-        if (depth == 16 or @as(*const ChainHeader, @ptrCast(@alignCast(item))).s_type != memory_dedicated_requirements_stype) return false;
-        next = if (@as(*const ChainHeader, @ptrCast(@alignCast(item))).p_next) |p| @ptrCast(@constCast(p)) else null;
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (depth == 16 or header.s_type != memory_dedicated_requirements_stype or seen_dedicated) return false;
+        seen_dedicated = true;
+        next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
         depth += 1;
     }
     return true;
@@ -2411,9 +2414,11 @@ fn getPhysicalDeviceImageFormatProperties2(physical: ?Physical, info: ?*const Ph
 fn queueFamilyProperties2ChainValid(raw: ?*anyopaque) bool {
     var next = raw;
     var depth: usize = 0;
+    var seen_global_priority = false;
     while (next) |item| {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
-        if (depth == 16 or header.s_type != 1000388000) return false;
+        if (depth == 16 or header.s_type != 1000388000 or seen_global_priority) return false;
+        seen_global_priority = true;
         next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
         depth += 1;
     }
@@ -13459,6 +13464,14 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(u32, 1), global_priorities.priority_count);
     try std.testing.expectEqual(@as(i32, 256), global_priorities.priorities[0]);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&global_priorities)), queue_properties[0].p_next);
+    var duplicate_global_priorities = QueueFamilyGlobalPriorityProperties{ .s_type = 1000388000, .p_next = null, .priority_count = 0xcafe_f00d, .priorities = .{ -1, -1, -1, -1 } };
+    global_priorities.p_next = @ptrCast(&duplicate_global_priorities);
+    queue_properties[0].queue_family_properties.timestamp_bits = 0xdead_beef;
+    try std.testing.expectEqual(@as(u32, 0xcafe_f00d), duplicate_global_priorities.priority_count);
+    getPhysicalDeviceQueueFamilyProperties2(ctx.physical, &queue_count, &queue_properties);
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), queue_properties[0].queue_family_properties.timestamp_bits);
+    try std.testing.expectEqual(@as(u32, 0xcafe_f00d), duplicate_global_priorities.priority_count);
+    global_priorities.p_next = null;
     queue_properties[0].queue_family_properties.timestamp_bits = 0xdead_beef;
     global_priorities.priority_count = 0xcafe_f00d;
     getPhysicalDeviceQueueFamilyProperties2(@ptrFromInt(8), &queue_count, &queue_properties);
@@ -13563,6 +13576,14 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(u64, 16), requirements.memory_requirements.size);
     try std.testing.expectEqual(@as(u32, 0), dedicated.prefers_dedicated_allocation);
     try std.testing.expectEqual(@as(u32, 0), dedicated.requires_dedicated_allocation);
+    var duplicate_dedicated = MemoryDedicatedRequirements{ .s_type = memory_dedicated_requirements_stype, .p_next = null, .prefers_dedicated_allocation = 0xaaaa_aaaa, .requires_dedicated_allocation = 0xbbbb_bbbb };
+    dedicated.p_next = @ptrCast(&duplicate_dedicated);
+    requirements.memory_requirements.size = 0xcafe_f00d;
+    try std.testing.expectEqual(@as(u32, 0xaaaa_aaaa), duplicate_dedicated.prefers_dedicated_allocation);
+    getBufferMemoryRequirements2(ctx.device, &buffer_requirements, &requirements);
+    try std.testing.expectEqual(@as(u64, 0xcafe_f00d), requirements.memory_requirements.size);
+    try std.testing.expectEqual(@as(u32, 0xaaaa_aaaa), duplicate_dedicated.prefers_dedicated_allocation);
+    dedicated.p_next = null;
     test_allocations_before_failure = 0;
     for (0..4096) |_| getBufferMemoryRequirements2(ctx.device, &buffer_requirements, &requirements);
     test_allocations_before_failure = null;
