@@ -102,6 +102,11 @@ fn canonicalFloat(bits: u32) u32 {
 fn quantizeF16(bits: u32) u32 {
     const value: f32 = @bitCast(bits);
     if (std.math.isNan(value)) return 0x7fc00000;
+    // OpQuantizeToF16 is defined in terms of the normalized f16 domain.  A
+    // value that would only be representable as an f16 subnormal must flush
+    // to signed zero rather than widening that subnormal back to f32.
+    const min_normal_f16: f32 = 0.00006103515625; // 2^-14
+    if (@abs(value) < min_normal_f16) return bits & 0x80000000;
     const half: f16 = @floatCast(value);
     const widened: f32 = @floatCast(half);
     return canonicalFloat(@bitCast(widened));
@@ -1574,6 +1579,10 @@ test "quantize to f16 handles NaN overflow and subnormal boundaries" {
     try std.testing.expectEqual(@as(u32, 0x7f80_0000), quantizeF16(0x7f80_0000));
     try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 65504))), quantizeF16(@bitCast(@as(f32, 65519))));
     try std.testing.expectEqual(@as(u32, 0x7f80_0000), quantizeF16(@bitCast(@as(f32, 65520))));
+    const min_normal = @as(f32, 0.00006103515625);
+    try std.testing.expectEqual(@as(u32, @bitCast(min_normal)), quantizeF16(@bitCast(min_normal)));
+    try std.testing.expectEqual(@as(u32, 0), quantizeF16(@bitCast(@as(f32, 0.00006))));
+    try std.testing.expectEqual(@as(u32, 0x8000_0000), quantizeF16(@bitCast(@as(f32, -0.00006))));
     try std.testing.expectEqual(@as(u32, 0), quantizeF16(@bitCast(@as(f32, 1e-8))));
 }
 
