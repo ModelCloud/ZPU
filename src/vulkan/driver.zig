@@ -515,7 +515,7 @@ const SamplerObj = struct {
     border_color: i32 = 0,
     unnormalized_coordinates: bool = false,
 };
-const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj, render_compatibility: Canonical };
+const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj, render_compatibility: Canonical, layers: u32 = 1 };
 const PipelineCacheObj = struct { owner: DeviceIdentity, data: Canonical = .{} };
 const descriptor_type_count = 11;
 const DescriptorCounts = [descriptor_type_count]u32;
@@ -772,7 +772,7 @@ const DispatchCommand = struct { base: [3]u32, groups: [3]u32, pipeline: *Comput
 const DispatchIndirectCommand = struct { buffer: *BufferObj, offset: u64, pipeline: *ComputePipelineObj, layout: ?*PipelineLayoutObj, descriptors: ?*DescriptorSetObj };
 const PrivateDataEntry = struct { object_type: i32 = 0, object: u64 = 0, data: u64 = 0 };
 const PrivateDataSlotObj = struct { owner: Device, entries: [max_api_items]PrivateDataEntry };
-const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: struct { image: *ImageObj, layout: i32, depth: f32, base_layer: u32 = 0, layer_count: u32 = 1 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, clear_color: bool = true, clear_depth: bool = true }, clear_attachments: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32 }, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{} }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 }, event_set: *EventObj, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
+const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: struct { image: *ImageObj, layout: i32, depth: f32, base_layer: u32 = 0, layer_count: u32 = 1 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, clear_color: bool = true, clear_depth: bool = true }, clear_attachments: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1 }, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{} }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 }, event_set: *EventObj, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
 const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_inheritance: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, inherited_dynamic_view_mask: u32 = 0, inherited_dynamic_color_format: i32 = 0, inherited_dynamic_depth_format: i32 = 0, inherited_dynamic_stencil_format: i32 = 0, inherited_dynamic_samples: u32 = 0, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_descriptor_bind_point: i32 = 0, bound_descriptor_stage_flags: u32 = 0, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, push_descriptor_bind_point: i32 = 0, push_descriptor_stage_flags: u32 = 0, descriptor_snapshots: [256]DescriptorSetObj = undefined, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, line_stipple_set: bool, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: [256]Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
 pub const CommandBuffer = *CommandBufferObj;
@@ -4697,8 +4697,8 @@ fn cmdClearDepthStencilImage(cb: ?CommandBuffer, image_handle: usize, layout: i3
         record(c, .{ .clear_depth = .{ .image = image, .layout = layout, .depth = value.?.depth, .base_layer = range.base_array_layer, .layer_count = range.layer_count } });
     }
 }
-fn clearRectValid(rect: ClearRect, width: u32, height: u32) bool {
-    if (rect.base_array_layer != 0 or rect.layer_count != 1 or rect.rect.offset.x < 0 or rect.rect.offset.y < 0 or rect.rect.extent.width == 0 or rect.rect.extent.height == 0) return false;
+fn clearRectValid(rect: ClearRect, width: u32, height: u32, layers: u32) bool {
+    if (rect.layer_count == 0 or rect.base_array_layer >= layers or rect.layer_count > layers - rect.base_array_layer or rect.rect.offset.x < 0 or rect.rect.offset.y < 0 or rect.rect.extent.width == 0 or rect.rect.extent.height == 0) return false;
     const end_x = std.math.add(u64, @intCast(rect.rect.offset.x), rect.rect.extent.width) catch return false;
     const end_y = std.math.add(u64, @intCast(rect.rect.offset.y), rect.rect.extent.height) catch return false;
     return end_x <= width and end_y <= height;
@@ -4719,7 +4719,8 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
         c.impl.invalid = true;
         return;
     }
-    for (rects.?[0..rect_count]) |rect| if (!clearRectValid(rect, color_image.width, color_image.height)) {
+    const framebuffer_layers = if (dynamic_rendering) 1 else framebuffer.?.layers;
+    for (rects.?[0..rect_count]) |rect| if (!clearRectValid(rect, color_image.width, color_image.height, framebuffer_layers)) {
         c.impl.invalid = true;
         return;
     };
@@ -4752,7 +4753,7 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
     for (attachments.?[0..attachment_count]) |attachment| for (rects.?[0..rect_count]) |rect| {
         const image = if (attachment.aspect_mask == 1) color_image else depth_image.?;
         const bytes = if (attachment.aspect_mask == 1) colorBytes(color_image, &attachment.clear_value.color).? else .{ 0, 0, 0, 0 };
-        record(c, .{ .clear_attachments = .{ .image = image, .depth = depth_image, .color = bytes, .depth_value = attachment.clear_value.depth_stencil.depth, .rect = rect.rect, .aspect_mask = attachment.aspect_mask } });
+        record(c, .{ .clear_attachments = .{ .image = image, .depth = depth_image, .color = bytes, .depth_value = attachment.clear_value.depth_stencil.depth, .rect = rect.rect, .aspect_mask = attachment.aspect_mask, .base_layer = rect.base_array_layer, .layer_count = rect.layer_count } });
     };
 }
 fn cmdNextSubpass(cb: ?CommandBuffer, contents: i32) callconv(.c) void {
@@ -6873,17 +6874,20 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
         },
         .clear_attachments => |op| {
             const region = cpu_cube.Rect{ .x = op.rect.offset.x, .y = op.rect.offset.y, .width = op.rect.extent.width, .height = op.rect.extent.height };
-            if (op.aspect_mask == 1) {
-                fillImagePatternRect(imageBytes(op.image), op.image.width, region, @bitCast(op.color));
-                op.image.clear_pattern = null;
-                op.image.content_bounds = unionRect(op.image.content_bounds, region);
-                op.image.force_full_present = true;
-                op.image.complex_3d_content = false;
-            } else {
-                fillImagePatternRect(imageBytes(op.image), op.image.width, region, @bitCast(op.depth_value));
-                op.image.clear_pattern = null;
-                op.image.content_bounds = unionRect(op.image.content_bounds, region);
+            const layer_size: usize = @intCast(imageLayerByteSize(op.image).?);
+            const bytes = imageBytes(op.image);
+            for (0..op.layer_count) |layer| {
+                const start: usize = @intCast(imageLayerOffset(op.image, op.base_layer + @as(u32, @intCast(layer))).?);
+                if (op.aspect_mask == 1) {
+                    fillImagePatternRect(bytes[start..][0..layer_size], op.image.width, region, @bitCast(op.color));
+                } else {
+                    fillImagePatternRect(bytes[start..][0..layer_size], op.image.width, region, @bitCast(op.depth_value));
+                }
             }
+            op.image.clear_pattern = null;
+            op.image.content_bounds = unionRect(op.image.content_bounds, region);
+            if (op.aspect_mask == 1) op.image.force_full_present = true;
+            op.image.complex_3d_content = false;
         },
         .next_subpass => {},
         .cube_draw => |op| {
@@ -7050,6 +7054,19 @@ test "Vulkan host-memory benchmark helpers implement exact command byte semantic
     try std.testing.expectEqualSlices(u8, &filled, &copied);
     try std.testing.expect(!rowSequencesOverlap(0, 8, 2, 4, 32, 8, 2, 4));
 }
+
+test "clear attachment regions execute across array layers" {
+    var storage: [32]u8 align(64) = .{0} ** 32;
+    const memory_bytes: []align(64) u8 = storage[0..];
+    var memory = MemoryObj{ .owner = @ptrFromInt(8), .bytes = memory_bytes, .mapped = false };
+    var image = ImageObj{ .owner = @ptrFromInt(8), .width = 2, .height = 2, .array_layers = 2, .samples = 1, .format = 44, .usage = 0x10, .layout = 1, .memory = &memory };
+    const command: Command = .{ .clear_attachments = .{ .image = &image, .depth = null, .color = .{ 1, 2, 3, 4 }, .depth_value = 0, .rect = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 2, .height = 2 } }, .aspect_mask = 1, .base_layer = 1, .layer_count = 1 } };
+    var query_context = QueryExecutionContext{};
+    executeValidatedCommand(command, &query_context);
+    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** 16, storage[0..16]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4 }, storage[16..32]);
+}
+
 fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy, to_image: bool) void {
     const b = bufferBytes(buffer);
     const pixels = imageBytes(image);
@@ -8720,7 +8737,7 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
     const color_image = color orelse return .error_initialization_failed;
     var compatibility = render_pass.compatibility.clone() catch return .error_out_of_host_memory;
     for (&framebuffer_objects, &framebuffer_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = d, .color_image = color_image, .depth_image = depth, .render_compatibility = compatibility };
+        object.* = .{ .owner = d, .color_image = color_image, .depth_image = depth, .render_compatibility = compatibility, .layers = ci.layers };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;

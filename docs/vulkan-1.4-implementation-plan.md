@@ -259,8 +259,8 @@ currently advertised Vulkan 1.0 profile. Runtime version reporting remains at
 Vulkan 1.0 until the broader feature, CTS, and performance gates below pass.
 Bounded 2D array images are now backed by per-layer memory (up to 256 layers),
 with matching image-format limits, requirements, subresource-layout offsets,
-2D-array views, host copies, clear ranges, buffer/image copies, image copies,
-and blit/resolve layer selection. Core buffer/image copies, image copies,
+2D-array views, host copies, clear ranges, attachment clears, buffer/image
+copies, image copies, and blit/resolve layer selection. Core buffer/image copies, image copies,
 blits, and resolves now execute matching multi-layer regions, with checked
 per-layer buffer strides honoring row length and image height. Invalid layer
 ranges fail before recording, and the array path has a positive
