@@ -17883,7 +17883,7 @@ fn computeStorageProfileTest() !void {
     // command is recorded. An invalid post-record write is rejected
     // failure-atomically, then a corrected write executes normally.
     try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memory, 0, 16, 0, &mapped));
-    @as(*u32, @ptrCast(@alignCast(mapped.?))).* = 0;
+    @as(*u32, @ptrCast(@alignCast(mapped.?))).* = 65_536;
     unmapMemory(ctx.device, memory);
     try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memory, 0, 16, 0, &mapped));
