@@ -4473,7 +4473,7 @@ fn record(cb: CommandBuffer, command: Command) void {
     cb.impl.commands[cb.impl.count] = owned;
     cb.impl.count += 1;
 }
-fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj, dynamic_color: ?*ImageObj, dynamic_depth: ?*ImageObj, dynamic_color_base_layer: u32, dynamic_depth_base_layer: u32, dynamic_layer_count: u32) Command {
+fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj, dynamic_color: ?*ImageObj, dynamic_depth: ?*ImageObj, dynamic_color_layout: i32, dynamic_depth_layout: i32, dynamic_color_base_layer: u32, dynamic_depth_base_layer: u32, dynamic_layer_count: u32) Command {
     var result = command;
     switch (result) {
         .cube_draw => |*draw| if (draw.framebuffer == null) {
@@ -4483,8 +4483,8 @@ fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj,
                 draw.color_base_layer = dynamic_color_base_layer;
                 draw.depth_base_layer = dynamic_depth_base_layer;
                 draw.layer_count = dynamic_layer_count;
-                draw.expected_color_layout = dynamic_color.?.layout;
-                draw.expected_depth_layout = if (dynamic_depth) |image| image.layout else -1;
+                draw.expected_color_layout = dynamic_color_layout;
+                draw.expected_depth_layout = dynamic_depth_layout;
             } else {
                 draw.framebuffer = framebuffer;
             }
@@ -4496,8 +4496,8 @@ fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj,
                 draw.color_base_layer = dynamic_color_base_layer;
                 draw.depth_base_layer = dynamic_depth_base_layer;
                 draw.layer_count = dynamic_layer_count;
-                draw.expected_color_layout = dynamic_color.?.layout;
-                draw.expected_depth_layout = if (dynamic_depth) |image| image.layout else -1;
+                draw.expected_color_layout = dynamic_color_layout;
+                draw.expected_depth_layout = dynamic_depth_layout;
             } else {
                 draw.framebuffer = framebuffer;
             }
@@ -4551,10 +4551,12 @@ fn cmdExecuteCommands(cb: ?CommandBuffer, count: u32, buffers: ?[*]const Command
             return;
         }
     }
+    const dynamic_color_layout = if (execute_dynamic) commandBufferImageLayout(primary, primary.impl.dynamic_color_image.?) else -1;
+    const dynamic_depth_layout = if (execute_dynamic) (if (primary.impl.dynamic_depth_image) |depth| commandBufferImageLayout(primary, depth) else -1) else -1;
     for (list) |raw| {
         const secondary = raw;
         for (secondary.impl.commands[0..secondary.impl.count]) |command| {
-            primary.impl.commands[primary.impl.count] = commandForSecondaryExecution(command, primary.impl.active_framebuffer, if (execute_dynamic) primary.impl.dynamic_color_image else null, if (execute_dynamic) primary.impl.dynamic_depth_image else null, if (execute_dynamic) primary.impl.dynamic_color_base_layer else 0, if (execute_dynamic) primary.impl.dynamic_depth_base_layer else 0, if (execute_dynamic) primary.impl.dynamic_layer_count else 1);
+            primary.impl.commands[primary.impl.count] = commandForSecondaryExecution(command, primary.impl.active_framebuffer, if (execute_dynamic) primary.impl.dynamic_color_image else null, if (execute_dynamic) primary.impl.dynamic_depth_image else null, dynamic_color_layout, dynamic_depth_layout, if (execute_dynamic) primary.impl.dynamic_color_base_layer else 0, if (execute_dynamic) primary.impl.dynamic_depth_base_layer else 0, if (execute_dynamic) primary.impl.dynamic_layer_count else 1);
             primary.impl.count += 1;
         }
         primary.impl.secondaries[primary.impl.secondary_count] = secondary;
@@ -9662,7 +9664,8 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
         return;
     };
     const color = color_view.image;
-    if (color.owner != command_buffer.impl.owner or color_view.aspect_mask != 1 or color_view.usage & 0x10 == 0 or color.format != 44 or color.layout != color_attachment.image_layout or color_view.base_array_layer >= color.array_layers or color_view.layer_count < ci.layer_count or ci.layer_count > color.array_layers - color_view.base_array_layer or ci.render_area.offset.x < 0 or ci.render_area.offset.y < 0 or ci.render_area.extent.width == 0 or ci.render_area.extent.height == 0 or @as(u64, @intCast(ci.render_area.offset.x)) + ci.render_area.extent.width > color.width or @as(u64, @intCast(ci.render_area.offset.y)) + ci.render_area.extent.height > color.height) {
+    const tracked_color_layout = commandBufferImageLayout(command_buffer, color);
+    if (color.owner != command_buffer.impl.owner or color_view.aspect_mask != 1 or color_view.usage & 0x10 == 0 or color.format != 44 or tracked_color_layout != color_attachment.image_layout or color_view.base_array_layer >= color.array_layers or color_view.layer_count < ci.layer_count or ci.layer_count > color.array_layers - color_view.base_array_layer or ci.render_area.offset.x < 0 or ci.render_area.offset.y < 0 or ci.render_area.extent.width == 0 or ci.render_area.extent.height == 0 or @as(u64, @intCast(ci.render_area.offset.x)) + ci.render_area.extent.width > color.width or @as(u64, @intCast(ci.render_area.offset.y)) + ci.render_area.extent.height > color.height) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -9676,7 +9679,8 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
             command_buffer.impl.invalid = true;
             return;
         };
-        if (depth_view.owner != command_buffer.impl.owner or depth_view.aspect_mask != 2 or depth_view.usage & 0x20 == 0 or depth_view.image.format != 126 or depth_view.image.layout != depth_attachment.image_layout or depth_view.base_array_layer >= depth_view.image.array_layers or depth_view.layer_count < ci.layer_count or ci.layer_count > depth_view.image.array_layers - depth_view.base_array_layer or depth_view.image.width != color.width or depth_view.image.height != color.height) {
+        const tracked_depth_layout = commandBufferImageLayout(command_buffer, depth_view.image);
+        if (depth_view.owner != command_buffer.impl.owner or depth_view.aspect_mask != 2 or depth_view.usage & 0x20 == 0 or depth_view.image.format != 126 or tracked_depth_layout != depth_attachment.image_layout or depth_view.base_array_layer >= depth_view.image.array_layers or depth_view.layer_count < ci.layer_count or ci.layer_count > depth_view.image.array_layers - depth_view.base_array_layer or depth_view.image.width != color.width or depth_view.image.height != color.height) {
             command_buffer.impl.invalid = true;
             return;
         }
@@ -9715,7 +9719,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
         command_buffer.impl.invalid = true;
         return;
     }
-    if (clear_color or clear_depth) record(command_buffer, .{ .render_clear = .{ .image = color, .depth = depth, .color = clear_color_value, .depth_value = clear_depth_value, .layer_count = ci.layer_count, .expected_color_layout = color.layout, .expected_depth_layout = if (depth) |image| image.layout else -1, .clear_color = clear_color, .clear_depth = clear_depth } });
+    if (clear_color or clear_depth) record(command_buffer, .{ .render_clear = .{ .image = color, .depth = depth, .color = clear_color_value, .depth_value = clear_depth_value, .layer_count = ci.layer_count, .expected_color_layout = tracked_color_layout, .expected_depth_layout = if (depth) |image| commandBufferImageLayout(command_buffer, image) else -1, .clear_color = clear_color, .clear_depth = clear_depth } });
     command_buffer.impl.dynamic_rendering = true;
     command_buffer.impl.dynamic_inheritance = false;
     command_buffer.impl.dynamic_color_image = color;
@@ -16143,6 +16147,23 @@ test "dynamic rendering begin and end own attachment scope" {
     clear_value.color.float32 = .{ 1, 0, 0, 1 };
     const attachment = RenderingAttachmentInfo{ .s_type = 1000044000, .p_next = null, .image_view = view, .image_layout = 1, .resolve_mode = 0, .resolve_image_view = 0, .resolve_image_layout = 0, .load_op = 1, .store_op = 0, .clear_value = clear_value };
     const rendering = RenderingInfo{ .s_type = 1000044001, .p_next = null, .flags = 0, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 2, .height = 2 } }, .layer_count = 1, .view_mask = 0, .color_attachment_count = 1, .color_attachments = @ptrCast(&attachment), .depth_attachment = null, .stencil_attachment = null };
+    // A layout transition recorded earlier in the same command buffer is the
+    // dynamic-rendering attachment state seen by the begin command.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    validImageLocked(image).?.layout = 0;
+    const dynamic_transition = ImageMemoryBarrier{ .s_type = 45, .p_next = null, .src_access_mask = 0, .dst_access_mask = 0x1800, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    cmdPipelineBarrier(commands[1], 1, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&dynamic_transition));
+    cmdBeginRendering(commands[1], &rendering);
+    try std.testing.expect(!commands[1].impl.invalid);
+    cmdEndRendering(commands[1]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[1]));
+    var transitioned_submit_commands = [_]CommandBuffer{commands[1]};
+    const transitioned_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &transitioned_submit_commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&transitioned_submit), 0));
+    try std.testing.expectEqual(@as(i32, 1), validImageLocked(image).?.layout);
+    @memset(imageBytes(validImageLocked(image).?), 0);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
     cmdBeginRendering(commands[0], &rendering);
     try std.testing.expect(commands[0].impl.dynamic_rendering);
     const dynamic_clear_attachment = ClearAttachment{ .aspect_mask = 1, .color_attachment = 0, .clear_value = clear_value };
