@@ -5010,6 +5010,12 @@ fn sync2AccessMaskToLegacy(mask: u64) ?u32 {
     if (mask & high_storage_write != 0) legacy |= 0x40; // SHADER_WRITE
     return legacy;
 }
+fn sync2TimestampStageToLegacy(stage: u64) ?u32 {
+    // VkCmdWriteTimestamp2 has a single-stage domain even though the
+    // synchronization2 ABI uses a 64-bit flags mask for the parameter.
+    if (stage == 0 or @popCount(stage) != 1) return null;
+    return sync2StageMaskToLegacy(stage);
+}
 
 fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callconv(.c) void {
     if (!dependencyInfoShapeValid(info)) {
@@ -5192,7 +5198,7 @@ fn cmdWaitEvents2(cb: ?CommandBuffer, event_count: u32, events: ?[*]const usize,
     }
 }
 fn cmdWriteTimestamp2(cb: ?CommandBuffer, stage: u64, pool: usize, index: u32) callconv(.c) void {
-    const legacy_stage = sync2StageMaskToLegacy(stage) orelse {
+    const legacy_stage = sync2TimestampStageToLegacy(stage) orelse {
         markCommandBufferInvalid(cb);
         return;
     };
@@ -14374,6 +14380,10 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expectEqual(@as(?u32, 0x20), sync2AccessMaskToLegacy(0x2_0000_0000));
     try std.testing.expect(sync2AccessMaskToLegacy(0x8000) == null);
     try std.testing.expect(sync2AccessMaskToLegacy(0x1_0000) == null);
+    try std.testing.expectEqual(@as(?u32, 0x1000), sync2TimestampStageToLegacy(0x1000));
+    try std.testing.expectEqual(@as(?u32, 0x1000), sync2TimestampStageToLegacy(0x1000_0000_0));
+    try std.testing.expect(sync2TimestampStageToLegacy(0) == null);
+    try std.testing.expect(sync2TimestampStageToLegacy(0x1000 | 0x2000) == null);
     try std.testing.expect(!stagesSupportAccess(0x1_0000, 0x8000));
     try std.testing.expect(sync2StageMaskToLegacy(0x8000_0000_0000_0000) == null);
     const ctx = try createTestDeviceContext();
