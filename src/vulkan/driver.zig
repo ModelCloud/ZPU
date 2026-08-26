@@ -4935,13 +4935,35 @@ fn cmdSetEvent2(cb: ?CommandBuffer, event: usize, info: ?*const DependencyInfo) 
         markCommandBufferInvalid(cb);
         return;
     }
+    const before_count: u16 = blk: {
+        lock();
+        defer mutex.unlock();
+        const command_buffer = validCommandBufferLocked(cb) orelse return;
+        break :blk command_buffer.impl.count;
+    };
     // An empty dependency is valid for event2 commands.  There is no barrier
     // command to lower in that case, but the event operation itself must still
     // be recorded.  For non-empty dependencies, lower the image/buffer state
     // before recording the event so layout tracking and stale-resource
     // validation observe the dependency.
     if (info.?.memory_barrier_count != 0 or info.?.buffer_memory_barrier_count != 0 or info.?.image_memory_barrier_count != 0) cmdPipelineBarrier2(cb, info);
+    lock();
+    const after_barrier = validCommandBufferLocked(cb) orelse {
+        mutex.unlock();
+        return;
+    };
+    if (after_barrier.impl.invalid) {
+        after_barrier.impl.count = before_count;
+        mutex.unlock();
+        return;
+    }
+    mutex.unlock();
     cmdSetEvent(cb, event, 0x1_0000);
+    lock();
+    if (validCommandBufferLocked(cb)) |command_buffer| {
+        if (command_buffer.impl.invalid) command_buffer.impl.count = before_count;
+    }
+    mutex.unlock();
 }
 fn cmdResetEvent2(cb: ?CommandBuffer, event: usize, stage_mask: u64) callconv(.c) void {
     if (stage_mask & 0x4000 != 0) {
@@ -13881,6 +13903,14 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expectEqual(Result.success, beginCommandBuffer(rollback_commands[0], &begin));
     const bad_wait_barrier = ImageMemoryBarrier2{ .s_type = 1000314002, .p_next = null, .src_stage_mask = 1, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = 0, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
     const bad_wait_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 0, .memory_barriers = null, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 1, .image_memory_barriers = @ptrCast(&bad_wait_barrier) };
+    var set_rollback_commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &set_rollback_commands));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(set_rollback_commands[0], &begin));
+    const set_rollback_before = set_rollback_commands[0].impl.count;
+    cmdSetEvent2(set_rollback_commands[0], event, &bad_wait_dependency);
+    try std.testing.expect(set_rollback_commands[0].impl.invalid);
+    try std.testing.expectEqual(set_rollback_before, set_rollback_commands[0].impl.count);
+    freeCommandBuffers(ctx.device, pool, 1, &set_rollback_commands);
     const rollback_before = rollback_commands[0].impl.count;
     cmdWaitEvents2(rollback_commands[0], 1, @ptrCast(&event), @ptrCast(&bad_wait_dependency));
     try std.testing.expect(rollback_commands[0].impl.invalid);
