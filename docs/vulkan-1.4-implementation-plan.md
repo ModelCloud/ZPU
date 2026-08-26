@@ -159,7 +159,7 @@ counts at submission, including post-record writes and failure-atomic invalid
 group rejection.
 Dynamic rendering now records finite
 `loadOp=CLEAR` attachment values for submission, validates clear domains, and
-accepts bounded nonzero `layerCount` values against zero-based array views;
+accepts bounded nonzero `layerCount` values against array-view layer ranges;
 layered clears and framebuffer-free indexed CPU-cube draws execute each
 selected layer, while rejecting command-buffer completion while a rendering
 scope remains open. Secondary command buffers can now carry the bounded

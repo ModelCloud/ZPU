@@ -9465,7 +9465,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
         return;
     };
     const color = color_view.image;
-    if (color.owner != command_buffer.impl.owner or color_view.aspect_mask != 1 or color_view.usage & 0x10 == 0 or color.format != 44 or color.layout != color_attachment.image_layout or color_view.base_array_layer != 0 or color_view.layer_count < ci.layer_count or ci.layer_count > color.array_layers or ci.render_area.offset.x < 0 or ci.render_area.offset.y < 0 or ci.render_area.extent.width == 0 or ci.render_area.extent.height == 0 or @as(u64, @intCast(ci.render_area.offset.x)) + ci.render_area.extent.width > color.width or @as(u64, @intCast(ci.render_area.offset.y)) + ci.render_area.extent.height > color.height) {
+    if (color.owner != command_buffer.impl.owner or color_view.aspect_mask != 1 or color_view.usage & 0x10 == 0 or color.format != 44 or color.layout != color_attachment.image_layout or color_view.base_array_layer >= color.array_layers or color_view.layer_count < ci.layer_count or ci.layer_count > color.array_layers - color_view.base_array_layer or ci.render_area.offset.x < 0 or ci.render_area.offset.y < 0 or ci.render_area.extent.width == 0 or ci.render_area.extent.height == 0 or @as(u64, @intCast(ci.render_area.offset.x)) + ci.render_area.extent.width > color.width or @as(u64, @intCast(ci.render_area.offset.y)) + ci.render_area.extent.height > color.height) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -9479,7 +9479,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
             command_buffer.impl.invalid = true;
             return;
         };
-        if (depth_view.owner != command_buffer.impl.owner or depth_view.aspect_mask != 2 or depth_view.usage & 0x20 == 0 or depth_view.image.format != 126 or depth_view.image.layout != depth_attachment.image_layout or depth_view.base_array_layer != 0 or depth_view.layer_count < ci.layer_count or ci.layer_count > depth_view.image.array_layers or depth_view.image.width != color.width or depth_view.image.height != color.height) {
+        if (depth_view.owner != command_buffer.impl.owner or depth_view.aspect_mask != 2 or depth_view.usage & 0x20 == 0 or depth_view.image.format != 126 or depth_view.image.layout != depth_attachment.image_layout or depth_view.base_array_layer >= depth_view.image.array_layers or depth_view.layer_count < ci.layer_count or ci.layer_count > depth_view.image.array_layers - depth_view.base_array_layer or depth_view.image.width != color.width or depth_view.image.height != color.height) {
             command_buffer.impl.invalid = true;
             return;
         }
