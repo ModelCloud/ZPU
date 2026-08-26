@@ -166,6 +166,10 @@ uniform blocks for direct, indexed, and bounded single-draw indirect commands;
 indirect profile bindings are snapshotted at record time and their post-record
 argument ranges are revalidated at submit.
 The unrestricted SPIR-V graphics space is still intentionally deferred.
+Because `drawIndirectFirstInstance` remains disabled in the truthful feature
+policy, all positive indexed and non-indexed indirect argument records now
+validate `firstInstance == 0` at submission, including the indirect-count
+variants; zero-count commands remain no-ops.
 Indirect dispatch now retains its argument buffer and consumes the three group
 counts at submission, including post-record writes and failure-atomic invalid
 group rejection.
