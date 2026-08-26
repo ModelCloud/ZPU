@@ -164,6 +164,10 @@ pub const Op = enum(u8) {
     bit_field_s_extract,
     /// Component-wise unsigned integer bit-field extraction.
     bit_field_u_extract,
+    /// Dynamic extraction of one component from a vector.
+    vector_extract_dynamic,
+    /// Dynamic replacement of one component in a vector.
+    vector_insert_dynamic,
 };
 
 pub const Instruction = struct {
@@ -322,6 +326,8 @@ fn valueOperand(op: Op, operand_index: usize) bool {
         .transpose, .any, .all, .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set, .bit_reverse, .bit_count => operand_index == 0,
         .bit_field_insert => operand_index < 4,
         .bit_field_s_extract, .bit_field_u_extract => operand_index < 3,
+        .vector_extract_dynamic => operand_index < 2,
+        .vector_insert_dynamic => operand_index < 3,
         .logical_not => operand_index == 0,
         .output => operand_index == 1,
     };

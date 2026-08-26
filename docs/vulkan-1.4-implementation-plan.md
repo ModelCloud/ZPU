@@ -58,7 +58,8 @@ validated interface path. Constant-folded scalar integer comparisons and nested
 boolean logical expressions, signed integer negation, component-wise integer
 multiply, bitwise operations, bounded integer bit reversal and population count,
 bit-field insertion and signed/unsigned extraction, integer division/remainder,
-and bounded integer shifts, floating remainder/modulo
+dynamic vector component extraction/insertion, integer division/remainder, and
+bounded integer shifts, floating remainder/modulo
 with truncating/flooring quotient, dynamic scalar integer comparisons, ordered/unordered scalar
 floating-point comparisons with NaN semantics, and dynamic scalar boolean
 logical operations, bounded f32 4x4 column-major matrix/vector arithmetic
@@ -450,7 +451,8 @@ Each slice must land with all of the following:
   profile now also supports signed integer negation, component-wise integer
   multiply, bitwise operations, bounded integer bit reversal and population count,
   bit-field insertion and signed/unsigned extraction, integer division/remainder,
-  and bounded integer shifts, executes bounded floating
+  dynamic vector component extraction/insertion, and bounded integer shifts,
+  executes bounded floating
   remainder/modulo and dynamic scalar integer comparisons,
   ordered/unordered scalar floating-point comparisons with NaN semantics, and
   dynamic scalar boolean logical operations, bounded f32 4x4 column-major
