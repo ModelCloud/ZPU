@@ -87,6 +87,11 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 110, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 111, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 112, .operands = .{ .min = 3, .max = 3 } },
+    // The bounded IR has only 32-bit scalar domains, so the 32-bit
+    // SConvert/UConvert/FConvert forms are exact type conversions.
+    .{ .opcode = 113, .operands = .{ .min = 3, .max = 3 } },
+    .{ .opcode = 114, .operands = .{ .min = 3, .max = 3 } },
+    .{ .opcode = 115, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 116, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 124, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 126, .operands = .{ .min = 3, .max = 3 } },
@@ -645,7 +650,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 }
                 block_terminated = true;
             },
-            61, 62, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...179, 182...205 => {
+            61, 62, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...179, 182...205 => {
                 if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
                 const valid_arity = switch (instruction.opcode) {
                     61, 84 => w.len == 3,
@@ -657,7 +662,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     80 => w.len >= 3,
                     81 => w.len >= 4,
                     82 => w.len == 5,
-                    83, 109, 110, 111, 112, 116, 124, 126, 127, 154, 155, 156, 157, 158, 159, 160 => w.len == 3,
+                    83, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 154, 155, 156, 157, 158, 159, 160 => w.len == 3,
                     128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 161, 162, 163, 164...167, 170...179, 182...199 => w.len == 4,
                     201 => w.len == 6,
                     202, 203 => w.len == 5,
@@ -811,7 +816,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const source = try valueShape(nodes, w[2]);
                 if (result.scalar != .f32 or result.columns != 4 or result.rows != 4 or !sameShape(result, source)) return error.Malformed;
             },
-            109, 110, 111, 112, 124 => {
+            109, 110, 111, 112, 113, 114, 115, 124 => {
                 const result = try resultShape(nodes, w[0]);
                 const source = try valueShape(nodes, w[2]);
                 if (result.columns != source.columns or result.rows != source.rows) return error.Malformed;
@@ -820,6 +825,9 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     110 => result.scalar == .i32 and source.scalar == .f32,
                     111 => result.scalar == .f32 and source.scalar == .i32,
                     112 => result.scalar == .f32 and source.scalar == .u32,
+                    113 => result.scalar == .u32 and scalarClass(source, .integer),
+                    114 => result.scalar == .i32 and scalarClass(source, .integer),
+                    115 => result.scalar == .f32 and source.scalar == .f32,
                     124 => result.scalar != .bool and source.scalar != .bool and result.scalar != source.scalar,
                     else => unreachable,
                 };
@@ -1145,7 +1153,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
+                41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
@@ -1248,7 +1256,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
+            41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
@@ -1272,7 +1280,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             82 => .composite_insert,
             83 => .copy_object,
             84 => .transpose,
-            109, 110, 111, 112 => .convert,
+            109, 110, 111, 112, 113, 114, 115 => .convert,
             116 => .quantize_f16,
             124 => .bitcast,
             126 => .ineg,
@@ -1510,6 +1518,29 @@ pub const compute_store = [_]u32{
     7,              42,             (5 << 16) | 54,  1,              8,
     0,              6,              (2 << 16) | 248, 9,              (3 << 16) | 62,
     5,              7,              (1 << 16) | 253, (1 << 16) | 56,
+};
+
+/// Compute profile variant exercising an exact 32-bit signed conversion before
+/// the StorageBuffer write.  The source is u32 and the output member is i32;
+/// both domains are represented losslessly by the canonical conversion IR.
+pub const compute_sconvert_store = [_]u32{
+    0x0723_0203,     0x0001_0000,     0,              12,              0,
+    (2 << 16) | 17,  1,               (3 << 16) | 14, 0,               1,
+    (6 << 16) | 15,  5,               8,              0x6e69616d,      0,
+    5,               (6 << 16) | 16,  8,              17,              1,
+    1,               1,               (3 << 16) | 71, 3,               2,
+    (4 << 16) | 71,  5,               33,             0,               (5 << 16) | 72,
+    3,               0,               35,             0,               (4 << 16) | 71,
+    5,               34,              0,              (2 << 16) | 19,  1,
+    (4 << 16) | 21,  2,               32,             0,               (4 << 16) | 21,
+    10,              32,              1,              (3 << 16) | 30,  3,
+    10,              (4 << 16) | 32,  4,              12,              3,
+    (4 << 16) | 59,  4,               5,              12,              (3 << 16) | 33,
+    6,               1,               (4 << 16) | 43, 2,               7,
+    42,              (5 << 16) | 54,  1,              8,               0,
+    6,               (2 << 16) | 248, 9,              (4 << 16) | 114, 10,
+    11,              7,               (3 << 16) | 62, 5,               11,
+    (1 << 16) | 253, (1 << 16) | 56,
 };
 
 /// Compute profile variant exercising component-wise integer multiplication
@@ -2124,6 +2155,60 @@ test "compute profile lowers a bounded storage-buffer store" {
     try std.testing.expectEqual(@as(usize, 2), program.instructions.len);
     try std.testing.expectEqual(ir.Op.output, program.instructions[1].op);
     try std.testing.expectEqual(@as(u32, 42), std.mem.readInt(u32, program.instructions[0].literal[0..4], .little));
+}
+
+test "compute profile lowers 32-bit signed conversion through canonical IR" {
+    var program = try compile(std.testing.allocator, &compute_sconvert_store, .compute, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var saw_convert = false;
+    for (program.instructions) |instruction| {
+        saw_convert = saw_convert or instruction.op == .convert;
+        if (instruction.op == .convert) {
+            try std.testing.expectEqual(ir.Scalar.i32, instruction.ty.scalar);
+            try std.testing.expectEqual(@as(usize, 1), instruction.operands.len);
+        }
+    }
+    try std.testing.expect(saw_convert);
+    try std.testing.expectEqual(ir.Scalar.i32, program.interfaces[0].ty.scalar);
+
+    // Rewire the same module to exercise OpUConvert (i32 -> u32) without
+    // changing its serialized control-flow shape.
+    var unsigned = compute_sconvert_store;
+    const unsigned_struct = testOpcodeOffset(&unsigned, 30, 0).?;
+    unsigned[unsigned_struct + 2] = 2;
+    const unsigned_constant = testOpcodeOffset(&unsigned, 43, 0).?;
+    unsigned[unsigned_constant + 1] = 10;
+    const unsigned_convert = testOpcodeOffset(&unsigned, 114, 0).?;
+    unsigned[unsigned_convert] = (@as(u32, 4) << 16) | 113;
+    unsigned[unsigned_convert + 1] = 2;
+    var unsigned_program = try compile(std.testing.allocator, &unsigned, .compute, "main", &.{});
+    defer unsigned_program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ir.Scalar.u32, unsigned_program.interfaces[0].ty.scalar);
+    try std.testing.expectEqual(ir.Op.convert, unsigned_program.instructions[1].op);
+
+    // Add a supported f32 type and use OpFConvert as an exact f32-domain
+    // identity.  The output remains a single scalar storage member.
+    const struct_offset = testOpcodeOffset(&compute_sconvert_store, 30, 0).?;
+    var float_words = try testInsertWords(std.testing.allocator, &compute_sconvert_store, struct_offset, &.{ (3 << 16) | 22, 12, 32 });
+    defer std.testing.allocator.free(float_words);
+    float_words[3] = 13;
+    const float_struct = testOpcodeOffset(float_words, 30, 0).?;
+    float_words[float_struct + 2] = 12;
+    const float_constant = testOpcodeOffset(float_words, 43, 0).?;
+    float_words[float_constant + 1] = 12;
+    float_words[float_constant + 3] = 0x3f80_0000;
+    const float_convert = testOpcodeOffset(float_words, 114, 0).?;
+    float_words[float_convert] = (@as(u32, 4) << 16) | 115;
+    float_words[float_convert + 1] = 12;
+    var float_program = try compile(std.testing.allocator, float_words, .compute, "main", &.{});
+    defer float_program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ir.Scalar.f32, float_program.interfaces[0].ty.scalar);
+    try std.testing.expectEqual(ir.Op.convert, float_program.instructions[1].op);
+
+    var malformed = compute_sconvert_store;
+    const malformed_convert = testOpcodeOffset(&malformed, 114, 0).?;
+    malformed[malformed_convert + 1] = 2; // OpSConvert must produce signed i32.
+    try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, &malformed, .compute, "main", &.{}));
 }
 
 test "compute profile lowers integer multiply before storage output" {

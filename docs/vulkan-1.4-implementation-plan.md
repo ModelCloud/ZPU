@@ -64,6 +64,7 @@ and exact `OpCopyObject` value copies,
 and bounded `OpQuantizeToF16` f32 precision rounding with normalized-f16
 subnormal flush-to-signed-zero semantics, plus scalar extended integer
 carry/borrow and high-word arithmetic with pair extraction,
+exact 32-bit `OpSConvert`, `OpUConvert`, and `OpFConvert` type conversions,
 integer division/remainder, and bounded
 integer shifts, floating remainder/modulo
 with truncating/flooring quotient, dynamic scalar integer comparisons, ordered/unordered scalar

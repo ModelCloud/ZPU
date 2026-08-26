@@ -908,7 +908,11 @@ fn validate(program: *const ir.Program) Error!void {
         if (instruction.op == .convert) {
             const from = program.instructions[instruction.operands[0]].ty.scalar;
             const to = instruction.ty.scalar;
-            if (from == .bool or to == .bool or (from == to)) return error.InvalidType;
+            // SConvert/UConvert/FConvert are admitted for the supported
+            // 32-bit domains.  Same-domain conversions are exact identities
+            // (notably OpFConvert on f32), while boolean conversions remain
+            // outside the profile.
+            if (from == .bool or to == .bool) return error.InvalidType;
         }
         if (instruction.op == .bitcast) {
             const from = program.instructions[instruction.operands[0]].ty.scalar;
@@ -1020,6 +1024,55 @@ test "storage-buffer access reads descriptor contents before transactional write
     try std.testing.expectEqual(@as(u32, 42), std.mem.readInt(u32, &storage, .little));
     for (0..4096) |_| try executor.execute(&.{.{ .interface = 0, .bytes = &storage }}, &.{.{ .interface = 0, .bytes = &storage }});
     try std.testing.expectEqual(@as(u32, 42 + 4096 * 5), std.mem.readInt(u32, &storage, .little));
+}
+
+test "32-bit integer conversion is exact and allocation-free on the warm path" {
+    const payload = [_]u8{ 0xff, 0xff, 0xff, 0xff };
+    var interfaces = [_]ir.Interface{.{ .storage = .output, .ty = .{ .scalar = .i32 }, .location = 0 }};
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &payload },
+        .{ .op = .convert, .ty = .{ .scalar = .i32 }, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .output, .ty = .{ .scalar = .i32 }, .operands = &.{ 0, 1 }, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    var output = [_]u8{0xaa} ** 4;
+    try executor.execute(&.{}, &.{.{ .interface = 0, .bytes = &output }});
+    try std.testing.expectEqualSlices(u8, &payload, &output);
+    for (0..4096) |_| try executor.execute(&.{}, &.{.{ .interface = 0, .bytes = &output }});
+    try std.testing.expectEqualSlices(u8, &payload, &output);
+
+    const signed_payload = [_]u8{ 0x2a, 0, 0, 0 };
+    var reverse_interfaces = [_]ir.Interface{.{ .storage = .output, .ty = .{ .scalar = .u32 }, .location = 0 }};
+    var reverse_instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = .{ .scalar = .i32 }, .operands = &.{}, .literal = &signed_payload },
+        .{ .op = .convert, .ty = .{ .scalar = .u32 }, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .output, .ty = .{ .scalar = .u32 }, .operands = &.{ 0, 1 }, .literal = &.{} },
+    };
+    var reverse_source = try testProgram(&reverse_interfaces, &reverse_instructions);
+    defer std.testing.allocator.free(reverse_source.bytes);
+    var reverse_executor = try Executor.init(std.testing.allocator, &reverse_source);
+    defer reverse_executor.deinit();
+    var reverse_output = [_]u8{0xaa} ** 4;
+    for (0..4097) |_| try reverse_executor.execute(&.{}, &.{.{ .interface = 0, .bytes = &reverse_output }});
+    try std.testing.expectEqualSlices(u8, &signed_payload, &reverse_output);
+
+    const float_payload = f32bytes(1.25);
+    var float_interfaces = [_]ir.Interface{.{ .storage = .output, .ty = .{ .scalar = .f32 }, .location = 0 }};
+    var float_instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &float_payload },
+        .{ .op = .convert, .ty = .{ .scalar = .f32 }, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .output, .ty = .{ .scalar = .f32 }, .operands = &.{ 0, 1 }, .literal = &.{} },
+    };
+    var float_source = try testProgram(&float_interfaces, &float_instructions);
+    defer std.testing.allocator.free(float_source.bytes);
+    var float_executor = try Executor.init(std.testing.allocator, &float_source);
+    defer float_executor.deinit();
+    var float_output = [_]u8{0xaa} ** 4;
+    for (0..4097) |_| try float_executor.execute(&.{}, &.{.{ .interface = 0, .bytes = &float_output }});
+    try std.testing.expectEqualSlices(u8, &float_payload, &float_output);
 }
 
 test "integer multiply is component-wise and wraps at 32 bits on the warm path" {
