@@ -9555,7 +9555,7 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
         command_buffer.impl.invalid = true;
         return;
     };
-    if (!graphicsDescriptorBindingValid(command_buffer.impl) or pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or vertex_count == 0) {
+    if (!graphicsDescriptorBindingValid(command_buffer.impl) or pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility))) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -9563,7 +9563,7 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
         command_buffer.impl.invalid = true;
         return;
     };
-    if (instance_count == 0) return;
+    if (vertex_count == 0 or instance_count == 0) return;
     const cull_mode = if (command_buffer.impl.dynamic.cull_mode == std.math.maxInt(u32)) pipeline.cull_mode else command_buffer.impl.dynamic.cull_mode;
     const front_face = if (command_buffer.impl.dynamic.front_face < 0) pipeline.front_face else command_buffer.impl.dynamic.front_face;
     const descriptor_snapshot = snapshotDescriptorSet(command_buffer, descriptors) orelse {
@@ -11812,6 +11812,13 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(!commands[0].impl.invalid);
     try std.testing.expectEqual(@as(u32, 1), commands[0].impl.commands[commands[0].impl.count - 1].cube_draw.base_vertex);
     try std.testing.expectEqual(@as(u32, 2), commands[0].impl.commands[commands[0].impl.count - 1].cube_draw.instance_count);
+    const no_op_draw_count = commands[0].impl.count;
+    cmdDraw(commands[0], 0, 1, 0, 0);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(no_op_draw_count, commands[0].impl.count);
+    cmdDrawIndexed(commands[0], 0, 1, 0, 0, 0);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(no_op_draw_count, commands[0].impl.count);
     cmdSetLineWidth(commands[0], 1);
     const dynamic_blend = [_]f32{ 0.125, 0.25, 0.5, 1 };
     cmdSetBlendConstants(commands[0], &dynamic_blend);
