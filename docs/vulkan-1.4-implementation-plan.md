@@ -227,7 +227,11 @@ layered clears and framebuffer-free indexed CPU-cube draws execute each
 selected layer, while rejecting command-buffer completion while a rendering
 scope remains open. Color attachments are optional for depth-only/no-target
 scopes; depth clears and attachment clears remain executable while color draws
-are rejected without a color target. Attachment layouts are snapshotted when dynamic commands
+are rejected without a color target. Dynamic pipeline declarations may also
+set `colorAttachmentCount` to zero when rasterizer discard is enabled; those
+attachmentless draws remain a validated no-op while pipeline, descriptor,
+depth, index, and indirect resources are checked for ownership/liveness.
+Attachment layouts are snapshotted when dynamic commands
 are recorded (including transitions earlier in the same command buffer) and
 checked again at submit, so a post-record host layout change fails atomically
 instead of executing against stale state. The promoted

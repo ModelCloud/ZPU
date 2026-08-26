@@ -1180,11 +1180,11 @@ fn graphicsPipelinePNext(raw: ?*const anyopaque, legacy: u32) ?GraphicsPipelineP
             pipeline_rendering_create_info_stype => {
                 if (seen_rendering) return null;
                 const info: *const PipelineRenderingCreateInfo = @ptrCast(@alignCast(item));
-                if (info.view_mask != 0 or info.color_attachment_count != 1 or info.color_attachment_formats == null or (info.depth_attachment_format != 0 and info.depth_attachment_format != 126) or info.stencil_attachment_format != 0) return null;
-                const color_format = info.color_attachment_formats.?[0];
+                if (info.view_mask != 0 or info.color_attachment_count > 1 or (info.color_attachment_count != 0 and (info.color_attachment_formats == null or info.color_attachment_formats.?[0] != 44)) or (info.depth_attachment_format != 0 and info.depth_attachment_format != 126) or info.stencil_attachment_format != 0) return null;
+                const color_format = if (info.color_attachment_count == 0) 0 else info.color_attachment_formats.?[0];
                 // ZPU's dynamic-rendering attachment path is deliberately
                 // bounded to the same formats accepted by vkCmdBeginRendering.
-                if (color_format != 44) return null;
+                if (color_format != 0 and color_format != 44) return null;
                 rendering = .{ .view_mask = info.view_mask, .color_format = color_format, .depth_format = info.depth_attachment_format, .stencil_format = info.stencil_attachment_format };
                 seen_rendering = true;
             },
@@ -6661,18 +6661,53 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
         },
         .cube_draw => |op| {
             const framebuffer = op.framebuffer;
-            const color = op.color_image orelse (framebuffer orelse return deadResource()).color_image orelse return deadResource();
+            const color_image = op.color_image orelse if (framebuffer) |fb| fb.color_image else null;
             const depth = op.depth_image orelse if (framebuffer) |fb| fb.depth_image else null;
-            const color_slot = imageSlot(color) orelse return deadResource();
-            const depth_slot = if (depth) |value| imageSlot(value) else null;
             if (framebuffer) |fb| if ((stateForObject(FramebufferObj, fb, &framebuffer_objects, &framebuffer_state) orelse return deadResource()).* != .live) return deadResource();
             if ((stateForObject(GraphicsPipelineObj, op.pipeline, &graphics_pipeline_objects, &graphics_pipeline_state) orelse return deadResource()).* != .live or !liveDescriptorObject(op.descriptors)) return deadResource();
+            const depth_slot = if (depth) |value| imageSlot(value) else null;
             const profile_draw = switch (op.pipeline.execution_abi) {
                 .profile_v1_scalar_graphics => true,
                 else => false,
             };
             const uniform = if (op.descriptors.uniform) |value| value else null;
             const texture = if (op.descriptors.texture) |value| value else null;
+            if (!op.pipeline.owner.eql(owner) or !op.descriptors.owner.eql(owner)) return wrongSubmittingDevice();
+            if (depth) |depth_image| {
+                if (depth_image.owner != owner or (depth_image.memory == null and depth_image.owned_bytes == null)) return wrongSubmittingDevice();
+                if (!liveImageObject(depth_image)) return deadResource();
+                if (depth_image.memory != null and !liveMemoryObject(depth_image.memory.?)) return deadResource();
+                if (op.expected_depth_layout >= 0) {
+                    const slot = depth_slot orelse return deadResource();
+                    if (layouts[slot] != op.expected_depth_layout) {
+                        hit(.layout_mismatch);
+                        return false;
+                    }
+                }
+                if (op.layer_count == 0 or op.depth_base_layer >= depth_image.array_layers or op.layer_count > depth_image.array_layers - op.depth_base_layer) return false;
+            } else if (op.expected_depth_layout >= 0) return false;
+            if (color_image == null) {
+                if (op.rasterizer_discard_enable == 0) return deadResource();
+                if (!profile_draw) {
+                    const uniform_buffer = uniform orelse return deadResource();
+                    const texture_image = texture orelse return deadResource();
+                    if (uniform_buffer.owner != owner or texture_image.owner != owner or uniform_buffer.memory == null or texture_image.memory == null) return wrongSubmittingDevice();
+                    if (!liveImageObject(texture_image) or !liveMemoryObject(uniform_buffer.memory.?) or !liveMemoryObject(texture_image.memory.?)) return deadResource();
+                }
+                if (profile_draw and !prevalidateProfileVertexBindings(op, owner)) return false;
+                if (profile_draw and !prevalidateProfileUniforms(op, owner)) return false;
+                if (op.descriptors.sampler) |sampler| {
+                    if ((stateForObject(SamplerObj, sampler, &sampler_objects, &sampler_state) orelse return deadResource()).* != .live) return deadResource();
+                    if (sampler.owner != owner) return wrongSubmittingDevice();
+                }
+                if (op.indexed) |indexed| {
+                    if (!liveBufferObject(indexed.buffer) or indexed.buffer.memory == null or !liveMemoryObject(indexed.buffer.memory.?)) return deadResource();
+                    if (indexed.buffer.owner != owner or indexed.buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+                }
+                return true;
+            }
+            const color = color_image.?;
+            const color_slot = imageSlot(color) orelse return deadResource();
             if (color.owner != owner or !op.descriptors.owner.eql(owner) or (color.memory == null and color.owned_bytes == null)) return wrongSubmittingDevice();
             if (depth) |depth_image| {
                 if (depth_image.owner != owner or (depth_image.memory == null and depth_image.owned_bytes == null)) return wrongSubmittingDevice();
@@ -6713,18 +6748,62 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
         },
         .indirect_draw => |op| {
             const framebuffer = op.framebuffer;
-            const color = op.color_image orelse (framebuffer orelse return deadResource()).color_image orelse return deadResource();
+            const color_image = op.color_image orelse if (framebuffer) |fb| fb.color_image else null;
             const depth = op.depth_image orelse if (framebuffer) |fb| fb.depth_image else null;
-            const color_slot = imageSlot(color) orelse return deadResource();
-            const depth_slot = if (depth) |value| imageSlot(value) else null;
             if (framebuffer) |fb| if ((stateForObject(FramebufferObj, fb, &framebuffer_objects, &framebuffer_state) orelse return deadResource()).* != .live) return deadResource();
             if ((stateForObject(GraphicsPipelineObj, op.pipeline, &graphics_pipeline_objects, &graphics_pipeline_state) orelse return deadResource()).* != .live or !liveDescriptorObject(op.descriptors)) return deadResource();
+            const depth_slot = if (depth) |value| imageSlot(value) else null;
             const profile_draw = switch (op.pipeline.execution_abi) {
                 .profile_v1_scalar_graphics => true,
                 else => false,
             };
             const uniform = if (op.descriptors.uniform) |value| value else null;
             const texture = if (op.descriptors.texture) |value| value else null;
+            if (!op.pipeline.owner.eql(owner) or !op.descriptors.owner.eql(owner)) return wrongSubmittingDevice();
+            if (depth) |depth_image| {
+                if (depth_image.owner != owner or (depth_image.memory == null and depth_image.owned_bytes == null)) return wrongSubmittingDevice();
+                if (!liveImageObject(depth_image)) return deadResource();
+                if (depth_image.memory != null and !liveMemoryObject(depth_image.memory.?)) return deadResource();
+                if (op.expected_depth_layout >= 0) {
+                    const slot = depth_slot orelse return deadResource();
+                    if (layouts[slot] != op.expected_depth_layout) {
+                        hit(.layout_mismatch);
+                        return false;
+                    }
+                }
+                if (op.layer_count == 0 or op.depth_base_layer >= depth_image.array_layers or op.layer_count > depth_image.array_layers - op.depth_base_layer) return false;
+            } else if (op.expected_depth_layout >= 0) return false;
+            if (color_image == null) {
+                if (op.rasterizer_discard_enable == 0) return deadResource();
+                if (!profile_draw) {
+                    const uniform_buffer = uniform orelse return deadResource();
+                    const texture_image = texture orelse return deadResource();
+                    if (uniform_buffer.owner != owner or texture_image.owner != owner or uniform_buffer.memory == null or texture_image.memory == null) return wrongSubmittingDevice();
+                    if (!liveImageObject(texture_image) or !liveMemoryObject(uniform_buffer.memory.?) or !liveMemoryObject(texture_image.memory.?)) return deadResource();
+                }
+                if (!liveBufferObject(op.indirect_buffer) or op.indirect_buffer.memory == null or !liveMemoryObject(op.indirect_buffer.memory.?)) return deadResource();
+                if (op.indirect_buffer.owner != owner or op.indirect_buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+                if (op.count_source) |count| {
+                    if (!liveBufferObject(count.buffer) or count.buffer.memory == null or !liveMemoryObject(count.buffer.memory.?)) return deadResource();
+                    if (count.buffer.owner != owner or count.buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+                    if (count.max_draw_count > 1 or count.offset % 4 != 0 or count.offset > count.buffer.size or count.buffer.size - count.offset < 4) return false;
+                }
+                if (op.indexed) {
+                    const index_buffer = op.index_buffer orelse return deadResource();
+                    if (!liveBufferObject(index_buffer) or index_buffer.memory == null or !liveMemoryObject(index_buffer.memory.?)) return deadResource();
+                    if (index_buffer.owner != owner or index_buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+                }
+                if (!indirectFirstInstanceValid(op)) return false;
+                if (profile_draw and !prevalidateIndirectProfileDraw(op, owner)) return false;
+                if (profile_draw and !prevalidateProfileUniforms(op, owner)) return false;
+                if (op.descriptors.sampler) |sampler| {
+                    if ((stateForObject(SamplerObj, sampler, &sampler_objects, &sampler_state) orelse return deadResource()).* != .live) return deadResource();
+                    if (sampler.owner != owner) return wrongSubmittingDevice();
+                }
+                return true;
+            }
+            const color = color_image.?;
+            const color_slot = imageSlot(color) orelse return deadResource();
             if (color.owner != owner or (color.memory == null and color.owned_bytes == null)) {
                 return wrongSubmittingDevice();
             }
@@ -8419,6 +8498,13 @@ test "dynamic rendering pipeline pNext validation is bounded and canonical" {
         try std.testing.expectEqual(@as(i32, 44), parsed.?.rendering.?.color_format);
         try std.testing.expectEqual(@as(i32, 126), parsed.?.rendering.?.depth_format);
     }
+    var attachmentless = rendering;
+    attachmentless.color_attachment_count = 0;
+    attachmentless.color_attachment_formats = null;
+    parsed = graphicsPipelinePNext(@ptrCast(&attachmentless), 0);
+    try std.testing.expect(parsed != null and parsed.?.rendering != null);
+    try std.testing.expectEqual(@as(i32, 0), parsed.?.rendering.?.color_format);
+    try std.testing.expectEqual(@as(i32, 126), parsed.?.rendering.?.depth_format);
     var bad = rendering;
     bad.color_attachment_formats = null;
     try std.testing.expect(graphicsPipelinePNext(@ptrCast(&bad), 0) == null);
@@ -8821,17 +8907,20 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     try w.u32le(1);
     try w.i32le(3);
     const cb = ci.color_blend orelse return error.Invalid;
-    if (cb.s_type != 26 or cb.p_next != null or cb.flags != 0 or try bool32(cb.logic_op_enable) != 0 or cb.logic_op != 0 or cb.attachment_count != 1 or cb.attachments == null or !std.meta.eql(cb.blend_constants, [_]f32{ 0, 0, 0, 0 })) return error.Invalid;
-    const attachment = cb.attachments.?[0];
-    if (try bool32(attachment.blend_enable) != 0 or attachment.src_color_blend_factor < 0 or attachment.src_color_blend_factor > 18 or attachment.dst_color_blend_factor < 0 or attachment.dst_color_blend_factor > 18 or attachment.color_blend_op < 0 or attachment.color_blend_op > 4 or attachment.src_alpha_blend_factor < 0 or attachment.src_alpha_blend_factor > 18 or attachment.dst_alpha_blend_factor < 0 or attachment.dst_alpha_blend_factor > 18 or attachment.alpha_blend_op < 0 or attachment.alpha_blend_op > 4 or attachment.color_write_mask != 0xf) return error.Invalid;
-    try w.u32le(1);
-    try w.i32le(attachment.src_color_blend_factor);
-    try w.i32le(attachment.dst_color_blend_factor);
-    try w.i32le(attachment.color_blend_op);
-    try w.i32le(attachment.src_alpha_blend_factor);
-    try w.i32le(attachment.dst_alpha_blend_factor);
-    try w.i32le(attachment.alpha_blend_op);
-    try w.u32le(0xf);
+    const color_attachment_count: u32 = if (dynamic_rendering_state) |state| if (state.color_format == 0) 0 else 1 else 1;
+    if (cb.s_type != 26 or cb.p_next != null or cb.flags != 0 or try bool32(cb.logic_op_enable) != 0 or cb.logic_op != 0 or cb.attachment_count != color_attachment_count or (color_attachment_count != 0 and cb.attachments == null) or (color_attachment_count == 0 and cb.attachments != null) or !std.meta.eql(cb.blend_constants, [_]f32{ 0, 0, 0, 0 })) return error.Invalid;
+    try w.u32le(color_attachment_count);
+    if (color_attachment_count != 0) {
+        const attachment = cb.attachments.?[0];
+        if (try bool32(attachment.blend_enable) != 0 or attachment.src_color_blend_factor < 0 or attachment.src_color_blend_factor > 18 or attachment.dst_color_blend_factor < 0 or attachment.dst_color_blend_factor > 18 or attachment.color_blend_op < 0 or attachment.color_blend_op > 4 or attachment.src_alpha_blend_factor < 0 or attachment.src_alpha_blend_factor > 18 or attachment.dst_alpha_blend_factor < 0 or attachment.dst_alpha_blend_factor > 18 or attachment.alpha_blend_op < 0 or attachment.alpha_blend_op > 4 or attachment.color_write_mask != 0xf) return error.Invalid;
+        try w.i32le(attachment.src_color_blend_factor);
+        try w.i32le(attachment.dst_color_blend_factor);
+        try w.i32le(attachment.color_blend_op);
+        try w.i32le(attachment.src_alpha_blend_factor);
+        try w.i32le(attachment.dst_alpha_blend_factor);
+        try w.i32le(attachment.alpha_blend_op);
+        try w.u32le(0xf);
+    }
     var canonical = try w.done();
     errdefer canonical.deinit();
     var layout_identity = try layout.canonical.clone();
@@ -10852,7 +10941,7 @@ fn graphicsDrawExecutionAllowed(abi: ExecutionAbi) bool {
 }
 fn dynamicPipelineRenderingCompatible(command_buffer: *const CommandBufferImpl, pipeline: *const GraphicsPipelineObj) bool {
     if (!pipeline.dynamic_rendering) return true;
-    const color_format = if (command_buffer.dynamic_inheritance) command_buffer.inherited_dynamic_color_format else (command_buffer.dynamic_color_image orelse return false).format;
+    const color_format = if (command_buffer.dynamic_inheritance) command_buffer.inherited_dynamic_color_format else if (command_buffer.dynamic_color_image) |color| color.format else 0;
     if (color_format != pipeline.rendering_color_format) return false;
     const depth_format = if (command_buffer.dynamic_inheritance) command_buffer.inherited_dynamic_depth_format else if (command_buffer.dynamic_depth_image) |depth| depth.format else 0;
     if (pipeline.rendering_depth_format == 0) {
@@ -13540,6 +13629,27 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(@as(usize, 0xfeed_face), invalid_dynamic_pipeline[0]);
     try std.testing.expectEqualSlices(SlotState, &dynamic_pipeline_states_before_rejection, &graphics_pipeline_state);
     dynamic_pipeline_formats[0] = 44;
+    var discard_rasterization = rasterization;
+    discard_rasterization.rasterizer_discard_enable = 1;
+    var no_color_blend = color_blend;
+    no_color_blend.attachment_count = 0;
+    no_color_blend.attachments = null;
+    var no_color_rendering = dynamic_pipeline_rendering;
+    no_color_rendering.color_attachment_count = 0;
+    no_color_rendering.color_attachment_formats = null;
+    var no_color_pipeline_info = dynamic_pipeline_info;
+    no_color_pipeline_info.p_next = @ptrCast(&no_color_rendering);
+    no_color_pipeline_info.rasterization = &discard_rasterization;
+    no_color_pipeline_info.color_blend = &no_color_blend;
+    var no_color_pipeline: [1]usize = .{0xfeed_face};
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&no_color_pipeline_info), null, &no_color_pipeline));
+    const no_color_pipeline_object = validGraphicsPipelineLocked(no_color_pipeline[0]).?;
+    try std.testing.expectEqual(@as(i32, 0), no_color_pipeline_object.rendering_color_format);
+    try std.testing.expectEqual(@as(i32, 126), no_color_pipeline_object.rendering_depth_format);
+    try std.testing.expectEqual(@as(u32, 1), no_color_pipeline_object.rasterizer_discard_enable);
+    // The fixture's shader pair is intentionally promoted to the executable
+    // CPU-cube ABI just like the color-bearing dynamic pipeline above.
+    no_color_pipeline_object.execution_abi = .cpu_cube_v1;
     var graphics_flags2 = PipelineCreateFlags2CreateInfo{ .s_type = pipeline_create_flags2_stype, .p_next = null, .flags = 0 };
     var graphics_flags2_info = pipeline_info;
     graphics_flags2_info.p_next = @ptrCast(&graphics_flags2);
@@ -14528,6 +14638,40 @@ test "vkcube presentation path records submits and presents two swapchain images
     cmdEndRendering(multi_commands[0]);
     try std.testing.expectEqual(Result.success, endCommandBuffer(multi_commands[0]));
     try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&dynamic_submit), 0));
+
+    // A dynamic graphics pipeline may legally declare zero color attachments
+    // when rasterizer discard is enabled.  It records a draw envelope without
+    // dereferencing a color image and executes as a no-op at submission.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    validImageLocked(depth_image).?.layout = 3;
+    cmdBeginRendering(multi_commands[0], &depth_only_rendering);
+    cmdBindPipeline(multi_commands[0], 0, no_color_pipeline[0]);
+    cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    setCoreDynamicGraphicsStateForTest(multi_commands[0], &viewport, &render_info.render_area);
+    cmdDraw(multi_commands[0], 3, 1, 0, 0);
+    try std.testing.expect(!multi_commands[0].impl.invalid);
+    cmdEndRendering(multi_commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(multi_commands[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&dynamic_submit), 0));
+
+    // A discard-only draw still snapshots the depth layout.  Mutating that
+    // layout after recording must reject the whole submit before execution.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    validImageLocked(depth_image).?.layout = 3;
+    cmdBeginRendering(multi_commands[0], &depth_only_rendering);
+    cmdBindPipeline(multi_commands[0], 0, no_color_pipeline[0]);
+    cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    setCoreDynamicGraphicsStateForTest(multi_commands[0], &viewport, &render_info.render_area);
+    cmdDraw(multi_commands[0], 3, 1, 0, 0);
+    cmdEndRendering(multi_commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(multi_commands[0]));
+    validImageLocked(depth_image).?.layout = 1;
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(queue, 1, @ptrCast(&dynamic_submit), 0));
+    validImageLocked(depth_image).?.layout = 3;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+    destroyPipeline(device, no_color_pipeline[0], null);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(render_secondary[0], 0));
     dynamic_secondary_inheritance.p_next = &dynamic_secondary_rendering;
     try std.testing.expectEqual(Result.success, beginCommandBuffer(render_secondary[0], &dynamic_secondary_begin));
