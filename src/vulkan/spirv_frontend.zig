@@ -258,6 +258,11 @@ fn staticConditionAt(nodes: []const Node, value_id: u32, depth: u8) Error!?bool 
             else => unreachable,
         };
     }
+    if (node.opcode == 169) {
+        if (node.words.len != 3) return error.Malformed;
+        const condition = try staticConditionAt(nodes, node.words[0], depth + 1) orelse return null;
+        return staticConditionAt(nodes, if (condition) node.words[1] else node.words[2], depth + 1);
+    }
     if (node.opcode < 170 or node.opcode > 179) return null;
     if (node.words.len != 2) return error.Malformed;
     const left = nodes[try id(nodes, node.words[0])];
@@ -559,7 +564,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     }
                 } else if (instruction.opcode == 250) {
                     const condition = nodes[try id(nodes, w[0])];
-                    if (!((condition.kind == .constant and (condition.opcode == 41 or condition.opcode == 42)) or (condition.kind == .function_value and ((condition.opcode >= 164 and condition.opcode <= 168) or (condition.opcode >= 170 and condition.opcode <= 179))))) return error.Unsupported;
+                    if (!((condition.kind == .constant and (condition.opcode == 41 or condition.opcode == 42)) or (condition.kind == .function_value and ((condition.opcode >= 164 and condition.opcode <= 179))))) return error.Unsupported;
                 }
                 if (instruction.opcode == 249) {
                     _ = try id(nodes, w[0]);
@@ -1772,6 +1777,28 @@ test "compute profile folds nested static logical conditions" {
     var unary_program = try compile(std.testing.allocator, unary, .compute, "main", &.{});
     defer unary_program.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 99), std.mem.readInt(u32, unary_program.instructions[0].literal[0..4], .little));
+}
+
+test "compute profile resolves a static boolean select branch" {
+    const true_offset = testOpcodeOffset(&compute_static_compare_phi_store, 41, 0).?;
+    var with_false = try testInsertWords(std.testing.allocator, &compute_static_compare_phi_store, true_offset, &.{ (3 << 16) | 42, 14, 18 });
+    defer std.testing.allocator.free(with_false);
+    with_false[3] = 20;
+    const branch_offset = testOpcodeOffset(with_false, 250, 0).?;
+    var selected = try testInsertWords(std.testing.allocator, with_false, branch_offset, &.{ (6 << 16) | 169, 14, 19, 17, 15, 18 });
+    defer std.testing.allocator.free(selected);
+    selected[3] = 20;
+    const selected_branch = testOpcodeOffset(selected, 250, 0).?;
+    selected[selected_branch + 1] = 19;
+    var program = try compile(std.testing.allocator, selected, .compute, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 42), std.mem.readInt(u32, program.instructions[0].literal[0..4], .little));
+
+    const compare = testOpcodeOffset(selected, 170, 0).?;
+    selected[compare + 4] = 13;
+    var false_program = try compile(std.testing.allocator, selected, .compute, "main", &.{});
+    defer false_program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 99), std.mem.readInt(u32, false_program.instructions[0].literal[0..4], .little));
 }
 
 test "compute profile lowers a boolean select into storage output" {
