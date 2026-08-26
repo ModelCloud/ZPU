@@ -9240,7 +9240,7 @@ fn bindVertexBuffersLocked(command_buffer: *CommandBufferObj, first_binding: u32
             return;
         };
         const available = if (offset <= buffer.size) buffer.size - offset else 0;
-        const size = if (buffer_sizes) |items| items[relative] else available;
+        const size = if (buffer_sizes) |items| (if (items[relative] == std.math.maxInt(u64)) available else items[relative]) else available;
         const stride = if (buffer_strides) |items| items[relative] else 0;
         if (buffer.owner != command_buffer.impl.owner or buffer.usage & 0x80 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or offset >= buffer.size or size == 0 or size > available or (stride != 0 and stride > 2048)) {
             command_buffer.impl.invalid = true;
@@ -16751,6 +16751,12 @@ test "vertex and index bindings are typed atomic lifecycle state and allocation 
     try std.testing.expect(!commands[0].impl.invalid);
     try std.testing.expectEqual([2]u64{ 16, 24 }, commands[0].impl.vertex_bindings.sizes[2..4].*);
     try std.testing.expectEqual([2]u64{ 8, 16 }, commands[0].impl.vertex_bindings.strides[2..4].*);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    const whole_sizes = [_]u64{ std.math.maxInt(u64), std.math.maxInt(u64) };
+    cmdBindVertexBuffers2(commands[0], 2, 2, &buffers, &offsets, &whole_sizes, &bounded_strides);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual([2]u64{ 60, 56 }, commands[0].impl.vertex_bindings.sizes[2..4].*);
     const before_bounded = commands[0].impl.vertex_bindings;
     const oversized = [_]u64{ 61, 24 };
     cmdBindVertexBuffers2(commands[0], 2, 2, &buffers, &offsets, &oversized, &bounded_strides);
