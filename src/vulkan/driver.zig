@@ -2475,7 +2475,11 @@ fn getProperties(physical: ?Physical, output: ?*Properties) callconv(.c) void {
 fn getQueuePropertiesLocked(h: Physical, n: *u32, output: ?[*]QueueProperties) bool {
     if (!validPhysicalLocked(h)) return false;
     if (output) |items| {
-        if (n.* > 0) items[0] = .{ .flags = 0x1 | 0x4, .count = 1, .timestamp_bits = 64, .granularity = .{ .width = 1, .height = 1, .depth = 1 } };
+        // The single queue executes graphics, compute, and transfer command
+        // streams.  Keep the reported family capability set aligned with
+        // the compute dispatch entry points rather than exposing a queue that
+        // cannot legally submit them.
+        if (n.* > 0) items[0] = .{ .flags = 0x1 | 0x2 | 0x4, .count = 1, .timestamp_bits = 64, .granularity = .{ .width = 1, .height = 1, .depth = 1 } };
         n.* = @min(n.*, 1);
     } else n.* = 1;
     return true;
@@ -12359,7 +12363,7 @@ test "core instance physical and device enumeration is bounded and allocation fr
         var queue_properties: [1]QueueProperties = undefined;
         getQueueProperties(physical[0], &queue_count, &queue_properties);
         try std.testing.expectEqual(@as(u32, 1), queue_count);
-        try std.testing.expectEqual(@as(u32, 0x5), queue_properties[0].flags);
+        try std.testing.expectEqual(@as(u32, 0x7), queue_properties[0].flags);
         try std.testing.expectEqual(@as(u32, 64), queue_properties[0].timestamp_bits);
         var memory_properties: MemoryProperties = undefined;
         getMemoryProperties(physical[0], &memory_properties);
@@ -14573,7 +14577,7 @@ test "all physical queries cover success boundaries and invalid handles" {
     try std.testing.expectEqual(@as(u32, 0), queue_count);
     queue_count = 1;
     getQueueProperties(p, &queue_count, &queue_properties);
-    try std.testing.expectEqual(@as(u32, 0x5), queue_properties[0].flags);
+    try std.testing.expectEqual(@as(u32, 0x7), queue_properties[0].flags);
     try std.testing.expectEqual(@as(u32, 1), queue_properties[0].count);
 
     var memory: MemoryProperties = undefined;

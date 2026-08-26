@@ -181,7 +181,7 @@ int main(void) {
     queue_family_count = 1;
     vkGetPhysicalDeviceQueueFamilyProperties(physical, &queue_family_count, &queue_family);
     CHECK_TRUE(queue_family_count == 1);
-    CHECK_TRUE(queue_family.queueFlags == (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_TRANSFER_BIT));
+    CHECK_TRUE(queue_family.queueFlags == (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT));
     CHECK_TRUE(queue_family.queueCount == 1 && queue_family.timestampValidBits == 64);
     CHECK_TRUE(queue_family.minImageTransferGranularity.width == 1 && queue_family.minImageTransferGranularity.height == 1 && queue_family.minImageTransferGranularity.depth == 1);
     VkPhysicalDeviceMemoryProperties physical_memory;

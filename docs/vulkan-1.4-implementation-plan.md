@@ -258,6 +258,10 @@ allocation limits respectively. The generated command matrix is a
 several commands intentionally expose only the narrow behavior behind the
 currently advertised Vulkan 1.0 profile. Runtime version reporting remains at
 Vulkan 1.0 until the broader feature, CTS, and performance gates below pass.
+The single queue family now reports graphics, compute, and transfer capability,
+matching the bounded compute pipeline and dispatch commands that can be
+submitted through it; queue count, timestamp, and granularity limits are
+unchanged.
 Bounded 2D array images are now backed by per-layer memory (up to 256 layers),
 with matching image-format limits, requirements, subresource-layout offsets,
 2D-array views, host copies, clear ranges, attachment clears, buffer/image
