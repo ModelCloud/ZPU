@@ -5383,6 +5383,79 @@ fn querySlotStateForRecording(c: *const CommandBufferObj, pool: *const QueryPool
     }
     return state;
 }
+fn querySlotStateBeforeSubmitCommand(submits: []const SubmitInfo, submit_index: usize, command_buffer_index: usize, command_index: usize, pool: *const QueryPoolObj, index: u32) u8 {
+    var state = pool.slots[index].state.load(.acquire);
+    for (submits[0..submit_index]) |submit| {
+        if (submit.command_buffer_count == 0) continue;
+        for (submit.command_buffers.?[0..submit.command_buffer_count]) |cb| for (cb.impl.commands[0..cb.impl.count]) |command| switch (command) {
+            .query_reset => |op| {
+                if (op.pool == pool and index >= op.first and index - op.first < op.count) state = 0;
+            },
+            .query_begin => |op| {
+                if (op.pool == pool and op.index == index) state = 1;
+            },
+            .query_end => |op| {
+                if (op.pool == pool and op.index == index) state = 2;
+            },
+            .query_timestamp => |op| {
+                if (op.pool == pool and op.index == index) state = 2;
+            },
+            else => {},
+        };
+    }
+    const current_submit = submits[submit_index];
+    if (current_submit.command_buffer_count != 0) {
+        const buffers = current_submit.command_buffers.?[0..current_submit.command_buffer_count];
+        for (buffers[0..command_buffer_index]) |cb| for (cb.impl.commands[0..cb.impl.count]) |command| switch (command) {
+            .query_reset => |op| {
+                if (op.pool == pool and index >= op.first and index - op.first < op.count) state = 0;
+            },
+            .query_begin => |op| {
+                if (op.pool == pool and op.index == index) state = 1;
+            },
+            .query_end => |op| {
+                if (op.pool == pool and op.index == index) state = 2;
+            },
+            .query_timestamp => |op| {
+                if (op.pool == pool and op.index == index) state = 2;
+            },
+            else => {},
+        };
+        for (buffers[command_buffer_index].impl.commands[0..command_index]) |command| switch (command) {
+            .query_reset => |op| {
+                if (op.pool == pool and index >= op.first and index - op.first < op.count) state = 0;
+            },
+            .query_begin => |op| {
+                if (op.pool == pool and op.index == index) state = 1;
+            },
+            .query_end => |op| {
+                if (op.pool == pool and op.index == index) state = 2;
+            },
+            .query_timestamp => |op| {
+                if (op.pool == pool and op.index == index) state = 2;
+            },
+            else => {},
+        };
+    }
+    return state;
+}
+fn queryCommandSequenceValid(command: Command, submits: []const SubmitInfo, submit_index: usize, command_buffer_index: usize, command_index: usize) bool {
+    switch (command) {
+        .query_reset => |op| {
+            var index = op.first;
+            var remaining = op.count;
+            while (remaining != 0) : ({
+                index += 1;
+                remaining -= 1;
+            }) if (querySlotStateBeforeSubmitCommand(submits, submit_index, command_buffer_index, command_index, op.pool, index) == 1) return false;
+        },
+        .query_begin => |op| return querySlotStateBeforeSubmitCommand(submits, submit_index, command_buffer_index, command_index, op.pool, op.index) == 0,
+        .query_end => |op| return querySlotStateBeforeSubmitCommand(submits, submit_index, command_buffer_index, command_index, op.pool, op.index) == 1,
+        .query_timestamp => |op| return querySlotStateBeforeSubmitCommand(submits, submit_index, command_buffer_index, command_index, op.pool, op.index) == 0,
+        else => {},
+    }
+    return true;
+}
 fn cmdResetQueryPool(cb: ?CommandBuffer, handle: usize, first: u32, count: u32) callconv(.c) void {
     lock();
     defer mutex.unlock();
@@ -10551,7 +10624,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
             timeline_states[index] = semaphore.timeline_value.load(.acquire);
         }
     }
-    for (list[0..count]) |submit| {
+    for (list[0..count], 0..) |submit, submit_index| {
         if (submit.s_type != 4 or submit.wait_semaphore_count > max_api_items or submit.command_buffer_count > max_api_items or submit.signal_semaphore_count > max_api_items or
             (submit.wait_semaphore_count != 0 and submit.wait_semaphores == null) or
             (submit.wait_semaphore_count != 0 and submit.wait_dst_stage_mask == null) or
@@ -10602,7 +10675,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
         }
         if (submit.command_buffer_count == 0) continue;
         const cbs = submit.command_buffers orelse return .error_initialization_failed;
-        for (cbs[0..submit.command_buffer_count]) |cb| {
+        for (cbs[0..submit.command_buffer_count], 0..) |cb, command_buffer_index| {
             const valid_cb = validCommandBufferLocked(cb) orelse return .error_initialization_failed;
             if (valid_cb.impl.owner != q.owner or valid_cb.impl.level != 0 or valid_cb.impl.state != 2) {
                 return .error_initialization_failed;
@@ -10611,10 +10684,12 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
             if (submitted_command_buffers[cb_slot] and valid_cb.impl.begin_flags & 4 == 0) return .error_initialization_failed;
             submitted_command_buffers[cb_slot] = true;
             for (valid_cb.impl.secondaries[0..valid_cb.impl.secondary_count]) |secondary| if ((stateForObject(CommandBufferObj, secondary, &command_buffer_objects, &command_buffer_state) orelse return .error_initialization_failed).* != .live or secondary.impl.state != 2) return .error_initialization_failed;
-            for (valid_cb.impl.commands[0..valid_cb.impl.count]) |command| if (!prevalidateCommand(command, q.owner, &layouts)) {
-                hit(.submission_atomicity);
-                return .error_initialization_failed;
-            };
+            for (valid_cb.impl.commands[0..valid_cb.impl.count], 0..) |command, command_index| {
+                if (!prevalidateCommand(command, q.owner, &layouts) or !queryCommandSequenceValid(command, list[0..count], submit_index, command_buffer_index, command_index)) {
+                    hit(.submission_atomicity);
+                    return .error_initialization_failed;
+                }
+            }
         }
     }
     mutex.unlock();
@@ -16947,8 +17022,8 @@ test "query pools expose exact availability timestamps copies and lifecycle" {
     const command_pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
     var command_pool: usize = 0;
     try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &command_pool_info, null, &command_pool));
-    const allocate = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = command_pool, .level = 0, .command_buffer_count = 1 };
-    var commands: [1]CommandBuffer = undefined;
+    const allocate = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = command_pool, .level = 0, .command_buffer_count = 2 };
+    var commands: [2]CommandBuffer = undefined;
     try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &commands));
     const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
@@ -16967,6 +17042,19 @@ test "query pools expose exact availability timestamps copies and lifecycle" {
     cmdCopyQueryPoolResults(commands[0], timestamp_pool, 2, 0, buffer, 0, 0, 0);
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBeginQuery(commands[0], occlusion_pool, 0, 0);
+    cmdEndQuery(commands[0], occlusion_pool, 0);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    cmdBeginQuery(commands[1], occlusion_pool, 0, 0);
+    cmdEndQuery(commands[1], occlusion_pool, 0);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[1]));
+    var cross_command_buffers = [_]CommandBuffer{ commands[0], commands[1] };
+    const cross_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 2, .command_buffers = &cross_command_buffers, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&cross_submit), 0));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdResetQueryPool(commands[0], timestamp_pool, 0, 2);
     cmdWriteTimestamp(commands[0], 1, timestamp_pool, 0);
