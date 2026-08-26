@@ -1955,6 +1955,7 @@ fn createInstance(info: ?*const InstanceInfo, alloc: ?*const Alloc, output: ?*In
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
     if (ci.layer_count != 0) return .error_layer_not_present;
+    if (ci.extension_count > max_api_items) return .error_initialization_failed;
     if (ci.extension_count != 0) {
         const extensions = ci.extensions orelse return .error_extension_not_present;
         for (extensions[0..ci.extension_count]) |extension| if (!supportedInstanceExtension(extension)) return .error_extension_not_present;
@@ -2517,6 +2518,7 @@ fn createDevice(physical: ?Physical, info: ?*const DeviceInfo, alloc: ?*const Al
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
     if (ci.layer_count != 0) return .error_layer_not_present;
+    if (ci.extension_count > max_api_items) return .error_initialization_failed;
     if (ci.extension_count != 0) {
         const extensions = ci.extensions orelse return .error_extension_not_present;
         for (extensions[0..ci.extension_count]) |extension| {
@@ -12999,6 +13001,11 @@ test "creation rejects every supported invalid-input class" {
     ci.layer_count = 0;
     ci.extension_count = 1;
     try std.testing.expectEqual(Result.error_extension_not_present, createInstance(&ci, null, &instance));
+    const instance_extension = [_][*:0]const u8{"VK_KHR_surface"};
+    ci.extensions = &instance_extension;
+    ci.extension_count = max_api_items + 1;
+    try std.testing.expectEqual(Result.error_initialization_failed, createInstance(&ci, null, &instance));
+    ci.extensions = null;
     ci.extension_count = 0;
     ci.flags = 1;
     try std.testing.expectEqual(Result.error_initialization_failed, createInstance(&ci, null, &instance));
@@ -13031,6 +13038,11 @@ test "creation rejects every supported invalid-input class" {
     di.layer_count = 0;
     di.extension_count = 1;
     try std.testing.expectEqual(Result.error_extension_not_present, createDevice(physical[0], &di, null, &device));
+    di.extensions = &instance_extension;
+    di.extension_count = max_api_items + 1;
+    try std.testing.expectEqual(Result.error_initialization_failed, createDevice(physical[0], &di, null, &device));
+    di.extensions = null;
+    di.extension_count = 1;
     const google_extension = [_][*:0]const u8{google_display_timing_extension};
     di.extensions = &google_extension;
     try std.testing.expectEqual(Result.error_extension_not_present, createDevice(physical[0], &di, null, &device));
