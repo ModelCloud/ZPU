@@ -19960,7 +19960,7 @@ fn computeStorageProfileTest() !void {
     var pipeline_layout: usize = 0;
     try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &pipeline_layout_info, null, &pipeline_layout));
 
-    const words = spirv_frontend.compute_static_switch_store;
+    const words = spirv_frontend.compute_static_branch_phi_store;
     const shader_info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = @sizeOf(@TypeOf(words)), .p_code = &words };
     var shader: usize = 0;
     try std.testing.expectEqual(Result.success, createShaderModule(ctx.device, &shader_info, null, &shader));

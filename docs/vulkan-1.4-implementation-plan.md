@@ -433,7 +433,10 @@ Each slice must land with all of the following:
   ownership, submit-time validation, transactional descriptor aliasing, and
   end-to-end write tests. Static acyclic branch and constant-selector switch
   profiles are also lowered with unselected side-effect blocks removed.
-  Indirect dispatch arguments are consumed at submission. Generic SPIR-V
+  Indirect dispatch arguments are consumed at submission. The bounded compute
+  profile now also resolves predecessor-selected `OpPhi` values at static
+  acyclic branch joins, preserving only the incoming value from the selected
+  predecessor before lowering to straight-line canonical IR. Generic SPIR-V
   dynamic control flow, dynamic indexing, atomics, shared-memory execution,
   and complete compute memory-visibility semantics remain.
 - [ ] **A8 — secondary command buffers:** inheritance, execution, reset, and

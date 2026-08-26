@@ -79,6 +79,7 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 249, .operands = .{ .min = 0, .max = max_entry_point_operands } },
     .{ .opcode = 250, .operands = .{ .min = 0, .max = max_entry_point_operands } },
     .{ .opcode = 251, .operands = .{ .min = 0, .max = max_entry_point_operands } },
+    .{ .opcode = 245, .operands = .{ .min = 0, .max = max_entry_point_operands } },
     .{ .opcode = 109, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 110, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 111, .operands = .{ .min = 3, .max = 3 } },
@@ -452,6 +453,19 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 in_function = false;
                 current_function = 0;
             },
+            245 => {
+                if (requested_stage != .compute) return error.Unsupported;
+                if (!in_function or !label_seen or terminated or block_terminated or w.len < 6 or (w.len - 2) % 2 != 0) return error.Malformed;
+                const result = try resultShape(nodes, w[0]);
+                var pair_index: usize = 2;
+                while (pair_index < w.len) : (pair_index += 2) {
+                    const value_shape = try valueShape(nodes, w[pair_index]);
+                    if (!sameShape(result, value_shape)) return error.Malformed;
+                    const label = nodes[try id(nodes, w[pair_index + 1])];
+                    if (label.kind != .label) return error.Malformed;
+                }
+                try define(nodes, w[1], .{ .kind = .function_value, .type_id = w[0], .opcode = 245, .words = w[2..] });
+            },
             249, 250, 251 => {
                 if (requested_stage != .compute) return error.Unsupported;
                 if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
@@ -712,6 +726,9 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
     const reachable = allocator.alloc(bool, module.instructions.len) catch return error.OutOfMemory;
     defer allocator.free(reachable);
     @memset(reachable, false);
+    const predecessor = allocator.alloc(u32, module.instructions.len) catch return error.OutOfMemory;
+    defer allocator.free(predecessor);
+    @memset(predecessor, std.math.maxInt(u32));
     var first_label: ?usize = null;
     for (module.instructions, instruction_functions, 0..) |instruction, instruction_function, instruction_index| {
         if (instruction_function == entry.function and instruction.opcode == 248) {
@@ -720,6 +737,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         }
     }
     var current_block = first_label orelse return error.Malformed;
+    var predecessor_label: u32 = std.math.maxInt(u32);
     const visited_labels = allocator.alloc(bool, module.bound) catch return error.OutOfMemory;
     defer allocator.free(visited_labels);
     @memset(visited_labels, false);
@@ -736,6 +754,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[cursor];
             if (cursor != current_block and instruction.opcode == 248) return error.Malformed;
             reachable[cursor] = true;
+            predecessor[cursor] = predecessor_label;
             switch (instruction.opcode) {
                 249 => {
                     next_label = instruction.words[0];
@@ -779,6 +798,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 }
             }
             if (!found) return error.Malformed;
+            predecessor_label = label_id;
         } else break;
     }
 
@@ -798,7 +818,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 133, 136, 142, 145, 169 => w[1],
+                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 131, 133, 136, 142, 145, 169, 245 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
@@ -807,6 +827,23 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 41, 42, 43, 48, 49, 50 => continue,
                 else => 2,
             };
+            if (instruction.opcode == 245) {
+                const selected_predecessor = predecessor[reverse_index];
+                if (selected_predecessor == std.math.maxInt(u32)) continue;
+                var pair_index: usize = 2;
+                var selected_phi = false;
+                while (pair_index < w.len) : (pair_index += 2) if (w[pair_index + 1] == selected_predecessor) {
+                    const operand_index = try id(nodes, w[pair_index]);
+                    if (!needed[operand_index]) {
+                        needed[operand_index] = true;
+                        changed = true;
+                    }
+                    selected_phi = true;
+                    break;
+                };
+                if (!selected_phi) return error.Malformed;
+                continue;
+            }
             const operand_end: usize = switch (instruction.opcode) {
                 79 => 4,
                 81 => 3,
@@ -835,10 +872,29 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         }
         lowered.deinit(allocator);
     }
-    for (module.instructions, instruction_functions, reachable) |instruction, instruction_function, is_reachable| {
+    var active_predecessor: u32 = std.math.maxInt(u32);
+    for (module.instructions, instruction_functions, reachable, predecessor) |instruction, instruction_function, is_reachable, selected_predecessor| {
         if (instruction_function != 0 and instruction_function != entry.function) continue;
         if (instruction_function == entry.function and !is_reachable) continue;
         const w = instruction.words;
+        if (instruction.opcode == 248) active_predecessor = selected_predecessor;
+        if (instruction.opcode == 245) {
+            const phi_index = try id(nodes, w[1]);
+            if (!needed[phi_index]) continue;
+            const selected_label = active_predecessor;
+            if (selected_label == std.math.maxInt(u32)) return error.Malformed;
+            var pair_index: usize = 2;
+            var source_id: ?u32 = null;
+            while (pair_index < w.len) : (pair_index += 2) if (w[pair_index + 1] == selected_label) {
+                source_id = w[pair_index];
+                break;
+            };
+            const source = source_id orelse return error.Malformed;
+            const source_canonical = canonical_ids[try id(nodes, source)];
+            if (source_canonical == std.math.maxInt(u32)) return error.Malformed;
+            canonical_ids[phi_index] = source_canonical;
+            continue;
+        }
         if (instruction.opcode == 62) {
             const target = nodes[try id(nodes, w[0])];
             if (target.kind != .variable or (target.a != 3 and !(requested_stage == .compute and target.a == 12))) return error.Unsupported;
@@ -861,7 +917,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 133, 136, 142, 145, 169 => w[1],
+            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 127, 128, 129, 130, 131, 133, 136, 142, 145, 169, 245 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
@@ -1148,6 +1204,31 @@ pub const compute_static_switch_store = [_]u32{
     12,              (2 << 16) | 248, 11,              (3 << 16) | 62,  5,
     13,              (2 << 16) | 249, 12,              (2 << 16) | 248, 12,
     (1 << 16) | 253, (1 << 16) | 56,
+};
+
+/// Compute profile variant with a statically selected conditional merge. The
+/// branch values are merged with OpPhi at the join; only the incoming value
+/// from the selected predecessor may reach the storage output.
+pub const compute_static_branch_phi_store = [_]u32{
+    0x0723_0203,     0x0001_0000,     0,               17,              0,
+    (2 << 16) | 17,  1,               (3 << 16) | 14,  0,               1,
+    (6 << 16) | 15,  5,               8,               0x6e69616d,      0,
+    5,               (6 << 16) | 16,  8,               17,              1,
+    1,               1,               (4 << 16) | 71,  5,               33,
+    0,               (4 << 16) | 71,  5,               34,              0,
+    (2 << 16) | 19,  1,               (4 << 16) | 21,  2,               32,
+    0,               (4 << 16) | 32,  4,               12,              2,
+    (2 << 16) | 20,  14,              (4 << 16) | 59,  4,               5,
+    12,              (3 << 16) | 33,  6,               1,               (4 << 16) | 43,
+    2,               7,               42,              (4 << 16) | 43,  2,
+    13,              99,              (3 << 16) | 41,  14,              15,
+    (5 << 16) | 54,  1,               8,               0,               6,
+    (2 << 16) | 248, 9,               (4 << 16) | 250, 15,              10,
+    11,              (2 << 16) | 248, 10,              (2 << 16) | 249, 12,
+    (2 << 16) | 248, 11,              (2 << 16) | 249, 12,              (2 << 16) | 248,
+    12,              (7 << 16) | 245, 2,               16,              7,
+    10,              13,              11,              (3 << 16) | 62,  5,
+    16,              (1 << 16) | 253, (1 << 16) | 56,
 };
 
 /// Compute profile variant using a scalar boolean select before the storage
@@ -1468,6 +1549,28 @@ test "compute profile resolves a static switch and rejects dynamic or duplicate 
     var default_program = try compile(std.testing.allocator, &default_case, .compute, "main", &.{});
     defer default_program.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 99), std.mem.readInt(u32, default_program.instructions[0].literal[0..4], .little));
+}
+
+test "compute profile resolves a static branch phi merge" {
+    var program = try compile(std.testing.allocator, &compute_static_branch_phi_store, .compute, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), program.instructions.len);
+    try std.testing.expectEqual(ir.Op.constant, program.instructions[0].op);
+    try std.testing.expectEqual(ir.Op.output, program.instructions[1].op);
+    try std.testing.expectEqual(@as(u32, 42), std.mem.readInt(u32, program.instructions[0].literal[0..4], .little));
+
+    var false_branch = compute_static_branch_phi_store;
+    const condition = testOpcodeOffset(&false_branch, 41, 0).?;
+    false_branch[condition] = (3 << 16) | 42;
+    var false_program = try compile(std.testing.allocator, &false_branch, .compute, "main", &.{});
+    defer false_program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), false_program.instructions.len);
+    try std.testing.expectEqual(@as(u32, 99), std.mem.readInt(u32, false_program.instructions[0].literal[0..4], .little));
+
+    var dynamic = compute_static_branch_phi_store;
+    const branch = testOpcodeOffset(&dynamic, 250, 0).?;
+    dynamic[branch + 1] = 7;
+    try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, &dynamic, .compute, "main", &.{}));
 }
 
 test "compute profile lowers a boolean select into storage output" {
