@@ -5364,6 +5364,25 @@ fn validQueryCopyRange(pool: *const QueryPoolObj, first: u32, count: u32) bool {
     // allowing the copy/get-results no-op form.
     return first < pool.slots.len and count <= pool.slots.len - first;
 }
+fn querySlotStateForRecording(c: *const CommandBufferObj, pool: *const QueryPoolObj, index: u32) u8 {
+    // Query availability is execution state, but commands in one buffer have
+    // a deterministic order.  Fold that recorded history over the current
+    // slot state so begin/timestamp cannot silently reuse an available query;
+    // a reset recorded earlier in the same buffer makes it available again.
+    const state = pool.slots[index].state.load(.acquire);
+    var cursor = c.impl.count;
+    while (cursor != 0) {
+        cursor -= 1;
+        switch (c.impl.commands[cursor]) {
+            .query_reset => |op| if (op.pool == pool and index >= op.first and index - op.first < op.count) return 0,
+            .query_begin => |op| if (op.pool == pool and op.index == index) return 1,
+            .query_end => |op| if (op.pool == pool and op.index == index) return 2,
+            .query_timestamp => |op| if (op.pool == pool and op.index == index) return 2,
+            else => {},
+        }
+    }
+    return state;
+}
 fn cmdResetQueryPool(cb: ?CommandBuffer, handle: usize, first: u32, count: u32) callconv(.c) void {
     lock();
     defer mutex.unlock();
@@ -5399,7 +5418,7 @@ fn cmdBeginQuery(cb: ?CommandBuffer, handle: usize, index: u32, flags: u32) call
         c.impl.invalid = true;
         return;
     };
-    if (!pool.owner.eql(c.impl.owner) or pool.query_type != 0 or index >= pool.slots.len or flags != 0 or c.impl.active_query_pool != null) {
+    if (!pool.owner.eql(c.impl.owner) or pool.query_type != 0 or index >= pool.slots.len or flags != 0 or c.impl.active_query_pool != null or querySlotStateForRecording(c, pool, index) != 0) {
         c.impl.invalid = true;
         return;
     }
@@ -5430,7 +5449,7 @@ fn cmdWriteTimestamp(cb: ?CommandBuffer, stage: u32, handle: usize, index: u32) 
         c.impl.invalid = true;
         return;
     };
-    if (!pool.owner.eql(c.impl.owner) or pool.query_type != 2 or index >= pool.slots.len or !validEventStageMask(stage) or !std.math.isPowerOfTwo(stage)) {
+    if (!pool.owner.eql(c.impl.owner) or pool.query_type != 2 or index >= pool.slots.len or !validEventStageMask(stage) or !std.math.isPowerOfTwo(stage) or querySlotStateForRecording(c, pool, index) != 0) {
         c.impl.invalid = true;
         return;
     }
@@ -16970,6 +16989,29 @@ test "query pools expose exact availability timestamps copies and lifecycle" {
     try std.testing.expectEqual(timestamps[1], copied[2]);
     try std.testing.expectEqual(@as(u64, 1), copied[3]);
     unmapMemory(ctx.device, memory);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdWriteTimestamp(commands[0], 1, timestamp_pool, 0);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdResetQueryPool(commands[0], timestamp_pool, 0, 1);
+    cmdWriteTimestamp(commands[0], 1, timestamp_pool, 0);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBeginQuery(commands[0], occlusion_pool, 0, 0);
+    cmdEndQuery(commands[0], occlusion_pool, 0);
+    cmdBeginQuery(commands[0], occlusion_pool, 0, 0);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBeginQuery(commands[0], occlusion_pool, 0, 0);
+    cmdEndQuery(commands[0], occlusion_pool, 0);
+    cmdResetQueryPool(commands[0], occlusion_pool, 0, 1);
+    cmdBeginQuery(commands[0], occlusion_pool, 0, 0);
+    cmdEndQuery(commands[0], occlusion_pool, 0);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
     test_allocations_before_failure = 0;
     for (0..4096) |_| try std.testing.expectEqual(Result.success, getQueryPoolResults(ctx.device, timestamp_pool, 0, 2, @sizeOf(@TypeOf(timestamps)), &timestamps, 8, 1));
     test_allocations_before_failure = null;
