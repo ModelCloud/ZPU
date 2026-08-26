@@ -108,6 +108,16 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 146, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 147, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 148, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 154, .operands = .{ .min = 3, .max = 3 } },
+    .{ .opcode = 155, .operands = .{ .min = 3, .max = 3 } },
+    .{ .opcode = 156, .operands = .{ .min = 3, .max = 3 } },
+    .{ .opcode = 157, .operands = .{ .min = 3, .max = 3 } },
+    .{ .opcode = 158, .operands = .{ .min = 3, .max = 3 } },
+    .{ .opcode = 159, .operands = .{ .min = 3, .max = 3 } },
+    .{ .opcode = 160, .operands = .{ .min = 3, .max = 3 } },
+    .{ .opcode = 161, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 162, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 163, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 164, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 165, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 166, .operands = .{ .min = 4, .max = 4 } },
@@ -607,7 +617,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 }
                 block_terminated = true;
             },
-            61, 62, 65, 79, 80, 81, 84, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 142, 143, 144, 145, 146, 147, 148, 164...169, 170...179, 182...200 => {
+            61, 62, 65, 79, 80, 81, 84, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 142, 143, 144, 145, 146, 147, 148, 154...163, 164...169, 170...179, 182...200 => {
                 if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
                 const valid_arity = switch (instruction.opcode) {
                     61, 84 => w.len == 3,
@@ -616,8 +626,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     79 => w.len >= 5,
                     80 => w.len >= 3,
                     81 => w.len >= 4,
-                    109, 110, 111, 112, 124, 126, 127 => w.len == 3,
-                    128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 142, 143, 144, 145, 146, 147, 148, 164...167, 170...179, 182...199 => w.len == 4,
+                    109, 110, 111, 112, 124, 126, 127, 154, 155, 156, 157, 158, 159, 160 => w.len == 3,
+                    128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 142, 143, 144, 145, 146, 147, 148, 161, 162, 163, 164...167, 170...179, 182...199 => w.len == 4,
                     200 => w.len == 3,
                     168 => w.len == 3,
                     169 => w.len == 5,
@@ -807,6 +817,22 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const left = try valueShape(nodes, w[2]);
                 const right = try valueShape(nodes, w[3]);
                 if (result.scalar != .f32 or result.columns != 1 or result.rows != 1 or left.scalar != .f32 or right.scalar != .f32 or left.columns < 2 or left.columns > 4 or left.rows != 1 or !sameShape(left, right)) return error.Malformed;
+            },
+            154, 155 => {
+                const result = try resultShape(nodes, w[0]);
+                const operand = try valueShape(nodes, w[2]);
+                if (result.scalar != .bool or result.columns != 1 or result.rows != 1 or operand.scalar != .bool or operand.columns < 2 or operand.columns > 4 or operand.rows != 1) return error.Malformed;
+            },
+            156, 157, 158, 159, 160 => {
+                const result = try resultShape(nodes, w[0]);
+                const operand = try valueShape(nodes, w[2]);
+                if (result.scalar != .bool or result.rows != 1 or operand.scalar != .f32 or operand.rows != 1 or result.columns != operand.columns) return error.Malformed;
+            },
+            161, 162, 163 => {
+                const result = try resultShape(nodes, w[0]);
+                const left = try valueShape(nodes, w[2]);
+                const right = try valueShape(nodes, w[3]);
+                if (result.scalar != .bool or result.rows != 1 or left.scalar != .f32 or left.rows != 1 or !sameShape(left, right) or result.columns != left.columns) return error.Malformed;
             },
             164...167 => {
                 const result = try resultShape(nodes, w[0]);
@@ -1021,7 +1047,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 84, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 142, 143, 144, 145, 146, 147, 148, 164...169, 170...179, 182...200, 245 => w[1],
+                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 84, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 142, 143, 144, 145, 146, 147, 148, 154...163, 164...169, 170...179, 182...200, 245 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
@@ -1123,7 +1149,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 84, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 142, 143, 144, 145, 146, 147, 148, 164...169, 170...179, 182...200, 245 => w[1],
+            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 84, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 142, 143, 144, 145, 146, 147, 148, 154...163, 164...169, 170...179, 182...200, 245 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
@@ -1173,6 +1199,16 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             146 => .matrix_times_matrix,
             147 => .outer_product,
             148 => .dot,
+            154 => .any,
+            155 => .all,
+            156 => .is_nan,
+            157 => .is_inf,
+            158 => .is_finite,
+            159 => .is_normal,
+            160 => .sign_bit_set,
+            161 => .less_or_greater,
+            162 => .ordered,
+            163 => .unordered,
             169 => .select,
             164...168 => if ((try staticCondition(nodes, rid)) != null) .constant else switch (instruction.opcode) {
                 164 => .logical_eq,
@@ -2122,6 +2158,87 @@ test "compute profile lowers floating remainder" {
     var found = false;
     for (program.instructions) |instruction| found = found or instruction.op == .frem;
     try std.testing.expect(found);
+}
+
+test "compute profile lowers floating classifications and ordered domains" {
+    var words = compute_float_remainder_store;
+    const pointer_offset = testOpcodeOffset(&words, 32, 0).?;
+    var typed = try testInsertWords(std.testing.allocator, &words, pointer_offset, &.{ (2 << 16) | 20, 3 });
+    defer std.testing.allocator.free(typed);
+    const pointer = testOpcodeOffset(typed, 32, 0).?;
+    typed[pointer + 3] = 3;
+    const remainder = testOpcodeOffset(typed, 140, 0).?;
+    var unary = try testRemoveWord(std.testing.allocator, typed, remainder + 4);
+    defer std.testing.allocator.free(unary);
+    unary[remainder] = (4 << 16) | 156;
+    unary[remainder + 1] = 3;
+    for ([_]u16{ 156, 157, 158, 159, 160 }) |opcode| {
+        unary[remainder] = (@as(u32, 4) << 16) | opcode;
+        var program = try compile(std.testing.allocator, unary, .compute, "main", &.{});
+        defer program.deinit(std.testing.allocator);
+        const expected = switch (opcode) {
+            156 => ir.Op.is_nan,
+            157 => ir.Op.is_inf,
+            158 => ir.Op.is_finite,
+            159 => ir.Op.is_normal,
+            160 => ir.Op.sign_bit_set,
+            else => unreachable,
+        };
+        var found = false;
+        for (program.instructions) |instruction| found = found or instruction.op == expected;
+        try std.testing.expect(found);
+    }
+    for ([_]u16{ 161, 162, 163 }) |opcode| {
+        var binary = try testInsertWords(std.testing.allocator, unary, remainder + 4, &.{10});
+        defer std.testing.allocator.free(binary);
+        binary[remainder] = (@as(u32, 5) << 16) | opcode;
+        var program = try compile(std.testing.allocator, binary, .compute, "main", &.{});
+        defer program.deinit(std.testing.allocator);
+        const expected = switch (opcode) {
+            161 => ir.Op.less_or_greater,
+            162 => ir.Op.ordered,
+            163 => ir.Op.unordered,
+            else => unreachable,
+        };
+        var found = false;
+        for (program.instructions) |instruction| found = found or instruction.op == expected;
+        try std.testing.expect(found);
+    }
+}
+
+test "compute profile lowers boolean any and all reductions" {
+    var words = compute_float_remainder_store;
+    const pointer_offset = testOpcodeOffset(&words, 32, 0).?;
+    var typed = try testInsertWords(std.testing.allocator, &words, pointer_offset, &.{ (2 << 16) | 20, 3 });
+    defer std.testing.allocator.free(typed);
+    const pointer = testOpcodeOffset(typed, 32, 0).?;
+    typed[pointer + 3] = 3;
+    const function_offset = testOpcodeOffset(typed, 54, 0).?;
+    var declarations = try testInsertWords(std.testing.allocator, typed, function_offset, &.{
+        (4 << 16) | 23, 12, 3,              4,
+        (3 << 16) | 41, 3,  13,             (3 << 16) | 42,
+        3,              14, (7 << 16) | 44, 12,
+        15,             13, 14,             13,
+        14,
+    });
+    defer std.testing.allocator.free(declarations);
+    declarations[3] = 16;
+    const remainder = testOpcodeOffset(declarations, 140, 0).?;
+    var reduction = try testRemoveWord(std.testing.allocator, declarations, remainder + 4);
+    defer std.testing.allocator.free(reduction);
+    reduction[remainder] = (4 << 16) | 154;
+    reduction[remainder + 1] = 3;
+    reduction[remainder + 2] = 11;
+    reduction[remainder + 3] = 15;
+    for ([_]u16{ 154, 155 }) |opcode| {
+        reduction[remainder] = (@as(u32, 4) << 16) | opcode;
+        var program = try compile(std.testing.allocator, reduction, .compute, "main", &.{});
+        defer program.deinit(std.testing.allocator);
+        const expected: ir.Op = if (opcode == 154) .any else .all;
+        var found = false;
+        for (program.instructions) |instruction| found = found or instruction.op == expected;
+        try std.testing.expect(found);
+    }
 }
 
 test "compute profile accepts a scalar storage-buffer pointer" {

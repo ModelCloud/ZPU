@@ -62,6 +62,9 @@ floating-point comparisons with NaN semantics, and dynamic scalar boolean
 logical operations, bounded f32 4x4 column-major matrix/vector arithmetic
 (`OpMatrixTimesScalar`, `OpVectorTimesMatrix`, `OpMatrixTimesMatrix`,
 `OpTranspose`, `OpOuterProduct`, and `OpDot`), plus
+bounded floating classification/reduction (`OpIsNan`, `OpIsInf`, `OpIsFinite`,
+`OpIsNormal`, `OpSignBitSet`, `OpLessOrGreater`, `OpOrdered`, `OpUnordered`,
+`OpAny`, and `OpAll`), plus
 statically resolved, acyclic `OpBranch`,
 `OpBranchConditional`, and constant-selector `OpSwitch` paths now prune
 unselected blocks before lowering, while dynamic conditions, loops, dynamic
@@ -448,7 +451,7 @@ Each slice must land with all of the following:
   ordered/unordered scalar floating-point comparisons with NaN semantics, and
   dynamic scalar boolean logical operations, bounded f32 4x4 column-major
   matrix/vector arithmetic (including transpose, outer-product, and vector
-  dot), and constant-folds
+  dot), floating classification/reduction, and constant-folds
   scalar integer equality, and resolves
   predecessor-selected `OpPhi` values at static
   acyclic branch joins, preserving only the incoming value from the selected

@@ -132,6 +132,26 @@ pub const Op = enum(u8) {
     outer_product,
     /// Dot product of equal-length f32 vectors, producing a scalar.
     dot,
+    /// Reduction of a bool vector to whether any lane is true.
+    any,
+    /// Reduction of a bool vector to whether all lanes are true.
+    all,
+    /// Per-lane floating-point NaN classification.
+    is_nan,
+    /// Per-lane floating-point infinity classification.
+    is_inf,
+    /// Per-lane floating-point finite classification.
+    is_finite,
+    /// Per-lane floating-point normal-number classification.
+    is_normal,
+    /// Per-lane floating-point sign-bit classification.
+    sign_bit_set,
+    /// Per-lane ordered less-than-or-greater-than comparison.
+    less_or_greater,
+    /// Per-lane ordered classification for two floating-point values.
+    ordered,
+    /// Per-lane unordered classification for two floating-point values.
+    unordered,
 };
 
 pub const Instruction = struct {
@@ -286,8 +306,8 @@ fn valueOperand(op: Op, operand_index: usize) bool {
         .shuffle => operand_index < 2,
         .fneg, .ineg, .bit_not, .convert => operand_index == 0,
         .select => operand_index < 3,
-        .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge, .logical_eq, .logical_ne, .logical_or, .logical_and, .fadd, .fsub, .fmul, .fdiv, .frem, .vector_times_scalar, .matrix_times_vector, .matrix_times_scalar, .vector_times_matrix, .matrix_times_matrix, .outer_product, .dot => operand_index < 2,
-        .transpose => operand_index == 0,
+        .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge, .logical_eq, .logical_ne, .logical_or, .logical_and, .fadd, .fsub, .fmul, .fdiv, .frem, .vector_times_scalar, .matrix_times_vector, .matrix_times_scalar, .vector_times_matrix, .matrix_times_matrix, .outer_product, .dot, .less_or_greater, .ordered, .unordered => operand_index < 2,
+        .transpose, .any, .all, .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set => operand_index == 0,
         .logical_not => operand_index == 0,
         .output => operand_index == 1,
     };
