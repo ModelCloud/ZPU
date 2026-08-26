@@ -4810,6 +4810,16 @@ fn sync2StageMaskToLegacy(mask: u64) ?u32 {
     return legacy;
 }
 
+fn sync2BarrierStageMaskToLegacy(stage_mask: u64, access_mask: u64) ?u32 {
+    // Synchronization2 permits VK_PIPELINE_STAGE_2_NONE for an empty
+    // synchronization scope. The compact legacy backend has no NONE stage,
+    // so use its conservative ALL_COMMANDS lowering only when the matching
+    // access scope is empty. A non-empty access mask with NONE is invalid
+    // because no pipeline stage can make that access visible.
+    if (stage_mask == 0) return if (access_mask == 0) 0x1_0000 else null;
+    return sync2StageMaskToLegacy(stage_mask);
+}
+
 fn sync2AccessMaskToLegacy(mask: u64) ?u32 {
     const high_sampled = @as(u64, 0x1_0000_0000);
     const high_storage_read = @as(u64, 0x2_0000_0000);
@@ -4843,11 +4853,11 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
     const dst_stage: u32 = 0x1_0000;
     var memories: [max_api_items]MemoryBarrier = undefined;
     if (ci.memory_barriers) |items| for (items[0..ci.memory_barrier_count], 0..) |barrier, index| {
-        const converted_src_stage = sync2StageMaskToLegacy(barrier.src_stage_mask) orelse {
+        const converted_src_stage = sync2BarrierStageMaskToLegacy(barrier.src_stage_mask, barrier.src_access_mask) orelse {
             markCommandBufferInvalid(cb);
             return;
         };
-        const converted_dst_stage = sync2StageMaskToLegacy(barrier.dst_stage_mask) orelse {
+        const converted_dst_stage = sync2BarrierStageMaskToLegacy(barrier.dst_stage_mask, barrier.dst_access_mask) orelse {
             markCommandBufferInvalid(cb);
             return;
         };
@@ -4867,11 +4877,11 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
     };
     var buffers: [max_api_items]BufferMemoryBarrier = undefined;
     if (ci.buffer_memory_barriers) |items| for (items[0..ci.buffer_memory_barrier_count], 0..) |barrier, index| {
-        const converted_src_stage = sync2StageMaskToLegacy(barrier.src_stage_mask) orelse {
+        const converted_src_stage = sync2BarrierStageMaskToLegacy(barrier.src_stage_mask, barrier.src_access_mask) orelse {
             markCommandBufferInvalid(cb);
             return;
         };
-        const converted_dst_stage = sync2StageMaskToLegacy(barrier.dst_stage_mask) orelse {
+        const converted_dst_stage = sync2BarrierStageMaskToLegacy(barrier.dst_stage_mask, barrier.dst_access_mask) orelse {
             markCommandBufferInvalid(cb);
             return;
         };
@@ -4891,11 +4901,11 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
     };
     var images: [max_api_items]ImageMemoryBarrier = undefined;
     if (ci.image_memory_barriers) |items| for (items[0..ci.image_memory_barrier_count], 0..) |barrier, index| {
-        const converted_src_stage = sync2StageMaskToLegacy(barrier.src_stage_mask) orelse {
+        const converted_src_stage = sync2BarrierStageMaskToLegacy(barrier.src_stage_mask, barrier.src_access_mask) orelse {
             markCommandBufferInvalid(cb);
             return;
         };
-        const converted_dst_stage = sync2StageMaskToLegacy(barrier.dst_stage_mask) orelse {
+        const converted_dst_stage = sync2BarrierStageMaskToLegacy(barrier.dst_stage_mask, barrier.dst_access_mask) orelse {
             markCommandBufferInvalid(cb);
             return;
         };
@@ -13719,6 +13729,8 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expectEqual(@as(usize, 48), @sizeOf(MemoryBarrier2));
     try std.testing.expectEqual(@as(usize, 96), @sizeOf(ImageMemoryBarrier2));
     try std.testing.expectEqual(@as(?u32, 0x1000), sync2StageMaskToLegacy(0x1000_0000_0));
+    try std.testing.expectEqual(@as(?u32, 0x1_0000), sync2BarrierStageMaskToLegacy(0, 0));
+    try std.testing.expect(sync2BarrierStageMaskToLegacy(0, 1) == null);
     try std.testing.expectEqual(@as(?u32, 0x20), sync2AccessMaskToLegacy(0x2_0000_0000));
     try std.testing.expect(sync2StageMaskToLegacy(0x8000_0000_0000_0000) == null);
     const ctx = try createTestDeviceContext();
@@ -13766,6 +13778,12 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     cmdPipelineBarrier2(commands[0], &empty_dependency);
     try std.testing.expect(!commands[0].impl.invalid);
     try std.testing.expectEqual(before_empty_barrier, commands[0].impl.count);
+    const none_barrier = MemoryBarrier2{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 0, .dst_stage_mask = 0, .src_access_mask = 0, .dst_access_mask = 0 };
+    const none_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 1, .memory_barriers = @ptrCast(&none_barrier), .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
+    const before_none_barrier = commands[0].impl.count;
+    cmdPipelineBarrier2(commands[0], &none_dependency);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(before_none_barrier, commands[0].impl.count);
     cmdSetEvent2(commands[0], event, &empty_dependency);
     cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&empty_dependency));
     cmdResetEvent2(commands[0], event, &empty_dependency);
