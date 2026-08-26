@@ -10359,7 +10359,7 @@ fn cmdDispatchBaseCommon(cb: ?CommandBuffer, base: [3]u32, groups: [3]u32) void 
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
     const non_zero_base = base[0] != 0 or base[1] != 0 or base[2] != 0;
-    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or command_buffer.impl.active_render_pass != null or command_buffer.impl.count == command_buffer.impl.commands.len or !dispatchGroupsValid(groups) or !dispatchBaseValid(base, groups) or (non_zero_base and (command_buffer.impl.bound_compute_pipeline == null or !command_buffer.impl.bound_compute_pipeline.?.dispatch_base))) {
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or command_buffer.impl.active_render_pass != null or command_buffer.impl.dynamic_rendering or command_buffer.impl.count == command_buffer.impl.commands.len or !dispatchGroupsValid(groups) or !dispatchBaseValid(base, groups) or (non_zero_base and (command_buffer.impl.bound_compute_pipeline == null or !command_buffer.impl.bound_compute_pipeline.?.dispatch_base))) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -10379,7 +10379,7 @@ fn cmdDispatchIndirect(cb: ?CommandBuffer, buffer_handle: usize, offset: u64) ca
         command_buffer.impl.invalid = true;
         return;
     };
-    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or command_buffer.impl.active_render_pass != null or command_buffer.impl.count == command_buffer.impl.commands.len or buffer.owner != command_buffer.impl.owner or buffer.usage & 0x100 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or offset % 4 != 0 or offset > buffer.size or buffer.size - offset < 12) {
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or command_buffer.impl.active_render_pass != null or command_buffer.impl.dynamic_rendering or command_buffer.impl.count == command_buffer.impl.commands.len or buffer.owner != command_buffer.impl.owner or buffer.usage & 0x100 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or offset % 4 != 0 or offset > buffer.size or buffer.size - offset < 12) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -17909,6 +17909,15 @@ test "compute dispatch command envelopes validate indirect groups and device mas
     test_allocations_before_failure = 0;
     for (0..4096) |_| cmdSetDeviceMask(commands[0], 1);
     test_allocations_before_failure = null;
+    try std.testing.expect(!commands[0].impl.invalid);
+    const before_dynamic_dispatch = commands[0].impl.count;
+    commands[0].impl.dynamic_rendering = true;
+    cmdDispatch(commands[0], 1, 1, 1);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_dynamic_dispatch, commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBindPipeline(commands[0], 1, compute_pipeline);
     try std.testing.expect(!commands[0].impl.invalid);
     cmdDispatch(commands[0], 1, 2, 3);
     cmdDispatchBase(commands[0], 2, 3, 4, 1, 1, 1);
