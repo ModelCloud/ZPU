@@ -2430,11 +2430,9 @@ fn getPhysicalDeviceSparseImageFormatProperties2(physical: ?Physical, info: ?*co
     const n = count orelse return;
     const i = info orelse return;
     if (i.s_type != 1000059008 or i.p_next != null) return;
-    const h = physical orelse return;
     lock();
-    const valid = validPhysicalLocked(h);
-    mutex.unlock();
-    if (!valid) return;
+    defer mutex.unlock();
+    if (!validPhysicalLocked(physical orelse return)) return;
     n.* = 0;
 }
 fn getPhysicalDeviceToolProperties(physical: ?Physical, count: ?*u32, output: ?[*]PhysicalDeviceToolProperties) callconv(.c) Result {
@@ -13414,6 +13412,14 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     var sparse_count: u32 = 1;
     getPhysicalDeviceSparseImageFormatProperties2(ctx.physical, &sparse_info, &sparse_count, null);
     try std.testing.expectEqual(@as(u32, 0), sparse_count);
+    sparse_count = 7;
+    getPhysicalDeviceSparseImageFormatProperties2(@ptrFromInt(8), &sparse_info, &sparse_count, null);
+    try std.testing.expectEqual(@as(u32, 7), sparse_count);
+    sparse_info.p_next = @ptrCast(&unknown_feature_chain);
+    sparse_count = 8;
+    getPhysicalDeviceSparseImageFormatProperties2(ctx.physical, &sparse_info, &sparse_count, null);
+    try std.testing.expectEqual(@as(u32, 8), sparse_count);
+    sparse_info.p_next = null;
     var external_buffer_info = PhysicalDeviceExternalBufferInfo{ .s_type = 1000071002, .p_next = null, .flags = 0, .usage = 0, .handle_type = 0 };
     var external_buffer = ExternalBufferProperties{ .s_type = 1000071003, .p_next = null, .external_memory_properties = .{ .external_memory_features = 0xffff_ffff, .export_from_imported_handle_types = 0xffff_ffff, .compatible_handle_types = 0xffff_ffff } };
     getPhysicalDeviceExternalBufferProperties(ctx.physical, &external_buffer_info, &external_buffer);
