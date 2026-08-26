@@ -225,7 +225,9 @@ Dynamic rendering now records finite
 accepts bounded nonzero `layerCount` values against array-view layer ranges;
 layered clears and framebuffer-free indexed CPU-cube draws execute each
 selected layer, while rejecting command-buffer completion while a rendering
-scope remains open. Attachment layouts are snapshotted when dynamic commands
+scope remains open. Color attachments are optional for depth-only/no-target
+scopes; depth clears and attachment clears remain executable while color draws
+are rejected without a color target. Attachment layouts are snapshotted when dynamic commands
 are recorded (including transitions earlier in the same command buffer) and
 checked again at submit, so a post-record host layout change fails atomically
 instead of executing against stale state. The promoted
