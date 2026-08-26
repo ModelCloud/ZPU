@@ -240,6 +240,11 @@ The command buffer must initialize each declared value before a direct, indexed,
 or indirect draw can be recorded; the bounded backend keeps its truthful policy
 (line width 1, zero depth-bias clamp, and no stencil attachment) while rejecting
 missing or unsupported state rather than silently substituting baked values.
+Query commands now enforce Vulkan render-scope rules: occlusion begin/end
+must be inside a traditional or dynamic render-pass instance, while timestamp
+writes must be outside one. The existing reset-history, availability,
+submission-lifetime, exact result, rollback, and allocation-free warm paths
+remain covered.
 The memory and sampler handle registries now meet the required 4096 and 4000
 allocation limits respectively. The generated command matrix is a
 234/234 dispatch/name-coverage artifact, not a Vulkan-conformance claim:

@@ -5896,7 +5896,8 @@ fn cmdBeginQuery(cb: ?CommandBuffer, handle: usize, index: u32, flags: u32) call
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or !pool.owner.eql(c.impl.owner) or pool.query_type != 0 or index >= pool.slots.len or flags != 0 or c.impl.active_query_pool != null or querySlotStateForRecording(c, pool, index) != 0) {
+    const in_render_scope = c.impl.active_render_pass != null or c.impl.dynamic_rendering;
+    if (c.impl.state != 1 or c.impl.invalid or !pool.owner.eql(c.impl.owner) or pool.query_type != 0 or !in_render_scope or index >= pool.slots.len or flags != 0 or c.impl.active_query_pool != null or querySlotStateForRecording(c, pool, index) != 0) {
         c.impl.invalid = true;
         return;
     }
@@ -5914,7 +5915,8 @@ fn cmdEndQuery(cb: ?CommandBuffer, handle: usize, index: u32) callconv(.c) void 
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or !pool.owner.eql(c.impl.owner) or c.impl.active_query_pool != pool or c.impl.active_query_index != index) {
+    const in_render_scope = c.impl.active_render_pass != null or c.impl.dynamic_rendering;
+    if (c.impl.state != 1 or c.impl.invalid or !pool.owner.eql(c.impl.owner) or !in_render_scope or c.impl.active_query_pool != pool or c.impl.active_query_index != index) {
         c.impl.invalid = true;
         return;
     }
@@ -5931,7 +5933,7 @@ fn cmdWriteTimestamp(cb: ?CommandBuffer, stage: u32, handle: usize, index: u32) 
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or !pool.owner.eql(c.impl.owner) or pool.query_type != 2 or index >= pool.slots.len or !validEventStageMask(stage) or !std.math.isPowerOfTwo(stage) or querySlotStateForRecording(c, pool, index) != 0) {
+    if (c.impl.state != 1 or c.impl.invalid or !pool.owner.eql(c.impl.owner) or pool.query_type != 2 or c.impl.active_render_pass != null or c.impl.dynamic_rendering or index >= pool.slots.len or !validEventStageMask(stage) or !std.math.isPowerOfTwo(stage) or querySlotStateForRecording(c, pool, index) != 0) {
         c.impl.invalid = true;
         return;
     }
@@ -18313,21 +18315,40 @@ test "query pools expose exact availability timestamps copies and lifecycle" {
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdBeginQuery(commands[0], occlusion_pool, 0, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
+    cmdWriteTimestamp(commands[0], 1, timestamp_pool, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    commands[0].impl.active_render_pass = null;
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
+    cmdBeginQuery(commands[0], occlusion_pool, 0, 0);
     cmdEndQuery(commands[0], occlusion_pool, 0);
+    commands[0].impl.active_render_pass = null;
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    commands[1].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
     cmdBeginQuery(commands[1], occlusion_pool, 0, 0);
     cmdEndQuery(commands[1], occlusion_pool, 0);
+    commands[1].impl.active_render_pass = null;
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[1]));
     const outside_query_count = commands[1].impl.count;
+    commands[1].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
     cmdBeginQuery(commands[1], occlusion_pool, 0, 0);
     try std.testing.expect(commands[1].impl.invalid);
     try std.testing.expectEqual(outside_query_count, commands[1].impl.count);
     try std.testing.expect(commands[1].impl.active_query_pool == null);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    commands[1].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
     cmdBeginQuery(commands[1], occlusion_pool, 0, 0);
     cmdEndQuery(commands[1], occlusion_pool, 0);
+    commands[1].impl.active_render_pass = null;
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[1]));
     var cross_command_buffers = [_]CommandBuffer{ commands[0], commands[1] };
     const cross_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 2, .command_buffers = &cross_command_buffers, .signal_semaphore_count = 0, .signal_semaphores = null };
@@ -18367,17 +18388,23 @@ test "query pools expose exact availability timestamps copies and lifecycle" {
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
     cmdBeginQuery(commands[0], occlusion_pool, 0, 0);
     cmdEndQuery(commands[0], occlusion_pool, 0);
     cmdBeginQuery(commands[0], occlusion_pool, 0, 0);
+    commands[0].impl.active_render_pass = null;
     try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
     cmdBeginQuery(commands[0], occlusion_pool, 0, 0);
     cmdEndQuery(commands[0], occlusion_pool, 0);
+    commands[0].impl.active_render_pass = null;
     cmdResetQueryPool(commands[0], occlusion_pool, 0, 1);
+    commands[0].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
     cmdBeginQuery(commands[0], occlusion_pool, 0, 0);
     cmdEndQuery(commands[0], occlusion_pool, 0);
+    commands[0].impl.active_render_pass = null;
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
     test_allocations_before_failure = 0;
     for (0..4096) |_| try std.testing.expectEqual(Result.success, getQueryPoolResults(ctx.device, timestamp_pool, 0, 2, @sizeOf(@TypeOf(timestamps)), &timestamps, 8, 1));
