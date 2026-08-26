@@ -257,12 +257,28 @@ pub const PhysicalDeviceVulkan14Properties = extern struct { s_type: i32, p_next
 // every optional capability is unadvertised, but each LP64 body remains the
 // exact size and alignment expected by callers.
 pub const PhysicalDeviceProtectedMemoryProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
-pub const PhysicalDeviceIDProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [48]u8 };
+pub const PhysicalDeviceIDProperties = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    device_uuid: [16]u8,
+    driver_uuid: [16]u8,
+    device_luid: [8]u8,
+    device_node_mask: u32,
+    device_luid_valid: u32,
+};
 pub const PhysicalDeviceSubgroupProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [16]u8 };
 pub const PhysicalDeviceMaintenance3Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [16]u8 };
 pub const PhysicalDevicePointClippingProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
 pub const PhysicalDeviceMultiviewProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
-pub const PhysicalDeviceDriverProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [520]u8 };
+pub const ConformanceVersion = extern struct { major: u8, minor: u8, subminor: u8, patch: u8 };
+pub const PhysicalDeviceDriverProperties = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    driver_id: i32,
+    driver_name: [256]u8,
+    driver_info: [256]u8,
+    conformance_version: ConformanceVersion,
+};
 pub const PhysicalDeviceTimelineSemaphoreProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
 pub const PhysicalDeviceFloatControlsProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [72]u8 };
 pub const PhysicalDeviceDescriptorIndexingProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [96]u8 };
@@ -638,6 +654,13 @@ const max_2d_extent: u32 = 8192;
 const max_image_array_layers: u32 = 256;
 const max_api_items: u32 = 256;
 const pipeline_cache_uuid = [_]u8{ 0x5a, 0x50, 0x55, 0x2d, 0x49, 0x43, 0x44, 0x2d, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31 };
+// Stable identity values are derived from the ZPU ICD name and are kept
+// distinct from the pipeline-cache UUID.  They make promoted identity
+// property queries useful without pretending that the host has a LUID.
+const device_uuid = [_]u8{ 0x5a, 0x50, 0x55, 0x2d, 0x44, 0x45, 0x56, 0x2d, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31 };
+const driver_uuid = [_]u8{ 0x5a, 0x50, 0x55, 0x2d, 0x44, 0x52, 0x56, 0x2d, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31 };
+const driver_name = "ZPU Experimental CPU";
+const driver_info = "ZPU userspace Vulkan ICD";
 const SlotState = enum(u8) { never, live, tombstone };
 var instance_objects: [max_objects]InstanceObj = undefined;
 var physical_objects: [max_objects]PhysicalObj = undefined;
@@ -1318,6 +1341,28 @@ fn populateCorePropertyChain(raw: ?*anyopaque) bool {
         const bytes_len = corePropertyPayloadBytes(header.s_type) orelse return false;
         const bytes: [*]u8 = @ptrCast(item);
         @memset(bytes[16 .. 16 + bytes_len], 0);
+        switch (header.s_type) {
+            1000071004 => {
+                const out: *PhysicalDeviceIDProperties = @ptrCast(@alignCast(item));
+                out.device_uuid = device_uuid;
+                out.driver_uuid = driver_uuid;
+                // CPU processes do not expose a PCI-style LUID.  The node
+                // mask still identifies the one logical device.
+                out.device_node_mask = 1;
+                out.device_luid_valid = 0;
+            },
+            1000196000 => {
+                const out: *PhysicalDeviceDriverProperties = @ptrCast(@alignCast(item));
+                // VK_DRIVER_ID_MESA_LLVMPIPE is the registered software-CPU
+                // driver class closest to this experimental ICD.  The name
+                // and info strings remain the authoritative ZPU identity.
+                out.driver_id = 13;
+                @memcpy(out.driver_name[0..driver_name.len], driver_name);
+                @memcpy(out.driver_info[0..driver_info.len], driver_info);
+                out.conformance_version = .{ .major = 0, .minor = 0, .subminor = 0, .patch = 0 };
+            },
+            else => {},
+        }
         next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
     }
     return true;
@@ -12017,14 +12062,21 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     test_allocations_before_failure = 0;
     for (0..4096) |_| getPhysicalDeviceProperties2(ctx.physical, &properties);
     test_allocations_before_failure = null;
-    var id_properties = PhysicalDeviceIDProperties{ .s_type = 1000071004, .p_next = null, .payload = [_]u8{0xff} ** 48 };
-    var driver_properties = PhysicalDeviceDriverProperties{ .s_type = 1000196000, .p_next = @ptrCast(&id_properties), .payload = [_]u8{0xff} ** 520 };
+    var id_properties = PhysicalDeviceIDProperties{ .s_type = 1000071004, .p_next = null, .device_uuid = [_]u8{0xff} ** 16, .driver_uuid = [_]u8{0xff} ** 16, .device_luid = [_]u8{0xff} ** 8, .device_node_mask = 0xffff_ffff, .device_luid_valid = 0xffff_ffff };
+    var driver_properties = PhysicalDeviceDriverProperties{ .s_type = 1000196000, .p_next = @ptrCast(&id_properties), .driver_id = -1, .driver_name = [_]u8{0xff} ** 256, .driver_info = [_]u8{0xff} ** 256, .conformance_version = .{ .major = 0xff, .minor = 0xff, .subminor = 0xff, .patch = 0xff } };
     var host_copy_properties = PhysicalDeviceHostImageCopyProperties{ .s_type = 1000270001, .p_next = @ptrCast(&driver_properties), .payload = [_]u8{0xff} ** 56 };
     var vulkan14_individual_properties = PhysicalDeviceVulkan14Properties{ .s_type = 56, .p_next = @ptrCast(&host_copy_properties), .payload = [_]u8{0xff} ** 128 };
     properties.p_next = @ptrCast(&vulkan14_individual_properties);
     getPhysicalDeviceProperties2(ctx.physical, &properties);
-    try std.testing.expect(std.mem.allEqual(u8, &id_properties.payload, 0));
-    try std.testing.expect(std.mem.allEqual(u8, &driver_properties.payload, 0));
+    try std.testing.expectEqualSlices(u8, &device_uuid, &id_properties.device_uuid);
+    try std.testing.expectEqualSlices(u8, &driver_uuid, &id_properties.driver_uuid);
+    try std.testing.expect(std.mem.allEqual(u8, &id_properties.device_luid, 0));
+    try std.testing.expectEqual(@as(u32, 1), id_properties.device_node_mask);
+    try std.testing.expectEqual(@as(u32, 0), id_properties.device_luid_valid);
+    try std.testing.expectEqual(@as(i32, 13), driver_properties.driver_id);
+    try std.testing.expectEqualSlices(u8, driver_name, driver_properties.driver_name[0..driver_name.len]);
+    try std.testing.expectEqualSlices(u8, driver_info, driver_properties.driver_info[0..driver_info.len]);
+    try std.testing.expectEqual(@as(u8, 0), driver_properties.conformance_version.major);
     try std.testing.expect(std.mem.allEqual(u8, &host_copy_properties.payload, 0));
     try std.testing.expect(std.mem.allEqual(u8, &vulkan14_individual_properties.payload, 0));
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&id_properties)), driver_properties.p_next);
