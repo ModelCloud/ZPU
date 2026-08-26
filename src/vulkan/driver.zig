@@ -9143,7 +9143,7 @@ fn cmdBindDescriptorSets2(cb: ?CommandBuffer, info: ?*const BindDescriptorSetsIn
         if (!command_buffer.impl.invalid) command_buffer.impl.bound_descriptor_stage_flags = stages;
     }
 }
-fn bindIndexBufferLocked(command_buffer: *CommandBufferObj, handle: usize, offset: u64, size: u64, index_type: i32) void {
+fn bindIndexBufferLocked(command_buffer: *CommandBufferObj, handle: usize, offset: u64, size: u64, index_type: i32, explicit_size: bool) void {
     const buffer = validBufferLocked(handle) orelse {
         command_buffer.impl.invalid = true;
         return;
@@ -9158,7 +9158,7 @@ fn bindIndexBufferLocked(command_buffer: *CommandBufferObj, handle: usize, offse
     };
     const available = if (offset <= buffer.size) buffer.size - offset else 0;
     const effective_size = if (size == std.math.maxInt(u64)) available else size;
-    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or buffer.owner != command_buffer.impl.owner or buffer.usage & 0x40 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or offset % index_size != 0 or offset >= buffer.size or effective_size == 0 or effective_size > available) {
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or buffer.owner != command_buffer.impl.owner or buffer.usage & 0x40 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or offset % index_size != 0 or offset >= buffer.size or effective_size == 0 or effective_size > available or (explicit_size and size != std.math.maxInt(u64) and size % index_size != 0)) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -9178,7 +9178,7 @@ fn cmdBindIndexBuffer(cb: ?CommandBuffer, handle: usize, offset: u64, index_type
         return;
     };
     const size = if (offset <= buffer.size) buffer.size - offset else 0;
-    bindIndexBufferLocked(command_buffer, handle, offset, size, index_type);
+    bindIndexBufferLocked(command_buffer, handle, offset, size, index_type, false);
 }
 fn bindVertexBuffersLocked(command_buffer: *CommandBufferObj, first_binding: u32, binding_count: u32, handles: ?[*]const usize, offsets: ?[*]const u64, sizes: ?[*]const u64, strides: ?[*]const u64, allow_empty: bool) void {
     if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or first_binding >= 16 or binding_count > 16 - first_binding or (binding_count == 0 and (!allow_empty or sizes != null or strides != null)) or (binding_count != 0 and (handles == null or offsets == null))) {
@@ -10407,7 +10407,7 @@ fn cmdBindIndexBuffer2(cb: ?CommandBuffer, buffer: usize, offset: u64, size: u64
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    bindIndexBufferLocked(command_buffer, buffer, offset, size, index_type);
+    bindIndexBufferLocked(command_buffer, buffer, offset, size, index_type, true);
 }
 fn cmdBindVertexBuffers2(cb: ?CommandBuffer, first_binding: u32, binding_count: u32, buffers: ?[*]const usize, offsets: ?[*]const u64, sizes: ?[*]const u64, strides: ?[*]const u64) callconv(.c) void {
     lock();
@@ -16677,6 +16677,10 @@ test "vertex and index bindings are typed atomic lifecycle state and allocation 
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdBindIndexBuffer2(commands[0], buffers[1], 4, 61, 1);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBindIndexBuffer2(commands[0], buffers[1], 4, 59, 1);
     try std.testing.expect(commands[0].impl.invalid);
 
     test_allocations_before_failure = 0;
