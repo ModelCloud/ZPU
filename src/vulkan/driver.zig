@@ -5657,7 +5657,7 @@ fn cmdResetQueryPool(cb: ?CommandBuffer, handle: usize, first: u32, count: u32) 
         return;
     };
     const overlaps_active = c.impl.active_query_pool == pool and first <= c.impl.active_query_index and c.impl.active_query_index - first < count;
-    if (!pool.owner.eql(c.impl.owner) or !validQueryRange(pool, first, count) or overlaps_active) {
+    if (c.impl.state != 1 or c.impl.invalid or !pool.owner.eql(c.impl.owner) or !validQueryRange(pool, first, count) or overlaps_active) {
         c.impl.invalid = true;
         return;
     }
@@ -5683,11 +5683,13 @@ fn cmdBeginQuery(cb: ?CommandBuffer, handle: usize, index: u32, flags: u32) call
         c.impl.invalid = true;
         return;
     };
-    if (!pool.owner.eql(c.impl.owner) or pool.query_type != 0 or index >= pool.slots.len or flags != 0 or c.impl.active_query_pool != null or querySlotStateForRecording(c, pool, index) != 0) {
+    if (c.impl.state != 1 or c.impl.invalid or !pool.owner.eql(c.impl.owner) or pool.query_type != 0 or index >= pool.slots.len or flags != 0 or c.impl.active_query_pool != null or querySlotStateForRecording(c, pool, index) != 0) {
         c.impl.invalid = true;
         return;
     }
+    const before = c.impl.count;
     record(c, .{ .query_begin = .{ .pool = pool, .index = index } });
+    if (c.impl.invalid or c.impl.count == before) return;
     c.impl.active_query_pool = pool;
     c.impl.active_query_index = index;
 }
@@ -5699,11 +5701,13 @@ fn cmdEndQuery(cb: ?CommandBuffer, handle: usize, index: u32) callconv(.c) void 
         c.impl.invalid = true;
         return;
     };
-    if (!pool.owner.eql(c.impl.owner) or c.impl.active_query_pool != pool or c.impl.active_query_index != index) {
+    if (c.impl.state != 1 or c.impl.invalid or !pool.owner.eql(c.impl.owner) or c.impl.active_query_pool != pool or c.impl.active_query_index != index) {
         c.impl.invalid = true;
         return;
     }
+    const before = c.impl.count;
     record(c, .{ .query_end = .{ .pool = pool, .index = index } });
+    if (c.impl.invalid or c.impl.count == before) return;
     c.impl.active_query_pool = null;
 }
 fn cmdWriteTimestamp(cb: ?CommandBuffer, stage: u32, handle: usize, index: u32) callconv(.c) void {
@@ -5714,7 +5718,7 @@ fn cmdWriteTimestamp(cb: ?CommandBuffer, stage: u32, handle: usize, index: u32) 
         c.impl.invalid = true;
         return;
     };
-    if (!pool.owner.eql(c.impl.owner) or pool.query_type != 2 or index >= pool.slots.len or !validEventStageMask(stage) or !std.math.isPowerOfTwo(stage) or querySlotStateForRecording(c, pool, index) != 0) {
+    if (c.impl.state != 1 or c.impl.invalid or !pool.owner.eql(c.impl.owner) or pool.query_type != 2 or index >= pool.slots.len or !validEventStageMask(stage) or !std.math.isPowerOfTwo(stage) or querySlotStateForRecording(c, pool, index) != 0) {
         c.impl.invalid = true;
         return;
     }
@@ -5735,7 +5739,7 @@ fn cmdCopyQueryPoolResults(cb: ?CommandBuffer, pool_handle: usize, first: u32, c
     const element_size = queryResultElementSize(flags);
     const alignment: u64 = if (flags & 1 != 0) 8 else 4;
     const required: u64 = if (count == 0) 0 else std.math.add(u64, std.math.mul(u64, count - 1, stride) catch std.math.maxInt(u64), element_size) catch std.math.maxInt(u64);
-    if (flags & ~@as(u32, 0xf) != 0 or !pool.owner.eql(c.impl.owner) or !validQueryCopyRange(pool, first, count) or (pool.query_type == 2 and flags & 8 != 0) or destination.owner != c.impl.owner or destination.usage & 0x2 == 0 or destination.memory == null or (count > 1 and (stride == 0 or stride < element_size or stride % alignment != 0)) or offset % alignment != 0 or offset >= destination.size or required > destination.size - offset) {
+    if (c.impl.state != 1 or c.impl.invalid or flags & ~@as(u32, 0xf) != 0 or !pool.owner.eql(c.impl.owner) or !validQueryCopyRange(pool, first, count) or (pool.query_type == 2 and flags & 8 != 0) or destination.owner != c.impl.owner or destination.usage & 0x2 == 0 or destination.memory == null or (count > 1 and (stride == 0 or stride < element_size or stride % alignment != 0)) or offset % alignment != 0 or offset >= destination.size or required > destination.size - offset) {
         c.impl.invalid = true;
         return;
     }
@@ -17391,6 +17395,16 @@ test "query pools expose exact availability timestamps copies and lifecycle" {
     cmdBeginQuery(commands[0], occlusion_pool, 0, 0);
     cmdEndQuery(commands[0], occlusion_pool, 0);
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    cmdBeginQuery(commands[1], occlusion_pool, 0, 0);
+    cmdEndQuery(commands[1], occlusion_pool, 0);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[1]));
+    const outside_query_count = commands[1].impl.count;
+    cmdBeginQuery(commands[1], occlusion_pool, 0, 0);
+    try std.testing.expect(commands[1].impl.invalid);
+    try std.testing.expectEqual(outside_query_count, commands[1].impl.count);
+    try std.testing.expect(commands[1].impl.active_query_pool == null);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
     cmdBeginQuery(commands[1], occlusion_pool, 0, 0);
     cmdEndQuery(commands[1], occlusion_pool, 0);
