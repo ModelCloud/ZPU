@@ -5016,6 +5016,9 @@ fn sync2TimestampStageToLegacy(stage: u64) ?u32 {
     if (stage == 0 or @popCount(stage) != 1) return null;
     return sync2StageMaskToLegacy(stage);
 }
+fn commandBufferOutsideRenderPass(command_buffer: *const CommandBufferObj) bool {
+    return command_buffer.impl.active_render_pass == null and !command_buffer.impl.dynamic_rendering;
+}
 
 fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callconv(.c) void {
     if (!dependencyInfoShapeValid(info)) {
@@ -5117,8 +5120,13 @@ fn cmdSetEvent2(cb: ?CommandBuffer, event: usize, info: ?*const DependencyInfo) 
     }
     const before_count: u16 = blk: {
         lock();
-        defer mutex.unlock();
         const command_buffer = validCommandBufferLocked(cb) orelse return;
+        if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or !commandBufferOutsideRenderPass(command_buffer)) {
+            command_buffer.impl.invalid = true;
+            mutex.unlock();
+            return;
+        }
+        defer mutex.unlock();
         break :blk command_buffer.impl.count;
     };
     // An empty dependency is valid for event2 commands.  There is no barrier
@@ -5146,6 +5154,17 @@ fn cmdSetEvent2(cb: ?CommandBuffer, event: usize, info: ?*const DependencyInfo) 
     mutex.unlock();
 }
 fn cmdResetEvent2(cb: ?CommandBuffer, event: usize, stage_mask: u64) callconv(.c) void {
+    lock();
+    const command_buffer = validCommandBufferLocked(cb) orelse {
+        mutex.unlock();
+        return;
+    };
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or !commandBufferOutsideRenderPass(command_buffer)) {
+        command_buffer.impl.invalid = true;
+        mutex.unlock();
+        return;
+    }
+    mutex.unlock();
     if (stage_mask & 0x4000 != 0) {
         markCommandBufferInvalid(cb);
         return;
@@ -14451,6 +14470,17 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&empty_dependency));
     cmdResetEvent2(commands[0], event, 0x1_0000);
     cmdResetEvent2(commands[0], event, 0);
+    const before_event_scope = commands[0].impl.count;
+    commands[0].impl.dynamic_rendering = true;
+    cmdSetEvent2(commands[0], event, &empty_dependency);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_event_scope, commands[0].impl.count);
+    commands[0].impl.invalid = false;
+    cmdResetEvent2(commands[0], event, 0x1_0000);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_event_scope, commands[0].impl.count);
+    commands[0].impl.invalid = false;
+    commands[0].impl.dynamic_rendering = false;
     cmdWriteTimestamp2(commands[0], 0x1000, query, 0);
     cmdWriteTimestamp2(commands[0], 0x1000_0000_0, query, 1);
     try std.testing.expect(!commands[0].impl.invalid);
