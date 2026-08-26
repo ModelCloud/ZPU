@@ -217,6 +217,10 @@ The promoted stencil-test-enable state follows the same initialized snapshot
 contract; because the advertised attachment policy is D32-only, an enabled
 resolved stencil test rejects the draw rather than silently dropping stencil
 semantics.
+The promoted depth-bias-enable state is initialized and resolved in the same
+draw snapshot. Since the bounded CPU raster profile does not implement depth
+bias, an enabled resolved value rejects the draw instead of silently changing
+depth output.
 The memory and sampler handle registries now meet the required 4096 and 4000
 allocation limits respectively. The generated command matrix is a
 234/234 dispatch/name-coverage artifact, not a Vulkan-conformance claim:
