@@ -207,6 +207,11 @@ indirect draws. A set discard value suppresses CPU raster work at submission,
 while an unset value rejects recording when the pipeline declares the dynamic
 state; static discard is retained in the pipeline identity and follows the
 same no-raster execution path.
+Promoted `VK_DYNAMIC_STATE_LINE_STIPPLE` is decoded as a pipeline-owned
+requirement. `vkCmdSetLineStipple` validates factor range, tracks lifecycle
+initialization, and resolves factor/pattern into direct and indirect draw
+snapshots; the bounded triangle-list executor retains this state but does not
+claim line-rasterization behavior.
 Depth-test enable, depth-write enable, and depth-compare-op dynamic values are
 also decoded and required before recording. The scalar graphics profile applies
 the Vulkan NEVER/LESS/EQUAL/LESS_OR_EQUAL/GREATER/NOT_EQUAL/GREATER_OR_EQUAL/
