@@ -194,6 +194,11 @@ The promoted viewport-with-count and scissor-with-count dynamic enum values
 are also decoded as aliases of the one-viewport/one-scissor count-aware
 commands, so their pipeline declarations enforce the same initialized state
 and bounded domain checks.
+Rasterizer-discard dynamic state is now decoded and snapshotted for direct and
+indirect draws. A set discard value suppresses CPU raster work at submission,
+while an unset value rejects recording when the pipeline declares the dynamic
+state; static discard is retained in the pipeline identity and follows the
+same no-raster execution path.
 The memory and sampler handle registries now meet the required 4096 and 4000
 allocation limits respectively. The generated command matrix is a
 234/234 dispatch/name-coverage artifact, not a Vulkan-conformance claim:
