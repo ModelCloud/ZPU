@@ -36,7 +36,10 @@ keeping factor validation bounded. Render-pass recording now also exercises a
 real two-subpass path: each subpass has its own compatible CPU-cube pipeline,
 `vkCmdNextSubpass` resets bindings, draw validation keys off the active
 subpass, and malformed extra transitions fail atomically; the warm path is
-allocation-free. Compute command recording now requires an owned bound compute
+allocation-free. The `vkCmdNextSubpass` bound check runs before reading the
+fixed eight-entry subpass-layout table, so advancing beyond the advertised
+maximum is a failure-atomic, allocation-free invalidation rather than an
+out-of-bounds access. Compute command recording now requires an owned bound compute
 pipeline, carries pipeline/layout/descriptor lifetime snapshots through
 submission prevalidation, and has a 4096-iteration allocation-free warm path.
 The `vkGetPhysicalDeviceFeatures2` query also accepts promoted Vulkan

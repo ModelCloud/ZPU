@@ -4892,10 +4892,18 @@ fn cmdNextSubpass(cb: ?CommandBuffer, contents: i32) callconv(.c) void {
     const depth = framebuffer.depth_image;
     const current_subpass = c.impl.active_subpass;
     const next_subpass = current_subpass + 1;
+    // Validate the subpass bound before indexing the fixed-size layout
+    // snapshots.  A legal render pass may use all eight profile subpasses;
+    // advancing beyond the last one must invalidate the command buffer
+    // atomically rather than evaluating subpass_color_layouts[8].
+    if (current_subpass >= render_pass.subpass_count or next_subpass >= render_pass.subpass_count) {
+        c.impl.invalid = true;
+        return;
+    }
     const color_transition = render_pass.subpass_color_layouts[current_subpass] != render_pass.subpass_color_layouts[next_subpass];
     const depth_transition = depth != null and render_pass.subpass_depth_layouts[current_subpass] != render_pass.subpass_depth_layouts[next_subpass];
     const required_commands: usize = 1 + @as(usize, @intFromBool(color_transition)) + @as(usize, @intFromBool(depth_transition));
-    if (c.impl.state != 1 or c.impl.invalid or c.impl.level != 0 or (contents != 0 and contents != 1) or next_subpass >= render_pass.subpass_count or @as(usize, c.impl.count) + required_commands > c.impl.commands.len) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.level != 0 or (contents != 0 and contents != 1) or @as(usize, c.impl.count) + required_commands > c.impl.commands.len) {
         c.impl.invalid = true;
         return;
     }
@@ -13389,6 +13397,39 @@ test "vkcube presentation path records submits and presents two swapchain images
     cmdNextSubpass(multi_commands[0], 0);
     cmdNextSubpass(multi_commands[0], 0);
     try std.testing.expect(multi_commands[0].impl.invalid);
+
+    // The fixed profile layout table has eight entries, matching the
+    // advertised render-pass subpass bound.  Exercise the exact upper bound
+    // so attempting to advance from subpass seven to eight is rejected before
+    // any layout-table indexing or command recording takes place.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    cmdBeginRenderPass(multi_commands[0], &multi_render_begin, 0);
+    const bounded_render_pass = validRenderPassLocked(multi_render_pass).?;
+    const saved_subpass_count = bounded_render_pass.subpass_count;
+    bounded_render_pass.subpass_count = 8;
+    multi_commands[0].impl.active_subpass = 7;
+    const before_out_of_range = multi_commands[0].impl.count;
+    cmdNextSubpass(multi_commands[0], 0);
+    try std.testing.expect(multi_commands[0].impl.invalid);
+    try std.testing.expectEqual(before_out_of_range, multi_commands[0].impl.count);
+    bounded_render_pass.subpass_count = saved_subpass_count;
+
+    // The rejection path is allocation-free as well as failure-atomic.
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+        cmdBeginRenderPass(multi_commands[0], &multi_render_begin, 0);
+        bounded_render_pass.subpass_count = 8;
+        multi_commands[0].impl.active_subpass = 7;
+        const before = multi_commands[0].impl.count;
+        cmdNextSubpass(multi_commands[0], 0);
+        try std.testing.expect(multi_commands[0].impl.invalid);
+        try std.testing.expectEqual(before, multi_commands[0].impl.count);
+        bounded_render_pass.subpass_count = saved_subpass_count;
+    }
+    test_allocations_before_failure = null;
     test_allocations_before_failure = 0;
     for (0..4096) |_| {
         try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
