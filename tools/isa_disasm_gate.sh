@@ -210,7 +210,8 @@ count_vex() {
 }
 
 count_vex_file() {
-  local file=$1 out="$workdir/counters.txt" result rc
+  local file=$1 result rc
+  rc=0
   if [[ "${file##*.}" == "a" ]]; then
     # Static archives restart addresses per member. Zig emits exactly one
     # object per kernel library, which readelf and objdump process natively;
@@ -224,13 +225,15 @@ count_vex_file() {
       return 1
     fi
   fi
-  # Capture output and status separately: command substitution in a `read`
-  # heredoc would swallow analyzer failures and look like zero counts.
-  if ! count_vex "$file" >"$out"; then
+  # Capture output and status separately: command substitution alone would
+  # swallow analyzer failures (empty output looks like zero counts), and
+  # redirecting the analyzer to the same intermediate file it uses internally
+  # makes `cat` read from its own stdout.
+  result=$(count_vex "$file") || rc=$?
+  if ((rc != 0)); then
     echo "isa-gate: analysis failed for '$file'" >&2
     return 1
   fi
-  result=$(cat "$out")
   # Exactly five integer counters, or the analysis is invalid: fail closed.
   if [[ ! "$result" =~ ^[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+\ [0-9]+$ ]]; then
     echo "isa-gate: malformed analyzer output for '$file': '$result'" >&2
