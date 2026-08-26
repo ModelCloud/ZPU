@@ -290,7 +290,9 @@ core implementations, without adding external-handle support.
 `VK_EXT_headless_surface` is now also enumerated and accepted. Its exact
 create-info ABI produces a CPU-backed offscreen surface; swapchains created
 from it use the shared lifecycle/timing path with a no-XCB transport, so
-headless presentation is usable without an X11 connection.
+headless presentation is usable without an X11 connection. The independent
+`zig build headless-present` C client exercises that extension through the
+system Vulkan loader and verifies the no-XCB acquire/present lifecycle.
 The single queue family now reports graphics, compute, and transfer capability,
 matching the bounded compute pipeline and dispatch commands that can be
 submitted through it; queue count, timestamp, and granularity limits are
@@ -354,9 +356,9 @@ state. The duplicate path is failure-atomic for binary and timeline semaphores,
 and `vkQueueSubmit2` inherits the same validation through its canonical submit
 conversion.
 
-The next execution-semantic checkpoint adds `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC`
-for the bounded descriptor path. Descriptor writes and update templates preserve
-the dynamic type, require the advertised 256-byte uniform-buffer alignment, and
+The bounded execution checkpoint for `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC`
+is complete. Descriptor writes and update templates preserve the dynamic type,
+require the advertised 256-byte uniform-buffer alignment, and
 `vkCmdBindDescriptorSets` applies one checked per-bind offset without mutating the
 descriptor set. Draw snapshots capture the effective offset, so rebinding the
 same set with a different offset is isolated and allocation-free. The focused
@@ -365,9 +367,9 @@ range bounds, snapshot isolation, and a 4096-iteration warm path. The bounded
 compute execution slice is also covered by an end-to-end dispatch that writes a
 mapped storage buffer and verifies the result after queue submission. General
 SPIR-V compute execution and unrestricted arbitrary graphics execution remain
-explicitly deferred. The driver executes only the bounded scalar graphics
-profile described above, with the same failure-atomic and allocation-free warm
-path guarantees as the other advertised subsets.
+the next execution-semantic gap; the driver still executes only the bounded
+scalar graphics profile described above, with the same failure-atomic and
+allocation-free warm-path guarantees as the other advertised subsets.
 
 | Core revision | Mandatory commands | Names dispatched now | Missing names |
 | --- | ---: | ---: | ---: |

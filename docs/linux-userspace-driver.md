@@ -271,6 +271,7 @@ These gates exercise progressively larger portions of the map:
 | `zig build smoke` | Direct ICD loading and loader-interface entry points without the system Vulkan loader. |
 | `vulkaninfo --summary` with `VK_DRIVER_FILES` | System-loader discovery and physical-device reporting. |
 | `zig build transfer` | C Vulkan client → loader → ZPU command submission → host-memory byte oracle. |
+| `zig build headless-present` | Independent C client → loader → `VK_EXT_headless_surface` → no-XCB swapchain acquire/present lifecycle. |
 | `zig build vkcube-ready` | Real vkcube acquire/submit/present lifecycle through loader and XCB. |
 | `zig build vkcube-visual` | Adds X-server readback proving a rendered pixel reached the window. |
 | `zig build target-4k-240` / `target-8k-60` | Adds controlled real-present p99 frame-time gates. |

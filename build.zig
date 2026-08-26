@@ -490,6 +490,20 @@ pub fn build(b: *std.Build) void {
     const transfer_step = b.step("transfer", "Run exact 240x240 transfers through the system Vulkan loader");
     transfer_step.dependOn(&run_transfer.step);
 
+    const headless_present_client = b.addExecutable(.{
+        .name = "zpu-headless-present",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize }),
+    });
+    headless_present_client.root_module.addCSourceFile(.{ .file = b.path("test/headless_present.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+    headless_present_client.root_module.link_libc = true;
+    headless_present_client.root_module.linkSystemLibrary("vulkan", .{});
+    const run_headless_present = b.addRunArtifact(headless_present_client);
+    run_headless_present.step.dependOn(&require_limited.step);
+    run_headless_present.setEnvironmentVariable("VK_DRIVER_FILES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_headless_present.step.dependOn(b.getInstallStep());
+    const headless_present_step = b.step("headless-present", "Run VK_EXT_headless_surface through the system Vulkan loader");
+    headless_present_step.dependOn(&run_headless_present.step);
+
     const xcb_present_test = b.addExecutable(.{
         .name = "zpu-xcb-present",
         .root_module = b.createModule(.{ .target = target, .optimize = optimize }),
