@@ -10301,7 +10301,17 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                     const values = timeline_info orelse return .error_initialization_failed;
                     if (values.wait_semaphore_values == null) return .error_initialization_failed;
                     _ = values.wait_semaphore_values.?[wait_index];
-                } else semaphore_states[semaphoreSlot(semaphore)] = false;
+                } else {
+                    // The synchronous single-queue executor has no other
+                    // producer that can make an unsignaled binary semaphore
+                    // ready.  Require a signal already visible or produced
+                    // by an earlier submit in this batch before consuming it;
+                    // otherwise the execution phase would wait forever after
+                    // validation had already accepted the submission.
+                    const slot = semaphoreSlot(semaphore);
+                    if (!semaphore_states[slot]) return .error_initialization_failed;
+                    semaphore_states[slot] = false;
+                }
             }
         }
         if (submit.signal_semaphore_count != 0) {
@@ -16442,6 +16452,9 @@ test "binary semaphores chain ordered submissions with allocation-free warm stat
     try std.testing.expectEqual(@as(usize, 0xfeed_face), unchanged);
     info.flags = 0;
     const wait_stage: u32 = 0x1000;
+    const unsignaled_wait = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 1, .wait_semaphores = @ptrCast(&semaphores[0]), .wait_dst_stage_mask = @ptrCast(&wait_stage), .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&unsignaled_wait), 0));
+    try std.testing.expect(!validSemaphoreLocked(semaphores[0]).?.signaled.load(.acquire));
     const signal_first = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 1, .signal_semaphores = @ptrCast(&semaphores[0]) };
     const wait_first_signal_second = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 1, .wait_semaphores = @ptrCast(&semaphores[0]), .wait_dst_stage_mask = @ptrCast(&wait_stage), .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 1, .signal_semaphores = @ptrCast(&semaphores[1]) };
     const chain = [_]SubmitInfo{ signal_first, wait_first_signal_second };
