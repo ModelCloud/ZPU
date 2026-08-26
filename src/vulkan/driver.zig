@@ -688,6 +688,12 @@ const GraphicsPipelineObj = struct {
     dynamic_stencil_op: bool = false,
     dynamic_depth_bias_enable: bool = false,
     dynamic_vertex_input_binding_stride: bool = false,
+    dynamic_line_width: bool = false,
+    dynamic_depth_bias: bool = false,
+    dynamic_blend_constants: bool = false,
+    dynamic_stencil_compare_mask: bool = false,
+    dynamic_stencil_write_mask: bool = false,
+    dynamic_stencil_reference: bool = false,
     stencil_test_enable: u32 = 0,
     viewport: Viewport,
     scissor: cpu_cube.Rect,
@@ -7969,6 +7975,10 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     var dynamic_vertex_input_binding_stride = false;
     var dynamic_line_width = false;
     var dynamic_depth_bias = false;
+    var dynamic_blend_constants = false;
+    var dynamic_stencil_compare_mask = false;
+    var dynamic_stencil_write_mask = false;
+    var dynamic_stencil_reference = false;
     var dynamic_indices: [16]u8 = undefined;
     var dynamic_count: u32 = 0;
     try w.u32le(if (ci.dynamic) |dy| dy.dynamic_state_count else 0);
@@ -7989,6 +7999,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
             prior = state;
             if (state == 0 or state == dynamic_state_viewport_with_count) dynamic_viewport = true else if (state == 1 or state == dynamic_state_scissor_with_count) dynamic_scissor = true else if (state == 2) dynamic_line_width = true;
             if (state == 3) dynamic_depth_bias = true;
+            if (state == 4) dynamic_blend_constants = true else if (state == 6) dynamic_stencil_compare_mask = true else if (state == 7) dynamic_stencil_write_mask = true else if (state == 8) dynamic_stencil_reference = true;
             if (state == dynamic_state_cull_mode) dynamic_cull_mode = true else if (state == dynamic_state_front_face) dynamic_front_face = true else if (state == dynamic_state_primitive_topology) dynamic_primitive_topology = true else if (state == dynamic_state_vertex_input_binding_stride) dynamic_vertex_input_binding_stride = true else if (state == dynamic_state_depth_test_enable) dynamic_depth_test_enable = true else if (state == dynamic_state_depth_write_enable) dynamic_depth_write_enable = true else if (state == dynamic_state_depth_compare_op) dynamic_depth_compare_op = true else if (state == 5) dynamic_depth_bounds = true else if (state == dynamic_state_depth_bounds_test_enable) dynamic_depth_bounds_test_enable = true else if (state == dynamic_state_stencil_test_enable) dynamic_stencil_test_enable = true else if (state == dynamic_state_stencil_op) dynamic_stencil_op = true else if (state == dynamic_state_rasterizer_discard_enable) dynamic_rasterizer_discard_enable = true else if (state == dynamic_state_depth_bias_enable) dynamic_depth_bias_enable = true else if (state == dynamic_state_primitive_restart_enable) dynamic_primitive_restart_enable = true;
             try w.i32le(state);
         }
@@ -8078,7 +8089,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         };
         profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     }
-    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .depth_bias_enable = pipeline_depth_bias_enable, .vertex_input_binding_mask = vertex_input_binding_mask, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .dynamic_vertex_input_binding_stride = dynamic_vertex_input_binding_stride, .viewport = baked_viewport, .scissor = baked_scissor };
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .depth_bias_enable = pipeline_depth_bias_enable, .vertex_input_binding_mask = vertex_input_binding_mask, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .dynamic_vertex_input_binding_stride = dynamic_vertex_input_binding_stride, .dynamic_line_width = dynamic_line_width, .dynamic_depth_bias = dynamic_depth_bias, .dynamic_blend_constants = dynamic_blend_constants, .dynamic_stencil_compare_mask = dynamic_stencil_compare_mask, .dynamic_stencil_write_mask = dynamic_stencil_write_mask, .dynamic_stencil_reference = dynamic_stencil_reference, .viewport = baked_viewport, .scissor = baked_scissor };
 }
 
 fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, set0: *const Canonical) bool {
@@ -9774,6 +9785,18 @@ fn cmdSetStencilWriteMask(cb: ?CommandBuffer, face_mask: u32, write_mask: u32) c
 fn cmdSetStencilReference(cb: ?CommandBuffer, face_mask: u32, reference: u32) callconv(.c) void {
     cmdSetStencilState(cb, face_mask, reference, .reference);
 }
+fn setCoreDynamicGraphicsStateForTest(cb: ?CommandBuffer, viewport: *const Viewport, scissor: *const Rect2D) void {
+    const blend = [_]f32{ 0, 0, 0, 0 };
+    cmdSetViewport(cb, 0, 1, @ptrCast(viewport));
+    cmdSetScissor(cb, 0, 1, @ptrCast(scissor));
+    cmdSetLineWidth(cb, 1);
+    cmdSetBlendConstants(cb, &blend);
+    cmdSetDepthBias(cb, 0, 0, 0);
+    cmdSetDepthBounds(cb, 0, 1);
+    cmdSetStencilCompareMask(cb, 3, 0);
+    cmdSetStencilWriteMask(cb, 3, 0);
+    cmdSetStencilReference(cb, 3, 0);
+}
 fn cmdPushConstants(cb: ?CommandBuffer, layout: usize, stage_flags: u32, offset: u32, size: u32, values: ?*const anyopaque) callconv(.c) void {
     lock();
     defer mutex.unlock();
@@ -9975,7 +9998,7 @@ fn graphicsDrawExecutionAllowed(abi: ExecutionAbi) bool {
     };
 }
 fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsPipelineObj) ?DrawRasterState {
-    if ((pipeline.dynamic_viewport and !command_buffer.impl.viewport_set) or (pipeline.dynamic_scissor and !command_buffer.impl.scissor_set) or (pipeline.dynamic_vertex_input_binding_stride and pipeline.vertex_input_binding_mask & command_buffer.impl.vertex_bindings.stride_set != pipeline.vertex_input_binding_mask) or (pipeline.dynamic_cull_mode and command_buffer.impl.dynamic.cull_mode == std.math.maxInt(u32)) or (pipeline.dynamic_front_face and command_buffer.impl.dynamic.front_face < 0) or (pipeline.dynamic_primitive_topology and !command_buffer.impl.dynamic.primitive_topology_set) or (pipeline.dynamic_primitive_restart_enable and !command_buffer.impl.dynamic.primitive_restart_enable_set) or (pipeline.dynamic_rasterizer_discard_enable and !command_buffer.impl.dynamic.rasterizer_discard_enable_set) or (pipeline.dynamic_depth_test_enable and !command_buffer.impl.dynamic.depth_test_enable_set) or (pipeline.dynamic_depth_write_enable and !command_buffer.impl.dynamic.depth_write_enable_set) or (pipeline.dynamic_depth_compare_op and !command_buffer.impl.dynamic.depth_compare_op_set) or (pipeline.dynamic_depth_bounds and !command_buffer.impl.depth_bounds_set) or (pipeline.dynamic_depth_bounds_test_enable and !command_buffer.impl.dynamic.depth_bounds_test_enable_set) or (pipeline.dynamic_stencil_test_enable and !command_buffer.impl.dynamic.stencil_test_enable_set) or (pipeline.dynamic_stencil_op and !command_buffer.impl.dynamic.stencil_op_set) or (pipeline.dynamic_depth_bias_enable and !command_buffer.impl.dynamic.depth_bias_enable_set)) return null;
+    if ((pipeline.dynamic_viewport and !command_buffer.impl.viewport_set) or (pipeline.dynamic_scissor and !command_buffer.impl.scissor_set) or (pipeline.dynamic_vertex_input_binding_stride and pipeline.vertex_input_binding_mask & command_buffer.impl.vertex_bindings.stride_set != pipeline.vertex_input_binding_mask) or (pipeline.dynamic_line_width and !command_buffer.impl.line_width_set) or (pipeline.dynamic_depth_bias and !command_buffer.impl.depth_bias_set) or (pipeline.dynamic_blend_constants and !command_buffer.impl.blend_constants_set) or (pipeline.dynamic_stencil_compare_mask and command_buffer.impl.stencil_compare_mask_set != 3) or (pipeline.dynamic_stencil_write_mask and command_buffer.impl.stencil_write_mask_set != 3) or (pipeline.dynamic_stencil_reference and command_buffer.impl.stencil_reference_set != 3) or (pipeline.dynamic_cull_mode and command_buffer.impl.dynamic.cull_mode == std.math.maxInt(u32)) or (pipeline.dynamic_front_face and command_buffer.impl.dynamic.front_face < 0) or (pipeline.dynamic_primitive_topology and !command_buffer.impl.dynamic.primitive_topology_set) or (pipeline.dynamic_primitive_restart_enable and !command_buffer.impl.dynamic.primitive_restart_enable_set) or (pipeline.dynamic_rasterizer_discard_enable and !command_buffer.impl.dynamic.rasterizer_discard_enable_set) or (pipeline.dynamic_depth_test_enable and !command_buffer.impl.dynamic.depth_test_enable_set) or (pipeline.dynamic_depth_write_enable and !command_buffer.impl.dynamic.depth_write_enable_set) or (pipeline.dynamic_depth_compare_op and !command_buffer.impl.dynamic.depth_compare_op_set) or (pipeline.dynamic_depth_bounds and !command_buffer.impl.depth_bounds_set) or (pipeline.dynamic_depth_bounds_test_enable and !command_buffer.impl.dynamic.depth_bounds_test_enable_set) or (pipeline.dynamic_stencil_test_enable and !command_buffer.impl.dynamic.stencil_test_enable_set) or (pipeline.dynamic_stencil_op and !command_buffer.impl.dynamic.stencil_op_set) or (pipeline.dynamic_depth_bias_enable and !command_buffer.impl.dynamic.depth_bias_enable_set)) return null;
     const primitive_topology = if (pipeline.dynamic_primitive_topology) command_buffer.impl.dynamic.primitive_topology else pipeline.primitive_topology;
     const primitive_restart_enable = if (pipeline.dynamic_primitive_restart_enable) command_buffer.impl.dynamic.primitive_restart_enable else pipeline.primitive_restart_enable;
     const rasterizer_discard_enable = if (pipeline.dynamic_rasterizer_discard_enable) command_buffer.impl.dynamic.rasterizer_discard_enable else pipeline.rasterizer_discard_enable;
@@ -10037,6 +10060,12 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     pipeline.dynamic_stencil_op = false;
     pipeline.dynamic_depth_bias_enable = false;
     pipeline.dynamic_vertex_input_binding_stride = false;
+    pipeline.dynamic_line_width = false;
+    pipeline.dynamic_depth_bias = false;
+    pipeline.dynamic_blend_constants = false;
+    pipeline.dynamic_stencil_compare_mask = false;
+    pipeline.dynamic_stencil_write_mask = false;
+    pipeline.dynamic_stencil_reference = false;
     var impl: CommandBufferImpl = undefined;
     impl.viewport = dynamic_viewport;
     impl.scissor = dynamic_scissor;
@@ -10195,6 +10224,36 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     resolved = drawRasterState(&command_buffer, &pipeline).?;
     try std.testing.expectEqual(@as(u16, 1), impl.vertex_bindings.stride_set);
     pipeline.dynamic_vertex_input_binding_stride = false;
+    pipeline.dynamic_line_width = true;
+    try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
+    impl.line_width_set = true;
+    resolved = drawRasterState(&command_buffer, &pipeline).?;
+    pipeline.dynamic_line_width = false;
+    pipeline.dynamic_depth_bias = true;
+    try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
+    impl.depth_bias_set = true;
+    resolved = drawRasterState(&command_buffer, &pipeline).?;
+    pipeline.dynamic_depth_bias = false;
+    pipeline.dynamic_blend_constants = true;
+    try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
+    impl.blend_constants_set = true;
+    resolved = drawRasterState(&command_buffer, &pipeline).?;
+    pipeline.dynamic_blend_constants = false;
+    pipeline.dynamic_stencil_compare_mask = true;
+    try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
+    impl.stencil_compare_mask_set = 3;
+    resolved = drawRasterState(&command_buffer, &pipeline).?;
+    pipeline.dynamic_stencil_compare_mask = false;
+    pipeline.dynamic_stencil_write_mask = true;
+    try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
+    impl.stencil_write_mask_set = 3;
+    resolved = drawRasterState(&command_buffer, &pipeline).?;
+    pipeline.dynamic_stencil_write_mask = false;
+    pipeline.dynamic_stencil_reference = true;
+    try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
+    impl.stencil_reference_set = 3;
+    resolved = drawRasterState(&command_buffer, &pipeline).?;
+    pipeline.dynamic_stencil_reference = false;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
     try std.testing.expectEqual(baked_viewport, resolved.viewport);
     try std.testing.expectEqual(dynamic_scissor, resolved.scissor);
@@ -12262,6 +12321,12 @@ test "vkcube presentation path records submits and presents two swapchain images
     var pipelines: [1]usize = undefined;
     try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, graphics_cache, 1, @ptrCast(&pipeline_info), null, &pipelines));
     const baseline_pipeline = validGraphicsPipelineLocked(pipelines[0]).?;
+    try std.testing.expect(baseline_pipeline.dynamic_line_width);
+    try std.testing.expect(baseline_pipeline.dynamic_depth_bias);
+    try std.testing.expect(baseline_pipeline.dynamic_blend_constants);
+    try std.testing.expect(baseline_pipeline.dynamic_stencil_compare_mask);
+    try std.testing.expect(baseline_pipeline.dynamic_stencil_write_mask);
+    try std.testing.expect(baseline_pipeline.dynamic_stencil_reference);
     const extended_dynamic_states = [_]i32{ dynamic_state_cull_mode, dynamic_state_front_face, dynamic_state_primitive_topology, dynamic_state_viewport_with_count, dynamic_state_scissor_with_count, dynamic_state_vertex_input_binding_stride, dynamic_state_depth_test_enable, dynamic_state_depth_write_enable, dynamic_state_depth_compare_op, 5, dynamic_state_depth_bounds_test_enable, dynamic_state_stencil_test_enable, dynamic_state_stencil_op, dynamic_state_rasterizer_discard_enable, dynamic_state_depth_bias_enable, dynamic_state_primitive_restart_enable };
     const extended_dynamic = PipelineDynamicStateCreateInfo{ .s_type = 27, .p_next = null, .flags = 0, .dynamic_state_count = extended_dynamic_states.len, .dynamic_states = &extended_dynamic_states };
     var extended_dynamic_pipeline_info = pipeline_info;
@@ -12797,6 +12862,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
     cmdSetViewport(multi_commands[0], 0, 1, @ptrCast(&multi_viewport));
     cmdSetScissor(multi_commands[0], 0, 1, @ptrCast(&multi_scissor));
+    setCoreDynamicGraphicsStateForTest(multi_commands[0], &multi_viewport, &multi_scissor);
     cmdDraw(multi_commands[0], 3, 1, 0, 0);
     try std.testing.expectEqual(@as(u32, 0), multi_commands[0].impl.active_subpass);
     cmdNextSubpass(multi_commands[0], 0);
@@ -12805,6 +12871,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
     cmdSetViewport(multi_commands[0], 0, 1, @ptrCast(&multi_viewport));
     cmdSetScissor(multi_commands[0], 0, 1, @ptrCast(&multi_scissor));
+    setCoreDynamicGraphicsStateForTest(multi_commands[0], &multi_viewport, &multi_scissor);
     cmdDraw(multi_commands[0], 3, 1, 0, 0);
     cmdEndRenderPass(multi_commands[0]);
     try std.testing.expectEqual(@as(u32, 0), multi_commands[0].impl.active_subpass);
@@ -12827,12 +12894,14 @@ test "vkcube presentation path records submits and presents two swapchain images
         cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
         cmdSetViewport(multi_commands[0], 0, 1, @ptrCast(&multi_viewport));
         cmdSetScissor(multi_commands[0], 0, 1, @ptrCast(&multi_scissor));
+        setCoreDynamicGraphicsStateForTest(multi_commands[0], &multi_viewport, &multi_scissor);
         cmdDraw(multi_commands[0], 3, 1, 0, 0);
         cmdNextSubpass(multi_commands[0], 0);
         cmdBindPipeline(multi_commands[0], 0, multi_pipeline[1]);
         cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
         cmdSetViewport(multi_commands[0], 0, 1, @ptrCast(&multi_viewport));
         cmdSetScissor(multi_commands[0], 0, 1, @ptrCast(&multi_scissor));
+        setCoreDynamicGraphicsStateForTest(multi_commands[0], &multi_viewport, &multi_scissor);
         cmdDraw(multi_commands[0], 3, 1, 0, 0);
         cmdEndRenderPass(multi_commands[0]);
         try std.testing.expect(!multi_commands[0].impl.invalid);
@@ -12946,6 +13015,23 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(commands[0].impl.invalid);
     commands[0].impl.invalid = false;
     commands[0].impl.index_buffer_handle = saved_index_handle;
+    cmdSetLineWidth(commands[0], 1);
+    const dynamic_blend = [_]f32{ 0.125, 0.25, 0.5, 1 };
+    cmdSetBlendConstants(commands[0], &dynamic_blend);
+    cmdSetDepthBias(commands[0], 1.25, 0, -2.5);
+    cmdSetDepthBounds(commands[0], 0.25, 0.75);
+    cmdSetStencilCompareMask(commands[0], 3, 0x1234_5678);
+    cmdSetStencilWriteMask(commands[0], 1, 0xabcd_ef01);
+    cmdSetStencilReference(commands[0], 2, 0x8765_4321);
+    cmdSetLineStipple(commands[0], 2, 0x00ff);
+    try std.testing.expect(commands[0].impl.line_width_set);
+    try std.testing.expectEqual(dynamic_blend, commands[0].impl.blend_constants);
+    try std.testing.expectEqual([3]f32{ 1.25, 0, -2.5 }, commands[0].impl.depth_bias);
+    try std.testing.expectEqual([2]f32{ 0.25, 0.75 }, commands[0].impl.depth_bounds);
+    try std.testing.expectEqual([2]u32{ 0x1234_5678, 0x1234_5678 }, commands[0].impl.stencil_compare_mask);
+    try std.testing.expectEqual(@as(u2, 1), commands[0].impl.stencil_write_mask_set);
+    try std.testing.expectEqual(@as(u2, 2), commands[0].impl.stencil_reference_set);
+    setCoreDynamicGraphicsStateForTest(commands[0], &viewport, &render_info.render_area);
     cmdDrawIndexedIndirect(commands[0], indirect_buffer, 0, 1, 20);
     try std.testing.expect(!commands[0].impl.invalid);
     cmdDrawIndirect(commands[0], indirect_buffer, 0, 1, 20);
@@ -12981,25 +13067,12 @@ test "vkcube presentation path records submits and presents two swapchain images
     cmdDrawIndexed(commands[0], 0, 1, 0, 0, 0);
     try std.testing.expect(!commands[0].impl.invalid);
     try std.testing.expectEqual(no_op_draw_count, commands[0].impl.count);
-    cmdSetLineWidth(commands[0], 1);
-    const dynamic_blend = [_]f32{ 0.125, 0.25, 0.5, 1 };
-    cmdSetBlendConstants(commands[0], &dynamic_blend);
-    cmdSetDepthBias(commands[0], 1.25, 0, -2.5);
-    cmdSetDepthBounds(commands[0], 0.25, 0.75);
-    cmdSetStencilCompareMask(commands[0], 3, 0x1234_5678);
-    cmdSetStencilWriteMask(commands[0], 1, 0xabcd_ef01);
-    cmdSetStencilReference(commands[0], 2, 0x8765_4321);
-    cmdSetLineStipple(commands[0], 2, 0x00ff);
-    try std.testing.expect(commands[0].impl.line_width_set);
-    try std.testing.expectEqual(dynamic_blend, commands[0].impl.blend_constants);
-    try std.testing.expectEqual([3]f32{ 1.25, 0, -2.5 }, commands[0].impl.depth_bias);
-    try std.testing.expectEqual([2]f32{ 0.25, 0.75 }, commands[0].impl.depth_bounds);
-    try std.testing.expectEqual([2]u32{ 0x1234_5678, 0x1234_5678 }, commands[0].impl.stencil_compare_mask);
-    try std.testing.expectEqual(@as(u2, 1), commands[0].impl.stencil_write_mask_set);
-    try std.testing.expectEqual(@as(u2, 2), commands[0].impl.stencil_reference_set);
     cmdDrawIndexed(commands[0], 3, 1, 1, -1, 7);
+    try std.testing.expect(!commands[0].impl.invalid);
     cmdEndQuery(commands[0], occlusion_pool, 0);
+    try std.testing.expect(!commands[0].impl.invalid);
     cmdEndRenderPass(commands[0]);
+    try std.testing.expect(!commands[0].impl.invalid);
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
 
     var acquired: usize = 0;
@@ -13068,6 +13141,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     cmdBindIndexBuffer(multi_commands[0], index_buffer, 0, 0);
     cmdSetViewport(multi_commands[0], 0, 1, @ptrCast(&viewport));
     cmdSetScissor(multi_commands[0], 0, 1, @ptrCast(&render_info.render_area));
+    setCoreDynamicGraphicsStateForTest(multi_commands[0], &viewport, &render_info.render_area);
     cmdDrawIndexed(multi_commands[0], 3, 1, 1, -1, 7);
     try std.testing.expect(!multi_commands[0].impl.invalid);
     cmdEndRendering(multi_commands[0]);
@@ -13107,6 +13181,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     cmdBindIndexBuffer(render_secondary[0], index_buffer, 0, 0);
     cmdSetViewport(render_secondary[0], 0, 1, @ptrCast(&viewport));
     cmdSetScissor(render_secondary[0], 0, 1, @ptrCast(&render_info.render_area));
+    setCoreDynamicGraphicsStateForTest(render_secondary[0], &viewport, &render_info.render_area);
     cmdDrawIndexed(render_secondary[0], 3, 1, 1, -1, 7);
     try std.testing.expect(!render_secondary[0].impl.invalid);
     try std.testing.expect(render_secondary[0].impl.dynamic_inheritance);
@@ -13160,12 +13235,14 @@ test "vkcube presentation path records submits and presents two swapchain images
     cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
     cmdSetViewport(multi_commands[0], 0, 1, @ptrCast(&multi_viewport));
     cmdSetScissor(multi_commands[0], 0, 1, @ptrCast(&multi_scissor));
+    setCoreDynamicGraphicsStateForTest(multi_commands[0], &multi_viewport, &multi_scissor);
     cmdDraw(multi_commands[0], 3, 1, 0, 0);
     cmdNextSubpass2(multi_commands[0], &pass2_begin, &pass2_end);
     cmdBindPipeline(multi_commands[0], 0, multi_pipeline[1]);
     cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
     cmdSetViewport(multi_commands[0], 0, 1, @ptrCast(&multi_viewport));
     cmdSetScissor(multi_commands[0], 0, 1, @ptrCast(&multi_scissor));
+    setCoreDynamicGraphicsStateForTest(multi_commands[0], &multi_viewport, &multi_scissor);
     cmdDraw(multi_commands[0], 3, 1, 0, 0);
     cmdEndRenderPass2(multi_commands[0], &pass2_end);
     try std.testing.expectEqual(Result.success, endCommandBuffer(multi_commands[0]));
@@ -13181,6 +13258,7 @@ test "vkcube presentation path records submits and presents two swapchain images
         cmdBindIndexBuffer(commands[0], index_buffer, 0, 0);
         cmdSetViewport(commands[0], 0, 1, @ptrCast(&viewport));
         cmdSetScissor(commands[0], 0, 1, @ptrCast(&render_info.render_area));
+        setCoreDynamicGraphicsStateForTest(commands[0], &viewport, &render_info.render_area);
         cmdDrawIndexed(commands[0], 3, 1, 1, -1, 7);
         cmdDraw(commands[0], 3, 2, 1, 7);
         cmdEndRenderPass(commands[0]);
@@ -13322,6 +13400,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     cmdBindIndexBuffer(commands[0], index_buffer, 0, 0);
     cmdSetViewport(commands[0], 0, 1, @ptrCast(&viewport));
     cmdSetScissor(commands[0], 0, 1, @ptrCast(&render_info.render_area));
+    setCoreDynamicGraphicsStateForTest(commands[0], &viewport, &render_info.render_area);
     cmdDrawIndexed(commands[0], 3, 1, 1, -1, 0);
     cmdEndRenderPass(commands[0]);
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));

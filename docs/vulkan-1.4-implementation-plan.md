@@ -229,6 +229,12 @@ The promoted depth-bias-enable state is initialized and resolved in the same
 draw snapshot. Since the bounded CPU raster profile does not implement depth
 bias, an enabled resolved value rejects the draw instead of silently changing
 depth output.
+Core dynamic line width, depth-bias values, blend constants, and stencil
+compare/write/reference masks are now decoded into pipeline-owned requirements.
+The command buffer must initialize each declared value before a direct, indexed,
+or indirect draw can be recorded; the bounded backend keeps its truthful policy
+(line width 1, zero depth-bias clamp, and no stencil attachment) while rejecting
+missing or unsupported state rather than silently substituting baked values.
 The memory and sampler handle registries now meet the required 4096 and 4000
 allocation limits respectively. The generated command matrix is a
 234/234 dispatch/name-coverage artifact, not a Vulkan-conformance claim:
