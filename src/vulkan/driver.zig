@@ -9365,6 +9365,69 @@ test "scalar graphics profile executes descriptor uniform blocks" {
         if (color_bytes[pixel * 4 + 2] == 255 and color_bytes[pixel * 4] == 0) saw_red = true;
     }
     try std.testing.expect(saw_red);
+
+    // The same descriptor snapshot must work for indexed and indirect draws;
+    // these paths share the profile executor but take different argument
+    // decoding routes.
+    var index_bytes: [6]u8 align(64) = .{ 0, 0, 1, 0, 2, 0 };
+    var index_memory = MemoryObj{ .owner = undefined, .bytes = index_bytes[0..], .mapped = true };
+    var index_buffer = BufferObj{ .owner = undefined, .size = index_bytes.len, .usage = 0x40, .memory = &index_memory };
+    @memset(color_bytes[0..], 0);
+    for (0..16) |index| std.mem.writeInt(u32, depth_bytes[index * 4 ..][0..4], 0x3f80_0000, .little);
+    var indexed_command = command;
+    indexed_command.cube_draw.indexed = .{ .buffer = &index_buffer, .offset = 0, .byte_count = 6, .index_type = 0, .vertex_offset = 0 };
+    executeValidatedCommand(indexed_command, &context);
+    saw_red = false;
+    for (0..16) |pixel| {
+        if (color_bytes[pixel * 4 + 2] == 255 and color_bytes[pixel * 4] == 0) saw_red = true;
+    }
+    try std.testing.expect(saw_red);
+
+    @memset(color_bytes[0..], 0);
+    for (0..16) |index| std.mem.writeInt(u32, depth_bytes[index * 4 ..][0..4], 0x3f80_0000, .little);
+    var indirect_bytes: [16]u8 align(64) = [_]u8{0} ** 16;
+    std.mem.writeInt(u32, indirect_bytes[0..4], 3, .little);
+    std.mem.writeInt(u32, indirect_bytes[4..8], 2, .little);
+    var indirect_memory = MemoryObj{ .owner = undefined, .bytes = indirect_bytes[0..], .mapped = true };
+    var indirect_buffer = BufferObj{ .owner = undefined, .size = indirect_bytes.len, .usage = 0x100, .memory = &indirect_memory };
+    const indirect_command = Command{ .indirect_draw = .{
+        .framebuffer = null,
+        .color_image = &color,
+        .depth_image = &depth,
+        .pipeline = &pipeline,
+        .descriptors = &descriptors,
+        .indirect_buffer = &indirect_buffer,
+        .offset = 0,
+        .draw_count = 1,
+        .stride = 16,
+        .indexed = false,
+        .index_buffer = null,
+        .index_offset = 0,
+        .index_type = 0,
+        .viewport = .{ .x = 0, .y = 0, .width = 4, .height = 4, .min_depth = 0, .max_depth = 1 },
+        .scissor = .{ .x = 0, .y = 0, .width = 4, .height = 4 },
+        .cull_mode = 0,
+        .front_face = 1,
+        .vertex_bindings = .{ .buffers = .{&vertex_buffer} ** 16, .offsets = .{0} ** 16, .sizes = .{48} ** 16, .strides = .{16} ** 16, .set = 1 },
+    } };
+    executeValidatedCommand(indirect_command, &context);
+    saw_red = false;
+    for (0..16) |pixel| {
+        if (color_bytes[pixel * 4 + 2] == 255 and color_bytes[pixel * 4] == 0) saw_red = true;
+    }
+    try std.testing.expect(saw_red);
+
+    // A malformed descriptor range is rejected before the profile can write
+    // either attachment, preserving command failure atomicity.
+    var invalid_descriptors = descriptors;
+    invalid_descriptors.uniform_range = uniform_bytes.len + 1;
+    var invalid_command = command;
+    invalid_command.cube_draw.descriptors = &invalid_descriptors;
+    @memset(color_bytes[0..], 0x7d);
+    const before_invalid = color_bytes;
+    executeValidatedCommand(invalid_command, &context);
+    try std.testing.expectEqualSlices(u8, &before_invalid, &color_bytes);
+
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     for (0..4096) |_| executeValidatedCommand(command, &context);
