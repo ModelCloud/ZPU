@@ -1569,6 +1569,14 @@ test "quantize to f16 rounds f32 values and preserves signed zero on warm path" 
     try std.testing.expectEqual(@as(u32, 0x8000_0000), executor.values[3].bits[0]);
 }
 
+test "quantize to f16 handles NaN overflow and subnormal boundaries" {
+    try std.testing.expectEqual(@as(u32, 0x7fc0_0000), quantizeF16(0x7fa1_2345));
+    try std.testing.expectEqual(@as(u32, 0x7f80_0000), quantizeF16(0x7f80_0000));
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 65504))), quantizeF16(@bitCast(@as(f32, 65519))));
+    try std.testing.expectEqual(@as(u32, 0x7f80_0000), quantizeF16(@bitCast(@as(f32, 65520))));
+    try std.testing.expectEqual(@as(u32, 0), quantizeF16(@bitCast(@as(f32, 1e-8))));
+}
+
 test "rejection is explicit and output transactional" {
     const one = f32bytes(1);
     var interfaces = [_]ir.Interface{.{ .storage = .output, .ty = .{ .scalar = .f32 }, .location = 0 }};
