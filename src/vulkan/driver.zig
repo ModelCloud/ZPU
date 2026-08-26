@@ -675,7 +675,7 @@ const QueryCommand = struct { pool: *QueryPoolObj, index: u32 };
 const QueryCopyCommand = struct { pool: *QueryPoolObj, first: u32, count: u32, destination: *BufferObj, offset: u64, stride: u64, flags: u32 };
 const IndexedDrawState = struct { buffer: *BufferObj, offset: u64, byte_count: u64, index_type: i32, vertex_offset: i32 };
 const IndirectCountState = struct { buffer: *BufferObj, offset: u64, max_draw_count: u32 };
-const IndirectDrawState = struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, indirect_buffer: *BufferObj, offset: u64, draw_count: u32, stride: u64, indexed: bool, index_buffer: ?*BufferObj, index_offset: u64, index_type: i32, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, count_source: ?IndirectCountState = null };
+const IndirectDrawState = struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, indirect_buffer: *BufferObj, offset: u64, draw_count: u32, stride: u64, indexed: bool, index_buffer: ?*BufferObj, index_offset: u64, index_type: i32, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, vertex_bindings: VertexBindingState = .{}, count_source: ?IndirectCountState = null };
 const BlitImageCommand = struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageBlit, filter: i32 };
 const ResolveImageCommand = struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageResolve };
 const DynamicState = struct { cull_mode: u32 = std.math.maxInt(u32), front_face: i32 = -1, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_bias_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, stencil_test_enable: u32 = 0, stencil_fail_op: i32 = 0, stencil_pass_op: i32 = 0, stencil_depth_fail_op: i32 = 0, stencil_compare_op: i32 = 7 };
@@ -5303,6 +5303,40 @@ fn prevalidateProfileVertexBindings(op: anytype, owner: *DeviceObj) bool {
     }
     return true;
 }
+
+fn prevalidateIndirectProfileDraw(op: IndirectDrawState, owner: *DeviceObj) bool {
+    const profile_draw = switch (op.pipeline.execution_abi) {
+        .profile_v1_scalar_graphics => true,
+        else => false,
+    };
+    if (!profile_draw) return true;
+    const bytes = bufferBytes(op.indirect_buffer);
+    const draw_count = if (op.count_source) |count| blk: {
+        const count_bytes = bufferBytes(count.buffer);
+        break :blk @min(std.mem.readInt(u32, count_bytes[@intCast(count.offset)..][0..4], .little), count.max_draw_count);
+    } else op.draw_count;
+    if (draw_count == 0) return true;
+    if (draw_count > 1) return false;
+    const base = @as(usize, @intCast(op.offset));
+    const indirect_size: usize = if (op.indexed) 20 else 16;
+    if (base > bytes.len or indirect_size > bytes.len - base) return false;
+    const words = bytes[base..];
+    const vertex_count = std.mem.readInt(u32, words[0..4], .little);
+    var cube: Command = undefined;
+    if (op.indexed) {
+        const first_index = std.mem.readInt(u32, words[8..12], .little);
+        const vertex_offset = std.mem.readInt(i32, words[12..16], .little);
+        const index_buffer = op.index_buffer orelse return false;
+        const index_size: u64 = if (op.index_type == 0) 2 else if (op.index_type == 1) 4 else return false;
+        const index_start = std.math.add(u64, op.index_offset, std.math.mul(u64, first_index, index_size) catch return false) catch return false;
+        const index_bytes = std.math.mul(u64, vertex_count, index_size) catch return false;
+        cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = vertex_count, .base_vertex = 0, .instance_count = std.mem.readInt(u32, words[4..8], .little), .indexed = .{ .buffer = index_buffer, .offset = index_start, .byte_count = index_bytes, .index_type = op.index_type, .vertex_offset = vertex_offset }, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .vertex_bindings = op.vertex_bindings } };
+    } else {
+        cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = vertex_count, .base_vertex = std.mem.readInt(u32, words[8..12], .little), .instance_count = std.mem.readInt(u32, words[4..8], .little), .indexed = null, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .vertex_bindings = op.vertex_bindings } };
+    }
+    return prevalidateProfileVertexBindings(cube.cube_draw, owner);
+}
+
 fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_objects]i32) bool {
     switch (command) {
         .fill => |op| {
@@ -5467,19 +5501,31 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             const framebuffer = op.framebuffer;
             const color = op.color_image orelse (framebuffer orelse return deadResource()).color_image orelse return deadResource();
             const depth = op.depth_image orelse (framebuffer orelse return deadResource()).depth_image orelse return deadResource();
-            const uniform = op.descriptors.uniform orelse return deadResource();
-            const texture = op.descriptors.texture orelse return deadResource();
             if (framebuffer) |fb| if ((stateForObject(FramebufferObj, fb, &framebuffer_objects, &framebuffer_state) orelse return deadResource()).* != .live) return deadResource();
             if ((stateForObject(GraphicsPipelineObj, op.pipeline, &graphics_pipeline_objects, &graphics_pipeline_state) orelse return deadResource()).* != .live or !liveDescriptorObject(op.descriptors)) return deadResource();
-            if (color.owner != owner or depth.owner != owner or uniform.owner != owner or texture.owner != owner or (color.memory == null and color.owned_bytes == null) or (depth.memory == null and depth.owned_bytes == null) or uniform.memory == null or texture.memory == null) {
+            const profile_draw = switch (op.pipeline.execution_abi) {
+                .profile_v1_scalar_graphics => true,
+                else => false,
+            };
+            const uniform = if (op.descriptors.uniform) |value| value else null;
+            const texture = if (op.descriptors.texture) |value| value else null;
+            if (color.owner != owner or depth.owner != owner or (color.memory == null and color.owned_bytes == null) or (depth.memory == null and depth.owned_bytes == null)) {
                 return wrongSubmittingDevice();
             }
-            if (!liveImageObject(color) or !liveImageObject(depth) or !liveImageObject(texture)) return deadResource();
+            if (!liveImageObject(color) or !liveImageObject(depth)) return deadResource();
             if (!op.pipeline.owner.eql(owner)) {
                 return wrongSubmittingDevice();
             }
-            if ((depth.memory != null and !liveMemoryObject(depth.memory.?)) or !liveMemoryObject(uniform.memory.?) or !liveMemoryObject(texture.memory.?)) {
-                return deadResource();
+            if (depth.memory != null and !liveMemoryObject(depth.memory.?)) return deadResource();
+            if (!profile_draw) {
+                const uniform_buffer = uniform orelse return deadResource();
+                const texture_image = texture orelse return deadResource();
+                if (uniform_buffer.owner != owner or texture_image.owner != owner or uniform_buffer.memory == null or texture_image.memory == null) return wrongSubmittingDevice();
+                if (!liveImageObject(texture_image) or !liveMemoryObject(uniform_buffer.memory.?) or !liveMemoryObject(texture_image.memory.?)) return deadResource();
+            }
+            if ((op.indexed and op.index_buffer == null) or (!profile_draw and (uniform == null or texture == null))) return false;
+            if (op.index_buffer) |index_buffer| {
+                if (index_buffer.memory != null and !liveMemoryObject(index_buffer.memory.?)) return deadResource();
             }
             if (!liveBufferObject(op.indirect_buffer) or op.indirect_buffer.memory == null or !liveMemoryObject(op.indirect_buffer.memory.?)) {
                 return deadResource();
@@ -5492,6 +5538,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 if (count.buffer.owner != owner or count.buffer.memory.?.owner != owner) return wrongSubmittingDevice();
                 if (count.max_draw_count > 1 or count.offset % 4 != 0 or count.offset > count.buffer.size or count.buffer.size - count.offset < 4) return false;
             }
+            if (profile_draw and !prevalidateIndirectProfileDraw(op, owner)) return false;
             if (op.indexed) {
                 const index_buffer = op.index_buffer orelse return deadResource();
                 if (!liveBufferObject(index_buffer) or index_buffer.memory == null or !liveMemoryObject(index_buffer.memory.?)) {
@@ -6049,11 +6096,11 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
                     const index_start = op.index_offset + @as(u64, first_index) * index_size;
                     const index_bytes = @as(u64, first) * index_size;
                     if (index_start > index_buffer.size or index_bytes > index_buffer.size - index_start) continue;
-                    cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = first, .base_vertex = 0, .instance_count = instances, .indexed = .{ .buffer = index_buffer, .offset = index_start, .byte_count = index_bytes, .index_type = op.index_type, .vertex_offset = vertex_offset }, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face } };
+                    cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = first, .base_vertex = 0, .instance_count = instances, .indexed = .{ .buffer = index_buffer, .offset = index_start, .byte_count = index_bytes, .index_type = op.index_type, .vertex_offset = vertex_offset }, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .vertex_bindings = op.vertex_bindings } };
                 } else {
                     const first_vertex = std.mem.readInt(u32, words[8..12], .little);
                     _ = std.mem.readInt(u32, words[12..16], .little);
-                    cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = first, .base_vertex = first_vertex, .instance_count = instances, .indexed = null, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face } };
+                    cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = first, .base_vertex = first_vertex, .instance_count = instances, .indexed = null, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .vertex_bindings = op.vertex_bindings } };
                 }
                 executeValidatedCommand(cube, query_context);
             }
@@ -9120,6 +9167,35 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     indexed_command.cube_draw.indexed = .{ .buffer = &index_buffer, .offset = 0, .byte_count = 6, .index_type = 0, .vertex_offset = 0 };
     executeValidatedCommand(indexed_command, &context);
     try std.testing.expect(std.mem.readInt(u32, color_bytes[0..4], .little) != 0 or std.mem.readInt(u32, color_bytes[4..8], .little) != 0);
+    @memset(color_bytes[0..], 0);
+    for (0..16) |index| std.mem.writeInt(u32, depth_bytes[index * 4 ..][0..4], 0x3f80_0000, .little);
+    var indirect_bytes: [16]u8 align(64) = [_]u8{0} ** 16;
+    std.mem.writeInt(u32, indirect_bytes[0..4], 3, .little);
+    std.mem.writeInt(u32, indirect_bytes[4..8], 1, .little);
+    var indirect_memory = MemoryObj{ .owner = undefined, .bytes = indirect_bytes[0..], .mapped = true };
+    var indirect_buffer = BufferObj{ .owner = undefined, .size = indirect_bytes.len, .usage = 0x100, .memory = &indirect_memory };
+    const indirect_command = Command{ .indirect_draw = .{
+        .framebuffer = null,
+        .color_image = &color,
+        .depth_image = &depth,
+        .pipeline = &pipeline,
+        .descriptors = &descriptors,
+        .indirect_buffer = &indirect_buffer,
+        .offset = 0,
+        .draw_count = 1,
+        .stride = 16,
+        .indexed = false,
+        .index_buffer = null,
+        .index_offset = 0,
+        .index_type = 0,
+        .viewport = .{ .x = 0, .y = 0, .width = 4, .height = 4, .min_depth = 0, .max_depth = 1 },
+        .scissor = .{ .x = 0, .y = 0, .width = 4, .height = 4 },
+        .cull_mode = 0,
+        .front_face = 1,
+        .vertex_bindings = .{ .buffers = .{&vertex_buffer} ** 16, .offsets = .{0} ** 16, .sizes = .{48} ** 16, .strides = .{16} ** 16, .set = 1 },
+    } };
+    executeValidatedCommand(indirect_command, &context);
+    try std.testing.expect(std.mem.readInt(u32, color_bytes[0..4], .little) != 0 or std.mem.readInt(u32, color_bytes[4..8], .little) != 0);
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     for (0..4096) |_| executeValidatedCommand(command, &context);
@@ -9344,7 +9420,7 @@ fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64
             invalid_index_state = bound_index.owner != command_buffer.impl.owner or bound_index.usage & 0x40 == 0 or bound_index.memory == null or !liveMemoryObject(bound_index.memory.?);
         } else invalid_index_state = true;
     }
-    if (pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or pipeline.execution_abi != .cpu_cube_v1 or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or indirect_buffer.owner != command_buffer.impl.owner or indirect_buffer.usage & 0x100 == 0 or indirect_buffer.memory == null or !liveMemoryObject(indirect_buffer.memory.?) or offset % 4 != 0 or stride < indirect_size or stride % 4 != 0 or offset > indirect_buffer.size or required > indirect_buffer.size - offset or invalid_index_state) {
+    if (pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or indirect_buffer.owner != command_buffer.impl.owner or indirect_buffer.usage & 0x100 == 0 or indirect_buffer.memory == null or !liveMemoryObject(indirect_buffer.memory.?) or offset % 4 != 0 or stride < indirect_size or stride % 4 != 0 or offset > indirect_buffer.size or required > indirect_buffer.size - offset or invalid_index_state) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -9358,7 +9434,7 @@ fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64
         command_buffer.impl.invalid = true;
         return;
     };
-    record(command_buffer, .{ .indirect_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .pipeline = pipeline, .descriptors = descriptor_snapshot, .indirect_buffer = indirect_buffer, .offset = offset, .draw_count = draw_count, .stride = stride, .indexed = indexed, .index_buffer = index_buffer, .index_offset = command_buffer.impl.index_offset, .index_type = command_buffer.impl.index_type, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = cull_mode, .front_face = front_face, .count_source = count_source } });
+    record(command_buffer, .{ .indirect_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .pipeline = pipeline, .descriptors = descriptor_snapshot, .indirect_buffer = indirect_buffer, .offset = offset, .draw_count = draw_count, .stride = stride, .indexed = indexed, .index_buffer = index_buffer, .index_offset = command_buffer.impl.index_offset, .index_type = command_buffer.impl.index_type, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = cull_mode, .front_face = front_face, .vertex_bindings = command_buffer.impl.vertex_bindings, .count_source = count_source } });
 }
 fn cmdDrawIndirect(cb: ?CommandBuffer, indirect: usize, offset: u64, draw_count: u32, stride: u64) callconv(.c) void {
     cmdDrawIndirectCommon(cb, indirect, offset, draw_count, stride, false, null);
