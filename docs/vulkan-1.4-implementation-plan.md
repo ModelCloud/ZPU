@@ -63,6 +63,9 @@ optional D32 depth format in its canonical compatibility key. Direct,
 indexed, and indirect draws validate those formats against the active
 dynamic-rendering attachments before recording, while secondary command
 buffers validate against their inherited rendering formats before execution.
+Color-only dynamic scopes now carry the optional-depth contract through
+submission prevalidation and both scalar raster paths, skipping depth storage
+without allocating a synthetic attachment.
 The bounded compute profile now also admits direct scalar StorageBuffer
 `OpLoad` reads (including read/write aliasing of the descriptor range) with
 transactional output commits; static access-chain reads share the same

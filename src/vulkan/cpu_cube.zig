@@ -263,9 +263,10 @@ fn stripeLane(y: i32, height: u32, lane_count: usize, stripe_count: usize) usize
     return @intCast(stripe % lane_count);
 }
 
-fn drawInternal(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, base_vertex: u32, viewport: Viewport, scissor: Rect, counters: *Counters, comptime optimized: bool, cull_mode: u32, front_face: i32, lane_index: usize, lane_count: usize, stripe_count: usize, prepared: ?*const PreparedDraw, indexed: ?IndexStream, comptime count_work: bool) usize {
+fn drawInternal(target: []u8, depth: ?[]u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, base_vertex: u32, viewport: Viewport, scissor: Rect, counters: *Counters, comptime optimized: bool, cull_mode: u32, front_face: i32, lane_index: usize, lane_count: usize, stripe_count: usize, prepared: ?*const PreparedDraw, indexed: ?IndexStream, comptime count_work: bool) usize {
     const source_vertex_count = if (indexed != null) packedVertexCount(uniform) orelse return 0 else base_vertex +| vertex_count;
-    if (vertex_count == 0 or vertex_count % 3 != 0 or source_vertex_count == 0 or uniform.len < 64 + @as(usize, source_vertex_count) * 32 or target.len != @as(usize, width) * height * 4 or depth.len < @as(usize, width) * height * 4 or texture.len != @as(usize, texture_width) * texture_height * 4 or texture_width == 0 or texture_height == 0) return 0;
+    if (vertex_count == 0 or vertex_count % 3 != 0 or source_vertex_count == 0 or uniform.len < 64 + @as(usize, source_vertex_count) * 32 or target.len != @as(usize, width) * height * 4 or texture.len != @as(usize, texture_width) * texture_height * 4 or texture_width == 0 or texture_height == 0) return 0;
+    if (depth) |depth_bytes| if (depth_bytes.len < @as(usize, width) * height * 4) return 0;
     if (count_work) counters.triangles_submitted += vertex_count / 3;
     var row_lanes: [8192]u8 = undefined;
     if (lane_count != 1) {
@@ -382,10 +383,14 @@ fn drawInternal(target: []u8, depth: []u8, width: u32, height: u32, uniform: []c
                             if (@abs(inverse_w) >= 0.000001) {
                                 const z = if (optimized) stepped_z else fragment_b0 * v0.screen[2] + fragment_b1 * v1.screen[2] + fragment_b2 * v2.screen[2];
                                 const pixel_index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
-                                const depth_offset = pixel_index * 4;
-                                if (z <= readFloat(depth, depth_offset)) {
+                                const depth_pass = if (depth) |depth_bytes| blk: {
+                                    const depth_offset = pixel_index * 4;
+                                    if (z > readFloat(depth_bytes, depth_offset)) break :blk false;
                                     if (count_work) counters.depth_tests_passed += 1;
-                                    writeFloat(depth, depth_offset, z);
+                                    writeFloat(depth_bytes, depth_offset, z);
+                                    break :blk true;
+                                } else true;
+                                if (depth_pass) {
                                     const reciprocal_w = 1.0 / inverse_w;
                                     const u_over_w = if (optimized) stepped_u_over_w else fragment_b0 * u_over_w0 + fragment_b1 * u_over_w1 + fragment_b2 * u_over_w2;
                                     const v_over_w = if (optimized) stepped_v_over_w else fragment_b0 * v_over_w0 + fragment_b1 * v_over_w1 + fragment_b2 * v_over_w2;
@@ -413,12 +418,12 @@ fn drawInternal(target: []u8, depth: []u8, width: u32, height: u32, uniform: []c
     return pixels_written;
 }
 
-pub fn drawCounted(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, counters: *Counters) usize {
+pub fn drawCounted(target: []u8, depth: ?[]u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, counters: *Counters) usize {
     return drawInternal(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, 0, viewport, scissor, counters, true, 0, 0, 0, 1, 1, null, null, true);
 }
 
 /// Untiled scalar oracle used by differential tests and checksum validation.
-pub fn drawReferenceCounted(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, counters: *Counters) usize {
+pub fn drawReferenceCounted(target: []u8, depth: ?[]u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, counters: *Counters) usize {
     return drawInternal(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, 0, viewport, scissor, counters, false, 0, 0, 0, 1, 1, null, null, true);
 }
 
@@ -428,7 +433,7 @@ const parallel_8k_slice_count = 40;
 const ParallelBand = struct { counters: Counters = .{}, pixels_written: usize = 0 };
 const ParallelDraw = struct {
     target: []u8,
-    depth: []u8,
+    depth: ?[]u8,
     width: u32,
     height: u32,
     uniform: []const u8,
@@ -644,7 +649,7 @@ fn dispatchParallel(job: ParallelJob) bool {
     return true;
 }
 
-fn drawParallel(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, base_vertex: u32, viewport: Viewport, scissor: Rect, cull_mode: u32, front_face: i32, bounds: ?*Rect, dirty_output: ?[]u8, indexed: ?IndexStream) ?usize {
+fn drawParallel(target: []u8, depth: ?[]u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, base_vertex: u32, viewport: Viewport, scissor: Rect, cull_mode: u32, front_face: i32, bounds: ?*Rect, dirty_output: ?[]u8, indexed: ?IndexStream) ?usize {
     const dirty_bytes = dirtyTileByteCount(width, height);
     if (dirty_bytes > max_dirty_tile_bytes) return null;
     if (dirty_output) |output| if (output.len < dirty_bytes) return null;
@@ -673,15 +678,15 @@ pub fn clearDirtyTilesParallel(color: []u8, color_pattern: u32, depth: []u8, dep
     return dispatchParallel(.{ .tile_clear = &context });
 }
 
-pub fn drawTracked(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, cull_mode: u32, front_face: i32, bounds: *Rect) usize {
+pub fn drawTracked(target: []u8, depth: ?[]u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, cull_mode: u32, front_face: i32, bounds: *Rect) usize {
     return drawTrackedTiles(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, cull_mode, front_face, bounds, null);
 }
 
-pub fn drawTrackedTiles(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, cull_mode: u32, front_face: i32, bounds: *Rect, dirty_output: ?[]u8) usize {
+pub fn drawTrackedTiles(target: []u8, depth: ?[]u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, cull_mode: u32, front_face: i32, bounds: *Rect, dirty_output: ?[]u8) usize {
     return drawTrackedTilesBase(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, 0, viewport, scissor, cull_mode, front_face, bounds, dirty_output);
 }
 
-pub fn drawTrackedTilesBase(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, base_vertex: u32, viewport: Viewport, scissor: Rect, cull_mode: u32, front_face: i32, bounds: *Rect, dirty_output: ?[]u8) usize {
+pub fn drawTrackedTilesBase(target: []u8, depth: ?[]u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, base_vertex: u32, viewport: Viewport, scissor: Rect, cull_mode: u32, front_face: i32, bounds: *Rect, dirty_output: ?[]u8) usize {
     if (@as(u64, width) * height >= 1920 * 1080) if (drawParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, base_vertex, viewport, scissor, cull_mode, front_face, bounds, dirty_output, null)) |pixels_written| return pixels_written;
     const prepared = prepareDraw(uniform, vertex_count, base_vertex, viewport, null);
     bounds.* = preparedBounds(&prepared, width, height, scissor);
@@ -690,7 +695,7 @@ pub fn drawTrackedTilesBase(target: []u8, depth: []u8, width: u32, height: u32, 
     return drawInternal(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, base_vertex, viewport, scissor, &counters, true, cull_mode, front_face, 0, 1, 1, &prepared, null, false);
 }
 
-pub fn drawIndexedTrackedTiles(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, index_count: u32, viewport: Viewport, scissor: Rect, cull_mode: u32, front_face: i32, bounds: *Rect, dirty_output: ?[]u8, indexed: IndexStream) usize {
+pub fn drawIndexedTrackedTiles(target: []u8, depth: ?[]u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, index_count: u32, viewport: Viewport, scissor: Rect, cull_mode: u32, front_face: i32, bounds: *Rect, dirty_output: ?[]u8, indexed: IndexStream) usize {
     const primitive_index_count = index_count - index_count % 3;
     if (primitive_index_count == 0) {
         bounds.* = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
@@ -704,7 +709,7 @@ pub fn drawIndexedTrackedTiles(target: []u8, depth: []u8, width: u32, height: u3
     return drawInternal(target, depth, width, height, uniform, texture, texture_width, texture_height, primitive_index_count, 0, viewport, scissor, &counters, true, cull_mode, front_face, 0, 1, 1, &prepared, indexed, false);
 }
 
-pub fn draw(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, cull_mode: u32, front_face: i32) usize {
+pub fn draw(target: []u8, depth: ?[]u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, cull_mode: u32, front_face: i32) usize {
     if (@as(u64, width) * height >= 1920 * 1080) if (drawParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, 0, viewport, scissor, cull_mode, front_face, null, null, null)) |pixels_written| return pixels_written;
     var counters = Counters{};
     return drawInternal(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, 0, viewport, scissor, &counters, true, cull_mode, front_face, 0, 1, 1, null, null, false);
@@ -733,6 +738,18 @@ test "one textured triangle updates color and depth" {
     offset = 0;
     while (offset < culled_depth.len) : (offset += 4) writeFloat(&culled_depth, offset, 1);
     try std.testing.expectEqual(@as(usize, 0), draw(&culled_target, &culled_depth, 8, 8, &uniform, &texture, 1, 1, 3, .{ .x = 0, .y = 0, .width = 8, .height = 8, .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = 8, .height = 8 }, 1, 0));
+}
+
+test "color-only rasterization skips depth storage" {
+    var uniform = [_]u8{0} ** (64 + 3 * 32);
+    for (0..4) |i| writeFloat(&uniform, (i * 4 + i) * 4, 1);
+    const positions = [_][4]f32{ .{ -0.8, -0.8, 0.2, 1 }, .{ 0.8, -0.8, 0.2, 1 }, .{ 0, 0.8, 0.2, 1 } };
+    for (positions, 0..) |position, i| for (position, 0..) |value, component| writeFloat(&uniform, 64 + i * 16 + component * 4, value);
+    const texture = [_]u8{ 255, 255, 255, 255 };
+    var target = [_]u8{0} ** (8 * 8 * 4);
+    const written = draw(&target, null, 8, 8, &uniform, &texture, 1, 1, 3, .{ .x = 0, .y = 0, .width = 8, .height = 8, .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = 8, .height = 8 }, 0, 0);
+    try std.testing.expect(written > 0);
+    try std.testing.expect(target[(4 * 8 + 4) * 4] != 0);
 }
 
 test "indexed rasterization matches direct geometry for uint16 uint32 and signed vertex offsets" {

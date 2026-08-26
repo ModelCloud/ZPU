@@ -6635,9 +6635,9 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
         .cube_draw => |op| {
             const framebuffer = op.framebuffer;
             const color = op.color_image orelse (framebuffer orelse return deadResource()).color_image orelse return deadResource();
-            const depth = op.depth_image orelse (framebuffer orelse return deadResource()).depth_image orelse return deadResource();
+            const depth = op.depth_image orelse if (framebuffer) |fb| fb.depth_image else null;
             const color_slot = imageSlot(color) orelse return deadResource();
-            const depth_slot = imageSlot(depth) orelse return deadResource();
+            const depth_slot = if (depth) |value| imageSlot(value) else null;
             if (framebuffer) |fb| if ((stateForObject(FramebufferObj, fb, &framebuffer_objects, &framebuffer_state) orelse return deadResource()).* != .live) return deadResource();
             if ((stateForObject(GraphicsPipelineObj, op.pipeline, &graphics_pipeline_objects, &graphics_pipeline_state) orelse return deadResource()).* != .live or !liveDescriptorObject(op.descriptors)) return deadResource();
             const profile_draw = switch (op.pipeline.execution_abi) {
@@ -6646,15 +6646,27 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             };
             const uniform = if (op.descriptors.uniform) |value| value else null;
             const texture = if (op.descriptors.texture) |value| value else null;
-            if (color.owner != owner or depth.owner != owner or !op.descriptors.owner.eql(owner) or (color.memory == null and color.owned_bytes == null) or (depth.memory == null and depth.owned_bytes == null)) return wrongSubmittingDevice();
-            if (!liveImageObject(color) or !liveImageObject(depth)) return deadResource();
-            if ((op.expected_color_layout >= 0 and layouts[color_slot] != op.expected_color_layout) or (op.expected_depth_layout >= 0 and layouts[depth_slot] != op.expected_depth_layout)) {
+            if (color.owner != owner or !op.descriptors.owner.eql(owner) or (color.memory == null and color.owned_bytes == null)) return wrongSubmittingDevice();
+            if (depth) |depth_image| {
+                if (depth_image.owner != owner or (depth_image.memory == null and depth_image.owned_bytes == null)) return wrongSubmittingDevice();
+                if (!liveImageObject(depth_image)) return deadResource();
+            }
+            if (!liveImageObject(color)) return deadResource();
+            if (op.expected_color_layout >= 0 and layouts[color_slot] != op.expected_color_layout) {
                 hit(.layout_mismatch);
                 return false;
             }
-            if (op.layer_count == 0 or op.color_base_layer >= color.array_layers or op.layer_count > color.array_layers - op.color_base_layer or op.depth_base_layer >= depth.array_layers or op.layer_count > depth.array_layers - op.depth_base_layer) return false;
+            if (op.expected_depth_layout >= 0) {
+                const slot = depth_slot orelse return false;
+                if (layouts[slot] != op.expected_depth_layout) {
+                    hit(.layout_mismatch);
+                    return false;
+                }
+            }
+            if (op.layer_count == 0 or op.color_base_layer >= color.array_layers or op.layer_count > color.array_layers - op.color_base_layer) return false;
+            if (depth) |depth_image| if (op.depth_base_layer >= depth_image.array_layers or op.layer_count > depth_image.array_layers - op.depth_base_layer) return false;
             if (!op.pipeline.owner.eql(owner)) return wrongSubmittingDevice();
-            if (depth.memory != null and !liveMemoryObject(depth.memory.?)) return deadResource();
+            if (depth) |depth_image| if (depth_image.memory != null and !liveMemoryObject(depth_image.memory.?)) return deadResource();
             if (!profile_draw) {
                 const uniform_buffer = uniform orelse return deadResource();
                 const texture_image = texture orelse return deadResource();
@@ -6675,9 +6687,9 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
         .indirect_draw => |op| {
             const framebuffer = op.framebuffer;
             const color = op.color_image orelse (framebuffer orelse return deadResource()).color_image orelse return deadResource();
-            const depth = op.depth_image orelse (framebuffer orelse return deadResource()).depth_image orelse return deadResource();
+            const depth = op.depth_image orelse if (framebuffer) |fb| fb.depth_image else null;
             const color_slot = imageSlot(color) orelse return deadResource();
-            const depth_slot = imageSlot(depth) orelse return deadResource();
+            const depth_slot = if (depth) |value| imageSlot(value) else null;
             if (framebuffer) |fb| if ((stateForObject(FramebufferObj, fb, &framebuffer_objects, &framebuffer_state) orelse return deadResource()).* != .live) return deadResource();
             if ((stateForObject(GraphicsPipelineObj, op.pipeline, &graphics_pipeline_objects, &graphics_pipeline_state) orelse return deadResource()).* != .live or !liveDescriptorObject(op.descriptors)) return deadResource();
             const profile_draw = switch (op.pipeline.execution_abi) {
@@ -6686,19 +6698,31 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             };
             const uniform = if (op.descriptors.uniform) |value| value else null;
             const texture = if (op.descriptors.texture) |value| value else null;
-            if (color.owner != owner or depth.owner != owner or (color.memory == null and color.owned_bytes == null) or (depth.memory == null and depth.owned_bytes == null)) {
+            if (color.owner != owner or (color.memory == null and color.owned_bytes == null)) {
                 return wrongSubmittingDevice();
             }
-            if (!liveImageObject(color) or !liveImageObject(depth)) return deadResource();
-            if ((op.expected_color_layout >= 0 and layouts[color_slot] != op.expected_color_layout) or (op.expected_depth_layout >= 0 and layouts[depth_slot] != op.expected_depth_layout)) {
+            if (depth) |depth_image| {
+                if (depth_image.owner != owner or (depth_image.memory == null and depth_image.owned_bytes == null)) return wrongSubmittingDevice();
+                if (!liveImageObject(depth_image)) return deadResource();
+            }
+            if (!liveImageObject(color)) return deadResource();
+            if (op.expected_color_layout >= 0 and layouts[color_slot] != op.expected_color_layout) {
                 hit(.layout_mismatch);
                 return false;
             }
-            if (op.layer_count == 0 or op.color_base_layer >= color.array_layers or op.layer_count > color.array_layers - op.color_base_layer or op.depth_base_layer >= depth.array_layers or op.layer_count > depth.array_layers - op.depth_base_layer) return false;
+            if (op.expected_depth_layout >= 0) {
+                const slot = depth_slot orelse return false;
+                if (layouts[slot] != op.expected_depth_layout) {
+                    hit(.layout_mismatch);
+                    return false;
+                }
+            }
+            if (op.layer_count == 0 or op.color_base_layer >= color.array_layers or op.layer_count > color.array_layers - op.color_base_layer) return false;
+            if (depth) |depth_image| if (op.depth_base_layer >= depth_image.array_layers or op.layer_count > depth_image.array_layers - op.depth_base_layer) return false;
             if (!op.pipeline.owner.eql(owner)) {
                 return wrongSubmittingDevice();
             }
-            if (depth.memory != null and !liveMemoryObject(depth.memory.?)) return deadResource();
+            if (depth) |depth_image| if (depth_image.memory != null and !liveMemoryObject(depth_image.memory.?)) return deadResource();
             if (!profile_draw) {
                 const uniform_buffer = uniform orelse return deadResource();
                 const texture_image = texture orelse return deadResource();
@@ -7048,9 +7072,9 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
         else => return,
     };
     const color = op.color_image orelse op.framebuffer.?.color_image.?;
-    const depth = op.depth_image orelse op.framebuffer.?.depth_image.?;
+    const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
     const color_bytes = imageLayerBytes(color, op.color_base_layer + layer);
-    const depth_bytes = imageLayerBytes(depth, op.depth_base_layer + layer);
+    const depth_bytes = if (depth) |depth_image| imageLayerBytes(depth_image, op.depth_base_layer + layer) else null;
     if (op.vertex_count < 3 or op.vertex_count % 3 != 0 or op.vertex_count > 4096 or op.instance_count == 0) return;
     var bounds = emptyRect();
     var pixels_written: usize = 0;
@@ -7167,17 +7191,20 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
             const depth_value = b0 * vertices[0].z + b1 * vertices[1].z + b2 * vertices[2].z;
             if (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1) continue;
             const offset = (@as(usize, @intCast(y)) * color.width + @as(usize, @intCast(x))) * 4;
-            const stored_depth: f32 = @bitCast(std.mem.readInt(u32, depth_bytes[offset..][0..4], .little));
-            if ((op.depth_bounds_test_enable != 0 and (depth_value < op.depth_bounds[0] or depth_value > op.depth_bounds[1])) or (op.depth_test_enable != 0 and (!std.math.isFinite(stored_depth) or !profileDepthCompare(op.depth_compare_op, depth_value, stored_depth)))) continue;
+            if (depth_bytes != null and op.depth_bounds_test_enable != 0 and (depth_value < op.depth_bounds[0] or depth_value > op.depth_bounds[1])) continue;
+            if (depth_bytes) |depth_storage| {
+                const stored_depth: f32 = @bitCast(std.mem.readInt(u32, depth_storage[offset..][0..4], .little));
+                if (op.depth_test_enable != 0 and (!std.math.isFinite(stored_depth) or !profileDepthCompare(op.depth_compare_op, depth_value, stored_depth))) continue;
+            }
             if (profileWriteColor(color_bytes[offset..][0..4], profile.fragment_bool, &fragment_output_bytes) == null) return;
-            if (op.depth_write_enable != 0) std.mem.writeInt(u32, depth_bytes[offset..][0..4], @bitCast(depth_value), .little);
+            if (depth_bytes) |depth_storage| if (op.depth_write_enable != 0) std.mem.writeInt(u32, depth_storage[offset..][0..4], @bitCast(depth_value), .little);
             bounds = unionRect(bounds, .{ .x = @intCast(x), .y = @intCast(y), .width = 1, .height = 1 });
             pixels_written += 1;
         };
     }
     if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(pixels_written, .monotonic);
     color.content_bounds = unionRect(color.content_bounds, bounds);
-    depth.content_bounds = unionRect(depth.content_bounds, bounds);
+    if (depth) |depth_image| depth_image.content_bounds = unionRect(depth_image.content_bounds, bounds);
     color.complex_3d_content = true;
     color.force_full_present = true;
 }
@@ -7339,7 +7366,7 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
             if (op.depth_test_enable != 1 or op.depth_write_enable != 1 or op.depth_compare_op != 3 or op.depth_bounds_test_enable != 0 or op.depth_bounds[0] != 0 or op.depth_bounds[1] != 1) return;
             const operation_start = frame_pacing.monotonicNs();
             const color = op.color_image orelse op.framebuffer.?.color_image.?;
-            const depth = op.depth_image orelse op.framebuffer.?.depth_image.?;
+            const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
             const uniform_buffer = op.descriptors.uniform.?;
             const uniform_start: usize = @intCast(uniform_buffer.offset + op.descriptors.uniform_offset);
             const uniform_length: usize = @intCast(@min(op.descriptors.uniform_range, uniform_buffer.size - op.descriptors.uniform_offset));
@@ -7350,7 +7377,7 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
             var pixels_written: usize = 0;
             for (0..op.layer_count) |layer| {
                 const color_layer = imageLayerBytes(color, op.color_base_layer + @as(u32, @intCast(layer)));
-                const depth_layer = imageLayerBytes(depth, op.depth_base_layer + @as(u32, @intCast(layer)));
+                const depth_layer = if (depth) |depth_image| imageLayerBytes(depth_image, op.depth_base_layer + @as(u32, @intCast(layer))) else null;
                 for (0..op.instance_count) |_| {
                     pixels_written += if (op.indexed) |indexed| blk: {
                         const bytes = bufferBytes(indexed.buffer)[@intCast(indexed.offset)..][0..@intCast(indexed.byte_count)];
@@ -7361,7 +7388,7 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
             }
             if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(pixels_written, .monotonic);
             color.content_bounds = unionRect(color.content_bounds, bounds);
-            depth.content_bounds = unionRect(depth.content_bounds, bounds);
+            if (depth) |depth_image| depth_image.content_bounds = unionRect(depth_image.content_bounds, bounds);
             color.complex_3d_content = true;
             color.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
         },
@@ -11288,6 +11315,18 @@ test "scalar graphics profile executes descriptor uniform blocks" {
     }
     try std.testing.expect(saw_red);
 
+    // Dynamic rendering permits a color-only scope.  The profile executor
+    // must skip depth reads/writes while preserving fragment output.
+    @memset(color_bytes[0..], 0);
+    var color_only_command = command;
+    color_only_command.cube_draw.depth_image = null;
+    executeValidatedCommand(color_only_command, &context);
+    saw_red = false;
+    for (0..16) |pixel| {
+        if (color_bytes[pixel * 4 + 2] == 255 and color_bytes[pixel * 4] == 0) saw_red = true;
+    }
+    try std.testing.expect(saw_red);
+
     // The same descriptor snapshot must work for indexed and indirect draws;
     // these paths share the profile executor but take different argument
     // decoding routes.
@@ -14318,6 +14357,32 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&dynamic_submit), 0));
     const dynamic_rendered_bytes = imageBytes(validImageLocked(images[0]).?);
     try std.testing.expect(!std.mem.eql(u8, &[_]u8{ 0, 0, 0, 255 }, dynamic_rendered_bytes[4 * (4 * 8 + 4) ..][0..4]));
+
+    // A dynamic pipeline may omit the depth attachment entirely.  Exercise
+    // the submission prevalidation and CPU raster path with a color-only
+    // rendering scope so this ABI promise is not merely parser coverage.
+    const saved_dynamic_depth_format = dynamic_pipeline_object.rendering_depth_format;
+    dynamic_pipeline_object.rendering_depth_format = 0;
+    var dynamic_color_only_rendering = dynamic_rendering;
+    dynamic_color_only_rendering.depth_attachment = null;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    validImageLocked(images[0]).?.layout = 1;
+    cmdBeginRendering(multi_commands[0], &dynamic_color_only_rendering);
+    cmdBindPipeline(multi_commands[0], 0, dynamic_pipeline[0]);
+    cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    cmdBindIndexBuffer(multi_commands[0], index_buffer, 0, 0);
+    cmdSetViewport(multi_commands[0], 0, 1, @ptrCast(&viewport));
+    cmdSetScissor(multi_commands[0], 0, 1, @ptrCast(&render_info.render_area));
+    setCoreDynamicGraphicsStateForTest(multi_commands[0], &viewport, &render_info.render_area);
+    cmdDrawIndexed(multi_commands[0], 3, 1, 1, -1, 7);
+    try std.testing.expect(!multi_commands[0].impl.invalid);
+    cmdEndRendering(multi_commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(multi_commands[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&dynamic_submit), 0));
+    try std.testing.expect(!std.mem.eql(u8, &[_]u8{ 0, 0, 0, 255 }, imageBytes(validImageLocked(images[0]).?)[4 * (4 * 8 + 4) ..][0..4]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+    dynamic_pipeline_object.rendering_depth_format = saved_dynamic_depth_format;
 
     // Secondary command buffers can inherit a dynamic-rendering scope through
     // VkCommandBufferInheritanceRenderingInfo.  The inherited formats and
