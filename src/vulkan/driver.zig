@@ -17249,6 +17249,22 @@ test "dynamic rendering begin and end own attachment scope" {
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&none_submit), 0));
     try std.testing.expectEqual(none_bytes_before, std.mem.readInt(u32, imageBytes(validImageLocked(image).?)[0..4], .little));
     try std.testing.expect(validImageLocked(image).?.force_full_present);
+    // A no-attachment scope is also a legal synchronization/rasterization
+    // envelope when it records no draws.  It must still own begin/end state
+    // and submit successfully without manufacturing an image target.
+    const empty_rendering = RenderingInfo{ .s_type = 1000044001, .p_next = null, .flags = 0, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 1, .height = 1 } }, .layer_count = 1, .view_mask = 0, .color_attachment_count = 0, .color_attachments = null, .depth_attachment = null, .stencil_attachment = null };
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBeginRendering(commands[0], &empty_rendering);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expect(commands[0].impl.dynamic_color_image == null);
+    try std.testing.expect(commands[0].impl.dynamic_depth_image == null);
+    try std.testing.expectEqual(@as(u16, 0), commands[0].impl.count);
+    cmdEndRendering(commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    var empty_submit_commands = [_]CommandBuffer{commands[0]};
+    const empty_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &empty_submit_commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&empty_submit), 0));
     // A depth-only dynamic-rendering scope is valid even when no color
     // attachment is supplied.  It can clear and store depth, while graphics
     // draws remain rejected because the executable profile has no color
