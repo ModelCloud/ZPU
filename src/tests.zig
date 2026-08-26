@@ -58,7 +58,9 @@ test "all SIMD-width backends match scalar exactly" {
     var expected: [3 + 153 * 13]u8 = undefined;
     var actual: [3 + 153 * 13]u8 = undefined;
     for ([_]s.Format{ .rgba8_unorm, .bgra8_unorm }) |format| {
-        // Forced backend calls are safe: portable vectors are legalized for the build target.
+        // Forced backend calls are gated on runtime support: portable vectors
+        // are legalized for the pinned baseline artifact target and the
+        // eight-lane tier lives in separately compiled x86-64-v3 kernels.
         for ([_]dispatch.Backend{ .scalar, .portable_vector, .avx2 }) |backend| {
             if (dispatch.available(backend)) try exercise(format, 0x5a50555eed, backend, &actual, &expected);
         }

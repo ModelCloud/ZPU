@@ -1,8 +1,41 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    // Default shipped artifacts to the x86-64 baseline CPU model so LLVM can
+    // never emit AVX2/AVX-512 (or any VEX-encoded) instruction into them.
+    // `-Dcpu` remains an explicit opt into a higher artifact tier. The
+    // eight-lane kernels live in a separate x86_64_v3 library; building with
+    // `-Dv3-kernels=false` produces fully kernel-free baseline artifacts for
+    // the ISA disassembly evidence gates.
+    const v3_kernels_enabled = b.option(bool, "v3-kernels", "Link the separately compiled x86-64-v3 eight-lane kernel objects") orelse true;
+    const enable_xcb = b.option(bool, "xcb", "Build the xcb-dependent artifacts (ICD, demo)") orelse true;
+    const target = b.standardTargetOptions(.{ .default_target = .{ .cpu_model = .baseline } });
     const optimize = b.standardOptimizeOption(.{});
+    if (b.option([]const u8, "search-prefix", "Extra library search prefix for cross builds (e.g. /usr/lib/aarch64-linux-gnu)")) |prefix| {
+        b.addSearchPrefix(prefix);
+    }
+
+    const v3_tier_applicable = target.result.cpu.arch == .x86_64;
+    const v3_available = v3_kernels_enabled and v3_tier_applicable;
+
+    const build_config = b.addOptions();
+    build_config.addOption(bool, "v3_kernels", v3_available);
+    const build_config_module = build_config.createModule();
+
+    // Kernel-free twin configuration: identical sources and flags except the
+    // eight-lane boundary is compiled out. ReleaseFast copies of every
+    // shipped artifact are gated with zero-VEX expectations in `isa-gate`,
+    // keeping the strongest evidence inside the normal test contract.
+    const clean_config = b.addOptions();
+    clean_config.addOption(bool, "v3_kernels", false);
+    const clean_config_module = clean_config.createModule();
+    const release_fast = .ReleaseFast;
+
+    const v3_kernels_main: ?*std.Build.Step.Compile =
+        if (v3_available) addV3Kernels(b, target, "zpu-x86-64-v3-kernels") else null;
+    const v3_kernels_host: ?*std.Build.Step.Compile =
+        if (v3_available) addV3Kernels(b, b.graph.host, "zpu-host-x86-64-v3-kernels") else null;
+
     const require_limited = b.addSystemCommand(&.{"tools/require-limited.sh"});
     const smolvm_guest_test = b.addSystemCommand(&.{"test/smolvm_guest.sh"});
     smolvm_guest_test.step.dependOn(&require_limited.step);
@@ -41,7 +74,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     zpu.link_libc = true;
-    zpu.linkSystemLibrary("xcb", .{});
+    if (enable_xcb) zpu.linkSystemLibrary("xcb", .{});
+    zpu.addImport("zpu_config", build_config_module);
+    if (v3_kernels_main) |k| zpu.linkLibrary(k);
     const icd = b.addLibrary(.{
         .name = "vulkan_zpu",
         .linkage = .dynamic,
@@ -52,8 +87,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     icd.root_module.link_libc = true;
-    icd.root_module.linkSystemLibrary("xcb", .{});
-    b.installArtifact(icd);
+    if (enable_xcb) icd.root_module.linkSystemLibrary("xcb", .{});
+    if (enable_xcb) b.installArtifact(icd);
     const install_manifest = b.addInstallFile(b.path("src/vulkan/zpu_icd.x86_64.json"), "share/vulkan/icd.d/zpu_icd.x86_64.json");
     b.getInstallStep().dependOn(&install_manifest.step);
     const demo = b.addExecutable(.{
@@ -65,13 +100,51 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "zpu", .module = zpu }},
         }),
     });
-    b.installArtifact(demo);
+    if (enable_xcb) b.installArtifact(demo);
+
+    // Kernel-free ReleaseFast twins used by the isa-gate as the strongest
+    // normal-contract evidence: identical sources, boundary compiled out.
+    const zpu_clean = b.addModule("zpu-clean", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = release_fast,
+    });
+    zpu_clean.link_libc = true;
+    if (enable_xcb) zpu_clean.linkSystemLibrary("xcb", .{});
+    zpu_clean.addImport("zpu_config", clean_config_module);
+    const icd_clean = b.addLibrary(.{
+        .name = "vulkan_zpu_clean",
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vulkan/driver.zig"),
+            .target = target,
+            .optimize = release_fast,
+        }),
+    });
+    icd_clean.root_module.link_libc = true;
+    if (enable_xcb) icd_clean.root_module.linkSystemLibrary("xcb", .{});
+    const demo_clean = b.addExecutable(.{
+        .name = "zpu-demo-clean",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/demo/main.zig"),
+            .target = target,
+            .optimize = release_fast,
+            .imports = &.{.{ .name = "zpu", .module = zpu_clean }},
+        }),
+    });
 
     const benchmark = b.addExecutable(.{
         .name = "zpu-benchmark",
         .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_main.zig"), .target = target, .optimize = optimize }),
     });
+    benchmark.root_module.addImport("zpu_config", build_config_module);
+    if (v3_kernels_main) |k| benchmark.root_module.linkLibrary(k);
     b.installArtifact(benchmark);
+    const benchmark_clean = b.addExecutable(.{
+        .name = "zpu-benchmark-clean",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_main.zig"), .target = target, .optimize = release_fast }),
+    });
+    benchmark_clean.root_module.addImport("zpu_config", clean_config_module);
     const run_benchmark = b.addRunArtifact(benchmark);
     if (b.args) |args| run_benchmark.addArgs(args);
     const benchmark_step = b.step("benchmark", "Run deterministic 2D benchmark and optional baseline guard");
@@ -148,7 +221,17 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
     run_tests.step.dependOn(&require_limited.step);
     const test_step = b.step("test", "Run deterministic unit tests");
-    test_step.dependOn(&run_tests.step);
+    // Cross-compiling: prove the test graph builds for the target without
+    // attempting to execute foreign binaries locally.
+    const cross_compiling = target.result.cpu.arch != b.graph.host.result.cpu.arch or
+        target.result.os.tag != b.graph.host.result.os.tag;
+    if (cross_compiling) {
+        tests.step.dependOn(&require_limited.step);
+        test_step.dependOn(&tests.step);
+    } else {
+        test_step.dependOn(&run_tests.step);
+    }
+
     const benchmark_ir_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/render_ir_exec_benchmark.zig"), .target = b.graph.host, .optimize = .Debug }) });
     benchmark_ir_tests.root_module.link_libc = true;
     const run_benchmark_ir_tests = b.addRunArtifact(benchmark_ir_tests);
@@ -160,6 +243,8 @@ pub fn build(b: *std.Build) void {
     const benchmark_tests = b.addTest(.{
         .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_main.zig"), .target = b.graph.host, .optimize = .Debug }),
     });
+    benchmark_tests.root_module.addImport("zpu_config", build_config_module);
+    if (v3_kernels_host) |k| benchmark_tests.root_module.linkLibrary(k);
     const run_benchmark_tests = b.addRunArtifact(benchmark_tests);
     run_benchmark_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&run_benchmark_tests.step);
@@ -174,16 +259,21 @@ pub fn build(b: *std.Build) void {
     benchmark_cli_tests.addFileArg(b.path("test/benchmark_cli.sh"));
     benchmark_cli_tests.addArtifactArg(benchmark);
     benchmark_cli_tests.step.dependOn(&require_limited.step);
-    test_step.dependOn(&benchmark_cli_tests.step);
     const benchmark_history_tests = b.addSystemCommand(&.{"test/benchmark_history.sh"});
     benchmark_history_tests.addArtifactArg(benchmark);
     benchmark_history_tests.step.dependOn(&require_limited.step);
-    test_step.dependOn(&benchmark_history_tests.step);
     const evidence_tests = b.addSystemCommand(&.{"test/evidence.sh"});
     evidence_tests.addArtifactArg(benchmark);
     evidence_tests.addArtifactArg(benchmark_3d);
     evidence_tests.step.dependOn(&require_limited.step);
-    test_step.dependOn(&evidence_tests.step);
+    if (!cross_compiling) {
+        // These integrations execute the built artifacts locally and are
+        // meaningless for foreign targets; the compile-only coverage above
+        // already proves the graph builds.
+        test_step.dependOn(&benchmark_cli_tests.step);
+        test_step.dependOn(&benchmark_history_tests.step);
+        test_step.dependOn(&evidence_tests.step);
+    }
     const cpu_fanout_tests = b.addSystemCommand(&.{"test/cpu_fanout.sh"});
     cpu_fanout_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&cpu_fanout_tests.step);
@@ -203,7 +293,14 @@ pub fn build(b: *std.Build) void {
     run_shader_module.step.dependOn(&require_limited.step);
     run_shader_module.setEnvironmentVariable("VK_DRIVER_FILES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
     run_shader_module.step.dependOn(b.getInstallStep());
-    test_step.dependOn(&run_shader_module.step);
+    if (cross_compiling) {
+        // Foreign targets have no local Vulkan loader to link against (the
+        // system libvulkan's glibc symbol versions typically exceed Zig's
+        // bundled cross sysroot), and executing the client locally is
+        // impossible anyway. The ISA-relevant proof is the rest of the graph.
+    } else {
+        test_step.dependOn(&run_shader_module.step);
+    }
 
     const reference_module = b.createModule(.{ .root_source_file = b.path("test/spirv_frontend_reference.zig"), .target = b.graph.host, .optimize = .Debug });
     reference_module.addImport("frontend", b.createModule(.{ .root_source_file = b.path("src/vulkan/spirv_frontend.zig"), .target = b.graph.host, .optimize = .Debug }));
@@ -306,6 +403,8 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_main.zig"), .target = b.graph.host, .optimize = .Debug }),
         .use_llvm = true,
     });
+    benchmark_coverage_tests.root_module.addImport("zpu_config", build_config_module);
+    if (v3_kernels_host) |k| benchmark_coverage_tests.root_module.linkLibrary(k);
     const benchmark_path = b.pathFromRoot("src/benchmark.zig");
     const collect_benchmark_coverage = b.addSystemCommand(&.{ "kcov", "--clean", b.fmt("--include-path={s}", .{benchmark_path}) });
     collect_benchmark_coverage.step.dependOn(&require_limited.step);
@@ -320,6 +419,8 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_main.zig"), .target = b.graph.host, .optimize = .Debug }),
         .use_llvm = true,
     });
+    benchmark_coverage_exe.root_module.addImport("zpu_config", build_config_module);
+    if (v3_kernels_host) |k| benchmark_coverage_exe.root_module.linkLibrary(k);
     const collect_cli_coverage = b.addSystemCommand(&.{"bash"});
     collect_cli_coverage.addFileArg(b.path("test/benchmark_cli.sh"));
     collect_cli_coverage.step.dependOn(&require_limited.step);
@@ -337,6 +438,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_3d.zig"), .target = b.graph.host, .optimize = .Debug }),
         .use_llvm = true,
     });
+    benchmark_3d_coverage_tests.root_module.link_libc = true;
     const benchmark_3d_path = b.pathFromRoot("src/benchmark_3d.zig");
     const collect_benchmark_3d_coverage = b.addSystemCommand(&.{ "kcov", "--clean", b.fmt("--include-path={s}", .{benchmark_3d_path}) });
     collect_benchmark_3d_coverage.step.dependOn(&require_limited.step);
@@ -452,4 +554,139 @@ pub fn build(b: *std.Build) void {
     pr_readiness_command.step.dependOn(&require_limited.step);
     const pr_readiness_step = b.step("pr-readiness", "Validate fresh complete benchmark, screenshot, and video evidence");
     pr_readiness_step.dependOn(&pr_readiness_command.step);
+
+    const isa_gate = b.addSystemCommand(&.{ "bash", "tools/isa_disasm_gate.sh", "check" });
+    if (target.result.cpu.arch == .x86_64) {
+        const baseline_pinned = target.result.cpu.model == &std.Target.x86.cpu.x86_64;
+        var gated_files: usize = 0;
+        // Linkage consistency: the ICD never links kernels, whatever the tier.
+        isa_gate.addArg("--no-kernel-symbols");
+        if (enable_xcb) {
+            isa_gate.addArtifactArg(icd);
+            isa_gate.addArtifactArg(icd_clean);
+            gated_files += 2;
+        }
+        if (baseline_pinned) {
+            // Default tier: strongest contract. ReleaseFast kernel-free twins
+            // and the default-tree artifacts must contain zero VEX inside
+            // project functions; demo/benchmark additionally carry genuinely
+            // vectorized kernel exports when the v3 tier applies.
+            if (enable_xcb) {
+                isa_gate.addArg("--clean");
+                isa_gate.addArtifactArg(icd_clean);
+                isa_gate.addArtifactArg(demo_clean);
+                gated_files += 2;
+            }
+            isa_gate.addArg("--clean");
+            isa_gate.addArtifactArg(benchmark_clean);
+            gated_files += 1;
+            if (v3_available) {
+                isa_gate.addArg("--kernelized");
+                gated_files += 1;
+                isa_gate.addArtifactArg(demo);
+                isa_gate.addArtifactArg(benchmark);
+                if (v3_kernels_main) |k| {
+                    isa_gate.addArtifactArg(k);
+                    gated_files += 1;
+                }
+            } else {
+                isa_gate.addArg("--no-kernel-symbols");
+                gated_files += 1;
+                isa_gate.addArtifactArg(demo);
+                isa_gate.addArtifactArg(benchmark);
+                gated_files += 1;
+            }
+        } else if (v3_available) {
+            // Explicit -Dcpu opt-in: portable-tier VEX is the user's choice,
+            // but the eight-lane exports must be linked and vectorized.
+            isa_gate.addArg("--kernels-linked");
+            gated_files += 1;
+            isa_gate.addArtifactArg(demo);
+            isa_gate.addArtifactArg(benchmark);
+            if (v3_kernels_main) |k| {
+                isa_gate.addArtifactArg(k);
+                gated_files += 1;
+            }
+        }
+        if (gated_files == 0) {
+            // No artifacts to scan: run the gate's first-class skip path so
+            // the step still exercises the tool deterministically and exits 0.
+            const skip_reason = b.fmt("no scannable artifacts for cpu={s} -Dxcb={} -Dv3-kernels={}", .{ @tagName(target.result.cpu.arch), enable_xcb, v3_kernels_enabled });
+            isa_gate.argv.clearRetainingCapacity();
+            isa_gate.addArg(b.pathFromRoot("tools/isa_disasm_gate.sh"));
+            isa_gate.addArg("skip");
+            isa_gate.addArg(skip_reason);
+        }
+    } else {
+        isa_gate.argv.clearRetainingCapacity();
+        isa_gate.addArg(b.pathFromRoot("tools/isa_disasm_gate.sh"));
+        isa_gate.addArg("skip");
+        isa_gate.addArg(b.fmt("ISA tier evidence is x86-specific; target arch is {s}", .{@tagName(target.result.cpu.arch)}));
+    }
+    isa_gate.step.dependOn(&require_limited.step);
+
+    const isa_selftest = b.addSystemCommand(&.{ "bash", "tools/isa_gate_selftest.sh" });
+    isa_selftest.step.dependOn(&require_limited.step);
+
+    const isa_wiring_regression = b.addSystemCommand(&.{ "bash", "tools/isa_gate_wiring_regression.sh" });
+    isa_wiring_regression.step.dependOn(&require_limited.step);
+
+    const isa_gate_step = b.step("isa-gate", "Require baseline artifacts free of VEX instructions with a vectorized kernel positive control");
+    isa_gate_step.dependOn(&isa_gate.step);
+    isa_gate_step.dependOn(&isa_selftest.step);
+    isa_gate_step.dependOn(&isa_wiring_regression.step);
+    test_step.dependOn(&isa_gate.step);
+    if (v3_kernels_main) |k| {
+        const kernel_guard_regression = b.addSystemCommand(&.{ "bash", "tools/kernel_guard_regression.sh" });
+        kernel_guard_regression.addArtifactArg(k);
+        kernel_guard_regression.step.dependOn(&require_limited.step);
+        isa_gate_step.dependOn(&kernel_guard_regression.step);
+        test_step.dependOn(&kernel_guard_regression.step);
+    }
+    test_step.dependOn(&isa_selftest.step);
+    test_step.dependOn(&isa_wiring_regression.step);
+    const isa_cross = b.addSystemCommand(&.{ "bash", "tools/isa_cross_target_gate.sh" });
+    isa_cross.step.dependOn(&require_limited.step);
+    const isa_cross_step = b.step("isa-cross", "Collect cross-target codegen evidence for the pinned ISA tiers");
+    isa_cross_step.dependOn(&isa_cross.step);
+
+    // Deterministic install path for the kernel archive (used by
+    // tools/isa_cross_target_gate.sh); hard-fails when the tier is absent.
+    const install_v3_step = b.step("install-v3-archive", "Install the x86-64-v3 eight-lane kernel archive");
+    if (v3_kernels_main) |k| {
+        const install_archive = b.addInstallArtifact(k, .{
+            .dest_dir = .{ .override = .{ .custom = "isa" } },
+            .dest_sub_path = "libzpu-x86-64-v3-kernels.a",
+        });
+        install_v3_step.dependOn(&install_archive.step);
+    } else {
+        const unavailable = b.addFail("install-v3-archive requires the x86-64-v3 tier (x86_64 target and -Dv3-kernels=true)");
+        install_v3_step.dependOn(&unavailable.step);
+    }
+}
+
+/// Builds the eight-lane kernel objects as their own static library compiled
+/// with an explicit x86_64_v3 CPU model on the consumer's OS/ABI, or returns
+/// null when the tier does not apply to that target's architecture. Baseline
+/// artifact codegen never sees this source, so AVX2 instructions can only
+/// exist inside these linked-in kernel objects.
+///
+/// The kernels are always ReleaseFast: they are hot loops, and Debug-mode
+/// safety plumbing would otherwise drag std.debug machinery into the v3 tier.
+fn addV3Kernels(b: *std.Build, resolved: std.Build.ResolvedTarget, name: []const u8) ?*std.Build.Step.Compile {
+    if (resolved.result.cpu.arch != .x86_64) return null;
+    var query = resolved.query;
+    query.cpu_arch = .x86_64;
+    query.cpu_model = .{ .explicit = &std.Target.x86.cpu.x86_64_v3 };
+    query.cpu_features_add = .empty;
+    query.cpu_features_sub = .empty;
+    return b.addLibrary(.{
+        .name = name,
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/x86_64_v3_kernels.zig"),
+            .target = b.resolveTargetQuery(query),
+            .optimize = .ReleaseFast,
+        }),
+    });
 }

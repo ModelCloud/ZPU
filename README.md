@@ -43,6 +43,8 @@ ZPU targets Zig 0.16.0, the newest stable compiler at the time of this milestone
 zig build
 zig build api-inventory
 zig build test
+zig build isa-gate
+zig build isa-cross
 zig build coverage
 zig build smoke
 zig build transfer
@@ -132,12 +134,12 @@ DRM/KMS driver.
 
 - `src/surface.zig` owns RGBA8/BGRA8 memory layout, validation, colors, and clipping.
 - `src/raster/` implements clear/fill and straight-alpha Porter-Duff source-over rectangles.
-- `src/simd/` owns backend selection and scalar, portable four-pixel vector, and host-gated eight-pixel AVX2-oriented paths for constant-color spans and per-pixel RGBA source spans.
+- `src/simd/` owns backend selection and the scalar and portable four-pixel vector tiers; the eight-pixel tier is compiled separately in `src/x86_64_v3_kernels.zig` (see [design/isa-tiers.md](design/isa-tiers.md)).
 - `src/command/` decouples command recording semantics from raster execution.
 - `src/platform/` owns presentation; today that is a headless PPM sink.
 - `src/vulkan/` contains original minimal Vulkan 1.0 ABI declarations, private loader entry points, object lifetime handling, and the ICD manifest.
 
-The x86 dispatcher checks CPUID AVX/OSXSAVE, XCR0 state, and AVX2 before selecting the host-gated eight-lane backend; other hosts use the portable four-lane family. The width-oriented kernels use Zig `@Vector` rather than handwritten intrinsics. Zig/LLVM may legalize or scalarize these operations according to the compilation target, so the backend names describe kernel families rather than promising emitted instructions. AVX-512 is intentionally excluded until controlled measurements show a tail-latency benefit. Automatic dispatch never advertises unsupported CPU/OS state.
+ISA tiers are enforced by a build/code-generation boundary, not by naming conventions. Default builds pin every artifact to the x86-64 baseline CPU model, so no VEX-encoded (AVX2, AVX-512, FMA, BMI) instruction can exist inside any project function (foreign library code on an explicit allowlist and data tables are reported separately); `-Dcpu=` remains an explicit opt into a higher artifact tier. The eight-lane kernels are compiled as their own x86-64-v3 static library that baseline codegen reaches only through extern symbols after the runtime CPUID AVX/OSXSAVE, XCR0, and AVX2 checks pass; a tripwire panics if an unsupported host ever reached them, and the comptime boundary flag is tied to actual linkage so AVX2 availability can never be advertised without the kernel objects present. The width-oriented kernels use Zig `@Vector` rather than handwritten intrinsics, so pixel results are identical across tiers. AVX-512 remains excluded until controlled measurements show a tail-latency benefit, and automatic dispatch never advertises unsupported CPU/OS state. `zig build isa-gate` enforces all of this with deterministic raw-prefix disassembly analysis (ReleaseFast kernel-free twins must be fully clean; default artifacts may carry VEX only inside genuinely vectorized `zpu_v3_*` kernels), with fixture-based negative controls proving leaks fail closed.
 
 Tests compare every backend byte-for-byte with scalar for both formats, deliberately misaligned surface starts and padded strides, clipping and off-screen rectangles and sprites, odd widths and vector tails, alpha 0/1/128/254/255, and deterministic randomized content and operations.
 
