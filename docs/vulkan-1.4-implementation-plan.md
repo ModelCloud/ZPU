@@ -289,7 +289,8 @@ CPU raster profile.
 Synchronization2 now normalizes the promoted 64-bit stage/access aliases that
 have exact meaning in the bounded CPU backend: copy/resolve/blit/clear stages,
 index/vertex-attribute input, pre-rasterization vertex work, and sampled or
-storage shader access. The mapping is applied consistently to dependency
+storage shader access, together with the core generic `MEMORY_READ` and
+`MEMORY_WRITE` access domains. The mapping is applied consistently to dependency
 barriers, event/timestamp commands, and `vkQueueSubmit2`; unknown high bits
 remain rejected before command state or submission state is published. ABI,
 rollback, high-bit positive/negative, and 4096-iteration allocation-free tests

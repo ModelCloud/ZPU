@@ -5287,7 +5287,7 @@ fn sync2AccessMaskToLegacy(mask: u64) ?u32 {
     const high_sampled = @as(u64, 0x1_0000_0000);
     const high_storage_read = @as(u64, 0x2_0000_0000);
     const high_storage_write = @as(u64, 0x4_0000_0000);
-    const supported = @as(u64, 0x7fff) | high_sampled | high_storage_read | high_storage_write;
+    const supported = @as(u64, 0x1_ffff) | high_sampled | high_storage_read | high_storage_write;
     if (mask & ~supported != 0) return null;
     var legacy: u32 = @truncate(mask & 0x1_ffff);
     if (mask & (high_sampled | high_storage_read) != 0) legacy |= 0x20; // SHADER_READ
@@ -5310,7 +5310,8 @@ fn dynamicRenderingDependencyValid(info: *const DependencyInfo) bool {
     // buffer/image barriers and non-framebuffer stages are invalid here.
     if (info.buffer_memory_barrier_count != 0 or info.image_memory_barrier_count != 0) return false;
     if (info.memory_barriers) |items| for (items[0..info.memory_barrier_count]) |barrier| {
-        if (barrier.src_stage_mask & ~@as(u64, 0x700) != 0 or barrier.dst_stage_mask & ~@as(u64, 0x700) != 0 or barrier.src_access_mask & ~@as(u64, 0x780) != 0 or barrier.dst_access_mask & ~@as(u64, 0x780) != 0) return false;
+        const attachment_access: u64 = 0x780 | 0x18000; // attachment plus generic memory visibility
+        if (barrier.src_stage_mask & ~@as(u64, 0x700) != 0 or barrier.dst_stage_mask & ~@as(u64, 0x700) != 0 or barrier.src_access_mask & ~attachment_access != 0 or barrier.dst_access_mask & ~attachment_access != 0) return false;
     };
     return true;
 }
@@ -5339,8 +5340,9 @@ fn legacyDependencyScopeValid(command_buffer: *const CommandBufferObj, src_stage
     if (command_buffer.impl.dynamic_rendering) {
         if (buffer_list.len != 0 or image_list.len != 0) return false;
         if (memory_list.len == 0) return true;
-        if (src_stage_mask & ~@as(u32, 0x700) != 0 or dst_stage_mask & ~@as(u32, 0x700) != 0) return false;
-        for (memory_list) |barrier| if (barrier.src_access_mask & ~@as(u32, 0x780) != 0 or barrier.dst_access_mask & ~@as(u32, 0x780) != 0) return false;
+        const lowered_all_commands = src_stage_mask == 0x1_0000 and dst_stage_mask == 0x1_0000;
+        if (!lowered_all_commands and (src_stage_mask & ~@as(u32, 0x700) != 0 or dst_stage_mask & ~@as(u32, 0x700) != 0)) return false;
+        for (memory_list) |barrier| if (barrier.src_access_mask & ~@as(u32, 0x18780) != 0 or barrier.dst_access_mask & ~@as(u32, 0x18780) != 0) return false;
         return true;
     }
     if (command_buffer.impl.active_render_pass == null) return true;
@@ -5702,7 +5704,7 @@ fn validEventStageMask(stage_mask: u32) bool {
     return validPipelineStageMask(stage_mask) and stage_mask & 0x4000 == 0;
 }
 fn stagesSupportAccess(stage_mask: u32, access_mask: u32) bool {
-    if (access_mask & ~@as(u32, 0x7fff) != 0) return false;
+    if (access_mask & ~@as(u32, 0x1_ffff) != 0) return false;
     if (access_mask == 0 or stage_mask & 0x1_0000 != 0) return true; // ALL_COMMANDS
     var stages = stage_mask;
     if (stages & 0x8000 != 0) stages |= 0x7fe; // ALL_GRAPHICS
@@ -12726,7 +12728,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     extended_render_info.dependencies = @ptrCast(&bad_dependency);
     try std.testing.expectError(error.Invalid, buildRenderPass(&extended_render_info, false));
     bad_dependency = dependency;
-    bad_dependency.dst_access_mask = 0x8000;
+    bad_dependency.dst_access_mask = 0x2_0000;
     extended_render_info.dependencies = @ptrCast(&bad_dependency);
     try std.testing.expectError(error.Invalid, buildRenderPass(&extended_render_info, false));
     var dependency2 = SubpassDependency2{ .s_type = 1000109003, .p_next = null, .src_subpass = 0xffff_ffff, .dst_subpass = 0, .src_stage_mask = 4, .dst_stage_mask = 4, .src_access_mask = 4, .dst_access_mask = 4, .dependency_flags = 1, .view_offset = 0 };
@@ -15525,13 +15527,14 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expect(validPipelineStageMask(0x4000));
     try std.testing.expect(!validEventStageMask(0x4000));
     try std.testing.expectEqual(@as(?u32, 0x20), sync2AccessMaskToLegacy(0x2_0000_0000));
-    try std.testing.expect(sync2AccessMaskToLegacy(0x8000) == null);
-    try std.testing.expect(sync2AccessMaskToLegacy(0x1_0000) == null);
+    try std.testing.expectEqual(@as(?u32, 0x8000), sync2AccessMaskToLegacy(0x8000));
+    try std.testing.expectEqual(@as(?u32, 0x1_0000), sync2AccessMaskToLegacy(0x1_0000));
     try std.testing.expectEqual(@as(?u32, 0x1000), sync2TimestampStageToLegacy(0x1000));
     try std.testing.expectEqual(@as(?u32, 0x1000), sync2TimestampStageToLegacy(0x1000_0000_0));
     try std.testing.expect(sync2TimestampStageToLegacy(0) == null);
     try std.testing.expect(sync2TimestampStageToLegacy(0x1000 | 0x2000) == null);
-    try std.testing.expect(!stagesSupportAccess(0x1_0000, 0x8000));
+    try std.testing.expect(stagesSupportAccess(0x1_0000, 0x8000));
+    try std.testing.expect(stagesSupportAccess(0x1, 0x1_0000));
     try std.testing.expect(sync2StageMaskToLegacy(0x8000_0000_0000_0000) == null);
     const ctx = try createTestDeviceContext();
     const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
@@ -15563,6 +15566,14 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     const attachment_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 1, .memory_barriers = @ptrCast(&attachment_memory_barrier), .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
     try std.testing.expect(dynamicRenderingDependencyValid(&attachment_dependency));
     try std.testing.expect(!dynamicRenderingDependencyValid(&dependency));
+    var generic_memory_barrier = attachment_memory_barrier;
+    generic_memory_barrier.src_access_mask = 0x8000;
+    generic_memory_barrier.dst_access_mask = 0x1_0000;
+    var generic_memory_dependency = attachment_dependency;
+    generic_memory_dependency.memory_barriers = @ptrCast(&generic_memory_barrier);
+    try std.testing.expect(dynamicRenderingDependencyValid(&generic_memory_dependency));
+    generic_memory_barrier.dst_access_mask = 0x2_0000;
+    try std.testing.expect(!dynamicRenderingDependencyValid(&generic_memory_dependency));
     const mixed_memory_barriers = [_]MemoryBarrier2{
         .{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 1, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0 },
         .{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 0x2000, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0 },
@@ -15626,6 +15637,11 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(before_event_scope, commands[0].impl.count);
     commands[0].impl.invalid = false;
+    const before_dynamic_generic_barrier = commands[0].impl.count;
+    generic_memory_barrier.dst_access_mask = 0x1_0000;
+    cmdPipelineBarrier2(commands[0], &generic_memory_dependency);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(before_dynamic_generic_barrier, commands[0].impl.count);
     const before_dynamic_wait_scope = commands[0].impl.count;
     cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&dependency));
     try std.testing.expect(commands[0].impl.invalid);
