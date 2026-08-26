@@ -97,8 +97,8 @@ folds in the following as core, all of which must actually work:
 From `ui/ozone/platform/headless/vulkan_implementation_headless.cc`,
 `InitializeVulkanInstance`:
 
-- [ ] `VK_KHR_external_memory_capabilities` — always required
-- [ ] `VK_KHR_external_semaphore_capabilities` — always required
+- [x] `VK_KHR_external_memory_capabilities` — always required (enumerated and accepted; promoted capability query is exposed with zero external-handle support)
+- [x] `VK_KHR_external_semaphore_capabilities` — always required (enumerated and accepted; promoted capability query is exposed with zero external-handle support)
 - [ ] `VK_KHR_surface` — required when `using_surface`
 - [ ] `VK_EXT_headless_surface` — required when `using_surface`
 

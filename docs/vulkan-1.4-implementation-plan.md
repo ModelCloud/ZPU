@@ -282,6 +282,11 @@ allocation limits respectively. The generated command matrix is a
 several commands intentionally expose only the narrow behavior behind the
 currently advertised Vulkan 1.0 profile. Runtime version reporting remains at
 Vulkan 1.0 until the broader feature, CTS, and performance gates below pass.
+The two promoted instance capability names required by Chromium's headless
+bootstrap, `VK_KHR_external_memory_capabilities` and
+`VK_KHR_external_semaphore_capabilities`, are now enumerated and accepted;
+their KHR physical-device query aliases resolve to the same zero-capability
+core implementations, without adding external-handle support.
 The single queue family now reports graphics, compute, and transfer capability,
 matching the bounded compute pipeline and dispatch commands that can be
 submitted through it; queue count, timestamp, and granularity limits are

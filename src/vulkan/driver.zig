@@ -2160,8 +2160,12 @@ fn enumerateInstanceExtensions(layer: ?[*:0]const u8, count: ?*u32, props: ?[*]E
         return .error_initialization_failed;
     };
     if (layer != null) return .error_extension_not_present;
-    const names = [_][]const u8{ "VK_KHR_surface", "VK_KHR_xcb_surface" };
-    const versions = [_]u32{ 25, 6 };
+    // Chromium's headless Vulkan bootstrap enables the two promoted
+    // external-capability names by string even when the driver reports a
+    // Vulkan 1.0 API version.  They are capability-query aliases only: ZPU
+    // still exposes no import/export handles or external-memory features.
+    const names = [_][]const u8{ "VK_KHR_surface", "VK_KHR_xcb_surface", "VK_KHR_external_memory_capabilities", "VK_KHR_external_semaphore_capabilities" };
+    const versions = [_]u32{ 25, 6, 1, 1 };
     if (props) |items| {
         const available = n.*;
         const written = @min(available, names.len);
@@ -2178,7 +2182,10 @@ fn enumerateInstanceExtensions(layer: ?[*:0]const u8, count: ?*u32, props: ?[*]E
 }
 fn supportedInstanceExtension(name: [*:0]const u8) bool {
     const value = std.mem.span(name);
-    return std.mem.eql(u8, value, "VK_KHR_surface") or std.mem.eql(u8, value, "VK_KHR_xcb_surface");
+    return std.mem.eql(u8, value, "VK_KHR_external_memory_capabilities") or
+        std.mem.eql(u8, value, "VK_KHR_external_semaphore_capabilities") or
+        std.mem.eql(u8, value, "VK_KHR_surface") or
+        std.mem.eql(u8, value, "VK_KHR_xcb_surface");
 }
 fn createInstance(info: ?*const InstanceInfo, alloc: ?*const Alloc, output: ?*Instance) callconv(.c) Result {
     const ci = info orelse return .error_initialization_failed;
@@ -12495,7 +12502,7 @@ fn globalLookup(n: []const u8) Fn {
 }
 fn instanceLookup(n: []const u8) Fn {
     if (globalLookup(n)) |f| return f;
-    const map = .{ .{ "vkDestroyInstance", destroyInstance }, .{ "vkEnumeratePhysicalDevices", enumeratePhysicalDevices }, .{ "vkEnumeratePhysicalDeviceGroups", enumeratePhysicalDeviceGroups }, .{ "vkGetPhysicalDeviceFeatures", getFeatures }, .{ "vkGetPhysicalDeviceFeatures2", getPhysicalDeviceFeatures2 }, .{ "vkGetPhysicalDeviceProperties", getProperties }, .{ "vkGetPhysicalDeviceProperties2", getPhysicalDeviceProperties2 }, .{ "vkGetPhysicalDeviceQueueFamilyProperties", getQueueProperties }, .{ "vkGetPhysicalDeviceQueueFamilyProperties2", getPhysicalDeviceQueueFamilyProperties2 }, .{ "vkGetPhysicalDeviceMemoryProperties", getMemoryProperties }, .{ "vkGetPhysicalDeviceMemoryProperties2", getPhysicalDeviceMemoryProperties2 }, .{ "vkGetPhysicalDeviceFormatProperties", getFormatProperties }, .{ "vkGetPhysicalDeviceFormatProperties2", getPhysicalDeviceFormatProperties2 }, .{ "vkGetPhysicalDeviceImageFormatProperties", getImageFormatProperties }, .{ "vkGetPhysicalDeviceImageFormatProperties2", getPhysicalDeviceImageFormatProperties2 }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties", getSparseImageFormatProperties }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties2", getPhysicalDeviceSparseImageFormatProperties2 }, .{ "vkGetPhysicalDeviceToolProperties", getPhysicalDeviceToolProperties }, .{ "vkGetPhysicalDeviceExternalBufferProperties", getPhysicalDeviceExternalBufferProperties }, .{ "vkGetPhysicalDeviceExternalFenceProperties", getPhysicalDeviceExternalFenceProperties }, .{ "vkGetPhysicalDeviceExternalSemaphoreProperties", getPhysicalDeviceExternalSemaphoreProperties }, .{ "vkEnumerateDeviceExtensionProperties", enumerateDeviceExtensions }, .{ "vkEnumerateDeviceLayerProperties", enumerateDeviceLayers }, .{ "vkCreateDevice", createDevice }, .{ "vkGetDeviceProcAddr", getDeviceProcAddr }, .{ "vkDestroyDevice", destroyDevice }, .{ "vkGetDeviceQueue", getDeviceQueue }, .{ "vkGetDeviceQueue2", getDeviceQueue2 }, .{ "vkCreateXcbSurfaceKHR", createXcbSurface }, .{ "vkDestroySurfaceKHR", destroySurface }, .{ "vkGetPhysicalDeviceSurfaceSupportKHR", getSurfaceSupport }, .{ "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", getSurfaceCapabilities }, .{ "vkGetPhysicalDeviceSurfaceFormatsKHR", getSurfaceFormats }, .{ "vkGetPhysicalDeviceSurfacePresentModesKHR", getSurfacePresentModes } };
+    const map = .{ .{ "vkDestroyInstance", destroyInstance }, .{ "vkEnumeratePhysicalDevices", enumeratePhysicalDevices }, .{ "vkEnumeratePhysicalDeviceGroups", enumeratePhysicalDeviceGroups }, .{ "vkGetPhysicalDeviceFeatures", getFeatures }, .{ "vkGetPhysicalDeviceFeatures2", getPhysicalDeviceFeatures2 }, .{ "vkGetPhysicalDeviceProperties", getProperties }, .{ "vkGetPhysicalDeviceProperties2", getPhysicalDeviceProperties2 }, .{ "vkGetPhysicalDeviceQueueFamilyProperties", getQueueProperties }, .{ "vkGetPhysicalDeviceQueueFamilyProperties2", getPhysicalDeviceQueueFamilyProperties2 }, .{ "vkGetPhysicalDeviceMemoryProperties", getMemoryProperties }, .{ "vkGetPhysicalDeviceMemoryProperties2", getPhysicalDeviceMemoryProperties2 }, .{ "vkGetPhysicalDeviceFormatProperties", getFormatProperties }, .{ "vkGetPhysicalDeviceFormatProperties2", getPhysicalDeviceFormatProperties2 }, .{ "vkGetPhysicalDeviceImageFormatProperties", getImageFormatProperties }, .{ "vkGetPhysicalDeviceImageFormatProperties2", getPhysicalDeviceImageFormatProperties2 }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties", getSparseImageFormatProperties }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties2", getPhysicalDeviceSparseImageFormatProperties2 }, .{ "vkGetPhysicalDeviceToolProperties", getPhysicalDeviceToolProperties }, .{ "vkGetPhysicalDeviceExternalBufferProperties", getPhysicalDeviceExternalBufferProperties }, .{ "vkGetPhysicalDeviceExternalBufferPropertiesKHR", getPhysicalDeviceExternalBufferProperties }, .{ "vkGetPhysicalDeviceExternalFenceProperties", getPhysicalDeviceExternalFenceProperties }, .{ "vkGetPhysicalDeviceExternalSemaphoreProperties", getPhysicalDeviceExternalSemaphoreProperties }, .{ "vkGetPhysicalDeviceExternalSemaphorePropertiesKHR", getPhysicalDeviceExternalSemaphoreProperties }, .{ "vkEnumerateDeviceExtensionProperties", enumerateDeviceExtensions }, .{ "vkEnumerateDeviceLayerProperties", enumerateDeviceLayers }, .{ "vkCreateDevice", createDevice }, .{ "vkGetDeviceProcAddr", getDeviceProcAddr }, .{ "vkDestroyDevice", destroyDevice }, .{ "vkGetDeviceQueue", getDeviceQueue }, .{ "vkGetDeviceQueue2", getDeviceQueue2 }, .{ "vkCreateXcbSurfaceKHR", createXcbSurface }, .{ "vkDestroySurfaceKHR", destroySurface }, .{ "vkGetPhysicalDeviceSurfaceSupportKHR", getSurfaceSupport }, .{ "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", getSurfaceCapabilities }, .{ "vkGetPhysicalDeviceSurfaceFormatsKHR", getSurfaceFormats }, .{ "vkGetPhysicalDeviceSurfacePresentModesKHR", getSurfacePresentModes } };
     inline for (map) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
     return deviceLookup(n);
 }
@@ -12560,7 +12567,7 @@ pub export fn vk_icdGetPhysicalDeviceProcAddr(instance: ?Instance, name: ?[*:0]c
     defer mutex.unlock();
     if (!validInstanceLocked(instance orelse return null)) return null;
     const n = std.mem.span(name orelse return null);
-    const map = .{ .{ "vkGetPhysicalDeviceFeatures", getFeatures }, .{ "vkGetPhysicalDeviceFeatures2", getPhysicalDeviceFeatures2 }, .{ "vkGetPhysicalDeviceProperties", getProperties }, .{ "vkGetPhysicalDeviceProperties2", getPhysicalDeviceProperties2 }, .{ "vkGetPhysicalDeviceQueueFamilyProperties", getQueueProperties }, .{ "vkGetPhysicalDeviceQueueFamilyProperties2", getPhysicalDeviceQueueFamilyProperties2 }, .{ "vkGetPhysicalDeviceMemoryProperties", getMemoryProperties }, .{ "vkGetPhysicalDeviceMemoryProperties2", getPhysicalDeviceMemoryProperties2 }, .{ "vkGetPhysicalDeviceFormatProperties", getFormatProperties }, .{ "vkGetPhysicalDeviceFormatProperties2", getPhysicalDeviceFormatProperties2 }, .{ "vkGetPhysicalDeviceImageFormatProperties", getImageFormatProperties }, .{ "vkGetPhysicalDeviceImageFormatProperties2", getPhysicalDeviceImageFormatProperties2 }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties", getSparseImageFormatProperties }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties2", getPhysicalDeviceSparseImageFormatProperties2 }, .{ "vkGetPhysicalDeviceToolProperties", getPhysicalDeviceToolProperties }, .{ "vkGetPhysicalDeviceExternalBufferProperties", getPhysicalDeviceExternalBufferProperties }, .{ "vkGetPhysicalDeviceExternalFenceProperties", getPhysicalDeviceExternalFenceProperties }, .{ "vkGetPhysicalDeviceExternalSemaphoreProperties", getPhysicalDeviceExternalSemaphoreProperties }, .{ "vkEnumerateDeviceExtensionProperties", enumerateDeviceExtensions }, .{ "vkEnumerateDeviceLayerProperties", enumerateDeviceLayers }, .{ "vkCreateDevice", createDevice }, .{ "vkGetPhysicalDeviceSurfaceSupportKHR", getSurfaceSupport }, .{ "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", getSurfaceCapabilities }, .{ "vkGetPhysicalDeviceSurfaceFormatsKHR", getSurfaceFormats }, .{ "vkGetPhysicalDeviceSurfacePresentModesKHR", getSurfacePresentModes } };
+    const map = .{ .{ "vkGetPhysicalDeviceFeatures", getFeatures }, .{ "vkGetPhysicalDeviceFeatures2", getPhysicalDeviceFeatures2 }, .{ "vkGetPhysicalDeviceProperties", getProperties }, .{ "vkGetPhysicalDeviceProperties2", getPhysicalDeviceProperties2 }, .{ "vkGetPhysicalDeviceQueueFamilyProperties", getQueueProperties }, .{ "vkGetPhysicalDeviceQueueFamilyProperties2", getPhysicalDeviceQueueFamilyProperties2 }, .{ "vkGetPhysicalDeviceMemoryProperties", getMemoryProperties }, .{ "vkGetPhysicalDeviceMemoryProperties2", getPhysicalDeviceMemoryProperties2 }, .{ "vkGetPhysicalDeviceFormatProperties", getFormatProperties }, .{ "vkGetPhysicalDeviceFormatProperties2", getPhysicalDeviceFormatProperties2 }, .{ "vkGetPhysicalDeviceImageFormatProperties", getImageFormatProperties }, .{ "vkGetPhysicalDeviceImageFormatProperties2", getPhysicalDeviceImageFormatProperties2 }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties", getSparseImageFormatProperties }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties2", getPhysicalDeviceSparseImageFormatProperties2 }, .{ "vkGetPhysicalDeviceToolProperties", getPhysicalDeviceToolProperties }, .{ "vkGetPhysicalDeviceExternalBufferProperties", getPhysicalDeviceExternalBufferProperties }, .{ "vkGetPhysicalDeviceExternalBufferPropertiesKHR", getPhysicalDeviceExternalBufferProperties }, .{ "vkGetPhysicalDeviceExternalFenceProperties", getPhysicalDeviceExternalFenceProperties }, .{ "vkGetPhysicalDeviceExternalSemaphoreProperties", getPhysicalDeviceExternalSemaphoreProperties }, .{ "vkGetPhysicalDeviceExternalSemaphorePropertiesKHR", getPhysicalDeviceExternalSemaphoreProperties }, .{ "vkEnumerateDeviceExtensionProperties", enumerateDeviceExtensions }, .{ "vkEnumerateDeviceLayerProperties", enumerateDeviceLayers }, .{ "vkCreateDevice", createDevice }, .{ "vkGetPhysicalDeviceSurfaceSupportKHR", getSurfaceSupport }, .{ "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", getSurfaceCapabilities }, .{ "vkGetPhysicalDeviceSurfaceFormatsKHR", getSurfaceFormats }, .{ "vkGetPhysicalDeviceSurfacePresentModesKHR", getSurfacePresentModes } };
     inline for (map) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
     return null;
 }
@@ -12591,17 +12598,23 @@ test "enumeration lifecycle and unsupported features" {
     try std.testing.expect(vk_icdGetPhysicalDeviceProcAddr(instance, "vkDestroyInstance") == null);
     var extension_count: u32 = 9;
     try std.testing.expectEqual(Result.success, enumerateInstanceExtensions(null, &extension_count, null));
-    try std.testing.expectEqual(@as(u32, 2), extension_count);
-    var extension_properties: [2]ExtensionProperties = undefined;
+    try std.testing.expectEqual(@as(u32, 4), extension_count);
+    var extension_properties: [4]ExtensionProperties = undefined;
     extension_count = 1;
     try std.testing.expectEqual(Result.incomplete, enumerateInstanceExtensions(null, &extension_count, &extension_properties));
     try std.testing.expectEqual(@as(u32, 1), extension_count);
     try std.testing.expectEqualStrings("VK_KHR_surface", std.mem.sliceTo(&extension_properties[0].name, 0));
     try std.testing.expectEqual(@as(u32, 25), extension_properties[0].spec_version);
-    extension_count = 2;
+    extension_count = 4;
     try std.testing.expectEqual(Result.success, enumerateInstanceExtensions(null, &extension_count, &extension_properties));
     try std.testing.expectEqualStrings("VK_KHR_xcb_surface", std.mem.sliceTo(&extension_properties[1].name, 0));
     try std.testing.expectEqual(@as(u32, 6), extension_properties[1].spec_version);
+    try std.testing.expectEqualStrings("VK_KHR_external_memory_capabilities", std.mem.sliceTo(&extension_properties[2].name, 0));
+    try std.testing.expectEqual(@as(u32, 1), extension_properties[2].spec_version);
+    try std.testing.expectEqualStrings("VK_KHR_external_semaphore_capabilities", std.mem.sliceTo(&extension_properties[3].name, 0));
+    try std.testing.expectEqual(@as(u32, 1), extension_properties[3].spec_version);
+    try std.testing.expect(vk_icdGetPhysicalDeviceProcAddr(instance, "vkGetPhysicalDeviceExternalBufferPropertiesKHR") != null);
+    try std.testing.expect(vk_icdGetPhysicalDeviceProcAddr(instance, "vkGetPhysicalDeviceExternalSemaphorePropertiesKHR") != null);
     try std.testing.expectEqual(Result.error_extension_not_present, enumerateInstanceExtensions("layer", &extension_count, null));
     var count: u32 = 0;
     try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &count, null));
@@ -12653,7 +12666,7 @@ test "enumeration lifecycle and unsupported features" {
     ci.extension_count = 1;
     ci.extensions = &unsupported_extensions;
     try std.testing.expectEqual(Result.error_extension_not_present, createInstance(&ci, null, &instance));
-    const supported_extensions = [_][*:0]const u8{ "VK_KHR_surface", "VK_KHR_xcb_surface" };
+    const supported_extensions = [_][*:0]const u8{ "VK_KHR_surface", "VK_KHR_xcb_surface", "VK_KHR_external_memory_capabilities", "VK_KHR_external_semaphore_capabilities" };
     ci.extension_count = supported_extensions.len;
     ci.extensions = &supported_extensions;
     try std.testing.expectEqual(Result.success, createInstance(&ci, null, &instance));
@@ -12675,17 +12688,17 @@ test "core instance physical and device enumeration is bounded and allocation fr
     var physical_count: u32 = 1;
     var physical: [1]Physical = undefined;
     try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &physical_count, &physical));
-    var instance_extensions: [2]ExtensionProperties = undefined;
+    var instance_extensions: [4]ExtensionProperties = undefined;
     var device_extensions: [2]ExtensionProperties = undefined;
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     for (0..4096) |_| {
         var count: u32 = 0;
         try std.testing.expectEqual(Result.success, enumerateInstanceExtensions(null, &count, null));
-        try std.testing.expectEqual(@as(u32, 2), count);
+        try std.testing.expectEqual(@as(u32, 4), count);
         count = instance_extensions.len;
         try std.testing.expectEqual(Result.success, enumerateInstanceExtensions(null, &count, &instance_extensions));
-        try std.testing.expectEqual(@as(u32, 2), count);
+        try std.testing.expectEqual(@as(u32, 4), count);
         count = 0;
         try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &count, null));
         try std.testing.expectEqual(@as(u32, 1), count);

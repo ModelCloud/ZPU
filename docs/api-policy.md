@@ -154,7 +154,7 @@ Everything in this column is the honest present state, not an aspiration.
 | Max `VkApplicationInfo::apiVersion` accepted | Vulkan 1.0 | the pinned version |
 | Profile | none claimed | `VP_KHR_roadmap_2026` targeted, not claimed |
 | Loader–ICD interface | negotiates `min(requested, 7)`; **accepts lower interfaces** | 7 only |
-| Instance extensions | `VK_KHR_surface`, `VK_KHR_xcb_surface` | minimum surface per sections 2–3 |
+| Instance extensions | `VK_KHR_surface`, `VK_KHR_xcb_surface`, `VK_KHR_external_memory_capabilities`, `VK_KHR_external_semaphore_capabilities` | minimum surface per sections 2–3 |
 | Device extensions | `VK_KHR_swapchain` | minimum surface per sections 2–3 |
 | Optional features | none advertised | minimum surface per sections 2–3 |
 | Conformance | non-conformant; no CTS run exists in this repository | conformance investigation only after the mandatory core is complete |
