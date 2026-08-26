@@ -472,6 +472,7 @@ pub const PipelineDepthStencilStateCreateInfo = extern struct { s_type: i32, p_n
 pub const PipelineColorBlendAttachmentState = extern struct { blend_enable: u32, src_color_blend_factor: i32, dst_color_blend_factor: i32, color_blend_op: i32, src_alpha_blend_factor: i32, dst_alpha_blend_factor: i32, alpha_blend_op: i32, color_write_mask: u32 };
 pub const PipelineColorBlendStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, logic_op_enable: u32, logic_op: i32, attachment_count: u32, attachments: ?[*]const PipelineColorBlendAttachmentState, blend_constants: [4]f32 };
 pub const PipelineDynamicStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, dynamic_state_count: u32, dynamic_states: ?[*]const i32 };
+pub const PipelineRenderingCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, view_mask: u32, color_attachment_count: u32, color_attachment_formats: ?[*]const i32, depth_attachment_format: i32, stencil_attachment_format: i32 };
 pub const GraphicsPipelineCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, stage_count: u32, stages: ?[*]const PipelineShaderStageCreateInfo, vertex_input: ?*const PipelineVertexInputStateCreateInfo, input_assembly: ?*const PipelineInputAssemblyStateCreateInfo, tessellation: ?*const anyopaque, viewport: ?*const PipelineViewportStateCreateInfo, rasterization: ?*const PipelineRasterizationStateCreateInfo, multisample: ?*const PipelineMultisampleStateCreateInfo, depth_stencil: ?*const PipelineDepthStencilStateCreateInfo, color_blend: ?*const PipelineColorBlendStateCreateInfo, dynamic: ?*const PipelineDynamicStateCreateInfo, layout: usize, render_pass: usize, subpass: u32, base_pipeline: usize, base_pipeline_index: i32 };
 pub const AttachmentDescription = extern struct { flags: u32, format: i32, samples: u32, load_op: i32, store_op: i32, stencil_load_op: i32, stencil_store_op: i32, initial_layout: i32, final_layout: i32 };
 pub const AttachmentReference = extern struct { attachment: u32, layout: i32 };
@@ -730,6 +731,10 @@ const GraphicsPipelineObj = struct {
     dynamic_stencil_compare_mask: bool = false,
     dynamic_stencil_write_mask: bool = false,
     dynamic_stencil_reference: bool = false,
+    dynamic_rendering: bool = false,
+    rendering_color_format: i32 = 0,
+    rendering_depth_format: i32 = 0,
+    rendering_stencil_format: i32 = 0,
     stencil_test_enable: u32 = 0,
     viewport: Viewport,
     scissor: cpu_cube.Rect,
@@ -1090,6 +1095,7 @@ const ChainHeader = extern struct { s_type: i32, p_next: ?*const ChainHeader };
 const google_display_timing_extension = "VK_GOOGLE_display_timing";
 const google_present_times_info_stype: i32 = 1_000_092_000;
 const memory_dedicated_requirements_stype: i32 = 1_000_127_000;
+const pipeline_rendering_create_info_stype: i32 = 1_000_044_002;
 
 // VK_KHR_maintenance5 promotes VkPipelineCreateFlags2CreateInfo into the
 // core 1.4 pipeline-create pNext chain.  The CPU backend has one supported
@@ -1121,6 +1127,78 @@ fn pipelineCreateFlags2(raw: ?*const anyopaque, legacy: u32, allow_dispatch_base
         depth += 1;
     }
     return effective;
+}
+
+const PipelineRenderingState = struct {
+    view_mask: u32,
+    color_format: i32,
+    depth_format: i32,
+    stencil_format: i32,
+};
+const GraphicsPipelinePNextState = struct {
+    flags: u32,
+    rendering: ?PipelineRenderingState = null,
+};
+
+// Graphics pipeline creation accepts the promoted flags2 node together with
+// VkPipelineRenderingCreateInfo.  Keep this parser bounded and failure-atomic:
+// unknown, duplicate, malformed, or over-deep chains are rejected before any
+// pipeline state is allocated or published.
+fn graphicsPipelinePNext(raw: ?*const anyopaque, legacy: u32) ?GraphicsPipelinePNextState {
+    if (raw == null) {
+        if (legacy != 0) return null;
+        return .{ .flags = 0 };
+    }
+    var next = raw;
+    var depth: usize = 0;
+    var seen_flags2 = false;
+    var seen_rendering = false;
+    var effective_flags = legacy;
+    var rendering: ?PipelineRenderingState = null;
+    while (next) |item| {
+        if (depth == 16) return null;
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        switch (header.s_type) {
+            pipeline_create_flags2_stype => {
+                if (seen_flags2) return null;
+                const flags2: *const PipelineCreateFlags2CreateInfo = @ptrCast(@alignCast(item));
+                if (flags2.flags & ~@as(u64, pipeline_create_dispatch_base_bit) != 0) return null;
+                // Graphics pipelines do not support dispatch-base; a promoted
+                // zero node still overrides the legacy field as required.
+                effective_flags = @truncate(flags2.flags);
+                if (effective_flags != 0) return null;
+                seen_flags2 = true;
+            },
+            pipeline_rendering_create_info_stype => {
+                if (seen_rendering) return null;
+                const info: *const PipelineRenderingCreateInfo = @ptrCast(@alignCast(item));
+                if (info.view_mask != 0 or info.color_attachment_count != 1 or info.color_attachment_formats == null or (info.depth_attachment_format != 0 and info.depth_attachment_format != 126) or info.stencil_attachment_format != 0) return null;
+                const color_format = info.color_attachment_formats.?[0];
+                // ZPU's dynamic-rendering attachment path is deliberately
+                // bounded to the same formats accepted by vkCmdBeginRendering.
+                if (color_format != 44) return null;
+                rendering = .{ .view_mask = info.view_mask, .color_format = color_format, .depth_format = info.depth_attachment_format, .stencil_format = info.stencil_attachment_format };
+                seen_rendering = true;
+            },
+            else => return null,
+        }
+        next = header.p_next;
+        depth += 1;
+    }
+    if (effective_flags != 0) return null;
+    return .{ .flags = effective_flags, .rendering = rendering };
+}
+
+fn pipelineRenderingCompatibility(state: PipelineRenderingState) CanonicalError!Canonical {
+    var w: CanonicalWriter = .{};
+    defer w.deinit();
+    try w.header(6);
+    try w.u32le(1); // dynamic_rendering_v1
+    try w.u32le(state.view_mask);
+    try w.i32le(state.color_format);
+    try w.i32le(state.depth_format);
+    try w.i32le(state.stencil_format);
+    return w.done();
 }
 
 const SemaphoreCreatePNextState = struct { timeline: bool = false, initial_value: u64 = 0 };
@@ -8252,6 +8330,9 @@ test "Vulkan graphics pipeline ABI declarations match LP64 layouts" {
     try std.testing.expectEqual(@as(usize, 72), @offsetOf(ComputePipelineCreateInfo, "layout"));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(PipelineCreateFlags2CreateInfo));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PipelineCreateFlags2CreateInfo, "flags"));
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(PipelineRenderingCreateInfo));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(PipelineRenderingCreateInfo, "color_attachment_formats"));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(PipelineRenderingCreateInfo, "depth_attachment_format"));
 }
 
 test "pipeline flags2 validation is bounded and allocation-free" {
@@ -8269,6 +8350,39 @@ test "pipeline flags2 validation is bounded and allocation-free" {
     try std.testing.expectEqual(@as(?u32, pipeline_create_dispatch_base_bit), pipelineCreateFlags2(null, pipeline_create_dispatch_base_bit, true));
     try std.testing.expectEqual(@as(?u32, null), pipelineCreateFlags2(null, pipeline_create_dispatch_base_bit, false));
     try std.testing.expectEqual(@as(?u32, 0), pipelineCreateFlags2(@ptrCast(&node), pipeline_create_dispatch_base_bit, true));
+}
+
+test "dynamic rendering pipeline pNext validation is bounded and canonical" {
+    var formats = [_]i32{44};
+    var rendering = PipelineRenderingCreateInfo{ .s_type = pipeline_rendering_create_info_stype, .p_next = null, .view_mask = 0, .color_attachment_count = 1, .color_attachment_formats = &formats, .depth_attachment_format = 126, .stencil_attachment_format = 0 };
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    var parsed: ?GraphicsPipelinePNextState = null;
+    for (0..4096) |_| {
+        parsed = graphicsPipelinePNext(@ptrCast(&rendering), 0);
+        try std.testing.expect(parsed != null and parsed.?.rendering != null);
+        try std.testing.expectEqual(@as(i32, 44), parsed.?.rendering.?.color_format);
+        try std.testing.expectEqual(@as(i32, 126), parsed.?.rendering.?.depth_format);
+    }
+    var bad = rendering;
+    bad.color_attachment_formats = null;
+    try std.testing.expect(graphicsPipelinePNext(@ptrCast(&bad), 0) == null);
+    bad = rendering;
+    bad.color_attachment_count = 2;
+    try std.testing.expect(graphicsPipelinePNext(@ptrCast(&bad), 0) == null);
+    bad = rendering;
+    bad.p_next = @ptrCast(&bad);
+    try std.testing.expect(graphicsPipelinePNext(@ptrCast(&bad), 0) == null);
+    bad = rendering;
+    bad.depth_attachment_format = 37;
+    try std.testing.expect(graphicsPipelinePNext(@ptrCast(&bad), 0) == null);
+    var flags2 = PipelineCreateFlags2CreateInfo{ .s_type = pipeline_create_flags2_stype, .p_next = @ptrCast(&rendering), .flags = 0 };
+    rendering.p_next = null;
+    try std.testing.expect(graphicsPipelinePNext(@ptrCast(&flags2), pipeline_create_dispatch_base_bit) != null);
+    flags2.flags = pipeline_create_dispatch_base_bit;
+    try std.testing.expect(graphicsPipelinePNext(@ptrCast(&flags2), 0) == null);
+    var unknown = ChainHeader{ .s_type = 999, .p_next = null };
+    try std.testing.expect(graphicsPipelinePNext(@ptrCast(&unknown), 0) == null);
 }
 
 test "compute pipeline creation validates ownership, publishes typed handles, and rolls back" {
@@ -8428,16 +8542,30 @@ fn validScissorDomain(scissor: Rect2D) bool {
 }
 
 fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo) CanonicalError!GraphicsPipelineObj {
-    if (ci.s_type != 28 or pipelineCreateFlags2(ci.p_next, ci.flags, false) == null or ci.stage_count != 2 or ci.stages == null or ci.tessellation != null or ci.base_pipeline != 0 or (ci.base_pipeline_index != -1 and ci.base_pipeline_index != 0)) return error.Invalid;
+    const pnext = graphicsPipelinePNext(ci.p_next, ci.flags) orelse return error.Invalid;
+    if (ci.s_type != 28 or ci.stage_count != 2 or ci.stages == null or ci.tessellation != null or ci.base_pipeline != 0 or (ci.base_pipeline_index != -1 and ci.base_pipeline_index != 0)) return error.Invalid;
     const layout = validPipelineLayoutLocked(ci.layout) orelse return error.Invalid;
-    const render_pass = validRenderPassLocked(ci.render_pass) orelse return error.Invalid;
-    if (!layout.owner.eql(d) or !render_pass.owner.eql(d) or ci.subpass >= render_pass.subpass_count) return error.Invalid;
+    const dynamic_rendering_state = pnext.rendering;
+    if (dynamic_rendering_state != null and ci.render_pass != 0) return error.Invalid;
+    if (dynamic_rendering_state != null and ci.subpass != 0) return error.Invalid;
+    const render_pass = if (ci.render_pass != 0) validRenderPassLocked(ci.render_pass) else null;
+    if (render_pass == null and dynamic_rendering_state == null) return error.Invalid;
+    if (!layout.owner.eql(d) or (render_pass != null and !render_pass.?.owner.eql(d)) or (render_pass != null and ci.subpass >= render_pass.?.subpass_count)) return error.Invalid;
+    var dynamic_render_compatibility: ?Canonical = null;
+    if (dynamic_rendering_state) |state| {
+        dynamic_render_compatibility = try pipelineRenderingCompatibility(state);
+    }
+    defer if (dynamic_render_compatibility) |*compatibility| compatibility.deinit();
     var w: CanonicalWriter = .{};
     defer w.deinit();
     try w.header(5);
     try w.u32le(1); // cpu_cube_v1
     try appendCanonical(&w, &layout.canonical);
-    try appendCanonical(&w, &render_pass.compatibility);
+    if (render_pass) |pass| {
+        try appendCanonical(&w, &pass.compatibility);
+    } else {
+        try appendCanonical(&w, &dynamic_render_compatibility.?);
+    }
     try w.u32le(ci.subpass);
     var stage_indices: [2]u8 = .{ 0, 1 };
     const stages = ci.stages.?[0..2];
@@ -8656,7 +8784,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     var set0 = try layout.set0.clone();
     errdefer set0.deinit();
     if (test_fail_render_compatibility_clone) return error.OutOfMemory;
-    var render_compatibility = try render_pass.compatibility.clone();
+    var render_compatibility = if (render_pass) |pass| try pass.compatibility.clone() else try dynamic_render_compatibility.?.clone();
     errdefer render_compatibility.deinit();
     var profile_execution: ?ProfileGraphics = null;
     if (profile_contract) |contract| {
@@ -8671,7 +8799,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         };
         profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     }
-    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .depth_bias_enable = pipeline_depth_bias_enable, .vertex_input_binding_mask = vertex_input_binding_mask, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .dynamic_vertex_input_binding_stride = dynamic_vertex_input_binding_stride, .dynamic_line_width = dynamic_line_width, .dynamic_line_stipple = dynamic_line_stipple, .dynamic_depth_bias = dynamic_depth_bias, .dynamic_blend_constants = dynamic_blend_constants, .dynamic_stencil_compare_mask = dynamic_stencil_compare_mask, .dynamic_stencil_write_mask = dynamic_stencil_write_mask, .dynamic_stencil_reference = dynamic_stencil_reference, .viewport = baked_viewport, .scissor = baked_scissor };
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .depth_bias_enable = pipeline_depth_bias_enable, .vertex_input_binding_mask = vertex_input_binding_mask, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .dynamic_vertex_input_binding_stride = dynamic_vertex_input_binding_stride, .dynamic_line_width = dynamic_line_width, .dynamic_line_stipple = dynamic_line_stipple, .dynamic_depth_bias = dynamic_depth_bias, .dynamic_blend_constants = dynamic_blend_constants, .dynamic_stencil_compare_mask = dynamic_stencil_compare_mask, .dynamic_stencil_write_mask = dynamic_stencil_write_mask, .dynamic_stencil_reference = dynamic_stencil_reference, .dynamic_rendering = dynamic_rendering_state != null, .rendering_color_format = if (dynamic_rendering_state) |state| state.color_format else 0, .rendering_depth_format = if (dynamic_rendering_state) |state| state.depth_format else 0, .rendering_stencil_format = if (dynamic_rendering_state) |state| state.stencil_format else 0, .viewport = baked_viewport, .scissor = baked_scissor };
 }
 
 fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, set0: *const Canonical) bool {
@@ -10616,6 +10744,18 @@ fn graphicsDrawExecutionAllowed(abi: ExecutionAbi) bool {
         else => false,
     };
 }
+fn dynamicPipelineRenderingCompatible(command_buffer: *const CommandBufferImpl, pipeline: *const GraphicsPipelineObj) bool {
+    if (!pipeline.dynamic_rendering) return true;
+    const color = command_buffer.dynamic_color_image orelse return false;
+    if (color.format != pipeline.rendering_color_format) return false;
+    const depth = command_buffer.dynamic_depth_image;
+    if (pipeline.rendering_depth_format == 0) {
+        if (depth != null) return false;
+    } else {
+        if (depth == null or depth.?.format != pipeline.rendering_depth_format) return false;
+    }
+    return pipeline.rendering_stencil_format == 0;
+}
 fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsPipelineObj) ?DrawRasterState {
     if ((pipeline.dynamic_viewport and !command_buffer.impl.viewport_set) or (pipeline.dynamic_scissor and !command_buffer.impl.scissor_set) or (pipeline.dynamic_vertex_input_binding_stride and pipeline.vertex_input_binding_mask & command_buffer.impl.vertex_bindings.stride_set != pipeline.vertex_input_binding_mask) or (pipeline.dynamic_line_width and !command_buffer.impl.line_width_set) or (pipeline.dynamic_line_stipple and !command_buffer.impl.line_stipple_set) or (pipeline.dynamic_depth_bias and !command_buffer.impl.depth_bias_set) or (pipeline.dynamic_blend_constants and !command_buffer.impl.blend_constants_set) or (pipeline.dynamic_stencil_compare_mask and command_buffer.impl.stencil_compare_mask_set != 3) or (pipeline.dynamic_stencil_write_mask and command_buffer.impl.stencil_write_mask_set != 3) or (pipeline.dynamic_stencil_reference and command_buffer.impl.stencil_reference_set != 3) or (pipeline.dynamic_cull_mode and command_buffer.impl.dynamic.cull_mode == std.math.maxInt(u32)) or (pipeline.dynamic_front_face and command_buffer.impl.dynamic.front_face < 0) or (pipeline.dynamic_primitive_topology and !command_buffer.impl.dynamic.primitive_topology_set) or (pipeline.dynamic_primitive_restart_enable and !command_buffer.impl.dynamic.primitive_restart_enable_set) or (pipeline.dynamic_rasterizer_discard_enable and !command_buffer.impl.dynamic.rasterizer_discard_enable_set) or (pipeline.dynamic_depth_test_enable and !command_buffer.impl.dynamic.depth_test_enable_set) or (pipeline.dynamic_depth_write_enable and !command_buffer.impl.dynamic.depth_write_enable_set) or (pipeline.dynamic_depth_compare_op and !command_buffer.impl.dynamic.depth_compare_op_set) or (pipeline.dynamic_depth_bounds and !command_buffer.impl.depth_bounds_set) or (pipeline.dynamic_depth_bounds_test_enable and !command_buffer.impl.dynamic.depth_bounds_test_enable_set) or (pipeline.dynamic_stencil_test_enable and !command_buffer.impl.dynamic.stencil_test_enable_set) or (pipeline.dynamic_stencil_op and !command_buffer.impl.dynamic.stencil_op_set) or (pipeline.dynamic_depth_bias_enable and !command_buffer.impl.dynamic.depth_bias_enable_set)) return null;
     const primitive_topology = if (pipeline.dynamic_primitive_topology) command_buffer.impl.dynamic.primitive_topology else pipeline.primitive_topology;
@@ -11271,7 +11411,7 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
         command_buffer.impl.invalid = true;
         return;
     };
-    if (!graphicsDescriptorBindingValid(command_buffer.impl) or pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility))) {
+    if (!graphicsDescriptorBindingValid(command_buffer.impl) or pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or (dynamic_rendering and !dynamicPipelineRenderingCompatible(command_buffer.impl, pipeline))) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -11334,7 +11474,7 @@ fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, fir
     const relative_start = @as(u64, first_index) * index_size;
     const start = command_buffer.impl.index_offset + relative_start;
     const byte_count = @as(u64, index_count) * index_size;
-    if (!graphicsDescriptorBindingValid(command_buffer.impl) or pipeline != pipeline_pointer or layout != layout_pointer or index_buffer != index_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or index_buffer.owner != command_buffer.impl.owner or index_buffer.memory == null or !liveMemoryObject(index_buffer.memory.?) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or start > index_buffer.size or byte_count > index_buffer.size - start or byte_count > command_buffer.impl.index_size -| (start -| command_buffer.impl.index_offset)) {
+    if (!graphicsDescriptorBindingValid(command_buffer.impl) or pipeline != pipeline_pointer or layout != layout_pointer or index_buffer != index_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or index_buffer.owner != command_buffer.impl.owner or index_buffer.memory == null or !liveMemoryObject(index_buffer.memory.?) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or (dynamic_rendering and !dynamicPipelineRenderingCompatible(command_buffer.impl, pipeline)) or start > index_buffer.size or byte_count > index_buffer.size - start or byte_count > command_buffer.impl.index_size -| (start -| command_buffer.impl.index_offset)) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -11412,7 +11552,7 @@ fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64
     }
     const range_valid = if (draw_count == 0) true else required <= indirect_buffer.size -| offset;
     const stride_valid = draw_count <= 1 or (stride >= indirect_size and stride % 4 == 0);
-    if (!graphicsDescriptorBindingValid(command_buffer.impl) or pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or indirect_buffer.owner != command_buffer.impl.owner or indirect_buffer.usage & 0x100 == 0 or indirect_buffer.memory == null or !liveMemoryObject(indirect_buffer.memory.?) or offset % 4 != 0 or !stride_valid or (draw_count != 0 and offset > indirect_buffer.size) or !range_valid or invalid_index_state) {
+    if (!graphicsDescriptorBindingValid(command_buffer.impl) or pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or (dynamic_rendering and !dynamicPipelineRenderingCompatible(command_buffer.impl, pipeline)) or indirect_buffer.owner != command_buffer.impl.owner or indirect_buffer.usage & 0x100 == 0 or indirect_buffer.memory == null or !liveMemoryObject(indirect_buffer.memory.?) or offset % 4 != 0 or !stride_valid or (draw_count != 0 and offset > indirect_buffer.size) or !range_valid or invalid_index_state) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -13256,6 +13396,25 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(baseline_pipeline.dynamic_stencil_compare_mask);
     try std.testing.expect(baseline_pipeline.dynamic_stencil_write_mask);
     try std.testing.expect(baseline_pipeline.dynamic_stencil_reference);
+    var dynamic_pipeline_formats = [_]i32{44};
+    var dynamic_pipeline_rendering = PipelineRenderingCreateInfo{ .s_type = pipeline_rendering_create_info_stype, .p_next = null, .view_mask = 0, .color_attachment_count = 1, .color_attachment_formats = &dynamic_pipeline_formats, .depth_attachment_format = 126, .stencil_attachment_format = 0 };
+    var dynamic_pipeline_info = pipeline_info;
+    dynamic_pipeline_info.p_next = @ptrCast(&dynamic_pipeline_rendering);
+    dynamic_pipeline_info.render_pass = 0;
+    var dynamic_pipeline: [1]usize = .{0xfeed_face};
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&dynamic_pipeline_info), null, &dynamic_pipeline));
+    const dynamic_pipeline_object = validGraphicsPipelineLocked(dynamic_pipeline[0]).?;
+    try std.testing.expect(dynamic_pipeline_object.dynamic_rendering);
+    try std.testing.expectEqual(@as(i32, 44), dynamic_pipeline_object.rendering_color_format);
+    try std.testing.expectEqual(@as(i32, 126), dynamic_pipeline_object.rendering_depth_format);
+    dynamic_pipeline_formats[0] = 37;
+    const dynamic_pipeline_states_before_rejection = graphics_pipeline_state;
+    var invalid_dynamic_pipeline = [_]usize{0xfeed_face};
+    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&dynamic_pipeline_info), null, &invalid_dynamic_pipeline));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), invalid_dynamic_pipeline[0]);
+    try std.testing.expectEqualSlices(SlotState, &dynamic_pipeline_states_before_rejection, &graphics_pipeline_state);
+    dynamic_pipeline_formats[0] = 44;
+    destroyPipeline(device, dynamic_pipeline[0], null);
     var graphics_flags2 = PipelineCreateFlags2CreateInfo{ .s_type = pipeline_create_flags2_stype, .p_next = null, .flags = 0 };
     var graphics_flags2_info = pipeline_info;
     graphics_flags2_info.p_next = @ptrCast(&graphics_flags2);

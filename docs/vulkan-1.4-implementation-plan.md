@@ -56,6 +56,12 @@ Pipeline creation also accepts the promoted Vulkan 1.4
 both graphics and compute pipelines, and the compute dispatch-base bit is
 honored through the same canonical, failure-atomic path as the legacy flag;
 unsupported or high flag bits leave outputs and registries unchanged.
+Graphics pipeline creation now also consumes the Vulkan 1.3
+`VkPipelineRenderingCreateInfo` pNext for `renderPass = VK_NULL_HANDLE`:
+the bounded dynamic-rendering profile records one BGRA8 color format and
+optional D32 depth format in its canonical compatibility key, and direct,
+indexed, and indirect draws validate those formats against the active
+dynamic-rendering attachments before recording.
 The bounded compute profile now also admits direct scalar StorageBuffer
 `OpLoad` reads (including read/write aliasing of the descriptor range) with
 transactional output commits; static access-chain reads share the same
