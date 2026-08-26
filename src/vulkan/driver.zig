@@ -4553,19 +4553,19 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
-    const framebuffer = c.impl.active_framebuffer orelse {
+    const dynamic_rendering = c.impl.dynamic_rendering;
+    const framebuffer = c.impl.active_framebuffer;
+    const color = if (dynamic_rendering) c.impl.dynamic_color_image else (if (framebuffer) |value| value.color_image else null);
+    const color_image = color orelse {
         c.impl.invalid = true;
         return;
     };
-    const color = framebuffer.color_image orelse {
-        c.impl.invalid = true;
-        return;
-    };
-    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass == null or c.impl.level != 0 or attachment_count == 0 or attachment_count > max_api_items or rect_count == 0 or rect_count > max_api_items or attachments == null or rects == null or @as(usize, c.impl.count) + @as(usize, attachment_count) * rect_count > c.impl.commands.len) {
+    const depth_image = if (dynamic_rendering) c.impl.dynamic_depth_image else (if (framebuffer) |value| value.depth_image else null);
+    if (c.impl.state != 1 or c.impl.invalid or (!dynamic_rendering and c.impl.active_render_pass == null) or c.impl.level != 0 or attachment_count == 0 or attachment_count > max_api_items or rect_count == 0 or rect_count > max_api_items or attachments == null or rects == null or @as(usize, c.impl.count) + @as(usize, attachment_count) * rect_count > c.impl.commands.len) {
         c.impl.invalid = true;
         return;
     }
-    for (rects.?[0..rect_count]) |rect| if (!clearRectValid(rect, color.width, color.height)) {
+    for (rects.?[0..rect_count]) |rect| if (!clearRectValid(rect, color_image.width, color_image.height)) {
         c.impl.invalid = true;
         return;
     };
@@ -4579,12 +4579,12 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
                 c.impl.invalid = true;
                 return;
             }
-            if (colorBytes(color, &attachment.clear_value.color) == null) {
+            if (colorBytes(color_image, &attachment.clear_value.color) == null) {
                 c.impl.invalid = true;
                 return;
             }
         } else {
-            const depth = framebuffer.depth_image orelse {
+            const depth = depth_image orelse {
                 c.impl.invalid = true;
                 return;
             };
@@ -4596,9 +4596,9 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
         }
     }
     for (attachments.?[0..attachment_count]) |attachment| for (rects.?[0..rect_count]) |rect| {
-        const image = if (attachment.aspect_mask == 1) color else framebuffer.depth_image.?;
-        const bytes = if (attachment.aspect_mask == 1) colorBytes(color, &attachment.clear_value.color).? else .{ 0, 0, 0, 0 };
-        record(c, .{ .clear_attachments = .{ .image = image, .depth = framebuffer.depth_image, .color = bytes, .depth_value = attachment.clear_value.depth_stencil.depth, .rect = rect.rect, .aspect_mask = attachment.aspect_mask } });
+        const image = if (attachment.aspect_mask == 1) color_image else depth_image.?;
+        const bytes = if (attachment.aspect_mask == 1) colorBytes(color_image, &attachment.clear_value.color).? else .{ 0, 0, 0, 0 };
+        record(c, .{ .clear_attachments = .{ .image = image, .depth = depth_image, .color = bytes, .depth_value = attachment.clear_value.depth_stencil.depth, .rect = rect.rect, .aspect_mask = attachment.aspect_mask } });
     };
 }
 fn cmdNextSubpass(cb: ?CommandBuffer, contents: i32) callconv(.c) void {
@@ -14895,6 +14895,12 @@ test "dynamic rendering begin and end own attachment scope" {
     const rendering = RenderingInfo{ .s_type = 1000044001, .p_next = null, .flags = 0, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 2, .height = 2 } }, .layer_count = 1, .view_mask = 0, .color_attachment_count = 1, .color_attachments = @ptrCast(&attachment), .depth_attachment = null, .stencil_attachment = null };
     cmdBeginRendering(commands[0], &rendering);
     try std.testing.expect(commands[0].impl.dynamic_rendering);
+    const dynamic_clear_attachment = ClearAttachment{ .aspect_mask = 1, .color_attachment = 0, .clear_value = clear_value };
+    const dynamic_clear_rect = ClearRect{ .rect = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 1, .height = 1 } }, .base_array_layer = 0, .layer_count = 1 };
+    const before_dynamic_clear = commands[0].impl.count;
+    cmdClearAttachments(commands[0], 1, @ptrCast(&dynamic_clear_attachment), 1, @ptrCast(&dynamic_clear_rect));
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(before_dynamic_clear + 1, commands[0].impl.count);
     var locations = [_]u32{0};
     const location_info = RenderingAttachmentLocationInfo{ .s_type = 1000232001, .p_next = null, .color_attachment_count = 1, .color_attachment_locations = &locations };
     cmdSetRenderingAttachmentLocations(commands[0], &location_info);
