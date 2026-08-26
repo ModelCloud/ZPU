@@ -213,6 +213,10 @@ ignoring them.
 The promoted depth-bounds-test-enable state is likewise initialized, resolved,
 and snapshotted for direct and indirect draws, so a dynamic pipeline cannot
 silently fall back to its static enable value.
+The promoted stencil-test-enable state follows the same initialized snapshot
+contract; because the advertised attachment policy is D32-only, an enabled
+resolved stencil test rejects the draw rather than silently dropping stencil
+semantics.
 The memory and sampler handle registries now meet the required 4096 and 4000
 allocation limits respectively. The generated command matrix is a
 234/234 dispatch/name-coverage artifact, not a Vulkan-conformance claim:
