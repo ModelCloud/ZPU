@@ -8584,7 +8584,7 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    if ((bind_point != 0 and bind_point != 1) or first_set != 0 or count != 1 or sets == null or command_buffer.impl.state != 1) {
+    if ((bind_point != 0 and bind_point != 1) or first_set != 0 or count != 1 or sets == null or command_buffer.impl.state != 1 or command_buffer.impl.invalid) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -15265,6 +15265,10 @@ test "dynamic uniform descriptors apply aligned per-bind offsets transactionally
     var dynamic_offset: u32 = 256;
     cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 0, null);
     try std.testing.expect(command[0].impl.invalid);
+    try std.testing.expect(command[0].impl.bound_descriptors == null);
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 1, @ptrCast(&dynamic_offset));
+    try std.testing.expect(command[0].impl.invalid);
+    try std.testing.expect(command[0].impl.bound_descriptors == null);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
     cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 1, null);
