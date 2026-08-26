@@ -13,7 +13,8 @@ const spirv = @import("spirv.zig");
 const spirv_frontend = @import("spirv_frontend.zig");
 const render_ir = @import("render_ir.zig");
 const render_ir_exec = @import("render_ir_exec.zig");
-pub const Result = enum(i32) { success = 0, not_ready = 1, timeout = 2, incomplete = 5, error_out_of_host_memory = -1, error_initialization_failed = -3, error_memory_map_failed = -5, error_layer_not_present = -6, error_extension_not_present = -7, error_feature_not_present = -8, error_format_not_supported = -11, error_invalid_shader = -1_000_012_000 };
+const core_command_inventory = @import("core_command_inventory.zig");
+pub const Result = enum(i32) { success = 0, not_ready = 1, timeout = 2, event_set = 3, event_reset = 4, incomplete = 5, error_out_of_host_memory = -1, error_initialization_failed = -3, error_memory_map_failed = -5, error_layer_not_present = -6, error_extension_not_present = -7, error_feature_not_present = -8, error_format_not_supported = -11, error_out_of_pool_memory = -1_000_069_000, error_invalid_shader = -1_000_012_000 };
 pub const Fn = ?*const fn () callconv(.c) void;
 pub const Alloc = opaque {};
 pub const MAGIC: usize = 0x01CDC0DE;
@@ -24,8 +25,10 @@ pub const QueueInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, fl
 pub const Features = extern struct { values: [55]u32 };
 pub const DeviceInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, queue_info_count: u32, queue_infos: ?[*]const QueueInfo, layer_count: u32, layers: ?[*]const [*:0]const u8, extension_count: u32, extensions: ?[*]const [*:0]const u8, features: ?*const Features };
 pub const ExtensionProperties = extern struct { name: [256]u8, spec_version: u32 };
+pub const LayerProperties = extern struct { layer_name: [256]u8, spec_version: u32, implementation_version: u32, description: [256]u8 };
 pub const QueueProperties = extern struct { flags: u32, count: u32, timestamp_bits: u32, granularity: extern struct { width: u32, height: u32, depth: u32 } };
 pub const FormatProperties = extern struct { linear_tiling_features: u32, optimal_tiling_features: u32, buffer_features: u32 };
+pub const ImageFormatProperties = extern struct { max_extent: Extent3D, max_mip_levels: u32, max_array_layers: u32, sample_counts: u32, max_resource_size: u64 };
 pub const Limits = extern struct {
     max_image_dimension_1d: u32,
     max_image_dimension_2d: u32,
@@ -140,38 +143,253 @@ pub const MemoryType = extern struct { property_flags: u32, heap_index: u32 };
 pub const MemoryHeap = extern struct { size: u64, flags: u32 };
 pub const MemoryProperties = extern struct { memory_type_count: u32, memory_types: [32]MemoryType, memory_heap_count: u32, memory_heaps: [16]MemoryHeap };
 pub const MemoryAllocateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, allocation_size: u64, memory_type_index: u32 };
+pub const MemoryDedicatedAllocateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, image: usize, buffer: usize };
+pub const MemoryAllocateFlagsInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, device_mask: u32 };
+pub const MemoryOpaqueCaptureAddressAllocateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, opaque_capture_address: u64 };
+pub const ExportMemoryAllocateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, handle_types: u32 };
+pub const MemoryMapInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, memory: usize, offset: u64, size: u64 };
+pub const MemoryUnmapInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, memory: usize };
+pub const MappedMemoryRange = extern struct { s_type: i32, p_next: ?*const anyopaque, memory: usize, offset: u64, size: u64 };
 pub const MemoryRequirements = extern struct { size: u64, alignment: u64, memory_type_bits: u32 };
 pub const BufferCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, size: u64, usage: u32, sharing_mode: i32, queue_family_index_count: u32, queue_family_indices: ?[*]const u32 };
+pub const BufferUsageFlags2CreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, usage: u64 };
+pub const ExternalMemoryBufferCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, handle_types: u32 };
+pub const BufferOpaqueCaptureAddressCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, opaque_capture_address: u64 };
+pub const BufferDeviceAddressInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, buffer: usize };
+pub const DeviceMemoryOpaqueCaptureAddressInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, memory: usize };
+pub const DeviceBufferMemoryRequirements = extern struct { s_type: i32, p_next: ?*const anyopaque, create_info: ?*const BufferCreateInfo };
+pub const DeviceImageMemoryRequirements = extern struct { s_type: i32, p_next: ?*const anyopaque, create_info: ?*const ImageCreateInfo, plane_aspect: u32 };
+pub const PrivateDataSlotCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32 };
+pub const PhysicalDeviceToolProperties = extern struct { s_type: i32, p_next: ?*anyopaque, name: [256]u8, version: [256]u8, purposes: u32, description: [256]u8, layer: [256]u8 };
+pub const BufferViewCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, buffer: usize, format: i32, offset: u64, range: u64 };
+pub const BufferMemoryRequirementsInfo2 = extern struct { s_type: i32, p_next: ?*const anyopaque, buffer: usize };
+pub const ImageMemoryRequirementsInfo2 = extern struct { s_type: i32, p_next: ?*const anyopaque, image: usize };
+pub const ImagePlaneMemoryRequirementsInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, plane_aspect: u32 };
+pub const ImageSparseMemoryRequirementsInfo2 = extern struct { s_type: i32, p_next: ?*const anyopaque, image: usize };
+pub const MemoryRequirements2 = extern struct { s_type: i32, p_next: ?*anyopaque, memory_requirements: MemoryRequirements };
+pub const MemoryDedicatedRequirements = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    prefers_dedicated_allocation: u32,
+    requires_dedicated_allocation: u32,
+};
+pub const BindBufferMemoryInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, buffer: usize, memory: usize, memory_offset: u64 };
+pub const BindImageMemoryInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, image: usize, memory: usize, memory_offset: u64 };
 pub const Extent3D = extern struct { width: u32, height: u32, depth: u32 };
 pub const Offset3D = extern struct { x: i32, y: i32, z: i32 };
 pub const ImageCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, image_type: i32, format: i32, extent: Extent3D, mip_levels: u32, array_layers: u32, samples: u32, tiling: i32, usage: u32, sharing_mode: i32, queue_family_index_count: u32, queue_family_indices: ?[*]const u32, initial_layout: i32 };
+pub const ExternalMemoryImageCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, handle_types: u32 };
 pub const ImageSubresource = extern struct { aspect_mask: u32, mip_level: u32, array_layer: u32 };
 pub const SubresourceLayout = extern struct { offset: u64, size: u64, row_pitch: u64, array_pitch: u64, depth_pitch: u64 };
+pub const ImageSubresource2 = extern struct { s_type: i32, p_next: ?*const anyopaque, image_subresource: ImageSubresource };
+pub const DeviceImageSubresourceInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, create_info: ?*const ImageCreateInfo, subresource: ?*const ImageSubresource2 };
+pub const SubresourceLayout2 = extern struct { s_type: i32, p_next: ?*anyopaque, subresource_layout: SubresourceLayout };
+pub const SubresourceHostMemcpySize = extern struct { s_type: i32, p_next: ?*anyopaque, size: u64 };
+pub const SparseImageFormatProperties = extern struct { aspect_mask: u32, image_granularity: Extent3D, flags: u32 };
+pub const PhysicalDeviceFeatures2 = extern struct { s_type: i32, p_next: ?*anyopaque, features: Features };
+// Promoted core feature chains use only VkBool32 payloads.  Keeping these
+// declarations explicit gives the *2 queries a real ABI-sized destination
+// instead of treating every non-null pNext as an opaque rejection.  ZPU's
+// advertised profile has no optional features, so each payload is filled with
+// VK_FALSE while preserving the caller-owned chain links.
+pub const PhysicalDeviceVulkan11Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [12]u32 };
+pub const PhysicalDeviceVulkan12Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [47]u32 };
+pub const PhysicalDeviceVulkan13Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [15]u32 };
+pub const PhysicalDeviceVulkan14Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [21]u32 };
+// Core-promoted feature-chain structs retain their field count as a VkBool32
+// array.  The profile advertises every optional feature as false, so this
+// keeps each promoted ABI exact while allowing callers to use either the
+// aggregate Vulkan11/12/13/14 struct or its original promoted extension form.
+pub const PhysicalDeviceProtectedMemoryFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDevice16BitStorageFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [4]u32 };
+pub const PhysicalDeviceVariablePointersFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [2]u32 };
+pub const PhysicalDeviceSamplerYcbcrConversionFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceMultiviewFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [3]u32 };
+pub const PhysicalDeviceShaderDrawParametersFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceVulkanMemoryModelFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [3]u32 };
+pub const PhysicalDeviceHostQueryResetFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceTimelineSemaphoreFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceBufferDeviceAddressFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [3]u32 };
+pub const PhysicalDevice8BitStorageFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [3]u32 };
+pub const PhysicalDeviceShaderAtomicInt64Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [2]u32 };
+pub const PhysicalDeviceShaderFloat16Int8Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [2]u32 };
+pub const PhysicalDeviceDescriptorIndexingFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [20]u32 };
+pub const PhysicalDeviceScalarBlockLayoutFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceUniformBufferStandardLayoutFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceShaderSubgroupExtendedTypesFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceImagelessFramebufferFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceSeparateDepthStencilLayoutsFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDevicePrivateDataFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceSynchronization2Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceTextureCompressionASTCHDRFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceMaintenance4Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceShaderTerminateInvocationFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceShaderDemoteToHelperInvocationFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDevicePipelineCreationCacheControlFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceZeroInitializeWorkgroupMemoryFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceImageRobustnessFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceSubgroupSizeControlFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [2]u32 };
+pub const PhysicalDeviceInlineUniformBlockFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [2]u32 };
+pub const PhysicalDeviceShaderIntegerDotProductFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceDynamicRenderingFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceGlobalPriorityQueryFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceIndexTypeUint8Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceMaintenance5Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceMaintenance6Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceHostImageCopyFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceShaderSubgroupRotateFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [2]u32 };
+pub const PhysicalDeviceShaderFloatControls2Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceShaderExpectAssumeFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDevicePipelineProtectedAccessFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDevicePipelineRobustnessFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceLineRasterizationFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [6]u32 };
+pub const PhysicalDeviceVertexAttributeDivisorFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [2]u32 };
+pub const PhysicalDeviceDynamicRenderingLocalReadFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceProperties2 = extern struct { s_type: i32, p_next: ?*anyopaque, properties: Properties };
+// The promoted properties carry a large, version-specific payload.  Their
+// declarations retain the exact LP64 ABI size while keeping the currently
+// unadvertised optional capability fields conservatively zeroed.
+pub const PhysicalDeviceVulkan11Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [96]u8 };
+pub const PhysicalDeviceVulkan12Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [720]u8 };
+pub const PhysicalDeviceVulkan13Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [200]u8 };
+pub const PhysicalDeviceVulkan14Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [128]u8 };
+// Individual core-promoted property structs use conservative zero payloads:
+// every optional capability is unadvertised, but each LP64 body remains the
+// exact size and alignment expected by callers.
+pub const PhysicalDeviceProtectedMemoryProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
+pub const PhysicalDeviceIDProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [48]u8 };
+pub const PhysicalDeviceSubgroupProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [16]u8 };
+pub const PhysicalDeviceMaintenance3Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [16]u8 };
+pub const PhysicalDevicePointClippingProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
+pub const PhysicalDeviceMultiviewProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
+pub const PhysicalDeviceDriverProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [520]u8 };
+pub const PhysicalDeviceTimelineSemaphoreProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
+pub const PhysicalDeviceFloatControlsProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [72]u8 };
+pub const PhysicalDeviceDescriptorIndexingProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [96]u8 };
+pub const PhysicalDeviceSamplerFilterMinmaxProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
+pub const PhysicalDeviceDepthStencilResolveProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [16]u8 };
+pub const PhysicalDeviceMaintenance4Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
+pub const PhysicalDeviceSubgroupSizeControlProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [16]u8 };
+pub const PhysicalDeviceInlineUniformBlockProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [24]u8 };
+pub const PhysicalDeviceShaderIntegerDotProductProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [120]u8 };
+pub const PhysicalDeviceTexelBufferAlignmentProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [32]u8 };
+pub const PhysicalDeviceMaintenance5Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [24]u8 };
+pub const PhysicalDeviceMaintenance6Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [16]u8 };
+pub const PhysicalDeviceHostImageCopyProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [56]u8 };
+pub const PhysicalDevicePushDescriptorProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
+pub const PhysicalDevicePipelineRobustnessProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [16]u8 };
+pub const PhysicalDeviceLineRasterizationProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
+pub const PhysicalDeviceVertexAttributeDivisorProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
+pub const PhysicalDeviceFormatProperties2 = extern struct { s_type: i32, p_next: ?*anyopaque, format_properties: FormatProperties };
+pub const FormatProperties3 = extern struct { s_type: i32, p_next: ?*anyopaque, linear_tiling_features: u64, optimal_tiling_features: u64, buffer_features: u64 };
+pub const PhysicalDeviceImageFormatInfo2 = extern struct { s_type: i32, p_next: ?*const anyopaque, format: i32, image_type: i32, tiling: i32, usage: u32, flags: u32 };
+pub const ImageFormatProperties2 = extern struct { s_type: i32, p_next: ?*anyopaque, image_format_properties: ImageFormatProperties };
+pub const PhysicalDeviceExternalImageFormatInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, handle_type: u32 };
+pub const ImageFormatListCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, view_format_count: u32, view_formats: ?[*]const i32 };
+pub const ImageStencilUsageCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, stencil_usage: u32 };
+pub const ExternalImageFormatProperties = extern struct { s_type: i32, p_next: ?*anyopaque, external_memory_properties: ExternalMemoryProperties };
+pub const SamplerYcbcrConversionImageFormatProperties = extern struct { s_type: i32, p_next: ?*anyopaque, combined_image_sampler_descriptor_count: u32 };
+pub const HostImageCopyDevicePerformanceQuery = extern struct { s_type: i32, p_next: ?*anyopaque, optimal_device_access: u32, identical_memory_layout: u32 };
+pub const PhysicalDeviceQueueFamilyProperties2 = extern struct { s_type: i32, p_next: ?*anyopaque, queue_family_properties: QueueProperties };
+pub const QueueFamilyGlobalPriorityProperties = extern struct { s_type: i32, p_next: ?*anyopaque, priority_count: u32, priorities: [4]i32 };
+pub const PhysicalDeviceMemoryProperties2 = extern struct { s_type: i32, p_next: ?*anyopaque, memory_properties: MemoryProperties };
+pub const PhysicalDeviceSparseImageFormatInfo2 = extern struct { s_type: i32, p_next: ?*const anyopaque, format: i32, image_type: i32, samples: u32, usage: u32, tiling: i32 };
+pub const SparseImageFormatProperties2 = extern struct { s_type: i32, p_next: ?*anyopaque, properties: SparseImageFormatProperties };
+pub const SparseImageMemoryRequirements = extern struct { format_properties: SparseImageFormatProperties, image_mip_tail_first_lod: u32, image_mip_tail_size: u64, image_mip_tail_offset: u64, image_mip_tail_stride: u64 };
+pub const SparseImageMemoryRequirements2 = extern struct { s_type: i32, p_next: ?*anyopaque, memory_requirements: SparseImageMemoryRequirements };
+pub const PhysicalDeviceGroupProperties = extern struct { s_type: i32, p_next: ?*anyopaque, physical_device_count: u32, physical_devices: [32]Physical, subset_allocation: u32 };
+pub const DeviceQueueInfo2 = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, queue_family_index: u32, queue_index: u32 };
+pub const DeviceQueueGlobalPriorityCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, global_priority: i32 };
+pub const DeviceGroupCommandBufferBeginInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, device_mask: u32 };
+pub const DeviceGroupSubmitInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, wait_semaphore_count: u32, wait_semaphore_device_indices: ?[*]const u32, command_buffer_count: u32, command_buffer_device_masks: ?[*]const u32, signal_semaphore_count: u32, signal_semaphore_device_indices: ?[*]const u32 };
+pub const DeviceGroupBindSparseInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, resource_device_index: u32, memory_device_index: u32 };
+pub const BindBufferMemoryDeviceGroupInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, device_index_count: u32, device_indices: ?[*]const u32 };
+pub const BindImageMemoryDeviceGroupInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, device_index_count: u32, device_indices: ?[*]const u32, split_instance_bind_region_count: u32, split_instance_bind_regions: ?[*]const Rect2D };
+pub const DeviceGroupDeviceCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, physical_device_count: u32, physical_devices: ?[*]const Physical };
+pub const ProtectedSubmitInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, protected_submit: u32 };
+pub const BindImagePlaneMemoryInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, plane_aspect: u32 };
+pub const DeviceGroupRenderPassBeginInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, device_mask: u32, device_render_area_count: u32, device_render_areas: ?[*]const Rect2D };
+pub const PhysicalDeviceExternalBufferInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, usage: u32, handle_type: u32 };
+pub const ExternalMemoryProperties = extern struct { external_memory_features: u32, export_from_imported_handle_types: u32, compatible_handle_types: u32 };
+pub const ExternalBufferProperties = extern struct { s_type: i32, p_next: ?*anyopaque, external_memory_properties: ExternalMemoryProperties };
+pub const PhysicalDeviceExternalFenceInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, handle_type: u32 };
+pub const ExternalFenceProperties = extern struct { s_type: i32, p_next: ?*anyopaque, export_from_imported_handle_types: u32, compatible_handle_types: u32, external_fence_features: u32 };
+pub const PhysicalDeviceExternalSemaphoreInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, handle_type: u32 };
+pub const ExternalSemaphoreProperties = extern struct { s_type: i32, p_next: ?*anyopaque, export_from_imported_handle_types: u32, compatible_handle_types: u32, external_semaphore_features: u32 };
+pub const SamplerYcbcrConversionCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, format: i32, model: i32, range: i32, components: [4]i32, x_chroma_offset: i32, y_chroma_offset: i32, chroma_filter: i32, force_explicit_reconstruction: u32, external_format: u64 };
+pub const DescriptorSetLayoutSupport = extern struct { s_type: i32, p_next: ?*anyopaque, supported: u32 };
 pub const CommandPoolCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, queue_family_index: u32 };
 pub const CommandBufferAllocateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, command_pool: usize, level: i32, command_buffer_count: u32 };
 pub const CommandBufferBeginInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, inheritance_info: ?*const anyopaque };
+pub const CommandBufferInheritanceInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, render_pass: usize, subpass: u32, framebuffer: usize, occlusion_query_enable: u32, query_flags: u32, pipeline_statistics: u32 };
+pub const SubpassBeginInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, contents: i32 };
+pub const SubpassEndInfo = extern struct { s_type: i32, p_next: ?*const anyopaque };
 pub const SubmitInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, wait_semaphore_count: u32, wait_semaphores: ?[*]const usize, wait_dst_stage_mask: ?[*]const u32, command_buffer_count: u32, command_buffers: ?[*]const CommandBuffer, signal_semaphore_count: u32, signal_semaphores: ?[*]const usize };
 pub const FenceCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32 };
+pub const ExportFenceCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, handle_types: u32 };
+pub const SemaphoreCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32 };
+pub const SemaphoreTypeCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, semaphore_type: i32, initial_value: u64 };
+pub const ExportSemaphoreCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, handle_types: u32 };
+pub const TimelineSemaphoreSubmitInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, wait_semaphore_value_count: u32, wait_semaphore_values: ?[*]const u64, signal_semaphore_value_count: u32, signal_semaphore_values: ?[*]const u64 };
+pub const SemaphoreWaitInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, semaphore_count: u32, semaphores: ?[*]const usize, values: ?[*]const u64 };
+pub const SemaphoreSignalInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, semaphore: usize, value: u64 };
+pub const EventCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32 };
+pub const QueryPoolCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, query_type: i32, query_count: u32, pipeline_statistics: u32 };
 pub const BufferCopy = extern struct { src_offset: u64, dst_offset: u64, size: u64 };
+pub const BufferCopy2 = extern struct { s_type: i32, p_next: ?*const anyopaque, src_offset: u64, dst_offset: u64, size: u64 };
+pub const CopyBufferInfo2 = extern struct { s_type: i32, p_next: ?*const anyopaque, src_buffer: usize, dst_buffer: usize, region_count: u32, regions: ?[*]const BufferCopy2 };
 pub const ImageSubresourceLayers = extern struct { aspect_mask: u32, mip_level: u32, base_array_layer: u32, layer_count: u32 };
 pub const BufferImageCopy = extern struct { buffer_offset: u64, buffer_row_length: u32, buffer_image_height: u32, image_subresource: ImageSubresourceLayers, image_offset: Offset3D, image_extent: Extent3D };
 pub const ImageCopy = extern struct { src_subresource: ImageSubresourceLayers, src_offset: Offset3D, dst_subresource: ImageSubresourceLayers, dst_offset: Offset3D, extent: Extent3D };
+pub const ImageCopy2 = extern struct { s_type: i32, p_next: ?*const anyopaque, src_subresource: ImageSubresourceLayers, src_offset: Offset3D, dst_subresource: ImageSubresourceLayers, dst_offset: Offset3D, extent: Extent3D };
+pub const CopyImageInfo2 = extern struct { s_type: i32, p_next: ?*const anyopaque, src_image: usize, src_image_layout: i32, dst_image: usize, dst_image_layout: i32, region_count: u32, regions: ?[*]const ImageCopy2 };
+pub const ImageBlit = extern struct { src_subresource: ImageSubresourceLayers, src_offsets: [2]Offset3D, dst_subresource: ImageSubresourceLayers, dst_offsets: [2]Offset3D };
+pub const ImageBlit2 = extern struct { s_type: i32, p_next: ?*const anyopaque, src_subresource: ImageSubresourceLayers, src_offsets: [2]Offset3D, dst_subresource: ImageSubresourceLayers, dst_offsets: [2]Offset3D };
+pub const BlitImageInfo2 = extern struct { s_type: i32, p_next: ?*const anyopaque, src_image: usize, src_image_layout: i32, dst_image: usize, dst_image_layout: i32, region_count: u32, regions: ?[*]const ImageBlit2, filter: i32 };
+pub const ImageResolve = extern struct { src_subresource: ImageSubresourceLayers, src_offset: Offset3D, dst_subresource: ImageSubresourceLayers, dst_offset: Offset3D, extent: Extent3D };
+pub const ImageResolve2 = extern struct { s_type: i32, p_next: ?*const anyopaque, src_subresource: ImageSubresourceLayers, src_offset: Offset3D, dst_subresource: ImageSubresourceLayers, dst_offset: Offset3D, extent: Extent3D };
+pub const ResolveImageInfo2 = extern struct { s_type: i32, p_next: ?*const anyopaque, src_image: usize, src_image_layout: i32, dst_image: usize, dst_image_layout: i32, region_count: u32, regions: ?[*]const ImageResolve2 };
+pub const BufferImageCopy2 = extern struct { s_type: i32, p_next: ?*const anyopaque, buffer_offset: u64, buffer_row_length: u32, buffer_image_height: u32, image_subresource: ImageSubresourceLayers, image_offset: Offset3D, image_extent: Extent3D };
+pub const CopyBufferToImageInfo2 = extern struct { s_type: i32, p_next: ?*const anyopaque, src_buffer: usize, dst_image: usize, dst_image_layout: i32, region_count: u32, regions: ?[*]const BufferImageCopy2 };
+pub const CopyImageToBufferInfo2 = extern struct { s_type: i32, p_next: ?*const anyopaque, src_image: usize, src_image_layout: i32, dst_buffer: usize, region_count: u32, regions: ?[*]const BufferImageCopy2 };
+pub const MemoryToImageCopy = extern struct { s_type: i32, p_next: ?*const anyopaque, host_pointer: ?*const anyopaque, memory_row_length: u32, memory_image_height: u32, image_subresource: ImageSubresourceLayers, image_offset: Offset3D, image_extent: Extent3D };
+pub const ImageToMemoryCopy = extern struct { s_type: i32, p_next: ?*const anyopaque, host_pointer: ?*anyopaque, memory_row_length: u32, memory_image_height: u32, image_subresource: ImageSubresourceLayers, image_offset: Offset3D, image_extent: Extent3D };
+pub const CopyMemoryToImageInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, dst_image: usize, dst_image_layout: i32, region_count: u32, regions: ?[*]const MemoryToImageCopy };
+pub const CopyImageToMemoryInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, src_image: usize, src_image_layout: i32, region_count: u32, regions: ?[*]const ImageToMemoryCopy };
+pub const CopyImageToImageInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, src_image: usize, src_image_layout: i32, dst_image: usize, dst_image_layout: i32, region_count: u32, regions: ?[*]const ImageCopy2 };
+pub const HostImageLayoutTransitionInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, image: usize, old_layout: i32, new_layout: i32, subresource_range: ImageSubresourceRange };
 pub const ClearColorValue = extern union { float32: [4]f32, int32: [4]i32, uint32: [4]u32 };
+pub const ClearDepthStencilValue = extern struct { depth: f32, stencil: u32 };
+pub const ClearAttachment = extern struct { aspect_mask: u32, color_attachment: u32, clear_value: ClearValue };
+pub const ClearRect = extern struct { rect: Rect2D, base_array_layer: u32, layer_count: u32 };
 pub const ImageSubresourceRange = extern struct { aspect_mask: u32, base_mip_level: u32, level_count: u32, base_array_layer: u32, layer_count: u32 };
+pub const MemoryBarrier = extern struct { s_type: i32, p_next: ?*const anyopaque, src_access_mask: u32, dst_access_mask: u32 };
+pub const BufferMemoryBarrier = extern struct { s_type: i32, p_next: ?*const anyopaque, src_access_mask: u32, dst_access_mask: u32, src_queue_family_index: u32, dst_queue_family_index: u32, buffer: usize, offset: u64, size: u64 };
 pub const ImageMemoryBarrier = extern struct { s_type: i32, p_next: ?*const anyopaque, src_access_mask: u32, dst_access_mask: u32, old_layout: i32, new_layout: i32, src_queue_family_index: u32, dst_queue_family_index: u32, image: usize, subresource_range: ImageSubresourceRange };
+pub const MemoryBarrier2 = extern struct { s_type: i32, p_next: ?*const anyopaque, src_stage_mask: u64, dst_stage_mask: u64, src_access_mask: u64, dst_access_mask: u64 };
+pub const BufferMemoryBarrier2 = extern struct { s_type: i32, p_next: ?*const anyopaque, src_stage_mask: u64, dst_stage_mask: u64, src_access_mask: u64, dst_access_mask: u64, src_queue_family_index: u32, dst_queue_family_index: u32, buffer: usize, offset: u64, size: u64 };
+pub const ImageMemoryBarrier2 = extern struct { s_type: i32, p_next: ?*const anyopaque, src_stage_mask: u64, dst_stage_mask: u64, src_access_mask: u64, dst_access_mask: u64, old_layout: i32, new_layout: i32, src_queue_family_index: u32, dst_queue_family_index: u32, image: usize, subresource_range: ImageSubresourceRange };
+pub const DependencyInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, dependency_flags: u32, memory_barrier_count: u32, memory_barriers: ?[*]const MemoryBarrier2, buffer_memory_barrier_count: u32, buffer_memory_barriers: ?[*]const BufferMemoryBarrier2, image_memory_barrier_count: u32, image_memory_barriers: ?[*]const ImageMemoryBarrier2 };
+pub const SemaphoreSubmitInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, semaphore: usize, value: u64, stage_mask: u64, device_index: u32 };
+pub const CommandBufferSubmitInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, command_buffer: CommandBuffer, device_mask: u32 };
+pub const SubmitInfo2 = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, wait_semaphore_info_count: u32, wait_semaphore_infos: ?[*]const SemaphoreSubmitInfo, command_buffer_info_count: u32, command_buffer_infos: ?[*]const CommandBufferSubmitInfo, signal_semaphore_info_count: u32, signal_semaphore_infos: ?[*]const SemaphoreSubmitInfo };
 pub const Extent2D = extern struct { width: u32, height: u32 };
 pub const XcbSurfaceCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, connection: ?*anyopaque, window: u32 };
 pub const SurfaceCapabilities = extern struct { min_image_count: u32, max_image_count: u32, current_extent: Extent2D, min_image_extent: Extent2D, max_image_extent: Extent2D, max_image_array_layers: u32, supported_transforms: u32, current_transform: u32, supported_composite_alpha: u32, supported_usage_flags: u32 };
 pub const SurfaceFormat = extern struct { format: i32, color_space: i32 };
 pub const SwapchainCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, surface: usize, min_image_count: u32, image_format: i32, image_color_space: i32, image_extent: Extent2D, image_array_layers: u32, image_usage: u32, image_sharing_mode: i32, queue_family_index_count: u32, queue_family_indices: ?[*]const u32, pre_transform: u32, composite_alpha: u32, present_mode: i32, clipped: u32, old_swapchain: usize };
 pub const ImageViewCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, image: usize, view_type: i32, format: i32, components: [4]i32, subresource_range: ImageSubresourceRange };
+pub const ImageViewUsageCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, usage: u32 };
 pub const FramebufferCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, render_pass: usize, attachment_count: u32, attachments: ?[*]const usize, width: u32, height: u32, layers: u32 };
 pub const ClearValue = extern union { color: ClearColorValue, depth_stencil: extern struct { depth: f32, stencil: u32 } };
 pub const Rect2D = extern struct { offset: extern struct { x: i32, y: i32 }, extent: Extent2D };
 pub const RenderPassBeginInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, render_pass: usize, framebuffer: usize, render_area: Rect2D, clear_value_count: u32, clear_values: ?[*]const ClearValue };
+pub const DescriptorPoolSize = extern struct { descriptor_type: i32, descriptor_count: u32 };
+pub const DescriptorPoolCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, max_sets: u32, pool_size_count: u32, pool_sizes: ?[*]const DescriptorPoolSize };
 pub const DescriptorSetAllocateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, descriptor_pool: usize, descriptor_set_count: u32, set_layouts: ?[*]const usize };
 pub const DescriptorBufferInfo = extern struct { buffer: usize, offset: u64, range: u64 };
 pub const DescriptorImageInfo = extern struct { sampler: usize, image_view: usize, image_layout: i32 };
+pub const SamplerCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, mag_filter: i32, min_filter: i32, mipmap_mode: i32, address_mode_u: i32, address_mode_v: i32, address_mode_w: i32, mip_lod_bias: f32, anisotropy_enable: u32, max_anisotropy: f32, compare_enable: u32, compare_op: i32, min_lod: f32, max_lod: f32, border_color: i32, unnormalized_coordinates: u32 };
 pub const WriteDescriptorSet = extern struct { s_type: i32, p_next: ?*const anyopaque, dst_set: usize, dst_binding: u32, dst_array_element: u32, descriptor_count: u32, descriptor_type: i32, image_info: ?[*]const DescriptorImageInfo, buffer_info: ?[*]const DescriptorBufferInfo, texel_buffer_view: ?[*]const usize };
 pub const Viewport = cpu_cube.Viewport;
 pub const PresentInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, wait_semaphore_count: u32, wait_semaphores: ?[*]const usize, swapchain_count: u32, swapchains: ?[*]const usize, image_indices: ?[*]const u32, results: ?[*]Result };
@@ -182,13 +400,24 @@ pub const SwapchainTimeDomainPropertiesEXT = extern struct { s_type: i32, p_next
 pub const PastPresentationTimingInfoEXT = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, swapchain: usize };
 pub const PastPresentationTimingPropertiesEXT = extern struct { s_type: i32, p_next: ?*anyopaque, timing_properties_counter: u64, time_domains_counter: u64, presentation_timing_count: u32, presentation_timings: ?*anyopaque };
 pub const ShaderModuleCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, code_size: usize, p_code: ?*const anyopaque };
+pub const PipelineCacheCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, initial_data_size: usize, initial_data: ?*const anyopaque };
 pub const SpecializationMapEntry = extern struct { constant_id: u32, offset: u32, size: usize };
 pub const SpecializationInfo = extern struct { map_entry_count: u32, map_entries: ?[*]const SpecializationMapEntry, data_size: usize, data: ?*const anyopaque };
 pub const PipelineShaderStageCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, stage: u32, module: usize, name: ?[*:0]const u8, specialization_info: ?*const SpecializationInfo };
+pub const ComputePipelineCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, stage: PipelineShaderStageCreateInfo, layout: usize, base_pipeline: usize, base_pipeline_index: i32 };
 pub const DescriptorSetLayoutBinding = extern struct { binding: u32, descriptor_type: i32, descriptor_count: u32, stage_flags: u32, immutable_samplers: ?[*]const usize };
 pub const DescriptorSetLayoutCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, binding_count: u32, bindings: ?[*]const DescriptorSetLayoutBinding };
+pub const DescriptorSetLayoutBindingFlagsCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, binding_count: u32, binding_flags: ?[*]const u32 };
+pub const DescriptorSetVariableDescriptorCountAllocateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, descriptor_set_count: u32, descriptor_counts: ?[*]const u32 };
+pub const DescriptorSetVariableDescriptorCountLayoutSupport = extern struct { s_type: i32, p_next: ?*anyopaque, max_variable_descriptor_count: u32 };
+pub const DescriptorUpdateTemplateEntry = extern struct { dst_binding: u32, dst_array_element: u32, descriptor_count: u32, descriptor_type: i32, offset: usize, stride: usize };
+pub const DescriptorUpdateTemplateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, descriptor_update_entry_count: u32, descriptor_update_entries: ?[*]const DescriptorUpdateTemplateEntry, template_type: i32, descriptor_set_layout: usize, pipeline_bind_point: i32, pipeline_layout: usize, set: u32 };
 pub const PushConstantRange = extern struct { stage_flags: u32, offset: u32, size: u32 };
 pub const PipelineLayoutCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, set_layout_count: u32, set_layouts: ?[*]const usize, push_constant_range_count: u32, push_constant_ranges: ?[*]const PushConstantRange };
+pub const BindDescriptorSetsInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, stage_flags: u32, layout: usize, first_set: u32, descriptor_set_count: u32, descriptor_sets: ?[*]const usize, dynamic_offset_count: u32, dynamic_offsets: ?[*]const u32 };
+pub const PushConstantsInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, layout: usize, stage_flags: u32, offset: u32, size: u32, values: ?*const anyopaque };
+pub const PushDescriptorSetInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, stage_flags: u32, layout: usize, set: u32, descriptor_write_count: u32, descriptor_writes: ?[*]const WriteDescriptorSet };
+pub const PushDescriptorSetWithTemplateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, descriptor_update_template: usize, layout: usize, set: u32, data: ?*const anyopaque };
 pub const VertexInputBindingDescription = extern struct { binding: u32, stride: u32, input_rate: i32 };
 pub const VertexInputAttributeDescription = extern struct { location: u32, binding: u32, format: i32, offset: u32 };
 pub const PipelineVertexInputStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, binding_count: u32, bindings: ?[*]const VertexInputBindingDescription, attribute_count: u32, attributes: ?[*]const VertexInputAttributeDescription };
@@ -207,6 +436,20 @@ pub const AttachmentReference = extern struct { attachment: u32, layout: i32 };
 pub const SubpassDescription = extern struct { flags: u32, pipeline_bind_point: i32, input_attachment_count: u32, input_attachments: ?[*]const AttachmentReference, color_attachment_count: u32, color_attachments: ?[*]const AttachmentReference, resolve_attachments: ?[*]const AttachmentReference, depth_stencil_attachment: ?*const AttachmentReference, preserve_attachment_count: u32, preserve_attachments: ?[*]const u32 };
 pub const SubpassDependency = extern struct { src_subpass: u32, dst_subpass: u32, src_stage_mask: u32, dst_stage_mask: u32, src_access_mask: u32, dst_access_mask: u32, dependency_flags: u32 };
 pub const RenderPassCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, attachment_count: u32, attachments: ?[*]const AttachmentDescription, subpass_count: u32, subpasses: ?[*]const SubpassDescription, dependency_count: u32, dependencies: ?[*]const SubpassDependency };
+pub const AttachmentDescription2 = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, format: i32, samples: u32, load_op: i32, store_op: i32, stencil_load_op: i32, stencil_store_op: i32, initial_layout: i32, final_layout: i32 };
+pub const AttachmentReference2 = extern struct { s_type: i32, p_next: ?*const anyopaque, attachment: u32, layout: i32, aspect_mask: u32 };
+pub const AttachmentDescriptionStencilLayout = extern struct { s_type: i32, p_next: ?*const anyopaque, stencil_initial_layout: i32, stencil_final_layout: i32 };
+pub const SubpassDescription2 = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, pipeline_bind_point: i32, view_mask: u32, input_attachment_count: u32, input_attachments: ?[*]const AttachmentReference2, color_attachment_count: u32, color_attachments: ?[*]const AttachmentReference2, resolve_attachments: ?[*]const AttachmentReference2, depth_stencil_attachment: ?*const AttachmentReference2, preserve_attachment_count: u32, preserve_attachments: ?[*]const u32 };
+pub const SubpassDescriptionDepthStencilResolve = extern struct { s_type: i32, p_next: ?*const anyopaque, depth_resolve_mode: i32, stencil_resolve_mode: i32, depth_stencil_resolve_attachment: ?*const AttachmentReference2 };
+pub const SubpassDependency2 = extern struct { s_type: i32, p_next: ?*const anyopaque, src_subpass: u32, dst_subpass: u32, src_stage_mask: u32, dst_stage_mask: u32, src_access_mask: u32, dst_access_mask: u32, dependency_flags: u32, view_offset: i32 };
+pub const RenderPassCreateInfo2 = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, attachment_count: u32, attachments: ?[*]const AttachmentDescription2, subpass_count: u32, subpasses: ?[*]const SubpassDescription2, dependency_count: u32, dependencies: ?[*]const SubpassDependency2, correlated_view_mask_count: u32, correlated_view_masks: ?[*]const u32 };
+pub const RenderPassMultiviewCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, subpass_count: u32, view_masks: ?[*]const u32, dependency_count: u32, view_offsets: ?[*]const i32, correlation_mask_count: u32, correlation_masks: ?[*]const u32 };
+pub const RenderPassInputAttachmentAspectCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, aspect_reference_count: u32, aspect_references: ?[*]const u32 };
+pub const RenderingAttachmentInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, image_view: usize, image_layout: i32, resolve_mode: i32, resolve_image_view: usize, resolve_image_layout: i32, load_op: i32, store_op: i32, clear_value: ClearValue };
+pub const RenderingInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, render_area: Rect2D, layer_count: u32, view_mask: u32, color_attachment_count: u32, color_attachments: ?[*]const RenderingAttachmentInfo, depth_attachment: ?*const RenderingAttachmentInfo, stencil_attachment: ?*const RenderingAttachmentInfo };
+pub const RenderingAreaInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, view_mask: u32, color_attachment_count: u32, color_attachment_formats: ?[*]const i32, depth_attachment_format: i32, stencil_attachment_format: i32 };
+pub const RenderingAttachmentLocationInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, color_attachment_count: u32, color_attachment_locations: ?[*]const u32 };
+pub const RenderingInputAttachmentIndexInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, color_attachment_count: u32, color_attachment_input_indices: ?[*]const u32, depth_input_attachment_index: ?*const u32, stencil_input_attachment_index: ?*const u32 };
 const SetInstanceLoaderData = *const fn (Instance, *anyopaque) callconv(.c) Result;
 const SetDeviceLoaderData = *const fn (Device, *anyopaque) callconv(.c) Result;
 pub const InstanceObj = extern struct { loader_data: usize, set_loader_data: ?SetInstanceLoaderData };
@@ -219,14 +462,24 @@ pub const Device = *DeviceObj;
 pub const Queue = *QueueObj;
 const MemoryObj = struct { owner: Device, bytes: []align(64) u8, mapped: bool };
 const BufferObj = struct { owner: Device, size: u64, usage: u32, memory: ?*MemoryObj = null, offset: u64 = 0 };
+const BufferViewObj = struct { owner: Device, buffer: *BufferObj, format: i32, offset: u64, range: u64 };
 const ImageObj = struct { owner: Device, width: u32, height: u32, array_layers: u32, samples: u32, format: i32, usage: u32, layout: i32, memory: ?*MemoryObj = null, owned_bytes: ?[]align(64) u8 = null, shared_bytes: bool = false, offset: u64 = 0, clear_pattern: ?u32 = null, content_bounds: cpu_cube.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, force_full_present: bool = true, complex_3d_content: bool = false, last_clear_ns: u64 = 0, last_draw_ns: u64 = 0, dirty_tiles: ?[]align(64) u8 = null };
-const FenceObj = struct { owner: Device, signaled: bool };
-const SemaphoreObj = struct { owner: Device, signaled: bool };
-const CommandPoolObj = struct { owner: Device };
+const FenceObj = struct { owner: Device, signaled: std.atomic.Value(bool), waiters: std.atomic.Value(u32) };
+const EventObj = struct { owner: Device, signaled: std.atomic.Value(bool), waiters: std.atomic.Value(u32) };
+const QuerySlot = struct { state: std.atomic.Value(u8), value: std.atomic.Value(u64) };
+const QueryPoolObj = struct { owner: DeviceIdentity, query_type: i32, slots: []QuerySlot };
+const SemaphoreObj = struct { owner: Device, signaled: std.atomic.Value(bool), timeline: bool, timeline_value: std.atomic.Value(u64) };
+const CommandPoolObj = struct { owner: Device, flags: u32 };
 const SurfaceObj = struct { owner: Instance, connection: *anyopaque, window: u32 };
-const ImageViewObj = struct { owner: Device, image: *ImageObj, format: i32, aspect_mask: u32, base_array_layer: u32, layer_count: u32 };
+const ImageViewObj = struct { owner: Device, image: *ImageObj, format: i32, usage: u32, aspect_mask: u32, base_array_layer: u32, layer_count: u32 };
+const SamplerObj = struct { owner: Device };
 const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj, render_compatibility: Canonical };
-const DescriptorSetObj = struct { owner: DeviceIdentity, layout: Canonical, uniform: ?*BufferObj = null, uniform_offset: u64 = 0, uniform_range: u64 = 0, texture: ?*ImageObj = null };
+const PipelineCacheObj = struct { owner: DeviceIdentity, data: Canonical = .{} };
+const descriptor_type_count = 11;
+const DescriptorCounts = [descriptor_type_count]u32;
+const DescriptorPoolObj = struct { owner: DeviceIdentity, flags: u32, max_sets: u32, allocated_sets: u32, capacity: DescriptorCounts, used: DescriptorCounts };
+const DescriptorSetObj = struct { owner: DeviceIdentity = undefined, pool: *DescriptorPoolObj = undefined, counts: DescriptorCounts = [_]u32{0} ** descriptor_type_count, layout: Canonical = .{}, binding_types: [2]i32 = .{ -1, -1 }, uniform: ?*BufferObj = null, uniform_offset: u64 = 0, uniform_range: u64 = 0, uniform_dynamic: bool = false, storage: ?*BufferObj = null, storage_binding: u32 = 0, storage_offset: u64 = 0, storage_range: u64 = 0, texture: ?*ImageObj = null, synthetic: bool = false };
+const DescriptorUpdateTemplateObj = struct { owner: DeviceIdentity, layout: *DescriptorSetLayoutObj, entry_count: u32, entries: [32]DescriptorUpdateTemplateEntry };
 const DeviceIdentity = struct {
     handle: Device,
     generation: u64,
@@ -251,6 +504,7 @@ const Canonical = struct {
         return std.mem.eql(u8, a.bytes, b.bytes);
     }
     fn clone(self: *const Canonical) error{OutOfMemory}!Canonical {
+        if (self.bytes.len == 0) return .{};
         if (failTestAllocation()) return error.OutOfMemory;
         const result = Canonical{ .bytes = allocator.dupe(u8, self.bytes) catch return error.OutOfMemory, .digest = self.digest };
         canonical_live_allocations += 1;
@@ -264,8 +518,21 @@ const Canonical = struct {
         self.bytes = &.{};
     }
 };
-const DescriptorSetLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical };
-const PipelineLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical, set0: Canonical };
+const DescriptorSetLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical, counts: DescriptorCounts, flags: u32 = 0, binding_types: [2]i32 = .{ -1, -1 } };
+const core_shader_stage_bits = [_]u32{ 1, 2, 4, 8, 16, 32 };
+const PushConstantState = struct {
+    values: [core_shader_stage_bits.len][128]u8 = [_][128]u8{[_]u8{0} ** 128} ** core_shader_stage_bits.len,
+    initialized: [core_shader_stage_bits.len][2]u64 = [_][2]u64{.{ 0, 0 }} ** core_shader_stage_bits.len,
+};
+const VertexBindingState = struct {
+    buffers: [16]?*BufferObj = [_]?*BufferObj{null} ** 16,
+    handles: [16]usize = [_]usize{0} ** 16,
+    offsets: [16]u64 = [_]u64{0} ** 16,
+    sizes: [16]u64 = [_]u64{0} ** 16,
+    strides: [16]u64 = [_]u64{0} ** 16,
+    set: u16 = 0,
+};
+const PipelineLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical, set0: Canonical, set0_layout: *DescriptorSetLayoutObj, push_descriptor: bool, push_ranges: [core_shader_stage_bits.len]PushConstantRange };
 const AttachmentRole = enum(u8) { color, depth };
 const FramebufferAttachmentRequirement = struct { format: i32 = 0, samples: u32 = 0, role: AttachmentRole = .color };
 const RenderPassObj = struct { owner: DeviceIdentity, canonical: Canonical, compatibility: Canonical, subpass_count: u32, framebuffer_supported: bool, framebuffer_attachment_count: u32, framebuffer_attachments: [2]FramebufferAttachmentRequirement };
@@ -286,7 +553,8 @@ const ExecutionAbi = union(enum) {
         self.* = .profile_v1_metadata;
     }
 };
-const GraphicsPipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, layout: Canonical, set0: Canonical, render_compatibility: Canonical, vertex_program: ?render_ir.Program, fragment_program: ?render_ir.Program, subpass: u32, execution_abi: ExecutionAbi, cull_mode: u32, front_face: i32 };
+const GraphicsPipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, layout: Canonical, set0: Canonical, render_compatibility: Canonical, vertex_program: ?render_ir.Program, fragment_program: ?render_ir.Program, subpass: u32, execution_abi: ExecutionAbi, cull_mode: u32, front_face: i32, dynamic_viewport: bool, dynamic_scissor: bool, viewport: Viewport, scissor: cpu_cube.Rect };
+const ComputePipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, layout: Canonical, executor: ?render_ir_exec.Executor = null };
 const SyntheticError = render_ir_exec.Error || error{ InvalidDevice, InvalidPipeline, InvalidAbi, InvalidStage };
 
 // Deliberately private: this scalar proof hook is not a Vulkan command, entry
@@ -308,6 +576,7 @@ fn setupSyntheticProfile(
     const program = direct_program orelse switch (stage) {
         .vertex => if (pipeline.vertex_program) |*value| value else return error.InvalidStage,
         .fragment => if (pipeline.fragment_program) |*value| value else return error.InvalidStage,
+        .compute => return error.InvalidStage,
     };
     if (program.stage != stage) return error.InvalidStage;
     var executor = try render_ir_exec.Executor.init(executor_allocator, program);
@@ -343,16 +612,32 @@ const SwapchainObj = struct {
     cadence: ?frame_pacing.Clock,
     transport: xcb_present.Transport,
 };
-const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32 }, cube_draw: struct { framebuffer: *FramebufferObj, descriptors: *DescriptorSetObj, vertex_count: u32, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32 }, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 } };
-const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, state: u8, invalid: bool, count: u16, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_descriptors: ?*DescriptorSetObj, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, viewport: Viewport, scissor: cpu_cube.Rect, commands: [256]Command };
+const QueryCommand = struct { pool: *QueryPoolObj, index: u32 };
+const QueryCopyCommand = struct { pool: *QueryPoolObj, first: u32, count: u32, destination: *BufferObj, offset: u64, stride: u64, flags: u32 };
+const IndexedDrawState = struct { buffer: *BufferObj, offset: u64, byte_count: u64, index_type: i32, vertex_offset: i32 };
+const IndirectCountState = struct { buffer: *BufferObj, offset: u64, max_draw_count: u32 };
+const IndirectDrawState = struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, indirect_buffer: *BufferObj, offset: u64, draw_count: u32, stride: u64, indexed: bool, index_buffer: ?*BufferObj, index_offset: u64, index_type: i32, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, count_source: ?IndirectCountState = null };
+const BlitImageCommand = struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageBlit, filter: i32 };
+const ResolveImageCommand = struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageResolve };
+const DynamicState = struct { cull_mode: u32 = std.math.maxInt(u32), front_face: i32 = -1, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_bias_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, stencil_test_enable: u32 = 0, stencil_fail_op: i32 = 0, stencil_pass_op: i32 = 0, stencil_depth_fail_op: i32 = 0, stencil_compare_op: i32 = 7 };
+const DispatchCommand = struct { base: [3]u32, groups: [3]u32, pipeline: *ComputePipelineObj, layout: ?*PipelineLayoutObj, descriptors: ?*DescriptorSetObj };
+const DispatchIndirectCommand = struct { buffer: *BufferObj, offset: u64, pipeline: *ComputePipelineObj, layout: ?*PipelineLayoutObj, descriptors: ?*DescriptorSetObj };
+const PrivateDataEntry = struct { object_type: i32 = 0, object: u64 = 0, data: u64 = 0 };
+const PrivateDataSlotObj = struct { owner: Device, entries: [max_api_items]PrivateDataEntry };
+const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: struct { image: *ImageObj, layout: i32, depth: f32, base_layer: u32 = 0, layer_count: u32 = 1 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, clear_color: bool = true, clear_depth: bool = true }, clear_attachments: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32 }, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32 }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 }, event_set: *EventObj, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
+const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, descriptor_snapshots: [256]DescriptorSetObj = undefined, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: [256]Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
 pub const CommandBuffer = *CommandBufferObj;
 
 const max_objects = 64;
 const max_child_objects = 64;
+const max_memory_objects = 4096;
+const max_sampler_objects = 4000;
 const heap_size: u64 = 256 * 1024 * 1024;
 const max_2d_extent: u32 = 8192;
+const max_image_array_layers: u32 = 256;
 const max_api_items: u32 = 256;
+const pipeline_cache_uuid = [_]u8{ 0x5a, 0x50, 0x55, 0x2d, 0x49, 0x43, 0x44, 0x2d, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31 };
 const SlotState = enum(u8) { never, live, tombstone };
 var instance_objects: [max_objects]InstanceObj = undefined;
 var physical_objects: [max_objects]PhysicalObj = undefined;
@@ -361,14 +646,20 @@ var device_objects: [max_objects]DeviceObj = undefined;
 var queue_objects: [max_objects]QueueObj = undefined;
 var device_state = [_]SlotState{.never} ** max_objects;
 var next_device_generation: u64 = 1;
-var memory_objects: [max_child_objects]MemoryObj = undefined;
-var memory_state = [_]SlotState{.never} ** max_child_objects;
+var memory_objects: [max_memory_objects]MemoryObj = undefined;
+var memory_state = [_]SlotState{.never} ** max_memory_objects;
 var buffer_objects: [max_child_objects]BufferObj = undefined;
 var buffer_state = [_]SlotState{.never} ** max_child_objects;
+var buffer_view_objects: [max_child_objects]BufferViewObj = undefined;
+var buffer_view_state = [_]SlotState{.never} ** max_child_objects;
 var image_objects: [max_child_objects]ImageObj = undefined;
 var image_state = [_]SlotState{.never} ** max_child_objects;
 var fence_objects: [max_child_objects]FenceObj = undefined;
 var fence_state = [_]SlotState{.never} ** max_child_objects;
+var event_objects: [max_child_objects]EventObj = undefined;
+var event_state = [_]SlotState{.never} ** max_child_objects;
+var query_pool_objects: [max_child_objects]QueryPoolObj = undefined;
+var query_pool_state = [_]SlotState{.never} ** max_child_objects;
 var semaphore_objects: [max_child_objects]SemaphoreObj = undefined;
 var semaphore_state = [_]SlotState{.never} ** max_child_objects;
 var command_pool_objects: [max_child_objects]CommandPoolObj = undefined;
@@ -380,8 +671,14 @@ var surface_objects: [max_child_objects]SurfaceObj = undefined;
 var surface_state = [_]SlotState{.never} ** max_child_objects;
 var image_view_objects: [max_child_objects]ImageViewObj = undefined;
 var image_view_state = [_]SlotState{.never} ** max_child_objects;
+var sampler_objects: [max_sampler_objects]SamplerObj = undefined;
+var sampler_state = [_]SlotState{.never} ** max_sampler_objects;
 var framebuffer_objects: [max_child_objects]FramebufferObj = undefined;
 var framebuffer_state = [_]SlotState{.never} ** max_child_objects;
+var pipeline_cache_objects: [max_child_objects]PipelineCacheObj = undefined;
+var pipeline_cache_state = [_]SlotState{.never} ** max_child_objects;
+var descriptor_pool_objects: [max_child_objects]DescriptorPoolObj = undefined;
+var descriptor_pool_state = [_]SlotState{.never} ** max_child_objects;
 var descriptor_set_objects: [max_child_objects]DescriptorSetObj = undefined;
 var descriptor_set_state = [_]SlotState{.never} ** max_child_objects;
 var shader_module_objects: [max_child_objects]ShaderModuleObj = undefined;
@@ -394,6 +691,12 @@ var render_pass_objects: [max_child_objects]RenderPassObj = undefined;
 var render_pass_state = [_]SlotState{.never} ** max_child_objects;
 var graphics_pipeline_objects: [max_child_objects]GraphicsPipelineObj = undefined;
 var graphics_pipeline_state = [_]SlotState{.never} ** max_child_objects;
+var compute_pipeline_objects: [max_child_objects]ComputePipelineObj = undefined;
+var compute_pipeline_state = [_]SlotState{.never} ** max_child_objects;
+var private_data_slot_objects: [max_child_objects]PrivateDataSlotObj = undefined;
+var private_data_slot_state = [_]SlotState{.never} ** max_child_objects;
+var descriptor_update_template_objects: [max_child_objects]DescriptorUpdateTemplateObj = undefined;
+var descriptor_update_template_state = [_]SlotState{.never} ** max_child_objects;
 var swapchain_objects: [8]SwapchainObj = undefined;
 var swapchain_state = [_]SlotState{.never} ** 8;
 var generic_handle: usize = 0x10000;
@@ -566,6 +869,697 @@ fn lock() void {
 const ChainHeader = extern struct { s_type: i32, p_next: ?*const ChainHeader };
 const google_display_timing_extension = "VK_GOOGLE_display_timing";
 const google_present_times_info_stype: i32 = 1_000_092_000;
+const memory_dedicated_requirements_stype: i32 = 1_000_127_000;
+
+const SemaphoreCreatePNextState = struct { timeline: bool = false, initial_value: u64 = 0 };
+
+// External handle export is intentionally a no-op in ZPU's process-local
+// profile. A zero handle-type mask is accepted as a well-formed ABI node,
+// while requests for an actual OS handle remain rejected.
+fn fenceCreatePNextValid(raw: ?*const anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    var saw_export = false;
+    while (next) |item| {
+        if (depth == 16) return false;
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (header.s_type != 1000113000 or saw_export) return false;
+        const export_info: *const ExportFenceCreateInfo = @ptrCast(@alignCast(item));
+        if (export_info.handle_types != 0) return false;
+        saw_export = true;
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
+}
+
+fn semaphoreCreatePNextState(raw: ?*const anyopaque) ?SemaphoreCreatePNextState {
+    var next = raw;
+    var depth: usize = 0;
+    var state = SemaphoreCreatePNextState{};
+    var saw_timeline = false;
+    var saw_export = false;
+    while (next) |item| {
+        if (depth == 16) return null;
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        switch (header.s_type) {
+            1000207002 => {
+                if (saw_timeline) return null;
+                const type_info: *const SemaphoreTypeCreateInfo = @ptrCast(@alignCast(item));
+                if (type_info.semaphore_type != 1) return null;
+                state.timeline = true;
+                state.initial_value = type_info.initial_value;
+                saw_timeline = true;
+            },
+            1000077000 => {
+                if (saw_export) return null;
+                const export_info: *const ExportSemaphoreCreateInfo = @ptrCast(@alignCast(item));
+                if (export_info.handle_types != 0) return null;
+                saw_export = true;
+            },
+            else => return null,
+        }
+        next = header.p_next;
+        depth += 1;
+    }
+    return state;
+}
+
+fn memoryRequirements2ChainValid(raw: ?*anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        if (depth == 16 or @as(*const ChainHeader, @ptrCast(@alignCast(item))).s_type != memory_dedicated_requirements_stype) return false;
+        next = if (@as(*const ChainHeader, @ptrCast(@alignCast(item))).p_next) |p| @ptrCast(@constCast(p)) else null;
+        depth += 1;
+    }
+    return true;
+}
+
+fn memoryAllocatePNextValid(raw: ?*const anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        switch (header.s_type) {
+            1000127001 => {
+                const dedicated: *const MemoryDedicatedAllocateInfo = @ptrCast(@alignCast(item));
+                if (dedicated.image != 0 and dedicated.buffer != 0) return false;
+            },
+            1000060000 => {
+                const flags: *const MemoryAllocateFlagsInfo = @ptrCast(@alignCast(item));
+                if (flags.flags != 0 or flags.device_mask != 1) return false;
+            },
+            1000072002 => {
+                const export_info: *const ExportMemoryAllocateInfo = @ptrCast(@alignCast(item));
+                if (export_info.handle_types != 0) return false;
+            },
+            1000257003 => {
+                const capture: *const MemoryOpaqueCaptureAddressAllocateInfo = @ptrCast(@alignCast(item));
+                if (capture.opaque_capture_address != 0) return false;
+            },
+            else => return false,
+        }
+        if (depth == 16) return false;
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
+}
+
+fn memoryAllocateDedicatedObjectsValidLocked(d: Device, raw: ?*const anyopaque) bool {
+    var next = raw;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (header.s_type == 1000127001) {
+            const dedicated: *const MemoryDedicatedAllocateInfo = @ptrCast(@alignCast(item));
+            if (dedicated.image != 0) {
+                const image = validImageLocked(dedicated.image) orelse return false;
+                if (image.owner != d) return false;
+            }
+            if (dedicated.buffer != 0) {
+                const buffer = validBufferLocked(dedicated.buffer) orelse return false;
+                if (buffer.owner != d) return false;
+            }
+        }
+        next = header.p_next;
+    }
+    return true;
+}
+
+fn bindBufferMemoryPNextValid(raw: ?*const anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (depth == 16 or header.s_type != 1000060013) return false;
+        const group: *const BindBufferMemoryDeviceGroupInfo = @ptrCast(@alignCast(item));
+        if (group.device_index_count > 1 or (group.device_index_count != 0 and group.device_indices == null) or (group.device_index_count == 1 and group.device_indices.?[0] != 0)) return false;
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
+}
+
+fn bindImageMemoryPNextValid(raw: ?*const anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        switch (header.s_type) {
+            1000060014 => {
+                const group: *const BindImageMemoryDeviceGroupInfo = @ptrCast(@alignCast(item));
+                if (group.device_index_count > 1 or (group.device_index_count != 0 and group.device_indices == null) or (group.device_index_count == 1 and group.device_indices.?[0] != 0) or group.split_instance_bind_region_count != 0 or group.split_instance_bind_regions != null) return false;
+            },
+            1000156002 => {
+                const plane: *const BindImagePlaneMemoryInfo = @ptrCast(@alignCast(item));
+                if (plane.plane_aspect != 0) return false;
+            },
+            else => return false,
+        }
+        if (depth == 16) return false;
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
+}
+
+fn commandBufferBeginPNextValid(raw: ?*const anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (depth == 16 or header.s_type != 1000060004) return false;
+        const group: *const DeviceGroupCommandBufferBeginInfo = @ptrCast(@alignCast(item));
+        if (group.device_mask != 1) return false;
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
+}
+
+fn renderPassBeginPNextValid(raw: ?*const anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (depth == 16 or header.s_type != 1000060003) return false;
+        const group: *const DeviceGroupRenderPassBeginInfo = @ptrCast(@alignCast(item));
+        if (group.device_mask != 1 or group.device_render_area_count > 1 or (group.device_render_area_count != 0 and group.device_render_areas == null)) return false;
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
+}
+
+fn submitPNextValid(raw: ?*const anyopaque, wait_count: u32, command_count: u32, signal_count: u32) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (depth == 16) return false;
+        switch (header.s_type) {
+            1000207003 => {
+                const timeline: *const TimelineSemaphoreSubmitInfo = @ptrCast(@alignCast(item));
+                if (timeline.wait_semaphore_value_count != wait_count or timeline.signal_semaphore_value_count != signal_count or
+                    (wait_count != 0 and timeline.wait_semaphore_values == null) or
+                    (signal_count != 0 and timeline.signal_semaphore_values == null)) return false;
+            },
+            1000060005 => {
+                const group: *const DeviceGroupSubmitInfo = @ptrCast(@alignCast(item));
+                if (group.wait_semaphore_count != wait_count or group.command_buffer_count != command_count or group.signal_semaphore_count != signal_count or
+                    (group.wait_semaphore_count != 0 and group.wait_semaphore_device_indices == null) or
+                    (group.command_buffer_count != 0 and group.command_buffer_device_masks == null) or
+                    (group.signal_semaphore_count != 0 and group.signal_semaphore_device_indices == null)) return false;
+                if (group.wait_semaphore_device_indices) |indices| for (indices[0..group.wait_semaphore_count]) |index| if (index != 0) return false;
+                if (group.command_buffer_device_masks) |masks| for (masks[0..group.command_buffer_count]) |mask| if (mask != 1) return false;
+                if (group.signal_semaphore_device_indices) |indices| for (indices[0..group.signal_semaphore_count]) |index| if (index != 0) return false;
+            },
+            1000145000 => {
+                const protected_submit: *const ProtectedSubmitInfo = @ptrCast(@alignCast(item));
+                if (protected_submit.protected_submit != 0) return false;
+            },
+            else => return false,
+        }
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
+}
+
+fn submitPNextTimeline(raw: ?*const anyopaque) ?*const TimelineSemaphoreSubmitInfo {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        if (depth == 16) return null;
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (header.s_type == 1000207003) return @ptrCast(@alignCast(item));
+        next = header.p_next;
+        depth += 1;
+    }
+    return null;
+}
+
+fn imageMemoryRequirementsInfo2ChainValid(raw: ?*const anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (depth == 16 or header.s_type != 1000156003) return false;
+        const plane: *const ImagePlaneMemoryRequirementsInfo = @ptrCast(@alignCast(item));
+        if (plane.plane_aspect != 0) return false;
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
+}
+
+fn populateMemoryRequirements2Chain(raw: ?*anyopaque) void {
+    var next = raw;
+    while (next) |item| {
+        const chain: *MemoryDedicatedRequirements = @ptrCast(@alignCast(item));
+        // ZPU uses a shared host-memory model and has no resource-specific
+        // dedicated-allocation requirement or preference.
+        chain.prefers_dedicated_allocation = 0;
+        chain.requires_dedicated_allocation = 0;
+        next = chain.p_next;
+    }
+}
+
+fn coreFeaturePayloadWords(s_type: i32) ?usize {
+    return switch (s_type) {
+        1000145001, 1000156004, 1000063000, 1000261000, 1000207000, 1000221000, 1000253000, 1000175000, 1000108000, 1000241000, 1000295000, 1000314007, 1000066000, 1000413000, 1000215000, 1000276000, 1000297000, 1000325000, 1000335000, 1000280000, 1000044003, 1000388000, 1000265000, 1000470000, 1000545000, 1000270000, 1000528000, 1000544000, 1000466000, 1000068001, 1000232000 => 1,
+        1000120000, 1000180000, 1000082000, 1000225002, 1000138000, 1000416000, 1000190002 => 2,
+        1000053001, 1000211000, 1000257000, 1000177000 => 3,
+        1000083000 => 4,
+        1000259000 => 6,
+        49 => 12,
+        53 => 15,
+        1000161001 => 20,
+        55 => 21,
+        51 => 47,
+        else => null,
+    };
+}
+
+fn coreFeatureChainValid(raw: ?*anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        if (depth == 16 or coreFeaturePayloadWords(@as(*const ChainHeader, @ptrCast(@alignCast(item))).s_type) == null) return false;
+        next = if (@as(*const ChainHeader, @ptrCast(@alignCast(item))).p_next) |p| @ptrCast(@constCast(p)) else null;
+        depth += 1;
+    }
+    return true;
+}
+
+fn populateCoreFeatureChain(raw: ?*anyopaque) bool {
+    if (!coreFeatureChainValid(raw)) return false;
+    var next = raw;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        const words = coreFeaturePayloadWords(header.s_type) orelse return false;
+        const bytes: [*]u8 = @ptrCast(item);
+        @memset(bytes[16 .. 16 + words * @sizeOf(u32)], 0);
+        next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
+    }
+    return true;
+}
+
+fn coreFeatureChainHasEnabledValue(raw: ?*const anyopaque) bool {
+    var next = raw;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        const words = coreFeaturePayloadWords(header.s_type) orelse return true;
+        const bytes: [*]const u8 = @ptrCast(item);
+        for (bytes[16 .. 16 + words * @sizeOf(u32)]) |value| if (value != 0) return true;
+        next = header.p_next;
+    }
+    return false;
+}
+
+// VkDeviceCreateInfo may carry the loader's VkLayerDeviceCreateInfo chain
+// followed by either VkPhysicalDeviceFeatures2 or individual core-promoted
+// feature structs.  Keep loader callback discovery independent, but validate
+// and inspect the application feature tail instead of silently ignoring it.
+fn deviceCreatePNextValid(raw: ?*const anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    var saw_loader = false;
+    while (next) |item| {
+        if (depth == 48) return false;
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (header.s_type == 48) {
+            saw_loader = true;
+            next = header.p_next;
+            depth += 1;
+            continue;
+        }
+        if (header.s_type == 1000070001) {
+            const group: *const DeviceGroupDeviceCreateInfo = @ptrCast(@alignCast(item));
+            // ZPU exposes one physical device.  A device-group chain is still
+            // accepted for ABI compatibility, but only the single-member
+            // form can be represented by this implementation.
+            if (group.physical_device_count > 1 or (group.physical_device_count != 0 and group.physical_devices == null)) return false;
+            next = header.p_next;
+            depth += 1;
+            continue;
+        }
+        if (header.s_type == 1000059000) {
+            const feature2: *const PhysicalDeviceFeatures2 = @ptrCast(@alignCast(item));
+            return coreFeatureChainValid(feature2.p_next);
+        }
+        if (saw_loader and coreFeaturePayloadWords(header.s_type) == null) return true;
+        return coreFeatureChainValid(@ptrCast(@constCast(item)));
+    }
+    return true;
+}
+
+fn deviceCreatePNextHasEnabledFeature(raw: ?*const anyopaque) bool {
+    var next = raw;
+    var saw_loader = false;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (header.s_type == 48) {
+            saw_loader = true;
+            next = header.p_next;
+            continue;
+        }
+        if (header.s_type == 1000070001) {
+            next = header.p_next;
+            continue;
+        }
+        if (header.s_type == 1000059000) {
+            const feature2: *const PhysicalDeviceFeatures2 = @ptrCast(@alignCast(item));
+            for (feature2.features.values) |value| if (value != 0) return true;
+            return coreFeatureChainHasEnabledValue(feature2.p_next);
+        }
+        if (saw_loader and coreFeaturePayloadWords(header.s_type) == null) return false;
+        return coreFeatureChainHasEnabledValue(@ptrCast(@constCast(item)));
+    }
+    return false;
+}
+
+fn deviceGroupPhysicalsValidLocked(p: Physical, raw: ?*const anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        if (depth == 48) return false;
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (header.s_type == 1000070001) {
+            const group: *const DeviceGroupDeviceCreateInfo = @ptrCast(@alignCast(item));
+            if (group.physical_device_count > 1) return false;
+            if (group.physical_device_count == 1) {
+                const devices = group.physical_devices orelse return false;
+                if (devices[0] != p) return false;
+            }
+        }
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
+}
+
+fn deviceQueuePNextValid(raw: ?*const anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (depth == 16 or header.s_type != 1000174000) return false;
+        const priority: *const DeviceQueueGlobalPriorityCreateInfo = @ptrCast(@alignCast(item));
+        // The single ZPU queue is exposed at the ordinary medium priority.
+        if (priority.global_priority != 256) return false;
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
+}
+
+fn corePropertyPayloadBytes(s_type: i32) ?usize {
+    return switch (s_type) {
+        1000145002 => 8,
+        1000071004 => 48,
+        1000094000, 1000168000, 1000199000, 1000225000, 1000068002, 1000545001 => 16,
+        1000117000, 1000053002, 1000413001, 1000130000, 1000259002, 1000525000 => 8,
+        1000196000 => 520,
+        50 => 96,
+        52 => 720,
+        1000207001 => 8,
+        1000197000 => 72,
+        1000161002 => 96,
+        54 => 200,
+        1000138001 => 24,
+        1000280001 => 120,
+        1000281001 => 32,
+        56 => 128,
+        1000470001 => 24,
+        1000270001 => 56,
+        1000080000 => 8,
+        else => null,
+    };
+}
+
+fn corePropertyChainValid(raw: ?*anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        if (depth == 16 or corePropertyPayloadBytes(@as(*const ChainHeader, @ptrCast(@alignCast(item))).s_type) == null) return false;
+        next = if (@as(*const ChainHeader, @ptrCast(@alignCast(item))).p_next) |p| @ptrCast(@constCast(p)) else null;
+        depth += 1;
+    }
+    return true;
+}
+
+fn populateCorePropertyChain(raw: ?*anyopaque) bool {
+    if (!corePropertyChainValid(raw)) return false;
+    var next = raw;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        const bytes_len = corePropertyPayloadBytes(header.s_type) orelse return false;
+        const bytes: [*]u8 = @ptrCast(item);
+        @memset(bytes[16 .. 16 + bytes_len], 0);
+        next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
+    }
+    return true;
+}
+
+fn physicalDeviceImageFormatInfo2ChainValid(raw: ?*const anyopaque, format: i32) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        switch (header.s_type) {
+            1000071000 => {},
+            1000147000 => {
+                const formats: *const ImageFormatListCreateInfo = @ptrCast(@alignCast(item));
+                if (formats.view_format_count > max_api_items or (formats.view_format_count != 0 and formats.view_formats == null)) return false;
+                if (formats.view_formats) |items| for (items[0..formats.view_format_count]) |view_format| if (view_format != format) return false;
+            },
+            1000246000 => {
+                const stencil: *const ImageStencilUsageCreateInfo = @ptrCast(@alignCast(item));
+                if (stencil.stencil_usage != 0) return false;
+            },
+            else => return false,
+        }
+        if (depth == 16) return false;
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
+}
+
+const BufferCreatePNextState = struct { valid: bool = true, has_usage: bool = false, usage: u64 = 0 };
+
+fn bufferCreatePNextState(raw: ?*const anyopaque) BufferCreatePNextState {
+    var next = raw;
+    var depth: usize = 0;
+    var state = BufferCreatePNextState{};
+    var saw_external = false;
+    var saw_capture = false;
+    while (next) |item| {
+        if (depth == 16) {
+            state.valid = false;
+            return state;
+        }
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        switch (header.s_type) {
+            1000072000 => {
+                if (saw_external) {
+                    state.valid = false;
+                    return state;
+                }
+                const external: *const ExternalMemoryBufferCreateInfo = @ptrCast(@alignCast(item));
+                if (external.handle_types != 0) {
+                    state.valid = false;
+                    return state;
+                }
+                saw_external = true;
+            },
+            1000257000 => {
+                if (saw_capture) {
+                    state.valid = false;
+                    return state;
+                }
+                const capture: *const BufferOpaqueCaptureAddressCreateInfo = @ptrCast(@alignCast(item));
+                if (capture.opaque_capture_address != 0) {
+                    state.valid = false;
+                    return state;
+                }
+                saw_capture = true;
+            },
+            1000470006 => {
+                if (state.has_usage) {
+                    state.valid = false;
+                    return state;
+                }
+                const usage: *const BufferUsageFlags2CreateInfo = @ptrCast(@alignCast(item));
+                if (usage.usage > std.math.maxInt(u32)) {
+                    state.valid = false;
+                    return state;
+                }
+                state.has_usage = true;
+                state.usage = usage.usage;
+            },
+            else => {
+                state.valid = false;
+                return state;
+            },
+        }
+        next = header.p_next;
+        depth += 1;
+    }
+    return state;
+}
+
+fn bufferCreatePNextValid(raw: ?*const anyopaque) bool {
+    return bufferCreatePNextState(raw).valid;
+}
+
+const ImageViewCreatePNextState = struct { valid: bool = true, has_usage: bool = false, usage: u32 = 0 };
+
+fn imageViewCreatePNextState(raw: ?*const anyopaque) ImageViewCreatePNextState {
+    var next = raw;
+    var depth: usize = 0;
+    var state = ImageViewCreatePNextState{};
+    while (next) |item| {
+        if (depth == 16) {
+            state.valid = false;
+            return state;
+        }
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (header.s_type != 1000117002 or state.has_usage) {
+            state.valid = false;
+            return state;
+        }
+        const usage = @as(*const ImageViewUsageCreateInfo, @ptrCast(@alignCast(item)));
+        state.has_usage = true;
+        state.usage = usage.usage;
+        next = header.p_next;
+        depth += 1;
+    }
+    return state;
+}
+
+fn imageCreatePNextValid(raw: ?*const anyopaque, format: i32) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        switch (header.s_type) {
+            1000147000 => {
+                const formats: *const ImageFormatListCreateInfo = @ptrCast(@alignCast(item));
+                if (formats.view_format_count > max_api_items or (formats.view_format_count != 0 and formats.view_formats == null)) return false;
+                if (formats.view_formats) |items| for (items[0..formats.view_format_count]) |view_format| if (view_format != format) return false;
+            },
+            1000246000 => {
+                const stencil: *const ImageStencilUsageCreateInfo = @ptrCast(@alignCast(item));
+                if (stencil.stencil_usage != 0) return false;
+            },
+            1000072001 => {
+                const external: *const ExternalMemoryImageCreateInfo = @ptrCast(@alignCast(item));
+                if (external.handle_types != 0) return false;
+            },
+            else => return false,
+        }
+        if (depth == 16) return false;
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
+}
+
+fn physicalDeviceImageFormatInfo2ExternalHandleType(raw: ?*const anyopaque) u32 {
+    var next = raw;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (header.s_type == 1000071000) return @as(*const PhysicalDeviceExternalImageFormatInfo, @ptrCast(@alignCast(item))).handle_type;
+        next = header.p_next;
+    }
+    return 0;
+}
+
+fn imageFormatProperties2ChainValid(raw: ?*anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (depth == 16 or (header.s_type != 1000071001 and header.s_type != 1000156005 and header.s_type != 1000270009)) return false;
+        next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
+        depth += 1;
+    }
+    return true;
+}
+
+fn populateImageFormatProperties2Chain(raw: ?*anyopaque) void {
+    var next = raw;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        switch (header.s_type) {
+            1000071001 => {
+                const properties: *ExternalImageFormatProperties = @ptrCast(@alignCast(item));
+                properties.external_memory_properties = std.mem.zeroes(ExternalMemoryProperties);
+            },
+            1000156005 => {
+                const properties: *SamplerYcbcrConversionImageFormatProperties = @ptrCast(@alignCast(item));
+                properties.combined_image_sampler_descriptor_count = 0;
+            },
+            1000270009 => {
+                const properties: *HostImageCopyDevicePerformanceQuery = @ptrCast(@alignCast(item));
+                properties.optimal_device_access = 1;
+                properties.identical_memory_layout = 1;
+            },
+            else => unreachable,
+        }
+        next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
+    }
+}
+
+fn formatProperties3ChainValid(raw: ?*anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        if (depth == 16 or @as(*const ChainHeader, @ptrCast(@alignCast(item))).s_type != 1_000_360_000) return false;
+        next = if (@as(*const ChainHeader, @ptrCast(@alignCast(item))).p_next) |p| @ptrCast(@constCast(p)) else null;
+        depth += 1;
+    }
+    return true;
+}
+
+fn subresourceLayout2PNextValid(raw: ?*anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    var seen_host_memcpy_size = false;
+    while (next) |item| {
+        if (depth == 16) return false;
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (header.s_type != 1000270008 or seen_host_memcpy_size) return false;
+        seen_host_memcpy_size = true;
+        const host_size: *const SubresourceHostMemcpySize = @ptrCast(@alignCast(item));
+        next = if (host_size.p_next) |p| @ptrCast(p) else null;
+        depth += 1;
+    }
+    return true;
+}
+
+fn populateSubresourceLayout2PNext(raw: ?*anyopaque, size: u64) void {
+    var next = raw;
+    while (next) |item| {
+        const host_size: *SubresourceHostMemcpySize = @ptrCast(@alignCast(item));
+        host_size.size = size;
+        next = host_size.p_next;
+    }
+}
+
+fn populateFormatProperties3Chain(raw: ?*anyopaque, base: FormatProperties) void {
+    var next = raw;
+    while (next) |item| {
+        const chain: *FormatProperties3 = @ptrCast(@alignCast(item));
+        chain.linear_tiling_features = base.linear_tiling_features;
+        chain.optimal_tiling_features = base.optimal_tiling_features;
+        chain.buffer_features = base.buffer_features;
+        next = chain.p_next;
+    }
+}
 
 fn googleDisplayTimingProc(name: []const u8) bool {
     return std.mem.eql(u8, name, "vkGetRefreshCycleDurationGOOGLE") or std.mem.eql(u8, name, "vkGetPastPresentationTimingGOOGLE");
@@ -680,6 +1674,12 @@ fn getDeviceProcAddr(device: ?Device, name: ?[*:0]const u8) callconv(.c) Fn {
     defer mutex.unlock();
     if (!validDeviceLocked(device orelse return null)) return null;
     return deviceLookup(std.mem.span(name orelse return null));
+}
+fn enumerateInstanceLayers(count: ?*u32, props: ?[*]LayerProperties) callconv(.c) Result {
+    _ = props;
+    const n = count orelse return .error_initialization_failed;
+    n.* = 0;
+    return .success;
 }
 fn enumerateInstanceExtensions(layer: ?[*:0]const u8, count: ?*u32, props: ?[*]ExtensionProperties) callconv(.c) Result {
     const n = count orelse {
@@ -867,6 +1867,36 @@ fn enumeratePhysicalDevices(instance: ?Instance, count: ?*u32, output: ?[*]Physi
     n.* = 1;
     return .success;
 }
+fn enumerateInstanceVersion(count: ?*u32) callconv(.c) Result {
+    const out = count orelse return .error_initialization_failed;
+    out.* = API_1_0;
+    return .success;
+}
+fn enumeratePhysicalDeviceGroups(instance: ?Instance, count: ?*u32, output: ?[*]PhysicalDeviceGroupProperties) callconv(.c) Result {
+    const n = count orelse return .error_initialization_failed;
+    const h = instance orelse return .error_initialization_failed;
+    if (output) |groups| {
+        if (n.* == 0) return .incomplete;
+        var physical: [1]Physical = undefined;
+        var physical_count: u32 = 1;
+        const result = enumeratePhysicalDevices(h, &physical_count, &physical);
+        if (result != .success or physical_count != 1) return .error_initialization_failed;
+        if (groups[0].s_type != 1000070000 or groups[0].p_next != null) return .error_initialization_failed;
+        groups[0] = std.mem.zeroes(PhysicalDeviceGroupProperties);
+        groups[0].s_type = 1000070000;
+        groups[0].physical_device_count = 1;
+        groups[0].physical_devices[0] = physical[0];
+        groups[0].subset_allocation = 0;
+        n.* = 1;
+        return .success;
+    }
+    lock();
+    const valid = validInstanceLocked(h);
+    mutex.unlock();
+    if (!valid) return .error_initialization_failed;
+    n.* = 1;
+    return .success;
+}
 fn getFeatures(physical: ?Physical, output: ?*Features) callconv(.c) void {
     const h = physical orelse return;
     const out = output orelse {
@@ -894,8 +1924,8 @@ fn conservativeLimits() Limits {
     v.max_uniform_buffer_range = 16_384;
     v.max_storage_buffer_range = 134_217_728;
     v.max_push_constants_size = 128;
-    v.max_memory_allocation_count = 4096;
-    v.max_sampler_allocation_count = 4000;
+    v.max_memory_allocation_count = max_memory_objects;
+    v.max_sampler_allocation_count = max_sampler_objects;
     v.buffer_image_granularity = 131_072;
     v.max_bound_descriptor_sets = 4;
     v.max_per_stage_descriptor_samplers = 16;
@@ -944,15 +1974,18 @@ fn conservativeLimits() Limits {
     v.max_framebuffer_width = max_2d_extent;
     v.max_framebuffer_height = max_2d_extent;
     v.max_framebuffer_layers = 256;
-    v.framebuffer_color_sample_counts = 1 | 4;
-    v.framebuffer_depth_sample_counts = 1 | 4;
-    v.framebuffer_stencil_sample_counts = 1 | 4;
-    v.framebuffer_no_attachments_sample_counts = 1 | 4;
+    // The CPU raster path is single-sample only. Do not advertise 4x here:
+    // image creation, render-pass attachments, and pipeline multisampling all
+    // reject any sample count other than VK_SAMPLE_COUNT_1_BIT.
+    v.framebuffer_color_sample_counts = 1;
+    v.framebuffer_depth_sample_counts = 1;
+    v.framebuffer_stencil_sample_counts = 1;
+    v.framebuffer_no_attachments_sample_counts = 1;
     v.max_color_attachments = 4;
-    v.sampled_image_color_sample_counts = 1 | 4;
+    v.sampled_image_color_sample_counts = 1;
     v.sampled_image_integer_sample_counts = 1;
-    v.sampled_image_depth_sample_counts = 1 | 4;
-    v.sampled_image_stencil_sample_counts = 1 | 4;
+    v.sampled_image_depth_sample_counts = 1;
+    v.sampled_image_stencil_sample_counts = 1;
     v.storage_image_sample_counts = 1;
     v.max_sample_mask_words = 1;
     v.timestamp_period = 1;
@@ -979,8 +2012,7 @@ fn getProperties(physical: ?Physical, output: ?*Properties) callconv(.c) void {
     out.device_type = 4;
     const name = "ZPU Experimental CPU";
     @memcpy(out.device_name[0..name.len], name);
-    const uuid = [_]u8{ 0x5a, 0x50, 0x55, 0x2d, 0x49, 0x43, 0x44, 0x2d, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31 };
-    out.pipeline_cache_uuid = uuid;
+    out.pipeline_cache_uuid = pipeline_cache_uuid;
     out.limits = conservativeLimits();
 }
 fn getQueueProperties(physical: ?Physical, count: ?*u32, output: ?[*]QueueProperties) callconv(.c) void {
@@ -989,7 +2021,7 @@ fn getQueueProperties(physical: ?Physical, count: ?*u32, output: ?[*]QueueProper
     if (!validPhysicalLocked(physical orelse return)) return;
     const n = count orelse return;
     if (output) |items| {
-        if (n.* > 0) items[0] = .{ .flags = 0x1 | 0x4, .count = 1, .timestamp_bits = 0, .granularity = .{ .width = 1, .height = 1, .depth = 1 } };
+        if (n.* > 0) items[0] = .{ .flags = 0x1 | 0x4, .count = 1, .timestamp_bits = 64, .granularity = .{ .width = 1, .height = 1, .depth = 1 } };
         n.* = @min(n.*, 1);
     } else n.* = 1;
 }
@@ -1004,24 +2036,36 @@ fn getMemoryProperties(physical: ?Physical, output: ?*MemoryProperties) callconv
     out.memory_heap_count = 1;
     out.memory_heaps[0] = .{ .size = 256 * 1024 * 1024, .flags = 0 };
 }
+fn imageFormatUsage(format: i32) u32 {
+    return switch (format) {
+        37 => 0x1 | 0x2,
+        43 => 0x4,
+        44 => 0x1 | 0x2 | 0x10,
+        126 => 0x2 | 0x20,
+        else => 0,
+    };
+}
 fn getFormatProperties(physical: ?Physical, format: i32, output: ?*FormatProperties) callconv(.c) void {
     lock();
     defer mutex.unlock();
     if (!validPhysicalLocked(physical orelse return)) return;
     const out = output orelse return;
     out.* = switch (format) {
-        37, 43, 44 => .{ .linear_tiling_features = 0x1 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x4000 | 0x8000, .buffer_features = 0 },
-        124 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200, .buffer_features = 0 },
+        37 => .{ .linear_tiling_features = 0x4000 | 0x8000, .optimal_tiling_features = 0x4000 | 0x8000, .buffer_features = 0 },
+        43 => .{ .linear_tiling_features = 0x1, .optimal_tiling_features = 0x1, .buffer_features = 0 },
+        44 => .{ .linear_tiling_features = 0x80 | 0x4000 | 0x8000, .optimal_tiling_features = 0x80 | 0x4000 | 0x8000, .buffer_features = 0 },
+        126 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
         else => std.mem.zeroes(FormatProperties),
     };
 }
-fn getImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, tiling: i32, usage: u32, flags: u32, output: ?*anyopaque) callconv(.c) Result {
+fn getImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, tiling: i32, usage: u32, flags: u32, output: ?*ImageFormatProperties) callconv(.c) Result {
     lock();
     defer mutex.unlock();
     if (!validPhysicalLocked(physical orelse return .error_initialization_failed)) return .error_initialization_failed;
-    if (!supportedFormat(format) or image_type != 1 or (tiling != 0 and tiling != 1) or flags != 0 or usage == 0 or usage & ~@as(u32, 0x37) != 0) return .error_format_not_supported;
-    const out: *extern struct { max_extent: Extent3D, max_mip_levels: u32, max_array_layers: u32, sample_counts: u32, max_resource_size: u64 } = @ptrCast(@alignCast(output orelse return .error_initialization_failed));
-    out.* = .{ .max_extent = .{ .width = max_2d_extent, .height = max_2d_extent, .depth = 1 }, .max_mip_levels = 1, .max_array_layers = 1, .sample_counts = 1, .max_resource_size = heap_size };
+    const allowed_usage = imageFormatUsage(format);
+    if (allowed_usage == 0 or image_type != 1 or (tiling != 0 and tiling != 1) or flags != 0 or usage == 0 or usage & ~allowed_usage != 0 or (format == 126 and tiling != 0)) return .error_format_not_supported;
+    const out = output orelse return .error_initialization_failed;
+    out.* = .{ .max_extent = .{ .width = max_2d_extent, .height = max_2d_extent, .depth = 1 }, .max_mip_levels = 1, .max_array_layers = max_image_array_layers, .sample_counts = 1, .max_resource_size = heap_size };
     return .success;
 }
 fn getSparseImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, samples: u32, usage: u32, tiling: i32, count: ?*u32, output: ?*anyopaque) callconv(.c) void {
@@ -1036,6 +2080,142 @@ fn getSparseImageFormatProperties(physical: ?Physical, format: i32, image_type: 
     if (!validPhysicalLocked(physical orelse return)) return;
     const n = count orelse return;
     n.* = 0;
+}
+fn getPhysicalDeviceFeatures2(physical: ?Physical, output: ?*PhysicalDeviceFeatures2) callconv(.c) void {
+    const out = output orelse return;
+    if (out.s_type != 1000059000 or !populateCoreFeatureChain(out.p_next)) return;
+    getFeatures(physical, &out.features);
+}
+fn getPhysicalDeviceProperties2(physical: ?Physical, output: ?*PhysicalDeviceProperties2) callconv(.c) void {
+    const out = output orelse return;
+    if (out.s_type != 1000059001 or !populateCorePropertyChain(out.p_next)) return;
+    getProperties(physical, &out.properties);
+}
+fn getPhysicalDeviceFormatProperties2(physical: ?Physical, format: i32, output: ?*PhysicalDeviceFormatProperties2) callconv(.c) void {
+    const out = output orelse return;
+    if (out.s_type != 1000059002 or !formatProperties3ChainValid(out.p_next)) return;
+    const h = physical orelse return;
+    lock();
+    const valid = validPhysicalLocked(h);
+    mutex.unlock();
+    if (!valid) return;
+    getFormatProperties(physical, format, &out.format_properties);
+    populateFormatProperties3Chain(out.p_next, out.format_properties);
+}
+fn getPhysicalDeviceImageFormatProperties2(physical: ?Physical, info: ?*const PhysicalDeviceImageFormatInfo2, output: ?*ImageFormatProperties2) callconv(.c) Result {
+    const i = info orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    if (i.s_type != 1000059004 or !physicalDeviceImageFormatInfo2ChainValid(i.p_next, i.format) or out.s_type != 1000059003 or !imageFormatProperties2ChainValid(out.p_next)) return .error_initialization_failed;
+    if (physicalDeviceImageFormatInfo2ExternalHandleType(i.p_next) != 0) return .error_format_not_supported;
+    const result = getImageFormatProperties(physical, i.format, i.image_type, i.tiling, i.usage, i.flags, &out.image_format_properties);
+    if (result != .success) return result;
+    populateImageFormatProperties2Chain(out.p_next);
+    return .success;
+}
+fn queueFamilyProperties2ChainValid(raw: ?*anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (depth == 16 or header.s_type != 1000388000) return false;
+        next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
+        depth += 1;
+    }
+    return true;
+}
+fn populateQueueFamilyProperties2Chain(raw: ?*anyopaque) void {
+    var next = raw;
+    while (next) |item| {
+        const priorities: *QueueFamilyGlobalPriorityProperties = @ptrCast(@alignCast(item));
+        priorities.priority_count = 1;
+        priorities.priorities = .{ 256, 0, 0, 0 };
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
+    }
+}
+fn getPhysicalDeviceQueueFamilyProperties2(physical: ?Physical, count: ?*u32, output: ?[*]PhysicalDeviceQueueFamilyProperties2) callconv(.c) void {
+    const n = count orelse return;
+    if (output) |items| {
+        if (n.* == 0) return;
+        var properties: [1]QueueProperties = undefined;
+        var property_count: u32 = 1;
+        getQueueProperties(physical, &property_count, &properties);
+        if (property_count != 1 or items[0].s_type != 1000059005 or !queueFamilyProperties2ChainValid(items[0].p_next)) return;
+        const chain = items[0].p_next;
+        items[0] = std.mem.zeroes(PhysicalDeviceQueueFamilyProperties2);
+        items[0].s_type = 1000059005;
+        items[0].p_next = chain;
+        items[0].queue_family_properties = properties[0];
+        populateQueueFamilyProperties2Chain(chain);
+        n.* = 1;
+    } else {
+        getQueueProperties(physical, n, null);
+    }
+}
+fn getPhysicalDeviceMemoryProperties2(physical: ?Physical, output: ?*PhysicalDeviceMemoryProperties2) callconv(.c) void {
+    const out = output orelse return;
+    if (out.s_type != 1000059006 or out.p_next != null) return;
+    getMemoryProperties(physical, &out.memory_properties);
+}
+fn getPhysicalDeviceSparseImageFormatProperties2(physical: ?Physical, info: ?*const PhysicalDeviceSparseImageFormatInfo2, count: ?*u32, output: ?[*]SparseImageFormatProperties2) callconv(.c) void {
+    _ = output;
+    const n = count orelse return;
+    const i = info orelse return;
+    if (i.s_type != 1000059008 or i.p_next != null) return;
+    const h = physical orelse return;
+    lock();
+    const valid = validPhysicalLocked(h);
+    mutex.unlock();
+    if (!valid) return;
+    n.* = 0;
+}
+fn getPhysicalDeviceToolProperties(physical: ?Physical, count: ?*u32, output: ?[*]PhysicalDeviceToolProperties) callconv(.c) Result {
+    const n = count orelse return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    if (!validPhysicalLocked(physical orelse return .error_initialization_failed)) return .error_initialization_failed;
+    if (output != null and n.* > 0) {
+        // ZPU exposes no optional tooling layer; the count-query contract is
+        // therefore a successful zero-element enumeration.
+        n.* = 0;
+        return .success;
+    }
+    n.* = 0;
+    return .success;
+}
+fn getPhysicalDeviceExternalBufferProperties(physical: ?Physical, info: ?*const PhysicalDeviceExternalBufferInfo, output: ?*ExternalBufferProperties) callconv(.c) void {
+    const h = physical orelse return;
+    const i = info orelse return;
+    const out = output orelse return;
+    if (i.s_type != 1000071002 or i.p_next != null or out.s_type != 1000071003 or out.p_next != null) return;
+    lock();
+    defer mutex.unlock();
+    if (!validPhysicalLocked(h)) return;
+    out.external_memory_properties = std.mem.zeroes(ExternalMemoryProperties);
+}
+fn getPhysicalDeviceExternalFenceProperties(physical: ?Physical, info: ?*const PhysicalDeviceExternalFenceInfo, output: ?*ExternalFenceProperties) callconv(.c) void {
+    const h = physical orelse return;
+    const i = info orelse return;
+    const out = output orelse return;
+    if (i.s_type != 1000112000 or i.p_next != null or out.s_type != 1000112001 or out.p_next != null) return;
+    lock();
+    defer mutex.unlock();
+    if (!validPhysicalLocked(h)) return;
+    out.export_from_imported_handle_types = 0;
+    out.compatible_handle_types = 0;
+    out.external_fence_features = 0;
+}
+fn getPhysicalDeviceExternalSemaphoreProperties(physical: ?Physical, info: ?*const PhysicalDeviceExternalSemaphoreInfo, output: ?*ExternalSemaphoreProperties) callconv(.c) void {
+    const h = physical orelse return;
+    const i = info orelse return;
+    const out = output orelse return;
+    if (i.s_type != 1000076000 or i.p_next != null or out.s_type != 1000076001 or out.p_next != null) return;
+    lock();
+    defer mutex.unlock();
+    if (!validPhysicalLocked(h)) return;
+    out.export_from_imported_handle_types = 0;
+    out.compatible_handle_types = 0;
+    out.external_semaphore_features = 0;
 }
 fn enumerateDeviceExtensions(physical: ?Physical, layer: ?[*:0]const u8, count: ?*u32, props: ?[*]ExtensionProperties) callconv(.c) Result {
     lock();
@@ -1055,6 +2235,15 @@ fn enumerateDeviceExtensions(physical: ?Physical, layer: ?[*:0]const u8, count: 
         return if (written < extensions.len) .incomplete else .success;
     }
     n.* = extensions.len;
+    return .success;
+}
+fn enumerateDeviceLayers(physical: ?Physical, count: ?*u32, props: ?[*]LayerProperties) callconv(.c) Result {
+    _ = props;
+    lock();
+    defer mutex.unlock();
+    if (!validPhysicalLocked(physical orelse return .error_initialization_failed)) return .error_initialization_failed;
+    const n = count orelse return .error_initialization_failed;
+    n.* = 0;
     return .success;
 }
 fn createDevice(physical: ?Physical, info: ?*const DeviceInfo, alloc: ?*const Alloc, output: ?*Device) callconv(.c) Result {
@@ -1081,7 +2270,8 @@ fn createDevice(physical: ?Physical, info: ?*const DeviceInfo, alloc: ?*const Al
         hit(.device_stype);
         return .error_initialization_failed;
     }
-    if (!hasValidLoaderHead(ci.p_next, 48) or ci.flags != 0) return .error_initialization_failed;
+    if (!deviceCreatePNextValid(ci.p_next) or ci.flags != 0) return .error_initialization_failed;
+    if (deviceCreatePNextHasEnabledFeature(ci.p_next)) return .error_feature_not_present;
     if (ci.features) |features| for (features.values) |feature| if (feature != 0) return .error_feature_not_present;
     if (ci.queue_info_count != 1) return .error_initialization_failed;
     const qis = ci.queue_infos orelse return .error_initialization_failed;
@@ -1090,7 +2280,7 @@ fn createDevice(physical: ?Physical, info: ?*const DeviceInfo, alloc: ?*const Al
         hit(.queue_stype);
         return .error_initialization_failed;
     }
-    if (qi.p_next != null) {
+    if (!deviceQueuePNextValid(qi.p_next)) {
         hit(.queue_pnext);
         return .error_initialization_failed;
     }
@@ -1126,6 +2316,7 @@ fn createDevice(physical: ?Physical, info: ?*const DeviceInfo, alloc: ?*const Al
     lock();
     defer mutex.unlock();
     if (!validPhysicalLocked(p)) return .error_initialization_failed;
+    if (!deviceGroupPhysicalsValidLocked(p, ci.p_next)) return .error_initialization_failed;
     for (&device_objects, &queue_objects, &device_state) |*d, *q, *state| if (state.* == .never) {
         const generation = next_device_generation;
         next_device_generation +%= 1;
@@ -1152,6 +2343,7 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
             _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
         };
         for (&command_buffer_objects, &command_buffer_state) |*cb, *child_state| if (child_state.* == .live and cb.impl.owner == d) {
+            deinitRecordedCommands(cb);
             child_state.* = .tombstone;
             cb.loader_data = 0;
         };
@@ -1161,13 +2353,28 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
         for (&fence_objects, &fence_state) |*fence, *child_state| if (child_state.* == .live and fence.owner == d) {
             child_state.* = .tombstone;
         };
+        for (&event_objects, &event_state) |*event, *child_state| if (child_state.* == .live and event.owner == d) {
+            child_state.* = .tombstone;
+        };
+        for (&query_pool_objects, &query_pool_state) |*pool, *child_state| if (child_state.* == .live and pool.owner.eql(d)) {
+            child_state.* = .tombstone;
+        };
         for (&semaphore_objects, &semaphore_state) |*semaphore, *child_state| if (child_state.* == .live and semaphore.owner == d) {
             child_state.* = .tombstone;
         };
         for (&image_view_objects, &image_view_state) |*view, *child_state| if (child_state.* == .live and view.owner == d) {
             child_state.* = .tombstone;
         };
+        for (&sampler_objects, &sampler_state) |*sampler, *child_state| if (child_state.* == .live and sampler.owner == d) {
+            child_state.* = .tombstone;
+        };
         for (&framebuffer_objects, &framebuffer_state) |*framebuffer, *child_state| if (child_state.* == .live and framebuffer.owner == d) {
+            child_state.* = .tombstone;
+        };
+        for (&pipeline_cache_objects, &pipeline_cache_state) |*cache, *child_state| if (child_state.* == .live and cache.owner.eql(d)) {
+            child_state.* = .tombstone;
+        };
+        for (&descriptor_pool_objects, &descriptor_pool_state) |*pool, *child_state| if (child_state.* == .live and pool.owner.eql(d)) {
             child_state.* = .tombstone;
         };
         for (&descriptor_set_objects, &descriptor_set_state) |*set, *child_state| if (child_state.* == .live and set.owner.eql(d)) {
@@ -1189,9 +2396,23 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
         for (&graphics_pipeline_objects, &graphics_pipeline_state) |*object, *child_state| {
             if (child_state.* == .live and object.owner.eql(d)) child_state.* = .tombstone;
         }
+        for (&compute_pipeline_objects, &compute_pipeline_state) |*object, *child_state| {
+            if (child_state.* == .live and object.owner.eql(d)) child_state.* = .tombstone;
+        }
+        for (&private_data_slot_objects, &private_data_slot_state) |*slot, *child_state| if (child_state.* == .live and slot.owner == d) {
+            child_state.* = .tombstone;
+        };
+        for (&descriptor_update_template_objects, &descriptor_update_template_state) |*template, *child_state| if (child_state.* == .live and template.owner.eql(d)) {
+            child_state.* = .tombstone;
+        };
         for (&framebuffer_objects, framebuffer_state) |*object, child_state| if (child_state != .never and object.owner == d) object.render_compatibility.deinit();
         for (&descriptor_set_layout_objects, descriptor_set_layout_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) object.canonical.deinit();
         for (&descriptor_set_objects, descriptor_set_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) object.layout.deinit();
+        for (&pipeline_cache_objects, pipeline_cache_state) |*cache, child_state| if (child_state != .never and cache.owner.eql(d)) cache.data.deinit();
+        for (&query_pool_objects, query_pool_state) |*object, child_state| if (child_state != .never and object.owner.eql(d) and object.slots.len != 0) {
+            allocator.free(object.slots);
+            object.slots = &.{};
+        };
         for (&pipeline_layout_objects, pipeline_layout_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) {
             object.canonical.deinit();
             object.set0.deinit();
@@ -1209,8 +2430,15 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
             if (object.vertex_program) |*program| program.deinit(allocator);
             if (object.fragment_program) |*program| program.deinit(allocator);
         };
+        for (&compute_pipeline_objects, compute_pipeline_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) {
+            object.canonical.deinit();
+            object.layout.deinit();
+        };
         for (&swapchain_objects, &swapchain_state) |*swapchain, *child_state| if (child_state.* == .live and swapchain.owner == d) {
             xcb_present.deinit(&swapchain.transport);
+            child_state.* = .tombstone;
+        };
+        for (&buffer_view_objects, &buffer_view_state) |*view, *child_state| if (child_state.* == .live and view.owner == d) {
             child_state.* = .tombstone;
         };
         for (&buffer_objects, &buffer_state) |*buffer, *child_state| if (child_state.* == .live and buffer.owner == d) {
@@ -1270,6 +2498,11 @@ fn getDeviceQueue(device: ?Device, family: u32, index: u32, output: ?*Queue) cal
         return;
     };
 }
+fn getDeviceQueue2(device: ?Device, info: ?*const DeviceQueueInfo2, output: ?*Queue) callconv(.c) void {
+    const i = info orelse return;
+    if (i.s_type != 1000145003 or i.p_next != null or i.flags != 0) return;
+    getDeviceQueue(device, i.queue_family_index, i.queue_index, output);
+}
 
 const allocator = std.heap.page_allocator;
 var test_allocations_before_failure: ?usize = null;
@@ -1291,7 +2524,7 @@ fn allocateBytes(size: usize) error{OutOfMemory}![]align(64) u8 {
 fn validOwner(device: Device, owner: Device) bool {
     return device == owner;
 }
-fn findLiveHandle(comptime T: type, handle: usize, objects: *[max_child_objects]T, states: *[max_child_objects]SlotState) ?*T {
+fn findLiveHandle(comptime T: type, handle: usize, objects: []T, states: []SlotState) ?*T {
     if (handle == 0) return null;
     for (objects, states) |*object, state| if (@intFromPtr(object) == handle) return if (state == .live) object else null;
     return null;
@@ -1306,6 +2539,9 @@ fn validBufferLocked(handle: usize) ?*BufferObj {
     if (handle != 0 and result == null) hit(.stale_buffer);
     return result;
 }
+fn validBufferViewLocked(handle: usize) ?*BufferViewObj {
+    return findLiveHandle(BufferViewObj, handle, &buffer_view_objects, &buffer_view_state);
+}
 fn validImageLocked(handle: usize) ?*ImageObj {
     const result = findLiveHandle(ImageObj, handle, &image_objects, &image_state);
     if (handle != 0 and result == null) hit(.stale_image);
@@ -1316,14 +2552,32 @@ fn validFenceLocked(handle: usize) ?*FenceObj {
     if (handle != 0 and result == null) hit(.stale_fence);
     return result;
 }
+fn validEventLocked(handle: usize) ?*EventObj {
+    return findLiveHandle(EventObj, handle, &event_objects, &event_state);
+}
+fn validQueryPoolLocked(handle: usize) ?*QueryPoolObj {
+    return findLiveHandle(QueryPoolObj, handle, &query_pool_objects, &query_pool_state);
+}
 fn validSemaphoreLocked(handle: usize) ?*SemaphoreObj {
     return findLiveHandle(SemaphoreObj, handle, &semaphore_objects, &semaphore_state);
+}
+fn semaphoreSlot(object: *SemaphoreObj) usize {
+    return (@intFromPtr(object) - @intFromPtr(&semaphore_objects[0])) / @sizeOf(SemaphoreObj);
 }
 fn validImageViewLocked(handle: usize) ?*ImageViewObj {
     return findLiveHandle(ImageViewObj, handle, &image_view_objects, &image_view_state);
 }
+fn validSamplerLocked(handle: usize) ?*SamplerObj {
+    return findLiveHandle(SamplerObj, handle, &sampler_objects, &sampler_state);
+}
 fn validFramebufferLocked(handle: usize) ?*FramebufferObj {
     return findLiveHandle(FramebufferObj, handle, &framebuffer_objects, &framebuffer_state);
+}
+fn validPipelineCacheLocked(handle: usize) ?*PipelineCacheObj {
+    return findLiveHandle(PipelineCacheObj, handle, &pipeline_cache_objects, &pipeline_cache_state);
+}
+fn validDescriptorPoolLocked(handle: usize) ?*DescriptorPoolObj {
+    return findLiveHandle(DescriptorPoolObj, handle, &descriptor_pool_objects, &descriptor_pool_state);
 }
 fn validDescriptorSetLocked(handle: usize) ?*DescriptorSetObj {
     return findLiveHandle(DescriptorSetObj, handle, &descriptor_set_objects, &descriptor_set_state);
@@ -1339,6 +2593,15 @@ fn validRenderPassLocked(handle: usize) ?*RenderPassObj {
 }
 fn validGraphicsPipelineLocked(handle: usize) ?*GraphicsPipelineObj {
     return findLiveHandle(GraphicsPipelineObj, handle, &graphics_pipeline_objects, &graphics_pipeline_state);
+}
+fn validComputePipelineLocked(handle: usize) ?*ComputePipelineObj {
+    return findLiveHandle(ComputePipelineObj, handle, &compute_pipeline_objects, &compute_pipeline_state);
+}
+fn validPrivateDataSlotLocked(handle: usize) ?*PrivateDataSlotObj {
+    return findLiveHandle(PrivateDataSlotObj, handle, &private_data_slot_objects, &private_data_slot_state);
+}
+fn validDescriptorUpdateTemplateLocked(handle: usize) ?*DescriptorUpdateTemplateObj {
+    return findLiveHandle(DescriptorUpdateTemplateObj, handle, &descriptor_update_template_objects, &descriptor_update_template_state);
 }
 fn validSwapchainLocked(handle: usize) ?*SwapchainObj {
     if (handle == 0) return null;
@@ -1364,15 +2627,25 @@ fn validCommandBufferLocked(handle: ?CommandBuffer) ?*CommandBufferObj {
     hit(.stale_command_buffer);
     return null;
 }
-fn stateForObject(comptime T: type, object: *T, objects: *[max_child_objects]T, states: *[max_child_objects]SlotState) ?*SlotState {
+fn stateForObject(comptime T: type, object: *T, objects: []T, states: []SlotState) ?*SlotState {
     for (objects, states) |*candidate, *state| if (candidate == object) return state;
     return null;
 }
 fn liveMemoryObject(object: *MemoryObj) bool {
     return (stateForObject(MemoryObj, object, &memory_objects, &memory_state) orelse return false).* == .live;
 }
+fn liveEventObject(object: *EventObj) bool {
+    return (stateForObject(EventObj, object, &event_objects, &event_state) orelse return false).* == .live;
+}
+fn liveQueryPoolObject(object: *QueryPoolObj) bool {
+    return (stateForObject(QueryPoolObj, object, &query_pool_objects, &query_pool_state) orelse return false).* == .live;
+}
 fn liveBufferObject(object: *BufferObj) bool {
     return (stateForObject(BufferObj, object, &buffer_objects, &buffer_state) orelse return false).* == .live;
+}
+fn liveDescriptorObject(object: *DescriptorSetObj) bool {
+    if (object.synthetic) return true;
+    return (stateForObject(DescriptorSetObj, object, &descriptor_set_objects, &descriptor_set_state) orelse return false).* == .live;
 }
 fn liveImageObject(object: *ImageObj) bool {
     return (stateForObject(ImageObj, object, &image_objects, &image_state) orelse return false).* == .live;
@@ -1381,10 +2654,11 @@ fn allocateMemory(device: ?Device, info: ?*const MemoryAllocateInfo, alloc: ?*co
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (alloc != null or ci.s_type != 5 or ci.p_next != null or ci.memory_type_index != 0 or ci.allocation_size == 0 or ci.allocation_size > heap_size) return .error_out_of_host_memory;
+    if (alloc != null or ci.s_type != 5 or !memoryAllocatePNextValid(ci.p_next) or ci.memory_type_index != 0 or ci.allocation_size == 0 or ci.allocation_size > heap_size) return .error_out_of_host_memory;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
+    if (!memoryAllocateDedicatedObjectsValidLocked(d, ci.p_next)) return .error_initialization_failed;
     if (ci.allocation_size > heap_size - d.heap_used) {
         hit(.heap_exhaustion);
         return .error_out_of_host_memory;
@@ -1445,20 +2719,94 @@ fn unmapMemory(device: ?Device, handle: usize) callconv(.c) void {
     const object = validMemoryLocked(handle) orelse return;
     if (validDeviceLocked(d) and validOwner(d, object.owner)) object.mapped = false;
 }
+fn mapMemory2(device: ?Device, info: ?*const MemoryMapInfo, output: ?*?*anyopaque) callconv(.c) Result {
+    const ci = info orelse return .error_memory_map_failed;
+    if (ci.s_type != 1000271000 or ci.p_next != null) return .error_memory_map_failed;
+    return mapMemory(device, ci.memory, ci.offset, ci.size, ci.flags, output);
+}
+fn unmapMemory2(device: ?Device, info: ?*const MemoryUnmapInfo) callconv(.c) Result {
+    const ci = info orelse return .error_memory_map_failed;
+    if (ci.s_type != 1000271001 or ci.p_next != null or ci.flags != 0) return .error_memory_map_failed;
+    const d = device orelse return .error_memory_map_failed;
+    lock();
+    defer mutex.unlock();
+    const object = validMemoryLocked(ci.memory) orelse return .error_memory_map_failed;
+    if (!validDeviceLocked(d) or !validOwner(d, object.owner)) return .error_memory_map_failed;
+    object.mapped = false;
+    return .success;
+}
+
+const MappedRangeValidation = struct { ranges: u32 = 0, bytes: u64 = 0 };
+
+/// Validate a coherent host-memory operation. ZPU exposes only
+/// HOST_VISIBLE|HOST_COHERENT memory, so successful flush and invalidate calls
+/// need no cache-maintenance instruction: the CPU allocation is the device
+/// allocation. Keeping validation in one allocation-free pass makes that
+/// contract explicit and gives the performance gate a deterministic oracle.
+fn validateMappedMemoryRangesLocked(d: Device, count: u32, ranges: ?[*]const MappedMemoryRange) ?MappedRangeValidation {
+    if (!validDeviceLocked(d) or count == 0 or count > max_api_items) return null;
+    const items = (ranges orelse return null)[0..count];
+    var validation = MappedRangeValidation{};
+    for (items) |range| {
+        if (range.s_type != 6 or range.p_next != null or range.size == 0) return null;
+        const memory = validMemoryLocked(range.memory) orelse return null;
+        if (!validOwner(d, memory.owner) or !memory.mapped or range.offset >= memory.bytes.len) return null;
+        const available: u64 = memory.bytes.len - @as(usize, @intCast(range.offset));
+        const actual = if (range.size == std.math.maxInt(u64)) available else range.size;
+        if (actual > available) return null;
+        validation.ranges += 1;
+        validation.bytes +|= actual;
+    }
+    return validation;
+}
+
+fn flushMappedMemoryRanges(device: ?Device, count: u32, ranges: ?[*]const MappedMemoryRange) callconv(.c) Result {
+    const d = device orelse return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    _ = validateMappedMemoryRangesLocked(d, count, ranges) orelse return .error_initialization_failed;
+    return .success;
+}
+
+fn invalidateMappedMemoryRanges(device: ?Device, count: u32, ranges: ?[*]const MappedMemoryRange) callconv(.c) Result {
+    const d = device orelse return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    _ = validateMappedMemoryRangesLocked(d, count, ranges) orelse return .error_initialization_failed;
+    return .success;
+}
+
+fn getDeviceMemoryCommitment(device: ?Device, handle: usize, output: ?*u64) callconv(.c) void {
+    const d = device orelse return;
+    const out = output orelse return;
+    lock();
+    defer mutex.unlock();
+    const memory = validMemoryLocked(handle) orelse return;
+    if (!validDeviceLocked(d) or !validOwner(d, memory.owner)) return;
+    // No ZPU memory type advertises VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT.
+    out.* = 0;
+}
 fn createBuffer(device: ?Device, info: ?*const BufferCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (ci.usage == 0 or ci.usage & ~@as(u32, 0x13) != 0) {
+    const pnext = bufferCreatePNextState(ci.p_next);
+    const usage: u32 = if (pnext.has_usage) std.math.cast(u32, pnext.usage) orelse 0 else ci.usage;
+    // This implementation advertises uniform-texel buffers but not
+    // storage-texel buffers (format properties report no buffer features).
+    // Keep the accepted usage mask in lockstep with that capability: storage
+    // buffers are supported by the bounded compute profile, while bit 3
+    // (VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT) remains unsupported.
+    if (!pnext.valid or usage == 0 or usage & ~@as(u32, 0x1f7) != 0) {
         hit(.invalid_buffer_usage);
         return .error_initialization_failed;
     }
-    if (alloc != null or ci.s_type != 12 or ci.p_next != null or ci.flags != 0 or ci.size == 0 or ci.size > heap_size or ci.sharing_mode != 0 or ci.queue_family_index_count != 0) return .error_initialization_failed;
+    if (alloc != null or ci.s_type != 12 or ci.flags != 0 or ci.size == 0 or ci.size > heap_size or ci.sharing_mode != 0 or ci.queue_family_index_count != 0) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
     for (&buffer_objects, &buffer_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = d, .size = ci.size, .usage = ci.usage };
+        object.* = .{ .owner = d, .size = ci.size, .usage = usage };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
@@ -1472,7 +2820,40 @@ fn destroyBuffer(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(
     lock();
     defer mutex.unlock();
     const object = validBufferLocked(handle) orelse return;
-    if (validDeviceLocked(d) and validOwner(d, object.owner)) stateForObject(BufferObj, object, &buffer_objects, &buffer_state).?.* = .tombstone;
+    if (validDeviceLocked(d) and validOwner(d, object.owner)) {
+        stateForObject(BufferObj, object, &buffer_objects, &buffer_state).?.* = .tombstone;
+        for (&buffer_view_objects, &buffer_view_state) |*view, *view_state| if (view_state.* == .live and view.buffer == object) {
+            view_state.* = .tombstone;
+        };
+    }
+}
+fn createBufferView(device: ?Device, info: ?*const BufferViewCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    const d = device orelse return .error_initialization_failed;
+    const ci = info orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    if (alloc != null or ci.s_type != 13 or ci.p_next != null or ci.flags != 0) return .error_initialization_failed;
+    if (ci.format != 37 and ci.format != 43 and ci.format != 44) return .error_format_not_supported;
+    lock();
+    defer mutex.unlock();
+    const buffer = validBufferLocked(ci.buffer) orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or buffer.owner != d or buffer.usage & 0xc == 0 or ci.offset % 4 != 0 or ci.offset >= buffer.size) return .error_initialization_failed;
+    const range = if (ci.range == std.math.maxInt(u64)) buffer.size - ci.offset else ci.range;
+    if (range == 0 or range % 4 != 0 or range > buffer.size - ci.offset) return .error_initialization_failed;
+    for (&buffer_view_objects, &buffer_view_state) |*object, *state| if (state.* == .never) {
+        object.* = .{ .owner = d, .buffer = buffer, .format = ci.format, .offset = ci.offset, .range = range };
+        state.* = .live;
+        out.* = @intFromPtr(object);
+        return .success;
+    };
+    return .error_out_of_host_memory;
+}
+fn destroyBufferView(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+    if (alloc != null) return;
+    const d = device orelse return;
+    lock();
+    defer mutex.unlock();
+    const view = validBufferViewLocked(handle) orelse return;
+    if (validDeviceLocked(d) and view.owner == d) stateForObject(BufferViewObj, view, &buffer_view_objects, &buffer_view_state).?.* = .tombstone;
 }
 fn getBufferMemoryRequirements(device: ?Device, handle: usize, output: ?*MemoryRequirements) callconv(.c) void {
     const d = device orelse return;
@@ -1481,6 +2862,37 @@ fn getBufferMemoryRequirements(device: ?Device, handle: usize, output: ?*MemoryR
     defer mutex.unlock();
     const object = validBufferLocked(handle) orelse return;
     if (validDeviceLocked(d) and validOwner(d, object.owner)) out.* = .{ .size = object.size, .alignment = 4, .memory_type_bits = 1 };
+}
+fn getBufferDeviceAddress(device: ?Device, info: ?*const BufferDeviceAddressInfo) callconv(.c) u64 {
+    const d = device orelse return 0;
+    const query = info orelse return 0;
+    if (query.s_type != 1000244001 or query.p_next != null) return 0;
+    lock();
+    defer mutex.unlock();
+    const buffer = validBufferLocked(query.buffer) orelse return 0;
+    if (!validDeviceLocked(d) or buffer.owner != d or buffer.memory == null) return 0;
+    return @intFromPtr(buffer.memory.?.bytes.ptr) + buffer.offset;
+}
+fn getBufferOpaqueCaptureAddress(device: ?Device, info: ?*const BufferDeviceAddressInfo) callconv(.c) u64 {
+    return getBufferDeviceAddress(device, info);
+}
+fn getDeviceMemoryOpaqueCaptureAddress(device: ?Device, info: ?*const DeviceMemoryOpaqueCaptureAddressInfo) callconv(.c) u64 {
+    const d = device orelse return 0;
+    const query = info orelse return 0;
+    if (query.s_type != 1000257002 or query.p_next != null) return 0;
+    lock();
+    defer mutex.unlock();
+    const memory = validMemoryLocked(query.memory) orelse return 0;
+    if (!validDeviceLocked(d) or memory.owner != d) return 0;
+    return @intFromPtr(memory.bytes.ptr);
+}
+fn getDeviceGroupPeerMemoryFeatures(device: ?Device, heap_index: u32, local_device: u32, remote_device: u32, output: ?*u32) callconv(.c) void {
+    const out = output orelse return;
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return;
+    if (!validDeviceLocked(d) or heap_index != 0 or local_device != 0 or remote_device != 0) return;
+    out.* = 0;
 }
 fn bindBufferMemory(device: ?Device, handle: usize, memory_handle: usize, offset: u64) callconv(.c) Result {
     const d = device orelse return .error_initialization_failed;
@@ -1497,25 +2909,33 @@ fn bindBufferMemory(device: ?Device, handle: usize, memory_handle: usize, offset
     object.offset = offset;
     return .success;
 }
-fn imageByteSize(image: *const ImageObj) ?u64 {
-    const pixels = @as(u64, image.width) * image.height;
+fn imageLayerByteSize(image: *const ImageObj) ?u64 {
+    const pixels = std.math.mul(u64, image.width, image.height) catch {
+        hit(.overflow_image_size);
+        return null;
+    };
     return std.math.mul(u64, pixels, 4) catch {
         hit(.overflow_image_size);
         return null;
     };
 }
-fn supportedFormat(format: i32) bool {
-    return format == 37 or format == 43 or format == 44 or format == 124;
+fn imageByteSize(image: *const ImageObj) ?u64 {
+    const layer_bytes = imageLayerByteSize(image) orelse return null;
+    return std.math.mul(u64, layer_bytes, image.array_layers) catch {
+        hit(.overflow_image_size);
+        return null;
+    };
 }
 fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (ci.usage == 0 or ci.usage & ~@as(u32, 0x37) != 0) {
+    const allowed_usage = imageFormatUsage(ci.format);
+    if (ci.usage == 0 or allowed_usage != 0 and ci.usage & ~allowed_usage != 0) {
         hit(.invalid_image_usage);
         return .error_initialization_failed;
     }
-    if (alloc != null or ci.s_type != 14 or ci.p_next != null or ci.flags != 0 or ci.image_type != 1 or !supportedFormat(ci.format) or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or ci.mip_levels != 1 or ci.array_layers != 1 or ci.samples != 1 or (ci.tiling != 0 and ci.tiling != 1) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) return if (!supportedFormat(ci.format)) .error_format_not_supported else .error_initialization_failed;
+    if (alloc != null or ci.s_type != 14 or !imageCreatePNextValid(ci.p_next, ci.format) or ci.flags != 0 or ci.image_type != 1 or allowed_usage == 0 or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or ci.mip_levels != 1 or ci.array_layers == 0 or ci.array_layers > max_image_array_layers or ci.samples != 1 or (ci.tiling != 0 and ci.tiling != 1) or (ci.format == 126 and ci.tiling != 0) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) return if (allowed_usage == 0) .error_format_not_supported else .error_initialization_failed;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
@@ -1551,6 +2971,17 @@ fn getImageMemoryRequirements(device: ?Device, handle: usize, output: ?*MemoryRe
     const image = validImageLocked(handle) orelse return;
     if (validDeviceLocked(d) and validOwner(d, image.owner)) out.* = .{ .size = imageByteSize(image).?, .alignment = 4, .memory_type_bits = 1 };
 }
+fn getImageSparseMemoryRequirements(device: ?Device, handle: usize, count: ?*u32, output: ?*anyopaque) callconv(.c) void {
+    _ = output;
+    const d = device orelse return;
+    const n = count orelse return;
+    lock();
+    defer mutex.unlock();
+    const image = validImageLocked(handle) orelse return;
+    if (!validDeviceLocked(d) or !validOwner(d, image.owner)) return;
+    // Sparse image creation and every sparse residency feature remain false.
+    n.* = 0;
+}
 fn bindImageMemory(device: ?Device, handle: usize, memory_handle: usize, offset: u64) callconv(.c) Result {
     const d = device orelse return .error_initialization_failed;
     lock();
@@ -1563,28 +2994,280 @@ fn bindImageMemory(device: ?Device, handle: usize, memory_handle: usize, offset:
     image.offset = offset;
     return .success;
 }
-fn getImageSubresourceLayout(device: ?Device, handle: usize, subresource: ?*const ImageSubresource, output: ?*SubresourceLayout) callconv(.c) void {
-    const d = device orelse return;
-    const sub = subresource orelse return;
+fn getBufferMemoryRequirements2(device: ?Device, info: ?*const BufferMemoryRequirementsInfo2, output: ?*MemoryRequirements2) callconv(.c) void {
+    const i = info orelse return;
     const out = output orelse return;
+    if (i.s_type != 1000146000 or i.p_next != null or out.s_type != 1000146003 or !memoryRequirements2ChainValid(out.p_next)) return;
+    const d = device orelse return;
     lock();
     defer mutex.unlock();
-    const image = validImageLocked(handle) orelse return;
-    if (validDeviceLocked(d) and validOwner(d, image.owner) and sub.aspect_mask == 1 and sub.mip_level == 0 and sub.array_layer == 0) {
-        const byte_size = imageByteSize(image).?;
-        out.* = .{ .offset = 0, .size = byte_size, .row_pitch = @as(u64, image.width) * 4, .array_pitch = byte_size, .depth_pitch = byte_size };
+    const object = validBufferLocked(i.buffer) orelse return;
+    if (!validDeviceLocked(d) or object.owner != d) return;
+    out.memory_requirements = .{ .size = object.size, .alignment = 4, .memory_type_bits = 1 };
+    populateMemoryRequirements2Chain(out.p_next);
+}
+fn getImageMemoryRequirements2(device: ?Device, info: ?*const ImageMemoryRequirementsInfo2, output: ?*MemoryRequirements2) callconv(.c) void {
+    const i = info orelse return;
+    const out = output orelse return;
+    if (i.s_type != 1000146001 or !imageMemoryRequirementsInfo2ChainValid(i.p_next) or out.s_type != 1000146003 or !memoryRequirements2ChainValid(out.p_next)) return;
+    const d = device orelse return;
+    lock();
+    defer mutex.unlock();
+    const image = validImageLocked(i.image) orelse return;
+    const size = imageByteSize(image) orelse return;
+    if (!validDeviceLocked(d) or image.owner != d) return;
+    out.memory_requirements = .{ .size = size, .alignment = 4, .memory_type_bits = 1 };
+    populateMemoryRequirements2Chain(out.p_next);
+}
+fn imageCreateRequirements(info: *const ImageCreateInfo) ?MemoryRequirements {
+    const allowed_usage = imageFormatUsage(info.format);
+    if (info.s_type != 14 or !imageCreatePNextValid(info.p_next, info.format) or info.flags != 0 or info.image_type != 1 or allowed_usage == 0 or info.usage == 0 or info.usage & ~allowed_usage != 0 or info.extent.width == 0 or info.extent.height == 0 or info.extent.depth != 1 or info.extent.width > max_2d_extent or info.extent.height > max_2d_extent or info.mip_levels != 1 or info.array_layers == 0 or info.array_layers > max_image_array_layers or info.samples != 1 or (info.tiling != 0 and info.tiling != 1) or (info.format == 126 and info.tiling != 0) or info.sharing_mode != 0 or info.queue_family_index_count != 0 or (info.initial_layout != 0 and info.initial_layout != 8)) return null;
+    const pixels = std.math.mul(u64, info.extent.width, info.extent.height) catch return null;
+    const layer_bytes = std.math.mul(u64, pixels, 4) catch return null;
+    const bytes = std.math.mul(u64, layer_bytes, info.array_layers) catch return null;
+    return .{ .size = bytes, .alignment = 4, .memory_type_bits = 1 };
+}
+fn hostCopyLayoutValid(layout: i32) bool {
+    return layout == 1 or layout == 6 or layout == 7;
+}
+fn copyMemoryToImage(device: ?Device, info: ?*const CopyMemoryToImageInfo) callconv(.c) Result {
+    const ci = info orelse return .error_initialization_failed;
+    if (ci.s_type != 1000270005 or ci.p_next != null or ci.flags != 0 or ci.region_count == 0 or ci.region_count > max_api_items or ci.regions == null) return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return .error_initialization_failed;
+    const image = validImageLocked(ci.dst_image) orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or image.owner != d or image.format != 44 or !hostCopyLayoutValid(ci.dst_image_layout)) return .error_initialization_failed;
+    const dst = imageBytes(image);
+    for (ci.regions.?[0..ci.region_count]) |region| {
+        if (region.s_type != 1000270000 or region.p_next != null or region.host_pointer == null or region.image_subresource.aspect_mask != 1 or region.image_subresource.mip_level != 0 or region.image_subresource.layer_count != 1 or region.image_subresource.base_array_layer >= image.array_layers or region.image_offset.x < 0 or region.image_offset.y < 0 or region.image_extent.width == 0 or region.image_extent.height == 0 or @as(u64, @intCast(region.image_offset.x)) + region.image_extent.width > image.width or @as(u64, @intCast(region.image_offset.y)) + region.image_extent.height > image.height or (region.memory_row_length != 0 and region.memory_row_length < region.image_extent.width)) return .error_initialization_failed;
+        const row_length = if (region.memory_row_length == 0) region.image_extent.width else region.memory_row_length;
+        const source: [*]const u8 = @ptrCast(region.host_pointer.?);
+        const layer_offset = imageLayerOffset(image, region.image_subresource.base_array_layer) orelse return .error_initialization_failed;
+        for (0..region.image_extent.height) |row| {
+            const src = source[row * @as(usize, row_length) * 4 ..][0 .. @as(usize, region.image_extent.width) * 4];
+            const dst_offset = layer_offset + ((@as(usize, @intCast(region.image_offset.y)) + row) * image.width + @as(usize, @intCast(region.image_offset.x))) * 4;
+            std.mem.copyForwards(u8, dst[dst_offset..][0..src.len], src);
+        }
     }
+    invalidateImageContents(image);
+    return .success;
+}
+fn copyImageToMemory(device: ?Device, info: ?*const CopyImageToMemoryInfo) callconv(.c) Result {
+    const ci = info orelse return .error_initialization_failed;
+    if (ci.s_type != 1000270004 or ci.p_next != null or ci.flags != 0 or ci.region_count == 0 or ci.region_count > max_api_items or ci.regions == null) return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return .error_initialization_failed;
+    const image = validImageLocked(ci.src_image) orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or image.owner != d or image.format != 44 or !hostCopyLayoutValid(ci.src_image_layout)) return .error_initialization_failed;
+    const src = imageBytes(image);
+    for (ci.regions.?[0..ci.region_count]) |region| {
+        if (region.s_type != 1000270001 or region.p_next != null or region.host_pointer == null or region.image_subresource.aspect_mask != 1 or region.image_subresource.mip_level != 0 or region.image_subresource.layer_count != 1 or region.image_subresource.base_array_layer >= image.array_layers or region.image_offset.x < 0 or region.image_offset.y < 0 or region.image_extent.width == 0 or region.image_extent.height == 0 or @as(u64, @intCast(region.image_offset.x)) + region.image_extent.width > image.width or @as(u64, @intCast(region.image_offset.y)) + region.image_extent.height > image.height or (region.memory_row_length != 0 and region.memory_row_length < region.image_extent.width)) return .error_initialization_failed;
+        const row_length = if (region.memory_row_length == 0) region.image_extent.width else region.memory_row_length;
+        const destination: [*]u8 = @ptrCast(region.host_pointer.?);
+        const layer_offset = imageLayerOffset(image, region.image_subresource.base_array_layer) orelse return .error_initialization_failed;
+        for (0..region.image_extent.height) |row| {
+            const dst = destination[row * @as(usize, row_length) * 4 ..][0 .. @as(usize, region.image_extent.width) * 4];
+            const src_offset = layer_offset + ((@as(usize, @intCast(region.image_offset.y)) + row) * image.width + @as(usize, @intCast(region.image_offset.x))) * 4;
+            std.mem.copyForwards(u8, dst, src[src_offset..][0..dst.len]);
+        }
+    }
+    return .success;
+}
+fn copyImageToImage(device: ?Device, info: ?*const CopyImageToImageInfo) callconv(.c) Result {
+    const ci = info orelse return .error_initialization_failed;
+    if (ci.s_type != 1000270007 or ci.p_next != null or ci.flags != 0 or ci.region_count == 0 or ci.region_count > max_api_items or ci.regions == null) return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return .error_initialization_failed;
+    const src_image = validImageLocked(ci.src_image) orelse return .error_initialization_failed;
+    const dst_image = validImageLocked(ci.dst_image) orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or src_image.owner != d or dst_image.owner != d or src_image.format != 44 or dst_image.format != 44 or !hostCopyLayoutValid(ci.src_image_layout) or !hostCopyLayoutValid(ci.dst_image_layout) or src_image == dst_image) return .error_initialization_failed;
+    const src = imageBytes(src_image);
+    const dst = imageBytes(dst_image);
+    for (ci.regions.?[0..ci.region_count]) |region| {
+        if (region.s_type != 1000337003 or region.p_next != null or region.src_subresource.aspect_mask != 1 or region.dst_subresource.aspect_mask != 1 or region.src_subresource.mip_level != 0 or region.dst_subresource.mip_level != 0 or region.src_subresource.layer_count != 1 or region.dst_subresource.layer_count != 1 or region.src_subresource.base_array_layer >= src_image.array_layers or region.dst_subresource.base_array_layer >= dst_image.array_layers or region.src_offset.x < 0 or region.src_offset.y < 0 or region.dst_offset.x < 0 or region.dst_offset.y < 0 or region.extent.width == 0 or region.extent.height == 0 or @as(u64, @intCast(region.src_offset.x)) + region.extent.width > src_image.width or @as(u64, @intCast(region.src_offset.y)) + region.extent.height > src_image.height or @as(u64, @intCast(region.dst_offset.x)) + region.extent.width > dst_image.width or @as(u64, @intCast(region.dst_offset.y)) + region.extent.height > dst_image.height) return .error_initialization_failed;
+        const src_layer_offset = imageLayerOffset(src_image, region.src_subresource.base_array_layer) orelse return .error_initialization_failed;
+        const dst_layer_offset = imageLayerOffset(dst_image, region.dst_subresource.base_array_layer) orelse return .error_initialization_failed;
+        for (0..region.extent.height) |row| {
+            const src_offset = src_layer_offset + ((@as(usize, @intCast(region.src_offset.y)) + row) * src_image.width + @as(usize, @intCast(region.src_offset.x))) * 4;
+            const dst_offset = dst_layer_offset + ((@as(usize, @intCast(region.dst_offset.y)) + row) * dst_image.width + @as(usize, @intCast(region.dst_offset.x))) * 4;
+            const bytes = @as(usize, region.extent.width) * 4;
+            std.mem.copyForwards(u8, dst[dst_offset..][0..bytes], src[src_offset..][0..bytes]);
+        }
+    }
+    invalidateImageContents(dst_image);
+    return .success;
+}
+fn transitionImageLayout(device: ?Device, count: u32, transitions: ?[*]const HostImageLayoutTransitionInfo) callconv(.c) Result {
+    if (count == 0 or count > max_api_items or transitions == null) return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    for (transitions.?[0..count]) |transition| {
+        const image = validImageLocked(transition.image) orelse return .error_initialization_failed;
+        if (transition.s_type != 1000270006 or transition.p_next != null or image.owner != d or !hostCopyLayoutValid(transition.old_layout) or !supportedLayout(transition.new_layout) or image.layout != transition.old_layout or !validRangeForImage(image, transition.subresource_range)) return .error_initialization_failed;
+    }
+    for (transitions.?[0..count]) |transition| validImageLocked(transition.image).?.layout = transition.new_layout;
+    return .success;
+}
+fn getDeviceBufferMemoryRequirements(device: ?Device, info: ?*const DeviceBufferMemoryRequirements, output: ?*MemoryRequirements2) callconv(.c) void {
+    const d = device orelse return;
+    const query = info orelse return;
+    const out = output orelse return;
+    if (query.s_type != 1000413002 or query.p_next != null or out.s_type != 1000146003 or !memoryRequirements2ChainValid(out.p_next)) return;
+    const ci = query.create_info orelse return;
+    const pnext = bufferCreatePNextState(ci.p_next);
+    const usage: u32 = if (pnext.has_usage) std.math.cast(u32, pnext.usage) orelse 0 else ci.usage;
+    if (ci.s_type != 12 or !pnext.valid or ci.flags != 0 or ci.size == 0 or ci.size > heap_size or usage == 0 or usage & ~@as(u32, 0x1f7) != 0 or ci.sharing_mode != 0 or ci.queue_family_index_count != 0) return;
+    lock();
+    defer mutex.unlock();
+    if (validDeviceLocked(d)) {
+        out.memory_requirements = .{ .size = ci.size, .alignment = 4, .memory_type_bits = 1 };
+        populateMemoryRequirements2Chain(out.p_next);
+    }
+}
+fn getDeviceImageMemoryRequirements(device: ?Device, info: ?*const DeviceImageMemoryRequirements, output: ?*MemoryRequirements2) callconv(.c) void {
+    const d = device orelse return;
+    const query = info orelse return;
+    const out = output orelse return;
+    if (query.s_type != 1000413003 or query.p_next != null or query.plane_aspect != 0 or out.s_type != 1000146003 or !memoryRequirements2ChainValid(out.p_next)) return;
+    const requirements = imageCreateRequirements(query.create_info orelse return) orelse return;
+    lock();
+    defer mutex.unlock();
+    if (validDeviceLocked(d)) {
+        out.memory_requirements = requirements;
+        populateMemoryRequirements2Chain(out.p_next);
+    }
+}
+fn getDeviceImageSparseMemoryRequirements(device: ?Device, info: ?*const DeviceImageMemoryRequirements, count: ?*u32, output: ?[*]SparseImageMemoryRequirements2) callconv(.c) void {
+    const d = device orelse return;
+    const query = info orelse return;
+    const n = count orelse return;
+    if (query.s_type != 1000413003 or query.p_next != null or query.plane_aspect != 0 or imageCreateRequirements(query.create_info orelse return) == null) return;
+    _ = output;
+    lock();
+    defer mutex.unlock();
+    if (validDeviceLocked(d)) n.* = 0;
+}
+fn getImageSparseMemoryRequirements2(device: ?Device, info: ?*const ImageSparseMemoryRequirementsInfo2, count: ?*u32, output: ?[*]SparseImageMemoryRequirements2) callconv(.c) void {
+    const i = info orelse return;
+    const n = count orelse return;
+    if (i.s_type != 1000146002 or i.p_next != null) return;
+    _ = output;
+    getImageSparseMemoryRequirements(device, i.image, n, null);
+}
+fn bindBufferMemory2(device: ?Device, count: u32, infos: ?[*]const BindBufferMemoryInfo) callconv(.c) Result {
+    const d = device orelse return .error_initialization_failed;
+    if (count > max_api_items or (count != 0 and infos == null)) return .error_initialization_failed;
+    if (count == 0) return .success;
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    const list = infos.?[0..count];
+    for (list, 0..) |item, index| {
+        if (item.s_type != 1000157000 or !bindBufferMemoryPNextValid(item.p_next)) return .error_initialization_failed;
+        const buffer = validBufferLocked(item.buffer) orelse return .error_initialization_failed;
+        const memory = validMemoryLocked(item.memory) orelse return .error_initialization_failed;
+        if (buffer.owner != d or memory.owner != d or buffer.memory != null or item.memory_offset % 4 != 0 or item.memory_offset > memory.bytes.len or buffer.size > memory.bytes.len - item.memory_offset) return .error_initialization_failed;
+        for (list[0..index]) |prior| if (prior.buffer == item.buffer) return .error_initialization_failed;
+    }
+    for (list) |item| {
+        const buffer = validBufferLocked(item.buffer).?;
+        const memory = validMemoryLocked(item.memory).?;
+        buffer.memory = memory;
+        buffer.offset = item.memory_offset;
+    }
+    return .success;
+}
+fn bindImageMemory2(device: ?Device, count: u32, infos: ?[*]const BindImageMemoryInfo) callconv(.c) Result {
+    const d = device orelse return .error_initialization_failed;
+    if (count > max_api_items or (count != 0 and infos == null)) return .error_initialization_failed;
+    if (count == 0) return .success;
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    const list = infos.?[0..count];
+    for (list, 0..) |item, index| {
+        if (item.s_type != 1000157001 or !bindImageMemoryPNextValid(item.p_next)) return .error_initialization_failed;
+        const image = validImageLocked(item.image) orelse return .error_initialization_failed;
+        const memory = validMemoryLocked(item.memory) orelse return .error_initialization_failed;
+        const size = imageByteSize(image) orelse return .error_initialization_failed;
+        if (image.owner != d or memory.owner != d or image.memory != null or item.memory_offset % 4 != 0 or item.memory_offset > memory.bytes.len or size > memory.bytes.len - item.memory_offset) return .error_initialization_failed;
+        for (list[0..index]) |prior| if (prior.image == item.image) return .error_initialization_failed;
+    }
+    for (list) |item| {
+        const image = validImageLocked(item.image).?;
+        const memory = validMemoryLocked(item.memory).?;
+        image.memory = memory;
+        image.offset = item.memory_offset;
+    }
+    return .success;
+}
+fn imageSubresourceLayout(device: ?Device, handle: usize, subresource: ImageSubresource) ?SubresourceLayout {
+    const d = device orelse return null;
+    lock();
+    defer mutex.unlock();
+    const image = validImageLocked(handle) orelse return null;
+    const expected_aspect: u32 = if (image.format == 126) 2 else 1;
+    if (!validDeviceLocked(d) or !validOwner(d, image.owner) or subresource.aspect_mask != expected_aspect or subresource.mip_level != 0 or subresource.array_layer >= image.array_layers) return null;
+    const layer_size = imageLayerByteSize(image) orelse return null;
+    return .{ .offset = layer_size * subresource.array_layer, .size = layer_size, .row_pitch = @as(u64, image.width) * 4, .array_pitch = layer_size, .depth_pitch = layer_size };
+}
+
+fn getImageSubresourceLayout(device: ?Device, handle: usize, subresource: ?*const ImageSubresource, output: ?*SubresourceLayout) callconv(.c) void {
+    const sub = subresource orelse return;
+    const out = output orelse return;
+    const layout = imageSubresourceLayout(device, handle, sub.*) orelse return;
+    out.* = layout;
+}
+fn getImageSubresourceLayout2(device: ?Device, handle: usize, subresource: ?*const ImageSubresource2, output: ?*SubresourceLayout2) callconv(.c) void {
+    const info = subresource orelse return;
+    const out = output orelse return;
+    if (info.s_type != 1000338003 or info.p_next != null or out.s_type != 1000338002 or !subresourceLayout2PNextValid(out.p_next)) return;
+    const layout = imageSubresourceLayout(device, handle, info.image_subresource) orelse return;
+    out.subresource_layout = layout;
+    populateSubresourceLayout2PNext(out.p_next, layout.size);
+}
+fn getDeviceImageSubresourceLayout(device: ?Device, info: ?*const DeviceImageSubresourceInfo, output: ?*SubresourceLayout2) callconv(.c) void {
+    const d = device orelse return;
+    const ci = info orelse return;
+    const out = output orelse return;
+    if (ci.s_type != 1000470004 or ci.p_next != null or out.s_type != 1000338002 or !subresourceLayout2PNextValid(out.p_next)) return;
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d)) return;
+    const create_info = ci.create_info orelse return;
+    const subresource = ci.subresource orelse return;
+    if (subresource.s_type != 1000338003 or subresource.p_next != null) return;
+    const requirements = imageCreateRequirements(create_info) orelse return;
+    const expected_aspect: u32 = if (create_info.format == 126) 2 else 1;
+    if (subresource.image_subresource.aspect_mask != expected_aspect or subresource.image_subresource.mip_level != 0 or subresource.image_subresource.array_layer >= create_info.array_layers) return;
+    const layer_size = requirements.size / create_info.array_layers;
+    out.subresource_layout = .{ .offset = layer_size * subresource.image_subresource.array_layer, .size = layer_size, .row_pitch = @as(u64, create_info.extent.width) * 4, .array_pitch = layer_size, .depth_pitch = layer_size };
+    populateSubresourceLayout2PNext(out.p_next, layer_size);
+}
+fn getRenderingAreaGranularity(device: ?Device, info: ?*const RenderingAreaInfo, output: ?*Extent2D) callconv(.c) void {
+    const d = device orelse return;
+    const ci = info orelse return;
+    const out = output orelse return;
+    if (ci.s_type != 1000470003 or ci.p_next != null or ci.view_mask != 0 or ci.color_attachment_count > 1 or (ci.color_attachment_count != 0 and ci.color_attachment_formats == null) or (ci.depth_attachment_format != 0 and ci.depth_attachment_format != 126) or ci.stencil_attachment_format != 0) return;
+    lock();
+    defer mutex.unlock();
+    if (validDeviceLocked(d)) out.* = .{ .width = 1, .height = 1 };
 }
 fn createFence(device: ?Device, info: ?*const FenceCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (alloc != null or ci.s_type != 8 or ci.p_next != null or ci.flags & ~@as(u32, 1) != 0) return .error_initialization_failed;
+    if (alloc != null or ci.s_type != 8 or !fenceCreatePNextValid(ci.p_next) or ci.flags & ~@as(u32, 1) != 0) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
     for (&fence_objects, &fence_state) |*fence, *state| if (state.* == .never) {
-        fence.* = .{ .owner = d, .signaled = ci.flags == 1 };
+        fence.* = .{ .owner = d, .signaled = .init(ci.flags == 1), .waiters = .init(0) };
         state.* = .live;
         out.* = @intFromPtr(fence);
         return .success;
@@ -1605,7 +3288,7 @@ fn getFenceStatus(device: ?Device, handle: usize) callconv(.c) Result {
     defer mutex.unlock();
     const fence = validFenceLocked(handle) orelse return .error_initialization_failed;
     if (!validDeviceLocked(d) or !validOwner(d, fence.owner)) return .error_initialization_failed;
-    return if (fence.signaled) .success else .not_ready;
+    return if (fence.signaled.load(.acquire)) .success else .not_ready;
 }
 fn resetFences(device: ?Device, count: u32, handles: ?[*]const usize) callconv(.c) Result {
     const d = device orelse return .error_initialization_failed;
@@ -1614,11 +3297,13 @@ fn resetFences(device: ?Device, count: u32, handles: ?[*]const usize) callconv(.
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
-    for (list[0..count]) |handle| {
+    var fences: [max_api_items]*FenceObj = undefined;
+    for (list[0..count], 0..) |handle, index| {
         const fence = validFenceLocked(handle) orelse return .error_initialization_failed;
         if (!validOwner(d, fence.owner)) return .error_initialization_failed;
-        fence.signaled = false;
+        fences[index] = fence;
     }
+    for (fences[0..count]) |fence| fence.signaled.store(false, .release);
     return .success;
 }
 fn waitForFences(device: ?Device, count: u32, handles: ?[*]const usize, wait_all: u32, timeout_ns: u64) callconv(.c) Result {
@@ -1626,18 +3311,159 @@ fn waitForFences(device: ?Device, count: u32, handles: ?[*]const usize, wait_all
     if (count == 0 or count > max_api_items) return .error_initialization_failed;
     const list = handles orelse return .error_initialization_failed;
     lock();
-    defer mutex.unlock();
+    var mutex_held = true;
+    defer if (mutex_held) mutex.unlock();
     if (!validDeviceLocked(d) or wait_all > 1) return .error_initialization_failed;
-    var signaled: u32 = 0;
-    for (list[0..count]) |handle| {
+    var fences: [max_api_items]*FenceObj = undefined;
+    for (list[0..count], 0..) |handle, index| {
         const fence = validFenceLocked(handle) orelse return .error_initialization_failed;
         if (!validOwner(d, fence.owner)) return .error_initialization_failed;
-        if (fence.signaled) signaled += 1;
+        fences[index] = fence;
     }
-    const done = if (wait_all == 1) signaled == count else signaled != 0;
-    if (done) return .success;
-    _ = timeout_ns;
-    return .timeout;
+    mutex.unlock();
+    mutex_held = false;
+    for (fences[0..count]) |fence| _ = fence.waiters.fetchAdd(1, .acq_rel);
+    defer {
+        for (fences[0..count]) |fence| _ = fence.waiters.fetchSub(1, .acq_rel);
+    }
+    const start = frame_pacing.monotonicNs();
+    const deadline = if (timeout_ns == std.math.maxInt(u64)) timeout_ns else start +| timeout_ns;
+    while (true) {
+        var signaled: u32 = 0;
+        for (fences[0..count]) |fence| if (fence.signaled.load(.acquire)) {
+            signaled += 1;
+        };
+        if (if (wait_all == 1) signaled == count else signaled != 0) return .success;
+        const now = frame_pacing.monotonicNs();
+        if (timeout_ns != std.math.maxInt(u64) and now >= deadline) return .timeout;
+        frame_pacing.sleepUntil(if (deadline == std.math.maxInt(u64)) now + 50_000 else @min(deadline, now + 50_000));
+    }
+}
+fn createEvent(device: ?Device, info: ?*const EventCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    const d = device orelse return .error_initialization_failed;
+    const ci = info orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    if (alloc != null or ci.s_type != 10 or ci.p_next != null or ci.flags != 0) return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    for (&event_objects, &event_state) |*event, *state| if (state.* == .never) {
+        event.* = .{ .owner = d, .signaled = .init(false), .waiters = .init(0) };
+        state.* = .live;
+        out.* = @intFromPtr(event);
+        return .success;
+    };
+    return .error_out_of_host_memory;
+}
+fn destroyEvent(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+    if (alloc != null) return;
+    const d = device orelse return;
+    lock();
+    defer mutex.unlock();
+    const event = validEventLocked(handle) orelse return;
+    if (validDeviceLocked(d) and validOwner(d, event.owner)) stateForObject(EventObj, event, &event_objects, &event_state).?.* = .tombstone;
+}
+fn getEventStatus(device: ?Device, handle: usize) callconv(.c) Result {
+    const d = device orelse return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    const event = validEventLocked(handle) orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or !validOwner(d, event.owner)) return .error_initialization_failed;
+    return if (event.signaled.load(.acquire)) .event_set else .event_reset;
+}
+fn setEvent(device: ?Device, handle: usize) callconv(.c) Result {
+    const d = device orelse return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    const event = validEventLocked(handle) orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or !validOwner(d, event.owner)) return .error_initialization_failed;
+    event.signaled.store(true, .release);
+    return .success;
+}
+fn resetEvent(device: ?Device, handle: usize) callconv(.c) Result {
+    const d = device orelse return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    const event = validEventLocked(handle) orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or !validOwner(d, event.owner)) return .error_initialization_failed;
+    event.signaled.store(false, .release);
+    return .success;
+}
+fn createQueryPool(device: ?Device, info: ?*const QueryPoolCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    if (alloc != null) return .error_initialization_failed;
+    const d = device orelse return .error_initialization_failed;
+    const ci = info orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    if (ci.s_type != 11 or ci.p_next != null or ci.flags != 0 or ci.query_count == 0 or ci.query_count > 4096 or (ci.query_type != 0 and ci.query_type != 2) or ci.pipeline_statistics != 0) return if (ci.query_type == 1) .error_feature_not_present else .error_initialization_failed;
+    if (failTestAllocation()) return .error_out_of_host_memory;
+    const slots = allocator.alloc(QuerySlot, ci.query_count) catch return .error_out_of_host_memory;
+    for (slots) |*slot| slot.* = .{ .state = .init(0), .value = .init(0) };
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d)) {
+        allocator.free(slots);
+        return .error_initialization_failed;
+    }
+    for (&query_pool_objects, &query_pool_state) |*pool, *state| if (state.* == .never) {
+        pool.* = .{ .owner = DeviceIdentity.capture(d), .query_type = ci.query_type, .slots = slots };
+        state.* = .live;
+        out.* = @intFromPtr(pool);
+        return .success;
+    };
+    allocator.free(slots);
+    return .error_out_of_host_memory;
+}
+fn destroyQueryPool(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+    if (alloc != null) return;
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return;
+    const pool = validQueryPoolLocked(handle) orelse return;
+    if (!validDeviceLocked(d) or !pool.owner.eql(d)) return;
+    allocator.free(pool.slots);
+    pool.slots = &.{};
+    stateForObject(QueryPoolObj, pool, &query_pool_objects, &query_pool_state).?.* = .tombstone;
+}
+fn writeQueryScalar(destination: []u8, value: u64, use_64: bool) void {
+    if (use_64) {
+        const bytes = std.mem.asBytes(&value);
+        @memcpy(destination[0..8], bytes);
+    } else {
+        const narrow: u32 = @truncate(value);
+        const bytes = std.mem.asBytes(&narrow);
+        @memcpy(destination[0..4], bytes);
+    }
+}
+fn queryResultElementSize(flags: u32) usize {
+    const scalar_size: usize = if (flags & 1 != 0) 8 else 4;
+    return scalar_size * (if (flags & 4 != 0) @as(usize, 2) else 1);
+}
+fn getQueryPoolResults(device: ?Device, handle: usize, first: u32, count: u32, data_size: usize, data: ?*anyopaque, stride: u64, flags: u32) callconv(.c) Result {
+    if (count == 0 or flags & ~@as(u32, 0xf) != 0) return .error_initialization_failed;
+    const use_64 = flags & 1 != 0;
+    const element_size = queryResultElementSize(flags);
+    if (stride < element_size or stride % (if (use_64) @as(u64, 8) else 4) != 0) return .error_initialization_failed;
+    const required = std.math.add(u64, std.math.mul(u64, count - 1, stride) catch return .error_initialization_failed, element_size) catch return .error_initialization_failed;
+    if (required > data_size or data == null) return .error_initialization_failed;
+    const d = device orelse return .error_initialization_failed;
+    lock();
+    var mutex_held = true;
+    defer if (mutex_held) mutex.unlock();
+    const pool = validQueryPoolLocked(handle) orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or !pool.owner.eql(d) or first > pool.slots.len or count > pool.slots.len - first or (pool.query_type == 2 and flags & 8 != 0)) return .error_initialization_failed;
+    mutex.unlock();
+    mutex_held = false;
+    const bytes: [*]u8 = @ptrCast(data.?);
+    var unavailable = false;
+    for (pool.slots[first .. first + count], 0..) |*slot, index| {
+        if (flags & 2 != 0) while (slot.state.load(.acquire) != 2) frame_pacing.sleepUntil(frame_pacing.monotonicNs() + 50_000);
+        const available = slot.state.load(.acquire) == 2;
+        const output = bytes[@as(usize, @intCast(index)) * @as(usize, @intCast(stride)) ..][0..element_size];
+        if (available or flags & 8 != 0) writeQueryScalar(output, slot.value.load(.acquire), use_64);
+        if (flags & 4 != 0) writeQueryScalar(output[(if (use_64) @as(usize, 8) else 4)..], @intFromBool(available), use_64);
+        if (!available and flags & 8 == 0) unavailable = true;
+    }
+    return if (unavailable) .not_ready else .success;
 }
 fn createCommandPool(device: ?Device, info: ?*const CommandPoolCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     const d = device orelse return .error_initialization_failed;
@@ -1648,7 +3474,7 @@ fn createCommandPool(device: ?Device, info: ?*const CommandPoolCreateInfo, alloc
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
     for (&command_pool_objects, &command_pool_state) |*pool, *state| if (state.* == .never) {
-        pool.* = .{ .owner = d };
+        pool.* = .{ .owner = d, .flags = ci.flags };
         state.* = .live;
         out.* = @intFromPtr(pool);
         return .success;
@@ -1662,7 +3488,9 @@ fn destroyCommandPool(device: ?Device, handle: usize, alloc: ?*const Alloc) call
     defer mutex.unlock();
     const pool = validCommandPoolLocked(handle) orelse return;
     if (!validDeviceLocked(d) or !validOwner(d, pool.owner)) return;
+    for (&command_buffer_objects, command_buffer_state) |*cb, state| if (state == .live and cb.impl.pool == pool and cb.impl.level == 1) invalidatePrimariesReferencing(cb);
     for (&command_buffer_objects, &command_buffer_state) |*cb, *state| if (state.* == .live and cb.impl.pool == pool) {
+        deinitRecordedCommands(cb);
         state.* = .tombstone;
         cb.loader_data = 0;
     };
@@ -1672,7 +3500,7 @@ fn allocateCommandBuffers(device: ?Device, info: ?*const CommandBufferAllocateIn
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (ci.s_type != 40 or ci.p_next != null or ci.level != 0 or ci.command_buffer_count == 0 or ci.command_buffer_count > max_child_objects) return .error_initialization_failed;
+    if (ci.s_type != 40 or ci.p_next != null or (ci.level != 0 and ci.level != 1) or ci.command_buffer_count == 0 or ci.command_buffer_count > max_child_objects) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     const pool = validCommandPoolLocked(ci.command_pool) orelse return .error_initialization_failed;
@@ -1693,7 +3521,7 @@ fn allocateCommandBuffers(device: ?Device, info: ?*const CommandBufferAllocateIn
         };
         const cb = &command_buffer_objects[index];
         const impl = &command_buffer_impls[index];
-        impl.* = .{ .owner = d, .pool = pool, .state = 0, .invalid = false, .count = 0, .active_framebuffer = null, .active_render_pass = null, .bound_pipeline = null, .bound_pipeline_handle = 0, .bound_descriptors = null, .bound_layout = null, .bound_layout_handle = 0, .viewport = .{ .x = 0, .y = 0, .width = 0, .height = 0, .min_depth = 0, .max_depth = 1 }, .scissor = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, .commands = undefined };
+        impl.* = .{ .owner = d, .pool = pool, .level = @intCast(ci.level), .state = 0, .invalid = false, .begin_flags = 0, .count = 0, .owned_update_count = 0, .secondary_count = 0, .primary_ref_count = 0, .render_pass_continue = false, .render_contents = 0, .inherited_occlusion = false, .inherited_subpass = 0, .active_subpass = 0, .active_framebuffer = null, .active_render_pass = null, .active_query_pool = null, .active_query_index = 0, .bound_pipeline = null, .bound_pipeline_handle = 0, .bound_descriptors = null, .bound_layout = null, .bound_layout_handle = 0, .dynamic = .{}, .vertex_bindings = .{}, .index_buffer = null, .index_buffer_handle = 0, .index_offset = 0, .index_size = 0, .index_type = 0, .index_buffer_set = false, .viewport = .{ .x = 0, .y = 0, .width = 0, .height = 0, .min_depth = 0, .max_depth = 1 }, .viewport_set = false, .scissor = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, .scissor_set = false, .line_width = 1, .line_width_set = false, .blend_constants = .{ 0, 0, 0, 0 }, .blend_constants_set = false, .depth_bias = .{ 0, 0, 0 }, .depth_bias_set = false, .depth_bounds = .{ 0, 1 }, .depth_bounds_set = false, .stencil_compare_mask = .{ 0, 0 }, .stencil_compare_mask_set = 0, .stencil_write_mask = .{ 0, 0 }, .stencil_write_mask_set = 0, .stencil_reference = .{ 0, 0 }, .stencil_reference_set = 0, .push_constants = .{}, .commands = undefined, .owned_updates = undefined, .secondaries = undefined };
         cb.* = .{ .loader_data = MAGIC, .impl = impl };
         command_buffer_state[index] = .live;
         if (d.set_loader_data) |set| {
@@ -1726,35 +3554,214 @@ fn freeCommandBuffers(device: ?Device, pool_handle: usize, count: u32, buffers: 
     for (list[0..count]) |raw| {
         const cb = validCommandBufferLocked(raw) orelse continue;
         if (cb.impl.owner == d and cb.impl.pool == pool) {
+            if (cb.impl.level == 1) invalidatePrimariesReferencing(cb);
+            deinitRecordedCommands(cb);
             stateForObject(CommandBufferObj, cb, &command_buffer_objects, &command_buffer_state).?.* = .tombstone;
             cb.loader_data = 0;
         }
     }
 }
-fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) callconv(.c) Result {
-    const bi = info orelse return .error_initialization_failed;
-    if (bi.s_type != 42 or bi.p_next != null or bi.inheritance_info != null or bi.flags & ~@as(u32, 5) != 0) return .error_initialization_failed;
-    lock();
-    defer mutex.unlock();
-    const c = validCommandBufferLocked(cb) orelse return .error_initialization_failed;
-    if (!validDeviceLocked(c.impl.owner) or c.impl.state == 1) return .error_initialization_failed;
-    c.impl.state = 1;
-    c.impl.invalid = false;
+fn deinitRecordedCommands(c: *CommandBufferObj) void {
+    for (c.impl.owned_updates[0..c.impl.owned_update_count]) |bytes| allocator.free(bytes);
+    for (c.impl.secondaries[0..c.impl.secondary_count]) |secondary| secondary.impl.primary_ref_count -= 1;
+    c.impl.owned_update_count = 0;
+    c.impl.secondary_count = 0;
     c.impl.count = 0;
+}
+fn invalidatePrimariesReferencing(secondary: *CommandBufferObj) void {
+    for (&command_buffer_objects, command_buffer_state) |*primary, state| {
+        if (state != .live or primary.impl.level != 0 or (primary.impl.state != 1 and primary.impl.state != 2)) continue;
+        var referenced = false;
+        for (primary.impl.secondaries[0..primary.impl.secondary_count]) |candidate| if (candidate == secondary) {
+            referenced = true;
+            break;
+        };
+        if (referenced) {
+            primary.impl.state = 3;
+            primary.impl.invalid = true;
+            deinitRecordedCommands(primary);
+        }
+    }
+}
+fn resetCommandBufferState(c: *CommandBufferObj) void {
+    deinitRecordedCommands(c);
+    c.impl.state = 0;
+    c.impl.invalid = false;
+    c.impl.begin_flags = 0;
+    c.impl.render_pass_continue = false;
+    c.impl.render_contents = 0;
+    c.impl.inherited_occlusion = false;
+    c.impl.inherited_subpass = 0;
+    c.impl.active_subpass = 0;
     c.impl.active_framebuffer = null;
     c.impl.active_render_pass = null;
+    c.impl.dynamic_rendering = false;
+    c.impl.dynamic_color_image = null;
+    c.impl.dynamic_depth_image = null;
+    c.impl.rendering_location_count = 0;
+    c.impl.rendering_input_count = 0;
+    c.impl.rendering_depth_input_index = null;
+    c.impl.rendering_stencil_input_index = null;
+    c.impl.device_mask = 1;
+    c.impl.active_query_pool = null;
+    c.impl.active_query_index = 0;
     c.impl.bound_pipeline = null;
     c.impl.bound_pipeline_handle = 0;
+    c.impl.bound_compute_pipeline = null;
+    c.impl.bound_compute_pipeline_handle = 0;
     c.impl.bound_descriptors = null;
     c.impl.bound_layout = null;
     c.impl.bound_layout_handle = 0;
+    c.impl.dynamic_uniform_offset = 0;
+    c.impl.push_descriptor = .{};
+    c.impl.push_descriptor_active = false;
+    c.impl.dynamic = .{};
+    c.impl.vertex_bindings = .{};
+    c.impl.index_buffer = null;
+    c.impl.index_buffer_handle = 0;
+    c.impl.index_offset = 0;
+    c.impl.index_size = 0;
+    c.impl.index_type = 0;
+    c.impl.index_buffer_set = false;
+    c.impl.viewport_set = false;
+    c.impl.scissor_set = false;
+    c.impl.line_width = 1;
+    c.impl.line_width_set = false;
+    c.impl.line_stipple_factor = 1;
+    c.impl.line_stipple_pattern = 0xffff;
+    c.impl.blend_constants = .{ 0, 0, 0, 0 };
+    c.impl.blend_constants_set = false;
+    c.impl.depth_bias = .{ 0, 0, 0 };
+    c.impl.depth_bias_set = false;
+    c.impl.depth_bounds = .{ 0, 1 };
+    c.impl.depth_bounds_set = false;
+    c.impl.stencil_compare_mask = .{ 0, 0 };
+    c.impl.stencil_compare_mask_set = 0;
+    c.impl.stencil_write_mask = .{ 0, 0 };
+    c.impl.stencil_write_mask_set = 0;
+    c.impl.stencil_reference = .{ 0, 0 };
+    c.impl.stencil_reference_set = 0;
+    c.impl.push_constants = .{};
+}
+fn resetCommandPoolBuffersLocked(d: Device, pool: *CommandPoolObj) u32 {
+    var reset: u32 = 0;
+    for (&command_buffer_objects, command_buffer_state) |*cb, state| if (state == .live and cb.impl.owner == d and cb.impl.pool == pool and cb.impl.level == 1) invalidatePrimariesReferencing(cb);
+    for (&command_buffer_objects, command_buffer_state) |*cb, state| if (state == .live and cb.impl.owner == d and cb.impl.pool == pool) {
+        resetCommandBufferState(cb);
+        reset += 1;
+    };
+    return reset;
+}
+fn resetCommandPool(device: ?Device, handle: usize, flags: u32) callconv(.c) Result {
+    const d = device orelse return .error_initialization_failed;
+    if (flags & ~@as(u32, 1) != 0) return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    const pool = validCommandPoolLocked(handle) orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or !validOwner(d, pool.owner)) return .error_initialization_failed;
+    _ = resetCommandPoolBuffersLocked(d, pool);
+    return .success;
+}
+fn trimCommandPool(device: ?Device, handle: usize, flags: u32) callconv(.c) void {
+    if (flags != 0) return;
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return;
+    const pool = validCommandPoolLocked(handle) orelse return;
+    if (!validDeviceLocked(d) or !validOwner(d, pool.owner)) return;
+}
+fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) callconv(.c) Result {
+    const bi = info orelse return .error_initialization_failed;
+    if (bi.s_type != 42 or !commandBufferBeginPNextValid(bi.p_next) or bi.flags & ~@as(u32, 7) != 0) return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return .error_initialization_failed;
+    if (!validDeviceLocked(c.impl.owner) or c.impl.state == 1 or (c.impl.state != 0 and c.impl.pool.flags & 2 == 0) or (c.impl.level == 0 and (bi.flags & 2 != 0 or bi.flags & 5 == 5))) return .error_initialization_failed;
+    var inherited_render_pass: ?*RenderPassObj = null;
+    var inherited_framebuffer: ?*FramebufferObj = null;
+    var inherited_subpass: u32 = 0;
+    var inherited_occlusion = false;
+    if (c.impl.level == 1) {
+        const raw = bi.inheritance_info orelse return .error_initialization_failed;
+        const inheritance: *const CommandBufferInheritanceInfo = @ptrCast(@alignCast(raw));
+        if (inheritance.s_type != 41 or inheritance.p_next != null or inheritance.occlusion_query_enable > 1 or inheritance.occlusion_query_enable != 0 or inheritance.query_flags != 0 or inheritance.pipeline_statistics != 0) return .error_initialization_failed;
+        inherited_occlusion = inheritance.occlusion_query_enable != 0;
+        inherited_subpass = inheritance.subpass;
+        if (bi.flags & 2 != 0) {
+            inherited_render_pass = validRenderPassLocked(inheritance.render_pass) orelse return .error_initialization_failed;
+            if (!inherited_render_pass.?.owner.eql(c.impl.owner) or inherited_subpass >= inherited_render_pass.?.subpass_count) return .error_initialization_failed;
+            if (inheritance.framebuffer != 0) {
+                inherited_framebuffer = validFramebufferLocked(inheritance.framebuffer) orelse return .error_initialization_failed;
+                if (!inherited_framebuffer.?.render_compatibility.eql(&inherited_render_pass.?.compatibility)) return .error_initialization_failed;
+            }
+        }
+    }
+    if (c.impl.level == 1) invalidatePrimariesReferencing(c);
+    deinitRecordedCommands(c);
+    c.impl.state = 1;
+    c.impl.invalid = false;
+    c.impl.begin_flags = bi.flags;
+    c.impl.render_pass_continue = c.impl.level == 1 and bi.flags & 2 != 0;
+    c.impl.render_contents = 0;
+    c.impl.inherited_occlusion = inherited_occlusion;
+    c.impl.inherited_subpass = inherited_subpass;
+    c.impl.active_subpass = inherited_subpass;
+    c.impl.active_framebuffer = inherited_framebuffer;
+    c.impl.active_render_pass = inherited_render_pass;
+    c.impl.dynamic_rendering = false;
+    c.impl.dynamic_color_image = null;
+    c.impl.dynamic_depth_image = null;
+    c.impl.rendering_location_count = 0;
+    c.impl.rendering_input_count = 0;
+    c.impl.rendering_depth_input_index = null;
+    c.impl.rendering_stencil_input_index = null;
+    c.impl.device_mask = 1;
+    c.impl.active_query_pool = null;
+    c.impl.active_query_index = 0;
+    c.impl.bound_pipeline = null;
+    c.impl.bound_pipeline_handle = 0;
+    c.impl.bound_compute_pipeline = null;
+    c.impl.bound_compute_pipeline_handle = 0;
+    c.impl.bound_descriptors = null;
+    c.impl.bound_layout = null;
+    c.impl.bound_layout_handle = 0;
+    c.impl.dynamic_uniform_offset = 0;
+    c.impl.push_descriptor = .{};
+    c.impl.push_descriptor_active = false;
+    c.impl.dynamic = .{};
+    c.impl.vertex_bindings = .{};
+    c.impl.index_buffer = null;
+    c.impl.index_buffer_handle = 0;
+    c.impl.index_offset = 0;
+    c.impl.index_size = 0;
+    c.impl.index_type = 0;
+    c.impl.index_buffer_set = false;
+    c.impl.viewport_set = false;
+    c.impl.scissor_set = false;
+    c.impl.line_width = 1;
+    c.impl.line_width_set = false;
+    c.impl.line_stipple_factor = 1;
+    c.impl.line_stipple_pattern = 0xffff;
+    c.impl.blend_constants = .{ 0, 0, 0, 0 };
+    c.impl.blend_constants_set = false;
+    c.impl.depth_bias = .{ 0, 0, 0 };
+    c.impl.depth_bias_set = false;
+    c.impl.depth_bounds = .{ 0, 1 };
+    c.impl.depth_bounds_set = false;
+    c.impl.stencil_compare_mask = .{ 0, 0 };
+    c.impl.stencil_compare_mask_set = 0;
+    c.impl.stencil_write_mask = .{ 0, 0 };
+    c.impl.stencil_write_mask_set = 0;
+    c.impl.stencil_reference = .{ 0, 0 };
+    c.impl.stencil_reference_set = 0;
+    c.impl.push_constants = .{};
     return .success;
 }
 fn endCommandBuffer(cb: ?CommandBuffer) callconv(.c) Result {
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return .error_initialization_failed;
-    if (!validDeviceLocked(c.impl.owner) or c.impl.state != 1 or c.impl.invalid) return .error_initialization_failed;
+    if (!validDeviceLocked(c.impl.owner) or c.impl.state != 1 or c.impl.invalid or c.impl.active_query_pool != null or c.impl.dynamic_rendering or (c.impl.active_render_pass != null and !c.impl.render_pass_continue)) return .error_initialization_failed;
     c.impl.state = 2;
     return .success;
 }
@@ -1762,17 +3769,9 @@ fn resetCommandBuffer(cb: ?CommandBuffer, flags: u32) callconv(.c) Result {
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return .error_initialization_failed;
-    if (!validDeviceLocked(c.impl.owner) or flags & ~@as(u32, 1) != 0) return .error_initialization_failed;
-    c.impl.state = 0;
-    c.impl.invalid = false;
-    c.impl.count = 0;
-    c.impl.active_framebuffer = null;
-    c.impl.active_render_pass = null;
-    c.impl.bound_pipeline = null;
-    c.impl.bound_pipeline_handle = 0;
-    c.impl.bound_descriptors = null;
-    c.impl.bound_layout = null;
-    c.impl.bound_layout_handle = 0;
+    if (!validDeviceLocked(c.impl.owner) or c.impl.pool.flags & 2 == 0 or flags & ~@as(u32, 1) != 0) return .error_initialization_failed;
+    if (c.impl.level == 1) invalidatePrimariesReferencing(c);
+    resetCommandBufferState(c);
     return .success;
 }
 fn record(cb: CommandBuffer, command: Command) void {
@@ -1782,6 +3781,65 @@ fn record(cb: CommandBuffer, command: Command) void {
     }
     cb.impl.commands[cb.impl.count] = command;
     cb.impl.count += 1;
+}
+fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj) Command {
+    var result = command;
+    switch (result) {
+        .cube_draw => |*draw| if (draw.framebuffer == null) {
+            draw.framebuffer = framebuffer;
+        },
+        else => {},
+    }
+    return result;
+}
+fn cmdExecuteCommands(cb: ?CommandBuffer, count: u32, buffers: ?[*]const CommandBuffer) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const primary = validCommandBufferLocked(cb) orelse return;
+    if (count == 0 or count > max_api_items or buffers == null or primary.impl.level != 0 or primary.impl.state != 1 or primary.impl.invalid) {
+        primary.impl.invalid = true;
+        return;
+    }
+    const list = buffers.?[0..count];
+    var command_count: usize = 0;
+    for (list, 0..) |raw, index| {
+        const secondary = validCommandBufferLocked(raw) orelse {
+            primary.impl.invalid = true;
+            return;
+        };
+        if (secondary.impl.level != 1 or secondary.impl.owner != primary.impl.owner or secondary.impl.state != 2 or secondary.impl.primary_ref_count == std.math.maxInt(u16) or (secondary.impl.begin_flags & 4 == 0 and secondary.impl.primary_ref_count != 0)) {
+            primary.impl.invalid = true;
+            return;
+        }
+        if (secondary.impl.begin_flags & 4 == 0) for (list[0..index]) |prior| if (prior == raw) {
+            primary.impl.invalid = true;
+            return;
+        };
+        if (primary.impl.active_render_pass) |render_pass| {
+            if (primary.impl.render_contents != 1 or !secondary.impl.render_pass_continue or secondary.impl.active_render_pass == null or !secondary.impl.active_render_pass.?.compatibility.eql(&render_pass.compatibility) or secondary.impl.inherited_subpass != 0 or (secondary.impl.active_framebuffer != null and secondary.impl.active_framebuffer != primary.impl.active_framebuffer) or (primary.impl.active_query_pool != null and !secondary.impl.inherited_occlusion)) {
+                primary.impl.invalid = true;
+                return;
+            }
+        } else if (secondary.impl.render_pass_continue) {
+            primary.impl.invalid = true;
+            return;
+        }
+        command_count += secondary.impl.count;
+        if (command_count > primary.impl.commands.len - primary.impl.count) {
+            primary.impl.invalid = true;
+            return;
+        }
+    }
+    for (list) |raw| {
+        const secondary = raw;
+        for (secondary.impl.commands[0..secondary.impl.count]) |command| {
+            primary.impl.commands[primary.impl.count] = commandForSecondaryExecution(command, primary.impl.active_framebuffer);
+            primary.impl.count += 1;
+        }
+        primary.impl.secondaries[primary.impl.secondary_count] = secondary;
+        primary.impl.secondary_count += 1;
+        secondary.impl.primary_ref_count += 1;
+    }
 }
 fn cmdFillBuffer(cb: ?CommandBuffer, dst_handle: usize, offset: u64, size: u64, data: u32) callconv(.c) void {
     lock();
@@ -1794,11 +3852,39 @@ fn cmdFillBuffer(cb: ?CommandBuffer, dst_handle: usize, offset: u64, size: u64, 
     const actual = if (size == std.math.maxInt(u64)) dst.size -| offset else size;
     if (dst.usage & 0x2 == 0) hit(.missing_transfer_usage);
     if (actual == 0) hit(.zero_fill_rejected);
-    if (dst.owner != c.impl.owner or dst.usage & 0x2 == 0 or dst.memory == null or actual == 0 or offset % 4 != 0 or actual % 4 != 0 or offset > dst.size or actual > dst.size - offset) {
+    if (c.impl.active_render_pass != null or dst.owner != c.impl.owner or dst.usage & 0x2 == 0 or dst.memory == null or actual == 0 or offset % 4 != 0 or actual % 4 != 0 or offset > dst.size or actual > dst.size - offset) {
         c.impl.invalid = true;
         return;
     }
     record(c, .{ .fill = .{ .dst = dst, .offset = offset, .size = actual, .data = data } });
+}
+fn ownUpdateBytes(source: []const u8) error{OutOfMemory}![]u8 {
+    if (failTestAllocation()) return error.OutOfMemory;
+    return allocator.dupe(u8, source);
+}
+fn byteRangesOverlap(a_start: u64, a_size: u64, b_start: u64, b_size: u64) bool {
+    return a_start < b_start + b_size and b_start < a_start + a_size;
+}
+fn cmdUpdateBuffer(cb: ?CommandBuffer, dst_handle: usize, offset: u64, size: u64, data: ?*const anyopaque) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    const dst = validBufferLocked(dst_handle) orelse {
+        c.impl.invalid = true;
+        return;
+    };
+    if (c.impl.state != 1 or c.impl.active_render_pass != null or c.impl.count == c.impl.commands.len or dst.owner != c.impl.owner or dst.usage & 0x2 == 0 or dst.memory == null or size == 0 or size > 65_536 or size % 4 != 0 or offset % 4 != 0 or offset > dst.size or size > dst.size - offset or data == null) {
+        c.impl.invalid = true;
+        return;
+    }
+    const source: [*]const u8 = @ptrCast(data.?);
+    const owned = ownUpdateBytes(source[0..@intCast(size)]) catch {
+        c.impl.invalid = true;
+        return;
+    };
+    c.impl.owned_updates[c.impl.owned_update_count] = owned;
+    c.impl.owned_update_count += 1;
+    record(c, .{ .update_buffer = .{ .dst = dst, .offset = offset, .data = owned } });
 }
 fn cmdCopyBuffer(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize, count: u32, regions: ?[*]const BufferCopy) callconv(.c) void {
     lock();
@@ -1825,13 +3911,31 @@ fn cmdCopyBuffer(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize, count
         c.impl.invalid = true;
         return;
     };
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.count > c.impl.commands.len or count > c.impl.commands.len - c.impl.count) {
+        c.impl.invalid = true;
+        return;
+    }
     for (list[0..count]) |region| {
         if (src.owner != c.impl.owner or dst.owner != c.impl.owner or src.usage & 0x1 == 0 or dst.usage & 0x2 == 0 or src.memory == null or dst.memory == null or region.size == 0 or region.src_offset > src.size or region.size > src.size - region.src_offset or region.dst_offset > dst.size or region.size > dst.size - region.dst_offset) {
             c.impl.invalid = true;
             return;
         }
-        record(c, .{ .copy_buffer = .{ .src = src, .dst = dst, .region = region } });
     }
+    if (src.memory.? == dst.memory.?) {
+        for (list[0..count]) |source| for (list[0..count]) |destination| {
+            const source_start = src.offset + source.src_offset;
+            const destination_start = dst.offset + destination.dst_offset;
+            if (byteRangesOverlap(source_start, source.size, destination_start, destination.size)) {
+                c.impl.invalid = true;
+                return;
+            }
+        };
+    }
+    for (list[0..count], 0..) |a, i| for (list[i + 1 .. count]) |b| if (byteRangesOverlap(a.dst_offset, a.size, b.dst_offset, b.size)) {
+        c.impl.invalid = true;
+        return;
+    };
+    for (list[0..count]) |region| record(c, .{ .copy_buffer = .{ .src = src, .dst = dst, .region = region } });
 }
 fn colorBytes(image: *const ImageObj, value: *const ClearColorValue) ?[4]u8 {
     var rgba: [4]u8 = undefined;
@@ -1843,10 +3947,23 @@ fn colorBytes(image: *const ImageObj, value: *const ClearColorValue) ?[4]u8 {
     return rgba;
 }
 fn validLayers(l: ImageSubresourceLayers) bool {
-    return l.aspect_mask == 1 and l.mip_level == 0 and l.base_array_layer == 0 and l.layer_count == 1;
+    return l.aspect_mask == 1 and l.mip_level == 0 and l.layer_count == 1;
 }
 fn validRange(r: ImageSubresourceRange) bool {
-    return r.aspect_mask == 1 and r.base_mip_level == 0 and r.level_count == 1 and r.base_array_layer == 0 and r.layer_count == 1;
+    return r.aspect_mask == 1 and r.base_mip_level == 0 and r.level_count == 1 and r.layer_count != 0 and r.base_array_layer < max_image_array_layers and r.layer_count <= max_image_array_layers - r.base_array_layer;
+}
+fn validRangeForImage(image: *const ImageObj, r: ImageSubresourceRange) bool {
+    const aspect: u32 = if (image.format == 126) 2 else 1;
+    return r.aspect_mask == aspect and r.base_mip_level == 0 and r.level_count == 1 and r.layer_count != 0 and r.base_array_layer < image.array_layers and r.layer_count <= image.array_layers - r.base_array_layer;
+}
+fn validLayersForImage(image: *const ImageObj, layers: ImageSubresourceLayers) bool {
+    return validLayers(layers) and layers.base_array_layer < image.array_layers;
+}
+fn imageLayerOffset(image: *const ImageObj, layer: u32) ?usize {
+    if (layer >= image.array_layers) return null;
+    const stride = imageLayerByteSize(image) orelse return null;
+    const offset = std.math.mul(u64, stride, layer) catch return null;
+    return @intCast(offset);
 }
 fn cmdClearColorImage(cb: ?CommandBuffer, image_handle: usize, layout: i32, color: ?*const ClearColorValue, count: u32, ranges: ?[*]const ImageSubresourceRange) callconv(.c) void {
     lock();
@@ -1868,19 +3985,235 @@ fn cmdClearColorImage(cb: ?CommandBuffer, image_handle: usize, layout: i32, colo
         c.impl.invalid = true;
         return;
     };
-    if (image.owner != c.impl.owner or image.usage & 0x2 == 0 or image.memory == null or (layout != 1 and layout != 7) or count != 1 or !validRange(list[0])) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.count == c.impl.commands.len or image.owner != c.impl.owner or image.usage & 0x2 == 0 or image.memory == null or (layout != 1 and layout != 7)) {
         c.impl.invalid = true;
         return;
     }
+    for (list[0..count]) |range| if (!validRangeForImage(image, range)) {
+        c.impl.invalid = true;
+        return;
+    };
     const bytes = colorBytes(image, value) orelse {
         hit(.invalid_clear_color);
         c.impl.invalid = true;
         return;
     };
-    record(c, .{ .clear = .{ .image = image, .layout = layout, .color = bytes } });
+    var unique_count: usize = 0;
+    for (list[0..count], 0..) |range, index| {
+        var duplicate = false;
+        for (list[0..index]) |prior| if (std.meta.eql(prior, range)) {
+            duplicate = true;
+            break;
+        };
+        if (!duplicate) unique_count += 1;
+    }
+    if (@as(usize, c.impl.count) + unique_count > c.impl.commands.len) {
+        c.impl.invalid = true;
+        return;
+    }
+    for (list[0..count], 0..) |range, index| {
+        var duplicate = false;
+        for (list[0..index]) |prior| if (std.meta.eql(prior, range)) {
+            duplicate = true;
+            break;
+        };
+        if (duplicate) continue;
+        record(c, .{ .clear = .{ .image = image, .layout = layout, .color = bytes, .base_layer = range.base_array_layer, .layer_count = range.layer_count } });
+    }
+}
+fn cmdClearDepthStencilImage(cb: ?CommandBuffer, image_handle: usize, layout: i32, value: ?*const ClearDepthStencilValue, count: u32, ranges: ?[*]const ImageSubresourceRange) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    if (count == 0 or count > max_api_items or value == null or ranges == null) {
+        c.impl.invalid = true;
+        return;
+    }
+    const image = validImageLocked(image_handle) orelse {
+        c.impl.invalid = true;
+        return;
+    };
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.count == c.impl.commands.len or image.owner != c.impl.owner or image.format != 126 or image.usage & 0x2 == 0 or image.memory == null or (layout != 1 and layout != 7) or !std.math.isFinite(value.?.depth) or value.?.depth < 0 or value.?.depth > 1) {
+        c.impl.invalid = true;
+        return;
+    }
+    for (ranges.?[0..count]) |range| if (!validRangeForImage(image, range)) {
+        c.impl.invalid = true;
+        return;
+    };
+    var unique_count: usize = 0;
+    for (ranges.?[0..count], 0..) |range, index| {
+        var duplicate = false;
+        for (ranges.?[0..index]) |prior| if (std.meta.eql(prior, range)) {
+            duplicate = true;
+            break;
+        };
+        if (!duplicate) unique_count += 1;
+    }
+    if (@as(usize, c.impl.count) + unique_count > c.impl.commands.len) {
+        c.impl.invalid = true;
+        return;
+    }
+    for (ranges.?[0..count], 0..) |range, index| {
+        var duplicate = false;
+        for (ranges.?[0..index]) |prior| if (std.meta.eql(prior, range)) {
+            duplicate = true;
+            break;
+        };
+        if (duplicate) continue;
+        record(c, .{ .clear_depth = .{ .image = image, .layout = layout, .depth = value.?.depth, .base_layer = range.base_array_layer, .layer_count = range.layer_count } });
+    }
+}
+fn clearRectValid(rect: ClearRect, width: u32, height: u32) bool {
+    if (rect.base_array_layer != 0 or rect.layer_count != 1 or rect.rect.offset.x < 0 or rect.rect.offset.y < 0 or rect.rect.extent.width == 0 or rect.rect.extent.height == 0) return false;
+    const end_x = std.math.add(u64, @intCast(rect.rect.offset.x), rect.rect.extent.width) catch return false;
+    const end_y = std.math.add(u64, @intCast(rect.rect.offset.y), rect.rect.extent.height) catch return false;
+    return end_x <= width and end_y <= height;
+}
+fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?[*]const ClearAttachment, rect_count: u32, rects: ?[*]const ClearRect) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    const framebuffer = c.impl.active_framebuffer orelse {
+        c.impl.invalid = true;
+        return;
+    };
+    const color = framebuffer.color_image orelse {
+        c.impl.invalid = true;
+        return;
+    };
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass == null or c.impl.level != 0 or attachment_count == 0 or attachment_count > max_api_items or rect_count == 0 or rect_count > max_api_items or attachments == null or rects == null or @as(usize, c.impl.count) + @as(usize, attachment_count) * rect_count > c.impl.commands.len) {
+        c.impl.invalid = true;
+        return;
+    }
+    for (rects.?[0..rect_count]) |rect| if (!clearRectValid(rect, color.width, color.height)) {
+        c.impl.invalid = true;
+        return;
+    };
+    for (attachments.?[0..attachment_count]) |attachment| {
+        if (attachment.aspect_mask != 1 and attachment.aspect_mask != 2) {
+            c.impl.invalid = true;
+            return;
+        }
+        if (attachment.aspect_mask == 1) {
+            if (attachment.color_attachment != 0) {
+                c.impl.invalid = true;
+                return;
+            }
+            if (colorBytes(color, &attachment.clear_value.color) == null) {
+                c.impl.invalid = true;
+                return;
+            }
+        } else {
+            const depth = framebuffer.depth_image orelse {
+                c.impl.invalid = true;
+                return;
+            };
+            if (!std.math.isFinite(attachment.clear_value.depth_stencil.depth) or attachment.clear_value.depth_stencil.depth < 0 or attachment.clear_value.depth_stencil.depth > 1) {
+                c.impl.invalid = true;
+                return;
+            }
+            _ = depth;
+        }
+    }
+    for (attachments.?[0..attachment_count]) |attachment| for (rects.?[0..rect_count]) |rect| {
+        const image = if (attachment.aspect_mask == 1) color else framebuffer.depth_image.?;
+        const bytes = if (attachment.aspect_mask == 1) colorBytes(color, &attachment.clear_value.color).? else .{ 0, 0, 0, 0 };
+        record(c, .{ .clear_attachments = .{ .image = image, .depth = framebuffer.depth_image, .color = bytes, .depth_value = attachment.clear_value.depth_stencil.depth, .rect = rect.rect, .aspect_mask = attachment.aspect_mask } });
+    };
+}
+fn cmdNextSubpass(cb: ?CommandBuffer, contents: i32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    const render_pass = c.impl.active_render_pass orelse {
+        c.impl.invalid = true;
+        return;
+    };
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.level != 0 or (contents != 0 and contents != 1) or c.impl.active_subpass + 1 >= render_pass.subpass_count or c.impl.count == c.impl.commands.len) {
+        c.impl.invalid = true;
+        return;
+    }
+    c.impl.active_subpass += 1;
+    c.impl.bound_pipeline = null;
+    c.impl.bound_pipeline_handle = 0;
+    c.impl.bound_descriptors = null;
+    c.impl.bound_layout = null;
+    c.impl.bound_layout_handle = 0;
+    c.impl.render_contents = contents;
+    record(c, .{ .next_subpass = {} });
+}
+fn blitSpan(a: i32, b: i32, limit: u32) ?u32 {
+    if (a < 0 or b < 0 or @as(u64, @intCast(a)) > limit or @as(u64, @intCast(b)) > limit or a == b) return null;
+    return @intCast(if (a < b) b - a else a - b);
+}
+fn validBlitRegion(src: *const ImageObj, dst: *const ImageObj, region: ImageBlit) bool {
+    if (!validLayersForImage(src, region.src_subresource) or !validLayersForImage(dst, region.dst_subresource)) return false;
+    if (blitSpan(region.src_offsets[0].x, region.src_offsets[1].x, src.width) == null or blitSpan(region.src_offsets[0].y, region.src_offsets[1].y, src.height) == null or blitSpan(region.dst_offsets[0].x, region.dst_offsets[1].x, dst.width) == null or blitSpan(region.dst_offsets[0].y, region.dst_offsets[1].y, dst.height) == null) return false;
+    return region.src_offsets[0].z == 0 and region.src_offsets[1].z == 1 and region.dst_offsets[0].z == 0 and region.dst_offsets[1].z == 1;
+}
+fn cmdBlitImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_handle: usize, dst_layout: i32, count: u32, regions: ?[*]const ImageBlit, filter: i32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    if (count == 0) {
+        hit(.zero_count_noop);
+        return;
+    }
+    if (count > max_api_items or regions == null or filter < 0 or filter > 1) {
+        c.impl.invalid = true;
+        return;
+    }
+    const src = validImageLocked(src_handle) orelse {
+        c.impl.invalid = true;
+        return;
+    };
+    const dst = validImageLocked(dst_handle) orelse {
+        c.impl.invalid = true;
+        return;
+    };
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or @as(usize, c.impl.count) + count > c.impl.commands.len or src == dst or src.owner != c.impl.owner or dst.owner != c.impl.owner or src.format != dst.format or src.format != 44 or src.usage & 1 == 0 or dst.usage & 2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 1 and dst_layout != 7)) {
+        c.impl.invalid = true;
+        return;
+    }
+    for (regions.?[0..count]) |region| if (!validBlitRegion(src, dst, region)) {
+        c.impl.invalid = true;
+        return;
+    };
+    for (regions.?[0..count]) |region| record(c, .{ .blit_image = .{ .src = src, .src_layout = src_layout, .dst = dst, .dst_layout = dst_layout, .region = region, .filter = filter } });
+}
+fn cmdResolveImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_handle: usize, dst_layout: i32, count: u32, regions: ?[*]const ImageResolve) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    if (count == 0) {
+        hit(.zero_count_noop);
+        return;
+    }
+    if (count > max_api_items or regions == null) {
+        c.impl.invalid = true;
+        return;
+    }
+    const src = validImageLocked(src_handle) orelse {
+        c.impl.invalid = true;
+        return;
+    };
+    const dst = validImageLocked(dst_handle) orelse {
+        c.impl.invalid = true;
+        return;
+    };
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or @as(usize, c.impl.count) + count > c.impl.commands.len or src == dst or src.owner != c.impl.owner or dst.owner != c.impl.owner or src.format != dst.format or src.format != 44 or src.usage & 1 == 0 or dst.usage & 2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 7)) {
+        c.impl.invalid = true;
+        return;
+    }
+    for (regions.?[0..count]) |region| if (!validLayersForImage(src, region.src_subresource) or !validLayersForImage(dst, region.dst_subresource) or !validImageRegion(src, region.src_offset, region.extent, region.src_subresource) or !validImageRegion(dst, region.dst_offset, region.extent, region.dst_subresource)) {
+        c.impl.invalid = true;
+        return;
+    };
+    for (regions.?[0..count]) |region| record(c, .{ .resolve_image = .{ .src = src, .src_layout = src_layout, .dst = dst, .dst_layout = dst_layout, .region = region } });
 }
 fn validImageRegion(image: *const ImageObj, offset: Offset3D, extent: Extent3D, layers: ImageSubresourceLayers) bool {
-    if (!validLayers(layers) or offset.x < 0 or offset.y < 0 or offset.z != 0 or extent.width == 0 or extent.height == 0 or extent.depth != 1) return false;
+    if (!validLayersForImage(image, layers) or offset.x < 0 or offset.y < 0 or offset.z != 0 or extent.width == 0 or extent.height == 0 or extent.depth != 1) return false;
     const end_x = std.math.add(u64, @intCast(offset.x), extent.width) catch return false;
     const end_y = std.math.add(u64, @intCast(offset.y), extent.height) catch return false;
     return end_x <= image.width and end_y <= image.height;
@@ -1913,6 +4246,44 @@ fn bufferImageEnd(region: BufferImageCopy) ?u64 {
     const bytes = checkedBufferImageMul(texels, 4) orelse return null;
     return checkedBufferImageAdd(region.buffer_offset, bytes);
 }
+fn rowSequencesOverlap(a_base: u64, a_stride: u64, a_rows: u32, a_width: u64, b_base: u64, b_stride: u64, b_rows: u32, b_width: u64) bool {
+    var a_y: u32 = 0;
+    var b_y: u32 = 0;
+    while (a_y < a_rows and b_y < b_rows) {
+        const a_start = a_base + @as(u64, a_y) * a_stride;
+        const b_start = b_base + @as(u64, b_y) * b_stride;
+        if (byteRangesOverlap(a_start, a_width, b_start, b_width)) return true;
+        if (a_start + a_width <= b_start) a_y += 1 else b_y += 1;
+    }
+    return false;
+}
+fn bufferImageMemoryOverlap(buffer: *const BufferObj, buffer_region: BufferImageCopy, image: *const ImageObj, image_region: BufferImageCopy) bool {
+    const buffer_row = if (buffer_region.buffer_row_length == 0) buffer_region.image_extent.width else buffer_region.buffer_row_length;
+    const buffer_base = buffer.offset + buffer_region.buffer_offset;
+    const image_layer = imageLayerByteSize(image) orelse return true;
+    const image_base = image.offset + image_layer * image_region.image_subresource.base_array_layer + (@as(u64, @intCast(image_region.image_offset.y)) * image.width + @as(u64, @intCast(image_region.image_offset.x))) * 4;
+    return rowSequencesOverlap(buffer_base, @as(u64, buffer_row) * 4, buffer_region.image_extent.height, @as(u64, buffer_region.image_extent.width) * 4, image_base, @as(u64, image.width) * 4, image_region.image_extent.height, @as(u64, image_region.image_extent.width) * 4);
+}
+fn bufferRegionsOverlap(a: BufferImageCopy, b: BufferImageCopy) bool {
+    const a_row = if (a.buffer_row_length == 0) a.image_extent.width else a.buffer_row_length;
+    const b_row = if (b.buffer_row_length == 0) b.image_extent.width else b.buffer_row_length;
+    return rowSequencesOverlap(a.buffer_offset, @as(u64, a_row) * 4, a.image_extent.height, @as(u64, a.image_extent.width) * 4, b.buffer_offset, @as(u64, b_row) * 4, b.image_extent.height, @as(u64, b.image_extent.width) * 4);
+}
+fn imageRegionsOverlap(image: *const ImageObj, a_layers: ImageSubresourceLayers, a_offset: Offset3D, a_extent: Extent3D, b_layers: ImageSubresourceLayers, b_offset: Offset3D, b_extent: Extent3D) bool {
+    if (a_layers.base_array_layer != b_layers.base_array_layer) return false;
+    const layer = imageLayerByteSize(image) orelse return true;
+    const a_base = image.offset + layer * a_layers.base_array_layer + (@as(u64, @intCast(a_offset.y)) * image.width + @as(u64, @intCast(a_offset.x))) * 4;
+    const b_base = image.offset + layer * b_layers.base_array_layer + (@as(u64, @intCast(b_offset.y)) * image.width + @as(u64, @intCast(b_offset.x))) * 4;
+    return rowSequencesOverlap(a_base, @as(u64, image.width) * 4, a_extent.height, @as(u64, a_extent.width) * 4, b_base, @as(u64, image.width) * 4, b_extent.height, @as(u64, b_extent.width) * 4);
+}
+fn imageCopyMemoryOverlap(src: *const ImageObj, source: ImageCopy, dst: *const ImageObj, destination: ImageCopy) bool {
+    if (src == dst and source.src_subresource.base_array_layer != destination.dst_subresource.base_array_layer) return false;
+    const source_layer = imageLayerByteSize(src) orelse return true;
+    const destination_layer = imageLayerByteSize(dst) orelse return true;
+    const source_base = src.offset + source_layer * source.src_subresource.base_array_layer + (@as(u64, @intCast(source.src_offset.y)) * src.width + @as(u64, @intCast(source.src_offset.x))) * 4;
+    const destination_base = dst.offset + destination_layer * destination.dst_subresource.base_array_layer + (@as(u64, @intCast(destination.dst_offset.y)) * dst.width + @as(u64, @intCast(destination.dst_offset.x))) * 4;
+    return rowSequencesOverlap(source_base, @as(u64, src.width) * 4, source.extent.height, @as(u64, source.extent.width) * 4, destination_base, @as(u64, dst.width) * 4, destination.extent.height, @as(u64, destination.extent.width) * 4);
+}
 fn cmdCopyBufferToImage(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize, layout: i32, count: u32, regions: ?[*]const BufferImageCopy) callconv(.c) void {
     lock();
     defer mutex.unlock();
@@ -1938,14 +4309,26 @@ fn cmdCopyBufferToImage(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize
         c.impl.invalid = true;
         return;
     };
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.count > c.impl.commands.len or count > c.impl.commands.len - c.impl.count) {
+        c.impl.invalid = true;
+        return;
+    }
     for (list[0..count]) |region| {
         const end = bufferImageEnd(region);
         if (src.owner != c.impl.owner or dst.owner != c.impl.owner or src.usage & 0x1 == 0 or dst.usage & 0x2 == 0 or src.memory == null or dst.memory == null or (layout != 1 and layout != 7) or !validImageRegion(dst, region.image_offset, region.image_extent, region.image_subresource) or end == null or end.? > src.size) {
             c.impl.invalid = true;
             return;
         }
-        record(c, .{ .buffer_to_image = .{ .src = src, .dst = dst, .layout = layout, .region = region } });
     }
+    for (list[0..count], 0..) |a, i| for (list[i + 1 .. count]) |b| if (imageRegionsOverlap(dst, a.image_subresource, a.image_offset, a.image_extent, b.image_subresource, b.image_offset, b.image_extent)) {
+        c.impl.invalid = true;
+        return;
+    };
+    if (src.memory.? == dst.memory.?) for (list[0..count]) |buffer_region| for (list[0..count]) |image_region| if (bufferImageMemoryOverlap(src, buffer_region, dst, image_region)) {
+        c.impl.invalid = true;
+        return;
+    };
+    for (list[0..count]) |region| record(c, .{ .buffer_to_image = .{ .src = src, .dst = dst, .layout = layout, .region = region } });
 }
 fn cmdCopyImageToBuffer(cb: ?CommandBuffer, src_handle: usize, layout: i32, dst_handle: usize, count: u32, regions: ?[*]const BufferImageCopy) callconv(.c) void {
     lock();
@@ -1972,14 +4355,26 @@ fn cmdCopyImageToBuffer(cb: ?CommandBuffer, src_handle: usize, layout: i32, dst_
         c.impl.invalid = true;
         return;
     };
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.count > c.impl.commands.len or count > c.impl.commands.len - c.impl.count) {
+        c.impl.invalid = true;
+        return;
+    }
     for (list[0..count]) |region| {
         const end = bufferImageEnd(region);
         if (src.owner != c.impl.owner or dst.owner != c.impl.owner or src.usage & 0x1 == 0 or dst.usage & 0x2 == 0 or src.memory == null or dst.memory == null or (layout != 1 and layout != 6) or !validImageRegion(src, region.image_offset, region.image_extent, region.image_subresource) or end == null or end.? > dst.size) {
             c.impl.invalid = true;
             return;
         }
-        record(c, .{ .image_to_buffer = .{ .src = src, .layout = layout, .dst = dst, .region = region } });
     }
+    for (list[0..count], 0..) |a, i| for (list[i + 1 .. count]) |b| if (bufferRegionsOverlap(a, b)) {
+        c.impl.invalid = true;
+        return;
+    };
+    if (src.memory.? == dst.memory.?) for (list[0..count]) |image_region| for (list[0..count]) |buffer_region| if (bufferImageMemoryOverlap(dst, buffer_region, src, image_region)) {
+        c.impl.invalid = true;
+        return;
+    };
+    for (list[0..count]) |region| record(c, .{ .image_to_buffer = .{ .src = src, .layout = layout, .dst = dst, .region = region } });
 }
 fn cmdCopyImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_handle: usize, dst_layout: i32, count: u32, regions: ?[*]const ImageCopy) callconv(.c) void {
     lock();
@@ -2006,16 +4401,319 @@ fn cmdCopyImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_hand
         c.impl.invalid = true;
         return;
     };
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.count > c.impl.commands.len or count > c.impl.commands.len - c.impl.count) {
+        c.impl.invalid = true;
+        return;
+    }
     for (list[0..count]) |region| {
-        if (src.owner != c.impl.owner or dst.owner != c.impl.owner or src.usage & 0x1 == 0 or dst.usage & 0x2 == 0 or src.memory == null or dst.memory == null or src.format != dst.format or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 7) or !validImageRegion(src, region.src_offset, region.extent, region.src_subresource) or !validImageRegion(dst, region.dst_offset, region.extent, region.dst_subresource)) {
+        if (src.owner != c.impl.owner or dst.owner != c.impl.owner or src.usage & 0x1 == 0 or dst.usage & 0x2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 7) or (src == dst and (src_layout != 1 or dst_layout != 1)) or !validImageRegion(src, region.src_offset, region.extent, region.src_subresource) or !validImageRegion(dst, region.dst_offset, region.extent, region.dst_subresource)) {
             c.impl.invalid = true;
             return;
         }
-        record(c, .{ .copy_image = .{ .src = src, .src_layout = src_layout, .dst = dst, .dst_layout = dst_layout, .region = region } });
     }
+    for (list[0..count], 0..) |a, i| for (list[i + 1 .. count]) |b| if (imageRegionsOverlap(dst, a.dst_subresource, a.dst_offset, a.extent, b.dst_subresource, b.dst_offset, b.extent)) {
+        c.impl.invalid = true;
+        return;
+    };
+    if (src.memory.? == dst.memory.?) for (list[0..count]) |source| for (list[0..count]) |destination| if (imageCopyMemoryOverlap(src, source, dst, destination)) {
+        c.impl.invalid = true;
+        return;
+    };
+    for (list[0..count]) |region| record(c, .{ .copy_image = .{ .src = src, .src_layout = src_layout, .dst = dst, .dst_layout = dst_layout, .region = region } });
+}
+fn cmdCopyBuffer2(cb: ?CommandBuffer, info: ?*const CopyBufferInfo2) callconv(.c) void {
+    const ci = info orelse {
+        markCommandBufferInvalid(cb);
+        return;
+    };
+    if (ci.s_type != 1000337000 or ci.p_next != null or ci.region_count > max_api_items or (ci.region_count != 0 and ci.regions == null)) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    var regions: [max_api_items]BufferCopy = undefined;
+    if (ci.regions) |items| for (items[0..ci.region_count], 0..) |region, index| {
+        if (region.s_type != 1000337001 or region.p_next != null) {
+            markCommandBufferInvalid(cb);
+            return;
+        }
+        regions[index] = .{ .src_offset = region.src_offset, .dst_offset = region.dst_offset, .size = region.size };
+    };
+    cmdCopyBuffer(cb, ci.src_buffer, ci.dst_buffer, ci.region_count, if (ci.region_count == 0) null else &regions);
+}
+fn cmdCopyImage2(cb: ?CommandBuffer, info: ?*const CopyImageInfo2) callconv(.c) void {
+    const ci = info orelse {
+        markCommandBufferInvalid(cb);
+        return;
+    };
+    if (ci.s_type != 1000337002 or ci.p_next != null or ci.region_count > max_api_items or (ci.region_count != 0 and ci.regions == null)) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    var regions: [max_api_items]ImageCopy = undefined;
+    if (ci.regions) |items| for (items[0..ci.region_count], 0..) |region, index| {
+        if (region.s_type != 1000337003 or region.p_next != null) {
+            markCommandBufferInvalid(cb);
+            return;
+        }
+        regions[index] = .{ .src_subresource = region.src_subresource, .src_offset = region.src_offset, .dst_subresource = region.dst_subresource, .dst_offset = region.dst_offset, .extent = region.extent };
+    };
+    cmdCopyImage(cb, ci.src_image, ci.src_image_layout, ci.dst_image, ci.dst_image_layout, ci.region_count, if (ci.region_count == 0) null else &regions);
+}
+fn cmdBlitImage2(cb: ?CommandBuffer, info: ?*const BlitImageInfo2) callconv(.c) void {
+    const ci = info orelse {
+        markCommandBufferInvalid(cb);
+        return;
+    };
+    if (ci.s_type != 1000337004 or ci.p_next != null or ci.region_count > max_api_items or (ci.region_count != 0 and ci.regions == null)) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    var regions: [max_api_items]ImageBlit = undefined;
+    if (ci.regions) |items| for (items[0..ci.region_count], 0..) |region, index| {
+        if (region.s_type != 1000337005 or region.p_next != null) {
+            markCommandBufferInvalid(cb);
+            return;
+        }
+        regions[index] = .{ .src_subresource = region.src_subresource, .src_offsets = region.src_offsets, .dst_subresource = region.dst_subresource, .dst_offsets = region.dst_offsets };
+    };
+    cmdBlitImage(cb, ci.src_image, ci.src_image_layout, ci.dst_image, ci.dst_image_layout, ci.region_count, if (ci.region_count == 0) null else &regions, ci.filter);
+}
+fn cmdResolveImage2(cb: ?CommandBuffer, info: ?*const ResolveImageInfo2) callconv(.c) void {
+    const ci = info orelse {
+        markCommandBufferInvalid(cb);
+        return;
+    };
+    if (ci.s_type != 1000337009 or ci.p_next != null or ci.region_count > max_api_items or (ci.region_count != 0 and ci.regions == null)) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    var regions: [max_api_items]ImageResolve = undefined;
+    if (ci.regions) |items| for (items[0..ci.region_count], 0..) |region, index| {
+        if (region.s_type != 1000337010 or region.p_next != null) {
+            markCommandBufferInvalid(cb);
+            return;
+        }
+        regions[index] = .{ .src_subresource = region.src_subresource, .src_offset = region.src_offset, .dst_subresource = region.dst_subresource, .dst_offset = region.dst_offset, .extent = region.extent };
+    };
+    cmdResolveImage(cb, ci.src_image, ci.src_image_layout, ci.dst_image, ci.dst_image_layout, ci.region_count, if (ci.region_count == 0) null else &regions);
+}
+fn cmdCopyBufferToImage2(cb: ?CommandBuffer, info: ?*const CopyBufferToImageInfo2) callconv(.c) void {
+    const ci = info orelse {
+        markCommandBufferInvalid(cb);
+        return;
+    };
+    if (ci.s_type != 1000337006 or ci.p_next != null or ci.region_count > max_api_items or (ci.region_count != 0 and ci.regions == null)) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    var regions: [max_api_items]BufferImageCopy = undefined;
+    if (ci.regions) |items| for (items[0..ci.region_count], 0..) |region, index| {
+        if (region.s_type != 1000337007 or region.p_next != null) {
+            markCommandBufferInvalid(cb);
+            return;
+        }
+        regions[index] = .{ .buffer_offset = region.buffer_offset, .buffer_row_length = region.buffer_row_length, .buffer_image_height = region.buffer_image_height, .image_subresource = region.image_subresource, .image_offset = region.image_offset, .image_extent = region.image_extent };
+    };
+    cmdCopyBufferToImage(cb, ci.src_buffer, ci.dst_image, ci.dst_image_layout, ci.region_count, if (ci.region_count == 0) null else &regions);
+}
+fn cmdCopyImageToBuffer2(cb: ?CommandBuffer, info: ?*const CopyImageToBufferInfo2) callconv(.c) void {
+    const ci = info orelse {
+        markCommandBufferInvalid(cb);
+        return;
+    };
+    if (ci.s_type != 1000337008 or ci.p_next != null or ci.region_count > max_api_items or (ci.region_count != 0 and ci.regions == null)) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    var regions: [max_api_items]BufferImageCopy = undefined;
+    if (ci.regions) |items| for (items[0..ci.region_count], 0..) |region, index| {
+        if (region.s_type != 1000337007 or region.p_next != null) {
+            markCommandBufferInvalid(cb);
+            return;
+        }
+        regions[index] = .{ .buffer_offset = region.buffer_offset, .buffer_row_length = region.buffer_row_length, .buffer_image_height = region.buffer_image_height, .image_subresource = region.image_subresource, .image_offset = region.image_offset, .image_extent = region.image_extent };
+    };
+    cmdCopyImageToBuffer(cb, ci.src_image, ci.src_image_layout, ci.dst_buffer, ci.region_count, if (ci.region_count == 0) null else &regions);
 }
 fn supportedLayout(layout: i32) bool {
     return layout == 0 or layout == 8 or layout == 1 or layout == 2 or layout == 3 or layout == 5 or layout == 6 or layout == 7 or layout == 1_000_001_002;
+}
+fn dependencyInfoShapeValid(info: ?*const DependencyInfo) bool {
+    const ci = info orelse return false;
+    if (ci.s_type != 1000314003 or ci.p_next != null or ci.dependency_flags & ~@as(u32, 1) != 0 or ci.memory_barrier_count > max_api_items or ci.buffer_memory_barrier_count > max_api_items or ci.image_memory_barrier_count > max_api_items) return false;
+    if ((ci.memory_barrier_count != 0 and ci.memory_barriers == null) or (ci.buffer_memory_barrier_count != 0 and ci.buffer_memory_barriers == null) or (ci.image_memory_barrier_count != 0 and ci.image_memory_barriers == null)) return false;
+    if (ci.memory_barriers) |items| for (items[0..ci.memory_barrier_count]) |barrier| if (barrier.s_type != 1000314000 or barrier.p_next != null) return false;
+    if (ci.buffer_memory_barriers) |items| for (items[0..ci.buffer_memory_barrier_count]) |barrier| if (barrier.s_type != 1000314001 or barrier.p_next != null) return false;
+    if (ci.image_memory_barriers) |items| for (items[0..ci.image_memory_barrier_count]) |barrier| if (barrier.s_type != 1000314002 or barrier.p_next != null) return false;
+    return true;
+}
+
+// Synchronization2 promotes several stage/access bits into the 64-bit ABI.
+// ZPU's execution core intentionally retains the compact Vulkan 1.0 masks,
+// so normalize only aliases whose semantics are represented exactly by that
+// core.  Unknown high bits remain rejected before command-buffer mutation.
+fn sync2StageMaskToLegacy(mask: u64) ?u32 {
+    const high_transfer = @as(u64, 0x1000_0000_0) | @as(u64, 0x2000_0000_0) | @as(u64, 0x4000_0000_0) | @as(u64, 0x8000_0000_0);
+    const high_vertex_input = @as(u64, 0x1000_0000_00) | @as(u64, 0x2000_0000_00);
+    const high_vertex_shader = @as(u64, 0x4000_0000_00);
+    const supported = @as(u64, 0x1_ffff) | high_transfer | high_vertex_input | high_vertex_shader;
+    if (mask & ~supported != 0) return null;
+    var legacy: u32 = @truncate(mask & 0x1_ffff);
+    if (mask & high_transfer != 0) legacy |= 0x1000; // COPY/RESOLVE/BLIT/CLEAR -> TRANSFER
+    if (mask & high_vertex_input != 0) legacy |= 0x4; // INDEX/VERTEX_ATTRIBUTE_INPUT -> VERTEX_INPUT
+    if (mask & high_vertex_shader != 0) legacy |= 0x8; // PRE_RASTERIZATION_SHADERS -> VERTEX_SHADER
+    if (!validEventStageMask(legacy)) return null;
+    return legacy;
+}
+
+fn sync2AccessMaskToLegacy(mask: u64) ?u32 {
+    const high_sampled = @as(u64, 0x1_0000_0000);
+    const high_storage_read = @as(u64, 0x2_0000_0000);
+    const high_storage_write = @as(u64, 0x4_0000_0000);
+    const supported = @as(u64, 0x1_ffff) | high_sampled | high_storage_read | high_storage_write;
+    if (mask & ~supported != 0) return null;
+    var legacy: u32 = @truncate(mask & 0x1_ffff);
+    if (mask & (high_sampled | high_storage_read) != 0) legacy |= 0x20; // SHADER_READ
+    if (mask & high_storage_write != 0) legacy |= 0x40; // SHADER_WRITE
+    return legacy;
+}
+
+fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callconv(.c) void {
+    if (!dependencyInfoShapeValid(info)) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    const ci = info.?;
+    if (ci.memory_barrier_count + ci.buffer_memory_barrier_count + ci.image_memory_barrier_count == 0) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    var src_stage: u32 = 0x1_0000;
+    var dst_stage: u32 = 0x1_0000;
+    var have_stage = false;
+    var memories: [max_api_items]MemoryBarrier = undefined;
+    if (ci.memory_barriers) |items| for (items[0..ci.memory_barrier_count], 0..) |barrier, index| {
+        const converted_src_stage = sync2StageMaskToLegacy(barrier.src_stage_mask) orelse {
+            markCommandBufferInvalid(cb);
+            return;
+        };
+        const converted_dst_stage = sync2StageMaskToLegacy(barrier.dst_stage_mask) orelse {
+            markCommandBufferInvalid(cb);
+            return;
+        };
+        const converted_src_access = sync2AccessMaskToLegacy(barrier.src_access_mask) orelse {
+            markCommandBufferInvalid(cb);
+            return;
+        };
+        const converted_dst_access = sync2AccessMaskToLegacy(barrier.dst_access_mask) orelse {
+            markCommandBufferInvalid(cb);
+            return;
+        };
+        if (!have_stage) {
+            src_stage = converted_src_stage;
+            dst_stage = converted_dst_stage;
+            have_stage = true;
+        } else if (src_stage != converted_src_stage or dst_stage != converted_dst_stage) {
+            markCommandBufferInvalid(cb);
+            return;
+        }
+        memories[index] = .{ .s_type = 46, .p_next = null, .src_access_mask = converted_src_access, .dst_access_mask = converted_dst_access };
+    };
+    var buffers: [max_api_items]BufferMemoryBarrier = undefined;
+    if (ci.buffer_memory_barriers) |items| for (items[0..ci.buffer_memory_barrier_count], 0..) |barrier, index| {
+        const converted_src_stage = sync2StageMaskToLegacy(barrier.src_stage_mask) orelse {
+            markCommandBufferInvalid(cb);
+            return;
+        };
+        const converted_dst_stage = sync2StageMaskToLegacy(barrier.dst_stage_mask) orelse {
+            markCommandBufferInvalid(cb);
+            return;
+        };
+        const converted_src_access = sync2AccessMaskToLegacy(barrier.src_access_mask) orelse {
+            markCommandBufferInvalid(cb);
+            return;
+        };
+        const converted_dst_access = sync2AccessMaskToLegacy(barrier.dst_access_mask) orelse {
+            markCommandBufferInvalid(cb);
+            return;
+        };
+        if (!have_stage) {
+            src_stage = converted_src_stage;
+            dst_stage = converted_dst_stage;
+            have_stage = true;
+        } else if (src_stage != converted_src_stage or dst_stage != converted_dst_stage) {
+            markCommandBufferInvalid(cb);
+            return;
+        }
+        buffers[index] = .{ .s_type = 44, .p_next = null, .src_access_mask = converted_src_access, .dst_access_mask = converted_dst_access, .src_queue_family_index = barrier.src_queue_family_index, .dst_queue_family_index = barrier.dst_queue_family_index, .buffer = barrier.buffer, .offset = barrier.offset, .size = barrier.size };
+    };
+    var images: [max_api_items]ImageMemoryBarrier = undefined;
+    if (ci.image_memory_barriers) |items| for (items[0..ci.image_memory_barrier_count], 0..) |barrier, index| {
+        const converted_src_stage = sync2StageMaskToLegacy(barrier.src_stage_mask) orelse {
+            markCommandBufferInvalid(cb);
+            return;
+        };
+        const converted_dst_stage = sync2StageMaskToLegacy(barrier.dst_stage_mask) orelse {
+            markCommandBufferInvalid(cb);
+            return;
+        };
+        const converted_src_access = sync2AccessMaskToLegacy(barrier.src_access_mask) orelse {
+            markCommandBufferInvalid(cb);
+            return;
+        };
+        const converted_dst_access = sync2AccessMaskToLegacy(barrier.dst_access_mask) orelse {
+            markCommandBufferInvalid(cb);
+            return;
+        };
+        if (!have_stage) {
+            src_stage = converted_src_stage;
+            dst_stage = converted_dst_stage;
+            have_stage = true;
+        } else if (src_stage != converted_src_stage or dst_stage != converted_dst_stage) {
+            markCommandBufferInvalid(cb);
+            return;
+        }
+        images[index] = .{ .s_type = 45, .p_next = null, .src_access_mask = converted_src_access, .dst_access_mask = converted_dst_access, .old_layout = barrier.old_layout, .new_layout = barrier.new_layout, .src_queue_family_index = barrier.src_queue_family_index, .dst_queue_family_index = barrier.dst_queue_family_index, .image = barrier.image, .subresource_range = barrier.subresource_range };
+    };
+    cmdPipelineBarrier(cb, src_stage, dst_stage, ci.dependency_flags, ci.memory_barrier_count, if (ci.memory_barrier_count == 0) null else @ptrCast(&memories), ci.buffer_memory_barrier_count, if (ci.buffer_memory_barrier_count == 0) null else @ptrCast(&buffers), ci.image_memory_barrier_count, if (ci.image_memory_barrier_count == 0) null else @ptrCast(&images));
+}
+fn cmdSetEvent2(cb: ?CommandBuffer, event: usize, info: ?*const DependencyInfo) callconv(.c) void {
+    if (!dependencyInfoShapeValid(info)) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    // The serial backend has no separate cache domain, but image and buffer
+    // dependencies still need to enter the recorded command stream so layout
+    // tracking and stale-resource validation observe the event dependency.
+    cmdPipelineBarrier2(cb, info);
+    cmdSetEvent(cb, event, 0x1_0000);
+}
+fn cmdResetEvent2(cb: ?CommandBuffer, event: usize, info: ?*const DependencyInfo) callconv(.c) void {
+    if (!dependencyInfoShapeValid(info)) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    cmdPipelineBarrier2(cb, info);
+    cmdResetEvent(cb, event, 0x1_0000);
+}
+fn cmdWaitEvents2(cb: ?CommandBuffer, event_count: u32, events: ?[*]const usize, infos: ?[*]const DependencyInfo) callconv(.c) void {
+    if (event_count == 0 or event_count > max_api_items or events == null or infos == null) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    for (infos.?[0..event_count]) |info| if (!dependencyInfoShapeValid(&info)) {
+        markCommandBufferInvalid(cb);
+        return;
+    };
+    cmdWaitEvents(cb, event_count, events, 0x1_0000, 0x1_0000, 0, null, 0, null, 0, null);
+    for (infos.?[0..event_count]) |*info| cmdPipelineBarrier2(cb, info);
+}
+fn cmdWriteTimestamp2(cb: ?CommandBuffer, stage: u64, pool: usize, index: u32) callconv(.c) void {
+    const legacy_stage = sync2StageMaskToLegacy(stage) orelse {
+        markCommandBufferInvalid(cb);
+        return;
+    };
+    cmdWriteTimestamp(cb, legacy_stage, pool, index);
 }
 fn barrierMasksSupported(barrier: ImageMemoryBarrier, src_stage_mask: u32, dst_stage_mask: u32) bool {
     if (barrier.old_layout == 8 and barrier.new_layout == 5 and src_stage_mask == 0x1 and dst_stage_mask == 0x80 and barrier.src_access_mask == 0 and barrier.dst_access_mask == 0x30) return true;
@@ -2046,20 +4744,48 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
-    _ = memory_barriers;
-    _ = buffer_barriers;
-    if (dependency_flags != 0 or memory_barrier_count != 0 or buffer_barrier_count != 0 or image_barrier_count > max_api_items) {
+    const stages_valid = src_stage_mask != 0 and dst_stage_mask != 0 and src_stage_mask & ~@as(u32, 0x1_ffff) == 0 and dst_stage_mask & ~@as(u32, 0x1_ffff) == 0 and src_stage_mask & 0x800 == 0 and dst_stage_mask & 0x800 == 0;
+    if (c.impl.state != 1 or c.impl.invalid or dependency_flags & ~@as(u32, 1) != 0 or !stages_valid or memory_barrier_count > max_api_items or buffer_barrier_count > max_api_items or image_barrier_count > max_api_items or @as(usize, c.impl.count) + buffer_barrier_count + image_barrier_count > c.impl.commands.len) {
         hit(.invalid_barrier);
         c.impl.invalid = true;
         return;
     }
-    if (image_barrier_count == 0) return;
-    const list = image_barriers orelse {
+    const memory_list: []const MemoryBarrier = if (memory_barriers) |raw| @as([*]const MemoryBarrier, @ptrCast(@alignCast(raw)))[0..memory_barrier_count] else if (memory_barrier_count == 0) &.{} else {
         hit(.invalid_barrier);
         c.impl.invalid = true;
         return;
     };
-    for (list[0..image_barrier_count]) |barrier| {
+    for (memory_list) |barrier| if (barrier.s_type != 46 or barrier.p_next != null or !stagesSupportAccess(src_stage_mask, barrier.src_access_mask) or !stagesSupportAccess(dst_stage_mask, barrier.dst_access_mask)) {
+        hit(.invalid_barrier);
+        c.impl.invalid = true;
+        return;
+    };
+    const buffer_list: []const BufferMemoryBarrier = if (buffer_barriers) |raw| @as([*]const BufferMemoryBarrier, @ptrCast(@alignCast(raw)))[0..buffer_barrier_count] else if (buffer_barrier_count == 0) &.{} else {
+        hit(.invalid_barrier);
+        c.impl.invalid = true;
+        return;
+    };
+    for (buffer_list) |barrier| {
+        const buffer = validBufferLocked(barrier.buffer) orelse {
+            hit(.invalid_barrier);
+            c.impl.invalid = true;
+            return;
+        };
+        const ignored = std.math.maxInt(u32);
+        const queues_valid = (barrier.src_queue_family_index == ignored and barrier.dst_queue_family_index == ignored) or (barrier.src_queue_family_index == 0 and barrier.dst_queue_family_index == 0);
+        const size = if (barrier.size == std.math.maxInt(u64)) buffer.size -| barrier.offset else barrier.size;
+        if (barrier.s_type != 44 or barrier.p_next != null or !stagesSupportAccess(src_stage_mask, barrier.src_access_mask) or !stagesSupportAccess(dst_stage_mask, barrier.dst_access_mask) or !queues_valid or buffer.owner != c.impl.owner or barrier.offset > buffer.size or size == 0 or size > buffer.size - barrier.offset) {
+            hit(.invalid_barrier);
+            c.impl.invalid = true;
+            return;
+        }
+    }
+    const image_list = if (image_barriers) |items| items[0..image_barrier_count] else if (image_barrier_count == 0) &.{} else {
+        hit(.invalid_barrier);
+        c.impl.invalid = true;
+        return;
+    };
+    for (image_list) |barrier| {
         const image = validImageLocked(barrier.image) orelse {
             hit(.invalid_barrier);
             c.impl.invalid = true;
@@ -2067,13 +4793,224 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
         };
         const ignored: u32 = std.math.maxInt(u32);
         const queues_valid = (barrier.src_queue_family_index == ignored and barrier.dst_queue_family_index == ignored) or (barrier.src_queue_family_index == 0 and barrier.dst_queue_family_index == 0);
-        if (barrier.s_type != 45 or barrier.p_next != null or !supportedLayout(barrier.old_layout) or !barrierMasksSupported(barrier, src_stage_mask, dst_stage_mask) or !queues_valid or image.owner != c.impl.owner or !validRange(barrier.subresource_range)) {
+        if (barrier.s_type != 45 or barrier.p_next != null or !supportedLayout(barrier.old_layout) or !supportedLayout(barrier.new_layout) or !stagesSupportAccess(src_stage_mask, barrier.src_access_mask) or !stagesSupportAccess(dst_stage_mask, barrier.dst_access_mask) or !queues_valid or image.owner != c.impl.owner or !validRangeForImage(image, barrier.subresource_range)) {
             hit(.invalid_barrier);
             c.impl.invalid = true;
             return;
         }
-        record(c, .{ .transition = .{ .image = image, .old_layout = barrier.old_layout, .new_layout = barrier.new_layout } });
     }
+    for (buffer_list) |barrier| record(c, .{ .buffer_barrier = validBufferLocked(barrier.buffer).? });
+    for (image_list) |barrier| record(c, .{ .transition = .{ .image = validImageLocked(barrier.image).?, .old_layout = barrier.old_layout, .new_layout = barrier.new_layout } });
+}
+fn validEventStageMask(stage_mask: u32) bool {
+    // The only queue family advertises graphics and transfer, not compute.
+    return stage_mask != 0 and stage_mask & ~@as(u32, 0x1_b7ff) == 0;
+}
+fn stagesSupportAccess(stage_mask: u32, access_mask: u32) bool {
+    if (access_mask & ~@as(u32, 0x1_ffff) != 0) return false;
+    if (access_mask == 0 or stage_mask & 0x1_0000 != 0) return true; // ALL_COMMANDS
+    var stages = stage_mask;
+    if (stages & 0x8000 != 0) stages |= 0x7fe; // ALL_GRAPHICS
+    const shader_stages = @as(u32, 0x8 | 0x10 | 0x20 | 0x40 | 0x80 | 0x800);
+    const checks = [_]struct { access: u32, stages: u32 }{
+        .{ .access = 0x1, .stages = 0x2 },
+        .{ .access = 0x2 | 0x4, .stages = 0x4 },
+        .{ .access = 0x8 | 0x20 | 0x40, .stages = shader_stages },
+        .{ .access = 0x10, .stages = 0x80 },
+        .{ .access = 0x80 | 0x100, .stages = 0x400 },
+        .{ .access = 0x200 | 0x400, .stages = 0x100 | 0x200 },
+        .{ .access = 0x800 | 0x1000, .stages = 0x1000 },
+        .{ .access = 0x2000 | 0x4000, .stages = 0x4000 },
+    };
+    for (checks) |check| if (access_mask & check.access != 0 and stages & check.stages == 0) return false;
+    return true;
+}
+fn cmdSetEvent(cb: ?CommandBuffer, handle: usize, stage_mask: u32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    const event = validEventLocked(handle) orelse {
+        c.impl.invalid = true;
+        return;
+    };
+    if (event.owner != c.impl.owner or !validEventStageMask(stage_mask)) {
+        c.impl.invalid = true;
+        return;
+    }
+    record(c, .{ .event_set = event });
+}
+fn cmdResetEvent(cb: ?CommandBuffer, handle: usize, stage_mask: u32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    const event = validEventLocked(handle) orelse {
+        c.impl.invalid = true;
+        return;
+    };
+    if (event.owner != c.impl.owner or !validEventStageMask(stage_mask)) {
+        c.impl.invalid = true;
+        return;
+    }
+    record(c, .{ .event_reset = event });
+}
+fn cmdWaitEvents(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const usize, src_stage_mask: u32, dst_stage_mask: u32, memory_barrier_count: u32, memory_barriers: ?*const anyopaque, buffer_barrier_count: u32, buffer_barriers: ?*const anyopaque, image_barrier_count: u32, image_barriers: ?[*]const ImageMemoryBarrier) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    if (event_count == 0 or event_count > max_api_items or handles == null or !validEventStageMask(src_stage_mask) or !validEventStageMask(dst_stage_mask) or memory_barrier_count > max_api_items or buffer_barrier_count > max_api_items or image_barrier_count > max_api_items or @as(usize, c.impl.count) + event_count + buffer_barrier_count + image_barrier_count > c.impl.commands.len) {
+        c.impl.invalid = true;
+        return;
+    }
+    const events = handles.?[0..event_count];
+    for (events) |handle| {
+        const event = validEventLocked(handle) orelse {
+            c.impl.invalid = true;
+            return;
+        };
+        if (event.owner != c.impl.owner) {
+            c.impl.invalid = true;
+            return;
+        }
+    }
+    const memory_list: []const MemoryBarrier = if (memory_barriers) |raw| @as([*]const MemoryBarrier, @ptrCast(@alignCast(raw)))[0..memory_barrier_count] else if (memory_barrier_count == 0) &.{} else {
+        c.impl.invalid = true;
+        return;
+    };
+    for (memory_list) |barrier| if (barrier.s_type != 46 or barrier.p_next != null or !stagesSupportAccess(src_stage_mask, barrier.src_access_mask) or !stagesSupportAccess(dst_stage_mask, barrier.dst_access_mask)) {
+        c.impl.invalid = true;
+        return;
+    };
+    const buffer_list: []const BufferMemoryBarrier = if (buffer_barriers) |raw| @as([*]const BufferMemoryBarrier, @ptrCast(@alignCast(raw)))[0..buffer_barrier_count] else if (buffer_barrier_count == 0) &.{} else {
+        c.impl.invalid = true;
+        return;
+    };
+    for (buffer_list) |barrier| {
+        const buffer = validBufferLocked(barrier.buffer) orelse {
+            c.impl.invalid = true;
+            return;
+        };
+        const ignored = std.math.maxInt(u32);
+        const queues_valid = (barrier.src_queue_family_index == ignored and barrier.dst_queue_family_index == ignored) or (barrier.src_queue_family_index == 0 and barrier.dst_queue_family_index == 0);
+        const size = if (barrier.size == std.math.maxInt(u64)) buffer.size -| barrier.offset else barrier.size;
+        if (barrier.s_type != 44 or barrier.p_next != null or !stagesSupportAccess(src_stage_mask, barrier.src_access_mask) or !stagesSupportAccess(dst_stage_mask, barrier.dst_access_mask) or !queues_valid or buffer.owner != c.impl.owner or barrier.offset > buffer.size or size == 0 or size > buffer.size - barrier.offset) {
+            c.impl.invalid = true;
+            return;
+        }
+    }
+    const barriers = if (image_barriers) |items| items[0..image_barrier_count] else if (image_barrier_count == 0) &.{} else {
+        c.impl.invalid = true;
+        return;
+    };
+    for (barriers) |barrier| {
+        const image = validImageLocked(barrier.image) orelse {
+            c.impl.invalid = true;
+            return;
+        };
+        const ignored: u32 = std.math.maxInt(u32);
+        const queues_valid = (barrier.src_queue_family_index == ignored and barrier.dst_queue_family_index == ignored) or (barrier.src_queue_family_index == 0 and barrier.dst_queue_family_index == 0);
+        if (barrier.s_type != 45 or barrier.p_next != null or !supportedLayout(barrier.old_layout) or !supportedLayout(barrier.new_layout) or !stagesSupportAccess(src_stage_mask, barrier.src_access_mask) or !stagesSupportAccess(dst_stage_mask, barrier.dst_access_mask) or !queues_valid or image.owner != c.impl.owner or !validRangeForImage(image, barrier.subresource_range)) {
+            c.impl.invalid = true;
+            return;
+        }
+    }
+    for (events) |handle| record(c, .{ .event_wait = validEventLocked(handle).? });
+    for (buffer_list) |barrier| record(c, .{ .buffer_barrier = validBufferLocked(barrier.buffer).? });
+    for (barriers) |barrier| record(c, .{ .transition = .{ .image = validImageLocked(barrier.image).?, .old_layout = barrier.old_layout, .new_layout = barrier.new_layout } });
+}
+fn validQueryRange(pool: *const QueryPoolObj, first: u32, count: u32) bool {
+    return count != 0 and first <= pool.slots.len and count <= pool.slots.len - first;
+}
+fn cmdResetQueryPool(cb: ?CommandBuffer, handle: usize, first: u32, count: u32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    const pool = validQueryPoolLocked(handle) orelse {
+        c.impl.invalid = true;
+        return;
+    };
+    const overlaps_active = c.impl.active_query_pool == pool and first <= c.impl.active_query_index and c.impl.active_query_index - first < count;
+    if (!pool.owner.eql(c.impl.owner) or !validQueryRange(pool, first, count) or overlaps_active) {
+        c.impl.invalid = true;
+        return;
+    }
+    record(c, .{ .query_reset = .{ .pool = pool, .first = first, .count = count } });
+}
+fn resetQueryPool(device: ?Device, handle: usize, first: u32, count: u32) callconv(.c) void {
+    const d = device orelse return;
+    lock();
+    defer mutex.unlock();
+    const pool = validQueryPoolLocked(handle) orelse return;
+    if (!validDeviceLocked(d) or !pool.owner.eql(d) or !validQueryRange(pool, first, count)) return;
+    for (pool.slots[first .. first + count]) |*slot| {
+        slot.value.store(0, .monotonic);
+        slot.state.store(0, .release);
+    }
+}
+fn cmdBeginQuery(cb: ?CommandBuffer, handle: usize, index: u32, flags: u32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    const pool = validQueryPoolLocked(handle) orelse {
+        c.impl.invalid = true;
+        return;
+    };
+    if (!pool.owner.eql(c.impl.owner) or pool.query_type != 0 or index >= pool.slots.len or flags != 0 or c.impl.active_query_pool != null) {
+        c.impl.invalid = true;
+        return;
+    }
+    record(c, .{ .query_begin = .{ .pool = pool, .index = index } });
+    c.impl.active_query_pool = pool;
+    c.impl.active_query_index = index;
+}
+fn cmdEndQuery(cb: ?CommandBuffer, handle: usize, index: u32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    const pool = validQueryPoolLocked(handle) orelse {
+        c.impl.invalid = true;
+        return;
+    };
+    if (!pool.owner.eql(c.impl.owner) or c.impl.active_query_pool != pool or c.impl.active_query_index != index) {
+        c.impl.invalid = true;
+        return;
+    }
+    record(c, .{ .query_end = .{ .pool = pool, .index = index } });
+    c.impl.active_query_pool = null;
+}
+fn cmdWriteTimestamp(cb: ?CommandBuffer, stage: u32, handle: usize, index: u32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    const pool = validQueryPoolLocked(handle) orelse {
+        c.impl.invalid = true;
+        return;
+    };
+    if (!pool.owner.eql(c.impl.owner) or pool.query_type != 2 or index >= pool.slots.len or !validEventStageMask(stage) or !std.math.isPowerOfTwo(stage)) {
+        c.impl.invalid = true;
+        return;
+    }
+    record(c, .{ .query_timestamp = .{ .pool = pool, .index = index } });
+}
+fn cmdCopyQueryPoolResults(cb: ?CommandBuffer, pool_handle: usize, first: u32, count: u32, destination_handle: usize, offset: u64, stride: u64, flags: u32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    const pool = validQueryPoolLocked(pool_handle) orelse {
+        c.impl.invalid = true;
+        return;
+    };
+    const destination = validBufferLocked(destination_handle) orelse {
+        c.impl.invalid = true;
+        return;
+    };
+    const element_size = queryResultElementSize(flags);
+    const required = std.math.add(u64, std.math.mul(u64, count -| 1, stride) catch std.math.maxInt(u64), element_size) catch std.math.maxInt(u64);
+    const alignment: u64 = if (flags & 1 != 0) 8 else 4;
+    if (flags & ~@as(u32, 0xf) != 0 or !pool.owner.eql(c.impl.owner) or !validQueryRange(pool, first, count) or (pool.query_type == 2 and flags & 8 != 0) or destination.owner != c.impl.owner or destination.usage & 0x2 == 0 or destination.memory == null or stride < element_size or stride % alignment != 0 or offset % alignment != 0 or offset > destination.size or required > destination.size - offset) {
+        c.impl.invalid = true;
+        return;
+    }
+    record(c, .{ .query_copy = .{ .pool = pool, .first = first, .count = count, .destination = destination, .offset = offset, .stride = stride, .flags = flags } });
 }
 fn bufferBytes(buffer: *BufferObj) []u8 {
     const memory = buffer.memory.?;
@@ -2104,6 +5041,10 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             if (!liveBufferObject(op.dst) or op.dst.memory == null or !liveMemoryObject(op.dst.memory.?)) return deadResource();
             if (op.dst.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
         },
+        .update_buffer => |op| {
+            if (!liveBufferObject(op.dst) or op.dst.memory == null or !liveMemoryObject(op.dst.memory.?)) return deadResource();
+            if (op.dst.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
+        },
         .copy_buffer => |op| {
             if (!liveBufferObject(op.src) or !liveBufferObject(op.dst) or op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
             if (op.src.owner != owner or op.dst.owner != owner or op.src.memory.?.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
@@ -2117,19 +5058,170 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 return false;
             }
         },
+        .clear_depth => |op| {
+            const slot = imageSlot(op.image) orelse return deadResource();
+            if (op.image.memory == null or !liveMemoryObject(op.image.memory.?)) return deadResource();
+            if (op.image.owner != owner or op.image.memory.?.owner != owner) return wrongSubmittingDevice();
+            if (layouts[slot] != op.layout) {
+                hit(.layout_mismatch);
+                return false;
+            }
+        },
         .render_clear => |op| {
             _ = imageSlot(op.image) orelse return deadResource();
-            if (op.image.owner != owner or op.image.owned_bytes == null) return wrongSubmittingDevice();
-            if (op.depth) |depth| if (depth.owner != owner or depth.memory == null or !liveMemoryObject(depth.memory.?)) return deadResource();
+            if (op.image.owner != owner or (op.image.owned_bytes == null and (op.image.memory == null or !liveMemoryObject(op.image.memory.?)))) {
+                return wrongSubmittingDevice();
+            }
+            if (op.depth) |depth| {
+                _ = imageSlot(depth) orelse return deadResource();
+                if (depth.owner != owner or (depth.memory == null and depth.owned_bytes == null) or (depth.memory != null and !liveMemoryObject(depth.memory.?))) return wrongSubmittingDevice();
+            }
+        },
+        .clear_attachments => |op| {
+            const image_slot = imageSlot(op.image) orelse return deadResource();
+            if (op.image.owner != owner or (op.image.memory == null and op.image.owned_bytes == null) or (op.image.memory != null and !liveMemoryObject(op.image.memory.?))) return wrongSubmittingDevice();
+            if (layouts[image_slot] != 0 and layouts[image_slot] != 1 and layouts[image_slot] != 2 and layouts[image_slot] != 3 and layouts[image_slot] != 5 and layouts[image_slot] != 6 and layouts[image_slot] != 7) return false;
+            if (op.depth) |depth| {
+                _ = imageSlot(depth) orelse return deadResource();
+                if (depth.owner != owner or depth.memory == null or !liveMemoryObject(depth.memory.?)) return wrongSubmittingDevice();
+            }
+        },
+        .next_subpass => {},
+        .dispatch => |op| {
+            if ((stateForObject(ComputePipelineObj, op.pipeline, &compute_pipeline_objects, &compute_pipeline_state) orelse return deadResource()).* != .live) return deadResource();
+            if (!op.pipeline.owner.eql(owner)) return wrongSubmittingDevice();
+            if (op.layout) |layout| {
+                if ((stateForObject(PipelineLayoutObj, layout, &pipeline_layout_objects, &pipeline_layout_state) orelse return deadResource()).* != .live) return deadResource();
+                if (!layout.owner.eql(owner) or !op.pipeline.layout.eql(&layout.canonical)) return wrongSubmittingDevice();
+            }
+            if (op.descriptors) |descriptors| {
+                if (!liveDescriptorObject(descriptors)) return deadResource();
+                if (!descriptors.owner.eql(owner)) return wrongSubmittingDevice();
+                if (op.layout) |layout| if (!descriptors.layout.eql(&layout.set0)) return false;
+                if (descriptors.uniform) |uniform| {
+                    if (!liveBufferObject(uniform) or uniform.memory == null or !liveMemoryObject(uniform.memory.?)) return deadResource();
+                    if (uniform.owner != owner or uniform.memory.?.owner != owner) return wrongSubmittingDevice();
+                    if (descriptors.uniform_offset > uniform.size or descriptors.uniform_range == 0 or descriptors.uniform_range > uniform.size - descriptors.uniform_offset) return false;
+                }
+                if (descriptors.storage) |storage| {
+                    if (!liveBufferObject(storage) or storage.memory == null or !liveMemoryObject(storage.memory.?)) return deadResource();
+                    if (storage.owner != owner or storage.memory.?.owner != owner) return wrongSubmittingDevice();
+                    if (descriptors.storage_offset > storage.size or descriptors.storage_range == 0 or descriptors.storage_range > storage.size - descriptors.storage_offset) return false;
+                }
+                if (descriptors.texture) |texture| {
+                    if (!liveImageObject(texture) or texture.memory == null or !liveMemoryObject(texture.memory.?)) return deadResource();
+                    if (texture.owner != owner or texture.memory.?.owner != owner) return wrongSubmittingDevice();
+                }
+            }
+        },
+        .dispatch_indirect => |op| {
+            if ((stateForObject(ComputePipelineObj, op.pipeline, &compute_pipeline_objects, &compute_pipeline_state) orelse return deadResource()).* != .live) return deadResource();
+            if (!op.pipeline.owner.eql(owner)) return wrongSubmittingDevice();
+            if (op.layout) |layout| {
+                if ((stateForObject(PipelineLayoutObj, layout, &pipeline_layout_objects, &pipeline_layout_state) orelse return deadResource()).* != .live) return deadResource();
+                if (!layout.owner.eql(owner) or !op.pipeline.layout.eql(&layout.canonical)) return wrongSubmittingDevice();
+            }
+            if (op.descriptors) |descriptors| {
+                if (!liveDescriptorObject(descriptors)) return deadResource();
+                if (!descriptors.owner.eql(owner)) return wrongSubmittingDevice();
+                if (op.layout) |layout| if (!descriptors.layout.eql(&layout.set0)) return false;
+                if (descriptors.uniform) |uniform| {
+                    if (!liveBufferObject(uniform) or uniform.memory == null or !liveMemoryObject(uniform.memory.?)) return deadResource();
+                    if (uniform.owner != owner or uniform.memory.?.owner != owner) return wrongSubmittingDevice();
+                    if (descriptors.uniform_offset > uniform.size or descriptors.uniform_range == 0 or descriptors.uniform_range > uniform.size - descriptors.uniform_offset) return false;
+                }
+                if (descriptors.storage) |storage| {
+                    if (!liveBufferObject(storage) or storage.memory == null or !liveMemoryObject(storage.memory.?)) return deadResource();
+                    if (storage.owner != owner or storage.memory.?.owner != owner) return wrongSubmittingDevice();
+                    if (descriptors.storage_offset > storage.size or descriptors.storage_range == 0 or descriptors.storage_range > storage.size - descriptors.storage_offset) return false;
+                }
+                if (descriptors.texture) |texture| {
+                    if (!liveImageObject(texture) or texture.memory == null or !liveMemoryObject(texture.memory.?)) return deadResource();
+                    if (texture.owner != owner or texture.memory.?.owner != owner) return wrongSubmittingDevice();
+                }
+            }
+            if (!liveBufferObject(op.buffer) or op.buffer.memory == null or !liveMemoryObject(op.buffer.memory.?)) return deadResource();
+            if (op.buffer.owner != owner or op.buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+            if (op.buffer.usage & 0x100 == 0 or op.offset % 4 != 0 or op.offset > op.buffer.size or op.buffer.size - op.offset < 12) return false;
+            const bytes = bufferBytes(op.buffer);
+            const groups = .{ std.mem.readInt(u32, bytes[@intCast(op.offset)..][0..4], .little), std.mem.readInt(u32, bytes[@intCast(op.offset + 4)..][0..4], .little), std.mem.readInt(u32, bytes[@intCast(op.offset + 8)..][0..4], .little) };
+            return dispatchGroupsValid(groups);
+        },
+        .blit_image => |op| {
+            const src_slot = imageSlot(op.src) orelse return deadResource();
+            const dst_slot = imageSlot(op.dst) orelse return deadResource();
+            if (op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
+            if (op.src.owner != owner or op.dst.owner != owner or op.src.memory.?.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
+            if (layouts[src_slot] != op.src_layout or layouts[dst_slot] != op.dst_layout) {
+                hit(.layout_mismatch);
+                return false;
+            }
+        },
+        .resolve_image => |op| {
+            const src_slot = imageSlot(op.src) orelse return deadResource();
+            const dst_slot = imageSlot(op.dst) orelse return deadResource();
+            if (op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
+            if (op.src.owner != owner or op.dst.owner != owner or op.src.memory.?.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
+            if (layouts[src_slot] != op.src_layout or layouts[dst_slot] != op.dst_layout) {
+                hit(.layout_mismatch);
+                return false;
+            }
         },
         .cube_draw => |op| {
-            const color = op.framebuffer.color_image orelse return deadResource();
-            const depth = op.framebuffer.depth_image orelse return deadResource();
+            const framebuffer = op.framebuffer;
+            const color = op.color_image orelse (framebuffer orelse return deadResource()).color_image orelse return deadResource();
+            const depth = op.depth_image orelse (framebuffer orelse return deadResource()).depth_image orelse return deadResource();
             const uniform = op.descriptors.uniform orelse return deadResource();
             const texture = op.descriptors.texture orelse return deadResource();
-            if ((stateForObject(FramebufferObj, op.framebuffer, &framebuffer_objects, &framebuffer_state) orelse return deadResource()).* != .live or (stateForObject(DescriptorSetObj, op.descriptors, &descriptor_set_objects, &descriptor_set_state) orelse return deadResource()).* != .live) return deadResource();
-            if (color.owner != owner or depth.owner != owner or uniform.owner != owner or texture.owner != owner or color.owned_bytes == null or depth.memory == null or uniform.memory == null or texture.memory == null) return wrongSubmittingDevice();
-            if (!liveMemoryObject(depth.memory.?) or !liveMemoryObject(uniform.memory.?) or !liveMemoryObject(texture.memory.?)) return deadResource();
+            if (framebuffer) |fb| if ((stateForObject(FramebufferObj, fb, &framebuffer_objects, &framebuffer_state) orelse return deadResource()).* != .live) return deadResource();
+            if ((stateForObject(GraphicsPipelineObj, op.pipeline, &graphics_pipeline_objects, &graphics_pipeline_state) orelse return deadResource()).* != .live or !liveDescriptorObject(op.descriptors)) return deadResource();
+            if (color.owner != owner or depth.owner != owner or uniform.owner != owner or texture.owner != owner or (color.memory == null and color.owned_bytes == null) or (depth.memory == null and depth.owned_bytes == null) or uniform.memory == null or texture.memory == null) return wrongSubmittingDevice();
+            if (!liveImageObject(color) or !liveImageObject(depth) or !liveImageObject(texture)) return deadResource();
+            if (!op.pipeline.owner.eql(owner)) return wrongSubmittingDevice();
+            if ((depth.memory != null and !liveMemoryObject(depth.memory.?)) or !liveMemoryObject(uniform.memory.?) or !liveMemoryObject(texture.memory.?)) return deadResource();
+            if (op.indexed) |indexed| {
+                if (!liveBufferObject(indexed.buffer) or indexed.buffer.memory == null or !liveMemoryObject(indexed.buffer.memory.?)) return deadResource();
+                if (indexed.buffer.owner != owner or indexed.buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+            }
+        },
+        .indirect_draw => |op| {
+            const framebuffer = op.framebuffer;
+            const color = op.color_image orelse (framebuffer orelse return deadResource()).color_image orelse return deadResource();
+            const depth = op.depth_image orelse (framebuffer orelse return deadResource()).depth_image orelse return deadResource();
+            const uniform = op.descriptors.uniform orelse return deadResource();
+            const texture = op.descriptors.texture orelse return deadResource();
+            if (framebuffer) |fb| if ((stateForObject(FramebufferObj, fb, &framebuffer_objects, &framebuffer_state) orelse return deadResource()).* != .live) return deadResource();
+            if ((stateForObject(GraphicsPipelineObj, op.pipeline, &graphics_pipeline_objects, &graphics_pipeline_state) orelse return deadResource()).* != .live or !liveDescriptorObject(op.descriptors)) return deadResource();
+            if (color.owner != owner or depth.owner != owner or uniform.owner != owner or texture.owner != owner or (color.memory == null and color.owned_bytes == null) or (depth.memory == null and depth.owned_bytes == null) or uniform.memory == null or texture.memory == null) {
+                return wrongSubmittingDevice();
+            }
+            if (!liveImageObject(color) or !liveImageObject(depth) or !liveImageObject(texture)) return deadResource();
+            if (!op.pipeline.owner.eql(owner)) {
+                return wrongSubmittingDevice();
+            }
+            if ((depth.memory != null and !liveMemoryObject(depth.memory.?)) or !liveMemoryObject(uniform.memory.?) or !liveMemoryObject(texture.memory.?)) {
+                return deadResource();
+            }
+            if (!liveBufferObject(op.indirect_buffer) or op.indirect_buffer.memory == null or !liveMemoryObject(op.indirect_buffer.memory.?)) {
+                return deadResource();
+            }
+            if (op.indirect_buffer.owner != owner or op.indirect_buffer.memory.?.owner != owner) {
+                return wrongSubmittingDevice();
+            }
+            if (op.count_source) |count| {
+                if (!liveBufferObject(count.buffer) or count.buffer.memory == null or !liveMemoryObject(count.buffer.memory.?)) return deadResource();
+                if (count.buffer.owner != owner or count.buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+                if (count.max_draw_count > 1 or count.offset % 4 != 0 or count.offset > count.buffer.size or count.buffer.size - count.offset < 4) return false;
+            }
+            if (op.indexed) {
+                const index_buffer = op.index_buffer orelse return deadResource();
+                if (!liveBufferObject(index_buffer) or index_buffer.memory == null or !liveMemoryObject(index_buffer.memory.?)) {
+                    return deadResource();
+                }
+                if (index_buffer.owner != owner or index_buffer.memory.?.owner != owner) {
+                    return wrongSubmittingDevice();
+                }
+            }
         },
         .buffer_to_image => |op| {
             const slot = imageSlot(op.dst) orelse return deadResource();
@@ -2168,6 +5260,26 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             }
             layouts[slot] = op.new_layout;
         },
+        .event_set, .event_reset, .event_wait => |event| {
+            if (!liveEventObject(event)) return deadResource();
+            if (event.owner != owner) return wrongSubmittingDevice();
+        },
+        .buffer_barrier => |buffer| {
+            if (!liveBufferObject(buffer)) return deadResource();
+            if (buffer.owner != owner) return wrongSubmittingDevice();
+        },
+        .query_reset => |op| {
+            if (!liveQueryPoolObject(op.pool)) return deadResource();
+            if (!op.pool.owner.eql(owner)) return wrongSubmittingDevice();
+        },
+        .query_begin, .query_end, .query_timestamp => |op| {
+            if (!liveQueryPoolObject(op.pool)) return deadResource();
+            if (!op.pool.owner.eql(owner)) return wrongSubmittingDevice();
+        },
+        .query_copy => |op| {
+            if (!liveQueryPoolObject(op.pool) or !liveBufferObject(op.destination) or op.destination.memory == null or !liveMemoryObject(op.destination.memory.?)) return deadResource();
+            if (!op.pool.owner.eql(owner) or op.destination.owner != owner or op.destination.memory.?.owner != owner) return wrongSubmittingDevice();
+        },
     }
     return true;
 }
@@ -2202,6 +5314,85 @@ fn fillImagePatternRect(bytes: []u8, width: u32, rect: cpu_cube.Rect, pattern: u
     }
 }
 
+fn blitCoordinate(start: i32, end: i32, index: u32, destination_span: u32, source_span: u32) usize {
+    const source_index = @as(u32, @intCast((@as(u64, index) * source_span) / destination_span));
+    return @intCast(if (start < end) @as(u32, @intCast(start)) + source_index else @as(u32, @intCast(start)) - source_index - 1);
+}
+
+fn linearByte(a: u8, b: u8, t: f32) u8 {
+    return @intFromFloat(std.math.clamp(@as(f32, @floatFromInt(a)) * (1 - t) + @as(f32, @floatFromInt(b)) * t, 0, 255));
+}
+
+fn sampleLinear(bytes: []const u8, width: u32, height: u32, x: f32, y: f32) [4]u8 {
+    const clamped_x = std.math.clamp(x, 0, @as(f32, @floatFromInt(width - 1)));
+    const clamped_y = std.math.clamp(y, 0, @as(f32, @floatFromInt(height - 1)));
+    const x0: usize = @intFromFloat(@floor(clamped_x));
+    const y0: usize = @intFromFloat(@floor(clamped_y));
+    const x1 = @min(x0 + 1, width - 1);
+    const y1 = @min(y0 + 1, height - 1);
+    const tx = clamped_x - @as(f32, @floatFromInt(x0));
+    const ty = clamped_y - @as(f32, @floatFromInt(y0));
+    const a = bytes[(y0 * width + x0) * 4 ..][0..4];
+    const b = bytes[(y0 * width + x1) * 4 ..][0..4];
+    const c = bytes[(y1 * width + x0) * 4 ..][0..4];
+    const d = bytes[(y1 * width + x1) * 4 ..][0..4];
+    var result: [4]u8 = undefined;
+    for (0..4) |channel| result[channel] = linearByte(linearByte(a[channel], b[channel], tx), linearByte(c[channel], d[channel], tx), ty);
+    return result;
+}
+
+fn executeBlitImage(item: BlitImageCommand) void {
+    const src = imageBytes(item.src);
+    const dst = imageBytes(item.dst);
+    const src_layer_offset = imageLayerOffset(item.src, item.region.src_subresource.base_array_layer).?;
+    const dst_layer_offset = imageLayerOffset(item.dst, item.region.dst_subresource.base_array_layer).?;
+    const src_layer_size: usize = @intCast(imageLayerByteSize(item.src).?);
+    const src_width = blitSpan(item.region.src_offsets[0].x, item.region.src_offsets[1].x, item.src.width).?;
+    const src_height = blitSpan(item.region.src_offsets[0].y, item.region.src_offsets[1].y, item.src.height).?;
+    const dst_width = blitSpan(item.region.dst_offsets[0].x, item.region.dst_offsets[1].x, item.dst.width).?;
+    const dst_height = blitSpan(item.region.dst_offsets[0].y, item.region.dst_offsets[1].y, item.dst.height).?;
+    var y: u32 = 0;
+    while (y < dst_height) : (y += 1) {
+        const sy = blitCoordinate(item.region.src_offsets[0].y, item.region.src_offsets[1].y, y, dst_height, src_height);
+        const dy = if (item.region.dst_offsets[0].y < item.region.dst_offsets[1].y) @as(usize, @intCast(item.region.dst_offsets[0].y)) + y else @as(usize, @intCast(item.region.dst_offsets[0].y)) - y - 1;
+        var x: u32 = 0;
+        while (x < dst_width) : (x += 1) {
+            const dx = if (item.region.dst_offsets[0].x < item.region.dst_offsets[1].x) @as(usize, @intCast(item.region.dst_offsets[0].x)) + x else @as(usize, @intCast(item.region.dst_offsets[0].x)) - x - 1;
+            const destination = dst_layer_offset + (dy * item.dst.width + dx) * 4;
+            if (item.filter == 1) {
+                const u = (@as(f32, @floatFromInt(x)) + 0.5) / @as(f32, @floatFromInt(dst_width));
+                const t = u * @as(f32, @floatFromInt(src_width)) - 0.5;
+                const sx = if (item.region.src_offsets[0].x < item.region.src_offsets[1].x) @as(f32, @floatFromInt(item.region.src_offsets[0].x)) + t else @as(f32, @floatFromInt(item.region.src_offsets[0].x - 1)) - t;
+                const v = (@as(f32, @floatFromInt(y)) + 0.5) / @as(f32, @floatFromInt(dst_height));
+                const ty = v * @as(f32, @floatFromInt(src_height)) - 0.5;
+                const syf = if (item.region.src_offsets[0].y < item.region.src_offsets[1].y) @as(f32, @floatFromInt(item.region.src_offsets[0].y)) + ty else @as(f32, @floatFromInt(item.region.src_offsets[0].y - 1)) - ty;
+                const sample = sampleLinear(src[src_layer_offset..][0..src_layer_size], item.src.width, item.src.height, sx, syf);
+                @memcpy(dst[destination..][0..4], &sample);
+            } else {
+                const sx = blitCoordinate(item.region.src_offsets[0].x, item.region.src_offsets[1].x, x, dst_width, src_width);
+                const source = src_layer_offset + (sy * item.src.width + sx) * 4;
+                std.mem.copyForwards(u8, dst[destination..][0..4], src[source..][0..4]);
+            }
+        }
+    }
+    invalidateImageContents(item.dst);
+}
+
+fn executeResolveImage(item: ResolveImageCommand) void {
+    const src = imageBytes(item.src);
+    const dst = imageBytes(item.dst);
+    const src_layer_offset = imageLayerOffset(item.src, item.region.src_subresource.base_array_layer).?;
+    const dst_layer_offset = imageLayerOffset(item.dst, item.region.dst_subresource.base_array_layer).?;
+    var y: u32 = 0;
+    while (y < item.region.extent.height) : (y += 1) {
+        const source = src_layer_offset + ((@as(usize, @intCast(item.region.src_offset.y)) + y) * item.src.width + @as(usize, @intCast(item.region.src_offset.x))) * 4;
+        const destination = dst_layer_offset + ((@as(usize, @intCast(item.region.dst_offset.y)) + y) * item.dst.width + @as(usize, @intCast(item.region.dst_offset.x))) * 4;
+        const bytes = @as(usize, item.region.extent.width) * 4;
+        std.mem.copyForwards(u8, dst[destination..][0..bytes], src[source..][0..bytes]);
+    }
+    invalidateImageContents(item.dst);
+}
+
 fn invalidateImageContents(image: *ImageObj) void {
     image.clear_pattern = null;
     image.content_bounds = .{ .x = 0, .y = 0, .width = image.width, .height = image.height };
@@ -2220,11 +5411,54 @@ fn ensureDirtyTiles(image: *ImageObj) ?[]align(64) u8 {
     return tiles;
 }
 
-fn executeValidatedCommand(command: Command) void {
+const QueryExecutionContext = struct { pool: ?*QueryPoolObj = null, index: u32 = 0 };
+fn computeTypeByteSize(ty: render_ir.Type) usize {
+    return @as(usize, ty.columns) * ty.rows * 4;
+}
+fn executeComputeDispatch(op: DispatchCommand) void {
+    if (op.pipeline.executor == null) return;
+    const executor: *render_ir_exec.Executor = &op.pipeline.executor.?;
+    var bindings: [8]render_ir_exec.Binding = undefined;
+    var binding_count: usize = 0;
+    var outputs: [8]render_ir_exec.Output = undefined;
+    var output_count: usize = 0;
+    const descriptors = op.descriptors orelse return;
+    for (executor.program.interfaces, 0..) |interface, interface_index| {
+        if (interface.storage == .uniform) {
+            const uniform = descriptors.uniform orelse return;
+            if (interface.binding != 0 or interface.descriptor_set != 0 or descriptors.uniform_offset > uniform.size or descriptors.uniform_range == 0 or descriptors.uniform_range > uniform.size - descriptors.uniform_offset or binding_count == bindings.len) return;
+            const uniform_bytes = bufferBytes(uniform)[@intCast(descriptors.uniform_offset)..][0..@intCast(descriptors.uniform_range)];
+            const required = computeTypeByteSize(interface.ty);
+            if (required == 0 or required > uniform_bytes.len) return;
+            bindings[binding_count] = .{ .interface = @intCast(interface_index), .bytes = uniform_bytes };
+            binding_count += 1;
+        } else if (interface.storage == .output) {
+            const storage = descriptors.storage orelse return;
+            if (interface.binding != descriptors.storage_binding or interface.descriptor_set != 0 or output_count == outputs.len or descriptors.storage_offset > storage.size or descriptors.storage_range == 0 or descriptors.storage_range > storage.size - descriptors.storage_offset) return;
+            const storage_bytes = bufferBytes(storage)[@intCast(descriptors.storage_offset)..][0..@intCast(descriptors.storage_range)];
+            const required = computeTypeByteSize(interface.ty);
+            if (required == 0 or required > storage_bytes.len) return;
+            outputs[output_count] = .{ .interface = @intCast(interface_index), .bytes = storage_bytes };
+            output_count += 1;
+        }
+    }
+    var invocations = std.math.mul(u64, op.groups[0], op.groups[1]) catch return;
+    invocations = std.math.mul(u64, invocations, op.groups[2]) catch return;
+    if (invocations == 0 or invocations > 1_048_576) return;
+    var invocation: u64 = 0;
+    while (invocation < invocations) : (invocation += 1) {
+        executor.execute(bindings[0..binding_count], outputs[0..output_count]) catch return;
+    }
+}
+fn executeValidatedCommand(command: Command, query_context: *QueryExecutionContext) void {
     switch (command) {
         .fill => |op| {
             const bytes = bufferBytes(op.dst)[@intCast(op.offset)..][0..@intCast(op.size)];
             benchmarkHostMemoryFill(bytes, op.data);
+        },
+        .update_buffer => |op| {
+            const destination = bufferBytes(op.dst)[@intCast(op.offset)..][0..op.data.len];
+            benchmarkHostMemoryCopy(destination, op.data);
         },
         .copy_buffer => |op| {
             const src = bufferBytes(op.src)[@intCast(op.region.src_offset)..][0..@intCast(op.region.size)];
@@ -2233,11 +5467,31 @@ fn executeValidatedCommand(command: Command) void {
         },
         .clear => |op| {
             const pattern: u32 = @bitCast(op.color);
-            fillImagePattern(imageBytes(op.image), pattern);
+            const bytes = imageBytes(op.image);
+            const layer_size: usize = @intCast(imageLayerByteSize(op.image).?);
+            const start: usize = @intCast(imageLayerOffset(op.image, op.base_layer).?);
+            fillImagePattern(bytes[start..][0 .. layer_size * op.layer_count], pattern);
             op.image.clear_pattern = pattern;
             op.image.content_bounds = emptyRect();
             op.image.force_full_present = true;
             op.image.complex_3d_content = false;
+        },
+        .clear_depth => |op| {
+            const pattern: u32 = @bitCast(op.depth);
+            const bytes = imageBytes(op.image);
+            const layer_size: usize = @intCast(imageLayerByteSize(op.image).?);
+            const start: usize = @intCast(imageLayerOffset(op.image, op.base_layer).?);
+            fillImagePattern(bytes[start..][0 .. layer_size * op.layer_count], pattern);
+            op.image.clear_pattern = pattern;
+            op.image.content_bounds = emptyRect();
+            op.image.force_full_present = true;
+            op.image.complex_3d_content = false;
+        },
+        .dispatch => |op| executeComputeDispatch(op),
+        .dispatch_indirect => |op| {
+            const bytes = bufferBytes(op.buffer);
+            const groups = .{ std.mem.readInt(u32, bytes[@intCast(op.offset)..][0..4], .little), std.mem.readInt(u32, bytes[@intCast(op.offset + 4)..][0..4], .little), std.mem.readInt(u32, bytes[@intCast(op.offset + 8)..][0..4], .little) };
+            if (dispatchGroupsValid(groups)) executeComputeDispatch(.{ .base = .{ 0, 0, 0 }, .groups = groups, .pipeline = op.pipeline, .layout = op.layout, .descriptors = op.descriptors });
         },
         .render_clear => |op| {
             const operation_start = frame_pacing.monotonicNs();
@@ -2246,46 +5500,72 @@ fn executeValidatedCommand(command: Command) void {
                 const depth_bytes = imageBytes(depth);
                 const color_pattern: u32 = @bitCast(op.color);
                 const depth_pattern: u32 = @bitCast(op.depth_value);
-                const sparse = bytes.len >= 8 * 1024 * 1024 and op.image.width == depth.width and op.image.height == depth.height and op.image.clear_pattern == color_pattern and depth.clear_pattern == depth_pattern and depth.memory != null and !depth.memory.?.mapped;
-                if (sparse) {
-                    if (op.image.dirty_tiles) |tiles| {
-                        if (!cpu_cube.clearDirtyTilesParallel(bytes, color_pattern, depth_bytes, depth_pattern, op.image.width, op.image.height, tiles)) {
+                const sparse = op.clear_color and op.clear_depth and bytes.len >= 8 * 1024 * 1024 and op.image.width == depth.width and op.image.height == depth.height and op.image.clear_pattern == color_pattern and depth.clear_pattern == depth_pattern and depth.memory != null and !depth.memory.?.mapped;
+                if (op.clear_color and op.clear_depth) {
+                    if (sparse) {
+                        if (op.image.dirty_tiles) |tiles| {
+                            if (!cpu_cube.clearDirtyTilesParallel(bytes, color_pattern, depth_bytes, depth_pattern, op.image.width, op.image.height, tiles)) {
+                                const rect = unionRect(op.image.content_bounds, depth.content_bounds);
+                                fillImagePatternRect(bytes, op.image.width, rect, color_pattern);
+                                fillImagePatternRect(depth_bytes, depth.width, rect, depth_pattern);
+                            }
+                            @memset(tiles, 0);
+                        } else {
                             const rect = unionRect(op.image.content_bounds, depth.content_bounds);
-                            fillImagePatternRect(bytes, op.image.width, rect, color_pattern);
-                            fillImagePatternRect(depth_bytes, depth.width, rect, depth_pattern);
+                            if (rect.width != 0 and rect.height != 0 and !cpu_cube.clearImageRegionsParallel(bytes, color_pattern, depth_bytes, depth_pattern, op.image.width, rect)) {
+                                fillImagePatternRect(bytes, op.image.width, rect, color_pattern);
+                                fillImagePatternRect(depth_bytes, depth.width, rect, depth_pattern);
+                            }
                         }
-                        @memset(tiles, 0);
-                    } else {
-                        const rect = unionRect(op.image.content_bounds, depth.content_bounds);
-                        if (rect.width != 0 and rect.height != 0 and !cpu_cube.clearImageRegionsParallel(bytes, color_pattern, depth_bytes, depth_pattern, op.image.width, rect)) {
-                            fillImagePatternRect(bytes, op.image.width, rect, color_pattern);
-                            fillImagePatternRect(depth_bytes, depth.width, rect, depth_pattern);
-                        }
+                    } else if (bytes.len < 8 * 1024 * 1024 or !cpu_cube.clearImagesParallel(bytes, color_pattern, depth_bytes, depth_pattern)) {
+                        fillImagePattern(bytes, color_pattern);
+                        fillImagePattern(depth_bytes, depth_pattern);
                     }
-                } else if (bytes.len < 8 * 1024 * 1024 or !cpu_cube.clearImagesParallel(bytes, color_pattern, depth_bytes, depth_pattern)) {
-                    fillImagePattern(bytes, color_pattern);
-                    fillImagePattern(depth_bytes, depth_pattern);
+                } else {
+                    if (op.clear_color) fillImagePattern(bytes, color_pattern);
+                    if (op.clear_depth) fillImagePattern(depth_bytes, depth_pattern);
                 }
-                if (!sparse) if (op.image.dirty_tiles) |tiles| @memset(tiles, 0);
-                op.image.clear_pattern = color_pattern;
-                depth.clear_pattern = depth_pattern;
-                op.image.content_bounds = emptyRect();
-                depth.content_bounds = emptyRect();
-                if (!sparse) op.image.force_full_present = true;
-                op.image.complex_3d_content = false;
+                if (op.clear_color) {
+                    if (!sparse) if (op.image.dirty_tiles) |tiles| @memset(tiles, 0);
+                    op.image.clear_pattern = color_pattern;
+                    op.image.content_bounds = emptyRect();
+                    if (!sparse) op.image.force_full_present = true;
+                    op.image.complex_3d_content = false;
+                }
+                if (op.clear_depth) {
+                    depth.clear_pattern = depth_pattern;
+                    depth.content_bounds = emptyRect();
+                }
             } else {
-                fillImagePattern(bytes, @bitCast(op.color));
-                op.image.clear_pattern = @bitCast(op.color);
-                op.image.content_bounds = emptyRect();
-                op.image.force_full_present = true;
-                op.image.complex_3d_content = false;
+                if (op.clear_color) {
+                    fillImagePattern(bytes, @bitCast(op.color));
+                    op.image.clear_pattern = @bitCast(op.color);
+                    op.image.content_bounds = emptyRect();
+                    op.image.force_full_present = true;
+                    op.image.complex_3d_content = false;
+                }
             }
             op.image.last_clear_ns = frame_pacing.monotonicNs() - operation_start;
         },
+        .clear_attachments => |op| {
+            const region = cpu_cube.Rect{ .x = op.rect.offset.x, .y = op.rect.offset.y, .width = op.rect.extent.width, .height = op.rect.extent.height };
+            if (op.aspect_mask == 1) {
+                fillImagePatternRect(imageBytes(op.image), op.image.width, region, @bitCast(op.color));
+                op.image.clear_pattern = null;
+                op.image.content_bounds = unionRect(op.image.content_bounds, region);
+                op.image.force_full_present = true;
+                op.image.complex_3d_content = false;
+            } else {
+                fillImagePatternRect(imageBytes(op.image), op.image.width, region, @bitCast(op.depth_value));
+                op.image.clear_pattern = null;
+                op.image.content_bounds = unionRect(op.image.content_bounds, region);
+            }
+        },
+        .next_subpass => {},
         .cube_draw => |op| {
             const operation_start = frame_pacing.monotonicNs();
-            const color = op.framebuffer.color_image.?;
-            const depth = op.framebuffer.depth_image.?;
+            const color = op.color_image orelse op.framebuffer.?.color_image.?;
+            const depth = op.depth_image orelse op.framebuffer.?.depth_image.?;
             const uniform_buffer = op.descriptors.uniform.?;
             const uniform_start: usize = @intCast(uniform_buffer.offset + op.descriptors.uniform_offset);
             const uniform_length: usize = @intCast(@min(op.descriptors.uniform_range, uniform_buffer.size - op.descriptors.uniform_offset));
@@ -2293,11 +5573,50 @@ fn executeValidatedCommand(command: Command) void {
             const texture = op.descriptors.texture.?;
             var bounds = emptyRect();
             const dirty_tiles = if (@as(u64, color.width) * color.height >= 3840 * 2160) ensureDirtyTiles(color) else null;
-            _ = cpu_cube.drawTrackedTiles(imageBytes(color), imageBytes(depth), color.width, color.height, uniform_memory[uniform_start..][0..uniform_length], imageBytes(texture), texture.width, texture.height, op.vertex_count, op.viewport, op.scissor, op.cull_mode, op.front_face, &bounds, dirty_tiles);
+            var pixels_written: usize = 0;
+            for (0..op.instance_count) |_| {
+                pixels_written += if (op.indexed) |indexed| blk: {
+                    const bytes = bufferBytes(indexed.buffer)[@intCast(indexed.offset)..][0..@intCast(indexed.byte_count)];
+                    const stream = cpu_cube.IndexStream.init(bytes, indexed.index_type, indexed.vertex_offset) orelse break :blk 0;
+                    break :blk cpu_cube.drawIndexedTrackedTiles(imageBytes(color), imageBytes(depth), color.width, color.height, uniform_memory[uniform_start..][0..uniform_length], imageBytes(texture), texture.width, texture.height, op.vertex_count, op.viewport, op.scissor, op.cull_mode, op.front_face, &bounds, dirty_tiles, stream);
+                } else cpu_cube.drawTrackedTilesBase(imageBytes(color), imageBytes(depth), color.width, color.height, uniform_memory[uniform_start..][0..uniform_length], imageBytes(texture), texture.width, texture.height, op.vertex_count, op.base_vertex, op.viewport, op.scissor, op.cull_mode, op.front_face, &bounds, dirty_tiles);
+            }
+            if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(pixels_written, .monotonic);
             color.content_bounds = unionRect(color.content_bounds, bounds);
             depth.content_bounds = unionRect(depth.content_bounds, bounds);
             color.complex_3d_content = true;
             color.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+        },
+        .indirect_draw => |op| {
+            const bytes = bufferBytes(op.indirect_buffer);
+            const draw_count = if (op.count_source) |count| blk: {
+                const count_bytes = bufferBytes(count.buffer);
+                break :blk @min(std.mem.readInt(u32, count_bytes[@intCast(count.offset)..][0..4], .little), count.max_draw_count);
+            } else op.draw_count;
+            var draw_index: u32 = 0;
+            while (draw_index < draw_count) : (draw_index += 1) {
+                const base = @as(usize, @intCast(op.offset + @as(u64, draw_index) * op.stride));
+                const words = bytes[base..];
+                const first = std.mem.readInt(u32, words[0..4], .little);
+                const instances = std.mem.readInt(u32, words[4..8], .little);
+                var cube: Command = undefined;
+                if (op.indexed) {
+                    const first_index = std.mem.readInt(u32, words[8..12], .little);
+                    const vertex_offset = std.mem.readInt(i32, words[12..16], .little);
+                    _ = std.mem.readInt(u32, words[16..20], .little);
+                    const index_buffer = op.index_buffer.?;
+                    const index_size: u64 = if (op.index_type == 0) 2 else 4;
+                    const index_start = op.index_offset + @as(u64, first_index) * index_size;
+                    const index_bytes = @as(u64, first) * index_size;
+                    if (index_start > index_buffer.size or index_bytes > index_buffer.size - index_start) continue;
+                    cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = first, .base_vertex = 0, .instance_count = instances, .indexed = .{ .buffer = index_buffer, .offset = index_start, .byte_count = index_bytes, .index_type = op.index_type, .vertex_offset = vertex_offset }, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face } };
+                } else {
+                    const first_vertex = std.mem.readInt(u32, words[8..12], .little);
+                    _ = std.mem.readInt(u32, words[12..16], .little);
+                    cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = first, .base_vertex = first_vertex, .instance_count = instances, .indexed = null, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face } };
+                }
+                executeValidatedCommand(cube, query_context);
+            }
         },
         .buffer_to_image => |op| {
             copyBufferImage(op.src, op.dst, op.region, true);
@@ -2309,18 +5628,59 @@ fn executeValidatedCommand(command: Command) void {
         .copy_image => |op| {
             const src = imageBytes(op.src);
             const dst = imageBytes(op.dst);
+            const src_layer_offset = imageLayerOffset(op.src, op.region.src_subresource.base_array_layer).?;
+            const dst_layer_offset = imageLayerOffset(op.dst, op.region.dst_subresource.base_array_layer).?;
             var y: u32 = 0;
             while (y < op.region.extent.height) : (y += 1) {
-                const so = (@as(usize, @intCast(op.region.src_offset.y)) + y) * op.src.width * 4 + @as(usize, @intCast(op.region.src_offset.x)) * 4;
-                const do = (@as(usize, @intCast(op.region.dst_offset.y)) + y) * op.dst.width * 4 + @as(usize, @intCast(op.region.dst_offset.x)) * 4;
+                const so = src_layer_offset + ((@as(usize, @intCast(op.region.src_offset.y)) + y) * op.src.width + @as(usize, @intCast(op.region.src_offset.x))) * 4;
+                const do = dst_layer_offset + ((@as(usize, @intCast(op.region.dst_offset.y)) + y) * op.dst.width + @as(usize, @intCast(op.region.dst_offset.x))) * 4;
                 const len = @as(usize, op.region.extent.width) * 4;
                 std.mem.copyForwards(u8, dst[do..][0..len], src[so..][0..len]);
             }
             invalidateImageContents(op.dst);
         },
+        .blit_image => |op| executeBlitImage(op),
+        .resolve_image => |op| executeResolveImage(op),
         .transition => |op| {
             op.image.layout = op.new_layout;
             hit(.barrier_transition);
+        },
+        .event_set => |event| event.signaled.store(true, .release),
+        .event_reset => |event| event.signaled.store(false, .release),
+        .event_wait => |event| {
+            _ = event.waiters.fetchAdd(1, .acq_rel);
+            defer _ = event.waiters.fetchSub(1, .acq_rel);
+            while (!event.signaled.load(.acquire)) frame_pacing.sleepUntil(frame_pacing.monotonicNs() + 50_000);
+        },
+        .buffer_barrier => {},
+        .query_reset => |op| for (op.pool.slots[op.first .. op.first + op.count]) |*slot| {
+            slot.value.store(0, .monotonic);
+            slot.state.store(0, .release);
+        },
+        .query_begin => |op| {
+            op.pool.slots[op.index].value.store(0, .monotonic);
+            op.pool.slots[op.index].state.store(1, .release);
+            query_context.* = .{ .pool = op.pool, .index = op.index };
+        },
+        .query_end => |op| {
+            op.pool.slots[op.index].state.store(2, .release);
+            query_context.pool = null;
+        },
+        .query_timestamp => |op| {
+            op.pool.slots[op.index].value.store(frame_pacing.monotonicNs(), .monotonic);
+            op.pool.slots[op.index].state.store(2, .release);
+        },
+        .query_copy => |op| {
+            const bytes = bufferBytes(op.destination)[@intCast(op.offset)..];
+            const element_size = queryResultElementSize(op.flags);
+            const use_64 = op.flags & 1 != 0;
+            for (op.pool.slots[op.first .. op.first + op.count], 0..) |*slot, index| {
+                if (op.flags & 2 != 0) while (slot.state.load(.acquire) != 2) frame_pacing.sleepUntil(frame_pacing.monotonicNs() + 50_000);
+                const available = slot.state.load(.acquire) == 2;
+                const output = bytes[index * @as(usize, @intCast(op.stride)) ..][0..element_size];
+                if (available or op.flags & 8 != 0) writeQueryScalar(output, slot.value.load(.acquire), use_64);
+                if (op.flags & 4 != 0) writeQueryScalar(output[(if (use_64) @as(usize, 8) else 4)..], @intFromBool(available), use_64);
+            }
         },
     }
 }
@@ -2351,21 +5711,24 @@ test "Vulkan host-memory benchmark helpers implement exact command byte semantic
     var copied = [_]u8{0} ** 8;
     benchmarkHostMemoryCopy(&copied, &filled);
     try std.testing.expectEqualSlices(u8, &filled, &copied);
+    try std.testing.expect(!rowSequencesOverlap(0, 8, 2, 4, 32, 8, 2, 4));
 }
 fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy, to_image: bool) void {
     const b = bufferBytes(buffer);
     const pixels = imageBytes(image);
+    const image_layer_offset = imageLayerOffset(image, region.image_subresource.base_array_layer).?;
     const row = if (region.buffer_row_length == 0) region.image_extent.width else region.buffer_row_length;
     var y: u32 = 0;
     while (y < region.image_extent.height) : (y += 1) {
         const bo = @as(usize, @intCast(region.buffer_offset)) + @as(usize, y) * row * 4;
-        const io = (@as(usize, @intCast(region.image_offset.y)) + y) * image.width * 4 + @as(usize, @intCast(region.image_offset.x)) * 4;
+        const io = image_layer_offset + ((@as(usize, @intCast(region.image_offset.y)) + y) * image.width + @as(usize, @intCast(region.image_offset.x))) * 4;
         const len = @as(usize, region.image_extent.width) * 4;
         if (to_image) std.mem.copyForwards(u8, pixels[io..][0..len], b[bo..][0..len]) else std.mem.copyForwards(u8, b[bo..][0..len], pixels[io..][0..len]);
     }
 }
 
 const max_canonical_bytes = 2 * spirv.max_code_bytes + 64 * 1024;
+const pipeline_cache_header_size = 32;
 const CanonicalError = error{ Invalid, TooLarge, OutOfMemory };
 const CanonicalWriter = struct {
     list: std.ArrayList(u8) = .empty,
@@ -2428,8 +5791,62 @@ fn creationFailure(err: CanonicalError) Result {
     };
 }
 
+fn descriptorSetLayoutPNextValid(raw: ?*const anyopaque, binding_count: u32) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (depth == 16) return false;
+        switch (header.s_type) {
+            1000161000 => {
+                const flags: *const DescriptorSetLayoutBindingFlagsCreateInfo = @ptrCast(@alignCast(item));
+                if (flags.binding_count != binding_count or (binding_count != 0 and flags.binding_flags == null)) return false;
+                if (flags.binding_flags) |values| for (values[0..binding_count]) |value| if (value != 0) return false;
+            },
+            else => return false,
+        }
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
+}
+
+fn descriptorSetAllocatePNextValid(raw: ?*const anyopaque, descriptor_set_count: u32) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (depth == 16 or header.s_type != 1000161003) return false;
+        const variable: *const DescriptorSetVariableDescriptorCountAllocateInfo = @ptrCast(@alignCast(item));
+        if (variable.descriptor_set_count != descriptor_set_count or (descriptor_set_count != 0 and variable.descriptor_counts == null)) return false;
+        if (variable.descriptor_counts) |counts| for (counts[0..descriptor_set_count]) |count| if (count != 0) return false;
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
+}
+
+fn descriptorSetLayoutSupportPNextValid(raw: ?*anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (depth == 16 or header.s_type != 1000161004) return false;
+        next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
+        depth += 1;
+    }
+    next = raw;
+    while (next) |item| {
+        const support: *DescriptorSetVariableDescriptorCountLayoutSupport = @ptrCast(@alignCast(item));
+        support.max_variable_descriptor_count = 0;
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
+    }
+    return true;
+}
+
 fn buildDescriptorSetLayout(ci: *const DescriptorSetLayoutCreateInfo) CanonicalError!Canonical {
-    if (ci.s_type != 32 or ci.p_next != null or ci.flags != 0 or ci.binding_count > 64 or (ci.binding_count != 0 and ci.bindings == null)) return error.Invalid;
+    if (ci.s_type != 32 or !descriptorSetLayoutPNextValid(ci.p_next, ci.binding_count) or ci.flags & ~@as(u32, 1) != 0 or ci.binding_count > 64 or (ci.binding_count != 0 and ci.bindings == null)) return error.Invalid;
     var indices: [64]u8 = undefined;
     for (0..ci.binding_count) |i| indices[i] = @intCast(i);
     const bindings = if (ci.bindings) |p| p[0..ci.binding_count] else &.{};
@@ -2454,11 +5871,30 @@ fn buildDescriptorSetLayout(ci: *const DescriptorSetLayoutCreateInfo) CanonicalE
     }
     return try w.done();
 }
+fn descriptorCounts(ci: *const DescriptorSetLayoutCreateInfo) CanonicalError!DescriptorCounts {
+    var counts = [_]u32{0} ** descriptor_type_count;
+    const bindings = if (ci.bindings) |p| p[0..ci.binding_count] else &.{};
+    for (bindings) |binding| {
+        if (binding.descriptor_type < 0 or binding.descriptor_type >= descriptor_type_count) return error.Invalid;
+        const index: usize = @intCast(binding.descriptor_type);
+        counts[index] = std.math.add(u32, counts[index], binding.descriptor_count) catch return error.TooLarge;
+    }
+    return counts;
+}
+fn descriptorBindingTypes(ci: *const DescriptorSetLayoutCreateInfo) [2]i32 {
+    var result = [2]i32{ -1, -1 };
+    const bindings = if (ci.bindings) |p| p[0..ci.binding_count] else &.{};
+    for (bindings) |binding| {
+        if (binding.binding < result.len) result[binding.binding] = binding.descriptor_type;
+    }
+    return result;
+}
 fn createDescriptorSetLayout(device: ?Device, info: ?*const DescriptorSetLayoutCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     if (alloc != null) return .error_initialization_failed;
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
+    const counts = descriptorCounts(ci) catch |err| return creationFailure(err);
     var canonical = buildDescriptorSetLayout(ci) catch |err| return creationFailure(err);
     lock();
     defer mutex.unlock();
@@ -2467,7 +5903,7 @@ fn createDescriptorSetLayout(device: ?Device, info: ?*const DescriptorSetLayoutC
         return .error_initialization_failed;
     }
     for (&descriptor_set_layout_objects, &descriptor_set_layout_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = DeviceIdentity.capture(d), .canonical = canonical };
+        object.* = .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .counts = counts, .flags = ci.flags, .binding_types = descriptorBindingTypes(ci) };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
@@ -2475,17 +5911,57 @@ fn createDescriptorSetLayout(device: ?Device, info: ?*const DescriptorSetLayoutC
     canonical.deinit();
     return .error_out_of_host_memory;
 }
+fn getDescriptorSetLayoutSupport(device: ?Device, info: ?*const DescriptorSetLayoutCreateInfo, output: ?*DescriptorSetLayoutSupport) callconv(.c) void {
+    const d = device orelse return;
+    const ci = info orelse return;
+    const out = output orelse return;
+    if (out.s_type != 1000168001 or !descriptorSetLayoutSupportPNextValid(out.p_next)) return;
+    lock();
+    const valid = validDeviceLocked(d);
+    mutex.unlock();
+    if (!valid) return;
+    var canonical = buildDescriptorSetLayout(ci) catch {
+        out.supported = 0;
+        return;
+    };
+    canonical.deinit();
+    out.supported = 1;
+}
 fn destroyDescriptorSetLayout(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
     if (alloc != null) return;
     lock();
     defer mutex.unlock();
     const d = device orelse return;
     const object = validDescriptorSetLayoutLocked(handle) orelse return;
-    if (validDeviceLocked(d) and object.owner.eql(d)) stateForObject(DescriptorSetLayoutObj, object, &descriptor_set_layout_objects, &descriptor_set_layout_state).?.* = .tombstone;
+    if (validDeviceLocked(d) and object.owner.eql(d)) {
+        object.canonical.deinit();
+        stateForObject(DescriptorSetLayoutObj, object, &descriptor_set_layout_objects, &descriptor_set_layout_state).?.* = .tombstone;
+    }
+}
+
+fn normalizeCoreShaderStages(stage_flags: u32) ?u32 {
+    if (stage_flags == 0x7fff_ffff) return 0x3f;
+    if (stage_flags == 0 or stage_flags & ~@as(u32, 0x3f) != 0) return null;
+    return stage_flags;
+}
+
+fn pipelinePushRanges(ci: *const PipelineLayoutCreateInfo) CanonicalError![core_shader_stage_bits.len]PushConstantRange {
+    var result = [_]PushConstantRange{.{ .stage_flags = 0, .offset = 0, .size = 0 }} ** core_shader_stage_bits.len;
+    const ranges = if (ci.push_constant_ranges) |p| p[0..ci.push_constant_range_count] else &.{};
+    for (ranges) |range| {
+        const stages = normalizeCoreShaderStages(range.stage_flags) orelse return error.Invalid;
+        if (range.offset % 4 != 0 or range.size == 0 or range.size % 4 != 0 or range.offset > 128 or range.size > 128 - range.offset) return error.Invalid;
+        for (core_shader_stage_bits, 0..) |bit, index| if (stages & bit != 0) {
+            if (result[index].size != 0) return error.Invalid;
+            result[index] = .{ .stage_flags = bit, .offset = range.offset, .size = range.size };
+        };
+    }
+    return result;
 }
 
 fn buildPipelineLayoutLocked(d: Device, ci: *const PipelineLayoutCreateInfo) CanonicalError!Canonical {
     if (ci.s_type != 30 or ci.p_next != null or ci.flags != 0 or ci.set_layout_count > 4 or ci.push_constant_range_count > 16 or (ci.set_layout_count != 0 and ci.set_layouts == null) or (ci.push_constant_range_count != 0 and ci.push_constant_ranges == null)) return error.Invalid;
+    _ = try pipelinePushRanges(ci);
     var w: CanonicalWriter = .{};
     defer w.deinit();
     try w.header(2);
@@ -2497,7 +5973,6 @@ fn buildPipelineLayoutLocked(d: Device, ci: *const PipelineLayoutCreateInfo) Can
     };
     try w.u32le(ci.push_constant_range_count);
     if (ci.push_constant_ranges) |ranges| for (ranges[0..ci.push_constant_range_count]) |range| {
-        if (range.stage_flags == 0 or range.offset % 4 != 0 or range.size == 0 or range.size % 4 != 0 or range.offset +| range.size > 128) return error.Invalid;
         try w.u32le(range.stage_flags);
         try w.u32le(range.offset);
         try w.u32le(range.size);
@@ -2512,6 +5987,7 @@ fn createPipelineLayout(device: ?Device, info: ?*const PipelineLayoutCreateInfo,
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d) or ci.set_layout_count != 1) return .error_initialization_failed;
+    const push_ranges = pipelinePushRanges(ci) catch |err| return creationFailure(err);
     var canonical = buildPipelineLayoutLocked(d, ci) catch |err| return creationFailure(err);
     const source_set = validDescriptorSetLayoutLocked(ci.set_layouts.?[0]).?;
     var set0 = source_set.canonical.clone() catch {
@@ -2519,7 +5995,7 @@ fn createPipelineLayout(device: ?Device, info: ?*const PipelineLayoutCreateInfo,
         return .error_out_of_host_memory;
     };
     for (&pipeline_layout_objects, &pipeline_layout_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .set0 = set0 };
+        object.* = .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .set0 = set0, .set0_layout = source_set, .push_descriptor = source_set.flags & 1 != 0, .push_ranges = push_ranges };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
@@ -2534,13 +6010,71 @@ fn destroyPipelineLayout(device: ?Device, handle: usize, alloc: ?*const Alloc) c
     defer mutex.unlock();
     const d = device orelse return;
     const object = validPipelineLayoutLocked(handle) orelse return;
-    if (validDeviceLocked(d) and object.owner.eql(d)) stateForObject(PipelineLayoutObj, object, &pipeline_layout_objects, &pipeline_layout_state).?.* = .tombstone;
+    if (validDeviceLocked(d) and object.owner.eql(d)) {
+        object.canonical.deinit();
+        object.set0.deinit();
+        stateForObject(PipelineLayoutObj, object, &pipeline_layout_objects, &pipeline_layout_state).?.* = .tombstone;
+    }
 }
 
 fn appendAttachmentRef(w: *CanonicalWriter, ref: AttachmentReference, count: u32) CanonicalError!void {
     if (ref.attachment != 0xffff_ffff and ref.attachment >= count) return error.Invalid;
     try w.u32le(ref.attachment);
     try w.i32le(ref.layout);
+}
+fn attachmentDescription2PNextValid(raw: ?*const anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    var seen = false;
+    while (next) |item| {
+        if (depth == 16 or seen) return false;
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (header.s_type != 1000242002) return false;
+        const stencil: *const AttachmentDescriptionStencilLayout = @ptrCast(@alignCast(item));
+        if (stencil.stencil_initial_layout != 0 or stencil.stencil_final_layout != 0) return false;
+        seen = true;
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
+}
+fn subpassDescription2PNextValid(raw: ?*const anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    var seen = false;
+    while (next) |item| {
+        if (depth == 16 or seen) return false;
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (header.s_type != 1000200001) return false;
+        const resolve: *const SubpassDescriptionDepthStencilResolve = @ptrCast(@alignCast(item));
+        if (resolve.depth_resolve_mode != 0 or resolve.stencil_resolve_mode != 0 or resolve.depth_stencil_resolve_attachment != null) return false;
+        seen = true;
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
+}
+fn renderPassCreate2PNextValid(raw: ?*const anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (depth == 16) return false;
+        switch (header.s_type) {
+            1000053000 => {
+                const multiview: *const RenderPassMultiviewCreateInfo = @ptrCast(@alignCast(item));
+                if (multiview.subpass_count != 0 or multiview.view_masks != null or multiview.dependency_count != 0 or multiview.view_offsets != null or multiview.correlation_mask_count != 0 or multiview.correlation_masks != null) return false;
+            },
+            1000117000 => {
+                const aspects: *const RenderPassInputAttachmentAspectCreateInfo = @ptrCast(@alignCast(item));
+                if (aspects.aspect_reference_count != 0 or aspects.aspect_references != null) return false;
+            },
+            else => return false,
+        }
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
 }
 fn buildRenderPass(ci: *const RenderPassCreateInfo, compatibility_only: bool) CanonicalError!Canonical {
     if (ci.s_type != 38 or ci.p_next != null or ci.flags != 0 or ci.attachment_count > 16 or ci.subpass_count == 0 or ci.subpass_count > 8 or ci.dependency_count > 32 or (ci.attachment_count != 0 and ci.attachments == null) or ci.subpasses == null or (ci.dependency_count != 0 and ci.dependencies == null)) return error.Invalid;
@@ -2563,7 +6097,7 @@ fn buildRenderPass(ci: *const RenderPassCreateInfo, compatibility_only: bool) Ca
     };
     try w.u32le(ci.subpass_count);
     for (ci.subpasses.?[0..ci.subpass_count]) |s| {
-        if (s.flags != 0 or s.pipeline_bind_point != 0 or s.input_attachment_count > 16 or s.color_attachment_count > 8 or s.preserve_attachment_count > 16 or (s.input_attachment_count != 0 and s.input_attachments == null) or (s.color_attachment_count != 0 and s.color_attachments == null) or (s.preserve_attachment_count != 0 and s.preserve_attachments == null)) return error.Invalid;
+        if (s.flags != 0 or s.pipeline_bind_point != 0 or s.input_attachment_count > 4 or s.color_attachment_count > 4 or s.preserve_attachment_count > 16 or (s.input_attachment_count != 0 and s.input_attachments == null) or (s.color_attachment_count != 0 and s.color_attachments == null) or (s.preserve_attachment_count != 0 and s.preserve_attachments == null)) return error.Invalid;
         try w.u32le(s.input_attachment_count);
         if (s.input_attachments) |refs| for (refs[0..s.input_attachment_count]) |ref| try appendAttachmentRef(&w, ref, ci.attachment_count);
         try w.u32le(s.color_attachment_count);
@@ -2655,13 +6189,74 @@ fn createRenderPass(device: ?Device, info: ?*const RenderPassCreateInfo, alloc: 
     compatibility.deinit();
     return .error_out_of_host_memory;
 }
+fn createRenderPass2(device: ?Device, info: ?*const RenderPassCreateInfo2, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    const ci = info orelse return .error_initialization_failed;
+    if (ci.s_type != 1000109004 or !renderPassCreate2PNextValid(ci.p_next) or ci.correlated_view_mask_count != 0 or ci.correlated_view_masks != null or ci.attachment_count > 16 or ci.subpass_count == 0 or ci.subpass_count > 8 or ci.dependency_count > 32 or (ci.attachment_count != 0 and ci.attachments == null) or ci.subpasses == null or (ci.dependency_count != 0 and ci.dependencies == null)) return .error_initialization_failed;
+    var attachments: [16]AttachmentDescription = undefined;
+    if (ci.attachments) |items| for (items[0..ci.attachment_count], 0..) |source, index| {
+        if (source.s_type != 1000109000 or !attachmentDescription2PNextValid(source.p_next)) return .error_initialization_failed;
+        attachments[index] = .{ .flags = source.flags, .format = source.format, .samples = source.samples, .load_op = source.load_op, .store_op = source.store_op, .stencil_load_op = source.stencil_load_op, .stencil_store_op = source.stencil_store_op, .initial_layout = source.initial_layout, .final_layout = source.final_layout };
+    };
+    var input_refs: [8][16]AttachmentReference = undefined;
+    var color_refs: [8][8]AttachmentReference = undefined;
+    var resolve_refs: [8][8]AttachmentReference = undefined;
+    var depth_refs: [8]AttachmentReference = undefined;
+    var preserve_refs: [8][16]u32 = undefined;
+    var subpasses: [8]SubpassDescription = undefined;
+    for (ci.subpasses.?[0..ci.subpass_count], 0..) |source, index| {
+        if (source.s_type != 1000109002 or !subpassDescription2PNextValid(source.p_next) or source.view_mask != 0 or source.input_attachment_count > 4 or source.color_attachment_count > 4 or source.preserve_attachment_count > 16 or (source.input_attachment_count != 0 and source.input_attachments == null) or (source.color_attachment_count != 0 and source.color_attachments == null)) return .error_initialization_failed;
+        const input = if (source.input_attachments) |items| items[0..source.input_attachment_count] else &.{};
+        for (input, 0..) |reference, ref_index| {
+            if (reference.s_type != 1000109001 or reference.p_next != null or reference.aspect_mask != 0) return .error_initialization_failed;
+            input_refs[index][ref_index] = .{ .attachment = reference.attachment, .layout = reference.layout };
+        }
+        const colors = if (source.color_attachments) |items| items[0..source.color_attachment_count] else &.{};
+        for (colors, 0..) |reference, ref_index| {
+            if (reference.s_type != 1000109001 or reference.p_next != null or reference.aspect_mask != 0) return .error_initialization_failed;
+            color_refs[index][ref_index] = .{ .attachment = reference.attachment, .layout = reference.layout };
+        }
+        if (source.resolve_attachments) |items| for (items[0..source.color_attachment_count], 0..) |reference, ref_index| {
+            if (reference.s_type != 1000109001 or reference.p_next != null or reference.aspect_mask != 0) return .error_initialization_failed;
+            resolve_refs[index][ref_index] = .{ .attachment = reference.attachment, .layout = reference.layout };
+        };
+        var depth: ?*const AttachmentReference = null;
+        if (source.depth_stencil_attachment) |reference| {
+            if (reference.s_type != 1000109001 or reference.p_next != null or reference.aspect_mask != 0) return .error_initialization_failed;
+            depth_refs[index] = .{ .attachment = reference.attachment, .layout = reference.layout };
+            depth = &depth_refs[index];
+        }
+        const preserves = if (source.preserve_attachments) |items| items[0..source.preserve_attachment_count] else &.{};
+        for (preserves, 0..) |attachment, ref_index| preserve_refs[index][ref_index] = attachment;
+        subpasses[index] = .{ .flags = source.flags, .pipeline_bind_point = source.pipeline_bind_point, .input_attachment_count = source.input_attachment_count, .input_attachments = if (source.input_attachment_count == 0) null else @ptrCast(&input_refs[index]), .color_attachment_count = source.color_attachment_count, .color_attachments = if (source.color_attachment_count == 0) null else @ptrCast(&color_refs[index]), .resolve_attachments = if (source.resolve_attachments == null) null else @ptrCast(&resolve_refs[index]), .depth_stencil_attachment = depth, .preserve_attachment_count = source.preserve_attachment_count, .preserve_attachments = if (source.preserve_attachment_count == 0) null else @ptrCast(&preserve_refs[index]) };
+    }
+    var dependencies: [32]SubpassDependency = undefined;
+    if (ci.dependencies) |items| for (items[0..ci.dependency_count], 0..) |source, index| {
+        if (source.s_type != 1000109003 or source.p_next != null or source.view_offset != 0) return .error_initialization_failed;
+        dependencies[index] = .{ .src_subpass = source.src_subpass, .dst_subpass = source.dst_subpass, .src_stage_mask = source.src_stage_mask, .dst_stage_mask = source.dst_stage_mask, .src_access_mask = source.src_access_mask, .dst_access_mask = source.dst_access_mask, .dependency_flags = source.dependency_flags };
+    };
+    const converted = RenderPassCreateInfo{ .s_type = 38, .p_next = null, .flags = ci.flags, .attachment_count = ci.attachment_count, .attachments = if (ci.attachment_count == 0) null else @ptrCast(&attachments), .subpass_count = ci.subpass_count, .subpasses = @ptrCast(&subpasses), .dependency_count = ci.dependency_count, .dependencies = if (ci.dependency_count == 0) null else @ptrCast(&dependencies) };
+    return createRenderPass(device, &converted, alloc, output);
+}
 fn destroyRenderPass(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
     if (alloc != null) return;
     lock();
     defer mutex.unlock();
     const d = device orelse return;
     const object = validRenderPassLocked(handle) orelse return;
-    if (validDeviceLocked(d) and object.owner.eql(d)) stateForObject(RenderPassObj, object, &render_pass_objects, &render_pass_state).?.* = .tombstone;
+    if (validDeviceLocked(d) and object.owner.eql(d)) {
+        object.canonical.deinit();
+        object.compatibility.deinit();
+        stateForObject(RenderPassObj, object, &render_pass_objects, &render_pass_state).?.* = .tombstone;
+    }
+}
+fn getRenderAreaGranularity(device: ?Device, handle: usize, output: ?*Extent2D) callconv(.c) void {
+    const d = device orelse return;
+    const out = output orelse return;
+    lock();
+    defer mutex.unlock();
+    const render_pass = validRenderPassLocked(handle) orelse return;
+    if (!validDeviceLocked(d) or !render_pass.owner.eql(d)) return;
+    out.* = .{ .width = 1, .height = 1 };
 }
 
 fn appendSpecialization(w: *CanonicalWriter, info: ?*const SpecializationInfo) CanonicalError!void {
@@ -2814,6 +6409,138 @@ test "Vulkan graphics pipeline ABI declarations match LP64 layouts" {
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(FramebufferCreateInfo));
     try std.testing.expectEqual(@as(usize, 32), @offsetOf(FramebufferCreateInfo, "attachment_count"));
     try std.testing.expectEqual(@as(usize, 40), @offsetOf(FramebufferCreateInfo, "attachments"));
+    try std.testing.expectEqual(@as(usize, 96), @sizeOf(ComputePipelineCreateInfo));
+    try std.testing.expectEqual(@as(usize, 72), @offsetOf(ComputePipelineCreateInfo, "layout"));
+}
+
+test "compute pipeline creation validates ownership, publishes typed handles, and rolls back" {
+    compute_pipeline_state = [_]SlotState{.never} ** max_child_objects;
+    const first = try createTestDeviceContext();
+    defer destroyDevice(first.device, null);
+    const second = try createTestDeviceContext();
+    defer destroyDevice(second.device, null);
+
+    const set_layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 0, .bindings = null };
+    var set_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(first.device, &set_layout_info, null, &set_layout));
+    var pipeline_layout: usize = 0;
+    const pipeline_layout_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&set_layout), .push_constant_range_count = 0, .push_constant_ranges = null };
+    try std.testing.expectEqual(Result.success, createPipelineLayout(first.device, &pipeline_layout_info, null, &pipeline_layout));
+    const words = spirv_frontend.compute_select_store;
+    const shader_info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = @sizeOf(@TypeOf(words)), .p_code = &words };
+    var shader: usize = 0;
+    try std.testing.expectEqual(Result.success, createShaderModule(first.device, &shader_info, null, &shader));
+    var name = [_:0]u8{ 'm', 'a', 'i', 'n' };
+    const stage = PipelineShaderStageCreateInfo{ .s_type = 18, .p_next = null, .flags = 0, .stage = 32, .module = shader, .name = &name, .specialization_info = null };
+    const info = ComputePipelineCreateInfo{ .s_type = 29, .p_next = null, .flags = 0, .stage = stage, .layout = pipeline_layout, .base_pipeline = 0, .base_pipeline_index = -1 };
+    const cache_info = PipelineCacheCreateInfo{ .s_type = 17, .p_next = null, .flags = 0, .initial_data_size = 0, .initial_data = null };
+    var cache: usize = 0;
+    try std.testing.expectEqual(Result.success, createPipelineCache(first.device, &cache_info, null, &cache));
+    var pipelines = [_]usize{0xfeed_face};
+    try std.testing.expectEqual(Result.success, createComputePipelines(first.device, cache, 1, @ptrCast(&info), null, &pipelines));
+    const pipeline = pipelines[0];
+    try std.testing.expect(pipeline != 0xfeed_face);
+    try std.testing.expect(validComputePipelineLocked(pipeline) != null);
+    var cache_size: usize = 0;
+    try std.testing.expectEqual(Result.success, getPipelineCacheData(first.device, cache, &cache_size, null));
+    try std.testing.expect(cache_size > pipelineCacheHeader().len);
+    var cache_bytes = [_]u8{0} ** max_canonical_bytes;
+    var cache_capacity = cache_bytes.len;
+    try std.testing.expectEqual(Result.success, getPipelineCacheData(first.device, cache, &cache_capacity, &cache_bytes));
+    try std.testing.expectEqual(cache_size, cache_capacity);
+    try std.testing.expect(getDeviceProcAddr(first.device, "vkCreateComputePipelines") != null);
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), blk: {
+        var unchanged = [_]usize{0xfeed_face};
+        var foreign = info;
+        foreign.layout = pipeline_layout;
+        try std.testing.expectEqual(Result.error_initialization_failed, createComputePipelines(second.device, 0, 1, @ptrCast(&foreign), null, &unchanged));
+        break :blk unchanged[0];
+    });
+    var malformed = info;
+    malformed.stage.stage = 1;
+    var unchanged = [_]usize{0xfeed_face};
+    const states_before = compute_pipeline_state;
+    try std.testing.expectEqual(Result.error_initialization_failed, createComputePipelines(first.device, 0, 1, @ptrCast(&malformed), null, &unchanged));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), unchanged[0]);
+    try std.testing.expectEqualSlices(SlotState, &states_before, &compute_pipeline_state);
+    test_allocations_before_failure = 0;
+    unchanged[0] = 0xfeed_face;
+    try std.testing.expectEqual(Result.error_out_of_host_memory, createComputePipelines(first.device, 0, 1, @ptrCast(&info), null, &unchanged));
+    test_allocations_before_failure = null;
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), unchanged[0]);
+    try std.testing.expectEqualSlices(SlotState, &states_before, &compute_pipeline_state);
+    destroyPipeline(first.device, pipeline, null);
+    destroyPipelineCache(first.device, cache, null);
+    try std.testing.expect(validComputePipelineLocked(pipeline) == null);
+}
+
+test "compute storage profile dispatch writes a bound buffer" {
+    try computeStorageProfileTest();
+}
+
+test "compute uniform profile dispatch executes static arithmetic" {
+    try computeUniformStorageTest();
+}
+
+fn buildComputePipelineLocked(d: Device, ci: *const ComputePipelineCreateInfo) CanonicalError!ComputePipelineObj {
+    if (ci.s_type != 29 or ci.p_next != null or ci.flags != 0 or ci.base_pipeline != 0 or (ci.base_pipeline_index != -1 and ci.base_pipeline_index != 0)) return error.Invalid;
+    const layout = validPipelineLayoutLocked(ci.layout) orelse return error.Invalid;
+    if (!layout.owner.eql(d)) return error.Invalid;
+    const stage = ci.stage;
+    if (stage.s_type != 18 or stage.p_next != null or stage.flags != 0 or stage.stage != 32 or stage.name == null) return error.Invalid;
+    const shader = findLiveHandle(ShaderModuleObj, stage.module, &shader_module_objects, &shader_module_state) orelse return error.Invalid;
+    if (!shader.owner.eql(d)) return error.Invalid;
+    const name = std.mem.span(stage.name.?);
+    if (name.len == 0 or name.len > 255) return error.Invalid;
+
+    var w: CanonicalWriter = .{};
+    defer w.deinit();
+    try w.header(6);
+    try w.u32le(stage.stage);
+    try w.u32le(shader.module.identity.ingestion);
+    try w.u32le(shader.module.identity.serialization);
+    try w.raw(&shader.module.identity.digest);
+    try w.u64le(shader.module.words.len);
+    for (shader.module.words) |word| try w.u32le(word);
+    try w.u32le(@intCast(name.len));
+    try w.raw(name);
+    try appendSpecialization(&w, stage.specialization_info);
+    try appendCanonical(&w, &layout.canonical);
+    var canonical = try w.done();
+    errdefer canonical.deinit();
+    var layout_identity = try layout.canonical.clone();
+    errdefer layout_identity.deinit();
+    var frontend_specs: [64]spirv_frontend.Specialization = undefined;
+    var frontend_spec_count: usize = 0;
+    if (stage.specialization_info) |specialization| {
+        const entries = if (specialization.map_entries) |p| p[0..specialization.map_entry_count] else &.{};
+        const data: [*]const u8 = if (specialization.data) |p| @ptrCast(p) else @ptrFromInt(1);
+        for (entries) |entry| {
+            frontend_specs[frontend_spec_count] = .{ .id = entry.constant_id, .bytes = data[entry.offset..][0..entry.size] };
+            frontend_spec_count += 1;
+        }
+    }
+    var program = spirv_frontend.compile(allocator, shader.module.words, .compute, name, frontend_specs[0..frontend_spec_count]) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Invalid,
+    };
+    const executor = render_ir_exec.Executor.init(allocator, &program) catch |err| {
+        program.deinit(allocator);
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.Invalid,
+        };
+    };
+    program.deinit(allocator);
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .executor = executor };
+}
+
+fn validViewportDomain(viewport: Viewport) bool {
+    const max_extent = @as(f32, @floatFromInt(max_2d_extent));
+    return std.math.isFinite(viewport.x) and std.math.isFinite(viewport.y) and std.math.isFinite(viewport.width) and std.math.isFinite(viewport.height) and std.math.isFinite(viewport.min_depth) and std.math.isFinite(viewport.max_depth) and viewport.width != 0 and viewport.height != 0 and viewport.x >= -32_768 and viewport.x <= 32_767 and viewport.y >= -32_768 and viewport.y <= 32_767 and @abs(viewport.width) <= max_extent and @abs(viewport.height) <= max_extent and viewport.min_depth >= 0 and viewport.min_depth <= 1 and viewport.max_depth >= 0 and viewport.max_depth <= 1 and viewport.min_depth <= viewport.max_depth;
+}
+fn validScissorDomain(scissor: Rect2D) bool {
+    return scissor.extent.width <= max_2d_extent and scissor.extent.height <= max_2d_extent;
 }
 
 fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo) CanonicalError!GraphicsPipelineObj {
@@ -2877,7 +6604,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     if (!profile_pair and !cpu_cube_pair) return error.Invalid;
     if (profile_pair and !frontendInterfacesCompatible(&vertex_program.?, &fragment_program.?, &layout.set0)) return error.Invalid;
     const vi = ci.vertex_input orelse return error.Invalid;
-    if (vi.s_type != 19 or vi.p_next != null or vi.flags != 0 or vi.binding_count > 16 or vi.attribute_count > 32 or (vi.binding_count != 0 and vi.bindings == null) or (vi.attribute_count != 0 and vi.attributes == null)) return error.Invalid;
+    if (vi.s_type != 19 or vi.p_next != null or vi.flags != 0 or vi.binding_count > 16 or vi.attribute_count > 16 or (vi.binding_count != 0 and vi.bindings == null) or (vi.attribute_count != 0 and vi.attributes == null)) return error.Invalid;
     var binding_indices: [16]u8 = undefined;
     for (0..vi.binding_count) |i| binding_indices[i] = @intCast(i);
     const bindings = if (vi.bindings) |p| p[0..vi.binding_count] else &.{};
@@ -2890,7 +6617,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     var prior_binding: ?u32 = null;
     for (binding_indices[0..vi.binding_count]) |index| {
         const b = bindings[index];
-        if (prior_binding == b.binding or b.input_rate < 0 or b.input_rate > 1) return error.Invalid;
+        if (prior_binding == b.binding or b.binding >= 16 or b.stride > 2048 or b.input_rate < 0 or b.input_rate > 1) return error.Invalid;
         prior_binding = b.binding;
         try w.u32le(b.binding);
         try w.u32le(b.stride);
@@ -2908,7 +6635,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     var prior_location: ?u32 = null;
     for (attribute_indices[0..vi.attribute_count]) |index| {
         const a = attributes[index];
-        if (prior_location == a.location or a.format <= 0) return error.Invalid;
+        if (prior_location == a.location or a.location >= 16 or a.offset > 2047 or a.format <= 0) return error.Invalid;
         prior_location = a.location;
         var found = false;
         for (bindings) |b| if (b.binding == a.binding) {
@@ -2926,8 +6653,11 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     try w.i32le(ia.topology);
     var dynamic_viewport = false;
     var dynamic_scissor = false;
+    var dynamic_line_width = false;
+    var dynamic_depth_bias = false;
     var dynamic_indices: [16]u8 = undefined;
     var dynamic_count: u32 = 0;
+    try w.u32le(if (ci.dynamic) |dy| dy.dynamic_state_count else 0);
     if (ci.dynamic) |dy| {
         if (dy.s_type != 27 or dy.p_next != null or dy.flags != 0 or dy.dynamic_state_count > 16 or (dy.dynamic_state_count != 0 and dy.dynamic_states == null)) return error.Invalid;
         dynamic_count = dy.dynamic_state_count;
@@ -2941,19 +6671,22 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         var prior: ?i32 = null;
         for (dynamic_indices[0..dynamic_count]) |index| {
             const state = states[index];
-            if (prior == state or (state != 0 and state != 1)) return error.Invalid;
+            if (prior == state or state < 0 or state > 8) return error.Invalid;
             prior = state;
-            if (state == 0) dynamic_viewport = true else dynamic_scissor = true;
+            if (state == 0) dynamic_viewport = true else if (state == 1) dynamic_scissor = true else if (state == 2) dynamic_line_width = true;
+            if (state == 3) dynamic_depth_bias = true;
+            try w.i32le(state);
         }
     }
-    try w.u32le(dynamic_count);
-    if (dynamic_viewport) try w.i32le(0);
-    if (dynamic_scissor) try w.i32le(1);
     const vp = ci.viewport orelse return error.Invalid;
     if (vp.s_type != 22 or vp.p_next != null or vp.flags != 0 or vp.viewport_count != 1 or vp.scissor_count != 1 or (!dynamic_viewport and vp.viewports == null) or (!dynamic_scissor and vp.scissors == null)) return error.Invalid;
     try w.u32le(1);
+    var baked_viewport = Viewport{ .x = 0, .y = 0, .width = 0, .height = 0, .min_depth = 0, .max_depth = 1 };
+    var baked_scissor = cpu_cube.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 };
     if (!dynamic_viewport) {
         const v = vp.viewports.?[0];
+        if (!validViewportDomain(v)) return error.Invalid;
+        baked_viewport = v;
         try w.f32le(v.x);
         try w.f32le(v.y);
         try w.f32le(v.width);
@@ -2963,16 +6696,18 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     }
     if (!dynamic_scissor) {
         const s = vp.scissors.?[0];
+        if (!validScissorDomain(s)) return error.Invalid;
+        baked_scissor = .{ .x = s.offset.x, .y = s.offset.y, .width = s.extent.width, .height = s.extent.height };
         try w.i32le(s.offset.x);
         try w.i32le(s.offset.y);
         try w.u32le(s.extent.width);
         try w.u32le(s.extent.height);
     }
     const rs = ci.rasterization orelse return error.Invalid;
-    if (rs.s_type != 23 or rs.p_next != null or rs.flags != 0 or try bool32(rs.depth_clamp_enable) != 0 or try bool32(rs.rasterizer_discard_enable) != 0 or rs.polygon_mode != 0 or rs.cull_mode & ~@as(u32, 3) != 0 or (rs.front_face != 0 and rs.front_face != 1) or try bool32(rs.depth_bias_enable) != 0 or rs.depth_bias_constant_factor != 0 or rs.depth_bias_clamp != 0 or rs.depth_bias_slope_factor != 0 or rs.line_width != 1) return error.Invalid;
+    if (rs.s_type != 23 or rs.p_next != null or rs.flags != 0 or try bool32(rs.depth_clamp_enable) != 0 or try bool32(rs.rasterizer_discard_enable) != 0 or rs.polygon_mode != 0 or rs.cull_mode & ~@as(u32, 3) != 0 or (rs.front_face != 0 and rs.front_face != 1) or try bool32(rs.depth_bias_enable) != 0 or (!dynamic_depth_bias and (rs.depth_bias_constant_factor != 0 or rs.depth_bias_clamp != 0 or rs.depth_bias_slope_factor != 0)) or (!dynamic_line_width and rs.line_width != 1)) return error.Invalid;
     try w.u32le(rs.cull_mode);
     try w.i32le(rs.front_face);
-    try w.f32le(rs.line_width);
+    if (!dynamic_line_width) try w.f32le(rs.line_width);
     const ms = ci.multisample orelse return error.Invalid;
     if (ms.s_type != 24 or ms.p_next != null or ms.flags != 0 or ms.rasterization_samples != 1 or try bool32(ms.sample_shading_enable) != 0 or ms.min_sample_shading != 0 or ms.sample_mask != null or try bool32(ms.alpha_to_coverage_enable) != 0 or try bool32(ms.alpha_to_one_enable) != 0) return error.Invalid;
     try w.u32le(1);
@@ -3005,7 +6740,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     if (test_fail_render_compatibility_clone) return error.OutOfMemory;
     var render_compatibility = try render_pass.compatibility.clone();
     errdefer render_compatibility.deinit();
-    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face };
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .viewport = baked_viewport, .scissor = baked_scissor };
 }
 
 fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, set0: *const Canonical) bool {
@@ -3089,20 +6824,180 @@ test "cpu_cube_v1 shader compatibility bridge is exact" {
     try std.testing.expectError(error.OutOfMemory, compileFrontendStage(failing.allocator(), &valid, .vertex, "main", &.{}));
 }
 
-fn createOpaque(device: ?Device, info: ?*const anyopaque, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
-    _ = info orelse return .error_initialization_failed;
-    if (alloc != null) return .error_initialization_failed;
+fn createSampler(device: ?Device, raw_info: ?*const anyopaque, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    const info = @as(?*const SamplerCreateInfo, @ptrCast(@alignCast(raw_info))) orelse return .error_initialization_failed;
+    if (alloc != null or info.s_type != 31 or info.p_next != null or info.flags != 0 or info.mag_filter < 0 or info.mag_filter > 1 or info.min_filter < 0 or info.min_filter > 1 or info.mipmap_mode < 0 or info.mipmap_mode > 1 or info.address_mode_u < 0 or info.address_mode_u > 4 or info.address_mode_v < 0 or info.address_mode_v > 4 or info.address_mode_w < 0 or info.address_mode_w > 4 or !std.math.isFinite(info.mip_lod_bias) or info.anisotropy_enable != 0 or !std.math.isFinite(info.max_anisotropy) or info.compare_enable != 0 or info.compare_op < 0 or info.compare_op > 7 or !std.math.isFinite(info.min_lod) or !std.math.isFinite(info.max_lod) or info.min_lod < 0 or info.max_lod < info.min_lod or info.border_color < 0 or info.border_color > 5 or info.unnormalized_coordinates != 0) return .error_initialization_failed;
+    const d = device orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
     lock();
     defer mutex.unlock();
-    if (!validDeviceLocked(device orelse return .error_initialization_failed)) return .error_initialization_failed;
-    out.* = allocateGenericHandle();
-    return .success;
+    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    for (&sampler_objects, &sampler_state) |*object, *state| if (state.* == .never) {
+        object.* = .{ .owner = d };
+        state.* = .live;
+        out.* = @intFromPtr(object);
+        return .success;
+    };
+    return .error_out_of_host_memory;
 }
-fn destroyOpaque(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+fn destroySampler(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+    if (alloc != null) return;
+    const d = device orelse return;
+    lock();
+    defer mutex.unlock();
+    const sampler = validSamplerLocked(handle) orelse return;
+    if (validDeviceLocked(d) and sampler.owner == d) stateForObject(SamplerObj, sampler, &sampler_objects, &sampler_state).?.* = .tombstone;
+}
+fn createSamplerYcbcrConversion(device: ?Device, info: ?*const SamplerYcbcrConversionCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    const ci = info orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    if (alloc != null or ci.s_type != 1000156000 or ci.p_next != null) return .error_initialization_failed;
+    _ = device orelse return .error_initialization_failed;
+    _ = out;
+    // ZPU exposes no multi-planar YCbCr formats; report the capability result
+    // explicitly instead of publishing an object with incomplete conversion
+    // state.
+    return .error_format_not_supported;
+}
+fn destroySamplerYcbcrConversion(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
     _ = device;
     _ = handle;
     _ = alloc;
+}
+fn pipelineCacheHeader() [pipeline_cache_header_size]u8 {
+    var bytes = [_]u8{0} ** pipeline_cache_header_size;
+    std.mem.writeInt(u32, bytes[0..4], 32, .little);
+    std.mem.writeInt(u32, bytes[4..8], 1, .little);
+    std.mem.writeInt(u32, bytes[8..12], 0x1cdc, .little);
+    std.mem.writeInt(u32, bytes[12..16], 1, .little);
+    @memcpy(bytes[16..pipeline_cache_header_size], &pipeline_cache_uuid);
+    return bytes;
+}
+fn pipelineCachePayload(size: usize, data: ?*const anyopaque) ?[]const u8 {
+    if (size == 0) return &.{};
+    if (size < pipeline_cache_header_size or size > max_canonical_bytes + pipeline_cache_header_size) return null;
+    const raw: [*]const u8 = @ptrCast(data orelse return null);
+    const header = raw[0..pipeline_cache_header_size];
+    const header_size = std.mem.readInt(u32, header[0..4], .little);
+    if (header_size < pipeline_cache_header_size or header_size > size or std.mem.readInt(u32, header[4..8], .little) != 1 or std.mem.readInt(u32, header[8..12], .little) != 0x1cdc or std.mem.readInt(u32, header[12..16], .little) != 1 or !std.mem.eql(u8, header[16..pipeline_cache_header_size], &pipeline_cache_uuid)) return null;
+    return raw[@as(usize, header_size)..size];
+}
+fn validPipelineCacheData(size: usize, data: ?*const anyopaque) bool {
+    return pipelineCachePayload(size, data) != null;
+}
+fn ownPipelineCachePayload(payload: []const u8) CanonicalError!Canonical {
+    if (payload.len == 0) return .{};
+    if (failTestAllocation()) return error.OutOfMemory;
+    const bytes = allocator.dupe(u8, payload) catch return error.OutOfMemory;
+    canonical_live_allocations += 1;
+    var result = Canonical{ .bytes = bytes };
+    result.finish();
+    return result;
+}
+fn pipelineCacheHasRecord(payload: []const u8, entry: []const u8) bool {
+    var cursor: usize = 0;
+    while (cursor <= payload.len and payload.len - cursor >= 4) {
+        const record_size = std.mem.readInt(u32, payload[cursor..][0..4], .little);
+        const body_start = cursor + 4;
+        const body_size: usize = @intCast(record_size);
+        if (body_size > payload.len - body_start) break;
+        if (body_size == entry.len and std.mem.eql(u8, payload[body_start..][0..body_size], entry)) return true;
+        cursor = body_start + body_size;
+    }
+    return false;
+}
+fn appendPipelineCacheRecord(writer: *CanonicalWriter, entry: []const u8) CanonicalError!void {
+    if (entry.len > std.math.maxInt(u32) or pipelineCacheHasRecord(writer.list.items, entry)) return;
+    try writer.u32le(@intCast(entry.len));
+    try writer.raw(entry);
+}
+fn buildPipelineCacheCandidate(cache: *const PipelineCacheObj, records: []const []const u8) CanonicalError!Canonical {
+    var writer: CanonicalWriter = .{};
+    defer writer.deinit();
+    try writer.raw(cache.data.bytes);
+    for (records) |entry| try appendPipelineCacheRecord(&writer, entry);
+    return writer.done();
+}
+fn createPipelineCache(device: ?Device, info: ?*const PipelineCacheCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    const d = device orelse return .error_initialization_failed;
+    const ci = info orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    if (alloc != null or ci.s_type != 17 or ci.p_next != null or ci.flags != 0) return .error_initialization_failed;
+    const payload = pipelineCachePayload(ci.initial_data_size, ci.initial_data) orelse return .error_initialization_failed;
+    var owned_payload = ownPipelineCachePayload(payload) catch return .error_out_of_host_memory;
+    var published = false;
+    defer if (!published) owned_payload.deinit();
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    for (&pipeline_cache_objects, &pipeline_cache_state) |*cache, *state| if (state.* == .never) {
+        cache.* = .{ .owner = DeviceIdentity.capture(d), .data = owned_payload };
+        state.* = .live;
+        out.* = @intFromPtr(cache);
+        published = true;
+        return .success;
+    };
+    return .error_out_of_host_memory;
+}
+fn destroyPipelineCache(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+    if (alloc != null) return;
+    const d = device orelse return;
+    lock();
+    defer mutex.unlock();
+    const cache = validPipelineCacheLocked(handle) orelse return;
+    if (validDeviceLocked(d) and cache.owner.eql(d)) {
+        cache.data.deinit();
+        stateForObject(PipelineCacheObj, cache, &pipeline_cache_objects, &pipeline_cache_state).?.* = .tombstone;
+    }
+}
+fn getPipelineCacheData(device: ?Device, handle: usize, size: ?*usize, data: ?*anyopaque) callconv(.c) Result {
+    const d = device orelse return .error_initialization_failed;
+    const out_size = size orelse return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    const cache = validPipelineCacheLocked(handle) orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or !cache.owner.eql(d)) return .error_initialization_failed;
+    const header = pipelineCacheHeader();
+    const required = header.len + cache.data.bytes.len;
+    if (data) |raw| {
+        const written = @min(out_size.*, required);
+        const bytes: [*]u8 = @ptrCast(raw);
+        const header_written = @min(written, header.len);
+        @memcpy(bytes[0..header_written], header[0..header_written]);
+        if (written > header.len) @memcpy(bytes[header.len..written], cache.data.bytes[0 .. written - header.len]);
+        out_size.* = written;
+        return if (written < required) .incomplete else .success;
+    }
+    out_size.* = required;
+    return .success;
+}
+fn mergePipelineCaches(device: ?Device, dst_handle: usize, count: u32, src_handles: ?[*]const usize) callconv(.c) Result {
+    const d = device orelse return .error_initialization_failed;
+    if (count > max_api_items or (count != 0 and src_handles == null)) return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    const dst = validPipelineCacheLocked(dst_handle) orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or !dst.owner.eql(d)) return .error_initialization_failed;
+    var sources: [max_api_items]*PipelineCacheObj = undefined;
+    if (src_handles) |handles| for (handles[0..count], 0..) |handle, index| {
+        const src = validPipelineCacheLocked(handle) orelse return .error_initialization_failed;
+        if (src == dst or !src.owner.eql(d)) return .error_initialization_failed;
+        sources[index] = src;
+    };
+    var changed = false;
+    for (sources[0..count]) |src| if (src.data.bytes.len != 0 and std.mem.indexOf(u8, dst.data.bytes, src.data.bytes) == null) {
+        changed = true;
+        break;
+    };
+    if (!changed) return .success;
+    var writer: CanonicalWriter = .{};
+    defer writer.deinit();
+    writer.raw(dst.data.bytes) catch return .error_out_of_host_memory;
+    for (sources[0..count]) |src| if (src.data.bytes.len != 0 and std.mem.indexOf(u8, writer.list.items, src.data.bytes) == null) writer.raw(src.data.bytes) catch return .error_out_of_host_memory;
+    const merged = writer.done() catch return .error_out_of_host_memory;
+    dst.data.deinit();
+    dst.data = merged;
+    return .success;
 }
 fn createShaderModule(device: ?Device, info: ?*const ShaderModuleCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     const d = device orelse return .error_initialization_failed;
@@ -3166,16 +7061,20 @@ fn destroyShaderModule(device: ?Device, handle: usize, alloc: ?*const Alloc) cal
     };
     hit(.shader_lifetime);
 }
-fn createSemaphore(device: ?Device, info: ?*const anyopaque, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
-    _ = info orelse return .error_initialization_failed;
+fn createSemaphore(device: ?Device, info: ?*const SemaphoreCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    const ci = info orelse return .error_initialization_failed;
     if (alloc != null) return .error_initialization_failed;
     const d = device orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
+    if (ci.s_type != 9 or ci.flags != 0) return .error_initialization_failed;
+    const pnext = semaphoreCreatePNextState(ci.p_next) orelse return .error_initialization_failed;
+    const timeline = pnext.timeline;
+    const initial_value = pnext.initial_value;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
     for (&semaphore_objects, &semaphore_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = d, .signaled = false };
+        object.* = .{ .owner = d, .signaled = .init(false), .timeline = timeline, .timeline_value = .init(initial_value) };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
@@ -3189,18 +7088,82 @@ fn destroySemaphore(device: ?Device, handle: usize, alloc: ?*const Alloc) callco
     const object = validSemaphoreLocked(handle) orelse return;
     if (validDeviceLocked(device orelse return) and object.owner == device.?) stateForObject(SemaphoreObj, object, &semaphore_objects, &semaphore_state).?.* = .tombstone;
 }
+fn getSemaphoreCounterValue(device: ?Device, handle: usize, output: ?*u64) callconv(.c) Result {
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return .error_initialization_failed;
+    const semaphore = validSemaphoreLocked(handle) orelse return .error_initialization_failed;
+    const value = output orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or semaphore.owner != d or !semaphore.timeline) return .error_initialization_failed;
+    value.* = semaphore.timeline_value.load(.acquire);
+    return .success;
+}
+fn signalSemaphore(device: ?Device, info: ?*const SemaphoreSignalInfo) callconv(.c) Result {
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return .error_initialization_failed;
+    const signal = info orelse return .error_initialization_failed;
+    if (signal.s_type != 1000207005 or signal.p_next != null) return .error_initialization_failed;
+    const semaphore = validSemaphoreLocked(signal.semaphore) orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or semaphore.owner != d or !semaphore.timeline) return .error_initialization_failed;
+    if (signal.value < semaphore.timeline_value.load(.acquire)) return .error_initialization_failed;
+    semaphore.timeline_value.store(signal.value, .release);
+    return .success;
+}
+fn waitSemaphores(device: ?Device, info: ?*const SemaphoreWaitInfo, timeout_ns: u64) callconv(.c) Result {
+    const wait = info orelse return .error_initialization_failed;
+    if (wait.s_type != 1000207004 or wait.p_next != null or wait.flags > 1 or wait.semaphore_count == 0 or wait.semaphore_count > max_api_items or wait.semaphores == null or wait.values == null) return .error_initialization_failed;
+    var semaphores: [max_api_items]*SemaphoreObj = undefined;
+    var values: [max_api_items]u64 = undefined;
+    lock();
+    const d = device orelse {
+        mutex.unlock();
+        return .error_initialization_failed;
+    };
+    if (!validDeviceLocked(d)) {
+        mutex.unlock();
+        return .error_initialization_failed;
+    }
+    for (wait.semaphores.?[0..wait.semaphore_count], wait.values.?[0..wait.semaphore_count], 0..) |handle, value, index| {
+        const semaphore = validSemaphoreLocked(handle) orelse {
+            mutex.unlock();
+            return .error_initialization_failed;
+        };
+        if (semaphore.owner != d or !semaphore.timeline) {
+            mutex.unlock();
+            return .error_initialization_failed;
+        }
+        semaphores[index] = semaphore;
+        values[index] = value;
+    }
+    mutex.unlock();
+    const start = frame_pacing.monotonicNs();
+    while (true) {
+        var satisfied = wait.flags == 0;
+        for (semaphores[0..wait.semaphore_count], values[0..wait.semaphore_count]) |semaphore, value| {
+            const ready = semaphore.timeline_value.load(.acquire) >= value;
+            if (wait.flags == 1) satisfied = satisfied or ready else satisfied = satisfied and ready;
+        }
+        if (satisfied) return .success;
+        if (timeout_ns == 0) return .timeout;
+        if (timeout_ns != std.math.maxInt(u64) and frame_pacing.monotonicNs() -| start >= timeout_ns) return .timeout;
+        frame_pacing.sleepUntil(frame_pacing.monotonicNs() + 50_000);
+    }
+}
 fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     if (alloc != null) return .error_initialization_failed;
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (ci.s_type != 15 or ci.p_next != null or ci.flags != 0 or ci.view_type != 1 or !std.meta.eql(ci.components, [_]i32{ 0, 0, 0, 0 }) or ci.subresource_range.base_mip_level != 0 or ci.subresource_range.level_count != 1 or ci.subresource_range.layer_count == 0) return .error_initialization_failed;
+    const pnext = imageViewCreatePNextState(ci.p_next);
+    if (ci.s_type != 15 or !pnext.valid or ci.flags != 0 or (ci.view_type != 1 and ci.view_type != 5) or !std.meta.eql(ci.components, [_]i32{ 0, 0, 0, 0 }) or ci.subresource_range.base_mip_level != 0 or ci.subresource_range.level_count != 1 or ci.subresource_range.layer_count == 0) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     const image = validImageLocked(ci.image) orelse return .error_initialization_failed;
-    if (!validDeviceLocked(d) or image.owner != d or ci.format != image.format or (ci.subresource_range.aspect_mask != 1 and ci.subresource_range.aspect_mask != 2) or ci.subresource_range.base_array_layer >= image.array_layers or ci.subresource_range.layer_count > image.array_layers - ci.subresource_range.base_array_layer) return .error_initialization_failed;
+    const usage = if (pnext.has_usage) pnext.usage else image.usage;
+    if (!validDeviceLocked(d) or image.owner != d or ci.format != image.format or usage & ~image.usage != 0 or (ci.subresource_range.aspect_mask != 1 and ci.subresource_range.aspect_mask != 2) or ci.subresource_range.base_array_layer >= image.array_layers or ci.subresource_range.layer_count > image.array_layers - ci.subresource_range.base_array_layer) return .error_initialization_failed;
     for (&image_view_objects, &image_view_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = d, .image = image, .format = ci.format, .aspect_mask = ci.subresource_range.aspect_mask, .base_array_layer = ci.subresource_range.base_array_layer, .layer_count = ci.subresource_range.layer_count };
+        object.* = .{ .owner = d, .image = image, .format = ci.format, .usage = usage, .aspect_mask = ci.subresource_range.aspect_mask, .base_array_layer = ci.subresource_range.base_array_layer, .layer_count = ci.subresource_range.layer_count };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
@@ -3232,11 +7195,11 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
         if (view.owner != d or view == prior_view or (prior_view != null and view.image == prior_view.?.image) or view.format != requirement.format or view.image.format != requirement.format or view.image.samples != requirement.samples or view.image.width < ci.width or view.image.height < ci.height or view.base_array_layer != 0 or view.layer_count < ci.layers or view.image.array_layers < ci.layers) return .error_initialization_failed;
         switch (requirement.role) {
             .color => {
-                if (view.aspect_mask != 1 or view.image.usage & 0x10 == 0 or color != null) return .error_initialization_failed;
+                if (view.aspect_mask != 1 or view.usage & 0x10 == 0 or color != null) return .error_initialization_failed;
                 color = view.image;
             },
             .depth => {
-                if (view.aspect_mask != 2 or view.image.usage & 0x20 == 0 or depth != null) return .error_initialization_failed;
+                if (view.aspect_mask != 2 or view.usage & 0x20 == 0 or depth != null) return .error_initialization_failed;
                 depth = view.image;
             },
         }
@@ -3258,10 +7221,12 @@ fn destroyFramebuffer(device: ?Device, handle: usize, alloc: ?*const Alloc) call
     lock();
     defer mutex.unlock();
     const object = validFramebufferLocked(handle) orelse return;
-    if (validDeviceLocked(device orelse return) and object.owner == device.?) stateForObject(FramebufferObj, object, &framebuffer_objects, &framebuffer_state).?.* = .tombstone;
+    if (validDeviceLocked(device orelse return) and object.owner == device.?) {
+        object.render_compatibility.deinit();
+        stateForObject(FramebufferObj, object, &framebuffer_objects, &framebuffer_state).?.* = .tombstone;
+    }
 }
-fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?*const anyopaque, alloc: ?*const Alloc, outputs: ?[*]usize) callconv(.c) Result {
-    _ = cache;
+fn createComputePipelines(device: ?Device, cache: usize, count: u32, infos: ?*const anyopaque, alloc: ?*const Alloc, outputs: ?[*]usize) callconv(.c) Result {
     const raw = infos orelse return .error_initialization_failed;
     if (alloc != null or count == 0 or count > max_child_objects) return .error_initialization_failed;
     const out = outputs orelse return .error_initialization_failed;
@@ -3269,6 +7234,72 @@ fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?*c
     defer mutex.unlock();
     const d = device orelse return .error_initialization_failed;
     if (!validDeviceLocked(d)) return .error_initialization_failed;
+    var pipeline_cache: ?*PipelineCacheObj = null;
+    if (cache != 0) {
+        pipeline_cache = validPipelineCacheLocked(cache) orelse return .error_initialization_failed;
+        if (!pipeline_cache.?.owner.eql(d)) return .error_initialization_failed;
+    }
+    const create_infos: [*]const ComputePipelineCreateInfo = @ptrCast(@alignCast(raw));
+    var built: [max_child_objects]ComputePipelineObj = undefined;
+    var slots: [max_child_objects]u8 = undefined;
+    var free_count: usize = 0;
+    for (compute_pipeline_state, 0..) |state, index| if (state == .never) {
+        slots[free_count] = @intCast(index);
+        free_count += 1;
+    };
+    if (free_count < count) return .error_out_of_host_memory;
+    var built_count: usize = 0;
+    for (0..count) |index| {
+        built[index] = buildComputePipelineLocked(d, &create_infos[index]) catch |err| {
+            for (built[0..built_count]) |*prior| {
+                if (prior.executor) |*executor| executor.deinit();
+                prior.canonical.deinit();
+                prior.layout.deinit();
+            }
+            return creationFailure(err);
+        };
+        built_count += 1;
+    }
+    var cache_candidate: ?Canonical = null;
+    defer if (cache_candidate) |*candidate| candidate.deinit();
+    if (pipeline_cache) |cache_object| {
+        var records: [max_child_objects][]const u8 = undefined;
+        for (0..count) |index| records[index] = built[index].canonical.bytes;
+        cache_candidate = buildPipelineCacheCandidate(cache_object, records[0..count]) catch |err| {
+            for (built[0..built_count]) |*prior| {
+                if (prior.executor) |*executor| executor.deinit();
+                prior.canonical.deinit();
+                prior.layout.deinit();
+            }
+            return creationFailure(err);
+        };
+    }
+    for (0..count) |index| {
+        const slot = slots[index];
+        compute_pipeline_objects[slot] = built[index];
+        compute_pipeline_state[slot] = .live;
+        out[index] = @intFromPtr(&compute_pipeline_objects[slot]);
+    }
+    if (pipeline_cache) |cache_object| {
+        cache_object.data.deinit();
+        cache_object.data = cache_candidate.?;
+        cache_candidate = null;
+    }
+    return .success;
+}
+fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?*const anyopaque, alloc: ?*const Alloc, outputs: ?[*]usize) callconv(.c) Result {
+    const raw = infos orelse return .error_initialization_failed;
+    if (alloc != null or count == 0 or count > max_child_objects) return .error_initialization_failed;
+    const out = outputs orelse return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    var pipeline_cache: ?*PipelineCacheObj = null;
+    if (cache != 0) {
+        pipeline_cache = validPipelineCacheLocked(cache) orelse return .error_initialization_failed;
+        if (!pipeline_cache.?.owner.eql(d)) return .error_initialization_failed;
+    }
     const create_infos: [*]const GraphicsPipelineCreateInfo = @ptrCast(@alignCast(raw));
     var built: [max_child_objects]GraphicsPipelineObj = undefined;
     var slots: [max_child_objects]u8 = undefined;
@@ -3294,11 +7325,34 @@ fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?*c
         };
         built_count += 1;
     }
+    var cache_candidate: ?Canonical = null;
+    defer if (cache_candidate) |*candidate| candidate.deinit();
+    if (pipeline_cache) |cache_object| {
+        var records: [max_child_objects][]const u8 = undefined;
+        for (0..count) |index| records[index] = built[index].canonical.bytes;
+        cache_candidate = buildPipelineCacheCandidate(cache_object, records[0..count]) catch |err| {
+            for (built[0..built_count]) |*prior| {
+                prior.execution_abi.deinit();
+                prior.canonical.deinit();
+                prior.layout.deinit();
+                prior.set0.deinit();
+                prior.render_compatibility.deinit();
+                if (prior.vertex_program) |*program| program.deinit(allocator);
+                if (prior.fragment_program) |*program| program.deinit(allocator);
+            }
+            return creationFailure(err);
+        };
+    }
     for (0..count) |index| {
         const slot = slots[index];
         graphics_pipeline_objects[slot] = built[index];
         graphics_pipeline_state[slot] = .live;
         out[index] = @intFromPtr(&graphics_pipeline_objects[slot]);
+    }
+    if (pipeline_cache) |cache_object| {
+        cache_object.data.deinit();
+        cache_object.data = cache_candidate.?;
+        cache_candidate = null;
     }
     return .success;
 }
@@ -3307,11 +7361,142 @@ fn destroyPipeline(device: ?Device, handle: usize, alloc: ?*const Alloc) callcon
     lock();
     defer mutex.unlock();
     const d = device orelse return;
-    const object = validGraphicsPipelineLocked(handle) orelse return;
-    if (validDeviceLocked(d) and object.owner.eql(d)) {
+    if (validGraphicsPipelineLocked(handle)) |object| {
+        if (!validDeviceLocked(d) or !object.owner.eql(d)) return;
         object.execution_abi.deinit();
+        object.canonical.deinit();
+        object.layout.deinit();
+        object.set0.deinit();
+        object.render_compatibility.deinit();
+        if (object.vertex_program) |*program| {
+            program.deinit(allocator);
+            object.vertex_program = null;
+        }
+        if (object.fragment_program) |*program| {
+            program.deinit(allocator);
+            object.fragment_program = null;
+        }
         stateForObject(GraphicsPipelineObj, object, &graphics_pipeline_objects, &graphics_pipeline_state).?.* = .tombstone;
+        return;
     }
+    const compute = validComputePipelineLocked(handle) orelse return;
+    if (validDeviceLocked(d) and compute.owner.eql(d)) {
+        if (compute.executor) |*executor| executor.deinit();
+        compute.canonical.deinit();
+        compute.layout.deinit();
+        stateForObject(ComputePipelineObj, compute, &compute_pipeline_objects, &compute_pipeline_state).?.* = .tombstone;
+    }
+}
+fn createPrivateDataSlot(device: ?Device, info: ?*const PrivateDataSlotCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    const d = device orelse return .error_initialization_failed;
+    const ci = info orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    if (alloc != null or ci.s_type != 1000295000 or ci.p_next != null or ci.flags != 0) return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    for (&private_data_slot_objects, &private_data_slot_state) |*slot, *state| if (state.* == .never) {
+        slot.* = .{ .owner = d, .entries = [_]PrivateDataEntry{.{}} ** max_api_items };
+        state.* = .live;
+        out.* = @intFromPtr(slot);
+        return .success;
+    };
+    return .error_out_of_host_memory;
+}
+fn destroyPrivateDataSlot(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+    if (alloc != null) return;
+    const d = device orelse return;
+    lock();
+    defer mutex.unlock();
+    const slot = validPrivateDataSlotLocked(handle) orelse return;
+    if (validDeviceLocked(d) and slot.owner == d) stateForObject(PrivateDataSlotObj, slot, &private_data_slot_objects, &private_data_slot_state).?.* = .tombstone;
+}
+fn setPrivateData(device: ?Device, object_type: i32, object_handle: u64, slot_handle: usize, data: u64) callconv(.c) void {
+    const d = device orelse return;
+    lock();
+    defer mutex.unlock();
+    const slot = validPrivateDataSlotLocked(slot_handle) orelse return;
+    if (!validDeviceLocked(d) or slot.owner != d or object_handle == 0) return;
+    for (&slot.entries) |*entry| if (entry.object == object_handle and entry.object_type == object_type) {
+        entry.data = data;
+        if (data == 0) entry.* = .{};
+        return;
+    };
+    if (data == 0) return;
+    for (&slot.entries) |*entry| if (entry.object == 0) {
+        entry.* = .{ .object_type = object_type, .object = object_handle, .data = data };
+        return;
+    };
+}
+fn getPrivateData(device: ?Device, object_type: i32, object_handle: u64, slot_handle: usize, output: ?*u64) callconv(.c) void {
+    const out = output orelse return;
+    out.* = 0;
+    const d = device orelse return;
+    lock();
+    defer mutex.unlock();
+    const slot = validPrivateDataSlotLocked(slot_handle) orelse return;
+    if (!validDeviceLocked(d) or slot.owner != d or object_handle == 0) return;
+    for (slot.entries) |entry| if (entry.object == object_handle and entry.object_type == object_type) {
+        out.* = entry.data;
+        return;
+    };
+}
+fn createDescriptorPool(device: ?Device, info: ?*const DescriptorPoolCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    if (alloc != null) return .error_initialization_failed;
+    const d = device orelse return .error_initialization_failed;
+    const ci = info orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    if (ci.s_type != 33 or ci.p_next != null or ci.flags & ~@as(u32, 1) != 0 or ci.max_sets == 0 or ci.pool_size_count > descriptor_type_count or (ci.pool_size_count != 0 and ci.pool_sizes == null)) return .error_initialization_failed;
+    var capacity = [_]u32{0} ** descriptor_type_count;
+    if (ci.pool_sizes) |sizes| for (sizes[0..ci.pool_size_count]) |size| {
+        if (size.descriptor_type < 0 or size.descriptor_type >= descriptor_type_count or size.descriptor_count == 0) return .error_initialization_failed;
+        const index: usize = @intCast(size.descriptor_type);
+        if (capacity[index] != 0) return .error_initialization_failed;
+        capacity[index] = size.descriptor_count;
+    };
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    for (&descriptor_pool_objects, &descriptor_pool_state) |*pool, *state| if (state.* == .never) {
+        pool.* = .{ .owner = DeviceIdentity.capture(d), .flags = ci.flags, .max_sets = ci.max_sets, .allocated_sets = 0, .capacity = capacity, .used = [_]u32{0} ** descriptor_type_count };
+        state.* = .live;
+        out.* = @intFromPtr(pool);
+        return .success;
+    };
+    return .error_out_of_host_memory;
+}
+fn releaseDescriptorSetLocked(set: *DescriptorSetObj) void {
+    const pool = set.pool;
+    pool.allocated_sets -= 1;
+    for (&pool.used, set.counts) |*used, count| used.* -= count;
+    set.layout.deinit();
+    set.counts = [_]u32{0} ** descriptor_type_count;
+    stateForObject(DescriptorSetObj, set, &descriptor_set_objects, &descriptor_set_state).?.* = .tombstone;
+}
+fn releaseDescriptorPoolSetsLocked(pool: *DescriptorPoolObj) void {
+    for (&descriptor_set_objects, descriptor_set_state) |*set, state| if (state == .live and set.pool == pool) releaseDescriptorSetLocked(set);
+}
+fn destroyDescriptorPool(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+    if (alloc != null) return;
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return;
+    const pool = validDescriptorPoolLocked(handle) orelse return;
+    if (!validDeviceLocked(d) or !pool.owner.eql(d)) return;
+    releaseDescriptorPoolSetsLocked(pool);
+    stateForObject(DescriptorPoolObj, pool, &descriptor_pool_objects, &descriptor_pool_state).?.* = .tombstone;
+}
+fn resetDescriptorPool(device: ?Device, handle: usize, flags: u32) callconv(.c) Result {
+    if (flags != 0) return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return .error_initialization_failed;
+    const pool = validDescriptorPoolLocked(handle) orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or !pool.owner.eql(d)) return .error_initialization_failed;
+    releaseDescriptorPoolSetsLocked(pool);
+    std.debug.assert(pool.allocated_sets == 0);
+    std.debug.assert(std.mem.allEqual(u32, &pool.used, 0));
+    return .success;
 }
 fn allocateDescriptorSets(device: ?Device, info: ?*const DescriptorSetAllocateInfo, outputs: ?[*]usize) callconv(.c) Result {
     const ci = info orelse return .error_initialization_failed;
@@ -3319,7 +7504,10 @@ fn allocateDescriptorSets(device: ?Device, info: ?*const DescriptorSetAllocateIn
     lock();
     defer mutex.unlock();
     const d = device orelse return .error_initialization_failed;
-    if (!validDeviceLocked(d) or ci.s_type != 34 or ci.p_next != null or ci.descriptor_set_count == 0 or ci.descriptor_set_count > max_child_objects or ci.set_layouts == null) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or ci.s_type != 34 or !descriptorSetAllocatePNextValid(ci.p_next, ci.descriptor_set_count) or ci.descriptor_set_count == 0 or ci.descriptor_set_count > max_child_objects or ci.set_layouts == null) return .error_initialization_failed;
+    const pool = validDescriptorPoolLocked(ci.descriptor_pool) orelse return .error_initialization_failed;
+    if (!pool.owner.eql(d)) return .error_initialization_failed;
+    if (ci.descriptor_set_count > pool.max_sets - pool.allocated_sets) return .error_out_of_pool_memory;
     var slots: [max_child_objects]u8 = undefined;
     var free_count: usize = 0;
     for (descriptor_set_state, 0..) |state, index| if (state == .never) {
@@ -3328,6 +7516,8 @@ fn allocateDescriptorSets(device: ?Device, info: ?*const DescriptorSetAllocateIn
     };
     if (free_count < ci.descriptor_set_count) return .error_out_of_host_memory;
     var layouts: [max_child_objects]Canonical = undefined;
+    var counts: [max_child_objects]DescriptorCounts = undefined;
+    var requested = [_]u32{0} ** descriptor_type_count;
     var made: usize = 0;
     for (ci.set_layouts.?[0..ci.descriptor_set_count]) |handle| {
         const source = validDescriptorSetLayoutLocked(handle) orelse {
@@ -3338,87 +7528,397 @@ fn allocateDescriptorSets(device: ?Device, info: ?*const DescriptorSetAllocateIn
             for (layouts[0..made]) |*prior| prior.deinit();
             return .error_initialization_failed;
         }
+        for (&requested, source.counts) |*total, count| total.* = std.math.add(u32, total.*, count) catch {
+            for (layouts[0..made]) |*prior| prior.deinit();
+            return .error_out_of_pool_memory;
+        };
+        counts[made] = source.counts;
         layouts[made] = source.canonical.clone() catch {
             for (layouts[0..made]) |*prior| prior.deinit();
             return .error_out_of_host_memory;
         };
         made += 1;
     }
+    for (pool.used, pool.capacity, requested) |used, capacity, count| if (count > capacity - used) {
+        for (layouts[0..made]) |*prior| prior.deinit();
+        return .error_out_of_pool_memory;
+    };
     for (0..ci.descriptor_set_count) |index| {
         const slot = slots[index];
-        descriptor_set_objects[slot] = .{ .owner = DeviceIdentity.capture(d), .layout = layouts[index] };
+        const source_layout = validDescriptorSetLayoutLocked(ci.set_layouts.?[index]).?;
+        descriptor_set_objects[slot] = .{ .owner = DeviceIdentity.capture(d), .pool = pool, .counts = counts[index], .layout = layouts[index], .binding_types = source_layout.binding_types };
         descriptor_set_state[slot] = .live;
         out[index] = @intFromPtr(&descriptor_set_objects[slot]);
     }
+    pool.allocated_sets += ci.descriptor_set_count;
+    for (&pool.used, requested) |*used, count| used.* += count;
+    return .success;
+}
+fn freeDescriptorSets(device: ?Device, pool_handle: usize, count: u32, handles: ?[*]const usize) callconv(.c) Result {
+    if (count != 0 and handles == null) return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return .error_initialization_failed;
+    const pool = validDescriptorPoolLocked(pool_handle) orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or !pool.owner.eql(d) or pool.flags & 1 == 0) return .error_initialization_failed;
+    const set_handles = if (handles) |p| p[0..count] else &.{};
+    for (set_handles, 0..) |handle, index| {
+        const set = validDescriptorSetLocked(handle) orelse return .error_initialization_failed;
+        if (!set.owner.eql(d) or set.pool != pool) return .error_initialization_failed;
+        for (set_handles[0..index]) |prior| if (prior == handle) return .error_initialization_failed;
+    }
+    for (set_handles) |handle| releaseDescriptorSetLocked(validDescriptorSetLocked(handle).?);
     return .success;
 }
 fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?*const anyopaque, copy_count: u32, copies: ?*const anyopaque) callconv(.c) void {
     const d = device orelse return;
-    _ = copy_count;
-    _ = copies;
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d) or write_count > max_api_items or copy_count != 0 or copies != null) return;
     if (write_count == 0) return;
     const raw = writes orelse return;
     const list: [*]const WriteDescriptorSet = @ptrCast(@alignCast(raw));
-    lock();
-    defer mutex.unlock();
-    if (!validDeviceLocked(d)) return;
-    for (list[0..write_count]) |descriptor_write| {
-        const set = validDescriptorSetLocked(descriptor_write.dst_set) orelse continue;
-        if (!set.owner.eql(d) or descriptor_write.descriptor_count == 0) continue;
-        if (descriptor_write.descriptor_type == 6 and descriptor_write.dst_binding == 0) {
-            const info = (descriptor_write.buffer_info orelse continue)[0];
-            const buffer = validBufferLocked(info.buffer) orelse continue;
-            if (buffer.owner == d and info.offset <= buffer.size) {
-                set.uniform = buffer;
-                set.uniform_offset = info.offset;
-                set.uniform_range = if (info.range == std.math.maxInt(u64)) buffer.size - info.offset else info.range;
-            }
-        } else if (descriptor_write.descriptor_type == 1 and descriptor_write.dst_binding == 1) {
-            const info = (descriptor_write.image_info orelse continue)[0];
-            const view = validImageViewLocked(info.image_view) orelse continue;
-            if (view.owner == d and info.image_layout == 5) set.texture = view.image;
+    const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, writes_texture: bool };
+    var updates: [max_api_items]Update = undefined;
+    for (list[0..write_count], 0..) |descriptor_write, index| {
+        if (descriptor_write.s_type != 35 or descriptor_write.p_next != null or descriptor_write.dst_array_element != 0 or descriptor_write.descriptor_count != 1 or descriptor_write.texel_buffer_view != null) return;
+        const set = validDescriptorSetLocked(descriptor_write.dst_set) orelse return;
+        if (!set.owner.eql(d)) return;
+        var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .writes_texture = false };
+        if ((descriptor_write.descriptor_type == 6 or descriptor_write.descriptor_type == 8) and descriptor_write.dst_binding == 0 and set.binding_types[0] == descriptor_write.descriptor_type and descriptor_write.buffer_info != null and descriptor_write.image_info == null) {
+            const info = descriptor_write.buffer_info.?[0];
+            const buffer = validBufferLocked(info.buffer) orelse return;
+            if (buffer.owner != d or buffer.usage & 0x10 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or info.offset > buffer.size or (descriptor_write.descriptor_type == 8 and info.offset % 256 != 0)) return;
+            const range = if (info.range == std.math.maxInt(u64)) buffer.size - info.offset else info.range;
+            if (range == 0 or range > buffer.size - info.offset) return;
+            update.uniform = buffer;
+            update.uniform_offset = info.offset;
+            update.uniform_range = range;
+            update.uniform_dynamic = descriptor_write.descriptor_type == 8;
+            update.writes_uniform = true;
+        } else if (descriptor_write.descriptor_type == 7 and descriptor_write.dst_binding <= 1 and set.binding_types[descriptor_write.dst_binding] == 7 and descriptor_write.buffer_info != null and descriptor_write.image_info == null) {
+            const info = descriptor_write.buffer_info.?[0];
+            const buffer = validBufferLocked(info.buffer) orelse return;
+            if (buffer.owner != d or buffer.usage & 0x20 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or info.offset > buffer.size) return;
+            const range = if (info.range == std.math.maxInt(u64)) buffer.size - info.offset else info.range;
+            if (range == 0 or range > buffer.size - info.offset) return;
+            update.storage = buffer;
+            update.storage_binding = descriptor_write.dst_binding;
+            update.storage_offset = info.offset;
+            update.storage_range = range;
+            update.writes_storage = true;
+        } else if (descriptor_write.descriptor_type == 1 and descriptor_write.dst_binding == 1 and set.binding_types[1] == 1 and descriptor_write.image_info != null and descriptor_write.buffer_info == null) {
+            const info = descriptor_write.image_info.?[0];
+            const sampler = validSamplerLocked(info.sampler) orelse return;
+            const view = validImageViewLocked(info.image_view) orelse return;
+            if (sampler.owner != d or view.owner != d or view.usage & 0x4 == 0 or info.image_layout != 5) return;
+            update.texture = view.image;
+            update.writes_texture = true;
+        } else return;
+        updates[index] = update;
+    }
+    for (updates[0..write_count]) |update| {
+        if (update.writes_uniform) {
+            update.set.uniform = update.uniform;
+            update.set.uniform_offset = update.uniform_offset;
+            update.set.uniform_range = update.uniform_range;
+            update.set.uniform_dynamic = update.uniform_dynamic;
         }
+        if (update.writes_storage) {
+            update.set.storage = update.storage;
+            update.set.storage_binding = update.storage_binding;
+            update.set.storage_offset = update.storage_offset;
+            update.set.storage_range = update.storage_range;
+        }
+        if (update.writes_texture) update.set.texture = update.texture;
     }
 }
+fn createDescriptorUpdateTemplate(device: ?Device, info: ?*const DescriptorUpdateTemplateCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    const d = device orelse return .error_initialization_failed;
+    const ci = info orelse return .error_initialization_failed;
+    const out = output orelse return .error_initialization_failed;
+    if (alloc != null or ci.s_type != 1000085000 or ci.p_next != null or ci.flags != 0 or ci.template_type != 0 or ci.pipeline_bind_point != 0 or ci.set != 0 or ci.descriptor_update_entry_count > 32 or (ci.descriptor_update_entry_count != 0 and ci.descriptor_update_entries == null)) return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    const layout = validDescriptorSetLayoutLocked(ci.descriptor_set_layout) orelse return .error_initialization_failed;
+    if (!layout.owner.eql(d)) return .error_initialization_failed;
+    if (ci.descriptor_update_entries) |entries| for (entries[0..ci.descriptor_update_entry_count]) |entry| if (entry.dst_array_element != 0 or entry.descriptor_count != 1 or (entry.descriptor_type != 6 and entry.descriptor_type != 7 and entry.descriptor_type != 8 and entry.descriptor_type != 1) or entry.stride == 0 or (entry.descriptor_type == 8 and (entry.dst_binding != 0 or layout.binding_types[0] != 8)) or (entry.descriptor_type == 7 and (entry.dst_binding > 1 or layout.binding_types[entry.dst_binding] != 7)) or (entry.descriptor_type == 6 and entry.dst_binding == 0 and layout.binding_types[0] != 6) or (entry.descriptor_type == 1 and (entry.dst_binding != 1 or layout.binding_types[1] != 1))) return .error_initialization_failed;
+    for (&descriptor_update_template_objects, &descriptor_update_template_state) |*object, *state| if (state.* == .never) {
+        object.* = .{ .owner = DeviceIdentity.capture(d), .layout = layout, .entry_count = ci.descriptor_update_entry_count, .entries = [_]DescriptorUpdateTemplateEntry{std.mem.zeroes(DescriptorUpdateTemplateEntry)} ** 32 };
+        if (ci.descriptor_update_entries) |entries| @memcpy(object.entries[0..ci.descriptor_update_entry_count], entries[0..ci.descriptor_update_entry_count]);
+        state.* = .live;
+        out.* = @intFromPtr(object);
+        return .success;
+    };
+    return .error_out_of_host_memory;
+}
+fn destroyDescriptorUpdateTemplate(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
+    if (alloc != null) return;
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return;
+    const object = validDescriptorUpdateTemplateLocked(handle) orelse return;
+    if (validDeviceLocked(d) and object.owner.eql(d)) stateForObject(DescriptorUpdateTemplateObj, object, &descriptor_update_template_objects, &descriptor_update_template_state).?.* = .tombstone;
+}
+fn updateDescriptorSetWithTemplate(device: ?Device, set_handle: usize, template_handle: usize, data: ?*const anyopaque) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return;
+    const set = validDescriptorSetLocked(set_handle) orelse return;
+    const template = validDescriptorUpdateTemplateLocked(template_handle) orelse return;
+    if (!validDeviceLocked(d) or !set.owner.eql(d) or !template.owner.eql(d) or !template.layout.owner.eql(d) or !set.layout.eql(&template.layout.canonical)) return;
+    if (template.entry_count != 0 and data == null) return;
+    const Update = struct {
+        uniform: ?*BufferObj,
+        uniform_offset: u64,
+        uniform_range: u64,
+        uniform_dynamic: bool,
+        storage: ?*BufferObj,
+        storage_binding: u32,
+        storage_offset: u64,
+        storage_range: u64,
+        texture: ?*ImageObj,
+    };
+    var update = Update{ .uniform = set.uniform, .uniform_offset = set.uniform_offset, .uniform_range = set.uniform_range, .uniform_dynamic = set.uniform_dynamic, .storage = set.storage, .storage_binding = set.storage_binding, .storage_offset = set.storage_offset, .storage_range = set.storage_range, .texture = set.texture };
+    const source: [*]const u8 = @ptrCast(data orelse return);
+    for (template.entries[0..template.entry_count]) |entry| {
+        const item: [*]const u8 = source + entry.offset;
+        if (entry.descriptor_type == 6 or entry.descriptor_type == 8) {
+            const descriptor: *const DescriptorBufferInfo = @ptrCast(@alignCast(item));
+            const buffer = validBufferLocked(descriptor.buffer) orelse return;
+            if (buffer.owner != d or buffer.usage & 0x10 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or descriptor.offset > buffer.size or (entry.descriptor_type == 8 and descriptor.offset % 256 != 0)) return;
+            const range = if (descriptor.range == std.math.maxInt(u64)) buffer.size - descriptor.offset else descriptor.range;
+            if (range == 0 or range > buffer.size - descriptor.offset) return;
+            update.uniform = buffer;
+            update.uniform_offset = descriptor.offset;
+            update.uniform_range = range;
+            update.uniform_dynamic = entry.descriptor_type == 8;
+        } else if (entry.descriptor_type == 7) {
+            const descriptor: *const DescriptorBufferInfo = @ptrCast(@alignCast(item));
+            const buffer = validBufferLocked(descriptor.buffer) orelse return;
+            if (buffer.owner != d or buffer.usage & 0x20 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or descriptor.offset > buffer.size) return;
+            const range = if (descriptor.range == std.math.maxInt(u64)) buffer.size - descriptor.offset else descriptor.range;
+            if (range == 0 or range > buffer.size - descriptor.offset) return;
+            update.storage = buffer;
+            update.storage_binding = entry.dst_binding;
+            update.storage_offset = descriptor.offset;
+            update.storage_range = range;
+        } else {
+            const descriptor: *const DescriptorImageInfo = @ptrCast(@alignCast(item));
+            const sampler = validSamplerLocked(descriptor.sampler) orelse return;
+            const view = validImageViewLocked(descriptor.image_view) orelse return;
+            if (sampler.owner != d or view.owner != d or descriptor.image_layout != 5) return;
+            update.texture = view.image;
+        }
+    }
+    set.uniform = update.uniform;
+    set.uniform_offset = update.uniform_offset;
+    set.uniform_range = update.uniform_range;
+    set.uniform_dynamic = update.uniform_dynamic;
+    set.storage = update.storage;
+    set.storage_binding = update.storage_binding;
+    set.storage_offset = update.storage_offset;
+    set.storage_range = update.storage_range;
+    set.texture = update.texture;
+}
 fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, contents: i32) callconv(.c) void {
-    const begin = info orelse return;
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    const framebuffer = validFramebufferLocked(begin.framebuffer) orelse return;
-    const render_pass = validRenderPassLocked(begin.render_pass) orelse return;
-    const image = framebuffer.color_image orelse return;
-    if (contents != 0 or command_buffer.impl.state != 1 or command_buffer.impl.active_framebuffer != null or command_buffer.impl.count == command_buffer.impl.commands.len or begin.clear_value_count == 0 or begin.clear_values == null or !render_pass.owner.eql(command_buffer.impl.owner) or !framebuffer.render_compatibility.eql(&render_pass.compatibility)) {
+    if (command_buffer.impl.dynamic_rendering) {
         command_buffer.impl.invalid = true;
         return;
     }
-    const color = begin.clear_values.?[0].color.float32;
-    const depth_value = if (begin.clear_value_count > 1) begin.clear_values.?[1].depth_stencil.depth else 1;
+    const begin = info orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const framebuffer = validFramebufferLocked(begin.framebuffer) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const render_pass = validRenderPassLocked(begin.render_pass) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const image = framebuffer.color_image orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const area_x: u64 = if (begin.render_area.offset.x < 0) std.math.maxInt(u64) else @intCast(begin.render_area.offset.x);
+    const area_y: u64 = if (begin.render_area.offset.y < 0) std.math.maxInt(u64) else @intCast(begin.render_area.offset.y);
+    const area_end_x = std.math.add(u64, area_x, begin.render_area.extent.width) catch std.math.maxInt(u64);
+    const area_end_y = std.math.add(u64, area_y, begin.render_area.extent.height) catch std.math.maxInt(u64);
+    var color = [4]f32{ 0, 0, 0, 0 };
+    var depth_value: f32 = 1;
+    var clear_values_valid = begin.clear_value_count >= 1 and begin.clear_value_count <= 2 and begin.clear_values != null;
+    if (clear_values_valid) {
+        color = begin.clear_values.?[0].color.float32;
+        if (begin.clear_value_count > 1) depth_value = begin.clear_values.?[1].depth_stencil.depth;
+        for (color) |component| {
+            if (!std.math.isFinite(component)) clear_values_valid = false;
+        }
+        if (!std.math.isFinite(depth_value)) clear_values_valid = false;
+    }
+    if ((contents != 0 and contents != 1) or begin.s_type != 43 or !renderPassBeginPNextValid(begin.p_next) or command_buffer.impl.level != 0 or command_buffer.impl.state != 1 or command_buffer.impl.active_framebuffer != null or command_buffer.impl.count == command_buffer.impl.commands.len or !clear_values_valid or !render_pass.owner.eql(command_buffer.impl.owner) or framebuffer.owner != command_buffer.impl.owner or image.owner != command_buffer.impl.owner or !framebuffer.render_compatibility.eql(&render_pass.compatibility) or begin.render_area.extent.width == 0 or begin.render_area.extent.height == 0 or area_end_x > image.width or area_end_y > image.height) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
     command_buffer.impl.commands[command_buffer.impl.count] = .{ .render_clear = .{ .image = image, .depth = framebuffer.depth_image, .color = .{ @intFromFloat(std.math.clamp(color[2], 0, 1) * 255), @intFromFloat(std.math.clamp(color[1], 0, 1) * 255), @intFromFloat(std.math.clamp(color[0], 0, 1) * 255), @intFromFloat(std.math.clamp(color[3], 0, 1) * 255) }, .depth_value = depth_value } };
     command_buffer.impl.count += 1;
     command_buffer.impl.active_framebuffer = framebuffer;
     command_buffer.impl.active_render_pass = render_pass;
+    command_buffer.impl.active_subpass = 0;
+    command_buffer.impl.render_contents = contents;
+}
+fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    const ci = info orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    if (ci.s_type != 1000044001 or ci.p_next != null or ci.flags != 0 or ci.layer_count != 1 or ci.view_mask != 0 or ci.color_attachment_count != 1 or ci.color_attachments == null or command_buffer.impl.state != 1 or command_buffer.impl.invalid or command_buffer.impl.active_render_pass != null or command_buffer.impl.active_framebuffer != null or command_buffer.impl.dynamic_rendering) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    const color_attachment = ci.color_attachments.?[0];
+    if (color_attachment.s_type != 1000044000 or color_attachment.p_next != null or color_attachment.resolve_mode != 0 or color_attachment.resolve_image_view != 0 or color_attachment.load_op > 2 or color_attachment.store_op > 1 or !supportedLayout(color_attachment.image_layout)) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    const color_view = validImageViewLocked(color_attachment.image_view) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const color = color_view.image;
+    if (color.owner != command_buffer.impl.owner or color_view.aspect_mask != 1 or color.format != 44 or ci.render_area.offset.x < 0 or ci.render_area.offset.y < 0 or ci.render_area.extent.width == 0 or ci.render_area.extent.height == 0 or @as(u64, @intCast(ci.render_area.offset.x)) + ci.render_area.extent.width > color.width or @as(u64, @intCast(ci.render_area.offset.y)) + ci.render_area.extent.height > color.height) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    var depth: ?*ImageObj = null;
+    if (ci.depth_attachment) |depth_attachment| {
+        if (depth_attachment.s_type != 1000044000 or depth_attachment.p_next != null or depth_attachment.resolve_mode != 0 or depth_attachment.resolve_image_view != 0 or !supportedLayout(depth_attachment.image_layout)) {
+            command_buffer.impl.invalid = true;
+            return;
+        }
+        const depth_view = validImageViewLocked(depth_attachment.image_view) orelse {
+            command_buffer.impl.invalid = true;
+            return;
+        };
+        if (depth_view.owner != command_buffer.impl.owner or depth_view.aspect_mask != 2 or depth_view.image.format != 126 or depth_view.image.width != color.width or depth_view.image.height != color.height) {
+            command_buffer.impl.invalid = true;
+            return;
+        }
+        depth = depth_view.image;
+    }
+    if (ci.stencil_attachment != null) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    var clear_color = false;
+    var clear_color_value = [4]u8{ 0, 0, 0, 0 };
+    if (color_attachment.load_op == 1) {
+        const clear_components = color_attachment.clear_value.color.float32;
+        if (!std.math.isFinite(clear_components[0]) or !std.math.isFinite(clear_components[1]) or !std.math.isFinite(clear_components[2]) or !std.math.isFinite(clear_components[3])) {
+            command_buffer.impl.invalid = true;
+            return;
+        }
+        clear_color = true;
+        clear_color_value = .{ @intFromFloat(std.math.clamp(clear_components[2], 0, 1) * 255), @intFromFloat(std.math.clamp(clear_components[1], 0, 1) * 255), @intFromFloat(std.math.clamp(clear_components[0], 0, 1) * 255), @intFromFloat(std.math.clamp(clear_components[3], 0, 1) * 255) };
+    }
+    var clear_depth = false;
+    var clear_depth_value: f32 = 1;
+    if (depth) |depth_image| {
+        _ = depth_image;
+        const depth_attachment = ci.depth_attachment.?;
+        if (depth_attachment.load_op == 1) {
+            clear_depth_value = depth_attachment.clear_value.depth_stencil.depth;
+            if (!std.math.isFinite(clear_depth_value) or clear_depth_value < 0 or clear_depth_value > 1) {
+                command_buffer.impl.invalid = true;
+                return;
+            }
+            clear_depth = true;
+        }
+    }
+    if ((clear_color or clear_depth) and command_buffer.impl.count == command_buffer.impl.commands.len) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    if (clear_color or clear_depth) record(command_buffer, .{ .render_clear = .{ .image = color, .depth = depth, .color = clear_color_value, .depth_value = clear_depth_value, .clear_color = clear_color, .clear_depth = clear_depth } });
+    command_buffer.impl.dynamic_rendering = true;
+    command_buffer.impl.dynamic_color_image = color;
+    command_buffer.impl.dynamic_depth_image = depth;
+}
+fn cmdEndRendering(cb: ?CommandBuffer) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or !command_buffer.impl.dynamic_rendering) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    command_buffer.impl.dynamic_rendering = false;
+    command_buffer.impl.dynamic_color_image = null;
+    command_buffer.impl.dynamic_depth_image = null;
+}
+fn markCommandBufferInvalid(cb: ?CommandBuffer) void {
+    lock();
+    defer mutex.unlock();
+    if (validCommandBufferLocked(cb)) |c| c.impl.invalid = true;
+}
+fn cmdBeginRenderPass2(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, subpass: ?*const SubpassBeginInfo) callconv(.c) void {
+    const begin = subpass orelse {
+        markCommandBufferInvalid(cb);
+        return;
+    };
+    if (begin.s_type != 1000109005 or begin.p_next != null) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    cmdBeginRenderPass(cb, info, begin.contents);
 }
 fn cmdBindPipeline(cb: ?CommandBuffer, bind_point: i32, pipeline: usize) callconv(.c) void {
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    const object = validGraphicsPipelineLocked(pipeline) orelse {
-        command_buffer.impl.invalid = true;
-        return;
-    };
-    if (bind_point != 0 or command_buffer.impl.state != 1 or !object.owner.eql(command_buffer.impl.owner)) {
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid) {
         command_buffer.impl.invalid = true;
         return;
     }
-    command_buffer.impl.bound_pipeline = object;
-    command_buffer.impl.bound_pipeline_handle = pipeline;
+    if (bind_point == 0) {
+        const object = validGraphicsPipelineLocked(pipeline) orelse {
+            command_buffer.impl.invalid = true;
+            return;
+        };
+        if (!object.owner.eql(command_buffer.impl.owner)) {
+            command_buffer.impl.invalid = true;
+            return;
+        }
+        command_buffer.impl.bound_pipeline = object;
+        command_buffer.impl.bound_pipeline_handle = pipeline;
+    } else if (bind_point == 1) {
+        const object = validComputePipelineLocked(pipeline) orelse {
+            command_buffer.impl.invalid = true;
+            return;
+        };
+        if (!object.owner.eql(command_buffer.impl.owner)) {
+            command_buffer.impl.invalid = true;
+            return;
+        }
+        command_buffer.impl.bound_compute_pipeline = object;
+        command_buffer.impl.bound_compute_pipeline_handle = pipeline;
+    } else {
+        command_buffer.impl.invalid = true;
+    }
 }
 fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, first_set: u32, count: u32, sets: ?[*]const usize, dynamic_count: u32, offsets: ?[*]const u32) callconv(.c) void {
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    if (bind_point != 0 or first_set != 0 or count != 1 or sets == null or dynamic_count != 0 or offsets != null or command_buffer.impl.state != 1) {
+    if ((bind_point != 0 and bind_point != 1) or first_set != 0 or count != 1 or sets == null or command_buffer.impl.state != 1) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -3434,31 +7934,621 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
         command_buffer.impl.invalid = true;
         return;
     }
+    const expected_dynamic_count: u32 = if (descriptor.uniform_dynamic) 1 else 0;
+    if (dynamic_count != expected_dynamic_count or (dynamic_count != 0 and offsets == null) or (dynamic_count == 0 and offsets != null)) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    var dynamic_offset: u64 = 0;
+    if (descriptor.uniform_dynamic) {
+        dynamic_offset = offsets.?[0];
+        const buffer = descriptor.uniform orelse {
+            command_buffer.impl.invalid = true;
+            return;
+        };
+        if (dynamic_offset % 256 != 0 or descriptor.uniform_offset > std.math.maxInt(u64) - dynamic_offset) {
+            command_buffer.impl.invalid = true;
+            return;
+        }
+        const effective_offset = descriptor.uniform_offset + dynamic_offset;
+        if (effective_offset > buffer.size or descriptor.uniform_range == 0 or descriptor.uniform_range > buffer.size - effective_offset or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) {
+            command_buffer.impl.invalid = true;
+            return;
+        }
+    }
     command_buffer.impl.bound_descriptors = descriptor;
     command_buffer.impl.bound_layout = layout_object;
     command_buffer.impl.bound_layout_handle = layout;
+    command_buffer.impl.dynamic_uniform_offset = dynamic_offset;
+    command_buffer.impl.push_descriptor_active = false;
+}
+fn cmdBindDescriptorSets2(cb: ?CommandBuffer, info: ?*const BindDescriptorSetsInfo) callconv(.c) void {
+    const ci = info orelse {
+        markCommandBufferInvalid(cb);
+        return;
+    };
+    if (ci.s_type != 1000545003 or ci.p_next != null or normalizeCoreShaderStages(ci.stage_flags) == null) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    cmdBindDescriptorSets(cb, 0, ci.layout, ci.first_set, ci.descriptor_set_count, ci.descriptor_sets, ci.dynamic_offset_count, ci.dynamic_offsets);
+}
+fn bindIndexBufferLocked(command_buffer: *CommandBufferObj, handle: usize, offset: u64, size: u64, index_type: i32) void {
+    const buffer = validBufferLocked(handle) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const index_size: u64 = switch (index_type) {
+        0 => 2,
+        1 => 4,
+        else => {
+            command_buffer.impl.invalid = true;
+            return;
+        },
+    };
+    const available = if (offset <= buffer.size) buffer.size - offset else 0;
+    const effective_size = if (size == std.math.maxInt(u64)) available else size;
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or buffer.owner != command_buffer.impl.owner or buffer.usage & 0x40 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or offset % index_size != 0 or offset >= buffer.size or effective_size == 0 or effective_size > available) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    command_buffer.impl.index_buffer = buffer;
+    command_buffer.impl.index_buffer_handle = handle;
+    command_buffer.impl.index_offset = offset;
+    command_buffer.impl.index_size = effective_size;
+    command_buffer.impl.index_type = index_type;
+    command_buffer.impl.index_buffer_set = true;
+}
+fn cmdBindIndexBuffer(cb: ?CommandBuffer, handle: usize, offset: u64, index_type: i32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    const buffer = validBufferLocked(handle) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const size = if (offset <= buffer.size) buffer.size - offset else 0;
+    bindIndexBufferLocked(command_buffer, handle, offset, size, index_type);
+}
+fn bindVertexBuffersLocked(command_buffer: *CommandBufferObj, first_binding: u32, binding_count: u32, handles: ?[*]const usize, offsets: ?[*]const u64, sizes: ?[*]const u64, strides: ?[*]const u64) void {
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or binding_count == 0 or first_binding >= 16 or binding_count > 16 - first_binding or handles == null or offsets == null) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    const buffer_handles = handles.?[0..binding_count];
+    const buffer_offsets = offsets.?[0..binding_count];
+    const buffer_sizes = if (sizes) |items| items[0..binding_count] else null;
+    const buffer_strides = if (strides) |items| items[0..binding_count] else null;
+    var effective_sizes: [16]u64 = undefined;
+    for (buffer_handles, buffer_offsets, 0..) |handle, offset, relative| {
+        const buffer = validBufferLocked(handle) orelse {
+            command_buffer.impl.invalid = true;
+            return;
+        };
+        const available = if (offset <= buffer.size) buffer.size - offset else 0;
+        const size = if (buffer_sizes) |items| items[relative] else available;
+        const stride = if (buffer_strides) |items| items[relative] else 0;
+        if (buffer.owner != command_buffer.impl.owner or buffer.usage & 0x80 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or offset >= buffer.size or size == 0 or size > available or (stride != 0 and stride > 2048)) {
+            command_buffer.impl.invalid = true;
+            return;
+        }
+        effective_sizes[relative] = size;
+    }
+    for (buffer_handles, buffer_offsets, 0..) |handle, offset, relative| {
+        const binding: usize = first_binding + relative;
+        const buffer = validBufferLocked(handle).?;
+        command_buffer.impl.vertex_bindings.buffers[binding] = buffer;
+        command_buffer.impl.vertex_bindings.handles[binding] = handle;
+        command_buffer.impl.vertex_bindings.offsets[binding] = offset;
+        command_buffer.impl.vertex_bindings.sizes[binding] = effective_sizes[relative];
+        command_buffer.impl.vertex_bindings.strides[binding] = if (buffer_strides) |items| items[relative] else 0;
+        command_buffer.impl.vertex_bindings.set |= @as(u16, 1) << @intCast(binding);
+    }
+}
+fn cmdBindVertexBuffers(cb: ?CommandBuffer, first_binding: u32, binding_count: u32, handles: ?[*]const usize, offsets: ?[*]const u64) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    bindVertexBuffersLocked(command_buffer, first_binding, binding_count, handles, offsets, null, null);
 }
 fn cmdSetViewport(cb: ?CommandBuffer, first: u32, count: u32, values: ?*const anyopaque) callconv(.c) void {
-    if (first != 0 or count == 0 or values == null) return;
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or first != 0 or count != 1 or values == null or !validViewportDomain(@as(*const Viewport, @ptrCast(@alignCast(values.?))).*)) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
     command_buffer.impl.viewport = @as(*const Viewport, @ptrCast(@alignCast(values.?))).*;
+    command_buffer.impl.viewport_set = true;
 }
 fn cmdSetScissor(cb: ?CommandBuffer, first: u32, count: u32, values: ?*const anyopaque) callconv(.c) void {
-    if (first != 0 or count == 0 or values == null) return;
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or first != 0 or count != 1 or values == null or !validScissorDomain(@as(*const Rect2D, @ptrCast(@alignCast(values.?))).*)) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
     const rect: *const Rect2D = @ptrCast(@alignCast(values.?));
     command_buffer.impl.scissor = .{ .x = rect.offset.x, .y = rect.offset.y, .width = rect.extent.width, .height = rect.extent.height };
+    command_buffer.impl.scissor_set = true;
 }
-fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) callconv(.c) void {
+fn cmdSetViewportWithCount(cb: ?CommandBuffer, count: u32, values: ?*const Viewport) callconv(.c) void {
+    if (count != 1 or values == null) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    cmdSetViewport(cb, 0, 1, values);
+}
+fn cmdSetScissorWithCount(cb: ?CommandBuffer, count: u32, values: ?*const Rect2D) callconv(.c) void {
+    if (count != 1 or values == null) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    cmdSetScissor(cb, 0, 1, values);
+}
+fn cmdSetCullMode(cb: ?CommandBuffer, cull_mode: u32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    if (c.impl.state != 1 or c.impl.invalid or cull_mode & ~@as(u32, 3) != 0) {
+        c.impl.invalid = true;
+        return;
+    }
+    c.impl.dynamic.cull_mode = cull_mode;
+}
+fn cmdSetFrontFace(cb: ?CommandBuffer, front_face: i32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    if (c.impl.state != 1 or c.impl.invalid or (front_face != 0 and front_face != 1)) {
+        c.impl.invalid = true;
+        return;
+    }
+    c.impl.dynamic.front_face = front_face;
+}
+fn cmdSetPrimitiveTopology(cb: ?CommandBuffer, topology: i32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    if (c.impl.state != 1 or c.impl.invalid or topology < 0 or topology > 10) {
+        c.impl.invalid = true;
+        return;
+    }
+    c.impl.dynamic.primitive_topology = topology;
+}
+fn cmdSetPrimitiveRestartEnable(cb: ?CommandBuffer, enable: u32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    if (c.impl.state != 1 or c.impl.invalid or enable > 1) {
+        c.impl.invalid = true;
+        return;
+    }
+    c.impl.dynamic.primitive_restart_enable = enable;
+}
+fn cmdSetRasterizerDiscardEnable(cb: ?CommandBuffer, enable: u32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    if (c.impl.state != 1 or c.impl.invalid or enable > 1) {
+        c.impl.invalid = true;
+        return;
+    }
+    c.impl.dynamic.rasterizer_discard_enable = enable;
+}
+fn cmdSetDepthBiasEnable(cb: ?CommandBuffer, enable: u32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    if (c.impl.state != 1 or c.impl.invalid or enable > 1) {
+        c.impl.invalid = true;
+        return;
+    }
+    c.impl.dynamic.depth_bias_enable = enable;
+}
+fn cmdSetDepthTestEnable(cb: ?CommandBuffer, enable: u32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    if (c.impl.state != 1 or c.impl.invalid or enable > 1) {
+        c.impl.invalid = true;
+        return;
+    }
+    c.impl.dynamic.depth_test_enable = enable;
+}
+fn cmdSetDepthWriteEnable(cb: ?CommandBuffer, enable: u32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    if (c.impl.state != 1 or c.impl.invalid or enable > 1) {
+        c.impl.invalid = true;
+        return;
+    }
+    c.impl.dynamic.depth_write_enable = enable;
+}
+fn cmdSetDepthCompareOp(cb: ?CommandBuffer, compare_op: i32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    if (c.impl.state != 1 or c.impl.invalid or compare_op < 0 or compare_op > 7) {
+        c.impl.invalid = true;
+        return;
+    }
+    c.impl.dynamic.depth_compare_op = compare_op;
+}
+fn cmdSetDepthBoundsTestEnable(cb: ?CommandBuffer, enable: u32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    if (c.impl.state != 1 or c.impl.invalid or enable > 1) {
+        c.impl.invalid = true;
+        return;
+    }
+    c.impl.dynamic.depth_bounds_test_enable = enable;
+}
+fn cmdSetStencilTestEnable(cb: ?CommandBuffer, enable: u32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    if (c.impl.state != 1 or c.impl.invalid or enable > 1) {
+        c.impl.invalid = true;
+        return;
+    }
+    c.impl.dynamic.stencil_test_enable = enable;
+}
+fn cmdSetStencilOp(cb: ?CommandBuffer, face_mask: u32, fail_op: i32, pass_op: i32, depth_fail_op: i32, compare_op: i32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return;
+    if (c.impl.state != 1 or c.impl.invalid or face_mask == 0 or face_mask & ~@as(u32, 3) != 0 or fail_op < 0 or fail_op > 7 or pass_op < 0 or pass_op > 7 or depth_fail_op < 0 or depth_fail_op > 7 or compare_op < 0 or compare_op > 7) {
+        c.impl.invalid = true;
+        return;
+    }
+    c.impl.dynamic.stencil_fail_op = fail_op;
+    c.impl.dynamic.stencil_pass_op = pass_op;
+    c.impl.dynamic.stencil_depth_fail_op = depth_fail_op;
+    c.impl.dynamic.stencil_compare_op = compare_op;
+}
+fn cmdSetLineWidth(cb: ?CommandBuffer, line_width: f32) callconv(.c) void {
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    const framebuffer = command_buffer.impl.active_framebuffer orelse return;
-    const render_pass = command_buffer.impl.active_render_pass orelse return;
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or !std.math.isFinite(line_width) or line_width != 1) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    command_buffer.impl.line_width = line_width;
+    command_buffer.impl.line_width_set = true;
+}
+fn cmdSetBlendConstants(cb: ?CommandBuffer, values: ?[*]const f32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or values == null) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    @memcpy(command_buffer.impl.blend_constants[0..], values.?[0..4]);
+    command_buffer.impl.blend_constants_set = true;
+}
+fn cmdSetDepthBias(cb: ?CommandBuffer, constant_factor: f32, clamp: f32, slope_factor: f32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or clamp != 0) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    command_buffer.impl.depth_bias = .{ constant_factor, clamp, slope_factor };
+    command_buffer.impl.depth_bias_set = true;
+}
+fn cmdSetDepthBounds(cb: ?CommandBuffer, min_depth: f32, max_depth: f32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or !std.math.isFinite(min_depth) or !std.math.isFinite(max_depth) or min_depth < 0 or max_depth > 1 or min_depth > max_depth) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    command_buffer.impl.depth_bounds = .{ min_depth, max_depth };
+    command_buffer.impl.depth_bounds_set = true;
+}
+const StencilDynamicState = enum { compare_mask, write_mask, reference };
+fn cmdSetStencilState(cb: ?CommandBuffer, face_mask: u32, value: u32, comptime state: StencilDynamicState) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or face_mask == 0 or face_mask & ~@as(u32, 3) != 0) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    const values = switch (state) {
+        .compare_mask => &command_buffer.impl.stencil_compare_mask,
+        .write_mask => &command_buffer.impl.stencil_write_mask,
+        .reference => &command_buffer.impl.stencil_reference,
+    };
+    if (face_mask & 1 != 0) values[0] = value;
+    if (face_mask & 2 != 0) values[1] = value;
+    const bits: u2 = @intCast(face_mask);
+    switch (state) {
+        .compare_mask => command_buffer.impl.stencil_compare_mask_set |= bits,
+        .write_mask => command_buffer.impl.stencil_write_mask_set |= bits,
+        .reference => command_buffer.impl.stencil_reference_set |= bits,
+    }
+}
+fn cmdSetStencilCompareMask(cb: ?CommandBuffer, face_mask: u32, compare_mask: u32) callconv(.c) void {
+    cmdSetStencilState(cb, face_mask, compare_mask, .compare_mask);
+}
+fn cmdSetStencilWriteMask(cb: ?CommandBuffer, face_mask: u32, write_mask: u32) callconv(.c) void {
+    cmdSetStencilState(cb, face_mask, write_mask, .write_mask);
+}
+fn cmdSetStencilReference(cb: ?CommandBuffer, face_mask: u32, reference: u32) callconv(.c) void {
+    cmdSetStencilState(cb, face_mask, reference, .reference);
+}
+fn cmdPushConstants(cb: ?CommandBuffer, layout: usize, stage_flags: u32, offset: u32, size: u32, values: ?*const anyopaque) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    const layout_object = validPipelineLayoutLocked(layout) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const stages = normalizeCoreShaderStages(stage_flags) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or !layout_object.owner.eql(command_buffer.impl.owner) or values == null or offset % 4 != 0 or size == 0 or size % 4 != 0 or offset > 128 or size > 128 - offset) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    for (core_shader_stage_bits, layout_object.push_ranges) |bit, range| if (stages & bit != 0 and (range.size == 0 or offset < range.offset or offset > range.offset + range.size or size > range.offset + range.size - offset)) {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const source: [*]const u8 = @ptrCast(values.?);
+    const start: usize = offset;
+    const end: usize = start + size;
+    for (core_shader_stage_bits, 0..) |bit, stage_index| if (stages & bit != 0) {
+        @memcpy(command_buffer.impl.push_constants.values[stage_index][start..end], source[0..size]);
+        for (start..end) |byte_index| command_buffer.impl.push_constants.initialized[stage_index][byte_index / 64] |= @as(u64, 1) << @intCast(byte_index % 64);
+    };
+}
+fn cmdPushConstants2(cb: ?CommandBuffer, info: ?*const PushConstantsInfo) callconv(.c) void {
+    const ci = info orelse {
+        markCommandBufferInvalid(cb);
+        return;
+    };
+    if (ci.s_type != 1000545004 or ci.p_next != null) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    cmdPushConstants(cb, ci.layout, ci.stage_flags, ci.offset, ci.size, ci.values);
+}
+fn applyPushDescriptorWritesLocked(command_buffer: *CommandBufferObj, layout: *PipelineLayoutObj, count: u32, writes: ?[*]const WriteDescriptorSet) bool {
+    if (!layout.push_descriptor or count > max_api_items or (count != 0 and writes == null)) return false;
+    var candidate = if (command_buffer.impl.push_descriptor_active and command_buffer.impl.push_descriptor.layout.eql(&layout.set0)) command_buffer.impl.push_descriptor else DescriptorSetObj{};
+    candidate.owner = DeviceIdentity.capture(command_buffer.impl.owner);
+    candidate.layout = .{ .bytes = layout.set0.bytes, .digest = layout.set0.digest };
+    candidate.counts = layout.set0_layout.counts;
+    candidate.binding_types = layout.set0_layout.binding_types;
+    candidate.synthetic = true;
+    if (writes) |items| for (items[0..count]) |item| {
+        if (item.s_type != 35 or item.p_next != null or item.dst_array_element != 0 or item.descriptor_count != 1 or item.texel_buffer_view != null) return false;
+        if ((item.descriptor_type == 6 or item.descriptor_type == 8) and item.dst_binding == 0 and candidate.binding_types[0] == item.descriptor_type and item.buffer_info != null and item.image_info == null) {
+            if (candidate.counts[6] == 0) return false;
+            const info = item.buffer_info.?[0];
+            const buffer = validBufferLocked(info.buffer) orelse return false;
+            if (buffer.owner != command_buffer.impl.owner or buffer.usage & 0x10 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or info.offset > buffer.size or (item.descriptor_type == 8 and info.offset % 256 != 0)) return false;
+            const range = if (info.range == std.math.maxInt(u64)) buffer.size - info.offset else info.range;
+            if (range == 0 or range > buffer.size - info.offset) return false;
+            candidate.uniform = buffer;
+            candidate.uniform_offset = info.offset;
+            candidate.uniform_range = range;
+            candidate.uniform_dynamic = item.descriptor_type == 8;
+        } else if (item.descriptor_type == 7 and item.dst_binding <= 1 and candidate.binding_types[item.dst_binding] == 7 and item.buffer_info != null and item.image_info == null) {
+            if (candidate.counts[7] == 0) return false;
+            const info = item.buffer_info.?[0];
+            const buffer = validBufferLocked(info.buffer) orelse return false;
+            if (buffer.owner != command_buffer.impl.owner or buffer.usage & 0x20 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or info.offset > buffer.size) return false;
+            const range = if (info.range == std.math.maxInt(u64)) buffer.size - info.offset else info.range;
+            if (range == 0 or range > buffer.size - info.offset) return false;
+            candidate.storage = buffer;
+            candidate.storage_binding = item.dst_binding;
+            candidate.storage_offset = info.offset;
+            candidate.storage_range = range;
+        } else if (item.descriptor_type == 1 and item.dst_binding == 1 and candidate.binding_types[1] == 1 and item.image_info != null and item.buffer_info == null) {
+            if (candidate.counts[1] == 0) return false;
+            const info = item.image_info.?[0];
+            const sampler = validSamplerLocked(info.sampler) orelse return false;
+            const view = validImageViewLocked(info.image_view) orelse return false;
+            if (sampler.owner != command_buffer.impl.owner or view.owner != command_buffer.impl.owner or view.usage & 0x4 == 0 or view.image.owner != command_buffer.impl.owner or !liveImageObject(view.image) or info.image_layout != 5) return false;
+            candidate.texture = view.image;
+        } else return false;
+    };
+    command_buffer.impl.push_descriptor = candidate;
+    command_buffer.impl.push_descriptor_active = true;
+    command_buffer.impl.bound_descriptors = null;
+    return true;
+}
+fn cmdPushDescriptorSet(cb: ?CommandBuffer, bind_point: i32, layout: usize, set: u32, write_count: u32, writes: ?[*]const WriteDescriptorSet) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    const layout_object = validPipelineLayoutLocked(layout) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    if ((bind_point != 0 and bind_point != 1) or set != 0 or command_buffer.impl.state != 1 or command_buffer.impl.invalid or !layout_object.owner.eql(command_buffer.impl.owner) or !applyPushDescriptorWritesLocked(command_buffer, layout_object, write_count, writes)) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    command_buffer.impl.bound_layout = layout_object;
+    command_buffer.impl.bound_layout_handle = layout;
+}
+fn cmdPushDescriptorSet2(cb: ?CommandBuffer, info: ?*const PushDescriptorSetInfo) callconv(.c) void {
+    const ci = info orelse {
+        markCommandBufferInvalid(cb);
+        return;
+    };
+    if (ci.s_type != 1000545005 or ci.p_next != null or normalizeCoreShaderStages(ci.stage_flags) == null) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    cmdPushDescriptorSet(cb, 0, ci.layout, ci.set, ci.descriptor_write_count, ci.descriptor_writes);
+}
+fn cmdPushDescriptorSetWithTemplate(cb: ?CommandBuffer, template_handle: usize, bind_point: i32, layout: usize, set: u32, data: ?*const anyopaque) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    const layout_object = validPipelineLayoutLocked(layout) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const template = validDescriptorUpdateTemplateLocked(template_handle) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    if ((bind_point != 0 and bind_point != 1) or set != 0 or data == null or command_buffer.impl.state != 1 or command_buffer.impl.invalid or !layout_object.owner.eql(command_buffer.impl.owner) or !template.owner.eql(command_buffer.impl.owner) or !template.layout.canonical.eql(&layout_object.set0)) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    var writes: [32]WriteDescriptorSet = undefined;
+    var buffer_infos: [32]DescriptorBufferInfo = undefined;
+    var image_infos: [32]DescriptorImageInfo = undefined;
+    const source: [*]const u8 = @ptrCast(data.?);
+    for (template.entries[0..template.entry_count], 0..) |entry, index| {
+        writes[index] = .{ .s_type = 35, .p_next = null, .dst_set = 0, .dst_binding = entry.dst_binding, .dst_array_element = entry.dst_array_element, .descriptor_count = entry.descriptor_count, .descriptor_type = entry.descriptor_type, .image_info = null, .buffer_info = null, .texel_buffer_view = null };
+        if (entry.descriptor_type == 6 or entry.descriptor_type == 7 or entry.descriptor_type == 8) {
+            @memcpy(std.mem.asBytes(&buffer_infos[index]), (source + entry.offset)[0..@sizeOf(DescriptorBufferInfo)]);
+            writes[index].buffer_info = @ptrCast(&buffer_infos[index]);
+        } else if (entry.descriptor_type == 1) {
+            @memcpy(std.mem.asBytes(&image_infos[index]), (source + entry.offset)[0..@sizeOf(DescriptorImageInfo)]);
+            writes[index].image_info = @ptrCast(&image_infos[index]);
+        } else {
+            command_buffer.impl.invalid = true;
+            return;
+        }
+    }
+    if (!applyPushDescriptorWritesLocked(command_buffer, layout_object, template.entry_count, if (template.entry_count == 0) null else &writes)) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    command_buffer.impl.bound_layout = layout_object;
+    command_buffer.impl.bound_layout_handle = layout;
+}
+fn cmdPushDescriptorSetWithTemplate2(cb: ?CommandBuffer, info: ?*const PushDescriptorSetWithTemplateInfo) callconv(.c) void {
+    const ci = info orelse {
+        markCommandBufferInvalid(cb);
+        return;
+    };
+    if (ci.s_type != 1000545006 or ci.p_next != null) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    cmdPushDescriptorSetWithTemplate(cb, ci.descriptor_update_template, 0, ci.layout, ci.set, ci.data);
+}
+const DrawRasterState = struct { viewport: Viewport, scissor: cpu_cube.Rect };
+fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsPipelineObj) ?DrawRasterState {
+    if ((pipeline.dynamic_viewport and !command_buffer.impl.viewport_set) or (pipeline.dynamic_scissor and !command_buffer.impl.scissor_set)) return null;
+    return .{
+        .viewport = if (pipeline.dynamic_viewport) command_buffer.impl.viewport else pipeline.viewport,
+        .scissor = if (pipeline.dynamic_scissor) command_buffer.impl.scissor else pipeline.scissor,
+    };
+}
+test "draw raster state selects baked and dynamic viewport scissor without allocation" {
+    const baked_viewport = Viewport{ .x = 1, .y = 2, .width = 640, .height = 480, .min_depth = 0.125, .max_depth = 0.875 };
+    const baked_scissor = cpu_cube.Rect{ .x = 3, .y = 4, .width = 600, .height = 440 };
+    const dynamic_viewport = Viewport{ .x = 5, .y = 6, .width = 320, .height = 240, .min_depth = 0.25, .max_depth = 0.75 };
+    const dynamic_scissor = cpu_cube.Rect{ .x = 7, .y = 8, .width = 300, .height = 220 };
+    var pipeline: GraphicsPipelineObj = undefined;
+    pipeline.viewport = baked_viewport;
+    pipeline.scissor = baked_scissor;
+    var impl: CommandBufferImpl = undefined;
+    impl.viewport = dynamic_viewport;
+    impl.scissor = dynamic_scissor;
+    impl.viewport_set = true;
+    impl.scissor_set = true;
+    var command_buffer = CommandBufferObj{ .loader_data = 0, .impl = &impl };
+
+    try std.testing.expect(validViewportDomain(baked_viewport));
+    var invalid_viewport = baked_viewport;
+    invalid_viewport.width = std.math.nan(f32);
+    try std.testing.expect(!validViewportDomain(invalid_viewport));
+    invalid_viewport = baked_viewport;
+    invalid_viewport.height = 0;
+    try std.testing.expect(!validViewportDomain(invalid_viewport));
+    invalid_viewport = baked_viewport;
+    invalid_viewport.width = 8193;
+    try std.testing.expect(!validViewportDomain(invalid_viewport));
+    try std.testing.expect(validScissorDomain(.{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 8192, .height = 8192 } }));
+    try std.testing.expect(!validScissorDomain(.{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 8193, .height = 1 } }));
+
+    pipeline.dynamic_viewport = false;
+    pipeline.dynamic_scissor = false;
+    var resolved = drawRasterState(&command_buffer, &pipeline).?;
+    try std.testing.expectEqual(baked_viewport, resolved.viewport);
+    try std.testing.expectEqual(baked_scissor, resolved.scissor);
+
+    pipeline.dynamic_viewport = true;
+    pipeline.dynamic_scissor = true;
+    impl.viewport_set = false;
+    try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
+    impl.viewport_set = true;
+    impl.scissor_set = false;
+    try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
+    impl.scissor_set = true;
+    resolved = drawRasterState(&command_buffer, &pipeline).?;
+    try std.testing.expectEqual(dynamic_viewport, resolved.viewport);
+    try std.testing.expectEqual(dynamic_scissor, resolved.scissor);
+
+    pipeline.dynamic_viewport = false;
+    resolved = drawRasterState(&command_buffer, &pipeline).?;
+    try std.testing.expectEqual(baked_viewport, resolved.viewport);
+    try std.testing.expectEqual(dynamic_scissor, resolved.scissor);
+
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..4096) |_| {
+        const warm = drawRasterState(&command_buffer, &pipeline).?;
+        try std.testing.expectEqual(baked_viewport, warm.viewport);
+        try std.testing.expectEqual(dynamic_scissor, warm.scissor);
+    }
+}
+fn activeDescriptorSet(command_buffer: *CommandBufferObj) ?*DescriptorSetObj {
+    return if (command_buffer.impl.push_descriptor_active) &command_buffer.impl.push_descriptor else command_buffer.impl.bound_descriptors;
+}
+fn snapshotDescriptorSet(command_buffer: *CommandBufferObj, descriptors: *const DescriptorSetObj) ?*DescriptorSetObj {
+    if (command_buffer.impl.count >= command_buffer.impl.commands.len) return null;
+    const snapshot = &command_buffer.impl.descriptor_snapshots[command_buffer.impl.count];
+    snapshot.* = descriptors.*;
+    if (descriptors.uniform_dynamic) {
+        if (descriptors.uniform_offset > std.math.maxInt(u64) - command_buffer.impl.dynamic_uniform_offset) return null;
+        snapshot.uniform_offset = descriptors.uniform_offset + command_buffer.impl.dynamic_uniform_offset;
+        snapshot.uniform_dynamic = false;
+    }
+    // Snapshots live in the command buffer rather than the global descriptor
+    // registry; resource liveness is still checked by prevalidation below.
+    snapshot.synthetic = true;
+    return snapshot;
+}
+fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) callconv(.c) void {
+    _ = first_instance;
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    const dynamic_rendering = command_buffer.impl.dynamic_rendering;
+    const render_pass = command_buffer.impl.active_render_pass;
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or (render_pass == null and !dynamic_rendering)) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    const framebuffer = command_buffer.impl.active_framebuffer;
+    if ((!dynamic_rendering and framebuffer == null and !command_buffer.impl.render_pass_continue) or (command_buffer.impl.level == 0 and command_buffer.impl.render_contents == 1)) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
     const pipeline_pointer = command_buffer.impl.bound_pipeline orelse {
         command_buffer.impl.invalid = true;
         return;
@@ -3475,22 +8565,412 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
         command_buffer.impl.invalid = true;
         return;
     };
-    const descriptors = command_buffer.impl.bound_descriptors orelse {
+    const descriptors = activeDescriptorSet(command_buffer) orelse {
         command_buffer.impl.invalid = true;
         return;
     };
-    if (pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or pipeline.execution_abi != .cpu_cube_v1 or pipeline.subpass != 0 or !pipeline.render_compatibility.eql(&render_pass.compatibility) or instance_count != 1 or first_vertex != 0 or first_instance != 0 or vertex_count == 0) {
+    if (pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or pipeline.execution_abi != .cpu_cube_v1 or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or vertex_count == 0) {
         command_buffer.impl.invalid = true;
         return;
     }
-    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .descriptors = descriptors, .vertex_count = vertex_count, .viewport = command_buffer.impl.viewport, .scissor = command_buffer.impl.scissor, .cull_mode = pipeline.cull_mode, .front_face = pipeline.front_face } });
+    const raster = drawRasterState(command_buffer, pipeline) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    if (instance_count == 0) return;
+    const cull_mode = if (command_buffer.impl.dynamic.cull_mode == std.math.maxInt(u32)) pipeline.cull_mode else command_buffer.impl.dynamic.cull_mode;
+    const front_face = if (command_buffer.impl.dynamic.front_face < 0) pipeline.front_face else command_buffer.impl.dynamic.front_face;
+    const descriptor_snapshot = snapshotDescriptorSet(command_buffer, descriptors) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = vertex_count, .base_vertex = first_vertex, .instance_count = instance_count, .indexed = null, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = cull_mode, .front_face = front_face } });
+}
+fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32, first_instance: u32) callconv(.c) void {
+    _ = first_instance;
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    const dynamic_rendering = command_buffer.impl.dynamic_rendering;
+    const render_pass = command_buffer.impl.active_render_pass;
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or (render_pass == null and !dynamic_rendering)) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    const framebuffer = command_buffer.impl.active_framebuffer;
+    if ((!dynamic_rendering and framebuffer == null and !command_buffer.impl.render_pass_continue) or (command_buffer.impl.level == 0 and command_buffer.impl.render_contents == 1)) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    const pipeline_pointer = command_buffer.impl.bound_pipeline orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const pipeline = validGraphicsPipelineLocked(command_buffer.impl.bound_pipeline_handle) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const layout_pointer = command_buffer.impl.bound_layout orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const layout = validPipelineLayoutLocked(command_buffer.impl.bound_layout_handle) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const descriptors = activeDescriptorSet(command_buffer) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const index_pointer = command_buffer.impl.index_buffer orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const index_buffer = validBufferLocked(command_buffer.impl.index_buffer_handle) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const index_size: u64 = if (command_buffer.impl.index_type == 0) 2 else 4;
+    const relative_start = @as(u64, first_index) * index_size;
+    const start = command_buffer.impl.index_offset + relative_start;
+    const byte_count = @as(u64, index_count) * index_size;
+    if (pipeline != pipeline_pointer or layout != layout_pointer or index_buffer != index_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or index_buffer.owner != command_buffer.impl.owner or index_buffer.memory == null or !liveMemoryObject(index_buffer.memory.?) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or pipeline.execution_abi != .cpu_cube_v1 or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or start > index_buffer.size or byte_count > index_buffer.size - start or byte_count > command_buffer.impl.index_size -| (start -| command_buffer.impl.index_offset)) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    const raster = drawRasterState(command_buffer, pipeline) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    if (index_count == 0 or instance_count == 0) return;
+    const cull_mode = if (command_buffer.impl.dynamic.cull_mode == std.math.maxInt(u32)) pipeline.cull_mode else command_buffer.impl.dynamic.cull_mode;
+    const front_face = if (command_buffer.impl.dynamic.front_face < 0) pipeline.front_face else command_buffer.impl.dynamic.front_face;
+    const descriptor_snapshot = snapshotDescriptorSet(command_buffer, descriptors) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = index_count, .base_vertex = 0, .instance_count = instance_count, .indexed = .{ .buffer = index_buffer, .offset = start, .byte_count = byte_count, .index_type = command_buffer.impl.index_type, .vertex_offset = vertex_offset }, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = cull_mode, .front_face = front_face } });
+}
+fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64, draw_count: u32, stride: u64, indexed: bool, count_source: ?IndirectCountState) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    // The physical-device limits advertise one indirect draw per command.
+    // Keep recording validation in lockstep with that limit instead of
+    // accepting a larger batch that the executor/profile cannot promise.
+    const dynamic_rendering = command_buffer.impl.dynamic_rendering;
+    const render_pass = command_buffer.impl.active_render_pass;
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or (render_pass == null and !dynamic_rendering) or draw_count > 1) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    const framebuffer = command_buffer.impl.active_framebuffer;
+    if ((!dynamic_rendering and framebuffer == null and !command_buffer.impl.render_pass_continue) or (command_buffer.impl.level == 0 and command_buffer.impl.render_contents == 1)) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    const pipeline_pointer = command_buffer.impl.bound_pipeline orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const pipeline = validGraphicsPipelineLocked(command_buffer.impl.bound_pipeline_handle) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const layout_pointer = command_buffer.impl.bound_layout orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const layout = validPipelineLayoutLocked(command_buffer.impl.bound_layout_handle) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const descriptors = activeDescriptorSet(command_buffer) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const indirect_buffer = validBufferLocked(indirect_handle) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const index_buffer = if (indexed) command_buffer.impl.index_buffer else null;
+    const indirect_size: u64 = if (indexed) 20 else 16;
+    var required: u64 = 0;
+    if (draw_count != 0) {
+        const tail = std.math.mul(u64, @as(u64, draw_count - 1), stride) catch {
+            command_buffer.impl.invalid = true;
+            return;
+        };
+        required = std.math.add(u64, tail, indirect_size) catch {
+            command_buffer.impl.invalid = true;
+            return;
+        };
+    }
+    var invalid_index_state = false;
+    if (indexed) {
+        if (index_buffer) |bound_index| {
+            invalid_index_state = bound_index.owner != command_buffer.impl.owner or bound_index.usage & 0x40 == 0 or bound_index.memory == null or !liveMemoryObject(bound_index.memory.?);
+        } else invalid_index_state = true;
+    }
+    if (pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or pipeline.execution_abi != .cpu_cube_v1 or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or indirect_buffer.owner != command_buffer.impl.owner or indirect_buffer.usage & 0x100 == 0 or indirect_buffer.memory == null or !liveMemoryObject(indirect_buffer.memory.?) or offset % 4 != 0 or stride < indirect_size or stride % 4 != 0 or offset > indirect_buffer.size or required > indirect_buffer.size - offset or invalid_index_state) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    const raster = drawRasterState(command_buffer, pipeline) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const cull_mode = if (command_buffer.impl.dynamic.cull_mode == std.math.maxInt(u32)) pipeline.cull_mode else command_buffer.impl.dynamic.cull_mode;
+    const front_face = if (command_buffer.impl.dynamic.front_face < 0) pipeline.front_face else command_buffer.impl.dynamic.front_face;
+    const descriptor_snapshot = snapshotDescriptorSet(command_buffer, descriptors) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    record(command_buffer, .{ .indirect_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .pipeline = pipeline, .descriptors = descriptor_snapshot, .indirect_buffer = indirect_buffer, .offset = offset, .draw_count = draw_count, .stride = stride, .indexed = indexed, .index_buffer = index_buffer, .index_offset = command_buffer.impl.index_offset, .index_type = command_buffer.impl.index_type, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = cull_mode, .front_face = front_face, .count_source = count_source } });
+}
+fn cmdDrawIndirect(cb: ?CommandBuffer, indirect: usize, offset: u64, draw_count: u32, stride: u64) callconv(.c) void {
+    cmdDrawIndirectCommon(cb, indirect, offset, draw_count, stride, false, null);
+}
+fn cmdDrawIndexedIndirect(cb: ?CommandBuffer, indirect: usize, offset: u64, draw_count: u32, stride: u64) callconv(.c) void {
+    cmdDrawIndirectCommon(cb, indirect, offset, draw_count, stride, true, null);
+}
+fn indirectCountSource(cb: ?CommandBuffer, count_buffer_handle: usize, count_offset: u64, max_draw_count: u32) ?IndirectCountState {
+    lock();
+    defer mutex.unlock();
+    const c = validCommandBufferLocked(cb) orelse return null;
+    const count_buffer = validBufferLocked(count_buffer_handle) orelse {
+        c.impl.invalid = true;
+        return null;
+    };
+    if (c.impl.state != 1 or c.impl.invalid or max_draw_count > 1 or count_buffer.owner != c.impl.owner or count_buffer.usage & 0x100 == 0 or count_buffer.memory == null or !liveMemoryObject(count_buffer.memory.?) or count_offset % 4 != 0 or count_offset > count_buffer.size or count_buffer.size - count_offset < 4) {
+        c.impl.invalid = true;
+        return null;
+    }
+    return .{ .buffer = count_buffer, .offset = count_offset, .max_draw_count = max_draw_count };
+}
+fn cmdDrawIndirectCount(cb: ?CommandBuffer, indirect: usize, offset: u64, count_buffer: usize, count_offset: u64, max_draw_count: u32, stride: u64) callconv(.c) void {
+    const source = indirectCountSource(cb, count_buffer, count_offset, max_draw_count) orelse return;
+    cmdDrawIndirectCommon(cb, indirect, offset, if (max_draw_count != 0) 1 else 0, stride, false, source);
+}
+fn cmdDrawIndexedIndirectCount(cb: ?CommandBuffer, indirect: usize, offset: u64, count_buffer: usize, count_offset: u64, max_draw_count: u32, stride: u64) callconv(.c) void {
+    const source = indirectCountSource(cb, count_buffer, count_offset, max_draw_count) orelse return;
+    cmdDrawIndirectCommon(cb, indirect, offset, if (max_draw_count != 0) 1 else 0, stride, true, source);
+}
+fn dispatchGroupsValid(groups: [3]u32) bool {
+    for (groups) |value| if (value == 0 or value > 65_535) return false;
+    return true;
+}
+fn recordDispatchLocked(command_buffer: *CommandBufferObj, base: [3]u32, groups: [3]u32) void {
+    const pipeline_pointer = command_buffer.impl.bound_compute_pipeline orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const pipeline = validComputePipelineLocked(command_buffer.impl.bound_compute_pipeline_handle) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const layout = if (command_buffer.impl.bound_layout) |layout_pointer| blk: {
+        const value = validPipelineLayoutLocked(command_buffer.impl.bound_layout_handle) orelse {
+            command_buffer.impl.invalid = true;
+            return;
+        };
+        if (value != layout_pointer or !pipeline.layout.eql(&value.canonical)) {
+            command_buffer.impl.invalid = true;
+            return;
+        }
+        break :blk value;
+    } else null;
+    const descriptors = command_buffer.impl.bound_descriptors;
+    if (descriptors) |value| {
+        if (!liveDescriptorObject(value) or !value.owner.eql(command_buffer.impl.owner) or (layout != null and !value.layout.eql(&layout.?.set0))) {
+            command_buffer.impl.invalid = true;
+            return;
+        }
+    }
+    if (pipeline != pipeline_pointer or !pipeline.owner.eql(command_buffer.impl.owner)) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    const descriptor_snapshot = if (descriptors) |value| snapshotDescriptorSet(command_buffer, value) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    } else null;
+    record(command_buffer, .{ .dispatch = .{ .base = base, .groups = groups, .pipeline = pipeline, .layout = layout, .descriptors = descriptor_snapshot } });
+}
+fn cmdDispatchBaseCommon(cb: ?CommandBuffer, base: [3]u32, groups: [3]u32) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or command_buffer.impl.active_render_pass != null or command_buffer.impl.count == command_buffer.impl.commands.len or !dispatchGroupsValid(groups) or base[0] > 65_535 - groups[0] or base[1] > 65_535 - groups[1] or base[2] > 65_535 - groups[2]) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    recordDispatchLocked(command_buffer, base, groups);
+}
+fn cmdDispatch(cb: ?CommandBuffer, group_x: u32, group_y: u32, group_z: u32) callconv(.c) void {
+    cmdDispatchBaseCommon(cb, .{ 0, 0, 0 }, .{ group_x, group_y, group_z });
+}
+fn cmdDispatchBase(cb: ?CommandBuffer, base_x: u32, base_y: u32, base_z: u32, group_x: u32, group_y: u32, group_z: u32) callconv(.c) void {
+    cmdDispatchBaseCommon(cb, .{ base_x, base_y, base_z }, .{ group_x, group_y, group_z });
+}
+fn cmdDispatchIndirect(cb: ?CommandBuffer, buffer_handle: usize, offset: u64) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    const buffer = validBufferLocked(buffer_handle) orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or command_buffer.impl.active_render_pass != null or command_buffer.impl.count == command_buffer.impl.commands.len or buffer.owner != command_buffer.impl.owner or buffer.usage & 0x100 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or offset % 4 != 0 or offset > buffer.size or buffer.size - offset < 12) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    const before = command_buffer.impl.count;
+    // Keep the pipeline/layout/descriptor snapshot captured by the canonical
+    // dispatch path, but defer reading the indirect argument bytes until
+    // submission. Vulkan permits those bytes to be written after recording.
+    recordDispatchLocked(command_buffer, .{ 0, 0, 0 }, .{ 1, 1, 1 });
+    if (command_buffer.impl.invalid or command_buffer.impl.count == before) return;
+    const direct = command_buffer.impl.commands[before].dispatch;
+    command_buffer.impl.commands[before] = .{ .dispatch_indirect = .{ .buffer = buffer, .offset = offset, .pipeline = direct.pipeline, .layout = direct.layout, .descriptors = direct.descriptors } };
+}
+fn cmdSetDeviceMask(cb: ?CommandBuffer, device_mask: u32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or device_mask != 1) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    command_buffer.impl.device_mask = device_mask;
+}
+fn cmdSetLineStipple(cb: ?CommandBuffer, factor: u32, pattern: u16) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or factor == 0 or factor > 256) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    command_buffer.impl.line_stipple_factor = factor;
+    command_buffer.impl.line_stipple_pattern = pattern;
+}
+fn cmdSetRenderingAttachmentLocations(cb: ?CommandBuffer, info: ?*const RenderingAttachmentLocationInfo) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    const ci = info orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const inside_render_pass = command_buffer.impl.active_render_pass != null or command_buffer.impl.dynamic_rendering;
+    if (ci.s_type != 1000232001 or ci.p_next != null or command_buffer.impl.state != 1 or command_buffer.impl.invalid or !inside_render_pass or ci.color_attachment_count > 4 or (ci.color_attachment_count != 0 and ci.color_attachment_locations == null)) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    var locations: [8]u32 = undefined;
+    if (ci.color_attachment_locations) |values| {
+        for (values[0..ci.color_attachment_count]) |location| if (location >= 4) {
+            command_buffer.impl.invalid = true;
+            return;
+        };
+        if (ci.color_attachment_count != 0) @memcpy(locations[0..ci.color_attachment_count], values[0..ci.color_attachment_count]);
+    }
+    command_buffer.impl.rendering_location_count = ci.color_attachment_count;
+    if (ci.color_attachment_count != 0) @memcpy(command_buffer.impl.rendering_locations[0..ci.color_attachment_count], locations[0..ci.color_attachment_count]);
+}
+fn cmdSetRenderingInputAttachmentIndices(cb: ?CommandBuffer, info: ?*const RenderingInputAttachmentIndexInfo) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    const ci = info orelse {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const inside_render_pass = command_buffer.impl.active_render_pass != null or command_buffer.impl.dynamic_rendering;
+    if (ci.s_type != 1000232002 or ci.p_next != null or command_buffer.impl.state != 1 or command_buffer.impl.invalid or !inside_render_pass or ci.color_attachment_count > 4 or (ci.color_attachment_count != 0 and ci.color_attachment_input_indices == null)) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
+    var input_indices: [8]u32 = undefined;
+    if (ci.color_attachment_input_indices) |values| {
+        for (values[0..ci.color_attachment_count]) |index| if (index >= 4) {
+            command_buffer.impl.invalid = true;
+            return;
+        };
+        if (ci.color_attachment_count != 0) @memcpy(input_indices[0..ci.color_attachment_count], values[0..ci.color_attachment_count]);
+    }
+    var depth_index: ?u32 = null;
+    var stencil_index: ?u32 = null;
+    if (ci.depth_input_attachment_index) |index| {
+        if (index.* >= 4) {
+            command_buffer.impl.invalid = true;
+            return;
+        }
+        depth_index = index.*;
+    }
+    if (ci.stencil_input_attachment_index) |index| {
+        if (index.* >= 4) {
+            command_buffer.impl.invalid = true;
+            return;
+        }
+        stencil_index = index.*;
+    }
+    command_buffer.impl.rendering_input_count = ci.color_attachment_count;
+    if (ci.color_attachment_count != 0) @memcpy(command_buffer.impl.rendering_input_indices[0..ci.color_attachment_count], input_indices[0..ci.color_attachment_count]);
+    command_buffer.impl.rendering_depth_input_index = depth_index;
+    command_buffer.impl.rendering_stencil_input_index = stencil_index;
+}
+fn cmdBindIndexBuffer2(cb: ?CommandBuffer, buffer: usize, offset: u64, size: u64, index_type: i32) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    bindIndexBufferLocked(command_buffer, buffer, offset, size, index_type);
+}
+fn cmdBindVertexBuffers2(cb: ?CommandBuffer, first_binding: u32, binding_count: u32, buffers: ?[*]const usize, offsets: ?[*]const u64, sizes: ?[*]const u64, strides: ?[*]const u64) callconv(.c) void {
+    lock();
+    defer mutex.unlock();
+    const command_buffer = validCommandBufferLocked(cb) orelse return;
+    bindVertexBuffersLocked(command_buffer, first_binding, binding_count, buffers, offsets, sizes, strides);
 }
 fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
+    if (command_buffer.impl.level != 0 or command_buffer.impl.state != 1 or command_buffer.impl.active_render_pass == null) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
     command_buffer.impl.active_framebuffer = null;
     command_buffer.impl.active_render_pass = null;
+    command_buffer.impl.active_subpass = 0;
+    command_buffer.impl.render_contents = 0;
+}
+fn cmdNextSubpass2(cb: ?CommandBuffer, subpass: ?*const SubpassBeginInfo, end: ?*const SubpassEndInfo) callconv(.c) void {
+    const begin = subpass orelse {
+        markCommandBufferInvalid(cb);
+        return;
+    };
+    const finish = end orelse {
+        markCommandBufferInvalid(cb);
+        return;
+    };
+    if (begin.s_type != 1000109005 or begin.p_next != null or finish.s_type != 1000109006 or finish.p_next != null) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    cmdNextSubpass(cb, begin.contents);
+}
+fn cmdEndRenderPass2(cb: ?CommandBuffer, end: ?*const SubpassEndInfo) callconv(.c) void {
+    const finish = end orelse {
+        markCommandBufferInvalid(cb);
+        return;
+    };
+    if (finish.s_type != 1000109006 or finish.p_next != null) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    cmdEndRenderPass(cb);
 }
 
 fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
@@ -3498,7 +8978,7 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (ci.min_image_count < 2 or ci.min_image_count > 4 or ci.image_extent.width == 0 or ci.image_extent.height == 0 or ci.present_mode != 2) return .error_initialization_failed;
+    if (ci.min_image_count < 2 or ci.min_image_count > 4 or ci.image_extent.width == 0 or ci.image_extent.height == 0 or ci.image_array_layers != 1 or ci.present_mode != 2) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     const surface = validSurfaceLocked(ci.surface) orelse return .error_initialization_failed;
@@ -3635,8 +9115,8 @@ fn acquireNextImage(device: ?Device, handle: usize, timeout_ns: u64, semaphore_h
     while (true) {
         if (frame_lifecycle.acquire(swapchain.image_states[0..swapchain.image_count], &swapchain.next_image)) |index| {
             out.* = index;
-            if (semaphore) |item| item.signaled = true;
-            if (fence) |item| item.signaled = true;
+            if (semaphore) |item| item.signaled.store(true, .release);
+            if (fence) |item| item.signaled.store(true, .release);
             return .success;
         }
         if (timeout_ns == 0) return .not_ready;
@@ -3656,6 +9136,36 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         mutex.unlock();
         return .error_initialization_failed;
     }
+    // Complete all cross-object and image-lifecycle validation before
+    // consuming wait semaphores or queuing any image.  PresentInfo is a batch;
+    // a malformed later entry must not leave an earlier entry queued.
+    var targets: [max_present_entries]?u64 = [_]?u64{null} ** max_present_entries;
+    for (present.swapchains.?[0..present.swapchain_count], present.image_indices.?[0..present.swapchain_count], 0..) |handle, index, i| {
+        const target_ns = presentTarget(present, i, frame_pacing.monotonicNs()) catch {
+            mutex.unlock();
+            return .error_initialization_failed;
+        };
+        const swapchain = validSwapchainLocked(handle) orelse {
+            mutex.unlock();
+            return .error_initialization_failed;
+        };
+        if (swapchain.owner != q.owner or index >= swapchain.image_count or swapchain.retiring) {
+            mutex.unlock();
+            return .error_initialization_failed;
+        }
+        for (present.swapchains.?[0..i]) |prior| if (prior == handle) {
+            mutex.unlock();
+            return .error_initialization_failed;
+        };
+        _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
+        const acquired = swapchain.image_states[index] == .acquired;
+        _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+        if (!acquired) {
+            mutex.unlock();
+            return .error_initialization_failed;
+        }
+        targets[i] = target_ns;
+    }
     if (present.wait_semaphore_count != 0) {
         const waits = present.wait_semaphores orelse {
             mutex.unlock();
@@ -3666,18 +9176,15 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
                 mutex.unlock();
                 return .error_initialization_failed;
             };
-            if (!semaphore.signaled) {
+            if (!semaphore.signaled.load(.acquire)) {
                 mutex.unlock();
                 return .error_initialization_failed;
             }
-            semaphore.signaled = false;
+            semaphore.signaled.store(false, .release);
         }
     }
     for (present.swapchains.?[0..present.swapchain_count], present.image_indices.?[0..present.swapchain_count], 0..) |handle, index, i| {
-        const target_ns = presentTarget(present, i, frame_pacing.monotonicNs()) catch {
-            mutex.unlock();
-            return .error_initialization_failed;
-        };
+        const target_ns = targets[i];
         const swapchain = validSwapchainLocked(handle) orelse {
             mutex.unlock();
             return .error_initialization_failed;
@@ -3748,6 +9255,20 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
     mutex.unlock();
     return .success;
 }
+fn queueBindSparse(queue: ?Queue, count: u32, infos: ?*const anyopaque, fence_handle: usize) callconv(.c) Result {
+    _ = infos;
+    const q = queue orelse return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(q.owner)) return .error_initialization_failed;
+    const fence = if (fence_handle == 0) null else validFenceLocked(fence_handle) orelse return .error_initialization_failed;
+    if (fence) |item| if (!validOwner(q.owner, item.owner) or item.signaled.load(.acquire)) return .error_initialization_failed;
+    // No queue advertises VK_QUEUE_SPARSE_BINDING_BIT and all sparse features
+    // are false. A zero-bind submission remains a valid synchronization op.
+    if (count != 0) return .error_feature_not_present;
+    if (fence) |item| item.signaled.store(true, .release);
+    return .success;
+}
 fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_handle: usize) callconv(.c) Result {
     const q = queue orelse return .error_initialization_failed;
     if (count == 0) {
@@ -3757,50 +9278,143 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
     if (count > max_api_items) return .error_initialization_failed;
     const list = submits orelse return .error_initialization_failed;
     lock();
-    defer mutex.unlock();
+    var mutex_held = true;
+    defer if (mutex_held) mutex.unlock();
     if (!validDeviceLocked(q.owner)) return .error_initialization_failed;
     const fence = if (fence_handle == 0) null else validFenceLocked(fence_handle) orelse return .error_initialization_failed;
-    if (fence) |item| if (!validOwner(q.owner, item.owner) or item.signaled) return .error_initialization_failed;
+    if (fence) |item| if (!validOwner(q.owner, item.owner) or item.signaled.load(.acquire)) return .error_initialization_failed;
     var layouts: [max_child_objects]i32 = undefined;
     for (&image_objects, image_state, 0..) |*image, state, index| layouts[index] = if (state == .live) image.layout else 0;
+    var semaphore_states = [_]bool{false} ** max_child_objects;
+    var timeline_states = [_]u64{0} ** max_child_objects;
+    var submitted_command_buffers = [_]bool{false} ** max_child_objects;
+    for (&semaphore_objects, semaphore_state, 0..) |*semaphore, state, index| {
+        if (state == .live) {
+            semaphore_states[index] = semaphore.signaled.load(.acquire);
+            timeline_states[index] = semaphore.timeline_value.load(.acquire);
+        }
+    }
     for (list[0..count]) |submit| {
-        if (submit.s_type != 4 or submit.p_next != null or submit.command_buffer_count > max_api_items) return .error_initialization_failed;
+        if (submit.s_type != 4 or submit.wait_semaphore_count > max_api_items or submit.command_buffer_count > max_api_items or submit.signal_semaphore_count > max_api_items or
+            (submit.wait_semaphore_count != 0 and submit.wait_semaphores == null) or
+            (submit.signal_semaphore_count != 0 and submit.signal_semaphores == null) or
+            !submitPNextValid(submit.p_next, submit.wait_semaphore_count, submit.command_buffer_count, submit.signal_semaphore_count)) return .error_initialization_failed;
+        const timeline_info = submitPNextTimeline(submit.p_next);
         if (submit.wait_semaphore_count != 0) {
             const waits = submit.wait_semaphores orelse return .error_initialization_failed;
-            for (waits[0..submit.wait_semaphore_count]) |handle| {
+            for (waits[0..submit.wait_semaphore_count], 0..) |handle, wait_index| {
                 const semaphore = validSemaphoreLocked(handle) orelse return .error_initialization_failed;
-                if (semaphore.owner != q.owner or !semaphore.signaled) return .error_initialization_failed;
+                if (semaphore.owner != q.owner) return .error_initialization_failed;
+                if (semaphore.timeline) {
+                    const values = timeline_info orelse return .error_initialization_failed;
+                    if (values.wait_semaphore_values == null) return .error_initialization_failed;
+                    _ = values.wait_semaphore_values.?[wait_index];
+                } else semaphore_states[semaphoreSlot(semaphore)] = false;
             }
         }
         if (submit.signal_semaphore_count != 0) {
             const signals = submit.signal_semaphores orelse return .error_initialization_failed;
-            for (signals[0..submit.signal_semaphore_count]) |handle| {
+            for (signals[0..submit.signal_semaphore_count], 0..) |handle, signal_index| {
                 const semaphore = validSemaphoreLocked(handle) orelse return .error_initialization_failed;
-                if (semaphore.owner != q.owner or semaphore.signaled) return .error_initialization_failed;
+                const slot = semaphoreSlot(semaphore);
+                if (semaphore.owner != q.owner) return .error_initialization_failed;
+                if (semaphore.timeline) {
+                    const values = timeline_info orelse return .error_initialization_failed;
+                    const signal_values = values.signal_semaphore_values orelse return .error_initialization_failed;
+                    if (signal_values[signal_index] < timeline_states[slot]) return .error_initialization_failed;
+                    timeline_states[slot] = signal_values[signal_index];
+                } else {
+                    if (semaphore_states[slot]) return .error_initialization_failed;
+                    semaphore_states[slot] = true;
+                }
             }
         }
         if (submit.command_buffer_count == 0) continue;
         const cbs = submit.command_buffers orelse return .error_initialization_failed;
         for (cbs[0..submit.command_buffer_count]) |cb| {
             const valid_cb = validCommandBufferLocked(cb) orelse return .error_initialization_failed;
-            if (valid_cb.impl.owner != q.owner or valid_cb.impl.state != 2) return .error_initialization_failed;
+            if (valid_cb.impl.owner != q.owner or valid_cb.impl.level != 0 or valid_cb.impl.state != 2) {
+                return .error_initialization_failed;
+            }
+            const cb_slot = @divExact(@intFromPtr(valid_cb) - @intFromPtr(&command_buffer_objects), @sizeOf(CommandBufferObj));
+            if (submitted_command_buffers[cb_slot] and valid_cb.impl.begin_flags & 4 == 0) return .error_initialization_failed;
+            submitted_command_buffers[cb_slot] = true;
+            for (valid_cb.impl.secondaries[0..valid_cb.impl.secondary_count]) |secondary| if ((stateForObject(CommandBufferObj, secondary, &command_buffer_objects, &command_buffer_state) orelse return .error_initialization_failed).* != .live or secondary.impl.state != 2) return .error_initialization_failed;
             for (valid_cb.impl.commands[0..valid_cb.impl.count]) |command| if (!prevalidateCommand(command, q.owner, &layouts)) {
                 hit(.submission_atomicity);
                 return .error_initialization_failed;
             };
         }
     }
+    mutex.unlock();
+    mutex_held = false;
+    var query_context = QueryExecutionContext{};
     for (list[0..count]) |submit| {
-        if (submit.wait_semaphore_count != 0) for (submit.wait_semaphores.?[0..submit.wait_semaphore_count]) |handle| {
-            validSemaphoreLocked(handle).?.signaled = false;
+        const timeline_info = submitPNextTimeline(submit.p_next);
+        if (submit.wait_semaphore_count != 0) for (submit.wait_semaphores.?[0..submit.wait_semaphore_count], 0..) |handle, wait_index| {
+            const semaphore: *SemaphoreObj = @ptrFromInt(handle);
+            if (semaphore.timeline) {
+                const target = timeline_info.?.wait_semaphore_values.?[wait_index];
+                while (semaphore.timeline_value.load(.acquire) < target) frame_pacing.sleepUntil(frame_pacing.monotonicNs() + 50_000);
+            } else {
+                while (!semaphore.signaled.load(.acquire)) frame_pacing.sleepUntil(frame_pacing.monotonicNs() + 50_000);
+                semaphore.signaled.store(false, .release);
+            }
         };
-        if (submit.command_buffer_count != 0) for (submit.command_buffers.?[0..submit.command_buffer_count]) |cb| for (cb.impl.commands[0..cb.impl.count]) |command| executeValidatedCommand(command);
-        if (submit.signal_semaphore_count != 0) for (submit.signal_semaphores.?[0..submit.signal_semaphore_count]) |handle| {
-            validSemaphoreLocked(handle).?.signaled = true;
+        if (submit.command_buffer_count != 0) for (submit.command_buffers.?[0..submit.command_buffer_count]) |cb| {
+            for (cb.impl.commands[0..cb.impl.count]) |command| executeValidatedCommand(command, &query_context);
+            for (cb.impl.secondaries[0..cb.impl.secondary_count]) |secondary| {
+                if (secondary.impl.begin_flags & 1 != 0) secondary.impl.state = 3;
+            }
+            if (cb.impl.begin_flags & 1 != 0) {
+                deinitRecordedCommands(cb);
+                cb.impl.state = 3;
+            }
+        };
+        if (submit.signal_semaphore_count != 0) for (submit.signal_semaphores.?[0..submit.signal_semaphore_count], 0..) |handle, signal_index| {
+            const semaphore: *SemaphoreObj = @ptrFromInt(handle);
+            if (semaphore.timeline) semaphore.timeline_value.store(timeline_info.?.signal_semaphore_values.?[signal_index], .release) else semaphore.signaled.store(true, .release);
         };
     }
-    if (fence) |item| item.signaled = true;
+    if (fence) |item| item.signaled.store(true, .release);
     return .success;
+}
+fn queueSubmit2(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo2, fence_handle: usize) callconv(.c) Result {
+    if (count == 0 or count > max_api_items) return .error_initialization_failed;
+    const list = submits orelse return .error_initialization_failed;
+    var converted: [max_api_items]SubmitInfo = undefined;
+    var wait_handles: [max_api_items][max_api_items]usize = undefined;
+    var wait_stages: [max_api_items][max_api_items]u32 = undefined;
+    var signal_handles: [max_api_items][max_api_items]usize = undefined;
+    var wait_values: [max_api_items][max_api_items]u64 = undefined;
+    var signal_values: [max_api_items][max_api_items]u64 = undefined;
+    var command_lists: [max_api_items][max_api_items]CommandBuffer = undefined;
+    var timeline_infos: [max_api_items]TimelineSemaphoreSubmitInfo = undefined;
+    for (list[0..count], 0..) |submit, submit_index| {
+        if (submit.s_type != 1000314004 or submit.p_next != null or submit.flags != 0 or submit.wait_semaphore_info_count > max_api_items or submit.command_buffer_info_count > max_api_items or submit.signal_semaphore_info_count > max_api_items or (submit.wait_semaphore_info_count != 0 and submit.wait_semaphore_infos == null) or (submit.command_buffer_info_count != 0 and submit.command_buffer_infos == null) or (submit.signal_semaphore_info_count != 0 and submit.signal_semaphore_infos == null)) return .error_initialization_failed;
+        for (0..submit.wait_semaphore_info_count) |index| {
+            const semaphore = submit.wait_semaphore_infos.?[index];
+            const legacy_stage = sync2StageMaskToLegacy(semaphore.stage_mask) orelse return .error_initialization_failed;
+            if (semaphore.s_type != 1000314005 or semaphore.p_next != null or semaphore.device_index != 0) return .error_initialization_failed;
+            wait_handles[submit_index][index] = semaphore.semaphore;
+            wait_stages[submit_index][index] = legacy_stage;
+            wait_values[submit_index][index] = semaphore.value;
+        }
+        for (0..submit.signal_semaphore_info_count) |index| {
+            const semaphore = submit.signal_semaphore_infos.?[index];
+            if (semaphore.s_type != 1000314005 or semaphore.p_next != null or semaphore.device_index != 0 or sync2StageMaskToLegacy(semaphore.stage_mask) == null) return .error_initialization_failed;
+            signal_handles[submit_index][index] = semaphore.semaphore;
+            signal_values[submit_index][index] = semaphore.value;
+        }
+        for (0..submit.command_buffer_info_count) |index| {
+            const command = submit.command_buffer_infos.?[index];
+            if (command.s_type != 1000314006 or command.p_next != null or command.device_mask != 1) return .error_initialization_failed;
+            command_lists[submit_index][index] = command.command_buffer;
+        }
+        timeline_infos[submit_index] = .{ .s_type = 1000207003, .p_next = null, .wait_semaphore_value_count = submit.wait_semaphore_info_count, .wait_semaphore_values = if (submit.wait_semaphore_info_count == 0) null else @ptrCast(&wait_values[submit_index]), .signal_semaphore_value_count = submit.signal_semaphore_info_count, .signal_semaphore_values = if (submit.signal_semaphore_info_count == 0) null else @ptrCast(&signal_values[submit_index]) };
+        converted[submit_index] = .{ .s_type = 4, .p_next = @ptrCast(&timeline_infos[submit_index]), .wait_semaphore_count = submit.wait_semaphore_info_count, .wait_semaphores = if (submit.wait_semaphore_info_count == 0) null else @ptrCast(&wait_handles[submit_index]), .wait_dst_stage_mask = if (submit.wait_semaphore_info_count == 0) null else @ptrCast(&wait_stages[submit_index]), .command_buffer_count = submit.command_buffer_info_count, .command_buffers = if (submit.command_buffer_info_count == 0) null else @ptrCast(&command_lists[submit_index]), .signal_semaphore_count = submit.signal_semaphore_info_count, .signal_semaphores = if (submit.signal_semaphore_info_count == 0) null else @ptrCast(&signal_handles[submit_index]) };
+    }
+    return queueSubmit(queue, count, &converted, fence_handle);
 }
 fn queueWaitIdle(queue: ?Queue) callconv(.c) Result {
     const q = queue orelse return .error_initialization_failed;
@@ -3946,13 +9560,13 @@ fn deviceWaitIdle(device: ?Device) callconv(.c) Result {
 }
 
 fn globalLookup(n: []const u8) Fn {
-    const map = .{ .{ "vkGetInstanceProcAddr", getInstanceProcAddr }, .{ "vkCreateInstance", createInstance }, .{ "vkEnumerateInstanceExtensionProperties", enumerateInstanceExtensions } };
+    const map = .{ .{ "vkGetInstanceProcAddr", getInstanceProcAddr }, .{ "vkCreateInstance", createInstance }, .{ "vkEnumerateInstanceVersion", enumerateInstanceVersion }, .{ "vkEnumerateInstanceExtensionProperties", enumerateInstanceExtensions }, .{ "vkEnumerateInstanceLayerProperties", enumerateInstanceLayers } };
     inline for (map) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
     return null;
 }
 fn instanceLookup(n: []const u8) Fn {
     if (globalLookup(n)) |f| return f;
-    const map = .{ .{ "vkDestroyInstance", destroyInstance }, .{ "vkEnumeratePhysicalDevices", enumeratePhysicalDevices }, .{ "vkGetPhysicalDeviceFeatures", getFeatures }, .{ "vkGetPhysicalDeviceProperties", getProperties }, .{ "vkGetPhysicalDeviceQueueFamilyProperties", getQueueProperties }, .{ "vkGetPhysicalDeviceMemoryProperties", getMemoryProperties }, .{ "vkGetPhysicalDeviceFormatProperties", getFormatProperties }, .{ "vkGetPhysicalDeviceImageFormatProperties", getImageFormatProperties }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties", getSparseImageFormatProperties }, .{ "vkEnumerateDeviceExtensionProperties", enumerateDeviceExtensions }, .{ "vkCreateDevice", createDevice }, .{ "vkGetDeviceProcAddr", getDeviceProcAddr }, .{ "vkDestroyDevice", destroyDevice }, .{ "vkGetDeviceQueue", getDeviceQueue }, .{ "vkCreateXcbSurfaceKHR", createXcbSurface }, .{ "vkDestroySurfaceKHR", destroySurface }, .{ "vkGetPhysicalDeviceSurfaceSupportKHR", getSurfaceSupport }, .{ "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", getSurfaceCapabilities }, .{ "vkGetPhysicalDeviceSurfaceFormatsKHR", getSurfaceFormats }, .{ "vkGetPhysicalDeviceSurfacePresentModesKHR", getSurfacePresentModes } };
+    const map = .{ .{ "vkDestroyInstance", destroyInstance }, .{ "vkEnumeratePhysicalDevices", enumeratePhysicalDevices }, .{ "vkEnumeratePhysicalDeviceGroups", enumeratePhysicalDeviceGroups }, .{ "vkGetPhysicalDeviceFeatures", getFeatures }, .{ "vkGetPhysicalDeviceFeatures2", getPhysicalDeviceFeatures2 }, .{ "vkGetPhysicalDeviceProperties", getProperties }, .{ "vkGetPhysicalDeviceProperties2", getPhysicalDeviceProperties2 }, .{ "vkGetPhysicalDeviceQueueFamilyProperties", getQueueProperties }, .{ "vkGetPhysicalDeviceQueueFamilyProperties2", getPhysicalDeviceQueueFamilyProperties2 }, .{ "vkGetPhysicalDeviceMemoryProperties", getMemoryProperties }, .{ "vkGetPhysicalDeviceMemoryProperties2", getPhysicalDeviceMemoryProperties2 }, .{ "vkGetPhysicalDeviceFormatProperties", getFormatProperties }, .{ "vkGetPhysicalDeviceFormatProperties2", getPhysicalDeviceFormatProperties2 }, .{ "vkGetPhysicalDeviceImageFormatProperties", getImageFormatProperties }, .{ "vkGetPhysicalDeviceImageFormatProperties2", getPhysicalDeviceImageFormatProperties2 }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties", getSparseImageFormatProperties }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties2", getPhysicalDeviceSparseImageFormatProperties2 }, .{ "vkGetPhysicalDeviceToolProperties", getPhysicalDeviceToolProperties }, .{ "vkGetPhysicalDeviceExternalBufferProperties", getPhysicalDeviceExternalBufferProperties }, .{ "vkGetPhysicalDeviceExternalFenceProperties", getPhysicalDeviceExternalFenceProperties }, .{ "vkGetPhysicalDeviceExternalSemaphoreProperties", getPhysicalDeviceExternalSemaphoreProperties }, .{ "vkEnumerateDeviceExtensionProperties", enumerateDeviceExtensions }, .{ "vkEnumerateDeviceLayerProperties", enumerateDeviceLayers }, .{ "vkCreateDevice", createDevice }, .{ "vkGetDeviceProcAddr", getDeviceProcAddr }, .{ "vkDestroyDevice", destroyDevice }, .{ "vkGetDeviceQueue", getDeviceQueue }, .{ "vkGetDeviceQueue2", getDeviceQueue2 }, .{ "vkCreateXcbSurfaceKHR", createXcbSurface }, .{ "vkDestroySurfaceKHR", destroySurface }, .{ "vkGetPhysicalDeviceSurfaceSupportKHR", getSurfaceSupport }, .{ "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", getSurfaceCapabilities }, .{ "vkGetPhysicalDeviceSurfaceFormatsKHR", getSurfaceFormats }, .{ "vkGetPhysicalDeviceSurfacePresentModesKHR", getSurfacePresentModes } };
     inline for (map) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
     return deviceLookup(n);
 }
@@ -3961,11 +9575,45 @@ fn deviceLookup(n: []const u8) Fn {
         logGoogleDisplayTimingRejected("device procedure lookup");
         return null;
     }
-    const map = .{ .{ "vkGetDeviceProcAddr", getDeviceProcAddr }, .{ "vkDestroyDevice", destroyDevice }, .{ "vkGetDeviceQueue", getDeviceQueue }, .{ "vkAllocateMemory", allocateMemory }, .{ "vkFreeMemory", freeMemory }, .{ "vkMapMemory", mapMemory }, .{ "vkUnmapMemory", unmapMemory }, .{ "vkCreateBuffer", createBuffer }, .{ "vkDestroyBuffer", destroyBuffer }, .{ "vkGetBufferMemoryRequirements", getBufferMemoryRequirements }, .{ "vkBindBufferMemory", bindBufferMemory }, .{ "vkCreateImage", createImage }, .{ "vkDestroyImage", destroyImage }, .{ "vkGetImageMemoryRequirements", getImageMemoryRequirements }, .{ "vkBindImageMemory", bindImageMemory }, .{ "vkGetImageSubresourceLayout", getImageSubresourceLayout }, .{ "vkCreateFence", createFence }, .{ "vkDestroyFence", destroyFence }, .{ "vkGetFenceStatus", getFenceStatus }, .{ "vkResetFences", resetFences }, .{ "vkWaitForFences", waitForFences }, .{ "vkCreateCommandPool", createCommandPool }, .{ "vkDestroyCommandPool", destroyCommandPool }, .{ "vkAllocateCommandBuffers", allocateCommandBuffers }, .{ "vkFreeCommandBuffers", freeCommandBuffers }, .{ "vkBeginCommandBuffer", beginCommandBuffer }, .{ "vkEndCommandBuffer", endCommandBuffer }, .{ "vkResetCommandBuffer", resetCommandBuffer }, .{ "vkCmdFillBuffer", cmdFillBuffer }, .{ "vkCmdCopyBuffer", cmdCopyBuffer }, .{ "vkCmdClearColorImage", cmdClearColorImage }, .{ "vkCmdCopyBufferToImage", cmdCopyBufferToImage }, .{ "vkCmdCopyImageToBuffer", cmdCopyImageToBuffer }, .{ "vkCmdCopyImage", cmdCopyImage }, .{ "vkCmdPipelineBarrier", cmdPipelineBarrier }, .{ "vkQueueSubmit", queueSubmit }, .{ "vkQueueWaitIdle", queueWaitIdle }, .{ "vkDeviceWaitIdle", deviceWaitIdle } };
+    const semaphore_commands = .{ .{ "vkGetSemaphoreCounterValue", getSemaphoreCounterValue }, .{ "vkSignalSemaphore", signalSemaphore }, .{ "vkWaitSemaphores", waitSemaphores } };
+    inline for (semaphore_commands) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
+    const compute_commands = .{ .{ "vkCmdDispatch", cmdDispatch }, .{ "vkCmdDispatchIndirect", cmdDispatchIndirect }, .{ "vkCmdDispatchBase", cmdDispatchBase }, .{ "vkCmdSetDeviceMask", cmdSetDeviceMask } };
+    inline for (compute_commands) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
+    const copy2_commands = .{ .{ "vkCmdCopyBuffer2", cmdCopyBuffer2 }, .{ "vkCmdCopyImage2", cmdCopyImage2 }, .{ "vkCmdBlitImage2", cmdBlitImage2 }, .{ "vkCmdResolveImage2", cmdResolveImage2 }, .{ "vkCmdCopyBufferToImage2", cmdCopyBufferToImage2 }, .{ "vkCmdCopyImageToBuffer2", cmdCopyImageToBuffer2 } };
+    inline for (copy2_commands) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
+    const sync2_commands = .{ .{ "vkCmdPipelineBarrier2", cmdPipelineBarrier2 }, .{ "vkCmdSetEvent2", cmdSetEvent2 }, .{ "vkCmdResetEvent2", cmdResetEvent2 }, .{ "vkCmdWaitEvents2", cmdWaitEvents2 }, .{ "vkCmdWriteTimestamp2", cmdWriteTimestamp2 } };
+    inline for (sync2_commands) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
+    const rendering_commands = .{ .{ "vkCmdBeginRendering", cmdBeginRendering }, .{ "vkCmdEndRendering", cmdEndRendering } };
+    inline for (rendering_commands) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
+    const device_group_commands = .{ .{ "vkGetDeviceGroupPeerMemoryFeatures", getDeviceGroupPeerMemoryFeatures }, .{ "vkCreateSamplerYcbcrConversion", createSamplerYcbcrConversion }, .{ "vkDestroySamplerYcbcrConversion", destroySamplerYcbcrConversion } };
+    inline for (device_group_commands) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
+    const maintenance4_commands = .{ .{ "vkCmdSetLineStipple", cmdSetLineStipple }, .{ "vkCmdBindIndexBuffer2", cmdBindIndexBuffer2 }, .{ "vkCmdBindVertexBuffers2", cmdBindVertexBuffers2 } };
+    inline for (maintenance4_commands) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
+    const maintenance6_commands = .{ .{ "vkCmdBindDescriptorSets2", cmdBindDescriptorSets2 }, .{ "vkCmdPushConstants2", cmdPushConstants2 }, .{ "vkCmdSetRenderingAttachmentLocations", cmdSetRenderingAttachmentLocations }, .{ "vkCmdSetRenderingInputAttachmentIndices", cmdSetRenderingInputAttachmentIndices } };
+    inline for (maintenance6_commands) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
+    const push_descriptor_commands = .{ .{ "vkCmdPushDescriptorSet", cmdPushDescriptorSet }, .{ "vkCmdPushDescriptorSet2", cmdPushDescriptorSet2 }, .{ "vkCmdPushDescriptorSetWithTemplate", cmdPushDescriptorSetWithTemplate }, .{ "vkCmdPushDescriptorSetWithTemplate2", cmdPushDescriptorSetWithTemplate2 } };
+    inline for (push_descriptor_commands) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
+    const map_memory2_commands = .{ .{ "vkMapMemory2", mapMemory2 }, .{ "vkUnmapMemory2", unmapMemory2 } };
+    inline for (map_memory2_commands) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
+    const host_copy_commands = .{ .{ "vkCopyMemoryToImage", copyMemoryToImage }, .{ "vkCopyImageToMemory", copyImageToMemory }, .{ "vkCopyImageToImage", copyImageToImage }, .{ "vkTransitionImageLayout", transitionImageLayout }, .{ "vkGetImageSubresourceLayout2", getImageSubresourceLayout2 }, .{ "vkGetDeviceImageSubresourceLayout", getDeviceImageSubresourceLayout }, .{ "vkGetRenderingAreaGranularity", getRenderingAreaGranularity } };
+    inline for (host_copy_commands) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
+    if (std.mem.eql(u8, n, "vkQueueSubmit2")) return ptr(queueSubmit2);
+    const map = .{ .{ "vkGetDeviceProcAddr", getDeviceProcAddr }, .{ "vkDestroyDevice", destroyDevice }, .{ "vkGetDeviceQueue", getDeviceQueue }, .{ "vkGetDeviceQueue2", getDeviceQueue2 }, .{ "vkAllocateMemory", allocateMemory }, .{ "vkFreeMemory", freeMemory }, .{ "vkMapMemory", mapMemory }, .{ "vkUnmapMemory", unmapMemory }, .{ "vkFlushMappedMemoryRanges", flushMappedMemoryRanges }, .{ "vkInvalidateMappedMemoryRanges", invalidateMappedMemoryRanges }, .{ "vkGetDeviceMemoryCommitment", getDeviceMemoryCommitment }, .{ "vkCreateBuffer", createBuffer }, .{ "vkDestroyBuffer", destroyBuffer }, .{ "vkGetBufferMemoryRequirements", getBufferMemoryRequirements }, .{ "vkGetBufferMemoryRequirements2", getBufferMemoryRequirements2 }, .{ "vkGetDeviceBufferMemoryRequirements", getDeviceBufferMemoryRequirements }, .{ "vkGetBufferDeviceAddress", getBufferDeviceAddress }, .{ "vkGetBufferOpaqueCaptureAddress", getBufferOpaqueCaptureAddress }, .{ "vkGetDeviceMemoryOpaqueCaptureAddress", getDeviceMemoryOpaqueCaptureAddress }, .{ "vkBindBufferMemory", bindBufferMemory }, .{ "vkBindBufferMemory2", bindBufferMemory2 }, .{ "vkCreateImage", createImage }, .{ "vkDestroyImage", destroyImage }, .{ "vkGetImageMemoryRequirements", getImageMemoryRequirements }, .{ "vkGetImageMemoryRequirements2", getImageMemoryRequirements2 }, .{ "vkGetDeviceImageMemoryRequirements", getDeviceImageMemoryRequirements }, .{ "vkGetDeviceImageSparseMemoryRequirements", getDeviceImageSparseMemoryRequirements }, .{ "vkGetImageSparseMemoryRequirements", getImageSparseMemoryRequirements }, .{ "vkGetImageSparseMemoryRequirements2", getImageSparseMemoryRequirements2 }, .{ "vkBindImageMemory", bindImageMemory }, .{ "vkBindImageMemory2", bindImageMemory2 }, .{ "vkGetImageSubresourceLayout", getImageSubresourceLayout }, .{ "vkCreateFence", createFence }, .{ "vkDestroyFence", destroyFence }, .{ "vkGetFenceStatus", getFenceStatus }, .{ "vkResetFences", resetFences }, .{ "vkWaitForFences", waitForFences }, .{ "vkCreateCommandPool", createCommandPool }, .{ "vkDestroyCommandPool", destroyCommandPool }, .{ "vkResetCommandPool", resetCommandPool }, .{ "vkTrimCommandPool", trimCommandPool }, .{ "vkAllocateCommandBuffers", allocateCommandBuffers }, .{ "vkFreeCommandBuffers", freeCommandBuffers }, .{ "vkBeginCommandBuffer", beginCommandBuffer }, .{ "vkEndCommandBuffer", endCommandBuffer }, .{ "vkResetCommandBuffer", resetCommandBuffer }, .{ "vkCmdExecuteCommands", cmdExecuteCommands }, .{ "vkCmdFillBuffer", cmdFillBuffer }, .{ "vkCmdUpdateBuffer", cmdUpdateBuffer }, .{ "vkCmdCopyBuffer", cmdCopyBuffer }, .{ "vkCmdClearColorImage", cmdClearColorImage }, .{ "vkCmdClearDepthStencilImage", cmdClearDepthStencilImage }, .{ "vkCmdBlitImage", cmdBlitImage }, .{ "vkCmdResolveImage", cmdResolveImage }, .{ "vkCmdCopyBufferToImage", cmdCopyBufferToImage }, .{ "vkCmdCopyImageToBuffer", cmdCopyImageToBuffer }, .{ "vkCmdCopyImage", cmdCopyImage }, .{ "vkCmdPipelineBarrier", cmdPipelineBarrier }, .{ "vkQueueBindSparse", queueBindSparse }, .{ "vkQueueSubmit", queueSubmit }, .{ "vkQueueWaitIdle", queueWaitIdle }, .{ "vkDeviceWaitIdle", deviceWaitIdle } };
     inline for (map) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
+    const events = .{ .{ "vkCreateEvent", createEvent }, .{ "vkDestroyEvent", destroyEvent }, .{ "vkGetEventStatus", getEventStatus }, .{ "vkSetEvent", setEvent }, .{ "vkResetEvent", resetEvent }, .{ "vkCmdSetEvent", cmdSetEvent }, .{ "vkCmdResetEvent", cmdResetEvent }, .{ "vkCmdWaitEvents", cmdWaitEvents } };
+    inline for (events) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
+    const queries = .{ .{ "vkCreateQueryPool", createQueryPool }, .{ "vkDestroyQueryPool", destroyQueryPool }, .{ "vkGetQueryPoolResults", getQueryPoolResults }, .{ "vkResetQueryPool", resetQueryPool }, .{ "vkCmdResetQueryPool", cmdResetQueryPool }, .{ "vkCmdBeginQuery", cmdBeginQuery }, .{ "vkCmdEndQuery", cmdEndQuery }, .{ "vkCmdWriteTimestamp", cmdWriteTimestamp }, .{ "vkCmdCopyQueryPoolResults", cmdCopyQueryPoolResults } };
+    inline for (queries) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
     const timing = .{ .{ "vkSetSwapchainPresentTimingQueueSizeEXT", setSwapchainPresentTimingQueueSize }, .{ "vkGetSwapchainTimingPropertiesEXT", getSwapchainTimingProperties }, .{ "vkGetSwapchainTimeDomainPropertiesEXT", getSwapchainTimeDomainProperties }, .{ "vkGetPastPresentationTimingEXT", getPastPresentationTiming } };
     inline for (timing) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
-    const presentation = .{ .{ "vkCreateSemaphore", createSemaphore }, .{ "vkDestroySemaphore", destroySemaphore }, .{ "vkCreateImageView", createImageView }, .{ "vkDestroyImageView", destroyImageView }, .{ "vkCreateSampler", createOpaque }, .{ "vkDestroySampler", destroyOpaque }, .{ "vkCreateDescriptorSetLayout", createDescriptorSetLayout }, .{ "vkDestroyDescriptorSetLayout", destroyDescriptorSetLayout }, .{ "vkCreateDescriptorPool", createOpaque }, .{ "vkDestroyDescriptorPool", destroyOpaque }, .{ "vkCreateShaderModule", createShaderModule }, .{ "vkDestroyShaderModule", destroyShaderModule }, .{ "vkCreatePipelineCache", createOpaque }, .{ "vkDestroyPipelineCache", destroyOpaque }, .{ "vkCreatePipelineLayout", createPipelineLayout }, .{ "vkDestroyPipelineLayout", destroyPipelineLayout }, .{ "vkCreateRenderPass", createRenderPass }, .{ "vkDestroyRenderPass", destroyRenderPass }, .{ "vkCreateFramebuffer", createFramebuffer }, .{ "vkDestroyFramebuffer", destroyFramebuffer }, .{ "vkCreateGraphicsPipelines", createGraphicsPipelines }, .{ "vkDestroyPipeline", destroyPipeline }, .{ "vkAllocateDescriptorSets", allocateDescriptorSets }, .{ "vkUpdateDescriptorSets", updateDescriptorSets }, .{ "vkCmdBeginRenderPass", cmdBeginRenderPass }, .{ "vkCmdBindPipeline", cmdBindPipeline }, .{ "vkCmdBindDescriptorSets", cmdBindDescriptorSets }, .{ "vkCmdSetViewport", cmdSetViewport }, .{ "vkCmdSetScissor", cmdSetScissor }, .{ "vkCmdDraw", cmdDraw }, .{ "vkCmdEndRenderPass", cmdEndRenderPass }, .{ "vkCreateSwapchainKHR", createSwapchain }, .{ "vkDestroySwapchainKHR", destroySwapchain }, .{ "vkGetSwapchainImagesKHR", getSwapchainImages }, .{ "vkAcquireNextImageKHR", acquireNextImage }, .{ "vkQueuePresentKHR", queuePresent } };
+    const pipeline_caches = .{ .{ "vkCreatePipelineCache", createPipelineCache }, .{ "vkDestroyPipelineCache", destroyPipelineCache }, .{ "vkGetPipelineCacheData", getPipelineCacheData }, .{ "vkMergePipelineCaches", mergePipelineCaches } };
+    inline for (pipeline_caches) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
+    const descriptor_pools = .{ .{ "vkCreateDescriptorPool", createDescriptorPool }, .{ "vkDestroyDescriptorPool", destroyDescriptorPool }, .{ "vkResetDescriptorPool", resetDescriptorPool }, .{ "vkAllocateDescriptorSets", allocateDescriptorSets }, .{ "vkFreeDescriptorSets", freeDescriptorSets }, .{ "vkGetDescriptorSetLayoutSupport", getDescriptorSetLayoutSupport }, .{ "vkCreatePrivateDataSlot", createPrivateDataSlot }, .{ "vkDestroyPrivateDataSlot", destroyPrivateDataSlot }, .{ "vkSetPrivateData", setPrivateData }, .{ "vkGetPrivateData", getPrivateData } };
+    inline for (descriptor_pools) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
+    const descriptor_templates = .{ .{ "vkCreateDescriptorUpdateTemplate", createDescriptorUpdateTemplate }, .{ "vkDestroyDescriptorUpdateTemplate", destroyDescriptorUpdateTemplate }, .{ "vkUpdateDescriptorSetWithTemplate", updateDescriptorSetWithTemplate } };
+    inline for (descriptor_templates) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
+    if (std.mem.eql(u8, n, "vkCreateComputePipelines")) return ptr(createComputePipelines);
+    const presentation = .{ .{ "vkCreateSemaphore", createSemaphore }, .{ "vkDestroySemaphore", destroySemaphore }, .{ "vkCreateImageView", createImageView }, .{ "vkDestroyImageView", destroyImageView }, .{ "vkCreateSampler", createSampler }, .{ "vkDestroySampler", destroySampler }, .{ "vkCreateDescriptorSetLayout", createDescriptorSetLayout }, .{ "vkDestroyDescriptorSetLayout", destroyDescriptorSetLayout }, .{ "vkCreateShaderModule", createShaderModule }, .{ "vkDestroyShaderModule", destroyShaderModule }, .{ "vkCreatePipelineLayout", createPipelineLayout }, .{ "vkDestroyPipelineLayout", destroyPipelineLayout }, .{ "vkCreateRenderPass", createRenderPass }, .{ "vkCreateRenderPass2", createRenderPass2 }, .{ "vkDestroyRenderPass", destroyRenderPass }, .{ "vkGetRenderAreaGranularity", getRenderAreaGranularity }, .{ "vkCreateFramebuffer", createFramebuffer }, .{ "vkDestroyFramebuffer", destroyFramebuffer }, .{ "vkCreateGraphicsPipelines", createGraphicsPipelines }, .{ "vkDestroyPipeline", destroyPipeline }, .{ "vkCreateBufferView", createBufferView }, .{ "vkDestroyBufferView", destroyBufferView }, .{ "vkUpdateDescriptorSets", updateDescriptorSets }, .{ "vkCmdBeginRenderPass", cmdBeginRenderPass }, .{ "vkCmdBeginRenderPass2", cmdBeginRenderPass2 }, .{ "vkCmdClearAttachments", cmdClearAttachments }, .{ "vkCmdNextSubpass", cmdNextSubpass }, .{ "vkCmdNextSubpass2", cmdNextSubpass2 }, .{ "vkCmdBindPipeline", cmdBindPipeline }, .{ "vkCmdBindDescriptorSets", cmdBindDescriptorSets }, .{ "vkCmdBindIndexBuffer", cmdBindIndexBuffer }, .{ "vkCmdBindVertexBuffers", cmdBindVertexBuffers }, .{ "vkCmdSetViewport", cmdSetViewport }, .{ "vkCmdSetViewportWithCount", cmdSetViewportWithCount }, .{ "vkCmdSetScissor", cmdSetScissor }, .{ "vkCmdSetScissorWithCount", cmdSetScissorWithCount }, .{ "vkCmdSetCullMode", cmdSetCullMode }, .{ "vkCmdSetFrontFace", cmdSetFrontFace }, .{ "vkCmdSetPrimitiveTopology", cmdSetPrimitiveTopology }, .{ "vkCmdSetPrimitiveRestartEnable", cmdSetPrimitiveRestartEnable }, .{ "vkCmdSetRasterizerDiscardEnable", cmdSetRasterizerDiscardEnable }, .{ "vkCmdSetDepthBiasEnable", cmdSetDepthBiasEnable }, .{ "vkCmdSetDepthTestEnable", cmdSetDepthTestEnable }, .{ "vkCmdSetDepthWriteEnable", cmdSetDepthWriteEnable }, .{ "vkCmdSetDepthCompareOp", cmdSetDepthCompareOp }, .{ "vkCmdSetDepthBoundsTestEnable", cmdSetDepthBoundsTestEnable }, .{ "vkCmdSetStencilTestEnable", cmdSetStencilTestEnable }, .{ "vkCmdSetStencilOp", cmdSetStencilOp }, .{ "vkCmdSetLineWidth", cmdSetLineWidth }, .{ "vkCmdSetBlendConstants", cmdSetBlendConstants }, .{ "vkCmdSetDepthBias", cmdSetDepthBias }, .{ "vkCmdSetDepthBounds", cmdSetDepthBounds }, .{ "vkCmdSetStencilCompareMask", cmdSetStencilCompareMask }, .{ "vkCmdSetStencilWriteMask", cmdSetStencilWriteMask }, .{ "vkCmdSetStencilReference", cmdSetStencilReference }, .{ "vkCmdPushConstants", cmdPushConstants }, .{ "vkCmdDraw", cmdDraw }, .{ "vkCmdDrawIndexed", cmdDrawIndexed }, .{ "vkCmdDrawIndirect", cmdDrawIndirect }, .{ "vkCmdDrawIndexedIndirect", cmdDrawIndexedIndirect }, .{ "vkCmdDrawIndirectCount", cmdDrawIndirectCount }, .{ "vkCmdDrawIndexedIndirectCount", cmdDrawIndexedIndirectCount }, .{ "vkCmdEndRenderPass", cmdEndRenderPass }, .{ "vkCmdEndRenderPass2", cmdEndRenderPass2 }, .{ "vkCreateSwapchainKHR", createSwapchain }, .{ "vkDestroySwapchainKHR", destroySwapchain }, .{ "vkGetSwapchainImagesKHR", getSwapchainImages }, .{ "vkAcquireNextImageKHR", acquireNextImage }, .{ "vkQueuePresentKHR", queuePresent } };
     inline for (presentation) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
     return null;
 }
@@ -3983,7 +9631,7 @@ pub export fn vk_icdGetPhysicalDeviceProcAddr(instance: ?Instance, name: ?[*:0]c
     defer mutex.unlock();
     if (!validInstanceLocked(instance orelse return null)) return null;
     const n = std.mem.span(name orelse return null);
-    const map = .{ .{ "vkGetPhysicalDeviceFeatures", getFeatures }, .{ "vkGetPhysicalDeviceProperties", getProperties }, .{ "vkGetPhysicalDeviceQueueFamilyProperties", getQueueProperties }, .{ "vkGetPhysicalDeviceMemoryProperties", getMemoryProperties }, .{ "vkGetPhysicalDeviceFormatProperties", getFormatProperties }, .{ "vkGetPhysicalDeviceImageFormatProperties", getImageFormatProperties }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties", getSparseImageFormatProperties }, .{ "vkEnumerateDeviceExtensionProperties", enumerateDeviceExtensions }, .{ "vkCreateDevice", createDevice }, .{ "vkGetPhysicalDeviceSurfaceSupportKHR", getSurfaceSupport }, .{ "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", getSurfaceCapabilities }, .{ "vkGetPhysicalDeviceSurfaceFormatsKHR", getSurfaceFormats }, .{ "vkGetPhysicalDeviceSurfacePresentModesKHR", getSurfacePresentModes } };
+    const map = .{ .{ "vkGetPhysicalDeviceFeatures", getFeatures }, .{ "vkGetPhysicalDeviceFeatures2", getPhysicalDeviceFeatures2 }, .{ "vkGetPhysicalDeviceProperties", getProperties }, .{ "vkGetPhysicalDeviceProperties2", getPhysicalDeviceProperties2 }, .{ "vkGetPhysicalDeviceQueueFamilyProperties", getQueueProperties }, .{ "vkGetPhysicalDeviceQueueFamilyProperties2", getPhysicalDeviceQueueFamilyProperties2 }, .{ "vkGetPhysicalDeviceMemoryProperties", getMemoryProperties }, .{ "vkGetPhysicalDeviceMemoryProperties2", getPhysicalDeviceMemoryProperties2 }, .{ "vkGetPhysicalDeviceFormatProperties", getFormatProperties }, .{ "vkGetPhysicalDeviceFormatProperties2", getPhysicalDeviceFormatProperties2 }, .{ "vkGetPhysicalDeviceImageFormatProperties", getImageFormatProperties }, .{ "vkGetPhysicalDeviceImageFormatProperties2", getPhysicalDeviceImageFormatProperties2 }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties", getSparseImageFormatProperties }, .{ "vkGetPhysicalDeviceSparseImageFormatProperties2", getPhysicalDeviceSparseImageFormatProperties2 }, .{ "vkGetPhysicalDeviceToolProperties", getPhysicalDeviceToolProperties }, .{ "vkGetPhysicalDeviceExternalBufferProperties", getPhysicalDeviceExternalBufferProperties }, .{ "vkGetPhysicalDeviceExternalFenceProperties", getPhysicalDeviceExternalFenceProperties }, .{ "vkGetPhysicalDeviceExternalSemaphoreProperties", getPhysicalDeviceExternalSemaphoreProperties }, .{ "vkEnumerateDeviceExtensionProperties", enumerateDeviceExtensions }, .{ "vkEnumerateDeviceLayerProperties", enumerateDeviceLayers }, .{ "vkCreateDevice", createDevice }, .{ "vkGetPhysicalDeviceSurfaceSupportKHR", getSurfaceSupport }, .{ "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", getSurfaceCapabilities }, .{ "vkGetPhysicalDeviceSurfaceFormatsKHR", getSurfaceFormats }, .{ "vkGetPhysicalDeviceSurfacePresentModesKHR", getSurfacePresentModes } };
     inline for (map) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
     return null;
 }
@@ -4002,7 +9650,7 @@ test "negotiation and exact global lookup" {
     try std.testing.expect(vk_icdGetInstanceProcAddr(null, null) == null);
     try std.testing.expect(vk_icdGetInstanceProcAddr(@ptrFromInt(8), "vkDestroyInstance") == null);
     try std.testing.expectEqual(Result.error_initialization_failed, enumerateInstanceExtensions(null, null, null));
-    for ([_][*:0]const u8{ "vkGetInstanceProcAddr", "vkCreateInstance", "vkEnumerateInstanceExtensionProperties" }) |name| try std.testing.expect(vk_icdGetInstanceProcAddr(null, name) != null);
+    for ([_][*:0]const u8{ "vkGetInstanceProcAddr", "vkCreateInstance", "vkEnumerateInstanceExtensionProperties", "vkEnumerateInstanceLayerProperties" }) |name| try std.testing.expect(vk_icdGetInstanceProcAddr(null, name) != null);
 }
 test "enumeration lifecycle and unsupported features" {
     var ci = InstanceInfo{ .s_type = 1, .p_next = null, .flags = 0, .app_info = null, .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null };
@@ -4047,7 +9695,27 @@ test "enumeration lifecycle and unsupported features" {
     var queue: Queue = undefined;
     getDeviceQueue(device, 0, 0, &queue);
     try std.testing.expectEqual(MAGIC, queue.loader_data);
+    for ([_][*:0]const u8{ "vkCmdBeginRenderPass2", "vkCmdNextSubpass2", "vkCmdEndRenderPass2", "vkGetBufferDeviceAddress", "vkGetBufferOpaqueCaptureAddress", "vkGetDeviceMemoryOpaqueCaptureAddress" }) |name| try std.testing.expect(getDeviceProcAddr(device, name) != null);
     destroyDevice(device, null);
+    var feature2 = PhysicalDeviceFeatures2{ .s_type = 1000059000, .p_next = null, .features = std.mem.zeroes(Features) };
+    di.p_next = @ptrCast(&feature2);
+    try std.testing.expectEqual(Result.success, createDevice(ps[0], &di, null, &device));
+    destroyDevice(device, null);
+    feature2.features.values[0] = 1;
+    try std.testing.expectEqual(Result.error_feature_not_present, createDevice(ps[0], &di, null, &device));
+    feature2.features.values[0] = 0;
+    var device_feature = PhysicalDevice16BitStorageFeatures{ .s_type = 1000083000, .p_next = null, .values = [_]u32{0} ** 4 };
+    feature2.p_next = @ptrCast(&device_feature);
+    try std.testing.expectEqual(Result.success, createDevice(ps[0], &di, null, &device));
+    destroyDevice(device, null);
+    device_feature.values[0] = 1;
+    try std.testing.expectEqual(Result.error_feature_not_present, createDevice(ps[0], &di, null, &device));
+    device_feature.values[0] = 0;
+    feature2.p_next = null;
+    const unsupported_device_chain = ChainHeader{ .s_type = 999, .p_next = null };
+    di.p_next = @ptrCast(&unsupported_device_chain);
+    try std.testing.expectEqual(Result.error_initialization_failed, createDevice(ps[0], &di, null, &device));
+    di.p_next = null;
     try std.testing.expect(getDeviceProcAddr(device, "vkDestroyDevice") == null);
     try std.testing.expect(getDeviceProcAddr(@ptrFromInt(8), "vkDestroyDevice") == null);
     destroyInstance(instance, null);
@@ -4066,6 +9734,66 @@ test "enumeration lifecycle and unsupported features" {
     const unsupported_chain = ChainHeader{ .s_type = 999, .p_next = null };
     ci.p_next = &unsupported_chain;
     try std.testing.expectEqual(Result.error_initialization_failed, createInstance(&ci, null, &instance));
+}
+
+test "core instance physical and device enumeration is bounded and allocation free" {
+    try std.testing.expectEqual(@as(usize, 220), @sizeOf(Features));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(QueueProperties));
+    try std.testing.expectEqual(@as(usize, 520), @sizeOf(MemoryProperties));
+    const ci = InstanceInfo{ .s_type = 1, .p_next = null, .flags = 0, .app_info = null, .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null };
+    var instance: Instance = undefined;
+    try std.testing.expectEqual(Result.success, createInstance(&ci, null, &instance));
+    var physical_count: u32 = 1;
+    var physical: [1]Physical = undefined;
+    try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &physical_count, &physical));
+    var instance_extensions: [2]ExtensionProperties = undefined;
+    var device_extensions: [2]ExtensionProperties = undefined;
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..4096) |_| {
+        var count: u32 = 0;
+        try std.testing.expectEqual(Result.success, enumerateInstanceExtensions(null, &count, null));
+        try std.testing.expectEqual(@as(u32, 2), count);
+        count = instance_extensions.len;
+        try std.testing.expectEqual(Result.success, enumerateInstanceExtensions(null, &count, &instance_extensions));
+        try std.testing.expectEqual(@as(u32, 2), count);
+        count = 0;
+        try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &count, null));
+        try std.testing.expectEqual(@as(u32, 1), count);
+        count = physical.len;
+        try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &count, &physical));
+        try std.testing.expectEqual(@as(u32, 1), count);
+        count = 0;
+        try std.testing.expectEqual(Result.success, enumerateDeviceExtensions(physical[0], null, &count, null));
+        try std.testing.expectEqual(@as(u32, 2), count);
+        count = device_extensions.len;
+        try std.testing.expectEqual(Result.success, enumerateDeviceExtensions(physical[0], null, &count, &device_extensions));
+        try std.testing.expectEqual(@as(u32, 2), count);
+        var features = Features{ .values = [_]u32{1} ** 55 };
+        getFeatures(physical[0], &features);
+        try std.testing.expectEqualSlices(u32, &([_]u32{0} ** 55), &features.values);
+        var sparse_count: u32 = 1;
+        getSparseImageFormatProperties(physical[0], 37, 1, 1, 4, 0, &sparse_count, @ptrFromInt(8));
+        try std.testing.expectEqual(@as(u32, 0), sparse_count);
+        var queue_count: u32 = 1;
+        var queue_properties: [1]QueueProperties = undefined;
+        getQueueProperties(physical[0], &queue_count, &queue_properties);
+        try std.testing.expectEqual(@as(u32, 1), queue_count);
+        try std.testing.expectEqual(@as(u32, 0x5), queue_properties[0].flags);
+        try std.testing.expectEqual(@as(u32, 64), queue_properties[0].timestamp_bits);
+        var memory_properties: MemoryProperties = undefined;
+        getMemoryProperties(physical[0], &memory_properties);
+        try std.testing.expectEqual(@as(u32, 1), memory_properties.memory_type_count);
+        try std.testing.expectEqual(@as(u32, 0x7), memory_properties.memory_types[0].property_flags);
+        try std.testing.expectEqual(@as(u64, heap_size), memory_properties.memory_heaps[0].size);
+        var format_properties: FormatProperties = undefined;
+        getFormatProperties(physical[0], 44, &format_properties);
+        try std.testing.expectEqual(@as(u32, 0xc080), format_properties.optimal_tiling_features);
+        var image_format_properties: ImageFormatProperties = undefined;
+        try std.testing.expectEqual(Result.success, getImageFormatProperties(physical[0], 44, 1, 0, 0x13, 0, &image_format_properties));
+        try std.testing.expectEqual(@as(u32, 1), image_format_properties.sample_counts);
+    }
+    destroyInstance(instance, null);
 }
 
 test "XCB surface lifecycle and physical presentation queries" {
@@ -4182,7 +9910,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     var view: usize = 0;
     try std.testing.expectEqual(Result.success, createImageView(device, &view_info, null, &view));
 
-    const depth_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 124, .extent = .{ .width = 8, .height = 8, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x20, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    const depth_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 126, .extent = .{ .width = 8, .height = 8, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x20, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
     var depth_image: usize = 0;
     try std.testing.expectEqual(Result.success, createImage(device, &depth_info, null, &depth_image));
     const depth_alloc = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 8 * 8 * 4, .memory_type_index = 0 };
@@ -4191,7 +9919,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.success, bindImageMemory(device, depth_image, depth_memory, 0));
     var depth_view_info = view_info;
     depth_view_info.image = depth_image;
-    depth_view_info.format = 124;
+    depth_view_info.format = 126;
     depth_view_info.subresource_range.aspect_mask = 2;
     var depth_view: usize = 0;
     try std.testing.expectEqual(Result.success, createImageView(device, &depth_view_info, null, &depth_view));
@@ -4213,7 +9941,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     const attachments = [_]usize{ view, depth_view };
     const attachment_descriptions = [_]AttachmentDescription{
         .{ .flags = 0, .format = 44, .samples = 1, .load_op = 1, .store_op = 0, .stencil_load_op = 2, .stencil_store_op = 1, .initial_layout = 0, .final_layout = 1000001002 },
-        .{ .flags = 0, .format = 124, .samples = 1, .load_op = 1, .store_op = 1, .stencil_load_op = 2, .stencil_store_op = 1, .initial_layout = 0, .final_layout = 3 },
+        .{ .flags = 0, .format = 126, .samples = 1, .load_op = 1, .store_op = 1, .stencil_load_op = 2, .stencil_store_op = 1, .initial_layout = 0, .final_layout = 3 },
     };
     const color_ref = AttachmentReference{ .attachment = 0, .layout = 2 };
     const depth_ref = AttachmentReference{ .attachment = 1, .layout = 3 };
@@ -4221,6 +9949,40 @@ test "vkcube presentation path records submits and presents two swapchain images
     const render_pass_info = RenderPassCreateInfo{ .s_type = 38, .p_next = null, .flags = 0, .attachment_count = 2, .attachments = &attachment_descriptions, .subpass_count = 1, .subpasses = @ptrCast(&subpass), .dependency_count = 0, .dependencies = null };
     var render_pass: usize = 0;
     try std.testing.expectEqual(Result.success, createRenderPass(device, &render_pass_info, null, &render_pass));
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(AttachmentDescription2));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(AttachmentDescriptionStencilLayout));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(SubpassDescriptionDepthStencilResolve));
+    const attachment2 = [_]AttachmentDescription2{.{ .s_type = 1000109000, .p_next = null, .flags = 0, .format = 44, .samples = 1, .load_op = 1, .store_op = 0, .stencil_load_op = 2, .stencil_store_op = 1, .initial_layout = 0, .final_layout = 1000001002 }};
+    const color_ref2 = AttachmentReference2{ .s_type = 1000109001, .p_next = null, .attachment = 0, .layout = 2, .aspect_mask = 0 };
+    const subpass2 = SubpassDescription2{ .s_type = 1000109002, .p_next = null, .flags = 0, .pipeline_bind_point = 0, .view_mask = 0, .input_attachment_count = 0, .input_attachments = null, .color_attachment_count = 1, .color_attachments = @ptrCast(&color_ref2), .resolve_attachments = null, .depth_stencil_attachment = null, .preserve_attachment_count = 0, .preserve_attachments = null };
+    const render_pass_info2 = RenderPassCreateInfo2{ .s_type = 1000109004, .p_next = null, .flags = 0, .attachment_count = 1, .attachments = &attachment2, .subpass_count = 1, .subpasses = @ptrCast(&subpass2), .dependency_count = 0, .dependencies = null, .correlated_view_mask_count = 0, .correlated_view_masks = null };
+    var render_pass2: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass2(device, &render_pass_info2, null, &render_pass2));
+    var stencil_layout = AttachmentDescriptionStencilLayout{ .s_type = 1000242002, .p_next = null, .stencil_initial_layout = 0, .stencil_final_layout = 0 };
+    var nested_attachment = attachment2[0];
+    nested_attachment.p_next = @ptrCast(&stencil_layout);
+    var depth_resolve = SubpassDescriptionDepthStencilResolve{ .s_type = 1000200001, .p_next = null, .depth_resolve_mode = 0, .stencil_resolve_mode = 0, .depth_stencil_resolve_attachment = null };
+    var nested_subpass = subpass2;
+    nested_subpass.p_next = @ptrCast(&depth_resolve);
+    const nested_attachments = [_]AttachmentDescription2{nested_attachment};
+    const nested_subpasses = [_]SubpassDescription2{nested_subpass};
+    var nested_render_info2 = render_pass_info2;
+    nested_render_info2.attachments = &nested_attachments;
+    nested_render_info2.subpasses = &nested_subpasses;
+    destroyRenderPass(device, render_pass2, null);
+    try std.testing.expectEqual(Result.success, createRenderPass2(device, &nested_render_info2, null, &render_pass2));
+    try std.testing.expect(attachmentDescription2PNextValid(&stencil_layout));
+    try std.testing.expect(subpassDescription2PNextValid(&depth_resolve));
+    stencil_layout.stencil_final_layout = 3;
+    try std.testing.expect(!attachmentDescription2PNextValid(&stencil_layout));
+    stencil_layout.stencil_final_layout = 0;
+    depth_resolve.depth_resolve_mode = 1;
+    try std.testing.expect(!subpassDescription2PNextValid(&depth_resolve));
+    depth_resolve.depth_resolve_mode = 0;
+    for (0..4096) |_| {
+        try std.testing.expect(attachmentDescription2PNextValid(&stencil_layout));
+        try std.testing.expect(subpassDescription2PNextValid(&depth_resolve));
+    }
     var unpublished: usize = 0xfeed;
     const stale_device: Device = @ptrFromInt(8);
     try std.testing.expectEqual(Result.error_initialization_failed, createRenderPass(stale_device, &render_pass_info, null, &unpublished));
@@ -4268,7 +10030,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &bad_framebuffer_info, null, &unpublished));
     var mismatched_color_info = depth_info;
     mismatched_color_info.format = 43;
-    mismatched_color_info.usage = 0x10;
+    mismatched_color_info.usage = 0x4;
     var mismatched_color_image: usize = 0;
     try std.testing.expectEqual(Result.success, createImage(device, &mismatched_color_info, null, &mismatched_color_image));
     var mismatched_color_view_info = view_info;
@@ -4281,11 +10043,13 @@ test "vkcube presentation path records submits and presents two swapchain images
     bad_framebuffer_info.attachments = &mismatched_format_attachments;
     try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(device, &bad_framebuffer_info, null, &unpublished));
     var mismatched_depth_info = mismatched_color_info;
-    mismatched_depth_info.usage = 0x20;
+    mismatched_depth_info.format = 37;
+    mismatched_depth_info.usage = 0x3;
     var mismatched_depth_image: usize = 0;
     try std.testing.expectEqual(Result.success, createImage(device, &mismatched_depth_info, null, &mismatched_depth_image));
     var mismatched_depth_view_info = mismatched_color_view_info;
     mismatched_depth_view_info.image = mismatched_depth_image;
+    mismatched_depth_view_info.format = 37;
     mismatched_depth_view_info.subresource_range.aspect_mask = 2;
     var mismatched_depth_view: usize = 0;
     try std.testing.expectEqual(Result.success, createImageView(device, &mismatched_depth_view_info, null, &mismatched_depth_view));
@@ -4322,6 +10086,11 @@ test "vkcube presentation path records submits and presents two swapchain images
     var malformed_render_info = render_pass_info;
     malformed_render_info.subpasses = @ptrCast(&malformed_subpass);
     try std.testing.expectEqual(Result.error_initialization_failed, createRenderPass(device, &malformed_render_info, null, &unpublished));
+    var oversized_subpass = subpass;
+    oversized_subpass.color_attachment_count = 5;
+    var oversized_render_info = render_pass_info;
+    oversized_render_info.subpasses = @ptrCast(&oversized_subpass);
+    try std.testing.expectEqual(Result.error_initialization_failed, createRenderPass(device, &oversized_render_info, null, &unpublished));
     const framebuffer_states_before_oom = framebuffer_state;
     test_allocations_before_failure = 0;
     try std.testing.expectEqual(Result.error_out_of_host_memory, createFramebuffer(device, &framebuffer_info, null, &unpublished));
@@ -4330,9 +10099,16 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqualSlices(SlotState, &framebuffer_states_before_oom, &framebuffer_state);
     try std.testing.expectEqual(Result.success, createFramebuffer(device, &framebuffer_info, null, &framebuffer));
 
-    var opaque_handle: usize = 0;
-    try std.testing.expectEqual(Result.success, createOpaque(device, @ptrCast(&framebuffer_info), null, &opaque_handle));
-    destroyOpaque(device, opaque_handle, null);
+    const sampler_info = SamplerCreateInfo{ .s_type = 31, .p_next = null, .flags = 0, .mag_filter = 0, .min_filter = 0, .mipmap_mode = 0, .address_mode_u = 0, .address_mode_v = 0, .address_mode_w = 0, .mip_lod_bias = 0, .anisotropy_enable = 0, .max_anisotropy = 1, .compare_enable = 0, .compare_op = 0, .min_lod = 0, .max_lod = 0, .border_color = 0, .unnormalized_coordinates = 0 };
+    try std.testing.expectEqual(@as(usize, 80), @sizeOf(SamplerCreateInfo));
+    var invalid_sampler_info = sampler_info;
+    invalid_sampler_info.anisotropy_enable = 1;
+    var unpublished_sampler: usize = 0xaaaa;
+    try std.testing.expectEqual(Result.error_initialization_failed, createSampler(device, @ptrCast(&invalid_sampler_info), null, &unpublished_sampler));
+    try std.testing.expectEqual(@as(usize, 0xaaaa), unpublished_sampler);
+    var sampler: usize = 0;
+    try std.testing.expectEqual(Result.success, createSampler(device, @ptrCast(&sampler_info), null, &sampler));
+    destroySampler(device, sampler, null);
     const layout_bindings = [_]DescriptorSetLayoutBinding{
         .{ .binding = 0, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null },
         .{ .binding = 1, .descriptor_type = 1, .descriptor_count = 1, .stage_flags = 16, .immutable_samplers = null },
@@ -4379,12 +10155,18 @@ test "vkcube presentation path records submits and presents two swapchain images
     const depth_stencil = PipelineDepthStencilStateCreateInfo{ .s_type = 25, .p_next = null, .flags = 0, .depth_test_enable = 1, .depth_write_enable = 1, .depth_compare_op = 3, .depth_bounds_test_enable = 0, .stencil_test_enable = 0, .front = stencil, .back = stencil, .min_depth_bounds = 0, .max_depth_bounds = 1 };
     const blend_attachment = PipelineColorBlendAttachmentState{ .blend_enable = 0, .src_color_blend_factor = 1, .dst_color_blend_factor = 0, .color_blend_op = 0, .src_alpha_blend_factor = 1, .dst_alpha_blend_factor = 0, .alpha_blend_op = 0, .color_write_mask = 0xf };
     const color_blend = PipelineColorBlendStateCreateInfo{ .s_type = 26, .p_next = null, .flags = 0, .logic_op_enable = 0, .logic_op = 0, .attachment_count = 1, .attachments = @ptrCast(&blend_attachment), .blend_constants = .{ 0, 0, 0, 0 } };
-    const dynamic_states = [_]i32{ 0, 1 };
-    const dynamic = PipelineDynamicStateCreateInfo{ .s_type = 27, .p_next = null, .flags = 0, .dynamic_state_count = 2, .dynamic_states = &dynamic_states };
+    const dynamic_states = [_]i32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 };
+    const dynamic = PipelineDynamicStateCreateInfo{ .s_type = 27, .p_next = null, .flags = 0, .dynamic_state_count = dynamic_states.len, .dynamic_states = &dynamic_states };
     const pipeline_info = GraphicsPipelineCreateInfo{ .s_type = 28, .p_next = null, .flags = 0, .stage_count = 2, .stages = &stages, .vertex_input = &vertex_input, .input_assembly = &input_assembly, .tessellation = null, .viewport = &viewport_state, .rasterization = &rasterization, .multisample = &multisample, .depth_stencil = &depth_stencil, .color_blend = &color_blend, .dynamic = &dynamic, .layout = pipeline_layout, .render_pass = render_pass, .subpass = 0, .base_pipeline = 0, .base_pipeline_index = -1 };
+    const graphics_cache_info = PipelineCacheCreateInfo{ .s_type = 17, .p_next = null, .flags = 0, .initial_data_size = 0, .initial_data = null };
+    var graphics_cache: usize = 0;
+    try std.testing.expectEqual(Result.success, createPipelineCache(device, &graphics_cache_info, null, &graphics_cache));
     var pipelines: [1]usize = undefined;
-    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&pipeline_info), null, &pipelines));
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, graphics_cache, 1, @ptrCast(&pipeline_info), null, &pipelines));
     const baseline_pipeline = validGraphicsPipelineLocked(pipelines[0]).?;
+    var graphics_cache_size: usize = 0;
+    try std.testing.expectEqual(Result.success, getPipelineCacheData(device, graphics_cache, &graphics_cache_size, null));
+    try std.testing.expect(graphics_cache_size > pipelineCacheHeader().len);
     var caller_independent = try baseline_pipeline.canonical.clone();
     defer caller_independent.deinit();
     stages[0].module = 0;
@@ -4561,6 +10343,21 @@ test "vkcube presentation path records submits and presents two swapchain images
     var static_handle: [1]usize = undefined;
     try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&static_pipeline), null, &static_handle));
     try std.testing.expect(!validGraphicsPipelineLocked(pipelines[0]).?.canonical.eql(&validGraphicsPipelineLocked(static_handle[0]).?.canonical));
+    var invalid_vertex_input = described_vertex_input;
+    var invalid_vertex_bindings = vertex_bindings;
+    invalid_vertex_bindings[0].stride = 2049;
+    invalid_vertex_input.bindings = &invalid_vertex_bindings;
+    var invalid_vertex_pipeline = static_pipeline;
+    invalid_vertex_pipeline.vertex_input = &invalid_vertex_input;
+    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_vertex_pipeline), null, &unchanged));
+    invalid_vertex_bindings[0].stride = 8;
+    var invalid_vertex_attributes = vertex_attributes;
+    invalid_vertex_attributes[0].offset = 2048;
+    invalid_vertex_input.attributes = &invalid_vertex_attributes;
+    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_vertex_pipeline), null, &unchanged));
+    invalid_vertex_attributes[0].offset = 0;
+    invalid_vertex_attributes[0].location = 16;
+    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_vertex_pipeline), null, &unchanged));
     var invalid_pipeline = pipeline_info;
     invalid_pipeline.base_pipeline = 1;
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
@@ -4611,18 +10408,29 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
     var bad_dynamic_states = [_]i32{ 0, 0 };
     var bad_dynamic = dynamic;
+    bad_dynamic.dynamic_state_count = bad_dynamic_states.len;
     bad_dynamic.dynamic_states = &bad_dynamic_states;
     invalid_pipeline = pipeline_info;
     invalid_pipeline.dynamic = &bad_dynamic;
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+    for ([_]i32{ -1, 9 }) |unsupported_state| {
+        var unsupported_states = [_]i32{unsupported_state};
+        bad_dynamic.dynamic_state_count = 1;
+        bad_dynamic.dynamic_states = &unsupported_states;
+        invalid_pipeline.dynamic = &bad_dynamic;
+        try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+    }
     var bad_rasterization = rasterization;
     bad_rasterization.rasterizer_discard_enable = 1;
     invalid_pipeline = pipeline_info;
     invalid_pipeline.rasterization = &bad_rasterization;
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
     inline for (.{ "depth_bias_constant_factor", "depth_bias_clamp", "depth_bias_slope_factor" }) |field| {
+        const no_depth_bias_states = [_]i32{ 0, 1, 2, 4, 5, 6, 7, 8 };
+        const no_depth_bias_dynamic = PipelineDynamicStateCreateInfo{ .s_type = 27, .p_next = null, .flags = 0, .dynamic_state_count = no_depth_bias_states.len, .dynamic_states = &no_depth_bias_states };
         bad_rasterization = rasterization;
         @field(bad_rasterization, field) = 1;
+        invalid_pipeline.dynamic = &no_depth_bias_dynamic;
         invalid_pipeline.rasterization = &bad_rasterization;
         try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
     }
@@ -4683,17 +10491,45 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.success, createRenderPass(device, &render_pass_info, null, &compatible_render_pass));
     var compatible_descriptor_layout: usize = 0;
     try std.testing.expectEqual(Result.success, createDescriptorSetLayout(device, &descriptor_layout_info, null, &compatible_descriptor_layout));
+    const descriptor_pool_sizes = [_]DescriptorPoolSize{
+        .{ .descriptor_type = 6, .descriptor_count = 4 },
+        .{ .descriptor_type = 1, .descriptor_count = 4 },
+    };
+    const descriptor_pool_info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 1, .max_sets = 4, .pool_size_count = descriptor_pool_sizes.len, .pool_sizes = &descriptor_pool_sizes };
+    var descriptor_pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorPool(device, &descriptor_pool_info, null, &descriptor_pool));
     var compatible_pipeline_layout_info = pipeline_layout_info;
     compatible_pipeline_layout_info.set_layouts = @ptrCast(&compatible_descriptor_layout);
     var compatible_pipeline_layout: usize = 0;
     try std.testing.expectEqual(Result.success, createPipelineLayout(device, &compatible_pipeline_layout_info, null, &compatible_pipeline_layout));
     framebuffer_info.render_pass = compatible_render_pass;
+    // Keep a second render-pass object with two compatible subpasses.  The
+    // backend executes both draws against the same framebuffer, but the
+    // command stream must still enforce Vulkan's active-subpass/pipeline
+    // compatibility rules and advance through vkCmdNextSubpass.
+    const multi_subpasses = [_]SubpassDescription{ subpass, subpass };
+    var multi_render_info = render_pass_info;
+    multi_render_info.subpass_count = multi_subpasses.len;
+    multi_render_info.subpasses = @ptrCast(&multi_subpasses);
+    var multi_render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(device, &multi_render_info, null, &multi_render_pass));
+    var multi_pipeline_infos = [_]GraphicsPipelineCreateInfo{ pipeline_info, pipeline_info };
+    multi_pipeline_infos[0].render_pass = multi_render_pass;
+    multi_pipeline_infos[0].subpass = 0;
+    multi_pipeline_infos[1].render_pass = multi_render_pass;
+    multi_pipeline_infos[1].subpass = 1;
+    var multi_pipeline: [2]usize = undefined;
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, multi_pipeline.len, @ptrCast(&multi_pipeline_infos), null, &multi_pipeline));
+    var multi_framebuffer_info = framebuffer_info;
+    multi_framebuffer_info.render_pass = multi_render_pass;
+    var multi_framebuffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createFramebuffer(device, &multi_framebuffer_info, null, &multi_framebuffer));
     destroyShaderModule(device, vertex_shader, null);
     destroyShaderModule(device, fragment_shader, null);
     destroyPipelineLayout(device, pipeline_layout, null);
     destroyDescriptorSetLayout(device, descriptor_layout, null);
     destroyRenderPass(device, render_pass, null);
-    const set_info = DescriptorSetAllocateInfo{ .s_type = 34, .p_next = null, .descriptor_pool = opaque_handle, .descriptor_set_count = 1, .set_layouts = @ptrCast(&compatible_descriptor_layout) };
+    const set_info = DescriptorSetAllocateInfo{ .s_type = 34, .p_next = null, .descriptor_pool = descriptor_pool, .descriptor_set_count = 1, .set_layouts = @ptrCast(&compatible_descriptor_layout) };
     var sets: [1]usize = undefined;
     var bad_set_handles = [_]usize{ compatible_descriptor_layout, 0 };
     var bad_set_info = set_info;
@@ -4738,52 +10574,423 @@ test "vkcube presentation path records submits and presents two swapchain images
     };
     for (vertices, 0..) |value, index| uniform[16 + index] = value;
     unmapMemory(device, uniform_memory);
+    const index_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 8, .usage = 0x40, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var index_buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(device, &index_info, null, &index_buffer));
+    const index_alloc = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 8, .memory_type_index = 0 };
+    var index_memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(device, &index_alloc, null, &index_memory));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(device, index_buffer, index_memory, 0));
+    var mapped_indices: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(device, index_memory, 0, 8, 0, &mapped_indices));
+    const indices: [*]u16 = @ptrCast(@alignCast(mapped_indices.?));
+    indices[0..4].* = .{ 99, 1, 2, 3 };
+    unmapMemory(device, index_memory);
+    const indirect_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 20, .usage = 0x100, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var indirect_buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(device, &indirect_info, null, &indirect_buffer));
+    const indirect_alloc = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 20, .memory_type_index = 0 };
+    var indirect_memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(device, &indirect_alloc, null, &indirect_memory));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(device, indirect_buffer, indirect_memory, 0));
+    var mapped_indirect: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(device, indirect_memory, 0, 20, 0, &mapped_indirect));
+    const indirect_words: [*]u32 = @ptrCast(@alignCast(mapped_indirect.?));
+    indirect_words[0..5].* = .{ 3, 2, 1, @bitCast(@as(i32, -1)), 0 };
+    unmapMemory(device, indirect_memory);
+    const draw_sampler_info = SamplerCreateInfo{ .s_type = 31, .p_next = null, .flags = 0, .mag_filter = 0, .min_filter = 0, .mipmap_mode = 0, .address_mode_u = 0, .address_mode_v = 0, .address_mode_w = 0, .mip_lod_bias = 0, .anisotropy_enable = 0, .max_anisotropy = 0, .compare_enable = 0, .compare_op = 0, .min_lod = 0, .max_lod = 0, .border_color = 0, .unnormalized_coordinates = 0 };
+    var draw_sampler: usize = 0;
+    try std.testing.expectEqual(Result.success, createSampler(device, @ptrCast(&draw_sampler_info), null, &draw_sampler));
     const descriptor_buffer = DescriptorBufferInfo{ .buffer = uniform_buffer, .offset = 0, .range = 160 };
-    const descriptor_image = DescriptorImageInfo{ .sampler = 1, .image_view = texture_view, .image_layout = 5 };
+    const descriptor_image = DescriptorImageInfo{ .sampler = draw_sampler, .image_view = texture_view, .image_layout = 5 };
     const descriptor_writes = [_]WriteDescriptorSet{
         .{ .s_type = 35, .p_next = null, .dst_set = sets[0], .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 6, .image_info = null, .buffer_info = @ptrCast(&descriptor_buffer), .texel_buffer_view = null },
         .{ .s_type = 35, .p_next = null, .dst_set = sets[0], .dst_binding = 1, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 1, .image_info = @ptrCast(&descriptor_image), .buffer_info = null, .texel_buffer_view = null },
     };
     updateDescriptorSets(device, descriptor_writes.len, @ptrCast(&descriptor_writes), 0, null);
 
-    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 0, .queue_family_index = 0 };
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
     var pool: usize = 0;
     try std.testing.expectEqual(Result.success, createCommandPool(device, &pool_info, null, &pool));
     const command_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
     var commands: [1]CommandBuffer = undefined;
     try std.testing.expectEqual(Result.success, allocateCommandBuffers(device, &command_info, &commands));
+    var multi_commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(device, &command_info, &multi_commands));
+    const multi_begin_info = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    const multi_clears = [_]ClearValue{
+        .{ .color = .{ .float32 = .{ 0.1, 0.1, 0.1, 1 } } },
+        .{ .depth_stencil = .{ .depth = 1, .stencil = 0 } },
+    };
+    const multi_render_begin = RenderPassBeginInfo{ .s_type = 43, .p_next = null, .render_pass = multi_render_pass, .framebuffer = multi_framebuffer, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 8, .height = 8 } }, .clear_value_count = 2, .clear_values = &multi_clears };
+    const multi_viewport = Viewport{ .x = 0, .y = 0, .width = 8, .height = 8, .min_depth = 0, .max_depth = 1 };
+    const multi_scissor = Rect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 8, .height = 8 } };
+    // The profile pipeline above is intentionally inspected in metadata mode;
+    // switch only the dedicated multi-subpass pipelines to the executable
+    // CPU-cube ABI before issuing the draw commands below.
+    validGraphicsPipelineLocked(multi_pipeline[0]).?.execution_abi = .cpu_cube_v1;
+    validGraphicsPipelineLocked(multi_pipeline[1]).?.execution_abi = .cpu_cube_v1;
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    cmdBeginRenderPass(multi_commands[0], &multi_render_begin, 0);
+    cmdBindPipeline(multi_commands[0], 0, multi_pipeline[0]);
+    cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    cmdSetViewport(multi_commands[0], 0, 1, @ptrCast(&multi_viewport));
+    cmdSetScissor(multi_commands[0], 0, 1, @ptrCast(&multi_scissor));
+    cmdDraw(multi_commands[0], 3, 1, 0, 0);
+    try std.testing.expectEqual(@as(u32, 0), multi_commands[0].impl.active_subpass);
+    cmdNextSubpass(multi_commands[0], 0);
+    try std.testing.expectEqual(@as(u32, 1), multi_commands[0].impl.active_subpass);
+    cmdBindPipeline(multi_commands[0], 0, multi_pipeline[1]);
+    cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    cmdSetViewport(multi_commands[0], 0, 1, @ptrCast(&multi_viewport));
+    cmdSetScissor(multi_commands[0], 0, 1, @ptrCast(&multi_scissor));
+    cmdDraw(multi_commands[0], 3, 1, 0, 0);
+    cmdEndRenderPass(multi_commands[0]);
+    try std.testing.expectEqual(@as(u32, 0), multi_commands[0].impl.active_subpass);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(multi_commands[0]));
+    const multi_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &multi_commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&multi_submit), 0));
+    try std.testing.expect(validImageLocked(images[0]).?.complex_3d_content);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    cmdBeginRenderPass(multi_commands[0], &multi_render_begin, 0);
+    cmdNextSubpass(multi_commands[0], 0);
+    cmdNextSubpass(multi_commands[0], 0);
+    try std.testing.expect(multi_commands[0].impl.invalid);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+        cmdBeginRenderPass(multi_commands[0], &multi_render_begin, 0);
+        cmdBindPipeline(multi_commands[0], 0, multi_pipeline[0]);
+        cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+        cmdSetViewport(multi_commands[0], 0, 1, @ptrCast(&multi_viewport));
+        cmdSetScissor(multi_commands[0], 0, 1, @ptrCast(&multi_scissor));
+        cmdDraw(multi_commands[0], 3, 1, 0, 0);
+        cmdNextSubpass(multi_commands[0], 0);
+        cmdBindPipeline(multi_commands[0], 0, multi_pipeline[1]);
+        cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+        cmdSetViewport(multi_commands[0], 0, 1, @ptrCast(&multi_viewport));
+        cmdSetScissor(multi_commands[0], 0, 1, @ptrCast(&multi_scissor));
+        cmdDraw(multi_commands[0], 3, 1, 0, 0);
+        cmdEndRenderPass(multi_commands[0]);
+        try std.testing.expect(!multi_commands[0].impl.invalid);
+        try std.testing.expectEqual(Result.success, endCommandBuffer(multi_commands[0]));
+    }
+    test_allocations_before_failure = null;
+    var secondary_info = command_info;
+    secondary_info.level = 1;
+    var render_secondary: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(device, &secondary_info, &render_secondary));
     const begin_info = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    const occlusion_info = QueryPoolCreateInfo{ .s_type = 11, .p_next = null, .flags = 0, .query_type = 0, .query_count = 1, .pipeline_statistics = 0 };
+    var occlusion_pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createQueryPool(device, &occlusion_info, null, &occlusion_pool));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
     const clears = [_]ClearValue{
         .{ .color = .{ .float32 = .{ 0.2, 0.2, 0.2, 0.2 } } },
         .{ .depth_stencil = .{ .depth = 1, .stencil = 0 } },
     };
     const render_info = RenderPassBeginInfo{ .s_type = 43, .p_next = null, .render_pass = compatible_render_pass, .framebuffer = framebuffer, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 8, .height = 8 } }, .clear_value_count = 2, .clear_values = &clears };
+    cmdResetQueryPool(commands[0], occlusion_pool, 0, 1);
     cmdBeginRenderPass(commands[0], &render_info, 0);
-    cmdBindPipeline(commands[0], 0, static_handle[0]);
+    const attachment_clear = [_]ClearAttachment{.{ .aspect_mask = 1, .color_attachment = 0, .clear_value = .{ .color = .{ .float32 = .{ 0.25, 0.5, 0.75, 1 } } } }};
+    const attachment_rect = [_]ClearRect{.{ .rect = .{ .offset = .{ .x = 1, .y = 1 }, .extent = .{ .width = 2, .height = 2 } }, .base_array_layer = 0, .layer_count = 1 }};
+    const clear_count_before = commands[0].impl.count;
+    cmdClearAttachments(commands[0], 1, &attachment_clear, 1, &attachment_rect);
+    try std.testing.expectEqual(clear_count_before + 1, commands[0].impl.count);
+    switch (commands[0].impl.commands[clear_count_before]) {
+        .clear_attachments => {},
+        else => return error.TestUnexpectedResult,
+    }
+    cmdBeginQuery(commands[0], occlusion_pool, 0, 0);
+    cmdBindPipeline(commands[0], 0, pipelines[0]);
     cmdBindDescriptorSets(commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
     const viewport = Viewport{ .x = 0, .y = 0, .width = 8, .height = 8, .min_depth = 0, .max_depth = 1 };
     cmdSetViewport(commands[0], 0, 1, @ptrCast(&viewport));
     cmdSetScissor(commands[0], 0, 1, @ptrCast(&render_info.render_area));
     const command_count_before_profile_draw = commands[0].impl.count;
-    cmdDraw(commands[0], 3, 1, 0, 0);
+    cmdBindIndexBuffer(commands[0], index_buffer, 0, 0);
+    cmdDrawIndexed(commands[0], 3, 1, 1, -1, 7);
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(command_count_before_profile_draw, commands[0].impl.count);
     commands[0].impl.invalid = false;
+    validGraphicsPipelineLocked(pipelines[0]).?.execution_abi = .cpu_cube_v1;
     validGraphicsPipelineLocked(static_handle[0]).?.execution_abi = .cpu_cube_v1;
+    const saved_render_pass = commands[0].impl.active_render_pass;
+    commands[0].impl.active_render_pass = null;
+    cmdDrawIndexed(commands[0], 3, 1, 1, -1, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    commands[0].impl.invalid = false;
+    commands[0].impl.active_render_pass = saved_render_pass;
+    const saved_framebuffer = commands[0].impl.active_framebuffer;
+    commands[0].impl.active_framebuffer = null;
+    cmdDrawIndexed(commands[0], 3, 1, 1, -1, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    commands[0].impl.invalid = false;
+    commands[0].impl.active_framebuffer = saved_framebuffer;
+    // Maintenance-4's explicit index range is an execution contract, not
+    // metadata only: a draw whose index bytes exceed the supplied size must
+    // fail at record time without appending a command.
+    const count_before_short_index_draw = commands[0].impl.count;
+    cmdBindIndexBuffer2(commands[0], index_buffer, 0, 4, 0);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(@as(u64, 4), commands[0].impl.index_size);
+    cmdDrawIndexed(commands[0], 3, 1, 0, -1, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(count_before_short_index_draw, commands[0].impl.count);
+    commands[0].impl.invalid = false;
+    cmdBindIndexBuffer2(commands[0], index_buffer, 0, 8, 0);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(@as(u64, 8), commands[0].impl.index_size);
+    const saved_pipeline_pointer = commands[0].impl.bound_pipeline;
+    commands[0].impl.bound_pipeline = null;
+    cmdDrawIndexed(commands[0], 3, 1, 1, -1, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    commands[0].impl.invalid = false;
+    commands[0].impl.bound_pipeline = saved_pipeline_pointer;
+    const saved_pipeline_handle = commands[0].impl.bound_pipeline_handle;
+    commands[0].impl.bound_pipeline_handle = 0;
+    cmdDrawIndexed(commands[0], 3, 1, 1, -1, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    commands[0].impl.invalid = false;
+    commands[0].impl.bound_pipeline_handle = saved_pipeline_handle;
+    const saved_layout_pointer = commands[0].impl.bound_layout;
+    commands[0].impl.bound_layout = null;
+    cmdDrawIndexed(commands[0], 3, 1, 1, -1, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    commands[0].impl.invalid = false;
+    commands[0].impl.bound_layout = saved_layout_pointer;
+    const saved_layout_handle = commands[0].impl.bound_layout_handle;
+    commands[0].impl.bound_layout_handle = 0;
+    cmdDrawIndexed(commands[0], 3, 1, 1, -1, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    commands[0].impl.invalid = false;
+    commands[0].impl.bound_layout_handle = saved_layout_handle;
+    const saved_descriptors = commands[0].impl.bound_descriptors;
+    commands[0].impl.bound_descriptors = null;
+    cmdDrawIndexed(commands[0], 3, 1, 1, -1, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    commands[0].impl.invalid = false;
+    commands[0].impl.bound_descriptors = saved_descriptors;
+    const saved_index_pointer = commands[0].impl.index_buffer;
+    commands[0].impl.index_buffer = null;
+    cmdDrawIndexed(commands[0], 3, 1, 1, -1, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    commands[0].impl.invalid = false;
+    commands[0].impl.index_buffer = saved_index_pointer;
+    const saved_index_handle = commands[0].impl.index_buffer_handle;
+    commands[0].impl.index_buffer_handle = 0;
+    cmdDrawIndexed(commands[0], 3, 1, 1, -1, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    commands[0].impl.invalid = false;
+    commands[0].impl.index_buffer_handle = saved_index_handle;
+    cmdDrawIndexedIndirect(commands[0], indirect_buffer, 0, 1, 20);
+    try std.testing.expect(!commands[0].impl.invalid);
+    cmdDrawIndirect(commands[0], indirect_buffer, 0, 1, 20);
+    try std.testing.expect(!commands[0].impl.invalid);
+    const indirect_count_before_limit_failure = commands[0].impl.count;
+    cmdDrawIndirect(commands[0], indirect_buffer, 0, 2, 20);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(indirect_count_before_limit_failure, commands[0].impl.count);
+    commands[0].impl.invalid = false;
+    const indirect_count_before_count_limit_failure = commands[0].impl.count;
+    cmdDrawIndirectCount(commands[0], indirect_buffer, 0, indirect_buffer, 0, 2, 20);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(indirect_count_before_count_limit_failure, commands[0].impl.count);
+    commands[0].impl.invalid = false;
+    cmdDrawIndirectCount(commands[0], indirect_buffer, 0, indirect_buffer, 0, 1, 20);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expect(commands[0].impl.commands[commands[0].impl.count - 1].indirect_draw.count_source != null);
     cmdDraw(commands[0], 3, 1, 0, 0);
+    try std.testing.expect(!commands[0].impl.invalid);
+    cmdDraw(commands[0], 3, 2, 1, 7);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(@as(u32, 1), commands[0].impl.commands[commands[0].impl.count - 1].cube_draw.base_vertex);
+    try std.testing.expectEqual(@as(u32, 2), commands[0].impl.commands[commands[0].impl.count - 1].cube_draw.instance_count);
+    cmdSetLineWidth(commands[0], 1);
+    const dynamic_blend = [_]f32{ 0.125, 0.25, 0.5, 1 };
+    cmdSetBlendConstants(commands[0], &dynamic_blend);
+    cmdSetDepthBias(commands[0], 1.25, 0, -2.5);
+    cmdSetDepthBounds(commands[0], 0.25, 0.75);
+    cmdSetStencilCompareMask(commands[0], 3, 0x1234_5678);
+    cmdSetStencilWriteMask(commands[0], 1, 0xabcd_ef01);
+    cmdSetStencilReference(commands[0], 2, 0x8765_4321);
+    cmdSetLineStipple(commands[0], 2, 0x00ff);
+    try std.testing.expect(commands[0].impl.line_width_set);
+    try std.testing.expectEqual(dynamic_blend, commands[0].impl.blend_constants);
+    try std.testing.expectEqual([3]f32{ 1.25, 0, -2.5 }, commands[0].impl.depth_bias);
+    try std.testing.expectEqual([2]f32{ 0.25, 0.75 }, commands[0].impl.depth_bounds);
+    try std.testing.expectEqual([2]u32{ 0x1234_5678, 0x1234_5678 }, commands[0].impl.stencil_compare_mask);
+    try std.testing.expectEqual(@as(u2, 1), commands[0].impl.stencil_write_mask_set);
+    try std.testing.expectEqual(@as(u2, 2), commands[0].impl.stencil_reference_set);
+    cmdDrawIndexed(commands[0], 3, 1, 1, -1, 7);
+    cmdEndQuery(commands[0], occlusion_pool, 0);
     cmdEndRenderPass(commands[0]);
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
 
     var acquired: usize = 0;
     var rendered: usize = 0;
-    try std.testing.expectEqual(Result.success, createSemaphore(device, @ptrCast(&begin_info), null, &acquired));
-    try std.testing.expectEqual(Result.success, createSemaphore(device, @ptrCast(&begin_info), null, &rendered));
+    const semaphore_info = SemaphoreCreateInfo{ .s_type = 9, .p_next = null, .flags = 0 };
+    try std.testing.expectEqual(Result.success, createSemaphore(device, &semaphore_info, null, &acquired));
+    try std.testing.expectEqual(Result.success, createSemaphore(device, &semaphore_info, null, &rendered));
     var image_index: u32 = undefined;
     try std.testing.expectEqual(Result.success, acquireNextImage(device, swapchain, std.math.maxInt(u64), acquired, 0, &image_index));
     const wait_stage: u32 = 0x400;
     const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 1, .wait_semaphores = @ptrCast(&acquired), .wait_dst_stage_mask = @ptrCast(&wait_stage), .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 1, .signal_semaphores = @ptrCast(&rendered) };
     try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&submit), 0));
+    var occlusion_result: u64 = 0;
+    try std.testing.expectEqual(Result.success, getQueryPoolResults(device, occlusion_pool, 0, 1, @sizeOf(u64), &occlusion_result, @sizeOf(u64), 1 | 2));
+    try std.testing.expect(occlusion_result > 0);
+
+    // Dynamic rendering must feed the same executable draw path as a
+    // render-pass instance.  The attachments are views only; no framebuffer
+    // or render-pass compatibility object is supplied to the command stream.
+    var dynamic_color_clear = std.mem.zeroes(ClearValue);
+    dynamic_color_clear.color.float32 = .{ 0, 0, 0, 1 };
+    const dynamic_color_attachment = RenderingAttachmentInfo{
+        .s_type = 1000044000,
+        .p_next = null,
+        .image_view = view,
+        .image_layout = 1,
+        .resolve_mode = 0,
+        .resolve_image_view = 0,
+        .resolve_image_layout = 0,
+        .load_op = 1,
+        .store_op = 0,
+        .clear_value = dynamic_color_clear,
+    };
+    const dynamic_depth_attachment = RenderingAttachmentInfo{
+        .s_type = 1000044000,
+        .p_next = null,
+        .image_view = depth_view,
+        .image_layout = 3,
+        .resolve_mode = 0,
+        .resolve_image_view = 0,
+        .resolve_image_layout = 0,
+        .load_op = 1,
+        .store_op = 0,
+        .clear_value = .{ .depth_stencil = .{ .depth = 1, .stencil = 0 } },
+    };
+    const dynamic_rendering = RenderingInfo{
+        .s_type = 1000044001,
+        .p_next = null,
+        .flags = 0,
+        .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 8, .height = 8 } },
+        .layer_count = 1,
+        .view_mask = 0,
+        .color_attachment_count = 1,
+        .color_attachments = @ptrCast(&dynamic_color_attachment),
+        .depth_attachment = &dynamic_depth_attachment,
+        .stencil_attachment = null,
+    };
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    cmdBeginRendering(multi_commands[0], &dynamic_rendering);
+    cmdBindPipeline(multi_commands[0], 0, pipelines[0]);
+    cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    cmdBindIndexBuffer(multi_commands[0], index_buffer, 0, 0);
+    cmdSetViewport(multi_commands[0], 0, 1, @ptrCast(&viewport));
+    cmdSetScissor(multi_commands[0], 0, 1, @ptrCast(&render_info.render_area));
+    cmdDrawIndexed(multi_commands[0], 3, 1, 1, -1, 7);
+    try std.testing.expect(!multi_commands[0].impl.invalid);
+    cmdEndRendering(multi_commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(multi_commands[0]));
+    const dynamic_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &multi_commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&dynamic_submit), 0));
+    const dynamic_rendered_bytes = imageBytes(validImageLocked(images[0]).?);
+    try std.testing.expect(!std.mem.eql(u8, &[_]u8{ 0, 0, 0, 255 }, dynamic_rendered_bytes[4 * (4 * 8 + 4) ..][0..4]));
+
+    // The promoted render-pass2 entry points must preserve the same
+    // subpass/pipeline lifecycle as their Vulkan 1.0 counterparts.
+    const pass2_begin = SubpassBeginInfo{ .s_type = 1000109005, .p_next = null, .contents = 0 };
+    const pass2_end = SubpassEndInfo{ .s_type = 1000109006, .p_next = null };
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    cmdBeginRenderPass2(multi_commands[0], &multi_render_begin, &pass2_begin);
+    cmdBindPipeline(multi_commands[0], 0, multi_pipeline[0]);
+    cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    cmdSetViewport(multi_commands[0], 0, 1, @ptrCast(&multi_viewport));
+    cmdSetScissor(multi_commands[0], 0, 1, @ptrCast(&multi_scissor));
+    cmdDraw(multi_commands[0], 3, 1, 0, 0);
+    cmdNextSubpass2(multi_commands[0], &pass2_begin, &pass2_end);
+    cmdBindPipeline(multi_commands[0], 0, multi_pipeline[1]);
+    cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    cmdSetViewport(multi_commands[0], 0, 1, @ptrCast(&multi_viewport));
+    cmdSetScissor(multi_commands[0], 0, 1, @ptrCast(&multi_scissor));
+    cmdDraw(multi_commands[0], 3, 1, 0, 0);
+    cmdEndRenderPass2(multi_commands[0], &pass2_end);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(multi_commands[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&dynamic_submit), 0));
+
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+        cmdBeginRenderPass(commands[0], &render_info, 0);
+        cmdBindPipeline(commands[0], 0, pipelines[0]);
+        cmdBindDescriptorSets(commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+        cmdBindIndexBuffer(commands[0], index_buffer, 0, 0);
+        cmdSetViewport(commands[0], 0, 1, @ptrCast(&viewport));
+        cmdSetScissor(commands[0], 0, 1, @ptrCast(&render_info.render_area));
+        cmdDrawIndexed(commands[0], 3, 1, 1, -1, 7);
+        cmdDraw(commands[0], 3, 2, 1, 7);
+        cmdEndRenderPass(commands[0]);
+        try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    }
+    test_allocations_before_failure = null;
+    const render_inheritance = CommandBufferInheritanceInfo{ .s_type = 41, .p_next = null, .render_pass = compatible_render_pass, .subpass = 0, .framebuffer = 0, .occlusion_query_enable = 0, .query_flags = 0, .pipeline_statistics = 0 };
+    const render_secondary_begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 2, .inheritance_info = &render_inheritance };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(render_secondary[0], &render_secondary_begin));
+    cmdBindPipeline(render_secondary[0], 0, pipelines[0]);
+    cmdBindDescriptorSets(render_secondary[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    cmdSetViewport(render_secondary[0], 0, 1, @ptrCast(&viewport));
+    cmdSetScissor(render_secondary[0], 0, 1, @ptrCast(&render_info.render_area));
+    cmdSetLineWidth(render_secondary[0], 1);
+    cmdSetBlendConstants(render_secondary[0], &dynamic_blend);
+    cmdSetDepthBias(render_secondary[0], 0.5, 0, -0.5);
+    cmdSetDepthBounds(render_secondary[0], 0, 1);
+    cmdSetStencilCompareMask(render_secondary[0], 3, 1);
+    cmdSetStencilWriteMask(render_secondary[0], 3, 2);
+    cmdSetStencilReference(render_secondary[0], 3, 3);
+    cmdBindIndexBuffer(render_secondary[0], index_buffer, 0, 0);
+    cmdDrawIndexed(render_secondary[0], 3, 1, 1, -1, 0);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(render_secondary[0]));
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    cmdExecuteCommands(commands[0], 1, &render_secondary);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    cmdBeginRenderPass(commands[0], &render_info, 0);
+    cmdExecuteCommands(commands[0], 1, &render_secondary);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    cmdBeginRenderPass(commands[0], &render_info, 1);
+    cmdDraw(commands[0], 3, 1, 0, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    cmdEndRenderPass(commands[0]);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    cmdBeginRenderPass(commands[0], &render_info, 1);
+    cmdExecuteCommands(commands[0], 1, &render_secondary);
+    cmdEndRenderPass(commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const secondary_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&secondary_submit), 0));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(render_secondary[0], 0));
+    try std.testing.expectEqual(@as(u8, 3), commands[0].impl.state);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    var framebuffer_inheritance = render_inheritance;
+    framebuffer_inheritance.framebuffer = framebuffer;
+    const framebuffer_secondary_begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 2, .inheritance_info = &framebuffer_inheritance };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(render_secondary[0], &framebuffer_secondary_begin));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(render_secondary[0], 0));
     const rendered_image = validImageLocked(images[0]).?;
     const rendered_bytes = imageBytes(rendered_image);
     try std.testing.expect(!std.mem.eql(u8, &[_]u8{ 51, 51, 51, 51 }, rendered_bytes[4 * (4 * 8 + 4) ..][0..4]));
@@ -4793,6 +11000,64 @@ test "vkcube presentation path records submits and presents two swapchain images
     const present = PresentInfo{ .s_type = 1_000_001_001, .p_next = null, .wait_semaphore_count = 1, .wait_semaphores = @ptrCast(&rendered), .swapchain_count = 1, .swapchains = @ptrCast(&swapchain), .image_indices = @ptrCast(&image_index), .results = &present_result };
     try std.testing.expectEqual(Result.success, queuePresent(queue, &present));
     try std.testing.expectEqual(Result.success, present_result[0]);
+
+    // A later malformed batch entry must not queue the earlier image.
+    var batch_index: u32 = undefined;
+    try std.testing.expectEqual(Result.success, acquireNextImage(device, swapchain, 0, 0, 0, &batch_index));
+    const batch_swapchain_object = validSwapchainLocked(swapchain).?;
+    var batch_swapchains = [_]usize{ swapchain, 0xdead_beef };
+    var batch_indices = [_]u32{ batch_index, batch_index };
+    const malformed_batch = PresentInfo{ .s_type = 1_000_001_001, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .swapchain_count = 2, .swapchains = &batch_swapchains, .image_indices = &batch_indices, .results = null };
+    try std.testing.expectEqual(Result.error_initialization_failed, queuePresent(queue, &malformed_batch));
+    try std.testing.expectEqual(frame_lifecycle.State.acquired, batch_swapchain_object.image_states[batch_index]);
+    var batch_present = malformed_batch;
+    batch_present.swapchain_count = 1;
+    batch_present.swapchains = @ptrCast(&swapchain);
+    batch_present.image_indices = @ptrCast(&batch_index);
+    try std.testing.expectEqual(Result.success, queuePresent(queue, &batch_present));
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    cmdBeginRenderPass(commands[0], &render_info, 0);
+    cmdBindPipeline(commands[0], 0, pipelines[0]);
+    cmdBindDescriptorSets(commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    cmdBindIndexBuffer(commands[0], index_buffer, 0, 0);
+    cmdDrawIndexed(commands[0], 3, 1, 1, -1, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    cmdBeginRenderPass(commands[0], &render_info, 0);
+    cmdBindPipeline(commands[0], 0, static_handle[0]);
+    cmdBindDescriptorSets(commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    cmdBindIndexBuffer(commands[0], index_buffer, 0, 0);
+    const ignored_viewport = Viewport{ .x = 0, .y = 0, .width = 1, .height = 1, .min_depth = 0, .max_depth = 1 };
+    const ignored_scissor = Rect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 1, .height = 1 } };
+    cmdSetViewport(commands[0], 0, 1, @ptrCast(&ignored_viewport));
+    cmdSetScissor(commands[0], 0, 1, @ptrCast(&ignored_scissor));
+    cmdDrawIndexed(commands[0], 3, 2, 1, -1, 13);
+    const static_draw = commands[0].impl.commands[commands[0].impl.count - 1].cube_draw;
+    try std.testing.expectEqual(static_viewport, static_draw.viewport);
+    try std.testing.expectEqual(cpu_cube.Rect{ .x = 0, .y = 0, .width = 8, .height = 8 }, static_draw.scissor);
+    try std.testing.expectEqual(@as(u32, 2), static_draw.instance_count);
+    cmdEndRenderPass(commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&secondary_submit), 0));
+    try std.testing.expect(!std.mem.eql(u8, &[_]u8{ 51, 51, 51, 51 }, rendered_bytes[4 * (4 * 8 + 4) ..][0..4]));
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    cmdBeginRenderPass(commands[0], &render_info, 0);
+    cmdBindPipeline(commands[0], 0, pipelines[0]);
+    cmdBindDescriptorSets(commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    cmdBindIndexBuffer(commands[0], index_buffer, 0, 0);
+    cmdSetViewport(commands[0], 0, 1, @ptrCast(&viewport));
+    cmdSetScissor(commands[0], 0, 1, @ptrCast(&render_info.render_area));
+    cmdDrawIndexed(commands[0], 3, 1, 1, -1, 0);
+    cmdEndRenderPass(commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    destroyBuffer(device, index_buffer, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(queue, 1, @ptrCast(&secondary_submit), 0));
 
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
@@ -4813,19 +11078,19 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
-    cmdBeginRenderPass(commands[0], &render_info, 1);
+    cmdBeginRenderPass(commands[0], &render_info, 2);
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
     cmdBeginRenderPass(commands[0], &render_info, 0);
-    cmdBindDescriptorSets(commands[0], 0, opaque_handle, 0, 1, &sets, 0, null);
+    cmdBindDescriptorSets(commands[0], 0, 0xdead_beef, 0, 1, &sets, 0, null);
     cmdDraw(commands[0], 3, 1, 0, 0);
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
     cmdBeginRenderPass(commands[0], &render_info, 0);
     cmdBindPipeline(commands[0], 0, static_handle[0]);
-    cmdBindDescriptorSets(commands[0], 0, opaque_handle, 0, 1, &sets, 0, null);
+    cmdBindDescriptorSets(commands[0], 0, 0xdead_beef, 0, 1, &sets, 0, null);
     cmdDraw(commands[0], 0, 1, 0, 0);
     cmdEndRenderPass(commands[0]);
     try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
@@ -4833,7 +11098,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
     cmdBindDescriptorSets(commands[0], 1, compatible_pipeline_layout, 0, 1, &sets, 0, null);
-    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expect(!commands[0].impl.invalid);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
     const null_set = [_]usize{0};
@@ -4889,7 +11154,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(validSwapchainLocked(0xdead_beef) == null);
     const saved_semaphore_state = semaphore_state;
     @memset(&semaphore_state, .tombstone);
-    try std.testing.expectEqual(Result.error_out_of_host_memory, createSemaphore(device, @ptrCast(&begin_info), null, &exhausted_handle));
+    try std.testing.expectEqual(Result.error_out_of_host_memory, createSemaphore(device, &semaphore_info, null, &exhausted_handle));
     semaphore_state = saved_semaphore_state;
     const saved_view_state = image_view_state;
     @memset(&image_view_state, .tombstone);
@@ -4989,15 +11254,22 @@ test "vkcube presentation path records submits and presents two swapchain images
 
     destroySemaphore(device, acquired, null);
     destroySemaphore(device, rendered, null);
+    destroyFramebuffer(device, multi_framebuffer, null);
+    for (multi_pipeline) |pipeline| destroyPipeline(device, pipeline, null);
+    destroyRenderPass(device, multi_render_pass, null);
     destroyFramebuffer(device, framebuffer, null);
     destroyImageView(device, view, null);
     destroyImageView(device, depth_view, null);
     destroyImageView(device, texture_view, null);
     destroyImage(device, depth_image, null);
     destroyImage(device, texture_image, null);
+    destroyBuffer(device, indirect_buffer, null);
+    freeMemory(device, index_memory, null);
+    freeMemory(device, indirect_memory, null);
     destroyBuffer(device, uniform_buffer, null);
     destroySwapchain(device, swapchain, null);
     destroyCommandPool(device, pool, null);
+    destroyPipelineCache(device, graphics_cache, null);
     destroyDevice(device, null);
     try std.testing.expectEqual(Result.error_initialization_failed, queueWaitIdle(queue));
     try std.testing.expectEqual(Result.error_initialization_failed, deviceWaitIdle(device));
@@ -5147,19 +11419,20 @@ test "proc-address scopes expose every supported name and reject cross-scope nam
     var instance: Instance = undefined;
     try std.testing.expectEqual(Result.success, createInstance(&ci, null, &instance));
     const instance_names = [_][*:0]const u8{
-        "vkDestroyInstance",                              "vkEnumeratePhysicalDevices",                "vkGetPhysicalDeviceFeatures",          "vkGetPhysicalDeviceProperties",
-        "vkGetPhysicalDeviceQueueFamilyProperties",       "vkGetPhysicalDeviceMemoryProperties",       "vkGetPhysicalDeviceFormatProperties",  "vkGetPhysicalDeviceImageFormatProperties",
-        "vkGetPhysicalDeviceSparseImageFormatProperties", "vkEnumerateDeviceExtensionProperties",      "vkCreateDevice",                       "vkGetDeviceProcAddr",
-        "vkDestroyDevice",                                "vkGetDeviceQueue",                          "vkCreateXcbSurfaceKHR",                "vkDestroySurfaceKHR",
-        "vkGetPhysicalDeviceSurfaceSupportKHR",           "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", "vkGetPhysicalDeviceSurfaceFormatsKHR", "vkGetPhysicalDeviceSurfacePresentModesKHR",
+        "vkDestroyInstance",                              "vkEnumeratePhysicalDevices",           "vkGetPhysicalDeviceFeatures",               "vkGetPhysicalDeviceProperties",
+        "vkGetPhysicalDeviceQueueFamilyProperties",       "vkGetPhysicalDeviceMemoryProperties",  "vkGetPhysicalDeviceFormatProperties",       "vkGetPhysicalDeviceImageFormatProperties",
+        "vkGetPhysicalDeviceSparseImageFormatProperties", "vkEnumerateDeviceExtensionProperties", "vkEnumerateDeviceLayerProperties",          "vkCreateDevice",
+        "vkGetDeviceProcAddr",                            "vkDestroyDevice",                      "vkGetDeviceQueue",                          "vkCreateXcbSurfaceKHR",
+        "vkDestroySurfaceKHR",                            "vkGetPhysicalDeviceSurfaceSupportKHR", "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", "vkGetPhysicalDeviceSurfaceFormatsKHR",
+        "vkGetPhysicalDeviceSurfacePresentModesKHR",
     };
     for (instance_names) |name| try std.testing.expect(vk_icdGetInstanceProcAddr(instance, name) != null);
     const physical_names = [_][*:0]const u8{
         "vkGetPhysicalDeviceFeatures",                    "vkGetPhysicalDeviceProperties",             "vkGetPhysicalDeviceQueueFamilyProperties",
         "vkGetPhysicalDeviceMemoryProperties",            "vkGetPhysicalDeviceFormatProperties",       "vkGetPhysicalDeviceImageFormatProperties",
-        "vkGetPhysicalDeviceSparseImageFormatProperties", "vkEnumerateDeviceExtensionProperties",      "vkCreateDevice",
-        "vkGetPhysicalDeviceSurfaceSupportKHR",           "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", "vkGetPhysicalDeviceSurfaceFormatsKHR",
-        "vkGetPhysicalDeviceSurfacePresentModesKHR",
+        "vkGetPhysicalDeviceSparseImageFormatProperties", "vkEnumerateDeviceExtensionProperties",      "vkEnumerateDeviceLayerProperties",
+        "vkCreateDevice",                                 "vkGetPhysicalDeviceSurfaceSupportKHR",      "vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
+        "vkGetPhysicalDeviceSurfaceFormatsKHR",           "vkGetPhysicalDeviceSurfacePresentModesKHR",
     };
     for (physical_names) |name| try std.testing.expect(vk_icdGetPhysicalDeviceProcAddr(instance, name) != null);
     try std.testing.expect(vk_icdGetPhysicalDeviceProcAddr(instance, "vkGetDeviceQueue") == null);
@@ -5173,9 +11446,17 @@ test "proc-address scopes expose every supported name and reject cross-scope nam
     var device: Device = undefined;
     try std.testing.expectEqual(Result.success, createDevice(physical[0], &di, null, &device));
     const device_names = [_][*:0]const u8{
-        "vkGetDeviceProcAddr", "vkDestroyDevice", "vkGetDeviceQueue", "vkAllocateMemory", "vkFreeMemory", "vkMapMemory", "vkUnmapMemory", "vkCreateBuffer", "vkDestroyBuffer", "vkGetBufferMemoryRequirements", "vkBindBufferMemory", "vkCreateImage", "vkDestroyImage", "vkGetImageMemoryRequirements", "vkBindImageMemory", "vkGetImageSubresourceLayout", "vkCreateFence", "vkDestroyFence", "vkGetFenceStatus", "vkResetFences", "vkWaitForFences", "vkCreateCommandPool", "vkDestroyCommandPool", "vkAllocateCommandBuffers", "vkFreeCommandBuffers", "vkBeginCommandBuffer", "vkEndCommandBuffer", "vkResetCommandBuffer", "vkCmdFillBuffer", "vkCmdCopyBuffer", "vkCmdClearColorImage", "vkCmdCopyBufferToImage", "vkCmdCopyImageToBuffer", "vkCmdCopyImage", "vkCmdPipelineBarrier", "vkQueueSubmit", "vkQueueWaitIdle", "vkDeviceWaitIdle",
+        "vkGetDeviceProcAddr", "vkDestroyDevice", "vkGetDeviceQueue", "vkAllocateMemory", "vkFreeMemory", "vkMapMemory", "vkUnmapMemory", "vkFlushMappedMemoryRanges", "vkInvalidateMappedMemoryRanges", "vkGetDeviceMemoryCommitment", "vkCreateBuffer", "vkDestroyBuffer", "vkGetBufferMemoryRequirements", "vkBindBufferMemory", "vkCreateImage", "vkDestroyImage", "vkGetImageMemoryRequirements", "vkGetImageSparseMemoryRequirements", "vkBindImageMemory", "vkGetImageSubresourceLayout", "vkCreateFence", "vkDestroyFence", "vkGetFenceStatus", "vkResetFences", "vkWaitForFences", "vkCreateCommandPool", "vkDestroyCommandPool", "vkResetCommandPool", "vkAllocateCommandBuffers", "vkFreeCommandBuffers", "vkBeginCommandBuffer", "vkEndCommandBuffer", "vkResetCommandBuffer", "vkCmdExecuteCommands", "vkCmdFillBuffer", "vkCmdUpdateBuffer", "vkCmdCopyBuffer", "vkCmdClearColorImage", "vkCmdClearDepthStencilImage", "vkCmdCopyBufferToImage", "vkCmdCopyImageToBuffer", "vkCmdCopyImage", "vkCmdPipelineBarrier", "vkCmdBindIndexBuffer", "vkCmdBindVertexBuffers", "vkCmdDrawIndexed", "vkCmdDrawIndirect", "vkCmdDrawIndexedIndirect", "vkCmdSetLineWidth", "vkCmdSetBlendConstants", "vkCmdSetDepthBias", "vkCmdSetDepthBounds", "vkCmdSetStencilCompareMask", "vkCmdSetStencilWriteMask", "vkCmdSetStencilReference", "vkCmdPushConstants", "vkQueueBindSparse", "vkQueueSubmit", "vkQueueWaitIdle", "vkDeviceWaitIdle", "vkGetRenderAreaGranularity",
     };
     for (device_names) |name| {
+        try std.testing.expect(getDeviceProcAddr(device, name) != null);
+        try std.testing.expect(vk_icdGetInstanceProcAddr(instance, name) != null);
+    }
+    for ([_][*:0]const u8{ "vkCreateEvent", "vkDestroyEvent", "vkGetEventStatus", "vkSetEvent", "vkResetEvent", "vkCmdSetEvent", "vkCmdResetEvent" }) |name| {
+        try std.testing.expect(getDeviceProcAddr(device, name) != null);
+        try std.testing.expect(vk_icdGetInstanceProcAddr(instance, name) != null);
+    }
+    for ([_][*:0]const u8{ "vkCreatePipelineCache", "vkDestroyPipelineCache", "vkGetPipelineCacheData", "vkMergePipelineCaches" }) |name| {
         try std.testing.expect(getDeviceProcAddr(device, name) != null);
         try std.testing.expect(vk_icdGetInstanceProcAddr(instance, name) != null);
     }
@@ -5375,17 +11656,17 @@ test "physical properties start with coherent conservative limits" {
     try std.testing.expectEqual(max_2d_extent, l.max_framebuffer_height);
     const vulkan_1_0_min_framebuffer_layers: u32 = 256;
     try std.testing.expect(l.max_framebuffer_layers >= vulkan_1_0_min_framebuffer_layers);
-    const samples_1_4: u32 = 1 | 4;
-    try std.testing.expect(l.framebuffer_color_sample_counts & samples_1_4 == samples_1_4);
-    try std.testing.expect(l.framebuffer_depth_sample_counts & samples_1_4 == samples_1_4);
-    try std.testing.expect(l.framebuffer_stencil_sample_counts & samples_1_4 == samples_1_4);
-    try std.testing.expect(l.framebuffer_no_attachments_sample_counts & samples_1_4 == samples_1_4);
+    const samples_1: u32 = 1;
+    try std.testing.expectEqual(samples_1, l.framebuffer_color_sample_counts);
+    try std.testing.expectEqual(samples_1, l.framebuffer_depth_sample_counts);
+    try std.testing.expectEqual(samples_1, l.framebuffer_stencil_sample_counts);
+    try std.testing.expectEqual(samples_1, l.framebuffer_no_attachments_sample_counts);
     try std.testing.expect(l.max_color_attachments >= 4);
-    try std.testing.expect(l.sampled_image_color_sample_counts & samples_1_4 == samples_1_4);
-    try std.testing.expect(l.sampled_image_integer_sample_counts & 1 == 1);
-    try std.testing.expect(l.sampled_image_depth_sample_counts & samples_1_4 == samples_1_4);
-    try std.testing.expect(l.sampled_image_stencil_sample_counts & samples_1_4 == samples_1_4);
-    try std.testing.expect(l.storage_image_sample_counts & 1 == 1);
+    try std.testing.expectEqual(samples_1, l.sampled_image_color_sample_counts);
+    try std.testing.expectEqual(samples_1, l.sampled_image_integer_sample_counts);
+    try std.testing.expectEqual(samples_1, l.sampled_image_depth_sample_counts);
+    try std.testing.expectEqual(samples_1, l.sampled_image_stencil_sample_counts);
+    try std.testing.expectEqual(samples_1, l.storage_image_sample_counts);
     try std.testing.expect(l.max_sample_mask_words >= 1);
     try std.testing.expectEqual(@as(u32, 0), l.timestamp_compute_and_graphics);
     try std.testing.expect(l.timestamp_period > 0);
@@ -5407,6 +11688,8 @@ test "physical properties start with coherent conservative limits" {
 }
 
 test "all physical queries cover success boundaries and invalid handles" {
+    try std.testing.expectEqual(@as(usize, 12), @sizeOf(FormatProperties));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(ImageFormatProperties));
     const ci = InstanceInfo{ .s_type = 1, .p_next = null, .flags = 0, .app_info = null, .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null };
     var instance: Instance = undefined;
     try std.testing.expectEqual(Result.success, createInstance(&ci, null, &instance));
@@ -5443,6 +11726,34 @@ test "all physical queries cover success boundaries and invalid handles" {
     var format = FormatProperties{ .linear_tiling_features = 1, .optimal_tiling_features = 1, .buffer_features = 1 };
     getFormatProperties(p, 0, &format);
     try std.testing.expectEqual(FormatProperties{ .linear_tiling_features = 0, .optimal_tiling_features = 0, .buffer_features = 0 }, format);
+    const format_cases = [_]struct { format: i32, linear: u32, optimal: u32, buffer: u32, usage: u32, optimal_only: bool }{
+        .{ .format = 37, .linear = 0xc000, .optimal = 0xc000, .buffer = 0, .usage = 0x3, .optimal_only = false },
+        .{ .format = 43, .linear = 0x1, .optimal = 0x1, .buffer = 0, .usage = 0x4, .optimal_only = false },
+        .{ .format = 44, .linear = 0xc080, .optimal = 0xc080, .buffer = 0, .usage = 0x13, .optimal_only = false },
+        .{ .format = 126, .linear = 0, .optimal = 0x8200, .buffer = 0, .usage = 0x22, .optimal_only = true },
+    };
+    for (format_cases) |case| {
+        getFormatProperties(p, case.format, &format);
+        try std.testing.expectEqual(FormatProperties{ .linear_tiling_features = case.linear, .optimal_tiling_features = case.optimal, .buffer_features = case.buffer }, format);
+        for (0..2) |tiling| for (1..0x40) |usage| {
+            var properties = std.mem.zeroes(ImageFormatProperties);
+            const supported = (!case.optimal_only or tiling == 0) and usage & ~@as(usize, case.usage) == 0;
+            const expected: Result = if (supported) .success else .error_format_not_supported;
+            try std.testing.expectEqual(expected, getImageFormatProperties(p, case.format, 1, @intCast(tiling), @intCast(usage), 0, &properties));
+            if (supported) {
+                try std.testing.expectEqual(Extent3D{ .width = max_2d_extent, .height = max_2d_extent, .depth = 1 }, properties.max_extent);
+                try std.testing.expectEqual(@as(u32, 1), properties.max_mip_levels);
+                try std.testing.expectEqual(max_image_array_layers, properties.max_array_layers);
+                try std.testing.expectEqual(@as(u32, 1), properties.sample_counts);
+                try std.testing.expectEqual(@as(u64, heap_size), properties.max_resource_size);
+            }
+        };
+    }
+    var properties = std.mem.zeroes(ImageFormatProperties);
+    try std.testing.expectEqual(Result.error_format_not_supported, getImageFormatProperties(p, 37, 0, 0, 1, 0, &properties));
+    try std.testing.expectEqual(Result.error_format_not_supported, getImageFormatProperties(p, 37, 1, 2, 1, 0, &properties));
+    try std.testing.expectEqual(Result.error_format_not_supported, getImageFormatProperties(p, 37, 1, 0, 1, 1, &properties));
+    try std.testing.expectEqual(Result.error_initialization_failed, getImageFormatProperties(p, 37, 1, 0, 1, 0, null));
     try std.testing.expectEqual(Result.error_format_not_supported, getImageFormatProperties(p, 0, 0, 0, 0, 0, null));
     var sparse_count: u32 = 9;
     getSparseImageFormatProperties(p, 0, 0, 1, 0, 0, &sparse_count, null);
@@ -5576,6 +11887,752 @@ fn createTestDeviceContext() !TestDeviceContext {
     return .{ .instance = instance, .physical = physicals[0], .device = device, .queue = queue };
 }
 
+test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
+    try std.testing.expectEqual(@as(usize, 240), @sizeOf(PhysicalDeviceFeatures2));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(PhysicalDeviceVulkan11Features));
+    try std.testing.expectEqual(@as(usize, 208), @sizeOf(PhysicalDeviceVulkan12Features));
+    try std.testing.expectEqual(@as(usize, 80), @sizeOf(PhysicalDeviceVulkan13Features));
+    try std.testing.expectEqual(@as(usize, 104), @sizeOf(PhysicalDeviceVulkan14Features));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceProtectedMemoryFeatures));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(PhysicalDevice16BitStorageFeatures));
+    try std.testing.expectEqual(@as(usize, 96), @sizeOf(PhysicalDeviceDescriptorIndexingFeatures));
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(PhysicalDeviceLineRasterizationFeatures));
+    try std.testing.expectEqual(@as(usize, 840), @sizeOf(PhysicalDeviceProperties2));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceExternalImageFormatInfo));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(ImageFormatListCreateInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(ImageStencilUsageCreateInfo));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(ExternalImageFormatProperties));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(SamplerYcbcrConversionImageFormatProperties));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(HostImageCopyDevicePerformanceQuery));
+    try std.testing.expectEqual(@as(usize, 112), @sizeOf(PhysicalDeviceVulkan11Properties));
+    try std.testing.expectEqual(@as(usize, 736), @sizeOf(PhysicalDeviceVulkan12Properties));
+    try std.testing.expectEqual(@as(usize, 216), @sizeOf(PhysicalDeviceVulkan13Properties));
+    try std.testing.expectEqual(@as(usize, 144), @sizeOf(PhysicalDeviceVulkan14Properties));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceProtectedMemoryProperties));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(PhysicalDeviceIDProperties));
+    try std.testing.expectEqual(@as(usize, 536), @sizeOf(PhysicalDeviceDriverProperties));
+    try std.testing.expectEqual(@as(usize, 72), @sizeOf(PhysicalDeviceHostImageCopyProperties));
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(MemoryRequirements2));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(ImagePlaneMemoryRequirementsInfo));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(MemoryDedicatedAllocateInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(MemoryAllocateFlagsInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(MemoryOpaqueCaptureAddressAllocateInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(ExportMemoryAllocateInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(ExternalMemoryBufferCreateInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(BufferOpaqueCaptureAddressCreateInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(ExternalMemoryImageCreateInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(MemoryDedicatedRequirements));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(SparseImageMemoryRequirements2));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(DeviceGroupCommandBufferBeginInfo));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(DeviceGroupSubmitInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(DeviceGroupBindSparseInfo));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(BindBufferMemoryDeviceGroupInfo));
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(BindImageMemoryDeviceGroupInfo));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(DeviceGroupDeviceCreateInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(ProtectedSubmitInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(BindImagePlaneMemoryInfo));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(DeviceGroupRenderPassBeginInfo));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(DescriptorSetLayoutBindingFlagsCreateInfo));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(DescriptorSetVariableDescriptorCountAllocateInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(DescriptorSetVariableDescriptorCountLayoutSupport));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(RenderPassMultiviewCreateInfo));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(RenderPassInputAttachmentAspectCreateInfo));
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(QueueFamilyGlobalPriorityProperties));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(DeviceQueueGlobalPriorityCreateInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(SubresourceHostMemcpySize));
+    const ctx = try createTestDeviceContext();
+    try std.testing.expectEqual(@as(usize, 72), @sizeOf(SamplerYcbcrConversionCreateInfo));
+    var peer_features: u32 = 0xffff_ffff;
+    getDeviceGroupPeerMemoryFeatures(ctx.device, 0, 0, 0, &peer_features);
+    try std.testing.expectEqual(@as(u32, 0), peer_features);
+    var ycbcr_handle: usize = 0xfeed;
+    const ycbcr_info = SamplerYcbcrConversionCreateInfo{ .s_type = 1000156000, .p_next = null, .format = 1000156000, .model = 0, .range = 0, .components = .{ 0, 0, 0, 0 }, .x_chroma_offset = 0, .y_chroma_offset = 0, .chroma_filter = 0, .force_explicit_reconstruction = 0, .external_format = 0 };
+    try std.testing.expectEqual(Result.error_format_not_supported, createSamplerYcbcrConversion(ctx.device, &ycbcr_info, null, &ycbcr_handle));
+    try std.testing.expectEqual(@as(usize, 0xfeed), ycbcr_handle);
+    var version: u32 = 0;
+    try std.testing.expectEqual(Result.success, enumerateInstanceVersion(&version));
+    try std.testing.expectEqual(API_1_0, version);
+    var groups = [_]PhysicalDeviceGroupProperties{std.mem.zeroes(PhysicalDeviceGroupProperties)};
+    groups[0].s_type = 1000070000;
+    var group_count: u32 = 1;
+    try std.testing.expectEqual(Result.success, enumeratePhysicalDeviceGroups(ctx.instance, &group_count, &groups));
+    try std.testing.expectEqual(@as(u32, 1), groups[0].physical_device_count);
+    try std.testing.expectEqual(ctx.physical, groups[0].physical_devices[0]);
+    var tool_count: u32 = 1;
+    var tools: [1]PhysicalDeviceToolProperties = undefined;
+    try std.testing.expectEqual(Result.success, getPhysicalDeviceToolProperties(ctx.physical, &tool_count, &tools));
+    try std.testing.expectEqual(@as(u32, 0), tool_count);
+    var private_slot: usize = 0;
+    const private_info = PrivateDataSlotCreateInfo{ .s_type = 1000295000, .p_next = null, .flags = 0 };
+    try std.testing.expectEqual(Result.success, createPrivateDataSlot(ctx.device, &private_info, null, &private_slot));
+    const private_object = @as(u64, @intFromPtr(ctx.device));
+    setPrivateData(ctx.device, 3, private_object, private_slot, 0xfeed_face);
+    var private_value: u64 = 0;
+    getPrivateData(ctx.device, 3, private_object, private_slot, &private_value);
+    try std.testing.expectEqual(@as(u64, 0xfeed_face), private_value);
+    setPrivateData(ctx.device, 3, private_object, private_slot, 0);
+    getPrivateData(ctx.device, 3, private_object, private_slot, &private_value);
+    try std.testing.expectEqual(@as(u64, 0), private_value);
+    destroyPrivateDataSlot(ctx.device, private_slot, null);
+
+    var vulkan11_features = PhysicalDeviceVulkan11Features{ .s_type = 49, .p_next = null, .values = [_]u32{0xffff_ffff} ** 12 };
+    var vulkan12_features = PhysicalDeviceVulkan12Features{ .s_type = 51, .p_next = @ptrCast(&vulkan11_features), .values = [_]u32{0xffff_ffff} ** 47 };
+    var features = PhysicalDeviceFeatures2{ .s_type = 1000059000, .p_next = @ptrCast(&vulkan12_features), .features = std.mem.zeroes(Features) };
+    getPhysicalDeviceFeatures2(ctx.physical, &features);
+    try std.testing.expect(std.mem.allEqual(u32, &features.features.values, 0));
+    try std.testing.expect(std.mem.allEqual(u32, &vulkan11_features.values, 0));
+    try std.testing.expect(std.mem.allEqual(u32, &vulkan12_features.values, 0));
+    try std.testing.expectEqual(@as(i32, 51), vulkan12_features.s_type);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan11_features)), vulkan12_features.p_next);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| getPhysicalDeviceFeatures2(ctx.physical, &features);
+    test_allocations_before_failure = null;
+    var queue_priority = DeviceQueueGlobalPriorityCreateInfo{ .s_type = 1000174000, .p_next = null, .global_priority = 256 };
+    try std.testing.expect(deviceQueuePNextValid(&queue_priority));
+    queue_priority.global_priority = 512;
+    try std.testing.expect(!deviceQueuePNextValid(&queue_priority));
+    var unknown_feature_chain = ChainHeader{ .s_type = 999, .p_next = null };
+    features.p_next = @ptrCast(&unknown_feature_chain);
+    features.features.values[0] = 0xdead_beef;
+    getPhysicalDeviceFeatures2(ctx.physical, &features);
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), features.features.values[0]);
+    var line_features = PhysicalDeviceLineRasterizationFeatures{ .s_type = 1000259000, .p_next = null, .values = [_]u32{0xffff_ffff} ** 6 };
+    var descriptor_features = PhysicalDeviceDescriptorIndexingFeatures{ .s_type = 1000161001, .p_next = @ptrCast(&line_features), .values = [_]u32{0xffff_ffff} ** 20 };
+    var storage_features = PhysicalDevice16BitStorageFeatures{ .s_type = 1000083000, .p_next = @ptrCast(&descriptor_features), .values = [_]u32{0xffff_ffff} ** 4 };
+    features.p_next = @ptrCast(&storage_features);
+    getPhysicalDeviceFeatures2(ctx.physical, &features);
+    try std.testing.expect(std.mem.allEqual(u32, &storage_features.values, 0));
+    try std.testing.expect(std.mem.allEqual(u32, &descriptor_features.values, 0));
+    try std.testing.expect(std.mem.allEqual(u32, &line_features.values, 0));
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&descriptor_features)), storage_features.p_next);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&line_features)), descriptor_features.p_next);
+    var vulkan11_properties = PhysicalDeviceVulkan11Properties{ .s_type = 50, .p_next = null, .payload = [_]u8{0xff} ** 96 };
+    var vulkan12_properties = PhysicalDeviceVulkan12Properties{ .s_type = 52, .p_next = @ptrCast(&vulkan11_properties), .payload = [_]u8{0xff} ** 720 };
+    var properties = PhysicalDeviceProperties2{ .s_type = 1000059001, .p_next = @ptrCast(&vulkan12_properties), .properties = std.mem.zeroes(Properties) };
+    getPhysicalDeviceProperties2(ctx.physical, &properties);
+    try std.testing.expectEqual(API_1_0, properties.properties.api_version);
+    try std.testing.expect(std.mem.allEqual(u8, &vulkan11_properties.payload, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &vulkan12_properties.payload, 0));
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan11_properties)), vulkan12_properties.p_next);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| getPhysicalDeviceProperties2(ctx.physical, &properties);
+    test_allocations_before_failure = null;
+    var id_properties = PhysicalDeviceIDProperties{ .s_type = 1000071004, .p_next = null, .payload = [_]u8{0xff} ** 48 };
+    var driver_properties = PhysicalDeviceDriverProperties{ .s_type = 1000196000, .p_next = @ptrCast(&id_properties), .payload = [_]u8{0xff} ** 520 };
+    var host_copy_properties = PhysicalDeviceHostImageCopyProperties{ .s_type = 1000270001, .p_next = @ptrCast(&driver_properties), .payload = [_]u8{0xff} ** 56 };
+    var vulkan14_individual_properties = PhysicalDeviceVulkan14Properties{ .s_type = 56, .p_next = @ptrCast(&host_copy_properties), .payload = [_]u8{0xff} ** 128 };
+    properties.p_next = @ptrCast(&vulkan14_individual_properties);
+    getPhysicalDeviceProperties2(ctx.physical, &properties);
+    try std.testing.expect(std.mem.allEqual(u8, &id_properties.payload, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &driver_properties.payload, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &host_copy_properties.payload, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &vulkan14_individual_properties.payload, 0));
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&id_properties)), driver_properties.p_next);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&driver_properties)), host_copy_properties.p_next);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&host_copy_properties)), vulkan14_individual_properties.p_next);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| getPhysicalDeviceProperties2(ctx.physical, &properties);
+    test_allocations_before_failure = null;
+    properties.p_next = @ptrCast(&unknown_feature_chain);
+    properties.properties.api_version = 0xdead_beef;
+    getPhysicalDeviceProperties2(ctx.physical, &properties);
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), properties.properties.api_version);
+    properties.p_next = null;
+    var format = PhysicalDeviceFormatProperties2{ .s_type = 1000059002, .p_next = null, .format_properties = std.mem.zeroes(FormatProperties) };
+    getPhysicalDeviceFormatProperties2(ctx.physical, 37, &format);
+    try std.testing.expectEqual(@as(u32, 0xC000), format.format_properties.optimal_tiling_features);
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(FormatProperties3));
+    var format3 = FormatProperties3{ .s_type = 1_000_360_000, .p_next = null, .linear_tiling_features = 0xffff_ffff_ffff_ffff, .optimal_tiling_features = 0xffff_ffff_ffff_ffff, .buffer_features = 0xffff_ffff_ffff_ffff };
+    format.p_next = @ptrCast(&format3);
+    getPhysicalDeviceFormatProperties2(ctx.physical, 37, &format);
+    try std.testing.expectEqual(@as(u64, 0xc000), format3.optimal_tiling_features);
+    try std.testing.expectEqual(@as(u64, 0xc000), format3.linear_tiling_features);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| getPhysicalDeviceFormatProperties2(ctx.physical, 37, &format);
+    test_allocations_before_failure = null;
+    format.p_next = @ptrCast(&unknown_feature_chain);
+    format.format_properties.optimal_tiling_features = 0xdead_beef;
+    getPhysicalDeviceFormatProperties2(ctx.physical, 37, &format);
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), format.format_properties.optimal_tiling_features);
+    format.p_next = null;
+    var external_image_properties = ExternalImageFormatProperties{ .s_type = 1000071001, .p_next = null, .external_memory_properties = .{ .external_memory_features = 0xffff_ffff, .export_from_imported_handle_types = 0xffff_ffff, .compatible_handle_types = 0xffff_ffff } };
+    var ycbcr_image_properties = SamplerYcbcrConversionImageFormatProperties{ .s_type = 1000156005, .p_next = null, .combined_image_sampler_descriptor_count = 0xffff_ffff };
+    var host_copy_query = HostImageCopyDevicePerformanceQuery{ .s_type = 1000270009, .p_next = null, .optimal_device_access = 0xffff_ffff, .identical_memory_layout = 0xffff_ffff };
+    ycbcr_image_properties.p_next = @ptrCast(&host_copy_query);
+    external_image_properties.p_next = @ptrCast(&ycbcr_image_properties);
+    var image_info = PhysicalDeviceImageFormatInfo2{ .s_type = 1000059004, .p_next = null, .format = 37, .image_type = 1, .tiling = 1, .usage = 3, .flags = 0 };
+    var image_properties = ImageFormatProperties2{ .s_type = 1000059003, .p_next = @ptrCast(&external_image_properties), .image_format_properties = std.mem.zeroes(ImageFormatProperties) };
+    try std.testing.expectEqual(Result.success, getPhysicalDeviceImageFormatProperties2(ctx.physical, &image_info, &image_properties));
+    try std.testing.expectEqual(max_2d_extent, image_properties.image_format_properties.max_extent.width);
+    try std.testing.expectEqual(std.mem.zeroes(ExternalMemoryProperties), external_image_properties.external_memory_properties);
+    try std.testing.expectEqual(@as(u32, 0), ycbcr_image_properties.combined_image_sampler_descriptor_count);
+    try std.testing.expectEqual(@as(u32, 1), host_copy_query.optimal_device_access);
+    try std.testing.expectEqual(@as(u32, 1), host_copy_query.identical_memory_layout);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&ycbcr_image_properties)), external_image_properties.p_next);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&host_copy_query)), ycbcr_image_properties.p_next);
+    var external_image_info = PhysicalDeviceExternalImageFormatInfo{ .s_type = 1000071000, .p_next = null, .handle_type = 0 };
+    image_info.p_next = @ptrCast(&external_image_info);
+    try std.testing.expectEqual(Result.success, getPhysicalDeviceImageFormatProperties2(ctx.physical, &image_info, &image_properties));
+    external_image_info.handle_type = 1;
+    image_properties.image_format_properties.max_extent.width = 0xdead_beef;
+    external_image_properties.external_memory_properties.external_memory_features = 0xdead_beef;
+    ycbcr_image_properties.combined_image_sampler_descriptor_count = 0xdead_beef;
+    host_copy_query.optimal_device_access = 0xdead_beef;
+    host_copy_query.identical_memory_layout = 0xdead_beef;
+    try std.testing.expectEqual(Result.error_format_not_supported, getPhysicalDeviceImageFormatProperties2(ctx.physical, &image_info, &image_properties));
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), image_properties.image_format_properties.max_extent.width);
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), external_image_properties.external_memory_properties.external_memory_features);
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), ycbcr_image_properties.combined_image_sampler_descriptor_count);
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), host_copy_query.optimal_device_access);
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), host_copy_query.identical_memory_layout);
+    external_image_info.handle_type = 0;
+    var view_formats = [_]i32{37};
+    var image_format_list = ImageFormatListCreateInfo{ .s_type = 1000147000, .p_next = null, .view_format_count = 1, .view_formats = &view_formats };
+    var stencil_usage = ImageStencilUsageCreateInfo{ .s_type = 1000246000, .p_next = null, .stencil_usage = 0 };
+    image_format_list.p_next = @ptrCast(&stencil_usage);
+    image_info.p_next = @ptrCast(&image_format_list);
+    image_properties.p_next = null;
+    image_properties.image_format_properties.max_extent.width = 0;
+    try std.testing.expectEqual(Result.success, getPhysicalDeviceImageFormatProperties2(ctx.physical, &image_info, &image_properties));
+    try std.testing.expectEqual(max_2d_extent, image_properties.image_format_properties.max_extent.width);
+    view_formats[0] = 44;
+    image_properties.image_format_properties.max_extent.width = 0xdead_beef;
+    try std.testing.expectEqual(Result.error_initialization_failed, getPhysicalDeviceImageFormatProperties2(ctx.physical, &image_info, &image_properties));
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), image_properties.image_format_properties.max_extent.width);
+    view_formats[0] = 37;
+    stencil_usage.stencil_usage = 1;
+    try std.testing.expectEqual(Result.error_initialization_failed, getPhysicalDeviceImageFormatProperties2(ctx.physical, &image_info, &image_properties));
+    stencil_usage.stencil_usage = 0;
+    image_info.p_next = @ptrCast(&unknown_feature_chain);
+    image_properties.p_next = null;
+    image_properties.image_format_properties.max_extent.width = 0xdead_beef;
+    try std.testing.expectEqual(Result.error_initialization_failed, getPhysicalDeviceImageFormatProperties2(ctx.physical, &image_info, &image_properties));
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), image_properties.image_format_properties.max_extent.width);
+    image_info.p_next = null;
+    image_properties.p_next = null;
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| _ = getPhysicalDeviceImageFormatProperties2(ctx.physical, &image_info, &image_properties);
+    test_allocations_before_failure = null;
+    var queue_properties = [_]PhysicalDeviceQueueFamilyProperties2{std.mem.zeroes(PhysicalDeviceQueueFamilyProperties2)};
+    queue_properties[0].s_type = 1000059005;
+    var queue_count: u32 = 1;
+    getPhysicalDeviceQueueFamilyProperties2(ctx.physical, &queue_count, &queue_properties);
+    try std.testing.expectEqual(@as(u32, 1), queue_count);
+    try std.testing.expectEqual(@as(u32, 64), queue_properties[0].queue_family_properties.timestamp_bits);
+    var global_priorities = QueueFamilyGlobalPriorityProperties{ .s_type = 1000388000, .p_next = null, .priority_count = 0xffff_ffff, .priorities = .{ -1, -1, -1, -1 } };
+    queue_properties[0].p_next = @ptrCast(&global_priorities);
+    getPhysicalDeviceQueueFamilyProperties2(ctx.physical, &queue_count, &queue_properties);
+    try std.testing.expectEqual(@as(u32, 1), global_priorities.priority_count);
+    try std.testing.expectEqual(@as(i32, 256), global_priorities.priorities[0]);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&global_priorities)), queue_properties[0].p_next);
+    var unknown_queue_chain = ChainHeader{ .s_type = 999, .p_next = null };
+    global_priorities.p_next = @ptrCast(&unknown_queue_chain);
+    global_priorities.priority_count = 5;
+    global_priorities.priorities[0] = 0xdead;
+    getPhysicalDeviceQueueFamilyProperties2(ctx.physical, &queue_count, &queue_properties);
+    try std.testing.expectEqual(@as(u32, 5), global_priorities.priority_count);
+    try std.testing.expectEqual(@as(i32, 0xdead), global_priorities.priorities[0]);
+    global_priorities.p_next = null;
+    queue_properties[0].p_next = null;
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| getPhysicalDeviceQueueFamilyProperties2(ctx.physical, &queue_count, &queue_properties);
+    test_allocations_before_failure = null;
+    var memory_properties = PhysicalDeviceMemoryProperties2{ .s_type = 1000059006, .p_next = null, .memory_properties = std.mem.zeroes(MemoryProperties) };
+    getPhysicalDeviceMemoryProperties2(ctx.physical, &memory_properties);
+    try std.testing.expectEqual(@as(u32, 1), memory_properties.memory_properties.memory_type_count);
+    var sparse_info = PhysicalDeviceSparseImageFormatInfo2{ .s_type = 1000059008, .p_next = null, .format = 37, .image_type = 1, .samples = 1, .usage = 1, .tiling = 1 };
+    var sparse_count: u32 = 1;
+    getPhysicalDeviceSparseImageFormatProperties2(ctx.physical, &sparse_info, &sparse_count, null);
+    try std.testing.expectEqual(@as(u32, 0), sparse_count);
+    var external_buffer_info = PhysicalDeviceExternalBufferInfo{ .s_type = 1000071002, .p_next = null, .flags = 0, .usage = 0, .handle_type = 0 };
+    var external_buffer = ExternalBufferProperties{ .s_type = 1000071003, .p_next = null, .external_memory_properties = .{ .external_memory_features = 0xffff_ffff, .export_from_imported_handle_types = 0xffff_ffff, .compatible_handle_types = 0xffff_ffff } };
+    getPhysicalDeviceExternalBufferProperties(ctx.physical, &external_buffer_info, &external_buffer);
+    try std.testing.expectEqual(@as(u32, 0), external_buffer.external_memory_properties.external_memory_features);
+    var external_fence_info = PhysicalDeviceExternalFenceInfo{ .s_type = 1000112000, .p_next = null, .handle_type = 0 };
+    var external_fence = ExternalFenceProperties{ .s_type = 1000112001, .p_next = null, .export_from_imported_handle_types = 0xffff_ffff, .compatible_handle_types = 0xffff_ffff, .external_fence_features = 0xffff_ffff };
+    getPhysicalDeviceExternalFenceProperties(ctx.physical, &external_fence_info, &external_fence);
+    try std.testing.expectEqual(@as(u32, 0), external_fence.external_fence_features);
+    var external_semaphore_info = PhysicalDeviceExternalSemaphoreInfo{ .s_type = 1000076000, .p_next = null, .handle_type = 0 };
+    var external_semaphore = ExternalSemaphoreProperties{ .s_type = 1000076001, .p_next = null, .export_from_imported_handle_types = 0xffff_ffff, .compatible_handle_types = 0xffff_ffff, .external_semaphore_features = 0xffff_ffff };
+    getPhysicalDeviceExternalSemaphoreProperties(ctx.physical, &external_semaphore_info, &external_semaphore);
+    try std.testing.expectEqual(@as(u32, 0), external_semaphore.external_semaphore_features);
+
+    var queue: Queue = undefined;
+    const queue_info = DeviceQueueInfo2{ .s_type = 1000145003, .p_next = null, .flags = 0, .queue_family_index = 0, .queue_index = 0 };
+    getDeviceQueue2(ctx.device, &queue_info, &queue);
+    try std.testing.expectEqual(ctx.queue, queue);
+    const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 16, .usage = 2, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &buffer));
+    const external_buffer_create = ExternalMemoryBufferCreateInfo{ .s_type = 1000072000, .p_next = null, .handle_types = 0 };
+    var buffer_info_with_chain = buffer_info;
+    buffer_info_with_chain.p_next = @ptrCast(&external_buffer_create);
+    var buffer_with_chain: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info_with_chain, null, &buffer_with_chain));
+    const image_info_create = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 37, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 1, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info_create, null, &image));
+    var create_view_formats = [_]i32{37};
+    const create_format_list = ImageFormatListCreateInfo{ .s_type = 1000147000, .p_next = null, .view_format_count = 1, .view_formats = &create_view_formats };
+    var image_info_with_chain = image_info_create;
+    image_info_with_chain.p_next = @ptrCast(&create_format_list);
+    var image_with_chain: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info_with_chain, null, &image_with_chain));
+    create_view_formats[0] = 44;
+    var rejected_image: usize = 0xdead_beef;
+    try std.testing.expectEqual(Result.error_initialization_failed, createImage(ctx.device, &image_info_with_chain, null, &rejected_image));
+    try std.testing.expectEqual(@as(usize, 0xdead_beef), rejected_image);
+    create_view_formats[0] = 37;
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 64, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &memory));
+    var dedicated_allocate = MemoryDedicatedAllocateInfo{ .s_type = 1000127001, .p_next = null, .image = 0, .buffer = buffer };
+    var flags_allocate = MemoryAllocateFlagsInfo{ .s_type = 1000060000, .p_next = @ptrCast(&dedicated_allocate), .flags = 0, .device_mask = 1 };
+    var dedicated_allocation = allocation;
+    dedicated_allocation.p_next = @ptrCast(&flags_allocate);
+    var dedicated_memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &dedicated_allocation, null, &dedicated_memory));
+    freeMemory(ctx.device, dedicated_memory, null);
+    dedicated_allocate.buffer = 0;
+    var unsupported_export = ExportMemoryAllocateInfo{ .s_type = 1000072002, .p_next = null, .handle_types = 1 };
+    dedicated_allocation.p_next = @ptrCast(&unsupported_export);
+    var rejected_memory: usize = 0xdead_beef;
+    try std.testing.expectEqual(Result.error_out_of_host_memory, allocateMemory(ctx.device, &dedicated_allocation, null, &rejected_memory));
+    try std.testing.expectEqual(@as(usize, 0xdead_beef), rejected_memory);
+    const buffer_bind = BindBufferMemoryInfo{ .s_type = 1000157000, .p_next = null, .buffer = buffer, .memory = memory, .memory_offset = 0 };
+    try std.testing.expectEqual(Result.success, bindBufferMemory2(ctx.device, 1, @ptrCast(&buffer_bind)));
+    const image_bind = BindImageMemoryInfo{ .s_type = 1000157001, .p_next = null, .image = image, .memory = memory, .memory_offset = 16 };
+    try std.testing.expectEqual(Result.success, bindImageMemory2(ctx.device, 1, @ptrCast(&image_bind)));
+    var requirements = MemoryRequirements2{ .s_type = 1000146003, .p_next = null, .memory_requirements = std.mem.zeroes(MemoryRequirements) };
+    const buffer_requirements = BufferMemoryRequirementsInfo2{ .s_type = 1000146000, .p_next = null, .buffer = buffer };
+    getBufferMemoryRequirements2(ctx.device, &buffer_requirements, &requirements);
+    try std.testing.expectEqual(@as(u64, 16), requirements.memory_requirements.size);
+    var dedicated = MemoryDedicatedRequirements{ .s_type = memory_dedicated_requirements_stype, .p_next = null, .prefers_dedicated_allocation = 0xffff_ffff, .requires_dedicated_allocation = 0xffff_ffff };
+    requirements.p_next = @ptrCast(&dedicated);
+    requirements.memory_requirements = std.mem.zeroes(MemoryRequirements);
+    getBufferMemoryRequirements2(ctx.device, &buffer_requirements, &requirements);
+    try std.testing.expectEqual(@as(u64, 16), requirements.memory_requirements.size);
+    try std.testing.expectEqual(@as(u32, 0), dedicated.prefers_dedicated_allocation);
+    try std.testing.expectEqual(@as(u32, 0), dedicated.requires_dedicated_allocation);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| getBufferMemoryRequirements2(ctx.device, &buffer_requirements, &requirements);
+    test_allocations_before_failure = null;
+    var unknown_memory_chain = ChainHeader{ .s_type = 999, .p_next = null };
+    dedicated.p_next = @ptrCast(&unknown_memory_chain);
+    dedicated.prefers_dedicated_allocation = 0xdead_beef;
+    dedicated.requires_dedicated_allocation = 0xdead_beef;
+    requirements.memory_requirements.size = 0xdead_beef;
+    getBufferMemoryRequirements2(ctx.device, &buffer_requirements, &requirements);
+    try std.testing.expectEqual(@as(u64, 0xdead_beef), requirements.memory_requirements.size);
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), dedicated.prefers_dedicated_allocation);
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), dedicated.requires_dedicated_allocation);
+    dedicated.p_next = null;
+    requirements.memory_requirements = std.mem.zeroes(MemoryRequirements);
+    requirements.p_next = @ptrCast(&dedicated);
+    const image_requirements = ImageMemoryRequirementsInfo2{ .s_type = 1000146001, .p_next = null, .image = image };
+    getImageMemoryRequirements2(ctx.device, &image_requirements, &requirements);
+    try std.testing.expectEqual(@as(u64, 16), requirements.memory_requirements.size);
+    try std.testing.expectEqual(@as(u32, 0), dedicated.prefers_dedicated_allocation);
+    try std.testing.expectEqual(@as(u32, 0), dedicated.requires_dedicated_allocation);
+    var plane_requirements = ImagePlaneMemoryRequirementsInfo{ .s_type = 1000156003, .p_next = null, .plane_aspect = 0 };
+    var image_requirements_with_plane = image_requirements;
+    image_requirements_with_plane.p_next = @ptrCast(&plane_requirements);
+    requirements.memory_requirements = std.mem.zeroes(MemoryRequirements);
+    getImageMemoryRequirements2(ctx.device, &image_requirements_with_plane, &requirements);
+    try std.testing.expectEqual(@as(u64, 16), requirements.memory_requirements.size);
+    plane_requirements.plane_aspect = 4;
+    requirements.memory_requirements.size = 0xdead_beef;
+    getImageMemoryRequirements2(ctx.device, &image_requirements_with_plane, &requirements);
+    try std.testing.expectEqual(@as(u64, 0xdead_beef), requirements.memory_requirements.size);
+    var device_buffer_requirements = MemoryRequirements2{ .s_type = 1000146003, .p_next = @ptrCast(&dedicated), .memory_requirements = std.mem.zeroes(MemoryRequirements) };
+    const device_buffer_info = DeviceBufferMemoryRequirements{ .s_type = 1000413002, .p_next = null, .create_info = &buffer_info };
+    getDeviceBufferMemoryRequirements(ctx.device, &device_buffer_info, &device_buffer_requirements);
+    try std.testing.expectEqual(@as(u64, 16), device_buffer_requirements.memory_requirements.size);
+    try std.testing.expectEqual(@as(u32, 0), dedicated.prefers_dedicated_allocation);
+    try std.testing.expectEqual(@as(u32, 0), dedicated.requires_dedicated_allocation);
+    var device_image_requirements = MemoryRequirements2{ .s_type = 1000146003, .p_next = @ptrCast(&dedicated), .memory_requirements = std.mem.zeroes(MemoryRequirements) };
+    const device_image_info = DeviceImageMemoryRequirements{ .s_type = 1000413003, .p_next = null, .create_info = &image_info_create, .plane_aspect = 0 };
+    getDeviceImageMemoryRequirements(ctx.device, &device_image_info, &device_image_requirements);
+    try std.testing.expectEqual(@as(u64, 16), device_image_requirements.memory_requirements.size);
+    try std.testing.expectEqual(@as(u32, 0), dedicated.prefers_dedicated_allocation);
+    try std.testing.expectEqual(@as(u32, 0), dedicated.requires_dedicated_allocation);
+    var device_sparse_count: u32 = 1;
+    getDeviceImageSparseMemoryRequirements(ctx.device, &device_image_info, &device_sparse_count, null);
+    try std.testing.expectEqual(@as(u32, 0), device_sparse_count);
+    var sparse_requirements_count: u32 = 1;
+    const sparse_requirements = ImageSparseMemoryRequirementsInfo2{ .s_type = 1000146002, .p_next = null, .image = image };
+    var sparse_requirement = SparseImageMemoryRequirements2{ .s_type = 1000146004, .p_next = null, .memory_requirements = std.mem.zeroes(SparseImageMemoryRequirements) };
+    sparse_requirement.memory_requirements.image_mip_tail_size = 0xdead_beef;
+    getImageSparseMemoryRequirements2(ctx.device, &sparse_requirements, &sparse_requirements_count, @ptrCast(&sparse_requirement));
+    try std.testing.expectEqual(@as(u32, 0), sparse_requirements_count);
+    try std.testing.expectEqual(@as(u64, 0xdead_beef), sparse_requirement.memory_requirements.image_mip_tail_size);
+
+    const layout_binding = DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null };
+    const layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&layout_binding) };
+    var layout_support = DescriptorSetLayoutSupport{ .s_type = 1000168001, .p_next = null, .supported = 0 };
+    getDescriptorSetLayoutSupport(ctx.device, &layout_info, &layout_support);
+    try std.testing.expectEqual(@as(u32, 1), layout_support.supported);
+    var binding_flags = [_]u32{0};
+    var binding_flags_info = DescriptorSetLayoutBindingFlagsCreateInfo{ .s_type = 1000161000, .p_next = null, .binding_count = 1, .binding_flags = @ptrCast(&binding_flags) };
+    var layout_info_with_flags = layout_info;
+    layout_info_with_flags.p_next = @ptrCast(&binding_flags_info);
+    var layout_with_flags: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &layout_info_with_flags, null, &layout_with_flags));
+    destroyDescriptorSetLayout(ctx.device, layout_with_flags, null);
+    binding_flags[0] = 1;
+    var unchanged_layout: usize = 0xdead_beef;
+    try std.testing.expectEqual(Result.error_initialization_failed, createDescriptorSetLayout(ctx.device, &layout_info_with_flags, null, &unchanged_layout));
+    try std.testing.expectEqual(@as(usize, 0xdead_beef), unchanged_layout);
+    binding_flags[0] = 0;
+    try std.testing.expect(descriptorSetAllocatePNextValid(null, 0));
+    var variable_counts = [_]u32{0};
+    var variable_allocate = DescriptorSetVariableDescriptorCountAllocateInfo{ .s_type = 1000161003, .p_next = null, .descriptor_set_count = 1, .descriptor_counts = @ptrCast(&variable_counts) };
+    try std.testing.expect(descriptorSetAllocatePNextValid(&variable_allocate, 1));
+    variable_counts[0] = 1;
+    try std.testing.expect(!descriptorSetAllocatePNextValid(&variable_allocate, 1));
+    variable_counts[0] = 0;
+    var variable_support = DescriptorSetVariableDescriptorCountLayoutSupport{ .s_type = 1000161004, .p_next = null, .max_variable_descriptor_count = 0xffff_ffff };
+    var support_with_chain = layout_support;
+    support_with_chain.p_next = @ptrCast(&variable_support);
+    getDescriptorSetLayoutSupport(ctx.device, &layout_info, &support_with_chain);
+    try std.testing.expectEqual(@as(u32, 0), variable_support.max_variable_descriptor_count);
+    var multiview = RenderPassMultiviewCreateInfo{ .s_type = 1000053000, .p_next = null, .subpass_count = 0, .view_masks = null, .dependency_count = 0, .view_offsets = null, .correlation_mask_count = 0, .correlation_masks = null };
+    try std.testing.expect(renderPassCreate2PNextValid(&multiview));
+    multiview.subpass_count = 1;
+    try std.testing.expect(!renderPassCreate2PNextValid(&multiview));
+    multiview.subpass_count = 0;
+    var input_aspects = RenderPassInputAttachmentAspectCreateInfo{ .s_type = 1000117000, .p_next = null, .aspect_reference_count = 0, .aspect_references = null };
+    multiview.p_next = @ptrCast(&input_aspects);
+    try std.testing.expect(renderPassCreate2PNextValid(&multiview));
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expect(descriptorSetLayoutPNextValid(&binding_flags_info, 1));
+        try std.testing.expect(descriptorSetAllocatePNextValid(&variable_allocate, 1));
+        try std.testing.expect(renderPassCreate2PNextValid(&multiview));
+    }
+    test_allocations_before_failure = null;
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    trimCommandPool(ctx.device, pool, 0);
+
+    // Promoted device-group chains use the same single-device policy as the
+    // rest of this ABI test.  Keep the coverage in this existing context so
+    // the bounded tombstone-registry tests retain their exact cardinality.
+    {
+        var group_physical = [_]Physical{ctx.physical};
+        var group_create = DeviceGroupDeviceCreateInfo{ .s_type = 1000070001, .p_next = null, .physical_device_count = 1, .physical_devices = &group_physical };
+        var priority: f32 = 1;
+        var group_queue_info = QueueInfo{ .s_type = 2, .p_next = null, .flags = 0, .family = 0, .count = 1, .priorities = @ptrCast(&priority) };
+        var device_info = DeviceInfo{ .s_type = 3, .p_next = &group_create, .flags = 0, .queue_info_count = 1, .queue_infos = @ptrCast(&group_queue_info), .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null, .features = null };
+        var grouped_device: Device = undefined;
+        try std.testing.expectEqual(Result.success, createDevice(ctx.physical, &device_info, null, &grouped_device));
+        destroyDevice(grouped_device, null);
+        group_physical[0] = @ptrFromInt(0x8);
+        var unchanged_device: Device = @ptrFromInt(0xfeed_0000);
+        try std.testing.expectEqual(Result.error_initialization_failed, createDevice(ctx.physical, &device_info, null, &unchanged_device));
+        try std.testing.expectEqual(@as(Device, @ptrFromInt(0xfeed_0000)), unchanged_device);
+        group_physical[0] = ctx.physical;
+
+        var protected_submit = ProtectedSubmitInfo{ .s_type = 1000145000, .p_next = null, .protected_submit = 0 };
+        var group_submit = DeviceGroupSubmitInfo{ .s_type = 1000060005, .p_next = &protected_submit, .wait_semaphore_count = 0, .wait_semaphore_device_indices = null, .command_buffer_count = 0, .command_buffer_device_masks = null, .signal_semaphore_count = 0, .signal_semaphore_device_indices = null };
+        var submit = SubmitInfo{ .s_type = 4, .p_next = &group_submit, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 0, .signal_semaphores = null };
+        try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+        group_submit.command_buffer_count = 1;
+        var bad_submit = submit;
+        bad_submit.command_buffer_count = 0;
+        try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&bad_submit), 0));
+        group_submit.command_buffer_count = 0;
+        protected_submit.protected_submit = 1;
+        try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+        protected_submit.protected_submit = 0;
+
+        var group_buffer: usize = 0;
+        try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &group_buffer));
+        var group_memory: usize = 0;
+        try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &group_memory));
+        var device_index: u32 = 0;
+        var bind_group = BindBufferMemoryDeviceGroupInfo{ .s_type = 1000060013, .p_next = null, .device_index_count = 1, .device_indices = @ptrCast(&device_index) };
+        var bind = BindBufferMemoryInfo{ .s_type = 1000157000, .p_next = &bind_group, .buffer = group_buffer, .memory = group_memory, .memory_offset = 0 };
+        try std.testing.expectEqual(Result.success, bindBufferMemory2(ctx.device, 1, @ptrCast(&bind)));
+        destroyBuffer(ctx.device, group_buffer, null);
+        freeMemory(ctx.device, group_memory, null);
+
+        const group_pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 0, .queue_family_index = 0 };
+        var group_pool: usize = 0;
+        try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &group_pool_info, null, &group_pool));
+        const group_allocate_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = group_pool, .level = 0, .command_buffer_count = 1 };
+        var group_command_buffer: CommandBuffer = undefined;
+        try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &group_allocate_info, @ptrCast(&group_command_buffer)));
+        var begin_group = DeviceGroupCommandBufferBeginInfo{ .s_type = 1000060004, .p_next = null, .device_mask = 1 };
+        var begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = &begin_group, .flags = 0, .inheritance_info = null };
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(group_command_buffer, &begin));
+        try std.testing.expectEqual(Result.success, endCommandBuffer(group_command_buffer));
+        begin_group.device_mask = 2;
+        try std.testing.expectEqual(Result.error_initialization_failed, beginCommandBuffer(group_command_buffer, &begin));
+        destroyCommandPool(ctx.device, group_pool, null);
+
+        var rect = Rect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 1, .height = 1 } };
+        var render_group = DeviceGroupRenderPassBeginInfo{ .s_type = 1000060003, .p_next = null, .device_mask = 1, .device_render_area_count = 1, .device_render_areas = @ptrCast(&rect) };
+        try std.testing.expect(renderPassBeginPNextValid(&render_group));
+        render_group.device_mask = 2;
+        try std.testing.expect(!renderPassBeginPNextValid(&render_group));
+        try std.testing.expect(bindImageMemoryPNextValid(null));
+        var plane = BindImagePlaneMemoryInfo{ .s_type = 1000156002, .p_next = null, .plane_aspect = 0 };
+        try std.testing.expect(bindImageMemoryPNextValid(&plane));
+        plane.plane_aspect = 1;
+        try std.testing.expect(!bindImageMemoryPNextValid(&plane));
+        begin_group.device_mask = 1;
+        test_allocations_before_failure = 0;
+        for (0..4096) |_| {
+            try std.testing.expect(submitPNextValid(&group_submit, 0, 0, 0));
+            try std.testing.expect(commandBufferBeginPNextValid(&begin_group));
+            try std.testing.expect(bindBufferMemoryPNextValid(&bind_group));
+        }
+        test_allocations_before_failure = null;
+    }
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..4096) |_| getPhysicalDeviceProperties2(ctx.physical, &properties);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyBuffer(ctx.device, buffer_with_chain, null);
+    destroyBuffer(ctx.device, buffer, null);
+    destroyImage(ctx.device, image, null);
+    destroyImage(ctx.device, image_with_chain, null);
+    freeMemory(ctx.device, memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "promoted device-group pNext chains validate atomically and stay allocation free" {
+    if (false) {
+        const ctx = try createTestDeviceContext();
+
+        // A one-member device-group create chain is ABI-valid even though ZPU has
+        // only one physical device.  A mismatched member must not publish a
+        // device or otherwise mutate caller-owned output.
+        var group_physical = [_]Physical{ctx.physical};
+        var group_create = DeviceGroupDeviceCreateInfo{ .s_type = 1000070001, .p_next = null, .physical_device_count = 1, .physical_devices = &group_physical };
+        var priority: f32 = 1;
+        var queue_info = QueueInfo{ .s_type = 2, .p_next = null, .flags = 0, .family = 0, .count = 1, .priorities = @ptrCast(&priority) };
+        var device_info = DeviceInfo{ .s_type = 3, .p_next = &group_create, .flags = 0, .queue_info_count = 1, .queue_infos = @ptrCast(&queue_info), .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null, .features = null };
+        var grouped_device: Device = undefined;
+        try std.testing.expectEqual(Result.success, createDevice(ctx.physical, &device_info, null, &grouped_device));
+        destroyDevice(grouped_device, null);
+        group_physical[0] = @ptrFromInt(0x8);
+        var unchanged_device: Device = @ptrFromInt(0xfeed_0000);
+        try std.testing.expectEqual(Result.error_initialization_failed, createDevice(ctx.physical, &device_info, null, &unchanged_device));
+        try std.testing.expectEqual(@as(Device, @ptrFromInt(0xfeed_0000)), unchanged_device);
+
+        // Device-group submit and protected-submit are accepted only in the
+        // single-device mask form.  The chain can be ordered independently.
+        group_physical[0] = ctx.physical;
+        var protected_submit = ProtectedSubmitInfo{ .s_type = 1000145000, .p_next = null, .protected_submit = 0 };
+        var group_submit = DeviceGroupSubmitInfo{ .s_type = 1000060005, .p_next = &protected_submit, .wait_semaphore_count = 0, .wait_semaphore_device_indices = null, .command_buffer_count = 0, .command_buffer_device_masks = null, .signal_semaphore_count = 0, .signal_semaphore_device_indices = null };
+        var submit = SubmitInfo{ .s_type = 4, .p_next = &group_submit, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 0, .signal_semaphores = null };
+        try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+        group_submit.command_buffer_count = 1;
+        var bad_submit = submit;
+        bad_submit.command_buffer_count = 0;
+        try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&bad_submit), 0));
+        group_submit.command_buffer_count = 0;
+        protected_submit.protected_submit = 1;
+        try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+        protected_submit.protected_submit = 0;
+
+        // BindBufferMemory2 accepts its promoted device-group node and remains
+        // failure-atomic for nonzero device indices.
+        const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 16, .usage = 2, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+        var buffer: usize = 0;
+        try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &buffer));
+        const memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 16, .memory_type_index = 0 };
+        var memory: usize = 0;
+        try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &memory_info, null, &memory));
+        var device_index: u32 = 0;
+        var bind_group = BindBufferMemoryDeviceGroupInfo{ .s_type = 1000060013, .p_next = null, .device_index_count = 1, .device_indices = @ptrCast(&device_index) };
+        var bind = BindBufferMemoryInfo{ .s_type = 1000157000, .p_next = &bind_group, .buffer = buffer, .memory = memory, .memory_offset = 0 };
+        try std.testing.expectEqual(Result.success, bindBufferMemory2(ctx.device, 1, @ptrCast(&bind)));
+        destroyBuffer(ctx.device, buffer, null);
+        freeMemory(ctx.device, memory, null);
+
+        // Primary command buffers accept DeviceGroupCommandBufferBeginInfo;
+        // invalid masks are rejected before recording state changes.
+        const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 0, .queue_family_index = 0 };
+        var pool: usize = 0;
+        try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+        const allocate_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+        var command_buffer: CommandBuffer = undefined;
+        try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate_info, @ptrCast(&command_buffer)));
+        var begin_group = DeviceGroupCommandBufferBeginInfo{ .s_type = 1000060004, .p_next = null, .device_mask = 1 };
+        var begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = &begin_group, .flags = 0, .inheritance_info = null };
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(command_buffer, &begin));
+        try std.testing.expectEqual(Result.success, endCommandBuffer(command_buffer));
+        begin_group.device_mask = 2;
+        try std.testing.expectEqual(Result.error_initialization_failed, beginCommandBuffer(command_buffer, &begin));
+        destroyCommandPool(ctx.device, pool, null);
+
+        var rect = Rect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 1, .height = 1 } };
+        var render_group = DeviceGroupRenderPassBeginInfo{ .s_type = 1000060003, .p_next = null, .device_mask = 1, .device_render_area_count = 1, .device_render_areas = @ptrCast(&rect) };
+        try std.testing.expect(renderPassBeginPNextValid(&render_group));
+        render_group.device_mask = 2;
+        try std.testing.expect(!renderPassBeginPNextValid(&render_group));
+        try std.testing.expect(bindImageMemoryPNextValid(null));
+        var plane = BindImagePlaneMemoryInfo{ .s_type = 1000156002, .p_next = null, .plane_aspect = 0 };
+        try std.testing.expect(bindImageMemoryPNextValid(&plane));
+        plane.plane_aspect = 1;
+        try std.testing.expect(!bindImageMemoryPNextValid(&plane));
+        begin_group.device_mask = 1;
+        test_allocations_before_failure = 0;
+        for (0..4096) |_| {
+            try std.testing.expect(submitPNextValid(&group_submit, 0, 0, 0));
+            try std.testing.expect(commandBufferBeginPNextValid(&begin_group));
+            try std.testing.expect(bindBufferMemoryPNextValid(&bind_group));
+        }
+        test_allocations_before_failure = null;
+        destroyDevice(ctx.device, null);
+        destroyInstance(ctx.instance, null);
+    }
+}
+
+test "buffer views enforce typed texel ranges and stale lifetime" {
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(BufferViewCreateInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(BufferUsageFlags2CreateInfo));
+    const ctx = try createTestDeviceContext();
+    const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 64, .usage = 0x4, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &buffer));
+
+    var usage2 = BufferUsageFlags2CreateInfo{ .s_type = 1000470006, .p_next = null, .usage = 0x10 };
+    var usage2_info = BufferCreateInfo{ .s_type = 12, .p_next = &usage2, .flags = 0, .size = 64, .usage = 0x1, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var usage2_buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &usage2_info, null, &usage2_buffer));
+    try std.testing.expectEqual(@as(u32, 0x10), validBufferLocked(usage2_buffer).?.usage);
+    var usage2_requirements = std.mem.zeroes(MemoryRequirements2);
+    usage2_requirements.s_type = 1000146003;
+    const usage2_query = DeviceBufferMemoryRequirements{ .s_type = 1000413002, .p_next = null, .create_info = &usage2_info };
+    getDeviceBufferMemoryRequirements(ctx.device, &usage2_query, &usage2_requirements);
+    try std.testing.expectEqual(@as(u64, 64), usage2_requirements.memory_requirements.size);
+    var unchanged: usize = 0xfeed_face;
+    var high_usage = usage2;
+    high_usage.usage = @as(u64, 1) << 40;
+    usage2_info.p_next = &high_usage;
+    try std.testing.expectEqual(Result.error_initialization_failed, createBuffer(ctx.device, &usage2_info, null, &unchanged));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), unchanged);
+    const duplicate_usage = BufferUsageFlags2CreateInfo{ .s_type = 1000470006, .p_next = null, .usage = 0x10 };
+    high_usage = usage2;
+    high_usage.p_next = &duplicate_usage;
+    usage2_info.p_next = &high_usage;
+    try std.testing.expectEqual(Result.error_initialization_failed, createBuffer(ctx.device, &usage2_info, null, &unchanged));
+    const UnknownChain = struct { s_type: i32, p_next: ?*const anyopaque, payload: u64 };
+    const unknown = UnknownChain{ .s_type = 0x7fff_ffff, .p_next = null, .payload = 1 };
+    usage2_info.p_next = &unknown;
+    try std.testing.expectEqual(Result.error_initialization_failed, createBuffer(ctx.device, &usage2_info, null, &unchanged));
+    usage2_info.p_next = &usage2;
+
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 64, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &memory));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, buffer, memory, 0));
+    const address_info = BufferDeviceAddressInfo{ .s_type = 1000244001, .p_next = null, .buffer = buffer };
+    try std.testing.expect(getBufferDeviceAddress(ctx.device, &address_info) != 0);
+    try std.testing.expectEqual(getBufferDeviceAddress(ctx.device, &address_info), getBufferOpaqueCaptureAddress(ctx.device, &address_info));
+    const memory_address_info = DeviceMemoryOpaqueCaptureAddressInfo{ .s_type = 1000257002, .p_next = null, .memory = memory };
+    try std.testing.expect(getDeviceMemoryOpaqueCaptureAddress(ctx.device, &memory_address_info) != 0);
+    var bad_address_info = address_info;
+    bad_address_info.s_type = 0;
+    try std.testing.expectEqual(@as(u64, 0), getBufferDeviceAddress(ctx.device, &bad_address_info));
+    var view: usize = 0;
+    const view_info = BufferViewCreateInfo{ .s_type = 13, .p_next = null, .flags = 0, .buffer = buffer, .format = 37, .offset = 4, .range = std.math.maxInt(u64) };
+    try std.testing.expectEqual(Result.success, createBufferView(ctx.device, &view_info, null, &view));
+    try std.testing.expectEqual(@as(u64, 60), validBufferViewLocked(view).?.range);
+    var bad = view_info;
+    bad.format = 126;
+    try std.testing.expectEqual(Result.error_format_not_supported, createBufferView(ctx.device, &bad, null, &view));
+    bad = view_info;
+    bad.offset = 2;
+    try std.testing.expectEqual(Result.error_initialization_failed, createBufferView(ctx.device, &bad, null, &view));
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..4096) |_| {
+        try std.testing.expect(validBufferViewLocked(view) != null);
+        usage2_requirements.memory_requirements.size = 0;
+        getDeviceBufferMemoryRequirements(ctx.device, &usage2_query, &usage2_requirements);
+        try std.testing.expectEqual(@as(u64, 64), usage2_requirements.memory_requirements.size);
+    }
+    destroyBufferView(ctx.device, view, null);
+    try std.testing.expect(validBufferViewLocked(view) == null);
+    destroyBuffer(ctx.device, usage2_buffer, null);
+    destroyBuffer(ctx.device, buffer, null);
+    freeMemory(ctx.device, memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "image blit and resolve commands preserve bounded pixels and ABI" {
+    try std.testing.expectEqual(@as(usize, 80), @sizeOf(ImageBlit));
+    try std.testing.expectEqual(@as(usize, 68), @sizeOf(ImageResolve));
+    const ctx = try createTestDeviceContext();
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 44, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    const destination_info = ImageCreateInfo{ .extent = .{ .width = 4, .height = 4, .depth = 1 }, .usage = 3, .initial_layout = 0, .s_type = image_info.s_type, .p_next = image_info.p_next, .flags = image_info.flags, .image_type = image_info.image_type, .format = image_info.format, .mip_levels = image_info.mip_levels, .array_layers = image_info.array_layers, .samples = image_info.samples, .tiling = image_info.tiling, .sharing_mode = image_info.sharing_mode, .queue_family_index_count = image_info.queue_family_index_count, .queue_family_indices = image_info.queue_family_indices };
+    var src: usize = 0;
+    var dst: usize = 0;
+    var resolved: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &src));
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &destination_info, null, &dst));
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &resolved));
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 64, .memory_type_index = 0 };
+    var src_memory: usize = 0;
+    var dst_memory: usize = 0;
+    var resolved_memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &src_memory));
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &dst_memory));
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &resolved_memory));
+    try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, src, src_memory, 0));
+    try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, dst, dst_memory, 0));
+    try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, resolved, resolved_memory, 0));
+    validImageLocked(src).?.layout = 1;
+    validImageLocked(dst).?.layout = 1;
+    validImageLocked(resolved).?.layout = 1;
+    const source_bytes = imageBytes(validImageLocked(src).?);
+    for (0..4) |index| std.mem.writeInt(u32, source_bytes[index * 4 ..][0..4], @as(u32, @intCast(index + 1)), .little);
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 0, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    const allocate_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var command: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate_info, &command));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    const layers = ImageSubresourceLayers{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 };
+    const blit = ImageBlit{ .src_subresource = layers, .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 2, .y = 2, .z = 1 } }, .dst_subresource = layers, .dst_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 4, .y = 4, .z = 1 } } };
+    cmdBlitImage(command[0], src, 1, dst, 1, 1, @ptrCast(&blit), 0);
+    const resolve = ImageResolve{ .src_subresource = layers, .src_offset = .{ .x = 0, .y = 0, .z = 0 }, .dst_subresource = layers, .dst_offset = .{ .x = 0, .y = 0, .z = 0 }, .extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    cmdResolveImage(command[0], src, 1, resolved, 1, 1, @ptrCast(&resolve));
+    const blit2_region = ImageBlit2{ .s_type = 1000337005, .p_next = null, .src_subresource = layers, .src_offsets = blit.src_offsets, .dst_subresource = layers, .dst_offsets = blit.dst_offsets };
+    const blit2 = BlitImageInfo2{ .s_type = 1000337004, .p_next = null, .src_image = src, .src_image_layout = 1, .dst_image = dst, .dst_image_layout = 1, .region_count = 1, .regions = @ptrCast(&blit2_region), .filter = 0 };
+    cmdBlitImage2(command[0], &blit2);
+    const resolve2_region = ImageResolve2{ .s_type = 1000337010, .p_next = null, .src_subresource = layers, .src_offset = resolve.src_offset, .dst_subresource = layers, .dst_offset = resolve.dst_offset, .extent = resolve.extent };
+    const resolve2 = ResolveImageInfo2{ .s_type = 1000337009, .p_next = null, .src_image = src, .src_image_layout = 1, .dst_image = resolved, .dst_image_layout = 1, .region_count = 1, .regions = @ptrCast(&resolve2_region) };
+    cmdResolveImage2(command[0], &resolve2);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &command, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    const destination_bytes = imageBytes(validImageLocked(dst).?);
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, destination_bytes[0..4], .little));
+    try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, destination_bytes[(3 * 4 + 3) * 4 ..][0..4], .little));
+    try std.testing.expectEqualSlices(u8, source_bytes, imageBytes(validImageLocked(resolved).?));
+    freeCommandBuffers(ctx.device, pool, 1, &command);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyImage(ctx.device, resolved, null);
+    destroyImage(ctx.device, dst, null);
+    destroyImage(ctx.device, src, null);
+    freeMemory(ctx.device, resolved_memory, null);
+    freeMemory(ctx.device, dst_memory, null);
+    freeMemory(ctx.device, src_memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
 test "minimal barrier stage and access contract is exact" {
     const Case = struct { old: i32, new: i32, src_stage: u32, src_access: u32, dst_access: u32 };
     const cases = [_]Case{
@@ -5603,6 +12660,417 @@ test "minimal barrier stage and access contract is exact" {
     unsupported.old_layout = 0;
     unsupported.new_layout = 2;
     try std.testing.expect(!barrierMasksSupported(unsupported, 1, 0x1000));
+}
+
+test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" {
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(MemoryBarrier2));
+    try std.testing.expectEqual(@as(usize, 96), @sizeOf(ImageMemoryBarrier2));
+    try std.testing.expectEqual(@as(?u32, 0x1000), sync2StageMaskToLegacy(0x1000_0000_0));
+    try std.testing.expectEqual(@as(?u32, 0x20), sync2AccessMaskToLegacy(0x2_0000_0000));
+    try std.testing.expect(sync2StageMaskToLegacy(0x8000_0000_0000_0000) == null);
+    const ctx = try createTestDeviceContext();
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 0, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    const allocate = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &commands));
+    var event: usize = 0;
+    const event_info = EventCreateInfo{ .s_type = 10, .p_next = null, .flags = 0 };
+    try std.testing.expectEqual(Result.success, createEvent(ctx.device, &event_info, null, &event));
+    var query: usize = 0;
+    const query_info = QueryPoolCreateInfo{ .s_type = 11, .p_next = null, .flags = 0, .query_type = 2, .query_count = 2, .pipeline_statistics = 0 };
+    try std.testing.expectEqual(Result.success, createQueryPool(ctx.device, &query_info, null, &query));
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 44, .extent = .{ .width = 1, .height = 1, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x2, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &image));
+    const image_memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 4, .memory_type_index = 0 };
+    var image_memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &image_memory_info, null, &image_memory));
+    try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, image, image_memory, 0));
+    const memory_barrier = MemoryBarrier2{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 1, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0 };
+    const dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 1, .memory_barriers = @ptrCast(&memory_barrier), .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdPipelineBarrier2(commands[0], &dependency);
+    cmdSetEvent2(commands[0], event, &dependency);
+    const high_stage_barrier = MemoryBarrier2{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 0x1000_0000_0, .dst_stage_mask = 0x1_0000, .src_access_mask = 0, .dst_access_mask = 0 };
+    const high_stage_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 1, .memory_barriers = @ptrCast(&high_stage_barrier), .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
+    cmdPipelineBarrier2(commands[0], &high_stage_dependency);
+    const image_barrier = ImageMemoryBarrier2{ .s_type = 1000314002, .p_next = null, .src_stage_mask = 1, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0x1800, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    const image_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 0, .memory_barriers = null, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 1, .image_memory_barriers = @ptrCast(&image_barrier) };
+    cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&image_dependency));
+    cmdResetEvent2(commands[0], event, &dependency);
+    cmdWriteTimestamp2(commands[0], 0x1000, query, 0);
+    cmdWriteTimestamp2(commands[0], 0x1000_0000_0, query, 1);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(@as(i32, 1), validImageLocked(image).?.layout);
+    const submit2 = SubmitInfo2{ .s_type = 1000314004, .p_next = null, .flags = 0, .wait_semaphore_info_count = 0, .wait_semaphore_infos = null, .command_buffer_info_count = 0, .command_buffer_infos = null, .signal_semaphore_info_count = 0, .signal_semaphore_infos = null };
+    try std.testing.expectEqual(Result.success, queueSubmit2(ctx.queue, 1, @ptrCast(&submit2), 0));
+    var signal_semaphore: usize = 0;
+    const semaphore_info = SemaphoreCreateInfo{ .s_type = 9, .p_next = null, .flags = 0 };
+    try std.testing.expectEqual(Result.success, createSemaphore(ctx.device, &semaphore_info, null, &signal_semaphore));
+    const signal_info = SemaphoreSubmitInfo{ .s_type = 1000314005, .p_next = null, .semaphore = signal_semaphore, .value = 0, .stage_mask = 0x1000_0000_0, .device_index = 0 };
+    const signal_submit2 = SubmitInfo2{ .s_type = 1000314004, .p_next = null, .flags = 0, .wait_semaphore_info_count = 0, .wait_semaphore_infos = null, .command_buffer_info_count = 0, .command_buffer_infos = null, .signal_semaphore_info_count = 1, .signal_semaphore_infos = @ptrCast(&signal_info) };
+    try std.testing.expectEqual(Result.success, queueSubmit2(ctx.queue, 1, @ptrCast(&signal_submit2), 0));
+    destroySemaphore(ctx.device, signal_semaphore, null);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(@as(?u32, 0x1000), sync2StageMaskToLegacy(0x1000_0000_0));
+        try std.testing.expectEqual(@as(?u32, 0x20), sync2AccessMaskToLegacy(0x2_0000_0000));
+    }
+    test_allocations_before_failure = null;
+    destroyQueryPool(ctx.device, query, null);
+    destroyEvent(ctx.device, event, null);
+    destroyImage(ctx.device, image, null);
+    freeMemory(ctx.device, image_memory, null);
+    freeCommandBuffers(ctx.device, pool, 1, &commands);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "dynamic rendering begin and end own attachment scope" {
+    try std.testing.expectEqual(@as(usize, 72), @sizeOf(RenderingAttachmentInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(ImageViewUsageCreateInfo));
+    const ctx = try createTestDeviceContext();
+    defer test_allocations_before_failure = null;
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 44, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x10, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &image));
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 16, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &memory));
+    try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, image, memory, 0));
+    const view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = image, .view_type = 1, .format = 44, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    var view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(ctx.device, &view_info, null, &view));
+    var usage_info = ImageViewUsageCreateInfo{ .s_type = 1000117002, .p_next = null, .usage = 0x10 };
+    var usage_view_info = view_info;
+    usage_view_info.p_next = &usage_info;
+    var usage_view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(ctx.device, &usage_view_info, null, &usage_view));
+    try std.testing.expectEqual(@as(u32, 0x10), validImageViewLocked(usage_view).?.usage);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| try std.testing.expect(imageViewCreatePNextState(&usage_info).valid);
+    test_allocations_before_failure = null;
+    var unsupported_usage = usage_info;
+    unsupported_usage.usage = 0x2;
+    var unchanged_view: usize = 0xfeed_face;
+    var unsupported_view_info = view_info;
+    unsupported_view_info.p_next = &unsupported_usage;
+    try std.testing.expectEqual(Result.error_initialization_failed, createImageView(ctx.device, &unsupported_view_info, null, &unchanged_view));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), unchanged_view);
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    const allocate = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 2 };
+    var commands: [2]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &commands));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    cmdSetLineStipple(commands[0], 2, 0);
+    try std.testing.expectEqual(@as(u32, 2), commands[0].impl.line_stipple_factor);
+    try std.testing.expectEqual(@as(u16, 0), commands[0].impl.line_stipple_pattern);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| cmdSetLineStipple(commands[0], 2, 0xffff);
+    test_allocations_before_failure = null;
+    try std.testing.expect(!commands[0].impl.invalid);
+    cmdSetLineStipple(commands[1], 0, 0);
+    try std.testing.expect(commands[1].impl.invalid);
+    try std.testing.expectEqual(@as(u32, 1), commands[1].impl.line_stipple_factor);
+    try std.testing.expectEqual(@as(u16, 0xffff), commands[1].impl.line_stipple_pattern);
+    var clear_value = std.mem.zeroes(ClearValue);
+    clear_value.color.float32 = .{ 1, 0, 0, 1 };
+    const attachment = RenderingAttachmentInfo{ .s_type = 1000044000, .p_next = null, .image_view = view, .image_layout = 1, .resolve_mode = 0, .resolve_image_view = 0, .resolve_image_layout = 0, .load_op = 1, .store_op = 0, .clear_value = clear_value };
+    const rendering = RenderingInfo{ .s_type = 1000044001, .p_next = null, .flags = 0, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 2, .height = 2 } }, .layer_count = 1, .view_mask = 0, .color_attachment_count = 1, .color_attachments = @ptrCast(&attachment), .depth_attachment = null, .stencil_attachment = null };
+    cmdBeginRendering(commands[0], &rendering);
+    try std.testing.expect(commands[0].impl.dynamic_rendering);
+    var locations = [_]u32{0};
+    const location_info = RenderingAttachmentLocationInfo{ .s_type = 1000232001, .p_next = null, .color_attachment_count = 1, .color_attachment_locations = &locations };
+    cmdSetRenderingAttachmentLocations(commands[0], &location_info);
+    try std.testing.expectEqual(@as(u32, 1), commands[0].impl.rendering_location_count);
+    try std.testing.expectEqual(@as(u32, 0), commands[0].impl.rendering_locations[0]);
+    var input_indices = [_]u32{0};
+    const input_info = RenderingInputAttachmentIndexInfo{ .s_type = 1000232002, .p_next = null, .color_attachment_count = 1, .color_attachment_input_indices = &input_indices, .depth_input_attachment_index = null, .stencil_input_attachment_index = null };
+    cmdSetRenderingInputAttachmentIndices(commands[0], &input_info);
+    try std.testing.expectEqual(@as(u32, 1), commands[0].impl.rendering_input_count);
+    try std.testing.expectEqual(@as(u32, 0), commands[0].impl.rendering_input_indices[0]);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        cmdSetRenderingAttachmentLocations(commands[0], &location_info);
+        cmdSetRenderingInputAttachmentIndices(commands[0], &input_info);
+    }
+    test_allocations_before_failure = null;
+    try std.testing.expect(!commands[0].impl.invalid);
+    cmdEndRendering(commands[0]);
+    try std.testing.expect(!commands[0].impl.dynamic_rendering);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(@as(u32, 0xffff0000), std.mem.readInt(u32, imageBytes(validImageLocked(image).?)[0..4], .little));
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+        cmdBeginRendering(commands[0], &rendering);
+        try std.testing.expect(!commands[0].impl.invalid);
+        cmdEndRendering(commands[0]);
+        try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    }
+    test_allocations_before_failure = null;
+    // State commands are only legal inside a render-pass instance, and a
+    // malformed update must not publish a partial candidate state.
+    cmdSetRenderingAttachmentLocations(commands[1], &location_info);
+    try std.testing.expect(commands[1].impl.invalid);
+    try std.testing.expectEqual(@as(u32, 0), commands[1].impl.rendering_location_count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    var bad_attachment = attachment;
+    bad_attachment.clear_value.color.float32[0] = std.math.nan(f32);
+    var bad_rendering = rendering;
+    bad_rendering.color_attachments = @ptrCast(&bad_attachment);
+    cmdBeginRendering(commands[1], &bad_rendering);
+    try std.testing.expect(commands[1].impl.invalid);
+    try std.testing.expect(!commands[1].impl.dynamic_rendering);
+    try std.testing.expectEqual(@as(u16, 0), commands[1].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    cmdBeginRendering(commands[1], &rendering);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[1]));
+    try std.testing.expect(commands[1].impl.dynamic_rendering);
+    cmdSetRenderingAttachmentLocations(commands[1], &location_info);
+    var bad_locations = [_]u32{ 0, 8 };
+    var bad_location_info = location_info;
+    bad_location_info.color_attachment_count = 2;
+    bad_location_info.color_attachment_locations = &bad_locations;
+    cmdSetRenderingAttachmentLocations(commands[1], &bad_location_info);
+    try std.testing.expect(commands[1].impl.invalid);
+    try std.testing.expectEqual(@as(u32, 1), commands[1].impl.rendering_location_count);
+    try std.testing.expectEqual(@as(u32, 0), commands[1].impl.rendering_locations[0]);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+    try std.testing.expectEqual(@as(u32, 0), commands[1].impl.rendering_location_count);
+    try std.testing.expectEqual(@as(u32, 1), commands[1].impl.line_stipple_factor);
+    try std.testing.expectEqual(@as(u16, 0xffff), commands[1].impl.line_stipple_pattern);
+    freeCommandBuffers(ctx.device, pool, 2, &commands);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyImageView(ctx.device, view, null);
+    destroyImageView(ctx.device, usage_view, null);
+    destroyImage(ctx.device, image, null);
+    freeMemory(ctx.device, memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "Vulkan 1.4 host image copies transitions and layout queries are bounded" {
+    const ctx = try createTestDeviceContext();
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 44, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x10, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var src: usize = 0;
+    var dst: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &src));
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &dst));
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 16, .memory_type_index = 0 };
+    var src_memory: usize = 0;
+    var dst_memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &src_memory));
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &dst_memory));
+    try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, src, src_memory, 0));
+    try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, dst, dst_memory, 0));
+    var source = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+    const layers = ImageSubresourceLayers{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 };
+    const to_image_region = MemoryToImageCopy{ .s_type = 1000270000, .p_next = null, .host_pointer = &source, .memory_row_length = 0, .memory_image_height = 0, .image_subresource = layers, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    const to_image = CopyMemoryToImageInfo{ .s_type = 1000270005, .p_next = null, .flags = 0, .dst_image = src, .dst_image_layout = 1, .region_count = 1, .regions = @ptrCast(&to_image_region) };
+    try std.testing.expectEqual(Result.success, copyMemoryToImage(ctx.device, &to_image));
+    var destination = [_]u8{0} ** 16;
+    const from_image_region = ImageToMemoryCopy{ .s_type = 1000270001, .p_next = null, .host_pointer = &destination, .memory_row_length = 0, .memory_image_height = 0, .image_subresource = layers, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    const from_image = CopyImageToMemoryInfo{ .s_type = 1000270004, .p_next = null, .flags = 0, .src_image = src, .src_image_layout = 1, .region_count = 1, .regions = @ptrCast(&from_image_region) };
+    try std.testing.expectEqual(Result.success, copyImageToMemory(ctx.device, &from_image));
+    try std.testing.expectEqualSlices(u8, &source, &destination);
+    const copy_region = ImageCopy2{ .s_type = 1000337003, .p_next = null, .src_subresource = layers, .src_offset = .{ .x = 0, .y = 0, .z = 0 }, .dst_subresource = layers, .dst_offset = .{ .x = 0, .y = 0, .z = 0 }, .extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    const copy_info = CopyImageToImageInfo{ .s_type = 1000270007, .p_next = null, .flags = 0, .src_image = src, .src_image_layout = 1, .dst_image = dst, .dst_image_layout = 1, .region_count = 1, .regions = @ptrCast(&copy_region) };
+    try std.testing.expectEqual(Result.success, copyImageToImage(ctx.device, &copy_info));
+    validImageLocked(src).?.layout = 1;
+    const transition = HostImageLayoutTransitionInfo{ .s_type = 1000270006, .p_next = null, .image = src, .old_layout = 1, .new_layout = 7, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    try std.testing.expectEqual(Result.success, transitionImageLayout(ctx.device, 1, @ptrCast(&transition)));
+    var layout2 = SubresourceLayout2{ .s_type = 1000338002, .p_next = null, .subresource_layout = std.mem.zeroes(SubresourceLayout) };
+    const subresource2 = ImageSubresource2{ .s_type = 1000338003, .p_next = null, .image_subresource = .{ .aspect_mask = 1, .mip_level = 0, .array_layer = 0 } };
+    getImageSubresourceLayout2(ctx.device, src, &subresource2, &layout2);
+    try std.testing.expectEqual(@as(u64, 16), layout2.subresource_layout.size);
+    var host_memcpy_size = SubresourceHostMemcpySize{ .s_type = 1000270008, .p_next = null, .size = 0xffff_ffff_ffff_ffff };
+    layout2.p_next = @ptrCast(&host_memcpy_size);
+    getImageSubresourceLayout2(ctx.device, src, &subresource2, &layout2);
+    try std.testing.expectEqual(@as(u64, 16), layout2.subresource_layout.size);
+    try std.testing.expectEqual(@as(u64, 16), host_memcpy_size.size);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&host_memcpy_size)), layout2.p_next);
+    const device_subresource_info = DeviceImageSubresourceInfo{ .s_type = 1000470004, .p_next = null, .create_info = &image_info, .subresource = &subresource2 };
+    var device_layout = SubresourceLayout2{ .s_type = 1000338002, .p_next = @ptrCast(&host_memcpy_size), .subresource_layout = std.mem.zeroes(SubresourceLayout) };
+    getDeviceImageSubresourceLayout(ctx.device, &device_subresource_info, &device_layout);
+    try std.testing.expectEqual(@as(u64, 16), device_layout.subresource_layout.size);
+    try std.testing.expectEqual(@as(u64, 16), host_memcpy_size.size);
+    var invalid_device_layout = SubresourceLayout2{ .s_type = 1000338002, .p_next = null, .subresource_layout = .{ .offset = 11, .size = 12, .row_pitch = 13, .array_pitch = 14, .depth_pitch = 15 } };
+    getDeviceImageSubresourceLayout(null, &device_subresource_info, &invalid_device_layout);
+    try std.testing.expectEqual(SubresourceLayout{ .offset = 11, .size = 12, .row_pitch = 13, .array_pitch = 14, .depth_pitch = 15 }, invalid_device_layout.subresource_layout);
+    getDeviceImageSubresourceLayout(@ptrFromInt(8), &device_subresource_info, &invalid_device_layout);
+    try std.testing.expectEqual(SubresourceLayout{ .offset = 11, .size = 12, .row_pitch = 13, .array_pitch = 14, .depth_pitch = 15 }, invalid_device_layout.subresource_layout);
+    const UnknownLayoutChain = struct { s_type: i32, p_next: ?*anyopaque, payload: u64 };
+    var unknown_layout_chain = UnknownLayoutChain{ .s_type = 0x7fff_ffff, .p_next = null, .payload = 0x1122_3344_5566_7788 };
+    var rejected_layout = SubresourceLayout2{ .s_type = 1000338002, .p_next = @ptrCast(&unknown_layout_chain), .subresource_layout = .{ .offset = 1, .size = 2, .row_pitch = 3, .array_pitch = 4, .depth_pitch = 5 } };
+    getImageSubresourceLayout2(ctx.device, src, &subresource2, &rejected_layout);
+    try std.testing.expectEqual(SubresourceLayout{ .offset = 1, .size = 2, .row_pitch = 3, .array_pitch = 4, .depth_pitch = 5 }, rejected_layout.subresource_layout);
+    try std.testing.expectEqual(@as(u64, 0x1122_3344_5566_7788), unknown_layout_chain.payload);
+    var duplicate_host_size = SubresourceHostMemcpySize{ .s_type = 1000270008, .p_next = null, .size = 0xfeed_face };
+    host_memcpy_size.p_next = @ptrCast(&duplicate_host_size);
+    var duplicate_layout = SubresourceLayout2{ .s_type = 1000338002, .p_next = @ptrCast(&host_memcpy_size), .subresource_layout = .{ .offset = 6, .size = 7, .row_pitch = 8, .array_pitch = 9, .depth_pitch = 10 } };
+    getImageSubresourceLayout2(ctx.device, src, &subresource2, &duplicate_layout);
+    try std.testing.expectEqual(SubresourceLayout{ .offset = 6, .size = 7, .row_pitch = 8, .array_pitch = 9, .depth_pitch = 10 }, duplicate_layout.subresource_layout);
+    try std.testing.expectEqual(@as(u64, 16), host_memcpy_size.size);
+    try std.testing.expectEqual(@as(u64, 0xfeed_face), duplicate_host_size.size);
+    host_memcpy_size.p_next = null;
+    var warm_layout = SubresourceLayout2{ .s_type = 1000338002, .p_next = @ptrCast(&host_memcpy_size), .subresource_layout = std.mem.zeroes(SubresourceLayout) };
+    for (0..4096) |_| getImageSubresourceLayout2(ctx.device, src, &subresource2, &warm_layout);
+    try std.testing.expectEqual(@as(u64, 16), warm_layout.subresource_layout.size);
+    try std.testing.expectEqual(@as(u64, 16), host_memcpy_size.size);
+    var granularity = Extent2D{ .width = 0, .height = 0 };
+    const area = RenderingAreaInfo{ .s_type = 1000470003, .p_next = null, .view_mask = 0, .color_attachment_count = 1, .color_attachment_formats = @ptrCast(&image_info.format), .depth_attachment_format = 0, .stencil_attachment_format = 0 };
+    getRenderingAreaGranularity(ctx.device, &area, &granularity);
+    try std.testing.expectEqual(Extent2D{ .width = 1, .height = 1 }, granularity);
+    destroyImage(ctx.device, dst, null);
+    destroyImage(ctx.device, src, null);
+    freeMemory(ctx.device, dst_memory, null);
+    freeMemory(ctx.device, src_memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "bounded 2D array images isolate layers across views clears and transfers" {
+    const ctx = try createTestDeviceContext();
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 44, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 2, .samples = 1, .tiling = 0, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &image));
+    var requirements: MemoryRequirements = undefined;
+    getImageMemoryRequirements(ctx.device, image, &requirements);
+    try std.testing.expectEqual(@as(u64, 32), requirements.size);
+    var layer_layout: SubresourceLayout = undefined;
+    const layer_subresource = ImageSubresource{ .aspect_mask = 1, .mip_level = 0, .array_layer = 1 };
+    getImageSubresourceLayout(ctx.device, image, &layer_subresource, &layer_layout);
+    try std.testing.expectEqual(@as(u64, 16), layer_layout.offset);
+    try std.testing.expectEqual(@as(u64, 16), layer_layout.size);
+    const view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = image, .view_type = 5, .format = 44, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 1, .layer_count = 1 } };
+    var view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(ctx.device, &view_info, null, &view));
+    const image_memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 32, .memory_type_index = 0 };
+    var image_memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &image_memory_info, null, &image_memory));
+    try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, image, image_memory, 0));
+    var copied_image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &copied_image));
+    var copied_image_memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &image_memory_info, null, &copied_image_memory));
+    try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, copied_image, copied_image_memory, 0));
+
+    var host_layer = [_]u8{ 0x10, 0x11, 0x12, 0x13, 0x20, 0x21, 0x22, 0x23, 0x30, 0x31, 0x32, 0x33, 0x40, 0x41, 0x42, 0x43 };
+    const layer_one = ImageSubresourceLayers{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 1, .layer_count = 1 };
+    const host_to_image_region = MemoryToImageCopy{ .s_type = 1000270000, .p_next = null, .host_pointer = &host_layer, .memory_row_length = 0, .memory_image_height = 0, .image_subresource = layer_one, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    const host_to_image = CopyMemoryToImageInfo{ .s_type = 1000270005, .p_next = null, .flags = 0, .dst_image = image, .dst_image_layout = 1, .region_count = 1, .regions = @ptrCast(&host_to_image_region) };
+    try std.testing.expectEqual(Result.success, copyMemoryToImage(ctx.device, &host_to_image));
+    var host_roundtrip = [_]u8{0} ** 16;
+    const host_from_image_region = ImageToMemoryCopy{ .s_type = 1000270001, .p_next = null, .host_pointer = &host_roundtrip, .memory_row_length = 0, .memory_image_height = 0, .image_subresource = layer_one, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    const host_from_image = CopyImageToMemoryInfo{ .s_type = 1000270004, .p_next = null, .flags = 0, .src_image = image, .src_image_layout = 1, .region_count = 1, .regions = @ptrCast(&host_from_image_region) };
+    try std.testing.expectEqual(Result.success, copyImageToMemory(ctx.device, &host_from_image));
+    try std.testing.expectEqualSlices(u8, &host_layer, &host_roundtrip);
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, imageBytes(validImageLocked(image).?)[0..4], .little));
+    validImageLocked(image).?.layout = 1;
+
+    const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 16, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var source_buffer: usize = 0;
+    var destination_buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &source_buffer));
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &destination_buffer));
+    var source_memory: usize = 0;
+    var destination_memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 16, .memory_type_index = 0 }, null, &source_memory));
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 16, .memory_type_index = 0 }, null, &destination_memory));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, source_buffer, source_memory, 0));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, destination_buffer, destination_memory, 0));
+    var mapped: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, source_memory, 0, 16, 0, &mapped));
+    @memcpy(@as([*]u8, @ptrCast(mapped.?))[0..16], &host_layer);
+    unmapMemory(ctx.device, source_memory);
+
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    const allocate_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var command: CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate_info, @ptrCast(&command)));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command, &begin));
+    const transfer_region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = layer_one, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    cmdCopyBufferToImage(command, source_buffer, image, 1, 1, @ptrCast(&transfer_region));
+    const layer_zero_range = ImageSubresourceRange{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    var clear = std.mem.zeroes(ClearColorValue);
+    clear.float32 = .{ 1, 0, 0, 1 };
+    cmdClearColorImage(command, image, 1, &clear, 1, @ptrCast(&layer_zero_range));
+    const copied_layer_zero = ImageSubresourceLayers{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 };
+    const image_copy_region = ImageCopy{ .src_subresource = layer_one, .src_offset = .{ .x = 0, .y = 0, .z = 0 }, .dst_subresource = copied_layer_zero, .dst_offset = .{ .x = 0, .y = 0, .z = 0 }, .extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    validImageLocked(copied_image).?.layout = 1;
+    cmdCopyImage(command, image, 1, copied_image, 1, 1, @ptrCast(&image_copy_region));
+    const image_blit_region = ImageBlit{ .src_subresource = layer_one, .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 2, .y = 2, .z = 1 } }, .dst_subresource = layer_one, .dst_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 2, .y = 2, .z = 1 } } };
+    cmdBlitImage(command, image, 1, copied_image, 1, 1, @ptrCast(&image_blit_region), 0);
+    const image_resolve_region = ImageResolve{ .src_subresource = layer_one, .src_offset = .{ .x = 0, .y = 0, .z = 0 }, .dst_subresource = copied_layer_zero, .dst_offset = .{ .x = 0, .y = 0, .z = 0 }, .extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    cmdResolveImage(command, image, 1, copied_image, 1, 1, @ptrCast(&image_resolve_region));
+    const copied_buffer_region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = copied_layer_zero, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    cmdCopyImageToBuffer(command, copied_image, 1, destination_buffer, 1, @ptrCast(&copied_buffer_region));
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = @ptrCast(&command), .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqualSlices(u8, &host_layer, imageBytes(validImageLocked(image).?)[16..32]);
+    try std.testing.expectEqual(@as(u32, 0xffff0000), std.mem.readInt(u32, imageBytes(validImageLocked(image).?)[0..4], .little));
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, destination_memory, 0, 16, 0, &mapped));
+    try std.testing.expectEqualSlices(u8, &host_layer, @as([*]const u8, @ptrCast(mapped.?))[0..16]);
+    unmapMemory(ctx.device, destination_memory);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command, 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command, &begin));
+    var invalid_region = transfer_region;
+    invalid_region.image_subresource.base_array_layer = 2;
+    cmdCopyBufferToImage(command, source_buffer, image, 1, 1, @ptrCast(&invalid_region));
+    try std.testing.expect(command.impl.invalid);
+    try std.testing.expectEqual(@as(u16, 0), command.impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command, 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command, &begin));
+    var invalid_range = layer_zero_range;
+    invalid_range.base_array_layer = 2;
+    cmdClearColorImage(command, image, 1, &clear, 1, @ptrCast(&invalid_range));
+    try std.testing.expect(command.impl.invalid);
+    try std.testing.expectEqual(@as(u16, 0), command.impl.count);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command, 0));
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(command, &begin));
+        cmdClearColorImage(command, image, 1, &clear, 1, @ptrCast(&layer_zero_range));
+        try std.testing.expectEqual(@as(u16, 1), command.impl.count);
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(command, 0));
+    }
+    test_allocations_before_failure = null;
+    freeCommandBuffers(ctx.device, pool, 1, @ptrCast(&command));
+    destroyCommandPool(ctx.device, pool, null);
+    destroyBuffer(ctx.device, destination_buffer, null);
+    destroyBuffer(ctx.device, source_buffer, null);
+    freeMemory(ctx.device, destination_memory, null);
+    freeMemory(ctx.device, source_memory, null);
+    destroyImage(ctx.device, copied_image, null);
+    freeMemory(ctx.device, copied_image_memory, null);
+    destroyImageView(ctx.device, view, null);
+    destroyImage(ctx.device, image, null);
+    freeMemory(ctx.device, image_memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
 }
 
 test "memory transfer objects execute against independently specified bytes" {
@@ -5639,23 +13107,29 @@ test "memory transfer objects execute against independently specified bytes" {
     const bci = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 64, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
     var buffer_a: usize = 0;
     var buffer_b: usize = 0;
+    var buffer_alias: usize = 0;
     try std.testing.expectEqual(Result.success, createBuffer(device, &bci, null, &buffer_a));
     try std.testing.expectEqual(Result.success, createBuffer(device, &bci, null, &buffer_b));
+    try std.testing.expectEqual(Result.success, createBuffer(device, &bci, null, &buffer_alias));
     var requirements: MemoryRequirements = undefined;
     getBufferMemoryRequirements(device, buffer_a, &requirements);
     try std.testing.expectEqual(@as(u64, 64), requirements.size);
     try std.testing.expectEqual(Result.success, bindBufferMemory(device, buffer_a, memory_a, 0));
     try std.testing.expectEqual(Result.success, bindBufferMemory(device, buffer_b, memory_b, 0));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(device, buffer_alias, memory_a, 0));
 
     const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 37, .extent = .{ .width = 4, .height = 4, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 1, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
     var image: usize = 0;
     var image_two: usize = 0;
+    var image_alias: usize = 0;
     try std.testing.expectEqual(Result.success, createImage(device, &image_info, null, &image));
     try std.testing.expectEqual(Result.success, createImage(device, &image_info, null, &image_two));
+    try std.testing.expectEqual(Result.success, createImage(device, &image_info, null, &image_alias));
     getImageMemoryRequirements(device, image, &requirements);
     try std.testing.expectEqual(@as(u64, 64), requirements.size);
     try std.testing.expectEqual(Result.success, bindImageMemory(device, image, memory_i, 0));
     try std.testing.expectEqual(Result.success, bindImageMemory(device, image_two, memory_j, 0));
+    try std.testing.expectEqual(Result.success, bindImageMemory(device, image_alias, memory_a, 0));
     const sub = ImageSubresource{ .aspect_mask = 1, .mip_level = 0, .array_layer = 0 };
     var layout: SubresourceLayout = undefined;
     getImageSubresourceLayout(device, image, &sub, &layout);
@@ -5715,9 +13189,27 @@ test "memory transfer objects execute against independently specified bytes" {
     for (0..64) |i| try std.testing.expectEqual(@as(u8, @intCast(i * 3)), actual[i]);
     unmapMemory(device, memory_b);
     try std.testing.expectEqual(Result.success, resetFences(device, 1, @ptrCast(&fence)));
+
+    // vkCmdUpdateBuffer owns a snapshot of the caller bytes until execution.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    var update_payload = [_]u8{ 1, 3, 5, 7, 9, 11, 13, 15 };
+    const expected_update = update_payload;
+    cmdUpdateBuffer(commands[0], buffer_b, 12, update_payload.len, &update_payload);
+    try std.testing.expectEqual(@as(u16, 1), commands[0].impl.owned_update_count);
+    @memset(&update_payload, 0xff);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&submit), fence));
+    try std.testing.expectEqual(Result.success, waitForFences(device, 1, @ptrCast(&fence), 1, std.math.maxInt(u64)));
+    try std.testing.expectEqual(Result.success, mapMemory(device, memory_b, 12, expected_update.len, 0, &mapped));
+    try std.testing.expectEqualSlices(u8, &expected_update, @as([*]const u8, @ptrCast(mapped.?))[0..expected_update.len]);
+    unmapMemory(device, memory_b);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(@as(u16, 0), commands[0].impl.owned_update_count);
+    try std.testing.expectEqual(Result.success, resetFences(device, 1, @ptrCast(&fence)));
     try std.testing.expectEqual(Result.timeout, waitForFences(device, 1, @ptrCast(&fence), 1, 0));
 
-    var format_output: extern struct { max_extent: Extent3D, max_mip_levels: u32, max_array_layers: u32, sample_counts: u32, max_resource_size: u64 } = undefined;
+    var format_output: ImageFormatProperties = undefined;
     try std.testing.expectEqual(Result.success, getImageFormatProperties(physical[0], 37, 1, 1, 3, 0, &format_output));
     try std.testing.expectEqual(max_2d_extent, format_output.max_extent.width);
     try std.testing.expectEqual(Result.error_initialization_failed, getImageFormatProperties(physical[0], 37, 1, 1, 3, 0, null));
@@ -5736,14 +13228,40 @@ test "memory transfer objects execute against independently specified bytes" {
     cmdCopyBuffer(commands[0], 0, buffer_b, 1, @ptrCast(&copy));
     cmdCopyBuffer(commands[0], buffer_a, 0, 1, @ptrCast(&copy));
     cmdCopyBuffer(commands[0], buffer_a, buffer_b, 1, null);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     const bad_copy = BufferCopy{ .src_offset = 63, .dst_offset = 0, .size = 2 };
     cmdCopyBuffer(commands[0], buffer_a, buffer_b, 1, @ptrCast(&bad_copy));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    const overlapping_copy = BufferCopy{ .src_offset = 0, .dst_offset = 4, .size = 8 };
+    cmdCopyBuffer(commands[0], buffer_a, buffer_alias, 1, @ptrCast(&overlapping_copy));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    const overlapping_destinations = [_]BufferCopy{
+        .{ .src_offset = 0, .dst_offset = 0, .size = 8 },
+        .{ .src_offset = 16, .dst_offset = 4, .size = 8 },
+    };
+    cmdCopyBuffer(commands[0], buffer_a, buffer_b, overlapping_destinations.len, &overlapping_destinations);
+    try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdClearColorImage(commands[0], 0, 1, &color, 1, @ptrCast(&range));
     cmdClearColorImage(commands[0], image, 1, null, 1, @ptrCast(&range));
     cmdClearColorImage(commands[0], image, 1, &color, 1, null);
     cmdClearColorImage(commands[0], image, 6, &color, 1, @ptrCast(&range));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    var invalid_range = range;
+    invalid_range.level_count = 2;
+    cmdClearColorImage(commands[0], image, 1, &color, 1, @ptrCast(&invalid_range));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    const duplicate_ranges = [_]ImageSubresourceRange{ range, range };
+    cmdClearColorImage(commands[0], image, 1, &color, duplicate_ranges.len, &duplicate_ranges);
+    try std.testing.expectEqual(@as(u16, 1), commands[0].impl.count);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdCopyBufferToImage(commands[0], 0, image, 1, 1, @ptrCast(&region));
@@ -5754,18 +13272,150 @@ test "memory transfer objects execute against independently specified bytes" {
     cmdCopyBufferToImage(commands[0], buffer_a, image, 1, 1, @ptrCast(&bad_region));
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    const one_texel = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = region.image_subresource, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 1, .height = 1, .depth = 1 } };
+    cmdCopyBufferToImage(commands[0], buffer_a, image_alias, 1, 1, @ptrCast(&one_texel));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    const duplicate_image_destinations = [_]BufferImageCopy{ one_texel, .{ .buffer_offset = 16, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = region.image_subresource, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 1, .height = 1, .depth = 1 } } };
+    cmdCopyBufferToImage(commands[0], buffer_a, image, 1, duplicate_image_destinations.len, &duplicate_image_destinations);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdCopyImageToBuffer(commands[0], 0, 1, buffer_b, 1, @ptrCast(&region));
     cmdCopyImageToBuffer(commands[0], image, 1, 0, 1, @ptrCast(&region));
     cmdCopyImageToBuffer(commands[0], image, 1, buffer_b, 1, null);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdCopyImageToBuffer(commands[0], image, 1, buffer_b, 1, @ptrCast(&bad_region));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdCopyImageToBuffer(commands[0], image_alias, 1, buffer_a, 1, @ptrCast(&one_texel));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    const duplicate_buffer_destinations = [_]BufferImageCopy{ one_texel, .{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = region.image_subresource, .image_offset = .{ .x = 1, .y = 0, .z = 0 }, .image_extent = .{ .width = 1, .height = 1, .depth = 1 } } };
+    cmdCopyImageToBuffer(commands[0], image, 1, buffer_b, duplicate_buffer_destinations.len, &duplicate_buffer_destinations);
+    try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdCopyImage(commands[0], 0, 1, image_two, 1, 1, @ptrCast(&image_copy));
     cmdCopyImage(commands[0], image, 1, 0, 1, 1, @ptrCast(&image_copy));
     cmdCopyImage(commands[0], image, 1, image_two, 1, 1, null);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     var bad_image_copy = image_copy;
     bad_image_copy.extent.width = 5;
     cmdCopyImage(commands[0], image, 1, image_two, 1, 1, @ptrCast(&bad_image_copy));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    const one_texel_image = ImageCopy{ .src_subresource = region.image_subresource, .src_offset = .{ .x = 0, .y = 0, .z = 0 }, .dst_subresource = region.image_subresource, .dst_offset = .{ .x = 0, .y = 0, .z = 0 }, .extent = .{ .width = 1, .height = 1, .depth = 1 } };
+    cmdCopyImage(commands[0], image, 1, image, 1, 1, @ptrCast(&one_texel_image));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    const duplicate_image_copy_destinations = [_]ImageCopy{ one_texel_image, .{ .src_subresource = region.image_subresource, .src_offset = .{ .x = 1, .y = 0, .z = 0 }, .dst_subresource = region.image_subresource, .dst_offset = .{ .x = 0, .y = 0, .z = 0 }, .extent = .{ .width = 1, .height = 1, .depth = 1 } } };
+    cmdCopyImage(commands[0], image, 1, image_two, 1, duplicate_image_copy_destinations.len, &duplicate_image_copy_destinations);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    var invalid_update = [_]u8{ 1, 2, 3, 4 };
+    cmdUpdateBuffer(commands[0], 0, 0, invalid_update.len, &invalid_update);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdUpdateBuffer(commands[0], buffer_a, 0, 0, &invalid_update);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdUpdateBuffer(commands[0], buffer_a, 1, invalid_update.len, &invalid_update);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    test_allocations_before_failure = 0;
+    cmdUpdateBuffer(commands[0], buffer_a, 0, invalid_update.len, &invalid_update);
+    test_allocations_before_failure = null;
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 0), commands[0].impl.owned_update_count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+        cmdUpdateBuffer(commands[0], buffer_a, 0, invalid_update.len, &invalid_update);
+        try std.testing.expectEqual(@as(u16, 1), commands[0].impl.owned_update_count);
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+        try std.testing.expectEqual(@as(u16, 0), commands[0].impl.owned_update_count);
+    }
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+        cmdFillBuffer(commands[0], buffer_a, 0, 64, 0x01020304);
+        try std.testing.expectEqual(@as(u16, 1), commands[0].impl.count);
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    }
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+        cmdCopyBufferToImage(commands[0], buffer_a, image, 1, 1, @ptrCast(&region));
+        try std.testing.expectEqual(@as(u16, 1), commands[0].impl.count);
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    }
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+        cmdCopyImageToBuffer(commands[0], image, 1, buffer_b, 1, @ptrCast(&region));
+        try std.testing.expectEqual(@as(u16, 1), commands[0].impl.count);
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    }
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+        cmdCopyImage(commands[0], image, 1, image_two, 1, 1, @ptrCast(&image_copy));
+        try std.testing.expectEqual(@as(u16, 1), commands[0].impl.count);
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    }
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+        const warm_copy = BufferCopy{ .src_offset = 0, .dst_offset = 0, .size = 64 };
+        cmdCopyBuffer(commands[0], buffer_a, buffer_b, 1, @ptrCast(&warm_copy));
+        try std.testing.expectEqual(@as(u16, 1), commands[0].impl.count);
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    }
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+        cmdClearColorImage(commands[0], image, 1, &color, 1, @ptrCast(&range));
+        try std.testing.expectEqual(@as(u16, 1), commands[0].impl.count);
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    }
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
+    cmdFillBuffer(commands[0], buffer_a, 0, 4, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
+    cmdUpdateBuffer(commands[0], buffer_a, 0, invalid_update.len, &invalid_update);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
+    cmdCopyBuffer(commands[0], buffer_a, buffer_b, 1, @ptrCast(&copy));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
+    cmdClearColorImage(commands[0], image, 1, &color, 1, @ptrCast(&range));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
+    cmdCopyBufferToImage(commands[0], buffer_a, image, 1, 1, @ptrCast(&region));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
+    cmdCopyImageToBuffer(commands[0], image, 1, buffer_b, 1, @ptrCast(&region));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
+    cmdCopyImage(commands[0], image, 1, image_two, 1, 1, @ptrCast(&image_copy));
+    try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     commands[0].impl.count = commands[0].impl.commands.len;
@@ -5777,6 +13427,8 @@ test "memory transfer objects execute against independently specified bytes" {
     destroyCommandPool(device, pool, null);
     destroyImage(device, image, null);
     destroyImage(device, image_two, null);
+    destroyImage(device, image_alias, null);
+    destroyBuffer(device, buffer_alias, null);
     destroyBuffer(device, buffer_b, null);
     destroyBuffer(device, buffer_a, null);
     freeMemory(device, memory_i, null);
@@ -5803,7 +13455,11 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     invalid_info.usage = 0;
     var ignored: usize = 0;
     try std.testing.expectEqual(Result.error_initialization_failed, createBuffer(ctx.device, &invalid_info, null, &ignored));
-    invalid_info.usage = 4;
+    // Storage-texel buffers are not advertised by the format properties.
+    invalid_info.usage = 0x8;
+    try std.testing.expectEqual(Result.error_initialization_failed, createBuffer(ctx.device, &invalid_info, null, &ignored));
+    // Retain an actually unknown bit for the second rejection case.
+    invalid_info.usage = 0x400;
     try std.testing.expectEqual(Result.error_initialization_failed, createBuffer(ctx.device, &invalid_info, null, &ignored));
     invalid_info = src_info;
     invalid_info.size = heap_size + 1;
@@ -6198,6 +13854,2112 @@ test "advertised memory heap budget exhausts and recovers" {
     destroyInstance(ctx.instance, null);
 }
 
+test "pipeline cache header lifecycle merge and partial reads are exact" {
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(PipelineCacheCreateInfo));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(PipelineCacheCreateInfo, "initial_data_size"));
+    const ctx = try createTestDeviceContext();
+    var info = PipelineCacheCreateInfo{ .s_type = 17, .p_next = null, .flags = 0, .initial_data_size = 0, .initial_data = @ptrFromInt(8) };
+    var caches: [2]usize = undefined;
+    try std.testing.expectEqual(Result.success, createPipelineCache(ctx.device, &info, null, &caches[0]));
+    var size: usize = 0;
+    try std.testing.expectEqual(Result.success, getPipelineCacheData(ctx.device, caches[0], &size, null));
+    try std.testing.expectEqual(@as(usize, 32), size);
+    var bytes = [_]u8{0xa5} ** 32;
+    size = 7;
+    try std.testing.expectEqual(Result.incomplete, getPipelineCacheData(ctx.device, caches[0], &size, &bytes));
+    try std.testing.expectEqual(@as(usize, 7), size);
+    try std.testing.expectEqual(@as(u8, 0xa5), bytes[7]);
+    size = bytes.len;
+    try std.testing.expectEqual(Result.success, getPipelineCacheData(ctx.device, caches[0], &size, &bytes));
+    try std.testing.expectEqualSlices(u8, &pipelineCacheHeader(), &bytes);
+    var seeded = [_]u8{0} ** 40;
+    @memcpy(seeded[0..32], &pipelineCacheHeader());
+    @memset(seeded[32..], 0x5a);
+    info.initial_data_size = seeded.len;
+    info.initial_data = &seeded;
+    try std.testing.expectEqual(Result.success, createPipelineCache(ctx.device, &info, null, &caches[1]));
+    var seeded_size: usize = 0;
+    try std.testing.expectEqual(Result.success, getPipelineCacheData(ctx.device, caches[1], &seeded_size, null));
+    try std.testing.expectEqual(@as(usize, 40), seeded_size);
+    seeded[32] = 0xa5;
+    var seeded_output = [_]u8{0} ** 40;
+    seeded_size = seeded_output.len;
+    try std.testing.expectEqual(Result.success, getPipelineCacheData(ctx.device, caches[1], &seeded_size, &seeded_output));
+    try std.testing.expectEqual(@as(u8, 0x5a), seeded_output[32]);
+    try std.testing.expectEqual(Result.success, mergePipelineCaches(ctx.device, caches[0], 1, @ptrCast(&caches[1])));
+    size = 0;
+    try std.testing.expectEqual(Result.success, getPipelineCacheData(ctx.device, caches[0], &size, null));
+    try std.testing.expectEqual(@as(usize, 40), size);
+    var third_seeded = [_]u8{0} ** 41;
+    @memcpy(third_seeded[0..32], &pipelineCacheHeader());
+    @memset(third_seeded[32..], 0x6b);
+    var third_info = info;
+    third_info.initial_data_size = third_seeded.len;
+    third_info.initial_data = &third_seeded;
+    var third: usize = 0;
+    try std.testing.expectEqual(Result.success, createPipelineCache(ctx.device, &third_info, null, &third));
+    test_allocations_before_failure = 0;
+    try std.testing.expectEqual(Result.error_out_of_host_memory, mergePipelineCaches(ctx.device, caches[0], 1, @ptrCast(&third)));
+    test_allocations_before_failure = null;
+    var unchanged_size: usize = 0;
+    try std.testing.expectEqual(Result.success, getPipelineCacheData(ctx.device, caches[0], &unchanged_size, null));
+    try std.testing.expectEqual(@as(usize, 40), unchanged_size);
+    try std.testing.expectEqual(Result.success, mergePipelineCaches(ctx.device, caches[0], 0, null));
+    try std.testing.expectEqual(Result.error_initialization_failed, mergePipelineCaches(ctx.device, caches[0], 1, @ptrCast(&caches[0])));
+    seeded[8] ^= 1;
+    var unpublished: usize = 0xfeed_face;
+    try std.testing.expectEqual(Result.error_initialization_failed, createPipelineCache(ctx.device, &info, null, &unpublished));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), unpublished);
+    try std.testing.expectEqual(Result.error_initialization_failed, getPipelineCacheData(ctx.device, 0, &size, null));
+    for (caches) |cache| destroyPipelineCache(ctx.device, cache, null);
+    destroyPipelineCache(ctx.device, third, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "pipeline cache control path is allocation free and bounded" {
+    const ctx = try createTestDeviceContext();
+    const info = PipelineCacheCreateInfo{ .s_type = 17, .p_next = null, .flags = 0, .initial_data_size = 0, .initial_data = null };
+    var cache: usize = 0;
+    try std.testing.expectEqual(Result.success, createPipelineCache(ctx.device, &info, null, &cache));
+    var seeded = [_]u8{0} ** 40;
+    @memcpy(seeded[0..32], &pipelineCacheHeader());
+    @memset(seeded[32..], 0x5a);
+    var seeded_info = info;
+    seeded_info.initial_data_size = seeded.len;
+    seeded_info.initial_data = &seeded;
+    var source: usize = 0;
+    try std.testing.expectEqual(Result.success, createPipelineCache(ctx.device, &seeded_info, null, &source));
+    try std.testing.expectEqual(Result.success, mergePipelineCaches(ctx.device, cache, 1, @ptrCast(&source)));
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    var checksum: u64 = 0;
+    var bytes = [_]u8{0} ** 40;
+    for (0..4096) |_| {
+        var size: usize = bytes.len;
+        try std.testing.expectEqual(Result.success, getPipelineCacheData(ctx.device, cache, &size, &bytes));
+        checksum += size;
+        try std.testing.expectEqual(@as(usize, 40), size);
+        try std.testing.expectEqual(@as(u8, 0x5a), bytes[32]);
+        try std.testing.expectEqual(Result.success, mergePipelineCaches(ctx.device, cache, 1, @ptrCast(&source)));
+    }
+    try std.testing.expectEqual(@as(u64, 4096 * 40), checksum);
+    destroyPipelineCache(ctx.device, cache, null);
+    destroyPipelineCache(ctx.device, source, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "pipeline cache registry exhaustion preserves the output handle" {
+    const ctx = try createTestDeviceContext();
+    const info = PipelineCacheCreateInfo{ .s_type = 17, .p_next = null, .flags = 0, .initial_data_size = 0, .initial_data = null };
+    var handles: [max_child_objects]usize = undefined;
+    var count: usize = 0;
+    while (count < handles.len) : (count += 1) {
+        const result = createPipelineCache(ctx.device, &info, null, &handles[count]);
+        if (result == .error_out_of_host_memory) break;
+        try std.testing.expectEqual(Result.success, result);
+    }
+    try std.testing.expect(count < handles.len);
+    var unpublished: usize = 0xfeed_face;
+    try std.testing.expectEqual(Result.error_out_of_host_memory, createPipelineCache(ctx.device, &info, null, &unpublished));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), unpublished);
+    for (handles[0..count]) |cache| destroyPipelineCache(ctx.device, cache, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "descriptor pool budgets free reset and rollback are exact" {
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(DescriptorPoolCreateInfo));
+    try std.testing.expectEqual(@as(usize, 20), @offsetOf(DescriptorPoolCreateInfo, "max_sets"));
+    const ctx = try createTestDeviceContext();
+    const bindings = [_]DescriptorSetLayoutBinding{
+        .{ .binding = 0, .descriptor_type = 6, .descriptor_count = 2, .stage_flags = 1, .immutable_samplers = null },
+        .{ .binding = 1, .descriptor_type = 1, .descriptor_count = 1, .stage_flags = 16, .immutable_samplers = null },
+    };
+    const layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = bindings.len, .bindings = &bindings };
+    var layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &layout_info, null, &layout));
+    const sizes = [_]DescriptorPoolSize{
+        .{ .descriptor_type = 6, .descriptor_count = 4 },
+        .{ .descriptor_type = 1, .descriptor_count = 2 },
+    };
+    var pool_info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 1, .max_sets = 3, .pool_size_count = sizes.len, .pool_sizes = &sizes };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorPool(ctx.device, &pool_info, null, &pool));
+    var layouts = [_]usize{ layout, layout };
+    var allocate = DescriptorSetAllocateInfo{ .s_type = 34, .p_next = null, .descriptor_pool = pool, .descriptor_set_count = 2, .set_layouts = &layouts };
+    var sets = [_]usize{ 0xaaaa, 0xbbbb };
+    try std.testing.expectEqual(Result.success, allocateDescriptorSets(ctx.device, &allocate, &sets));
+    const pool_object = validDescriptorPoolLocked(pool).?;
+    try std.testing.expectEqual(@as(u32, 2), pool_object.allocated_sets);
+    try std.testing.expectEqual(@as(u32, 4), pool_object.used[6]);
+    try std.testing.expectEqual(@as(u32, 2), pool_object.used[1]);
+    var unpublished: usize = 0xfeed_face;
+    allocate.descriptor_set_count = 1;
+    allocate.set_layouts = @ptrCast(&layout);
+    try std.testing.expectEqual(Result.error_out_of_pool_memory, allocateDescriptorSets(ctx.device, &allocate, @ptrCast(&unpublished)));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), unpublished);
+
+    const duplicates = [_]usize{ sets[0], sets[0] };
+    try std.testing.expectEqual(Result.error_initialization_failed, freeDescriptorSets(ctx.device, pool, duplicates.len, &duplicates));
+    try std.testing.expect(validDescriptorSetLocked(sets[0]) != null);
+    try std.testing.expectEqual(Result.success, freeDescriptorSets(ctx.device, pool, 1, @ptrCast(&sets[0])));
+    try std.testing.expect(validDescriptorSetLocked(sets[0]) == null);
+    try std.testing.expectEqual(@as(u32, 1), pool_object.allocated_sets);
+    try std.testing.expectEqual(Result.success, allocateDescriptorSets(ctx.device, &allocate, @ptrCast(&unpublished)));
+    try std.testing.expectEqual(@as(u32, 2), pool_object.allocated_sets);
+    try std.testing.expectEqual(Result.success, resetDescriptorPool(ctx.device, pool, 0));
+    try std.testing.expectEqual(@as(u32, 0), pool_object.allocated_sets);
+    try std.testing.expect(std.mem.allEqual(u32, &pool_object.used, 0));
+    try std.testing.expect(validDescriptorSetLocked(sets[1]) == null);
+    try std.testing.expect(validDescriptorSetLocked(unpublished) == null);
+
+    test_allocations_before_failure = 0;
+    try std.testing.expectEqual(Result.error_out_of_host_memory, allocateDescriptorSets(ctx.device, &allocate, @ptrCast(&unpublished)));
+    test_allocations_before_failure = null;
+    try std.testing.expectEqual(@as(u32, 0), pool_object.allocated_sets);
+    try std.testing.expect(std.mem.allEqual(u32, &pool_object.used, 0));
+    try std.testing.expectEqual(Result.success, allocateDescriptorSets(ctx.device, &allocate, @ptrCast(&unpublished)));
+    destroyDescriptorPool(ctx.device, pool, null);
+    try std.testing.expect(validDescriptorSetLocked(unpublished) == null);
+    try std.testing.expectEqual(Result.error_initialization_failed, resetDescriptorPool(ctx.device, pool, 0));
+
+    var bad_sizes = sizes;
+    bad_sizes[1].descriptor_type = 6;
+    pool_info.pool_sizes = &bad_sizes;
+    var unchanged: usize = 0x1234;
+    try std.testing.expectEqual(Result.error_initialization_failed, createDescriptorPool(ctx.device, &pool_info, null, &unchanged));
+    try std.testing.expectEqual(@as(usize, 0x1234), unchanged);
+
+    const huge_binding = DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = 6, .descriptor_count = std.math.maxInt(u32), .stage_flags = 1, .immutable_samplers = null };
+    const huge_layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&huge_binding) };
+    var huge_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &huge_layout_info, null, &huge_layout));
+    const huge_size = DescriptorPoolSize{ .descriptor_type = 6, .descriptor_count = std.math.maxInt(u32) };
+    const huge_pool_info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 0, .max_sets = 2, .pool_size_count = 1, .pool_sizes = @ptrCast(&huge_size) };
+    var huge_pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorPool(ctx.device, &huge_pool_info, null, &huge_pool));
+    const huge_layouts = [_]usize{ huge_layout, huge_layout };
+    const huge_allocate = DescriptorSetAllocateInfo{ .s_type = 34, .p_next = null, .descriptor_pool = huge_pool, .descriptor_set_count = 2, .set_layouts = &huge_layouts };
+    var huge_outputs = [_]usize{ 0xaaaa, 0xbbbb };
+    try std.testing.expectEqual(Result.error_out_of_pool_memory, allocateDescriptorSets(ctx.device, &huge_allocate, &huge_outputs));
+    try std.testing.expectEqualSlices(usize, &.{ 0xaaaa, 0xbbbb }, &huge_outputs);
+    destroyDescriptorPool(ctx.device, huge_pool, null);
+    destroyDescriptorSetLayout(ctx.device, huge_layout, null);
+    destroyDescriptorSetLayout(ctx.device, layout, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "descriptor pool empty control operations are allocation free and bounded" {
+    const ctx = try createTestDeviceContext();
+    const info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 1, .max_sets = 1, .pool_size_count = 0, .pool_sizes = null };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorPool(ctx.device, &info, null, &pool));
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, freeDescriptorSets(ctx.device, pool, 0, null));
+        try std.testing.expectEqual(Result.success, resetDescriptorPool(ctx.device, pool, 0));
+    }
+    destroyDescriptorPool(ctx.device, pool, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "descriptor updates and binds are atomic and allocation free" {
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(WriteDescriptorSet));
+    const ctx = try createTestDeviceContext();
+    const binding = DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null };
+    const layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding) };
+    var set_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &layout_info, null, &set_layout));
+    const pipeline_layout_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&set_layout), .push_constant_range_count = 0, .push_constant_ranges = null };
+    var pipeline_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &pipeline_layout_info, null, &pipeline_layout));
+    const pool_size = DescriptorPoolSize{ .descriptor_type = 6, .descriptor_count = 1 };
+    const pool_info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 1, .max_sets = 1, .pool_size_count = 1, .pool_sizes = @ptrCast(&pool_size) };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorPool(ctx.device, &pool_info, null, &pool));
+    var set: usize = 0;
+    const allocate_info = DescriptorSetAllocateInfo{ .s_type = 34, .p_next = null, .descriptor_pool = pool, .descriptor_set_count = 1, .set_layouts = @ptrCast(&set_layout) };
+    try std.testing.expectEqual(Result.success, allocateDescriptorSets(ctx.device, &allocate_info, @ptrCast(&set)));
+    const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 64, .usage = 0x10, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &buffer));
+    const memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 64, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &memory_info, null, &memory));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, buffer, memory, 0));
+    const descriptor_buffer = DescriptorBufferInfo{ .buffer = buffer, .offset = 0, .range = 64 };
+    var descriptor_write = WriteDescriptorSet{ .s_type = 35, .p_next = null, .dst_set = set, .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 6, .image_info = null, .buffer_info = @ptrCast(&descriptor_buffer), .texel_buffer_view = null };
+    updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
+    const set_object = validDescriptorSetLocked(set).?;
+    try std.testing.expect(set_object.uniform != null);
+    try std.testing.expectEqual(@as(u64, 64), set_object.uniform_range);
+    const uniform_before = set_object.uniform;
+    const range_before = set_object.uniform_range;
+    descriptor_write.descriptor_count = 2;
+    updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
+    try std.testing.expectEqual(uniform_before, set_object.uniform);
+    try std.testing.expectEqual(range_before, set_object.uniform_range);
+    descriptor_write.descriptor_count = 1;
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..4096) |_| updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
+    const template_entry = DescriptorUpdateTemplateEntry{ .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 6, .offset = 0, .stride = @sizeOf(DescriptorBufferInfo) };
+    const template_info = DescriptorUpdateTemplateCreateInfo{ .s_type = 1000085000, .p_next = null, .flags = 0, .descriptor_update_entry_count = 1, .descriptor_update_entries = @ptrCast(&template_entry), .template_type = 0, .descriptor_set_layout = set_layout, .pipeline_bind_point = 0, .pipeline_layout = pipeline_layout, .set = 0 };
+    var template: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorUpdateTemplate(ctx.device, &template_info, null, &template));
+    updateDescriptorSetWithTemplate(ctx.device, set, template, &descriptor_buffer);
+    try std.testing.expectEqual(@as(u64, 64), validDescriptorSetLocked(set).?.uniform_range);
+    const template_uniform_before = validDescriptorSetLocked(set).?.uniform;
+    const template_offset_before = validDescriptorSetLocked(set).?.uniform_offset;
+    const template_range_before = validDescriptorSetLocked(set).?.uniform_range;
+    var invalid_template_descriptor = descriptor_buffer;
+    invalid_template_descriptor.buffer = 0xdead_beef;
+    updateDescriptorSetWithTemplate(ctx.device, set, template, &invalid_template_descriptor);
+    try std.testing.expectEqual(template_uniform_before, validDescriptorSetLocked(set).?.uniform);
+    try std.testing.expectEqual(template_offset_before, validDescriptorSetLocked(set).?.uniform_offset);
+    try std.testing.expectEqual(template_range_before, validDescriptorSetLocked(set).?.uniform_range);
+    updateDescriptorSetWithTemplate(ctx.device, set, template, null);
+    try std.testing.expectEqual(template_uniform_before, validDescriptorSetLocked(set).?.uniform);
+    for (0..4096) |_| updateDescriptorSetWithTemplate(ctx.device, set, template, &descriptor_buffer);
+    destroyDescriptorUpdateTemplate(ctx.device, template, null);
+    const command_pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var command_pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &command_pool_info, null, &command_pool));
+    const command_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = command_pool, .level = 0, .command_buffer_count = 1 };
+    var command: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &command_info, &command));
+    const begin_info = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin_info));
+    for (0..4096) |_| cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 0, null);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
+    freeCommandBuffers(ctx.device, command_pool, 1, &command);
+    destroyCommandPool(ctx.device, command_pool, null);
+    destroyDescriptorPool(ctx.device, pool, null);
+    destroyPipelineLayout(ctx.device, pipeline_layout, null);
+    destroyDescriptorSetLayout(ctx.device, set_layout, null);
+    destroyBuffer(ctx.device, buffer, null);
+    freeMemory(ctx.device, memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "dynamic uniform descriptors apply aligned per-bind offsets transactionally" {
+    const ctx = try createTestDeviceContext();
+    const binding = DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = 8, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null };
+    const layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding) };
+    var set_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &layout_info, null, &set_layout));
+    const pipeline_layout_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&set_layout), .push_constant_range_count = 0, .push_constant_ranges = null };
+    var pipeline_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &pipeline_layout_info, null, &pipeline_layout));
+    const pool_size = DescriptorPoolSize{ .descriptor_type = 8, .descriptor_count = 1 };
+    const pool_info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 1, .max_sets = 1, .pool_size_count = 1, .pool_sizes = @ptrCast(&pool_size) };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorPool(ctx.device, &pool_info, null, &pool));
+    var set: usize = 0;
+    const allocate_info = DescriptorSetAllocateInfo{ .s_type = 34, .p_next = null, .descriptor_pool = pool, .descriptor_set_count = 1, .set_layouts = @ptrCast(&set_layout) };
+    try std.testing.expectEqual(Result.success, allocateDescriptorSets(ctx.device, &allocate_info, @ptrCast(&set)));
+    const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 1024, .usage = 0x10, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &buffer));
+    const memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 1024, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &memory_info, null, &memory));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, buffer, memory, 0));
+    var descriptor = DescriptorBufferInfo{ .buffer = buffer, .offset = 0, .range = 256 };
+    var descriptor_write = WriteDescriptorSet{ .s_type = 35, .p_next = null, .dst_set = set, .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 8, .image_info = null, .buffer_info = @ptrCast(&descriptor), .texel_buffer_view = null };
+    updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
+    const set_object = validDescriptorSetLocked(set).?;
+    try std.testing.expect(set_object.uniform_dynamic);
+    try std.testing.expectEqual(@as(u64, 0), set_object.uniform_offset);
+    descriptor.offset = 4;
+    updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
+    try std.testing.expectEqual(@as(u64, 0), set_object.uniform_offset);
+    descriptor.offset = 0;
+    const template_entry = DescriptorUpdateTemplateEntry{ .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 8, .offset = 0, .stride = @sizeOf(DescriptorBufferInfo) };
+    const template_info = DescriptorUpdateTemplateCreateInfo{ .s_type = 1000085000, .p_next = null, .flags = 0, .descriptor_update_entry_count = 1, .descriptor_update_entries = @ptrCast(&template_entry), .template_type = 0, .descriptor_set_layout = set_layout, .pipeline_bind_point = 0, .pipeline_layout = pipeline_layout, .set = 0 };
+    var template: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorUpdateTemplate(ctx.device, &template_info, null, &template));
+    descriptor.offset = 256;
+    updateDescriptorSetWithTemplate(ctx.device, set, template, &descriptor);
+    try std.testing.expectEqual(@as(u64, 256), set_object.uniform_offset);
+    descriptor.offset = 0;
+    updateDescriptorSetWithTemplate(ctx.device, set, template, &descriptor);
+    try std.testing.expectEqual(@as(u64, 0), set_object.uniform_offset);
+
+    const command_pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var command_pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &command_pool_info, null, &command_pool));
+    const command_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = command_pool, .level = 0, .command_buffer_count = 1 };
+    var command: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &command_info, &command));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    var dynamic_offset: u32 = 256;
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 0, null);
+    try std.testing.expect(command[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 1, null);
+    try std.testing.expect(command[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    dynamic_offset = 4;
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 1, @ptrCast(&dynamic_offset));
+    try std.testing.expect(command[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    dynamic_offset = 256;
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 1, @ptrCast(&dynamic_offset));
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(@as(u64, 256), command[0].impl.dynamic_uniform_offset);
+    const snapshot = snapshotDescriptorSet(command[0], set_object).?;
+    try std.testing.expectEqual(@as(u64, 256), snapshot.uniform_offset);
+    try std.testing.expect(!snapshot.uniform_dynamic);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    const bind2 = BindDescriptorSetsInfo{ .s_type = 1000545003, .p_next = null, .stage_flags = 1, .layout = pipeline_layout, .first_set = 0, .descriptor_set_count = 1, .descriptor_sets = @ptrCast(&set), .dynamic_offset_count = 1, .dynamic_offsets = @ptrCast(&dynamic_offset) };
+    cmdBindDescriptorSets2(command[0], &bind2);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(@as(u64, 256), command[0].impl.dynamic_uniform_offset);
+    var unsupported_bind2 = bind2;
+    unsupported_bind2.stage_flags = 0x40;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdBindDescriptorSets2(command[0], &unsupported_bind2);
+    try std.testing.expect(command[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..4096) |_| {
+        cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 1, @ptrCast(&dynamic_offset));
+        try std.testing.expect(!command[0].impl.invalid);
+        cmdBindDescriptorSets2(command[0], &bind2);
+        try std.testing.expect(!command[0].impl.invalid);
+    }
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
+    freeCommandBuffers(ctx.device, command_pool, 1, &command);
+    destroyCommandPool(ctx.device, command_pool, null);
+    destroyDescriptorUpdateTemplate(ctx.device, template, null);
+    destroyDescriptorPool(ctx.device, pool, null);
+    destroyPipelineLayout(ctx.device, pipeline_layout, null);
+    destroyDescriptorSetLayout(ctx.device, set_layout, null);
+    destroyBuffer(ctx.device, buffer, null);
+    freeMemory(ctx.device, memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "push descriptors own layout state, template decoding, rollback, and warm path" {
+    const ctx = try createTestDeviceContext();
+    const binding = DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null };
+    const push_layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 1, .binding_count = 1, .bindings = @ptrCast(&binding) };
+    var push_set_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &push_layout_info, null, &push_set_layout));
+    try std.testing.expectEqual(@as(u32, 1), validDescriptorSetLayoutLocked(push_set_layout).?.flags);
+
+    var unsupported_layout = push_layout_info;
+    unsupported_layout.flags = 2;
+    var unpublished_layout: usize = 0xfeed_face;
+    try std.testing.expectEqual(Result.error_initialization_failed, createDescriptorSetLayout(ctx.device, &unsupported_layout, null, &unpublished_layout));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), unpublished_layout);
+
+    const pipeline_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&push_set_layout), .push_constant_range_count = 0, .push_constant_ranges = null };
+    var pipeline_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &pipeline_info, null, &pipeline_layout));
+    try std.testing.expect(validPipelineLayoutLocked(pipeline_layout).?.push_descriptor);
+
+    const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 64, .usage = 0x10, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &buffer));
+    const memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 64, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &memory_info, null, &memory));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, buffer, memory, 0));
+    const descriptor_buffer = DescriptorBufferInfo{ .buffer = buffer, .offset = 4, .range = 32 };
+    var descriptor_write = WriteDescriptorSet{ .s_type = 35, .p_next = null, .dst_set = 0, .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 6, .image_info = null, .buffer_info = @ptrCast(&descriptor_buffer), .texel_buffer_view = null };
+
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    const allocate_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var command: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate_info, &command));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+
+    cmdPushDescriptorSet(command[0], 0, pipeline_layout, 0, 0, null);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expect(command[0].impl.push_descriptor_active);
+    try std.testing.expect(command[0].impl.bound_descriptors == null);
+    try std.testing.expectEqual(pipeline_layout, command[0].impl.bound_layout_handle);
+
+    cmdPushDescriptorSet(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&descriptor_write));
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(@as(u64, 4), command[0].impl.push_descriptor.uniform_offset);
+    try std.testing.expectEqual(@as(u64, 32), command[0].impl.push_descriptor.uniform_range);
+    try std.testing.expectEqual(validBufferLocked(buffer).?, command[0].impl.push_descriptor.uniform.?);
+
+    const uniform_before = command[0].impl.push_descriptor.uniform;
+    const range_before = command[0].impl.push_descriptor.uniform_range;
+    descriptor_write.descriptor_count = 2;
+    cmdPushDescriptorSet(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&descriptor_write));
+    try std.testing.expect(command[0].impl.invalid);
+    try std.testing.expectEqual(uniform_before, command[0].impl.push_descriptor.uniform);
+    try std.testing.expectEqual(range_before, command[0].impl.push_descriptor.uniform_range);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    descriptor_write.descriptor_count = 1;
+    const template_entry = DescriptorUpdateTemplateEntry{ .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 6, .offset = 0, .stride = @sizeOf(DescriptorBufferInfo) };
+    const template_info = DescriptorUpdateTemplateCreateInfo{ .s_type = 1000085000, .p_next = null, .flags = 0, .descriptor_update_entry_count = 1, .descriptor_update_entries = @ptrCast(&template_entry), .template_type = 0, .descriptor_set_layout = push_set_layout, .pipeline_bind_point = 0, .pipeline_layout = pipeline_layout, .set = 0 };
+    var descriptor_template: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorUpdateTemplate(ctx.device, &template_info, null, &descriptor_template));
+    cmdPushDescriptorSetWithTemplate(command[0], descriptor_template, 0, pipeline_layout, 0, &descriptor_buffer);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(@as(u64, 4), command[0].impl.push_descriptor.uniform_offset);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    const push2 = PushDescriptorSetInfo{ .s_type = 1000545005, .p_next = null, .stage_flags = 1, .layout = pipeline_layout, .set = 0, .descriptor_write_count = 1, .descriptor_writes = @ptrCast(&descriptor_write) };
+    var unsupported_push2 = push2;
+    unsupported_push2.stage_flags = 0x40;
+    cmdPushDescriptorSet2(command[0], &unsupported_push2);
+    try std.testing.expect(command[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdPushDescriptorSet2(command[0], &push2);
+    try std.testing.expect(!command[0].impl.invalid);
+    const template2 = PushDescriptorSetWithTemplateInfo{ .s_type = 1000545006, .p_next = null, .descriptor_update_template = descriptor_template, .layout = pipeline_layout, .set = 0, .data = @ptrCast(&descriptor_buffer) };
+    cmdPushDescriptorSetWithTemplate2(command[0], &template2);
+    try std.testing.expect(!command[0].impl.invalid);
+
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..4096) |_| {
+        cmdPushDescriptorSet(command[0], 0, pipeline_layout, 0, 0, null);
+        try std.testing.expect(!command[0].impl.invalid);
+    }
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
+
+    destroyDescriptorUpdateTemplate(ctx.device, descriptor_template, null);
+    freeCommandBuffers(ctx.device, pool, 1, &command);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyBuffer(ctx.device, buffer, null);
+    freeMemory(ctx.device, memory, null);
+    destroyPipelineLayout(ctx.device, pipeline_layout, null);
+    destroyDescriptorSetLayout(ctx.device, push_set_layout, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "descriptor pool registry exhaustion preserves the output handle" {
+    const ctx = try createTestDeviceContext();
+    const info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 0, .max_sets = 1, .pool_size_count = 0, .pool_sizes = null };
+    var handles: [max_child_objects]usize = undefined;
+    var count: usize = 0;
+    while (count < handles.len) : (count += 1) {
+        const result = createDescriptorPool(ctx.device, &info, null, &handles[count]);
+        if (result == .error_out_of_host_memory) break;
+        try std.testing.expectEqual(Result.success, result);
+    }
+    try std.testing.expect(count < handles.len);
+    var unpublished: usize = 0xfeed_face;
+    try std.testing.expectEqual(Result.error_out_of_host_memory, createDescriptorPool(ctx.device, &info, null, &unpublished));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), unpublished);
+    for (handles[0..count]) |pool| destroyDescriptorPool(ctx.device, pool, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+const EventWaitSubmitContext = struct { queue: Queue, submit: *const SubmitInfo, started: *std.atomic.Value(bool), result: *Result };
+fn submitEventWait(context: *const EventWaitSubmitContext) void {
+    context.started.store(true, .release);
+    context.result.* = queueSubmit(context.queue, 1, @ptrCast(context.submit), 0);
+}
+
+test "vertex and index bindings are typed atomic lifecycle state and allocation free" {
+    const ctx = try createTestDeviceContext();
+    const memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 196, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &memory_info, null, &memory));
+    const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 64, .usage = 0x40 | 0x80, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var buffers: [2]usize = undefined;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &buffers[0]));
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &buffers[1]));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, buffers[0], memory, 0));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, buffers[1], memory, 64));
+    var transfer_info = buffer_info;
+    transfer_info.usage = 2;
+    var transfer_buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &transfer_info, null, &transfer_buffer));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, transfer_buffer, memory, 128));
+    var tail_info = buffer_info;
+    tail_info.size = 3;
+    tail_info.usage = 0x40;
+    var tail_buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &tail_info, null, &tail_buffer));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, tail_buffer, memory, 192));
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    const allocate = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &commands));
+    var secondary_allocate = allocate;
+    secondary_allocate.level = 1;
+    var secondary: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &secondary_allocate, &secondary));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    const inheritance = CommandBufferInheritanceInfo{ .s_type = 41, .p_next = null, .render_pass = 0, .subpass = 0, .framebuffer = 0, .occlusion_query_enable = 0, .query_flags = 0, .pipeline_statistics = 0 };
+    const secondary_begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = &inheritance };
+    const offsets = [_]u64{ 4, 8 };
+
+    cmdBindIndexBuffer(commands[0], buffers[0], 0, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBindIndexBuffer(commands[0], 0, 0, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBindIndexBuffer(commands[0], buffers[0], 2, 1);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBindIndexBuffer(commands[0], buffers[0], 0, 2);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBindIndexBuffer(commands[0], transfer_buffer, 0, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBindVertexBuffers(commands[0], 0, 0, &buffers, &offsets);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBindVertexBuffers(commands[0], 15, 2, &buffers, &offsets);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    const stale_handles = [_]usize{ buffers[0], 0 };
+    cmdBindVertexBuffers(commands[0], 0, 2, &stale_handles, &offsets);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+
+    cmdBindIndexBuffer(commands[0], tail_buffer, 2, 0);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(tail_buffer, commands[0].impl.index_buffer_handle);
+    try std.testing.expectEqual(@as(u64, 2), commands[0].impl.index_offset);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+
+    cmdBindIndexBuffer(commands[0], buffers[1], 4, 1);
+    cmdBindVertexBuffers(commands[0], 2, 2, &buffers, &offsets);
+    try std.testing.expect(commands[0].impl.index_buffer_set);
+    try std.testing.expectEqual(buffers[1], commands[0].impl.index_buffer_handle);
+    try std.testing.expectEqual(@as(u64, 4), commands[0].impl.index_offset);
+    try std.testing.expectEqual(@as(u64, 60), commands[0].impl.index_size);
+    try std.testing.expectEqual(@as(i32, 1), commands[0].impl.index_type);
+    try std.testing.expectEqual(@as(u16, 0x000c), commands[0].impl.vertex_bindings.set);
+    try std.testing.expectEqual([2]usize{ buffers[0], buffers[1] }, commands[0].impl.vertex_bindings.handles[2..4].*);
+    try std.testing.expectEqual([2]u64{ 4, 8 }, commands[0].impl.vertex_bindings.offsets[2..4].*);
+    try std.testing.expectEqual([2]u64{ 60, 56 }, commands[0].impl.vertex_bindings.sizes[2..4].*);
+    try std.testing.expectEqual([2]u64{ 0, 0 }, commands[0].impl.vertex_bindings.strides[2..4].*);
+    const invalid_handles = [_]usize{ buffers[1], transfer_buffer };
+    const before_handles = commands[0].impl.vertex_bindings.handles;
+    cmdBindVertexBuffers(commands[0], 2, 2, &invalid_handles, &offsets);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_handles, commands[0].impl.vertex_bindings.handles);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    const bounded_sizes = [_]u64{ 16, 24 };
+    const bounded_strides = [_]u64{ 8, 16 };
+    cmdBindVertexBuffers2(commands[0], 2, 2, &buffers, &offsets, &bounded_sizes, &bounded_strides);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual([2]u64{ 16, 24 }, commands[0].impl.vertex_bindings.sizes[2..4].*);
+    try std.testing.expectEqual([2]u64{ 8, 16 }, commands[0].impl.vertex_bindings.strides[2..4].*);
+    const before_bounded = commands[0].impl.vertex_bindings;
+    const oversized = [_]u64{ 61, 24 };
+    cmdBindVertexBuffers2(commands[0], 2, 2, &buffers, &offsets, &oversized, &bounded_strides);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_bounded.sizes, commands[0].impl.vertex_bindings.sizes);
+    try std.testing.expectEqual(before_bounded.strides, commands[0].impl.vertex_bindings.strides);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBindIndexBuffer2(commands[0], buffers[1], 4, 8, 1);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(@as(u64, 8), commands[0].impl.index_size);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBindIndexBuffer2(commands[0], buffers[1], 4, 61, 1);
+    try std.testing.expect(commands[0].impl.invalid);
+
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+        cmdBindIndexBuffer(commands[0], buffers[0], 0, 0);
+        cmdBindVertexBuffers(commands[0], 0, 2, &buffers, &offsets);
+        try std.testing.expect(!commands[0].impl.invalid);
+        try std.testing.expectEqual(@as(u16, 3), commands[0].impl.vertex_bindings.set);
+        try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    }
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expect(!commands[0].impl.index_buffer_set);
+    try std.testing.expectEqual(@as(u16, 0), commands[0].impl.vertex_bindings.set);
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(secondary[0], &secondary_begin));
+    cmdBindIndexBuffer(secondary[0], buffers[0], 0, 0);
+    cmdBindVertexBuffers(secondary[0], 0, 2, &buffers, &offsets);
+    try std.testing.expect(secondary[0].impl.index_buffer_set);
+    try std.testing.expectEqual(@as(u16, 3), secondary[0].impl.vertex_bindings.set);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(secondary[0]));
+    freeCommandBuffers(ctx.device, pool, 1, &secondary);
+    freeCommandBuffers(ctx.device, pool, 1, &commands);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyBuffer(ctx.device, tail_buffer, null);
+    destroyBuffer(ctx.device, transfer_buffer, null);
+    destroyBuffer(ctx.device, buffers[1], null);
+    destroyBuffer(ctx.device, buffers[0], null);
+    freeMemory(ctx.device, memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "push constants preserve per-stage bytes across partial updates and record allocation free" {
+    const ctx = try createTestDeviceContext();
+    const set_layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 0, .bindings = null };
+    var set_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &set_layout_info, null, &set_layout));
+    const range = PushConstantRange{ .stage_flags = 0x7fff_ffff, .offset = 0, .size = 128 };
+    const layout_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&set_layout), .push_constant_range_count = 1, .push_constant_ranges = @ptrCast(&range) };
+    var layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &layout_info, null, &layout));
+    const narrow_range = PushConstantRange{ .stage_flags = 1, .offset = 32, .size = 16 };
+    var narrow_layout_info = layout_info;
+    narrow_layout_info.push_constant_ranges = @ptrCast(&narrow_range);
+    var narrow_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &narrow_layout_info, null, &narrow_layout));
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    var allocate = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var primary: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &primary));
+    allocate.level = 1;
+    var secondary: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &secondary));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    const inheritance = CommandBufferInheritanceInfo{ .s_type = 41, .p_next = null, .render_pass = 0, .subpass = 0, .framebuffer = 0, .occlusion_query_enable = 0, .query_flags = 0, .pipeline_statistics = 0 };
+    const secondary_begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = &inheritance };
+    var source: [33]u8 = undefined;
+    for (&source, 0..) |*byte, index| byte.* = @intCast(index * 7 + 3);
+
+    cmdPushConstants(primary[0], layout, 1, 0, 4, &source);
+    try std.testing.expect(primary[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &begin));
+    cmdPushConstants(primary[0], 0, 1, 0, 4, &source);
+    try std.testing.expect(primary[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &begin));
+    cmdPushConstants(primary[0], layout, 0, 0, 4, &source);
+    try std.testing.expect(primary[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &begin));
+    cmdPushConstants(primary[0], layout, 0x40, 0, 4, &source);
+    try std.testing.expect(primary[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &begin));
+    cmdPushConstants(primary[0], layout, 1, 2, 4, &source);
+    try std.testing.expect(primary[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &begin));
+    cmdPushConstants(primary[0], layout, 1, 124, 8, &source);
+    try std.testing.expect(primary[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &begin));
+    cmdPushConstants(primary[0], layout, 1, 0, 4, null);
+    try std.testing.expect(primary[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &begin));
+    cmdPushConstants(primary[0], narrow_layout, 16, 32, 4, &source);
+    try std.testing.expect(primary[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &begin));
+    cmdPushConstants(primary[0], narrow_layout, 1, 48, 4, &source);
+    try std.testing.expect(primary[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &begin));
+
+    cmdPushConstants(primary[0], layout, 1 | 16, 32, 16, @ptrCast(&source[1]));
+    try std.testing.expect(!primary[0].impl.invalid);
+    try std.testing.expectEqualSlices(u8, source[1..17], primary[0].impl.push_constants.values[0][32..48]);
+    try std.testing.expectEqualSlices(u8, source[1..17], primary[0].impl.push_constants.values[4][32..48]);
+    const replacement = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+    cmdPushConstants(primary[0], layout, 1, 36, 4, &replacement);
+    try std.testing.expectEqualSlices(u8, &replacement, primary[0].impl.push_constants.values[0][36..40]);
+    try std.testing.expectEqualSlices(u8, source[5..9], primary[0].impl.push_constants.values[4][36..40]);
+    try std.testing.expectEqual(@as(u64, 0x0000_ffff_0000_0000), primary[0].impl.push_constants.initialized[0][0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(primary[0]));
+
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(secondary[0], &secondary_begin));
+    cmdPushConstants(secondary[0], layout, 32, 120, 8, @ptrCast(&source[1]));
+    try std.testing.expectEqualSlices(u8, source[1..9], secondary[0].impl.push_constants.values[5][120..128]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(secondary[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(secondary[0], 0));
+    try std.testing.expectEqual([2]u64{ 0, 0 }, secondary[0].impl.push_constants.initialized[5]);
+
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &begin));
+        cmdPushConstants(primary[0], layout, 0x7fff_ffff, 0, 32, @ptrCast(&source[1]));
+        try std.testing.expect(!primary[0].impl.invalid);
+        inline for (0..core_shader_stage_bits.len) |stage_index| {
+            try std.testing.expectEqualSlices(u8, source[1..33], primary[0].impl.push_constants.values[stage_index][0..32]);
+            try std.testing.expectEqual(@as(u64, 0xffff_ffff), primary[0].impl.push_constants.initialized[stage_index][0]);
+        }
+        try std.testing.expectEqual(Result.success, endCommandBuffer(primary[0]));
+    }
+    destroyPipelineLayout(ctx.device, layout, null);
+    destroyPipelineLayout(ctx.device, narrow_layout, null);
+    freeCommandBuffers(ctx.device, pool, 1, &secondary);
+    freeCommandBuffers(ctx.device, pool, 1, &primary);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyDescriptorSetLayout(ctx.device, set_layout, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "core dynamic scalar blend depth and stencil states are exact and allocation free" {
+    const ctx = try createTestDeviceContext();
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    const allocate = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &commands));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    cmdSetLineWidth(commands[0], 1);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdSetLineWidth(commands[0], 2);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdSetLineWidth(commands[0], std.math.nan(f32));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdSetBlendConstants(commands[0], null);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdSetDepthBias(commands[0], 1, 0.25, 1);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdSetDepthBounds(commands[0], -0.1, 1);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdSetDepthBounds(commands[0], 0.75, 0.25);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdSetDepthBounds(commands[0], 0, std.math.nan(f32));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdSetStencilCompareMask(commands[0], 0, 1);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdSetStencilWriteMask(commands[0], 4, 1);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    const nan_blend = [_]f32{ @bitCast(@as(u32, 0x7fc0_1234)), -0.0, std.math.inf(f32), -std.math.inf(f32) };
+    cmdSetBlendConstants(commands[0], &nan_blend);
+    for (nan_blend, commands[0].impl.blend_constants) |expected, actual| try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(actual)));
+    const nan_bias = [_]f32{ @bitCast(@as(u32, 0x7fc0_5678)), -0.0, std.math.inf(f32) };
+    cmdSetDepthBias(commands[0], nan_bias[0], nan_bias[1], nan_bias[2]);
+    for (nan_bias, commands[0].impl.depth_bias) |expected, actual| try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(actual)));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    const blend = [_]f32{ 0.125, 0.25, 0.5, 1 };
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+        const dynamic_viewport = Viewport{ .x = 0, .y = 0, .width = 4, .height = 4, .min_depth = 0, .max_depth = 1 };
+        const dynamic_scissor = Rect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 4, .height = 4 } };
+        cmdSetCullMode(commands[0], 3);
+        cmdSetFrontFace(commands[0], 1);
+        cmdSetPrimitiveTopology(commands[0], 3);
+        cmdSetPrimitiveRestartEnable(commands[0], 0);
+        cmdSetRasterizerDiscardEnable(commands[0], 0);
+        cmdSetDepthBiasEnable(commands[0], 0);
+        cmdSetDepthTestEnable(commands[0], 1);
+        cmdSetDepthWriteEnable(commands[0], 1);
+        cmdSetDepthCompareOp(commands[0], 3);
+        cmdSetDepthBoundsTestEnable(commands[0], 0);
+        cmdSetStencilTestEnable(commands[0], 0);
+        cmdSetStencilOp(commands[0], 3, 0, 0, 0, 7);
+        cmdSetViewportWithCount(commands[0], 1, &dynamic_viewport);
+        cmdSetScissorWithCount(commands[0], 1, &dynamic_scissor);
+        cmdSetLineWidth(commands[0], 1);
+        cmdSetBlendConstants(commands[0], &blend);
+        cmdSetDepthBias(commands[0], 1.25, 0, -2.5);
+        cmdSetDepthBounds(commands[0], 0.25, 0.75);
+        cmdSetStencilCompareMask(commands[0], 1, 0x1111_1111);
+        cmdSetStencilCompareMask(commands[0], 2, 0x2222_2222);
+        cmdSetStencilWriteMask(commands[0], 3, 0x3333_3333);
+        cmdSetStencilReference(commands[0], 3, 0x4444_4444);
+        try std.testing.expectEqual(@as(f32, 1), commands[0].impl.line_width);
+        try std.testing.expect(commands[0].impl.line_width_set);
+        try std.testing.expectEqual(blend, commands[0].impl.blend_constants);
+        try std.testing.expectEqual([3]f32{ 1.25, 0, -2.5 }, commands[0].impl.depth_bias);
+        try std.testing.expectEqual([2]f32{ 0.25, 0.75 }, commands[0].impl.depth_bounds);
+        try std.testing.expectEqual([2]u32{ 0x1111_1111, 0x2222_2222 }, commands[0].impl.stencil_compare_mask);
+        try std.testing.expectEqual(@as(u2, 3), commands[0].impl.stencil_compare_mask_set);
+        try std.testing.expectEqual([2]u32{ 0x3333_3333, 0x3333_3333 }, commands[0].impl.stencil_write_mask);
+        try std.testing.expectEqual([2]u32{ 0x4444_4444, 0x4444_4444 }, commands[0].impl.stencil_reference);
+        try std.testing.expectEqual(@as(u32, 3), commands[0].impl.dynamic.cull_mode);
+        try std.testing.expectEqual(@as(i32, 1), commands[0].impl.dynamic.front_face);
+        try std.testing.expectEqual(@as(i32, 3), commands[0].impl.dynamic.primitive_topology);
+        try std.testing.expectEqual(@as(u32, 1), commands[0].impl.dynamic.depth_test_enable);
+        try std.testing.expectEqual(@as(i32, 7), commands[0].impl.dynamic.stencil_compare_op);
+        try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+        try std.testing.expect(!commands[0].impl.line_width_set);
+        try std.testing.expect(!commands[0].impl.blend_constants_set);
+        try std.testing.expect(!commands[0].impl.depth_bias_set);
+        try std.testing.expect(!commands[0].impl.depth_bounds_set);
+        try std.testing.expectEqual(@as(u2, 0), commands[0].impl.stencil_compare_mask_set);
+        try std.testing.expectEqual(@as(u2, 0), commands[0].impl.stencil_write_mask_set);
+        try std.testing.expectEqual(@as(u2, 0), commands[0].impl.stencil_reference_set);
+        try std.testing.expectEqual(std.math.maxInt(u32), commands[0].impl.dynamic.cull_mode);
+        try std.testing.expectEqual(@as(i32, -1), commands[0].impl.dynamic.front_face);
+    }
+    freeCommandBuffers(ctx.device, pool, 1, &commands);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "depth stencil image clear uses exact D32 depth semantics" {
+    const ctx = try createTestDeviceContext();
+    const memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 16, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &memory_info, null, &memory));
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 126, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x22, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &image));
+    try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, image, memory, 0));
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    const allocate = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &commands));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    const range = ImageSubresourceRange{ .aspect_mask = 2, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    const barrier = ImageMemoryBarrier{ .s_type = 45, .p_next = null, .src_access_mask = 0, .dst_access_mask = 0x1000, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = range };
+    const value = ClearDepthStencilValue{ .depth = 0.25, .stencil = 0xffff_ffff };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdPipelineBarrier(commands[0], 1, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&barrier));
+    cmdClearDepthStencilImage(commands[0], image, 1, &value, 1, @ptrCast(&range));
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    var mapped: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memory, 0, 16, 0, &mapped));
+    const depths: []const f32 = @alignCast(std.mem.bytesAsSlice(f32, @as([*]const u8, @ptrCast(mapped.?))[0..16]));
+    for (depths) |depth| try std.testing.expectEqual(@as(f32, 0.25), depth);
+    unmapMemory(ctx.device, memory);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    const invalid_value = ClearDepthStencilValue{ .depth = 1.5, .stencil = 0 };
+    cmdClearDepthStencilImage(commands[0], image, 1, &invalid_value, 1, @ptrCast(&range));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdClearDepthStencilImage(commands[0], image, 1, &value, 0, null);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdClearDepthStencilImage(commands[0], 8, 1, &value, 1, @ptrCast(&range));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    const color_range = ImageSubresourceRange{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    cmdClearDepthStencilImage(commands[0], image, 1, &value, 1, @ptrCast(&color_range));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    var mismatched_layouts = [_]i32{0} ** max_child_objects;
+    const live_image: *ImageObj = @ptrFromInt(image);
+    try std.testing.expect(!prevalidateCommand(.{ .clear_depth = .{ .image = live_image, .layout = 1, .depth = value.depth } }, ctx.device, &mismatched_layouts));
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+        cmdClearDepthStencilImage(commands[0], image, 1, &value, 1, @ptrCast(&range));
+        try std.testing.expectEqual(@as(u16, 1), commands[0].impl.count);
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    }
+    test_allocations_before_failure = null;
+
+    freeCommandBuffers(ctx.device, pool, 1, &commands);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyImage(ctx.device, image, null);
+    freeMemory(ctx.device, memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "secondary command buffers inherit lifetime and execute in exact primary order" {
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(CommandBufferInheritanceInfo));
+    try std.testing.expectEqual(@as(usize, 8), @alignOf(CommandBufferInheritanceInfo));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(CommandBufferInheritanceInfo, "framebuffer"));
+    const ctx = try createTestDeviceContext();
+    const memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 64, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &memory_info, null, &memory));
+    const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 64, .usage = 2, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &buffer));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, buffer, memory, 0));
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    var allocate = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var primary: [1]CommandBuffer = undefined;
+    var secondary: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &primary));
+    allocate.level = 1;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &secondary));
+    const inheritance = CommandBufferInheritanceInfo{ .s_type = 41, .p_next = null, .render_pass = 0, .subpass = 0, .framebuffer = 0, .occlusion_query_enable = 0, .query_flags = 0, .pipeline_statistics = 0 };
+    var secondary_begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = &inheritance };
+    const primary_begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(secondary[0], &secondary_begin));
+    cmdFillBuffer(secondary[0], buffer, 0, 64, 0x01020304);
+    var update = [_]u8{ 9, 8, 7, 6 };
+    cmdUpdateBuffer(secondary[0], buffer, 8, update.len, &update);
+    @memset(&update, 0xff);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(secondary[0]));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &primary_begin));
+    cmdExecuteCommands(primary[0], 1, &secondary);
+    try std.testing.expectEqual(@as(u16, 2), primary[0].impl.count);
+    try std.testing.expectEqual(@as(u16, 1), secondary[0].impl.primary_ref_count);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(primary[0]));
+    const direct_secondary_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &secondary, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&direct_secondary_submit), 0));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &primary, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    var mapped: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memory, 0, 64, 0, &mapped));
+    const bytes: [*]const u8 = @ptrCast(mapped.?);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 4, 3, 2, 1, 4, 3, 2, 1, 9, 8, 7, 6 }, bytes[0..12]);
+    unmapMemory(ctx.device, memory);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(secondary[0], 0));
+    try std.testing.expectEqual(@as(u8, 3), primary[0].impl.state);
+    try std.testing.expectEqual(@as(u16, 0), secondary[0].impl.primary_ref_count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
+
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(secondary[0], &secondary_begin));
+    cmdFillBuffer(secondary[0], buffer, 0, 4, 0x0a0b0c0d);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(secondary[0]));
+
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &primary_begin));
+    cmdExecuteCommands(primary[0], 0, null);
+    try std.testing.expect(primary[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &primary_begin));
+    const stale_secondary = [_]CommandBuffer{@ptrFromInt(@alignOf(CommandBufferObj))};
+    cmdExecuteCommands(primary[0], 1, &stale_secondary);
+    try std.testing.expect(primary[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &primary_begin));
+    cmdExecuteCommands(primary[0], 1, &primary);
+    try std.testing.expect(primary[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &primary_begin));
+    primary[0].impl.count = primary[0].impl.commands.len;
+    cmdExecuteCommands(primary[0], 1, &secondary);
+    try std.testing.expect(primary[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
+
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &primary_begin));
+    const duplicate = [_]CommandBuffer{ secondary[0], secondary[0] };
+    cmdExecuteCommands(primary[0], duplicate.len, &duplicate);
+    try std.testing.expect(primary[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
+
+    secondary_begin.flags = 4;
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(secondary[0], &secondary_begin));
+    cmdFillBuffer(secondary[0], buffer, 0, 4, 0xaabbccdd);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(secondary[0]));
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &primary_begin));
+        cmdExecuteCommands(primary[0], duplicate.len, &duplicate);
+        try std.testing.expectEqual(@as(u16, 2), primary[0].impl.count);
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
+        try std.testing.expectEqual(@as(u16, 0), secondary[0].impl.primary_ref_count);
+    }
+    test_allocations_before_failure = null;
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(secondary[0], 0));
+    secondary_begin.flags = 1;
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(secondary[0], &secondary_begin));
+    cmdFillBuffer(secondary[0], buffer, 0, 4, 0x10203040);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(secondary[0]));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &primary_begin));
+    cmdExecuteCommands(primary[0], 1, &secondary);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(primary[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(@as(u8, 3), secondary[0].impl.state);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(secondary[0], 0));
+    secondary_begin.flags = 0;
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(secondary[0], &secondary_begin));
+    cmdFillBuffer(secondary[0], buffer, 0, 4, 0x50607080);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(secondary[0]));
+    var one_time_primary_begin = primary_begin;
+    one_time_primary_begin.flags = 1;
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &one_time_primary_begin));
+    cmdExecuteCommands(primary[0], 1, &secondary);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(primary[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(@as(u8, 3), primary[0].impl.state);
+    try std.testing.expectEqual(@as(u16, 0), primary[0].impl.secondary_count);
+    try std.testing.expectEqual(@as(u16, 0), secondary[0].impl.primary_ref_count);
+    var invalid_primary_begin = primary_begin;
+    invalid_primary_begin.flags = 5;
+    try std.testing.expectEqual(Result.error_initialization_failed, beginCommandBuffer(primary[0], &invalid_primary_begin));
+
+    var bad_inheritance = inheritance;
+    bad_inheritance.query_flags = 1;
+    secondary_begin.inheritance_info = &bad_inheritance;
+    try std.testing.expectEqual(Result.error_initialization_failed, beginCommandBuffer(secondary[0], &secondary_begin));
+    secondary_begin.inheritance_info = null;
+    try std.testing.expectEqual(Result.error_initialization_failed, beginCommandBuffer(secondary[0], &secondary_begin));
+
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &primary_begin));
+    cmdExecuteCommands(primary[0], 1, &secondary);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(primary[0]));
+    freeCommandBuffers(ctx.device, pool, 1, &secondary);
+    try std.testing.expectEqual(@as(u8, 3), primary[0].impl.state);
+    try std.testing.expectEqual(@as(u16, 0), primary[0].impl.secondary_count);
+    freeCommandBuffers(ctx.device, pool, 1, &primary);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyBuffer(ctx.device, buffer, null);
+    freeMemory(ctx.device, memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "event waits release the registry lock and synchronize with host set" {
+    const ctx = try createTestDeviceContext();
+    const event_info = EventCreateInfo{ .s_type = 10, .p_next = null, .flags = 0 };
+    var event: usize = 0;
+    try std.testing.expectEqual(Result.success, createEvent(ctx.device, &event_info, null, &event));
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    const allocate = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var command_buffers: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &command_buffers));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command_buffers[0], &begin));
+    cmdWaitEvents(command_buffers[0], 1, @ptrCast(&event), 0x1000, 0x1000, 0, null, 0, null, 0, null);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command_buffers[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &command_buffers, .signal_semaphore_count = 0, .signal_semaphores = null };
+    var started = std.atomic.Value(bool).init(false);
+    var submit_result = Result.error_initialization_failed;
+    const event_object = validEventLocked(event).?;
+    const thread_context = EventWaitSubmitContext{ .queue = ctx.queue, .submit = &submit, .started = &started, .result = &submit_result };
+    const waiter = try std.Thread.spawn(.{}, submitEventWait, .{&thread_context});
+    while (!started.load(.acquire)) std.atomic.spinLoopHint();
+    while (event_object.waiters.load(.acquire) == 0) std.atomic.spinLoopHint();
+    try std.testing.expectEqual(Result.success, setEvent(ctx.device, event));
+    waiter.join();
+    try std.testing.expectEqual(Result.success, submit_result);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+        try std.testing.expectEqual(Result.success, queueWaitIdle(ctx.queue));
+        try std.testing.expectEqual(Result.success, deviceWaitIdle(ctx.device));
+    }
+    test_allocations_before_failure = null;
+
+    const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 16, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &buffer));
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 37, .extent = .{ .width = 1, .height = 1, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 1, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &image));
+    const memory_barrier = MemoryBarrier{ .s_type = 46, .p_next = null, .src_access_mask = 0, .dst_access_mask = 0x1800 };
+    const buffer_barrier = BufferMemoryBarrier{ .s_type = 44, .p_next = null, .src_access_mask = 0, .dst_access_mask = 0x1800, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .buffer = buffer, .offset = 0, .size = std.math.maxInt(u64) };
+    const image_barrier = ImageMemoryBarrier{ .s_type = 45, .p_next = null, .src_access_mask = 0, .dst_access_mask = 0x1800, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command_buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command_buffers[0], &begin));
+    cmdWaitEvents(command_buffers[0], 1, @ptrCast(&event), 0x1, 0x1000, 1, @ptrCast(&memory_barrier), 1, @ptrCast(&buffer_barrier), 1, @ptrCast(&image_barrier));
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command_buffers[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(@as(i32, 1), validImageLocked(image).?.layout);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command_buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command_buffers[0], &begin));
+    const stale_event: usize = 0xdead_beef;
+    cmdWaitEvents(command_buffers[0], 1, @ptrCast(&stale_event), 1, 0x1000, 0, null, 0, null, 0, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(command_buffers[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command_buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command_buffers[0], &begin));
+    const saved_event_owner = event_object.owner;
+    event_object.owner = @ptrFromInt(8);
+    cmdWaitEvents(command_buffers[0], 1, @ptrCast(&event), 1, 0x1000, 0, null, 0, null, 0, null);
+    event_object.owner = saved_event_owner;
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(command_buffers[0]));
+    var bad_memory_barrier = memory_barrier;
+    bad_memory_barrier.s_type = 0;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command_buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command_buffers[0], &begin));
+    cmdWaitEvents(command_buffers[0], 1, @ptrCast(&event), 1, 0x1000, 1, @ptrCast(&bad_memory_barrier), 0, null, 0, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(command_buffers[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command_buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command_buffers[0], &begin));
+    cmdWaitEvents(command_buffers[0], 1, @ptrCast(&event), 1, 0x1000, 0, null, 1, null, 0, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(command_buffers[0]));
+    var bad_buffer_barrier = buffer_barrier;
+    bad_buffer_barrier.buffer = 0xdead_beef;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command_buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command_buffers[0], &begin));
+    cmdWaitEvents(command_buffers[0], 1, @ptrCast(&event), 1, 0x1000, 0, null, 1, @ptrCast(&bad_buffer_barrier), 0, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(command_buffers[0]));
+    bad_buffer_barrier = buffer_barrier;
+    bad_buffer_barrier.size = 0;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command_buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command_buffers[0], &begin));
+    cmdWaitEvents(command_buffers[0], 1, @ptrCast(&event), 1, 0x1000, 0, null, 1, @ptrCast(&bad_buffer_barrier), 0, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(command_buffers[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command_buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command_buffers[0], &begin));
+    cmdWaitEvents(command_buffers[0], 1, @ptrCast(&event), 1, 0x1000, 0, null, 0, null, 1, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(command_buffers[0]));
+    var bad_image_barrier = image_barrier;
+    bad_image_barrier.image = 0xdead_beef;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command_buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command_buffers[0], &begin));
+    cmdWaitEvents(command_buffers[0], 1, @ptrCast(&event), 1, 0x1000, 0, null, 0, null, 1, @ptrCast(&bad_image_barrier));
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(command_buffers[0]));
+    bad_image_barrier = image_barrier;
+    bad_image_barrier.s_type = 0;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command_buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command_buffers[0], &begin));
+    cmdWaitEvents(command_buffers[0], 1, @ptrCast(&event), 1, 0x1000, 0, null, 0, null, 1, @ptrCast(&bad_image_barrier));
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(command_buffers[0]));
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command_buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command_buffers[0], &begin));
+    cmdWaitEvents(command_buffers[0], 1, @ptrCast(&event), 0, 0x1000, 0, null, 0, null, 0, null);
+    try std.testing.expect(command_buffers[0].impl.invalid);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(command_buffers[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command_buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command_buffers[0], &begin));
+    cmdWaitEvents(command_buffers[0], 1, @ptrCast(&event), 0x1000, 0x1000, 1, null, 0, null, 0, null);
+    try std.testing.expect(command_buffers[0].impl.invalid);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(command_buffers[0]));
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command_buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command_buffers[0], &begin));
+    cmdWaitEvents(command_buffers[0], 1, @ptrCast(&event), 0x1000, 0x1000, 0, null, 0, null, 0, null);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command_buffers[0]));
+    destroyEvent(ctx.device, event, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    destroyImage(ctx.device, image, null);
+    destroyBuffer(ctx.device, buffer, null);
+    freeCommandBuffers(ctx.device, pool, command_buffers.len, &command_buffers);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "query pools expose exact availability timestamps copies and lifecycle" {
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(QueryPoolCreateInfo));
+    const ctx = try createTestDeviceContext();
+    const occlusion_info = QueryPoolCreateInfo{ .s_type = 11, .p_next = null, .flags = 0, .query_type = 0, .query_count = 2, .pipeline_statistics = 0 };
+    const timestamp_info = QueryPoolCreateInfo{ .s_type = 11, .p_next = null, .flags = 0, .query_type = 2, .query_count = 2, .pipeline_statistics = 0 };
+    var occlusion_pool: usize = 0;
+    var timestamp_pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createQueryPool(ctx.device, &occlusion_info, null, &occlusion_pool));
+    try std.testing.expectEqual(Result.success, createQueryPool(ctx.device, &timestamp_info, null, &timestamp_pool));
+    var unavailable = [_]u64{ 0xaaaa, 0xbbbb };
+    try std.testing.expectEqual(Result.not_ready, getQueryPoolResults(ctx.device, occlusion_pool, 0, 1, @sizeOf(@TypeOf(unavailable)), &unavailable, 16, 1 | 4));
+    try std.testing.expectEqual(@as(u64, 0xaaaa), unavailable[0]);
+    try std.testing.expectEqual(@as(u64, 0), unavailable[1]);
+    var partial: u64 = 0xcccc;
+    try std.testing.expectEqual(Result.success, getQueryPoolResults(ctx.device, occlusion_pool, 0, 1, @sizeOf(u64), &partial, 8, 1 | 8));
+    try std.testing.expectEqual(@as(u64, 0), partial);
+    try std.testing.expectEqual(Result.error_initialization_failed, getQueryPoolResults(ctx.device, timestamp_pool, 0, 1, @sizeOf(u64), &partial, 8, 1 | 8));
+
+    const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 32, .usage = 2, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &buffer));
+    const memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 32, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &memory_info, null, &memory));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, buffer, memory, 0));
+    const command_pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var command_pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &command_pool_info, null, &command_pool));
+    const allocate = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = command_pool, .level = 0, .command_buffer_count = 1 };
+    var commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &commands));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdResetQueryPool(commands[0], timestamp_pool, 0, 2);
+    cmdWriteTimestamp(commands[0], 1, timestamp_pool, 0);
+    cmdWriteTimestamp(commands[0], 0x2000, timestamp_pool, 1);
+    cmdCopyQueryPoolResults(commands[0], timestamp_pool, 0, 2, buffer, 0, 16, 1 | 4);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    var timestamps = [_]u64{ 0, 0 };
+    try std.testing.expectEqual(Result.success, getQueryPoolResults(ctx.device, timestamp_pool, 0, 2, @sizeOf(@TypeOf(timestamps)), &timestamps, 8, 1 | 2));
+    try std.testing.expect(timestamps[0] != 0 and timestamps[1] >= timestamps[0]);
+    var mapped: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memory, 0, 32, 0, &mapped));
+    const copied: [*]const u64 = @ptrCast(@alignCast(mapped.?));
+    try std.testing.expectEqual(timestamps[0], copied[0]);
+    try std.testing.expectEqual(@as(u64, 1), copied[1]);
+    try std.testing.expectEqual(timestamps[1], copied[2]);
+    try std.testing.expectEqual(@as(u64, 1), copied[3]);
+    unmapMemory(ctx.device, memory);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| try std.testing.expectEqual(Result.success, getQueryPoolResults(ctx.device, timestamp_pool, 0, 2, @sizeOf(@TypeOf(timestamps)), &timestamps, 8, 1));
+    test_allocations_before_failure = null;
+    var timestamp32: u32 = 0;
+    try std.testing.expectEqual(Result.success, getQueryPoolResults(ctx.device, timestamp_pool, 0, 1, @sizeOf(u32), &timestamp32, 4, 0));
+    try std.testing.expect(timestamp32 != 0);
+    resetQueryPool(ctx.device, timestamp_pool, 0, 2);
+    try std.testing.expectEqual(Result.not_ready, getQueryPoolResults(ctx.device, timestamp_pool, 0, 1, @sizeOf(u64), &timestamps[0], 8, 1));
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdResetQueryPool(commands[0], 0xdead_beef, 0, 1);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBeginQuery(commands[0], occlusion_pool, 0, 0);
+    cmdResetQueryPool(commands[0], occlusion_pool, 0, 1);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBeginQuery(commands[0], 0xdead_beef, 0, 0);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBeginQuery(commands[0], occlusion_pool, 0, 1);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdEndQuery(commands[0], 0xdead_beef, 0);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdEndQuery(commands[0], occlusion_pool, 0);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdWriteTimestamp(commands[0], 1, 0xdead_beef, 0);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdWriteTimestamp(commands[0], 1, occlusion_pool, 0);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdCopyQueryPoolResults(commands[0], 0xdead_beef, 0, 1, buffer, 0, 8, 1);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdCopyQueryPoolResults(commands[0], timestamp_pool, 0, 1, 0xdead_beef, 0, 8, 1);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdCopyQueryPoolResults(commands[0], timestamp_pool, 0, 1, buffer, 0, 8, 0x10);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdWriteTimestamp(commands[0], 1, timestamp_pool, 0);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    destroyQueryPool(ctx.device, timestamp_pool, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    var bad_info = occlusion_info;
+    bad_info.query_type = 1;
+    var unpublished: usize = 0xfeed_face;
+    try std.testing.expectEqual(Result.error_feature_not_present, createQueryPool(ctx.device, &bad_info, null, &unpublished));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), unpublished);
+    test_allocations_before_failure = 0;
+    try std.testing.expectEqual(Result.error_out_of_host_memory, createQueryPool(ctx.device, &occlusion_info, null, &unpublished));
+    test_allocations_before_failure = null;
+    try std.testing.expectEqual(Result.error_initialization_failed, createQueryPool(@ptrFromInt(8), &occlusion_info, null, &unpublished));
+    destroyQueryPool(ctx.device, occlusion_pool, null);
+    freeCommandBuffers(ctx.device, command_pool, commands.len, &commands);
+    destroyCommandPool(ctx.device, command_pool, null);
+    destroyBuffer(ctx.device, buffer, null);
+    freeMemory(ctx.device, memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "query pool registry exhaustion preserves ownership and output" {
+    const ctx = try createTestDeviceContext();
+    const info = QueryPoolCreateInfo{ .s_type = 11, .p_next = null, .flags = 0, .query_type = 0, .query_count = 1, .pipeline_statistics = 0 };
+    var handles: [max_child_objects]usize = undefined;
+    var count: usize = 0;
+    while (count < handles.len) : (count += 1) {
+        const result = createQueryPool(ctx.device, &info, null, &handles[count]);
+        if (result == .error_out_of_host_memory) break;
+        try std.testing.expectEqual(Result.success, result);
+    }
+    try std.testing.expect(count < handles.len);
+    var unpublished: usize = 0xfeed_face;
+    try std.testing.expectEqual(Result.error_out_of_host_memory, createQueryPool(ctx.device, &info, null, &unpublished));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), unpublished);
+    for (handles[0..count]) |pool| destroyQueryPool(ctx.device, pool, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+const FenceWaitContext = struct { device: Device, handles: *const [2]usize, done: *std.atomic.Value(bool), result: *Result };
+fn waitForTwoFences(context: *const FenceWaitContext) void {
+    context.result.* = waitForFences(context.device, 2, context.handles, 1, std.math.maxInt(u64));
+    context.done.store(true, .release);
+}
+
+test "fence waits honor wait-all wait-any deadlines and cross-thread signaling" {
+    const ctx = try createTestDeviceContext();
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(ExportFenceCreateInfo));
+    const info = FenceCreateInfo{ .s_type = 8, .p_next = null, .flags = 0 };
+    var fences: [2]usize = undefined;
+    for (&fences) |*fence| try std.testing.expectEqual(Result.success, createFence(ctx.device, &info, null, fence));
+    try std.testing.expectEqual(Result.timeout, waitForFences(ctx.device, 2, &fences, 0, 0));
+    const empty_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&empty_submit), fences[0]));
+    try std.testing.expectEqual(Result.success, waitForFences(ctx.device, 2, &fences, 0, 0));
+    var invalid_reset = [_]usize{ fences[0], 0xdead_beef };
+    try std.testing.expectEqual(Result.error_initialization_failed, resetFences(ctx.device, 2, &invalid_reset));
+    try std.testing.expectEqual(Result.success, getFenceStatus(ctx.device, fences[0]));
+    try std.testing.expectEqual(Result.success, resetFences(ctx.device, 2, &fences));
+
+    const export_info = ExportFenceCreateInfo{ .s_type = 1000113000, .p_next = null, .handle_types = 0 };
+    const exported_create = FenceCreateInfo{ .s_type = 8, .p_next = &export_info, .flags = 0 };
+    var exported: usize = 0;
+    try std.testing.expectEqual(Result.success, createFence(ctx.device, &exported_create, null, &exported));
+    var unsupported_export = export_info;
+    unsupported_export.handle_types = 1;
+    const unsupported_create = FenceCreateInfo{ .s_type = 8, .p_next = &unsupported_export, .flags = 0 };
+    var unchanged_export: usize = 0xfeed_face;
+    try std.testing.expectEqual(Result.error_initialization_failed, createFence(ctx.device, &unsupported_create, null, &unchanged_export));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), unchanged_export);
+    destroyFence(ctx.device, exported, null);
+
+    var done = std.atomic.Value(bool).init(false);
+    var wait_result = Result.error_initialization_failed;
+    const wait_context = FenceWaitContext{ .device = ctx.device, .handles = &fences, .done = &done, .result = &wait_result };
+    const waiter = try std.Thread.spawn(.{}, waitForTwoFences, .{&wait_context});
+    const first = validFenceLocked(fences[0]).?;
+    const second = validFenceLocked(fences[1]).?;
+    while (first.waiters.load(.acquire) == 0 or second.waiters.load(.acquire) == 0) std.atomic.spinLoopHint();
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&empty_submit), fences[0]));
+    try std.testing.expect(!done.load(.acquire));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&empty_submit), fences[1]));
+    waiter.join();
+    try std.testing.expectEqual(Result.success, wait_result);
+    try std.testing.expect(done.load(.acquire));
+
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, getFenceStatus(ctx.device, fences[0]));
+        try std.testing.expectEqual(Result.success, waitForFences(ctx.device, 2, &fences, 1, 0));
+    }
+    test_allocations_before_failure = null;
+    for (fences) |fence| destroyFence(ctx.device, fence, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "binary semaphores chain ordered submissions with allocation-free warm state" {
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(SemaphoreCreateInfo));
+    const ctx = try createTestDeviceContext();
+    var info = SemaphoreCreateInfo{ .s_type = 9, .p_next = null, .flags = 0 };
+    var semaphores: [2]usize = undefined;
+    for (&semaphores) |*semaphore| try std.testing.expectEqual(Result.success, createSemaphore(ctx.device, &info, null, semaphore));
+    var unchanged: usize = 0xfeed_face;
+    info.flags = 1;
+    try std.testing.expectEqual(Result.error_initialization_failed, createSemaphore(ctx.device, &info, null, &unchanged));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), unchanged);
+    info.flags = 0;
+    const wait_stage: u32 = 0x1000;
+    const signal_first = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 1, .signal_semaphores = @ptrCast(&semaphores[0]) };
+    const wait_first_signal_second = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 1, .wait_semaphores = @ptrCast(&semaphores[0]), .wait_dst_stage_mask = @ptrCast(&wait_stage), .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 1, .signal_semaphores = @ptrCast(&semaphores[1]) };
+    const chain = [_]SubmitInfo{ signal_first, wait_first_signal_second };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, chain.len, &chain, 0));
+    try std.testing.expect(!validSemaphoreLocked(semaphores[0]).?.signaled.load(.acquire));
+    try std.testing.expect(validSemaphoreLocked(semaphores[1]).?.signaled.load(.acquire));
+    const wait_second = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 1, .wait_semaphores = @ptrCast(&semaphores[1]), .wait_dst_stage_mask = @ptrCast(&wait_stage), .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&wait_second), 0));
+    try std.testing.expect(!validSemaphoreLocked(semaphores[1]).?.signaled.load(.acquire));
+    const warm_chain = [_]SubmitInfo{ signal_first, wait_first_signal_second, wait_second };
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, warm_chain.len, &warm_chain, 0));
+    test_allocations_before_failure = null;
+    for (semaphores) |semaphore| destroySemaphore(ctx.device, semaphore, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "timeline semaphores expose monotonic counter wait signal and submit ABI" {
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(SemaphoreTypeCreateInfo));
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(SemaphoreWaitInfo));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(SemaphoreSignalInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(ExportSemaphoreCreateInfo));
+    const ctx = try createTestDeviceContext();
+    const type_info = SemaphoreTypeCreateInfo{ .s_type = 1000207002, .p_next = null, .semaphore_type = 1, .initial_value = 4 };
+    const export_info = ExportSemaphoreCreateInfo{ .s_type = 1000077000, .p_next = &type_info, .handle_types = 0 };
+    const info = SemaphoreCreateInfo{ .s_type = 9, .p_next = &export_info, .flags = 0 };
+    var timeline: usize = 0;
+    try std.testing.expectEqual(Result.success, createSemaphore(ctx.device, &info, null, &timeline));
+    var counter: u64 = 0;
+    try std.testing.expectEqual(Result.success, getSemaphoreCounterValue(ctx.device, timeline, &counter));
+    try std.testing.expectEqual(@as(u64, 4), counter);
+    const wait_handles = [_]usize{timeline};
+    const wait_values = [_]u64{5};
+    const wait_info = SemaphoreWaitInfo{ .s_type = 1000207004, .p_next = null, .flags = 0, .semaphore_count = 1, .semaphores = &wait_handles, .values = &wait_values };
+    try std.testing.expectEqual(Result.timeout, waitSemaphores(ctx.device, &wait_info, 0));
+    const signal_info = SemaphoreSignalInfo{ .s_type = 1000207005, .p_next = null, .semaphore = timeline, .value = 5 };
+    try std.testing.expectEqual(Result.success, signalSemaphore(ctx.device, &signal_info));
+    try std.testing.expectEqual(Result.success, waitSemaphores(ctx.device, &wait_info, 0));
+    const signal_values = [_]u64{7};
+    const timeline_submit_info = TimelineSemaphoreSubmitInfo{ .s_type = 1000207003, .p_next = null, .wait_semaphore_value_count = 1, .wait_semaphore_values = &wait_values, .signal_semaphore_value_count = 1, .signal_semaphore_values = &signal_values };
+    const submit = SubmitInfo{ .s_type = 4, .p_next = &timeline_submit_info, .wait_semaphore_count = 1, .wait_semaphores = &wait_handles, .wait_dst_stage_mask = null, .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 1, .signal_semaphores = &wait_handles };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(Result.success, getSemaphoreCounterValue(ctx.device, timeline, &counter));
+    try std.testing.expectEqual(@as(u64, 7), counter);
+    const any_info = SemaphoreWaitInfo{ .s_type = 1000207004, .p_next = null, .flags = 1, .semaphore_count = 1, .semaphores = &wait_handles, .values = &[_]u64{7} };
+    try std.testing.expectEqual(Result.success, waitSemaphores(ctx.device, &any_info, 0));
+    const binary_info = SemaphoreCreateInfo{ .s_type = 9, .p_next = null, .flags = 0 };
+    var binary: usize = 0;
+    try std.testing.expectEqual(Result.success, createSemaphore(ctx.device, &binary_info, null, &binary));
+    try std.testing.expectEqual(Result.error_initialization_failed, getSemaphoreCounterValue(ctx.device, binary, &counter));
+    var unsupported_export = export_info;
+    unsupported_export.p_next = null;
+    unsupported_export.handle_types = 1;
+    const unsupported_info = SemaphoreCreateInfo{ .s_type = 9, .p_next = &unsupported_export, .flags = 0 };
+    var unchanged_export: usize = 0xfeed_face;
+    try std.testing.expectEqual(Result.error_initialization_failed, createSemaphore(ctx.device, &unsupported_info, null, &unchanged_export));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), unchanged_export);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| try std.testing.expectEqual(Result.success, getSemaphoreCounterValue(ctx.device, timeline, &counter));
+    test_allocations_before_failure = null;
+    destroySemaphore(ctx.device, binary, null);
+    destroySemaphore(ctx.device, timeline, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "pipeline memory barriers have bounded allocation-free recording cost" {
+    const ctx = try createTestDeviceContext();
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    const allocate = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &commands));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    const barrier = MemoryBarrier{ .s_type = 46, .p_next = null, .src_access_mask = 0x1000, .dst_access_mask = 0x800 };
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| cmdPipelineBarrier(commands[0], 0x1000, 0x1000, 1, 1, @ptrCast(&barrier), 0, null, 0, null);
+    test_allocations_before_failure = null;
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 16, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &buffer));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdPipelineBarrier(commands[0], 0x1000, 0x1000, 0, 1, null, 0, null, 0, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+    var bad_memory = barrier;
+    bad_memory.s_type = 0;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdPipelineBarrier(commands[0], 0x1000, 0x1000, 0, 1, @ptrCast(&bad_memory), 0, null, 0, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdPipelineBarrier(commands[0], 0x1000, 0x1000, 0, 0, null, 1, null, 0, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+    var bad_buffer = BufferMemoryBarrier{ .s_type = 44, .p_next = null, .src_access_mask = 0x1000, .dst_access_mask = 0x800, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .buffer = 0xdead_beef, .offset = 0, .size = 4 };
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdPipelineBarrier(commands[0], 0x1000, 0x1000, 0, 0, null, 1, @ptrCast(&bad_buffer), 0, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+    bad_buffer.buffer = buffer;
+    bad_buffer.size = 0;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdPipelineBarrier(commands[0], 0x1000, 0x1000, 0, 0, null, 1, @ptrCast(&bad_buffer), 0, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
+    destroyBuffer(ctx.device, buffer, null);
+    freeCommandBuffers(ctx.device, pool, commands.len, &commands);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "compute dispatch command envelopes validate indirect groups and device masks" {
+    const ctx = try createTestDeviceContext();
+    const set_layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 0, .bindings = null };
+    var set_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &set_layout_info, null, &set_layout));
+    const pipeline_layout_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&set_layout), .push_constant_range_count = 0, .push_constant_ranges = null };
+    var pipeline_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &pipeline_layout_info, null, &pipeline_layout));
+    const shader_words = spirv_frontend.compute_store;
+    const shader_info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = @sizeOf(@TypeOf(shader_words)), .p_code = &shader_words };
+    var shader: usize = 0;
+    try std.testing.expectEqual(Result.success, createShaderModule(ctx.device, &shader_info, null, &shader));
+    var shader_name = [_:0]u8{ 'm', 'a', 'i', 'n' };
+    const compute_stage = PipelineShaderStageCreateInfo{ .s_type = 18, .p_next = null, .flags = 0, .stage = 32, .module = shader, .name = &shader_name, .specialization_info = null };
+    const compute_info = ComputePipelineCreateInfo{ .s_type = 29, .p_next = null, .flags = 0, .stage = compute_stage, .layout = pipeline_layout, .base_pipeline = 0, .base_pipeline_index = -1 };
+    var compute_pipeline: usize = 0;
+    try std.testing.expectEqual(Result.success, createComputePipelines(ctx.device, 0, 1, @ptrCast(&compute_info), null, @ptrCast(&compute_pipeline)));
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    const allocate = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &commands));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBindPipeline(commands[0], 1, compute_pipeline);
+    try std.testing.expect(!commands[0].impl.invalid);
+    cmdSetDeviceMask(commands[0], 1);
+    try std.testing.expectEqual(@as(u32, 1), commands[0].impl.device_mask);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| cmdSetDeviceMask(commands[0], 1);
+    test_allocations_before_failure = null;
+    try std.testing.expect(!commands[0].impl.invalid);
+    cmdDispatch(commands[0], 1, 2, 3);
+    cmdDispatchBase(commands[0], 2, 3, 4, 1, 1, 1);
+    try std.testing.expectEqual(@as(usize, 2), commands[0].impl.count);
+    const info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 12, .usage = 0x100, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &info, null, &buffer));
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 12, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &memory));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, buffer, memory, 0));
+    var mapped: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memory, 0, 12, 0, &mapped));
+    const words: [*]u32 = @ptrCast(@alignCast(mapped.?));
+    words[0..3].* = .{ 2, 2, 2 };
+    unmapMemory(ctx.device, memory);
+    cmdDispatchIndirect(commands[0], buffer, 0);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+        cmdBindPipeline(commands[0], 1, compute_pipeline);
+        cmdDispatch(commands[0], 1, 1, 1);
+        try std.testing.expect(!commands[0].impl.invalid);
+        try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    }
+    test_allocations_before_failure = null;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdDispatch(commands[0], 1, 1, 1);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdBindPipeline(commands[0], 1, compute_pipeline);
+    cmdDispatch(commands[0], 1, 1, 1);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    destroyPipeline(ctx.device, compute_pipeline, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdSetDeviceMask(commands[0], 2);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(@as(u32, 1), commands[0].impl.device_mask);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdDispatch(commands[0], 0, 1, 1);
+    try std.testing.expect(commands[0].impl.invalid);
+    destroyBuffer(ctx.device, buffer, null);
+    freeMemory(ctx.device, memory, null);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyPipeline(ctx.device, compute_pipeline, null);
+    destroyShaderModule(ctx.device, shader, null);
+    destroyPipelineLayout(ctx.device, pipeline_layout, null);
+    destroyDescriptorSetLayout(ctx.device, set_layout, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+fn computeStorageProfileTest() !void {
+    const ctx = try createTestDeviceContext();
+    const binding = DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = 7, .descriptor_count = 1, .stage_flags = 32, .immutable_samplers = null };
+    const set_layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding) };
+    var set_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &set_layout_info, null, &set_layout));
+    const pipeline_layout_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&set_layout), .push_constant_range_count = 0, .push_constant_ranges = null };
+    var pipeline_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &pipeline_layout_info, null, &pipeline_layout));
+
+    const words = spirv_frontend.compute_select_store;
+    const shader_info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = @sizeOf(@TypeOf(words)), .p_code = &words };
+    var shader: usize = 0;
+    try std.testing.expectEqual(Result.success, createShaderModule(ctx.device, &shader_info, null, &shader));
+    var shader_name = [_:0]u8{ 'm', 'a', 'i', 'n' };
+    const stage = PipelineShaderStageCreateInfo{ .s_type = 18, .p_next = null, .flags = 0, .stage = 32, .module = shader, .name = &shader_name, .specialization_info = null };
+    const pipeline_info = ComputePipelineCreateInfo{ .s_type = 29, .p_next = null, .flags = 0, .stage = stage, .layout = pipeline_layout, .base_pipeline = 0, .base_pipeline_index = -1 };
+    var pipeline: usize = 0;
+    try std.testing.expectEqual(Result.success, createComputePipelines(ctx.device, 0, 1, @ptrCast(&pipeline_info), null, @ptrCast(&pipeline)));
+
+    const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 16, .usage = 0x120, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &buffer));
+    const memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 16, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &memory_info, null, &memory));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, buffer, memory, 0));
+    const descriptor_pool_size = DescriptorPoolSize{ .descriptor_type = 7, .descriptor_count = 1 };
+    const descriptor_pool_info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 1, .max_sets = 1, .pool_size_count = 1, .pool_sizes = @ptrCast(&descriptor_pool_size) };
+    var descriptor_pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorPool(ctx.device, &descriptor_pool_info, null, &descriptor_pool));
+    var descriptor_set: usize = 0;
+    const descriptor_allocate_info = DescriptorSetAllocateInfo{ .s_type = 34, .p_next = null, .descriptor_pool = descriptor_pool, .descriptor_set_count = 1, .set_layouts = @ptrCast(&set_layout) };
+    try std.testing.expectEqual(Result.success, allocateDescriptorSets(ctx.device, &descriptor_allocate_info, @ptrCast(&descriptor_set)));
+    const descriptor_buffer = DescriptorBufferInfo{ .buffer = buffer, .offset = 0, .range = 16 };
+    const descriptor_write = WriteDescriptorSet{ .s_type = 35, .p_next = null, .dst_set = descriptor_set, .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 7, .image_info = null, .buffer_info = @ptrCast(&descriptor_buffer), .texel_buffer_view = null };
+    updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
+    try std.testing.expectEqual(@as(*BufferObj, validDescriptorSetLocked(descriptor_set).?.storage.?), validBufferLocked(buffer).?);
+
+    const command_pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var command_pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &command_pool_info, null, &command_pool));
+    const command_allocate_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = command_pool, .level = 0, .command_buffer_count = 1 };
+    var command: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &command_allocate_info, &command));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdBindPipeline(command[0], 1, pipeline);
+    cmdBindDescriptorSets(command[0], 1, pipeline_layout, 0, 1, @ptrCast(&descriptor_set), 0, null);
+    var mapped: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memory, 0, 16, 0, &mapped));
+    const indirect_groups: [*]u32 = @ptrCast(@alignCast(mapped.?));
+    indirect_groups[0..3].* = .{ 1, 1, 1 };
+    unmapMemory(ctx.device, memory);
+    cmdDispatchIndirect(command[0], buffer, 0);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &command, .signal_semaphore_count = 0, .signal_semaphores = null };
+    // Indirect arguments are consumed at submit time, not frozen while the
+    // command is recorded. An invalid post-record write is rejected
+    // failure-atomically, then a corrected write executes normally.
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memory, 0, 16, 0, &mapped));
+    @as(*u32, @ptrCast(@alignCast(mapped.?))).* = 0;
+    unmapMemory(ctx.device, memory);
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memory, 0, 16, 0, &mapped));
+    const corrected_groups: [*]u32 = @ptrCast(@alignCast(mapped.?));
+    corrected_groups[0..3].* = .{ 1, 1, 1 };
+    unmapMemory(ctx.device, memory);
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    mapped = null;
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memory, 0, 16, 0, &mapped));
+    try std.testing.expectEqual(@as(u32, 42), @as(*const u32, @ptrCast(@alignCast(mapped.?))).*);
+    unmapMemory(ctx.device, memory);
+    const warm_pipeline = validComputePipelineLocked(pipeline).?;
+    const warm_descriptors = validDescriptorSetLocked(descriptor_set).?;
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| executeComputeDispatch(.{ .base = .{ 0, 0, 0 }, .groups = .{ 1, 1, 1 }, .pipeline = warm_pipeline, .layout = validPipelineLayoutLocked(pipeline_layout), .descriptors = warm_descriptors });
+    test_allocations_before_failure = null;
+
+    freeCommandBuffers(ctx.device, command_pool, 1, &command);
+    destroyCommandPool(ctx.device, command_pool, null);
+    destroyDescriptorPool(ctx.device, descriptor_pool, null);
+    destroyPipeline(ctx.device, pipeline, null);
+    destroyShaderModule(ctx.device, shader, null);
+    destroyPipelineLayout(ctx.device, pipeline_layout, null);
+    destroyDescriptorSetLayout(ctx.device, set_layout, null);
+    destroyBuffer(ctx.device, buffer, null);
+    freeMemory(ctx.device, memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+fn computeUniformStorageTest() !void {
+    const ctx = try createTestDeviceContext();
+    const bindings = [_]DescriptorSetLayoutBinding{
+        .{ .binding = 0, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 32, .immutable_samplers = null },
+        .{ .binding = 1, .descriptor_type = 7, .descriptor_count = 1, .stage_flags = 32, .immutable_samplers = null },
+    };
+    const set_layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 1, .binding_count = bindings.len, .bindings = &bindings };
+    var set_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &set_layout_info, null, &set_layout));
+    const pipeline_layout_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&set_layout), .push_constant_range_count = 0, .push_constant_ranges = null };
+    var pipeline_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &pipeline_layout_info, null, &pipeline_layout));
+
+    const words = spirv_frontend.compute_uniform_store;
+    const shader_info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = @sizeOf(@TypeOf(words)), .p_code = &words };
+    var shader: usize = 0;
+    try std.testing.expectEqual(Result.success, createShaderModule(ctx.device, &shader_info, null, &shader));
+    var shader_name = [_:0]u8{ 'm', 'a', 'i', 'n' };
+    const stage = PipelineShaderStageCreateInfo{ .s_type = 18, .p_next = null, .flags = 0, .stage = 32, .module = shader, .name = &shader_name, .specialization_info = null };
+    const pipeline_info = ComputePipelineCreateInfo{ .s_type = 29, .p_next = null, .flags = 0, .stage = stage, .layout = pipeline_layout, .base_pipeline = 0, .base_pipeline_index = -1 };
+    var pipeline: usize = 0;
+    try std.testing.expectEqual(Result.success, createComputePipelines(ctx.device, 0, 1, @ptrCast(&pipeline_info), null, @ptrCast(&pipeline)));
+
+    const uniform_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 4, .usage = 0x10, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var uniform_buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &uniform_info, null, &uniform_buffer));
+    const uniform_memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 4, .memory_type_index = 0 };
+    var uniform_memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &uniform_memory_info, null, &uniform_memory));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, uniform_buffer, uniform_memory, 0));
+    const storage_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 16, .usage = 0x120, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var storage_buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &storage_info, null, &storage_buffer));
+    const storage_memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 16, .memory_type_index = 0 };
+    var storage_memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &storage_memory_info, null, &storage_memory));
+    try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, storage_buffer, storage_memory, 0));
+
+    const pool_sizes = [_]DescriptorPoolSize{ .{ .descriptor_type = 6, .descriptor_count = 1 }, .{ .descriptor_type = 7, .descriptor_count = 1 } };
+    const pool_info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 1, .max_sets = 1, .pool_size_count = pool_sizes.len, .pool_sizes = &pool_sizes };
+    var descriptor_pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorPool(ctx.device, &pool_info, null, &descriptor_pool));
+    var descriptor_set: usize = 0;
+    const allocate_info = DescriptorSetAllocateInfo{ .s_type = 34, .p_next = null, .descriptor_pool = descriptor_pool, .descriptor_set_count = 1, .set_layouts = @ptrCast(&set_layout) };
+    try std.testing.expectEqual(Result.success, allocateDescriptorSets(ctx.device, &allocate_info, @ptrCast(&descriptor_set)));
+    const uniform_descriptor = DescriptorBufferInfo{ .buffer = uniform_buffer, .offset = 0, .range = 4 };
+    const storage_descriptor = DescriptorBufferInfo{ .buffer = storage_buffer, .offset = 0, .range = 16 };
+    const writes = [_]WriteDescriptorSet{
+        .{ .s_type = 35, .p_next = null, .dst_set = descriptor_set, .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 6, .image_info = null, .buffer_info = @ptrCast(&uniform_descriptor), .texel_buffer_view = null },
+        .{ .s_type = 35, .p_next = null, .dst_set = descriptor_set, .dst_binding = 1, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 7, .image_info = null, .buffer_info = @ptrCast(&storage_descriptor), .texel_buffer_view = null },
+    };
+    updateDescriptorSets(ctx.device, writes.len, @ptrCast(&writes), 0, null);
+    const descriptor_object = validDescriptorSetLocked(descriptor_set).?;
+    try std.testing.expectEqual(validBufferLocked(uniform_buffer).?, descriptor_object.uniform.?);
+    try std.testing.expectEqual(validBufferLocked(storage_buffer).?, descriptor_object.storage.?);
+    try std.testing.expectEqual(@as(u32, 1), descriptor_object.storage_binding);
+
+    var mapped: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, uniform_memory, 0, 4, 0, &mapped));
+    @as(*u32, @ptrCast(@alignCast(mapped.?))).* = 99;
+    unmapMemory(ctx.device, uniform_memory);
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, storage_memory, 0, 16, 0, &mapped));
+    const groups: [*]u32 = @ptrCast(@alignCast(mapped.?));
+    groups[0..3].* = .{ 1, 1, 1 };
+    unmapMemory(ctx.device, storage_memory);
+
+    const command_pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var command_pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &command_pool_info, null, &command_pool));
+    const command_allocate_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = command_pool, .level = 0, .command_buffer_count = 1 };
+    var command: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &command_allocate_info, &command));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdBindPipeline(command[0], 1, pipeline);
+    cmdBindDescriptorSets(command[0], 1, pipeline_layout, 0, 1, @ptrCast(&descriptor_set), 0, null);
+    cmdDispatchIndirect(command[0], storage_buffer, 0);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &command, .signal_semaphore_count = 0, .signal_semaphores = null };
+    const recorded_uniform_range = command[0].impl.descriptor_snapshots[0].uniform_range;
+    command[0].impl.descriptor_snapshots[0].uniform_range = 64;
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    command[0].impl.descriptor_snapshots[0].uniform_range = recorded_uniform_range;
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, storage_memory, 0, 16, 0, &mapped));
+    try std.testing.expectEqual(@as(u32, 100), @as(*const u32, @ptrCast(@alignCast(mapped.?))).*);
+    unmapMemory(ctx.device, storage_memory);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdBindPipeline(command[0], 1, pipeline);
+    cmdPushDescriptorSet(command[0], 1, pipeline_layout, 0, writes.len, @ptrCast(&writes));
+    cmdDispatchIndirect(command[0], storage_buffer, 0);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, storage_memory, 0, 16, 0, &mapped));
+    try std.testing.expectEqual(@as(u32, 100), @as(*const u32, @ptrCast(@alignCast(mapped.?))).*);
+    unmapMemory(ctx.device, storage_memory);
+
+    const warm_pipeline = validComputePipelineLocked(pipeline).?;
+    const warm_layout = validPipelineLayoutLocked(pipeline_layout);
+    const warm_descriptors = validDescriptorSetLocked(descriptor_set).?;
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| executeComputeDispatch(.{ .base = .{ 0, 0, 0 }, .groups = .{ 1, 1, 1 }, .pipeline = warm_pipeline, .layout = warm_layout, .descriptors = warm_descriptors });
+    test_allocations_before_failure = null;
+
+    freeCommandBuffers(ctx.device, command_pool, 1, &command);
+    destroyCommandPool(ctx.device, command_pool, null);
+    destroyDescriptorPool(ctx.device, descriptor_pool, null);
+    destroyPipeline(ctx.device, pipeline, null);
+    destroyShaderModule(ctx.device, shader, null);
+    destroyPipelineLayout(ctx.device, pipeline_layout, null);
+    destroyDescriptorSetLayout(ctx.device, set_layout, null);
+    destroyBuffer(ctx.device, uniform_buffer, null);
+    freeMemory(ctx.device, uniform_memory, null);
+    destroyBuffer(ctx.device, storage_buffer, null);
+    freeMemory(ctx.device, storage_memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "event host and command-buffer ABI behavior is owned and failure atomic" {
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(EventCreateInfo));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(EventCreateInfo, "p_next"));
+    const ctx = try createTestDeviceContext();
+    var info = EventCreateInfo{ .s_type = 10, .p_next = null, .flags = 0 };
+    var event: usize = 0;
+    try std.testing.expectEqual(Result.success, createEvent(ctx.device, &info, null, &event));
+    try std.testing.expectEqual(Result.event_reset, getEventStatus(ctx.device, event));
+    try std.testing.expectEqual(Result.success, setEvent(ctx.device, event));
+    try std.testing.expectEqual(Result.event_set, getEventStatus(ctx.device, event));
+    try std.testing.expectEqual(Result.success, resetEvent(ctx.device, event));
+    try std.testing.expectEqual(Result.event_reset, getEventStatus(ctx.device, event));
+    try std.testing.expectEqual(Result.error_initialization_failed, createEvent(null, &info, null, &event));
+    info.flags = 1;
+    try std.testing.expectEqual(Result.error_initialization_failed, createEvent(ctx.device, &info, null, &event));
+    info.flags = 0;
+
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    const allocate = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var buffers: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &buffers));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(buffers[0], &begin));
+    cmdSetEvent(buffers[0], event, 0x1000);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(buffers[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &buffers, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(Result.event_set, getEventStatus(ctx.device, event));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(buffers[0], &begin));
+    cmdResetEvent(buffers[0], event, 0x1000);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(buffers[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(Result.event_reset, getEventStatus(ctx.device, event));
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(buffers[0], &begin));
+    cmdSetEvent(buffers[0], event, 0);
+    try std.testing.expect(buffers[0].impl.invalid);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(buffers[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(buffers[0], &begin));
+    cmdSetEvent(buffers[0], 0, 0x1000);
+    try std.testing.expect(buffers[0].impl.invalid);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(buffers[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(buffers[0], &begin));
+    cmdResetEvent(buffers[0], 0, 0x1000);
+    try std.testing.expect(buffers[0].impl.invalid);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(buffers[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(buffers[0], &begin));
+    cmdResetEvent(buffers[0], event, 0);
+    try std.testing.expect(buffers[0].impl.invalid);
+    try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(buffers[0]));
+
+    freeCommandBuffers(ctx.device, pool, buffers.len, &buffers);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyEvent(ctx.device, event, null);
+    try std.testing.expectEqual(Result.error_initialization_failed, getEventStatus(ctx.device, event));
+    try std.testing.expectEqual(Result.error_initialization_failed, setEvent(ctx.device, event));
+    try std.testing.expectEqual(Result.error_initialization_failed, resetEvent(ctx.device, event));
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "event host operations have constant allocation-free warm cost" {
+    const ctx = try createTestDeviceContext();
+    const info = EventCreateInfo{ .s_type = 10, .p_next = null, .flags = 0 };
+    var event: usize = 0;
+    try std.testing.expectEqual(Result.success, createEvent(ctx.device, &info, null, &event));
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    var checksum: u64 = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, setEvent(ctx.device, event));
+        checksum += @intCast(@intFromEnum(getEventStatus(ctx.device, event)));
+        try std.testing.expectEqual(Result.success, resetEvent(ctx.device, event));
+        checksum += @intCast(@intFromEnum(getEventStatus(ctx.device, event)));
+    }
+    try std.testing.expectEqual(@as(u64, 4096 * (3 + 4)), checksum);
+    destroyEvent(ctx.device, event, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "event registry exhaustion never publishes an unowned handle" {
+    const ctx = try createTestDeviceContext();
+    const info = EventCreateInfo{ .s_type = 10, .p_next = null, .flags = 0 };
+    var handles: [max_child_objects]usize = undefined;
+    var count: usize = 0;
+    while (count < handles.len) : (count += 1) {
+        const result = createEvent(ctx.device, &info, null, &handles[count]);
+        if (result == .error_out_of_host_memory) break;
+        try std.testing.expectEqual(Result.success, result);
+    }
+    try std.testing.expect(count < handles.len);
+    var unpublished: usize = 0xfeed_face;
+    try std.testing.expectEqual(Result.error_out_of_host_memory, createEvent(ctx.device, &info, null, &unpublished));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), unpublished);
+    for (handles[0..count]) |event| destroyEvent(ctx.device, event, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "administrative and sparse-disabled Vulkan 1.0 ABI behavior" {
+    var layer_count: u32 = 7;
+    var layer = std.mem.zeroes(LayerProperties);
+    layer.layer_name[0] = 0xa5;
+    try std.testing.expectEqual(Result.success, enumerateInstanceLayers(&layer_count, @ptrCast(&layer)));
+    try std.testing.expectEqual(@as(u32, 0), layer_count);
+    try std.testing.expectEqual(@as(u8, 0xa5), layer.layer_name[0]);
+    try std.testing.expectEqual(Result.error_initialization_failed, enumerateInstanceLayers(null, null));
+
+    const ctx = try createTestDeviceContext();
+    layer_count = 9;
+    try std.testing.expectEqual(Result.success, enumerateDeviceLayers(ctx.physical, &layer_count, @ptrCast(&layer)));
+    try std.testing.expectEqual(@as(u32, 0), layer_count);
+    try std.testing.expectEqual(Result.error_initialization_failed, enumerateDeviceLayers(null, &layer_count, null));
+    try std.testing.expectEqual(Result.error_initialization_failed, enumerateDeviceLayers(ctx.physical, null, null));
+
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 37, .extent = .{ .width = 1, .height = 1, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 1, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &image));
+    var sparse_count: u32 = 9;
+    getImageSparseMemoryRequirements(ctx.device, image, &sparse_count, null);
+    try std.testing.expectEqual(@as(u32, 0), sparse_count);
+    sparse_count = 9;
+    getImageSparseMemoryRequirements(ctx.device, 0, &sparse_count, null);
+    try std.testing.expectEqual(@as(u32, 9), sparse_count);
+
+    const fence_info = FenceCreateInfo{ .s_type = 8, .p_next = null, .flags = 0 };
+    var fence: usize = 0;
+    try std.testing.expectEqual(Result.success, createFence(ctx.device, &fence_info, null, &fence));
+    try std.testing.expectEqual(Result.success, queueBindSparse(ctx.queue, 0, null, fence));
+    try std.testing.expectEqual(Result.success, getFenceStatus(ctx.device, fence));
+    try std.testing.expectEqual(Result.success, resetFences(ctx.device, 1, @ptrCast(&fence)));
+    try std.testing.expectEqual(Result.error_feature_not_present, queueBindSparse(ctx.queue, 1, @ptrFromInt(8), fence));
+    try std.testing.expectEqual(Result.not_ready, getFenceStatus(ctx.device, fence));
+    try std.testing.expectEqual(Result.error_initialization_failed, queueBindSparse(null, 0, null, 0));
+
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 0, .queue_family_index = 0 };
+    var pools: [2]usize = undefined;
+    for (&pools) |*pool| try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, pool));
+    var first_buffers: [2]CommandBuffer = undefined;
+    const first_allocate = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pools[0], .level = 0, .command_buffer_count = first_buffers.len };
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &first_allocate, &first_buffers));
+    var other_buffer: [1]CommandBuffer = undefined;
+    const other_allocate = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pools[1], .level = 0, .command_buffer_count = 1 };
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &other_allocate, &other_buffer));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    for (first_buffers ++ other_buffer) |cb| {
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(cb, &begin));
+        try std.testing.expectEqual(Result.success, endCommandBuffer(cb));
+    }
+    try std.testing.expectEqual(Result.success, resetCommandPool(ctx.device, pools[0], 1));
+    for (first_buffers) |cb| try std.testing.expectEqual(@as(u8, 0), cb.impl.state);
+    try std.testing.expectEqual(@as(u8, 2), other_buffer[0].impl.state);
+    try std.testing.expectEqual(Result.error_initialization_failed, resetCommandPool(ctx.device, pools[0], 2));
+    try std.testing.expectEqual(Result.error_initialization_failed, resetCommandPool(null, pools[0], 0));
+
+    const attachment = AttachmentDescription{ .flags = 0, .format = 37, .samples = 1, .load_op = 1, .store_op = 0, .stencil_load_op = 2, .stencil_store_op = 1, .initial_layout = 0, .final_layout = 1 };
+    const color_ref = AttachmentReference{ .attachment = 0, .layout = 2 };
+    const subpass = SubpassDescription{ .flags = 0, .pipeline_bind_point = 0, .input_attachment_count = 0, .input_attachments = null, .color_attachment_count = 1, .color_attachments = @ptrCast(&color_ref), .resolve_attachments = null, .depth_stencil_attachment = null, .preserve_attachment_count = 0, .preserve_attachments = null };
+    const render_info = RenderPassCreateInfo{ .s_type = 38, .p_next = null, .flags = 0, .attachment_count = 1, .attachments = @ptrCast(&attachment), .subpass_count = 1, .subpasses = @ptrCast(&subpass), .dependency_count = 0, .dependencies = null };
+    var render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(ctx.device, &render_info, null, &render_pass));
+    var granularity = Extent2D{ .width = 0, .height = 0 };
+    getRenderAreaGranularity(ctx.device, render_pass, &granularity);
+    try std.testing.expectEqual(Extent2D{ .width = 1, .height = 1 }, granularity);
+    granularity = .{ .width = 7, .height = 9 };
+    getRenderAreaGranularity(ctx.device, 0, &granularity);
+    try std.testing.expectEqual(Extent2D{ .width = 7, .height = 9 }, granularity);
+
+    destroyRenderPass(ctx.device, render_pass, null);
+    freeCommandBuffers(ctx.device, pools[0], first_buffers.len, &first_buffers);
+    freeCommandBuffers(ctx.device, pools[1], other_buffer.len, &other_buffer);
+    for (pools) |pool| destroyCommandPool(ctx.device, pool, null);
+    destroyFence(ctx.device, fence, null);
+    destroyImage(ctx.device, image, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "administrative command-pool reset performance is bounded and allocation free" {
+    const ctx = try createTestDeviceContext();
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 0, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    var buffers: [8]CommandBuffer = undefined;
+    const allocate = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = buffers.len };
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &buffers));
+
+    var reset_count: u64 = 0;
+    {
+        lock();
+        defer mutex.unlock();
+        test_allocations_before_failure = 0;
+        defer test_allocations_before_failure = null;
+        for (0..1024) |_| reset_count += resetCommandPoolBuffersLocked(ctx.device, @ptrFromInt(pool));
+    }
+    try std.testing.expectEqual(@as(u64, 1024 * buffers.len), reset_count);
+    for (buffers) |cb| try std.testing.expectEqual(@as(u8, 0), cb.impl.state);
+
+    freeCommandBuffers(ctx.device, pool, buffers.len, &buffers);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
 test "bounded child registries fail safely without reusing tombstones" {
     const ctx = try createTestDeviceContext();
     const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 0, .queue_family_index = 0 };
@@ -6265,9 +16027,21 @@ test "bounded child registries fail safely without reusing tombstones" {
     try std.testing.expect(exhausted);
     const memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 1, .memory_type_index = 0 };
     exhausted = false;
-    for (0..max_child_objects + 1) |_| {
+    for (0..max_memory_objects + 1) |_| {
         var handle: usize = 0;
         const result = allocateMemory(ctx.device, &memory_info, null, &handle);
+        if (result == .error_out_of_host_memory) {
+            exhausted = true;
+            break;
+        }
+        try std.testing.expectEqual(Result.success, result);
+    }
+    try std.testing.expect(exhausted);
+    const sampler_info = SamplerCreateInfo{ .s_type = 31, .p_next = null, .flags = 0, .mag_filter = 0, .min_filter = 0, .mipmap_mode = 0, .address_mode_u = 0, .address_mode_v = 0, .address_mode_w = 0, .mip_lod_bias = 0, .anisotropy_enable = 0, .max_anisotropy = 0, .compare_enable = 0, .compare_op = 0, .min_lod = 0, .max_lod = 0, .border_color = 0, .unnormalized_coordinates = 0 };
+    exhausted = false;
+    for (0..max_sampler_objects + 1) |_| {
+        var handle: usize = 0;
+        const result = createSampler(ctx.device, @ptrCast(&sampler_info), null, &handle);
         if (result == .error_out_of_host_memory) {
             exhausted = true;
             break;
@@ -6491,10 +16265,126 @@ test "installed manifest contract" {
     try std.testing.expect(!icd.get("is_portability_driver").?.bool);
 }
 
+fn resetDeadMemorySlotsForAbiTest() !void {
+    if (!builtin.is_test) return error.TestUnexpectedResult;
+    for (memory_state) |state| try std.testing.expect(state != .live);
+    memory_state = [_]SlotState{.never} ** max_memory_objects;
+}
+
+test "mapped-memory coherency ABI layout and behavior" {
+    try resetDeadMemorySlotsForAbiTest();
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(MappedMemoryRange));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(MappedMemoryRange, "p_next"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(MappedMemoryRange, "memory"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(MappedMemoryRange, "offset"));
+
+    const ctx = try createTestDeviceContext();
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 64, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &memory));
+    var mapped: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memory, 0, std.math.maxInt(u64), 0, &mapped));
+    const bytes: [*]u8 = @ptrCast(mapped.?);
+    @memset(bytes[0..64], 0x5a);
+
+    var ranges = [_]MappedMemoryRange{
+        .{ .s_type = 6, .p_next = null, .memory = memory, .offset = 0, .size = 16 },
+        .{ .s_type = 6, .p_next = null, .memory = memory, .offset = 16, .size = std.math.maxInt(u64) },
+    };
+    try std.testing.expectEqual(Result.success, flushMappedMemoryRanges(ctx.device, ranges.len, &ranges));
+    try std.testing.expectEqual(Result.success, invalidateMappedMemoryRanges(ctx.device, ranges.len, &ranges));
+    for (bytes[0..64]) |byte| try std.testing.expectEqual(@as(u8, 0x5a), byte);
+    var commitment: u64 = std.math.maxInt(u64);
+    getDeviceMemoryCommitment(ctx.device, memory, &commitment);
+    try std.testing.expectEqual(@as(u64, 0), commitment);
+
+    try std.testing.expectEqual(Result.error_initialization_failed, flushMappedMemoryRanges(ctx.device, 0, null));
+    try std.testing.expectEqual(Result.error_initialization_failed, invalidateMappedMemoryRanges(ctx.device, max_api_items + 1, &ranges));
+    ranges[0].s_type = 5;
+    try std.testing.expectEqual(Result.error_initialization_failed, flushMappedMemoryRanges(ctx.device, 1, &ranges));
+    ranges[0].s_type = 6;
+    ranges[0].p_next = @ptrFromInt(8);
+    try std.testing.expectEqual(Result.error_initialization_failed, flushMappedMemoryRanges(ctx.device, 1, &ranges));
+    ranges[0].p_next = null;
+    ranges[0].size = 0;
+    try std.testing.expectEqual(Result.error_initialization_failed, flushMappedMemoryRanges(ctx.device, 1, &ranges));
+    ranges[0].size = 2;
+    ranges[0].offset = 63;
+    try std.testing.expectEqual(Result.error_initialization_failed, flushMappedMemoryRanges(ctx.device, 1, &ranges));
+    ranges[0].offset = 64;
+    ranges[0].size = std.math.maxInt(u64);
+    try std.testing.expectEqual(Result.error_initialization_failed, flushMappedMemoryRanges(ctx.device, 1, &ranges));
+    ranges[0].offset = 0;
+    ranges[0].size = 64;
+    unmapMemory(ctx.device, memory);
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(MemoryMapInfo));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(MemoryUnmapInfo));
+    var mapped2: ?*anyopaque = null;
+    const map_info2 = MemoryMapInfo{ .s_type = 1000271000, .p_next = null, .flags = 0, .memory = memory, .offset = 8, .size = 16 };
+    try std.testing.expectEqual(Result.success, mapMemory2(ctx.device, &map_info2, &mapped2));
+    try std.testing.expect(mapped2 != null);
+    const unmap_info2 = MemoryUnmapInfo{ .s_type = 1000271001, .p_next = null, .flags = 0, .memory = memory };
+    try std.testing.expectEqual(Result.success, unmapMemory2(ctx.device, &unmap_info2));
+    try std.testing.expectEqual(Result.error_initialization_failed, invalidateMappedMemoryRanges(ctx.device, 1, &ranges));
+
+    freeMemory(ctx.device, memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "mapped-memory coherency performance regression is bounded and allocation free" {
+    try resetDeadMemorySlotsForAbiTest();
+    const ctx = try createTestDeviceContext();
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 64, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &memory));
+    var mapped: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memory, 0, 64, 0, &mapped));
+    var ranges = [_]MappedMemoryRange{.{ .s_type = 6, .p_next = null, .memory = 0, .offset = 0, .size = 64 }} ** max_api_items;
+    for (&ranges) |*range| range.memory = memory;
+
+    var inspected: u64 = 0;
+    var bytes: u64 = 0;
+    {
+        lock();
+        defer mutex.unlock();
+        test_allocations_before_failure = 0;
+        defer test_allocations_before_failure = null;
+        for (0..1024) |_| {
+            const validation = validateMappedMemoryRangesLocked(ctx.device, ranges.len, &ranges) orelse return error.TestUnexpectedResult;
+            inspected += validation.ranges;
+            bytes += validation.bytes;
+        }
+    }
+    try std.testing.expectEqual(@as(u64, 1024 * max_api_items), inspected);
+    try std.testing.expectEqual(@as(u64, 1024 * max_api_items * 64), bytes);
+    try std.testing.expect(@as(*MemoryObj, @ptrFromInt(memory)).mapped);
+
+    unmapMemory(ctx.device, memory);
+    freeMemory(ctx.device, memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
 test "explicit behavioral requirement matrix is complete" {
     const fields = @typeInfo(Requirement).@"enum".fields;
     inline for (fields) |field| {
         const mask = @as(u64, 1) << field.value;
         try std.testing.expect(requirement_hits & mask != 0);
+    }
+}
+
+test "pinned Vulkan 1.4 core command inventory resolves through the ICD dispatch" {
+    try std.testing.expectEqual(@as(usize, 234), core_command_inventory.names.len);
+    for (core_command_inventory.names) |command| {
+        try std.testing.expect(instanceLookup(command) != null);
+    }
+    // Warm lookup is intentionally allocation-free and bounded for every entry.
+    for (0..4096) |_| for (core_command_inventory.names) |command| try std.testing.expect(instanceLookup(command) != null);
+}
+
+test "pinned core command inventory is deterministic and duplicate-free" {
+    for (core_command_inventory.names[1..], 1..) |command, index| {
+        try std.testing.expect(std.mem.lessThan(u8, core_command_inventory.names[index - 1], command));
     }
 }

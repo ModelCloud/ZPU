@@ -5,7 +5,7 @@ pub const serialization_version: u32 = 2;
 pub const max_values: usize = 4096;
 pub const max_instructions: usize = 4096;
 
-pub const Stage = enum(u8) { vertex = 0, fragment = 1 };
+pub const Stage = enum(u8) { vertex = 0, fragment = 1, compute = 2 };
 pub const Scalar = enum(u8) { bool = 0, i32 = 1, u32 = 2, f32 = 3 };
 pub const Type = packed struct { scalar: Scalar, columns: u3 = 1, rows: u3 = 1, _pad: u6 = 0 };
 pub const Op = enum(u8) {
@@ -28,6 +28,7 @@ pub const Op = enum(u8) {
     matrix_times_vector,
     convert,
     output,
+    select,
 };
 
 pub const Instruction = struct {
@@ -181,6 +182,7 @@ fn valueOperand(op: Op, operand_index: usize) bool {
         .extract => operand_index == 0,
         .shuffle => operand_index < 2,
         .fneg, .convert => operand_index == 0,
+        .select => operand_index < 3,
         .iadd, .isub, .fadd, .fsub, .fmul, .fdiv, .vector_times_scalar, .matrix_times_vector => operand_index < 2,
         .output => operand_index == 1,
     };

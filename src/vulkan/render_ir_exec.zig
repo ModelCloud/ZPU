@@ -269,6 +269,13 @@ pub const Executor = struct {
                         result.bits[i] = canonicalFloat(@bitCast(z));
                     }
                 },
+                .select => {
+                    const condition = try valueRef(self.values, pc, instruction.operands[0]);
+                    const when_true = try valueRef(self.values, pc, instruction.operands[1]);
+                    const when_false = try valueRef(self.values, pc, instruction.operands[2]);
+                    if (condition.ty.scalar != .bool or condition.ty.columns != 1 or condition.ty.rows != 1 or !same(when_true.ty, when_false.ty) or !same(when_true.ty, instruction.ty)) return error.InvalidType;
+                    result = if (condition.bits[0] != 0) when_true else when_false;
+                },
                 .vector_times_scalar => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
                     const b: f32 = @bitCast((try valueRef(self.values, pc, instruction.operands[1])).bits[0]);
@@ -346,6 +353,7 @@ fn validate(program: *const ir.Program) Error!void {
             .extract => n == 1 or n == 2,
             .shuffle => n == 2 + try lanes(instruction.ty),
             .fneg, .convert => n == 1,
+            .select => n == 3,
             .iadd, .isub, .fadd, .fsub, .fmul, .fdiv, .vector_times_scalar, .matrix_times_vector => n == 2,
             .output => n == 2,
         };
@@ -372,6 +380,9 @@ fn validate(program: *const ir.Program) Error!void {
             switch (instruction.op) {
                 .constant_composite, .composite => if (source_ty.scalar != instruction.ty.scalar) return error.InvalidType,
                 .fneg, .iadd, .isub, .fadd, .fsub, .fmul, .fdiv => if (!same(source_ty, instruction.ty)) return error.InvalidType,
+                .select => if (oi == 0) {
+                    if (source_ty.scalar != .bool or try lanes(source_ty) != 1) return error.InvalidType;
+                } else if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .output => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .vector_times_scalar => if ((oi == 0 and !same(source_ty, instruction.ty)) or (oi == 1 and (source_ty.scalar != .f32 or try lanes(source_ty) != 1))) return error.InvalidType,
                 .matrix_times_vector => if ((oi == 0 and !(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 4)) or (oi == 1 and !same(source_ty, instruction.ty))) return error.InvalidType,
@@ -884,6 +895,12 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
             for (0..try lanes(result_ty)) |i| operands[2 + i] = @intCast(i);
             result_id = try propertyInstruction(arena, &instructions, .shuffle, result_ty, operands[0 .. 2 + try lanes(result_ty)], &.{});
         },
+        .select => {
+            const condition = try propertyConstant(arena, &instructions, .{ .scalar = .bool });
+            const when_true = try propertyConstant(arena, &instructions, result_ty);
+            const when_false = try propertyConstant(arena, &instructions, result_ty);
+            result_id = try propertyInstruction(arena, &instructions, .select, result_ty, &.{ condition, when_true, when_false }, &.{});
+        },
         .fneg, .convert => {
             var source_ty = result_ty;
             if (convert_from) |scalar| source_ty.scalar = scalar;
@@ -983,15 +1000,17 @@ test "generated bounded operation by type-family property matrix is complete" {
     };
     try runPropertyCase(.matrix_times_vector, .{ .scalar = .f32, .columns = 4 }, null, null);
     totals[@intFromEnum(ir.Op.matrix_times_vector)] += 1;
-    const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14 };
+    try runPropertyCase(.select, .{ .scalar = .u32 }, null, null);
+    totals[@intFromEnum(ir.Op.select)] += 1;
+    const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1 };
     try std.testing.expectEqual(expected, totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 181), total);
-    std.debug.print("generated property matrix: operations=19 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 182), total);
+    std.debug.print("generated property matrix: operations=20 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -1123,13 +1142,13 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 19), malformed);
+    try std.testing.expectEqual(@as(usize, 20), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
     try std.testing.expectEqual(@as(usize, 5), runtime_nan);
     try std.testing.expectEqual(@as(usize, 5), signed_zero);
-    std.debug.print("generated property categories: malformed=19 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
+    std.debug.print("generated property categories: malformed=20 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
 }
 
 test "generated valid scalar DAGs are total and stable" {

@@ -63,10 +63,13 @@ pub fn build(b: *std.Build) void {
     smolvm_dry_run_step.dependOn(&smolvm_dry_run.step);
     const validate_api_inventory = b.addSystemCommand(&.{ "python3", "tools/api_inventory.py" });
     validate_api_inventory.step.dependOn(&require_limited.step);
+    const validate_command_matrix = b.addSystemCommand(&.{ "python3", "tools/vulkan_command_matrix.py" });
+    validate_command_matrix.step.dependOn(&require_limited.step);
     const test_api_inventory = b.addSystemCommand(&.{"test/api_inventory.sh"});
     test_api_inventory.step.dependOn(&require_limited.step);
     const api_inventory_step = b.step("api-inventory", "Validate the pinned Vulkan target inventory and failure fixtures");
     api_inventory_step.dependOn(&validate_api_inventory.step);
+    api_inventory_step.dependOn(&validate_command_matrix.step);
     api_inventory_step.dependOn(&test_api_inventory.step);
     const zpu = b.addModule("zpu", .{
         .root_source_file = b.path("src/root.zig"),
@@ -326,7 +329,12 @@ pub fn build(b: *std.Build) void {
     const behavior_tests = b.addTest(.{
         .root_module = behavior_module,
     });
-    const run_behavior = b.addRunArtifact(behavior_tests);
+    // Zig 0.16's server-mode test runner can terminate this large direct
+    // driver test binary before the parent sends its first protocol frame.
+    // Execute the compiled test artifact directly so the behavior gate uses
+    // the same exit-code path as the limited-CPU standalone test command.
+    const run_behavior = b.addSystemCommand(&.{ "sh", "-c", "exec \"$1\"", "zpu-behavior" });
+    run_behavior.addArtifactArg(behavior_tests);
     run_behavior.step.dependOn(&require_limited.step);
     const behavior_step = b.step("behavior", "Require every instrumented ICD behavioral requirement");
     behavior_step.dependOn(&run_behavior.step);
