@@ -4727,10 +4727,12 @@ fn cmdSetEvent2(cb: ?CommandBuffer, event: usize, info: ?*const DependencyInfo) 
         markCommandBufferInvalid(cb);
         return;
     }
-    // The serial backend has no separate cache domain, but image and buffer
-    // dependencies still need to enter the recorded command stream so layout
-    // tracking and stale-resource validation observe the event dependency.
-    cmdPipelineBarrier2(cb, info);
+    // An empty dependency is valid for event2 commands.  There is no barrier
+    // command to lower in that case, but the event operation itself must still
+    // be recorded.  For non-empty dependencies, lower the image/buffer state
+    // before recording the event so layout tracking and stale-resource
+    // validation observe the dependency.
+    if (info.?.memory_barrier_count != 0 or info.?.buffer_memory_barrier_count != 0 or info.?.image_memory_barrier_count != 0) cmdPipelineBarrier2(cb, info);
     cmdSetEvent(cb, event, 0x1_0000);
 }
 fn cmdResetEvent2(cb: ?CommandBuffer, event: usize, info: ?*const DependencyInfo) callconv(.c) void {
@@ -4738,7 +4740,7 @@ fn cmdResetEvent2(cb: ?CommandBuffer, event: usize, info: ?*const DependencyInfo
         markCommandBufferInvalid(cb);
         return;
     }
-    cmdPipelineBarrier2(cb, info);
+    if (info.?.memory_barrier_count != 0 or info.?.buffer_memory_barrier_count != 0 or info.?.image_memory_barrier_count != 0) cmdPipelineBarrier2(cb, info);
     cmdResetEvent(cb, event, 0x1_0000);
 }
 fn cmdWaitEvents2(cb: ?CommandBuffer, event_count: u32, events: ?[*]const usize, infos: ?[*]const DependencyInfo) callconv(.c) void {
@@ -4751,7 +4753,9 @@ fn cmdWaitEvents2(cb: ?CommandBuffer, event_count: u32, events: ?[*]const usize,
         return;
     };
     cmdWaitEvents(cb, event_count, events, 0x1_0000, 0x1_0000, 0, null, 0, null, 0, null);
-    for (infos.?[0..event_count]) |*info| cmdPipelineBarrier2(cb, info);
+    // Empty dependency records are valid and require no additional command;
+    // lower only entries that actually carry barrier state.
+    for (infos.?[0..event_count]) |*info| if (info.memory_barrier_count != 0 or info.buffer_memory_barrier_count != 0 or info.image_memory_barrier_count != 0) cmdPipelineBarrier2(cb, info);
 }
 fn cmdWriteTimestamp2(cb: ?CommandBuffer, stage: u64, pool: usize, index: u32) callconv(.c) void {
     const legacy_stage = sync2StageMaskToLegacy(stage) orelse {
@@ -12753,6 +12757,10 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     const image_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 0, .memory_barriers = null, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 1, .image_memory_barriers = @ptrCast(&image_barrier) };
     cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&image_dependency));
     cmdResetEvent2(commands[0], event, &dependency);
+    const empty_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 0, .memory_barriers = null, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
+    cmdSetEvent2(commands[0], event, &empty_dependency);
+    cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&empty_dependency));
+    cmdResetEvent2(commands[0], event, &empty_dependency);
     cmdWriteTimestamp2(commands[0], 0x1000, query, 0);
     cmdWriteTimestamp2(commands[0], 0x1000_0000_0, query, 1);
     try std.testing.expect(!commands[0].impl.invalid);
@@ -12760,6 +12768,7 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     try std.testing.expectEqual(@as(i32, 1), validImageLocked(image).?.layout);
+    try std.testing.expect(!validEventLocked(event).?.signaled.load(.acquire));
     const submit2 = SubmitInfo2{ .s_type = 1000314004, .p_next = null, .flags = 0, .wait_semaphore_info_count = 0, .wait_semaphore_infos = null, .command_buffer_info_count = 0, .command_buffer_infos = null, .signal_semaphore_info_count = 0, .signal_semaphore_infos = null };
     try std.testing.expectEqual(Result.success, queueSubmit2(ctx.queue, 1, @ptrCast(&submit2), 0));
     var signal_semaphore: usize = 0;

@@ -189,7 +189,10 @@ storage shader access. The mapping is applied consistently to dependency
 barriers, event/timestamp commands, and `vkQueueSubmit2`; unknown high bits
 remain rejected before command state or submission state is published. ABI,
 rollback, high-bit positive/negative, and 4096-iteration allocation-free tests
-cover the conversion path.
+cover the conversion path. `vkCmdSetEvent2`, `vkCmdResetEvent2`, and
+`vkCmdWaitEvents2` now also accept valid empty `VkDependencyInfo` nodes, which
+record the event operation without inventing a barrier; non-empty nodes still
+lower through the canonical barrier path.
 
 The next execution-semantic checkpoint adds `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC`
 for the bounded descriptor path. Descriptor writes and update templates preserve
