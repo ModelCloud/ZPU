@@ -1322,6 +1322,63 @@ fn corePropertyPayloadBytes(s_type: i32) ?usize {
     };
 }
 
+fn propertyWriteU32(bytes: []u8, offset: usize, value: u32) void {
+    std.mem.writeInt(u32, @ptrCast(bytes[offset..].ptr), value, .little);
+}
+
+fn propertyWriteU64(bytes: []u8, offset: usize, value: u64) void {
+    std.mem.writeInt(u64, @ptrCast(bytes[offset..].ptr), value, .little);
+}
+
+fn populatePromotedPropertyPayload(s_type: i32, bytes: []u8) void {
+    // The payload starts immediately after VkStructureType and pNext.  Keep
+    // this offset table in terms of the public Vulkan structs' fields so that
+    // the opaque storage remains an exact LP64 ABI while returning useful,
+    // truthful values for callers that use the aggregate promoted nodes.
+    switch (s_type) {
+        50 => { // VkPhysicalDeviceVulkan11Properties
+            @memcpy(bytes[0..16], &device_uuid);
+            @memcpy(bytes[16..32], &driver_uuid);
+            // A userspace CPU ICD has no PCI LUID; the UUID and one-device
+            // node mask are still stable and meaningful.
+            propertyWriteU32(bytes, 40, 1); // deviceNodeMask
+            propertyWriteU32(bytes, 44, 0); // deviceLUIDValid
+            // Optional subgroup/multiview/protected capabilities remain zero
+            // because the corresponding features are deliberately false.
+            propertyWriteU32(bytes, 68, 256); // maxMultiviewViewCount
+            propertyWriteU32(bytes, 72, 0xffff_ffff); // maxMultiviewInstanceIndex
+            propertyWriteU32(bytes, 76, 0); // protectedNoFault
+            propertyWriteU32(bytes, 80, 1024); // maxPerSetDescriptors
+            propertyWriteU64(bytes, 88, heap_size); // maxMemoryAllocationSize
+        },
+        52 => { // VkPhysicalDeviceVulkan12Properties
+            propertyWriteU32(bytes, 0, 13); // VK_DRIVER_ID_MESA_LLVMPIPE
+            @memcpy(bytes[4 .. 4 + driver_name.len], driver_name);
+            @memcpy(bytes[260 .. 260 + driver_info.len], driver_info);
+            // Conformance and optional shader/descriptor properties stay
+            // zero: this profile does not advertise Vulkan 1.2 features.
+            propertyWriteU64(bytes, 704, 0); // maxTimelineSemaphoreValueDifference
+            propertyWriteU32(bytes, 712, 0); // framebufferIntegerColorSampleCounts
+        },
+        54 => { // VkPhysicalDeviceVulkan13Properties
+            // No subgroup or inline-uniform feature is exposed.  The one
+            // useful promoted limit is the bounded buffer size enforced by
+            // createBuffer and the device heap.
+            propertyWriteU64(bytes, 192, heap_size); // maxBufferSize
+        },
+        56 => { // VkPhysicalDeviceVulkan14Properties
+            propertyWriteU32(bytes, 0, 4); // lineSubPixelPrecisionBits
+            propertyWriteU32(bytes, 4, 1); // maxVertexAttribDivisor
+            propertyWriteU32(bytes, 8, 1); // supportsNonZeroFirstInstance
+            // Push descriptors, local-read, robustness, and host-copy layout
+            // arrays remain zero because their features are unadvertised.
+            @memcpy(bytes[104..120], &pipeline_cache_uuid);
+            propertyWriteU32(bytes, 120, 1); // identicalMemoryTypeRequirements
+        },
+        else => {},
+    }
+}
+
 fn corePropertyChainValid(raw: ?*anyopaque) bool {
     var next = raw;
     var depth: usize = 0;
@@ -1341,6 +1398,7 @@ fn populateCorePropertyChain(raw: ?*anyopaque) bool {
         const bytes_len = corePropertyPayloadBytes(header.s_type) orelse return false;
         const bytes: [*]u8 = @ptrCast(item);
         @memset(bytes[16 .. 16 + bytes_len], 0);
+        populatePromotedPropertyPayload(header.s_type, bytes[16 .. 16 + bytes_len]);
         switch (header.s_type) {
             1000071004 => {
                 const out: *PhysicalDeviceIDProperties = @ptrCast(@alignCast(item));
@@ -12057,12 +12115,26 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&line_features)), descriptor_features.p_next);
     var vulkan11_properties = PhysicalDeviceVulkan11Properties{ .s_type = 50, .p_next = null, .payload = [_]u8{0xff} ** 96 };
     var vulkan12_properties = PhysicalDeviceVulkan12Properties{ .s_type = 52, .p_next = @ptrCast(&vulkan11_properties), .payload = [_]u8{0xff} ** 720 };
-    var properties = PhysicalDeviceProperties2{ .s_type = 1000059001, .p_next = @ptrCast(&vulkan12_properties), .properties = std.mem.zeroes(Properties) };
+    var vulkan13_properties = PhysicalDeviceVulkan13Properties{ .s_type = 54, .p_next = @ptrCast(&vulkan12_properties), .payload = [_]u8{0xff} ** 200 };
+    var vulkan14_properties = PhysicalDeviceVulkan14Properties{ .s_type = 56, .p_next = @ptrCast(&vulkan13_properties), .payload = [_]u8{0xff} ** 128 };
+    var properties = PhysicalDeviceProperties2{ .s_type = 1000059001, .p_next = @ptrCast(&vulkan14_properties), .properties = std.mem.zeroes(Properties) };
     getPhysicalDeviceProperties2(ctx.physical, &properties);
     try std.testing.expectEqual(API_1_0, properties.properties.api_version);
-    try std.testing.expect(std.mem.allEqual(u8, &vulkan11_properties.payload, 0));
-    try std.testing.expect(std.mem.allEqual(u8, &vulkan12_properties.payload, 0));
+    try std.testing.expectEqualSlices(u8, &device_uuid, vulkan11_properties.payload[0..16]);
+    try std.testing.expectEqualSlices(u8, &driver_uuid, vulkan11_properties.payload[16..32]);
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, vulkan11_properties.payload[40..44], .little));
+    try std.testing.expectEqual(@as(u32, 256), std.mem.readInt(u32, vulkan11_properties.payload[68..72], .little));
+    try std.testing.expectEqual(@as(u64, heap_size), std.mem.readInt(u64, vulkan11_properties.payload[88..96], .little));
+    try std.testing.expectEqual(@as(u32, 13), std.mem.readInt(u32, vulkan12_properties.payload[0..4], .little));
+    try std.testing.expectEqualSlices(u8, driver_name, vulkan12_properties.payload[4 .. 4 + driver_name.len]);
+    try std.testing.expectEqualSlices(u8, driver_info, vulkan12_properties.payload[260 .. 260 + driver_info.len]);
+    try std.testing.expectEqual(@as(u64, heap_size), std.mem.readInt(u64, vulkan13_properties.payload[192..200], .little));
+    try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, vulkan14_properties.payload[0..4], .little));
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, vulkan14_properties.payload[4..8], .little));
+    try std.testing.expectEqualSlices(u8, &pipeline_cache_uuid, vulkan14_properties.payload[104..120]);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan11_properties)), vulkan12_properties.p_next);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan12_properties)), vulkan13_properties.p_next);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan13_properties)), vulkan14_properties.p_next);
     test_allocations_before_failure = 0;
     for (0..4096) |_| getPhysicalDeviceProperties2(ctx.physical, &properties);
     test_allocations_before_failure = null;
@@ -12082,7 +12154,11 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqualSlices(u8, driver_info, driver_properties.driver_info[0..driver_info.len]);
     try std.testing.expectEqual(@as(u8, 0), driver_properties.conformance_version.major);
     try std.testing.expect(std.mem.allEqual(u8, &host_copy_properties.payload, 0));
-    try std.testing.expect(std.mem.allEqual(u8, &vulkan14_individual_properties.payload, 0));
+    try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, vulkan14_individual_properties.payload[0..4], .little));
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, vulkan14_individual_properties.payload[4..8], .little));
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, vulkan14_individual_properties.payload[8..12], .little));
+    try std.testing.expectEqualSlices(u8, &pipeline_cache_uuid, vulkan14_individual_properties.payload[104..120]);
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, vulkan14_individual_properties.payload[120..124], .little));
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&id_properties)), driver_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&driver_properties)), host_copy_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&host_copy_properties)), vulkan14_individual_properties.p_next);

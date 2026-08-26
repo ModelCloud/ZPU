@@ -48,11 +48,14 @@ other 1.1–1.4 feature forms) with exact LP64-sized VkBool32 payloads; unknown
 feature chains remain transactional rejections.
 `vkGetPhysicalDeviceProperties2` now accepts aggregate and individual
 promoted property chains with exact LP64-sized payloads and the same
-transactional unknown-chain rejection.  The individual forms retain caller
-links while zeroing unsupported capability fields; identity nodes additionally
-report deterministic ZPU UUIDs, the single-device node mask, driver name/info,
-the registered software-CPU driver class, and an explicit zero conformance
-version so diagnostics are useful without overstating conformance.
+transactional unknown-chain rejection. Aggregate Vulkan 1.1/1.2/1.3/1.4
+nodes now populate their typed identity and bounded-limit fields (UUIDs,
+driver strings/class, multiview limit, heap-backed allocation/buffer limits,
+line precision, vertex-divisor policy, and the stable layout UUID) instead of
+leaving the entire promoted payload opaque. The individual forms retain
+caller links while zeroing unsupported capability fields; identity nodes
+additionally report the single-device node mask and an explicit zero
+conformance version so diagnostics are useful without overstating conformance.
 `vkGetPhysicalDeviceImageFormatProperties2` also accepts the promoted
 external-image input and external-image/YCbCr output chains, reports the
 truthful no-external-handle/no-YCbCr policy, and rejects unknown chains without
