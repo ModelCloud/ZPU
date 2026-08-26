@@ -7,9 +7,11 @@ pub const vulkan = @import("vulkan/icd.zig");
 pub const platform = @import("platform/presenter.zig");
 pub const benchmark = @import("benchmark.zig");
 pub const render_pipeline = @import("render_pipeline.zig");
+pub const render_ir_exec = @import("vulkan/render_ir_exec.zig");
 
 test {
     _ = @import("tests.zig");
     _ = @import("vulkan/driver.zig");
     _ = @import("render_pipeline.zig");
+    _ = @import("vulkan/render_ir_exec.zig");
 }

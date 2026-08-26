@@ -2,9 +2,10 @@
 
 ZPU includes the frontend-only, non-conformant
 `zpu_spirv_render_profile_v1`. It validates and lowers a small bounded SPIR-V
-1.0 subset to owned canonical render IR for pipeline metadata. It does not
-provide general SPIR-V/Vulkan shader execution: `cpu_cube_v1` remains the only
-active graphics execution ABI and draw pixels are unchanged.
+1.0 subset to owned canonical render IR for pipeline metadata. Public Vulkan
+profile drawing remains unsupported: profile pipelines fail closed at
+`vkCmdDraw`, while `cpu_cube_v1` remains the only drawable graphics ABI and its
+command representation and pixels are unchanged.
 
 The v1 frontend accepts only Shader + Logical GLSL450, a selected straight-line
 Vertex or Fragment entry, bounded scalar/vector/mat4 and read-only uniform data,
@@ -13,6 +14,10 @@ and the small arithmetic/composite operation list documented in
 control flow, calls, derivatives, discard, atomics, barriers, push constants,
 storage writes, dynamic indexing, undefined/non-finite values, and all later
 SPIR-V versions are rejected rather than interpreted.
+In particular, every profile-v1 access-chain index must be a scalar `u32`
+ordinary or specialized constant after specialization. A runtime scalar `u32`
+index is dynamic indexing and is rejected by both the frontend and canonical
+IR executor setup.
 
 Pipeline creation treats that rejection as pipeline failure and publishes no
 pipeline or cache result. The only exception is an exact `cpu_cube_v1`
@@ -20,6 +25,13 @@ compatibility predicate for the immutable vertex/fragment module identities
 embedded by the readiness vkcube: both stages, `main`, exact word counts and
 full digests, and no specialization must match. This bridge does not create a
 frontend program and is not broader shader acceptance.
+
+Internally, the pipeline ABI is a typed choice among `cpu_cube_v1`,
+`profile_v1_metadata`, and `profile_v1_scalar_synthetic`. The last is a private,
+non-advertised, non-conformant test hook that owns one selected vertex or
+fragment scalar executor and accepts explicit interface-indexed byte bindings
+and outputs. It is never reached by Vulkan drawing and provides no Vulkan API,
+extension, feature, or profile-support claim.
 
 ZPU is a Zig-first experiment in a minimal-dependency, Vulkan-only userspace CPU graphics driver. This milestone adds an **experimental loader-compatible CPU transfer and vkcube rendering path**. It is not conformant Vulkan and is not yet sufficient for arbitrary Vulkan applications. The normative target for the API surface — the pinned core version, the profile ZPU builds toward, the loader–ICD interface requirement, and the gates that must pass before any advertised version changes — is [docs/api-policy.md](docs/api-policy.md). The driver, the ICD manifest, and CI advertise and assert Vulkan 1.0 today; the policy describes the target, not the present state.
 
@@ -60,6 +72,16 @@ advertising or imply Vulkan 1.4/profile support. See
 To run four independent experiment or optimization commands at once, `tools/cpu-fanout.sh` partitions the effective cpuset into four pairwise-disjoint, equal-size groups of whole physical cores and launches each one through the same limiter; see the fanout section and its comparability rules in [docs/benchmarking.md](docs/benchmarking.md).
 
 The build installs `zig-out/lib/libvulkan_zpu.so` and `zig-out/share/vulkan/icd.d/zpu_icd.x86_64.json`. The manifest's relative path resolves back to that installed library. XCB presentation links the shared object to libc, libm, the ELF interpreter, and libxcb. The loader-independent smoke test uses `dlopen` to resolve the three private loader entry points, negotiate interface version 7, create an instance, and enumerate the CPU device.
+
+For the hardware-isolated Omarchy workflow, [the SmolVM guest guide](docs/smolvm-omarchy.md)
+builds and stages ZPU wholly inside a real `smol-machines/smolvm` guest, rejects
+host ICD injection, and displays the guest's native XCB Vulkan validation window
+through the host Xwayland socket without enabling SmolVM's Venus GPU path.
+The real graphical proof used a nested Xephyr display through headless
+Weston/Xwayland. No real Omarchy image or Hyprland session was available for
+that run, so native Omarchy/Hyprland confirmation remains an explicit gate.
+The `smolvm-dry-run` build gate uses a transcribed CLI fixture, private test
+socket, and `env -i`; it requires neither real SmolVM nor a live display.
 
 To ask a system Vulkan loader to discover only ZPU:
 
@@ -102,6 +124,13 @@ vkcube's current uniform, vertex, texture, and depth contract; it is not a
 general SPIR-V implementation.
 
 ## Architecture
+
+The end-to-end Linux boundary is mapped in
+[`docs/linux-userspace-driver.md`](docs/linux-userspace-driver.md). It includes
+component, loader-discovery, frame-sequence, memory/presentation, and CPU-thread
+diagrams, plus an explicit account of which work stays in the application
+process, which work crosses into the X server, and why ZPU is not a kernel
+DRM/KMS driver.
 
 - `src/surface.zig` owns RGBA8/BGRA8 memory layout, validation, colors, and clipping.
 - `src/raster/` implements clear/fill and straight-alpha Porter-Duff source-over rectangles.
@@ -167,11 +196,18 @@ tools/limited-cpus.sh zig build target-800x600 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build target-4k-30 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build target-4k-60 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build target-4k-120 -Doptimize=ReleaseFast
+tools/limited-cpus.sh zig build target-4k-240 -Doptimize=ReleaseFast
+tools/limited-cpus.sh zig build target-8k-60 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build demo
 tools/limited-cpus.sh zig build -Doptimize=ReleaseFast
+tools/limited-cpus.sh zig build smolvm-guest-test
+tools/limited-cpus.sh zig build smolvm-dry-run
 ```
 
-CI runs these commands on Linux. Generated PPM files and Zig build outputs are ignored.
+These are the repository's Linux gates; the CI configuration is the exact
+authoritative list run by CI. The SmolVM isolation fixture and dry-run commands
+above are local review gates and are not currently CI jobs. Generated PPM files
+and Zig build outputs are ignored.
 
 `target-800x600` runs the real `vkcube` XCB path at 800x600, discards 120 warmup
 frames, then times 1,000 consecutive presented frames. It fails unless p99 frame
@@ -184,21 +220,35 @@ ZPU also exposes `VK_EXT_present_timing`: applications can attach
 monotonic or relative target time per swapchain. Untimed presents retain the
 process-local `ZPU_REFRESH_HZ` cadence.
 
-`target-4k-30`, `target-4k-60`, and `target-4k-120` apply the same individual-frame ultra-low
+`target-4k-30`, `target-4k-60`, `target-4k-120`, and `target-4k-240` apply the same individual-frame ultra-low
 1% timing gate to real 3840x2160 `vkcube`: after 120 warmup frames, p99 across
-1,000 frames must not exceed 33,333,333 ns, 16,666,666 ns, and 8,333,333 ns
-respectively. The strict floors use explicit 31 Hz, 63 Hz, and 126 Hz pacing
-guard bands so ordinary wake jitter cannot turn an exact nominal cadence into
-a dishonest sub-target 1% low.
+1,000 frames must not exceed 33,333,333 ns, 16,666,666 ns, 8,333,333 ns, and
+4,166,666 ns respectively. The strict floors use explicit 31 Hz, 63 Hz, 122 Hz,
+and 255 Hz pacing guard bands so ordinary wake jitter cannot turn an exact
+nominal cadence into a dishonest sub-target 1% low.
+`target-8k-60` extends the same real-present p99 gate to 7680x4320: 1,000
+post-warmup frames must remain at or below 16,666,666 ns with the standard
+63 Hz pacing guard. ZPU advertises and enforces an 8192x8192 maximum 2D image,
+framebuffer, viewport, and XCB surface extent to support this workload.
 With the canonical eight-core gate, the harness dedicates one inherited CPU to
-Xvfb and confines vkcube plus ZPU to the other seven; neither process can escape
-the caller's original affinity budget.
+Xvfb and confines the client process to the other seven; ZPU itself selects at
+most two of those CPUs and never escapes the caller's original affinity budget.
+The vkcube-specific rasterizer uses 32x32 tiles at 4K and 8K to reduce
+classification overhead without removing per-pixel coverage or depth tests.
+It conservatively records every tile touched by transformed, non-culled
+triangles and clears only those dirty tiles before the next draw, preserving
+unchanged background tiles without weakening color or depth correctness. The
+4K and 8K paths add one swapchain image, within the advertised four-image
+limit, to absorb rare producer stalls without expanding the CPU set.
 
-ZPU ranks CPUs within the process's inherited affinity mask once, pins its
-persistent render and presentation workers to CPUs on one NUMA node, and keeps
-those assignments for the process lifetime. Large color, depth, and XCB SHM
-caches are bound before first touch to that node and receive transparent
-huge-page advice; ZPU never expands the CPU mask supplied by the caller.
+ZPU ranks CPUs within the process's inherited affinity mask once and keeps all
+assignments on one NUMA node for the process lifetime. Every 2D path executes
+only on the pinned render CPU. A complex 3D pipeline may use one additional
+pinned raster CPU; presentation may migrate only between those same two
+cache-local CPUs, and ZPU never schedules work on a third CPU. Large color,
+depth, and XCB SHM caches are bound before first touch to the selected node and
+receive transparent huge-page advice; ZPU never expands the CPU mask supplied
+by the caller.
 
 `VK_GOOGLE_display_timing` is deliberately unsupported with no compatibility
 alias. Requests for that extension, its device procedures, or

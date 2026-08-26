@@ -536,6 +536,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 for (w[3..]) |index_id| {
                     const index_node = nodes[try id(nodes, index_id)];
                     const index_shape = try valueShape(nodes, index_id);
+                    // Profile v1 deliberately forbids dynamic access-chain indices;
+                    // the scalar executor receives canonical constants only.
                     if (index_node.kind != .constant or !scalarClass(index_shape, .integer) or index_shape.columns != 1 or index_node.words.len != 1) return error.Unsupported;
                     const index = index_node.words[0];
                     current_type = try indexedType(nodes, current_type, index);
@@ -1067,6 +1069,15 @@ test "uniform block constant access chain is read only and descriptor identity i
     try std.testing.expectEqual(@as(?u32, 2), program.interfaces[1].binding);
     try std.testing.expectEqual(ir.Op.access, program.instructions[1].op);
     try std.testing.expectEqual(ir.Op.extract, program.instructions[2].op);
+}
+
+test "profile v1 rejects runtime scalar u32 access chain index" {
+    const access_offset = testOpcodeOffset(&uniform_vertex, 65, 0).?;
+    const runtime_index = [_]u32{ (5 << 16) | 128, 3, 44, 20, 20 };
+    const dynamic = try testInsertWords(std.testing.allocator, &uniform_vertex, access_offset, &runtime_index);
+    defer std.testing.allocator.free(dynamic);
+    dynamic[testOpcodeOffset(dynamic, 65, 0).? + 4] = 44;
+    try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, dynamic, .vertex, "main", &.{}));
 }
 
 test "boolean true and false constants retain exact frontend values" {

@@ -127,6 +127,26 @@ fn recordFrameMetric(now: u64) void {
     }
     previous_metric_present_ns = now;
 }
+pub const Region = struct { x: u32 = 0, y: u32 = 0, width: u32 = 0, height: u32 = 0 };
+
+fn unionRegion(a: Region, b: Region) Region {
+    if (a.width == 0 or a.height == 0) return b;
+    if (b.width == 0 or b.height == 0) return a;
+    const x0 = @min(a.x, b.x);
+    const y0 = @min(a.y, b.y);
+    const x1 = @max(a.x + a.width, b.x + b.width);
+    const y1 = @max(a.y + a.height, b.y + b.height);
+    return .{ .x = x0, .y = y0, .width = x1 - x0, .height = y1 - y0 };
+}
+
+fn clampRegion(region: Region, width: u32, height: u32) Region {
+    const x0 = @min(region.x, width);
+    const y0 = @min(region.y, height);
+    const x1 = @min(region.x +| region.width, width);
+    const y1 = @min(region.y +| region.height, height);
+    return .{ .x = x0, .y = y0, .width = x1 - x0, .height = y1 - y0 };
+}
+
 pub const Transport = struct {
     connection: *Connection,
     window: u32,
@@ -135,6 +155,10 @@ pub const Transport = struct {
     width: u32,
     height: u32,
     shared_upload: ?SharedUpload = null,
+    visible_region: Region = .{},
+    visible_valid: bool = false,
+    pending_region: Region = .{},
+    pending_content: Region = .{},
     last: StageTimings = .{},
 };
 
@@ -200,7 +224,7 @@ pub fn deinit(transport: *Transport) void {
     _ = xcb_flush(transport.connection);
 }
 
-pub fn upload(transport: *Transport, pixels: []const u8) bool {
+pub fn upload(transport: *Transport, pixels: []const u8, content: Region, force_full: bool) bool {
     const total_start = monotonicNs();
     transport.last.present_start_ns = total_start;
     transport.last.upload_requests = 0;
@@ -218,15 +242,22 @@ pub fn upload(transport: *Transport, pixels: []const u8) bool {
     var y: usize = 0;
     const upload_start = monotonicNs();
     transport.last.upload_start_ns = upload_start;
+    const current_content = clampRegion(content, width, height);
+    const full = Region{ .width = width, .height = height };
+    const damage = if (force_full or !transport.visible_valid) full else unionRegion(transport.visible_region, current_content);
+    transport.pending_region = damage;
+    transport.pending_content = current_content;
     if (transport.shared_upload) |shared| {
         const shared_start = @intFromPtr(shared.address.ptr);
         const pixel_start = @intFromPtr(pixels.ptr);
         if (pixels.len > shared.address.len or pixel_start < shared_start or pixel_start - shared_start > shared.address.len - pixels.len) return false;
-        const offset: u32 = @intCast(pixel_start - shared_start);
-        _ = shared.api.put_image(connection, transport.pixmap, transport.gc, @intCast(width), @intCast(height), 0, 0, @intCast(width), @intCast(height), 0, 0, 24, 2, 0, shared.segment, offset);
-        transport.last.upload_requests = 1;
-        const reply = xcb_get_input_focus_reply(connection, xcb_get_input_focus(connection), null) orelse return false;
-        std.c.free(reply);
+        if (damage.width != 0 and damage.height != 0) {
+            const offset: u32 = @intCast(pixel_start - shared_start);
+            _ = shared.api.put_image(connection, transport.pixmap, transport.gc, @intCast(width), @intCast(height), @intCast(damage.x), @intCast(damage.y), @intCast(damage.width), @intCast(damage.height), @intCast(damage.x), @intCast(damage.y), 24, 2, 0, shared.segment, offset);
+            transport.last.upload_requests = 1;
+            const reply = xcb_get_input_focus_reply(connection, xcb_get_input_focus(connection), null) orelse return false;
+            std.c.free(reply);
+        }
     } else {
         while (y < height) {
             const rows = @min(rows_per_request, @as(usize, height) - y);
@@ -250,7 +281,8 @@ pub fn commit(transport: *Transport, pixels: []const u8) bool {
     const connection = transport.connection;
     const copy_start = monotonicNs();
     transport.last.copy_start_ns = copy_start;
-    _ = xcb_copy_area(connection, transport.pixmap, transport.window, transport.gc, 0, 0, 0, 0, @intCast(width), @intCast(height));
+    const damage = transport.pending_region;
+    if (damage.width != 0 and damage.height != 0) _ = xcb_copy_area(connection, transport.pixmap, transport.window, transport.gc, @intCast(damage.x), @intCast(damage.y), @intCast(damage.x), @intCast(damage.y), @intCast(damage.width), @intCast(damage.height));
     transport.last.copy_end_ns = monotonicNs();
     transport.last.copy_ns = transport.last.copy_end_ns - copy_start;
     const flush_start = monotonicNs();
@@ -258,6 +290,8 @@ pub fn commit(transport: *Transport, pixels: []const u8) bool {
     transport.last.flush_end_ns = monotonicNs();
     transport.last.flush_ns = transport.last.flush_end_ns - flush_start;
     transport.last.transport_total_ns = transport.last.flush_end_ns - transport.last.present_start_ns;
+    transport.visible_region = transport.pending_content;
+    transport.visible_valid = true;
     recordFrameMetric(transport.last.flush_end_ns);
     const verify = std.c.getenv("ZPU_VERIFY_PRESENT") orelse null;
     if (!verification_done and verify != null and verify.?[0] == '1') {
@@ -274,7 +308,7 @@ pub fn commit(transport: *Transport, pixels: []const u8) bool {
 }
 
 pub fn present(transport: *Transport, pixels: []const u8) bool {
-    return upload(transport, pixels) and commit(transport, pixels);
+    return upload(transport, pixels, .{ .width = transport.width, .height = transport.height }, true) and commit(transport, pixels);
 }
 
 extern fn xcb_generate_id(connection: *Connection) u32;
@@ -312,4 +346,10 @@ test "transport exposes a complete frame after all upload chunks" {
     var pixels = [_]u8{0} ** 64;
     var transport = init(@ptrFromInt(8), 1, 4, 4, 1).?;
     try std.testing.expect(present(&transport, &pixels));
+}
+
+test "damage covers old and new content and clamps to the drawable" {
+    try std.testing.expectEqual(Region{ .x = 2, .y = 3, .width = 9, .height = 8 }, unionRegion(.{ .x = 2, .y = 3, .width = 4, .height = 5 }, .{ .x = 8, .y = 6, .width = 3, .height = 5 }));
+    try std.testing.expectEqual(Region{ .x = 8, .y = 7, .width = 2, .height = 3 }, clampRegion(.{ .x = 8, .y = 7, .width = 50, .height = 50 }, 10, 10));
+    try std.testing.expectEqual(Region{ .x = 1, .y = 1, .width = 2, .height = 2 }, unionRegion(.{}, .{ .x = 1, .y = 1, .width = 2, .height = 2 }));
 }

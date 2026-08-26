@@ -1,0 +1,6 @@
+GPU0:
+    deviceName = ZPU Experimental CPU
+    deviceType = PHYSICAL_DEVICE_TYPE_CPU
+GPU1:
+    deviceName = Virtio-GPU Venus
+    deviceType = PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU

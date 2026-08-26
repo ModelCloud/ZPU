@@ -37,6 +37,30 @@ pub fn build(b: *std.Build) void {
         if (v3_available) addV3Kernels(b, b.graph.host, "zpu-host-x86-64-v3-kernels") else null;
 
     const require_limited = b.addSystemCommand(&.{"tools/require-limited.sh"});
+    const smolvm_guest_test = b.addSystemCommand(&.{"test/smolvm_guest.sh"});
+    smolvm_guest_test.step.dependOn(&require_limited.step);
+    const smolvm_guest_step = b.step("smolvm-guest-test", "Test fail-closed SmolVM guest isolation and launch commands");
+    smolvm_guest_step.dependOn(&smolvm_guest_test.step);
+    const smolvm_dry_run = b.addSystemCommand(&.{"test/smolvm_dry_run.sh"});
+    smolvm_dry_run.step.dependOn(&require_limited.step);
+    const smolvm_untrusted_environment = [_][]const u8{
+        "VK_DRIVER_FILES",              "VK_ICD_FILENAMES",                  "VK_ADD_DRIVER_FILES",             "VK_LAYER_PATH",               "VK_ADD_LAYER_PATH",
+        "VK_IMPLICIT_LAYER_PATH",       "VK_ADD_IMPLICIT_LAYER_PATH",        "VK_INSTANCE_LAYERS",              "VK_LOADER_LAYERS_ENABLE",     "VK_LOADER_LAYERS_DISABLE",
+        "VK_LOADER_LAYERS_ALLOW",       "VK_LOADER_DRIVERS_SELECT",          "VK_LOADER_DRIVERS_DISABLE",       "LD_PRELOAD",                  "LD_LIBRARY_PATH",
+        "LD_AUDIT",                     "ZPU_REFRESH_HZ",                    "ZPU_SMOLVM_MACHINE",              "ZPU_SMOLVM_IMAGE",            "ZPU_SMOLVM_CPUS",
+        "ZPU_SMOLVM_MEMORY",            "ZPU_SMOLVM_ALLOW_TRUSTED_X11",      "ZPU_SMOLVM_TESTING",              "ZPU_SMOLVM_TEST_SOCKET_ROOT", "DISPLAY",
+        "XAUTHORITY",                   "XDG_RUNTIME_DIR",                   "SMOLVM_FIXTURE_LOG",              "SMOLVM_FIXTURE_OMIT",         "SMOLVM_FIXTURE_NETWORK",
+        "SMOLVM_FIXTURE_STATE",         "SMOLVM_FIXTURE_JSON_MODE",          "SMOLVM_FIXTURE_FAIL_PACMAN",      "SMOLVM_FIXTURE_PACMAN_SLEEP", "SMOLVM_XAUTH_NLIST_FAIL",
+        "SMOLVM_XAUTH_GENERATE_FAIL",   "SMOLVM_XAUTH_DUPLICATE_EQUIVALENT", "SMOLVM_FIXTURE_PACMAN_READY",     "SMOLVM_XAUTH_EQUAL_KEY",      "SMOLVM_XAUTH_MULTIPLE_NEW",
+        "SMOLVM_XAUTH_READY",           "SMOLVM_XAUTH_SLEEP",                "SMOLVM_FIXTURE_CAPTURE_AUTH_DIR", "SMOLVM_TAR_LONG_LIST",        "SMOLVM_FIXTURE_FAIL_STOP_ONCE_FILE",
+        "SMOLVM_FIXTURE_CLEANUP_READY",
+    };
+    for (smolvm_untrusted_environment) |name| {
+        smolvm_guest_test.removeEnvironmentVariable(name);
+        smolvm_dry_run.removeEnvironmentVariable(name);
+    }
+    const smolvm_dry_run_step = b.step("smolvm-dry-run", "Print the complete guest lifecycle without changing host or VM state");
+    smolvm_dry_run_step.dependOn(&smolvm_dry_run.step);
     const validate_api_inventory = b.addSystemCommand(&.{ "python3", "tools/api_inventory.py" });
     validate_api_inventory.step.dependOn(&require_limited.step);
     const test_api_inventory = b.addSystemCommand(&.{"test/api_inventory.sh"});
@@ -162,14 +186,36 @@ pub fn build(b: *std.Build) void {
     run_target_4k_60.step.dependOn(b.getInstallStep());
     const target_4k_60_step = b.step("target-4k-60", "Require vkcube 3840x2160 presented-frame p99 at 60 FPS or better");
     target_4k_60_step.dependOn(&run_target_4k_60.step);
+    const benchmark_ir = b.addExecutable(.{ .name = "zpu-render-ir-exec-benchmark", .root_module = b.createModule(.{ .root_source_file = b.path("src/render_ir_exec_benchmark.zig"), .target = target, .optimize = optimize }) });
+    benchmark_ir.root_module.link_libc = true;
+    const run_benchmark_ir = b.addRunArtifact(benchmark_ir);
+    run_benchmark_ir.step.dependOn(&require_limited.step);
+    const benchmark_ir_step = b.step("benchmark-render-ir", "Benchmark synthetic scalar render IR setup and warm execution");
+    benchmark_ir_step.dependOn(&run_benchmark_ir.step);
 
     const run_target_4k_120 = b.addSystemCommand(&.{ "python3", "test/vkcube_benchmark.py" });
     run_target_4k_120.addArg(b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
-    run_target_4k_120.addArgs(&.{ "3840", "2160", "120", "126" });
+    run_target_4k_120.addArgs(&.{ "3840", "2160", "120", "122" });
     run_target_4k_120.step.dependOn(&require_limited.step);
     run_target_4k_120.step.dependOn(b.getInstallStep());
     const target_4k_120_step = b.step("target-4k-120", "Require vkcube 3840x2160 presented-frame p99 at 120 FPS or better");
     target_4k_120_step.dependOn(&run_target_4k_120.step);
+
+    const run_target_4k_240 = b.addSystemCommand(&.{ "python3", "test/vkcube_benchmark.py" });
+    run_target_4k_240.addArg(b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_target_4k_240.addArgs(&.{ "3840", "2160", "240", "255" });
+    run_target_4k_240.step.dependOn(&require_limited.step);
+    run_target_4k_240.step.dependOn(b.getInstallStep());
+    const target_4k_240_step = b.step("target-4k-240", "Require vkcube 3840x2160 presented-frame p99 at 240 FPS or better");
+    target_4k_240_step.dependOn(&run_target_4k_240.step);
+
+    const run_target_8k_60 = b.addSystemCommand(&.{ "python3", "test/vkcube_benchmark.py" });
+    run_target_8k_60.addArg(b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_target_8k_60.addArgs(&.{ "7680", "4320", "60", "63" });
+    run_target_8k_60.step.dependOn(&require_limited.step);
+    run_target_8k_60.step.dependOn(b.getInstallStep());
+    const target_8k_60_step = b.step("target-8k-60", "Require vkcube 7680x4320 presented-frame p99 at 60 FPS or better");
+    target_8k_60_step.dependOn(&run_target_8k_60.step);
 
     const tests = b.addTest(.{ .root_module = zpu });
     const run_tests = b.addRunArtifact(tests);
@@ -185,6 +231,12 @@ pub fn build(b: *std.Build) void {
     } else {
         test_step.dependOn(&run_tests.step);
     }
+
+    const benchmark_ir_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/render_ir_exec_benchmark.zig"), .target = b.graph.host, .optimize = .Debug }) });
+    benchmark_ir_tests.root_module.link_libc = true;
+    const run_benchmark_ir_tests = b.addRunArtifact(benchmark_ir_tests);
+    run_benchmark_ir_tests.step.dependOn(&require_limited.step);
+    test_step.dependOn(&run_benchmark_ir_tests.step);
     const cadence_tests = b.addSystemCommand(&.{ "python3", "test/cadence.py" });
     cadence_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&cadence_tests.step);
@@ -328,6 +380,7 @@ pub fn build(b: *std.Build) void {
         .{ "spirv-decode", "src/vulkan/spirv_decode.zig" },
         .{ "spirv-frontend", "src/vulkan/spirv_frontend.zig" },
         .{ "render-ir", "src/vulkan/render_ir.zig" },
+        .{ "render-ir-exec", "src/vulkan/render_ir_exec.zig" },
     }) |source| {
         const source_tests = b.addTest(.{
             .name = "zpu-" ++ source[0] ++ "-coverage-tests",

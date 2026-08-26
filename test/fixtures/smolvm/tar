@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ ${SMOLVM_TAR_LONG_LIST:-0} == 1 && ${1:-} == -tf ]]; then
+    printf '%s\n' zig-out/forbidden.so
+    for ((i = 0; i < 20000; i++)); do printf 'src/long-list-%05d.zig\n' "$i"; done
+    exit 0
+fi
+exec /usr/bin/tar "$@"

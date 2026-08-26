@@ -1,0 +1,5 @@
+# Image, network, CPU, and memory are launcher-owned and deliberately absent.
+# This prevents Smolfile/CLI precedence from weakening explicit launch policy.
+
+# Deliberately absent: gpu=true. ZPU is built and executed in the guest; enabling
+# SmolVM GPU would add virtio-gpu/Venus to a path whose isolation is the point.

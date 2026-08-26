@@ -1,11 +1,11 @@
 # PR-readiness evidence
 
-ZPU's evidence is tied to source. The 3D workload
-`zpu-vkcube-cpu-3d-v1-320x240-cube12` is a frozen 320×240, twelve-triangle
+ZPU's evidence is tied to source. The schema 3 workload
+`zpu-vkcube-cpu-3d-v3-800x600-cube12` is a frozen 800×600, twelve-triangle
 textured cube rendered by the existing `cpu_cube.zig` vkcube specialization.
 It is explicitly **not** a general SPIR-V benchmark. Five untimed warmups
 precede 30 full timed frames. The color oracle is FNV-1a-64
-`b63a7b2fb2f50601`. Reports include FPS, triangles/s, p50/p95/p99 latency, and
+`37d978fe1c101415`. Reports include FPS, triangles/s, p50/p95/p99 latency, and
 exact per-frame triangle, fragment, depth-pass, and color-write counts.
 
 Run full measurements under fanout worker 0:

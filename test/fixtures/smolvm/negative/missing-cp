@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SMOLVM_FIXTURE_OMIT=cp exec "$(dirname "$0")/../v1.7.0/smolvm" "$@"

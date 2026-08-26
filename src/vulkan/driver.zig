@@ -12,6 +12,7 @@ const present_worker = @import("present_worker.zig");
 const spirv = @import("spirv.zig");
 const spirv_frontend = @import("spirv_frontend.zig");
 const render_ir = @import("render_ir.zig");
+const render_ir_exec = @import("render_ir_exec.zig");
 pub const Result = enum(i32) { success = 0, not_ready = 1, timeout = 2, incomplete = 5, error_out_of_host_memory = -1, error_initialization_failed = -3, error_memory_map_failed = -5, error_layer_not_present = -6, error_extension_not_present = -7, error_feature_not_present = -8, error_format_not_supported = -11, error_invalid_shader = -1_000_012_000 };
 pub const Fn = ?*const fn () callconv(.c) void;
 pub const Alloc = opaque {};
@@ -218,7 +219,7 @@ pub const Device = *DeviceObj;
 pub const Queue = *QueueObj;
 const MemoryObj = struct { owner: Device, bytes: []align(64) u8, mapped: bool };
 const BufferObj = struct { owner: Device, size: u64, usage: u32, memory: ?*MemoryObj = null, offset: u64 = 0 };
-const ImageObj = struct { owner: Device, width: u32, height: u32, array_layers: u32, samples: u32, format: i32, usage: u32, layout: i32, memory: ?*MemoryObj = null, owned_bytes: ?[]align(64) u8 = null, shared_bytes: bool = false, offset: u64 = 0 };
+const ImageObj = struct { owner: Device, width: u32, height: u32, array_layers: u32, samples: u32, format: i32, usage: u32, layout: i32, memory: ?*MemoryObj = null, owned_bytes: ?[]align(64) u8 = null, shared_bytes: bool = false, offset: u64 = 0, clear_pattern: ?u32 = null, content_bounds: cpu_cube.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, force_full_present: bool = true, complex_3d_content: bool = false, last_clear_ns: u64 = 0, last_draw_ns: u64 = 0, dirty_tiles: ?[]align(64) u8 = null };
 const FenceObj = struct { owner: Device, signaled: bool };
 const SemaphoreObj = struct { owner: Device, signaled: bool };
 const CommandPoolObj = struct { owner: Device };
@@ -268,15 +269,72 @@ const PipelineLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical, 
 const AttachmentRole = enum(u8) { color, depth };
 const FramebufferAttachmentRequirement = struct { format: i32 = 0, samples: u32 = 0, role: AttachmentRole = .color };
 const RenderPassObj = struct { owner: DeviceIdentity, canonical: Canonical, compatibility: Canonical, subpass_count: u32, framebuffer_supported: bool, framebuffer_attachment_count: u32, framebuffer_attachments: [2]FramebufferAttachmentRequirement };
-const GraphicsPipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, layout: Canonical, set0: Canonical, render_compatibility: Canonical, vertex_program: ?render_ir.Program, fragment_program: ?render_ir.Program, subpass: u32, execution_abi: u32, cull_mode: u32, front_face: i32 };
+const SyntheticProfile = struct {
+    stage: render_ir.Stage,
+    executor: render_ir_exec.Executor,
+};
+const ExecutionAbi = union(enum) {
+    cpu_cube_v1,
+    profile_v1_metadata,
+    profile_v1_scalar_synthetic: SyntheticProfile,
+
+    fn deinit(self: *ExecutionAbi) void {
+        switch (self.*) {
+            .profile_v1_scalar_synthetic => |*synthetic| synthetic.executor.deinit(),
+            else => {},
+        }
+        self.* = .profile_v1_metadata;
+    }
+};
+const GraphicsPipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, layout: Canonical, set0: Canonical, render_compatibility: Canonical, vertex_program: ?render_ir.Program, fragment_program: ?render_ir.Program, subpass: u32, execution_abi: ExecutionAbi, cull_mode: u32, front_face: i32 };
+const SyntheticError = render_ir_exec.Error || error{ InvalidDevice, InvalidPipeline, InvalidAbi, InvalidStage };
+
+// Deliberately private: this scalar proof hook is not a Vulkan command, entry
+// point, extension, feature, or advertised capability.
+fn setupSyntheticProfile(
+    device: ?Device,
+    pipeline_handle: usize,
+    stage: render_ir.Stage,
+    direct_program: ?*const render_ir.Program,
+    executor_allocator: std.mem.Allocator,
+) SyntheticError!void {
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return error.InvalidDevice;
+    if (!validDeviceLocked(d)) return error.InvalidDevice;
+    const pipeline = validGraphicsPipelineLocked(pipeline_handle) orelse return error.InvalidPipeline;
+    if (!pipeline.owner.eql(d)) return error.InvalidPipeline;
+    if (pipeline.execution_abi != .profile_v1_metadata) return error.InvalidAbi;
+    const program = direct_program orelse switch (stage) {
+        .vertex => if (pipeline.vertex_program) |*value| value else return error.InvalidStage,
+        .fragment => if (pipeline.fragment_program) |*value| value else return error.InvalidStage,
+    };
+    if (program.stage != stage) return error.InvalidStage;
+    var executor = try render_ir_exec.Executor.init(executor_allocator, program);
+    errdefer executor.deinit();
+    pipeline.execution_abi = .{ .profile_v1_scalar_synthetic = .{ .stage = stage, .executor = executor } };
+}
+
+fn executeSyntheticProfile(device: ?Device, pipeline_handle: usize, bindings: []const render_ir_exec.Binding, outputs: []const render_ir_exec.Output) SyntheticError!void {
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return error.InvalidDevice;
+    if (!validDeviceLocked(d)) return error.InvalidDevice;
+    const pipeline = validGraphicsPipelineLocked(pipeline_handle) orelse return error.InvalidPipeline;
+    if (!pipeline.owner.eql(d)) return error.InvalidPipeline;
+    switch (pipeline.execution_abi) {
+        .profile_v1_scalar_synthetic => |*synthetic| try synthetic.executor.execute(bindings, outputs),
+        else => return error.InvalidAbi,
+    }
+}
 const SwapchainObj = struct {
     owner: Device,
     surface: *SurfaceObj,
     width: u32,
     height: u32,
     image_count: u32,
-    images: [3]usize,
-    image_states: [3]frame_lifecycle.State,
+    images: [4]usize,
+    image_states: [4]frame_lifecycle.State,
     next_image: u32,
     pending: u32,
     retiring: bool,
@@ -293,6 +351,7 @@ pub const CommandBuffer = *CommandBufferObj;
 const max_objects = 64;
 const max_child_objects = 64;
 const heap_size: u64 = 256 * 1024 * 1024;
+const max_2d_extent: u32 = 8192;
 const max_api_items: u32 = 256;
 const SlotState = enum(u8) { never, live, tombstone };
 var instance_objects: [max_objects]InstanceObj = undefined;
@@ -353,6 +412,8 @@ const TraceRecord = extern struct {
     copy_start_ns: u64,
     copy_end_ns: u64,
     flush_end_ns: u64,
+    render_clear_ns: u64,
+    render_draw_ns: u64,
     frame_end_ns: u64,
 };
 const max_trace_frames = 7_200;
@@ -389,9 +450,31 @@ fn recordTrace(record_value: TraceRecord) void {
     trace_written = offset == bytes.len;
 }
 
+fn recordPresentWorkerTrace(record_value: present_worker.Trace) void {
+    recordTrace(.{
+        .frame = trace_count,
+        .render_complete_ns = record_value.render_complete_ns,
+        .deadline_ns = record_value.deadline_ns,
+        .wake_ns = record_value.wake_ns,
+        .wake_error_ns = record_value.wake_error_ns,
+        .present_start_ns = record_value.present_start_ns,
+        .upload_end_ns = record_value.upload_end_ns,
+        .copy_start_ns = record_value.copy_start_ns,
+        .copy_end_ns = record_value.copy_end_ns,
+        .flush_end_ns = record_value.flush_end_ns,
+        .render_clear_ns = record_value.render_clear_ns,
+        .render_draw_ns = record_value.render_draw_ns,
+        .frame_end_ns = record_value.frame_end_ns,
+    });
+}
+
 fn synchronousOneCore() bool {
     const value = std.c.getenv("ZPU_ONE_CORE") orelse return false;
     return value[0] == '1';
+}
+
+fn usePresentWorker(complex_3d_content: bool, force_one_core: bool) bool {
+    return complex_3d_content and !force_one_core;
 }
 
 fn releasePresented(context: *anyopaque, image_index: u32) void {
@@ -716,7 +799,7 @@ fn getSurfaceCapabilities(physical: ?Physical, handle: usize, output: ?*SurfaceC
     const out = output orelse return .error_initialization_failed;
     const surface = validSurfaceLocked(handle) orelse return .error_initialization_failed;
     if (!validPhysicalLocked(p) or surface.owner != p.owner) return .error_initialization_failed;
-    out.* = .{ .min_image_count = 2, .max_image_count = 3, .current_extent = .{ .width = std.math.maxInt(u32), .height = std.math.maxInt(u32) }, .min_image_extent = .{ .width = 1, .height = 1 }, .max_image_extent = .{ .width = 4096, .height = 4096 }, .max_image_array_layers = 1, .supported_transforms = 1, .current_transform = 1, .supported_composite_alpha = 1, .supported_usage_flags = 0x10 };
+    out.* = .{ .min_image_count = 2, .max_image_count = 4, .current_extent = .{ .width = std.math.maxInt(u32), .height = std.math.maxInt(u32) }, .min_image_extent = .{ .width = 1, .height = 1 }, .max_image_extent = .{ .width = max_2d_extent, .height = max_2d_extent }, .max_image_array_layers = 1, .supported_transforms = 1, .current_transform = 1, .supported_composite_alpha = 1, .supported_usage_flags = 0x10 };
     return .success;
 }
 fn getSurfaceFormats(physical: ?Physical, handle: usize, count: ?*u32, output: ?[*]SurfaceFormat) callconv(.c) Result {
@@ -802,8 +885,8 @@ fn getFeatures(physical: ?Physical, output: ?*Features) callconv(.c) void {
 }
 fn conservativeLimits() Limits {
     var v = std.mem.zeroes(Limits);
-    v.max_image_dimension_1d = 4096;
-    v.max_image_dimension_2d = 4096;
+    v.max_image_dimension_1d = max_2d_extent;
+    v.max_image_dimension_2d = max_2d_extent;
     v.max_image_dimension_3d = 256;
     v.max_image_dimension_cube = 4096;
     v.max_image_array_layers = 256;
@@ -850,7 +933,7 @@ fn conservativeLimits() Limits {
     v.max_sampler_lod_bias = 2;
     v.max_sampler_anisotropy = 1;
     v.max_viewports = 1;
-    v.max_viewport_dimensions = .{ 4096, 4096 };
+    v.max_viewport_dimensions = .{ max_2d_extent, max_2d_extent };
     v.viewport_bounds_range = .{ -32_768, 32_767 };
     v.min_memory_map_alignment = 64;
     v.min_texel_buffer_offset_alignment = 256;
@@ -858,8 +941,8 @@ fn conservativeLimits() Limits {
     v.min_storage_buffer_offset_alignment = 256;
     v.min_texel_offset = -8;
     v.max_texel_offset = 7;
-    v.max_framebuffer_width = 4096;
-    v.max_framebuffer_height = 4096;
+    v.max_framebuffer_width = max_2d_extent;
+    v.max_framebuffer_height = max_2d_extent;
     v.max_framebuffer_layers = 256;
     v.framebuffer_color_sample_counts = 1 | 4;
     v.framebuffer_depth_sample_counts = 1 | 4;
@@ -938,7 +1021,7 @@ fn getImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, t
     if (!validPhysicalLocked(physical orelse return .error_initialization_failed)) return .error_initialization_failed;
     if (!supportedFormat(format) or image_type != 1 or (tiling != 0 and tiling != 1) or flags != 0 or usage == 0 or usage & ~@as(u32, 0x37) != 0) return .error_format_not_supported;
     const out: *extern struct { max_extent: Extent3D, max_mip_levels: u32, max_array_layers: u32, sample_counts: u32, max_resource_size: u64 } = @ptrCast(@alignCast(output orelse return .error_initialization_failed));
-    out.* = .{ .max_extent = .{ .width = 4096, .height = 4096, .depth = 1 }, .max_mip_levels = 1, .max_array_layers = 1, .sample_counts = 1, .max_resource_size = 256 * 1024 * 1024 };
+    out.* = .{ .max_extent = .{ .width = max_2d_extent, .height = max_2d_extent, .depth = 1 }, .max_mip_levels = 1, .max_array_layers = 1, .sample_counts = 1, .max_resource_size = heap_size };
     return .success;
 }
 fn getSparseImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, samples: u32, usage: u32, tiling: i32, count: ?*u32, output: ?*anyopaque) callconv(.c) void {
@@ -1118,6 +1201,7 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
             object.compatibility.deinit();
         };
         for (&graphics_pipeline_objects, graphics_pipeline_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) {
+            object.execution_abi.deinit();
             object.canonical.deinit();
             object.layout.deinit();
             object.set0.deinit();
@@ -1135,7 +1219,9 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
         for (&image_objects, &image_state) |*image, *child_state| if (child_state.* == .live and image.owner == d) {
             child_state.* = .tombstone;
             if (!image.shared_bytes) if (image.owned_bytes) |bytes| allocator.free(bytes);
+            if (image.dirty_tiles) |tiles| allocator.free(tiles);
             image.owned_bytes = null;
+            image.dirty_tiles = null;
         };
         for (&memory_objects, &memory_state) |*memory, *child_state| if (child_state.* == .live and memory.owner == d) {
             child_state.* = .tombstone;
@@ -1146,6 +1232,14 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
         state.* = .tombstone;
         d.loader_data = 0;
         q.loader_data = 0;
+        var devices_remain = false;
+        for (device_state) |candidate_state| if (candidate_state == .live) {
+            devices_remain = true;
+        };
+        if (!devices_remain) {
+            present_worker.shutdown();
+            cpu_cube.shutdownParallelWorkers();
+        }
         return;
     };
 }
@@ -1340,6 +1434,7 @@ fn mapMemory(device: ?Device, handle: usize, offset: u64, size: u64, flags: u32,
     const actual = if (size == std.math.maxInt(u64)) object.bytes.len - @as(usize, @intCast(offset)) else std.math.cast(usize, size) orelse return .error_memory_map_failed;
     if (actual > object.bytes.len - @as(usize, @intCast(offset))) return .error_memory_map_failed;
     object.mapped = true;
+    for (&image_objects, image_state) |*image, state| if (state == .live and image.memory == object) invalidateImageContents(image);
     out.* = object.bytes.ptr + @as(usize, @intCast(offset));
     return .success;
 }
@@ -1420,7 +1515,7 @@ fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Al
         hit(.invalid_image_usage);
         return .error_initialization_failed;
     }
-    if (alloc != null or ci.s_type != 14 or ci.p_next != null or ci.flags != 0 or ci.image_type != 1 or !supportedFormat(ci.format) or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > 4096 or ci.extent.height > 4096 or ci.extent.depth != 1 or ci.mip_levels != 1 or ci.array_layers != 1 or ci.samples != 1 or (ci.tiling != 0 and ci.tiling != 1) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) return if (!supportedFormat(ci.format)) .error_format_not_supported else .error_initialization_failed;
+    if (alloc != null or ci.s_type != 14 or ci.p_next != null or ci.flags != 0 or ci.image_type != 1 or !supportedFormat(ci.format) or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or ci.mip_levels != 1 or ci.array_layers != 1 or ci.samples != 1 or (ci.tiling != 0 and ci.tiling != 1) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) return if (!supportedFormat(ci.format)) .error_format_not_supported else .error_initialization_failed;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
@@ -1443,7 +1538,9 @@ fn destroyImage(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.
     if (validDeviceLocked(d) and validOwner(d, object.owner)) {
         stateForObject(ImageObj, object, &image_objects, &image_state).?.* = .tombstone;
         if (!object.shared_bytes) if (object.owned_bytes) |bytes| allocator.free(bytes);
+        if (object.dirty_tiles) |tiles| allocator.free(tiles);
         object.owned_bytes = null;
+        object.dirty_tiles = null;
     }
 }
 fn getImageMemoryRequirements(device: ?Device, handle: usize, output: ?*MemoryRequirements) callconv(.c) void {
@@ -2079,6 +2176,50 @@ fn fillImagePattern(bytes: []u8, pattern: u32) void {
     @memset(std.mem.bytesAsSlice(u32, aligned), pattern);
 }
 
+fn emptyRect() cpu_cube.Rect {
+    return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+}
+
+fn unionRect(a: cpu_cube.Rect, b: cpu_cube.Rect) cpu_cube.Rect {
+    if (a.width == 0 or a.height == 0) return b;
+    if (b.width == 0 or b.height == 0) return a;
+    const x0 = @min(a.x, b.x);
+    const y0 = @min(a.y, b.y);
+    const x1 = @max(a.x + @as(i32, @intCast(a.width)), b.x + @as(i32, @intCast(b.width)));
+    const y1 = @max(a.y + @as(i32, @intCast(a.height)), b.y + @as(i32, @intCast(b.height)));
+    return .{ .x = x0, .y = y0, .width = @intCast(x1 - x0), .height = @intCast(y1 - y0) };
+}
+
+fn fillImagePatternRect(bytes: []u8, width: u32, rect: cpu_cube.Rect, pattern: u32) void {
+    if (rect.width == 0 or rect.height == 0) return;
+    const aligned: []align(4) u8 = @alignCast(bytes);
+    const words = std.mem.bytesAsSlice(u32, aligned);
+    const x: usize = @intCast(rect.x);
+    const first_y: usize = @intCast(rect.y);
+    for (first_y..first_y + rect.height) |y| {
+        const start = y * width + x;
+        @memset(words[start..][0..rect.width], pattern);
+    }
+}
+
+fn invalidateImageContents(image: *ImageObj) void {
+    image.clear_pattern = null;
+    image.content_bounds = .{ .x = 0, .y = 0, .width = image.width, .height = image.height };
+    image.force_full_present = true;
+    image.complex_3d_content = false;
+    if (image.dirty_tiles) |tiles| @memset(tiles, 0);
+}
+
+fn ensureDirtyTiles(image: *ImageObj) ?[]align(64) u8 {
+    if (image.dirty_tiles) |tiles| return tiles;
+    const byte_count = cpu_cube.dirtyTileByteCount(image.width, image.height);
+    if (byte_count == 0 or byte_count > cpu_cube.max_dirty_tile_bytes) return null;
+    const tiles = allocateBytes(byte_count) catch return null;
+    @memset(tiles, 0);
+    image.dirty_tiles = tiles;
+    return tiles;
+}
+
 fn executeValidatedCommand(command: Command) void {
     switch (command) {
         .fill => |op| {
@@ -2091,21 +2232,58 @@ fn executeValidatedCommand(command: Command) void {
             benchmarkHostMemoryCopy(dst, src);
         },
         .clear => |op| {
-            fillImagePattern(imageBytes(op.image), @bitCast(op.color));
+            const pattern: u32 = @bitCast(op.color);
+            fillImagePattern(imageBytes(op.image), pattern);
+            op.image.clear_pattern = pattern;
+            op.image.content_bounds = emptyRect();
+            op.image.force_full_present = true;
+            op.image.complex_3d_content = false;
         },
         .render_clear => |op| {
+            const operation_start = frame_pacing.monotonicNs();
             const bytes = imageBytes(op.image);
             if (op.depth) |depth| {
                 const depth_bytes = imageBytes(depth);
-                if (bytes.len < 8 * 1024 * 1024 or !cpu_cube.clearImagesParallel(bytes, @bitCast(op.color), depth_bytes, @bitCast(op.depth_value))) {
-                    fillImagePattern(bytes, @bitCast(op.color));
-                    fillImagePattern(depth_bytes, @bitCast(op.depth_value));
+                const color_pattern: u32 = @bitCast(op.color);
+                const depth_pattern: u32 = @bitCast(op.depth_value);
+                const sparse = bytes.len >= 8 * 1024 * 1024 and op.image.width == depth.width and op.image.height == depth.height and op.image.clear_pattern == color_pattern and depth.clear_pattern == depth_pattern and depth.memory != null and !depth.memory.?.mapped;
+                if (sparse) {
+                    if (op.image.dirty_tiles) |tiles| {
+                        if (!cpu_cube.clearDirtyTilesParallel(bytes, color_pattern, depth_bytes, depth_pattern, op.image.width, op.image.height, tiles)) {
+                            const rect = unionRect(op.image.content_bounds, depth.content_bounds);
+                            fillImagePatternRect(bytes, op.image.width, rect, color_pattern);
+                            fillImagePatternRect(depth_bytes, depth.width, rect, depth_pattern);
+                        }
+                        @memset(tiles, 0);
+                    } else {
+                        const rect = unionRect(op.image.content_bounds, depth.content_bounds);
+                        if (rect.width != 0 and rect.height != 0 and !cpu_cube.clearImageRegionsParallel(bytes, color_pattern, depth_bytes, depth_pattern, op.image.width, rect)) {
+                            fillImagePatternRect(bytes, op.image.width, rect, color_pattern);
+                            fillImagePatternRect(depth_bytes, depth.width, rect, depth_pattern);
+                        }
+                    }
+                } else if (bytes.len < 8 * 1024 * 1024 or !cpu_cube.clearImagesParallel(bytes, color_pattern, depth_bytes, depth_pattern)) {
+                    fillImagePattern(bytes, color_pattern);
+                    fillImagePattern(depth_bytes, depth_pattern);
                 }
+                if (!sparse) if (op.image.dirty_tiles) |tiles| @memset(tiles, 0);
+                op.image.clear_pattern = color_pattern;
+                depth.clear_pattern = depth_pattern;
+                op.image.content_bounds = emptyRect();
+                depth.content_bounds = emptyRect();
+                if (!sparse) op.image.force_full_present = true;
+                op.image.complex_3d_content = false;
             } else {
                 fillImagePattern(bytes, @bitCast(op.color));
+                op.image.clear_pattern = @bitCast(op.color);
+                op.image.content_bounds = emptyRect();
+                op.image.force_full_present = true;
+                op.image.complex_3d_content = false;
             }
+            op.image.last_clear_ns = frame_pacing.monotonicNs() - operation_start;
         },
         .cube_draw => |op| {
+            const operation_start = frame_pacing.monotonicNs();
             const color = op.framebuffer.color_image.?;
             const depth = op.framebuffer.depth_image.?;
             const uniform_buffer = op.descriptors.uniform.?;
@@ -2113,10 +2291,17 @@ fn executeValidatedCommand(command: Command) void {
             const uniform_length: usize = @intCast(@min(op.descriptors.uniform_range, uniform_buffer.size - op.descriptors.uniform_offset));
             const uniform_memory = uniform_buffer.memory.?.bytes;
             const texture = op.descriptors.texture.?;
-            _ = cpu_cube.draw(imageBytes(color), imageBytes(depth), color.width, color.height, uniform_memory[uniform_start..][0..uniform_length], imageBytes(texture), texture.width, texture.height, op.vertex_count, op.viewport, op.scissor, op.cull_mode, op.front_face);
+            var bounds = emptyRect();
+            const dirty_tiles = if (@as(u64, color.width) * color.height >= 3840 * 2160) ensureDirtyTiles(color) else null;
+            _ = cpu_cube.drawTrackedTiles(imageBytes(color), imageBytes(depth), color.width, color.height, uniform_memory[uniform_start..][0..uniform_length], imageBytes(texture), texture.width, texture.height, op.vertex_count, op.viewport, op.scissor, op.cull_mode, op.front_face, &bounds, dirty_tiles);
+            color.content_bounds = unionRect(color.content_bounds, bounds);
+            depth.content_bounds = unionRect(depth.content_bounds, bounds);
+            color.complex_3d_content = true;
+            color.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
         },
         .buffer_to_image => |op| {
             copyBufferImage(op.src, op.dst, op.region, true);
+            invalidateImageContents(op.dst);
         },
         .image_to_buffer => |op| {
             copyBufferImage(op.dst, op.src, op.region, false);
@@ -2131,6 +2316,7 @@ fn executeValidatedCommand(command: Command) void {
                 const len = @as(usize, op.region.extent.width) * 4;
                 std.mem.copyForwards(u8, dst[do..][0..len], src[so..][0..len]);
             }
+            invalidateImageContents(op.dst);
         },
         .transition => |op| {
             op.image.layout = op.new_layout;
@@ -2149,6 +2335,13 @@ pub fn benchmarkHostMemoryFill(bytes: []u8, data: u32) void {
 /// CPU implementation shared by vkCmdCopyBuffer execution and its benchmark.
 pub fn benchmarkHostMemoryCopy(dst: []u8, src: []const u8) void {
     host_memory.copy(dst, src);
+}
+
+test "2D presentation stays one-core and only complex 3D enables the auxiliary worker" {
+    try std.testing.expect(!usePresentWorker(false, false));
+    try std.testing.expect(!usePresentWorker(false, true));
+    try std.testing.expect(!usePresentWorker(true, true));
+    try std.testing.expect(usePresentWorker(true, false));
 }
 
 test "Vulkan host-memory benchmark helpers implement exact command byte semantics" {
@@ -2812,7 +3005,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     if (test_fail_render_compatibility_clone) return error.OutOfMemory;
     var render_compatibility = try render_pass.compatibility.clone();
     errdefer render_compatibility.deinit();
-    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = 1, .cull_mode = rs.cull_mode, .front_face = rs.front_face };
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face };
 }
 
 fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, set0: *const Canonical) bool {
@@ -3089,6 +3282,7 @@ fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?*c
     for (0..count) |index| {
         built[index] = buildGraphicsPipelineLocked(d, &create_infos[index]) catch |err| {
             for (built[0..built_count]) |*prior| {
+                prior.execution_abi.deinit();
                 prior.canonical.deinit();
                 prior.layout.deinit();
                 prior.set0.deinit();
@@ -3114,7 +3308,10 @@ fn destroyPipeline(device: ?Device, handle: usize, alloc: ?*const Alloc) callcon
     defer mutex.unlock();
     const d = device orelse return;
     const object = validGraphicsPipelineLocked(handle) orelse return;
-    if (validDeviceLocked(d) and object.owner.eql(d)) stateForObject(GraphicsPipelineObj, object, &graphics_pipeline_objects, &graphics_pipeline_state).?.* = .tombstone;
+    if (validDeviceLocked(d) and object.owner.eql(d)) {
+        object.execution_abi.deinit();
+        stateForObject(GraphicsPipelineObj, object, &graphics_pipeline_objects, &graphics_pipeline_state).?.* = .tombstone;
+    }
 }
 fn allocateDescriptorSets(device: ?Device, info: ?*const DescriptorSetAllocateInfo, outputs: ?[*]usize) callconv(.c) Result {
     const ci = info orelse return .error_initialization_failed;
@@ -3282,7 +3479,7 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
         command_buffer.impl.invalid = true;
         return;
     };
-    if (pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or pipeline.execution_abi != 1 or pipeline.subpass != 0 or !pipeline.render_compatibility.eql(&render_pass.compatibility) or instance_count != 1 or first_vertex != 0 or first_instance != 0 or vertex_count == 0) {
+    if (pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or pipeline.execution_abi != .cpu_cube_v1 or pipeline.subpass != 0 or !pipeline.render_compatibility.eql(&render_pass.compatibility) or instance_count != 1 or first_vertex != 0 or first_instance != 0 or vertex_count == 0) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -3301,22 +3498,24 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (ci.min_image_count < 2 or ci.min_image_count > 3 or ci.image_extent.width == 0 or ci.image_extent.height == 0 or ci.present_mode != 2) return .error_initialization_failed;
+    if (ci.min_image_count < 2 or ci.min_image_count > 4 or ci.image_extent.width == 0 or ci.image_extent.height == 0 or ci.present_mode != 2) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     const surface = validSurfaceLocked(ci.surface) orelse return .error_initialization_failed;
     if (!validDeviceLocked(d) or surface.owner != d.physical.owner) return .error_initialization_failed;
     _ = cpu_locality.pinCurrent(.render);
     for (&swapchain_objects, &swapchain_state) |*swapchain, *state| if (state.* == .never) {
-        const transport = xcb_present.init(surface.connection, surface.window, ci.image_extent.width, ci.image_extent.height, ci.min_image_count) orelse return .error_initialization_failed;
+        const pixels = @as(u64, ci.image_extent.width) * ci.image_extent.height;
+        const image_count = if (pixels >= @as(u64, 3840) * 2160 and ci.min_image_count < 4) ci.min_image_count + 1 else ci.min_image_count;
+        const transport = xcb_present.init(surface.connection, surface.window, ci.image_extent.width, ci.image_extent.height, image_count) orelse return .error_initialization_failed;
         swapchain.* = .{
             .owner = d,
             .surface = surface,
             .width = ci.image_extent.width,
             .height = ci.image_extent.height,
-            .image_count = ci.min_image_count,
-            .images = .{ 0, 0, 0 },
-            .image_states = .{ .available, .available, .available },
+            .image_count = image_count,
+            .images = .{ 0, 0, 0, 0 },
+            .image_states = .{ .available, .available, .available, .available },
             .next_image = 0,
             .pending = 0,
             .retiring = false,
@@ -3326,7 +3525,7 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
             .transport = transport,
         };
         var created: u32 = 0;
-        while (created < ci.min_image_count) : (created += 1) {
+        while (created < image_count) : (created += 1) {
             var found = false;
             for (&image_objects, &image_state) |*image, *image_slot_state| if (!found and image_slot_state.* == .never) {
                 const byte_count = @as(usize, ci.image_extent.width) * ci.image_extent.height * 4;
@@ -3374,7 +3573,9 @@ fn destroySwapchain(device: ?Device, handle: usize, alloc: ?*const Alloc) callco
     for (swapchain.images[0..swapchain.image_count]) |image_handle| if (validImageLocked(image_handle)) |image| {
         stateForObject(ImageObj, image, &image_objects, &image_state).?.* = .tombstone;
         if (!image.shared_bytes) if (image.owned_bytes) |bytes| allocator.free(bytes);
+        if (image.dirty_tiles) |tiles| allocator.free(tiles);
         image.owned_bytes = null;
+        image.dirty_tiles = null;
     };
     for (&swapchain_objects, &swapchain_state) |*candidate, *state| if (candidate == swapchain) {
         state.* = .tombstone;
@@ -3451,7 +3652,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         mutex.unlock();
         return .error_initialization_failed;
     };
-    if (!validDeviceLocked(q.owner) or present.swapchain_count == 0 or present.swapchain_count > max_present_entries or present.swapchains == null or present.image_indices == null or (!builtin.is_test and !synchronousOneCore() and !present_worker.ensureStarted())) {
+    if (!validDeviceLocked(q.owner) or present.swapchain_count == 0 or present.swapchain_count > max_present_entries or present.swapchains == null or present.image_indices == null) {
         mutex.unlock();
         return .error_initialization_failed;
     }
@@ -3493,23 +3694,27 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         }
         swapchain.pending += 1;
         _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+        const image: *ImageObj = @ptrFromInt(swapchain.images[index]);
+        const content = xcb_present.Region{ .x = @intCast(@max(image.content_bounds.x, 0)), .y = @intCast(@max(image.content_bounds.y, 0)), .width = image.content_bounds.width, .height = image.content_bounds.height };
+        const force_full = image.force_full_present;
         if (builtin.is_test) {
-            const image: *ImageObj = @ptrFromInt(swapchain.images[index]);
             _ = xcb_present.present(&swapchain.transport, imageBytes(image));
+            image.force_full_present = false;
             releasePresented(swapchain, index);
-        } else if (synchronousOneCore()) {
+        } else if (!usePresentWorker(image.complex_3d_content, synchronousOneCore())) {
             const before = frame_pacing.monotonicNs();
             if (swapchain.cadence == null) swapchain.cadence = frame_pacing.Clock.init(before, frame_pacing.configuredRate());
             const deadline = target_ns orelse swapchain.cadence.?.deadline();
-            if (!xcb_present.upload(&swapchain.transport, imageBytes(@ptrFromInt(swapchain.images[index])))) {
+            if (!xcb_present.upload(&swapchain.transport, imageBytes(image), content, force_full)) {
                 releasePresented(swapchain, index);
                 mutex.unlock();
                 return .error_initialization_failed;
             }
-            if (deadline > before) frame_pacing.sleepUntilPrecise(deadline, frame_pacing.precision_spin_ns);
+            const commit_deadline = deadline -| frame_pacing.present_commit_lead_ns;
+            if (commit_deadline > before) frame_pacing.sleepUntilPrecise(commit_deadline, frame_pacing.present_spin_ns);
             const woke = frame_pacing.monotonicNs();
             swapchain.transport.last.wake_error_ns = @intCast(woke -| deadline);
-            if (!xcb_present.commit(&swapchain.transport, imageBytes(@ptrFromInt(swapchain.images[index])))) {
+            if (!xcb_present.commit(&swapchain.transport, imageBytes(image))) {
                 releasePresented(swapchain, index);
                 mutex.unlock();
                 return .error_initialization_failed;
@@ -3526,15 +3731,18 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
                 .copy_start_ns = swapchain.transport.last.copy_start_ns,
                 .copy_end_ns = swapchain.transport.last.copy_end_ns,
                 .flush_end_ns = swapchain.transport.last.flush_end_ns,
+                .render_clear_ns = image.last_clear_ns,
+                .render_draw_ns = image.last_draw_ns,
                 .frame_end_ns = finished,
             });
             swapchain.cadence.?.advance(finished);
+            image.force_full_present = false;
             releasePresented(swapchain, index);
-        } else if (!present_worker.enqueue(.{ .transport = &swapchain.transport, .cadence = &swapchain.cadence, .pixels = imageBytes(@ptrFromInt(swapchain.images[index])), .context = swapchain, .image_index = index, .release = releasePresented, .target_ns = target_ns })) {
+        } else if (!present_worker.ensureStarted() or !present_worker.enqueue(.{ .transport = &swapchain.transport, .cadence = &swapchain.cadence, .pixels = imageBytes(image), .content = content, .force_full = force_full, .context = swapchain, .image_index = index, .release = releasePresented, .trace = if (traceLimit() != 0) recordPresentWorkerTrace else null, .render_clear_ns = image.last_clear_ns, .render_draw_ns = image.last_draw_ns, .target_ns = target_ns })) {
             releasePresented(swapchain, index);
             mutex.unlock();
             return .error_initialization_failed;
-        }
+        } else image.force_full_present = false;
         if (present.results) |results| results[i] = .success;
     }
     mutex.unlock();
@@ -3651,6 +3859,10 @@ test "EXT present timing selects absolute and relative deadlines" {
     var google_info = info;
     google_info.p_next = &google;
     try std.testing.expectError(error.GoogleDisplayTimingUnsupported, presentTarget(&google_info, 0, 1_000));
+    const ignored = ChainHeader{ .s_type = 99, .p_next = null };
+    var ignored_info = info;
+    ignored_info.p_next = &ignored;
+    try std.testing.expectEqual(@as(?u64, null), try presentTarget(&ignored_info, 0, 1_000));
 }
 
 test "Google display timing procedure names are detected without aliases" {
@@ -3878,10 +4090,10 @@ test "XCB surface lifecycle and physical presentation queries" {
     var capabilities: SurfaceCapabilities = undefined;
     try std.testing.expectEqual(Result.success, getSurfaceCapabilities(physicals[0], surface, &capabilities));
     try std.testing.expectEqual(@as(u32, 2), capabilities.min_image_count);
-    try std.testing.expectEqual(@as(u32, 3), capabilities.max_image_count);
+    try std.testing.expectEqual(@as(u32, 4), capabilities.max_image_count);
     try std.testing.expectEqual(std.math.maxInt(u32), capabilities.current_extent.width);
     try std.testing.expectEqual(Extent2D{ .width = 1, .height = 1 }, capabilities.min_image_extent);
-    try std.testing.expectEqual(Extent2D{ .width = 4096, .height = 4096 }, capabilities.max_image_extent);
+    try std.testing.expectEqual(Extent2D{ .width = max_2d_extent, .height = max_2d_extent }, capabilities.max_image_extent);
     try std.testing.expectEqual(@as(u32, 0x10), capabilities.supported_usage_flags);
 
     var count: u32 = 0;
@@ -4203,7 +4415,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     const profile_pipeline = validGraphicsPipelineLocked(profile_handle[0]).?;
     try std.testing.expect(profile_pipeline.vertex_program != null);
     try std.testing.expect(profile_pipeline.fragment_program != null);
-    try std.testing.expectEqual(@as(u32, 1), profile_pipeline.execution_abi);
+    try std.testing.expect(profile_pipeline.execution_abi == .profile_v1_metadata);
     const owned_vertex_digest = profile_pipeline.vertex_program.?.identity.digest;
     const owned_fragment_digest = profile_pipeline.fragment_program.?.identity.digest;
     var rejected_profile_batch = [_]GraphicsPipelineCreateInfo{ profile_pipeline_info, profile_pipeline_info };
@@ -4234,6 +4446,46 @@ test "vkcube presentation path records submits and presents two swapchain images
     @memset(&profile_fragment_words, 0);
     try std.testing.expectEqualSlices(u8, &owned_vertex_digest, &profile_pipeline.vertex_program.?.identity.digest);
     try std.testing.expectEqualSlices(u8, &owned_fragment_digest, &profile_pipeline.fragment_program.?.identity.digest);
+    const synthetic_setup_allocations: usize = 7;
+    for (0..synthetic_setup_allocations) |fail_index| {
+        var failure_probe = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, setupSyntheticProfile(device, profile_handle[0], .fragment, null, failure_probe.allocator()));
+        try std.testing.expect(profile_pipeline.execution_abi == .profile_v1_metadata);
+        try std.testing.expectEqual(failure_probe.allocated_bytes, failure_probe.freed_bytes);
+        try std.testing.expectEqual(failure_probe.allocations, failure_probe.deallocations);
+    }
+    var synthetic_probe = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = std.math.maxInt(usize) });
+    try setupSyntheticProfile(device, profile_handle[0], .fragment, null, synthetic_probe.allocator());
+    try std.testing.expect(profile_pipeline.execution_abi == .profile_v1_scalar_synthetic);
+    const synthetic_bindings: [0]render_ir_exec.Binding = .{};
+    var synthetic_outputs: [64]render_ir_exec.Output = undefined;
+    var synthetic_output_bytes = [_][64]u8{.{0xaa} ** 64} ** 64;
+    var synthetic_output_count: usize = 0;
+    for (profile_pipeline.fragment_program.?.interfaces, 0..) |interface, interface_index| {
+        if (interface.storage == .output) {
+            synthetic_outputs[synthetic_output_count] = .{ .interface = @intCast(interface_index), .bytes = &synthetic_output_bytes[synthetic_output_count] };
+            synthetic_output_count += 1;
+        }
+    }
+    const output_before_rejection = synthetic_output_bytes;
+    try std.testing.expectError(error.InvalidOutput, executeSyntheticProfile(device, profile_handle[0], &synthetic_bindings, synthetic_outputs[0 .. synthetic_output_count - 1]));
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&output_before_rejection), std.mem.asBytes(&synthetic_output_bytes));
+    const allocations_before_warm_execute = synthetic_probe.allocations;
+    try executeSyntheticProfile(device, profile_handle[0], &synthetic_bindings, synthetic_outputs[0..synthetic_output_count]);
+    try std.testing.expectEqual(allocations_before_warm_execute, synthetic_probe.allocations);
+    try std.testing.expectError(error.InvalidAbi, setupSyntheticProfile(device, profile_handle[0], .fragment, null, std.testing.allocator));
+    var direct_program = try profile_pipeline.vertex_program.?.clone(std.testing.allocator);
+    defer direct_program.deinit(std.testing.allocator);
+    var direct_probe = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = std.math.maxInt(usize) });
+    try std.testing.expectError(error.InvalidAbi, executeSyntheticProfile(device, pipelines[0], &.{}, &.{}));
+    var fragment_failure_probe = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, setupSyntheticProfile(device, pipelines[0], .vertex, null, fragment_failure_probe.allocator()));
+    try std.testing.expectError(error.InvalidStage, setupSyntheticProfile(device, pipelines[0], .fragment, &direct_program, std.testing.allocator));
+    try setupSyntheticProfile(device, pipelines[0], .vertex, &direct_program, direct_probe.allocator());
+    validGraphicsPipelineLocked(pipelines[0]).?.execution_abi.deinit();
+    try std.testing.expectEqual(direct_probe.allocated_bytes, direct_probe.freed_bytes);
+    try std.testing.expectEqual(direct_probe.allocations, direct_probe.deallocations);
+    std.debug.print("pipeline scalar ABI matrix: abi_kinds=3 stage_selectors=2 setup_failures={d} warm_allocations=0 rollback_leaks=0 destroy_leaks=0\n", .{synthetic_setup_allocations});
     const fragment_object = findLiveHandle(ShaderModuleObj, fragment_shader, &shader_module_objects, &shader_module_state).?;
     const original_bound = fragment_object.module.words[3];
     fragment_object.module.words[3] = original_bound + 1;
@@ -4513,6 +4765,12 @@ test "vkcube presentation path records submits and presents two swapchain images
     const viewport = Viewport{ .x = 0, .y = 0, .width = 8, .height = 8, .min_depth = 0, .max_depth = 1 };
     cmdSetViewport(commands[0], 0, 1, @ptrCast(&viewport));
     cmdSetScissor(commands[0], 0, 1, @ptrCast(&render_info.render_area));
+    const command_count_before_profile_draw = commands[0].impl.count;
+    cmdDraw(commands[0], 3, 1, 0, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(command_count_before_profile_draw, commands[0].impl.count);
+    commands[0].impl.invalid = false;
+    validGraphicsPipelineLocked(static_handle[0]).?.execution_abi = .cpu_cube_v1;
     cmdDraw(commands[0], 3, 1, 0, 0);
     cmdEndRenderPass(commands[0]);
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
@@ -4651,6 +4909,27 @@ test "vkcube presentation path records submits and presents two swapchain images
     descriptor_set_state = saved_descriptor_state;
 
     const swapchain_object = validSwapchainLocked(swapchain).?;
+    var timing_counter: u64 = 0;
+    var timing_properties = SwapchainTimingPropertiesEXT{ .s_type = 1_000_208_001, .p_next = null, .refresh_duration = 0, .refresh_interval = 0 };
+    try std.testing.expectEqual(Result.success, getSwapchainTimingProperties(device, swapchain, &timing_properties, &timing_counter));
+    try std.testing.expect(timing_properties.refresh_duration > 0);
+    try std.testing.expectEqual(@as(u64, 1), timing_properties.refresh_interval);
+    try std.testing.expectEqual(@as(u64, 1), timing_counter);
+    var domains: [1]i32 = undefined;
+    var domain_ids: [1]u64 = undefined;
+    var domain_properties = SwapchainTimeDomainPropertiesEXT{ .s_type = 1_000_208_002, .p_next = null, .time_domain_count = 1, .time_domains = &domains, .time_domain_ids = &domain_ids };
+    try std.testing.expectEqual(Result.success, getSwapchainTimeDomainProperties(device, swapchain, &domain_properties, &timing_counter));
+    try std.testing.expectEqual(@as(u32, 1), domain_properties.time_domain_count);
+    try std.testing.expectEqual(@as(i32, 1), domains[0]);
+    try std.testing.expectEqual(@as(u64, 1), domain_ids[0]);
+    try std.testing.expectEqual(Result.not_ready, setSwapchainPresentTimingQueueSize(device, swapchain, 2));
+    const past_info = PastPresentationTimingInfoEXT{ .s_type = 1_000_208_005, .p_next = null, .flags = 0, .swapchain = swapchain };
+    var past_properties = PastPresentationTimingPropertiesEXT{ .s_type = 1_000_208_006, .p_next = null, .timing_properties_counter = 0, .time_domains_counter = 0, .presentation_timing_count = 1, .presentation_timings = @ptrFromInt(8) };
+    try std.testing.expectEqual(Result.success, getPastPresentationTiming(device, &past_info, &past_properties));
+    try std.testing.expectEqual(@as(u64, 1), past_properties.timing_properties_counter);
+    try std.testing.expectEqual(@as(u64, 1), past_properties.time_domains_counter);
+    try std.testing.expectEqual(@as(u32, 0), past_properties.presentation_timing_count);
+    try std.testing.expect(past_properties.presentation_timings == null);
     var lifecycle_index: u32 = undefined;
     try std.testing.expectEqual(Result.success, acquireNextImage(device, swapchain, 0, 0, 0, &lifecycle_index));
     try std.testing.expectEqual(Result.success, acquireNextImage(device, swapchain, 0, 0, 0, &lifecycle_index));
@@ -4687,6 +4966,11 @@ test "vkcube presentation path records submits and presents two swapchain images
     malformed_present.image_indices = @ptrCast(&bad_index);
     try std.testing.expectEqual(Result.error_initialization_failed, queuePresent(queue, &malformed_present));
     malformed_present.image_indices = @ptrCast(&lifecycle_index);
+    var bad_timing = PresentTimingInfoEXT{ .s_type = 1_000_208_004, .p_next = null, .flags = 0, .target_time = 0, .time_domain_id = 2, .present_stage_queries = 0, .target_time_domain_present_stage = 0 };
+    const bad_timings = PresentTimingsInfoEXT{ .s_type = 1_000_208_003, .p_next = null, .swapchain_count = 1, .timing_infos = @ptrCast(&bad_timing) };
+    malformed_present.p_next = &bad_timings;
+    try std.testing.expectEqual(Result.error_initialization_failed, queuePresent(queue, &malformed_present));
+    malformed_present.p_next = null;
     _ = std.c.pthread_mutex_lock(&swapchain_object.present_mutex);
     swapchain_object.image_states[lifecycle_index] = .available;
     _ = std.c.pthread_mutex_unlock(&swapchain_object.present_mutex);
@@ -5010,8 +5294,8 @@ test "physical properties start with coherent conservative limits" {
     try std.testing.expectEqual(@as(u32, 1), properties.device_id);
     try std.testing.expectEqual(@as(u32, 4), properties.device_type);
     const l = properties.limits;
-    try std.testing.expect(l.max_image_dimension_1d >= 4096);
-    try std.testing.expect(l.max_image_dimension_2d >= 4096);
+    try std.testing.expectEqual(max_2d_extent, l.max_image_dimension_1d);
+    try std.testing.expectEqual(max_2d_extent, l.max_image_dimension_2d);
     try std.testing.expect(l.max_image_dimension_3d >= 256);
     try std.testing.expect(l.max_image_dimension_cube >= 4096);
     try std.testing.expect(l.max_image_array_layers >= 256);
@@ -5074,7 +5358,7 @@ test "physical properties start with coherent conservative limits" {
     try std.testing.expect(l.max_sampler_lod_bias >= 2);
     try std.testing.expectEqual(@as(f32, 1), l.max_sampler_anisotropy);
     try std.testing.expectEqual(@as(u32, 1), l.max_viewports);
-    try std.testing.expect(l.max_viewport_dimensions[0] >= l.max_framebuffer_width and l.max_viewport_dimensions[1] >= l.max_framebuffer_height);
+    try std.testing.expectEqual([2]u32{ max_2d_extent, max_2d_extent }, l.max_viewport_dimensions);
     try std.testing.expect(l.viewport_bounds_range[0] <= -32_768 and l.viewport_bounds_range[1] >= 32_767);
     try std.testing.expectEqual(@as(u32, 0), l.viewport_sub_pixel_bits);
     try std.testing.expect(l.min_memory_map_alignment <= 64 and std.math.isPowerOfTwo(l.min_memory_map_alignment));
@@ -5087,7 +5371,8 @@ test "physical properties start with coherent conservative limits" {
     try std.testing.expectEqual(@as(f32, 0), l.min_interpolation_offset);
     try std.testing.expectEqual(@as(f32, 0), l.max_interpolation_offset);
     try std.testing.expectEqual(@as(u32, 0), l.sub_pixel_interpolation_offset_bits);
-    try std.testing.expect(l.max_framebuffer_width >= 4096 and l.max_framebuffer_height >= 4096);
+    try std.testing.expectEqual(max_2d_extent, l.max_framebuffer_width);
+    try std.testing.expectEqual(max_2d_extent, l.max_framebuffer_height);
     const vulkan_1_0_min_framebuffer_layers: u32 = 256;
     try std.testing.expect(l.max_framebuffer_layers >= vulkan_1_0_min_framebuffer_layers);
     const samples_1_4: u32 = 1 | 4;
@@ -5232,6 +5517,10 @@ test "creation rejects every supported invalid-input class" {
     di.layer_count = 0;
     di.extension_count = 1;
     try std.testing.expectEqual(Result.error_extension_not_present, createDevice(physical[0], &di, null, &device));
+    const google_extension = [_][*:0]const u8{google_display_timing_extension};
+    di.extensions = &google_extension;
+    try std.testing.expectEqual(Result.error_extension_not_present, createDevice(physical[0], &di, null, &device));
+    di.extensions = null;
     di.extension_count = 0;
     di.queue_info_count = 0;
     try std.testing.expectEqual(Result.error_initialization_failed, createDevice(physical[0], &di, null, &device));
@@ -5430,7 +5719,7 @@ test "memory transfer objects execute against independently specified bytes" {
 
     var format_output: extern struct { max_extent: Extent3D, max_mip_levels: u32, max_array_layers: u32, sample_counts: u32, max_resource_size: u64 } = undefined;
     try std.testing.expectEqual(Result.success, getImageFormatProperties(physical[0], 37, 1, 1, 3, 0, &format_output));
-    try std.testing.expectEqual(@as(u32, 4096), format_output.max_extent.width);
+    try std.testing.expectEqual(max_2d_extent, format_output.max_extent.width);
     try std.testing.expectEqual(Result.error_initialization_failed, getImageFormatProperties(physical[0], 37, 1, 1, 3, 0, null));
     try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(commands[0]));
     try std.testing.expectEqual(Result.error_initialization_failed, resetCommandBuffer(commands[0], 2));
