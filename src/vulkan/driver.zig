@@ -1336,6 +1336,87 @@ fn populatePromotedPropertyPayload(s_type: i32, bytes: []u8) void {
     // the opaque storage remains an exact LP64 ABI while returning useful,
     // truthful values for callers that use the aggregate promoted nodes.
     switch (s_type) {
+        1000145002 => { // VkPhysicalDeviceProtectedMemoryProperties
+            // Protected submissions are not exposed by this CPU profile.
+            propertyWriteU32(bytes, 0, 0);
+        },
+        1000094000 => { // VkPhysicalDeviceSubgroupProperties
+            // Subgroup execution is not part of the straight-line profile.
+            propertyWriteU32(bytes, 0, 0);
+            propertyWriteU32(bytes, 4, 0);
+            propertyWriteU32(bytes, 8, 0);
+            propertyWriteU32(bytes, 12, 0);
+        },
+        1000168000 => { // VkPhysicalDeviceMaintenance3Properties
+            propertyWriteU32(bytes, 0, 1024);
+            propertyWriteU64(bytes, 8, heap_size);
+        },
+        1000117000 => { // VkPhysicalDevicePointClippingProperties
+            propertyWriteU32(bytes, 0, 0); // VK_POINT_CLIPPING_BEHAVIOR_ALL_CLIP_PLANES
+        },
+        1000053002 => { // VkPhysicalDeviceMultiviewProperties
+            propertyWriteU32(bytes, 0, max_image_array_layers);
+            propertyWriteU32(bytes, 4, 0xffff_ffff);
+        },
+        1000207001 => { // VkPhysicalDeviceTimelineSemaphoreProperties
+            propertyWriteU64(bytes, 0, 0);
+        },
+        1000197000 => { // VkPhysicalDeviceFloatControlsProperties
+            // All float-control independence/preservation capabilities are
+            // unadvertised and therefore remain zero.
+        },
+        1000161002 => { // VkPhysicalDeviceDescriptorIndexingProperties
+            // Descriptor indexing update-after-bind is not advertised.
+        },
+        1000130000 => { // VkPhysicalDeviceSamplerFilterMinmaxProperties
+            // Filter min/max is not advertised.
+        },
+        1000199000 => { // VkPhysicalDeviceDepthStencilResolveProperties
+            // The CPU raster path is single-sample and has no resolve modes.
+        },
+        1000413001 => { // VkPhysicalDeviceMaintenance4Properties
+            propertyWriteU64(bytes, 0, heap_size);
+        },
+        1000225000 => { // VkPhysicalDeviceSubgroupSizeControlProperties
+            // No subgroup-size controls are exposed.
+        },
+        1000138001 => { // VkPhysicalDeviceInlineUniformBlockProperties
+            // Inline uniform blocks are not advertised.
+        },
+        1000280001 => { // VkPhysicalDeviceShaderIntegerDotProductProperties
+            // Integer dot-product acceleration is not advertised.
+        },
+        1000281001 => { // VkPhysicalDeviceTexelBufferAlignmentProperties
+            propertyWriteU64(bytes, 0, 256);
+            propertyWriteU32(bytes, 8, 0);
+            propertyWriteU64(bytes, 16, 256);
+            propertyWriteU32(bytes, 24, 0);
+        },
+        1000470001 => { // VkPhysicalDeviceMaintenance5Properties
+            // Maintenance-5 optional line/sample behaviors are unadvertised.
+        },
+        1000545001 => { // VkPhysicalDeviceMaintenance6Properties
+            // Maintenance-6 optional attachment behaviors are unadvertised.
+        },
+        1000270001 => { // VkPhysicalDeviceHostImageCopyProperties
+            // ZPU's host copies use one stable optimal-tile layout and the
+            // same memory requirements for host/device access.
+            @memcpy(bytes[32..48], &pipeline_cache_uuid);
+            propertyWriteU32(bytes, 48, 1);
+        },
+        1000080000 => { // VkPhysicalDevicePushDescriptorProperties
+            // Push descriptors are not advertised by the feature profile.
+        },
+        1000068002 => { // VkPhysicalDevicePipelineRobustnessProperties
+            // Robustness controls are not advertised.
+        },
+        1000259002 => { // VkPhysicalDeviceLineRasterizationProperties
+            propertyWriteU32(bytes, 0, 4);
+        },
+        1000525000 => { // VkPhysicalDeviceVertexAttributeDivisorProperties
+            propertyWriteU32(bytes, 0, 1);
+            propertyWriteU32(bytes, 4, 1);
+        },
         50 => { // VkPhysicalDeviceVulkan11Properties
             @memcpy(bytes[0..16], &device_uuid);
             @memcpy(bytes[16..32], &driver_uuid);
@@ -12138,7 +12219,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     test_allocations_before_failure = 0;
     for (0..4096) |_| getPhysicalDeviceProperties2(ctx.physical, &properties);
     test_allocations_before_failure = null;
+    var maintenance3_properties = PhysicalDeviceMaintenance3Properties{ .s_type = 1000168000, .p_next = null, .payload = [_]u8{0xff} ** 16 };
+    var subgroup_properties = PhysicalDeviceSubgroupProperties{ .s_type = 1000094000, .p_next = @ptrCast(&maintenance3_properties), .payload = [_]u8{0xff} ** 16 };
     var id_properties = PhysicalDeviceIDProperties{ .s_type = 1000071004, .p_next = null, .device_uuid = [_]u8{0xff} ** 16, .driver_uuid = [_]u8{0xff} ** 16, .device_luid = [_]u8{0xff} ** 8, .device_node_mask = 0xffff_ffff, .device_luid_valid = 0xffff_ffff };
+    id_properties.p_next = @ptrCast(&subgroup_properties);
     var driver_properties = PhysicalDeviceDriverProperties{ .s_type = 1000196000, .p_next = @ptrCast(&id_properties), .driver_id = -1, .driver_name = [_]u8{0xff} ** 256, .driver_info = [_]u8{0xff} ** 256, .conformance_version = .{ .major = 0xff, .minor = 0xff, .subminor = 0xff, .patch = 0xff } };
     var host_copy_properties = PhysicalDeviceHostImageCopyProperties{ .s_type = 1000270001, .p_next = @ptrCast(&driver_properties), .payload = [_]u8{0xff} ** 56 };
     var vulkan14_individual_properties = PhysicalDeviceVulkan14Properties{ .s_type = 56, .p_next = @ptrCast(&host_copy_properties), .payload = [_]u8{0xff} ** 128 };
@@ -12153,13 +12237,19 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqualSlices(u8, driver_name, driver_properties.driver_name[0..driver_name.len]);
     try std.testing.expectEqualSlices(u8, driver_info, driver_properties.driver_info[0..driver_info.len]);
     try std.testing.expectEqual(@as(u8, 0), driver_properties.conformance_version.major);
-    try std.testing.expect(std.mem.allEqual(u8, &host_copy_properties.payload, 0));
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, subgroup_properties.payload[0..4], .little));
+    try std.testing.expectEqual(@as(u32, 1024), std.mem.readInt(u32, maintenance3_properties.payload[0..4], .little));
+    try std.testing.expectEqual(@as(u64, heap_size), std.mem.readInt(u64, maintenance3_properties.payload[8..16], .little));
+    try std.testing.expectEqualSlices(u8, &pipeline_cache_uuid, host_copy_properties.payload[32..48]);
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, host_copy_properties.payload[48..52], .little));
     try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, vulkan14_individual_properties.payload[0..4], .little));
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, vulkan14_individual_properties.payload[4..8], .little));
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, vulkan14_individual_properties.payload[8..12], .little));
     try std.testing.expectEqualSlices(u8, &pipeline_cache_uuid, vulkan14_individual_properties.payload[104..120]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, vulkan14_individual_properties.payload[120..124], .little));
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&id_properties)), driver_properties.p_next);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&subgroup_properties)), id_properties.p_next);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&maintenance3_properties)), subgroup_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&driver_properties)), host_copy_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&host_copy_properties)), vulkan14_individual_properties.p_next);
     test_allocations_before_failure = 0;

@@ -50,11 +50,12 @@ feature chains remain transactional rejections.
 promoted property chains with exact LP64-sized payloads and the same
 transactional unknown-chain rejection. Aggregate Vulkan 1.1/1.2/1.3/1.4
 nodes now populate their typed identity and bounded-limit fields (UUIDs,
-driver strings/class, multiview limit, heap-backed allocation/buffer limits,
-line precision, vertex-divisor policy, and the stable layout UUID) instead of
-leaving the entire promoted payload opaque. The individual forms retain
-caller links while zeroing unsupported capability fields; identity nodes
-additionally report the single-device node mask and an explicit zero
+driver strings/class, multiview and descriptor limits, heap-backed
+allocation/buffer limits, texel alignment, line precision, vertex-divisor
+policy, and stable layout UUIDs) instead of leaving the entire promoted
+payload opaque. The individual forms likewise populate the supported limit
+fields, retain caller links, and zero unsupported capability fields; identity
+nodes additionally report the single-device node mask and an explicit zero
 conformance version so diagnostics are useful without overstating conformance.
 `vkGetPhysicalDeviceImageFormatProperties2` also accepts the promoted
 external-image input and external-image/YCbCr output chains, reports the
