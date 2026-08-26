@@ -234,11 +234,12 @@ instead of executing against stale state. The promoted
 `VK_ATTACHMENT_LOAD_OP_NONE` and `VK_ATTACHMENT_STORE_OP_NONE` values are
 accepted for dynamic attachments; load-none skips clears and store-none records
 a submission-time content discard at the end of the rendering scope. Secondary command buffers can now carry the bounded
-`VkCommandBufferInheritanceRenderingInfo` chain; execution validates the
-inherited color/depth formats and sample count against the active primary
-scope, then binds the primary's live attachment images into the copied draw
-records. Malformed chains, mismatched scopes, and active-query secondary
-execution remain failure-atomic. Device
+`VkCommandBufferInheritanceRenderingInfo` chain, including zero-color
+depth-only inheritance; execution validates the inherited color/depth formats
+and sample count against the active primary scope, then binds the primary's
+live attachment images into the copied draw records. Malformed chains,
+mismatched scopes, and active-query secondary execution remain
+failure-atomic. Device
 limits now also match the bounded
 execution profile: one sample, one indirect draw, and four color attachments;
 vertex-input binding/attribute stride, location, and offset bounds are checked

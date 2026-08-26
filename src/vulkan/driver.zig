@@ -4504,10 +4504,10 @@ fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) 
             const header: *const ChainHeader = @ptrCast(@alignCast(raw_dynamic));
             if (header.s_type != 1000044004 or header.p_next != null or bi.flags & 2 == 0 or inheritance.render_pass != 0 or inheritance.subpass != 0 or inheritance.framebuffer != 0) return .error_initialization_failed;
             const dynamic_info: *const CommandBufferInheritanceRenderingInfo = @ptrCast(@alignCast(raw_dynamic));
-            if (dynamic_info.flags != 0 or dynamic_info.view_mask != 0 or dynamic_info.color_attachment_count != 1 or dynamic_info.color_attachment_formats == null or dynamic_info.color_attachment_formats.?[0] != 44 or (dynamic_info.depth_attachment_format != 0 and dynamic_info.depth_attachment_format != 126) or dynamic_info.stencil_attachment_format != 0 or dynamic_info.rasterization_samples != 1) return .error_initialization_failed;
+            if (dynamic_info.flags != 0 or dynamic_info.view_mask != 0 or dynamic_info.color_attachment_count > 1 or (dynamic_info.color_attachment_count != 0 and (dynamic_info.color_attachment_formats == null or dynamic_info.color_attachment_formats.?[0] != 44)) or (dynamic_info.depth_attachment_format != 0 and dynamic_info.depth_attachment_format != 126) or dynamic_info.stencil_attachment_format != 0 or dynamic_info.rasterization_samples != 1) return .error_initialization_failed;
             inherited_dynamic = true;
             inherited_dynamic_view_mask = dynamic_info.view_mask;
-            inherited_dynamic_color_format = dynamic_info.color_attachment_formats.?[0];
+            inherited_dynamic_color_format = if (dynamic_info.color_attachment_count == 0) 0 else dynamic_info.color_attachment_formats.?[0];
             inherited_dynamic_depth_format = dynamic_info.depth_attachment_format;
             inherited_dynamic_stencil_format = dynamic_info.stencil_attachment_format;
             inherited_dynamic_samples = dynamic_info.rasterization_samples;
@@ -4654,7 +4654,7 @@ fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj,
     var result = command;
     switch (result) {
         .cube_draw => |*draw| if (draw.framebuffer == null) {
-            if (dynamic_color != null) {
+            if (dynamic_color != null or dynamic_depth != null) {
                 draw.color_image = dynamic_color;
                 draw.depth_image = dynamic_depth;
                 draw.color_base_layer = dynamic_color_base_layer;
@@ -4669,7 +4669,7 @@ fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj,
             }
         },
         .indirect_draw => |*draw| if (draw.framebuffer == null) {
-            if (dynamic_color != null) {
+            if (dynamic_color != null or dynamic_depth != null) {
                 draw.color_image = dynamic_color;
                 draw.depth_image = dynamic_depth;
                 draw.color_base_layer = dynamic_color_base_layer;
@@ -4717,7 +4717,9 @@ fn cmdExecuteCommands(cb: ?CommandBuffer, count: u32, buffers: ?[*]const Command
                 return;
             }
         } else if (primary.impl.dynamic_rendering) {
-            if (!secondary.impl.render_pass_continue or !secondary.impl.dynamic_inheritance or primary.impl.active_query_pool != null or secondary.impl.inherited_dynamic_view_mask != 0 or secondary.impl.inherited_dynamic_color_format != primary.impl.dynamic_color_image.?.format or secondary.impl.inherited_dynamic_depth_format != (if (primary.impl.dynamic_depth_image) |depth| depth.format else 0) or secondary.impl.inherited_dynamic_stencil_format != 0 or secondary.impl.inherited_dynamic_samples != primary.impl.dynamic_color_image.?.samples) {
+            const primary_color_format = if (primary.impl.dynamic_color_image) |color| color.format else 0;
+            const primary_samples = if (primary.impl.dynamic_color_image) |color| color.samples else if (primary.impl.dynamic_depth_image) |depth| depth.samples else 1;
+            if (!secondary.impl.render_pass_continue or !secondary.impl.dynamic_inheritance or primary.impl.active_query_pool != null or secondary.impl.inherited_dynamic_view_mask != 0 or secondary.impl.inherited_dynamic_color_format != primary_color_format or secondary.impl.inherited_dynamic_depth_format != (if (primary.impl.dynamic_depth_image) |depth| depth.format else 0) or secondary.impl.inherited_dynamic_stencil_format != 0 or secondary.impl.inherited_dynamic_samples != primary_samples) {
                 primary.impl.invalid = true;
                 return;
             }
@@ -4732,7 +4734,7 @@ fn cmdExecuteCommands(cb: ?CommandBuffer, count: u32, buffers: ?[*]const Command
             return;
         }
     }
-    const color_layout = if (execute_dynamic) commandBufferImageLayout(primary, primary.impl.dynamic_color_image.?) else renderPassAttachmentLayout(primary, true);
+    const color_layout = if (execute_dynamic) (if (primary.impl.dynamic_color_image) |color| commandBufferImageLayout(primary, color) else -1) else renderPassAttachmentLayout(primary, true);
     const depth_layout = if (execute_dynamic) (if (primary.impl.dynamic_depth_image) |depth| commandBufferImageLayout(primary, depth) else -1) else renderPassAttachmentLayout(primary, false);
     for (list) |raw| {
         const secondary = raw;
@@ -14502,6 +14504,41 @@ test "vkcube presentation path records submits and presents two swapchain images
     cmdDrawIndexed(render_secondary[0], 3, 1, 1, -1, 7);
     try std.testing.expect(!render_secondary[0].impl.invalid);
     try std.testing.expect(render_secondary[0].impl.dynamic_inheritance);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(render_secondary[0]));
+
+    // Secondary inheritance also permits a depth-only dynamic scope.  It has
+    // no color format to compare, but must still execute safely against the
+    // primary's depth attachment without force-unwrapping a missing color.
+    var depth_only_secondary_rendering = dynamic_secondary_rendering;
+    depth_only_secondary_rendering.color_attachment_count = 0;
+    depth_only_secondary_rendering.color_attachment_formats = null;
+    dynamic_secondary_inheritance.p_next = &depth_only_secondary_rendering;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(render_secondary[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(render_secondary[0], &dynamic_secondary_begin));
+    try std.testing.expectEqual(Result.success, endCommandBuffer(render_secondary[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    validImageLocked(depth_image).?.layout = 3;
+    var depth_only_rendering = dynamic_rendering;
+    depth_only_rendering.color_attachment_count = 0;
+    depth_only_rendering.color_attachments = null;
+    cmdBeginRendering(multi_commands[0], &depth_only_rendering);
+    cmdExecuteCommands(multi_commands[0], 1, &render_secondary);
+    try std.testing.expect(!multi_commands[0].impl.invalid);
+    cmdEndRendering(multi_commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(multi_commands[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&dynamic_submit), 0));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(render_secondary[0], 0));
+    dynamic_secondary_inheritance.p_next = &dynamic_secondary_rendering;
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(render_secondary[0], &dynamic_secondary_begin));
+    cmdBindPipeline(render_secondary[0], 0, dynamic_pipeline[0]);
+    cmdBindDescriptorSets(render_secondary[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    cmdBindIndexBuffer(render_secondary[0], index_buffer, 0, 0);
+    cmdSetViewport(render_secondary[0], 0, 1, @ptrCast(&viewport));
+    cmdSetScissor(render_secondary[0], 0, 1, @ptrCast(&render_info.render_area));
+    setCoreDynamicGraphicsStateForTest(render_secondary[0], &viewport, &render_info.render_area);
+    cmdDrawIndexed(render_secondary[0], 3, 1, 1, -1, 7);
+    try std.testing.expect(!render_secondary[0].impl.invalid);
     try std.testing.expectEqual(Result.success, endCommandBuffer(render_secondary[0]));
 
     try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
