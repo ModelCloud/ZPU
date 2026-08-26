@@ -11309,7 +11309,11 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
             mutex.unlock();
             return .error_initialization_failed;
         };
-        for (waits[0..present.wait_semaphore_count]) |handle| {
+        // Validate the complete wait list before consuming any semaphore.
+        // PresentInfo is transactional: duplicate waits, foreign/timeline
+        // semaphores, or an unsignaled wait must leave every image and
+        // semaphore untouched.
+        for (waits[0..present.wait_semaphore_count], 0..) |handle, wait_index| {
             const semaphore = validSemaphoreLocked(handle) orelse {
                 mutex.unlock();
                 return .error_initialization_failed;
@@ -11318,6 +11322,16 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
                 mutex.unlock();
                 return .error_initialization_failed;
             }
+            for (waits[0..wait_index]) |prior| if (prior == handle) {
+                mutex.unlock();
+                return .error_initialization_failed;
+            };
+        }
+        for (waits[0..present.wait_semaphore_count]) |handle| {
+            const semaphore = validSemaphoreLocked(handle) orelse {
+                mutex.unlock();
+                return .error_initialization_failed;
+            };
             semaphore.signaled.store(false, .release);
         }
     }
@@ -13394,6 +13408,23 @@ test "vkcube presentation path records submits and presents two swapchain images
     batch_present.swapchains = @ptrCast(&swapchain);
     batch_present.image_indices = @ptrCast(&batch_index);
     try std.testing.expectEqual(Result.success, queuePresent(queue, &batch_present));
+
+    // Duplicate present waits are rejected before either wait consumption or
+    // image queuing, preserving both pieces of synchronization state.
+    var duplicate_wait_semaphore: usize = 0;
+    try std.testing.expectEqual(Result.success, createSemaphore(device, &semaphore_info, null, &duplicate_wait_semaphore));
+    validSemaphoreLocked(duplicate_wait_semaphore).?.signaled.store(true, .release);
+    var duplicate_present_index: u32 = undefined;
+    try std.testing.expectEqual(Result.success, acquireNextImage(device, swapchain, 0, 0, 0, &duplicate_present_index));
+    const duplicate_waits = [_]usize{ duplicate_wait_semaphore, duplicate_wait_semaphore };
+    const duplicate_present = PresentInfo{ .s_type = 1_000_001_001, .p_next = null, .wait_semaphore_count = duplicate_waits.len, .wait_semaphores = &duplicate_waits, .swapchain_count = 1, .swapchains = @ptrCast(&swapchain), .image_indices = @ptrCast(&duplicate_present_index), .results = null };
+    try std.testing.expectEqual(Result.error_initialization_failed, queuePresent(queue, &duplicate_present));
+    try std.testing.expect(validSemaphoreLocked(duplicate_wait_semaphore).?.signaled.load(.acquire));
+    try std.testing.expectEqual(frame_lifecycle.State.acquired, validSwapchainLocked(swapchain).?.image_states[duplicate_present_index]);
+    _ = std.c.pthread_mutex_lock(&validSwapchainLocked(swapchain).?.present_mutex);
+    validSwapchainLocked(swapchain).?.image_states[duplicate_present_index] = .available;
+    _ = std.c.pthread_mutex_unlock(&validSwapchainLocked(swapchain).?.present_mutex);
+    destroySemaphore(device, duplicate_wait_semaphore, null);
 
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
