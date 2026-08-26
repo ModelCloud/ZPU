@@ -5169,7 +5169,9 @@ fn cmdWaitEvents(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const usize,
     for (barriers) |barrier| record(c, .{ .transition = .{ .image = validImageLocked(barrier.image).?, .old_layout = barrier.old_layout, .new_layout = barrier.new_layout } });
 }
 fn validQueryRange(pool: *const QueryPoolObj, first: u32, count: u32) bool {
-    return count != 0 and first <= pool.slots.len and count <= pool.slots.len - first;
+    // Reset commands permit an empty range, but firstQuery must still name an
+    // existing query and the range arithmetic must remain bounded.
+    return first < pool.slots.len and count <= pool.slots.len - first;
 }
 fn validQueryCopyRange(pool: *const QueryPoolObj, first: u32, count: u32) bool {
     // Vulkan requires firstQuery to identify an actual query even when the
@@ -5190,6 +5192,7 @@ fn cmdResetQueryPool(cb: ?CommandBuffer, handle: usize, first: u32, count: u32) 
         c.impl.invalid = true;
         return;
     }
+    if (count == 0) return;
     record(c, .{ .query_reset = .{ .pool = pool, .first = first, .count = count } });
 }
 fn resetQueryPool(device: ?Device, handle: usize, first: u32, count: u32) callconv(.c) void {
@@ -16350,6 +16353,9 @@ test "query pools expose exact availability timestamps copies and lifecycle" {
     cmdCopyQueryPoolResults(commands[0], timestamp_pool, 0, 0, buffer, 0, 0, 0);
     try std.testing.expect(!commands[0].impl.invalid);
     try std.testing.expectEqual(empty_copy_count, commands[0].impl.count);
+    cmdResetQueryPool(commands[0], timestamp_pool, 0, 0);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(empty_copy_count, commands[0].impl.count);
     cmdCopyQueryPoolResults(commands[0], timestamp_pool, 0, 1, buffer, 0, 0, 0);
     try std.testing.expect(!commands[0].impl.invalid);
     try std.testing.expectEqual(empty_copy_count + 1, commands[0].impl.count);
@@ -16387,6 +16393,7 @@ test "query pools expose exact availability timestamps copies and lifecycle" {
     try std.testing.expectEqual(Result.success, getQueryPoolResults(ctx.device, timestamp_pool, 0, 1, @sizeOf(u32), &timestamp32, 4, 0));
     try std.testing.expect(timestamp32 != 0);
     resetQueryPool(ctx.device, timestamp_pool, 0, 2);
+    resetQueryPool(ctx.device, timestamp_pool, 0, 0);
     try std.testing.expectEqual(Result.not_ready, getQueryPoolResults(ctx.device, timestamp_pool, 0, 1, @sizeOf(u64), &timestamps[0], 8, 1));
 
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
