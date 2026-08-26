@@ -4790,6 +4790,12 @@ fn dependencyInfoShapeValid(info: ?*const DependencyInfo) bool {
     if (ci.image_memory_barriers) |items| for (items[0..ci.image_memory_barrier_count]) |barrier| if (barrier.s_type != 1000314002 or barrier.p_next != null) return false;
     return true;
 }
+fn eventSetDependencyStagesValid(info: *const DependencyInfo) bool {
+    if (info.memory_barriers) |items| for (items[0..info.memory_barrier_count]) |barrier| if (barrier.src_stage_mask & 0x4000 != 0 or barrier.dst_stage_mask & 0x4000 != 0) return false;
+    if (info.buffer_memory_barriers) |items| for (items[0..info.buffer_memory_barrier_count]) |barrier| if (barrier.src_stage_mask & 0x4000 != 0 or barrier.dst_stage_mask & 0x4000 != 0) return false;
+    if (info.image_memory_barriers) |items| for (items[0..info.image_memory_barrier_count]) |barrier| if (barrier.src_stage_mask & 0x4000 != 0 or barrier.dst_stage_mask & 0x4000 != 0) return false;
+    return true;
+}
 
 // Synchronization2 promotes several stage/access bits into the 64-bit ABI.
 // ZPU's execution core intentionally retains the compact Vulkan 1.0 masks,
@@ -4925,7 +4931,7 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
     cmdPipelineBarrier(cb, src_stage, dst_stage, ci.dependency_flags, ci.memory_barrier_count, if (ci.memory_barrier_count == 0) null else @ptrCast(&memories), ci.buffer_memory_barrier_count, if (ci.buffer_memory_barrier_count == 0) null else @ptrCast(&buffers), ci.image_memory_barrier_count, if (ci.image_memory_barrier_count == 0) null else @ptrCast(&images));
 }
 fn cmdSetEvent2(cb: ?CommandBuffer, event: usize, info: ?*const DependencyInfo) callconv(.c) void {
-    if (!dependencyInfoShapeValid(info)) {
+    if (!dependencyInfoShapeValid(info) or !eventSetDependencyStagesValid(info.?)) {
         markCommandBufferInvalid(cb);
         return;
     }
@@ -4938,7 +4944,11 @@ fn cmdSetEvent2(cb: ?CommandBuffer, event: usize, info: ?*const DependencyInfo) 
     cmdSetEvent(cb, event, 0x1_0000);
 }
 fn cmdResetEvent2(cb: ?CommandBuffer, event: usize, stage_mask: u64) callconv(.c) void {
-    const legacy_stage = sync2StageMaskToLegacy(stage_mask) orelse {
+    if (stage_mask & 0x4000 != 0) {
+        markCommandBufferInvalid(cb);
+        return;
+    }
+    const legacy_stage = sync2BarrierStageMaskToLegacy(stage_mask, 0) orelse {
         markCommandBufferInvalid(cb);
         return;
     };
@@ -13797,6 +13807,7 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     cmdSetEvent2(commands[0], event, &empty_dependency);
     cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&empty_dependency));
     cmdResetEvent2(commands[0], event, 0x1_0000);
+    cmdResetEvent2(commands[0], event, 0);
     cmdWriteTimestamp2(commands[0], 0x1000, query, 0);
     cmdWriteTimestamp2(commands[0], 0x1000_0000_0, query, 1);
     try std.testing.expect(!commands[0].impl.invalid);
@@ -13822,6 +13833,10 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     }
     test_allocations_before_failure = null;
     cmdResetEvent2(commands[0], event, 0x8000_0000_0000_0000);
+    try std.testing.expect(commands[0].impl.invalid);
+    const host_barrier = MemoryBarrier2{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 0x4000, .dst_stage_mask = 0, .src_access_mask = 0, .dst_access_mask = 0 };
+    const host_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 1, .memory_barriers = @ptrCast(&host_barrier), .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
+    cmdSetEvent2(commands[0], event, &host_dependency);
     try std.testing.expect(commands[0].impl.invalid);
     destroyQueryPool(ctx.device, query, null);
     destroyEvent(ctx.device, event, null);
