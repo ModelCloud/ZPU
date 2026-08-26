@@ -4779,7 +4779,7 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
         c.impl.invalid = true;
         return;
     }
-    const framebuffer_layers = if (dynamic_rendering) 1 else framebuffer.?.layers;
+    const framebuffer_layers = if (dynamic_rendering) c.impl.dynamic_layer_count else framebuffer.?.layers;
     for (rects.?[0..rect_count]) |rect| if (!clearRectValid(rect, color_image.width, color_image.height, framebuffer_layers)) {
         c.impl.invalid = true;
         return;
@@ -4810,10 +4810,31 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
             _ = depth;
         }
     }
+    for (rects.?[0..rect_count]) |rect| {
+        const color_base = std.math.add(u32, rect.base_array_layer, if (dynamic_rendering) c.impl.dynamic_color_base_layer else 0) catch {
+            c.impl.invalid = true;
+            return;
+        };
+        if (color_base >= color_image.array_layers or rect.layer_count > color_image.array_layers - color_base) {
+            c.impl.invalid = true;
+            return;
+        }
+        if (depth_image) |depth| {
+            const depth_base = std.math.add(u32, rect.base_array_layer, if (dynamic_rendering) c.impl.dynamic_depth_base_layer else 0) catch {
+                c.impl.invalid = true;
+                return;
+            };
+            if (depth_base >= depth.array_layers or rect.layer_count > depth.array_layers - depth_base) {
+                c.impl.invalid = true;
+                return;
+            }
+        }
+    }
     for (attachments.?[0..attachment_count]) |attachment| for (rects.?[0..rect_count]) |rect| {
         const image = if (attachment.aspect_mask == 1) color_image else depth_image.?;
         const bytes = if (attachment.aspect_mask == 1) colorBytes(color_image, &attachment.clear_value.color).? else .{ 0, 0, 0, 0 };
-        record(c, .{ .clear_attachments = .{ .image = image, .depth = depth_image, .color = bytes, .depth_value = attachment.clear_value.depth_stencil.depth, .rect = rect.rect, .aspect_mask = attachment.aspect_mask, .base_layer = rect.base_array_layer, .layer_count = rect.layer_count } });
+        const base_layer = rect.base_array_layer + if (dynamic_rendering) (if (attachment.aspect_mask == 1) c.impl.dynamic_color_base_layer else c.impl.dynamic_depth_base_layer) else 0;
+        record(c, .{ .clear_attachments = .{ .image = image, .depth = depth_image, .color = bytes, .depth_value = attachment.clear_value.depth_stencil.depth, .rect = rect.rect, .aspect_mask = attachment.aspect_mask, .base_layer = base_layer, .layer_count = rect.layer_count } });
     };
 }
 fn cmdNextSubpass(cb: ?CommandBuffer, contents: i32) callconv(.c) void {
