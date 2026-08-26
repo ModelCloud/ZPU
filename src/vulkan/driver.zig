@@ -10429,7 +10429,7 @@ fn queueSubmit2(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo2, fence
         if (submit.s_type != 1000314004 or submit.p_next != null or submit.flags != 0 or submit.wait_semaphore_info_count > max_api_items or submit.command_buffer_info_count > max_api_items or submit.signal_semaphore_info_count > max_api_items or (submit.wait_semaphore_info_count != 0 and submit.wait_semaphore_infos == null) or (submit.command_buffer_info_count != 0 and submit.command_buffer_infos == null) or (submit.signal_semaphore_info_count != 0 and submit.signal_semaphore_infos == null)) return .error_initialization_failed;
         for (0..submit.wait_semaphore_info_count) |index| {
             const semaphore = submit.wait_semaphore_infos.?[index];
-            const legacy_stage = sync2StageMaskToLegacy(semaphore.stage_mask) orelse return .error_initialization_failed;
+            const legacy_stage = sync2BarrierStageMaskToLegacy(semaphore.stage_mask, 0) orelse return .error_initialization_failed;
             if (semaphore.s_type != 1000314005 or semaphore.p_next != null or semaphore.device_index != 0) return .error_initialization_failed;
             wait_handles[submit_index][index] = semaphore.semaphore;
             wait_stages[submit_index][index] = legacy_stage;
@@ -10437,13 +10437,13 @@ fn queueSubmit2(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo2, fence
         }
         for (0..submit.signal_semaphore_info_count) |index| {
             const semaphore = submit.signal_semaphore_infos.?[index];
-            if (semaphore.s_type != 1000314005 or semaphore.p_next != null or semaphore.device_index != 0 or sync2StageMaskToLegacy(semaphore.stage_mask) == null) return .error_initialization_failed;
+            if (semaphore.s_type != 1000314005 or semaphore.p_next != null or semaphore.device_index != 0 or sync2BarrierStageMaskToLegacy(semaphore.stage_mask, 0) == null) return .error_initialization_failed;
             signal_handles[submit_index][index] = semaphore.semaphore;
             signal_values[submit_index][index] = semaphore.value;
         }
         for (0..submit.command_buffer_info_count) |index| {
             const command = submit.command_buffer_infos.?[index];
-            if (command.s_type != 1000314006 or command.p_next != null or command.device_mask != 1) return .error_initialization_failed;
+            if (command.s_type != 1000314006 or command.p_next != null or (command.device_mask != 0 and command.device_mask != 1)) return .error_initialization_failed;
             command_lists[submit_index][index] = command.command_buffer;
         }
         timeline_infos[submit_index] = .{ .s_type = 1000207003, .p_next = null, .wait_semaphore_value_count = submit.wait_semaphore_info_count, .wait_semaphore_values = if (submit.wait_semaphore_info_count == 0) null else @ptrCast(&wait_values[submit_index]), .signal_semaphore_value_count = submit.signal_semaphore_info_count, .signal_semaphore_values = if (submit.signal_semaphore_info_count == 0) null else @ptrCast(&signal_values[submit_index]) };
@@ -13812,8 +13812,9 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     cmdWriteTimestamp2(commands[0], 0x1000_0000_0, query, 1);
     try std.testing.expect(!commands[0].impl.invalid);
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
-    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
-    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    const command_submit_info = CommandBufferSubmitInfo{ .s_type = 1000314006, .p_next = null, .command_buffer = commands[0], .device_mask = 0 };
+    const command_submit2 = SubmitInfo2{ .s_type = 1000314004, .p_next = null, .flags = 0, .wait_semaphore_info_count = 0, .wait_semaphore_infos = null, .command_buffer_info_count = 1, .command_buffer_infos = @ptrCast(&command_submit_info), .signal_semaphore_info_count = 0, .signal_semaphore_infos = null };
+    try std.testing.expectEqual(Result.success, queueSubmit2(ctx.queue, 1, @ptrCast(&command_submit2), 0));
     try std.testing.expectEqual(@as(i32, 1), validImageLocked(image).?.layout);
     try std.testing.expect(!validEventLocked(event).?.signaled.load(.acquire));
     try std.testing.expectEqual(Result.success, queueSubmit2(ctx.queue, 0, null, 0));
@@ -13822,7 +13823,7 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     var signal_semaphore: usize = 0;
     const semaphore_info = SemaphoreCreateInfo{ .s_type = 9, .p_next = null, .flags = 0 };
     try std.testing.expectEqual(Result.success, createSemaphore(ctx.device, &semaphore_info, null, &signal_semaphore));
-    const signal_info = SemaphoreSubmitInfo{ .s_type = 1000314005, .p_next = null, .semaphore = signal_semaphore, .value = 0, .stage_mask = 0x1000_0000_0, .device_index = 0 };
+    const signal_info = SemaphoreSubmitInfo{ .s_type = 1000314005, .p_next = null, .semaphore = signal_semaphore, .value = 0, .stage_mask = 0, .device_index = 0 };
     const signal_submit2 = SubmitInfo2{ .s_type = 1000314004, .p_next = null, .flags = 0, .wait_semaphore_info_count = 0, .wait_semaphore_infos = null, .command_buffer_info_count = 0, .command_buffer_infos = null, .signal_semaphore_info_count = 1, .signal_semaphore_infos = @ptrCast(&signal_info) };
     try std.testing.expectEqual(Result.success, queueSubmit2(ctx.queue, 1, @ptrCast(&signal_submit2), 0));
     destroySemaphore(ctx.device, signal_semaphore, null);
