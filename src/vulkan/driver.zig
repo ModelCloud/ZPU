@@ -5513,7 +5513,7 @@ fn cmdSetEvent(cb: ?CommandBuffer, handle: usize, stage_mask: u32) callconv(.c) 
         c.impl.invalid = true;
         return;
     };
-    if (event.owner != c.impl.owner or !validEventStageMask(stage_mask)) {
+    if (c.impl.state != 1 or c.impl.invalid or !commandBufferOutsideRenderPass(c) or event.owner != c.impl.owner or !validEventStageMask(stage_mask)) {
         c.impl.invalid = true;
         return;
     }
@@ -5527,7 +5527,7 @@ fn cmdResetEvent(cb: ?CommandBuffer, handle: usize, stage_mask: u32) callconv(.c
         c.impl.invalid = true;
         return;
     };
-    if (event.owner != c.impl.owner or !validEventStageMask(stage_mask)) {
+    if (c.impl.state != 1 or c.impl.invalid or !commandBufferOutsideRenderPass(c) or event.owner != c.impl.owner or !validEventStageMask(stage_mask)) {
         c.impl.invalid = true;
         return;
     }
@@ -18293,6 +18293,35 @@ test "event host and command-buffer ABI behavior is owned and failure atomic" {
     try std.testing.expectEqual(Result.success, endCommandBuffer(buffers[0]));
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     try std.testing.expectEqual(Result.event_reset, getEventStatus(ctx.device, event));
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(buffers[0], &begin));
+    buffers[0].impl.dynamic_rendering = true;
+    const dynamic_set_count = buffers[0].impl.count;
+    cmdSetEvent(buffers[0], event, 0x1000);
+    try std.testing.expect(buffers[0].impl.invalid);
+    try std.testing.expectEqual(dynamic_set_count, buffers[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(buffers[0], &begin));
+    buffers[0].impl.dynamic_rendering = true;
+    const dynamic_reset_event_count = buffers[0].impl.count;
+    cmdResetEvent(buffers[0], event, 0x1000);
+    try std.testing.expect(buffers[0].impl.invalid);
+    try std.testing.expectEqual(dynamic_reset_event_count, buffers[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(buffers[0], &begin));
+    buffers[0].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
+    const traditional_set_count = buffers[0].impl.count;
+    cmdSetEvent(buffers[0], event, 0x1000);
+    try std.testing.expect(buffers[0].impl.invalid);
+    try std.testing.expectEqual(traditional_set_count, buffers[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(buffers[0], &begin));
+    buffers[0].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
+    const traditional_reset_count = buffers[0].impl.count;
+    cmdResetEvent(buffers[0], event, 0x1000);
+    try std.testing.expect(buffers[0].impl.invalid);
+    try std.testing.expectEqual(traditional_reset_count, buffers[0].impl.count);
 
     try std.testing.expectEqual(Result.success, resetCommandBuffer(buffers[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(buffers[0], &begin));
