@@ -17515,9 +17515,9 @@ test "dynamic rendering begin and end own attachment scope" {
     const empty_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &empty_submit_commands, .signal_semaphore_count = 0, .signal_semaphores = null };
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&empty_submit), 0));
     // A depth-only dynamic-rendering scope is valid even when no color
-    // attachment is supplied.  It can clear and store depth, while graphics
-    // draws remain rejected because the executable profile has no color
-    // target to write.
+    // attachment is supplied. It can clear and store depth; executable
+    // CPU-cube draws use the same optional-color raster path as the primary
+    // presentation fixture.
     const depth_image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 126, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x20, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
     var depth_image: usize = 0;
     try std.testing.expectEqual(Result.success, createImage(ctx.device, &depth_image_info, null, &depth_image));

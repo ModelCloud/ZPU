@@ -298,7 +298,7 @@ fn drawInternal(target: ?[]u8, depth: ?[]u8, width: u32, height: u32, uniform: [
         if ((front_facing and cull_mode & 1 != 0) or (!front_facing and cull_mode & 2 != 0)) continue;
         if (count_work) counters.triangles_rasterized += 1;
 
-        const lighting = if (prepared_triangle) |state| state.lighting else blk: {
+        const lighting = if (target == null) &lighting_tables[0] else if (prepared_triangle) |state| state.lighting else blk: {
             const light = triangleLight(v0, v1, v2);
             const lighting_key: u32 = @bitCast(light);
             var lighting_index: usize = 0;
