@@ -308,6 +308,35 @@ pub const Executor = struct {
                         }
                     }
                 },
+                .bit_field_insert, .bit_field_s_extract, .bit_field_u_extract => {
+                    const base = try valueRef(self.values, pc, instruction.operands[0]);
+                    const insert = if (instruction.op == .bit_field_insert) try valueRef(self.values, pc, instruction.operands[1]) else null;
+                    const offset_index: usize = if (instruction.op == .bit_field_insert) 2 else 1;
+                    const count_index: usize = offset_index + 1;
+                    const offset = try valueRef(self.values, pc, instruction.operands[offset_index]);
+                    const count = try valueRef(self.values, pc, instruction.operands[count_index]);
+                    for (0..result.lanes()) |i| {
+                        const shift = offset.bits[if (offset.lanes() == 1) 0 else i];
+                        const width = count.bits[if (count.lanes() == 1) 0 else i];
+                        if (shift > 32 or width > 32 or shift +% width > 32) return error.NumericDomain;
+                        if (width == 0) {
+                            result.bits[i] = if (instruction.op == .bit_field_insert) base.bits[i] else 0;
+                            continue;
+                        }
+                        const field_mask: u32 = if (width == 32) 0xffffffff else (@as(u32, 1) << @intCast(width)) - 1;
+                        const shifted_mask = field_mask << @intCast(shift);
+                        if (instruction.op == .bit_field_insert) {
+                            result.bits[i] = (base.bits[i] & ~shifted_mask) | ((insert.?.bits[i] << @intCast(shift)) & shifted_mask);
+                        } else {
+                            const field = (base.bits[i] >> @intCast(shift)) & field_mask;
+                            if (instruction.op == .bit_field_s_extract and width < 32 and (field & (@as(u32, 1) << @intCast(width - 1))) != 0) {
+                                result.bits[i] = field | ~field_mask;
+                            } else {
+                                result.bits[i] = field;
+                            }
+                        }
+                    }
+                },
                 .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
                     const b = try valueRef(self.values, pc, instruction.operands[1]);
@@ -588,6 +617,8 @@ fn validate(program: *const ir.Program) Error!void {
             .extract => n == 1 or n == 2,
             .shuffle => n == 2 + try lanes(instruction.ty),
             .fneg, .ineg, .bit_not, .logical_not, .transpose, .any, .all, .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set, .bit_reverse, .bit_count, .convert => n == 1,
+            .bit_field_insert => n == 4,
+            .bit_field_s_extract, .bit_field_u_extract => n == 3,
             .select => n == 3,
             .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge, .logical_eq, .logical_ne, .logical_or, .logical_and, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .vector_times_scalar, .matrix_times_vector, .matrix_times_scalar, .vector_times_matrix, .matrix_times_matrix, .outer_product, .dot, .less_or_greater, .ordered, .unordered => n == 2,
             .output => n == 2,
@@ -638,6 +669,12 @@ fn validate(program: *const ir.Program) Error!void {
                 .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set => if (source_ty.scalar != .f32 or source_ty.rows != 1 or source_ty.columns != instruction.ty.columns or instruction.ty.scalar != .bool or instruction.ty.rows != 1) return error.InvalidType,
                 .less_or_greater, .ordered, .unordered => if (source_ty.scalar != .f32 or source_ty.rows != 1 or source_ty.columns != instruction.ty.columns or instruction.ty.scalar != .bool or instruction.ty.rows != 1) return error.InvalidType,
                 .bit_reverse, .bit_count => if (!same(source_ty, instruction.ty)) return error.InvalidType,
+                .bit_field_insert => if (oi < 2) {
+                    if (!same(source_ty, instruction.ty)) return error.InvalidType;
+                } else if (source_ty.scalar != .i32 and source_ty.scalar != .u32 or try lanes(source_ty) != 1) return error.InvalidType,
+                .bit_field_s_extract, .bit_field_u_extract => if (oi == 0) {
+                    if (!same(source_ty, instruction.ty)) return error.InvalidType;
+                } else if (source_ty.scalar != .i32 and source_ty.scalar != .u32 or try lanes(source_ty) != 1) return error.InvalidType,
                 .convert => if (try lanes(source_ty) != try lanes(instruction.ty)) return error.InvalidShape,
                 else => {},
             }
@@ -725,7 +762,7 @@ fn validate(program: *const ir.Program) Error!void {
             .transpose => {
                 if (instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 4) return error.InvalidType;
             },
-            .bit_reverse, .bit_count => if (instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32) return error.InvalidType,
+            .bit_reverse, .bit_count, .bit_field_insert, .bit_field_s_extract, .bit_field_u_extract => if (instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32) return error.InvalidType,
             .outer_product => {
                 if (instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 4) return error.InvalidType;
                 const left = program.instructions[instruction.operands[0]].ty;
@@ -1310,6 +1347,38 @@ test "integer bit reversal and population count are component-wise" {
     for (0..4096) |_| try executor.execute(&.{}, &.{});
 }
 
+test "integer bit-field insert and extraction preserve bounded masks" {
+    const base = [_]u8{ 0x5a, 0xa5, 0xf0, 0xf0 };
+    const insert = [_]u8{ 0x78, 0x56, 0x34, 0x12 };
+    const offset = [_]u8{ 8, 0, 0, 0 };
+    const count = [_]u8{ 8, 0, 0, 0 };
+    const sign_base = [_]u8{ 0, 0x80, 0, 0 };
+    const sign_offset = [_]u8{ 15, 0, 0, 0 };
+    const one = [_]u8{ 1, 0, 0, 0 };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &base },
+        .{ .op = .constant, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &insert },
+        .{ .op = .constant, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &offset },
+        .{ .op = .constant, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &count },
+        .{ .op = .bit_field_insert, .ty = .{ .scalar = .u32 }, .operands = &.{ 0, 1, 2, 3 }, .literal = &.{} },
+        .{ .op = .constant, .ty = .{ .scalar = .i32 }, .operands = &.{}, .literal = &sign_base },
+        .{ .op = .constant, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &sign_offset },
+        .{ .op = .constant, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &one },
+        .{ .op = .bit_field_s_extract, .ty = .{ .scalar = .i32 }, .operands = &.{ 5, 6, 7 }, .literal = &.{} },
+        .{ .op = .constant, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &sign_base },
+        .{ .op = .bit_field_u_extract, .ty = .{ .scalar = .u32 }, .operands = &.{ 9, 6, 7 }, .literal = &.{} },
+    };
+    var source = try testProgram(&.{}, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    try executor.execute(&.{}, &.{});
+    try std.testing.expectEqual(@as(u32, 0xf0f0_785a), executor.values[4].bits[0]);
+    try std.testing.expectEqual(@as(u32, 0xffff_ffff), executor.values[8].bits[0]);
+    try std.testing.expectEqual(@as(u32, 1), executor.values[10].bits[0]);
+    for (0..4096) |_| try executor.execute(&.{}, &.{});
+}
+
 test "rejection is explicit and output transactional" {
     const one = f32bytes(1);
     var interfaces = [_]ir.Interface{.{ .storage = .output, .ty = .{ .scalar = .f32 }, .location = 0 }};
@@ -1697,6 +1766,19 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
             const source = try propertyConstant(arena, &instructions, source_ty);
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{source}, &.{});
         },
+        .bit_field_insert => {
+            const base = try propertyConstant(arena, &instructions, result_ty);
+            const insert = try propertyConstant(arena, &instructions, result_ty);
+            const offset = try propertyInstruction(arena, &instructions, .constant, .{ .scalar = .u32 }, &.{}, &.{ 0, 0, 0, 0 });
+            const count = try propertyInstruction(arena, &instructions, .constant, .{ .scalar = .u32 }, &.{}, &.{ 4, 0, 0, 0 });
+            result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ base, insert, offset, count }, &.{});
+        },
+        .bit_field_s_extract, .bit_field_u_extract => {
+            const source = try propertyConstant(arena, &instructions, result_ty);
+            const offset = try propertyInstruction(arena, &instructions, .constant, .{ .scalar = .u32 }, &.{}, &.{ 0, 0, 0, 0 });
+            const count = try propertyInstruction(arena, &instructions, .constant, .{ .scalar = .u32 }, &.{}, &.{ 4, 0, 0, 0 });
+            result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ source, offset, count }, &.{});
+        },
         .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod => {
             const a = try propertyConstant(arena, &instructions, result_ty);
             const b = try propertyConstant(arena, &instructions, result_ty);
@@ -1864,6 +1946,10 @@ test "generated bounded operation by type-family property matrix is complete" {
             totals[@intFromEnum(ir.Op.bit_reverse)] += 1;
             try runPropertyCase(.bit_count, ty, null, null);
             totals[@intFromEnum(ir.Op.bit_count)] += 1;
+            inline for ([_]ir.Op{ .bit_field_insert, .bit_field_s_extract, .bit_field_u_extract }) |op| {
+                try runPropertyCase(op, ty, null, null);
+                totals[@intFromEnum(op)] += 1;
+            }
         }
         if (ty.scalar == .u32) inline for ([_]ir.Op{ .udiv, .umod }) |op| {
             try runPropertyCase(op, ty, null, null);
@@ -1935,15 +2021,15 @@ test "generated bounded operation by type-family property matrix is complete" {
         totals[@intFromEnum(op)] += 1;
     }
     const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14, 8, 4, 8, 8, 8, 8, 4, 4, 4, 4, 4, 8, 8, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2;
+    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3;
     try std.testing.expectEqualSlices(usize, expected_full[0..totals.len], &totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 349), total);
-    std.debug.print("generated property matrix: operations=82 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 373), total);
+    std.debug.print("generated property matrix: operations=85 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -2075,13 +2161,13 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 82), malformed);
+    try std.testing.expectEqual(@as(usize, 85), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
     try std.testing.expectEqual(@as(usize, 5), runtime_nan);
     try std.testing.expectEqual(@as(usize, 5), signed_zero);
-    std.debug.print("generated property categories: malformed=82 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
+    std.debug.print("generated property categories: malformed=85 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
 }
 
 test "generated valid scalar DAGs are total and stable" {
