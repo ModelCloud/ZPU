@@ -11855,7 +11855,9 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         if (timing_requests[i] != null and swapchain.present_timing_queue_size != 0) {
             _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
             const present_id = timing_requests[i].?.present_id orelse swapchain.present_timing_next_id;
-            if (timing_requests[i].?.present_id == null) swapchain.present_timing_next_id +%= 1;
+            if (timing_requests[i].?.present_id) |application_id| {
+                if (application_id >= swapchain.present_timing_next_id) swapchain.present_timing_next_id = application_id +% 1;
+            } else swapchain.present_timing_next_id +%= 1;
             swapchain.present_timing_outstanding += 1;
             _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
             timing_payload = .{
