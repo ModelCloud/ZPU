@@ -424,6 +424,29 @@ pub const Executor = struct {
                         result.bits[row] = canonicalFloat(@bitCast(sum));
                     }
                 },
+                .matrix_times_scalar => {
+                    const matrix = try valueRef(self.values, pc, instruction.operands[0]);
+                    const scalar: f32 = @bitCast((try valueRef(self.values, pc, instruction.operands[1])).bits[0]);
+                    for (0..16) |i| result.bits[i] = canonicalFloat(@bitCast(@as(f32, @bitCast(matrix.bits[i])) * scalar));
+                },
+                .vector_times_matrix => {
+                    const vector = try valueRef(self.values, pc, instruction.operands[0]);
+                    const matrix = try valueRef(self.values, pc, instruction.operands[1]);
+                    for (0..4) |col| {
+                        var sum: f32 = 0;
+                        for (0..4) |row| sum += @as(f32, @bitCast(vector.bits[row])) * @as(f32, @bitCast(matrix.bits[col * 4 + row]));
+                        result.bits[col] = canonicalFloat(@bitCast(sum));
+                    }
+                },
+                .matrix_times_matrix => {
+                    const left = try valueRef(self.values, pc, instruction.operands[0]);
+                    const right = try valueRef(self.values, pc, instruction.operands[1]);
+                    for (0..4) |col| for (0..4) |row| {
+                        var sum: f32 = 0;
+                        for (0..4) |k| sum += @as(f32, @bitCast(left.bits[k * 4 + row])) * @as(f32, @bitCast(right.bits[col * 4 + k]));
+                        result.bits[col * 4 + row] = canonicalFloat(@bitCast(sum));
+                    };
+                },
                 .convert => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
                     for (0..result.lanes()) |i| result.bits[i] = try convert(a.ty.scalar, instruction.ty.scalar, a.bits[i]);
@@ -488,7 +511,7 @@ fn validate(program: *const ir.Program) Error!void {
             .shuffle => n == 2 + try lanes(instruction.ty),
             .fneg, .ineg, .bit_not, .logical_not, .convert => n == 1,
             .select => n == 3,
-            .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge, .logical_eq, .logical_ne, .logical_or, .logical_and, .fadd, .fsub, .fmul, .fdiv, .frem, .vector_times_scalar, .matrix_times_vector => n == 2,
+            .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge, .logical_eq, .logical_ne, .logical_or, .logical_and, .fadd, .fsub, .fmul, .fdiv, .frem, .vector_times_scalar, .matrix_times_vector, .matrix_times_scalar, .vector_times_matrix, .matrix_times_matrix => n == 2,
             .output => n == 2,
         };
         if (!arity_ok) return error.InvalidOperand;
@@ -528,6 +551,9 @@ fn validate(program: *const ir.Program) Error!void {
                 .output => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .vector_times_scalar => if ((oi == 0 and !same(source_ty, instruction.ty)) or (oi == 1 and (source_ty.scalar != .f32 or try lanes(source_ty) != 1))) return error.InvalidType,
                 .matrix_times_vector => if ((oi == 0 and !(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 4)) or (oi == 1 and !same(source_ty, instruction.ty))) return error.InvalidType,
+                .matrix_times_scalar => if ((oi == 0 and (!(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 4) or !same(source_ty, instruction.ty))) or (oi == 1 and (source_ty.scalar != .f32 or try lanes(source_ty) != 1))) return error.InvalidType,
+                .vector_times_matrix => if ((oi == 0 and (!(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 1) or !same(source_ty, instruction.ty))) or (oi == 1 and !(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 4))) return error.InvalidType,
+                .matrix_times_matrix => if (!(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 4) or !same(source_ty, instruction.ty)) return error.InvalidType,
                 .convert => if (try lanes(source_ty) != try lanes(instruction.ty)) return error.InvalidShape,
                 else => {},
             }
@@ -576,7 +602,7 @@ fn validate(program: *const ir.Program) Error!void {
             if (total != try lanes(instruction.ty)) return error.InvalidShape;
         }
         switch (instruction.op) {
-            .fneg, .fadd, .fsub, .fmul, .fdiv, .frem, .vector_times_scalar, .matrix_times_vector => if (instruction.ty.scalar != .f32) return error.InvalidType,
+            .fneg, .fadd, .fsub, .fmul, .fdiv, .frem, .vector_times_scalar, .matrix_times_vector, .matrix_times_scalar, .vector_times_matrix, .matrix_times_matrix => if (instruction.ty.scalar != .f32) return error.InvalidType,
             .ineg => if (instruction.ty.scalar != .i32) return error.InvalidType,
             .bit_not, .bit_or, .bit_xor, .bit_and => if (instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32) return error.InvalidType,
             .udiv, .umod => if (instruction.ty.scalar != .u32) return error.InvalidType,
@@ -996,6 +1022,49 @@ test "floating remainder uses truncating quotient and rejects zero divisor" {
     var sentinel = [_]u8{0xa5} ** 4;
     try std.testing.expectError(error.NumericDomain, invalid_executor.execute(&.{}, &.{.{ .interface = 0, .bytes = &sentinel }}));
     try std.testing.expectEqualSlices(u8, &([_]u8{0xa5} ** 4), &sentinel);
+}
+
+test "four by four matrix arithmetic preserves column-major Vulkan semantics" {
+    const matrix_ty = ir.Type{ .scalar = .f32, .columns = 4, .rows = 4 };
+    const vector_ty = ir.Type{ .scalar = .f32, .columns = 4 };
+    var matrix_a: [64]u8 = undefined;
+    var matrix_identity: [64]u8 = .{0} ** 64;
+    for (0..16) |i| std.mem.writeInt(u32, matrix_a[i * 4 ..][0..4], @bitCast(@as(f32, @floatFromInt(i + 1))), .little);
+    for (0..4) |diagonal| std.mem.writeInt(u32, matrix_identity[(diagonal * 4 + diagonal) * 4 ..][0..4], @bitCast(@as(f32, 1)), .little);
+    const scalar = f32bytes(2);
+    var vector: [16]u8 = undefined;
+    for (0..4) |i| std.mem.writeInt(u32, vector[i * 4 ..][0..4], @bitCast(@as(f32, @floatFromInt(i + 1))), .little);
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .output, .ty = matrix_ty, .location = 0 },
+        .{ .storage = .output, .ty = vector_ty, .location = 1 },
+        .{ .storage = .output, .ty = matrix_ty, .location = 2 },
+    };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = matrix_ty, .operands = &.{}, .literal = &matrix_a },
+        .{ .op = .constant, .ty = matrix_ty, .operands = &.{}, .literal = &matrix_identity },
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &scalar },
+        .{ .op = .constant, .ty = vector_ty, .operands = &.{}, .literal = &vector },
+        .{ .op = .matrix_times_scalar, .ty = matrix_ty, .operands = &.{ 0, 2 }, .literal = &.{} },
+        .{ .op = .vector_times_matrix, .ty = vector_ty, .operands = &.{ 3, 1 }, .literal = &.{} },
+        .{ .op = .matrix_times_matrix, .ty = matrix_ty, .operands = &.{ 0, 1 }, .literal = &.{} },
+        .{ .op = .output, .ty = matrix_ty, .operands = &.{ 0, 4 }, .literal = &.{} },
+        .{ .op = .output, .ty = vector_ty, .operands = &.{ 1, 5 }, .literal = &.{} },
+        .{ .op = .output, .ty = matrix_ty, .operands = &.{ 2, 6 }, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    var scaled: [64]u8 = undefined;
+    var transformed: [16]u8 = undefined;
+    var multiplied: [64]u8 = undefined;
+    try executor.execute(&.{}, &.{ .{ .interface = 0, .bytes = &scaled }, .{ .interface = 1, .bytes = &transformed }, .{ .interface = 2, .bytes = &multiplied } });
+    for (0..16) |i| {
+        try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, @floatFromInt((i + 1) * 2)))), std.mem.readInt(u32, scaled[i * 4 ..][0..4], .little));
+        try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, @floatFromInt(i + 1)))), std.mem.readInt(u32, multiplied[i * 4 ..][0..4], .little));
+    }
+    for (0..4) |i| try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, @floatFromInt(i + 1)))), std.mem.readInt(u32, transformed[i * 4 ..][0..4], .little));
+    for (0..4096) |_| try executor.execute(&.{}, &.{ .{ .interface = 0, .bytes = &scaled }, .{ .interface = 1, .bytes = &transformed }, .{ .interface = 2, .bytes = &multiplied } });
 }
 
 test "rejection is explicit and output transactional" {
@@ -1426,6 +1495,21 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
             const vector = try propertyConstant(arena, &instructions, result_ty);
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ matrix, vector }, &.{});
         },
+        .matrix_times_scalar => {
+            const matrix = try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 4, .rows = 4 });
+            const scalar = try propertyConstant(arena, &instructions, .{ .scalar = .f32 });
+            result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ matrix, scalar }, &.{});
+        },
+        .vector_times_matrix => {
+            const vector = try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 4 });
+            const matrix = try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 4, .rows = 4 });
+            result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ vector, matrix }, &.{});
+        },
+        .matrix_times_matrix => {
+            const left = try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 4, .rows = 4 });
+            const right = try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 4, .rows = 4 });
+            result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ left, right }, &.{});
+        },
         .output => {
             interfaces[0] = .{ .storage = .output, .ty = result_ty, .location = 0 };
             interface_count = 1;
@@ -1532,6 +1616,12 @@ test "generated bounded operation by type-family property matrix is complete" {
     };
     try runPropertyCase(.matrix_times_vector, .{ .scalar = .f32, .columns = 4 }, null, null);
     totals[@intFromEnum(ir.Op.matrix_times_vector)] += 1;
+    try runPropertyCase(.matrix_times_scalar, .{ .scalar = .f32, .columns = 4, .rows = 4 }, null, null);
+    totals[@intFromEnum(ir.Op.matrix_times_scalar)] += 1;
+    try runPropertyCase(.vector_times_matrix, .{ .scalar = .f32, .columns = 4 }, null, null);
+    totals[@intFromEnum(ir.Op.vector_times_matrix)] += 1;
+    try runPropertyCase(.matrix_times_matrix, .{ .scalar = .f32, .columns = 4, .rows = 4 }, null, null);
+    totals[@intFromEnum(ir.Op.matrix_times_matrix)] += 1;
     try runPropertyCase(.select, .{ .scalar = .u32 }, null, null);
     totals[@intFromEnum(ir.Op.select)] += 1;
     inline for ([_]ir.Op{ .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle }) |op| {
@@ -1547,15 +1637,15 @@ test "generated bounded operation by type-family property matrix is complete" {
         totals[@intFromEnum(op)] += 1;
     }
     const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14, 8, 4, 8, 8, 8, 8, 4, 4, 4, 4, 4, 8, 8, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5};
+    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 3;
     try std.testing.expectEqualSlices(usize, expected_full[0..totals.len], &totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 312), total);
-    std.debug.print("generated property matrix: operations=63 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 315), total);
+    std.debug.print("generated property matrix: operations=66 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -1687,13 +1777,13 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 63), malformed);
+    try std.testing.expectEqual(@as(usize, 66), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
     try std.testing.expectEqual(@as(usize, 5), runtime_nan);
     try std.testing.expectEqual(@as(usize, 5), signed_zero);
-    std.debug.print("generated property categories: malformed=63 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
+    std.debug.print("generated property categories: malformed=66 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
 }
 
 test "generated valid scalar DAGs are total and stable" {

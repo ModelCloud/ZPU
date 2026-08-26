@@ -59,7 +59,8 @@ boolean logical expressions, signed integer negation, component-wise integer
 multiply, bitwise operations, integer division/remainder, and bounded integer
 shifts, floating remainder with truncating quotient, dynamic scalar integer comparisons, ordered/unordered scalar
 floating-point comparisons with NaN semantics, and dynamic scalar boolean
-logical operations, plus
+logical operations, bounded f32 4x4 column-major matrix/vector arithmetic
+(`OpMatrixTimesScalar`, `OpVectorTimesMatrix`, and `OpMatrixTimesMatrix`), plus
 statically resolved, acyclic `OpBranch`,
 `OpBranchConditional`, and constant-selector `OpSwitch` paths now prune
 unselected blocks before lowering, while dynamic conditions, loops, dynamic
@@ -444,7 +445,8 @@ Each slice must land with all of the following:
   multiply, bitwise operations, integer division/remainder, and bounded integer
   shifts, executes bounded floating remainder and dynamic scalar integer comparisons,
   ordered/unordered scalar floating-point comparisons with NaN semantics, and
-  dynamic scalar boolean logical operations, and constant-folds
+  dynamic scalar boolean logical operations, bounded f32 4x4 column-major
+  matrix/vector arithmetic, and constant-folds
   scalar integer equality, and resolves
   predecessor-selected `OpPhi` values at static
   acyclic branch joins, preserving only the incoming value from the selected
