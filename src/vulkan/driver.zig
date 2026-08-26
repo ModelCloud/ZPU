@@ -5713,7 +5713,7 @@ fn cmdResetQueryPool(cb: ?CommandBuffer, handle: usize, first: u32, count: u32) 
         return;
     };
     const overlaps_active = c.impl.active_query_pool == pool and first <= c.impl.active_query_index and c.impl.active_query_index - first < count;
-    if (c.impl.state != 1 or c.impl.invalid or !pool.owner.eql(c.impl.owner) or !validQueryRange(pool, first, count) or overlaps_active) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or !pool.owner.eql(c.impl.owner) or !validQueryRange(pool, first, count) or overlaps_active) {
         c.impl.invalid = true;
         return;
     }
@@ -5795,7 +5795,7 @@ fn cmdCopyQueryPoolResults(cb: ?CommandBuffer, pool_handle: usize, first: u32, c
     const element_size = queryResultElementSize(flags);
     const alignment: u64 = if (flags & 1 != 0) 8 else 4;
     const required: u64 = if (count == 0) 0 else std.math.add(u64, std.math.mul(u64, count - 1, stride) catch std.math.maxInt(u64), element_size) catch std.math.maxInt(u64);
-    if (c.impl.state != 1 or c.impl.invalid or flags & ~@as(u32, 0xf) != 0 or !pool.owner.eql(c.impl.owner) or !validQueryCopyRange(pool, first, count) or (pool.query_type == 2 and flags & 8 != 0) or destination.owner != c.impl.owner or destination.usage & 0x2 == 0 or destination.memory == null or (count > 1 and (stride == 0 or stride < element_size or stride % alignment != 0)) or offset % alignment != 0 or offset >= destination.size or required > destination.size - offset) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or flags & ~@as(u32, 0xf) != 0 or !pool.owner.eql(c.impl.owner) or !validQueryCopyRange(pool, first, count) or (pool.query_type == 2 and flags & 8 != 0) or destination.owner != c.impl.owner or destination.usage & 0x2 == 0 or destination.memory == null or (count > 1 and (stride == 0 or stride < element_size or stride % alignment != 0)) or offset % alignment != 0 or offset >= destination.size or required > destination.size - offset) {
         c.impl.invalid = true;
         return;
     }
@@ -17497,9 +17497,37 @@ test "query pools expose exact availability timestamps copies and lifecycle" {
     cmdResetQueryPool(commands[0], timestamp_pool, 0, 0);
     try std.testing.expect(!commands[0].impl.invalid);
     try std.testing.expectEqual(empty_copy_count, commands[0].impl.count);
+    commands[0].impl.dynamic_rendering = true;
+    const dynamic_reset_count = commands[0].impl.count;
+    cmdResetQueryPool(commands[0], timestamp_pool, 0, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(dynamic_reset_count, commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
+    const traditional_reset_count = commands[0].impl.count;
+    cmdResetQueryPool(commands[0], timestamp_pool, 0, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(traditional_reset_count, commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdCopyQueryPoolResults(commands[0], timestamp_pool, 0, 1, buffer, 0, 0, 0);
     try std.testing.expect(!commands[0].impl.invalid);
     try std.testing.expectEqual(empty_copy_count + 1, commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.dynamic_rendering = true;
+    const dynamic_copy_count = commands[0].impl.count;
+    cmdCopyQueryPoolResults(commands[0], timestamp_pool, 0, 1, buffer, 0, 0, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(dynamic_copy_count, commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
+    const traditional_copy_count = commands[0].impl.count;
+    cmdCopyQueryPoolResults(commands[0], timestamp_pool, 0, 1, buffer, 0, 0, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(traditional_copy_count, commands[0].impl.count);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdCopyQueryPoolResults(commands[0], timestamp_pool, 2, 0, buffer, 0, 0, 0);
