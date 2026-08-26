@@ -162,7 +162,9 @@ Dynamic rendering now records finite
 accepts bounded nonzero `layerCount` values against array-view layer ranges;
 layered clears and framebuffer-free indexed CPU-cube draws execute each
 selected layer, while rejecting command-buffer completion while a rendering
-scope remains open. Secondary command buffers can now carry the bounded
+scope remains open. Attachment layouts are snapshotted when dynamic commands
+are recorded and checked again at submit, so a post-record host layout change
+fails atomically instead of executing against stale state. Secondary command buffers can now carry the bounded
 `VkCommandBufferInheritanceRenderingInfo` chain; execution validates the
 inherited color/depth formats and sample count against the active primary
 scope, then binds the primary's live attachment images into the copied draw
