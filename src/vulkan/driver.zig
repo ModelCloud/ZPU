@@ -495,7 +495,7 @@ const descriptor_type_count = 11;
 const DescriptorCounts = [descriptor_type_count]u32;
 const DescriptorPoolObj = struct { owner: DeviceIdentity, flags: u32, max_sets: u32, allocated_sets: u32, capacity: DescriptorCounts, used: DescriptorCounts };
 const DescriptorSetObj = struct { owner: DeviceIdentity = undefined, pool: *DescriptorPoolObj = undefined, counts: DescriptorCounts = [_]u32{0} ** descriptor_type_count, layout: Canonical = .{}, binding_types: [2]i32 = .{ -1, -1 }, uniform: ?*BufferObj = null, uniform_offset: u64 = 0, uniform_range: u64 = 0, uniform_dynamic: bool = false, storage: ?*BufferObj = null, storage_binding: u32 = 0, storage_offset: u64 = 0, storage_range: u64 = 0, texture: ?*ImageObj = null, synthetic: bool = false };
-const DescriptorUpdateTemplateObj = struct { owner: DeviceIdentity, layout: *DescriptorSetLayoutObj, pipeline_bind_point: i32 = 0, entry_count: u32, entries: [32]DescriptorUpdateTemplateEntry };
+const DescriptorUpdateTemplateObj = struct { owner: DeviceIdentity, layout: *DescriptorSetLayoutObj, pipeline_bind_point: i32 = 0, pipeline_layout: usize = 0, entry_count: u32, entries: [32]DescriptorUpdateTemplateEntry };
 const DeviceIdentity = struct {
     handle: Device,
     generation: u64,
@@ -8305,7 +8305,7 @@ fn createDescriptorUpdateTemplate(device: ?Device, info: ?*const DescriptorUpdat
     if (!layout.owner.eql(d)) return .error_initialization_failed;
     if (ci.descriptor_update_entries) |entries| for (entries[0..ci.descriptor_update_entry_count]) |entry| if (entry.dst_array_element != 0 or entry.descriptor_count != 1 or (entry.descriptor_type != 6 and entry.descriptor_type != 7 and entry.descriptor_type != 8 and entry.descriptor_type != 1) or entry.stride == 0 or (entry.descriptor_type == 8 and (entry.dst_binding != 0 or layout.binding_types[0] != 8)) or (entry.descriptor_type == 7 and (entry.dst_binding > 1 or layout.binding_types[entry.dst_binding] != 7)) or (entry.descriptor_type == 6 and entry.dst_binding == 0 and layout.binding_types[0] != 6) or (entry.descriptor_type == 1 and (entry.dst_binding != 1 or layout.binding_types[1] != 1))) return .error_initialization_failed;
     for (&descriptor_update_template_objects, &descriptor_update_template_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = DeviceIdentity.capture(d), .layout = layout, .pipeline_bind_point = ci.pipeline_bind_point, .entry_count = ci.descriptor_update_entry_count, .entries = [_]DescriptorUpdateTemplateEntry{std.mem.zeroes(DescriptorUpdateTemplateEntry)} ** 32 };
+        object.* = .{ .owner = DeviceIdentity.capture(d), .layout = layout, .pipeline_bind_point = ci.pipeline_bind_point, .pipeline_layout = ci.pipeline_layout, .entry_count = ci.descriptor_update_entry_count, .entries = [_]DescriptorUpdateTemplateEntry{std.mem.zeroes(DescriptorUpdateTemplateEntry)} ** 32 };
         if (ci.descriptor_update_entries) |entries| @memcpy(object.entries[0..ci.descriptor_update_entry_count], entries[0..ci.descriptor_update_entry_count]);
         state.* = .live;
         out.* = @intFromPtr(object);
@@ -9098,7 +9098,7 @@ fn cmdPushDescriptorSetWithTemplateLocked(command_buffer: *CommandBufferObj, tem
         command_buffer.impl.invalid = true;
         return;
     };
-    if ((bind_point != 0 and bind_point != 1) or set != 0 or data == null or command_buffer.impl.state != 1 or command_buffer.impl.invalid or !layout_object.owner.eql(command_buffer.impl.owner) or !template.owner.eql(command_buffer.impl.owner) or !template.layout.canonical.eql(&layout_object.set0)) {
+    if ((bind_point != 0 and bind_point != 1) or set != 0 or data == null or command_buffer.impl.state != 1 or command_buffer.impl.invalid or !layout_object.owner.eql(command_buffer.impl.owner) or !template.owner.eql(command_buffer.impl.owner) or !template.layout.canonical.eql(&layout_object.set0) or (template.pipeline_layout != 0 and template.pipeline_layout != layout)) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -15377,6 +15377,14 @@ test "push descriptors own layout state, template decoding, rollback, and warm p
         try std.testing.expect(!command[0].impl.invalid);
     }
     test_allocations_before_failure = null;
+
+    var alternate_pipeline_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &pipeline_info, null, &alternate_pipeline_layout));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdPushDescriptorSetWithTemplate(command[0], descriptor_template, alternate_pipeline_layout, 0, &descriptor_buffer);
+    try std.testing.expect(command[0].impl.invalid);
+    destroyPipelineLayout(ctx.device, alternate_pipeline_layout, null);
 
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
