@@ -205,6 +205,11 @@ the Vulkan NEVER/LESS/EQUAL/LESS_OR_EQUAL/GREATER/NOT_EQUAL/GREATER_OR_EQUAL/
 ALWAYS comparisons and independently controls depth writes; the legacy
 CPU-cube path rejects non-default depth modes rather than silently changing its
 fixed depth behavior.
+Core `VK_DYNAMIC_STATE_DEPTH_BOUNDS` is now decoded as an initialized draw
+requirement. Ordered finite bounds are snapshotted into direct and indirect
+draws, the scalar profile applies the inclusive Vulkan depth-bounds test, and
+the legacy CPU-cube path rejects non-default bounds instead of silently
+ignoring them.
 The memory and sampler handle registries now meet the required 4096 and 4000
 allocation limits respectively. The generated command matrix is a
 234/234 dispatch/name-coverage artifact, not a Vulkan-conformance claim:
