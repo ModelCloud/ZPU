@@ -985,7 +985,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const result = result_id orelse continue;
             if (!needed[try id(nodes, result)]) continue;
             const first_operand: usize = switch (instruction.opcode) {
-                41, 42, 43, 48, 49, 50, 164...168 => continue,
+                41, 42, 43, 48, 49, 50 => continue,
+                164...168 => if (try staticCondition(nodes, result) != null) continue else 2,
                 170...179 => if (try staticCondition(nodes, result) != null) continue else 2,
                 182...193 => 2,
                 else => 2,
@@ -1124,7 +1125,14 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             142 => .vector_times_scalar,
             145 => .matrix_times_vector,
             169 => .select,
-            164...168 => .constant,
+            164...168 => if ((try staticCondition(nodes, rid)) != null) .constant else switch (instruction.opcode) {
+                164 => .logical_eq,
+                165 => .logical_ne,
+                166 => .logical_or,
+                167 => .logical_and,
+                168 => .logical_not,
+                else => unreachable,
+            },
             170...179 => if ((try staticCondition(nodes, rid)) != null) .constant else switch (instruction.opcode) {
                 170 => .ieq,
                 171 => .ine,
@@ -1999,6 +2007,30 @@ test "compute profile lowers dynamic integer comparison before select" {
     var saw_ine = false;
     for (unequal_program.instructions) |instruction| saw_ine = saw_ine or instruction.op == .ine;
     try std.testing.expect(saw_ine);
+}
+
+test "compute profile lowers dynamic boolean logical operations" {
+    const opcodes = [_]u16{ 164, 165, 166, 167, 168 };
+    const expected = [_]ir.Op{ .logical_eq, .logical_ne, .logical_or, .logical_and, .logical_not };
+    for (opcodes, expected) |opcode, expected_op| {
+        var words = compute_dynamic_compare_store;
+        words[3] = 20;
+        const select = testOpcodeOffset(&words, 169, 0).?;
+        const binary = opcode != 168;
+        const inserted_words: []const u32 = if (binary)
+            &[_]u32{ (@as(u32, 5) << 16) | opcode, 12, 19, 13, 13 }
+        else
+            &[_]u32{ (@as(u32, 4) << 16) | opcode, 12, 19, 13 };
+        var expanded = try testInsertWords(std.testing.allocator, &words, select, inserted_words);
+        defer std.testing.allocator.free(expanded);
+        const selected = testOpcodeOffset(expanded, 169, 0).?;
+        expanded[selected + 3] = 19;
+        var program = try compile(std.testing.allocator, expanded, .compute, "main", &.{});
+        defer program.deinit(std.testing.allocator);
+        var found = false;
+        for (program.instructions) |instruction| found = found or instruction.op == expected_op;
+        try std.testing.expect(found);
+    }
 }
 
 test "compute profile lowers ordered and unordered float comparisons" {
