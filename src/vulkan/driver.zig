@@ -1570,16 +1570,26 @@ fn populateCorePropertyChain(raw: ?*anyopaque) bool {
 fn physicalDeviceImageFormatInfo2ChainValid(raw: ?*const anyopaque, format: i32) bool {
     var next = raw;
     var depth: usize = 0;
+    var seen_external = false;
+    var seen_format_list = false;
+    var seen_stencil = false;
     while (next) |item| {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
         switch (header.s_type) {
-            1000071000 => {},
+            1000071000 => {
+                if (seen_external) return false;
+                seen_external = true;
+            },
             1000147000 => {
+                if (seen_format_list) return false;
+                seen_format_list = true;
                 const formats: *const ImageFormatListCreateInfo = @ptrCast(@alignCast(item));
                 if (formats.view_format_count > max_api_items or (formats.view_format_count != 0 and formats.view_formats == null)) return false;
                 if (formats.view_formats) |items| for (items[0..formats.view_format_count]) |view_format| if (view_format != format) return false;
             },
             1000246000 => {
+                if (seen_stencil) return false;
+                seen_stencil = true;
                 const stencil: *const ImageStencilUsageCreateInfo = @ptrCast(@alignCast(item));
                 if (stencil.stencil_usage != 0) return false;
             },
@@ -1725,9 +1735,27 @@ fn physicalDeviceImageFormatInfo2ExternalHandleType(raw: ?*const anyopaque) u32 
 fn imageFormatProperties2ChainValid(raw: ?*anyopaque) bool {
     var next = raw;
     var depth: usize = 0;
+    var seen_external = false;
+    var seen_ycbcr = false;
+    var seen_host_copy = false;
     while (next) |item| {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
-        if (depth == 16 or (header.s_type != 1000071001 and header.s_type != 1000156005 and header.s_type != 1000270009)) return false;
+        if (depth == 16) return false;
+        switch (header.s_type) {
+            1000071001 => {
+                if (seen_external) return false;
+                seen_external = true;
+            },
+            1000156005 => {
+                if (seen_ycbcr) return false;
+                seen_ycbcr = true;
+            },
+            1000270009 => {
+                if (seen_host_copy) return false;
+                seen_host_copy = true;
+            },
+            else => return false,
+        }
         next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
         depth += 1;
     }
@@ -1761,9 +1789,12 @@ fn populateImageFormatProperties2Chain(raw: ?*anyopaque) void {
 fn formatProperties3ChainValid(raw: ?*anyopaque) bool {
     var next = raw;
     var depth: usize = 0;
+    var seen = false;
     while (next) |item| {
-        if (depth == 16 or @as(*const ChainHeader, @ptrCast(@alignCast(item))).s_type != 1_000_360_000) return false;
-        next = if (@as(*const ChainHeader, @ptrCast(@alignCast(item))).p_next) |p| @ptrCast(@constCast(p)) else null;
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (depth == 16 or header.s_type != 1_000_360_000 or seen) return false;
+        seen = true;
+        next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
         depth += 1;
     }
     return true;
@@ -13308,6 +13339,20 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     getPhysicalDeviceFormatProperties2(ctx.physical, 37, &format);
     try std.testing.expectEqual(@as(u64, 0xc000), format3.optimal_tiling_features);
     try std.testing.expectEqual(@as(u64, 0xc000), format3.linear_tiling_features);
+    var duplicate_format3 = FormatProperties3{ .s_type = 1_000_360_000, .p_next = null, .linear_tiling_features = 0xaaaa, .optimal_tiling_features = 0xbbbb, .buffer_features = 0xcccc };
+    format3.p_next = @ptrCast(&duplicate_format3);
+    format3.linear_tiling_features = 0xffff_ffff_ffff_ffff;
+    format3.optimal_tiling_features = 0xffff_ffff_ffff_ffff;
+    format3.buffer_features = 0xffff_ffff_ffff_ffff;
+    format.format_properties = .{ .linear_tiling_features = 0x1111, .optimal_tiling_features = 0x2222, .buffer_features = 0x3333 };
+    try std.testing.expectEqual(@as(u64, 0xaaaa), duplicate_format3.linear_tiling_features);
+    getPhysicalDeviceFormatProperties2(ctx.physical, 37, &format);
+    try std.testing.expectEqual(@as(u64, 0x1111), format.format_properties.linear_tiling_features);
+    try std.testing.expectEqual(@as(u64, 0x2222), format.format_properties.optimal_tiling_features);
+    try std.testing.expectEqual(@as(u64, 0x3333), format.format_properties.buffer_features);
+    try std.testing.expectEqual(@as(u64, 0xffff_ffff_ffff_ffff), format3.linear_tiling_features);
+    try std.testing.expectEqual(@as(u64, 0xaaaa), duplicate_format3.linear_tiling_features);
+    format3.p_next = null;
     format.format_properties = .{ .linear_tiling_features = 0x1111, .optimal_tiling_features = 0x2222, .buffer_features = 0x3333 };
     format3.linear_tiling_features = 0x4444;
     format3.optimal_tiling_features = 0x5555;
@@ -13348,6 +13393,12 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     var external_image_info = PhysicalDeviceExternalImageFormatInfo{ .s_type = 1000071000, .p_next = null, .handle_type = 0 };
     image_info.p_next = @ptrCast(&external_image_info);
     try std.testing.expectEqual(Result.success, getPhysicalDeviceImageFormatProperties2(ctx.physical, &image_info, &image_properties));
+    var duplicate_external_image_info = PhysicalDeviceExternalImageFormatInfo{ .s_type = 1000071000, .p_next = null, .handle_type = 0 };
+    external_image_info.p_next = @ptrCast(&duplicate_external_image_info);
+    image_properties.image_format_properties.max_extent.width = 0xdead_beef;
+    try std.testing.expectEqual(Result.error_initialization_failed, getPhysicalDeviceImageFormatProperties2(ctx.physical, &image_info, &image_properties));
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), image_properties.image_format_properties.max_extent.width);
+    external_image_info.p_next = null;
     external_image_info.handle_type = 1;
     image_properties.image_format_properties.max_extent.width = 0xdead_beef;
     external_image_properties.external_memory_properties.external_memory_features = 0xdead_beef;
@@ -13360,6 +13411,14 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(u32, 0xdead_beef), ycbcr_image_properties.combined_image_sampler_descriptor_count);
     try std.testing.expectEqual(@as(u32, 0xdead_beef), host_copy_query.optimal_device_access);
     try std.testing.expectEqual(@as(u32, 0xdead_beef), host_copy_query.identical_memory_layout);
+    var duplicate_ycbcr_properties = SamplerYcbcrConversionImageFormatProperties{ .s_type = 1000156005, .p_next = null, .combined_image_sampler_descriptor_count = 0xeeee_eeee };
+    ycbcr_image_properties.p_next = @ptrCast(&duplicate_ycbcr_properties);
+    duplicate_ycbcr_properties.p_next = @ptrCast(&host_copy_query);
+    image_properties.image_format_properties.max_extent.width = 0xcafe_f00d;
+    try std.testing.expectEqual(Result.error_initialization_failed, getPhysicalDeviceImageFormatProperties2(ctx.physical, &image_info, &image_properties));
+    try std.testing.expectEqual(@as(u32, 0xcafe_f00d), image_properties.image_format_properties.max_extent.width);
+    try std.testing.expectEqual(@as(u32, 0xeeee_eeee), duplicate_ycbcr_properties.combined_image_sampler_descriptor_count);
+    ycbcr_image_properties.p_next = @ptrCast(&host_copy_query);
     external_image_info.handle_type = 0;
     var view_formats = [_]i32{37};
     var image_format_list = ImageFormatListCreateInfo{ .s_type = 1000147000, .p_next = null, .view_format_count = 1, .view_formats = &view_formats };
