@@ -5019,6 +5019,16 @@ fn sync2TimestampStageToLegacy(stage: u64) ?u32 {
 fn commandBufferOutsideRenderPass(command_buffer: *const CommandBufferObj) bool {
     return command_buffer.impl.active_render_pass == null and !command_buffer.impl.dynamic_rendering;
 }
+fn dynamicRenderingDependencyValid(info: *const DependencyInfo) bool {
+    // ZPU does not expose dynamicRenderingLocalRead.  Vulkan therefore only
+    // permits attachment access memory barriers in a dynamic render pass;
+    // buffer/image barriers and non-framebuffer stages are invalid here.
+    if (info.buffer_memory_barrier_count != 0 or info.image_memory_barrier_count != 0) return false;
+    if (info.memory_barriers) |items| for (items[0..info.memory_barrier_count]) |barrier| {
+        if (barrier.src_stage_mask & ~@as(u64, 0x700) != 0 or barrier.dst_stage_mask & ~@as(u64, 0x700) != 0 or barrier.src_access_mask & ~@as(u64, 0x780) != 0 or barrier.dst_access_mask & ~@as(u64, 0x780) != 0) return false;
+    };
+    return true;
+}
 
 fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callconv(.c) void {
     if (!dependencyInfoShapeValid(info)) {
@@ -5026,6 +5036,20 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
         return;
     }
     const ci = info.?;
+    if (ci.memory_barrier_count + ci.buffer_memory_barrier_count + ci.image_memory_barrier_count != 0) {
+        lock();
+        const command_buffer = validCommandBufferLocked(cb) orelse {
+            mutex.unlock();
+            return;
+        };
+        const in_dynamic_rendering = command_buffer.impl.dynamic_rendering;
+        if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or (in_dynamic_rendering and !dynamicRenderingDependencyValid(ci))) {
+            command_buffer.impl.invalid = true;
+            mutex.unlock();
+            return;
+        }
+        mutex.unlock();
+    }
     if (ci.memory_barrier_count + ci.buffer_memory_barrier_count + ci.image_memory_barrier_count == 0) {
         lock();
         defer mutex.unlock();
@@ -14427,6 +14451,10 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, image, image_memory, 0));
     const memory_barrier = MemoryBarrier2{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 1, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0 };
     const dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 1, .memory_barriers = @ptrCast(&memory_barrier), .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
+    const attachment_memory_barrier = MemoryBarrier2{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 0x400, .dst_stage_mask = 0x400, .src_access_mask = 0x80, .dst_access_mask = 0x100 };
+    const attachment_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 1, .memory_barriers = @ptrCast(&attachment_memory_barrier), .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
+    try std.testing.expect(dynamicRenderingDependencyValid(&attachment_dependency));
+    try std.testing.expect(!dynamicRenderingDependencyValid(&dependency));
     const mixed_memory_barriers = [_]MemoryBarrier2{
         .{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 1, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0 },
         .{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 0x2000, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0 },
@@ -14477,6 +14505,10 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expectEqual(before_event_scope, commands[0].impl.count);
     commands[0].impl.invalid = false;
     cmdResetEvent2(commands[0], event, 0x1_0000);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_event_scope, commands[0].impl.count);
+    commands[0].impl.invalid = false;
+    cmdPipelineBarrier2(commands[0], &dependency);
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(before_event_scope, commands[0].impl.count);
     commands[0].impl.invalid = false;
