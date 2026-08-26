@@ -6962,14 +6962,17 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
         .copy_image => |op| {
             const src = imageBytes(op.src);
             const dst = imageBytes(op.dst);
-            const src_layer_offset = imageLayerOffset(op.src, op.region.src_subresource.base_array_layer).?;
-            const dst_layer_offset = imageLayerOffset(op.dst, op.region.dst_subresource.base_array_layer).?;
-            var y: u32 = 0;
-            while (y < op.region.extent.height) : (y += 1) {
-                const so = src_layer_offset + ((@as(usize, @intCast(op.region.src_offset.y)) + y) * op.src.width + @as(usize, @intCast(op.region.src_offset.x))) * 4;
-                const do = dst_layer_offset + ((@as(usize, @intCast(op.region.dst_offset.y)) + y) * op.dst.width + @as(usize, @intCast(op.region.dst_offset.x))) * 4;
-                const len = @as(usize, op.region.extent.width) * 4;
-                std.mem.copyForwards(u8, dst[do..][0..len], src[so..][0..len]);
+            var layer: u32 = 0;
+            while (layer < op.region.src_subresource.layer_count) : (layer += 1) {
+                const src_layer_offset = imageLayerOffset(op.src, op.region.src_subresource.base_array_layer + layer).?;
+                const dst_layer_offset = imageLayerOffset(op.dst, op.region.dst_subresource.base_array_layer + layer).?;
+                var y: u32 = 0;
+                while (y < op.region.extent.height) : (y += 1) {
+                    const so = src_layer_offset + ((@as(usize, @intCast(op.region.src_offset.y)) + y) * op.src.width + @as(usize, @intCast(op.region.src_offset.x))) * 4;
+                    const do = dst_layer_offset + ((@as(usize, @intCast(op.region.dst_offset.y)) + y) * op.dst.width + @as(usize, @intCast(op.region.dst_offset.x))) * 4;
+                    const len = @as(usize, op.region.extent.width) * 4;
+                    std.mem.copyForwards(u8, dst[do..][0..len], src[so..][0..len]);
+                }
             }
             invalidateImageContents(op.dst);
         },
@@ -16102,20 +16105,43 @@ test "bounded 2D array images isolate layers across views clears and transfers" 
     var clear = std.mem.zeroes(ClearColorValue);
     clear.float32 = .{ 1, 0, 0, 1 };
     cmdClearColorImage(command, image, 1, &clear, 1, @ptrCast(&layer_zero_range));
-    const image_copy_region = ImageCopy{ .src_subresource = transfer_region.image_subresource, .src_offset = .{ .x = 0, .y = 0, .z = 0 }, .dst_subresource = transfer_region.image_subresource, .dst_offset = .{ .x = 0, .y = 0, .z = 0 }, .extent = .{ .width = 2, .height = 2, .depth = 1 } };
-    validImageLocked(copied_image).?.layout = 1;
-    cmdCopyImage(command, image, 1, copied_image, 1, 1, @ptrCast(&image_copy_region));
-    const image_blit_region = ImageBlit{ .src_subresource = transfer_region.image_subresource, .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 2, .y = 2, .z = 1 } }, .dst_subresource = transfer_region.image_subresource, .dst_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 2, .y = 2, .z = 1 } } };
-    cmdBlitImage(command, image, 1, copied_image, 1, 1, @ptrCast(&image_blit_region), 0);
-    const image_resolve_region = ImageResolve{ .src_subresource = transfer_region.image_subresource, .src_offset = .{ .x = 0, .y = 0, .z = 0 }, .dst_subresource = transfer_region.image_subresource, .dst_offset = .{ .x = 0, .y = 0, .z = 0 }, .extent = .{ .width = 2, .height = 2, .depth = 1 } };
-    cmdResolveImage(command, image, 1, copied_image, 1, 1, @ptrCast(&image_resolve_region));
-    const copied_buffer_region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = transfer_region.image_subresource, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
-    cmdCopyImageToBuffer(command, copied_image, 1, destination_buffer, 1, @ptrCast(&copied_buffer_region));
-    try std.testing.expectEqual(Result.success, endCommandBuffer(command));
     const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = @ptrCast(&command), .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command));
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     try std.testing.expectEqualSlices(u8, host_layers[16..32], imageBytes(validImageLocked(image).?)[16..32]);
     try std.testing.expectEqual(@as(u32, 0xffff0000), std.mem.readInt(u32, imageBytes(validImageLocked(image).?)[0..4], .little));
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command, 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command, &begin));
+    const image_copy_region = ImageCopy{ .src_subresource = transfer_region.image_subresource, .src_offset = .{ .x = 0, .y = 0, .z = 0 }, .dst_subresource = transfer_region.image_subresource, .dst_offset = .{ .x = 0, .y = 0, .z = 0 }, .extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    validImageLocked(copied_image).?.layout = 1;
+    cmdCopyImage(command, image, 1, copied_image, 1, 1, @ptrCast(&image_copy_region));
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqualSlices(u8, imageBytes(validImageLocked(image).?)[0..32], imageBytes(validImageLocked(copied_image).?)[0..32]);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command, 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command, &begin));
+    const image_blit_region = ImageBlit{ .src_subresource = transfer_region.image_subresource, .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 2, .y = 2, .z = 1 } }, .dst_subresource = transfer_region.image_subresource, .dst_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 2, .y = 2, .z = 1 } } };
+    cmdBlitImage(command, image, 1, copied_image, 1, 1, @ptrCast(&image_blit_region), 0);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqualSlices(u8, imageBytes(validImageLocked(image).?)[0..32], imageBytes(validImageLocked(copied_image).?)[0..32]);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command, 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command, &begin));
+    const image_resolve_region = ImageResolve{ .src_subresource = transfer_region.image_subresource, .src_offset = .{ .x = 0, .y = 0, .z = 0 }, .dst_subresource = transfer_region.image_subresource, .dst_offset = .{ .x = 0, .y = 0, .z = 0 }, .extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    cmdResolveImage(command, image, 1, copied_image, 1, 1, @ptrCast(&image_resolve_region));
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqualSlices(u8, imageBytes(validImageLocked(image).?)[0..32], imageBytes(validImageLocked(copied_image).?)[0..32]);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command, 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command, &begin));
+    const copied_buffer_region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = transfer_region.image_subresource, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    cmdCopyImageToBuffer(command, copied_image, 1, destination_buffer, 1, @ptrCast(&copied_buffer_region));
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     try std.testing.expectEqual(Result.success, mapMemory(ctx.device, destination_memory, 0, 32, 0, &mapped));
     try std.testing.expectEqualSlices(u8, imageBytes(validImageLocked(copied_image).?)[0..32], @as([*]const u8, @ptrCast(mapped.?))[0..32]);
     unmapMemory(ctx.device, destination_memory);
