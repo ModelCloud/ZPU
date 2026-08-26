@@ -11473,12 +11473,20 @@ fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
         command_buffer.impl.invalid = true;
         return;
     }
+    const active_subpass = command_buffer.impl.active_subpass;
+    // A render-pass instance can end only in its final subpass.  Validate the
+    // scope before indexing the fixed layout snapshots so malformed internal
+    // state is rejected atomically rather than reaching an out-of-bounds
+    // access.
+    if (active_subpass >= render_pass.?.subpass_count or active_subpass + 1 != render_pass.?.subpass_count) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
     const image = framebuffer.?.color_image orelse {
         command_buffer.impl.invalid = true;
         return;
     };
     const depth = framebuffer.?.depth_image;
-    const active_subpass = command_buffer.impl.active_subpass;
     const color_subpass_layout = render_pass.?.subpass_color_layouts[active_subpass];
     const depth_subpass_layout = render_pass.?.subpass_depth_layouts[active_subpass];
     const color_transition = color_subpass_layout != render_pass.?.color_final_layout;
@@ -13391,6 +13399,14 @@ test "vkcube presentation path records submits and presents two swapchain images
     const multi_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &multi_commands, .signal_semaphore_count = 0, .signal_semaphores = null };
     try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&multi_submit), 0));
     try std.testing.expect(validImageLocked(images[0]).?.complex_3d_content);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    cmdBeginRenderPass(multi_commands[0], &multi_render_begin, 0);
+    const before_early_end = multi_commands[0].impl.count;
+    cmdEndRenderPass(multi_commands[0]);
+    try std.testing.expect(multi_commands[0].impl.invalid);
+    try std.testing.expectEqual(before_early_end, multi_commands[0].impl.count);
+    try std.testing.expect(multi_commands[0].impl.active_render_pass != null);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
     cmdBeginRenderPass(multi_commands[0], &multi_render_begin, 0);
@@ -20513,6 +20529,7 @@ test "traditional render passes honor load operations and image layout transitio
         try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
         try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
         cmdBeginRenderPass(command[0], &render_begin, 0);
+        cmdNextSubpass(command[0], 0);
         cmdEndRenderPass(command[0]);
         try std.testing.expect(!command[0].impl.invalid);
     }

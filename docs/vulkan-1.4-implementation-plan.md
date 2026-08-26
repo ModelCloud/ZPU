@@ -39,7 +39,9 @@ subpass, and malformed extra transitions fail atomically; the warm path is
 allocation-free. The `vkCmdNextSubpass` bound check runs before reading the
 fixed eight-entry subpass-layout table, so advancing beyond the advertised
 maximum is a failure-atomic, allocation-free invalidation rather than an
-out-of-bounds access. Compute command recording now requires an owned bound compute
+out-of-bounds access. Ending a traditional render pass before its final
+subpass is likewise rejected without recording or closing the active scope.
+Compute command recording now requires an owned bound compute
 pipeline, carries pipeline/layout/descriptor lifetime snapshots through
 submission prevalidation, and has a 4096-iteration allocation-free warm path.
 The `vkGetPhysicalDeviceFeatures2` query also accepts promoted Vulkan
