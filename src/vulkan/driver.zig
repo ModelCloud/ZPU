@@ -9707,12 +9707,14 @@ fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64
         };
     }
     var invalid_index_state = false;
-    if (indexed) {
+    if (indexed and draw_count != 0) {
         if (index_buffer) |bound_index| {
             invalid_index_state = bound_index.owner != command_buffer.impl.owner or bound_index.usage & 0x40 == 0 or bound_index.memory == null or !liveMemoryObject(bound_index.memory.?);
         } else invalid_index_state = true;
     }
-    if (!graphicsDescriptorBindingValid(command_buffer.impl) or pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or indirect_buffer.owner != command_buffer.impl.owner or indirect_buffer.usage & 0x100 == 0 or indirect_buffer.memory == null or !liveMemoryObject(indirect_buffer.memory.?) or offset % 4 != 0 or stride < indirect_size or stride % 4 != 0 or offset > indirect_buffer.size or required > indirect_buffer.size - offset or invalid_index_state) {
+    const range_valid = if (draw_count == 0) true else required <= indirect_buffer.size -| offset;
+    const stride_valid = draw_count <= 1 or (stride >= indirect_size and stride % 4 == 0);
+    if (!graphicsDescriptorBindingValid(command_buffer.impl) or pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or indirect_buffer.owner != command_buffer.impl.owner or indirect_buffer.usage & 0x100 == 0 or indirect_buffer.memory == null or !liveMemoryObject(indirect_buffer.memory.?) or offset % 4 != 0 or !stride_valid or (draw_count != 0 and offset > indirect_buffer.size) or !range_valid or invalid_index_state) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -11820,6 +11822,11 @@ test "vkcube presentation path records submits and presents two swapchain images
     cmdDrawIndirectCount(commands[0], indirect_buffer, 0, indirect_buffer, 0, 1, 20);
     try std.testing.expect(!commands[0].impl.invalid);
     try std.testing.expect(commands[0].impl.commands[commands[0].impl.count - 1].indirect_draw.count_source != null);
+    const zero_indirect_count = commands[0].impl.count;
+    cmdDrawIndirect(commands[0], indirect_buffer, 20, 0, 0);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(zero_indirect_count + 1, commands[0].impl.count);
+    try std.testing.expectEqual(@as(u32, 0), commands[0].impl.commands[commands[0].impl.count - 1].indirect_draw.draw_count);
     cmdDraw(commands[0], 3, 1, 0, 0);
     try std.testing.expect(!commands[0].impl.invalid);
     cmdDraw(commands[0], 3, 2, 1, 7);
