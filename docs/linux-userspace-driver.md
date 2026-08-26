@@ -217,8 +217,9 @@ Presentation cadence is process-local:
   the process lifetime.
 - Its opt-in timing queue also exposes bounded FIFO history through
   `vkGetPastPresentationTimingEXT`, including the queue/dequeue and pixel
-  visibility stages requested by the application. Count queries and queue-full
-  backpressure do not allocate on the hot path.
+  visibility stages requested by the application. `VkPresentId2KHR` IDs are
+  retained when supplied, with monotonic per-swapchain IDs as the fallback.
+  Count queries and queue-full backpressure do not allocate on the hot path.
 - Untimed presents continue on the process's configured cadence.
 - `VK_GOOGLE_display_timing` is unsupported and diagnosed with an error that
   directs callers to the sanctioned controls above.

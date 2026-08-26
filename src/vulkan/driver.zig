@@ -420,6 +420,7 @@ pub const SamplerCreateInfo = extern struct { s_type: i32, p_next: ?*const anyop
 pub const WriteDescriptorSet = extern struct { s_type: i32, p_next: ?*const anyopaque, dst_set: usize, dst_binding: u32, dst_array_element: u32, descriptor_count: u32, descriptor_type: i32, image_info: ?[*]const DescriptorImageInfo, buffer_info: ?[*]const DescriptorBufferInfo, texel_buffer_view: ?[*]const usize };
 pub const Viewport = cpu_cube.Viewport;
 pub const PresentInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, wait_semaphore_count: u32, wait_semaphores: ?[*]const usize, swapchain_count: u32, swapchains: ?[*]const usize, image_indices: ?[*]const u32, results: ?[*]Result };
+pub const PresentId2KHR = extern struct { s_type: i32, p_next: ?*const anyopaque, swapchain_count: u32, present_ids: ?[*]const u64 };
 pub const PresentTimingsInfoEXT = extern struct { s_type: i32, p_next: ?*const anyopaque, swapchain_count: u32, timing_infos: ?[*]const PresentTimingInfoEXT };
 pub const PresentTimingInfoEXT = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, target_time: u64, time_domain_id: u64, present_stage_queries: u32, target_time_domain_present_stage: u32 };
 pub const SwapchainTimingPropertiesEXT = extern struct { s_type: i32, p_next: ?*anyopaque, refresh_duration: u64, refresh_interval: u64 };
@@ -11853,8 +11854,8 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         var timing_payload: ?present_worker.Timing = null;
         if (timing_requests[i] != null and swapchain.present_timing_queue_size != 0) {
             _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
-            const present_id = swapchain.present_timing_next_id;
-            swapchain.present_timing_next_id +%= 1;
+            const present_id = timing_requests[i].?.present_id orelse swapchain.present_timing_next_id;
+            if (timing_requests[i].?.present_id == null) swapchain.present_timing_next_id +%= 1;
             swapchain.present_timing_outstanding += 1;
             _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
             timing_payload = .{
@@ -12157,12 +12158,14 @@ fn queueWaitIdle(queue: ?Queue) callconv(.c) Result {
     }
     return .success;
 }
-const PresentTimingRequest = struct { target_ns: u64, requested_stages: u32 };
+const PresentTimingRequest = struct { target_ns: u64, requested_stages: u32, present_id: ?u64 = null };
 
 fn presentTimingRequest(info: *const PresentInfo, index: usize, now_ns: u64) !?PresentTimingRequest {
     var next = info.p_next;
     var depth: usize = 0;
     var seen_timings = false;
+    var seen_present_ids = false;
+    var present_id: ?u64 = null;
     var request: ?PresentTimingRequest = null;
     while (next) |raw| : (depth += 1) {
         if (depth == 16) return error.InvalidPresentTiming;
@@ -12170,6 +12173,17 @@ fn presentTimingRequest(info: *const PresentInfo, index: usize, now_ns: u64) !?P
         if (header.s_type == google_present_times_info_stype) {
             logGoogleDisplayTimingRejected("VkPresentTimesInfoGOOGLE in vkQueuePresentKHR");
             return error.GoogleDisplayTimingUnsupported;
+        }
+        if (header.s_type == 1_000_479_001) {
+            if (seen_present_ids) return error.InvalidPresentTiming;
+            seen_present_ids = true;
+            const ids: *const PresentId2KHR = @ptrCast(@alignCast(raw));
+            if (ids.p_next != null or ids.swapchain_count != info.swapchain_count or ids.present_ids == null) return error.InvalidPresentTiming;
+            present_id = ids.present_ids.?[index];
+            if (present_id.? == 0) return error.InvalidPresentTiming;
+            if (request) |*value| value.present_id = present_id;
+            next = @ptrCast(header.p_next);
+            continue;
         }
         if (header.s_type == 1_000_208_003) {
             if (seen_timings) return error.InvalidPresentTiming;
@@ -12188,7 +12202,7 @@ fn presentTimingRequest(info: *const PresentInfo, index: usize, now_ns: u64) !?P
                 const rounded = (cycles / period) * period;
                 target = std.math.add(u64, now_ns, rounded) catch return error.InvalidPresentTiming;
             }
-            request = .{ .target_ns = target, .requested_stages = timing.present_stage_queries };
+            request = .{ .target_ns = target, .requested_stages = timing.present_stage_queries, .present_id = present_id };
             next = @ptrCast(header.p_next);
             continue;
         }
@@ -12266,9 +12280,14 @@ test "EXT present timing returned-only ABI and nearest-cycle targets are exact" 
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(PastPresentationTimingInfoEXT));
     try std.testing.expectEqual(@as(usize, 48), @sizeOf(PresentTimingInfoEXT));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(PresentTimingsInfoEXT));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(PresentId2KHR));
     var timing = PresentTimingInfoEXT{ .s_type = 1_000_208_004, .p_next = null, .flags = 2, .target_time = 10_000_000, .time_domain_id = 1, .present_stage_queries = 0, .target_time_domain_present_stage = 0 };
-    const timings = PresentTimingsInfoEXT{ .s_type = 1_000_208_003, .p_next = null, .swapchain_count = 1, .timing_infos = @ptrCast(&timing) };
+    var present_id: u64 = 42;
+    var present_ids = PresentId2KHR{ .s_type = 1_000_479_001, .p_next = null, .swapchain_count = 1, .present_ids = @ptrCast(&present_id) };
+    var timings = PresentTimingsInfoEXT{ .s_type = 1_000_208_003, .p_next = @ptrCast(&present_ids), .swapchain_count = 1, .timing_infos = @ptrCast(&timing) };
     const info = PresentInfo{ .s_type = 1_000_001_001, .p_next = &timings, .wait_semaphore_count = 0, .wait_semaphores = null, .swapchain_count = 1, .swapchains = null, .image_indices = null, .results = null };
+    const identified = try presentTimingRequest(&info, 0, 1_000);
+    try std.testing.expectEqual(@as(?u64, 42), identified.?.present_id);
     const nearest = try presentTarget(&info, 0, 1_000);
     try std.testing.expect(nearest.? >= 1_000);
     try std.testing.expectEqual(@as(u64, 8_334_333), nearest.?);

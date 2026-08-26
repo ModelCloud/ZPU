@@ -222,8 +222,10 @@ process-local `ZPU_REFRESH_HZ` cadence. When the swapchain timing queue is
 enabled with `vkSetSwapchainPresentTimingQueueSizeEXT`,
 `vkGetPastPresentationTimingEXT` returns bounded FIFO history with queue,
 dequeue, first-pixel-out, and first-pixel-visible timestamps for the requested
-present stages; count queries, `VK_INCOMPLETE`, and queue-full backpressure are
-failure-atomic and allocation-free on the warm path.
+present stages. The optional `VkPresentId2KHR` chain supplies application
+present IDs; otherwise ZPU assigns monotonic per-swapchain IDs. Count queries,
+`VK_INCOMPLETE`, and queue-full backpressure are failure-atomic and
+allocation-free on the warm path.
 
 `target-4k-30`, `target-4k-60`, `target-4k-120`, and `target-4k-240` apply the same individual-frame ultra-low
 1% timing gate to real 3840x2160 `vkcube`: after 120 warmup frames, p99 across
