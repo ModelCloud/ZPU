@@ -118,6 +118,8 @@ pub const Op = enum(u8) {
     logical_and,
     /// Scalar boolean NOT operation.
     logical_not,
+    /// Component-wise floating-point remainder with truncating quotient.
+    frem,
 };
 
 pub const Instruction = struct {
@@ -272,7 +274,7 @@ fn valueOperand(op: Op, operand_index: usize) bool {
         .shuffle => operand_index < 2,
         .fneg, .ineg, .bit_not, .convert => operand_index == 0,
         .select => operand_index < 3,
-        .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge, .logical_eq, .logical_ne, .logical_or, .logical_and, .fadd, .fsub, .fmul, .fdiv, .vector_times_scalar, .matrix_times_vector => operand_index < 2,
+        .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge, .logical_eq, .logical_ne, .logical_or, .logical_and, .fadd, .fsub, .fmul, .fdiv, .frem, .vector_times_scalar, .matrix_times_vector => operand_index < 2,
         .logical_not => operand_index == 0,
         .output => operand_index == 1,
     };
