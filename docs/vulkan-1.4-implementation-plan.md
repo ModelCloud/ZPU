@@ -14,10 +14,10 @@ the command is marked complete.
 ## Baseline gap
 
 The pinned cumulative core contains 234 commands, 603 types, and 390 enums.
-Before the first slice, ZPU's dispatch tables named 83 of 137 Vulkan 1.0
-commands and none of the 97 commands introduced by Vulkan 1.1 through 1.4.
-Some named 1.0 commands are intentionally narrow or opaque placeholders, so
-name coverage is only a lower-bound inventory, not a conformance percentage.
+The current dispatch tables expose all 234 core command names, including the
+97 commands introduced by Vulkan 1.1 through 1.4. Some commands are still
+intentionally narrow, capability-gated, or opaque placeholders, so name
+coverage is only a lower-bound inventory, not a conformance percentage.
 
 ## Current checkpoint
 
@@ -59,9 +59,10 @@ unsupported or high flag bits leave outputs and registries unchanged.
 Graphics pipeline creation now also consumes the Vulkan 1.3
 `VkPipelineRenderingCreateInfo` pNext for `renderPass = VK_NULL_HANDLE`:
 the bounded dynamic-rendering profile records one BGRA8 color format and
-optional D32 depth format in its canonical compatibility key, and direct,
+optional D32 depth format in its canonical compatibility key. Direct,
 indexed, and indirect draws validate those formats against the active
-dynamic-rendering attachments before recording.
+dynamic-rendering attachments before recording, while secondary command
+buffers validate against their inherited rendering formats before execution.
 The bounded compute profile now also admits direct scalar StorageBuffer
 `OpLoad` reads (including read/write aliasing of the descriptor range) with
 transactional output commits; static access-chain reads share the same
