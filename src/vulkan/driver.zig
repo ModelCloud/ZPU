@@ -4838,7 +4838,7 @@ fn sync2AccessMaskToLegacy(mask: u64) ?u32 {
     const high_sampled = @as(u64, 0x1_0000_0000);
     const high_storage_read = @as(u64, 0x2_0000_0000);
     const high_storage_write = @as(u64, 0x4_0000_0000);
-    const supported = @as(u64, 0x1_ffff) | high_sampled | high_storage_read | high_storage_write;
+    const supported = @as(u64, 0x7fff) | high_sampled | high_storage_read | high_storage_write;
     if (mask & ~supported != 0) return null;
     var legacy: u32 = @truncate(mask & 0x1_ffff);
     if (mask & (high_sampled | high_storage_read) != 0) legacy |= 0x20; // SHADER_READ
@@ -5125,7 +5125,7 @@ fn validEventStageMask(stage_mask: u32) bool {
     return stage_mask != 0 and stage_mask & ~@as(u32, 0x1_b7ff) == 0;
 }
 fn stagesSupportAccess(stage_mask: u32, access_mask: u32) bool {
-    if (access_mask & ~@as(u32, 0x1_ffff) != 0) return false;
+    if (access_mask & ~@as(u32, 0x7fff) != 0) return false;
     if (access_mask == 0 or stage_mask & 0x1_0000 != 0) return true; // ALL_COMMANDS
     var stages = stage_mask;
     if (stages & 0x8000 != 0) stages |= 0x7fe; // ALL_GRAPHICS
@@ -13814,6 +13814,9 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expectEqual(@as(?u32, 0x1_0000), sync2BarrierStageMaskToLegacy(0, 0));
     try std.testing.expect(sync2BarrierStageMaskToLegacy(0, 1) == null);
     try std.testing.expectEqual(@as(?u32, 0x20), sync2AccessMaskToLegacy(0x2_0000_0000));
+    try std.testing.expect(sync2AccessMaskToLegacy(0x8000) == null);
+    try std.testing.expect(sync2AccessMaskToLegacy(0x1_0000) == null);
+    try std.testing.expect(!stagesSupportAccess(0x1_0000, 0x8000));
     try std.testing.expect(sync2StageMaskToLegacy(0x8000_0000_0000_0000) == null);
     const ctx = try createTestDeviceContext();
     const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 0, .queue_family_index = 0 };
