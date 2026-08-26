@@ -1016,24 +1016,36 @@ fn memoryRequirements2ChainValid(raw: ?*anyopaque) bool {
 fn memoryAllocatePNextValid(raw: ?*const anyopaque) bool {
     var next = raw;
     var depth: usize = 0;
+    var saw_dedicated = false;
+    var saw_flags = false;
+    var saw_export = false;
+    var saw_capture = false;
     while (next) |item| {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
         switch (header.s_type) {
             1000127001 => {
+                if (saw_dedicated) return false;
                 const dedicated: *const MemoryDedicatedAllocateInfo = @ptrCast(@alignCast(item));
                 if (dedicated.image != 0 and dedicated.buffer != 0) return false;
+                saw_dedicated = true;
             },
             1000060000 => {
+                if (saw_flags) return false;
                 const flags: *const MemoryAllocateFlagsInfo = @ptrCast(@alignCast(item));
                 if (flags.flags != 0 or flags.device_mask != 1) return false;
+                saw_flags = true;
             },
             1000072002 => {
+                if (saw_export) return false;
                 const export_info: *const ExportMemoryAllocateInfo = @ptrCast(@alignCast(item));
                 if (export_info.handle_types != 0) return false;
+                saw_export = true;
             },
             1000257003 => {
+                if (saw_capture) return false;
                 const capture: *const MemoryOpaqueCaptureAddressAllocateInfo = @ptrCast(@alignCast(item));
                 if (capture.opaque_capture_address != 0) return false;
+                saw_capture = true;
             },
             else => return false,
         }
@@ -1067,9 +1079,11 @@ fn memoryAllocateDedicatedObjectsValidLocked(d: Device, raw: ?*const anyopaque) 
 fn bindBufferMemoryPNextValid(raw: ?*const anyopaque) bool {
     var next = raw;
     var depth: usize = 0;
+    var seen = false;
     while (next) |item| {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
-        if (depth == 16 or header.s_type != 1000060013) return false;
+        if (depth == 16 or header.s_type != 1000060013 or seen) return false;
+        seen = true;
         const group: *const BindBufferMemoryDeviceGroupInfo = @ptrCast(@alignCast(item));
         if (group.device_index_count > 1 or (group.device_index_count != 0 and group.device_indices == null) or (group.device_index_count == 1 and group.device_indices.?[0] != 0)) return false;
         next = header.p_next;
@@ -1081,16 +1095,22 @@ fn bindBufferMemoryPNextValid(raw: ?*const anyopaque) bool {
 fn bindImageMemoryPNextValid(raw: ?*const anyopaque) bool {
     var next = raw;
     var depth: usize = 0;
+    var seen_group = false;
+    var seen_plane = false;
     while (next) |item| {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
         switch (header.s_type) {
             1000060014 => {
+                if (seen_group) return false;
                 const group: *const BindImageMemoryDeviceGroupInfo = @ptrCast(@alignCast(item));
                 if (group.device_index_count > 1 or (group.device_index_count != 0 and group.device_indices == null) or (group.device_index_count == 1 and group.device_indices.?[0] != 0) or group.split_instance_bind_region_count != 0 or group.split_instance_bind_regions != null) return false;
+                seen_group = true;
             },
             1000156002 => {
+                if (seen_plane) return false;
                 const plane: *const BindImagePlaneMemoryInfo = @ptrCast(@alignCast(item));
                 if (plane.plane_aspect != 0) return false;
+                seen_plane = true;
             },
             else => return false,
         }
@@ -1104,9 +1124,11 @@ fn bindImageMemoryPNextValid(raw: ?*const anyopaque) bool {
 fn commandBufferBeginPNextValid(raw: ?*const anyopaque) bool {
     var next = raw;
     var depth: usize = 0;
+    var seen = false;
     while (next) |item| {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
-        if (depth == 16 or header.s_type != 1000060004) return false;
+        if (depth == 16 or header.s_type != 1000060004 or seen) return false;
+        seen = true;
         const group: *const DeviceGroupCommandBufferBeginInfo = @ptrCast(@alignCast(item));
         if (group.device_mask != 1) return false;
         next = header.p_next;
@@ -1118,9 +1140,11 @@ fn commandBufferBeginPNextValid(raw: ?*const anyopaque) bool {
 fn renderPassBeginPNextValid(raw: ?*const anyopaque) bool {
     var next = raw;
     var depth: usize = 0;
+    var seen = false;
     while (next) |item| {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
-        if (depth == 16 or header.s_type != 1000060003) return false;
+        if (depth == 16 or header.s_type != 1000060003 or seen) return false;
+        seen = true;
         const group: *const DeviceGroupRenderPassBeginInfo = @ptrCast(@alignCast(item));
         if (group.device_mask != 1 or group.device_render_area_count > 1 or (group.device_render_area_count != 0 and group.device_render_areas == null)) return false;
         next = header.p_next;
@@ -1189,9 +1213,11 @@ fn submitPNextTimeline(raw: ?*const anyopaque) ?*const TimelineSemaphoreSubmitIn
 fn imageMemoryRequirementsInfo2ChainValid(raw: ?*const anyopaque) bool {
     var next = raw;
     var depth: usize = 0;
+    var seen = false;
     while (next) |item| {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
-        if (depth == 16 or header.s_type != 1000156003) return false;
+        if (depth == 16 or header.s_type != 1000156003 or seen) return false;
+        seen = true;
         const plane: *const ImagePlaneMemoryRequirementsInfo = @ptrCast(@alignCast(item));
         if (plane.plane_aspect != 0) return false;
         next = header.p_next;
@@ -6503,11 +6529,13 @@ fn creationFailure(err: CanonicalError) Result {
 fn descriptorSetLayoutPNextValid(raw: ?*const anyopaque, binding_count: u32) bool {
     var next = raw;
     var depth: usize = 0;
+    var seen = false;
     while (next) |item| {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
-        if (depth == 16) return false;
+        if (depth == 16 or seen) return false;
         switch (header.s_type) {
             1000161000 => {
+                seen = true;
                 const flags: *const DescriptorSetLayoutBindingFlagsCreateInfo = @ptrCast(@alignCast(item));
                 if (flags.binding_count != binding_count or (binding_count != 0 and flags.binding_flags == null)) return false;
                 if (flags.binding_flags) |values| for (values[0..binding_count]) |value| if (value != 0) return false;
@@ -6523,9 +6551,11 @@ fn descriptorSetLayoutPNextValid(raw: ?*const anyopaque, binding_count: u32) boo
 fn descriptorSetAllocatePNextValid(raw: ?*const anyopaque, descriptor_set_count: u32) bool {
     var next = raw;
     var depth: usize = 0;
+    var seen = false;
     while (next) |item| {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
-        if (depth == 16 or header.s_type != 1000161003) return false;
+        if (depth == 16 or header.s_type != 1000161003 or seen) return false;
+        seen = true;
         const variable: *const DescriptorSetVariableDescriptorCountAllocateInfo = @ptrCast(@alignCast(item));
         if (variable.descriptor_set_count != descriptor_set_count or (descriptor_set_count != 0 and variable.descriptor_counts == null)) return false;
         if (variable.descriptor_counts) |counts| for (counts[0..descriptor_set_count]) |count| if (count != 0) return false;
@@ -6538,9 +6568,11 @@ fn descriptorSetAllocatePNextValid(raw: ?*const anyopaque, descriptor_set_count:
 fn descriptorSetLayoutSupportPNextValid(raw: ?*anyopaque) bool {
     var next = raw;
     var depth: usize = 0;
+    var seen = false;
     while (next) |item| {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
-        if (depth == 16 or header.s_type != 1000161004) return false;
+        if (depth == 16 or header.s_type != 1000161004 or seen) return false;
+        seen = true;
         next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
         depth += 1;
     }
@@ -6766,17 +6798,23 @@ fn subpassDescription2PNextValid(raw: ?*const anyopaque) bool {
 fn renderPassCreate2PNextValid(raw: ?*const anyopaque) bool {
     var next = raw;
     var depth: usize = 0;
+    var seen_multiview = false;
+    var seen_aspects = false;
     while (next) |item| {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
         if (depth == 16) return false;
         switch (header.s_type) {
             1000053000 => {
+                if (seen_multiview) return false;
                 const multiview: *const RenderPassMultiviewCreateInfo = @ptrCast(@alignCast(item));
                 if (multiview.subpass_count != 0 or multiview.view_masks != null or multiview.dependency_count != 0 or multiview.view_offsets != null or multiview.correlation_mask_count != 0 or multiview.correlation_masks != null) return false;
+                seen_multiview = true;
             },
             1000117000 => {
+                if (seen_aspects) return false;
                 const aspects: *const RenderPassInputAttachmentAspectCreateInfo = @ptrCast(@alignCast(item));
                 if (aspects.aspect_reference_count != 0 or aspects.aspect_references != null) return false;
+                seen_aspects = true;
             },
             else => return false,
         }
@@ -13585,6 +13623,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     var dedicated_memory: usize = 0;
     try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &dedicated_allocation, null, &dedicated_memory));
     freeMemory(ctx.device, dedicated_memory, null);
+    var duplicate_flags_allocate = MemoryAllocateFlagsInfo{ .s_type = 1000060000, .p_next = null, .flags = 0, .device_mask = 1 };
+    flags_allocate.p_next = @ptrCast(&duplicate_flags_allocate);
+    try std.testing.expect(!memoryAllocatePNextValid(&flags_allocate));
+    flags_allocate.p_next = @ptrCast(&dedicated_allocate);
     dedicated_allocate.buffer = 0;
     var unsupported_export = ExportMemoryAllocateInfo{ .s_type = 1000072002, .p_next = null, .handle_types = 1 };
     dedicated_allocation.p_next = @ptrCast(&unsupported_export);
@@ -13642,6 +13684,12 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     requirements.memory_requirements = std.mem.zeroes(MemoryRequirements);
     getImageMemoryRequirements2(ctx.device, &image_requirements_with_plane, &requirements);
     try std.testing.expectEqual(@as(u64, 16), requirements.memory_requirements.size);
+    var duplicate_plane_requirements = ImagePlaneMemoryRequirementsInfo{ .s_type = 1000156003, .p_next = null, .plane_aspect = 0 };
+    plane_requirements.p_next = @ptrCast(&duplicate_plane_requirements);
+    requirements.memory_requirements.size = 0xcafe_f00d;
+    getImageMemoryRequirements2(ctx.device, &image_requirements_with_plane, &requirements);
+    try std.testing.expectEqual(@as(u64, 0xcafe_f00d), requirements.memory_requirements.size);
+    plane_requirements.p_next = null;
     plane_requirements.plane_aspect = 4;
     requirements.memory_requirements.size = 0xdead_beef;
     getImageMemoryRequirements2(ctx.device, &image_requirements_with_plane, &requirements);
@@ -13686,6 +13734,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(Result.error_initialization_failed, createDescriptorSetLayout(ctx.device, &layout_info_with_flags, null, &unchanged_layout));
     try std.testing.expectEqual(@as(usize, 0xdead_beef), unchanged_layout);
     binding_flags[0] = 0;
+    var duplicate_binding_flags_info = DescriptorSetLayoutBindingFlagsCreateInfo{ .s_type = 1000161000, .p_next = null, .binding_count = 1, .binding_flags = @ptrCast(&binding_flags) };
+    binding_flags_info.p_next = @ptrCast(&duplicate_binding_flags_info);
+    try std.testing.expect(!descriptorSetLayoutPNextValid(&binding_flags_info, 1));
+    binding_flags_info.p_next = null;
     try std.testing.expect(descriptorSetAllocatePNextValid(null, 0));
     var variable_counts = [_]u32{0};
     var variable_allocate = DescriptorSetVariableDescriptorCountAllocateInfo{ .s_type = 1000161003, .p_next = null, .descriptor_set_count = 1, .descriptor_counts = @ptrCast(&variable_counts) };
@@ -13693,6 +13745,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     variable_counts[0] = 1;
     try std.testing.expect(!descriptorSetAllocatePNextValid(&variable_allocate, 1));
     variable_counts[0] = 0;
+    var duplicate_variable_allocate = DescriptorSetVariableDescriptorCountAllocateInfo{ .s_type = 1000161003, .p_next = null, .descriptor_set_count = 1, .descriptor_counts = @ptrCast(&variable_counts) };
+    variable_allocate.p_next = @ptrCast(&duplicate_variable_allocate);
+    try std.testing.expect(!descriptorSetAllocatePNextValid(&variable_allocate, 1));
+    variable_allocate.p_next = null;
     var variable_support = DescriptorSetVariableDescriptorCountLayoutSupport{ .s_type = 1000161004, .p_next = null, .max_variable_descriptor_count = 0xffff_ffff };
     var support_with_chain = layout_support;
     support_with_chain.p_next = @ptrCast(&variable_support);
@@ -13706,6 +13762,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     var input_aspects = RenderPassInputAttachmentAspectCreateInfo{ .s_type = 1000117000, .p_next = null, .aspect_reference_count = 0, .aspect_references = null };
     multiview.p_next = @ptrCast(&input_aspects);
     try std.testing.expect(renderPassCreate2PNextValid(&multiview));
+    var duplicate_multiview = RenderPassMultiviewCreateInfo{ .s_type = 1000053000, .p_next = null, .subpass_count = 0, .view_masks = null, .dependency_count = 0, .view_offsets = null, .correlation_mask_count = 0, .correlation_masks = null };
+    input_aspects.p_next = @ptrCast(&duplicate_multiview);
+    try std.testing.expect(!renderPassCreate2PNextValid(&multiview));
+    input_aspects.p_next = null;
     test_allocations_before_failure = 0;
     for (0..4096) |_| {
         try std.testing.expect(descriptorSetLayoutPNextValid(&binding_flags_info, 1));
