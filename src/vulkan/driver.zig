@@ -3608,7 +3608,9 @@ fn getRenderingAreaGranularity(device: ?Device, info: ?*const RenderingAreaInfo,
     const d = device orelse return;
     const ci = info orelse return;
     const out = output orelse return;
-    if (ci.s_type != 1000470003 or ci.p_next != null or ci.view_mask != 0 or ci.color_attachment_count > 1 or (ci.color_attachment_count != 0 and ci.color_attachment_formats == null) or (ci.depth_attachment_format != 0 and ci.depth_attachment_format != 126) or ci.stencil_attachment_format != 0) return;
+    if (ci.s_type != 1000470003 or ci.p_next != null or ci.view_mask != 0 or ci.color_attachment_count > 1 or
+        (ci.color_attachment_count != 0 and (ci.color_attachment_formats == null or imageFormatUsage(ci.color_attachment_formats.?[0]) & 0x10 == 0)) or
+        (ci.depth_attachment_format != 0 and ci.depth_attachment_format != 126) or ci.stencil_attachment_format != 0) return;
     lock();
     defer mutex.unlock();
     if (validDeviceLocked(d)) out.* = .{ .width = 1, .height = 1 };
@@ -14562,6 +14564,12 @@ test "Vulkan 1.4 host image copies transitions and layout queries are bounded" {
     const area = RenderingAreaInfo{ .s_type = 1000470003, .p_next = null, .view_mask = 0, .color_attachment_count = 1, .color_attachment_formats = @ptrCast(&image_info.format), .depth_attachment_format = 0, .stencil_attachment_format = 0 };
     getRenderingAreaGranularity(ctx.device, &area, &granularity);
     try std.testing.expectEqual(Extent2D{ .width = 1, .height = 1 }, granularity);
+    var unsupported_area_format: i32 = 37;
+    var bad_area = area;
+    bad_area.color_attachment_formats = @ptrCast(&unsupported_area_format);
+    granularity = .{ .width = 0xdead, .height = 0xbeef };
+    getRenderingAreaGranularity(ctx.device, &bad_area, &granularity);
+    try std.testing.expectEqual(Extent2D{ .width = 0xdead, .height = 0xbeef }, granularity);
     destroyImage(ctx.device, dst, null);
     destroyImage(ctx.device, src, null);
     destroyImage(ctx.device, unbound, null);

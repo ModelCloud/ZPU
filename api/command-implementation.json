@@ -235,6 +235,6 @@
     "vkTransitionImageLayout": "Validates and applies bounded host image layout transitions with old-layout, subresource, ownership, and stale-handle checks.",
   "vkGetImageSubresourceLayout2": "Validates Vulkan 1.4 ImageSubresource2/SubresourceLayout2 ABI, accepts the promoted VkSubresourceHostMemcpySize output chain, and returns exact owned-image layout metadata including the selected array-layer offset, per-layer size, and host memcpy size.",
   "vkGetDeviceImageSubresourceLayout": "Validates the live-device ownership boundary, then computes exact bounded per-array-layer subresource layout offsets, sizes, pitches, and VkSubresourceHostMemcpySize output directly from image-create and subresource ABI without publishing an image; null or stale devices leave output untouched.",
-    "vkGetRenderingAreaGranularity": "Validates RenderingAreaInfo and returns the ZPU one-pixel rendering granularity policy."
+    "vkGetRenderingAreaGranularity": "Validates RenderingAreaInfo, including the supported color/depth attachment format domains and zero-view policy, and returns the ZPU one-pixel rendering granularity without mutating output on malformed or unsupported queries."
   }
 }
