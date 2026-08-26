@@ -4829,7 +4829,10 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
     }
     const ci = info.?;
     if (ci.memory_barrier_count + ci.buffer_memory_barrier_count + ci.image_memory_barrier_count == 0) {
-        markCommandBufferInvalid(cb);
+        lock();
+        defer mutex.unlock();
+        const c = validCommandBufferLocked(cb) orelse return;
+        if (c.impl.state != 1 or c.impl.invalid) c.impl.invalid = true;
         return;
     }
     var src_stage: u32 = 0x1_0000;
@@ -13761,6 +13764,10 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&image_dependency));
     cmdResetEvent2(commands[0], event, &dependency);
     const empty_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 0, .memory_barriers = null, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
+    const before_empty_barrier = commands[0].impl.count;
+    cmdPipelineBarrier2(commands[0], &empty_dependency);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(before_empty_barrier, commands[0].impl.count);
     cmdSetEvent2(commands[0], event, &empty_dependency);
     cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&empty_dependency));
     cmdResetEvent2(commands[0], event, &empty_dependency);
