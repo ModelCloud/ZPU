@@ -5057,7 +5057,7 @@ fn sync2StageMaskToLegacy(mask: u64) ?u32 {
     if (mask & high_transfer != 0) legacy |= 0x1000; // COPY/RESOLVE/BLIT/CLEAR -> TRANSFER
     if (mask & high_vertex_input != 0) legacy |= 0x4; // INDEX/VERTEX_ATTRIBUTE_INPUT -> VERTEX_INPUT
     if (mask & high_vertex_shader != 0) legacy |= 0x8; // PRE_RASTERIZATION_SHADERS -> VERTEX_SHADER
-    if (!validEventStageMask(legacy)) return null;
+    if (!validPipelineStageMask(legacy)) return null;
     return legacy;
 }
 
@@ -5086,6 +5086,7 @@ fn sync2TimestampStageToLegacy(stage: u64) ?u32 {
     // VkCmdWriteTimestamp2 has a single-stage domain even though the
     // synchronization2 ABI uses a 64-bit flags mask for the parameter.
     if (stage == 0 or @popCount(stage) != 1) return null;
+    if (stage == 0x4000) return null;
     return sync2StageMaskToLegacy(stage);
 }
 fn commandBufferOutsideRenderPass(command_buffer: *const CommandBufferObj) bool {
@@ -5372,7 +5373,7 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
-    const stages_valid = src_stage_mask != 0 and dst_stage_mask != 0 and src_stage_mask & ~@as(u32, 0x1_ffff) == 0 and dst_stage_mask & ~@as(u32, 0x1_ffff) == 0 and src_stage_mask & 0x800 == 0 and dst_stage_mask & 0x800 == 0;
+    const stages_valid = validPipelineStageMask(src_stage_mask) and validPipelineStageMask(dst_stage_mask);
     if (c.impl.state != 1 or c.impl.invalid or dependency_flags & ~@as(u32, 1) != 0 or !stages_valid or memory_barrier_count > max_api_items or buffer_barrier_count > max_api_items or image_barrier_count > max_api_items or @as(usize, c.impl.count) + buffer_barrier_count + image_barrier_count > c.impl.commands.len) {
         hit(.invalid_barrier);
         c.impl.invalid = true;
@@ -5430,12 +5431,17 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
     for (buffer_list) |barrier| record(c, .{ .buffer_barrier = validBufferLocked(barrier.buffer).? });
     for (image_list) |barrier| record(c, .{ .transition = .{ .image = validImageLocked(barrier.image).?, .old_layout = barrier.old_layout, .new_layout = barrier.new_layout } });
 }
-fn validEventStageMask(stage_mask: u32) bool {
+fn validPipelineStageMask(stage_mask: u32) bool {
     // The only queue family advertises graphics and transfer.  Tessellation,
-    // geometry, and compute stages are not enabled by the device profile, and
-    // HOST is forbidden for event/timestamp/semaphore-wait stage masks.
-    const supported: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x80 | 0x100 | 0x200 | 0x400 | 0x1000 | 0x2000 | 0x8000 | 0x1_0000;
+    // geometry, and compute stages are not enabled by the device profile.
+    // HOST remains valid for pipeline barriers as a host synchronization
+    // source/sink, subject to the barrier queue-family rules.
+    const supported: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x80 | 0x100 | 0x200 | 0x400 | 0x1000 | 0x2000 | 0x4000 | 0x8000 | 0x1_0000;
     return stage_mask != 0 and stage_mask & ~supported == 0;
+}
+fn validEventStageMask(stage_mask: u32) bool {
+    // Event, timestamp, and semaphore-wait stage masks cannot use HOST.
+    return validPipelineStageMask(stage_mask) and stage_mask & 0x4000 == 0;
 }
 fn stagesSupportAccess(stage_mask: u32, access_mask: u32) bool {
     if (access_mask & ~@as(u32, 0x7fff) != 0) return false;
@@ -14569,7 +14575,9 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expect(sync2BarrierStageMaskToLegacy(0, 1) == null);
     try std.testing.expect(sync2StageMaskToLegacy(0x40) == null);
     try std.testing.expect(sync2StageMaskToLegacy(0x800) == null);
+    try std.testing.expectEqual(@as(?u32, 0x4000), sync2StageMaskToLegacy(0x4000));
     try std.testing.expect(validEventStageMask(0x1000));
+    try std.testing.expect(validPipelineStageMask(0x4000));
     try std.testing.expect(!validEventStageMask(0x4000));
     try std.testing.expectEqual(@as(?u32, 0x20), sync2AccessMaskToLegacy(0x2_0000_0000));
     try std.testing.expect(sync2AccessMaskToLegacy(0x8000) == null);
