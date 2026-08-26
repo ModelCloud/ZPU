@@ -30,6 +30,9 @@ pub const Op = enum(u8) {
     output,
     select,
     storage,
+    /// Component-wise two's-complement integer multiplication. Appended to
+    /// preserve the serialized numeric values of existing operations.
+    imul,
 };
 
 pub const Instruction = struct {
@@ -184,7 +187,7 @@ fn valueOperand(op: Op, operand_index: usize) bool {
         .shuffle => operand_index < 2,
         .fneg, .convert => operand_index == 0,
         .select => operand_index < 3,
-        .iadd, .isub, .fadd, .fsub, .fmul, .fdiv, .vector_times_scalar, .matrix_times_vector => operand_index < 2,
+        .iadd, .isub, .imul, .fadd, .fsub, .fmul, .fdiv, .vector_times_scalar, .matrix_times_vector => operand_index < 2,
         .output => operand_index == 1,
     };
 }
