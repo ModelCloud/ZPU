@@ -48,6 +48,16 @@ pub const Op = enum(u8) {
     /// Component-wise integer bitwise NOT. Appended to preserve existing
     /// serialized operation values.
     bit_not,
+    /// Component-wise unsigned integer division.
+    udiv,
+    /// Component-wise signed integer division.
+    sdiv,
+    /// Component-wise unsigned integer remainder.
+    umod,
+    /// Component-wise signed integer remainder with dividend sign.
+    srem,
+    /// Component-wise signed modulo with divisor sign.
+    smod,
 };
 
 pub const Instruction = struct {
@@ -202,7 +212,7 @@ fn valueOperand(op: Op, operand_index: usize) bool {
         .shuffle => operand_index < 2,
         .fneg, .ineg, .bit_not, .convert => operand_index == 0,
         .select => operand_index < 3,
-        .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .fadd, .fsub, .fmul, .fdiv, .vector_times_scalar, .matrix_times_vector => operand_index < 2,
+        .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .fadd, .fsub, .fmul, .fdiv, .vector_times_scalar, .matrix_times_vector => operand_index < 2,
         .output => operand_index == 1,
     };
 }

@@ -93,7 +93,12 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 131, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 132, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 133, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 134, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 135, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 136, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 137, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 138, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 139, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 142, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 145, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 164, .operands = .{ .min = 4, .max = 4 } },
@@ -580,7 +585,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 }
                 block_terminated = true;
             },
-            61, 62, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 136, 142, 145, 164...169, 170...179, 197...200 => {
+            61, 62, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...169, 170...179, 197...200 => {
                 if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
                 const valid_arity = switch (instruction.opcode) {
                     61 => w.len == 3,
@@ -590,7 +595,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     80 => w.len >= 3,
                     81 => w.len >= 4,
                     109, 110, 111, 112, 124, 126, 127 => w.len == 3,
-                    128, 129, 130, 131, 132, 133, 136, 142, 145, 164...167, 170...179, 197...199 => w.len == 4,
+                    128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...167, 170...179, 197...199 => w.len == 4,
                     200 => w.len == 3,
                     168 => w.len == 3,
                     169 => w.len == 5,
@@ -721,10 +726,14 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const result = try resultShape(nodes, w[0]);
                 if (!scalarClass(result, .float) or !sameShape(result, try valueShape(nodes, w[2]))) return error.Malformed;
             },
-            126, 128, 130, 132, 129, 131, 133, 136 => {
+            126, 128, 130, 132, 129, 131, 133, 134, 135, 136, 137, 138, 139 => {
                 const result = try resultShape(nodes, w[0]);
                 if (instruction.opcode == 126) {
                     if (result.scalar != .i32 or !sameShape(result, try valueShape(nodes, w[2]))) return error.Malformed;
+                } else if (instruction.opcode == 134 or instruction.opcode == 137) {
+                    if (result.scalar != .u32 or !sameShape(result, try valueShape(nodes, w[2])) or !sameShape(result, try valueShape(nodes, w[3]))) return error.Malformed;
+                } else if (instruction.opcode == 135 or instruction.opcode == 138 or instruction.opcode == 139) {
+                    if (result.scalar != .i32 or !sameShape(result, try valueShape(nodes, w[2])) or !sameShape(result, try valueShape(nodes, w[3]))) return error.Malformed;
                 } else {
                     const class: ScalarClass = if (instruction.opcode == 128 or instruction.opcode == 130 or instruction.opcode == 132) .integer else .float;
                     if (!scalarClass(result, class) or !sameShape(result, try valueShape(nodes, w[2])) or !sameShape(result, try valueShape(nodes, w[3]))) return error.Malformed;
@@ -942,7 +951,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 136, 142, 145, 164...169, 170...179, 197...200, 245 => w[1],
+                41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...169, 170...179, 197...200, 245 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
@@ -1041,7 +1050,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 136, 142, 145, 164...169, 170...179, 197...200, 245 => w[1],
+            41, 42, 43, 44, 48, 49, 50, 61, 65, 79, 80, 81, 109, 110, 111, 112, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 142, 145, 164...169, 170...179, 197...200, 245 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
@@ -1069,7 +1078,12 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             131 => .fsub,
             132 => .imul,
             133 => .fmul,
+            134 => .udiv,
+            135 => .sdiv,
             136 => .fdiv,
+            137 => .umod,
+            138 => .srem,
+            139 => .smod,
             197 => .bit_or,
             198 => .bit_xor,
             199 => .bit_and,
@@ -1295,6 +1309,29 @@ pub const compute_bitwise_store = [_]u32{
     12,              7,              (4 << 16) | 200, 2,          14,
     13,              (3 << 16) | 62, 5,               14,         (1 << 16) | 253,
     (1 << 16) | 56,
+};
+
+/// Compute profile variant exercising unsigned division/remainder. The same
+/// fixture is switched to signed opcodes in the frontend regression test so
+/// all five integer quotient/remainder mappings share identical ABI coverage.
+pub const compute_integer_div_store = [_]u32{
+    0x0723_0203,     0x0001_0000,    0,               14,         0,
+    (2 << 16) | 17,  1,              (3 << 16) | 14,  0,          1,
+    (6 << 16) | 15,  5,              8,               0x6e69616d, 0,
+    5,               (6 << 16) | 16, 8,               17,         1,
+    1,               1,              (4 << 16) | 71,  5,          33,
+    0,               (4 << 16) | 71, 5,               34,         0,
+    (2 << 16) | 19,  1,              (4 << 16) | 21,  2,          32,
+    0,               (4 << 16) | 32, 4,               12,         2,
+    (4 << 16) | 59,  4,              5,               12,         (3 << 16) | 33,
+    6,               1,              (4 << 16) | 43,  2,          7,
+    42,              (4 << 16) | 43, 2,               10,         5,
+    (5 << 16) | 54,  1,              8,               0,          6,
+    (2 << 16) | 248, 9,              (5 << 16) | 134, 2,          11,
+    7,               10,             (5 << 16) | 137, 2,          12,
+    7,               10,             (5 << 16) | 128, 2,          13,
+    11,              12,             (3 << 16) | 62,  5,          13,
+    (1 << 16) | 253, (1 << 16) | 56,
 };
 
 /// Scalar-pointer form of the bounded compute store profile.  Unlike the
@@ -1750,6 +1787,43 @@ test "compute profile lowers the integer bitwise operation family" {
     try std.testing.expect(saw_or and saw_xor and saw_and and saw_not);
     try std.testing.expectEqual(ir.Op.output, program.instructions[program.instructions.len - 1].op);
     try std.testing.expectEqual(ir.Scalar.u32, program.instructions[program.instructions.len - 1].ty.scalar);
+}
+
+test "compute profile lowers integer division and remainder with exact signedness" {
+    var program = try compile(std.testing.allocator, &compute_integer_div_store, .compute, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var saw_udiv = false;
+    var saw_umod = false;
+    for (program.instructions) |instruction| {
+        saw_udiv = saw_udiv or instruction.op == .udiv;
+        saw_umod = saw_umod or instruction.op == .umod;
+    }
+    try std.testing.expect(saw_udiv and saw_umod);
+
+    const first_div = testOpcodeOffset(&compute_integer_div_store, 134, 0).?;
+    const second_div = testOpcodeOffset(&compute_integer_div_store, 137, 0).?;
+    const signed_type = testOpcodeOffset(&compute_integer_div_store, 21, 0).?;
+    var signed_div = compute_integer_div_store;
+    signed_div[signed_type + 3] = 1;
+    signed_div[first_div] = (5 << 16) | 135;
+    signed_div[second_div] = (5 << 16) | 138;
+    var signed_program = try compile(std.testing.allocator, &signed_div, .compute, "main", &.{});
+    defer signed_program.deinit(std.testing.allocator);
+    var saw_sdiv = false;
+    for (signed_program.instructions) |instruction| saw_sdiv = saw_sdiv or instruction.op == .sdiv;
+    try std.testing.expect(saw_sdiv);
+
+    for ([_]u16{ 138, 139 }) |opcode| {
+        var signed_remainder = compute_integer_div_store;
+        signed_remainder[signed_type + 3] = 1;
+        signed_remainder[first_div] = (5 << 16) | 135;
+        signed_remainder[second_div] = (@as(u32, 5) << 16) | opcode;
+        var remainder_program = try compile(std.testing.allocator, &signed_remainder, .compute, "main", &.{});
+        defer remainder_program.deinit(std.testing.allocator);
+        var saw_remainder = false;
+        for (remainder_program.instructions) |instruction| saw_remainder = saw_remainder or (opcode == 138 and instruction.op == .srem) or (opcode == 139 and instruction.op == .smod);
+        try std.testing.expect(saw_remainder);
+    }
 }
 
 test "compute profile accepts a scalar storage-buffer pointer" {
