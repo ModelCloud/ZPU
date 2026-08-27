@@ -381,7 +381,25 @@ pub const PhysicalDeviceProperties2 = extern struct { s_type: i32, p_next: ?*any
 // The promoted properties carry a large, version-specific payload.  Their
 // declarations retain the exact LP64 ABI size while keeping the currently
 // unadvertised optional capability fields conservatively zeroed.
-pub const PhysicalDeviceVulkan11Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [96]u8 };
+pub const PhysicalDeviceVulkan11Properties = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    device_uuid: [16]u8,
+    driver_uuid: [16]u8,
+    device_luid: [8]u8,
+    device_node_mask: u32,
+    device_luid_valid: u32,
+    subgroup_size: u32,
+    subgroup_supported_stages: u32,
+    subgroup_supported_operations: u32,
+    subgroup_quad_operations_in_all_stages: u32,
+    point_clipping_behavior: i32,
+    max_multiview_view_count: u32,
+    max_multiview_instance_index: u32,
+    protected_no_fault: u32,
+    max_per_set_descriptors: u32,
+    max_memory_allocation_size: u64,
+};
 pub const PhysicalDeviceVulkan12Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [720]u8 };
 pub const PhysicalDeviceVulkan13Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [200]u8 };
 pub const PhysicalDeviceVulkan14Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [128]u8 };
@@ -16744,6 +16762,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(SamplerYcbcrConversionImageFormatProperties));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(HostImageCopyDevicePerformanceQuery));
     try std.testing.expectEqual(@as(usize, 112), @sizeOf(PhysicalDeviceVulkan11Properties));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVulkan11Properties, "device_uuid"));
+    try std.testing.expectEqual(@as(usize, 56), @offsetOf(PhysicalDeviceVulkan11Properties, "device_node_mask"));
+    try std.testing.expectEqual(@as(usize, 84), @offsetOf(PhysicalDeviceVulkan11Properties, "max_multiview_view_count"));
+    try std.testing.expectEqual(@as(usize, 104), @offsetOf(PhysicalDeviceVulkan11Properties, "max_memory_allocation_size"));
     try std.testing.expectEqual(@as(usize, 736), @sizeOf(PhysicalDeviceVulkan12Properties));
     try std.testing.expectEqual(@as(usize, 216), @sizeOf(PhysicalDeviceVulkan13Properties));
     try std.testing.expectEqual(@as(usize, 144), @sizeOf(PhysicalDeviceVulkan14Properties));
@@ -17041,18 +17063,21 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(u32, 0xdead_beef), features.features.values[0]);
     try std.testing.expectEqual(@as(u32, 0xcafe_f00d), storage_features.values[0]);
     features.p_next = null;
-    var vulkan11_properties = PhysicalDeviceVulkan11Properties{ .s_type = 50, .p_next = null, .payload = [_]u8{0xff} ** 96 };
+    var vulkan11_properties = std.mem.zeroes(PhysicalDeviceVulkan11Properties);
+    vulkan11_properties.s_type = 50;
+    vulkan11_properties.p_next = null;
+    @memset(std.mem.asBytes(&vulkan11_properties)[16..], 0xff);
     var vulkan12_properties = PhysicalDeviceVulkan12Properties{ .s_type = 52, .p_next = @ptrCast(&vulkan11_properties), .payload = [_]u8{0xff} ** 720 };
     var vulkan13_properties = PhysicalDeviceVulkan13Properties{ .s_type = 54, .p_next = @ptrCast(&vulkan12_properties), .payload = [_]u8{0xff} ** 200 };
     var vulkan14_properties = PhysicalDeviceVulkan14Properties{ .s_type = 56, .p_next = @ptrCast(&vulkan13_properties), .payload = [_]u8{0xff} ** 128 };
     var properties = PhysicalDeviceProperties2{ .s_type = 1000059001, .p_next = @ptrCast(&vulkan14_properties), .properties = std.mem.zeroes(Properties) };
     getPhysicalDeviceProperties2(ctx.physical, &properties);
     try std.testing.expectEqual(API_1_0, properties.properties.api_version);
-    try std.testing.expectEqualSlices(u8, &device_uuid, vulkan11_properties.payload[0..16]);
-    try std.testing.expectEqualSlices(u8, &driver_uuid, vulkan11_properties.payload[16..32]);
-    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, vulkan11_properties.payload[40..44], .little));
-    try std.testing.expectEqual(@as(u32, 256), std.mem.readInt(u32, vulkan11_properties.payload[68..72], .little));
-    try std.testing.expectEqual(@as(u64, heap_size), std.mem.readInt(u64, vulkan11_properties.payload[88..96], .little));
+    try std.testing.expectEqualSlices(u8, &device_uuid, &vulkan11_properties.device_uuid);
+    try std.testing.expectEqualSlices(u8, &driver_uuid, &vulkan11_properties.driver_uuid);
+    try std.testing.expectEqual(@as(u32, 1), vulkan11_properties.device_node_mask);
+    try std.testing.expectEqual(@as(u32, 256), vulkan11_properties.max_multiview_view_count);
+    try std.testing.expectEqual(@as(u64, heap_size), vulkan11_properties.max_memory_allocation_size);
     try std.testing.expectEqual(@as(u32, 13), std.mem.readInt(u32, vulkan12_properties.payload[0..4], .little));
     try std.testing.expectEqualSlices(u8, driver_name, vulkan12_properties.payload[4 .. 4 + driver_name.len]);
     try std.testing.expectEqualSlices(u8, driver_info, vulkan12_properties.payload[260 .. 260 + driver_info.len]);
@@ -17063,15 +17088,18 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan11_properties)), vulkan12_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan12_properties)), vulkan13_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan13_properties)), vulkan14_properties.p_next);
-    var duplicate_vulkan11_properties = PhysicalDeviceVulkan11Properties{ .s_type = 50, .p_next = null, .payload = [_]u8{0xee} ** 96 };
+    var duplicate_vulkan11_properties = std.mem.zeroes(PhysicalDeviceVulkan11Properties);
+    duplicate_vulkan11_properties.s_type = 50;
+    duplicate_vulkan11_properties.p_next = null;
+    @memset(std.mem.asBytes(&duplicate_vulkan11_properties)[16..], 0xee);
     vulkan11_properties.p_next = @ptrCast(&duplicate_vulkan11_properties);
     properties.properties.api_version = 0x1111_1111;
     vulkan14_properties.payload[0] = 0x22;
-    try std.testing.expectEqual(@as(u8, 0xee), duplicate_vulkan11_properties.payload[0]);
+    try std.testing.expectEqual(@as(u8, 0xee), duplicate_vulkan11_properties.device_uuid[0]);
     getPhysicalDeviceProperties2(ctx.physical, &properties);
     try std.testing.expectEqual(@as(u32, 0x1111_1111), properties.properties.api_version);
     try std.testing.expectEqual(@as(u8, 0x22), vulkan14_properties.payload[0]);
-    try std.testing.expectEqual(@as(u8, 0xee), duplicate_vulkan11_properties.payload[0]);
+    try std.testing.expectEqual(@as(u8, 0xee), duplicate_vulkan11_properties.device_uuid[0]);
     vulkan11_properties.p_next = null;
     properties.properties.api_version = 0xdead_beef;
     vulkan14_properties.payload[0] = 0xca;
