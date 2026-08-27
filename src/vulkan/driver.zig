@@ -9213,10 +9213,29 @@ fn destroySampler(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv
     const sampler = validSamplerLocked(handle) orelse return;
     if (validDeviceLocked(d) and sampler.owner == d) stateForObject(SamplerObj, sampler, &sampler_objects, &sampler_state).?.* = .tombstone;
 }
+fn validSamplerYcbcrComponent(component: i32) bool {
+    // VkComponentSwizzle is IDENTITY, ZERO, ONE, R, G, B, or A.  Keep this
+    // domain explicit even though the conversion itself is unsupported, so a
+    // malformed request cannot be misreported as a capability rejection.
+    return component >= 0 and component <= 6;
+}
+fn samplerYcbcrConversionCreateInfoValid(ci: *const SamplerYcbcrConversionCreateInfo) bool {
+    return ci.s_type == 1000156000 and ci.p_next == null and
+        ci.model >= 0 and ci.model <= 4 and
+        ci.range >= 0 and ci.range <= 1 and
+        validSamplerYcbcrComponent(ci.components[0]) and
+        validSamplerYcbcrComponent(ci.components[1]) and
+        validSamplerYcbcrComponent(ci.components[2]) and
+        validSamplerYcbcrComponent(ci.components[3]) and
+        ci.x_chroma_offset >= 0 and ci.x_chroma_offset <= 1 and
+        ci.y_chroma_offset >= 0 and ci.y_chroma_offset <= 1 and
+        ci.chroma_filter >= 0 and ci.chroma_filter <= 1 and
+        ci.force_explicit_reconstruction <= 1 and ci.external_format == 0;
+}
 fn createSamplerYcbcrConversion(device: ?Device, info: ?*const SamplerYcbcrConversionCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (alloc != null or ci.s_type != 1000156000 or ci.p_next != null) return .error_initialization_failed;
+    if (alloc != null or !samplerYcbcrConversionCreateInfoValid(ci)) return .error_initialization_failed;
     _ = device orelse return .error_initialization_failed;
     _ = out;
     // ZPU exposes no multi-planar YCbCr formats; report the capability result
@@ -16204,6 +16223,26 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     var ycbcr_handle: usize = 0xfeed;
     const ycbcr_info = SamplerYcbcrConversionCreateInfo{ .s_type = 1000156000, .p_next = null, .format = 1000156000, .model = 0, .range = 0, .components = .{ 0, 0, 0, 0 }, .x_chroma_offset = 0, .y_chroma_offset = 0, .chroma_filter = 0, .force_explicit_reconstruction = 0, .external_format = 0 };
     try std.testing.expectEqual(Result.error_format_not_supported, createSamplerYcbcrConversion(ctx.device, &ycbcr_info, null, &ycbcr_handle));
+    try std.testing.expectEqual(@as(usize, 0xfeed), ycbcr_handle);
+    // Unsupported multi-planar formats still receive full ABI-domain
+    // validation before the capability result.  Every malformed payload must
+    // leave the output handle untouched and return initialization failure.
+    var malformed_ycbcr = ycbcr_info;
+    malformed_ycbcr.model = 5;
+    try std.testing.expectEqual(Result.error_initialization_failed, createSamplerYcbcrConversion(ctx.device, &malformed_ycbcr, null, &ycbcr_handle));
+    malformed_ycbcr = ycbcr_info;
+    malformed_ycbcr.components[2] = 7;
+    try std.testing.expectEqual(Result.error_initialization_failed, createSamplerYcbcrConversion(ctx.device, &malformed_ycbcr, null, &ycbcr_handle));
+    malformed_ycbcr = ycbcr_info;
+    malformed_ycbcr.x_chroma_offset = 2;
+    try std.testing.expectEqual(Result.error_initialization_failed, createSamplerYcbcrConversion(ctx.device, &malformed_ycbcr, null, &ycbcr_handle));
+    malformed_ycbcr = ycbcr_info;
+    malformed_ycbcr.force_explicit_reconstruction = 2;
+    try std.testing.expectEqual(Result.error_initialization_failed, createSamplerYcbcrConversion(ctx.device, &malformed_ycbcr, null, &ycbcr_handle));
+    try std.testing.expectEqual(@as(usize, 0xfeed), ycbcr_handle);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| try std.testing.expectEqual(Result.error_format_not_supported, createSamplerYcbcrConversion(ctx.device, &ycbcr_info, null, &ycbcr_handle));
+    test_allocations_before_failure = null;
     try std.testing.expectEqual(@as(usize, 0xfeed), ycbcr_handle);
     var version: u32 = 0;
     try std.testing.expectEqual(Result.success, enumerateInstanceVersion(&version));
