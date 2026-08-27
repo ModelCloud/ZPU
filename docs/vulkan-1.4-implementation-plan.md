@@ -724,6 +724,13 @@ Each slice must land with all of the following:
   The frontend uses the normative GLSL.std.450 opcode numbers for the vector
   and bit-index families (`Length` 65 through `FindUMsb` 74); stale offset
   encodings are rejected instead of being misinterpreted.
+  Fragment interpolation queries (`InterpolateAtCentroid`, `InterpolateAtSample`,
+  and `InterpolateAtOffset`) are accepted for the single-sample graphics
+  profile.  Centroid queries preserve the incoming interpolated value; sample
+  queries require sample zero and offset queries require a zero f32x2 offset,
+  which are lowered to an exact value copy.  Non-fragment stages, nonzero
+  samples, and nonzero offsets remain rejected because the profile does not
+  expose multisample coverage data.
   A single
   side-effect-free dynamic conditional or one-case runtime switch with a common
   merge is also lowered to compare/select; generic SPIR-V dynamic control flow,
