@@ -6149,10 +6149,13 @@ fn rowSequencesOverlap(a_base: u64, a_stride: u64, a_rows: u32, a_width: u64, b_
     var a_y: u32 = 0;
     var b_y: u32 = 0;
     while (a_y < a_rows and b_y < b_rows) {
-        const a_start = a_base + @as(u64, a_y) * a_stride;
-        const b_start = b_base + @as(u64, b_y) * b_stride;
+        const a_row_offset = std.math.mul(u64, a_y, a_stride) catch return true;
+        const b_row_offset = std.math.mul(u64, b_y, b_stride) catch return true;
+        const a_start = std.math.add(u64, a_base, a_row_offset) catch return true;
+        const b_start = std.math.add(u64, b_base, b_row_offset) catch return true;
         if (byteRangesOverlap(a_start, a_width, b_start, b_width)) return true;
-        if (a_start + a_width <= b_start) a_y += 1 else b_y += 1;
+        const a_end = std.math.add(u64, a_start, a_width) catch return true;
+        if (a_end <= b_start) a_y += 1 else b_y += 1;
     }
     return false;
 }
@@ -6160,12 +6163,23 @@ fn bufferImageMemoryOverlap(buffer: *const BufferObj, buffer_region: BufferImage
     const buffer_row = if (buffer_region.buffer_row_length == 0) buffer_region.image_extent.width else buffer_region.buffer_row_length;
     const buffer_layer_stride = bufferImageLayerStride(buffer_region) orelse return true;
     const image_layer = imageLayerByteSize(image) orelse return true;
-    const image_row_offset = (@as(u64, @intCast(image_region.image_offset.y)) * image.width + @as(u64, @intCast(image_region.image_offset.x))) * 4;
+    const image_row_texels = checkedBufferImageMul(@as(u64, @intCast(image_region.image_offset.y)), image.width) orelse return true;
+    const image_row_start = checkedBufferImageAdd(image_row_texels, @as(u64, @intCast(image_region.image_offset.x))) orelse return true;
+    const image_row_offset = checkedBufferImageMul(image_row_start, 4) orelse return true;
+    const buffer_base = checkedBufferImageAdd(buffer.offset, buffer_region.buffer_offset) orelse return true;
+    const buffer_stride = checkedBufferImageMul(buffer_row, 4) orelse return true;
+    const buffer_width = checkedBufferImageMul(buffer_region.image_extent.width, 4) orelse return true;
+    const image_stride = checkedBufferImageMul(image.width, 4) orelse return true;
+    const image_width = checkedBufferImageMul(image_region.image_extent.width, 4) orelse return true;
     for (0..buffer_region.image_subresource.layer_count) |buffer_layer| {
-        const buffer_base = std.math.add(u64, buffer.offset + buffer_region.buffer_offset, buffer_layer_stride * buffer_layer) catch return true;
+        const buffer_layer_offset = checkedBufferImageMul(buffer_layer_stride, buffer_layer) orelse return true;
+        const buffer_layer_base = checkedBufferImageAdd(buffer_base, buffer_layer_offset) orelse return true;
         for (0..image_region.image_subresource.layer_count) |image_layer_index| {
-            const image_base = std.math.add(u64, image.offset + image_layer * (image_region.image_subresource.base_array_layer + image_layer_index), image_row_offset) catch return true;
-            if (rowSequencesOverlap(buffer_base, @as(u64, buffer_row) * 4, buffer_region.image_extent.height, @as(u64, buffer_region.image_extent.width) * 4, image_base, @as(u64, image.width) * 4, image_region.image_extent.height, @as(u64, image_region.image_extent.width) * 4)) return true;
+            const image_layer_number = checkedBufferImageAdd(image_region.image_subresource.base_array_layer, image_layer_index) orelse return true;
+            const image_layer_offset = checkedBufferImageMul(image_layer, image_layer_number) orelse return true;
+            const image_base = checkedBufferImageAdd(image.offset, image_layer_offset) orelse return true;
+            const image_row_base = checkedBufferImageAdd(image_base, image_row_offset) orelse return true;
+            if (rowSequencesOverlap(buffer_layer_base, buffer_stride, buffer_region.image_extent.height, buffer_width, image_row_base, image_stride, image_region.image_extent.height, image_width)) return true;
         }
     }
     return false;
@@ -6175,24 +6189,43 @@ fn bufferRegionsOverlap(a: BufferImageCopy, b: BufferImageCopy) bool {
     const b_row = if (b.buffer_row_length == 0) b.image_extent.width else b.buffer_row_length;
     const a_layer_stride = bufferImageLayerStride(a) orelse return true;
     const b_layer_stride = bufferImageLayerStride(b) orelse return true;
+    const a_stride = checkedBufferImageMul(a_row, 4) orelse return true;
+    const b_stride = checkedBufferImageMul(b_row, 4) orelse return true;
+    const a_width = checkedBufferImageMul(a.image_extent.width, 4) orelse return true;
+    const b_width = checkedBufferImageMul(b.image_extent.width, 4) orelse return true;
     for (0..a.image_subresource.layer_count) |a_layer| {
-        const a_base = std.math.add(u64, a.buffer_offset, a_layer_stride * a_layer) catch return true;
+        const a_layer_offset = checkedBufferImageMul(a_layer_stride, a_layer) orelse return true;
+        const a_base = checkedBufferImageAdd(a.buffer_offset, a_layer_offset) orelse return true;
         for (0..b.image_subresource.layer_count) |b_layer| {
-            const b_base = std.math.add(u64, b.buffer_offset, b_layer_stride * b_layer) catch return true;
-            if (rowSequencesOverlap(a_base, @as(u64, a_row) * 4, a.image_extent.height, @as(u64, a.image_extent.width) * 4, b_base, @as(u64, b_row) * 4, b.image_extent.height, @as(u64, b.image_extent.width) * 4)) return true;
+            const b_layer_offset = checkedBufferImageMul(b_layer_stride, b_layer) orelse return true;
+            const b_base = checkedBufferImageAdd(b.buffer_offset, b_layer_offset) orelse return true;
+            if (rowSequencesOverlap(a_base, a_stride, a.image_extent.height, a_width, b_base, b_stride, b.image_extent.height, b_width)) return true;
         }
     }
     return false;
 }
 fn imageRegionsOverlap(image: *const ImageObj, a_layers: ImageSubresourceLayers, a_offset: Offset3D, a_extent: Extent3D, b_layers: ImageSubresourceLayers, b_offset: Offset3D, b_extent: Extent3D) bool {
     const layer = imageLayerByteSize(image) orelse return true;
-    const a_row_offset = (@as(u64, @intCast(a_offset.y)) * image.width + @as(u64, @intCast(a_offset.x))) * 4;
-    const b_row_offset = (@as(u64, @intCast(b_offset.y)) * image.width + @as(u64, @intCast(b_offset.x))) * 4;
+    const a_row_texels = checkedBufferImageMul(@as(u64, @intCast(a_offset.y)), image.width) orelse return true;
+    const b_row_texels = checkedBufferImageMul(@as(u64, @intCast(b_offset.y)), image.width) orelse return true;
+    const a_row_start = checkedBufferImageAdd(a_row_texels, @as(u64, @intCast(a_offset.x))) orelse return true;
+    const b_row_start = checkedBufferImageAdd(b_row_texels, @as(u64, @intCast(b_offset.x))) orelse return true;
+    const a_row_offset = checkedBufferImageMul(a_row_start, 4) orelse return true;
+    const b_row_offset = checkedBufferImageMul(b_row_start, 4) orelse return true;
+    const row_stride = checkedBufferImageMul(image.width, 4) orelse return true;
+    const a_width = checkedBufferImageMul(a_extent.width, 4) orelse return true;
+    const b_width = checkedBufferImageMul(b_extent.width, 4) orelse return true;
     for (0..a_layers.layer_count) |a_layer| {
-        const a_base = std.math.add(u64, image.offset + layer * (a_layers.base_array_layer + a_layer), a_row_offset) catch return true;
+        const a_layer_number = checkedBufferImageAdd(a_layers.base_array_layer, a_layer) orelse return true;
+        const a_layer_offset = checkedBufferImageMul(layer, a_layer_number) orelse return true;
+        const a_base = checkedBufferImageAdd(image.offset, a_layer_offset) orelse return true;
+        const a_row_base = checkedBufferImageAdd(a_base, a_row_offset) orelse return true;
         for (0..b_layers.layer_count) |b_layer| {
-            const b_base = std.math.add(u64, image.offset + layer * (b_layers.base_array_layer + b_layer), b_row_offset) catch return true;
-            if (rowSequencesOverlap(a_base, @as(u64, image.width) * 4, a_extent.height, @as(u64, a_extent.width) * 4, b_base, @as(u64, image.width) * 4, b_extent.height, @as(u64, b_extent.width) * 4)) return true;
+            const b_layer_number = checkedBufferImageAdd(b_layers.base_array_layer, b_layer) orelse return true;
+            const b_layer_offset = checkedBufferImageMul(layer, b_layer_number) orelse return true;
+            const b_base = checkedBufferImageAdd(image.offset, b_layer_offset) orelse return true;
+            const b_row_base = checkedBufferImageAdd(b_base, b_row_offset) orelse return true;
+            if (rowSequencesOverlap(a_row_base, row_stride, a_extent.height, a_width, b_row_base, row_stride, b_extent.height, b_width)) return true;
         }
     }
     return false;
@@ -6200,13 +6233,27 @@ fn imageRegionsOverlap(image: *const ImageObj, a_layers: ImageSubresourceLayers,
 fn imageCopyMemoryOverlap(src: *const ImageObj, source: ImageCopy, dst: *const ImageObj, destination: ImageCopy) bool {
     const source_layer = imageLayerByteSize(src) orelse return true;
     const destination_layer = imageLayerByteSize(dst) orelse return true;
-    const source_row_offset = (@as(u64, @intCast(source.src_offset.y)) * src.width + @as(u64, @intCast(source.src_offset.x))) * 4;
-    const destination_row_offset = (@as(u64, @intCast(destination.dst_offset.y)) * dst.width + @as(u64, @intCast(destination.dst_offset.x))) * 4;
+    const source_row_texels = checkedBufferImageMul(@as(u64, @intCast(source.src_offset.y)), src.width) orelse return true;
+    const destination_row_texels = checkedBufferImageMul(@as(u64, @intCast(destination.dst_offset.y)), dst.width) orelse return true;
+    const source_row_start = checkedBufferImageAdd(source_row_texels, @as(u64, @intCast(source.src_offset.x))) orelse return true;
+    const destination_row_start = checkedBufferImageAdd(destination_row_texels, @as(u64, @intCast(destination.dst_offset.x))) orelse return true;
+    const source_row_offset = checkedBufferImageMul(source_row_start, 4) orelse return true;
+    const destination_row_offset = checkedBufferImageMul(destination_row_start, 4) orelse return true;
+    const source_stride = checkedBufferImageMul(src.width, 4) orelse return true;
+    const destination_stride = checkedBufferImageMul(dst.width, 4) orelse return true;
+    const source_width = checkedBufferImageMul(source.extent.width, 4) orelse return true;
+    const destination_width = checkedBufferImageMul(destination.extent.width, 4) orelse return true;
     for (0..source.src_subresource.layer_count) |source_index| {
-        const source_base = std.math.add(u64, src.offset + source_layer * (source.src_subresource.base_array_layer + source_index), source_row_offset) catch return true;
+        const source_layer_number = checkedBufferImageAdd(source.src_subresource.base_array_layer, source_index) orelse return true;
+        const source_layer_offset = checkedBufferImageMul(source_layer, source_layer_number) orelse return true;
+        const source_base = checkedBufferImageAdd(src.offset, source_layer_offset) orelse return true;
+        const source_row_base = checkedBufferImageAdd(source_base, source_row_offset) orelse return true;
         for (0..destination.dst_subresource.layer_count) |destination_index| {
-            const destination_base = std.math.add(u64, dst.offset + destination_layer * (destination.dst_subresource.base_array_layer + destination_index), destination_row_offset) catch return true;
-            if (rowSequencesOverlap(source_base, @as(u64, src.width) * 4, source.extent.height, @as(u64, source.extent.width) * 4, destination_base, @as(u64, dst.width) * 4, destination.extent.height, @as(u64, destination.extent.width) * 4)) return true;
+            const destination_layer_number = checkedBufferImageAdd(destination.dst_subresource.base_array_layer, destination_index) orelse return true;
+            const destination_layer_offset = checkedBufferImageMul(destination_layer, destination_layer_number) orelse return true;
+            const destination_base = checkedBufferImageAdd(dst.offset, destination_layer_offset) orelse return true;
+            const destination_row_base = checkedBufferImageAdd(destination_base, destination_row_offset) orelse return true;
+            if (rowSequencesOverlap(source_row_base, source_stride, source.extent.height, source_width, destination_row_base, destination_stride, destination.extent.height, destination_width)) return true;
         }
     }
     return false;
@@ -9019,6 +9066,22 @@ test "Vulkan host-memory benchmark helpers implement exact command byte semantic
     benchmarkHostMemoryCopy(&copied, &filled);
     try std.testing.expectEqualSlices(u8, &filled, &copied);
     try std.testing.expect(!rowSequencesOverlap(0, 8, 2, 4, 32, 8, 2, 4));
+}
+
+test "buffer and image overlap checks reject wrapping address arithmetic" {
+    const owner: Device = @ptrFromInt(8);
+    var image = ImageObj{ .owner = owner, .width = 4, .height = 4, .array_layers = 2, .samples = 1, .format = 37, .usage = 3, .layout = 0, .offset = std.math.maxInt(u64) - 31 };
+    var buffer = BufferObj{ .owner = owner, .size = 128, .usage = 3 };
+    const layers = ImageSubresourceLayers{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 1, .layer_count = 1 };
+    const transfer = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = layers, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 1, .height = 1, .depth = 1 } };
+    const copy = ImageCopy{ .src_subresource = layers, .src_offset = .{ .x = 0, .y = 0, .z = 0 }, .dst_subresource = layers, .dst_offset = .{ .x = 0, .y = 0, .z = 0 }, .extent = .{ .width = 1, .height = 1, .depth = 1 } };
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expect(bufferImageMemoryOverlap(&buffer, transfer, &image, transfer));
+        try std.testing.expect(imageRegionsOverlap(&image, layers, transfer.image_offset, transfer.image_extent, layers, transfer.image_offset, transfer.image_extent));
+        try std.testing.expect(imageCopyMemoryOverlap(&image, copy, &image, copy));
+    }
+    test_allocations_before_failure = null;
 }
 
 test "indirect draws honor the disabled first-instance feature at submission" {

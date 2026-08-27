@@ -822,6 +822,15 @@ be represented, instead of unwrapping a missing size.  The host-copy regression
 corrupts a bound image offset and exercises memory-to-image, image-to-memory,
 and image-to-image rejection 4096 times with allocation injection enabled;
 the malformed-size requirements query remains failure-atomic.
+
+### Latest audit slice — transfer overlap arithmetic
+
+Buffer/image overlap detection now checks every row, layer, byte-width, and
+base-address multiplication/addition.  Any wrapping intermediate is treated
+conservatively as overlap, preventing malformed retained offsets from becoming
+apparently disjoint transfers.  A 4096-iteration warm regression covers the
+buffer-to-image, image-region, and image-copy overlap helpers with allocation
+injection enabled.
 - [ ] **A8 — secondary command buffers:** inheritance, execution, reset, and
   lifetime rules. Traditional render-pass inheritance now matches the active
   subpass for multi-subpass execution, and the bounded dynamic rendering
