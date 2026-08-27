@@ -21866,7 +21866,42 @@ test "traditional depth-only render passes bind, clear, transition, and stay all
     try std.testing.expectEqual(@as(u32, 0x3e80_0000), std.mem.readInt(u32, imageBytes(image_object)[0..4], .little));
     try std.testing.expectEqual(@as(i32, 3), image_object.layout);
 
+    // The same attachment-role model also supports depth-only subpass
+    // transitions; no color image is required while advancing the scope.
+    const second_depth_ref = AttachmentReference{ .attachment = 0, .layout = 1 };
+    const depth_subpasses = [_]SubpassDescription{
+        subpass,
+        .{ .flags = 0, .pipeline_bind_point = 0, .input_attachment_count = 0, .input_attachments = null, .color_attachment_count = 0, .color_attachments = null, .resolve_attachments = null, .depth_stencil_attachment = @ptrCast(&second_depth_ref), .preserve_attachment_count = 0, .preserve_attachments = null },
+    };
+    var depth_multi_info = render_info;
+    depth_multi_info.subpass_count = depth_subpasses.len;
+    depth_multi_info.subpasses = @ptrCast(&depth_subpasses);
+    var depth_multi_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(ctx.device, &depth_multi_info, null, &depth_multi_pass));
+    var depth_multi_framebuffer_info = framebuffer_info;
+    depth_multi_framebuffer_info.render_pass = depth_multi_pass;
+    var depth_multi_framebuffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createFramebuffer(ctx.device, &depth_multi_framebuffer_info, null, &depth_multi_framebuffer));
+    render_begin.render_pass = depth_multi_pass;
+    render_begin.framebuffer = depth_multi_framebuffer;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdBeginRenderPass(command[0], &render_begin, 0);
+    try std.testing.expect(!command[0].impl.invalid);
+    cmdNextSubpass(command[0], 0);
+    try std.testing.expect(!command[0].impl.invalid);
+    cmdEndRenderPass(command[0]);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 4), command[0].impl.count);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(@as(i32, 3), image_object.layout);
+    destroyFramebuffer(ctx.device, depth_multi_framebuffer, null);
+    destroyRenderPass(ctx.device, depth_multi_pass, null);
+
     // Missing the depth clear value is rejected atomically at record time.
+    render_begin.render_pass = render_pass;
+    render_begin.framebuffer = framebuffer;
     render_begin.clear_value_count = 0;
     render_begin.clear_values = null;
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
