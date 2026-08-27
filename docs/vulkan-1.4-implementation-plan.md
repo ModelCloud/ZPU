@@ -158,6 +158,10 @@ The Vulkan 1.1 individual storage, variable-pointer, sampler-YCbCr,
 multiview, protected-memory, and shader-draw-parameter nodes expose their
 registry field names directly, preserving the same all-false and failure-
 atomic query behavior.
+The remaining promoted individual feature nodes for Vulkan 1.2–1.4 now do the
+same (memory model, address, storage-width, synchronization, rendering,
+maintenance, host-copy, robustness, and related controls), so callers no
+longer need to address synthetic `values[]` fields for the core feature ABI.
 The Vulkan 1.1 aggregate body is represented by named fields for 16-bit
 storage, multiview, variable pointers, protected memory, YCbCr conversion,
 and shader draw parameters. The Vulkan 1.2 aggregate body is represented by
