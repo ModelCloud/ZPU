@@ -154,6 +154,10 @@ non-null `pNext`. It also accepts the individual core-promoted feature
 structures (16-bit storage, descriptor indexing, line rasterization, and the
 other 1.1–1.4 feature forms) with exact LP64-sized VkBool32 payloads; unknown
 feature chains remain transactional rejections.
+The Vulkan 1.4 aggregate body is now represented by named fields for global
+priority query, subgroup rotation, line rasterization, divisor, index-type
+uint8, dynamic-rendering local-read, maintenance, robustness, host-image-copy,
+and push-descriptor features; its all-false query remains allocation-free.
 `vkGetPhysicalDeviceProperties2` now accepts aggregate and individual
 promoted property chains with exact LP64-sized payloads and the same
 transactional unknown-chain rejection. Aggregate Vulkan 1.1/1.2/1.3/1.4

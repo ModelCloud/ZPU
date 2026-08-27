@@ -195,7 +195,31 @@ pub const PhysicalDeviceFeatures2 = extern struct { s_type: i32, p_next: ?*anyop
 pub const PhysicalDeviceVulkan11Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [12]u32 };
 pub const PhysicalDeviceVulkan12Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [47]u32 };
 pub const PhysicalDeviceVulkan13Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [15]u32 };
-pub const PhysicalDeviceVulkan14Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [21]u32 };
+pub const PhysicalDeviceVulkan14Features = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    global_priority_query: u32,
+    shader_subgroup_rotate: u32,
+    shader_subgroup_rotate_clustered: u32,
+    shader_float_controls2: u32,
+    shader_expect_assume: u32,
+    rectangular_lines: u32,
+    bresenham_lines: u32,
+    smooth_lines: u32,
+    stippled_rectangular_lines: u32,
+    stippled_bresenham_lines: u32,
+    stippled_smooth_lines: u32,
+    vertex_attribute_instance_rate_divisor: u32,
+    vertex_attribute_instance_rate_zero_divisor: u32,
+    index_type_uint8: u32,
+    dynamic_rendering_local_read: u32,
+    maintenance5: u32,
+    maintenance6: u32,
+    pipeline_protected_access: u32,
+    pipeline_robustness: u32,
+    host_image_copy: u32,
+    push_descriptor: u32,
+};
 // Core-promoted feature-chain structs retain their field count as a VkBool32
 // array.  The profile advertises every optional feature as false, so this
 // keeps each promoted ABI exact while allowing callers to use either the
@@ -16788,6 +16812,9 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceMaintenance4Properties));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(PhysicalDeviceInlineUniformBlockProperties));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDevicePushDescriptorProperties));
+    try std.testing.expectEqual(@as(usize, 104), @sizeOf(PhysicalDeviceVulkan14Features));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVulkan14Features, "global_priority_query"));
+    try std.testing.expectEqual(@as(usize, 96), @offsetOf(PhysicalDeviceVulkan14Features, "push_descriptor"));
     getPhysicalDeviceFeatures2(ctx.physical, &features);
     try std.testing.expect(std.mem.allEqual(u32, &features.features.values, 0));
     try std.testing.expect(std.mem.allEqual(u32, &vulkan11_features.values, 0));
@@ -16800,6 +16827,40 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     getPhysicalDeviceFeatures2(ctx.physical, &subgroup_query);
     try std.testing.expectEqual(@as(u32, 0), subgroup_features.subgroup_size_control);
     try std.testing.expectEqual(@as(u32, 0), subgroup_features.compute_full_subgroups);
+    var vulkan14_features = PhysicalDeviceVulkan14Features{
+        .s_type = 55,
+        .p_next = null,
+        .global_priority_query = 0xffff_ffff,
+        .shader_subgroup_rotate = 0xffff_ffff,
+        .shader_subgroup_rotate_clustered = 0xffff_ffff,
+        .shader_float_controls2 = 0xffff_ffff,
+        .shader_expect_assume = 0xffff_ffff,
+        .rectangular_lines = 0xffff_ffff,
+        .bresenham_lines = 0xffff_ffff,
+        .smooth_lines = 0xffff_ffff,
+        .stippled_rectangular_lines = 0xffff_ffff,
+        .stippled_bresenham_lines = 0xffff_ffff,
+        .stippled_smooth_lines = 0xffff_ffff,
+        .vertex_attribute_instance_rate_divisor = 0xffff_ffff,
+        .vertex_attribute_instance_rate_zero_divisor = 0xffff_ffff,
+        .index_type_uint8 = 0xffff_ffff,
+        .dynamic_rendering_local_read = 0xffff_ffff,
+        .maintenance5 = 0xffff_ffff,
+        .maintenance6 = 0xffff_ffff,
+        .pipeline_protected_access = 0xffff_ffff,
+        .pipeline_robustness = 0xffff_ffff,
+        .host_image_copy = 0xffff_ffff,
+        .push_descriptor = 0xffff_ffff,
+    };
+    var vulkan14_query = features;
+    vulkan14_query.p_next = @ptrCast(&vulkan14_features);
+    getPhysicalDeviceFeatures2(ctx.physical, &vulkan14_query);
+    try std.testing.expectEqual(@as(i32, 55), vulkan14_features.s_type);
+    try std.testing.expectEqual(@as(?*anyopaque, null), vulkan14_features.p_next);
+    try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&vulkan14_features)[16..100], 0));
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| getPhysicalDeviceFeatures2(ctx.physical, &vulkan14_query);
+    test_allocations_before_failure = null;
     test_allocations_before_failure = 0;
     for (0..4096) |_| getPhysicalDeviceFeatures2(ctx.physical, &subgroup_query);
     test_allocations_before_failure = null;
