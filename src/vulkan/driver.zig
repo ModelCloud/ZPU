@@ -962,6 +962,7 @@ pub const DescriptorBufferInfo = extern struct { buffer: usize, offset: u64, ran
 pub const DescriptorImageInfo = extern struct { sampler: usize, image_view: usize, image_layout: i32 };
 pub const SamplerCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, mag_filter: i32, min_filter: i32, mipmap_mode: i32, address_mode_u: i32, address_mode_v: i32, address_mode_w: i32, mip_lod_bias: f32, anisotropy_enable: u32, max_anisotropy: f32, compare_enable: u32, compare_op: i32, min_lod: f32, max_lod: f32, border_color: i32, unnormalized_coordinates: u32 };
 pub const WriteDescriptorSet = extern struct { s_type: i32, p_next: ?*const anyopaque, dst_set: usize, dst_binding: u32, dst_array_element: u32, descriptor_count: u32, descriptor_type: i32, image_info: ?[*]const DescriptorImageInfo, buffer_info: ?[*]const DescriptorBufferInfo, texel_buffer_view: ?[*]const usize };
+pub const CopyDescriptorSet = extern struct { s_type: i32, p_next: ?*const anyopaque, src_set: usize, src_binding: u32, src_array_element: u32, dst_set: usize, dst_binding: u32, dst_array_element: u32, descriptor_count: u32 };
 pub const Viewport = cpu_cube.Viewport;
 pub const PresentInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, wait_semaphore_count: u32, wait_semaphores: ?[*]const usize, swapchain_count: u32, swapchains: ?[*]const usize, image_indices: ?[*]const u32, results: ?[*]Result };
 pub const PresentId2KHR = extern struct { s_type: i32, p_next: ?*const anyopaque, swapchain_count: u32, present_ids: ?[*]const u64 };
@@ -3389,7 +3390,7 @@ fn getImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, t
     out.* = .{ .max_extent = .{ .width = max_2d_extent, .height = max_2d_extent, .depth = 1 }, .max_mip_levels = 1, .max_array_layers = max_image_array_layers, .sample_counts = 1, .max_resource_size = heap_size };
     return .success;
 }
-fn getSparseImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, samples: u32, usage: u32, tiling: i32, count: ?*u32, output: ?*anyopaque) callconv(.c) void {
+fn getSparseImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, samples: u32, usage: u32, tiling: i32, count: ?*u32, output: ?[*]SparseImageFormatProperties) callconv(.c) void {
     _ = format;
     _ = image_type;
     _ = samples;
@@ -4391,7 +4392,7 @@ fn getImageMemoryRequirements(device: ?Device, handle: usize, output: ?*MemoryRe
     const image = validImageLocked(handle) orelse return;
     if (validDeviceLocked(d) and validOwner(d, image.owner)) out.* = .{ .size = imageByteSize(image).?, .alignment = 4, .memory_type_bits = 1 };
 }
-fn getImageSparseMemoryRequirements(device: ?Device, handle: usize, count: ?*u32, output: ?*anyopaque) callconv(.c) void {
+fn getImageSparseMemoryRequirements(device: ?Device, handle: usize, count: ?*u32, output: ?[*]SparseImageMemoryRequirements) callconv(.c) void {
     _ = output;
     const d = device orelse return;
     const n = count orelse return;
@@ -6679,7 +6680,7 @@ fn barrierMasksSupported(barrier: ImageMemoryBarrier, src_stage_mask: u32, dst_s
     };
     return src_stage_mask == expected_src_stage and dst_stage_mask == 0x1000 and barrier.src_access_mask == expected_src_access and barrier.dst_access_mask == expected_dst_access;
 }
-fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u32, dependency_flags: u32, memory_barrier_count: u32, memory_barriers: ?*const anyopaque, buffer_barrier_count: u32, buffer_barriers: ?*const anyopaque, image_barrier_count: u32, image_barriers: ?[*]const ImageMemoryBarrier) callconv(.c) void {
+fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u32, dependency_flags: u32, memory_barrier_count: u32, memory_barriers: ?[*]const MemoryBarrier, buffer_barrier_count: u32, buffer_barriers: ?[*]const BufferMemoryBarrier, image_barrier_count: u32, image_barriers: ?[*]const ImageMemoryBarrier) callconv(.c) void {
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
@@ -6689,7 +6690,7 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
         c.impl.invalid = true;
         return;
     }
-    const memory_list: []const MemoryBarrier = if (memory_barriers) |raw| @as([*]const MemoryBarrier, @ptrCast(@alignCast(raw)))[0..memory_barrier_count] else if (memory_barrier_count == 0) &.{} else {
+    const memory_list: []const MemoryBarrier = if (memory_barriers) |items| items[0..memory_barrier_count] else if (memory_barrier_count == 0) &.{} else {
         hit(.invalid_barrier);
         c.impl.invalid = true;
         return;
@@ -6699,7 +6700,7 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
         c.impl.invalid = true;
         return;
     };
-    const buffer_list: []const BufferMemoryBarrier = if (buffer_barriers) |raw| @as([*]const BufferMemoryBarrier, @ptrCast(@alignCast(raw)))[0..buffer_barrier_count] else if (buffer_barrier_count == 0) &.{} else {
+    const buffer_list: []const BufferMemoryBarrier = if (buffer_barriers) |items| items[0..buffer_barrier_count] else if (buffer_barrier_count == 0) &.{} else {
         hit(.invalid_barrier);
         c.impl.invalid = true;
         return;
@@ -6805,7 +6806,7 @@ fn cmdResetEvent(cb: ?CommandBuffer, handle: usize, stage_mask: u32) callconv(.c
     }
     record(c, .{ .event_reset = event });
 }
-fn cmdWaitEvents(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const usize, src_stage_mask: u32, dst_stage_mask: u32, memory_barrier_count: u32, memory_barriers: ?*const anyopaque, buffer_barrier_count: u32, buffer_barriers: ?*const anyopaque, image_barrier_count: u32, image_barriers: ?[*]const ImageMemoryBarrier) callconv(.c) void {
+fn cmdWaitEvents(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const usize, src_stage_mask: u32, dst_stage_mask: u32, memory_barrier_count: u32, memory_barriers: ?[*]const MemoryBarrier, buffer_barrier_count: u32, buffer_barriers: ?[*]const BufferMemoryBarrier, image_barrier_count: u32, image_barriers: ?[*]const ImageMemoryBarrier) callconv(.c) void {
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
@@ -6824,7 +6825,7 @@ fn cmdWaitEvents(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const usize,
             return;
         }
     }
-    const memory_list: []const MemoryBarrier = if (memory_barriers) |raw| @as([*]const MemoryBarrier, @ptrCast(@alignCast(raw)))[0..memory_barrier_count] else if (memory_barrier_count == 0) &.{} else {
+    const memory_list: []const MemoryBarrier = if (memory_barriers) |items| items[0..memory_barrier_count] else if (memory_barrier_count == 0) &.{} else {
         c.impl.invalid = true;
         return;
     };
@@ -6832,7 +6833,7 @@ fn cmdWaitEvents(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const usize,
         c.impl.invalid = true;
         return;
     };
-    const buffer_list: []const BufferMemoryBarrier = if (buffer_barriers) |raw| @as([*]const BufferMemoryBarrier, @ptrCast(@alignCast(raw)))[0..buffer_barrier_count] else if (buffer_barrier_count == 0) &.{} else {
+    const buffer_list: []const BufferMemoryBarrier = if (buffer_barriers) |items| items[0..buffer_barrier_count] else if (buffer_barrier_count == 0) &.{} else {
         c.impl.invalid = true;
         return;
     };
@@ -9986,8 +9987,8 @@ test "cpu_cube_v1 shader compatibility bridge is exact" {
     try std.testing.expectError(error.OutOfMemory, compileFrontendStage(failing.allocator(), &valid, .vertex, "main", &.{}));
 }
 
-fn createSampler(device: ?Device, raw_info: ?*const anyopaque, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
-    const info = @as(?*const SamplerCreateInfo, @ptrCast(@alignCast(raw_info))) orelse return .error_initialization_failed;
+fn createSampler(device: ?Device, create_info: ?*const SamplerCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
+    const info = create_info orelse return .error_initialization_failed;
     if (alloc != null or info.s_type != 31 or info.p_next != null or info.flags != 0 or info.mag_filter < 0 or info.mag_filter > 1 or info.min_filter < 0 or info.min_filter > 1 or info.mipmap_mode < 0 or info.mipmap_mode > 1 or info.address_mode_u < 0 or info.address_mode_u > 4 or info.address_mode_v < 0 or info.address_mode_v > 4 or info.address_mode_w < 0 or info.address_mode_w > 4 or !std.math.isFinite(info.mip_lod_bias) or info.anisotropy_enable != 0 or !std.math.isFinite(info.max_anisotropy) or info.compare_enable != 0 or info.compare_op < 0 or info.compare_op > 7 or !std.math.isFinite(info.min_lod) or !std.math.isFinite(info.max_lod) or info.min_lod < 0 or info.max_lod < info.min_lod or info.border_color < 0 or info.border_color > 5 or info.unnormalized_coordinates != 0) return .error_initialization_failed;
     const d = device orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
@@ -10428,7 +10429,7 @@ fn destroyFramebuffer(device: ?Device, handle: usize, alloc: ?*const Alloc) call
         stateForObject(FramebufferObj, object, &framebuffer_objects, &framebuffer_state).?.* = .tombstone;
     }
 }
-fn createComputePipelines(device: ?Device, cache: usize, count: u32, infos: ?*const anyopaque, alloc: ?*const Alloc, outputs: ?[*]usize) callconv(.c) Result {
+fn createComputePipelines(device: ?Device, cache: usize, count: u32, infos: ?*const ComputePipelineCreateInfo, alloc: ?*const Alloc, outputs: ?[*]usize) callconv(.c) Result {
     const raw = infos orelse return .error_initialization_failed;
     if (alloc != null or count == 0 or count > max_child_objects) return .error_initialization_failed;
     const out = outputs orelse return .error_initialization_failed;
@@ -10441,7 +10442,7 @@ fn createComputePipelines(device: ?Device, cache: usize, count: u32, infos: ?*co
         pipeline_cache = validPipelineCacheLocked(cache) orelse return .error_initialization_failed;
         if (!pipeline_cache.?.owner.eql(d)) return .error_initialization_failed;
     }
-    const create_infos: [*]const ComputePipelineCreateInfo = @ptrCast(@alignCast(raw));
+    const create_infos: [*]const ComputePipelineCreateInfo = @ptrCast(raw);
     var built: [max_child_objects]ComputePipelineObj = undefined;
     var slots: [max_child_objects]u8 = undefined;
     var free_count: usize = 0;
@@ -10489,7 +10490,7 @@ fn createComputePipelines(device: ?Device, cache: usize, count: u32, infos: ?*co
     }
     return .success;
 }
-fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?*const anyopaque, alloc: ?*const Alloc, outputs: ?[*]usize) callconv(.c) Result {
+fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?*const GraphicsPipelineCreateInfo, alloc: ?*const Alloc, outputs: ?[*]usize) callconv(.c) Result {
     const raw = infos orelse return .error_initialization_failed;
     if (alloc != null or count == 0 or count > max_child_objects) return .error_initialization_failed;
     const out = outputs orelse return .error_initialization_failed;
@@ -10502,7 +10503,7 @@ fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?*c
         pipeline_cache = validPipelineCacheLocked(cache) orelse return .error_initialization_failed;
         if (!pipeline_cache.?.owner.eql(d)) return .error_initialization_failed;
     }
-    const create_infos: [*]const GraphicsPipelineCreateInfo = @ptrCast(@alignCast(raw));
+    const create_infos: [*]const GraphicsPipelineCreateInfo = @ptrCast(raw);
     var built: [max_child_objects]GraphicsPipelineObj = undefined;
     var slots: [max_child_objects]u8 = undefined;
     var free_count: usize = 0;
@@ -10776,14 +10777,13 @@ fn freeDescriptorSets(device: ?Device, pool_handle: usize, count: u32, handles: 
     for (set_handles) |handle| releaseDescriptorSetLocked(validDescriptorSetLocked(handle).?);
     return .success;
 }
-fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?*const anyopaque, copy_count: u32, copies: ?*const anyopaque) callconv(.c) void {
+fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const WriteDescriptorSet, copy_count: u32, copies: ?[*]const CopyDescriptorSet) callconv(.c) void {
     const d = device orelse return;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d) or write_count > max_api_items or copy_count != 0 or copies != null) return;
     if (write_count == 0) return;
-    const raw = writes orelse return;
-    const list: [*]const WriteDescriptorSet = @ptrCast(@alignCast(raw));
+    const list = writes orelse return;
     const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, sampler: ?*SamplerObj, writes_texture: bool };
     var updates: [max_api_items]Update = undefined;
     for (list[0..write_count], 0..) |descriptor_write, index| {
@@ -11380,26 +11380,26 @@ fn cmdBindVertexBuffers(cb: ?CommandBuffer, first_binding: u32, binding_count: u
     const command_buffer = validCommandBufferLocked(cb) orelse return;
     bindVertexBuffersLocked(command_buffer, first_binding, binding_count, handles, offsets, null, null, false);
 }
-fn cmdSetViewport(cb: ?CommandBuffer, first: u32, count: u32, values: ?*const anyopaque) callconv(.c) void {
+fn cmdSetViewport(cb: ?CommandBuffer, first: u32, count: u32, values: ?*const Viewport) callconv(.c) void {
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or first != 0 or count != 1 or values == null or !validViewportDomain(@as(*const Viewport, @ptrCast(@alignCast(values.?))).*)) {
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or first != 0 or count != 1 or values == null or !validViewportDomain(values.?.*)) {
         command_buffer.impl.invalid = true;
         return;
     }
-    command_buffer.impl.viewport = @as(*const Viewport, @ptrCast(@alignCast(values.?))).*;
+    command_buffer.impl.viewport = values.?.*;
     command_buffer.impl.viewport_set = true;
 }
-fn cmdSetScissor(cb: ?CommandBuffer, first: u32, count: u32, values: ?*const anyopaque) callconv(.c) void {
+fn cmdSetScissor(cb: ?CommandBuffer, first: u32, count: u32, values: ?*const Rect2D) callconv(.c) void {
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or first != 0 or count != 1 or values == null or !validScissorDomain(@as(*const Rect2D, @ptrCast(@alignCast(values.?))).*)) {
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or first != 0 or count != 1 or values == null or !validScissorDomain(values.?.*)) {
         command_buffer.impl.invalid = true;
         return;
     }
-    const rect: *const Rect2D = @ptrCast(@alignCast(values.?));
+    const rect = values.?;
     command_buffer.impl.scissor = .{ .x = rect.offset.x, .y = rect.offset.y, .width = rect.extent.width, .height = rect.extent.height };
     command_buffer.impl.scissor_set = true;
 }
@@ -14095,6 +14095,9 @@ test "core instance physical and device enumeration is bounded and allocation fr
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(Features, "robust_buffer_access"));
     try std.testing.expectEqual(@as(usize, 216), @offsetOf(Features, "inherited_queries"));
     try std.testing.expectEqual(feature_word_count, @sizeOf(Features) / @sizeOf(u32));
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(CopyDescriptorSet));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(CopyDescriptorSet, "src_set"));
+    try std.testing.expectEqual(@as(usize, 48), @offsetOf(CopyDescriptorSet, "descriptor_count"));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(QueueProperties));
     try std.testing.expectEqual(@as(usize, 520), @sizeOf(MemoryProperties));
     const ci = InstanceInfo{ .s_type = 1, .p_next = null, .flags = 0, .app_info = null, .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null };
