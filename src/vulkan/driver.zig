@@ -1097,7 +1097,16 @@ const EventSignalKind = enum(u8) { none, host, legacy, synchronization2 };
 const EventSetCommand = struct { event: *EventObj, signal_kind: EventSignalKind, stage_mask: u32, dependency_key: u64 };
 const EventObj = struct { owner: Device, signaled: std.atomic.Value(bool), waiters: std.atomic.Value(u32), signal_kind: std.atomic.Value(u8), signal_stage_mask: std.atomic.Value(u32), signal_dependency_key: std.atomic.Value(u64) };
 const QuerySlot = struct { state: std.atomic.Value(u8), value: std.atomic.Value(u64) };
-const QueryPoolObj = struct { owner: DeviceIdentity, query_type: i32, slots: []QuerySlot };
+const QueryPoolObj = struct {
+    owner: DeviceIdentity,
+    query_type: i32,
+    slots: []QuerySlot,
+    // Commands and host result reads retain the pool pointer after dropping
+    // the registry mutex.  Retire the backing slots only after every such
+    // reader has released its pin.
+    active_users: std.atomic.Value(u32),
+    retire_pending: bool,
+};
 const SemaphoreObj = struct { owner: Device, signaled: std.atomic.Value(bool), timeline: bool, timeline_value: std.atomic.Value(u64) };
 const CommandPoolObj = struct { owner: Device, flags: u32 };
 const SurfaceObj = struct { owner: Instance, connection: *anyopaque, window: u32, headless: bool = false };
@@ -3758,6 +3767,7 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
             child_state.* = .tombstone;
         };
         for (&query_pool_objects, &query_pool_state) |*pool, *child_state| if (child_state.* == .live and pool.owner.eql(d)) {
+            pool.retire_pending = true;
             child_state.* = .tombstone;
         };
         for (&semaphore_objects, &semaphore_state) |*semaphore, *child_state| if (child_state.* == .live and semaphore.owner == d) {
@@ -3810,9 +3820,9 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
         for (&descriptor_set_layout_objects, descriptor_set_layout_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) object.canonical.deinit();
         for (&descriptor_set_objects, descriptor_set_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) object.layout.deinit();
         for (&pipeline_cache_objects, pipeline_cache_state) |*cache, child_state| if (child_state != .never and cache.owner.eql(d)) cache.data.deinit();
-        for (&query_pool_objects, query_pool_state) |*object, child_state| if (child_state != .never and object.owner.eql(d) and object.slots.len != 0) {
-            allocator.free(object.slots);
-            object.slots = &.{};
+        for (&query_pool_objects, query_pool_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) {
+            object.retire_pending = true;
+            retireQueryPoolSlotsLocked(object);
         };
         for (&pipeline_layout_objects, pipeline_layout_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) {
             object.canonical.deinit();
@@ -4105,6 +4115,52 @@ fn liveEventObject(object: *EventObj) bool {
 }
 fn liveQueryPoolObject(object: *QueryPoolObj) bool {
     return (stateForObject(QueryPoolObj, object, &query_pool_objects, &query_pool_state) orelse return false).* == .live;
+}
+/// Free a retired query pool's slot storage once no submission or host read
+/// still holds the object pointer.  The registry mutex serializes the
+/// retirement flag and allocator operation; the atomic count lets execution
+/// continue without holding that global lock.
+fn retireQueryPoolSlotsLocked(pool: *QueryPoolObj) void {
+    if (!pool.retire_pending or pool.active_users.load(.acquire) != 0) return;
+    if (pool.slots.len != 0) allocator.free(pool.slots);
+    pool.slots = &.{};
+    pool.retire_pending = false;
+}
+fn releaseQueryPoolUserLocked(pool: *QueryPoolObj) void {
+    const previous = pool.active_users.fetchSub(1, .acq_rel);
+    if (previous == 1) retireQueryPoolSlotsLocked(pool);
+}
+fn releaseQueryPoolUser(pool: *QueryPoolObj) void {
+    lock();
+    defer mutex.unlock();
+    releaseQueryPoolUserLocked(pool);
+}
+fn pinQueryPoolLocked(pool: *QueryPoolObj, owner: DeviceIdentity) bool {
+    if (!liveQueryPoolObject(pool) or pool.retire_pending or !pool.owner.eql(owner.handle) or pool.owner.generation != owner.generation) return false;
+    _ = pool.active_users.fetchAdd(1, .acq_rel);
+    return true;
+}
+fn pinQueryPoolCommandLocked(command: Command, owner: DeviceIdentity, pinned: *[max_child_objects]*QueryPoolObj, pinned_count: *usize) bool {
+    const pool = switch (command) {
+        .query_reset => |op| op.pool,
+        .query_begin => |op| op.pool,
+        .query_end => |op| op.pool,
+        .query_timestamp => |op| op.pool,
+        .query_copy => |op| op.pool,
+        else => return true,
+    };
+    for (pinned[0..pinned_count.*]) |existing| if (existing == pool) return true;
+    if (pinned_count.* == pinned.len or !pinQueryPoolLocked(pool, owner)) return false;
+    pinned[pinned_count.*] = pool;
+    pinned_count.* += 1;
+    return true;
+}
+fn pinQueryPoolsInCommandBufferLocked(command_buffer: *CommandBufferObj, owner: DeviceIdentity, pinned: *[max_child_objects]*QueryPoolObj, pinned_count: *usize) bool {
+    for (command_buffer.impl.commands[0..command_buffer.impl.count]) |command| if (!pinQueryPoolCommandLocked(command, owner, pinned, pinned_count)) return false;
+    for (command_buffer.impl.secondaries[0..command_buffer.impl.secondary_count]) |secondary| {
+        if (!pinQueryPoolsInCommandBufferLocked(secondary, owner, pinned, pinned_count)) return false;
+    }
+    return true;
 }
 fn liveBufferObject(object: *BufferObj) bool {
     return (stateForObject(BufferObj, object, &buffer_objects, &buffer_state) orelse return false).* == .live;
@@ -4990,7 +5046,7 @@ fn createQueryPool(device: ?Device, info: ?*const QueryPoolCreateInfo, alloc: ?*
         return .error_initialization_failed;
     }
     for (&query_pool_objects, &query_pool_state) |*pool, *state| if (state.* == .never) {
-        pool.* = .{ .owner = DeviceIdentity.capture(d), .query_type = ci.query_type, .slots = slots };
+        pool.* = .{ .owner = DeviceIdentity.capture(d), .query_type = ci.query_type, .slots = slots, .active_users = .init(0), .retire_pending = false };
         state.* = .live;
         out.* = @intFromPtr(pool);
         return .success;
@@ -5005,9 +5061,9 @@ fn destroyQueryPool(device: ?Device, handle: usize, alloc: ?*const Alloc) callco
     const d = device orelse return;
     const pool = validQueryPoolLocked(handle) orelse return;
     if (!validDeviceLocked(d) or !pool.owner.eql(d)) return;
-    allocator.free(pool.slots);
-    pool.slots = &.{};
+    pool.retire_pending = true;
     stateForObject(QueryPoolObj, pool, &query_pool_objects, &query_pool_state).?.* = .tombstone;
+    retireQueryPoolSlotsLocked(pool);
 }
 fn writeQueryScalar(destination: []u8, value: u64, use_64: bool) void {
     if (use_64) {
@@ -5038,9 +5094,10 @@ fn getQueryPoolResults(device: ?Device, handle: usize, first: u32, count: u32, d
     var mutex_held = true;
     defer if (mutex_held) mutex.unlock();
     const pool = validQueryPoolLocked(handle) orelse return .error_initialization_failed;
-    if (!validDeviceLocked(d) or !pool.owner.eql(d) or first >= pool.slots.len or count > pool.slots.len - first or (pool.query_type == 2 and flags & 8 != 0)) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or !pool.owner.eql(d) or first >= pool.slots.len or count > pool.slots.len - first or (pool.query_type == 2 and flags & 8 != 0) or !pinQueryPoolLocked(pool, DeviceIdentity.capture(d))) return .error_initialization_failed;
     mutex.unlock();
     mutex_held = false;
+    defer releaseQueryPoolUser(pool);
     if (count == 0) return .success;
     const bytes: [*]u8 = @ptrCast(data.?);
     var unavailable = false;
@@ -14390,6 +14447,8 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
     var semaphore_states = [_]bool{false} ** max_child_objects;
     var timeline_states = [_]u64{0} ** max_child_objects;
     var submitted_command_buffers = [_]bool{false} ** max_child_objects;
+    var pinned_query_pools: [max_child_objects]*QueryPoolObj = undefined;
+    var pinned_query_pool_count: usize = 0;
     for (&semaphore_objects, semaphore_state, 0..) |*semaphore, state, index| {
         if (state == .live) {
             semaphore_states[index] = semaphore.signaled.load(.acquire);
@@ -14478,8 +14537,26 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
             }
         }
     }
+    // Recorded query commands retain pool pointers while the synchronous
+    // executor runs without the registry mutex.  Pin every pool referenced by
+    // primary and secondary command buffers before dropping the lock so a
+    // concurrent vkDestroyQueryPool/vkDestroyDevice cannot free its slots.
+    const queue_owner = DeviceIdentity.capture(q.owner);
+    for (list[0..count]) |submit| if (submit.command_buffer_count != 0) {
+        for (submit.command_buffers.?[0..submit.command_buffer_count]) |cb| {
+            if (!pinQueryPoolsInCommandBufferLocked(cb, queue_owner, &pinned_query_pools, &pinned_query_pool_count)) {
+                for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
+                return .error_initialization_failed;
+            }
+        }
+    };
     mutex.unlock();
     mutex_held = false;
+    defer {
+        lock();
+        defer mutex.unlock();
+        for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
+    }
     var query_context = QueryExecutionContext{};
     for (list[0..count]) |submit| {
         const timeline_info = submitPNextTimeline(submit.p_next);
@@ -23725,7 +23802,25 @@ test "query pools expose exact availability timestamps copies and lifecycle" {
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdWriteTimestamp(commands[0], 1, timestamp_pool, 0);
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    // Retire a pool while a submission-style reader pin is active.  Destruction
+    // tombstones the handle but keeps slot storage alive until the final pin
+    // release; both operations are allocation-free on the warm path.
+    const retired_pool = validQueryPoolLocked(timestamp_pool).?;
+    lock();
+    try std.testing.expect(pinQueryPoolLocked(retired_pool, DeviceIdentity.capture(ctx.device)));
+    try std.testing.expectEqual(@as(u32, 1), retired_pool.active_users.load(.acquire));
+    mutex.unlock();
+    test_allocations_before_failure = 0;
     destroyQueryPool(ctx.device, timestamp_pool, null);
+    test_allocations_before_failure = null;
+    try std.testing.expect(retired_pool.retire_pending);
+    try std.testing.expect(retired_pool.slots.len != 0);
+    lock();
+    releaseQueryPoolUserLocked(retired_pool);
+    try std.testing.expectEqual(@as(u32, 0), retired_pool.active_users.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), retired_pool.slots.len);
+    try std.testing.expect(!retired_pool.retire_pending);
+    mutex.unlock();
     try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     var bad_info = occlusion_info;
     bad_info.query_type = 1;

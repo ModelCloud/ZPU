@@ -840,6 +840,17 @@ Malformed image dimensions therefore fail atomically instead of reaching the
 presentation transport with an inconsistent byte envelope; the regression
 repeats that rejection 4096 times without allocations before presenting the
 restored image successfully.
+
+### Latest audit slice — query-pool retirement pins
+
+Query-pool slot storage is now retired rather than freed immediately when a
+pool is destroyed. Host `vkGetQueryPoolResults` calls and queue submissions
+(including secondary command buffers) pin every referenced pool while they
+execute without the registry mutex; the final pin release performs the deferred
+free. Destruction and device teardown remain tombstone/failure-atomic, and the
+warm-path regression verifies a pinned destroy/release sequence without
+allocations.
+
 - [ ] **A8 — secondary command buffers:** inheritance, execution, reset, and
   lifetime rules. Traditional render-pass inheritance now matches the active
   subpass for multi-subpass execution, and the bounded dynamic rendering
