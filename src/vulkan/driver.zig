@@ -1162,7 +1162,31 @@ const PipelineCacheObj = struct { owner: DeviceIdentity, data: Canonical = .{} }
 const descriptor_type_count = 11;
 const DescriptorCounts = [descriptor_type_count]u32;
 const DescriptorPoolObj = struct { owner: DeviceIdentity, flags: u32, max_sets: u32, allocated_sets: u32, capacity: DescriptorCounts, used: DescriptorCounts };
-const DescriptorSetObj = struct { owner: DeviceIdentity = undefined, pool: *DescriptorPoolObj = undefined, counts: DescriptorCounts = [_]u32{0} ** descriptor_type_count, layout: Canonical = .{}, binding_types: [2]i32 = .{ -1, -1 }, uniform: ?*BufferObj = null, uniform_offset: u64 = 0, uniform_range: u64 = 0, uniform_dynamic: bool = false, storage: ?*BufferObj = null, storage_binding: u32 = 0, storage_offset: u64 = 0, storage_range: u64 = 0, texture: ?*ImageObj = null, sampler: ?*SamplerObj = null, synthetic: bool = false };
+const DescriptorSetObj = struct {
+    owner: DeviceIdentity = undefined,
+    pool: *DescriptorPoolObj = undefined,
+    counts: DescriptorCounts = [_]u32{0} ** descriptor_type_count,
+    layout: Canonical = .{},
+    binding_types: [2]i32 = .{ -1, -1 },
+    uniform: ?*BufferObj = null,
+    uniform_offset: u64 = 0,
+    uniform_range: u64 = 0,
+    uniform_dynamic: bool = false,
+    storage: ?*BufferObj = null,
+    storage_binding: u32 = 0,
+    storage_offset: u64 = 0,
+    storage_range: u64 = 0,
+    texture: ?*ImageObj = null,
+    sampler: ?*SamplerObj = null,
+    // A command-local snapshot keeps the source descriptor-set pointer so
+    // queue submission can defer its canonical storage through destruction.
+    source_set: ?*DescriptorSetObj = null,
+    // Push-descriptor snapshots borrow VkPipelineLayout::set0 bytes.
+    layout_source: ?*PipelineLayoutObj = null,
+    synthetic: bool = false,
+    active_users: std.atomic.Value(u32) = .init(0),
+    retire_pending: bool = false,
+};
 const DescriptorUpdateTemplateObj = struct { owner: DeviceIdentity, layout: *DescriptorSetLayoutObj, template_type: i32 = 0, pipeline_bind_point: i32 = 0, pipeline_layout: usize = 0, entry_count: u32, entries: [32]DescriptorUpdateTemplateEntry };
 const DeviceIdentity = struct {
     handle: Device,
@@ -1219,7 +1243,18 @@ const VertexBindingState = struct {
     stride_set: u16 = 0,
     set: u16 = 0,
 };
-const PipelineLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical, set0: Canonical, set0_layout: *DescriptorSetLayoutObj, push_descriptor: bool, push_ranges: [core_shader_stage_bits.len]PushConstantRange };
+const PipelineLayoutObj = struct {
+    owner: DeviceIdentity,
+    canonical: Canonical,
+    set0: Canonical,
+    set0_layout: *DescriptorSetLayoutObj,
+    push_descriptor: bool,
+    push_ranges: [core_shader_stage_bits.len]PushConstantRange,
+    // Dispatch commands and push-descriptor snapshots retain the canonical
+    // layout bytes after queue submission drops the registry mutex.
+    active_users: std.atomic.Value(u32) = .init(0),
+    retire_pending: bool = false,
+};
 const AttachmentRole = enum(u8) { color, depth };
 const FramebufferAttachmentRequirement = struct { format: i32 = 0, samples: u32 = 0, role: AttachmentRole = .color };
 const RenderPassObj = struct {
@@ -3836,6 +3871,7 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
             child_state.* = .tombstone;
         };
         for (&descriptor_set_objects, &descriptor_set_state) |*set, *child_state| if (child_state.* == .live and set.owner.eql(d)) {
+            set.retire_pending = true;
             child_state.* = .tombstone;
         };
         for (&shader_module_objects, &shader_module_state) |*shader, *child_state| if (child_state.* == .live and shader.owner.eql(d)) {
@@ -3846,7 +3882,10 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
             if (child_state.* == .live and object.owner.eql(d)) child_state.* = .tombstone;
         }
         for (&pipeline_layout_objects, &pipeline_layout_state) |*object, *child_state| {
-            if (child_state.* == .live and object.owner.eql(d)) child_state.* = .tombstone;
+            if (child_state.* == .live and object.owner.eql(d)) {
+                object.retire_pending = true;
+                child_state.* = .tombstone;
+            }
         }
         for (&render_pass_objects, &render_pass_state) |*object, *child_state| {
             if (child_state.* == .live and object.owner.eql(d)) child_state.* = .tombstone;
@@ -3871,15 +3910,18 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
         };
         for (&framebuffer_objects, framebuffer_state) |*object, child_state| if (child_state != .never and object.owner == d) object.render_compatibility.deinit();
         for (&descriptor_set_layout_objects, descriptor_set_layout_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) object.canonical.deinit();
-        for (&descriptor_set_objects, descriptor_set_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) object.layout.deinit();
+        for (&descriptor_set_objects, descriptor_set_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) {
+            object.retire_pending = true;
+            retireDescriptorSetLocked(object);
+        };
         for (&pipeline_cache_objects, pipeline_cache_state) |*cache, child_state| if (child_state != .never and cache.owner.eql(d)) cache.data.deinit();
         for (&query_pool_objects, query_pool_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) {
             object.retire_pending = true;
             retireQueryPoolSlotsLocked(object);
         };
         for (&pipeline_layout_objects, pipeline_layout_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) {
-            object.canonical.deinit();
-            object.set0.deinit();
+            object.retire_pending = true;
+            retirePipelineLayoutLocked(object);
         };
         for (&render_pass_objects, render_pass_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) {
             object.canonical.deinit();
@@ -4289,6 +4331,75 @@ const PinnedPipelines = struct {
     compute_count: usize = 0,
 };
 
+const PinnedPipelineLayouts = struct {
+    layouts: [max_resource_pins]*PipelineLayoutObj = undefined,
+    layout_count: usize = 0,
+};
+
+const PinnedDescriptorSets = struct {
+    sets: [max_resource_pins]*DescriptorSetObj = undefined,
+    set_count: usize = 0,
+};
+
+fn retirePipelineLayoutLocked(layout: *PipelineLayoutObj) void {
+    if (!layout.retire_pending or layout.active_users.load(.acquire) != 0) return;
+    layout.canonical.deinit();
+    layout.set0.deinit();
+    layout.retire_pending = false;
+}
+
+fn releasePipelineLayoutUserLocked(layout: *PipelineLayoutObj) void {
+    const previous = layout.active_users.fetchSub(1, .acq_rel);
+    if (previous == 1) retirePipelineLayoutLocked(layout);
+}
+
+fn pinPipelineLayoutLocked(layout: *PipelineLayoutObj, owner: Device, pinned: *PinnedPipelineLayouts) bool {
+    if ((stateForObject(PipelineLayoutObj, layout, &pipeline_layout_objects, &pipeline_layout_state) orelse return false).* != .live or layout.retire_pending or !layout.owner.eql(owner)) return false;
+    for (pinned.layouts[0..pinned.layout_count]) |existing| if (existing == layout) return true;
+    if (pinned.layout_count == pinned.layouts.len) return false;
+    _ = layout.active_users.fetchAdd(1, .acq_rel);
+    pinned.layouts[pinned.layout_count] = layout;
+    pinned.layout_count += 1;
+    return true;
+}
+
+fn releasePinnedPipelineLayoutsLocked(pinned: *PinnedPipelineLayouts) void {
+    for (pinned.layouts[0..pinned.layout_count]) |layout| releasePipelineLayoutUserLocked(layout);
+    pinned.layout_count = 0;
+}
+
+fn retireDescriptorSetLocked(set: *DescriptorSetObj) void {
+    if (!set.retire_pending or set.active_users.load(.acquire) != 0) return;
+    set.layout.deinit();
+    set.uniform = null;
+    set.storage = null;
+    set.texture = null;
+    set.sampler = null;
+    set.source_set = null;
+    set.layout_source = null;
+    set.retire_pending = false;
+}
+
+fn releaseDescriptorSetUserLocked(set: *DescriptorSetObj) void {
+    const previous = set.active_users.fetchSub(1, .acq_rel);
+    if (previous == 1) retireDescriptorSetLocked(set);
+}
+
+fn pinDescriptorSetLocked(set: *DescriptorSetObj, owner: Device, pinned: *PinnedDescriptorSets) bool {
+    if ((stateForObject(DescriptorSetObj, set, &descriptor_set_objects, &descriptor_set_state) orelse return false).* != .live or set.retire_pending or !set.owner.eql(owner)) return false;
+    for (pinned.sets[0..pinned.set_count]) |existing| if (existing == set) return true;
+    if (pinned.set_count == pinned.sets.len) return false;
+    _ = set.active_users.fetchAdd(1, .acq_rel);
+    pinned.sets[pinned.set_count] = set;
+    pinned.set_count += 1;
+    return true;
+}
+
+fn releasePinnedDescriptorSetsLocked(pinned: *PinnedDescriptorSets) void {
+    for (pinned.sets[0..pinned.set_count]) |set| releaseDescriptorSetUserLocked(set);
+    pinned.set_count = 0;
+}
+
 fn retireGraphicsPipelineLocked(pipeline: *GraphicsPipelineObj) void {
     if (!pipeline.retire_pending or pipeline.active_users.load(.acquire) != 0) return;
     pipeline.execution_abi.deinit();
@@ -4432,9 +4543,11 @@ fn pinFramebufferImagesLocked(framebuffer: ?*FramebufferObj, owner: Device, pinn
     return true;
 }
 
-fn pinDescriptorResourcesLocked(descriptors: ?*DescriptorSetObj, owner: Device, pinned: *PinnedResources) bool {
+fn pinDescriptorResourcesLocked(descriptors: ?*DescriptorSetObj, owner: Device, pinned: *PinnedResources, pinned_sets: *PinnedDescriptorSets, pinned_layouts: *PinnedPipelineLayouts) bool {
     const set = descriptors orelse return true;
     if (!liveDescriptorObject(set) or !set.owner.eql(owner)) return false;
+    if (set.source_set) |source| if (!pinDescriptorSetLocked(source, owner, pinned_sets)) return false;
+    if (set.layout_source) |layout| if (!pinPipelineLayoutLocked(layout, owner, pinned_layouts)) return false;
     if (set.uniform) |buffer| if (!pinBufferMemoryLocked(buffer, owner, pinned)) return false;
     if (set.storage) |buffer| if (!pinBufferMemoryLocked(buffer, owner, pinned)) return false;
     if (set.texture) |image| if (!pinImageLocked(image, owner, pinned)) return false;
@@ -4446,7 +4559,7 @@ fn pinVertexBindingsLocked(bindings: VertexBindingState, owner: Device, pinned: 
     return true;
 }
 
-fn pinCommandResourcesLocked(command: Command, owner: Device, pinned: *PinnedResources) bool {
+fn pinCommandResourcesLocked(command: Command, owner: Device, pinned: *PinnedResources, pinned_sets: *PinnedDescriptorSets, pinned_layouts: *PinnedPipelineLayouts) bool {
     switch (command) {
         .fill => |op| return pinBufferMemoryLocked(op.dst, owner, pinned),
         .update_buffer => |op| return pinBufferMemoryLocked(op.dst, owner, pinned),
@@ -4459,20 +4572,20 @@ fn pinCommandResourcesLocked(command: Command, owner: Device, pinned: *PinnedRes
         .clear_attachments_deferred, .next_subpass => return true,
         .blit_image => |op| return pinImageLocked(op.src, owner, pinned) and pinImageLocked(op.dst, owner, pinned),
         .resolve_image => |op| return pinImageLocked(op.src, owner, pinned) and pinImageLocked(op.dst, owner, pinned),
-        .dispatch => |op| return pinDescriptorResourcesLocked(op.descriptors, owner, pinned),
-        .dispatch_indirect => |op| return pinBufferMemoryLocked(op.buffer, owner, pinned) and pinDescriptorResourcesLocked(op.descriptors, owner, pinned),
+        .dispatch => |op| return (if (op.layout) |layout| pinPipelineLayoutLocked(layout, owner, pinned_layouts) else true) and pinDescriptorResourcesLocked(op.descriptors, owner, pinned, pinned_sets, pinned_layouts),
+        .dispatch_indirect => |op| return pinBufferMemoryLocked(op.buffer, owner, pinned) and (if (op.layout) |layout| pinPipelineLayoutLocked(layout, owner, pinned_layouts) else true) and pinDescriptorResourcesLocked(op.descriptors, owner, pinned, pinned_sets, pinned_layouts),
         .cube_draw => |op| {
             if (!pinFramebufferImagesLocked(op.framebuffer, owner, pinned)) return false;
             if (op.color_image) |image| if (!pinImageLocked(image, owner, pinned)) return false;
             if (op.depth_image) |image| if (!pinImageLocked(image, owner, pinned)) return false;
-            if (!pinDescriptorResourcesLocked(op.descriptors, owner, pinned) or !pinVertexBindingsLocked(op.vertex_bindings, owner, pinned)) return false;
+            if (!pinDescriptorResourcesLocked(op.descriptors, owner, pinned, pinned_sets, pinned_layouts) or !pinVertexBindingsLocked(op.vertex_bindings, owner, pinned)) return false;
             if (op.indexed) |indexed| if (!pinBufferMemoryLocked(indexed.buffer, owner, pinned)) return false;
         },
         .indirect_draw => |op| {
             if (!pinFramebufferImagesLocked(op.framebuffer, owner, pinned)) return false;
             if (op.color_image) |image| if (!pinImageLocked(image, owner, pinned)) return false;
             if (op.depth_image) |image| if (!pinImageLocked(image, owner, pinned)) return false;
-            if (!pinDescriptorResourcesLocked(op.descriptors, owner, pinned) or !pinVertexBindingsLocked(op.vertex_bindings, owner, pinned)) return false;
+            if (!pinDescriptorResourcesLocked(op.descriptors, owner, pinned, pinned_sets, pinned_layouts) or !pinVertexBindingsLocked(op.vertex_bindings, owner, pinned)) return false;
             if (!pinBufferMemoryLocked(op.indirect_buffer, owner, pinned)) return false;
             if (op.index_buffer) |buffer| if (!pinBufferMemoryLocked(buffer, owner, pinned)) return false;
             if (op.count_source) |count| if (!pinBufferMemoryLocked(count.buffer, owner, pinned)) return false;
@@ -4487,8 +4600,8 @@ fn pinCommandResourcesLocked(command: Command, owner: Device, pinned: *PinnedRes
     return true;
 }
 
-fn pinCommandResourcesInBufferLocked(command_buffer: *CommandBufferObj, owner: Device, pinned: *PinnedResources) bool {
-    for (command_buffer.impl.commands[0..command_buffer.impl.count]) |command| if (!pinCommandResourcesLocked(command, owner, pinned)) return false;
+fn pinCommandResourcesInBufferLocked(command_buffer: *CommandBufferObj, owner: Device, pinned: *PinnedResources, pinned_sets: *PinnedDescriptorSets, pinned_layouts: *PinnedPipelineLayouts) bool {
+    for (command_buffer.impl.commands[0..command_buffer.impl.count]) |command| if (!pinCommandResourcesLocked(command, owner, pinned, pinned_sets, pinned_layouts)) return false;
     return true;
 }
 
@@ -9850,9 +9963,9 @@ fn destroyPipelineLayout(device: ?Device, handle: usize, alloc: ?*const Alloc) c
     const d = device orelse return;
     const object = validPipelineLayoutLocked(handle) orelse return;
     if (validDeviceLocked(d) and object.owner.eql(d)) {
-        object.canonical.deinit();
-        object.set0.deinit();
+        object.retire_pending = true;
         stateForObject(PipelineLayoutObj, object, &pipeline_layout_objects, &pipeline_layout_state).?.* = .tombstone;
+        retirePipelineLayoutLocked(object);
     }
 }
 
@@ -11837,11 +11950,9 @@ fn releaseDescriptorSetLocked(set: *DescriptorSetObj) void {
     const pool = set.pool;
     pool.allocated_sets -= 1;
     for (&pool.used, set.counts) |*used, count| used.* -= count;
-    set.layout.deinit();
-    set.counts = [_]u32{0} ** descriptor_type_count;
-    set.sampler = null;
-    set.texture = null;
+    set.retire_pending = true;
     stateForObject(DescriptorSetObj, set, &descriptor_set_objects, &descriptor_set_state).?.* = .tombstone;
+    retireDescriptorSetLocked(set);
 }
 fn releaseDescriptorPoolSetsLocked(pool: *DescriptorPoolObj) void {
     for (&descriptor_set_objects, descriptor_set_state) |*set, state| if (state == .live and set.pool == pool) releaseDescriptorSetLocked(set);
@@ -12872,6 +12983,7 @@ fn applyPushDescriptorWritesLocked(command_buffer: *CommandBufferObj, layout: *P
     var candidate = if (command_buffer.impl.push_descriptor_active and command_buffer.impl.push_descriptor.layout.eql(&layout.set0)) command_buffer.impl.push_descriptor else DescriptorSetObj{};
     candidate.owner = DeviceIdentity.capture(command_buffer.impl.owner);
     candidate.layout = .{ .bytes = layout.set0.bytes, .digest = layout.set0.digest };
+    candidate.layout_source = layout;
     candidate.counts = layout.set0_layout.counts;
     candidate.binding_types = layout.set0_layout.binding_types;
     candidate.synthetic = true;
@@ -13756,6 +13868,10 @@ fn snapshotDescriptorSet(command_buffer: *CommandBufferObj, descriptors: *const 
     if (command_buffer.impl.count >= command_buffer.impl.commands.len) return null;
     const snapshot = &command_buffer.impl.descriptor_snapshots[command_buffer.impl.count];
     snapshot.* = descriptors.*;
+    snapshot.active_users = .init(0);
+    snapshot.retire_pending = false;
+    snapshot.source_set = null;
+    if (!descriptors.synthetic) snapshot.source_set = @constCast(descriptors);
     if (descriptors.uniform_dynamic) {
         if (descriptors.uniform_offset > std.math.maxInt(u64) - command_buffer.impl.dynamic_uniform_offset) return null;
         snapshot.uniform_offset = descriptors.uniform_offset + command_buffer.impl.dynamic_uniform_offset;
@@ -14762,6 +14878,8 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
     var pinned_command_buffer_count: usize = 0;
     var pinned_resources = PinnedResources{};
     var pinned_pipelines = PinnedPipelines{};
+    var pinned_descriptor_sets = PinnedDescriptorSets{};
+    var pinned_pipeline_layouts = PinnedPipelineLayouts{};
     for (&semaphore_objects, semaphore_state, 0..) |*semaphore, state, index| {
         if (state == .live) {
             semaphore_states[index] = semaphore.signaled.load(.acquire);
@@ -14862,6 +14980,8 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                 for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
                 releasePinnedResourcesLocked(&pinned_resources);
                 releasePinnedPipelinesLocked(&pinned_pipelines);
+                releasePinnedDescriptorSetsLocked(&pinned_descriptor_sets);
+                releasePinnedPipelineLayoutsLocked(&pinned_pipeline_layouts);
                 return .error_initialization_failed;
             }
             for (cb.impl.secondaries[0..cb.impl.secondary_count]) |secondary| if (!pinCommandBufferForSubmissionLocked(secondary, q.owner, &pinned_command_buffers, &pinned_command_buffer_count)) {
@@ -14869,6 +14989,8 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                 for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
                 releasePinnedResourcesLocked(&pinned_resources);
                 releasePinnedPipelinesLocked(&pinned_pipelines);
+                releasePinnedDescriptorSetsLocked(&pinned_descriptor_sets);
+                releasePinnedPipelineLayoutsLocked(&pinned_pipeline_layouts);
                 return .error_initialization_failed;
             };
             if (!pinQueryPoolsInCommandBufferLocked(cb, queue_owner, &pinned_query_pools, &pinned_query_pool_count)) {
@@ -14876,13 +14998,17 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                 for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
                 releasePinnedResourcesLocked(&pinned_resources);
                 releasePinnedPipelinesLocked(&pinned_pipelines);
+                releasePinnedDescriptorSetsLocked(&pinned_descriptor_sets);
+                releasePinnedPipelineLayoutsLocked(&pinned_pipeline_layouts);
                 return .error_initialization_failed;
             }
-            if (!pinCommandResourcesInBufferLocked(cb, q.owner, &pinned_resources)) {
+            if (!pinCommandResourcesInBufferLocked(cb, q.owner, &pinned_resources, &pinned_descriptor_sets, &pinned_pipeline_layouts)) {
                 for (pinned_command_buffers[0..pinned_command_buffer_count]) |pinned| releaseCommandBufferUserLocked(pinned);
                 for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
                 releasePinnedResourcesLocked(&pinned_resources);
                 releasePinnedPipelinesLocked(&pinned_pipelines);
+                releasePinnedDescriptorSetsLocked(&pinned_descriptor_sets);
+                releasePinnedPipelineLayoutsLocked(&pinned_pipeline_layouts);
                 return .error_initialization_failed;
             }
             if (!pinCommandPipelinesInBufferLocked(cb, q.owner, &pinned_pipelines)) {
@@ -14890,6 +15016,8 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                 for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
                 releasePinnedResourcesLocked(&pinned_resources);
                 releasePinnedPipelinesLocked(&pinned_pipelines);
+                releasePinnedDescriptorSetsLocked(&pinned_descriptor_sets);
+                releasePinnedPipelineLayoutsLocked(&pinned_pipeline_layouts);
                 return .error_initialization_failed;
             }
         }
@@ -14906,6 +15034,8 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
         for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
         releasePinnedResourcesLocked(&pinned_resources);
         releasePinnedPipelinesLocked(&pinned_pipelines);
+        releasePinnedDescriptorSetsLocked(&pinned_descriptor_sets);
+        releasePinnedPipelineLayoutsLocked(&pinned_pipeline_layouts);
     }
     var query_context = QueryExecutionContext{};
     for (list[0..count]) |submit| {
@@ -24764,6 +24894,34 @@ fn computeStorageProfileTest() !void {
     const pipeline_released = pipeline_object.executor == null;
     mutex.unlock();
     try std.testing.expect(pipeline_released);
+
+    // Descriptor snapshots and dispatch layouts borrow canonical bytes from
+    // their registry objects.  Destruction must tombstone handles immediately
+    // while deferring those bytes until a submission pin drains.
+    var descriptor_pins = PinnedDescriptorSets{};
+    var layout_pins = PinnedPipelineLayouts{};
+    lock();
+    const descriptor_object = validDescriptorSetLocked(descriptor_set).?;
+    const layout_object = validPipelineLayoutLocked(pipeline_layout).?;
+    try std.testing.expect(pinDescriptorSetLocked(descriptor_object, ctx.device, &descriptor_pins));
+    try std.testing.expect(pinPipelineLayoutLocked(layout_object, ctx.device, &layout_pins));
+    const descriptor_bytes = descriptor_object.layout.bytes.len;
+    const layout_bytes = layout_object.set0.bytes.len;
+    mutex.unlock();
+    try std.testing.expect(descriptor_bytes != 0);
+    try std.testing.expect(layout_bytes != 0);
+    try std.testing.expectEqual(Result.success, freeDescriptorSets(ctx.device, descriptor_pool, 1, @ptrCast(&descriptor_set)));
+    destroyPipelineLayout(ctx.device, pipeline_layout, null);
+    try std.testing.expect(descriptor_object.layout.bytes.len != 0);
+    try std.testing.expect(layout_object.set0.bytes.len != 0);
+    lock();
+    releasePinnedDescriptorSetsLocked(&descriptor_pins);
+    releasePinnedPipelineLayoutsLocked(&layout_pins);
+    const descriptor_retired = descriptor_object.layout.bytes.len == 0;
+    const layout_retired = layout_object.set0.bytes.len == 0;
+    mutex.unlock();
+    try std.testing.expect(descriptor_retired);
+    try std.testing.expect(layout_retired);
 
     freeCommandBuffers(ctx.device, command_pool, 1, &command);
     destroyCommandPool(ctx.device, command_pool, null);

@@ -886,6 +886,17 @@ last execution pin is released.  The compute-profile regression covers the
 destroy-while-pinned path and verifies that the executor remains usable until
 release.
 
+Descriptor snapshots and compute dispatch layouts now follow the same rule.
+Command-local descriptor snapshots retain their source descriptor-set identity,
+while push-descriptor snapshots retain their pipeline-layout identity.  Queue
+submission pins those objects before execution; `vkFreeDescriptorSets`, pool or
+device teardown, and `vkDestroyPipelineLayout` tombstone handles immediately
+but defer canonical layout-byte teardown until the final pin drains.  The
+compute-profile lifetime regression destroys a pinned descriptor set and
+pipeline layout, verifies both canonical payloads remain available during the
+pin, and confirms they retire after release without adding work to the warm
+recording path.
+
 - [ ] **A8 — secondary command buffers:** inheritance, execution, reset, and
   lifetime rules. Traditional render-pass inheritance now matches the active
   subpass for multi-subpass execution, and the bounded dynamic rendering
