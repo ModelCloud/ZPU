@@ -831,7 +831,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const set = nodes[try id(nodes, w[2])];
                 if (set.kind != .ext_inst_import or set.a != 450) return error.Unsupported;
                 if (w[3] < 1 or w[3] > 24 and w[3] != 25 and w[3] != 26 and w[3] != 27 and w[3] != 28 and w[3] != 29 and w[3] != 30 and w[3] != 31 and w[3] != 32 and w[3] != 33 and w[3] != 34 and w[3] != 35 and w[3] != 36 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50 and w[3] != 51 and w[3] != 53 and w[3] != 54 and w[3] != 55 and w[3] != 56 and w[3] != 57 and w[3] != 58 and w[3] != 59 and w[3] != 60 and w[3] != 61 and w[3] != 62 and w[3] != 63 and w[3] != 65 and w[3] != 66 and w[3] != 67 and w[3] != 68 and w[3] != 69 and w[3] != 70 and w[3] != 71 and w[3] != 72 and w[3] != 73 and w[3] != 74 and w[3] != 75 and w[3] != 76 and w[3] != 77 and w[3] != 79 and w[3] != 80 and w[3] != 81) return error.Unsupported;
-                if ((w[3] >= 1 and w[3] <= 24 or w[3] >= 27 and w[3] <= 36 or w[3] >= 54 and w[3] <= 61 or w[3] == 62 or w[3] == 63 or w[3] == 65 or w[3] == 68 or w[3] >= 72 and w[3] <= 75) and w.len != 5) return error.Malformed;
+                if ((w[3] >= 1 and w[3] <= 24 or w[3] >= 27 and w[3] <= 34 or w[3] == 36 or w[3] >= 54 and w[3] <= 61 or w[3] == 62 or w[3] == 63 or w[3] == 65 or w[3] == 68 or w[3] >= 72 and w[3] <= 75) and w.len != 5) return error.Malformed;
                 if ((w[3] == 25 or w[3] == 26 or w[3] == 35 or w[3] == 51 or w[3] == 53 or w[3] == 76 or w[3] == 77) and w.len != 6) return error.Malformed;
                 if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48 or w[3] == 66 or w[3] == 67 or w[3] == 70 or w[3] == 79 or w[3] == 80) and w.len != 6) return error.Malformed;
                 if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50 or w[3] == 69 or w[3] == 71 or w[3] == 81) and w.len != 7) return error.Malformed;
@@ -977,7 +977,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 if (w.len < 5 or w.len > 7) return error.Malformed;
                 const set = nodes[try id(nodes, w[2])];
                 if (set.kind != .ext_inst_import or set.a != 450 or (w[3] < 1 or w[3] > 24 and w[3] != 25 and w[3] != 26 and w[3] != 27 and w[3] != 28 and w[3] != 29 and w[3] != 30 and w[3] != 31 and w[3] != 32 and w[3] != 33 and w[3] != 34 and w[3] != 35 and w[3] != 36 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50 and w[3] != 51 and w[3] != 53 and w[3] != 54 and w[3] != 55 and w[3] != 56 and w[3] != 57 and w[3] != 58 and w[3] != 59 and w[3] != 60 and w[3] != 61 and w[3] != 62 and w[3] != 63 and w[3] != 65 and w[3] != 66 and w[3] != 67 and w[3] != 68 and w[3] != 69 and w[3] != 70 and w[3] != 71 and w[3] != 72 and w[3] != 73 and w[3] != 74 and w[3] != 75 and w[3] != 76 and w[3] != 77 and w[3] != 79 and w[3] != 80 and w[3] != 81)) return error.Unsupported;
-                if ((w[3] >= 1 and w[3] <= 24 or w[3] >= 27 and w[3] <= 36 or w[3] >= 54 and w[3] <= 61 or w[3] == 62 or w[3] == 63 or w[3] == 65 or w[3] == 68 or w[3] >= 72 and w[3] <= 75) and w.len != 5) return error.Malformed;
+                if ((w[3] >= 1 and w[3] <= 24 or w[3] >= 27 and w[3] <= 34 or w[3] == 36 or w[3] >= 54 and w[3] <= 61 or w[3] == 62 or w[3] == 63 or w[3] == 65 or w[3] == 68 or w[3] >= 72 and w[3] <= 75) and w.len != 5) return error.Malformed;
                 if ((w[3] == 25 or w[3] == 26 or w[3] == 35 or w[3] == 51 or w[3] == 53 or w[3] == 76 or w[3] == 77) and w.len != 6) return error.Malformed;
                 if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48 or w[3] == 66 or w[3] == 67 or w[3] == 70 or w[3] == 79 or w[3] == 80) and w.len != 6) return error.Malformed;
                 if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50 or w[3] == 69 or w[3] == 71 or w[3] == 81) and w.len != 7) return error.Malformed;
@@ -2970,6 +2970,32 @@ test "GLSL Modf and Frexp admissions validate bounded output pointers" {
     const members = [_]u32{ 3, 3 };
     nodes[5] = .{ .kind = .structure, .words = &members };
     try std.testing.expectEqual(ir.Type{ .scalar = .f32, .columns = 2 }, try resultShape(&nodes, 5));
+}
+
+test "compute profile lowers bounded Modf pointer result" {
+    const words = [_]u32{
+        0x0723_0203,     0x0001_0000,    0,               12,             0,
+        (2 << 16) | 17,  1,              (3 << 16) | 14,  0,              1,
+        (7 << 16) | 15,  5,              8,               0x6e69616d,     0,
+        4,               5,              (4 << 16) | 71,  4,              30,
+        0,               (4 << 16) | 71, 5,               30,             1,
+        (2 << 16) | 19,  1,              (3 << 16) | 22,  2,              32,
+        (4 << 16) | 32,  3,              3,               2,              (4 << 16) | 59,
+        3,               4,              3,               (4 << 16) | 59, 3,
+        5,               3,              (3 << 16) | 33,  6,              1,
+        (4 << 16) | 43,  2,              7,               0x4050_0000,    (6 << 16) | 11,
+        9,               0x4c534c47,     0x6474732e,      0x3035342e,     0,
+        (5 << 16) | 54,  1,              8,               0,              6,
+        (2 << 16) | 248, 10,             (7 << 16) | 12,  2,              11,
+        9,               35,             7,               4,              (3 << 16) | 62,
+        5,               11,             (1 << 16) | 253, (1 << 16) | 56,
+    };
+    var program = try compile(std.testing.allocator, &words, .compute, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), program.instructions.len);
+    try std.testing.expectEqual(ir.Op.f_modf, program.instructions[1].op);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 0 }, program.instructions[1].operands);
+    try std.testing.expectEqual(ir.Op.output, program.instructions[2].op);
 }
 
 test "GLSL non-NaN min/max/clamp admissions preserve f32 shapes" {
