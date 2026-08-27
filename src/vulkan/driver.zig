@@ -307,12 +307,19 @@ pub const PhysicalDeviceVulkan14Features = extern struct {
 // array.  The profile advertises every optional feature as false, so this
 // keeps each promoted ABI exact while allowing callers to use either the
 // aggregate Vulkan11/12/13/14 struct or its original promoted extension form.
-pub const PhysicalDeviceProtectedMemoryFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDevice16BitStorageFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [4]u32 };
-pub const PhysicalDeviceVariablePointersFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [2]u32 };
-pub const PhysicalDeviceSamplerYcbcrConversionFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceMultiviewFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [3]u32 };
-pub const PhysicalDeviceShaderDrawParametersFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceProtectedMemoryFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, protected_memory: u32 };
+pub const PhysicalDevice16BitStorageFeatures = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    storage_buffer16_bit_access: u32,
+    uniform_and_storage_buffer16_bit_access: u32,
+    storage_push_constant16: u32,
+    storage_input_output16: u32,
+};
+pub const PhysicalDeviceVariablePointersFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, variable_pointers_storage_buffer: u32, variable_pointers: u32 };
+pub const PhysicalDeviceSamplerYcbcrConversionFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, sampler_ycbcr_conversion: u32 };
+pub const PhysicalDeviceMultiviewFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, multiview: u32, multiview_geometry_shader: u32, multiview_tessellation_shader: u32 };
+pub const PhysicalDeviceShaderDrawParametersFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, shader_draw_parameters: u32 };
 pub const PhysicalDeviceVulkanMemoryModelFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [3]u32 };
 pub const PhysicalDeviceHostQueryResetFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
 pub const PhysicalDeviceTimelineSemaphoreFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
@@ -13985,13 +13992,13 @@ test "enumeration lifecycle and unsupported features" {
     feature2.features.values[0] = 1;
     try std.testing.expectEqual(Result.error_feature_not_present, createDevice(ps[0], &di, null, &device));
     feature2.features.values[0] = 0;
-    var device_feature = PhysicalDevice16BitStorageFeatures{ .s_type = 1000083000, .p_next = null, .values = [_]u32{0} ** 4 };
+    var device_feature = PhysicalDevice16BitStorageFeatures{ .s_type = 1000083000, .p_next = null, .storage_buffer16_bit_access = 0, .uniform_and_storage_buffer16_bit_access = 0, .storage_push_constant16 = 0, .storage_input_output16 = 0 };
     feature2.p_next = @ptrCast(&device_feature);
     try std.testing.expectEqual(Result.success, createDevice(ps[0], &di, null, &device));
     destroyDevice(device, null);
-    device_feature.values[0] = 1;
+    device_feature.storage_buffer16_bit_access = 1;
     try std.testing.expectEqual(Result.error_feature_not_present, createDevice(ps[0], &di, null, &device));
-    device_feature.values[0] = 0;
+    device_feature.storage_buffer16_bit_access = 0;
     feature2.p_next = null;
     const unsupported_device_chain = ChainHeader{ .s_type = 999, .p_next = null };
     di.p_next = @ptrCast(&unsupported_device_chain);
@@ -16993,7 +17000,19 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 80), @sizeOf(PhysicalDeviceVulkan13Features));
     try std.testing.expectEqual(@as(usize, 104), @sizeOf(PhysicalDeviceVulkan14Features));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceProtectedMemoryFeatures));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceProtectedMemoryFeatures, "protected_memory"));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(PhysicalDevice16BitStorageFeatures));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDevice16BitStorageFeatures, "storage_buffer16_bit_access"));
+    try std.testing.expectEqual(@as(usize, 28), @offsetOf(PhysicalDevice16BitStorageFeatures, "storage_input_output16"));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceVariablePointersFeatures));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVariablePointersFeatures, "variable_pointers_storage_buffer"));
+    try std.testing.expectEqual(@as(usize, 20), @offsetOf(PhysicalDeviceVariablePointersFeatures, "variable_pointers"));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(PhysicalDeviceMultiviewFeatures));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceMultiviewFeatures, "multiview"));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceSamplerYcbcrConversionFeatures));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceSamplerYcbcrConversionFeatures, "sampler_ycbcr_conversion"));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceShaderDrawParametersFeatures));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceShaderDrawParametersFeatures, "shader_draw_parameters"));
     try std.testing.expectEqual(@as(usize, 96), @sizeOf(PhysicalDeviceDescriptorIndexingFeatures));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceDescriptorIndexingFeatures, "shader_input_attachment_array_dynamic_indexing"));
     try std.testing.expectEqual(@as(usize, 92), @offsetOf(PhysicalDeviceDescriptorIndexingFeatures, "runtime_descriptor_array"));
@@ -17307,13 +17326,14 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     descriptor_features.s_type = 1000161001;
     descriptor_features.p_next = @ptrCast(&line_features);
     @memset(std.mem.asBytes(&descriptor_features)[16..], 0xff);
-    var storage_features = PhysicalDevice16BitStorageFeatures{ .s_type = 1000083000, .p_next = @ptrCast(&descriptor_features), .values = [_]u32{0xffff_ffff} ** 4 };
+    var storage_features = PhysicalDevice16BitStorageFeatures{ .s_type = 1000083000, .p_next = @ptrCast(&descriptor_features), .storage_buffer16_bit_access = 0xffff_ffff, .uniform_and_storage_buffer16_bit_access = 0xffff_ffff, .storage_push_constant16 = 0xffff_ffff, .storage_input_output16 = 0xffff_ffff };
     var divisor_features = PhysicalDeviceVertexAttributeDivisorFeatures{ .s_type = 1000191002, .p_next = @ptrCast(&storage_features), .vertex_attribute_instance_rate_divisor = 0xffff_ffff, .vertex_attribute_instance_rate_zero_divisor = 0xffff_ffff };
     features.p_next = @ptrCast(&divisor_features);
     getPhysicalDeviceFeatures2(ctx.physical, &features);
     try std.testing.expectEqual(@as(u32, 0), divisor_features.vertex_attribute_instance_rate_divisor);
     try std.testing.expectEqual(@as(u32, 0), divisor_features.vertex_attribute_instance_rate_zero_divisor);
-    try std.testing.expect(std.mem.allEqual(u32, &storage_features.values, 0));
+    try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&storage_features)[16..], 0));
+    try std.testing.expectEqual(@as(u32, 0), storage_features.storage_buffer16_bit_access);
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&descriptor_features)[16..], 0));
     try std.testing.expectEqual(@as(u32, 0), descriptor_features.shader_input_attachment_array_dynamic_indexing);
     try std.testing.expectEqual(@as(u32, 0), descriptor_features.runtime_descriptor_array);
@@ -17329,18 +17349,18 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     var duplicate_line_features = PhysicalDeviceLineRasterizationFeatures{ .s_type = 1000259000, .p_next = null, .rectangular_lines = 0xaaaa_aaaa, .bresenham_lines = 0xaaaa_aaaa, .smooth_lines = 0xaaaa_aaaa, .stippled_rectangular_lines = 0xaaaa_aaaa, .stippled_bresenham_lines = 0xaaaa_aaaa, .stippled_smooth_lines = 0xaaaa_aaaa };
     line_features.p_next = @ptrCast(&duplicate_line_features);
     features.features.values[0] = 0x1111_1111;
-    storage_features.values[0] = 0x2222_2222;
+    storage_features.storage_buffer16_bit_access = 0x2222_2222;
     try std.testing.expectEqual(@as(u32, 0xaaaa_aaaa), duplicate_line_features.rectangular_lines);
     getPhysicalDeviceFeatures2(ctx.physical, &features);
     try std.testing.expectEqual(@as(u32, 0x1111_1111), features.features.values[0]);
-    try std.testing.expectEqual(@as(u32, 0x2222_2222), storage_features.values[0]);
+    try std.testing.expectEqual(@as(u32, 0x2222_2222), storage_features.storage_buffer16_bit_access);
     try std.testing.expectEqual(@as(u32, 0xaaaa_aaaa), duplicate_line_features.rectangular_lines);
     line_features.p_next = null;
     features.features.values[0] = 0xdead_beef;
-    storage_features.values[0] = 0xcafe_f00d;
+    storage_features.storage_buffer16_bit_access = 0xcafe_f00d;
     getPhysicalDeviceFeatures2(@ptrFromInt(8), &features);
     try std.testing.expectEqual(@as(u32, 0xdead_beef), features.features.values[0]);
-    try std.testing.expectEqual(@as(u32, 0xcafe_f00d), storage_features.values[0]);
+    try std.testing.expectEqual(@as(u32, 0xcafe_f00d), storage_features.storage_buffer16_bit_access);
     features.p_next = null;
     var vulkan11_properties = std.mem.zeroes(PhysicalDeviceVulkan11Properties);
     vulkan11_properties.s_type = 50;
