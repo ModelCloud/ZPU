@@ -543,6 +543,11 @@ waits use the separate lowering path, reject legacy signals, and can consume
 synchronization2 signals. These rejections leave the command count untouched;
 the warm rejection path is covered by 4096 allocation-free iterations.
 
+Synchronization2 event waits also retain a canonical pointer-independent key
+for each `VkDependencyInfo`. A wait on a synchronization2 signal is rejected
+unless its dependency payload matches the latest signal payload; same-buffer
+mismatches are failure-atomic and covered directly.
+
 The bounded execution checkpoint for `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC`
 is complete. Descriptor writes and update templates preserve the dynamic type,
 require the advertised 256-byte uniform-buffer alignment, and

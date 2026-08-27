@@ -1075,8 +1075,8 @@ const BufferViewObj = struct { owner: Device, buffer: *BufferObj, format: i32, o
 const ImageObj = struct { owner: Device, width: u32, height: u32, array_layers: u32, samples: u32, format: i32, usage: u32, layout: i32, memory: ?*MemoryObj = null, owned_bytes: ?[]align(64) u8 = null, shared_bytes: bool = false, offset: u64 = 0, clear_pattern: ?u32 = null, content_bounds: cpu_cube.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, force_full_present: bool = true, complex_3d_content: bool = false, last_clear_ns: u64 = 0, last_draw_ns: u64 = 0, dirty_tiles: ?[]align(64) u8 = null };
 const FenceObj = struct { owner: Device, signaled: std.atomic.Value(bool), waiters: std.atomic.Value(u32) };
 const EventSignalKind = enum(u8) { none, host, legacy, synchronization2 };
-const EventSetCommand = struct { event: *EventObj, signal_kind: EventSignalKind, stage_mask: u32 };
-const EventObj = struct { owner: Device, signaled: std.atomic.Value(bool), waiters: std.atomic.Value(u32), signal_kind: std.atomic.Value(u8), signal_stage_mask: std.atomic.Value(u32) };
+const EventSetCommand = struct { event: *EventObj, signal_kind: EventSignalKind, stage_mask: u32, dependency_key: u64 };
+const EventObj = struct { owner: Device, signaled: std.atomic.Value(bool), waiters: std.atomic.Value(u32), signal_kind: std.atomic.Value(u8), signal_stage_mask: std.atomic.Value(u32), signal_dependency_key: std.atomic.Value(u64) };
 const QuerySlot = struct { state: std.atomic.Value(u8), value: std.atomic.Value(u64) };
 const QueryPoolObj = struct { owner: DeviceIdentity, query_type: i32, slots: []QuerySlot };
 const SemaphoreObj = struct { owner: Device, signaled: std.atomic.Value(bool), timeline: bool, timeline_value: std.atomic.Value(u64) };
@@ -4857,7 +4857,7 @@ fn createEvent(device: ?Device, info: ?*const EventCreateInfo, alloc: ?*const Al
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
     for (&event_objects, &event_state) |*event, *state| if (state.* == .never) {
-        event.* = .{ .owner = d, .signaled = .init(false), .waiters = .init(0), .signal_kind = .init(@intFromEnum(EventSignalKind.none)), .signal_stage_mask = .init(0) };
+        event.* = .{ .owner = d, .signaled = .init(false), .waiters = .init(0), .signal_kind = .init(@intFromEnum(EventSignalKind.none)), .signal_stage_mask = .init(0), .signal_dependency_key = .init(0) };
         state.* = .live;
         out.* = @intFromPtr(event);
         return .success;
@@ -4888,6 +4888,7 @@ fn setEvent(device: ?Device, handle: usize) callconv(.c) Result {
     if (!validDeviceLocked(d) or !validOwner(d, event.owner)) return .error_initialization_failed;
     event.signal_stage_mask.store(0x4000, .release);
     event.signal_kind.store(@intFromEnum(EventSignalKind.host), .release);
+    event.signal_dependency_key.store(0, .release);
     event.signaled.store(true, .release);
     return .success;
 }
@@ -4899,6 +4900,7 @@ fn resetEvent(device: ?Device, handle: usize) callconv(.c) Result {
     if (!validDeviceLocked(d) or !validOwner(d, event.owner)) return .error_initialization_failed;
     event.signal_stage_mask.store(0, .release);
     event.signal_kind.store(@intFromEnum(EventSignalKind.none), .release);
+    event.signal_dependency_key.store(0, .release);
     event.signaled.store(false, .release);
     return .success;
 }
@@ -6269,6 +6271,59 @@ fn renderingAttachmentLayoutValid(layout: i32, aspect_mask: u32) bool {
     // attachment is accessed by dynamic rendering.
     return layout == 1 or (aspect_mask == 1 and layout == 2) or (aspect_mask == 2 and layout == 3);
 }
+fn dependencyKeyMix(hash: *u64, value: u64) void {
+    hash.* ^= value;
+    hash.* *%= 1099511628211;
+}
+fn dependencyInfoKey(info: *const DependencyInfo) u64 {
+    // Canonicalize every value-bearing member while omitting pNext and array
+    // pointers.  The resulting key is stable across caller storage and lets
+    // event2 waits compare the exact bounded dependency payload at submit
+    // time without retaining foreign pointers.
+    var hash: u64 = 14695981039346656037;
+    dependencyKeyMix(&hash, @as(u64, @bitCast(@as(i64, info.s_type))));
+    dependencyKeyMix(&hash, info.dependency_flags);
+    dependencyKeyMix(&hash, info.memory_barrier_count);
+    dependencyKeyMix(&hash, info.buffer_memory_barrier_count);
+    dependencyKeyMix(&hash, info.image_memory_barrier_count);
+    if (info.memory_barriers) |items| for (items[0..info.memory_barrier_count]) |barrier| {
+        dependencyKeyMix(&hash, @as(u64, @bitCast(@as(i64, barrier.s_type))));
+        dependencyKeyMix(&hash, barrier.src_stage_mask);
+        dependencyKeyMix(&hash, barrier.dst_stage_mask);
+        dependencyKeyMix(&hash, barrier.src_access_mask);
+        dependencyKeyMix(&hash, barrier.dst_access_mask);
+    };
+    if (info.buffer_memory_barriers) |items| for (items[0..info.buffer_memory_barrier_count]) |barrier| {
+        dependencyKeyMix(&hash, @as(u64, @bitCast(@as(i64, barrier.s_type))));
+        dependencyKeyMix(&hash, barrier.src_stage_mask);
+        dependencyKeyMix(&hash, barrier.dst_stage_mask);
+        dependencyKeyMix(&hash, barrier.src_access_mask);
+        dependencyKeyMix(&hash, barrier.dst_access_mask);
+        dependencyKeyMix(&hash, barrier.src_queue_family_index);
+        dependencyKeyMix(&hash, barrier.dst_queue_family_index);
+        dependencyKeyMix(&hash, barrier.buffer);
+        dependencyKeyMix(&hash, barrier.offset);
+        dependencyKeyMix(&hash, barrier.size);
+    };
+    if (info.image_memory_barriers) |items| for (items[0..info.image_memory_barrier_count]) |barrier| {
+        dependencyKeyMix(&hash, @as(u64, @bitCast(@as(i64, barrier.s_type))));
+        dependencyKeyMix(&hash, barrier.src_stage_mask);
+        dependencyKeyMix(&hash, barrier.dst_stage_mask);
+        dependencyKeyMix(&hash, barrier.src_access_mask);
+        dependencyKeyMix(&hash, barrier.dst_access_mask);
+        dependencyKeyMix(&hash, @as(u64, @bitCast(@as(i64, barrier.old_layout))));
+        dependencyKeyMix(&hash, @as(u64, @bitCast(@as(i64, barrier.new_layout))));
+        dependencyKeyMix(&hash, barrier.src_queue_family_index);
+        dependencyKeyMix(&hash, barrier.dst_queue_family_index);
+        dependencyKeyMix(&hash, barrier.image);
+        dependencyKeyMix(&hash, barrier.subresource_range.aspect_mask);
+        dependencyKeyMix(&hash, barrier.subresource_range.base_mip_level);
+        dependencyKeyMix(&hash, barrier.subresource_range.level_count);
+        dependencyKeyMix(&hash, barrier.subresource_range.base_array_layer);
+        dependencyKeyMix(&hash, barrier.subresource_range.layer_count);
+    };
+    return hash;
+}
 fn dependencyInfoShapeValid(info: ?*const DependencyInfo) bool {
     const ci = info orelse return false;
     if (ci.s_type != 1000314003 or ci.p_next != null or ci.dependency_flags & ~@as(u32, 1) != 0 or ci.memory_barrier_count > max_api_items or ci.buffer_memory_barrier_count > max_api_items or ci.image_memory_barrier_count > max_api_items) return false;
@@ -6579,7 +6634,7 @@ fn cmdSetEvent2(cb: ?CommandBuffer, event: usize, info: ?*const DependencyInfo) 
         return;
     }
     mutex.unlock();
-    cmdSetEventCommon(cb, event, 0x1_0000, .synchronization2);
+    cmdSetEventCommon(cb, event, 0x1_0000, .synchronization2, dependencyInfoKey(info.?));
     lock();
     if (validCommandBufferLocked(cb)) |command_buffer| {
         if (command_buffer.impl.invalid) command_buffer.impl.count = before_count;
@@ -6646,7 +6701,7 @@ fn cmdWaitEvents2(cb: ?CommandBuffer, event_count: u32, events: ?[*]const usize,
             return;
         }
         mutex.unlock();
-        cmdWaitEventsCommon(cb, 1, events.? + index, 0x1_0000, 0x1_0000, 0, null, 0, null, 0, null, true);
+        cmdWaitEventsCommon(cb, 1, events.? + index, 0x1_0000, 0x1_0000, 0, null, 0, null, 0, null, true, dependencyInfoKey(info));
         if (info.memory_barrier_count != 0 or info.buffer_memory_barrier_count != 0 or info.image_memory_barrier_count != 0) cmdPipelineBarrier2(cb, info);
         lock();
         const after = validCommandBufferLocked(cb) orelse {
@@ -6814,7 +6869,7 @@ fn stagesSupportAccess(stage_mask: u32, access_mask: u32) bool {
     for (checks) |check| if (access_mask & check.access != 0 and stages & check.stages == 0) return false;
     return true;
 }
-fn cmdSetEventCommon(cb: ?CommandBuffer, handle: usize, stage_mask: u32, signal_kind: EventSignalKind) void {
+fn cmdSetEventCommon(cb: ?CommandBuffer, handle: usize, stage_mask: u32, signal_kind: EventSignalKind, dependency_key: u64) void {
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
@@ -6826,10 +6881,10 @@ fn cmdSetEventCommon(cb: ?CommandBuffer, handle: usize, stage_mask: u32, signal_
         c.impl.invalid = true;
         return;
     }
-    record(c, .{ .event_set = .{ .event = event, .signal_kind = signal_kind, .stage_mask = stage_mask } });
+    record(c, .{ .event_set = .{ .event = event, .signal_kind = signal_kind, .stage_mask = stage_mask, .dependency_key = dependency_key } });
 }
 fn cmdSetEvent(cb: ?CommandBuffer, handle: usize, stage_mask: u32) callconv(.c) void {
-    cmdSetEventCommon(cb, handle, stage_mask, .legacy);
+    cmdSetEventCommon(cb, handle, stage_mask, .legacy, 0);
 }
 fn cmdResetEvent(cb: ?CommandBuffer, handle: usize, stage_mask: u32) callconv(.c) void {
     lock();
@@ -6852,6 +6907,16 @@ fn eventSetRecordedBefore(c: *const CommandBufferObj, event: *const EventObj, si
     };
     return false;
 }
+fn eventSet2DependencyKeyRecordedBefore(c: *const CommandBufferObj, event: *const EventObj) ?u64 {
+    var key: ?u64 = null;
+    for (c.impl.commands[0..c.impl.count]) |command| switch (command) {
+        .event_set => |operation| if (operation.event == event and operation.signal_kind == .synchronization2) {
+            key = operation.dependency_key;
+        },
+        else => {},
+    };
+    return key;
+}
 fn legacyEventWaitStageMask(c: *const CommandBufferObj, event: *const EventObj) u32 {
     var required: u32 = 0;
     const signal_kind = @as(EventSignalKind, @enumFromInt(event.signal_kind.load(.acquire)));
@@ -6864,7 +6929,7 @@ fn legacyEventWaitStageMask(c: *const CommandBufferObj, event: *const EventObj) 
     };
     return required;
 }
-fn cmdWaitEventsCommon(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const usize, src_stage_mask: u32, dst_stage_mask: u32, memory_barrier_count: u32, memory_barriers: ?[*]const MemoryBarrier, buffer_barrier_count: u32, buffer_barriers: ?[*]const BufferMemoryBarrier, image_barrier_count: u32, image_barriers: ?[*]const ImageMemoryBarrier, allow_synchronization2_signal: bool) void {
+fn cmdWaitEventsCommon(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const usize, src_stage_mask: u32, dst_stage_mask: u32, memory_barrier_count: u32, memory_barriers: ?[*]const MemoryBarrier, buffer_barrier_count: u32, buffer_barriers: ?[*]const BufferMemoryBarrier, image_barrier_count: u32, image_barriers: ?[*]const ImageMemoryBarrier, allow_synchronization2_signal: bool, dependency_key: u64) void {
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
@@ -6883,8 +6948,12 @@ fn cmdWaitEventsCommon(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const 
             signal_kind == .legacy or eventSetRecordedBefore(c, event, .legacy)
         else
             signal_kind == .synchronization2 or eventSetRecordedBefore(c, event, .synchronization2);
+        const sync2_dependency_mismatch = if (allow_synchronization2_signal) blk: {
+            if (eventSet2DependencyKeyRecordedBefore(c, event)) |recorded_key| break :blk recorded_key != dependency_key;
+            break :blk signal_kind == .synchronization2 and event.signal_dependency_key.load(.acquire) != dependency_key;
+        } else false;
         const missing_legacy_stage = !allow_synchronization2_signal and legacyEventWaitStageMask(c, event) & ~src_stage_mask != 0;
-        if (event.owner != c.impl.owner or incompatible_signal or missing_legacy_stage) {
+        if (event.owner != c.impl.owner or incompatible_signal or sync2_dependency_mismatch or missing_legacy_stage) {
             c.impl.invalid = true;
             return;
         }
@@ -6939,7 +7008,7 @@ fn cmdWaitEventsCommon(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const 
     for (barriers) |barrier| record(c, .{ .transition = .{ .image = validImageLocked(barrier.image).?, .old_layout = barrier.old_layout, .new_layout = barrier.new_layout } });
 }
 fn cmdWaitEvents(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const usize, src_stage_mask: u32, dst_stage_mask: u32, memory_barrier_count: u32, memory_barriers: ?[*]const MemoryBarrier, buffer_barrier_count: u32, buffer_barriers: ?[*]const BufferMemoryBarrier, image_barrier_count: u32, image_barriers: ?[*]const ImageMemoryBarrier) callconv(.c) void {
-    cmdWaitEventsCommon(cb, event_count, handles, src_stage_mask, dst_stage_mask, memory_barrier_count, memory_barriers, buffer_barrier_count, buffer_barriers, image_barrier_count, image_barriers, false);
+    cmdWaitEventsCommon(cb, event_count, handles, src_stage_mask, dst_stage_mask, memory_barrier_count, memory_barriers, buffer_barrier_count, buffer_barriers, image_barrier_count, image_barriers, false, 0);
 }
 fn validQueryRange(pool: *const QueryPoolObj, first: u32, count: u32) bool {
     // Reset commands permit an empty range, but firstQuery must still name an
@@ -8381,11 +8450,13 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
         .event_set => |operation| {
             operation.event.signal_stage_mask.store(operation.stage_mask, .release);
             operation.event.signal_kind.store(@intFromEnum(operation.signal_kind), .release);
+            operation.event.signal_dependency_key.store(operation.dependency_key, .release);
             operation.event.signaled.store(true, .release);
         },
         .event_reset => |event| {
             event.signal_stage_mask.store(0, .release);
             event.signal_kind.store(@intFromEnum(EventSignalKind.none), .release);
+            event.signal_dependency_key.store(0, .release);
             event.signaled.store(false, .release);
         },
         .event_wait => |event| {
@@ -18897,9 +18968,16 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     const high_stage_barrier = MemoryBarrier2{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 0x1000_0000_0, .dst_stage_mask = 0x1_0000, .src_access_mask = 0, .dst_access_mask = 0 };
     const high_stage_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 1, .memory_barriers = @ptrCast(&high_stage_barrier), .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
     cmdPipelineBarrier2(commands[0], &high_stage_dependency);
-    const image_barrier = ImageMemoryBarrier2{ .s_type = 1000314002, .p_next = null, .src_stage_mask = 1, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0x1800, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    // Keep the paired event2 image dependency layout-stable so both the
+    // signal and matching wait can be prevalidated in one submission.
+    validImageLocked(image).?.layout = 1;
+    const image_barrier = ImageMemoryBarrier2{ .s_type = 1000314002, .p_next = null, .src_stage_mask = 1, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0x1800, .old_layout = 1, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
     const image_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 0, .memory_barriers = null, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 1, .image_memory_barriers = @ptrCast(&image_barrier) };
     const legacy_image_barrier = ImageMemoryBarrier{ .s_type = 45, .p_next = null, .src_access_mask = 0, .dst_access_mask = 0x1800, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    // The wait must match the latest synchronization2 signal's dependency
+    // payload exactly, so signal the same image dependency immediately before
+    // recording the paired wait.
+    cmdSetEvent2(commands[0], event, &image_dependency);
     const legacy_memory_barrier = MemoryBarrier{ .s_type = 46, .p_next = null, .src_access_mask = 0, .dst_access_mask = 0 };
     const wait_before = commands[0].impl.count;
     cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&image_dependency));
@@ -18918,6 +18996,11 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     cmdSetEvent2(@ptrFromInt(@as(usize, @alignOf(CommandBufferObj))), event, &empty_dependency);
     cmdSetEvent2(commands[0], event, &empty_dependency);
     try std.testing.expectEqual(before_invalid_event_handle + 1, commands[0].impl.count);
+    const before_mismatched_event2_wait = commands[0].impl.count;
+    cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&dependency));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_mismatched_event2_wait, commands[0].impl.count);
+    commands[0].impl.invalid = false;
     const before_empty_barrier = commands[0].impl.count;
     cmdPipelineBarrier2(commands[0], &empty_dependency);
     try std.testing.expect(!commands[0].impl.invalid);
