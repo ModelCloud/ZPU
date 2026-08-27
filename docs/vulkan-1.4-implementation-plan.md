@@ -514,9 +514,10 @@ Each slice must land with all of the following:
   dynamic control flow, aggregate/descriptor-array indexing, atomics, shared-memory execution,
   and complete compute memory-visibility semantics remain.
 - [ ] **A8 — secondary command buffers:** inheritance, execution, reset, and
-  lifetime rules. Traditional render-pass inheritance and the bounded dynamic
-  rendering inheritance chain are covered; unrestricted secondary state
-  inheritance and full command-scope rules remain.
+  lifetime rules. Traditional render-pass inheritance now matches the active
+  subpass for multi-subpass execution, and the bounded dynamic rendering
+  inheritance chain is covered; unrestricted secondary state inheritance and
+  full command-scope rules remain.
 - [ ] **A9 — sparse-disabled core contracts:** sparse-requirement queries and
   zero-bind queue behavior remain truthful while sparse features stay false.
 - [ ] **A10 — replace opaque placeholders:** samplers, descriptor pools,

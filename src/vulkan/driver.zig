@@ -4713,7 +4713,12 @@ fn cmdExecuteCommands(cb: ?CommandBuffer, count: u32, buffers: ?[*]const Command
             return;
         };
         if (primary.impl.active_render_pass) |render_pass| {
-            if (primary.impl.render_contents != 1 or !secondary.impl.render_pass_continue or secondary.impl.active_render_pass == null or !secondary.impl.active_render_pass.?.compatibility.eql(&render_pass.compatibility) or secondary.impl.inherited_subpass != 0 or (secondary.impl.active_framebuffer != null and secondary.impl.active_framebuffer != primary.impl.active_framebuffer) or (primary.impl.active_query_pool != null and !secondary.impl.inherited_occlusion)) {
+            // A traditional secondary may target any subpass in the
+            // inherited render pass.  Execution is legal only when its
+            // inherited subpass matches the primary's currently active
+            // subpass; restricting this to subpass zero would reject legal
+            // multi-subpass command streams.
+            if (primary.impl.render_contents != 1 or !secondary.impl.render_pass_continue or secondary.impl.active_render_pass == null or !secondary.impl.active_render_pass.?.compatibility.eql(&render_pass.compatibility) or secondary.impl.inherited_subpass != primary.impl.active_subpass or (secondary.impl.active_framebuffer != null and secondary.impl.active_framebuffer != primary.impl.active_framebuffer) or (primary.impl.active_query_pool != null and !secondary.impl.inherited_occlusion)) {
                 primary.impl.invalid = true;
                 return;
             }
@@ -14981,6 +14986,86 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.success, resetCommandBuffer(render_secondary[0], 0));
     try std.testing.expectEqual(@as(u8, 3), commands[0].impl.state);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+
+    // Traditional secondary command buffers may inherit a later subpass, but
+    // execution must occur in the primary's matching active subpass.  This
+    // exercises the Vulkan multi-subpass rule that was previously narrowed to
+    // subpass zero.
+    var multi_subpass_inheritance = CommandBufferInheritanceInfo{ .s_type = 41, .p_next = null, .render_pass = multi_render_pass, .subpass = 1, .framebuffer = 0, .occlusion_query_enable = 0, .query_flags = 0, .pipeline_statistics = 0 };
+    var multi_subpass_secondary_begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 6, .inheritance_info = &multi_subpass_inheritance };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(render_secondary[0], &multi_subpass_secondary_begin));
+    cmdBindPipeline(render_secondary[0], 0, multi_pipeline[1]);
+    cmdBindDescriptorSets(render_secondary[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    cmdSetViewport(render_secondary[0], 0, 1, @ptrCast(&multi_viewport));
+    cmdSetScissor(render_secondary[0], 0, 1, @ptrCast(&multi_scissor));
+    setCoreDynamicGraphicsStateForTest(render_secondary[0], &multi_viewport, &multi_scissor);
+    cmdDraw(render_secondary[0], 3, 1, 0, 0);
+    try std.testing.expect(!render_secondary[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(render_secondary[0]));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    cmdBeginRenderPass(multi_commands[0], &multi_render_begin, 0);
+    cmdNextSubpass(multi_commands[0], 1);
+    try std.testing.expectEqual(@as(u32, 1), multi_commands[0].impl.active_subpass);
+    cmdExecuteCommands(multi_commands[0], 1, &render_secondary);
+    try std.testing.expect(!multi_commands[0].impl.invalid);
+    cmdEndRenderPass(multi_commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(multi_commands[0]));
+    var multi_secondary_submit = secondary_submit;
+    multi_secondary_submit.command_buffers = &multi_commands;
+    try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&multi_secondary_submit), 0));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+
+    // A secondary inherited for subpass zero is not interchangeable with one
+    // inherited for subpass one; reject that mismatch before flattening any
+    // commands into the primary.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(render_secondary[0], 0));
+    multi_subpass_inheritance.subpass = 0;
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(render_secondary[0], &multi_subpass_secondary_begin));
+    cmdBindPipeline(render_secondary[0], 0, multi_pipeline[0]);
+    cmdBindDescriptorSets(render_secondary[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    cmdSetViewport(render_secondary[0], 0, 1, @ptrCast(&multi_viewport));
+    cmdSetScissor(render_secondary[0], 0, 1, @ptrCast(&multi_scissor));
+    setCoreDynamicGraphicsStateForTest(render_secondary[0], &multi_viewport, &multi_scissor);
+    cmdDraw(render_secondary[0], 3, 1, 0, 0);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(render_secondary[0]));
+    multi_subpass_inheritance.subpass = 1;
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    cmdBeginRenderPass(multi_commands[0], &multi_render_begin, 0);
+    cmdNextSubpass(multi_commands[0], 1);
+    const mismatched_secondary_count = multi_commands[0].impl.count;
+    cmdExecuteCommands(multi_commands[0], 1, &render_secondary);
+    try std.testing.expect(multi_commands[0].impl.invalid);
+    try std.testing.expectEqual(mismatched_secondary_count, multi_commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(render_secondary[0], 0));
+
+    // Simultaneous-use secondary execution stays allocation-free across the
+    // warm path, including the subpass matching checks and command flattening.
+    multi_subpass_inheritance.subpass = 1;
+    multi_subpass_secondary_begin.flags = 6;
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(render_secondary[0], &multi_subpass_secondary_begin));
+    cmdBindPipeline(render_secondary[0], 0, multi_pipeline[1]);
+    cmdBindDescriptorSets(render_secondary[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    cmdSetViewport(render_secondary[0], 0, 1, @ptrCast(&multi_viewport));
+    cmdSetScissor(render_secondary[0], 0, 1, @ptrCast(&multi_scissor));
+    setCoreDynamicGraphicsStateForTest(render_secondary[0], &multi_viewport, &multi_scissor);
+    cmdDraw(render_secondary[0], 3, 1, 0, 0);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(render_secondary[0]));
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+        cmdBeginRenderPass(multi_commands[0], &multi_render_begin, 0);
+        cmdNextSubpass(multi_commands[0], 1);
+        cmdExecuteCommands(multi_commands[0], 1, &render_secondary);
+        try std.testing.expect(!multi_commands[0].impl.invalid);
+        cmdEndRenderPass(multi_commands[0]);
+        try std.testing.expectEqual(Result.success, endCommandBuffer(multi_commands[0]));
+    }
+    test_allocations_before_failure = null;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(render_secondary[0], 0));
+
     var framebuffer_inheritance = render_inheritance;
     framebuffer_inheritance.framebuffer = framebuffer;
     const framebuffer_secondary_begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 2, .inheritance_info = &framebuffer_inheritance };
