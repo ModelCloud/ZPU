@@ -10441,7 +10441,7 @@ fn destroyFramebuffer(device: ?Device, handle: usize, alloc: ?*const Alloc) call
         stateForObject(FramebufferObj, object, &framebuffer_objects, &framebuffer_state).?.* = .tombstone;
     }
 }
-fn createComputePipelines(device: ?Device, cache: usize, count: u32, infos: ?*const ComputePipelineCreateInfo, alloc: ?*const Alloc, outputs: ?[*]usize) callconv(.c) Result {
+fn createComputePipelines(device: ?Device, cache: usize, count: u32, infos: ?[*]const ComputePipelineCreateInfo, alloc: ?*const Alloc, outputs: ?[*]usize) callconv(.c) Result {
     const raw = infos orelse return .error_initialization_failed;
     if (alloc != null or count == 0 or count > max_child_objects) return .error_initialization_failed;
     const out = outputs orelse return .error_initialization_failed;
@@ -10502,7 +10502,7 @@ fn createComputePipelines(device: ?Device, cache: usize, count: u32, infos: ?*co
     }
     return .success;
 }
-fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?*const GraphicsPipelineCreateInfo, alloc: ?*const Alloc, outputs: ?[*]usize) callconv(.c) Result {
+fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?[*]const GraphicsPipelineCreateInfo, alloc: ?*const Alloc, outputs: ?[*]usize) callconv(.c) Result {
     const raw = infos orelse return .error_initialization_failed;
     if (alloc != null or count == 0 or count > max_child_objects) return .error_initialization_failed;
     const out = outputs orelse return .error_initialization_failed;
@@ -11392,37 +11392,37 @@ fn cmdBindVertexBuffers(cb: ?CommandBuffer, first_binding: u32, binding_count: u
     const command_buffer = validCommandBufferLocked(cb) orelse return;
     bindVertexBuffersLocked(command_buffer, first_binding, binding_count, handles, offsets, null, null, false);
 }
-fn cmdSetViewport(cb: ?CommandBuffer, first: u32, count: u32, values: ?*const Viewport) callconv(.c) void {
+fn cmdSetViewport(cb: ?CommandBuffer, first: u32, count: u32, values: ?[*]const Viewport) callconv(.c) void {
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or first != 0 or count != 1 or values == null or !validViewportDomain(values.?.*)) {
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or first != 0 or count != 1 or values == null or !validViewportDomain(values.?[0])) {
         command_buffer.impl.invalid = true;
         return;
     }
-    command_buffer.impl.viewport = values.?.*;
+    command_buffer.impl.viewport = values.?[0];
     command_buffer.impl.viewport_set = true;
 }
-fn cmdSetScissor(cb: ?CommandBuffer, first: u32, count: u32, values: ?*const Rect2D) callconv(.c) void {
+fn cmdSetScissor(cb: ?CommandBuffer, first: u32, count: u32, values: ?[*]const Rect2D) callconv(.c) void {
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or first != 0 or count != 1 or values == null or !validScissorDomain(values.?.*)) {
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or first != 0 or count != 1 or values == null or !validScissorDomain(values.?[0])) {
         command_buffer.impl.invalid = true;
         return;
     }
-    const rect = values.?;
+    const rect = values.?[0];
     command_buffer.impl.scissor = .{ .x = rect.offset.x, .y = rect.offset.y, .width = rect.extent.width, .height = rect.extent.height };
     command_buffer.impl.scissor_set = true;
 }
-fn cmdSetViewportWithCount(cb: ?CommandBuffer, count: u32, values: ?*const Viewport) callconv(.c) void {
+fn cmdSetViewportWithCount(cb: ?CommandBuffer, count: u32, values: ?[*]const Viewport) callconv(.c) void {
     if (count != 1 or values == null) {
         markCommandBufferInvalid(cb);
         return;
     }
     cmdSetViewport(cb, 0, 1, values);
 }
-fn cmdSetScissorWithCount(cb: ?CommandBuffer, count: u32, values: ?*const Rect2D) callconv(.c) void {
+fn cmdSetScissorWithCount(cb: ?CommandBuffer, count: u32, values: ?[*]const Rect2D) callconv(.c) void {
     if (count != 1 or values == null) {
         markCommandBufferInvalid(cb);
         return;
@@ -21365,8 +21365,8 @@ test "core dynamic scalar blend depth and stencil states are exact and allocatio
         cmdSetDepthBoundsTestEnable(commands[0], 0);
         cmdSetStencilTestEnable(commands[0], 0);
         cmdSetStencilOp(commands[0], 3, 0, 0, 0, 7);
-        cmdSetViewportWithCount(commands[0], 1, &dynamic_viewport);
-        cmdSetScissorWithCount(commands[0], 1, &dynamic_scissor);
+        cmdSetViewportWithCount(commands[0], 1, @ptrCast(&dynamic_viewport));
+        cmdSetScissorWithCount(commands[0], 1, @ptrCast(&dynamic_scissor));
         cmdSetLineWidth(commands[0], 1);
         cmdSetBlendConstants(commands[0], &blend);
         cmdSetDepthBias(commands[0], 1.25, 0, -2.5);

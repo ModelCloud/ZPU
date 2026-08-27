@@ -159,8 +159,9 @@ registry field names (rather than an opaque word array), with the same 220-byte
 LP64 layout and allocation-free all-false query behavior.
 Core entry points that consume barrier, viewport/scissor, sampler, pipeline,
 descriptor-update, and sparse-query arrays now use their concrete ABI pointer
-types internally as well, while retaining the same bounded validation and
-failure-atomic behavior.
+types internally as well (including counted viewport/scissor and pipeline
+create arrays), while retaining the same bounded validation and failure-atomic
+behavior.
 The Vulkan 1.1 individual storage, variable-pointer, sampler-YCbCr,
 multiview, protected-memory, and shader-draw-parameter nodes expose their
 registry field names directly, preserving the same all-false and failure-
