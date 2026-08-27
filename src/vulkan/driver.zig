@@ -20368,6 +20368,17 @@ test "dynamic rendering begin and end own attachment scope" {
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&dont_care_submit), 0));
     try std.testing.expectEqual(dont_care_bytes_before, std.mem.readInt(u32, imageBytes(validImageLocked(image).?)[0..4], .little));
     try std.testing.expect(validImageLocked(image).?.force_full_present);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+        cmdBeginRendering(commands[1], &dont_care_rendering);
+        try std.testing.expect(!commands[1].impl.invalid);
+        try std.testing.expectEqual(@as(u16, 1), commands[1].impl.count);
+        cmdEndRendering(commands[1]);
+        try std.testing.expectEqual(Result.success, endCommandBuffer(commands[1]));
+    }
+    test_allocations_before_failure = null;
 
     // Vulkan 1.3/1.4 NONE load/store operations are valid dynamic-rendering
     // attachment controls.  LOAD_OP_NONE records a begin-time discard and
@@ -24855,6 +24866,17 @@ test "traditional render passes honor load operations and image layout transitio
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     try std.testing.expect(image_object.force_full_present);
     try std.testing.expectEqual(@as(i32, 1), image_object.layout);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+        cmdBeginRenderPass(command[0], &render_begin, 0);
+        try std.testing.expect(!command[0].impl.invalid);
+        try std.testing.expectEqual(@as(u16, 2), command[0].impl.count);
+        cmdEndRenderPass(command[0]);
+        try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
+    }
+    test_allocations_before_failure = null;
     destroyFramebuffer(ctx.device, dont_care_framebuffer, null);
     destroyRenderPass(ctx.device, dont_care_render_pass, null);
     attachment.store_op = 0;
