@@ -886,6 +886,17 @@ pub const Executor = struct {
                     result.bits[0] = canonicalFloat(@bitCast(parts.fpart));
                     result.bits[1] = canonicalFloat(@bitCast(parts.ipart));
                 },
+                .f_frexp_struct => {
+                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const x: f32 = @bitCast(source.bits[0]);
+                    // The significand is poison for non-finite values in the
+                    // GLSL.std.450 FrexpStruct contract. Reject before
+                    // publishing either member so execute remains atomic.
+                    if (!std.math.isFinite(x)) return error.NumericDomain;
+                    const parts = std.math.frexp(x);
+                    result.bits[0] = canonicalFloat(@bitCast(parts.significand));
+                    result.bits[1] = @bitCast(parts.exponent);
+                },
                 .i_pack_snorm4x8, .i_pack_unorm4x8, .i_pack_snorm2x16, .i_pack_unorm2x16 => {
                     const source = try valueRef(self.values, pc, instruction.operands[0]);
                     const signed = instruction.op == .i_pack_snorm4x8 or instruction.op == .i_pack_snorm2x16;
@@ -1186,7 +1197,7 @@ fn validate(program: *const ir.Program) Error!void {
             .shuffle => n == 2 + try lanes(instruction.ty),
             .fneg, .ineg, .f_abs, .i_abs, .i_sign, .f_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .f_determinant, .f_matrix_inverse, .f_length, .f_normalize, .i_find_lsb, .i_find_s_msb, .i_find_u_msb, .i_pack_snorm4x8, .i_pack_unorm4x8, .i_pack_snorm2x16, .i_pack_unorm2x16, .f_unpack_snorm2x16, .f_unpack_unorm2x16, .f_unpack_snorm4x8, .f_unpack_unorm4x8, .i_pack_half2x16, .f_unpack_half2x16, .bit_not, .logical_not, .transpose, .any, .all, .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set, .bit_reverse, .bit_count, .convert, .bitcast, .copy_object, .quantize_f16 => n == 1,
             .f_modf, .f_frexp => n == 2,
-            .f_modf_struct => n == 1,
+            .f_modf_struct, .f_frexp_struct => n == 1,
             .bit_field_insert => n == 4,
             .bit_field_s_extract, .bit_field_u_extract => n == 3,
             .select => n == 3,
@@ -1495,6 +1506,11 @@ fn validate(program: *const ir.Program) Error!void {
                 const source = program.instructions[instruction.operands[0]].ty;
                 if (source.scalar != .f32 or source.columns != 1 or source.rows != 1) return error.InvalidType;
             },
+            .f_frexp_struct => {
+                if (instruction.ty.scalar != .f32 or instruction.ty.columns != 2 or instruction.ty.rows != 1) return error.InvalidType;
+                const source = program.instructions[instruction.operands[0]].ty;
+                if (source.scalar != .f32 or source.columns != 1 or source.rows != 1) return error.InvalidType;
+            },
             .i_pack_snorm4x8, .i_pack_unorm4x8 => {
                 if ((instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32) or instruction.ty.columns != 1 or instruction.ty.rows != 1) return error.InvalidType;
                 const source = program.instructions[instruction.operands[0]].ty;
@@ -1588,7 +1604,7 @@ fn isValueOperand(op: ir.Op, i: usize) bool {
         .bitcast => i == 0,
         .copy_object => i == 0,
         .output => i == 1,
-        .f_modf, .f_frexp, .f_modf_struct => i == 0,
+        .f_modf, .f_frexp, .f_modf_struct, .f_frexp_struct => i == 0,
         else => true,
     };
 }
@@ -2287,6 +2303,28 @@ test "GLSL ModfStruct returns fraction then integral scalar members" {
     try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, -0.75))), executor.values[1].bits[0]);
     try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, -2))), executor.values[1].bits[1]);
     for (0..4096) |_| try executor.execute(&.{}, &.{});
+}
+
+test "GLSL FrexpStruct returns significand then signed exponent scalar members" {
+    const literal = f32bytes(-12.0);
+    var interfaces = [_]ir.Interface{};
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &literal },
+        .{ .op = .f_frexp_struct, .ty = .{ .scalar = .f32, .columns = 2 }, .operands = &.{0}, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    try executor.execute(&.{}, &.{});
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, -0.75))), executor.values[1].bits[0]);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(i32, 4))), executor.values[1].bits[1]);
+    for (0..4096) |_| try executor.execute(&.{}, &.{});
+    const inf_literal = f32bytes(std.math.inf(f32));
+    instructions[0].literal = &inf_literal;
+    var invalid_source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(invalid_source.bytes);
+    try std.testing.expectError(error.NumericDomain, Executor.init(std.testing.allocator, &invalid_source));
 }
 
 test "GLSL NMin NMax and NClamp prefer non-NaN operands" {
@@ -3910,6 +3948,10 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
             const source = try propertyConstant(arena, &instructions, .{ .scalar = .f32 });
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{source}, &.{});
         },
+        .f_frexp_struct => {
+            const source = try propertyConstant(arena, &instructions, .{ .scalar = .f32 });
+            result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{source}, &.{});
+        },
         .i_pack_snorm4x8, .i_pack_unorm4x8 => {
             const source = try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 4 });
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{source}, &.{});
@@ -4342,6 +4384,8 @@ test "generated bounded operation by type-family property matrix is complete" {
     totals[@intFromEnum(ir.Op.f_unpack_half2x16)] += 1;
     try runPropertyCase(.f_modf_struct, .{ .scalar = .f32, .columns = 2 }, null, null);
     totals[@intFromEnum(ir.Op.f_modf_struct)] += 1;
+    try runPropertyCase(.f_frexp_struct, .{ .scalar = .f32, .columns = 2 }, null, null);
+    totals[@intFromEnum(ir.Op.f_frexp_struct)] += 1;
     try runPropertyCase(.any, .{ .scalar = .bool }, null, null);
     totals[@intFromEnum(ir.Op.any)] += 1;
     try runPropertyCase(.all, .{ .scalar = .bool }, null, null);
@@ -4373,15 +4417,15 @@ test "generated bounded operation by type-family property matrix is complete" {
         totals[@intFromEnum(op)] += 1;
     }
     const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14, 8, 4, 8, 8, 8, 8, 4, 4, 4, 4, 4, 8, 8, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4} ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 4, 4 } ++ [_]usize{1};
+    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4} ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 4, 4 } ++ [_]usize{1} ++ [_]usize{1};
     try std.testing.expectEqualSlices(usize, expected_full[0..totals.len], &totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 687), total);
-    std.debug.print("generated property matrix: operations=169 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 688), total);
+    std.debug.print("generated property matrix: operations=170 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -4513,13 +4557,13 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 169), malformed);
+    try std.testing.expectEqual(@as(usize, 170), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
     try std.testing.expectEqual(@as(usize, 5), runtime_nan);
     try std.testing.expectEqual(@as(usize, 5), signed_zero);
-    std.debug.print("generated property categories: malformed=169 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
+    std.debug.print("generated property categories: malformed=170 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
 }
 
 test "generated valid scalar DAGs are total and stable" {
