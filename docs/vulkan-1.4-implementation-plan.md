@@ -291,8 +291,9 @@ statically indexed uniform-block `u32`, or choose scalar values with a boolean
 select, then apply scalar arithmetic before writing through a
 `VK_DESCRIPTOR_TYPE_STORAGE_BUFFER`;
 invocation multiplication is bounded, uniform/storage ranges are validated at
-record and submit time, and the output is written synchronously. Generic
-SPIR-V compute control flow, dynamic loads, atomics,
+record and submit time, and the output is written synchronously. One bounded,
+side-effect-free runtime conditional with a two-arm `OpPhi` merge is lowered to
+SSA `OpSelect`; generic SPIR-V compute control flow, dynamic loads, atomics,
 shared memory, and general arbitrary graphics execution remain explicitly
 deferred. A final dynamic vector component in an access chain is now lowered
 with runtime bounds checks; dynamic structure, matrix, aggregate, and
@@ -658,11 +659,11 @@ Each slice must land with all of the following:
   dynamic scalar boolean logical operations, bounded f32 4x4 column-major
   matrix/vector arithmetic (including transpose, outer-product, and vector
   dot), floating classification/reduction, and constant-folds
-  scalar integer equality, and resolves
-  predecessor-selected `OpPhi` values at static
-  acyclic branch joins, preserving only the incoming value from the selected
-  predecessor before lowering to straight-line canonical IR. Generic SPIR-V
-  dynamic control flow, aggregate/descriptor-array indexing, atomics, shared-memory execution,
+  scalar integer equality, and resolves predecessor-selected `OpPhi` values at
+  static acyclic branch joins, preserving only the incoming value from the
+  selected predecessor before lowering to straight-line canonical IR. A single
+  side-effect-free dynamic conditional with a common merge is also lowered to
+  `OpSelect`; generic SPIR-V dynamic control flow, aggregate/descriptor-array indexing, atomics, shared-memory execution,
   and complete compute memory-visibility semantics remain.
 - [ ] **A8 — secondary command buffers:** inheritance, execution, reset, and
   lifetime rules. Traditional render-pass inheritance now matches the active

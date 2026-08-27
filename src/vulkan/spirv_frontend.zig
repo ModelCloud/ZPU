@@ -32,6 +32,17 @@ const Decorations = struct {
 };
 const Entry = struct { stage: ir.Stage, function: u32, name: []const u8, interfaces: []const u32 };
 
+/// A bounded, side-effect-free structured conditional that can be lowered to
+/// a canonical SSA select.  General control flow remains outside profile v1;
+/// retaining this metadata lets the lowering preserve both branch values
+/// without executing either branch as a host-side side effect.
+const DynamicBranch = struct {
+    condition: u32,
+    true_label: u32,
+    false_label: u32,
+    merge_label: u32,
+};
+
 const Count = struct { min: u16, max: u16 };
 const OpcodeMeta = struct { opcode: u16, operands: Count, supported: bool = true };
 const opcode_schema = [_]OpcodeMeta{
@@ -408,6 +419,69 @@ fn interfacesUnique(items: []const ir.Interface) bool {
     return true;
 }
 
+fn findLabelOffset(module: *const decode.Module, instruction_functions: []const u32, function: u32, label: u32) ?usize {
+    for (module.instructions, instruction_functions, 0..) |instruction, instruction_function, instruction_index| {
+        if (instruction_function == function and instruction.opcode == 248 and instruction.words.len == 1 and instruction.words[0] == label)
+            return instruction_index;
+    }
+    return null;
+}
+
+/// Mark one side of the narrow dynamic-conditional profile.  The arm must be
+/// a straight-line, side-effect-free block ending in an unconditional branch
+/// to the merge label.  This deliberately excludes stores, nested branches,
+/// loops, and phi nodes; those require a real CFG executor rather than a
+/// select lowering.
+fn markDynamicArm(
+    module: *const decode.Module,
+    instruction_functions: []const u32,
+    function: u32,
+    start: usize,
+    label: u32,
+    merge_label: u32,
+    reachable: []bool,
+    predecessor: []u32,
+) Error!void {
+    var cursor = start;
+    while (cursor < module.instructions.len and instruction_functions[cursor] == function) : (cursor += 1) {
+        const instruction = module.instructions[cursor];
+        if (cursor != start and instruction.opcode == 248) return error.Unsupported;
+        reachable[cursor] = true;
+        predecessor[cursor] = label;
+        switch (instruction.opcode) {
+            249 => {
+                if (instruction.words.len != 1 or instruction.words[0] != merge_label) return error.Unsupported;
+                return;
+            },
+            245, 250, 251, 252, 253, 56, 62 => return error.Unsupported,
+            else => {},
+        }
+    }
+    return error.Malformed;
+}
+
+fn dynamicArmTarget(
+    module: *const decode.Module,
+    instruction_functions: []const u32,
+    function: u32,
+    start: usize,
+) Error!u32 {
+    var cursor = start;
+    while (cursor < module.instructions.len and instruction_functions[cursor] == function) : (cursor += 1) {
+        const instruction = module.instructions[cursor];
+        if (cursor != start and instruction.opcode == 248) return error.Unsupported;
+        switch (instruction.opcode) {
+            249 => {
+                if (instruction.words.len != 1) return error.Malformed;
+                return instruction.words[0];
+            },
+            245, 250, 251, 252, 253, 56, 62 => return error.Unsupported,
+            else => {},
+        }
+    }
+    return error.Malformed;
+}
+
 /// Strict zpu_spirv_render_profile_v1 compilation. `Malformed` denotes broken
 /// SPIR-V structure/def-use; `Unsupported` denotes valid constructs outside
 /// this deliberately small frontend profile.
@@ -640,7 +714,9 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     }
                 } else if (instruction.opcode == 250) {
                     const condition = nodes[try id(nodes, w[0])];
-                    if (!((condition.kind == .constant and (condition.opcode == 41 or condition.opcode == 42)) or (condition.kind == .function_value and ((condition.opcode >= 164 and condition.opcode <= 179))))) return error.Unsupported;
+                    const condition_shape = try valueShape(nodes, w[0]);
+                    if (condition_shape.scalar != .bool or condition_shape.columns != 1 or condition_shape.rows != 1) return error.Unsupported;
+                    if (condition.kind != .constant and condition.kind != .function_value) return error.Unsupported;
                 }
                 if (instruction.opcode == 249) {
                     _ = try id(nodes, w[0]);
@@ -1055,10 +1131,10 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
     std.mem.sort(ir.Interface, interfaces.items, {}, interfaceLess);
     if (!interfacesUnique(interfaces.items)) return error.Unsupported;
 
-    // Resolve the bounded control-flow slice before SSA lowering. Only
-    // statically selected, acyclic branches are admitted; this keeps the
-    // canonical IR straight-line while ensuring that writes in an unselected
-    // block cannot become observable side effects.
+    // Resolve the bounded control-flow slice before SSA lowering. Statically
+    // selected acyclic branches and one side-effect-free dynamic conditional
+    // are admitted; this keeps canonical IR straight-line while ensuring that
+    // writes in an unselected block cannot become observable side effects.
     const reachable = allocator.alloc(bool, module.instructions.len) catch return error.OutOfMemory;
     defer allocator.free(reachable);
     @memset(reachable, false);
@@ -1077,6 +1153,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
     const visited_labels = allocator.alloc(bool, module.bound) catch return error.OutOfMemory;
     defer allocator.free(visited_labels);
     @memset(visited_labels, false);
+    var dynamic_branch: ?DynamicBranch = null;
     while (true) {
         if (current_block >= module.instructions.len or module.instructions[current_block].opcode != 248) return error.Malformed;
         const label_id = module.instructions[current_block].words[0];
@@ -1097,8 +1174,33 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     block_done = true;
                 },
                 250 => {
-                    const condition = try staticCondition(nodes, instruction.words[0]) orelse return error.Unsupported;
-                    next_label = if (condition) instruction.words[1] else instruction.words[2];
+                    const condition_id = instruction.words[0];
+                    if (try staticCondition(nodes, condition_id)) |condition| {
+                        next_label = if (condition) instruction.words[1] else instruction.words[2];
+                    } else {
+                        // Admit one structured, side-effect-free dynamic if:
+                        // both arms must be straight-line blocks that branch
+                        // to the same merge, where OpPhi can become OpSelect.
+                        if (dynamic_branch != null) return error.Unsupported;
+                        const condition_shape = try valueShape(nodes, condition_id);
+                        if (condition_shape.scalar != .bool or condition_shape.columns != 1 or condition_shape.rows != 1) return error.Unsupported;
+                        const true_label = instruction.words[1];
+                        const false_label = instruction.words[2];
+                        if (true_label == false_label) return error.Unsupported;
+                        const true_start = findLabelOffset(&module, instruction_functions, entry.function, true_label) orelse return error.Malformed;
+                        const false_start = findLabelOffset(&module, instruction_functions, entry.function, false_label) orelse return error.Malformed;
+                        const merge_label = try dynamicArmTarget(&module, instruction_functions, entry.function, true_start);
+                        if (merge_label != try dynamicArmTarget(&module, instruction_functions, entry.function, false_start)) return error.Unsupported;
+                        if (merge_label == true_label or merge_label == false_label) return error.Unsupported;
+                        const merge_start = findLabelOffset(&module, instruction_functions, entry.function, merge_label) orelse return error.Malformed;
+                        if (merge_start == true_start or merge_start == false_start) return error.Unsupported;
+                        dynamic_branch = .{ .condition = condition_id, .true_label = true_label, .false_label = false_label, .merge_label = merge_label };
+                        try markDynamicArm(&module, instruction_functions, entry.function, true_start, true_label, merge_label, reachable, predecessor);
+                        try markDynamicArm(&module, instruction_functions, entry.function, false_start, false_label, merge_label, reachable, predecessor);
+                        visited_labels[try id(nodes, true_label)] = true;
+                        visited_labels[try id(nodes, false_label)] = true;
+                        next_label = merge_label;
+                    }
                     block_done = true;
                 },
                 251 => {
@@ -1133,13 +1235,14 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 }
             }
             if (!found) return error.Malformed;
-            predecessor_label = label_id;
+            predecessor_label = if (dynamic_branch != null and target == dynamic_branch.?.merge_label) std.math.maxInt(u32) else label_id;
         } else break;
     }
 
     const needed = allocator.alloc(bool, module.bound) catch return error.OutOfMemory;
     defer allocator.free(needed);
     @memset(needed, false);
+    if (dynamic_branch) |branch| needed[try id(nodes, branch.condition)] = true;
     for (module.instructions, instruction_functions, reachable) |instruction, instruction_function, is_reachable| {
         if (is_reachable and instruction_function == entry.function and instruction.opcode == 62)
             needed[try id(nodes, instruction.words[1])] = true;
@@ -1167,7 +1270,25 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             };
             if (instruction.opcode == 245) {
                 const selected_predecessor = predecessor[reverse_index];
-                if (selected_predecessor == std.math.maxInt(u32)) continue;
+                if (selected_predecessor == std.math.maxInt(u32)) {
+                    const branch = dynamic_branch orelse continue;
+                    // The merge has two incoming values; both are required
+                    // because lowering will materialize a runtime select.
+                    var pair_index: usize = 2;
+                    var matched = false;
+                    while (pair_index < w.len) : (pair_index += 2) {
+                        const incoming_label = w[pair_index + 1];
+                        if (incoming_label != branch.true_label and incoming_label != branch.false_label) continue;
+                        const operand_index = try id(nodes, w[pair_index]);
+                        if (!needed[operand_index]) {
+                            needed[operand_index] = true;
+                            changed = true;
+                        }
+                        matched = true;
+                    }
+                    if (!matched) return error.Malformed;
+                    continue;
+                }
                 var pair_index: usize = 2;
                 var selected_phi = false;
                 while (pair_index < w.len) : (pair_index += 2) if (w[pair_index + 1] == selected_predecessor) {
@@ -1221,7 +1342,31 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const phi_index = try id(nodes, w[1]);
             if (!needed[phi_index]) continue;
             const selected_label = active_predecessor;
-            if (selected_label == std.math.maxInt(u32)) return error.Malformed;
+            if (selected_label == std.math.maxInt(u32)) {
+                const branch = dynamic_branch orelse return error.Malformed;
+                const condition_canonical = canonical_ids[try id(nodes, branch.condition)];
+                if (condition_canonical == std.math.maxInt(u32)) return error.Malformed;
+                var true_source: ?u32 = null;
+                var false_source: ?u32 = null;
+                var pair_index: usize = 2;
+                while (pair_index < w.len) : (pair_index += 2) {
+                    if (w[pair_index + 1] == branch.true_label) true_source = w[pair_index];
+                    if (w[pair_index + 1] == branch.false_label) false_source = w[pair_index];
+                }
+                const true_id = true_source orelse return error.Malformed;
+                const false_id = false_source orelse return error.Malformed;
+                const true_canonical = canonical_ids[try id(nodes, true_id)];
+                const false_canonical = canonical_ids[try id(nodes, false_id)];
+                if (true_canonical == std.math.maxInt(u32) or false_canonical == std.math.maxInt(u32)) return error.Malformed;
+                const phi_shape = try resultShape(nodes, w[0]);
+                const select_operands = allocator.dupe(u32, &.{ condition_canonical, true_canonical, false_canonical }) catch return error.OutOfMemory;
+                errdefer allocator.free(select_operands);
+                const select_literal = allocator.dupe(u8, &.{}) catch return error.OutOfMemory;
+                errdefer allocator.free(select_literal);
+                try lowered.append(allocator, .{ .op = .select, .ty = phi_shape, .operands = select_operands, .literal = select_literal });
+                canonical_ids[phi_index] = @intCast(lowered.items.len - 1);
+                continue;
+            }
             var pair_index: usize = 2;
             var source_id: ?u32 = null;
             while (pair_index < w.len) : (pair_index += 2) if (w[pair_index + 1] == selected_label) {
@@ -2056,6 +2201,15 @@ fn testInsertWords(allocator: std.mem.Allocator, source: []const u32, offset: us
     return result;
 }
 
+fn testReplaceInstruction(allocator: std.mem.Allocator, source: []const u32, offset: usize, replacement: []const u32) ![]u32 {
+    const width: usize = source[offset] >> 16;
+    const result = try allocator.alloc(u32, source.len - width + replacement.len);
+    std.mem.copyForwards(u32, result[0..offset], source[0..offset]);
+    std.mem.copyForwards(u32, result[offset..][0..replacement.len], replacement);
+    std.mem.copyForwards(u32, result[offset + replacement.len ..], source[offset + width ..]);
+    return result;
+}
+
 fn testDynamicVectorAccessVariant(allocator: std.mem.Allocator) ![]u32 {
     var words: std.ArrayList(u32) = .empty;
     try words.appendSlice(allocator, &uniform_vertex);
@@ -2569,6 +2723,72 @@ test "compute profile lowers dynamic integer comparison before select" {
     var saw_ine = false;
     for (unequal_program.instructions) |instruction| saw_ine = saw_ine or instruction.op == .ine;
     try std.testing.expect(saw_ine);
+}
+
+test "compute profile lowers a side-effect-free dynamic branch phi to select" {
+    const select_offset = testOpcodeOffset(&compute_dynamic_compare_store, 169, 0).?;
+    const branch_and_merge = [_]u32{
+        (4 << 16) | 250, 13, 18,              19,
+        (2 << 16) | 248, 18, (2 << 16) | 249, 20,
+        (2 << 16) | 248, 19, (2 << 16) | 249, 20,
+        (2 << 16) | 248, 20, (7 << 16) | 245, 2,
+        16,              14, 18,              15,
+        19,
+    };
+    var words = try testReplaceInstruction(std.testing.allocator, &compute_dynamic_compare_store, select_offset, &branch_and_merge);
+    defer std.testing.allocator.free(words);
+    words[3] = 21;
+    var program = try compile(std.testing.allocator, words, .compute, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var saw_compare = false;
+    var saw_select = false;
+    for (program.instructions) |instruction| {
+        saw_compare = saw_compare or instruction.op == .ieq;
+        saw_select = saw_select or instruction.op == .select;
+    }
+    try std.testing.expect(saw_compare and saw_select);
+    var select_index: ?usize = null;
+    for (program.instructions, 0..) |instruction, index| {
+        if (instruction.op == .select) select_index = index;
+    }
+    try std.testing.expect(select_index != null);
+    try std.testing.expectEqual(@as(usize, 3), program.instructions[select_index.?].operands.len);
+    try std.testing.expectEqual(ir.Op.ieq, program.instructions[program.instructions[select_index.?].operands[0]].op);
+
+    var mismatched = try std.testing.allocator.dupe(u32, words);
+    defer std.testing.allocator.free(mismatched);
+    const second_branch = testOpcodeOffset(mismatched, 249, 1).?;
+    mismatched[second_branch + 1] = 18;
+    try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, mismatched, .compute, "main", &.{}));
+
+    const true_label = testOpcodeOffset(words, 248, 1).?;
+    var side_effect = try testInsertWords(std.testing.allocator, words, true_label + 2, &.{ (3 << 16) | 62, 5, 14 });
+    defer std.testing.allocator.free(side_effect);
+    side_effect[3] = 21;
+    try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, side_effect, .compute, "main", &.{}));
+}
+
+test "dynamic branch frontend warm path remains bounded and deterministic" {
+    const select_offset = testOpcodeOffset(&compute_dynamic_compare_store, 169, 0).?;
+    const branch_and_merge = [_]u32{
+        (4 << 16) | 250, 13, 18,              19,
+        (2 << 16) | 248, 18, (2 << 16) | 249, 20,
+        (2 << 16) | 248, 19, (2 << 16) | 249, 20,
+        (2 << 16) | 248, 20, (7 << 16) | 245, 2,
+        16,              14, 18,              15,
+        19,
+    };
+    var words = try testReplaceInstruction(std.testing.allocator, &compute_dynamic_compare_store, select_offset, &branch_and_merge);
+    defer std.testing.allocator.free(words);
+    words[3] = 21;
+    var baseline = try compile(std.testing.allocator, words, .compute, "main", &.{});
+    defer baseline.deinit(std.testing.allocator);
+    try std.testing.expect(baseline.instructions.len <= ir.max_instructions);
+    for (0..64) |_| {
+        var candidate = try compile(std.testing.allocator, words, .compute, "main", &.{});
+        defer candidate.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(u8, baseline.bytes, candidate.bytes);
+    }
 }
 
 test "compute profile lowers dynamic boolean logical operations" {
