@@ -321,6 +321,8 @@ short or zero strides fail before recording without mutating command state.
 The `multiDrawIndirect` feature is now advertised and accepted at device
 creation, with `maxDrawIndirectCount = 4`; every post-record argument and
 indexed range is prevalidated before the first draw executes.
+Direct indexed draws use checked first-index and bound-offset arithmetic, so
+overflow invalidates the command buffer before publishing a draw record.
 Indirect dispatch now retains its argument buffer and consumes the three group
 counts at submission, including post-record writes and failure-atomic invalid
 group rejection.

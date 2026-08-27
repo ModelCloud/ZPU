@@ -13319,9 +13319,18 @@ fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, fir
         return;
     };
     const index_size: u64 = if (command_buffer.impl.index_type == 0) 2 else 4;
-    const relative_start = @as(u64, first_index) * index_size;
-    const start = command_buffer.impl.index_offset + relative_start;
-    const byte_count = @as(u64, index_count) * index_size;
+    const relative_start = std.math.mul(u64, @as(u64, first_index), index_size) catch {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const start = std.math.add(u64, command_buffer.impl.index_offset, relative_start) catch {
+        command_buffer.impl.invalid = true;
+        return;
+    };
+    const byte_count = std.math.mul(u64, @as(u64, index_count), index_size) catch {
+        command_buffer.impl.invalid = true;
+        return;
+    };
     if (!graphicsDescriptorBindingValid(command_buffer.impl) or pipeline != pipeline_pointer or layout != layout_pointer or index_buffer != index_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or index_buffer.owner != command_buffer.impl.owner or index_buffer.memory == null or !liveMemoryObject(index_buffer.memory.?) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or (dynamic_rendering and !dynamicPipelineRenderingCompatible(command_buffer.impl, pipeline)) or start > index_buffer.size or byte_count > index_buffer.size - start or byte_count > command_buffer.impl.index_size -| (start -| command_buffer.impl.index_offset)) {
         command_buffer.impl.invalid = true;
         return;
@@ -16224,6 +16233,17 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(count_before_short_index_draw, commands[0].impl.count);
     commands[0].impl.invalid = false;
+    // Checked index addressing must reject an overflowing bound offset before
+    // any command is appended, even if malformed internal state supplies an
+    // otherwise impossible offset.
+    const saved_index_offset = commands[0].impl.index_offset;
+    commands[0].impl.index_offset = std.math.maxInt(u64) - 1;
+    const count_before_overflow_index_draw = commands[0].impl.count;
+    cmdDrawIndexed(commands[0], 3, 1, 1, -1, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(count_before_overflow_index_draw, commands[0].impl.count);
+    commands[0].impl.invalid = false;
+    commands[0].impl.index_offset = saved_index_offset;
     cmdBindIndexBuffer2(commands[0], index_buffer, 0, 8, 0);
     try std.testing.expect(!commands[0].impl.invalid);
     try std.testing.expectEqual(@as(u64, 8), commands[0].impl.index_size);
