@@ -828,11 +828,11 @@ pub const Executor = struct {
                 .logical_eq, .logical_ne, .logical_or, .logical_and => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
                     const b = try valueRef(self.values, pc, instruction.operands[1]);
-                    result.bits[0] = @intFromBool(switch (instruction.op) {
-                        .logical_eq => a.bits[0] == b.bits[0],
-                        .logical_ne => a.bits[0] != b.bits[0],
-                        .logical_or => a.bits[0] != 0 or b.bits[0] != 0,
-                        .logical_and => a.bits[0] != 0 and b.bits[0] != 0,
+                    for (0..result.lanes()) |i| result.bits[i] = @intFromBool(switch (instruction.op) {
+                        .logical_eq => a.bits[i] == b.bits[i],
+                        .logical_ne => a.bits[i] != b.bits[i],
+                        .logical_or => a.bits[i] != 0 or b.bits[i] != 0,
+                        .logical_and => a.bits[i] != 0 and b.bits[i] != 0,
                         else => unreachable,
                     });
                 },
@@ -1211,7 +1211,7 @@ fn validate(program: *const ir.Program) Error!void {
                 .i_find_u_msb => if (source_ty.scalar != .u32 or source_ty.rows != 1 or source_ty.columns != instruction.ty.columns or instruction.ty.scalar != .i32 or instruction.ty.rows != 1) return error.InvalidType,
                 .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle => if (source_ty.scalar != .i32 and source_ty.scalar != .u32 or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
                 .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge => if (source_ty.scalar != .f32 or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
-                .logical_eq, .logical_ne, .logical_or, .logical_and => if (source_ty.scalar != .bool or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
+                .logical_eq, .logical_ne, .logical_or, .logical_and => if (source_ty.scalar != .bool or source_ty.columns < 1 or source_ty.columns > 4 or source_ty.rows != 1) return error.InvalidType,
                 .select => if (oi == 0) {
                     if (source_ty.scalar != .bool or try lanes(source_ty) != 1) return error.InvalidType;
                 } else if (!same(source_ty, instruction.ty)) return error.InvalidType,
@@ -1329,15 +1329,15 @@ fn validate(program: *const ir.Program) Error!void {
                 if (!same(left, right) or left.scalar != .f32 or left.columns != 1 or left.rows != 1) return error.InvalidType;
             },
             .logical_eq, .logical_ne, .logical_or, .logical_and => {
-                if (instruction.ty.scalar != .bool or instruction.ty.columns != 1 or instruction.ty.rows != 1) return error.InvalidType;
+                if (instruction.ty.scalar != .bool or instruction.ty.rows != 1 or instruction.ty.columns < 1 or instruction.ty.columns > 4) return error.InvalidType;
                 const left = program.instructions[instruction.operands[0]].ty;
                 const right = program.instructions[instruction.operands[1]].ty;
-                if (!same(left, right) or left.scalar != .bool or left.columns != 1 or left.rows != 1) return error.InvalidType;
+                if (!same(left, right) or !same(left, instruction.ty) or left.scalar != .bool or left.columns < 1 or left.columns > 4 or left.rows != 1) return error.InvalidType;
             },
             .logical_not => {
-                if (instruction.ty.scalar != .bool or instruction.ty.columns != 1 or instruction.ty.rows != 1) return error.InvalidType;
+                if (instruction.ty.scalar != .bool or instruction.ty.rows != 1 or instruction.ty.columns < 1 or instruction.ty.columns > 4) return error.InvalidType;
                 const source = program.instructions[instruction.operands[0]].ty;
-                if (source.scalar != .bool or source.columns != 1 or source.rows != 1) return error.InvalidType;
+                if (!same(source, instruction.ty) or source.scalar != .bool or source.columns < 1 or source.columns > 4 or source.rows != 1) return error.InvalidType;
             },
             .iadd, .isub, .imul => if (instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32) return error.InvalidType,
             .transpose => {
@@ -2803,6 +2803,36 @@ test "boolean logical operations preserve scalar truth tables on the warm path" 
     try std.testing.expectEqual(@as(u32, 0), executor.values[5].bits[0]);
     try std.testing.expectEqual(@as(u32, 1), executor.values[6].bits[0]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, &output, .little));
+    for (0..4096) |_| try executor.execute(&.{}, &.{.{ .interface = 0, .bytes = &output }});
+}
+
+test "boolean logical operations preserve vector lanes on the warm path" {
+    var interfaces = [_]ir.Interface{.{ .storage = .output, .ty = .{ .scalar = .bool, .columns = 4 }, .location = 0 }};
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = .{ .scalar = .bool }, .operands = &.{}, .literal = &.{1} },
+        .{ .op = .constant, .ty = .{ .scalar = .bool }, .operands = &.{}, .literal = &.{0} },
+        .{ .op = .constant_composite, .ty = .{ .scalar = .bool, .columns = 4 }, .operands = &.{ 0, 1, 0, 1 }, .literal = &.{} },
+        .{ .op = .constant_composite, .ty = .{ .scalar = .bool, .columns = 4 }, .operands = &.{ 1, 0, 1, 0 }, .literal = &.{} },
+        .{ .op = .logical_eq, .ty = .{ .scalar = .bool, .columns = 4 }, .operands = &.{ 2, 3 }, .literal = &.{} },
+        .{ .op = .logical_ne, .ty = .{ .scalar = .bool, .columns = 4 }, .operands = &.{ 2, 3 }, .literal = &.{} },
+        .{ .op = .logical_or, .ty = .{ .scalar = .bool, .columns = 4 }, .operands = &.{ 2, 3 }, .literal = &.{} },
+        .{ .op = .logical_and, .ty = .{ .scalar = .bool, .columns = 4 }, .operands = &.{ 2, 3 }, .literal = &.{} },
+        .{ .op = .logical_not, .ty = .{ .scalar = .bool, .columns = 4 }, .operands = &.{3}, .literal = &.{} },
+        .{ .op = .output, .ty = .{ .scalar = .bool, .columns = 4 }, .operands = &.{ 0, 8 }, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    var output = [_]u8{0} ** 16;
+    try executor.execute(&.{}, &.{.{ .interface = 0, .bytes = &output }});
+    try std.testing.expectEqualSlices(u32, &.{ 0, 0, 0, 0 }, executor.values[4].bits[0..4]);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 1, 1, 1 }, executor.values[5].bits[0..4]);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 1, 1, 1 }, executor.values[6].bits[0..4]);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 0, 0, 0 }, executor.values[7].bits[0..4]);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 0, 1, 0 }, executor.values[8].bits[0..4]);
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, output[0..4], .little));
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, output[4..8], .little));
     for (0..4096) |_| try executor.execute(&.{}, &.{.{ .interface = 0, .bytes = &output }});
 }
 
