@@ -847,9 +847,10 @@ Query-pool slot storage is now retired rather than freed immediately when a
 pool is destroyed. Host `vkGetQueryPoolResults` calls and queue submissions
 (including secondary command buffers) pin every referenced pool while they
 execute without the registry mutex; the final pin release performs the deferred
-free. Destruction and device teardown remain tombstone/failure-atomic, and the
-warm-path regression verifies a pinned destroy/release sequence without
-allocations.
+free. Host resets are rejected while a pool is pinned, preventing slot writes
+from racing queue execution. Destruction and device teardown remain
+tombstone/failure-atomic, and the warm-path regressions verify pinned
+destroy/release and reset rejection without allocations.
 
 - [ ] **A8 — secondary command buffers:** inheritance, execution, reset, and
   lifetime rules. Traditional render-pass inheritance now matches the active
