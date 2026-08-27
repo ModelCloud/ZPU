@@ -200,6 +200,13 @@ const opcode_schema = [_]OpcodeMeta{
     // resolver; only the default control mask is admitted in profile v1.
     .{ .opcode = 247, .operands = .{ .min = 2, .max = 2 } },
     .{ .opcode = 253, .operands = .{ .min = 0, .max = 0 } },
+    // The bounded compute profile has no shared-memory or atomic execution
+    // state.  A workgroup execution barrier with relaxed semantics is
+    // therefore represented as a validated no-op; stronger scopes/semantics
+    // remain outside the profile and are rejected below.
+    // Keep the schema envelope broad enough to classify non-compute uses as
+    // unsupported before the compute-specific arity check runs.
+    .{ .opcode = 224, .operands = .{ .min = 0, .max = 3 } },
     .{ .opcode = 71, .operands = .{ .min = 2, .max = 3 } },
     .{ .opcode = 72, .operands = .{ .min = 3, .max = 4 } },
     .{ .opcode = 999, .operands = .{ .min = 0, .max = 0 }, .supported = false },
@@ -477,6 +484,22 @@ fn valueShape(nodes: []const Node, value_id: u32) Error!ir.Type {
     const value = nodes[try id(nodes, value_id)];
     if (value.kind != .constant and value.kind != .function_value) return error.Malformed;
     return resultShape(nodes, value.type_id);
+}
+
+/// Return a scalar unsigned 32-bit literal used by a bounded structural
+/// instruction.  Scope and memory-semantics operands in SPIR-V are IDs, not
+/// inline values; requiring an actual OpConstant keeps the no-op barrier
+/// contract deterministic and avoids retaining caller/module state.
+fn scalarU32Constant(nodes: []const Node, value_id: u32) Error!u32 {
+    const node = nodes[try id(nodes, value_id)];
+    if (node.kind != .constant or node.opcode != 43 or node.words.len != 1) return error.Unsupported;
+    const shape = try resultShape(nodes, node.type_id);
+    if (shape.scalar != .u32 or shape.columns != 1 or shape.rows != 1) return error.Unsupported;
+    return node.words[0];
+}
+
+fn controlBarrierValuesValid(execution_scope: u32, memory_scope: u32, memory_semantics: u32) bool {
+    return execution_scope == 2 and memory_scope == 2 and memory_semantics == 0;
 }
 
 const ScalarClass = enum { integer, float };
@@ -858,6 +881,19 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 if (!in_function or !label_seen or terminated or block_terminated or w.len != 0) return error.Malformed;
                 terminated = true;
                 block_terminated = true;
+            },
+            224 => {
+                if (requested_stage != .compute) return error.Unsupported;
+                if (!in_function or !label_seen or terminated or block_terminated or w.len != 3) return error.Malformed;
+                // ZPU's compute executor runs a bounded, side-effect-free
+                // profile with no shared-memory or atomic state.  Admit only
+                // the exact workgroup/relaxed barrier that has no additional
+                // visibility semantics to lower; stronger barriers stay
+                // explicitly outside the profile.
+                const execution_scope = try scalarU32Constant(nodes, w[0]);
+                const memory_scope = try scalarU32Constant(nodes, w[1]);
+                const memory_semantics = try scalarU32Constant(nodes, w[2]);
+                if (!controlBarrierValuesValid(execution_scope, memory_scope, memory_semantics)) return error.Unsupported;
             },
             12 => {
                 if (!in_function or !label_seen or terminated or block_terminated or w.len < 5 or w.len > 7) return error.Malformed;
@@ -2743,6 +2779,58 @@ test "compute profile lowers a bounded storage-buffer store" {
     try std.testing.expectEqual(@as(usize, 2), program.instructions.len);
     try std.testing.expectEqual(ir.Op.output, program.instructions[1].op);
     try std.testing.expectEqual(@as(u32, 42), std.mem.readInt(u32, program.instructions[0].literal[0..4], .little));
+}
+
+test "compute profile admits only the relaxed workgroup control barrier" {
+    // Add literal ScopeWorkgroup (2), ScopeWorkgroup (2), and Relaxed (0)
+    // operands before the function, then place OpControlBarrier immediately
+    // after the entry label.  The barrier has no IR result and must therefore
+    // disappear from the canonical straight-line program.
+    const function_offset = testOpcodeOffset(&compute_store, 54, 0).?;
+    var with_constants = try testInsertWords(std.testing.allocator, &compute_store, function_offset, &.{
+        (4 << 16) | 43, 2, 11, 2,
+        (4 << 16) | 43, 2, 12, 2,
+        (4 << 16) | 43, 2, 13, 0,
+    });
+    defer std.testing.allocator.free(with_constants);
+    with_constants[3] = 14;
+    const label = testOpcodeOffset(with_constants, 248, 0).?;
+    const barrier = [_]u32{ (4 << 16) | 224, 11, 12, 13 };
+    const with_barrier = try testInsertWords(std.testing.allocator, with_constants, label + (with_constants[label] >> 16), &barrier);
+    defer std.testing.allocator.free(with_barrier);
+
+    var baseline = try compile(std.testing.allocator, &compute_store, .compute, "main", &.{});
+    defer baseline.deinit(std.testing.allocator);
+    var program = try compile(std.testing.allocator, with_barrier, .compute, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, baseline.bytes, program.bytes);
+    try std.testing.expect(baseline.identity.eql(program.identity));
+
+    // The validation predicate is constant-time and allocation-free on the
+    // warm path used by command creation.
+    for (0..4096) |_| {
+        try std.testing.expect(controlBarrierValuesValid(2, 2, 0));
+        try std.testing.expect(!controlBarrierValuesValid(1, 2, 0));
+        try std.testing.expect(!controlBarrierValuesValid(2, 2, 0x8));
+    }
+
+    var stronger = with_barrier;
+    const semantics = testOpcodeOffset(stronger, 43, 3).?;
+    stronger[semantics + 3] = 0x8; // AcquireRelease requires visibility state.
+    try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, stronger, .compute, "main", &.{}));
+
+    var malformed = with_barrier;
+    const barrier_offset = testOpcodeOffset(malformed, 224, 0).?;
+    malformed[barrier_offset] = (3 << 16) | 224;
+    try std.testing.expectError(error.Malformed, compile(std.testing.allocator, malformed, .compute, "main", &.{}));
+
+    // The same opcode remains unsupported for graphics stages, even when the
+    // instruction envelope is malformed, so the profile cannot imply a
+    // cross-stage synchronization guarantee it does not execute.
+    const vertex_return = testOpcodeOffset(&positive_vertex, 253, 0).?;
+    const vertex_with_barrier = try testInsertWords(std.testing.allocator, &positive_vertex, vertex_return, &barrier);
+    defer std.testing.allocator.free(vertex_with_barrier);
+    try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, vertex_with_barrier, .vertex, "main", &.{}));
 }
 
 test "compute profile lowers 32-bit signed conversion through canonical IR" {
