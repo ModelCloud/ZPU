@@ -286,6 +286,13 @@ priority and rejects other priorities before publishing device state.
 The sampler-YCbCr conversion create record is also ABI-exact: its core body
 ends at `forceExplicitReconstruction`; Android `externalFormat`, when used,
 belongs to a separate pNext extension and is not folded into the core struct.
+`vkCreateSampler` now accepts the promoted `VkSamplerReductionModeCreateInfo`
+chain in its default weighted-average form, rejects MIN/MAX with
+`VK_ERROR_FEATURE_NOT_PRESENT` because `samplerFilterMinmax` is not advertised,
+and classifies well-formed YCbCr sampler chains as the explicit unsupported
+format policy. Duplicate, unknown, malformed, and null-conversion chains leave
+the output handle untouched; the feature-rejection path has a 4096-call
+allocation-free warm test.
 The first execution slice now compiles and runs a bounded straight-line
 SPIR-V compute profiles that either store a constant `u32`, load one
 statically indexed uniform-block `u32`, or choose scalar values with a boolean

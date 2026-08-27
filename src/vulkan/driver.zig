@@ -990,6 +990,14 @@ pub const DescriptorSetAllocateInfo = extern struct { s_type: i32, p_next: ?*con
 pub const DescriptorBufferInfo = extern struct { buffer: usize, offset: u64, range: u64 };
 pub const DescriptorImageInfo = extern struct { sampler: usize, image_view: usize, image_layout: i32 };
 pub const SamplerCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, mag_filter: i32, min_filter: i32, mipmap_mode: i32, address_mode_u: i32, address_mode_v: i32, address_mode_w: i32, mip_lod_bias: f32, anisotropy_enable: u32, max_anisotropy: f32, compare_enable: u32, compare_op: i32, min_lod: f32, max_lod: f32, border_color: i32, unnormalized_coordinates: u32 };
+/// Promoted VK_EXT_sampler_filter_minmax sampler-chain payload.  The
+/// reduction mode is kept typed so the core sampler entry point can accept
+/// the ABI without treating the node as an opaque byte blob.
+pub const SamplerReductionModeCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, reduction_mode: i32 };
+/// Promoted VK_KHR_sampler_ycbcr_conversion sampler-chain payload.  ZPU does
+/// not advertise multi-planar formats, but recognizing the node lets us
+/// distinguish a valid unsupported request from a malformed chain.
+pub const SamplerYcbcrConversionInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, conversion: usize };
 pub const WriteDescriptorSet = extern struct { s_type: i32, p_next: ?*const anyopaque, dst_set: usize, dst_binding: u32, dst_array_element: u32, descriptor_count: u32, descriptor_type: i32, image_info: ?[*]const DescriptorImageInfo, buffer_info: ?[*]const DescriptorBufferInfo, texel_buffer_view: ?[*]const usize };
 pub const CopyDescriptorSet = extern struct { s_type: i32, p_next: ?*const anyopaque, src_set: usize, src_binding: u32, src_array_element: u32, dst_set: usize, dst_binding: u32, dst_array_element: u32, descriptor_count: u32 };
 pub const Viewport = cpu_cube.Viewport;
@@ -11250,11 +11258,67 @@ test "cpu_cube_v1 shader compatibility bridge is exact" {
     try std.testing.expectError(error.OutOfMemory, compileFrontendStage(failing.allocator(), &valid, .vertex, "main", &.{}));
 }
 
+const SamplerCreatePNextState = struct {
+    valid: bool = true,
+    reduction_mode: i32 = 0,
+    has_reduction_mode: bool = false,
+    ycbcr_conversion: usize = 0,
+    has_ycbcr_conversion: bool = false,
+};
+
+/// Validate the mandatory core sampler extension chain without publishing
+/// partial sampler state.  The promoted min/max reduction feature is not
+/// advertised by ZPU, so only the default weighted-average mode is executable;
+/// a well-formed MIN/MAX request is reported as a feature rejection by the
+/// caller.  YCbCr conversion remains a valid ABI node but is explicitly
+/// unsupported because no conversion handles or multi-planar formats exist.
+fn samplerCreatePNextState(raw: ?*const anyopaque) SamplerCreatePNextState {
+    var state = SamplerCreatePNextState{};
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| : (depth += 1) {
+        if (depth == 16) {
+            state.valid = false;
+            return state;
+        }
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        switch (header.s_type) {
+            1000130001 => {
+                const info: *const SamplerReductionModeCreateInfo = @ptrCast(@alignCast(item));
+                if (state.has_reduction_mode or info.reduction_mode < 0 or info.reduction_mode > 2) {
+                    state.valid = false;
+                    return state;
+                }
+                state.has_reduction_mode = true;
+                state.reduction_mode = info.reduction_mode;
+            },
+            1000156001 => {
+                const info: *const SamplerYcbcrConversionInfo = @ptrCast(@alignCast(item));
+                if (state.has_ycbcr_conversion or info.conversion == 0) {
+                    state.valid = false;
+                    return state;
+                }
+                state.has_ycbcr_conversion = true;
+                state.ycbcr_conversion = info.conversion;
+            },
+            else => {
+                state.valid = false;
+                return state;
+            },
+        }
+        next = header.p_next;
+    }
+    return state;
+}
+
 fn createSampler(device: ?Device, create_info: ?*const SamplerCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     const info = create_info orelse return .error_initialization_failed;
-    if (alloc != null or info.s_type != 31 or info.p_next != null or info.flags != 0 or info.mag_filter < 0 or info.mag_filter > 1 or info.min_filter < 0 or info.min_filter > 1 or info.mipmap_mode < 0 or info.mipmap_mode > 1 or info.address_mode_u < 0 or info.address_mode_u > 4 or info.address_mode_v < 0 or info.address_mode_v > 4 or info.address_mode_w < 0 or info.address_mode_w > 4 or !std.math.isFinite(info.mip_lod_bias) or info.anisotropy_enable != 0 or !std.math.isFinite(info.max_anisotropy) or info.compare_enable != 0 or info.compare_op < 0 or info.compare_op > 7 or !std.math.isFinite(info.min_lod) or !std.math.isFinite(info.max_lod) or info.min_lod < 0 or info.max_lod < info.min_lod or info.border_color < 0 or info.border_color > 5 or info.unnormalized_coordinates != 0) return .error_initialization_failed;
+    const pnext = samplerCreatePNextState(info.p_next);
+    if (alloc != null or info.s_type != 31 or !pnext.valid or info.flags != 0 or info.mag_filter < 0 or info.mag_filter > 1 or info.min_filter < 0 or info.min_filter > 1 or info.mipmap_mode < 0 or info.mipmap_mode > 1 or info.address_mode_u < 0 or info.address_mode_u > 4 or info.address_mode_v < 0 or info.address_mode_v > 4 or info.address_mode_w < 0 or info.address_mode_w > 4 or !std.math.isFinite(info.mip_lod_bias) or info.anisotropy_enable != 0 or !std.math.isFinite(info.max_anisotropy) or info.compare_enable != 0 or info.compare_op < 0 or info.compare_op > 7 or !std.math.isFinite(info.min_lod) or !std.math.isFinite(info.max_lod) or info.min_lod < 0 or info.max_lod < info.min_lod or info.border_color < 0 or info.border_color > 5 or info.unnormalized_coordinates != 0) return .error_initialization_failed;
     const d = device orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
+    if (pnext.reduction_mode != 0) return .error_feature_not_present;
+    if (pnext.has_ycbcr_conversion) return .error_format_not_supported;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
@@ -16148,6 +16212,8 @@ test "vkcube presentation path records submits and presents two swapchain images
 
     const sampler_info = SamplerCreateInfo{ .s_type = 31, .p_next = null, .flags = 0, .mag_filter = 0, .min_filter = 0, .mipmap_mode = 0, .address_mode_u = 0, .address_mode_v = 0, .address_mode_w = 0, .mip_lod_bias = 0, .anisotropy_enable = 0, .max_anisotropy = 1, .compare_enable = 0, .compare_op = 0, .min_lod = 0, .max_lod = 0, .border_color = 0, .unnormalized_coordinates = 0 };
     try std.testing.expectEqual(@as(usize, 80), @sizeOf(SamplerCreateInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(SamplerReductionModeCreateInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(SamplerYcbcrConversionInfo));
     var invalid_sampler_info = sampler_info;
     invalid_sampler_info.anisotropy_enable = 1;
     var unpublished_sampler: usize = 0xaaaa;
@@ -16156,6 +16222,54 @@ test "vkcube presentation path records submits and presents two swapchain images
     var sampler: usize = 0;
     try std.testing.expectEqual(Result.success, createSampler(device, @ptrCast(&sampler_info), null, &sampler));
     destroySampler(device, sampler, null);
+    // The promoted reduction-mode node is accepted in its default form,
+    // while the optional MIN/MAX feature remains truthfully disabled.
+    var weighted_reduction = SamplerReductionModeCreateInfo{ .s_type = 1000130001, .p_next = null, .reduction_mode = 0 };
+    var reduction_sampler_info = sampler_info;
+    reduction_sampler_info.p_next = @ptrCast(&weighted_reduction);
+    var reduction_sampler: usize = 0;
+    try std.testing.expectEqual(Result.success, createSampler(device, &reduction_sampler_info, null, &reduction_sampler));
+    destroySampler(device, reduction_sampler, null);
+    weighted_reduction.reduction_mode = 1;
+    var unsupported_reduction_info = sampler_info;
+    unsupported_reduction_info.p_next = @ptrCast(&weighted_reduction);
+    unpublished_sampler = 0xbbbb;
+    try std.testing.expectEqual(Result.error_feature_not_present, createSampler(device, &unsupported_reduction_info, null, &unpublished_sampler));
+    try std.testing.expectEqual(@as(usize, 0xbbbb), unpublished_sampler);
+    weighted_reduction.reduction_mode = 0;
+    var duplicate_reduction = SamplerReductionModeCreateInfo{ .s_type = 1000130001, .p_next = @ptrCast(&weighted_reduction), .reduction_mode = 0 };
+    var duplicate_reduction_info = sampler_info;
+    duplicate_reduction_info.p_next = @ptrCast(&duplicate_reduction);
+    unpublished_sampler = 0xcccc;
+    try std.testing.expectEqual(Result.error_initialization_failed, createSampler(device, &duplicate_reduction_info, null, &unpublished_sampler));
+    try std.testing.expectEqual(@as(usize, 0xcccc), unpublished_sampler);
+    const UnknownSamplerChain = extern struct { s_type: i32, p_next: ?*const anyopaque, payload: u64 };
+    var unknown_sampler_chain = UnknownSamplerChain{ .s_type = 0x7fff_ffff, .p_next = null, .payload = 0xfeed_face };
+    var unknown_sampler_info = sampler_info;
+    unknown_sampler_info.p_next = @ptrCast(&unknown_sampler_chain);
+    unpublished_sampler = 0xdddd;
+    try std.testing.expectEqual(Result.error_initialization_failed, createSampler(device, &unknown_sampler_info, null, &unpublished_sampler));
+    try std.testing.expectEqual(@as(usize, 0xdddd), unpublished_sampler);
+    var ycbcr_info = SamplerYcbcrConversionInfo{ .s_type = 1000156001, .p_next = null, .conversion = 1 };
+    var unsupported_ycbcr_info = sampler_info;
+    unsupported_ycbcr_info.p_next = @ptrCast(&ycbcr_info);
+    unpublished_sampler = 0xeeee;
+    try std.testing.expectEqual(Result.error_format_not_supported, createSampler(device, &unsupported_ycbcr_info, null, &unpublished_sampler));
+    try std.testing.expectEqual(@as(usize, 0xeeee), unpublished_sampler);
+    ycbcr_info.conversion = 0;
+    unpublished_sampler = 0xffff;
+    try std.testing.expectEqual(Result.error_initialization_failed, createSampler(device, &unsupported_ycbcr_info, null, &unpublished_sampler));
+    try std.testing.expectEqual(@as(usize, 0xffff), unpublished_sampler);
+    // Feature-disabled MIN reduction is a hot rejection path and must not
+    // allocate or mutate a caller's output handle.
+    weighted_reduction.reduction_mode = 2;
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        unpublished_sampler = 0x1234;
+        try std.testing.expectEqual(Result.error_feature_not_present, createSampler(device, &unsupported_reduction_info, null, &unpublished_sampler));
+        try std.testing.expectEqual(@as(usize, 0x1234), unpublished_sampler);
+    }
+    test_allocations_before_failure = null;
     const layout_bindings = [_]DescriptorSetLayoutBinding{
         .{ .binding = 0, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null },
         .{ .binding = 1, .descriptor_type = 1, .descriptor_count = 1, .stage_flags = 16, .immutable_samplers = null },
