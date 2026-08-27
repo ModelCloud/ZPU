@@ -4642,6 +4642,7 @@ fn record(cb: CommandBuffer, command: Command) void {
     } else if (cb.impl.active_framebuffer) |framebuffer| {
         switch (owned) {
             .render_clear => |*clear| clear.layer_count = framebuffer.layers,
+            .clear_depth => |*clear| clear.layer_count = framebuffer.layers,
             .cube_draw => |*draw| draw.layer_count = framebuffer.layers,
             .indirect_draw => |*draw| draw.layer_count = framebuffer.layers,
             else => {},
@@ -5071,10 +5072,7 @@ fn cmdNextSubpass(cb: ?CommandBuffer, contents: i32) callconv(.c) void {
         c.impl.invalid = true;
         return;
     };
-    const image = framebuffer.color_image orelse {
-        c.impl.invalid = true;
-        return;
-    };
+    const image = framebuffer.color_image;
     const depth = framebuffer.depth_image;
     const current_subpass = c.impl.active_subpass;
     const next_subpass = current_subpass + 1;
@@ -5093,7 +5091,7 @@ fn cmdNextSubpass(cb: ?CommandBuffer, contents: i32) callconv(.c) void {
         c.impl.invalid = true;
         return;
     }
-    if (color_transition) record(c, .{ .transition = .{ .image = image, .old_layout = render_pass.subpass_color_layouts[current_subpass], .new_layout = render_pass.subpass_color_layouts[next_subpass] } });
+    if (image) |color_image| if (color_transition) record(c, .{ .transition = .{ .image = color_image, .old_layout = render_pass.subpass_color_layouts[current_subpass], .new_layout = render_pass.subpass_color_layouts[next_subpass] } });
     if (depth) |depth_image| if (depth_transition) record(c, .{ .transition = .{ .image = depth_image, .old_layout = render_pass.subpass_depth_layouts[current_subpass], .new_layout = render_pass.subpass_depth_layouts[next_subpass] } });
     c.impl.active_subpass = next_subpass;
     c.impl.bound_pipeline = null;
@@ -6525,6 +6523,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 hit(.layout_mismatch);
                 return false;
             }
+            if (op.layer_count == 0 or op.base_layer >= op.image.array_layers or op.layer_count > op.image.array_layers - op.base_layer) return false;
         },
         .render_clear => |op| {
             const color_slot = imageSlot(op.image) orelse return deadResource();
@@ -8177,39 +8176,52 @@ const RenderPassFramebufferMetadata = struct {
 
 fn snapshotRenderPassFramebufferMetadata(ci: *const RenderPassCreateInfo) RenderPassFramebufferMetadata {
     if (ci.attachment_count == 0 or ci.attachment_count > 2 or ci.attachments == null or ci.subpasses == null) return .{};
+    var has_color = false;
     var has_depth = false;
     for (ci.subpasses.?[0..ci.subpass_count], 0..) |subpass, subpass_index| {
-        if (subpass.input_attachment_count != 0 or subpass.resolve_attachments != null or subpass.preserve_attachment_count != 0 or subpass.color_attachment_count != 1 or subpass.color_attachments == null or subpass.color_attachments.?[0].attachment != 0) return .{};
+        if (subpass.input_attachment_count != 0 or subpass.resolve_attachments != null or subpass.preserve_attachment_count != 0) return .{};
+        const subpass_has_color = if (subpass.color_attachment_count == 0 and subpass.color_attachments == null)
+            false
+        else if (subpass.color_attachment_count == 1 and subpass.color_attachments != null and subpass.color_attachments.?[0].attachment == 0)
+            true
+        else
+            return .{};
+        if (subpass_index == 0) has_color = subpass_has_color else if (subpass_has_color != has_color) return .{};
         const depth = subpass.depth_stencil_attachment;
         if (depth) |reference| {
-            if (reference.attachment != 1) return .{};
+            const expected_attachment: u32 = if (has_color) 1 else 0;
+            if (reference.attachment != expected_attachment) return .{};
             if (subpass_index != 0 and !has_depth) return .{};
             has_depth = true;
         } else if (subpass_index != 0 and has_depth) return .{};
     }
-    const expected_count: u32 = if (has_depth) 2 else 1;
+    if (!has_color and !has_depth) return .{};
+    const expected_count: u32 = @as(u32, @intFromBool(has_color)) + @as(u32, @intFromBool(has_depth));
     if (ci.attachment_count != expected_count) return .{};
     const descriptions = ci.attachments.?;
     const first_subpass = ci.subpasses.?[0];
-    const color_reference = first_subpass.color_attachments.?[0];
     var result = RenderPassFramebufferMetadata{ .supported = true, .attachment_count = expected_count };
-    result.attachments[0] = .{ .format = descriptions[0].format, .samples = descriptions[0].samples, .role = .color };
-    result.color_load_op = descriptions[0].load_op;
-    result.color_store_op = descriptions[0].store_op;
-    result.color_initial_layout = descriptions[0].initial_layout;
-    result.color_subpass_layout = color_reference.layout;
-    result.color_final_layout = descriptions[0].final_layout;
-    for (ci.subpasses.?[0..ci.subpass_count], 0..) |subpass, index| {
-        result.subpass_color_layouts[index] = subpass.color_attachments.?[0].layout;
+    if (has_color) {
+        const color_reference = first_subpass.color_attachments.?[0];
+        result.attachments[0] = .{ .format = descriptions[0].format, .samples = descriptions[0].samples, .role = .color };
+        result.color_load_op = descriptions[0].load_op;
+        result.color_store_op = descriptions[0].store_op;
+        result.color_initial_layout = descriptions[0].initial_layout;
+        result.color_subpass_layout = color_reference.layout;
+        result.color_final_layout = descriptions[0].final_layout;
+        for (ci.subpasses.?[0..ci.subpass_count], 0..) |subpass, index| {
+            result.subpass_color_layouts[index] = subpass.color_attachments.?[0].layout;
+        }
     }
     if (has_depth) {
         const depth_reference = first_subpass.depth_stencil_attachment.?;
-        result.attachments[1] = .{ .format = descriptions[1].format, .samples = descriptions[1].samples, .role = .depth };
-        result.depth_load_op = descriptions[1].load_op;
-        result.depth_store_op = descriptions[1].store_op;
-        result.depth_initial_layout = descriptions[1].initial_layout;
+        const depth_index: usize = if (has_color) 1 else 0;
+        result.attachments[depth_index] = .{ .format = descriptions[depth_index].format, .samples = descriptions[depth_index].samples, .role = .depth };
+        result.depth_load_op = descriptions[depth_index].load_op;
+        result.depth_store_op = descriptions[depth_index].store_op;
+        result.depth_initial_layout = descriptions[depth_index].initial_layout;
         result.depth_subpass_layout = depth_reference.layout;
-        result.depth_final_layout = descriptions[1].final_layout;
+        result.depth_final_layout = descriptions[depth_index].final_layout;
         for (ci.subpasses.?[0..ci.subpass_count], 0..) |subpass, index| {
             result.subpass_depth_layouts[index] = subpass.depth_stencil_attachment.?.layout;
         }
@@ -8932,7 +8944,12 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     try w.u32le(1);
     try w.i32le(3);
     const cb = ci.color_blend orelse return error.Invalid;
-    const color_attachment_count: u32 = if (dynamic_rendering_state) |state| if (state.color_format == 0) 0 else 1 else 1;
+    const color_attachment_count: u32 = if (dynamic_rendering_state) |state|
+        if (state.color_format == 0) 0 else 1
+    else if (render_pass) |pass|
+        if (pass.framebuffer_supported and pass.framebuffer_attachment_count != 0 and pass.framebuffer_attachments[0].role == .depth) 0 else 1
+    else
+        1;
     if (cb.s_type != 26 or cb.p_next != null or cb.flags != 0 or try bool32(cb.logic_op_enable) != 0 or cb.logic_op != 0 or cb.attachment_count != color_attachment_count or (color_attachment_count != 0 and cb.attachments == null) or (color_attachment_count == 0 and cb.attachments != null) or !std.meta.eql(cb.blend_constants, [_]f32{ 0, 0, 0, 0 })) return error.Invalid;
     try w.u32le(color_attachment_count);
     if (color_attachment_count != 0) {
@@ -9539,10 +9556,10 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
         }
         prior_view = view;
     }
-    const color_image = color orelse return .error_initialization_failed;
+    if (color == null and depth == null) return .error_initialization_failed;
     var compatibility = render_pass.compatibility.clone() catch return .error_out_of_host_memory;
     for (&framebuffer_objects, &framebuffer_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = d, .color_image = color_image, .depth_image = depth, .render_compatibility = compatibility, .layers = ci.layers };
+        object.* = .{ .owner = d, .color_image = color, .depth_image = depth, .render_compatibility = compatibility, .layers = ci.layers };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
@@ -10093,7 +10110,9 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
         command_buffer.impl.invalid = true;
         return;
     };
-    const image = framebuffer.color_image orelse {
+    const color_image = framebuffer.color_image;
+    const depth = framebuffer.depth_image;
+    const image = color_image orelse depth orelse {
         command_buffer.impl.invalid = true;
         return;
     };
@@ -10103,12 +10122,13 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     const area_end_y = std.math.add(u64, area_y, begin.render_area.extent.height) catch std.math.maxInt(u64);
     var color = [4]f32{ 0, 0, 0, 0 };
     var depth_value: f32 = 1;
-    const clear_color = render_pass.color_load_op == 1;
-    const clear_depth = framebuffer.depth_image != null and render_pass.depth_load_op == 1;
+    const clear_color = color_image != null and render_pass.color_load_op == 1;
+    const clear_depth = depth != null and render_pass.depth_load_op == 1;
+    const depth_clear_index: usize = if (color_image != null) 1 else 0;
     var clear_values_valid = begin.clear_value_count <= render_pass.framebuffer_attachment_count and
         (begin.clear_value_count == 0 or begin.clear_values != null) and
         (!clear_color or begin.clear_value_count >= 1) and
-        (!clear_depth or begin.clear_value_count >= 2);
+        (!clear_depth or begin.clear_value_count > depth_clear_index);
     if (clear_values_valid and begin.clear_value_count != 0) {
         if (clear_color) {
             color = begin.clear_values.?[0].color.float32;
@@ -10117,26 +10137,25 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
             }
         }
         if (clear_depth) {
-            depth_value = begin.clear_values.?[1].depth_stencil.depth;
+            depth_value = begin.clear_values.?[depth_clear_index].depth_stencil.depth;
             if (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1) clear_values_valid = false;
         }
     }
-    const depth = framebuffer.depth_image;
     // UNDEFINED is an explicit discard request: the tracked previous layout
     // need not match it, but a command recorded against a concrete prior
     // layout still has to fail atomically if that resource changes before
     // submission.  Capture the live layout for that case so submission
     // prevalidation can retain the stale-resource check.
-    const tracked_color_layout = commandBufferImageLayout(command_buffer, image);
+    const tracked_color_layout = if (color_image) |color_target| commandBufferImageLayout(command_buffer, color_target) else -1;
     const tracked_depth_layout = if (depth) |depth_image| commandBufferImageLayout(command_buffer, depth_image) else render_pass.depth_initial_layout;
-    const color_old_layout = if (render_pass.color_initial_layout == 0) tracked_color_layout else render_pass.color_initial_layout;
+    const color_old_layout = if (color_image != null) (if (render_pass.color_initial_layout == 0) tracked_color_layout else render_pass.color_initial_layout) else -1;
     const depth_old_layout = if (render_pass.depth_initial_layout == 0 and depth != null) tracked_depth_layout else render_pass.depth_initial_layout;
     const first_color_layout = render_pass.subpass_color_layouts[0];
     const first_depth_layout = render_pass.subpass_depth_layouts[0];
-    const layout_count: usize = 1 + @as(usize, if (depth != null) 1 else 0);
+    const layout_count: usize = @as(usize, @intFromBool(color_image != null)) + @as(usize, @intFromBool(depth != null));
     const clear_count: usize = @as(usize, if (clear_color or clear_depth) 1 else 0);
     const layout_capacity = @as(usize, command_buffer.impl.count) + layout_count + clear_count;
-    if ((contents != 0 and contents != 1) or begin.s_type != 43 or !renderPassBeginPNextValid(begin.p_next) or command_buffer.impl.level != 0 or command_buffer.impl.state != 1 or command_buffer.impl.active_framebuffer != null or layout_capacity > command_buffer.impl.commands.len or !clear_values_valid or !render_pass.owner.eql(command_buffer.impl.owner) or framebuffer.owner != command_buffer.impl.owner or image.owner != command_buffer.impl.owner or !framebuffer.render_compatibility.eql(&render_pass.compatibility) or (render_pass.color_initial_layout != 0 and tracked_color_layout != render_pass.color_initial_layout) or (depth != null and render_pass.depth_initial_layout != 0 and tracked_depth_layout != render_pass.depth_initial_layout) or begin.render_area.extent.width == 0 or begin.render_area.extent.height == 0 or area_end_x > image.width or area_end_y > image.height) {
+    if ((contents != 0 and contents != 1) or begin.s_type != 43 or !renderPassBeginPNextValid(begin.p_next) or command_buffer.impl.level != 0 or command_buffer.impl.state != 1 or command_buffer.impl.active_framebuffer != null or layout_capacity > command_buffer.impl.commands.len or !clear_values_valid or !render_pass.owner.eql(command_buffer.impl.owner) or framebuffer.owner != command_buffer.impl.owner or image.owner != command_buffer.impl.owner or !framebuffer.render_compatibility.eql(&render_pass.compatibility) or (color_image != null and render_pass.color_initial_layout != 0 and tracked_color_layout != render_pass.color_initial_layout) or (depth != null and render_pass.depth_initial_layout != 0 and tracked_depth_layout != render_pass.depth_initial_layout) or begin.render_area.extent.width == 0 or begin.render_area.extent.height == 0 or area_end_x > image.width or area_end_y > image.height) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -10144,9 +10163,13 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     command_buffer.impl.active_render_pass = render_pass;
     command_buffer.impl.active_subpass = 0;
     command_buffer.impl.render_contents = contents;
-    if (color_old_layout != first_color_layout) record(command_buffer, .{ .transition = .{ .image = image, .old_layout = color_old_layout, .new_layout = first_color_layout } });
+    if (color_image) |color_target| if (color_old_layout != first_color_layout) record(command_buffer, .{ .transition = .{ .image = color_target, .old_layout = color_old_layout, .new_layout = first_color_layout } });
     if (depth) |depth_image| if (depth_old_layout != first_depth_layout) record(command_buffer, .{ .transition = .{ .image = depth_image, .old_layout = depth_old_layout, .new_layout = first_depth_layout } });
-    if (clear_color or clear_depth) record(command_buffer, .{ .render_clear = .{ .image = image, .depth = depth, .color = .{ @intFromFloat(std.math.clamp(color[2], 0, 1) * 255), @intFromFloat(std.math.clamp(color[1], 0, 1) * 255), @intFromFloat(std.math.clamp(color[0], 0, 1) * 255), @intFromFloat(std.math.clamp(color[3], 0, 1) * 255) }, .depth_value = depth_value, .expected_color_layout = first_color_layout, .expected_depth_layout = if (depth != null) first_depth_layout else -1, .clear_color = clear_color, .clear_depth = clear_depth } });
+    if (clear_color or clear_depth) {
+        if (color_image) |color_target| {
+            record(command_buffer, .{ .render_clear = .{ .image = color_target, .depth = depth, .color = .{ @intFromFloat(std.math.clamp(color[2], 0, 1) * 255), @intFromFloat(std.math.clamp(color[1], 0, 1) * 255), @intFromFloat(std.math.clamp(color[0], 0, 1) * 255), @intFromFloat(std.math.clamp(color[3], 0, 1) * 255) }, .depth_value = depth_value, .expected_color_layout = first_color_layout, .expected_depth_layout = if (depth != null) first_depth_layout else -1, .clear_color = clear_color, .clear_depth = clear_depth } });
+        } else if (depth) |depth_image| if (clear_depth) record(command_buffer, .{ .clear_depth = .{ .image = depth_image, .layout = first_depth_layout, .depth = depth_value, .layer_count = framebuffer.layers } });
+    }
 }
 fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.c) void {
     lock();
@@ -12051,16 +12074,17 @@ fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
         command_buffer.impl.invalid = true;
         return;
     }
-    const image = framebuffer.?.color_image orelse {
+    const image = framebuffer.?.color_image;
+    const depth = framebuffer.?.depth_image;
+    if (image == null and depth == null) {
         command_buffer.impl.invalid = true;
         return;
-    };
-    const depth = framebuffer.?.depth_image;
+    }
     const color_subpass_layout = render_pass.?.subpass_color_layouts[active_subpass];
     const depth_subpass_layout = render_pass.?.subpass_depth_layouts[active_subpass];
-    const color_transition = color_subpass_layout != render_pass.?.color_final_layout;
+    const color_transition = image != null and color_subpass_layout != render_pass.?.color_final_layout;
     const depth_transition = depth != null and depth_subpass_layout != render_pass.?.depth_final_layout;
-    const color_discard = render_pass.?.color_store_op == attachment_store_op_none;
+    const color_discard = image != null and render_pass.?.color_store_op == attachment_store_op_none;
     const depth_discard = depth != null and render_pass.?.depth_store_op == attachment_store_op_none;
     const transition_count: usize = @as(usize, @intFromBool(color_transition)) + @as(usize, @intFromBool(depth_transition));
     const discard_count: usize = @as(usize, @intFromBool(color_discard)) + @as(usize, @intFromBool(depth_discard));
@@ -12068,9 +12092,9 @@ fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
         command_buffer.impl.invalid = true;
         return;
     }
-    if (color_discard) record(command_buffer, .{ .discard_image = .{ .image = image, .layer_count = framebuffer.?.layers } });
+    if (image) |color_image| if (color_discard) record(command_buffer, .{ .discard_image = .{ .image = color_image, .layer_count = framebuffer.?.layers } });
     if (depth) |depth_image| if (depth_discard) record(command_buffer, .{ .discard_image = .{ .image = depth_image, .layer_count = framebuffer.?.layers } });
-    if (color_transition) record(command_buffer, .{ .transition = .{ .image = image, .old_layout = color_subpass_layout, .new_layout = render_pass.?.color_final_layout } });
+    if (image) |color_image| if (color_transition) record(command_buffer, .{ .transition = .{ .image = color_image, .old_layout = color_subpass_layout, .new_layout = render_pass.?.color_final_layout } });
     if (depth) |depth_image| if (depth_transition) record(command_buffer, .{ .transition = .{ .image = depth_image, .old_layout = depth_subpass_layout, .new_layout = render_pass.?.depth_final_layout } });
     command_buffer.impl.active_framebuffer = null;
     command_buffer.impl.active_render_pass = null;
@@ -13650,6 +13674,26 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(baseline_pipeline.dynamic_stencil_compare_mask);
     try std.testing.expect(baseline_pipeline.dynamic_stencil_write_mask);
     try std.testing.expect(baseline_pipeline.dynamic_stencil_reference);
+    // Traditional depth-only render passes use a zero-attachment color-blend
+    // state and retain the D32 attachment as framebuffer slot zero.
+    const depth_only_reference = AttachmentReference{ .attachment = 0, .layout = 3 };
+    const depth_only_subpass = SubpassDescription{ .flags = 0, .pipeline_bind_point = 0, .input_attachment_count = 0, .input_attachments = null, .color_attachment_count = 0, .color_attachments = null, .resolve_attachments = null, .depth_stencil_attachment = &depth_only_reference, .preserve_attachment_count = 0, .preserve_attachments = null };
+    const depth_only_description = [_]AttachmentDescription{.{ .flags = 0, .format = 126, .samples = 1, .load_op = 0, .store_op = 1, .stencil_load_op = 2, .stencil_store_op = 1, .initial_layout = 0, .final_layout = 3 }};
+    const depth_only_render_info = RenderPassCreateInfo{ .s_type = 38, .p_next = null, .flags = 0, .attachment_count = 1, .attachments = &depth_only_description, .subpass_count = 1, .subpasses = @ptrCast(&depth_only_subpass), .dependency_count = 0, .dependencies = null };
+    var depth_only_render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(device, &depth_only_render_info, null, &depth_only_render_pass));
+    var no_color_legacy_blend = color_blend;
+    no_color_legacy_blend.attachment_count = 0;
+    no_color_legacy_blend.attachments = null;
+    var depth_only_legacy_info = pipeline_info;
+    depth_only_legacy_info.color_blend = &no_color_legacy_blend;
+    depth_only_legacy_info.render_pass = depth_only_render_pass;
+    var depth_only_legacy_pipeline: [1]usize = .{0xfeed_face};
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&depth_only_legacy_info), null, &depth_only_legacy_pipeline));
+    const depth_only_legacy_object = validGraphicsPipelineLocked(depth_only_legacy_pipeline[0]).?;
+    try std.testing.expectEqual(@as(u32, 0), depth_only_legacy_object.rasterizer_discard_enable);
+    destroyPipeline(device, depth_only_legacy_pipeline[0], null);
+    destroyRenderPass(device, depth_only_render_pass, null);
     var dynamic_pipeline_formats = [_]i32{44};
     var dynamic_pipeline_rendering = PipelineRenderingCreateInfo{ .s_type = pipeline_rendering_create_info_stype, .p_next = null, .view_mask = 0, .color_attachment_count = 1, .color_attachment_formats = &dynamic_pipeline_formats, .depth_attachment_format = 126, .stencil_attachment_format = 0 };
     var dynamic_pipeline_info = pipeline_info;
@@ -21761,6 +21805,94 @@ test "traditional render passes honor load operations and image layout transitio
     destroyFramebuffer(ctx.device, clear_framebuffer, null);
     destroyFramebuffer(ctx.device, framebuffer, null);
     destroyRenderPass(ctx.device, clear_render_pass, null);
+    destroyRenderPass(ctx.device, render_pass, null);
+    destroyImageView(ctx.device, view, null);
+    destroyImage(ctx.device, image, null);
+    freeMemory(ctx.device, memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "traditional depth-only render passes bind, clear, transition, and stay allocation free" {
+    try resetDeadChildSlotsForAbiTest();
+    const ctx = try createTestDeviceContext();
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 126, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x20, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &image));
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 16, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &memory));
+    try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, image, memory, 0));
+    const view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = image, .view_type = 1, .format = 126, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = 2, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    var view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(ctx.device, &view_info, null, &view));
+    const depth_ref = AttachmentReference{ .attachment = 0, .layout = 3 };
+    const attachment = AttachmentDescription{ .flags = 0, .format = 126, .samples = 1, .load_op = 1, .store_op = 1, .stencil_load_op = 2, .stencil_store_op = 1, .initial_layout = 0, .final_layout = 3 };
+    const subpass = SubpassDescription{ .flags = 0, .pipeline_bind_point = 0, .input_attachment_count = 0, .input_attachments = null, .color_attachment_count = 0, .color_attachments = null, .resolve_attachments = null, .depth_stencil_attachment = @ptrCast(&depth_ref), .preserve_attachment_count = 0, .preserve_attachments = null };
+    const render_info = RenderPassCreateInfo{ .s_type = 38, .p_next = null, .flags = 0, .attachment_count = 1, .attachments = @ptrCast(&attachment), .subpass_count = 1, .subpasses = @ptrCast(&subpass), .dependency_count = 0, .dependencies = null };
+    var render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(ctx.device, &render_info, null, &render_pass));
+    const pass = validRenderPassLocked(render_pass).?;
+    try std.testing.expect(pass.framebuffer_supported);
+    try std.testing.expectEqual(@as(u32, 1), pass.framebuffer_attachment_count);
+    try std.testing.expectEqual(AttachmentRole.depth, pass.framebuffer_attachments[0].role);
+    try std.testing.expectEqual(@as(i32, 3), pass.subpass_depth_layouts[0]);
+    const framebuffer_info = FramebufferCreateInfo{ .s_type = 37, .p_next = null, .flags = 0, .render_pass = render_pass, .attachment_count = 1, .attachments = @ptrCast(&view), .width = 2, .height = 2, .layers = 1 };
+    var framebuffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createFramebuffer(ctx.device, &framebuffer_info, null, &framebuffer));
+    try std.testing.expect(validFramebufferLocked(framebuffer).?.color_image == null);
+    try std.testing.expect(validFramebufferLocked(framebuffer).?.depth_image != null);
+
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    const allocate_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var command: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate_info, &command));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    var depth_clear = ClearValue{ .depth_stencil = .{ .depth = 0.25, .stencil = 0 } };
+    var render_begin = RenderPassBeginInfo{ .s_type = 43, .p_next = null, .render_pass = render_pass, .framebuffer = framebuffer, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 2, .height = 2 } }, .clear_value_count = 1, .clear_values = @ptrCast(&depth_clear) };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdBeginRenderPass(command[0], &render_begin, 0);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 2), command[0].impl.count);
+    try std.testing.expectEqual(@as(std.meta.Tag(Command), .clear_depth), std.meta.activeTag(command[0].impl.commands[1]));
+    cmdEndRenderPass(command[0]);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &command, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    const image_object = validImageLocked(image).?;
+    try std.testing.expectEqual(@as(u32, 0x3e80_0000), std.mem.readInt(u32, imageBytes(image_object)[0..4], .little));
+    try std.testing.expectEqual(@as(i32, 3), image_object.layout);
+
+    // Missing the depth clear value is rejected atomically at record time.
+    render_begin.clear_value_count = 0;
+    render_begin.clear_values = null;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdBeginRenderPass(command[0], &render_begin, 0);
+    try std.testing.expect(command[0].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 0), command[0].impl.count);
+    try std.testing.expect(command[0].impl.active_render_pass == null);
+
+    // Warm begin/end remains allocation free and preserves the depth-only
+    // attachment identity across command-buffer reuse.
+    render_begin.clear_value_count = 1;
+    render_begin.clear_values = @ptrCast(&depth_clear);
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+        cmdBeginRenderPass(command[0], &render_begin, 0);
+        cmdEndRenderPass(command[0]);
+        try std.testing.expect(!command[0].impl.invalid);
+    }
+
+    freeCommandBuffers(ctx.device, pool, 1, &command);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyFramebuffer(ctx.device, framebuffer, null);
     destroyRenderPass(ctx.device, render_pass, null);
     destroyImageView(ctx.device, view, null);
     destroyImage(ctx.device, image, null);
