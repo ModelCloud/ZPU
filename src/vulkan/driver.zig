@@ -11475,7 +11475,7 @@ fn createDescriptorUpdateTemplate(device: ?Device, info: ?*const DescriptorUpdat
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (alloc != null or ci.s_type != 1000085000 or ci.p_next != null or ci.flags != 0 or (ci.template_type != 0 and ci.template_type != 1) or (ci.pipeline_bind_point != 0 and ci.pipeline_bind_point != 1) or ci.set != 0 or ci.descriptor_update_entry_count > 32 or (ci.descriptor_update_entry_count != 0 and ci.descriptor_update_entries == null)) return .error_initialization_failed;
+    if (alloc != null or ci.s_type != 1000085000 or ci.p_next != null or ci.flags != 0 or (ci.template_type != 0 and ci.template_type != 1) or (ci.pipeline_bind_point != 0 and ci.pipeline_bind_point != 1) or ci.set != 0 or ci.descriptor_update_entry_count == 0 or ci.descriptor_update_entry_count > 32 or ci.descriptor_update_entries == null) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
@@ -12333,7 +12333,7 @@ fn cmdPushConstants2(cb: ?CommandBuffer, info: ?*const PushConstantsInfo) callco
     cmdPushConstants(cb, ci.layout, ci.stage_flags, ci.offset, ci.size, ci.values);
 }
 fn applyPushDescriptorWritesLocked(command_buffer: *CommandBufferObj, layout: *PipelineLayoutObj, count: u32, writes: ?[*]const WriteDescriptorSet) bool {
-    if (!layout.push_descriptor or count > max_api_items or (count != 0 and writes == null)) return false;
+    if (!layout.push_descriptor or count == 0 or count > max_api_items or writes == null) return false;
     var candidate = if (command_buffer.impl.push_descriptor_active and command_buffer.impl.push_descriptor.layout.eql(&layout.set0)) command_buffer.impl.push_descriptor else DescriptorSetObj{};
     candidate.owner = DeviceIdentity.capture(command_buffer.impl.owner);
     candidate.layout = .{ .bytes = layout.set0.bytes, .digest = layout.set0.digest };
@@ -22209,11 +22209,17 @@ test "push descriptors own layout state, template decoding, rollback, and warm p
     const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
 
-    cmdPushDescriptorSet(command[0], 0, pipeline_layout, 0, 0, null);
-    try std.testing.expect(!command[0].impl.invalid);
-    try std.testing.expect(command[0].impl.push_descriptor_active);
-    try std.testing.expect(command[0].impl.bound_descriptors == null);
-    try std.testing.expectEqual(pipeline_layout, command[0].impl.bound_layout_handle);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        cmdPushDescriptorSet(command[0], 0, pipeline_layout, 0, 0, null);
+        try std.testing.expect(command[0].impl.invalid);
+        try std.testing.expect(!command[0].impl.push_descriptor_active);
+        try std.testing.expect(command[0].impl.bound_descriptors == null);
+        try std.testing.expectEqual(@as(usize, 0), command[0].impl.bound_layout_handle);
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    }
+    test_allocations_before_failure = null;
 
     cmdPushDescriptorSet(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&descriptor_write));
     try std.testing.expect(!command[0].impl.invalid);
@@ -22237,6 +22243,12 @@ test "push descriptors own layout state, template decoding, rollback, and warm p
     var descriptor_template: usize = 0;
     try std.testing.expectEqual(Result.success, createDescriptorUpdateTemplate(ctx.device, &template_info, null, &descriptor_template));
     try std.testing.expectEqual(@as(i32, 1), validDescriptorUpdateTemplateLocked(descriptor_template).?.template_type);
+    var empty_template_info = template_info;
+    empty_template_info.descriptor_update_entry_count = 0;
+    empty_template_info.descriptor_update_entries = null;
+    var empty_template: usize = 0xfeed_face;
+    try std.testing.expectEqual(Result.error_initialization_failed, createDescriptorUpdateTemplate(ctx.device, &empty_template_info, null, &empty_template));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), empty_template);
     var unsupported_template_info = template_info;
     unsupported_template_info.pipeline_bind_point = 2;
     var unsupported_template: usize = 0xfeed_face;
@@ -22269,6 +22281,14 @@ test "push descriptors own layout state, template decoding, rollback, and warm p
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
     const push2 = PushDescriptorSetInfo{ .s_type = 1000545005, .p_next = null, .stage_flags = 1, .layout = pipeline_layout, .set = 0, .descriptor_write_count = 1, .descriptor_writes = @ptrCast(&descriptor_write) };
+    var empty_push2 = push2;
+    empty_push2.descriptor_write_count = 0;
+    empty_push2.descriptor_writes = null;
+    cmdPushDescriptorSet2(command[0], &empty_push2);
+    try std.testing.expect(command[0].impl.invalid);
+    try std.testing.expect(!command[0].impl.push_descriptor_active);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
     var unsupported_push2 = push2;
     unsupported_push2.stage_flags = 0x40;
     cmdPushDescriptorSet2(command[0], &unsupported_push2);
@@ -22306,7 +22326,7 @@ test "push descriptors own layout state, template decoding, rollback, and warm p
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     for (0..4096) |_| {
-        cmdPushDescriptorSet(command[0], 0, pipeline_layout, 0, 0, null);
+        cmdPushDescriptorSet(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&descriptor_write));
         try std.testing.expect(!command[0].impl.invalid);
     }
     try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
