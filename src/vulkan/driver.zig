@@ -23345,6 +23345,9 @@ test "secondary command buffers inherit lifetime and execute in exact primary or
     try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&direct_secondary_submit), 0));
     const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &primary, .signal_semaphore_count = 0, .signal_semaphores = null };
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    test_allocations_before_failure = null;
     var mapped: ?*anyopaque = null;
     try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memory, 0, 64, 0, &mapped));
     const bytes: [*]const u8 = @ptrCast(mapped.?);
