@@ -343,12 +343,18 @@ pub const Executor = struct {
                         }
                     }
                 },
-                .f_round, .f_round_even, .f_trunc => {
+                .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
                     for (0..result.lanes()) |i| {
                         const x: f32 = @bitCast(a.bits[i]);
                         const value = if (instruction.op == .f_trunc)
                             @trunc(x)
+                        else if (instruction.op == .f_floor)
+                            @floor(x)
+                        else if (instruction.op == .f_ceil)
+                            @ceil(x)
+                        else if (instruction.op == .f_fract)
+                            x - @floor(x)
                         else if (instruction.op == .f_round)
                             @round(x)
                         else if (!std.math.isFinite(x))
@@ -820,7 +826,7 @@ fn validate(program: *const ir.Program) Error!void {
             .vector_insert_dynamic => n == 3,
             .composite_insert => n == 3,
             .shuffle => n == 2 + try lanes(instruction.ty),
-            .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .f_round, .f_round_even, .f_trunc, .bit_not, .logical_not, .transpose, .any, .all, .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set, .bit_reverse, .bit_count, .convert, .bitcast, .copy_object, .quantize_f16 => n == 1,
+            .fneg, .ineg, .f_abs, .i_abs, .i_sign, .f_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .bit_not, .logical_not, .transpose, .any, .all, .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set, .bit_reverse, .bit_count, .convert, .bitcast, .copy_object, .quantize_f16 => n == 1,
             .bit_field_insert => n == 4,
             .bit_field_s_extract, .bit_field_u_extract => n == 3,
             .select => n == 3,
@@ -858,7 +864,7 @@ fn validate(program: *const ir.Program) Error!void {
                 .constant_composite, .composite => if (source_ty.scalar != instruction.ty.scalar) return error.InvalidType,
                 .u_min, .i_min, .u_max, .i_max => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .f_clamp, .u_clamp, .i_clamp, .f_mix, .fma, .f_smooth_step => if (!same(source_ty, instruction.ty)) return error.InvalidType,
-                .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .f_round, .f_round_even, .f_trunc, .bit_not, .logical_not, .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step, .transpose => if (!same(source_ty, instruction.ty)) return error.InvalidType,
+                .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .bit_not, .logical_not, .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step, .transpose => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle => if (source_ty.scalar != .i32 and source_ty.scalar != .u32 or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
                 .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge => if (source_ty.scalar != .f32 or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
                 .logical_eq, .logical_ne, .logical_or, .logical_and => if (source_ty.scalar != .bool or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
@@ -1063,6 +1069,9 @@ fn validate(program: *const ir.Program) Error!void {
                 if (instruction.ty.scalar != .f32 or instruction.ty.rows != 1) return error.InvalidType;
             },
             .f_round, .f_round_even, .f_trunc => {
+                if (instruction.ty.scalar != .f32 or instruction.ty.rows != 1) return error.InvalidType;
+            },
+            .f_floor, .f_ceil, .f_fract => {
                 if (instruction.ty.scalar != .f32 or instruction.ty.rows != 1) return error.InvalidType;
             },
             else => {},
@@ -1446,6 +1455,9 @@ test "GLSL round round-even and trunc preserve bounded f32 lanes" {
         .{ .op = .f_round, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{0}, .literal = &.{} },
         .{ .op = .f_round_even, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{0}, .literal = &.{} },
         .{ .op = .f_trunc, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .f_floor, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .f_ceil, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .f_fract, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{0}, .literal = &.{} },
     };
     var source = try testProgram(&interfaces, &instructions);
     defer std.testing.allocator.free(source.bytes);
@@ -1462,6 +1474,18 @@ test "GLSL round round-even and trunc preserve bounded f32 lanes" {
     try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 1))), executor.values[3].bits[1]);
     try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, -1))), executor.values[3].bits[2]);
     try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, -1))), executor.values[3].bits[3]);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 1))), executor.values[4].bits[0]);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 1))), executor.values[4].bits[1]);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, -2))), executor.values[4].bits[2]);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, -2))), executor.values[4].bits[3]);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 2))), executor.values[5].bits[0]);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 2))), executor.values[5].bits[1]);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, -1))), executor.values[5].bits[2]);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, -1))), executor.values[5].bits[3]);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4), @as(f32, @bitCast(executor.values[6].bits[0])), 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.6), @as(f32, @bitCast(executor.values[6].bits[1])), 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.6), @as(f32, @bitCast(executor.values[6].bits[2])), 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4), @as(f32, @bitCast(executor.values[6].bits[3])), 0.000001);
     for (0..4096) |_| try executor.execute(&.{.{ .interface = 0, .bytes = &values }}, &.{});
 }
 
@@ -2654,7 +2678,7 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
             const when_false = try propertyConstant(arena, &instructions, result_ty);
             result_id = try propertyInstruction(arena, &instructions, .select, result_ty, &.{ condition, when_true, when_false }, &.{});
         },
-        .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .f_round, .f_round_even, .f_trunc, .bit_not, .bit_reverse, .bit_count, .convert, .bitcast, .copy_object, .quantize_f16 => {
+        .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .bit_not, .bit_reverse, .bit_count, .convert, .bitcast, .copy_object, .quantize_f16 => {
             var source_ty = result_ty;
             if (convert_from) |scalar| source_ty.scalar = scalar;
             const source = try propertyConstant(arena, &instructions, source_ty);
@@ -2883,6 +2907,10 @@ test "generated bounded operation by type-family property matrix is complete" {
                 try runPropertyCase(op, ty, null, null);
                 totals[@intFromEnum(op)] += 1;
             }
+            inline for ([_]ir.Op{ .f_floor, .f_ceil, .f_fract }) |op| {
+                try runPropertyCase(op, ty, null, null);
+                totals[@intFromEnum(op)] += 1;
+            }
         }
         if (is_integer) inline for ([_]ir.Op{ .iadd, .isub, .imul }) |op| {
             try runPropertyCase(op, ty, null, null);
@@ -3006,15 +3034,15 @@ test "generated bounded operation by type-family property matrix is complete" {
         totals[@intFromEnum(op)] += 1;
     }
     const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14, 8, 4, 8, 8, 8, 8, 4, 4, 4, 4, 4, 8, 8, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{4, 4} ++ [_]usize{4, 4} ++ [_]usize{4, 4, 4};
+    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{4, 4} ++ [_]usize{4, 4} ++ [_]usize{4, 4, 4} ++ [_]usize{4, 4, 4};
     try std.testing.expectEqualSlices(usize, expected_full[0..totals.len], &totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 527), total);
-    std.debug.print("generated property matrix: operations=115 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 539), total);
+    std.debug.print("generated property matrix: operations=118 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -3146,13 +3174,13 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 115), malformed);
+    try std.testing.expectEqual(@as(usize, 118), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
     try std.testing.expectEqual(@as(usize, 5), runtime_nan);
     try std.testing.expectEqual(@as(usize, 5), signed_zero);
-    std.debug.print("generated property categories: malformed=115 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
+    std.debug.print("generated property categories: malformed=118 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
 }
 
 test "generated valid scalar DAGs are total and stable" {
