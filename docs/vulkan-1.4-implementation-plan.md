@@ -861,6 +861,23 @@ update payloads and retained secondary references from being freed underneath
 the executor. One-time command buffers retire their records after the final
 pin release; the secondary-lifetime regression covers the deferred path.
 
+### Latest audit slice — submitted resource storage pins
+
+Queue submission now retains every image and backing memory allocation reached
+by copied command records, including framebuffer attachments, descriptor
+uniform/storage buffers, vertex/index streams, indirect/count buffers, and
+image-transfer sources and destinations.  The fixed-size pin lists keep the
+submission warm path allocation-free. `vkDestroyImage`, `vkFreeMemory`, and
+device teardown tombstone handles immediately but defer private image bytes,
+dirty-tile metadata, and memory pages until the final submission pin releases;
+this prevents a concurrent destruction from invalidating CPU slices while the
+synchronous executor runs outside the registry mutex.  The lifetime regression
+pins a bound allocation, destroys its last buffer, verifies the bytes remain
+available through deferred free, and confirms release returns the storage.
+Shared swapchain transport storage follows the same rule: transport teardown
+waits for all pinned swapchain images instead of freeing shared presentation
+bytes underneath a submitted image.
+
 - [ ] **A8 — secondary command buffers:** inheritance, execution, reset, and
   lifetime rules. Traditional render-pass inheritance now matches the active
   subpass for multi-subpass execution, and the bounded dynamic rendering

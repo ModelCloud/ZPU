@@ -1088,10 +1088,40 @@ pub const Instance = *InstanceObj;
 pub const Physical = *PhysicalObj;
 pub const Device = *DeviceObj;
 pub const Queue = *QueueObj;
-const MemoryObj = struct { owner: Device, bytes: []align(64) u8, mapped: bool };
+const MemoryObj = struct {
+    owner: Device,
+    bytes: []align(64) u8,
+    mapped: bool,
+    active_users: std.atomic.Value(u32) = .init(0),
+    retire_pending: bool = false,
+    storage_released: bool = false,
+};
 const BufferObj = struct { owner: Device, size: u64, usage: u32, memory: ?*MemoryObj = null, offset: u64 = 0 };
 const BufferViewObj = struct { owner: Device, buffer: *BufferObj, format: i32, offset: u64, range: u64 };
-const ImageObj = struct { owner: Device, width: u32, height: u32, array_layers: u32, samples: u32, format: i32, usage: u32, layout: i32, memory: ?*MemoryObj = null, owned_bytes: ?[]align(64) u8 = null, shared_bytes: bool = false, offset: u64 = 0, clear_pattern: ?u32 = null, content_bounds: cpu_cube.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, force_full_present: bool = true, complex_3d_content: bool = false, last_clear_ns: u64 = 0, last_draw_ns: u64 = 0, dirty_tiles: ?[]align(64) u8 = null };
+const ImageObj = struct {
+    owner: Device,
+    width: u32,
+    height: u32,
+    array_layers: u32,
+    samples: u32,
+    format: i32,
+    usage: u32,
+    layout: i32,
+    memory: ?*MemoryObj = null,
+    owned_bytes: ?[]align(64) u8 = null,
+    shared_bytes: bool = false,
+    offset: u64 = 0,
+    clear_pattern: ?u32 = null,
+    content_bounds: cpu_cube.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    force_full_present: bool = true,
+    complex_3d_content: bool = false,
+    last_clear_ns: u64 = 0,
+    last_draw_ns: u64 = 0,
+    dirty_tiles: ?[]align(64) u8 = null,
+    active_users: std.atomic.Value(u32) = .init(0),
+    retire_pending: bool = false,
+    shared_owner: usize = 0,
+};
 const FenceObj = struct { owner: Device, signaled: std.atomic.Value(bool), waiters: std.atomic.Value(u32) };
 const EventSignalKind = enum(u8) { none, host, legacy, synchronization2 };
 const EventSetCommand = struct { event: *EventObj, signal_kind: EventSignalKind, stage_mask: u32, dependency_key: u64 };
@@ -1408,6 +1438,7 @@ const SwapchainObj = struct {
     present_timing_next_id: u64,
     present_timing_history: [max_present_entries]PresentTimingRecord,
     transport: xcb_present.Transport,
+    transport_retire_pending: bool = false,
 };
 const PresentTimingRecord = struct {
     present_id: u64 = 0,
@@ -1437,6 +1468,10 @@ pub const CommandBuffer = *CommandBufferObj;
 
 const max_objects = 64;
 const max_child_objects = 64;
+// A submitted command stream can retain one instance of every live buffer
+// and image, and each of those can point at a distinct allocation.  Keep the
+// pin lists fixed-size so the submission hot path remains allocation-free.
+const max_resource_pins = max_child_objects * 2;
 const max_memory_objects = 4096;
 const max_sampler_objects = 4000;
 const heap_size: u64 = 256 * 1024 * 1024;
@@ -3848,7 +3883,7 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
             object.layout.deinit();
         };
         for (&swapchain_objects, &swapchain_state) |*swapchain, *child_state| if (child_state.* == .live and swapchain.owner == d) {
-            xcb_present.deinit(&swapchain.transport);
+            swapchain.transport_retire_pending = true;
             child_state.* = .tombstone;
         };
         for (&buffer_view_objects, &buffer_view_state) |*view, *child_state| if (child_state.* == .live and view.owner == d) {
@@ -3859,15 +3894,14 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
         };
         for (&image_objects, &image_state) |*image, *child_state| if (child_state.* == .live and image.owner == d) {
             child_state.* = .tombstone;
-            if (!image.shared_bytes) if (image.owned_bytes) |bytes| allocator.free(bytes);
-            if (image.dirty_tiles) |tiles| allocator.free(tiles);
-            image.owned_bytes = null;
-            image.dirty_tiles = null;
+            image.retire_pending = true;
+            retireImageStorageLocked(image);
         };
+        for (&swapchain_objects, swapchain_state) |*swapchain, child_state| if (child_state != .never and swapchain.owner == d) maybeRetireSwapchainTransportLocked(@intFromPtr(swapchain));
         for (&memory_objects, &memory_state) |*memory, *child_state| if (child_state.* == .live and memory.owner == d) {
             child_state.* = .tombstone;
-            allocator.free(memory.bytes);
-            memory.mapped = false;
+            memory.retire_pending = true;
+            retireMemoryStorageLocked(memory);
         };
         d.heap_used = 0;
         state.* = .tombstone;
@@ -4229,6 +4263,164 @@ fn liveDescriptorObject(object: *DescriptorSetObj) bool {
 fn liveImageObject(object: *ImageObj) bool {
     return (stateForObject(ImageObj, object, &image_objects, &image_state) orelse return false).* == .live;
 }
+
+const PinnedResources = struct {
+    images: [max_resource_pins]*ImageObj = undefined,
+    image_count: usize = 0,
+    memories: [max_resource_pins]*MemoryObj = undefined,
+    memory_count: usize = 0,
+};
+
+/// Shared swapchain image bytes are owned by the presentation transport, not
+/// by ImageObj.  Keep that transport alive until every image pin has drained.
+fn maybeRetireSwapchainTransportLocked(handle: usize) void {
+    if (handle == 0) return;
+    for (&swapchain_objects) |*swapchain| if (@intFromPtr(swapchain) == handle and swapchain.transport_retire_pending) {
+        for (swapchain.images[0..swapchain.image_count]) |image_handle| {
+            const image: *ImageObj = @ptrFromInt(image_handle);
+            if (image.active_users.load(.acquire) != 0) return;
+        }
+        xcb_present.deinit(&swapchain.transport);
+        swapchain.transport_retire_pending = false;
+        return;
+    };
+}
+
+/// Release an image's private backing storage after the final submission pin
+/// drops.  Image objects themselves live in the fixed registry, so only the
+/// byte payload and dirty-tile metadata need retirement.
+fn retireImageStorageLocked(image: *ImageObj) void {
+    if (!image.retire_pending or image.active_users.load(.acquire) != 0) return;
+    if (!image.shared_bytes) if (image.owned_bytes) |bytes| allocator.free(bytes);
+    if (image.dirty_tiles) |tiles| allocator.free(tiles);
+    image.owned_bytes = null;
+    image.dirty_tiles = null;
+    image.retire_pending = false;
+    maybeRetireSwapchainTransportLocked(image.shared_owner);
+}
+
+fn releaseImageUserLocked(image: *ImageObj) void {
+    const previous = image.active_users.fetchSub(1, .acq_rel);
+    if (previous == 1) retireImageStorageLocked(image);
+}
+
+/// Retire an allocation only after all commands that captured its byte slice
+/// have completed.  The empty sentinel is never passed to allocator.free;
+/// storage_released makes repeated device teardown idempotent.
+fn retireMemoryStorageLocked(memory: *MemoryObj) void {
+    if (!memory.retire_pending or memory.active_users.load(.acquire) != 0 or memory.storage_released) return;
+    allocator.free(memory.bytes);
+    memory.bytes = &.{};
+    memory.mapped = false;
+    memory.storage_released = true;
+    memory.retire_pending = false;
+}
+
+fn releaseMemoryUserLocked(memory: *MemoryObj) void {
+    const previous = memory.active_users.fetchSub(1, .acq_rel);
+    if (previous == 1) retireMemoryStorageLocked(memory);
+}
+
+fn pinMemoryLocked(memory: *MemoryObj, owner: Device, pinned: *PinnedResources) bool {
+    if (!liveMemoryObject(memory) or memory.retire_pending or memory.owner != owner) return false;
+    for (pinned.memories[0..pinned.memory_count]) |existing| if (existing == memory) return true;
+    if (pinned.memory_count == pinned.memories.len) return false;
+    _ = memory.active_users.fetchAdd(1, .acq_rel);
+    pinned.memories[pinned.memory_count] = memory;
+    pinned.memory_count += 1;
+    return true;
+}
+
+fn pinImageLocked(image: *ImageObj, owner: Device, pinned: *PinnedResources) bool {
+    if (!liveImageObject(image) or image.retire_pending or image.owner != owner) return false;
+    for (pinned.images[0..pinned.image_count]) |existing| if (existing == image) return true;
+    if (pinned.image_count == pinned.images.len) return false;
+    if (image.memory) |memory| if (!pinMemoryLocked(memory, owner, pinned)) return false;
+    _ = image.active_users.fetchAdd(1, .acq_rel);
+    pinned.images[pinned.image_count] = image;
+    pinned.image_count += 1;
+    return true;
+}
+
+fn pinBufferMemoryLocked(buffer: *BufferObj, owner: Device, pinned: *PinnedResources) bool {
+    const memory = buffer.memory orelse return false;
+    return pinMemoryLocked(memory, owner, pinned);
+}
+
+fn pinFramebufferImagesLocked(framebuffer: ?*FramebufferObj, owner: Device, pinned: *PinnedResources) bool {
+    const fb = framebuffer orelse return true;
+    if ((stateForObject(FramebufferObj, fb, &framebuffer_objects, &framebuffer_state) orelse return false).* != .live or fb.owner != owner) return false;
+    if (fb.color_image) |image| if (!pinImageLocked(image, owner, pinned)) return false;
+    if (fb.depth_image) |image| if (!pinImageLocked(image, owner, pinned)) return false;
+    return true;
+}
+
+fn pinDescriptorResourcesLocked(descriptors: ?*DescriptorSetObj, owner: Device, pinned: *PinnedResources) bool {
+    const set = descriptors orelse return true;
+    if (!liveDescriptorObject(set) or !set.owner.eql(owner)) return false;
+    if (set.uniform) |buffer| if (!pinBufferMemoryLocked(buffer, owner, pinned)) return false;
+    if (set.storage) |buffer| if (!pinBufferMemoryLocked(buffer, owner, pinned)) return false;
+    if (set.texture) |image| if (!pinImageLocked(image, owner, pinned)) return false;
+    return true;
+}
+
+fn pinVertexBindingsLocked(bindings: VertexBindingState, owner: Device, pinned: *PinnedResources) bool {
+    for (bindings.buffers) |buffer| if (buffer) |value| if (!pinBufferMemoryLocked(value, owner, pinned)) return false;
+    return true;
+}
+
+fn pinCommandResourcesLocked(command: Command, owner: Device, pinned: *PinnedResources) bool {
+    switch (command) {
+        .fill => |op| return pinBufferMemoryLocked(op.dst, owner, pinned),
+        .update_buffer => |op| return pinBufferMemoryLocked(op.dst, owner, pinned),
+        .copy_buffer => |op| return pinBufferMemoryLocked(op.src, owner, pinned) and pinBufferMemoryLocked(op.dst, owner, pinned),
+        .clear => |op| return pinImageLocked(op.image, owner, pinned),
+        .clear_depth => |op| return pinImageLocked(op.image, owner, pinned),
+        .render_clear => |op| return pinImageLocked(op.image, owner, pinned) and (if (op.depth) |depth| pinImageLocked(depth, owner, pinned) else true),
+        .discard_image => |op| return pinImageLocked(op.image, owner, pinned),
+        .clear_attachments => |op| return pinImageLocked(op.image, owner, pinned) and (if (op.depth) |depth| pinImageLocked(depth, owner, pinned) else true),
+        .clear_attachments_deferred, .next_subpass => return true,
+        .blit_image => |op| return pinImageLocked(op.src, owner, pinned) and pinImageLocked(op.dst, owner, pinned),
+        .resolve_image => |op| return pinImageLocked(op.src, owner, pinned) and pinImageLocked(op.dst, owner, pinned),
+        .dispatch => |op| return pinDescriptorResourcesLocked(op.descriptors, owner, pinned),
+        .dispatch_indirect => |op| return pinBufferMemoryLocked(op.buffer, owner, pinned) and pinDescriptorResourcesLocked(op.descriptors, owner, pinned),
+        .cube_draw => |op| {
+            if (!pinFramebufferImagesLocked(op.framebuffer, owner, pinned)) return false;
+            if (op.color_image) |image| if (!pinImageLocked(image, owner, pinned)) return false;
+            if (op.depth_image) |image| if (!pinImageLocked(image, owner, pinned)) return false;
+            if (!pinDescriptorResourcesLocked(op.descriptors, owner, pinned) or !pinVertexBindingsLocked(op.vertex_bindings, owner, pinned)) return false;
+            if (op.indexed) |indexed| if (!pinBufferMemoryLocked(indexed.buffer, owner, pinned)) return false;
+        },
+        .indirect_draw => |op| {
+            if (!pinFramebufferImagesLocked(op.framebuffer, owner, pinned)) return false;
+            if (op.color_image) |image| if (!pinImageLocked(image, owner, pinned)) return false;
+            if (op.depth_image) |image| if (!pinImageLocked(image, owner, pinned)) return false;
+            if (!pinDescriptorResourcesLocked(op.descriptors, owner, pinned) or !pinVertexBindingsLocked(op.vertex_bindings, owner, pinned)) return false;
+            if (!pinBufferMemoryLocked(op.indirect_buffer, owner, pinned)) return false;
+            if (op.index_buffer) |buffer| if (!pinBufferMemoryLocked(buffer, owner, pinned)) return false;
+            if (op.count_source) |count| if (!pinBufferMemoryLocked(count.buffer, owner, pinned)) return false;
+        },
+        .buffer_to_image => |op| return pinBufferMemoryLocked(op.src, owner, pinned) and pinImageLocked(op.dst, owner, pinned),
+        .image_to_buffer => |op| return pinImageLocked(op.src, owner, pinned) and pinBufferMemoryLocked(op.dst, owner, pinned),
+        .copy_image => |op| return pinImageLocked(op.src, owner, pinned) and pinImageLocked(op.dst, owner, pinned),
+        .transition => |op| return pinImageLocked(op.image, owner, pinned),
+        .event_set, .event_reset, .event_wait, .buffer_barrier, .query_reset, .query_begin, .query_end, .query_timestamp => return true,
+        .query_copy => |op| return pinBufferMemoryLocked(op.destination, owner, pinned),
+    }
+    return true;
+}
+
+fn pinCommandResourcesInBufferLocked(command_buffer: *CommandBufferObj, owner: Device, pinned: *PinnedResources) bool {
+    for (command_buffer.impl.commands[0..command_buffer.impl.count]) |command| if (!pinCommandResourcesLocked(command, owner, pinned)) return false;
+    return true;
+}
+
+fn releasePinnedResourcesLocked(pinned: *PinnedResources) void {
+    for (pinned.images[0..pinned.image_count]) |image| releaseImageUserLocked(image);
+    for (pinned.memories[0..pinned.memory_count]) |memory| releaseMemoryUserLocked(memory);
+    pinned.image_count = 0;
+    pinned.memory_count = 0;
+}
 fn allocateMemory(device: ?Device, info: ?*const MemoryAllocateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
@@ -4272,10 +4464,10 @@ fn freeMemory(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c)
     };
     const state = stateForObject(MemoryObj, object, &memory_objects, &memory_state).?;
     state.* = .tombstone;
+    object.retire_pending = true;
     d.heap_used -= object.bytes.len;
     hit(.heap_recovery);
-    allocator.free(object.bytes);
-    object.mapped = false;
+    retireMemoryStorageLocked(object);
 }
 fn mapMemory(device: ?Device, handle: usize, offset: u64, size: u64, flags: u32, output: ?*?*anyopaque) callconv(.c) Result {
     const d = device orelse return .error_memory_map_failed;
@@ -4537,10 +4729,8 @@ fn destroyImage(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.
     const object = validImageLocked(handle) orelse return;
     if (validDeviceLocked(d) and validOwner(d, object.owner)) {
         stateForObject(ImageObj, object, &image_objects, &image_state).?.* = .tombstone;
-        if (!object.shared_bytes) if (object.owned_bytes) |bytes| allocator.free(bytes);
-        if (object.dirty_tiles) |tiles| allocator.free(tiles);
-        object.owned_bytes = null;
-        object.dirty_tiles = null;
+        object.retire_pending = true;
+        retireImageStorageLocked(object);
     }
 }
 fn getImageMemoryRequirements(device: ?Device, handle: usize, output: ?*MemoryRequirements) callconv(.c) void {
@@ -14001,10 +14191,8 @@ fn cmdEndRenderPass2(cb: ?CommandBuffer, end: ?*const SubpassEndInfo) callconv(.
 fn rollbackSwapchainCreation(swapchain: *SwapchainObj, created: u32) void {
     for (swapchain.images[0..created]) |image_handle| if (validImageLocked(image_handle)) |image| {
         stateForObject(ImageObj, image, &image_objects, &image_state).?.* = .tombstone;
-        if (!image.shared_bytes) if (image.owned_bytes) |bytes| allocator.free(bytes);
-        if (image.dirty_tiles) |tiles| allocator.free(tiles);
-        image.owned_bytes = null;
-        image.dirty_tiles = null;
+        image.retire_pending = true;
+        retireImageStorageLocked(image);
     };
     xcb_present.deinit(&swapchain.transport);
 }
@@ -14071,7 +14259,7 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
                     break :blk allocateBytes(byte_count) catch return .error_out_of_host_memory;
                 };
                 @memset(bytes, 0);
-                image.* = .{ .owner = d, .width = ci.image_extent.width, .height = ci.image_extent.height, .array_layers = ci.image_array_layers, .samples = 1, .format = ci.image_format, .usage = ci.image_usage, .layout = 0, .owned_bytes = bytes, .shared_bytes = shared_bytes };
+                image.* = .{ .owner = d, .width = ci.image_extent.width, .height = ci.image_extent.height, .array_layers = ci.image_array_layers, .samples = 1, .format = ci.image_format, .usage = ci.image_usage, .layout = 0, .owned_bytes = bytes, .shared_bytes = shared_bytes, .shared_owner = if (shared_bytes) @intFromPtr(swapchain) else 0 };
                 image_slot_state.* = .live;
                 swapchain.images[created] = @intFromPtr(image);
                 found = true;
@@ -14106,14 +14294,13 @@ fn destroySwapchain(device: ?Device, handle: usize, alloc: ?*const Alloc) callco
     _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
     lock();
     defer mutex.unlock();
-    xcb_present.deinit(&swapchain.transport);
+    swapchain.transport_retire_pending = true;
     for (swapchain.images[0..swapchain.image_count]) |image_handle| if (validImageLocked(image_handle)) |image| {
         stateForObject(ImageObj, image, &image_objects, &image_state).?.* = .tombstone;
-        if (!image.shared_bytes) if (image.owned_bytes) |bytes| allocator.free(bytes);
-        if (image.dirty_tiles) |tiles| allocator.free(tiles);
-        image.owned_bytes = null;
-        image.dirty_tiles = null;
+        image.retire_pending = true;
+        retireImageStorageLocked(image);
     };
+    maybeRetireSwapchainTransportLocked(@intFromPtr(swapchain));
     for (&swapchain_objects, &swapchain_state) |*candidate, *state| if (candidate == swapchain) {
         state.* = .tombstone;
     };
@@ -14486,6 +14673,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
     var pinned_query_pool_count: usize = 0;
     var pinned_command_buffers: [max_child_objects]*CommandBufferObj = undefined;
     var pinned_command_buffer_count: usize = 0;
+    var pinned_resources = PinnedResources{};
     for (&semaphore_objects, semaphore_state, 0..) |*semaphore, state, index| {
         if (state == .live) {
             semaphore_states[index] = semaphore.signaled.load(.acquire);
@@ -14584,16 +14772,25 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
             if (!pinCommandBufferForSubmissionLocked(cb, q.owner, &pinned_command_buffers, &pinned_command_buffer_count)) {
                 for (pinned_command_buffers[0..pinned_command_buffer_count]) |pinned| releaseCommandBufferUserLocked(pinned);
                 for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
+                releasePinnedResourcesLocked(&pinned_resources);
                 return .error_initialization_failed;
             }
             for (cb.impl.secondaries[0..cb.impl.secondary_count]) |secondary| if (!pinCommandBufferForSubmissionLocked(secondary, q.owner, &pinned_command_buffers, &pinned_command_buffer_count)) {
                 for (pinned_command_buffers[0..pinned_command_buffer_count]) |pinned| releaseCommandBufferUserLocked(pinned);
                 for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
+                releasePinnedResourcesLocked(&pinned_resources);
                 return .error_initialization_failed;
             };
             if (!pinQueryPoolsInCommandBufferLocked(cb, queue_owner, &pinned_query_pools, &pinned_query_pool_count)) {
                 for (pinned_command_buffers[0..pinned_command_buffer_count]) |pinned| releaseCommandBufferUserLocked(pinned);
                 for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
+                releasePinnedResourcesLocked(&pinned_resources);
+                return .error_initialization_failed;
+            }
+            if (!pinCommandResourcesInBufferLocked(cb, q.owner, &pinned_resources)) {
+                for (pinned_command_buffers[0..pinned_command_buffer_count]) |pinned| releaseCommandBufferUserLocked(pinned);
+                for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
+                releasePinnedResourcesLocked(&pinned_resources);
                 return .error_initialization_failed;
             }
         }
@@ -14608,6 +14805,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
             if (command_buffer_active_users[commandBufferSlot(command_buffer)].load(.acquire) == 0 and command_buffer.impl.state == 3 and command_buffer.impl.begin_flags & 1 != 0 and command_buffer.impl.count != 0 and !command_buffer_retire_pending[commandBufferSlot(command_buffer)]) deinitRecordedCommands(command_buffer);
         }
         for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
+        releasePinnedResourcesLocked(&pinned_resources);
     }
     var query_context = QueryExecutionContext{};
     for (list[0..count]) |submit| {
@@ -23477,6 +23675,25 @@ test "secondary command buffers inherit lifetime and execute in exact primary or
     mutex.unlock();
     try std.testing.expectEqual(@as(u8, 3), primary[0].impl.state);
     try std.testing.expectEqual(@as(u16, 0), primary[0].impl.secondary_count);
+    // Resource pins use the same deferred-retirement contract as command
+    // buffers: once the last live buffer is gone, vkFreeMemory may tombstone
+    // the allocation while a submission still owns its byte slice, but the
+    // allocator release must wait for that pin.
+    var resource_pins = PinnedResources{};
+    lock();
+    const memory_object = validMemoryLocked(memory).?;
+    const memory_pinned = pinMemoryLocked(memory_object, ctx.device, &resource_pins);
+    mutex.unlock();
+    try std.testing.expect(memory_pinned);
+    destroyBuffer(ctx.device, buffer, null);
+    freeMemory(ctx.device, memory, null);
+    try std.testing.expect(!memory_object.storage_released);
+    try std.testing.expectEqual(@as(usize, 64), memory_object.bytes.len);
+    lock();
+    releasePinnedResourcesLocked(&resource_pins);
+    const memory_released = memory_object.storage_released;
+    mutex.unlock();
+    try std.testing.expect(memory_released);
     freeCommandBuffers(ctx.device, pool, 1, &primary);
     destroyCommandPool(ctx.device, pool, null);
     destroyBuffer(ctx.device, buffer, null);
