@@ -55,6 +55,7 @@ const Count = struct { min: u16, max: u16 };
 const OpcodeMeta = struct { opcode: u16, operands: Count, supported: bool = true };
 const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 0, .operands = .{ .min = 0, .max = 0 } },
+    .{ .opcode = 317, .operands = .{ .min = 0, .max = 0 } }, // OpNoLine
     .{ .opcode = 2, .operands = .{ .min = 1, .max = max_debug_string_words } },
     .{ .opcode = 3, .operands = .{ .min = 2, .max = 3 + max_debug_string_words } },
     .{ .opcode = 4, .operands = .{ .min = 1, .max = max_debug_string_words } },
@@ -535,7 +536,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         const instruction_meta = opcodeMeta(instruction.opcode).?;
         instruction_functions[instruction_index] = current_function;
         switch (instruction.opcode) {
-            0, 2, 3, 4, 5, 6, 7, 8 => {}, // bounded debug/non-semantic declarations are discarded
+            0, 2, 3, 4, 5, 6, 7, 8, 317 => {}, // bounded debug/non-semantic declarations are discarded
             17 => {
                 const meta = valueMeta(&capability_schema, w[0]) orelse return error.Unsupported;
                 if (!meta.supported or capability) return error.Unsupported;
@@ -3527,6 +3528,16 @@ test "unselected straight-line functions and debug declarations do not enter ide
     var compiled = try compile(std.testing.allocator, with_dead, .vertex, "main", &.{});
     defer compiled.deinit(std.testing.allocator);
     try std.testing.expectEqualSlices(u8, baseline.bytes, compiled.bytes);
+
+    const label = testOpcodeOffset(&positive_vertex, 248, 0).?;
+    const with_no_line = try testInsertWords(std.testing.allocator, &positive_vertex, label + 2, &.{(1 << 16) | 317});
+    defer std.testing.allocator.free(with_no_line);
+    var no_line_program = try compile(std.testing.allocator, with_no_line, .vertex, "main", &.{});
+    defer no_line_program.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, baseline.bytes, no_line_program.bytes);
+    const malformed_no_line = try testInsertWords(std.testing.allocator, &positive_vertex, label + 2, &.{ (2 << 16) | 317, 0 });
+    defer std.testing.allocator.free(malformed_no_line);
+    try std.testing.expectError(error.Malformed, compile(std.testing.allocator, malformed_no_line, .vertex, "main", &.{}));
 }
 
 test "raw SPIR-V ID permutation cannot change canonical bytes or identity" {
