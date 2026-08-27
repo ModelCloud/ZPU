@@ -566,7 +566,7 @@ pub const Executor = struct {
                         else => unreachable,
                     });
                 },
-                .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max => {
+                .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
                     const b = try valueRef(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| {
@@ -587,6 +587,7 @@ pub const Executor = struct {
                             },
                             .f_min => if (y < x) y else x,
                             .f_max => if (x < y) y else x,
+                            .f_step => if (y < x) @as(f32, 0.0) else @as(f32, 1.0),
                             else => unreachable,
                         };
                         result.bits[i] = canonicalFloat(@bitCast(z));
@@ -648,6 +649,19 @@ pub const Executor = struct {
                         else
                             x * (1.0 - z) + y * z;
                         result.bits[i] = canonicalFloat(@bitCast(value));
+                    }
+                },
+                .f_smooth_step => {
+                    const edge0 = try valueRef(self.values, pc, instruction.operands[0]);
+                    const edge1 = try valueRef(self.values, pc, instruction.operands[1]);
+                    const value = try valueRef(self.values, pc, instruction.operands[2]);
+                    for (0..result.lanes()) |i| {
+                        const e0: f32 = @bitCast(edge0.bits[i]);
+                        const e1: f32 = @bitCast(edge1.bits[i]);
+                        const x: f32 = @bitCast(value.bits[i]);
+                        if (e0 >= e1) return error.NumericDomain;
+                        const t = if (x <= e0) 0.0 else if (x >= e1) 1.0 else (x - e0) / (e1 - e0);
+                        result.bits[i] = canonicalFloat(@bitCast(t * t * (3.0 - 2.0 * t)));
                     }
                 },
                 .select => {
@@ -793,8 +807,8 @@ fn validate(program: *const ir.Program) Error!void {
             .bit_field_s_extract, .bit_field_u_extract => n == 3,
             .select => n == 3,
             .u_min, .i_min, .u_max, .i_max => n == 2,
-            .f_clamp, .u_clamp, .i_clamp, .f_mix, .fma => n == 3,
-            .iadd, .isub, .imul, .iadd_carry, .isub_borrow, .umul_extended, .smul_extended, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge, .logical_eq, .logical_ne, .logical_or, .logical_and, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .vector_times_scalar, .matrix_times_vector, .matrix_times_scalar, .vector_times_matrix, .matrix_times_matrix, .outer_product, .dot, .less_or_greater, .ordered, .unordered => n == 2,
+            .f_clamp, .u_clamp, .i_clamp, .f_mix, .fma, .f_smooth_step => n == 3,
+            .iadd, .isub, .imul, .iadd_carry, .isub_borrow, .umul_extended, .smul_extended, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge, .logical_eq, .logical_ne, .logical_or, .logical_and, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step, .vector_times_scalar, .matrix_times_vector, .matrix_times_scalar, .vector_times_matrix, .matrix_times_matrix, .outer_product, .dot, .less_or_greater, .ordered, .unordered => n == 2,
             .output => n == 2,
         };
         if (!arity_ok) return error.InvalidOperand;
@@ -825,8 +839,8 @@ fn validate(program: *const ir.Program) Error!void {
             switch (instruction.op) {
                 .constant_composite, .composite => if (source_ty.scalar != instruction.ty.scalar) return error.InvalidType,
                 .u_min, .i_min, .u_max, .i_max => if (!same(source_ty, instruction.ty)) return error.InvalidType,
-                .f_clamp, .u_clamp, .i_clamp, .f_mix, .fma => if (!same(source_ty, instruction.ty)) return error.InvalidType,
-                .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .bit_not, .logical_not, .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .transpose => if (!same(source_ty, instruction.ty)) return error.InvalidType,
+                .f_clamp, .u_clamp, .i_clamp, .f_mix, .fma, .f_smooth_step => if (!same(source_ty, instruction.ty)) return error.InvalidType,
+                .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .bit_not, .logical_not, .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step, .transpose => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle => if (source_ty.scalar != .i32 and source_ty.scalar != .u32 or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
                 .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge => if (source_ty.scalar != .f32 or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
                 .logical_eq, .logical_ne, .logical_or, .logical_and => if (source_ty.scalar != .bool or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
@@ -1025,6 +1039,9 @@ fn validate(program: *const ir.Program) Error!void {
                 if (instruction.ty.scalar != .i32 or instruction.ty.rows != 1) return error.InvalidType;
             },
             .f_mix, .fma => {
+                if (instruction.ty.scalar != .f32 or instruction.ty.rows != 1) return error.InvalidType;
+            },
+            .f_step, .f_smooth_step => {
                 if (instruction.ty.scalar != .f32 or instruction.ty.rows != 1) return error.InvalidType;
             },
             else => {},
@@ -1361,6 +1378,8 @@ test "GLSL mix and fused multiply-add preserve component semantics" {
         .{ .op = .input, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{2}, .literal = &.{} },
         .{ .op = .f_mix, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{ 0, 1, 2 }, .literal = &.{} },
         .{ .op = .fma, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{ 0, 1, 2 }, .literal = &.{} },
+        .{ .op = .f_step, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{ 1, 0 }, .literal = &.{} },
+        .{ .op = .f_smooth_step, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{ 2, 1, 0 }, .literal = &.{} },
     };
     var source = try testProgram(&interfaces, &instructions);
     defer std.testing.allocator.free(source.bytes);
@@ -1375,6 +1394,21 @@ test "GLSL mix and fused multiply-add preserve component semantics" {
     try std.testing.expectEqual(@as(u32, 0xc0700000), executor.values[4].bits[1]);
     try std.testing.expectEqual(@as(u32, 0x7fc00000), executor.values[4].bits[2]);
     try std.testing.expectEqual(@as(u32, 0x7fc00000), executor.values[4].bits[3]);
+    try std.testing.expectEqual(@as(u32, 0x00000000), executor.values[5].bits[0]);
+    try std.testing.expectEqual(@as(u32, 0x00000000), executor.values[5].bits[1]);
+    try std.testing.expectEqual(@as(u32, 0x3f800000), executor.values[5].bits[2]);
+    try std.testing.expectEqual(@as(u32, 0x00000000), executor.values[5].bits[3]);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.7407407), @as(f32, @bitCast(executor.values[6].bits[0])), 0.000001);
+    try std.testing.expectEqual(@as(u32, 0x00000000), executor.values[6].bits[1]);
+    try std.testing.expectEqual(@as(u32, 0x7fc00000), executor.values[6].bits[2]);
+    try std.testing.expectEqual(@as(u32, 0x00000000), executor.values[6].bits[3]);
+    var invalid_smooth = instructions;
+    invalid_smooth[6].operands = &.{ 2, 2, 0 };
+    var invalid_source = try testProgram(&interfaces, &invalid_smooth);
+    defer std.testing.allocator.free(invalid_source.bytes);
+    var invalid_executor = try Executor.init(std.testing.allocator, &invalid_source);
+    defer invalid_executor.deinit();
+    try std.testing.expectError(error.NumericDomain, invalid_executor.execute(&.{ .{ .interface = 0, .bytes = &left }, .{ .interface = 1, .bytes = &right }, .{ .interface = 2, .bytes = &factor } }, &.{}));
     for (0..4096) |_| try executor.execute(&.{ .{ .interface = 0, .bytes = &left }, .{ .interface = 1, .bytes = &right }, .{ .interface = 2, .bytes = &factor } }, &.{});
 }
 
@@ -2609,7 +2643,15 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
             const c = try propertyConstant(arena, &instructions, result_ty);
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ a, b, c }, &.{});
         },
-        .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max => {
+        .f_smooth_step => {
+            const zero_literal = try arena.alloc(u8, try byteSize(result_ty));
+            @memset(zero_literal, 0);
+            const edge0 = try propertyInstruction(arena, &instructions, .constant, result_ty, &.{}, zero_literal);
+            const edge1 = try propertyConstant(arena, &instructions, result_ty);
+            const value = try propertyConstant(arena, &instructions, result_ty);
+            result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ edge0, edge1, value }, &.{});
+        },
+        .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step => {
             const a = try propertyConstant(arena, &instructions, result_ty);
             const b = try propertyConstant(arena, &instructions, result_ty);
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ a, b }, &.{});
@@ -2780,6 +2822,10 @@ test "generated bounded operation by type-family property matrix is complete" {
             totals[@intFromEnum(ir.Op.f_mix)] += 1;
             try runPropertyCase(.fma, ty, null, null);
             totals[@intFromEnum(ir.Op.fma)] += 1;
+            try runPropertyCase(.f_step, ty, null, null);
+            totals[@intFromEnum(ir.Op.f_step)] += 1;
+            try runPropertyCase(.f_smooth_step, ty, null, null);
+            totals[@intFromEnum(ir.Op.f_smooth_step)] += 1;
         }
         if (is_integer) inline for ([_]ir.Op{ .iadd, .isub, .imul }) |op| {
             try runPropertyCase(op, ty, null, null);
@@ -2903,15 +2949,15 @@ test "generated bounded operation by type-family property matrix is complete" {
         totals[@intFromEnum(op)] += 1;
     }
     const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14, 8, 4, 8, 8, 8, 8, 4, 4, 4, 4, 4, 8, 8, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{4, 4};
+    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{4, 4} ++ [_]usize{4, 4};
     try std.testing.expectEqualSlices(usize, expected_full[0..totals.len], &totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 507), total);
-    std.debug.print("generated property matrix: operations=110 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 515), total);
+    std.debug.print("generated property matrix: operations=112 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -3043,13 +3089,13 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 110), malformed);
+    try std.testing.expectEqual(@as(usize, 112), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
     try std.testing.expectEqual(@as(usize, 5), runtime_nan);
     try std.testing.expectEqual(@as(usize, 5), signed_zero);
-    std.debug.print("generated property categories: malformed=110 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
+    std.debug.print("generated property categories: malformed=112 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
 }
 
 test "generated valid scalar DAGs are total and stable" {

@@ -330,7 +330,7 @@ fn supportedGlslExtInst(ext: u32, result: ir.Type, operand: ir.Type) bool {
         43 => result.scalar == .f32 and result.rows == 1,
         44 => result.scalar == .u32 and result.rows == 1,
         45 => result.scalar == .i32 and result.rows == 1,
-        46, 50 => result.scalar == .f32 and result.rows == 1,
+        46, 48, 49, 50 => result.scalar == .f32 and result.rows == 1,
         else => false,
     };
 }
@@ -725,15 +725,15 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 if (!in_function or !label_seen or terminated or block_terminated or w.len < 5 or w.len > 7) return error.Malformed;
                 const set = nodes[try id(nodes, w[2])];
                 if (set.kind != .ext_inst_import or set.a != 450) return error.Unsupported;
-                if (w[3] != 4 and w[3] != 5 and w[3] != 6 and w[3] != 7 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 50) return error.Unsupported;
+                if (w[3] != 4 and w[3] != 5 and w[3] != 6 and w[3] != 7 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50) return error.Unsupported;
                 if ((w[3] == 4 or w[3] == 5 or w[3] == 6 or w[3] == 7) and w.len != 5) return error.Malformed;
-                if ((w[3] >= 37 and w[3] <= 42) and w.len != 6) return error.Malformed;
-                if ((w[3] >= 43 and w[3] <= 46 or w[3] == 50) and w.len != 7) return error.Malformed;
+                if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48) and w.len != 6) return error.Malformed;
+                if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50) and w.len != 7) return error.Malformed;
                 const result = try resultShape(nodes, w[0]);
                 const operand = try valueShape(nodes, w[4]);
                 if (!supportedGlslExtInst(w[3], result, operand)) return error.Unsupported;
-                if ((w[3] >= 37 and w[3] <= 42) and !sameShape(result, try valueShape(nodes, w[5]))) return error.Unsupported;
-                if ((w[3] >= 43 and w[3] <= 46 or w[3] == 50) and (!sameShape(result, try valueShape(nodes, w[5])) or !sameShape(result, try valueShape(nodes, w[6])))) return error.Unsupported;
+                if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48) and !sameShape(result, try valueShape(nodes, w[5]))) return error.Unsupported;
+                if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50) and (!sameShape(result, try valueShape(nodes, w[5])) or !sameShape(result, try valueShape(nodes, w[6])))) return error.Unsupported;
                 try define(nodes, w[1], .{ .kind = .function_value, .type_id = w[0], .opcode = 12, .a = w[2], .b = w[3], .words = w[4..] });
             },
             56 => {
@@ -861,15 +861,15 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             12 => {
                 if (w.len < 5 or w.len > 7) return error.Malformed;
                 const set = nodes[try id(nodes, w[2])];
-                if (set.kind != .ext_inst_import or set.a != 450 or (w[3] != 4 and w[3] != 5 and w[3] != 6 and w[3] != 7 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 50)) return error.Unsupported;
+                if (set.kind != .ext_inst_import or set.a != 450 or (w[3] != 4 and w[3] != 5 and w[3] != 6 and w[3] != 7 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50)) return error.Unsupported;
                 if ((w[3] == 4 or w[3] == 5 or w[3] == 6 or w[3] == 7) and w.len != 5) return error.Malformed;
-                if ((w[3] >= 37 and w[3] <= 42) and w.len != 6) return error.Malformed;
-                if ((w[3] >= 43 and w[3] <= 46 or w[3] == 50) and w.len != 7) return error.Malformed;
+                if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48) and w.len != 6) return error.Malformed;
+                if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50) and w.len != 7) return error.Malformed;
                 const result = try resultShape(nodes, w[0]);
                 const operand = try valueShape(nodes, w[4]);
                 if (!supportedGlslExtInst(w[3], result, operand)) return error.Unsupported;
-                if ((w[3] >= 37 and w[3] <= 42) and !sameShape(result, try valueShape(nodes, w[5]))) return error.Unsupported;
-                if ((w[3] >= 43 and w[3] <= 46 or w[3] == 50) and (!sameShape(result, try valueShape(nodes, w[5])) or !sameShape(result, try valueShape(nodes, w[6])))) return error.Unsupported;
+                if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48) and !sameShape(result, try valueShape(nodes, w[5]))) return error.Unsupported;
+                if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50) and (!sameShape(result, try valueShape(nodes, w[5])) or !sameShape(result, try valueShape(nodes, w[6])))) return error.Unsupported;
             },
             44, 80 => {
                 const result = try resultShape(nodes, w[0]);
@@ -1575,6 +1575,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 44 => .u_clamp,
                 45 => .i_clamp,
                 46 => .f_mix,
+                48 => .f_step,
+                49 => .f_smooth_step,
                 50 => .fma,
                 else => unreachable,
             },
@@ -2609,6 +2611,16 @@ test "compute profile lowers bounded GLSL.std.450 absolute values" {
         try std.testing.expectEqual(expected, ternary_program.instructions[1].op);
         try std.testing.expectEqual(@as(usize, 3), ternary_program.instructions[1].operands.len);
     }
+    const step = try testReplaceInstruction(std.testing.allocator, words, testOpcodeOffset(words, 12, 0).?, &.{ (7 << 16) | 12, 2, 13, 12, 48, 7, 7 });
+    defer std.testing.allocator.free(step);
+    var step_program = try compile(std.testing.allocator, step, .compute, "main", &.{});
+    defer step_program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ir.Op.f_step, step_program.instructions[1].op);
+    const smooth_step = try testReplaceInstruction(std.testing.allocator, words, testOpcodeOffset(words, 12, 0).?, &.{ (8 << 16) | 12, 2, 13, 12, 49, 7, 7, 7 });
+    defer std.testing.allocator.free(smooth_step);
+    var smooth_step_program = try compile(std.testing.allocator, smooth_step, .compute, "main", &.{});
+    defer smooth_step_program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ir.Op.f_smooth_step, smooth_step_program.instructions[1].op);
 }
 
 test "compute profile lowers bounded GLSL.std.450 integer min/max" {

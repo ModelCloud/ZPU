@@ -683,7 +683,10 @@ Each slice must land with all of the following:
   component-wise min/max ordering and reject inverted bounds as a numeric
   domain error. Scalar/vector `FMix` and `Fma` now lower as strict three-input
   floating-point operations; `FMix` computes the linear blend and `Fma` uses a
-  fused multiply-add with canonical NaN output. A single
+  fused multiply-add with canonical NaN output. Scalar/vector `Step` and
+  `SmoothStep` now lower with exact threshold and Hermite interpolation
+  semantics; inverted smooth-step edges are rejected as a numeric-domain
+  error. A single
   side-effect-free dynamic conditional or one-case runtime switch with a common
   merge is also lowered to compare/select; generic SPIR-V dynamic control flow,
   aggregate/descriptor-array indexing, atomics, shared-memory execution,
