@@ -677,7 +677,9 @@ Each slice must land with all of the following:
   implementation-defined NaN operand choice. Scalar/vector `FSign` and `SSign`
   are likewise lowered with strict scalar-domain checks; floating NaNs map
   deterministically to canonical `+0`, signed zero keeps its sign bit, and
-  signed integer extrema map to `-1` without overflow. A single
+  signed integer extrema map to `-1` without overflow. Scalar/vector unsigned
+  and signed integer `UMin`/`SMin`/`UMax`/`SMax` are also lowered with exact
+  32-bit ordering. A single
   side-effect-free dynamic conditional or one-case runtime switch with a common
   merge is also lowered to compare/select; generic SPIR-V dynamic control flow,
   aggregate/descriptor-array indexing, atomics, shared-memory execution,

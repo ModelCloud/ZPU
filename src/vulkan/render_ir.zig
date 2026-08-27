@@ -202,6 +202,14 @@ pub const Op = enum(u8) {
     f_sign,
     /// Component-wise signed integer sign from GLSL.std.450.
     i_sign,
+    /// Component-wise unsigned integer minimum from GLSL.std.450.
+    u_min,
+    /// Component-wise signed integer minimum from GLSL.std.450.
+    i_min,
+    /// Component-wise unsigned integer maximum from GLSL.std.450.
+    u_max,
+    /// Component-wise signed integer maximum from GLSL.std.450.
+    i_max,
 };
 
 pub const Instruction = struct {
@@ -356,6 +364,7 @@ fn valueOperand(op: Op, operand_index: usize) bool {
         .shuffle => operand_index < 2,
         .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .bit_not, .convert, .bitcast, .copy_object, .quantize_f16 => operand_index == 0,
         .select => operand_index < 3,
+        .u_min, .i_min, .u_max, .i_max => operand_index < 2,
         .iadd, .isub, .imul, .iadd_carry, .isub_borrow, .umul_extended, .smul_extended, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge, .logical_eq, .logical_ne, .logical_or, .logical_and, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .vector_times_scalar, .matrix_times_vector, .matrix_times_scalar, .vector_times_matrix, .matrix_times_matrix, .outer_product, .dot, .less_or_greater, .ordered, .unordered => operand_index < 2,
         .transpose, .any, .all, .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set, .bit_reverse, .bit_count => operand_index == 0,
         .bit_field_insert => operand_index < 4,
