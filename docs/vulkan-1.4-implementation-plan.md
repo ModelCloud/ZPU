@@ -831,6 +831,15 @@ conservatively as overlap, preventing malformed retained offsets from becoming
 apparently disjoint transfers.  A 4096-iteration warm regression covers the
 buffer-to-image, image-region, and image-copy overlap helpers with allocation
 injection enabled.
+
+### Latest audit slice — swapchain-present image validation
+
+`vkQueuePresentKHR` now validates each retained swapchain image handle and its
+owned backing span before consuming waits or transitioning the image lifecycle.
+Malformed image dimensions therefore fail atomically instead of reaching the
+presentation transport with an inconsistent byte envelope; the regression
+repeats that rejection 4096 times without allocations before presenting the
+restored image successfully.
 - [ ] **A8 — secondary command buffers:** inheritance, execution, reset, and
   lifetime rules. Traditional render-pass inheritance now matches the active
   subpass for multi-subpass execution, and the bounded dynamic rendering

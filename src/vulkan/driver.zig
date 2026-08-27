@@ -14144,6 +14144,14 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
             mutex.unlock();
             return .error_initialization_failed;
         }
+        const image = validImageLocked(swapchain.images[index]) orelse {
+            mutex.unlock();
+            return .error_initialization_failed;
+        };
+        if (!imageStorageValid(image)) {
+            mutex.unlock();
+            return .error_initialization_failed;
+        }
         if (target_request != null and swapchain.present_timing_queue_size != 0) {
             _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
             const full = swapchain.present_timing_outstanding >= swapchain.present_timing_queue_size;
@@ -15172,6 +15180,13 @@ test "XCB and headless surface lifecycle and physical presentation queries" {
     try std.testing.expectEqual(Result.success, acquireNextImage(device, headless_swapchain, 0, 0, 0, &headless_image_index));
     const headless_indices = [_]u32{headless_image_index};
     const headless_present = PresentInfo{ .s_type = 1_000_001_001, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .swapchain_count = 1, .swapchains = @ptrCast(&headless_swapchain), .image_indices = @ptrCast(&headless_indices), .results = null };
+    const headless_image = validImageLocked(validSwapchainLocked(headless_swapchain).?.images[headless_image_index]).?;
+    const saved_headless_width = headless_image.width;
+    headless_image.width = std.math.maxInt(u32);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| try std.testing.expectEqual(Result.error_initialization_failed, queuePresent(queue, &headless_present));
+    test_allocations_before_failure = null;
+    headless_image.width = saved_headless_width;
     try std.testing.expectEqual(Result.success, queuePresent(queue, &headless_present));
     test_allocations_before_failure = 0;
     for (0..4096) |_| {
