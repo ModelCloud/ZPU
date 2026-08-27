@@ -709,7 +709,9 @@ Each slice must land with all of the following:
   to signed lane positions with the specified `-1` zero/sentinel behavior.
   `Ldexp` now lowers scalar/vector f32 values with same-width signed i32
   exponents, rejects non-finite/overflowing results atomically, and keeps the
-  warm path allocation-free.
+  warm path allocation-free. `NMin`, `NMax`, and `NClamp` now lower the
+  non-NaN-preferred floating-point family with explicit NaN selection,
+  inverted-bound rejection, and allocation-free warm execution.
   A single
   side-effect-free dynamic conditional or one-case runtime switch with a common
   merge is also lowered to compare/select; generic SPIR-V dynamic control flow,

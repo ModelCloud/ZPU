@@ -830,7 +830,7 @@ pub const Executor = struct {
                         result.bits[i] = canonicalFloat(@bitCast(z));
                     }
                 },
-                .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step => {
+                .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_n_min, .f_n_max, .f_step => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
                     const b = try valueRef(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| {
@@ -851,6 +851,8 @@ pub const Executor = struct {
                             },
                             .f_min => if (y < x) y else x,
                             .f_max => if (x < y) y else x,
+                            .f_n_min => if (std.math.isNan(x)) y else if (std.math.isNan(y)) x else if (y < x) y else x,
+                            .f_n_max => if (std.math.isNan(x)) y else if (std.math.isNan(y)) x else if (x < y) y else x,
                             .f_step => if (y < x) @as(f32, 0.0) else @as(f32, 1.0),
                             else => unreachable,
                         };
@@ -872,18 +874,19 @@ pub const Executor = struct {
                         };
                     }
                 },
-                .f_clamp, .u_clamp, .i_clamp => {
+                .f_clamp, .f_n_clamp, .u_clamp, .i_clamp => {
                     const value = try valueRef(self.values, pc, instruction.operands[0]);
                     const minimum = try valueRef(self.values, pc, instruction.operands[1]);
                     const maximum = try valueRef(self.values, pc, instruction.operands[2]);
                     for (0..result.lanes()) |i| {
-                        if (instruction.op == .f_clamp) {
+                        if (instruction.op == .f_clamp or instruction.op == .f_n_clamp) {
                             const x: f32 = @bitCast(value.bits[i]);
                             const min_value: f32 = @bitCast(minimum.bits[i]);
                             const max_value: f32 = @bitCast(maximum.bits[i]);
                             if (min_value > max_value) return error.NumericDomain;
-                            const lower = if (x < min_value) min_value else x;
-                            result.bits[i] = canonicalFloat(@bitCast(if (max_value < lower) max_value else lower));
+                            const lower = if (instruction.op == .f_n_clamp and std.math.isNan(x)) min_value else if (instruction.op == .f_n_clamp and std.math.isNan(min_value)) x else if (x < min_value) min_value else x;
+                            const clamped = if (instruction.op == .f_n_clamp and std.math.isNan(lower)) max_value else if (instruction.op == .f_n_clamp and std.math.isNan(max_value)) lower else if (max_value < lower) max_value else lower;
+                            result.bits[i] = canonicalFloat(@bitCast(clamped));
                         } else if (instruction.op == .u_clamp) {
                             const min_value = minimum.bits[i];
                             const max_value = maximum.bits[i];
@@ -1071,9 +1074,9 @@ fn validate(program: *const ir.Program) Error!void {
             .bit_field_s_extract, .bit_field_u_extract => n == 3,
             .select => n == 3,
             .u_min, .i_min, .u_max, .i_max => n == 2,
-            .f_clamp, .u_clamp, .i_clamp, .f_mix, .fma, .f_smooth_step, .f_face_forward, .f_refract => n == 3,
+            .f_clamp, .u_clamp, .i_clamp, .f_n_clamp, .f_mix, .fma, .f_smooth_step, .f_face_forward, .f_refract => n == 3,
             .f_distance, .f_cross, .f_reflect, .f_ldexp => n == 2,
-            .iadd, .isub, .imul, .iadd_carry, .isub_borrow, .umul_extended, .smul_extended, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge, .logical_eq, .logical_ne, .logical_or, .logical_and, .f_atan2, .f_pow, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step, .vector_times_scalar, .matrix_times_vector, .matrix_times_scalar, .vector_times_matrix, .matrix_times_matrix, .outer_product, .dot, .less_or_greater, .ordered, .unordered => n == 2,
+            .iadd, .isub, .imul, .iadd_carry, .isub_borrow, .umul_extended, .smul_extended, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge, .logical_eq, .logical_ne, .logical_or, .logical_and, .f_atan2, .f_pow, .f_n_min, .f_n_max, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step, .vector_times_scalar, .matrix_times_vector, .matrix_times_scalar, .vector_times_matrix, .matrix_times_matrix, .outer_product, .dot, .less_or_greater, .ordered, .unordered => n == 2,
             .output => n == 2,
         };
         if (!arity_ok) return error.InvalidOperand;
@@ -1104,8 +1107,8 @@ fn validate(program: *const ir.Program) Error!void {
             switch (instruction.op) {
                 .constant_composite, .composite => if (source_ty.scalar != instruction.ty.scalar) return error.InvalidType,
                 .u_min, .i_min, .u_max, .i_max => if (!same(source_ty, instruction.ty)) return error.InvalidType,
-                .f_clamp, .u_clamp, .i_clamp, .f_mix, .fma, .f_smooth_step => if (!same(source_ty, instruction.ty)) return error.InvalidType,
-                .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .bit_not, .logical_not, .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .f_atan2, .f_pow, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step, .transpose => if (!same(source_ty, instruction.ty)) return error.InvalidType,
+                .f_clamp, .u_clamp, .i_clamp, .f_n_clamp, .f_mix, .fma, .f_smooth_step => if (!same(source_ty, instruction.ty)) return error.InvalidType,
+                .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .bit_not, .logical_not, .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .f_atan2, .f_pow, .f_n_min, .f_n_max, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step, .transpose => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .f_determinant => if (source_ty.scalar != .f32 or source_ty.columns != 4 or source_ty.rows != 4 or instruction.ty.scalar != .f32 or instruction.ty.columns != 1 or instruction.ty.rows != 1) return error.InvalidType,
                 .f_matrix_inverse => if (source_ty.scalar != .f32 or source_ty.columns != 4 or source_ty.rows != 4 or instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 4) return error.InvalidType,
                 .f_length => if (source_ty.scalar != .f32 or source_ty.rows != 1 or source_ty.columns < 2 or source_ty.columns > 4) return error.InvalidType,
@@ -1296,7 +1299,7 @@ fn validate(program: *const ir.Program) Error!void {
                 const right = program.instructions[instruction.operands[1]].ty;
                 if (!same(left, right) or left.scalar != .f32 or left.rows != 1 or left.columns != instruction.ty.columns) return error.InvalidType;
             },
-            .f_min, .f_max => {
+            .f_min, .f_max, .f_n_min, .f_n_max => {
                 if (instruction.ty.scalar != .f32 or instruction.ty.rows != 1) return error.InvalidType;
             },
             .f_sign => {
@@ -1311,7 +1314,7 @@ fn validate(program: *const ir.Program) Error!void {
             .i_min, .i_max => {
                 if (instruction.ty.scalar != .i32 or instruction.ty.rows != 1) return error.InvalidType;
             },
-            .f_clamp => {
+            .f_clamp, .f_n_clamp => {
                 if (instruction.ty.scalar != .f32 or instruction.ty.rows != 1) return error.InvalidType;
             },
             .u_clamp => {
@@ -2044,6 +2047,67 @@ test "GLSL Ldexp scales f32 lanes with signed exponents and stays failure atomic
     try std.testing.expectError(error.NumericDomain, executor.execute(&bindings, &.{}));
     try std.testing.expectEqualSlices(u32, prior.bits[0..4], executor.values[2].bits[0..4]);
     std.mem.writeInt(u32, exponents[12..16], @bitCast(@as(i32, 0)), .little);
+    for (0..4096) |_| try executor.execute(&bindings, &.{});
+}
+
+test "GLSL NMin NMax and NClamp prefer non-NaN operands" {
+    var x = [_]u8{0} ** 16;
+    var y = [_]u8{0} ** 16;
+    var minimum = [_]u8{0} ** 16;
+    var maximum = [_]u8{0} ** 16;
+    const x_values = [_]u32{ 0x7fc00000, @bitCast(@as(f32, 2)), 0x7fc00000, 0x80000000 };
+    const y_values = [_]u32{ @bitCast(@as(f32, 1)), 0x7fc00000, 0x7fc00000, 0 };
+    const min_values = [_]f32{ 0, 0, 1, -1 };
+    const max_values = [_]f32{ 2, 2, 3, 1 };
+    for (0..4) |lane| {
+        std.mem.writeInt(u32, x[lane * 4 ..][0..4], x_values[lane], .little);
+        std.mem.writeInt(u32, y[lane * 4 ..][0..4], y_values[lane], .little);
+        std.mem.writeInt(u32, minimum[lane * 4 ..][0..4], @bitCast(min_values[lane]), .little);
+        std.mem.writeInt(u32, maximum[lane * 4 ..][0..4], @bitCast(max_values[lane]), .little);
+    }
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .input, .ty = .{ .scalar = .f32, .columns = 4 }, .location = 0 },
+        .{ .storage = .input, .ty = .{ .scalar = .f32, .columns = 4 }, .location = 1 },
+        .{ .storage = .input, .ty = .{ .scalar = .f32, .columns = 4 }, .location = 2 },
+        .{ .storage = .input, .ty = .{ .scalar = .f32, .columns = 4 }, .location = 3 },
+    };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .input, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .input, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{1}, .literal = &.{} },
+        .{ .op = .input, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{2}, .literal = &.{} },
+        .{ .op = .input, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{3}, .literal = &.{} },
+        .{ .op = .f_n_min, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{ 0, 1 }, .literal = &.{} },
+        .{ .op = .f_n_max, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{ 0, 1 }, .literal = &.{} },
+        .{ .op = .f_n_clamp, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{ 0, 2, 3 }, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    const bindings = [_]Binding{
+        .{ .interface = 0, .bytes = &x },
+        .{ .interface = 1, .bytes = &y },
+        .{ .interface = 2, .bytes = &minimum },
+        .{ .interface = 3, .bytes = &maximum },
+    };
+    try executor.execute(&bindings, &.{});
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 1))), executor.values[4].bits[0]);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 2))), executor.values[4].bits[1]);
+    try std.testing.expectEqual(@as(u32, 0x7fc00000), executor.values[4].bits[2]);
+    try std.testing.expectEqual(@as(u32, 0x80000000), executor.values[4].bits[3]);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 1))), executor.values[5].bits[0]);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 2))), executor.values[5].bits[1]);
+    try std.testing.expectEqual(@as(u32, 0x7fc00000), executor.values[5].bits[2]);
+    try std.testing.expectEqual(@as(u32, 0x80000000), executor.values[5].bits[3]);
+    try std.testing.expectEqual(@as(u32, 0), executor.values[6].bits[0]);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 2))), executor.values[6].bits[1]);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 1))), executor.values[6].bits[2]);
+    try std.testing.expectEqual(@as(u32, 0x80000000), executor.values[6].bits[3]);
+    const prior = executor.values[6];
+    std.mem.writeInt(u32, maximum[0..4], @bitCast(@as(f32, -1)), .little);
+    try std.testing.expectError(error.NumericDomain, executor.execute(&bindings, &.{}));
+    try std.testing.expectEqualSlices(u32, prior.bits[0..4], executor.values[6].bits[0..4]);
+    std.mem.writeInt(u32, maximum[0..4], @bitCast(@as(f32, 2)), .little);
     for (0..4096) |_| try executor.execute(&bindings, &.{});
 }
 
@@ -3467,7 +3531,7 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
             const b = try propertyConstant(arena, &instructions, result_ty);
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ a, b }, &.{});
         },
-        .f_clamp, .u_clamp, .i_clamp => {
+        .f_clamp, .f_n_clamp, .u_clamp, .i_clamp => {
             const value = try propertyConstant(arena, &instructions, result_ty);
             const minimum = try propertyConstant(arena, &instructions, result_ty);
             const maximum = try propertyConstant(arena, &instructions, result_ty);
@@ -3487,7 +3551,7 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
             const value = try propertyConstant(arena, &instructions, result_ty);
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ edge0, edge1, value }, &.{});
         },
-        .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .f_atan2, .f_pow, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step => {
+        .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .f_atan2, .f_pow, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_n_min, .f_n_max, .f_step => {
             const a = try propertyConstant(arena, &instructions, result_ty);
             const b = try propertyConstant(arena, &instructions, result_ty);
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ a, b }, &.{});
@@ -3645,7 +3709,7 @@ test "generated bounded operation by type-family property matrix is complete" {
             try runPropertyCase(op, ty, null, null);
             totals[@intFromEnum(op)] += 1;
         };
-        if (is_float and is_non_matrix) inline for ([_]ir.Op{ .f_min, .f_max }) |op| {
+        if (is_float and is_non_matrix) inline for ([_]ir.Op{ .f_min, .f_max, .f_n_min, .f_n_max }) |op| {
             try runPropertyCase(op, ty, null, null);
             totals[@intFromEnum(op)] += 1;
         };
@@ -3660,6 +3724,8 @@ test "generated bounded operation by type-family property matrix is complete" {
             totals[@intFromEnum(ir.Op.f_sign)] += 1;
             try runPropertyCase(.f_clamp, ty, null, null);
             totals[@intFromEnum(ir.Op.f_clamp)] += 1;
+            try runPropertyCase(.f_n_clamp, ty, null, null);
+            totals[@intFromEnum(ir.Op.f_n_clamp)] += 1;
             try runPropertyCase(.f_mix, ty, null, null);
             totals[@intFromEnum(ir.Op.f_mix)] += 1;
             try runPropertyCase(.fma, ty, null, null);
@@ -3829,15 +3895,15 @@ test "generated bounded operation by type-family property matrix is complete" {
         totals[@intFromEnum(op)] += 1;
     }
     const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14, 8, 4, 8, 8, 8, 8, 4, 4, 4, 4, 4, 8, 8, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4};
+    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4} ++ [_]usize{ 4, 4, 4 };
     try std.testing.expectEqualSlices(usize, expected_full[0..totals.len], &totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 656), total);
-    std.debug.print("generated property matrix: operations=153 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 668), total);
+    std.debug.print("generated property matrix: operations=156 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -3969,13 +4035,13 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 153), malformed);
+    try std.testing.expectEqual(@as(usize, 156), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
     try std.testing.expectEqual(@as(usize, 5), runtime_nan);
     try std.testing.expectEqual(@as(usize, 5), signed_zero);
-    std.debug.print("generated property categories: malformed=153 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
+    std.debug.print("generated property categories: malformed=156 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
 }
 
 test "generated valid scalar DAGs are total and stable" {

@@ -343,7 +343,7 @@ fn supportedGlslExtInst(ext: u32, result: ir.Type, operand: ir.Type) bool {
                 43 => result.scalar == .f32 and result.rows == 1,
                 44 => result.scalar == .u32 and result.rows == 1,
                 45 => result.scalar == .i32 and result.rows == 1,
-                46, 48, 49, 50 => result.scalar == .f32 and result.rows == 1,
+                46, 48, 49, 50, 79, 80, 81 => result.scalar == .f32 and result.rows == 1,
                 else => false,
             };
         },
@@ -740,16 +740,16 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 if (!in_function or !label_seen or terminated or block_terminated or w.len < 5 or w.len > 7) return error.Malformed;
                 const set = nodes[try id(nodes, w[2])];
                 if (set.kind != .ext_inst_import or set.a != 450) return error.Unsupported;
-                if (w[3] < 1 or w[3] > 24 and w[3] != 25 and w[3] != 26 and w[3] != 27 and w[3] != 28 and w[3] != 29 and w[3] != 30 and w[3] != 31 and w[3] != 32 and w[3] != 33 and w[3] != 34 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50 and w[3] != 53 and w[3] != 62 and w[3] != 63 and w[3] != 64 and w[3] != 65 and w[3] != 66 and w[3] != 67 and w[3] != 68 and w[3] != 69 and w[3] != 70 and w[3] != 71) return error.Unsupported;
+                if (w[3] < 1 or w[3] > 24 and w[3] != 25 and w[3] != 26 and w[3] != 27 and w[3] != 28 and w[3] != 29 and w[3] != 30 and w[3] != 31 and w[3] != 32 and w[3] != 33 and w[3] != 34 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50 and w[3] != 53 and w[3] != 62 and w[3] != 63 and w[3] != 64 and w[3] != 65 and w[3] != 66 and w[3] != 67 and w[3] != 68 and w[3] != 69 and w[3] != 70 and w[3] != 71 and w[3] != 79 and w[3] != 80 and w[3] != 81) return error.Unsupported;
                 if ((w[3] >= 1 and w[3] <= 24 or w[3] >= 27 and w[3] <= 34 or w[3] == 62 or w[3] == 65 or w[3] >= 69 and w[3] <= 71) and w.len != 5) return error.Malformed;
                 if ((w[3] == 25 or w[3] == 26 or w[3] == 53) and w.len != 6) return error.Malformed;
-                if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48 or w[3] == 63 or w[3] == 64 or w[3] == 67) and w.len != 6) return error.Malformed;
-                if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50 or w[3] == 66 or w[3] == 68) and w.len != 7) return error.Malformed;
+                if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48 or w[3] == 63 or w[3] == 64 or w[3] == 67 or w[3] == 79 or w[3] == 80) and w.len != 6) return error.Malformed;
+                if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50 or w[3] == 66 or w[3] == 68 or w[3] == 81) and w.len != 7) return error.Malformed;
                 const result = try resultShape(nodes, w[0]);
                 const operand = try valueShape(nodes, w[4]);
                 if (!supportedGlslExtInst(w[3], result, operand)) return error.Unsupported;
-                if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48) and !sameShape(result, try valueShape(nodes, w[5]))) return error.Unsupported;
-                if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50) and (!sameShape(result, try valueShape(nodes, w[5])) or !sameShape(result, try valueShape(nodes, w[6])))) return error.Unsupported;
+                if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48 or w[3] == 79 or w[3] == 80) and !sameShape(result, try valueShape(nodes, w[5]))) return error.Unsupported;
+                if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50 or w[3] == 81) and (!sameShape(result, try valueShape(nodes, w[5])) or !sameShape(result, try valueShape(nodes, w[6])))) return error.Unsupported;
                 if ((w[3] == 63 or w[3] == 64 or w[3] == 67) and !sameShape(operand, try valueShape(nodes, w[5]))) return error.Unsupported;
                 if (w[3] == 66 and (!sameShape(result, try valueShape(nodes, w[5])) or !sameShape(result, try valueShape(nodes, w[6])))) return error.Unsupported;
                 if (w[3] == 68 and (!sameShape(result, try valueShape(nodes, w[5])) or (try valueShape(nodes, w[6])).scalar != .f32 or (try valueShape(nodes, w[6])).columns != 1 or (try valueShape(nodes, w[6])).rows != 1)) return error.Unsupported;
@@ -884,16 +884,16 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             12 => {
                 if (w.len < 5 or w.len > 7) return error.Malformed;
                 const set = nodes[try id(nodes, w[2])];
-                if (set.kind != .ext_inst_import or set.a != 450 or (w[3] < 1 or w[3] > 24 and w[3] != 25 and w[3] != 26 and w[3] != 27 and w[3] != 28 and w[3] != 29 and w[3] != 30 and w[3] != 31 and w[3] != 32 and w[3] != 33 and w[3] != 34 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50 and w[3] != 53 and w[3] != 62 and w[3] != 63 and w[3] != 64 and w[3] != 65 and w[3] != 66 and w[3] != 67 and w[3] != 68 and w[3] != 69 and w[3] != 70 and w[3] != 71)) return error.Unsupported;
+                if (set.kind != .ext_inst_import or set.a != 450 or (w[3] < 1 or w[3] > 24 and w[3] != 25 and w[3] != 26 and w[3] != 27 and w[3] != 28 and w[3] != 29 and w[3] != 30 and w[3] != 31 and w[3] != 32 and w[3] != 33 and w[3] != 34 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50 and w[3] != 53 and w[3] != 62 and w[3] != 63 and w[3] != 64 and w[3] != 65 and w[3] != 66 and w[3] != 67 and w[3] != 68 and w[3] != 69 and w[3] != 70 and w[3] != 71 and w[3] != 79 and w[3] != 80 and w[3] != 81)) return error.Unsupported;
                 if ((w[3] >= 1 and w[3] <= 24 or w[3] >= 27 and w[3] <= 34 or w[3] == 62 or w[3] == 65 or w[3] >= 69 and w[3] <= 71) and w.len != 5) return error.Malformed;
                 if ((w[3] == 25 or w[3] == 26 or w[3] == 53) and w.len != 6) return error.Malformed;
-                if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48 or w[3] == 63 or w[3] == 64 or w[3] == 67) and w.len != 6) return error.Malformed;
-                if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50 or w[3] == 66 or w[3] == 68) and w.len != 7) return error.Malformed;
+                if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48 or w[3] == 63 or w[3] == 64 or w[3] == 67 or w[3] == 79 or w[3] == 80) and w.len != 6) return error.Malformed;
+                if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50 or w[3] == 66 or w[3] == 68 or w[3] == 81) and w.len != 7) return error.Malformed;
                 const result = try resultShape(nodes, w[0]);
                 const operand = try valueShape(nodes, w[4]);
                 if (!supportedGlslExtInst(w[3], result, operand)) return error.Unsupported;
-                if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48) and !sameShape(result, try valueShape(nodes, w[5]))) return error.Unsupported;
-                if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50) and (!sameShape(result, try valueShape(nodes, w[5])) or !sameShape(result, try valueShape(nodes, w[6])))) return error.Unsupported;
+                if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48 or w[3] == 79 or w[3] == 80) and !sameShape(result, try valueShape(nodes, w[5]))) return error.Unsupported;
+                if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50 or w[3] == 81) and (!sameShape(result, try valueShape(nodes, w[5])) or !sameShape(result, try valueShape(nodes, w[6])))) return error.Unsupported;
                 if ((w[3] == 63 or w[3] == 64 or w[3] == 67) and !sameShape(operand, try valueShape(nodes, w[5]))) return error.Unsupported;
                 if (w[3] == 66 and (!sameShape(result, try valueShape(nodes, w[5])) or !sameShape(result, try valueShape(nodes, w[6])))) return error.Unsupported;
                 if (w[3] == 68 and (!sameShape(result, try valueShape(nodes, w[5])) or (try valueShape(nodes, w[6])).scalar != .f32 or (try valueShape(nodes, w[6])).columns != 1 or (try valueShape(nodes, w[6])).rows != 1)) return error.Unsupported;
@@ -1637,6 +1637,9 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 69 => .i_find_lsb,
                 70 => .i_find_s_msb,
                 71 => .i_find_u_msb,
+                79 => .f_n_min,
+                80 => .f_n_max,
+                81 => .f_n_clamp,
                 37 => .f_min,
                 38 => .u_min,
                 39 => .i_min,
@@ -2790,6 +2793,16 @@ test "GLSL Ldexp admissions preserve f32 value shape" {
     try std.testing.expect(supportedGlslExtInst(53, vec4, vec4));
     try std.testing.expect(!supportedGlslExtInst(53, scalar, matrix));
     try std.testing.expect(!supportedGlslExtInst(53, matrix, matrix));
+}
+
+test "GLSL non-NaN min/max/clamp admissions preserve f32 shapes" {
+    const scalar = ir.Type{ .scalar = .f32 };
+    const vec4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    const matrix = ir.Type{ .scalar = .f32, .columns = 4, .rows = 4 };
+    try std.testing.expect(supportedGlslExtInst(79, scalar, scalar));
+    try std.testing.expect(supportedGlslExtInst(80, vec4, vec4));
+    try std.testing.expect(supportedGlslExtInst(81, vec4, vec4));
+    try std.testing.expect(!supportedGlslExtInst(79, matrix, matrix));
 }
 
 test "GLSL geometric admissions enforce vector arity and component shapes" {
