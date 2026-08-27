@@ -58,6 +58,11 @@ Pipeline creation also accepts the promoted Vulkan 1.4
 both graphics and compute pipelines, and the compute dispatch-base bit is
 honored through the same canonical, failure-atomic path as the legacy flag;
 unsupported or high flag bits leave outputs and registries unchanged.
+The promoted `VkPipelineRobustnessCreateInfo` ABI is accepted on graphics and
+compute pipeline and shader-stage chains when all behavior fields request the
+device-default policy; non-default robustness values, duplicate nodes, and
+unknown chain entries remain transactional rejections because the optional
+robustness feature is not advertised.
 Graphics pipeline creation now also consumes the Vulkan 1.3
 `VkPipelineRenderingCreateInfo` pNext for `renderPass = VK_NULL_HANDLE`:
 the bounded dynamic-rendering profile records one BGRA8 color format and

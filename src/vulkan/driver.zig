@@ -461,6 +461,8 @@ pub const PipelineCacheCreateInfo = extern struct { s_type: i32, p_next: ?*const
 pub const SpecializationMapEntry = extern struct { constant_id: u32, offset: u32, size: usize };
 pub const SpecializationInfo = extern struct { map_entry_count: u32, map_entries: ?[*]const SpecializationMapEntry, data_size: usize, data: ?*const anyopaque };
 pub const PipelineShaderStageCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, stage: u32, module: usize, name: ?[*:0]const u8, specialization_info: ?*const SpecializationInfo };
+pub const PipelineRobustnessCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, storage_buffers: i32, uniform_buffers: i32, vertex_inputs: i32, images: i32 };
+pub const PipelineRobustnessCreateInfoEXT = PipelineRobustnessCreateInfo;
 pub const ComputePipelineCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, stage: PipelineShaderStageCreateInfo, layout: usize, base_pipeline: usize, base_pipeline_index: i32 };
 pub const PipelineCreateFlags2CreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u64 };
 pub const DescriptorSetLayoutBinding = extern struct { binding: u32, descriptor_type: i32, descriptor_count: u32, stage_flags: u32, immutable_samplers: ?[*]const usize };
@@ -1113,6 +1115,7 @@ const google_display_timing_extension = "VK_GOOGLE_display_timing";
 const google_present_times_info_stype: i32 = 1_000_092_000;
 const memory_dedicated_requirements_stype: i32 = 1_000_127_000;
 const pipeline_rendering_create_info_stype: i32 = 1_000_044_002;
+const pipeline_robustness_create_info_stype: i32 = 1_000_068_000;
 const attachment_store_op_none: i32 = 1_000_301_000;
 const attachment_load_op_none: i32 = 1_000_400_000;
 fn validAttachmentLoadOp(op: i32) bool {
@@ -1120,6 +1123,30 @@ fn validAttachmentLoadOp(op: i32) bool {
 }
 fn validAttachmentStoreOp(op: i32) bool {
     return op == 0 or op == 1 or op == attachment_store_op_none;
+}
+
+fn pipelineRobustnessNodeValid(item: *const anyopaque) bool {
+    const info: *const PipelineRobustnessCreateInfo = @ptrCast(@alignCast(item));
+    // The optional pipelineRobustness feature is not advertised.  The
+    // Vulkan default behavior is nevertheless ABI-valid and has no
+    // execution effect, so accept only the all-device-default form.
+    return info.storage_buffers == 0 and info.uniform_buffers == 0 and info.vertex_inputs == 0 and info.images == 0;
+}
+
+fn pipelineRobustnessCreateInfoValid(raw: ?*const anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    var seen = false;
+    while (next) |item| {
+        if (depth == 16) return false;
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (header.s_type != pipeline_robustness_create_info_stype or seen) return false;
+        if (!pipelineRobustnessNodeValid(item)) return false;
+        seen = true;
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
 }
 
 // VK_KHR_maintenance5 promotes VkPipelineCreateFlags2CreateInfo into the
@@ -1134,23 +1161,34 @@ fn pipelineCreateFlags2(raw: ?*const anyopaque, legacy: u32, allow_dispatch_base
     }
     var next = raw;
     var depth: usize = 0;
-    var effective: u32 = 0;
+    var effective: u32 = legacy;
+    var seen_flags2 = false;
+    var seen_robustness = false;
     while (next) |item| {
         if (depth == 16) return null;
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
-        if (header.s_type != pipeline_create_flags2_stype) return null;
-        const flags2: *const PipelineCreateFlags2CreateInfo = @ptrCast(@alignCast(item));
-        // This bounded implementation accepts exactly one promoted node.  The
-        // promoted flags replace the legacy field (including when the legacy
-        // field contains a supported dispatch-base bit), as specified by the
-        // Vulkan 1.4 promotion rules.
-        if (flags2.p_next != null) return null;
-        if (flags2.flags & ~@as(u64, pipeline_create_dispatch_base_bit) != 0) return null;
-        effective = @truncate(flags2.flags);
-        if (!allow_dispatch_base and effective != 0) return null;
+        switch (header.s_type) {
+            pipeline_create_flags2_stype => {
+                if (seen_flags2) return null;
+                const flags2: *const PipelineCreateFlags2CreateInfo = @ptrCast(@alignCast(item));
+                // The promoted flags replace the legacy field (including when
+                // the legacy field contains a supported dispatch-base bit), as
+                // specified by the Vulkan 1.4 promotion rules.
+                if (flags2.p_next != null) return null;
+                if (flags2.flags & ~@as(u64, pipeline_create_dispatch_base_bit) != 0) return null;
+                effective = @truncate(flags2.flags);
+                seen_flags2 = true;
+            },
+            pipeline_robustness_create_info_stype => {
+                if (seen_robustness or !pipelineRobustnessNodeValid(item)) return null;
+                seen_robustness = true;
+            },
+            else => return null,
+        }
         next = header.p_next;
         depth += 1;
     }
+    if (!allow_dispatch_base and effective != 0) return null;
     return effective;
 }
 
@@ -1178,6 +1216,7 @@ fn graphicsPipelinePNext(raw: ?*const anyopaque, legacy: u32) ?GraphicsPipelineP
     var depth: usize = 0;
     var seen_flags2 = false;
     var seen_rendering = false;
+    var seen_robustness = false;
     var effective_flags = legacy;
     var rendering: ?PipelineRenderingState = null;
     while (next) |item| {
@@ -1204,6 +1243,10 @@ fn graphicsPipelinePNext(raw: ?*const anyopaque, legacy: u32) ?GraphicsPipelineP
                 if (color_format != 0 and color_format != 44) return null;
                 rendering = .{ .view_mask = info.view_mask, .color_format = color_format, .depth_format = info.depth_attachment_format, .stencil_format = info.stencil_attachment_format };
                 seen_rendering = true;
+            },
+            pipeline_robustness_create_info_stype => {
+                if (seen_robustness or !pipelineRobustnessNodeValid(item)) return null;
+                seen_robustness = true;
             },
             else => return null,
         }
@@ -8614,6 +8657,8 @@ test "Vulkan graphics pipeline ABI declarations match LP64 layouts" {
     try std.testing.expectEqual(@as(usize, 72), @offsetOf(ComputePipelineCreateInfo, "layout"));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(PipelineCreateFlags2CreateInfo));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PipelineCreateFlags2CreateInfo, "flags"));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(PipelineRobustnessCreateInfo));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PipelineRobustnessCreateInfo, "storage_buffers"));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(PipelineRenderingCreateInfo));
     try std.testing.expectEqual(@as(usize, 24), @offsetOf(PipelineRenderingCreateInfo, "color_attachment_formats"));
     try std.testing.expectEqual(@as(usize, 32), @offsetOf(PipelineRenderingCreateInfo, "depth_attachment_format"));
@@ -8621,10 +8666,22 @@ test "Vulkan graphics pipeline ABI declarations match LP64 layouts" {
 
 test "pipeline flags2 validation is bounded and allocation-free" {
     var node = PipelineCreateFlags2CreateInfo{ .s_type = pipeline_create_flags2_stype, .p_next = null, .flags = pipeline_create_dispatch_base_bit };
+    var robustness = PipelineRobustnessCreateInfo{ .s_type = pipeline_robustness_create_info_stype, .p_next = null, .storage_buffers = 0, .uniform_buffers = 0, .vertex_inputs = 0, .images = 0 };
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     for (0..4096) |_| try std.testing.expectEqual(@as(?u32, pipeline_create_dispatch_base_bit), pipelineCreateFlags2(@ptrCast(&node), 0, true));
     try std.testing.expectEqual(@as(?u32, null), pipelineCreateFlags2(@ptrCast(&node), 0, false));
+    robustness.p_next = @ptrCast(&node);
+    try std.testing.expectEqual(@as(?u32, pipeline_create_dispatch_base_bit), pipelineCreateFlags2(@ptrCast(&robustness), 0, true));
+    try std.testing.expectEqual(@as(?u32, null), pipelineCreateFlags2(@ptrCast(&robustness), 0, false));
+    robustness.p_next = null;
+    robustness.storage_buffers = 1;
+    try std.testing.expectEqual(@as(?u32, null), pipelineCreateFlags2(@ptrCast(&robustness), 0, true));
+    robustness.storage_buffers = 0;
+    var duplicate_robustness = robustness;
+    robustness.p_next = @ptrCast(&duplicate_robustness);
+    try std.testing.expectEqual(@as(?u32, null), pipelineCreateFlags2(@ptrCast(&robustness), 0, true));
+    robustness.p_next = null;
     node.flags = @as(u64, 1) << 40;
     try std.testing.expectEqual(@as(?u32, null), pipelineCreateFlags2(@ptrCast(&node), 0, true));
     node.flags = 0;
@@ -8639,6 +8696,7 @@ test "pipeline flags2 validation is bounded and allocation-free" {
 test "dynamic rendering pipeline pNext validation is bounded and canonical" {
     var formats = [_]i32{44};
     var rendering = PipelineRenderingCreateInfo{ .s_type = pipeline_rendering_create_info_stype, .p_next = null, .view_mask = 0, .color_attachment_count = 1, .color_attachment_formats = &formats, .depth_attachment_format = 126, .stencil_attachment_format = 0 };
+    var robustness = PipelineRobustnessCreateInfo{ .s_type = pipeline_robustness_create_info_stype, .p_next = null, .storage_buffers = 0, .uniform_buffers = 0, .vertex_inputs = 0, .images = 0 };
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     var parsed: ?GraphicsPipelinePNextState = null;
@@ -8655,6 +8713,14 @@ test "dynamic rendering pipeline pNext validation is bounded and canonical" {
     try std.testing.expect(parsed != null and parsed.?.rendering != null);
     try std.testing.expectEqual(@as(i32, 0), parsed.?.rendering.?.color_format);
     try std.testing.expectEqual(@as(i32, 126), parsed.?.rendering.?.depth_format);
+    robustness.p_next = @ptrCast(&rendering);
+    parsed = graphicsPipelinePNext(@ptrCast(&robustness), 0);
+    try std.testing.expect(parsed != null and parsed.?.rendering != null);
+    robustness.p_next = null;
+    try std.testing.expect(graphicsPipelinePNext(@ptrCast(&robustness), 0) != null);
+    robustness.storage_buffers = 1;
+    try std.testing.expect(graphicsPipelinePNext(@ptrCast(&robustness), 0) == null);
+    robustness.storage_buffers = 0;
     var bad = rendering;
     bad.color_attachment_formats = null;
     try std.testing.expect(graphicsPipelinePNext(@ptrCast(&bad), 0) == null);
@@ -8704,6 +8770,18 @@ test "compute pipeline creation validates ownership, publishes typed handles, an
     const pipeline = pipelines[0];
     try std.testing.expect(pipeline != 0xfeed_face);
     try std.testing.expect(validComputePipelineLocked(pipeline) != null);
+    var robustness = PipelineRobustnessCreateInfo{ .s_type = pipeline_robustness_create_info_stype, .p_next = null, .storage_buffers = 0, .uniform_buffers = 0, .vertex_inputs = 0, .images = 0 };
+    var robustness_info = info;
+    robustness_info.p_next = @ptrCast(&robustness);
+    var robustness_pipeline = [_]usize{0xfeed_face};
+    try std.testing.expectEqual(Result.success, createComputePipelines(first.device, 0, 1, @ptrCast(&robustness_info), null, &robustness_pipeline));
+    try std.testing.expect(validComputePipelineLocked(robustness_pipeline[0]) != null);
+    var stage_robustness = robustness;
+    var stage_robustness_info = info;
+    stage_robustness_info.stage.p_next = @ptrCast(&stage_robustness);
+    var stage_robustness_pipeline = [_]usize{0xfeed_face};
+    try std.testing.expectEqual(Result.success, createComputePipelines(first.device, 0, 1, @ptrCast(&stage_robustness_info), null, &stage_robustness_pipeline));
+    try std.testing.expect(validComputePipelineLocked(stage_robustness_pipeline[0]) != null);
     var flags2 = PipelineCreateFlags2CreateInfo{ .s_type = pipeline_create_flags2_stype, .p_next = null, .flags = 0 };
     var flags2_info = info;
     flags2_info.flags = pipeline_create_dispatch_base_bit;
@@ -8756,6 +8834,8 @@ test "compute pipeline creation validates ownership, publishes typed handles, an
     try std.testing.expectEqualSlices(SlotState, &states_before, &compute_pipeline_state);
     destroyPipeline(first.device, dispatch_flags2_pipeline[0], null);
     destroyPipeline(first.device, zero_flags2_pipeline[0], null);
+    destroyPipeline(first.device, stage_robustness_pipeline[0], null);
+    destroyPipeline(first.device, robustness_pipeline[0], null);
     destroyPipeline(first.device, pipeline, null);
     destroyPipelineCache(first.device, cache, null);
     try std.testing.expect(validComputePipelineLocked(pipeline) == null);
@@ -8775,7 +8855,7 @@ fn buildComputePipelineLocked(d: Device, ci: *const ComputePipelineCreateInfo) C
     const layout = validPipelineLayoutLocked(ci.layout) orelse return error.Invalid;
     if (!layout.owner.eql(d)) return error.Invalid;
     const stage = ci.stage;
-    if (stage.s_type != 18 or stage.p_next != null or stage.flags != 0 or stage.stage != 32 or stage.name == null) return error.Invalid;
+    if (stage.s_type != 18 or !pipelineRobustnessCreateInfoValid(stage.p_next) or stage.flags != 0 or stage.stage != 32 or stage.name == null) return error.Invalid;
     const shader = findLiveHandle(ShaderModuleObj, stage.module, &shader_module_objects, &shader_module_state) orelse return error.Invalid;
     if (!shader.owner.eql(d)) return error.Invalid;
     const name = std.mem.span(stage.name.?);
@@ -8869,7 +8949,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     var cpu_cube_stage_mask: u32 = 0;
     for (stage_indices) |index| {
         const stage = stages[index];
-        if (stage.s_type != 18 or stage.p_next != null or stage.flags != 0 or (stage.stage != 1 and stage.stage != 0x10) or stage_mask & stage.stage != 0 or stage.name == null) return error.Invalid;
+        if (stage.s_type != 18 or !pipelineRobustnessCreateInfoValid(stage.p_next) or stage.flags != 0 or (stage.stage != 1 and stage.stage != 0x10) or stage_mask & stage.stage != 0 or stage.name == null) return error.Invalid;
         const shader = findLiveHandle(ShaderModuleObj, stage.module, &shader_module_objects, &shader_module_state) orelse return error.Invalid;
         if (!shader.owner.eql(d)) return error.Invalid;
         const name = std.mem.span(stage.name.?);
