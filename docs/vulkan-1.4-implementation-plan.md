@@ -479,7 +479,10 @@ Queue submission and host timeline waits now reject duplicate semaphore handles
 within each wait or signal array before consuming or publishing synchronization
 state. The duplicate path is failure-atomic for binary and timeline semaphores,
 and `vkQueueSubmit2` inherits the same validation through its canonical submit
-conversion.
+conversion. Because the bounded executor has no asynchronous producer, a
+timeline wait is accepted only when its target is already satisfied by the
+current counter or an earlier submit in the same batch; unsatisfied waits fail
+before publication instead of spinning forever.
 
 The bounded execution checkpoint for `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC`
 is complete. Descriptor writes and update templates preserve the dynamic type,

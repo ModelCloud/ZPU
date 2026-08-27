@@ -13039,7 +13039,17 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                 if (semaphore.timeline) {
                     const values = timeline_info orelse return .error_initialization_failed;
                     if (values.wait_semaphore_values == null) return .error_initialization_failed;
-                    _ = values.wait_semaphore_values.?[wait_index];
+                    const target = values.wait_semaphore_values.?[wait_index];
+                    // The profile executes a queue synchronously and has no
+                    // external producer that can advance a timeline while a
+                    // submission is blocked.  A wait must therefore already
+                    // be satisfied by the current value (or an earlier
+                    // submission in this batch, reflected in timeline_states)
+                    // before validation accepts the batch.  Rejecting here
+                    // keeps the call failure-atomic and avoids an executor
+                    // spin that could never complete.
+                    const slot = semaphoreSlot(semaphore);
+                    if (target > timeline_states[slot]) return .error_initialization_failed;
                 } else {
                     if (timeline_info) |values| if (values.wait_semaphore_values) |wait_values| if (wait_values[wait_index] != 0) return .error_initialization_failed;
                     // The synchronous single-queue executor has no other
@@ -21486,6 +21496,21 @@ test "timeline semaphores expose monotonic counter wait signal and submit ABI" {
     var counter: u64 = 0;
     try std.testing.expectEqual(Result.success, getSemaphoreCounterValue(ctx.device, timeline, &counter));
     try std.testing.expectEqual(@as(u64, 4), counter);
+    // A synchronous queue cannot make progress on an unsatisfied timeline
+    // wait from an external producer.  Reject it during submission
+    // validation instead of accepting a batch that would spin forever.
+    const zero_type_info = SemaphoreTypeCreateInfo{ .s_type = 1000207002, .p_next = null, .semaphore_type = 1, .initial_value = 0 };
+    const zero_info = SemaphoreCreateInfo{ .s_type = 9, .p_next = &zero_type_info, .flags = 0 };
+    var unsatisfied_timeline: usize = 0;
+    try std.testing.expectEqual(Result.success, createSemaphore(ctx.device, &zero_info, null, &unsatisfied_timeline));
+    const unsatisfied_handles = [_]usize{unsatisfied_timeline};
+    const unsatisfied_values = [_]u64{1};
+    const unsatisfied_timeline_info = TimelineSemaphoreSubmitInfo{ .s_type = 1000207003, .p_next = null, .wait_semaphore_value_count = 1, .wait_semaphore_values = &unsatisfied_values, .signal_semaphore_value_count = 0, .signal_semaphore_values = null };
+    const unsatisfied_submit = SubmitInfo{ .s_type = 4, .p_next = &unsatisfied_timeline_info, .wait_semaphore_count = 1, .wait_semaphores = &unsatisfied_handles, .wait_dst_stage_mask = @ptrCast(&[_]u32{0x1000}), .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&unsatisfied_submit), 0));
+    try std.testing.expectEqual(Result.success, getSemaphoreCounterValue(ctx.device, unsatisfied_timeline, &counter));
+    try std.testing.expectEqual(@as(u64, 0), counter);
+    destroySemaphore(ctx.device, unsatisfied_timeline, null);
     const wait_handles = [_]usize{timeline};
     const wait_values = [_]u64{5};
     const wait_info = SemaphoreWaitInfo{ .s_type = 1000207004, .p_next = null, .flags = 0, .semaphore_count = 1, .semaphores = &wait_handles, .values = &wait_values };
