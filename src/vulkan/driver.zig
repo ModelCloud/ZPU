@@ -2833,7 +2833,13 @@ fn bufferCreatePNextValid(raw: ?*const anyopaque) bool {
     return bufferCreatePNextState(raw).valid;
 }
 
-const ImageViewCreatePNextState = struct { valid: bool = true, has_usage: bool = false, usage: u32 = 0 };
+const ImageViewCreatePNextState = struct {
+    valid: bool = true,
+    has_usage: bool = false,
+    usage: u32 = 0,
+    has_ycbcr_conversion: bool = false,
+    ycbcr_conversion: usize = 0,
+};
 
 fn imageViewCreatePNextState(raw: ?*const anyopaque) ImageViewCreatePNextState {
     var next = raw;
@@ -2845,13 +2851,34 @@ fn imageViewCreatePNextState(raw: ?*const anyopaque) ImageViewCreatePNextState {
             return state;
         }
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
-        if (header.s_type != 1000117002 or state.has_usage) {
-            state.valid = false;
-            return state;
+        switch (header.s_type) {
+            1000117002 => {
+                if (state.has_usage) {
+                    state.valid = false;
+                    return state;
+                }
+                const usage = @as(*const ImageViewUsageCreateInfo, @ptrCast(@alignCast(item)));
+                state.has_usage = true;
+                state.usage = usage.usage;
+            },
+            1000156001 => {
+                if (state.has_ycbcr_conversion) {
+                    state.valid = false;
+                    return state;
+                }
+                const conversion = @as(*const SamplerYcbcrConversionInfo, @ptrCast(@alignCast(item)));
+                if (conversion.conversion == 0) {
+                    state.valid = false;
+                    return state;
+                }
+                state.has_ycbcr_conversion = true;
+                state.ycbcr_conversion = conversion.conversion;
+            },
+            else => {
+                state.valid = false;
+                return state;
+            },
         }
-        const usage = @as(*const ImageViewUsageCreateInfo, @ptrCast(@alignCast(item)));
-        state.has_usage = true;
-        state.usage = usage.usage;
         next = header.p_next;
         depth += 1;
     }
@@ -11719,6 +11746,7 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
     const out = output orelse return .error_initialization_failed;
     const pnext = imageViewCreatePNextState(ci.p_next);
     if (ci.s_type != 15 or !pnext.valid or ci.flags != 0 or (ci.view_type != 1 and ci.view_type != 5) or !std.meta.eql(ci.components, [_]i32{ 0, 0, 0, 0 }) or ci.subresource_range.base_mip_level != 0 or ci.subresource_range.level_count != 1 or ci.subresource_range.layer_count == 0) return .error_initialization_failed;
+    if (pnext.has_ycbcr_conversion) return .error_format_not_supported;
     lock();
     defer mutex.unlock();
     const image = validImageLocked(ci.image) orelse return .error_initialization_failed;
@@ -21148,6 +21176,7 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
 test "dynamic rendering begin and end own attachment scope" {
     try std.testing.expectEqual(@as(usize, 72), @sizeOf(RenderingAttachmentInfo));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(ImageViewUsageCreateInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(SamplerYcbcrConversionInfo));
     const ctx = try createTestDeviceContext();
     defer test_allocations_before_failure = null;
     const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 44, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x10, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
@@ -21184,6 +21213,31 @@ test "dynamic rendering begin and end own attachment scope" {
     unsupported_view_info.p_next = &unsupported_usage;
     try std.testing.expectEqual(Result.error_initialization_failed, createImageView(ctx.device, &unsupported_view_info, null, &unchanged_view));
     try std.testing.expectEqual(@as(usize, 0xfeed_face), unchanged_view);
+    // A well-formed promoted YCbCr conversion chain is recognized as an
+    // unsupported-format request, while a null conversion is malformed.
+    var ycbcr_view_conversion = SamplerYcbcrConversionInfo{ .s_type = 1000156001, .p_next = null, .conversion = 1 };
+    var ycbcr_view_info = view_info;
+    ycbcr_view_info.p_next = @ptrCast(&ycbcr_view_conversion);
+    unchanged_view = 0xcafe_babe;
+    try std.testing.expectEqual(Result.error_format_not_supported, createImageView(ctx.device, &ycbcr_view_info, null, &unchanged_view));
+    try std.testing.expectEqual(@as(usize, 0xcafe_babe), unchanged_view);
+    ycbcr_view_conversion.conversion = 0;
+    unchanged_view = 0xd00d;
+    try std.testing.expectEqual(Result.error_initialization_failed, createImageView(ctx.device, &ycbcr_view_info, null, &unchanged_view));
+    try std.testing.expectEqual(@as(usize, 0xd00d), unchanged_view);
+    var duplicate_ycbcr_view = SamplerYcbcrConversionInfo{ .s_type = 1000156001, .p_next = @ptrCast(&ycbcr_view_conversion), .conversion = 1 };
+    var duplicate_ycbcr_view_info = view_info;
+    duplicate_ycbcr_view_info.p_next = @ptrCast(&duplicate_ycbcr_view);
+    unchanged_view = 0xbeef;
+    try std.testing.expectEqual(Result.error_initialization_failed, createImageView(ctx.device, &duplicate_ycbcr_view_info, null, &unchanged_view));
+    try std.testing.expectEqual(@as(usize, 0xbeef), unchanged_view);
+    ycbcr_view_conversion.conversion = 1;
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        const pnext = imageViewCreatePNextState(&ycbcr_view_conversion);
+        try std.testing.expect(pnext.valid and pnext.has_ycbcr_conversion and pnext.ycbcr_conversion == 1);
+    }
+    test_allocations_before_failure = null;
     const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
     var pool: usize = 0;
     try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
