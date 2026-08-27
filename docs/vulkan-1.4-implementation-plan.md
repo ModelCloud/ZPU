@@ -342,8 +342,8 @@ checked again at submit, so a post-record host layout change fails atomically
 instead of executing against stale state. The promoted
 `VK_ATTACHMENT_LOAD_OP_NONE` and `VK_ATTACHMENT_STORE_OP_NONE` values are
 accepted for dynamic attachments; DONT_CARE and load-none record a
-submission-time content discard at begin, while store-none records another
-discard at the end of the rendering scope. Secondary command buffers can now carry the bounded
+submission-time content discard at begin, while DONT_CARE and store-none record
+another discard at the end of the rendering scope. Secondary command buffers can now carry the bounded
 `VkCommandBufferInheritanceRenderingInfo` chain, including zero-color
 depth-only inheritance; execution validates the inherited color/depth formats
 and sample count against the active primary scope, requires
@@ -507,8 +507,9 @@ attachmentless, and 4096-iteration allocation-free tests cover the paths. Clear 
 subpass layouts, rejecting host-side layout changes after recording and
 propagating those expectations into secondary command-buffer execution. The
 promoted LOAD_OP_NONE/STORE_OP_NONE enum values are accepted as well;
-load-none records a bounded content discard at begin, while store-none records
-a bounded content discard at end-of-pass; both retain bytes until submission.
+load-none records a bounded content discard at begin, while DONT_CARE and
+store-none record a bounded content discard at end-of-pass; both retain bytes
+until submission.
 
 The Vulkan 1.4 host-image-copy commands accept both advertised four-byte color
 formats (RGBA8 UNORM and BGRA8 UNORM) with identical row/layer addressing and

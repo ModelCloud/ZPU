@@ -1422,7 +1422,7 @@ const DispatchIndirectCommand = struct { buffer: *BufferObj, offset: u64, pipeli
 const PrivateDataEntry = struct { object_type: i32 = 0, object: u64 = 0, data: u64 = 0 };
 const PrivateDataSlotObj = struct { owner: Device, entries: [max_api_items]PrivateDataEntry };
 const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: struct { image: *ImageObj, layout: i32, depth: f32, base_layer: u32 = 0, layer_count: u32 = 1 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, clear_color: bool = true, clear_depth: bool = true }, discard_image: struct { image: *ImageObj, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_attachments: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 }, clear_attachments_deferred: struct { color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 }, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, depth_bias_enable: u32 = 0, depth_bias: [3]f32 = .{ 0, 0, 0 }, blend_constants: [4]f32 = .{ 0, 0, 0, 0 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{} }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 }, event_set: EventSetCommand, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
-const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_inheritance: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, dynamic_color_base_layer: u32 = 0, dynamic_depth_base_layer: u32 = 0, dynamic_layer_count: u32 = 1, dynamic_color_store_none: bool = false, dynamic_depth_store_none: bool = false, inherited_dynamic_view_mask: u32 = 0, inherited_dynamic_color_format: i32 = 0, inherited_dynamic_depth_format: i32 = 0, inherited_dynamic_stencil_format: i32 = 0, inherited_dynamic_samples: u32 = 0, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_descriptor_bind_point: i32 = 0, bound_descriptor_stage_flags: u32 = 0, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, push_descriptor_bind_point: i32 = 0, push_descriptor_stage_flags: u32 = 0, descriptor_snapshots: [256]DescriptorSetObj = undefined, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, line_stipple_set: bool, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: [256]Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
+const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_inheritance: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, dynamic_color_base_layer: u32 = 0, dynamic_depth_base_layer: u32 = 0, dynamic_layer_count: u32 = 1, dynamic_color_store_none: bool = false, dynamic_depth_store_none: bool = false, dynamic_color_store_discard: bool = false, dynamic_depth_store_discard: bool = false, inherited_dynamic_view_mask: u32 = 0, inherited_dynamic_color_format: i32 = 0, inherited_dynamic_depth_format: i32 = 0, inherited_dynamic_stencil_format: i32 = 0, inherited_dynamic_samples: u32 = 0, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_descriptor_bind_point: i32 = 0, bound_descriptor_stage_flags: u32 = 0, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, push_descriptor_bind_point: i32 = 0, push_descriptor_stage_flags: u32 = 0, descriptor_snapshots: [256]DescriptorSetObj = undefined, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, line_stipple_set: bool, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: [256]Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
 pub const CommandBuffer = *CommandBufferObj;
 
@@ -1695,13 +1695,15 @@ const google_present_times_info_stype: i32 = 1_000_092_000;
 const memory_dedicated_requirements_stype: i32 = 1_000_127_000;
 const pipeline_rendering_create_info_stype: i32 = 1_000_044_002;
 const pipeline_robustness_create_info_stype: i32 = 1_000_068_000;
+const attachment_load_op_dont_care: i32 = 2;
+const attachment_store_op_dont_care: i32 = 2;
 const attachment_store_op_none: i32 = 1_000_301_000;
 const attachment_load_op_none: i32 = 1_000_400_000;
 fn validAttachmentLoadOp(op: i32) bool {
-    return op == 0 or op == 1 or op == 2 or op == attachment_load_op_none;
+    return op == 0 or op == 1 or op == attachment_load_op_dont_care or op == attachment_load_op_none;
 }
 fn validAttachmentStoreOp(op: i32) bool {
-    return op == 0 or op == 1 or op == attachment_store_op_none;
+    return op == 0 or op == 1 or op == attachment_store_op_dont_care or op == attachment_store_op_none;
 }
 
 fn pipelineRobustnessNodeValid(item: *const anyopaque) bool {
@@ -5160,6 +5162,8 @@ fn resetCommandBufferState(c: *CommandBufferObj) void {
     c.impl.dynamic_layer_count = 1;
     c.impl.dynamic_color_store_none = false;
     c.impl.dynamic_depth_store_none = false;
+    c.impl.dynamic_color_store_discard = false;
+    c.impl.dynamic_depth_store_discard = false;
     c.impl.inherited_dynamic_view_mask = 0;
     c.impl.inherited_dynamic_color_format = 0;
     c.impl.inherited_dynamic_depth_format = 0;
@@ -5311,6 +5315,8 @@ fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) 
     c.impl.dynamic_layer_count = 1;
     c.impl.dynamic_color_store_none = false;
     c.impl.dynamic_depth_store_none = false;
+    c.impl.dynamic_color_store_discard = false;
+    c.impl.dynamic_depth_store_discard = false;
     c.impl.inherited_dynamic_view_mask = inherited_dynamic_view_mask;
     c.impl.inherited_dynamic_color_format = inherited_dynamic_color_format;
     c.impl.inherited_dynamic_depth_format = inherited_dynamic_depth_format;
@@ -11618,8 +11624,8 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     // contents at the start of the render pass. Record an explicit discard
     // after any initial-layout transition so the undefined-content contract
     // is visible to submission prevalidation and the CPU image metadata.
-    const color_discard = color_image != null and (render_pass.color_load_op == 2 or render_pass.color_load_op == attachment_load_op_none);
-    const depth_discard = depth != null and (render_pass.depth_load_op == 2 or render_pass.depth_load_op == attachment_load_op_none);
+    const color_discard = color_image != null and (render_pass.color_load_op == attachment_load_op_dont_care or render_pass.color_load_op == attachment_load_op_none);
+    const depth_discard = depth != null and (render_pass.depth_load_op == attachment_load_op_dont_care or render_pass.depth_load_op == attachment_load_op_none);
     const discard_count: usize = @as(usize, @intFromBool(color_discard)) + @as(usize, @intFromBool(depth_discard));
     const layout_capacity = @as(usize, command_buffer.impl.count) + layout_count + clear_count + discard_count;
     if ((contents != 0 and contents != 1) or begin.s_type != 43 or !renderPassBeginPNextValid(begin.p_next) or command_buffer.impl.level != 0 or command_buffer.impl.state != 1 or command_buffer.impl.active_framebuffer != null or layout_capacity > command_buffer.impl.commands.len or !clear_values_valid or !render_pass.owner.eql(command_buffer.impl.owner) or framebuffer.owner != command_buffer.impl.owner or (image != null and image.?.owner != command_buffer.impl.owner) or !framebuffer.render_compatibility.eql(&render_pass.compatibility) or (color_image != null and render_pass.color_initial_layout != 0 and tracked_color_layout != render_pass.color_initial_layout) or (depth != null and render_pass.depth_initial_layout != 0 and tracked_depth_layout != render_pass.depth_initial_layout) or begin.render_area.extent.width == 0 or begin.render_area.extent.height == 0 or area_end_x > render_width or area_end_y > render_height) {
@@ -11730,8 +11736,8 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
     // beginning of dynamic rendering. Keep that operation explicit and
     // ordered before any load-op clear, while retaining the view's layer
     // range for arrayed attachments.
-    const color_discard = color_attachment != null and (color_attachment.?.load_op == 2 or color_attachment.?.load_op == attachment_load_op_none);
-    const depth_discard = depth != null and (ci.depth_attachment.?.load_op == 2 or ci.depth_attachment.?.load_op == attachment_load_op_none);
+    const color_discard = color_attachment != null and (color_attachment.?.load_op == attachment_load_op_dont_care or color_attachment.?.load_op == attachment_load_op_none);
+    const depth_discard = depth != null and (ci.depth_attachment.?.load_op == attachment_load_op_dont_care or ci.depth_attachment.?.load_op == attachment_load_op_none);
     const discard_count: usize = @as(usize, @intFromBool(color_discard)) + @as(usize, @intFromBool(depth_discard));
     const clear_count: usize = @as(usize, @intFromBool(clear_color or clear_depth));
     if (@as(usize, command_buffer.impl.count) + discard_count + clear_count > command_buffer.impl.commands.len) {
@@ -11767,6 +11773,8 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
     command_buffer.impl.dynamic_layer_count = ci.layer_count;
     command_buffer.impl.dynamic_color_store_none = if (color_attachment) |attachment| attachment.store_op == attachment_store_op_none else false;
     command_buffer.impl.dynamic_depth_store_none = if (ci.depth_attachment) |attachment| attachment.store_op == attachment_store_op_none else false;
+    command_buffer.impl.dynamic_color_store_discard = if (color_attachment) |attachment| attachment.store_op == attachment_store_op_dont_care or attachment.store_op == attachment_store_op_none else false;
+    command_buffer.impl.dynamic_depth_store_discard = if (ci.depth_attachment) |attachment| attachment.store_op == attachment_store_op_dont_care or attachment.store_op == attachment_store_op_none else false;
     // VK_KHR_dynamic_rendering_local_read state is scoped to the active
     // rendering instance; a later begin starts with the attachment identity
     // mappings reset rather than inheriting stale locations or input indices.
@@ -11787,13 +11795,13 @@ fn cmdEndRendering(cb: ?CommandBuffer) callconv(.c) void {
         command_buffer.impl.invalid = true;
         return;
     }
-    const discard_count: u16 = @as(u16, @intCast(@as(u32, @intFromBool(command_buffer.impl.dynamic_color_store_none)) + @as(u32, @intFromBool(command_buffer.impl.dynamic_depth_store_none))));
+    const discard_count: u16 = @as(u16, @intCast(@as(u32, @intFromBool(command_buffer.impl.dynamic_color_store_discard)) + @as(u32, @intFromBool(command_buffer.impl.dynamic_depth_store_discard))));
     if (discard_count != 0 and command_buffer.impl.count > command_buffer.impl.commands.len - discard_count) {
         command_buffer.impl.invalid = true;
         return;
     }
-    if (command_buffer.impl.dynamic_color_store_none) record(command_buffer, .{ .discard_image = .{ .image = command_buffer.impl.dynamic_color_image.?, .base_layer = command_buffer.impl.dynamic_color_base_layer, .layer_count = command_buffer.impl.dynamic_layer_count } });
-    if (command_buffer.impl.dynamic_depth_store_none) record(command_buffer, .{ .discard_image = .{ .image = command_buffer.impl.dynamic_depth_image.?, .base_layer = command_buffer.impl.dynamic_depth_base_layer, .layer_count = command_buffer.impl.dynamic_layer_count } });
+    if (command_buffer.impl.dynamic_color_store_discard) record(command_buffer, .{ .discard_image = .{ .image = command_buffer.impl.dynamic_color_image.?, .base_layer = command_buffer.impl.dynamic_color_base_layer, .layer_count = command_buffer.impl.dynamic_layer_count } });
+    if (command_buffer.impl.dynamic_depth_store_discard) record(command_buffer, .{ .discard_image = .{ .image = command_buffer.impl.dynamic_depth_image.?, .base_layer = command_buffer.impl.dynamic_depth_base_layer, .layer_count = command_buffer.impl.dynamic_layer_count } });
     command_buffer.impl.dynamic_rendering = false;
     command_buffer.impl.dynamic_color_image = null;
     command_buffer.impl.dynamic_depth_image = null;
@@ -11802,6 +11810,8 @@ fn cmdEndRendering(cb: ?CommandBuffer) callconv(.c) void {
     command_buffer.impl.dynamic_layer_count = 1;
     command_buffer.impl.dynamic_color_store_none = false;
     command_buffer.impl.dynamic_depth_store_none = false;
+    command_buffer.impl.dynamic_color_store_discard = false;
+    command_buffer.impl.dynamic_depth_store_discard = false;
     command_buffer.impl.rendering_location_count = 0;
     command_buffer.impl.rendering_input_count = 0;
     command_buffer.impl.rendering_depth_input_index = null;
@@ -13665,8 +13675,8 @@ fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
     const depth_subpass_layout = render_pass.?.subpass_depth_layouts[active_subpass];
     const color_transition = image != null and color_subpass_layout != render_pass.?.color_final_layout;
     const depth_transition = depth != null and depth_subpass_layout != render_pass.?.depth_final_layout;
-    const color_discard = image != null and render_pass.?.color_store_op == attachment_store_op_none;
-    const depth_discard = depth != null and render_pass.?.depth_store_op == attachment_store_op_none;
+    const color_discard = image != null and (render_pass.?.color_store_op == attachment_store_op_dont_care or render_pass.?.color_store_op == attachment_store_op_none);
+    const depth_discard = depth != null and (render_pass.?.depth_store_op == attachment_store_op_dont_care or render_pass.?.depth_store_op == attachment_store_op_none);
     const transition_count: usize = @as(usize, @intFromBool(color_transition)) + @as(usize, @intFromBool(depth_transition));
     const discard_count: usize = @as(usize, @intFromBool(color_discard)) + @as(usize, @intFromBool(depth_discard));
     if (@as(usize, command_buffer.impl.count) + transition_count + discard_count > command_buffer.impl.commands.len) {
@@ -20350,8 +20360,8 @@ test "dynamic rendering begin and end own attachment scope" {
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
     var dont_care_attachment = attachment;
-    dont_care_attachment.load_op = 2;
-    dont_care_attachment.store_op = 0;
+    dont_care_attachment.load_op = attachment_load_op_dont_care;
+    dont_care_attachment.store_op = attachment_store_op_dont_care;
     var dont_care_rendering = rendering;
     dont_care_rendering.color_attachments = @ptrCast(&dont_care_attachment);
     const dont_care_bytes_before = std.mem.readInt(u32, imageBytes(validImageLocked(image).?)[0..4], .little);
@@ -20361,7 +20371,8 @@ test "dynamic rendering begin and end own attachment scope" {
     try std.testing.expectEqual(@as(std.meta.Tag(Command), .discard_image), std.meta.activeTag(commands[1].impl.commands[0]));
     cmdEndRendering(commands[1]);
     try std.testing.expect(!commands[1].impl.invalid);
-    try std.testing.expectEqual(@as(u16, 1), commands[1].impl.count);
+    try std.testing.expectEqual(@as(u16, 2), commands[1].impl.count);
+    try std.testing.expectEqual(@as(std.meta.Tag(Command), .discard_image), std.meta.activeTag(commands[1].impl.commands[1]));
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[1]));
     var dont_care_submit_commands = [_]CommandBuffer{commands[1]};
     const dont_care_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &dont_care_submit_commands, .signal_semaphore_count = 0, .signal_semaphores = null };
@@ -24837,8 +24848,8 @@ test "traditional render passes honor load operations and image layout transitio
 
     // DONT_CARE load operations discard prior attachment contents at begin,
     // after the initial-layout transition, without requiring a clear value.
-    attachment.load_op = 2;
-    attachment.store_op = 0;
+    attachment.load_op = attachment_load_op_dont_care;
+    attachment.store_op = attachment_store_op_dont_care;
     attachment.initial_layout = 1;
     attachment.final_layout = 1;
     render_info.attachments = @ptrCast(&attachment);
@@ -24861,7 +24872,8 @@ test "traditional render passes honor load operations and image layout transitio
     try std.testing.expectEqual(@as(std.meta.Tag(Command), .discard_image), std.meta.activeTag(command[0].impl.commands[1]));
     cmdEndRenderPass(command[0]);
     try std.testing.expect(!command[0].impl.invalid);
-    try std.testing.expectEqual(@as(u16, 3), command[0].impl.count);
+    try std.testing.expectEqual(@as(u16, 4), command[0].impl.count);
+    try std.testing.expectEqual(@as(std.meta.Tag(Command), .discard_image), std.meta.activeTag(command[0].impl.commands[2]));
     try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     try std.testing.expect(image_object.force_full_present);
