@@ -304,6 +304,9 @@ pub const Op = enum(u8) {
     i_find_s_msb,
     /// Index of the most-significant set bit from GLSL.std.450.
     i_find_u_msb,
+    /// Builds an f32 value from a value and a signed power-of-two exponent
+    /// from GLSL.std.450 Ldexp.
+    f_ldexp,
 };
 
 pub const Instruction = struct {
@@ -466,7 +469,7 @@ fn valueOperand(op: Op, operand_index: usize) bool {
         .f_round, .f_round_even, .f_trunc => operand_index == 0,
         .f_floor, .f_ceil, .f_fract => operand_index == 0,
         .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .f_determinant, .f_matrix_inverse, .f_length, .f_normalize => operand_index == 0,
-        .f_atan2, .f_pow => operand_index < 2,
+        .f_atan2, .f_pow, .f_ldexp => operand_index < 2,
         .f_distance, .f_cross, .f_reflect => operand_index < 2,
         .f_face_forward, .f_refract => operand_index < 3,
         .i_find_lsb, .i_find_s_msb, .i_find_u_msb => operand_index == 0,
