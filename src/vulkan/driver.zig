@@ -519,7 +519,13 @@ pub const PushDescriptorSetInfo = extern struct { s_type: i32, p_next: ?*const a
 pub const PushDescriptorSetWithTemplateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, descriptor_update_template: usize, layout: usize, set: u32, data: ?*const anyopaque };
 pub const VertexInputBindingDescription = extern struct { binding: u32, stride: u32, input_rate: i32 };
 pub const VertexInputAttributeDescription = extern struct { location: u32, binding: u32, format: i32, offset: u32 };
+pub const VertexInputBindingDivisorDescription = extern struct { binding: u32, divisor: u32 };
+pub const VertexInputBindingDivisorDescriptionKHR = VertexInputBindingDivisorDescription;
+pub const VertexInputBindingDivisorDescriptionEXT = VertexInputBindingDivisorDescription;
 pub const PipelineVertexInputStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, binding_count: u32, bindings: ?[*]const VertexInputBindingDescription, attribute_count: u32, attributes: ?[*]const VertexInputAttributeDescription };
+pub const PipelineVertexInputDivisorStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, vertex_binding_divisor_count: u32, vertex_binding_divisors: ?[*]const VertexInputBindingDivisorDescription };
+pub const PipelineVertexInputDivisorStateCreateInfoKHR = PipelineVertexInputDivisorStateCreateInfo;
+pub const PipelineVertexInputDivisorStateCreateInfoEXT = PipelineVertexInputDivisorStateCreateInfo;
 pub const PipelineInputAssemblyStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, topology: i32, primitive_restart_enable: u32 };
 pub const PipelineViewportStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, viewport_count: u32, viewports: ?[*]const Viewport, scissor_count: u32, scissors: ?[*]const Rect2D };
 pub const PipelineRasterizationStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, depth_clamp_enable: u32, rasterizer_discard_enable: u32, polygon_mode: i32, cull_mode: u32, front_face: i32, depth_bias_enable: u32, depth_bias_constant_factor: f32, depth_bias_clamp: f32, depth_bias_slope_factor: f32, line_width: f32 };
@@ -1181,6 +1187,26 @@ fn pipelineRobustnessCreateInfoValid(raw: ?*const anyopaque) bool {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
         if (header.s_type != pipeline_robustness_create_info_stype or seen) return false;
         if (!pipelineRobustnessNodeValid(item)) return false;
+        seen = true;
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
+}
+
+fn pipelineVertexInputDivisorStateValid(raw: ?*const anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    var seen = false;
+    while (next) |item| {
+        if (depth == 16) return false;
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (header.s_type != 1_000_191_001 or seen) return false;
+        const info: *const PipelineVertexInputDivisorStateCreateInfo = @ptrCast(@alignCast(item));
+        // Vertex-attribute divisor is not advertised.  A zero-entry node is
+        // still a valid ABI extension and has no execution effect; nonzero
+        // divisors would require the disabled feature and are rejected.
+        if (info.vertex_binding_divisor_count > max_api_items or info.vertex_binding_divisor_count != 0) return false;
         seen = true;
         next = header.p_next;
         depth += 1;
@@ -8739,6 +8765,25 @@ test "pipeline flags2 validation is bounded and allocation-free" {
     try std.testing.expectEqual(@as(?u32, 0), pipelineCreateFlags2(@ptrCast(&node), pipeline_create_dispatch_base_bit, true));
 }
 
+test "vertex input divisor pNext accepts only the feature-disabled default" {
+    var divisor = PipelineVertexInputDivisorStateCreateInfo{ .s_type = 1_000_191_001, .p_next = null, .vertex_binding_divisor_count = 0, .vertex_binding_divisors = null };
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..4096) |_| try std.testing.expect(pipelineVertexInputDivisorStateValid(@ptrCast(&divisor)));
+    var divisor_description = VertexInputBindingDivisorDescription{ .binding = 0, .divisor = 1 };
+    divisor.vertex_binding_divisor_count = 1;
+    divisor.vertex_binding_divisors = @ptrCast(&divisor_description);
+    try std.testing.expect(!pipelineVertexInputDivisorStateValid(@ptrCast(&divisor)));
+    divisor.vertex_binding_divisor_count = 0;
+    divisor.vertex_binding_divisors = null;
+    var duplicate = divisor;
+    divisor.p_next = @ptrCast(&duplicate);
+    try std.testing.expect(!pipelineVertexInputDivisorStateValid(@ptrCast(&divisor)));
+    divisor.p_next = null;
+    divisor.s_type = 1000525000;
+    try std.testing.expect(!pipelineVertexInputDivisorStateValid(@ptrCast(&divisor)));
+}
+
 test "dynamic rendering pipeline pNext validation is bounded and canonical" {
     var formats = [_]i32{44};
     var rendering = PipelineRenderingCreateInfo{ .s_type = pipeline_rendering_create_info_stype, .p_next = null, .view_mask = 0, .color_attachment_count = 1, .color_attachment_formats = &formats, .depth_attachment_format = 126, .stencil_attachment_format = 0 };
@@ -9033,7 +9078,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     if (!profile_pair and !cpu_cube_pair) return error.Invalid;
     if (profile_pair and !frontendInterfacesCompatible(&vertex_program.?, &fragment_program.?, &layout.set0)) return error.Invalid;
     const vi = ci.vertex_input orelse return error.Invalid;
-    if (vi.s_type != 19 or vi.p_next != null or vi.flags != 0 or vi.binding_count > 16 or vi.attribute_count > 16 or (vi.binding_count != 0 and vi.bindings == null) or (vi.attribute_count != 0 and vi.attributes == null)) return error.Invalid;
+    if (vi.s_type != 19 or !pipelineVertexInputDivisorStateValid(vi.p_next) or vi.flags != 0 or vi.binding_count > 16 or vi.attribute_count > 16 or (vi.binding_count != 0 and vi.bindings == null) or (vi.attribute_count != 0 and vi.attributes == null)) return error.Invalid;
     var binding_indices: [16]u8 = undefined;
     for (0..vi.binding_count) |i| binding_indices[i] = @intCast(i);
     const bindings = if (vi.bindings) |p| p[0..vi.binding_count] else &.{};
@@ -9271,7 +9316,7 @@ fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *con
 /// bool/f32x4 outputs through the validated render IR; arbitrary SPIR-V remains
 /// metadata-only and is never silently emulated.
 fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const render_ir.Program, vi: *const PipelineVertexInputStateCreateInfo) ?ProfileGraphicsContract {
-    if (vi.s_type != 19 or vi.p_next != null or vi.flags != 0 or vi.binding_count > 16 or vi.attribute_count > 16 or (vi.binding_count != 0 and vi.bindings == null) or (vi.attribute_count != 0 and vi.attributes == null)) return null;
+    if (vi.s_type != 19 or !pipelineVertexInputDivisorStateValid(vi.p_next) or vi.flags != 0 or vi.binding_count > 16 or vi.attribute_count > 16 or (vi.binding_count != 0 and vi.bindings == null) or (vi.attribute_count != 0 and vi.attributes == null)) return null;
     var result = ProfileGraphicsContract{ .vertex_output = 0, .vertex_output_count = 0, .fragment_output = 0, .fragment_bool = false };
     var vertex_inputs: u32 = 0;
     for (vertex.interfaces, 0..) |interface, index| switch (interface.storage) {
@@ -13955,6 +14000,15 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(baseline_pipeline.dynamic_stencil_compare_mask);
     try std.testing.expect(baseline_pipeline.dynamic_stencil_write_mask);
     try std.testing.expect(baseline_pipeline.dynamic_stencil_reference);
+    var divisor_state = PipelineVertexInputDivisorStateCreateInfo{ .s_type = 1_000_191_001, .p_next = null, .vertex_binding_divisor_count = 0, .vertex_binding_divisors = null };
+    var divisor_vertex_input = vertex_input;
+    divisor_vertex_input.p_next = @ptrCast(&divisor_state);
+    var divisor_pipeline_info = pipeline_info;
+    divisor_pipeline_info.vertex_input = &divisor_vertex_input;
+    var divisor_pipeline: [1]usize = .{0xfeed_face};
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, graphics_cache, 1, @ptrCast(&divisor_pipeline_info), null, &divisor_pipeline));
+    try std.testing.expect(divisor_pipeline[0] != 0xfeed_face);
+    try std.testing.expect(validGraphicsPipelineLocked(divisor_pipeline[0]) != null);
     // Traditional depth-only render passes use a zero-attachment color-blend
     // state and retain the D32 attachment as framebuffer slot zero.
     const depth_only_reference = AttachmentReference{ .attachment = 0, .layout = 3 };
@@ -15450,6 +15504,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     cmdBindPipeline(commands[0], 0, pipelines[0]);
     cmdBindDescriptorSets(commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
     destroyPipeline(device, pipelines[0], null);
+    destroyPipeline(device, divisor_pipeline[0], null);
     destroyPipeline(device, dynamic_pipeline[0], null);
     cmdDraw(commands[0], 3, 1, 0, 0);
     try std.testing.expect(commands[0].impl.invalid);
