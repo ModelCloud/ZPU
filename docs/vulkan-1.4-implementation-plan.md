@@ -712,6 +712,9 @@ Each slice must land with all of the following:
   warm path allocation-free. `NMin`, `NMax`, and `NClamp` now lower the
   non-NaN-preferred floating-point family with explicit NaN selection,
   inverted-bound rejection, and allocation-free warm execution.
+  The frontend uses the normative GLSL.std.450 opcode numbers for the vector
+  and bit-index families (`Length` 65 through `FindUMsb` 74); stale offset
+  encodings are rejected instead of being misinterpreted.
   A single
   side-effect-free dynamic conditional or one-case runtime switch with a common
   merge is also lowered to compare/select; generic SPIR-V dynamic control flow,
