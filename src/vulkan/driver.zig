@@ -208,7 +208,57 @@ pub const PhysicalDeviceVulkan11Features = extern struct {
     sampler_ycbcr_conversion: u32,
     shader_draw_parameters: u32,
 };
-pub const PhysicalDeviceVulkan12Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [47]u32 };
+pub const PhysicalDeviceVulkan12Features = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    sampler_mirror_clamp_to_edge: u32,
+    draw_indirect_count: u32,
+    storage_buffer8_bit_access: u32,
+    uniform_and_storage_buffer8_bit_access: u32,
+    storage_push_constant8: u32,
+    shader_buffer_int64_atomics: u32,
+    shader_shared_int64_atomics: u32,
+    shader_float16: u32,
+    shader_int8: u32,
+    descriptor_indexing: u32,
+    shader_input_attachment_array_dynamic_indexing: u32,
+    shader_uniform_texel_buffer_array_dynamic_indexing: u32,
+    shader_storage_texel_buffer_array_dynamic_indexing: u32,
+    shader_uniform_buffer_array_non_uniform_indexing: u32,
+    shader_sampled_image_array_non_uniform_indexing: u32,
+    shader_storage_buffer_array_non_uniform_indexing: u32,
+    shader_storage_image_array_non_uniform_indexing: u32,
+    shader_input_attachment_array_non_uniform_indexing: u32,
+    shader_uniform_texel_buffer_array_non_uniform_indexing: u32,
+    shader_storage_texel_buffer_array_non_uniform_indexing: u32,
+    descriptor_binding_uniform_buffer_update_after_bind: u32,
+    descriptor_binding_sampled_image_update_after_bind: u32,
+    descriptor_binding_storage_image_update_after_bind: u32,
+    descriptor_binding_storage_buffer_update_after_bind: u32,
+    descriptor_binding_uniform_texel_buffer_update_after_bind: u32,
+    descriptor_binding_storage_texel_buffer_update_after_bind: u32,
+    descriptor_binding_update_unused_while_pending: u32,
+    descriptor_binding_partially_bound: u32,
+    descriptor_binding_variable_descriptor_count: u32,
+    runtime_descriptor_array: u32,
+    sampler_filter_minmax: u32,
+    scalar_block_layout: u32,
+    imageless_framebuffer: u32,
+    uniform_buffer_standard_layout: u32,
+    shader_subgroup_extended_types: u32,
+    separate_depth_stencil_layouts: u32,
+    host_query_reset: u32,
+    timeline_semaphore: u32,
+    buffer_device_address: u32,
+    buffer_device_address_capture_replay: u32,
+    buffer_device_address_multi_device: u32,
+    vulkan_memory_model: u32,
+    vulkan_memory_model_device_scope: u32,
+    vulkan_memory_model_availability_visibility_chains: u32,
+    shader_output_viewport_index: u32,
+    shader_output_layer: u32,
+    subgroup_broadcast_dynamic_id: u32,
+};
 pub const PhysicalDeviceVulkan13Features = extern struct {
     s_type: i32,
     p_next: ?*anyopaque,
@@ -16831,7 +16881,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
         .sampler_ycbcr_conversion = 0xffff_ffff,
         .shader_draw_parameters = 0xffff_ffff,
     };
-    var vulkan12_features = PhysicalDeviceVulkan12Features{ .s_type = 51, .p_next = @ptrCast(&vulkan11_features), .values = [_]u32{0xffff_ffff} ** 47 };
+    var vulkan12_features = std.mem.zeroes(PhysicalDeviceVulkan12Features);
+    vulkan12_features.s_type = 51;
+    vulkan12_features.p_next = @ptrCast(&vulkan11_features);
+    @memset(std.mem.asBytes(&vulkan12_features)[16..204], 0xff);
     var features = PhysicalDeviceFeatures2{ .s_type = 1000059000, .p_next = @ptrCast(&vulkan12_features), .features = std.mem.zeroes(Features) };
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceVertexAttributeDivisorFeatures));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVertexAttributeDivisorFeatures, "vertex_attribute_instance_rate_divisor"));
@@ -16869,10 +16922,16 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 80), @sizeOf(PhysicalDeviceVulkan13Features));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVulkan13Features, "robust_image_access"));
     try std.testing.expectEqual(@as(usize, 72), @offsetOf(PhysicalDeviceVulkan13Features, "maintenance4"));
+    try std.testing.expectEqual(@as(usize, 208), @sizeOf(PhysicalDeviceVulkan12Features));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVulkan12Features, "sampler_mirror_clamp_to_edge"));
+    try std.testing.expectEqual(@as(usize, 200), @offsetOf(PhysicalDeviceVulkan12Features, "subgroup_broadcast_dynamic_id"));
     getPhysicalDeviceFeatures2(ctx.physical, &features);
     try std.testing.expect(std.mem.allEqual(u32, &features.features.values, 0));
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&vulkan11_features)[16..64], 0));
-    try std.testing.expect(std.mem.allEqual(u32, &vulkan12_features.values, 0));
+    try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&vulkan12_features)[16..204], 0));
+    try std.testing.expectEqual(@as(u32, 0), vulkan12_features.timeline_semaphore);
+    try std.testing.expectEqual(@as(u32, 0), vulkan12_features.buffer_device_address);
+    try std.testing.expectEqual(@as(u32, 0), vulkan12_features.subgroup_broadcast_dynamic_id);
     try std.testing.expectEqual(@as(i32, 51), vulkan12_features.s_type);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan11_features)), vulkan12_features.p_next);
     var subgroup_features = PhysicalDeviceSubgroupSizeControlFeatures{ .s_type = 1000225002, .p_next = null, .subgroup_size_control = 0xffff_ffff, .compute_full_subgroups = 0xffff_ffff };

@@ -156,7 +156,9 @@ other 1.1–1.4 feature forms) with exact LP64-sized VkBool32 payloads; unknown
 feature chains remain transactional rejections.
 The Vulkan 1.1 aggregate body is represented by named fields for 16-bit
 storage, multiview, variable pointers, protected memory, YCbCr conversion,
-and shader draw parameters. The Vulkan 1.3 aggregate body is represented by
+and shader draw parameters. The Vulkan 1.2 aggregate body is represented by
+named fields for promoted descriptor-indexing, storage, memory-model,
+timeline-semaphore, and buffer-address features. The Vulkan 1.3 aggregate body is represented by
 named fields for robust image access, inline uniform blocks, private data,
 dynamic rendering, synchronization2, subgroup controls, and maintenance.
 The Vulkan 1.4 aggregate body is now represented by named fields for global
