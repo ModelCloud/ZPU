@@ -63,6 +63,12 @@ compute pipeline and shader-stage chains when all behavior fields request the
 device-default policy; non-default robustness values, duplicate nodes, and
 unknown chain entries remain transactional rejections because the optional
 robustness feature is not advertised.
+
+The promoted `VkPhysicalDeviceMaintenance5Properties` and
+`VkPhysicalDeviceMaintenance6Properties` query nodes now use their exact LP64
+field layouts (including the 12-byte Maintenance 6 payload) and return the
+truthful all-zero optional-capability policy. Duplicate or unknown property
+nodes leave the complete `vkGetPhysicalDeviceProperties2` output untouched.
 Graphics pipeline creation now also consumes the Vulkan 1.3
 `VkPipelineRenderingCreateInfo` pNext for `renderPass = VK_NULL_HANDLE`:
 the bounded dynamic-rendering profile records one BGRA8 color format and
