@@ -456,7 +456,55 @@ pub const PhysicalDeviceVulkan12Properties = extern struct {
     max_timeline_semaphore_value_difference: u64,
     framebuffer_integer_color_sample_counts: u32,
 };
-pub const PhysicalDeviceVulkan13Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [200]u8 };
+pub const PhysicalDeviceVulkan13Properties = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    min_subgroup_size: u32,
+    max_subgroup_size: u32,
+    max_compute_workgroup_subgroups: u32,
+    required_subgroup_size_stages: u32,
+    max_inline_uniform_block_size: u32,
+    max_per_stage_descriptor_inline_uniform_blocks: u32,
+    max_per_stage_descriptor_update_after_bind_inline_uniform_blocks: u32,
+    max_descriptor_set_inline_uniform_blocks: u32,
+    max_descriptor_set_update_after_bind_inline_uniform_blocks: u32,
+    max_inline_uniform_total_size: u32,
+    integer_dot_product8_bit_unsigned_accelerated: u32,
+    integer_dot_product8_bit_signed_accelerated: u32,
+    integer_dot_product8_bit_mixed_signedness_accelerated: u32,
+    integer_dot_product4x8_bit_packed_unsigned_accelerated: u32,
+    integer_dot_product4x8_bit_packed_signed_accelerated: u32,
+    integer_dot_product4x8_bit_packed_mixed_signedness_accelerated: u32,
+    integer_dot_product16_bit_unsigned_accelerated: u32,
+    integer_dot_product16_bit_signed_accelerated: u32,
+    integer_dot_product16_bit_mixed_signedness_accelerated: u32,
+    integer_dot_product32_bit_unsigned_accelerated: u32,
+    integer_dot_product32_bit_signed_accelerated: u32,
+    integer_dot_product32_bit_mixed_signedness_accelerated: u32,
+    integer_dot_product64_bit_unsigned_accelerated: u32,
+    integer_dot_product64_bit_signed_accelerated: u32,
+    integer_dot_product64_bit_mixed_signedness_accelerated: u32,
+    integer_dot_product_accumulating_saturating8_bit_unsigned_accelerated: u32,
+    integer_dot_product_accumulating_saturating8_bit_signed_accelerated: u32,
+    integer_dot_product_accumulating_saturating8_bit_mixed_signedness_accelerated: u32,
+    integer_dot_product_accumulating_saturating4x8_bit_packed_unsigned_accelerated: u32,
+    integer_dot_product_accumulating_saturating4x8_bit_packed_signed_accelerated: u32,
+    integer_dot_product_accumulating_saturating4x8_bit_packed_mixed_signedness_accelerated: u32,
+    integer_dot_product_accumulating_saturating16_bit_unsigned_accelerated: u32,
+    integer_dot_product_accumulating_saturating16_bit_signed_accelerated: u32,
+    integer_dot_product_accumulating_saturating16_bit_mixed_signedness_accelerated: u32,
+    integer_dot_product_accumulating_saturating32_bit_unsigned_accelerated: u32,
+    integer_dot_product_accumulating_saturating32_bit_signed_accelerated: u32,
+    integer_dot_product_accumulating_saturating32_bit_mixed_signedness_accelerated: u32,
+    integer_dot_product_accumulating_saturating64_bit_unsigned_accelerated: u32,
+    integer_dot_product_accumulating_saturating64_bit_signed_accelerated: u32,
+    integer_dot_product_accumulating_saturating64_bit_mixed_signedness_accelerated: u32,
+    storage_texel_buffer_offset_alignment_bytes: u64,
+    storage_texel_buffer_offset_single_texel_alignment: u32,
+    uniform_texel_buffer_offset_alignment_bytes: u64,
+    uniform_texel_buffer_offset_single_texel_alignment: u32,
+    max_buffer_size: u64,
+};
 pub const PhysicalDeviceVulkan14Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [128]u8 };
 // Individual core-promoted property structs use conservative zero payloads:
 // every optional capability is unadvertised, but each LP64 body remains the
@@ -16828,6 +16876,11 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 720), @offsetOf(PhysicalDeviceVulkan12Properties, "max_timeline_semaphore_value_difference"));
     try std.testing.expectEqual(@as(usize, 728), @offsetOf(PhysicalDeviceVulkan12Properties, "framebuffer_integer_color_sample_counts"));
     try std.testing.expectEqual(@as(usize, 216), @sizeOf(PhysicalDeviceVulkan13Properties));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVulkan13Properties, "min_subgroup_size"));
+    try std.testing.expectEqual(@as(usize, 52), @offsetOf(PhysicalDeviceVulkan13Properties, "max_inline_uniform_total_size"));
+    try std.testing.expectEqual(@as(usize, 176), @offsetOf(PhysicalDeviceVulkan13Properties, "storage_texel_buffer_offset_alignment_bytes"));
+    try std.testing.expectEqual(@as(usize, 192), @offsetOf(PhysicalDeviceVulkan13Properties, "uniform_texel_buffer_offset_alignment_bytes"));
+    try std.testing.expectEqual(@as(usize, 208), @offsetOf(PhysicalDeviceVulkan13Properties, "max_buffer_size"));
     try std.testing.expectEqual(@as(usize, 144), @sizeOf(PhysicalDeviceVulkan14Properties));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceProtectedMemoryProperties));
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(PhysicalDeviceIDProperties));
@@ -17131,7 +17184,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     vulkan12_properties.s_type = 52;
     vulkan12_properties.p_next = @ptrCast(&vulkan11_properties);
     @memset(std.mem.asBytes(&vulkan12_properties)[16..], 0xff);
-    var vulkan13_properties = PhysicalDeviceVulkan13Properties{ .s_type = 54, .p_next = @ptrCast(&vulkan12_properties), .payload = [_]u8{0xff} ** 200 };
+    var vulkan13_properties = std.mem.zeroes(PhysicalDeviceVulkan13Properties);
+    vulkan13_properties.s_type = 54;
+    vulkan13_properties.p_next = @ptrCast(&vulkan12_properties);
+    @memset(std.mem.asBytes(&vulkan13_properties)[16..], 0xff);
     var vulkan14_properties = PhysicalDeviceVulkan14Properties{ .s_type = 56, .p_next = @ptrCast(&vulkan13_properties), .payload = [_]u8{0xff} ** 128 };
     var properties = PhysicalDeviceProperties2{ .s_type = 1000059001, .p_next = @ptrCast(&vulkan14_properties), .properties = std.mem.zeroes(Properties) };
     getPhysicalDeviceProperties2(ctx.physical, &properties);
@@ -17144,7 +17200,7 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(i32, 13), vulkan12_properties.driver_id);
     try std.testing.expectEqualSlices(u8, driver_name, vulkan12_properties.driver_name[0..driver_name.len]);
     try std.testing.expectEqualSlices(u8, driver_info, vulkan12_properties.driver_info[0..driver_info.len]);
-    try std.testing.expectEqual(@as(u64, heap_size), std.mem.readInt(u64, vulkan13_properties.payload[192..200], .little));
+    try std.testing.expectEqual(@as(u64, heap_size), vulkan13_properties.max_buffer_size);
     try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, vulkan14_properties.payload[0..4], .little));
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, vulkan14_properties.payload[4..8], .little));
     try std.testing.expectEqualSlices(u8, &pipeline_cache_uuid, vulkan14_properties.payload[104..120]);
