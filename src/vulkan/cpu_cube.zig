@@ -1013,3 +1013,39 @@ test "parallel worker shuts down and restarts without detached execution" {
     shutdownParallelWorkers();
     try std.testing.expectEqual(@as(u32, 0xaabbccdd), std.mem.readInt(u32, color[0..4], .little));
 }
+
+const ParallelShutdownProbe = struct {
+    started: *std.atomic.Value(bool),
+    done: *std.atomic.Value(bool),
+};
+
+fn parallelShutdownProbe(context: *ParallelShutdownProbe) void {
+    context.started.store(true, .release);
+    shutdownParallelWorkers();
+    context.done.store(true, .release);
+}
+
+test "parallel shutdown waits for an active render job" {
+    var color: [64]u8 align(4) = [_]u8{0} ** 64;
+    var depth: [64]u8 align(4) = [_]u8{0} ** 64;
+    try std.testing.expect(clearImagesParallel(&color, 0x11223344, &depth, 0x55667788));
+
+    var held_job = ParallelClear{ .color = &color, .color_pattern = 0, .depth = &depth, .depth_pattern = 0 };
+    _ = std.c.pthread_mutex_lock(&parallel_mutex);
+    parallel_active = .{ .clear = &held_job };
+    var started = std.atomic.Value(bool).init(false);
+    var done = std.atomic.Value(bool).init(false);
+    var context = ParallelShutdownProbe{ .started = &started, .done = &done };
+    const shutdown_thread = try std.Thread.spawn(.{}, parallelShutdownProbe, .{&context});
+    while (!started.load(.acquire)) std.atomic.spinLoopHint();
+    _ = std.c.pthread_mutex_unlock(&parallel_mutex);
+    std.Thread.yield() catch {};
+    try std.testing.expect(!done.load(.acquire));
+
+    _ = std.c.pthread_mutex_lock(&parallel_mutex);
+    parallel_active = null;
+    _ = std.c.pthread_cond_broadcast(&parallel_condition);
+    _ = std.c.pthread_mutex_unlock(&parallel_mutex);
+    shutdown_thread.join();
+    try std.testing.expect(done.load(.acquire));
+}
