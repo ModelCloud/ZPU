@@ -372,9 +372,12 @@ attachment-indexed clear values it consumes, UNDEFINED captures the tracked
 prior layout as a discard transition, and begin/end record the subpass, each
 declared inter-subpass, and final layout transitions for submission-time
 validation. Depth-only framebuffers bind a single depth view and use the same
-draw/clear lifecycle without fabricating a color target. Failure-atomic
-positive/negative, two-subpass, depth-clear, and 4096-iteration allocation-free
-tests cover the paths. Clear and draw commands also snapshot the active
+draw/clear lifecycle without fabricating a color target. Legal zero-attachment
+subpasses are also supported for rasterizer-discard render-pass instances;
+their framebuffer extent supplies render-area bounds, begin/end record no
+image work, and multi-subpass advancement remains a bounded NEXT_SUBPASS
+envelope. Failure-atomic positive/negative, two-subpass, depth-clear,
+attachmentless, and 4096-iteration allocation-free tests cover the paths. Clear and draw commands also snapshot the active
 subpass layouts, rejecting host-side layout changes after recording and
 propagating those expectations into secondary command-buffer execution. The
 promoted LOAD_OP_NONE/STORE_OP_NONE enum values are accepted as well;

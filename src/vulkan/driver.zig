@@ -531,7 +531,7 @@ const SamplerObj = struct {
     border_color: i32 = 0,
     unnormalized_coordinates: bool = false,
 };
-const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj, render_compatibility: Canonical, layers: u32 = 1 };
+const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj, render_compatibility: Canonical, width: u32 = 0, height: u32 = 0, layers: u32 = 1 };
 const PipelineCacheObj = struct { owner: DeviceIdentity, data: Canonical = .{} };
 const descriptor_type_count = 11;
 const DescriptorCounts = [descriptor_type_count]u32;
@@ -5629,10 +5629,17 @@ fn dynamicAttachmentLayout(command_buffer: *const CommandBufferObj, image: ?*Ima
     return if (image) |value| commandBufferImageLayout(command_buffer, value) else -1;
 }
 fn renderPassAttachmentLayout(command_buffer: *const CommandBufferObj, color: bool) i32 {
-    return if (command_buffer.impl.active_render_pass) |render_pass|
-        if (color) render_pass.subpass_color_layouts[command_buffer.impl.active_subpass] else render_pass.subpass_depth_layouts[command_buffer.impl.active_subpass]
-    else
-        -1;
+    return if (command_buffer.impl.active_render_pass) |render_pass| blk: {
+        if (command_buffer.impl.active_subpass >= render_pass.subpass_count) break :blk -1;
+        if (color) {
+            if (render_pass.framebuffer_attachment_count == 0 or render_pass.framebuffer_attachments[0].role != .color) break :blk -1;
+            break :blk render_pass.subpass_color_layouts[command_buffer.impl.active_subpass];
+        }
+        const has_depth = (render_pass.framebuffer_attachment_count == 1 and render_pass.framebuffer_attachments[0].role == .depth) or
+            (render_pass.framebuffer_attachment_count == 2 and render_pass.framebuffer_attachments[1].role == .depth);
+        if (!has_depth) break :blk -1;
+        break :blk render_pass.subpass_depth_layouts[command_buffer.impl.active_subpass];
+    } else -1;
 }
 fn recordedAttachmentLayout(command_buffer: *const CommandBufferObj, color: bool) i32 {
     return if (command_buffer.impl.dynamic_rendering)
@@ -8175,7 +8182,13 @@ const RenderPassFramebufferMetadata = struct {
 };
 
 fn snapshotRenderPassFramebufferMetadata(ci: *const RenderPassCreateInfo) RenderPassFramebufferMetadata {
-    if (ci.attachment_count == 0 or ci.attachment_count > 2 or ci.attachments == null or ci.subpasses == null) return .{};
+    if (ci.attachment_count > 2 or ci.subpasses == null or (ci.attachment_count != 0 and ci.attachments == null)) return .{};
+    if (ci.attachment_count == 0) {
+        for (ci.subpasses.?[0..ci.subpass_count]) |subpass| {
+            if (subpass.input_attachment_count != 0 or subpass.input_attachments != null or subpass.resolve_attachments != null or subpass.preserve_attachment_count != 0 or subpass.preserve_attachments != null or subpass.color_attachment_count != 0 or subpass.color_attachments != null or subpass.depth_stencil_attachment != null) return .{};
+        }
+        return .{ .supported = true, .attachment_count = 0 };
+    }
     var has_color = false;
     var has_depth = false;
     for (ci.subpasses.?[0..ci.subpass_count], 0..) |subpass, subpass_index| {
@@ -8947,7 +8960,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     const color_attachment_count: u32 = if (dynamic_rendering_state) |state|
         if (state.color_format == 0) 0 else 1
     else if (render_pass) |pass|
-        if (pass.framebuffer_supported and pass.framebuffer_attachment_count != 0 and pass.framebuffer_attachments[0].role == .depth) 0 else 1
+        if (pass.framebuffer_supported and (pass.framebuffer_attachment_count == 0 or pass.framebuffer_attachments[0].role == .depth)) 0 else 1
     else
         1;
     if (cb.s_type != 26 or cb.p_next != null or cb.flags != 0 or try bool32(cb.logic_op_enable) != 0 or cb.logic_op != 0 or cb.attachment_count != color_attachment_count or (color_attachment_count != 0 and cb.attachments == null) or (color_attachment_count == 0 and cb.attachments != null) or !std.meta.eql(cb.blend_constants, [_]f32{ 0, 0, 0, 0 })) return error.Invalid;
@@ -9535,31 +9548,33 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
     const out = output orelse return .error_initialization_failed;
     lock();
     defer mutex.unlock();
-    if (!validDeviceLocked(d) or ci.s_type != 37 or ci.p_next != null or ci.flags != 0 or ci.attachment_count == 0 or ci.attachment_count > 2 or ci.attachments == null or ci.width == 0 or ci.height == 0 or ci.layers == 0) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or ci.s_type != 37 or ci.p_next != null or ci.flags != 0 or ci.attachment_count > 2 or (ci.attachment_count != 0 and ci.attachments == null) or ci.width == 0 or ci.height == 0 or ci.layers == 0) return .error_initialization_failed;
     const render_pass = validRenderPassLocked(ci.render_pass) orelse return .error_initialization_failed;
     if (!render_pass.owner.eql(d) or !render_pass.framebuffer_supported or ci.attachment_count != render_pass.framebuffer_attachment_count) return .error_initialization_failed;
     var color: ?*ImageObj = null;
     var depth: ?*ImageObj = null;
     var prior_view: ?*ImageViewObj = null;
-    for (ci.attachments.?[0..ci.attachment_count], render_pass.framebuffer_attachments[0..ci.attachment_count]) |handle, requirement| {
-        const view = validImageViewLocked(handle) orelse return .error_initialization_failed;
-        if (view.owner != d or view == prior_view or (prior_view != null and view.image == prior_view.?.image) or view.format != requirement.format or view.image.format != requirement.format or view.image.samples != requirement.samples or view.image.width < ci.width or view.image.height < ci.height or view.base_array_layer != 0 or view.layer_count < ci.layers or view.image.array_layers < ci.layers) return .error_initialization_failed;
-        switch (requirement.role) {
-            .color => {
-                if (view.aspect_mask != 1 or view.usage & 0x10 == 0 or color != null) return .error_initialization_failed;
-                color = view.image;
-            },
-            .depth => {
-                if (view.aspect_mask != 2 or view.usage & 0x20 == 0 or depth != null) return .error_initialization_failed;
-                depth = view.image;
-            },
+    if (ci.attachments) |attachments| {
+        for (attachments[0..ci.attachment_count], render_pass.framebuffer_attachments[0..ci.attachment_count]) |handle, requirement| {
+            const view = validImageViewLocked(handle) orelse return .error_initialization_failed;
+            if (view.owner != d or view == prior_view or (prior_view != null and view.image == prior_view.?.image) or view.format != requirement.format or view.image.format != requirement.format or view.image.samples != requirement.samples or view.image.width < ci.width or view.image.height < ci.height or view.base_array_layer != 0 or view.layer_count < ci.layers or view.image.array_layers < ci.layers) return .error_initialization_failed;
+            switch (requirement.role) {
+                .color => {
+                    if (view.aspect_mask != 1 or view.usage & 0x10 == 0 or color != null) return .error_initialization_failed;
+                    color = view.image;
+                },
+                .depth => {
+                    if (view.aspect_mask != 2 or view.usage & 0x20 == 0 or depth != null) return .error_initialization_failed;
+                    depth = view.image;
+                },
+            }
+            prior_view = view;
         }
-        prior_view = view;
     }
-    if (color == null and depth == null) return .error_initialization_failed;
+    if (color == null and depth == null and render_pass.framebuffer_attachment_count != 0) return .error_initialization_failed;
     var compatibility = render_pass.compatibility.clone() catch return .error_out_of_host_memory;
     for (&framebuffer_objects, &framebuffer_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = d, .color_image = color, .depth_image = depth, .render_compatibility = compatibility, .layers = ci.layers };
+        object.* = .{ .owner = d, .color_image = color, .depth_image = depth, .render_compatibility = compatibility, .width = ci.width, .height = ci.height, .layers = ci.layers };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
@@ -10112,10 +10127,9 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     };
     const color_image = framebuffer.color_image;
     const depth = framebuffer.depth_image;
-    const image = color_image orelse depth orelse {
-        command_buffer.impl.invalid = true;
-        return;
-    };
+    const image = color_image orelse depth;
+    const render_width = if (image) |target| target.width else framebuffer.width;
+    const render_height = if (image) |target| target.height else framebuffer.height;
     const area_x: u64 = if (begin.render_area.offset.x < 0) std.math.maxInt(u64) else @intCast(begin.render_area.offset.x);
     const area_y: u64 = if (begin.render_area.offset.y < 0) std.math.maxInt(u64) else @intCast(begin.render_area.offset.y);
     const area_end_x = std.math.add(u64, area_x, begin.render_area.extent.width) catch std.math.maxInt(u64);
@@ -10155,7 +10169,7 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     const layout_count: usize = @as(usize, @intFromBool(color_image != null)) + @as(usize, @intFromBool(depth != null));
     const clear_count: usize = @as(usize, if (clear_color or clear_depth) 1 else 0);
     const layout_capacity = @as(usize, command_buffer.impl.count) + layout_count + clear_count;
-    if ((contents != 0 and contents != 1) or begin.s_type != 43 or !renderPassBeginPNextValid(begin.p_next) or command_buffer.impl.level != 0 or command_buffer.impl.state != 1 or command_buffer.impl.active_framebuffer != null or layout_capacity > command_buffer.impl.commands.len or !clear_values_valid or !render_pass.owner.eql(command_buffer.impl.owner) or framebuffer.owner != command_buffer.impl.owner or image.owner != command_buffer.impl.owner or !framebuffer.render_compatibility.eql(&render_pass.compatibility) or (color_image != null and render_pass.color_initial_layout != 0 and tracked_color_layout != render_pass.color_initial_layout) or (depth != null and render_pass.depth_initial_layout != 0 and tracked_depth_layout != render_pass.depth_initial_layout) or begin.render_area.extent.width == 0 or begin.render_area.extent.height == 0 or area_end_x > image.width or area_end_y > image.height) {
+    if ((contents != 0 and contents != 1) or begin.s_type != 43 or !renderPassBeginPNextValid(begin.p_next) or command_buffer.impl.level != 0 or command_buffer.impl.state != 1 or command_buffer.impl.active_framebuffer != null or layout_capacity > command_buffer.impl.commands.len or !clear_values_valid or !render_pass.owner.eql(command_buffer.impl.owner) or framebuffer.owner != command_buffer.impl.owner or (image != null and image.?.owner != command_buffer.impl.owner) or !framebuffer.render_compatibility.eql(&render_pass.compatibility) or (color_image != null and render_pass.color_initial_layout != 0 and tracked_color_layout != render_pass.color_initial_layout) or (depth != null and render_pass.depth_initial_layout != 0 and tracked_depth_layout != render_pass.depth_initial_layout) or begin.render_area.extent.width == 0 or begin.render_area.extent.height == 0 or area_end_x > render_width or area_end_y > render_height) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -12076,10 +12090,6 @@ fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
     }
     const image = framebuffer.?.color_image;
     const depth = framebuffer.?.depth_image;
-    if (image == null and depth == null) {
-        command_buffer.impl.invalid = true;
-        return;
-    }
     const color_subpass_layout = render_pass.?.subpass_color_layouts[active_subpass];
     const depth_subpass_layout = render_pass.?.subpass_depth_layouts[active_subpass];
     const color_transition = image != null and color_subpass_layout != render_pass.?.color_final_layout;
@@ -13747,6 +13757,21 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(@as(i32, 126), depth_only_pipeline_object.rendering_depth_format);
     try std.testing.expectEqual(@as(u32, 0), depth_only_pipeline_object.rasterizer_discard_enable);
     depth_only_pipeline_object.execution_abi = .cpu_cube_v1;
+    // Traditional render passes may also be attachmentless when every
+    // subpass is rasterizer-discard only.  The legacy pipeline ABI must
+    // therefore accept a zero color-blend attachment count for that pass.
+    const attachmentless_subpass = SubpassDescription{ .flags = 0, .pipeline_bind_point = 0, .input_attachment_count = 0, .input_attachments = null, .color_attachment_count = 0, .color_attachments = null, .resolve_attachments = null, .depth_stencil_attachment = null, .preserve_attachment_count = 0, .preserve_attachments = null };
+    const attachmentless_render_info = RenderPassCreateInfo{ .s_type = 38, .p_next = null, .flags = 0, .attachment_count = 0, .attachments = null, .subpass_count = 1, .subpasses = @ptrCast(&attachmentless_subpass), .dependency_count = 0, .dependencies = null };
+    var attachmentless_render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(device, &attachmentless_render_info, null, &attachmentless_render_pass));
+    try std.testing.expectEqual(@as(u32, 0), validRenderPassLocked(attachmentless_render_pass).?.framebuffer_attachment_count);
+    var attachmentless_pipeline_info = depth_only_legacy_info;
+    attachmentless_pipeline_info.render_pass = attachmentless_render_pass;
+    attachmentless_pipeline_info.rasterization = &discard_rasterization;
+    var attachmentless_pipeline: [1]usize = .{0xfeed_face};
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&attachmentless_pipeline_info), null, &attachmentless_pipeline));
+    try std.testing.expectEqual(@as(u32, 1), validGraphicsPipelineLocked(attachmentless_pipeline[0]).?.rasterizer_discard_enable);
+    validGraphicsPipelineLocked(attachmentless_pipeline[0]).?.execution_abi = .cpu_cube_v1;
     var graphics_flags2 = PipelineCreateFlags2CreateInfo{ .s_type = pipeline_create_flags2_stype, .p_next = null, .flags = 0 };
     var graphics_flags2_info = pipeline_info;
     graphics_flags2_info.p_next = @ptrCast(&graphics_flags2);
@@ -14287,6 +14312,9 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.success, allocateCommandBuffers(device, &command_info, &commands));
     var multi_commands: [1]CommandBuffer = undefined;
     try std.testing.expectEqual(Result.success, allocateCommandBuffers(device, &command_info, &multi_commands));
+    var attachmentless_framebuffer_info = FramebufferCreateInfo{ .s_type = 37, .p_next = null, .flags = 0, .render_pass = attachmentless_render_pass, .attachment_count = 0, .attachments = null, .width = 8, .height = 8, .layers = 1 };
+    var attachmentless_framebuffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createFramebuffer(device, &attachmentless_framebuffer_info, null, &attachmentless_framebuffer));
     const multi_begin_info = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
     const multi_clears = [_]ClearValue{
         .{ .color = .{ .float32 = .{ 0.1, 0.1, 0.1, 1 } } },
@@ -14295,6 +14323,24 @@ test "vkcube presentation path records submits and presents two swapchain images
     const multi_render_begin = RenderPassBeginInfo{ .s_type = 43, .p_next = null, .render_pass = multi_render_pass, .framebuffer = multi_framebuffer, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 8, .height = 8 } }, .clear_value_count = 2, .clear_values = &multi_clears };
     const multi_viewport = Viewport{ .x = 0, .y = 0, .width = 8, .height = 8, .min_depth = 0, .max_depth = 1 };
     const multi_scissor = Rect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 8, .height = 8 } };
+    // The legacy render-pass path also executes a rasterizer-discard draw
+    // against a zero-attachment framebuffer.  No image is dereferenced and
+    // the submission remains a valid no-op.
+    const attachmentless_render_begin = RenderPassBeginInfo{ .s_type = 43, .p_next = null, .render_pass = attachmentless_render_pass, .framebuffer = attachmentless_framebuffer, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 8, .height = 8 } }, .clear_value_count = 0, .clear_values = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    cmdBeginRenderPass(multi_commands[0], &attachmentless_render_begin, 0);
+    cmdBindPipeline(multi_commands[0], 0, attachmentless_pipeline[0]);
+    cmdBindDescriptorSets(multi_commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    setCoreDynamicGraphicsStateForTest(multi_commands[0], &multi_viewport, &multi_scissor);
+    cmdDraw(multi_commands[0], 3, 1, 0, 0);
+    try std.testing.expect(!multi_commands[0].impl.invalid);
+    cmdEndRenderPass(multi_commands[0]);
+    try std.testing.expect(!multi_commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(multi_commands[0]));
+    const attachmentless_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &multi_commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&attachmentless_submit), 0));
+    try std.testing.expectEqual(@as(u16, 1), multi_commands[0].impl.count);
+    try std.testing.expectEqual(@as(std.meta.Tag(Command), .cube_draw), std.meta.activeTag(multi_commands[0].impl.commands[0]));
     // The profile pipeline above is intentionally inspected in metadata mode;
     // switch only the dedicated multi-subpass pipelines to the executable
     // CPU-cube ABI before issuing the draw commands below.
@@ -15350,6 +15396,9 @@ test "vkcube presentation path records submits and presents two swapchain images
 
     destroySemaphore(device, acquired, null);
     destroySemaphore(device, rendered, null);
+    destroyFramebuffer(device, attachmentless_framebuffer, null);
+    destroyPipeline(device, attachmentless_pipeline[0], null);
+    destroyRenderPass(device, attachmentless_render_pass, null);
     destroyFramebuffer(device, multi_framebuffer, null);
     for (multi_pipeline) |pipeline| destroyPipeline(device, pipeline, null);
     destroyRenderPass(device, multi_render_pass, null);
@@ -21932,6 +21981,103 @@ test "traditional depth-only render passes bind, clear, transition, and stay all
     destroyImageView(ctx.device, view, null);
     destroyImage(ctx.device, image, null);
     freeMemory(ctx.device, memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "traditional attachmentless render passes support discard scopes allocation free" {
+    try resetDeadChildSlotsForAbiTest();
+    const ctx = try createTestDeviceContext();
+    const subpass = SubpassDescription{ .flags = 0, .pipeline_bind_point = 0, .input_attachment_count = 0, .input_attachments = null, .color_attachment_count = 0, .color_attachments = null, .resolve_attachments = null, .depth_stencil_attachment = null, .preserve_attachment_count = 0, .preserve_attachments = null };
+    const render_info = RenderPassCreateInfo{ .s_type = 38, .p_next = null, .flags = 0, .attachment_count = 0, .attachments = null, .subpass_count = 1, .subpasses = @ptrCast(&subpass), .dependency_count = 0, .dependencies = null };
+    var render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(ctx.device, &render_info, null, &render_pass));
+    const pass = validRenderPassLocked(render_pass).?;
+    try std.testing.expect(pass.framebuffer_supported);
+    try std.testing.expectEqual(@as(u32, 0), pass.framebuffer_attachment_count);
+    const framebuffer_info = FramebufferCreateInfo{ .s_type = 37, .p_next = null, .flags = 0, .render_pass = render_pass, .attachment_count = 0, .attachments = null, .width = 4, .height = 3, .layers = 1 };
+    var framebuffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createFramebuffer(ctx.device, &framebuffer_info, null, &framebuffer));
+    const framebuffer_object = validFramebufferLocked(framebuffer).?;
+    try std.testing.expect(framebuffer_object.color_image == null and framebuffer_object.depth_image == null);
+    try std.testing.expectEqual(@as(u32, 4), framebuffer_object.width);
+    try std.testing.expectEqual(@as(u32, 3), framebuffer_object.height);
+
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    const allocate_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var command: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate_info, &command));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    var render_begin = RenderPassBeginInfo{ .s_type = 43, .p_next = null, .render_pass = render_pass, .framebuffer = framebuffer, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 4, .height = 3 } }, .clear_value_count = 0, .clear_values = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdBeginRenderPass(command[0], &render_begin, 0);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 0), command[0].impl.count);
+    cmdEndRenderPass(command[0]);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &command, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+
+    // The framebuffer extent is the only bounds source when no image exists.
+    // Reject an oversized render area without publishing any scope or command.
+    render_begin.render_area.extent = .{ .width = 5, .height = 3 };
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdBeginRenderPass(command[0], &render_begin, 0);
+    try std.testing.expect(command[0].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 0), command[0].impl.count);
+    try std.testing.expect(command[0].impl.active_render_pass == null);
+
+    // Multiple attachmentless subpasses remain a valid discard-only scope;
+    // advancing records only the bounded NEXT_SUBPASS envelope.
+    const subpasses = [_]SubpassDescription{ subpass, subpass };
+    var multi_info = render_info;
+    multi_info.subpass_count = subpasses.len;
+    multi_info.subpasses = @ptrCast(&subpasses);
+    var multi_render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(ctx.device, &multi_info, null, &multi_render_pass));
+    var multi_framebuffer_info = framebuffer_info;
+    multi_framebuffer_info.render_pass = multi_render_pass;
+    var multi_framebuffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createFramebuffer(ctx.device, &multi_framebuffer_info, null, &multi_framebuffer));
+    render_begin.render_pass = multi_render_pass;
+    render_begin.framebuffer = multi_framebuffer;
+    render_begin.render_area.extent = .{ .width = 4, .height = 3 };
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdBeginRenderPass(command[0], &render_begin, 0);
+    cmdNextSubpass(command[0], 0);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 1), command[0].impl.count);
+    try std.testing.expectEqual(@as(std.meta.Tag(Command), .next_subpass), std.meta.activeTag(command[0].impl.commands[0]));
+    cmdEndRenderPass(command[0]);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+
+    // Once warmed, a no-target begin/end must not allocate, matching the
+    // allocation-free dynamic attachmentless path.
+    render_begin.render_pass = render_pass;
+    render_begin.framebuffer = framebuffer;
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+        cmdBeginRenderPass(command[0], &render_begin, 0);
+        cmdEndRenderPass(command[0]);
+        try std.testing.expect(!command[0].impl.invalid);
+    }
+    test_allocations_before_failure = null;
+    freeCommandBuffers(ctx.device, pool, 1, &command);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyFramebuffer(ctx.device, multi_framebuffer, null);
+    destroyRenderPass(ctx.device, multi_render_pass, null);
+    destroyFramebuffer(ctx.device, framebuffer, null);
+    destroyRenderPass(ctx.device, render_pass, null);
     destroyDevice(ctx.device, null);
     destroyInstance(ctx.instance, null);
 }
