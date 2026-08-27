@@ -18132,6 +18132,17 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     signal_info.value = 0;
     try std.testing.expectEqual(Result.success, queueSubmit2(ctx.queue, 1, @ptrCast(&signal_submit2), 0));
     destroySemaphore(ctx.device, signal_semaphore, null);
+    var unsatisfied_timeline: usize = 0;
+    const timeline_type = SemaphoreTypeCreateInfo{ .s_type = 1000207002, .p_next = null, .semaphore_type = 1, .initial_value = 0 };
+    const timeline_create = SemaphoreCreateInfo{ .s_type = 9, .p_next = &timeline_type, .flags = 0 };
+    try std.testing.expectEqual(Result.success, createSemaphore(ctx.device, &timeline_create, null, &unsatisfied_timeline));
+    const timeline_wait_info = SemaphoreSubmitInfo{ .s_type = 1000314005, .p_next = null, .semaphore = unsatisfied_timeline, .value = 1, .stage_mask = 0, .device_index = 0 };
+    const timeline_wait_submit = SubmitInfo2{ .s_type = 1000314004, .p_next = null, .flags = 0, .wait_semaphore_info_count = 1, .wait_semaphore_infos = @ptrCast(&timeline_wait_info), .command_buffer_info_count = 0, .command_buffer_infos = null, .signal_semaphore_info_count = 0, .signal_semaphore_infos = null };
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit2(ctx.queue, 1, @ptrCast(&timeline_wait_submit), 0));
+    var unsatisfied_counter: u64 = 99;
+    try std.testing.expectEqual(Result.success, getSemaphoreCounterValue(ctx.device, unsatisfied_timeline, &unsatisfied_counter));
+    try std.testing.expectEqual(@as(u64, 0), unsatisfied_counter);
+    destroySemaphore(ctx.device, unsatisfied_timeline, null);
     test_allocations_before_failure = 0;
     for (0..4096) |_| {
         try std.testing.expectEqual(@as(?u32, 0x1000), sync2StageMaskToLegacy(0x1000_0000_0));
