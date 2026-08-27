@@ -322,7 +322,15 @@ pub const PhysicalDeviceSubgroupSizeControlPropertiesKHR = PhysicalDeviceSubgrou
 pub const PhysicalDeviceSubgroupSizeControlPropertiesEXT = PhysicalDeviceSubgroupSizeControlProperties;
 pub const PhysicalDeviceInlineUniformBlockProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [24]u8 };
 pub const PhysicalDeviceShaderIntegerDotProductProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [120]u8 };
-pub const PhysicalDeviceTexelBufferAlignmentProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [32]u8 };
+pub const PhysicalDeviceTexelBufferAlignmentProperties = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    storage_texel_buffer_offset_alignment: u64,
+    storage_texel_buffer_offset_single_texel_alignment: u32,
+    uniform_texel_buffer_offset_alignment: u64,
+    uniform_texel_buffer_offset_single_texel_alignment: u32,
+};
+pub const PhysicalDeviceTexelBufferAlignmentPropertiesEXT = PhysicalDeviceTexelBufferAlignmentProperties;
 pub const PhysicalDeviceMaintenance5Properties = extern struct {
     s_type: i32,
     p_next: ?*anyopaque,
@@ -16728,6 +16736,11 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceSubgroupSizeControlFeatures, "subgroup_size_control"));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(PhysicalDeviceSubgroupSizeControlProperties));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceSubgroupSizeControlProperties, "min_subgroup_size"));
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(PhysicalDeviceTexelBufferAlignmentProperties));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceTexelBufferAlignmentProperties, "storage_texel_buffer_offset_alignment"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(PhysicalDeviceTexelBufferAlignmentProperties, "storage_texel_buffer_offset_single_texel_alignment"));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(PhysicalDeviceTexelBufferAlignmentProperties, "uniform_texel_buffer_offset_alignment"));
+    try std.testing.expectEqual(@as(usize, 40), @offsetOf(PhysicalDeviceTexelBufferAlignmentProperties, "uniform_texel_buffer_offset_single_texel_alignment"));
     getPhysicalDeviceFeatures2(ctx.physical, &features);
     try std.testing.expect(std.mem.allEqual(u32, &features.features.values, 0));
     try std.testing.expect(std.mem.allEqual(u32, &vulkan11_features.values, 0));
@@ -16845,6 +16858,17 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(u32, 0), subgroup_size_properties.required_subgroup_size_stages);
     test_allocations_before_failure = 0;
     for (0..4096) |_| getPhysicalDeviceProperties2(ctx.physical, &subgroup_properties_query);
+    test_allocations_before_failure = null;
+    var texel_properties = PhysicalDeviceTexelBufferAlignmentProperties{ .s_type = 1000281001, .p_next = null, .storage_texel_buffer_offset_alignment = 0xffff_ffff_ffff_ffff, .storage_texel_buffer_offset_single_texel_alignment = 0xffff_ffff, .uniform_texel_buffer_offset_alignment = 0xffff_ffff_ffff_ffff, .uniform_texel_buffer_offset_single_texel_alignment = 0xffff_ffff };
+    var texel_properties_query = properties;
+    texel_properties_query.p_next = @ptrCast(&texel_properties);
+    getPhysicalDeviceProperties2(ctx.physical, &texel_properties_query);
+    try std.testing.expectEqual(@as(u64, 256), texel_properties.storage_texel_buffer_offset_alignment);
+    try std.testing.expectEqual(@as(u32, 0), texel_properties.storage_texel_buffer_offset_single_texel_alignment);
+    try std.testing.expectEqual(@as(u64, 256), texel_properties.uniform_texel_buffer_offset_alignment);
+    try std.testing.expectEqual(@as(u32, 0), texel_properties.uniform_texel_buffer_offset_single_texel_alignment);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| getPhysicalDeviceProperties2(ctx.physical, &texel_properties_query);
     test_allocations_before_failure = null;
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(PhysicalDeviceMaintenance5Properties));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceMaintenance5Properties, "early_fragment_multisample_coverage_after_sample_counting"));

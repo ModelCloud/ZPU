@@ -83,6 +83,9 @@ aliases sharing the same layouts.
 The promoted subgroup-size-control feature and property nodes likewise expose
 typed LP64 fields; all controls and limits remain zero because subgroup-size
 control is outside the advertised execution profile.
+The promoted texel-buffer-alignment property node now exposes its four typed
+alignment fields (256-byte storage/uniform alignment and single-texel flags
+false) with the EXT alias sharing the same LP64 layout.
 
 Graphics pipeline vertex-input chains accept the feature-disabled,
 zero-entry `VkPipelineVertexInputDivisorStateCreateInfo` form with bounded,
