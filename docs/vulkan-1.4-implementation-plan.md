@@ -674,7 +674,10 @@ Each slice must land with all of the following:
   `SAbs` with strict import/opcode/type checks; signed `INT_MIN` absolute value
   is rejected as a numeric-domain error. It also lowers scalar/vector `FMin`
   and `FMax` with strict floating-point shape checks and a deterministic
-  implementation-defined NaN operand choice. A single
+  implementation-defined NaN operand choice. Scalar/vector `FSign` and `SSign`
+  are likewise lowered with strict scalar-domain checks; floating NaNs map
+  deterministically to canonical `+0`, signed zero keeps its sign bit, and
+  signed integer extrema map to `-1` without overflow. A single
   side-effect-free dynamic conditional or one-case runtime switch with a common
   merge is also lowered to compare/select; generic SPIR-V dynamic control flow,
   aggregate/descriptor-array indexing, atomics, shared-memory execution,
