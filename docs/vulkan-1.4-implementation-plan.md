@@ -173,8 +173,11 @@ driver strings/class, multiview and descriptor limits, heap-backed
 allocation/buffer limits, texel alignment, line precision, vertex-divisor
 policy, and stable layout UUIDs) instead of leaving the entire promoted
 payload opaque. The individual forms likewise populate the supported limit
-fields, retain caller links, and zero unsupported capability fields; identity
-nodes additionally report the single-device node mask and an explicit zero
+fields, retain caller links, and zero unsupported capability fields; the
+FloatControls, DescriptorIndexing, ShaderIntegerDotProduct, and HostImageCopy
+forms now expose every registry field with exact LP64 offsets (including the
+trailing alignment padding) rather than synthetic byte arrays. Identity nodes
+additionally report the single-device node mask and an explicit zero
 conformance version so diagnostics are useful without overstating conformance.
 `vkGetPhysicalDeviceImageFormatProperties2` also accepts the promoted
 external-image input and external-image/YCbCr output chains, reports the
