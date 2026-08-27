@@ -273,6 +273,9 @@ Because `drawIndirectFirstInstance` remains disabled in the truthful feature
 policy, all positive indexed and non-indexed indirect argument records now
 validate `firstInstance == 0` at submission, including the indirect-count
 variants; zero-count commands remain no-ops.
+Positive indirect draws also enforce the Vulkan command-structure stride
+minimum (16 bytes non-indexed, 20 bytes indexed) and four-byte alignment;
+short or zero strides fail before recording without mutating command state.
 Indirect dispatch now retains its argument buffer and consumes the three group
 counts at submission, including post-record writes and failure-atomic invalid
 group rejection.

@@ -12231,8 +12231,13 @@ fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64
             invalid_index_state = bound_index.owner != command_buffer.impl.owner or bound_index.usage & 0x40 == 0 or bound_index.memory == null or !liveMemoryObject(bound_index.memory.?);
         } else invalid_index_state = true;
     }
-    const range_valid = if (draw_count == 0) true else required <= indirect_buffer.size -| offset;
-    const stride_valid = draw_count <= 1 or (stride >= indirect_size and stride % 4 == 0);
+    const offset_valid = offset <= indirect_buffer.size;
+    const range_valid = if (draw_count == 0) offset_valid else offset_valid and required <= indirect_buffer.size - offset;
+    // Vulkan requires each positive-count indirect command to use a stride at
+    // least as large as its command structure and aligned to four bytes.  The
+    // previous draw_count <= 1 shortcut accidentally admitted zero/short
+    // strides for the advertised one-draw path.
+    const stride_valid = draw_count == 0 or (stride >= indirect_size and stride % 4 == 0);
     if (!graphicsDescriptorBindingValid(command_buffer.impl) or pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or (dynamic_rendering and !dynamicPipelineRenderingCompatible(command_buffer.impl, pipeline)) or indirect_buffer.owner != command_buffer.impl.owner or indirect_buffer.usage & 0x100 == 0 or indirect_buffer.memory == null or !liveMemoryObject(indirect_buffer.memory.?) or offset % 4 != 0 or !stride_valid or (draw_count != 0 and offset > indirect_buffer.size) or !range_valid or invalid_index_state) {
         command_buffer.impl.invalid = true;
         return;
@@ -15022,6 +15027,16 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(!commands[0].impl.invalid);
     cmdDrawIndirect(commands[0], indirect_buffer, 0, 1, 20);
     try std.testing.expect(!commands[0].impl.invalid);
+    const indirect_count_before_short_stride = commands[0].impl.count;
+    cmdDrawIndirect(commands[0], indirect_buffer, 0, 1, 12);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(indirect_count_before_short_stride, commands[0].impl.count);
+    commands[0].impl.invalid = false;
+    const indirect_count_before_zero_stride = commands[0].impl.count;
+    cmdDrawIndexedIndirect(commands[0], indirect_buffer, 0, 1, 0);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(indirect_count_before_zero_stride, commands[0].impl.count);
+    commands[0].impl.invalid = false;
     const indirect_count_before_limit_failure = commands[0].impl.count;
     cmdDrawIndirect(commands[0], indirect_buffer, 0, 2, 20);
     try std.testing.expect(commands[0].impl.invalid);
