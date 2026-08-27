@@ -4122,6 +4122,18 @@ fn bufferStorageValid(buffer: *const BufferObj) bool {
     const size = std.math.cast(usize, buffer.size) orelse return false;
     return offset <= memory.bytes.len and size <= memory.bytes.len - offset;
 }
+/// Validate the backing span for images retained by recorded commands.  Swapchain
+/// images use owned CPU-local bytes; device images use a bound memory offset.
+/// Both paths need the same final bounds check before submission-time slices.
+fn imageStorageValid(image: *const ImageObj) bool {
+    const size_u64 = imageByteSize(image) orelse return false;
+    const size = std.math.cast(usize, size_u64) orelse return false;
+    if (image.owned_bytes) |bytes| return size <= bytes.len;
+    const memory = image.memory orelse return false;
+    if (!liveMemoryObject(memory)) return false;
+    const offset = std.math.cast(usize, image.offset) orelse return false;
+    return offset <= memory.bytes.len and size <= memory.bytes.len - offset;
+}
 fn liveDescriptorObject(object: *DescriptorSetObj) bool {
     if (object.synthetic) return true;
     return (stateForObject(DescriptorSetObj, object, &descriptor_set_objects, &descriptor_set_state) orelse return false).* == .live;
@@ -7654,6 +7666,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             const slot = imageSlot(op.image) orelse return deadResource();
             if (op.image.memory == null or !liveMemoryObject(op.image.memory.?)) return deadResource();
             if (op.image.owner != owner or op.image.memory.?.owner != owner) return wrongSubmittingDevice();
+            if (!imageStorageValid(op.image)) return false;
             if (layouts[slot] != op.layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -7663,6 +7676,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             const slot = imageSlot(op.image) orelse return deadResource();
             if (op.image.memory == null or !liveMemoryObject(op.image.memory.?)) return deadResource();
             if (op.image.owner != owner or op.image.memory.?.owner != owner) return wrongSubmittingDevice();
+            if (!imageStorageValid(op.image)) return false;
             if (layouts[slot] != op.layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -7674,6 +7688,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             if (op.image.owner != owner or (op.image.owned_bytes == null and (op.image.memory == null or !liveMemoryObject(op.image.memory.?)))) {
                 return wrongSubmittingDevice();
             }
+            if (!imageStorageValid(op.image)) return false;
             if (op.expected_color_layout >= 0 and layouts[color_slot] != op.expected_color_layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -7682,6 +7697,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             if (op.depth) |depth| {
                 const depth_slot = imageSlot(depth) orelse return deadResource();
                 if (depth.owner != owner or (depth.memory == null and depth.owned_bytes == null) or (depth.memory != null and !liveMemoryObject(depth.memory.?))) return wrongSubmittingDevice();
+                if (!imageStorageValid(depth)) return false;
                 if (op.expected_depth_layout >= 0 and layouts[depth_slot] != op.expected_depth_layout) {
                     hit(.layout_mismatch);
                     return false;
@@ -7693,6 +7709,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             const slot = imageSlot(op.image) orelse return deadResource();
             _ = slot;
             if (op.image.owner != owner or (op.image.memory == null and op.image.owned_bytes == null) or (op.image.memory != null and !liveMemoryObject(op.image.memory.?))) return wrongSubmittingDevice();
+            if (!imageStorageValid(op.image)) return false;
             if (op.layer_count == 0 or op.base_layer >= op.image.array_layers or op.layer_count > op.image.array_layers - op.base_layer) return false;
         },
         .clear_attachments => |op| {
@@ -7707,6 +7724,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             if (op.depth) |depth| {
                 const depth_slot = imageSlot(depth) orelse return deadResource();
                 if (depth.owner != owner or depth.memory == null or !liveMemoryObject(depth.memory.?)) return wrongSubmittingDevice();
+                if (!imageStorageValid(depth)) return false;
                 if (op.expected_depth_layout >= 0 and layouts[depth_slot] != op.expected_depth_layout) {
                     hit(.layout_mismatch);
                     return false;
@@ -7743,6 +7761,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 if (descriptors.texture) |texture| {
                     if (!liveImageObject(texture) or texture.memory == null or !liveMemoryObject(texture.memory.?)) return deadResource();
                     if (texture.owner != owner or texture.memory.?.owner != owner) return wrongSubmittingDevice();
+                    if (!imageStorageValid(texture)) return false;
                 }
                 if (descriptors.sampler) |sampler| {
                     if ((stateForObject(SamplerObj, sampler, &sampler_objects, &sampler_state) orelse return deadResource()).* != .live) return deadResource();
@@ -7776,6 +7795,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 if (descriptors.texture) |texture| {
                     if (!liveImageObject(texture) or texture.memory == null or !liveMemoryObject(texture.memory.?)) return deadResource();
                     if (texture.owner != owner or texture.memory.?.owner != owner) return wrongSubmittingDevice();
+                    if (!imageStorageValid(texture)) return false;
                 }
                 if (descriptors.sampler) |sampler| {
                     if ((stateForObject(SamplerObj, sampler, &sampler_objects, &sampler_state) orelse return deadResource()).* != .live) return deadResource();
@@ -7795,6 +7815,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             const dst_slot = imageSlot(op.dst) orelse return deadResource();
             if (op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
             if (op.src.owner != owner or op.dst.owner != owner or op.src.memory.?.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
+            if (!imageStorageValid(op.src) or !imageStorageValid(op.dst)) return false;
             if (layouts[src_slot] != op.src_layout or layouts[dst_slot] != op.dst_layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -7805,6 +7826,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             const dst_slot = imageSlot(op.dst) orelse return deadResource();
             if (op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
             if (op.src.owner != owner or op.dst.owner != owner or op.src.memory.?.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
+            if (!imageStorageValid(op.src) or !imageStorageValid(op.dst)) return false;
             if (layouts[src_slot] != op.src_layout or layouts[dst_slot] != op.dst_layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -7828,6 +7850,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 if (depth_image.owner != owner or (depth_image.memory == null and depth_image.owned_bytes == null)) return wrongSubmittingDevice();
                 if (!liveImageObject(depth_image)) return deadResource();
                 if (depth_image.memory != null and !liveMemoryObject(depth_image.memory.?)) return deadResource();
+                if (!imageStorageValid(depth_image)) return false;
                 if (op.expected_depth_layout >= 0) {
                     const slot = depth_slot orelse return deadResource();
                     if (layouts[slot] != op.expected_depth_layout) {
@@ -7870,6 +7893,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 if (!liveImageObject(depth_image)) return deadResource();
             }
             if (!liveImageObject(color)) return deadResource();
+            if (!imageStorageValid(color)) return false;
             if (op.expected_color_layout >= 0 and layouts[color_slot] != op.expected_color_layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -7890,6 +7914,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 const texture_image = texture orelse return deadResource();
                 if (uniform_buffer.owner != owner or texture_image.owner != owner or uniform_buffer.memory == null or texture_image.memory == null) return wrongSubmittingDevice();
                 if (!liveImageObject(texture_image) or !liveMemoryObject(uniform_buffer.memory.?) or !liveMemoryObject(texture_image.memory.?)) return deadResource();
+                if (!imageStorageValid(texture_image)) return false;
                 if (!bufferStorageValid(uniform_buffer)) return false;
             }
             if (profile_draw and !prevalidateProfileVertexBindings(op, owner)) return false;
@@ -7922,6 +7947,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 if (depth_image.owner != owner or (depth_image.memory == null and depth_image.owned_bytes == null)) return wrongSubmittingDevice();
                 if (!liveImageObject(depth_image)) return deadResource();
                 if (depth_image.memory != null and !liveMemoryObject(depth_image.memory.?)) return deadResource();
+                if (!imageStorageValid(depth_image)) return false;
                 if (op.expected_depth_layout >= 0) {
                     const slot = depth_slot orelse return deadResource();
                     if (layouts[slot] != op.expected_depth_layout) {
@@ -7974,6 +8000,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 if (!liveImageObject(depth_image)) return deadResource();
             }
             if (!liveImageObject(color)) return deadResource();
+            if (!imageStorageValid(color)) return false;
             if (op.expected_color_layout >= 0 and layouts[color_slot] != op.expected_color_layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -7996,6 +8023,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 const texture_image = texture orelse return deadResource();
                 if (uniform_buffer.owner != owner or texture_image.owner != owner or uniform_buffer.memory == null or texture_image.memory == null) return wrongSubmittingDevice();
                 if (!liveImageObject(texture_image) or !liveMemoryObject(uniform_buffer.memory.?) or !liveMemoryObject(texture_image.memory.?)) return deadResource();
+                if (!imageStorageValid(texture_image)) return false;
                 if (!bufferStorageValid(uniform_buffer)) return false;
             }
             if ((op.indexed and op.index_buffer == null) or (!profile_draw and (uniform == null or texture == null))) return false;
@@ -8037,7 +8065,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             const slot = imageSlot(op.dst) orelse return deadResource();
             if (!liveBufferObject(op.src) or op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
             if (op.src.owner != owner or op.dst.owner != owner or op.src.memory.?.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
-            if (!bufferStorageValid(op.src)) return false;
+            if (!bufferStorageValid(op.src) or !imageStorageValid(op.dst)) return false;
             if (layouts[slot] != op.layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -8047,7 +8075,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             const slot = imageSlot(op.src) orelse return deadResource();
             if (!liveBufferObject(op.dst) or op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
             if (op.src.owner != owner or op.dst.owner != owner or op.src.memory.?.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
-            if (!bufferStorageValid(op.dst)) return false;
+            if (!imageStorageValid(op.src) or !bufferStorageValid(op.dst)) return false;
             if (layouts[slot] != op.layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -8058,6 +8086,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             const dst_slot = imageSlot(op.dst) orelse return deadResource();
             if (op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
             if (op.src.owner != owner or op.dst.owner != owner or op.src.memory.?.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
+            if (!imageStorageValid(op.src) or !imageStorageValid(op.dst)) return false;
             if (layouts[src_slot] != op.src_layout or layouts[dst_slot] != op.dst_layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -21155,6 +21184,21 @@ test "memory transfer objects execute against independently specified bytes" {
     for (0..4096) |_| try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(queue, 1, @ptrCast(&submit), 0));
     test_allocations_before_failure = null;
     destination_object.offset = saved_destination_offset;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+
+    // The same submission-time guard applies to bound images retained by
+    // clear/copy commands.  An invalid image offset must be rejected before
+    // imageBytes forms a slice, with no partial execution or allocation.
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdClearColorImage(commands[0], image, 1, &color, 1, @ptrCast(&range));
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const image_object = validImageLocked(image).?;
+    const saved_image_offset = image_object.offset;
+    image_object.offset = std.math.maxInt(u64);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(queue, 1, @ptrCast(&submit), 0));
+    test_allocations_before_failure = null;
+    image_object.offset = saved_image_offset;
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
 
     var format_output: ImageFormatProperties = undefined;

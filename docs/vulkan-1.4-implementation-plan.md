@@ -802,10 +802,11 @@ Each slice must land with all of the following:
 
 ### Latest audit slice — submission-time buffer span validation
 
-Command buffers retain pointers to bound buffers until queue submission.  The
-submission prevalidator now rechecks each retained buffer's offset and size
-against the live allocation before any execution path calls `bufferBytes`.
-This covers fills, updates, copies, image transfers, query-result copies,
+Command buffers retain pointers to bound buffers and images until queue
+submission.  The submission prevalidator now rechecks each retained buffer's
+offset and size, plus each image's bound/owned byte span, against live storage
+before any execution path calls `bufferBytes` or `imageBytes`.  This covers
+fills, updates, copies, image transfers, query-result copies,
 indirect dispatch/draw argument and count buffers, index buffers, vertex
 bindings, descriptor-backed uniform/storage buffers, and the scalar graphics
 profile.  A malformed post-record bound offset is rejected failure-atomically;
