@@ -207,6 +207,9 @@ const opcode_schema = [_]OpcodeMeta{
     // Keep the schema envelope broad enough to classify non-compute uses as
     // unsupported before the compute-specific arity check runs.
     .{ .opcode = 224, .operands = .{ .min = 0, .max = 3 } },
+    // OpMemoryBarrier has the same relaxed-workgroup no-op contract in the
+    // bounded profile, but carries only memory scope and semantics.
+    .{ .opcode = 225, .operands = .{ .min = 0, .max = 2 } },
     .{ .opcode = 71, .operands = .{ .min = 2, .max = 3 } },
     .{ .opcode = 72, .operands = .{ .min = 3, .max = 4 } },
     .{ .opcode = 999, .operands = .{ .min = 0, .max = 0 }, .supported = false },
@@ -500,6 +503,10 @@ fn scalarU32Constant(nodes: []const Node, value_id: u32) Error!u32 {
 
 fn controlBarrierValuesValid(execution_scope: u32, memory_scope: u32, memory_semantics: u32) bool {
     return execution_scope == 2 and memory_scope == 2 and memory_semantics == 0;
+}
+
+fn memoryBarrierValuesValid(memory_scope: u32, memory_semantics: u32) bool {
+    return memory_scope == 2 and memory_semantics == 0;
 }
 
 const ScalarClass = enum { integer, float };
@@ -894,6 +901,17 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const memory_scope = try scalarU32Constant(nodes, w[1]);
                 const memory_semantics = try scalarU32Constant(nodes, w[2]);
                 if (!controlBarrierValuesValid(execution_scope, memory_scope, memory_semantics)) return error.Unsupported;
+            },
+            225 => {
+                if (requested_stage != .compute) return error.Unsupported;
+                if (!in_function or !label_seen or terminated or block_terminated or w.len != 2) return error.Malformed;
+                // No shared-memory or atomic state exists in the bounded ZPU
+                // executor, so the exact relaxed workgroup memory barrier is
+                // a validated no-op.  Any ordering or visibility request is
+                // rejected instead of being silently approximated.
+                const memory_scope = try scalarU32Constant(nodes, w[0]);
+                const memory_semantics = try scalarU32Constant(nodes, w[1]);
+                if (!memoryBarrierValuesValid(memory_scope, memory_semantics)) return error.Unsupported;
             },
             12 => {
                 if (!in_function or !label_seen or terminated or block_terminated or w.len < 5 or w.len > 7) return error.Malformed;
@@ -2781,11 +2799,12 @@ test "compute profile lowers a bounded storage-buffer store" {
     try std.testing.expectEqual(@as(u32, 42), std.mem.readInt(u32, program.instructions[0].literal[0..4], .little));
 }
 
-test "compute profile admits only the relaxed workgroup control barrier" {
+test "compute profile admits only relaxed workgroup barriers" {
     // Add literal ScopeWorkgroup (2), ScopeWorkgroup (2), and Relaxed (0)
-    // operands before the function, then place OpControlBarrier immediately
-    // after the entry label.  The barrier has no IR result and must therefore
-    // disappear from the canonical straight-line program.
+    // operands before the function, then place OpControlBarrier and
+    // OpMemoryBarrier immediately after the entry label.  Neither barrier has
+    // an IR result and both must disappear from the canonical straight-line
+    // program.
     const function_offset = testOpcodeOffset(&compute_store, 54, 0).?;
     var with_constants = try testInsertWords(std.testing.allocator, &compute_store, function_offset, &.{
         (4 << 16) | 43, 2, 11, 2,
@@ -2795,7 +2814,7 @@ test "compute profile admits only the relaxed workgroup control barrier" {
     defer std.testing.allocator.free(with_constants);
     with_constants[3] = 14;
     const label = testOpcodeOffset(with_constants, 248, 0).?;
-    const barrier = [_]u32{ (4 << 16) | 224, 11, 12, 13 };
+    const barrier = [_]u32{ (4 << 16) | 224, 11, 12, 13, (3 << 16) | 225, 12, 13 };
     const with_barrier = try testInsertWords(std.testing.allocator, with_constants, label + (with_constants[label] >> 16), &barrier);
     defer std.testing.allocator.free(with_barrier);
 
@@ -2812,17 +2831,28 @@ test "compute profile admits only the relaxed workgroup control barrier" {
         try std.testing.expect(controlBarrierValuesValid(2, 2, 0));
         try std.testing.expect(!controlBarrierValuesValid(1, 2, 0));
         try std.testing.expect(!controlBarrierValuesValid(2, 2, 0x8));
+        try std.testing.expect(memoryBarrierValuesValid(2, 0));
+        try std.testing.expect(!memoryBarrierValuesValid(1, 0));
+        try std.testing.expect(!memoryBarrierValuesValid(2, 0x8));
     }
 
-    var stronger = with_barrier;
+    var stronger = try std.testing.allocator.dupe(u32, with_barrier);
+    defer std.testing.allocator.free(stronger);
     const semantics = testOpcodeOffset(stronger, 43, 3).?;
     stronger[semantics + 3] = 0x8; // AcquireRelease requires visibility state.
     try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, stronger, .compute, "main", &.{}));
 
-    var malformed = with_barrier;
+    var malformed = try std.testing.allocator.dupe(u32, with_barrier);
+    defer std.testing.allocator.free(malformed);
     const barrier_offset = testOpcodeOffset(malformed, 224, 0).?;
     malformed[barrier_offset] = (3 << 16) | 224;
     try std.testing.expectError(error.Malformed, compile(std.testing.allocator, malformed, .compute, "main", &.{}));
+
+    var malformed_memory = try std.testing.allocator.dupe(u32, with_barrier);
+    defer std.testing.allocator.free(malformed_memory);
+    const memory_barrier_offset = testOpcodeOffset(malformed_memory, 225, 0).?;
+    malformed_memory[memory_barrier_offset] = (2 << 16) | 225;
+    try std.testing.expectError(error.Malformed, compile(std.testing.allocator, malformed_memory, .compute, "main", &.{}));
 
     // The same opcode remains unsupported for graphics stages, even when the
     // instruction envelope is malformed, so the profile cannot imply a

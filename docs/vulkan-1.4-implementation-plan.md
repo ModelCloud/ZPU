@@ -294,8 +294,10 @@ select, then apply scalar arithmetic before writing through a
 `OpControlBarrier` only in its exact workgroup execution-scope,
 workgroup memory-scope, relaxed-memory form, lowering that
 synchronization-only construct to a validated allocation-free no-op because
-the profile has no shared-memory or atomic state; stronger barrier scopes or
-memory semantics remain rejected rather than approximated.
+the profile has no shared-memory or atomic state. `OpMemoryBarrier` is
+accepted under the matching workgroup-scope/relaxed-semantics form and is
+lowered to the same no-op. Stronger barrier scopes or memory semantics remain
+rejected rather than approximated.
 invocation multiplication is bounded, uniform/storage ranges are validated at
 record and submit time, and the output is written synchronously. One bounded,
 side-effect-free runtime conditional or one-case runtime `OpSwitch` with a
@@ -804,8 +806,9 @@ Each slice must land with all of the following:
   merge is also lowered to compare/select; generic SPIR-V dynamic control flow,
   aggregate/descriptor-array indexing, atomics, shared-memory execution,
   and complete compute memory-visibility semantics remain. The relaxed
-  workgroup barrier form is covered by malformed/unsupported and warm-path
-  frontend tests without changing the advertised feature set.
+  workgroup control- and memory-barrier forms are covered by
+  malformed/unsupported and warm-path frontend tests without changing the
+  advertised feature set.
 
 ### Latest audit slice — submission-time buffer span validation
 
