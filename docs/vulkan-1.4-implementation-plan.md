@@ -534,6 +534,13 @@ profile, so mask `1` is the only valid value. Each rejection is failure-atomic,
 including the synchronization2 lowering wrappers, and the direct event fixture
 covers every entry point.
 
+Event signal provenance is now retained through recording and submission.
+`vkCmdWaitEvents` rejects an event signaled by `vkCmdSetEvent2`, including a
+signal recorded earlier in the same command buffer and one completed by an
+earlier submission. Synchronization2 waits use the separate lowering path so
+they can consume synchronization2 signals. The rejection leaves the command
+count untouched and its warm path is covered by 4096 allocation-free iterations.
+
 The bounded execution checkpoint for `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC`
 is complete. Descriptor writes and update templates preserve the dynamic type,
 require the advertised 256-byte uniform-buffer alignment, and
