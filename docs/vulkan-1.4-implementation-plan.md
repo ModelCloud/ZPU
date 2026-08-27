@@ -26,7 +26,8 @@ entry points. The completed slices include timeline semaphores, compute
 pipeline records and dispatch envelopes, render-pass2, copy-commands2,
 synchronization2, dynamic rendering, queue-submit2, private data,
 memory-requirement/address queries, device-group peer queries, host image
-copies/layouts, descriptor templates, push descriptors, and the
+copies/layouts, including the Vulkan 1.4 `VK_HOST_IMAGE_COPY_MEMCPY_BIT`
+full-image/zero-offset contract, descriptor templates, push descriptors, and the
 supported/unsupported YCbCr policy. Maintenance-6 rendering attachment
 locations and input-attachment indices now have command-buffer-owned state,
 inside-render-pass validation, atomic rollback, reset/begin lifecycle reset,
