@@ -169,7 +169,12 @@ int main(void) {
     memset(&physical_features, 0xff, sizeof(physical_features));
     vkGetPhysicalDeviceFeatures(physical, &physical_features);
     const uint8_t *feature_bytes = (const uint8_t *)&physical_features;
-    for (size_t i = 0; i < sizeof(physical_features); ++i) CHECK_TRUE(feature_bytes[i] == 0);
+    const size_t multi_draw_offset = (const uint8_t *)&physical_features.multiDrawIndirect - feature_bytes;
+    CHECK_TRUE(physical_features.multiDrawIndirect == VK_TRUE);
+    for (size_t i = 0; i < sizeof(physical_features); ++i) {
+        if (i >= multi_draw_offset && i < multi_draw_offset + sizeof(VkBool32)) continue;
+        CHECK_TRUE(feature_bytes[i] == 0);
+    }
     uint32_t sparse_property_count = 1;
     VkSparseImageFormatProperties sparse_properties[1];
     vkGetPhysicalDeviceSparseImageFormatProperties(physical, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_TILING_OPTIMAL, &sparse_property_count, sparse_properties);
