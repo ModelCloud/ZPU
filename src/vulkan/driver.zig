@@ -4362,7 +4362,7 @@ fn getBufferDeviceAddress(device: ?Device, info: ?*const BufferDeviceAddressInfo
     lock();
     defer mutex.unlock();
     const buffer = validBufferLocked(query.buffer) orelse return 0;
-    if (!validDeviceLocked(d) or buffer.owner != d or buffer.memory == null) return 0;
+    if (!validDeviceLocked(d) or buffer.owner != d or buffer.memory == null or !bufferStorageValid(buffer)) return 0;
     return @intFromPtr(buffer.memory.?.bytes.ptr) + buffer.offset;
 }
 fn getBufferOpaqueCaptureAddress(device: ?Device, info: ?*const BufferDeviceAddressInfo) callconv(.c) u64 {
@@ -19638,6 +19638,16 @@ test "buffer views enforce typed texel ranges and stale lifetime" {
     const address_info = BufferDeviceAddressInfo{ .s_type = 1000244001, .p_next = null, .buffer = buffer };
     try std.testing.expect(getBufferDeviceAddress(ctx.device, &address_info) != 0);
     try std.testing.expectEqual(getBufferDeviceAddress(ctx.device, &address_info), getBufferOpaqueCaptureAddress(ctx.device, &address_info));
+    const address_buffer = validBufferLocked(buffer).?;
+    const saved_address_offset = address_buffer.offset;
+    address_buffer.offset = std.math.maxInt(u64);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(@as(u64, 0), getBufferDeviceAddress(ctx.device, &address_info));
+        try std.testing.expectEqual(@as(u64, 0), getBufferOpaqueCaptureAddress(ctx.device, &address_info));
+    }
+    test_allocations_before_failure = null;
+    address_buffer.offset = saved_address_offset;
     const memory_address_info = DeviceMemoryOpaqueCaptureAddressInfo{ .s_type = 1000257002, .p_next = null, .memory = memory };
     try std.testing.expect(getDeviceMemoryOpaqueCaptureAddress(ctx.device, &memory_address_info) != 0);
     var bad_address_info = address_info;
