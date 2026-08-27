@@ -4109,6 +4109,19 @@ fn liveQueryPoolObject(object: *QueryPoolObj) bool {
 fn liveBufferObject(object: *BufferObj) bool {
     return (stateForObject(BufferObj, object, &buffer_objects, &buffer_state) orelse return false).* == .live;
 }
+/// Validate the bound span before submission-time execution derives a slice.
+///
+/// Buffer creation/binding normally establishes this invariant, but Vulkan
+/// command recording retains object pointers until queue submission.  Keep
+/// the final check close to execution so stale or internally-corrupted
+/// offsets fail the batch atomically instead of reaching an unchecked slice.
+fn bufferStorageValid(buffer: *const BufferObj) bool {
+    const memory = buffer.memory orelse return false;
+    if (!liveMemoryObject(memory)) return false;
+    const offset = std.math.cast(usize, buffer.offset) orelse return false;
+    const size = std.math.cast(usize, buffer.size) orelse return false;
+    return offset <= memory.bytes.len and size <= memory.bytes.len - offset;
+}
 fn liveDescriptorObject(object: *DescriptorSetObj) bool {
     if (object.synthetic) return true;
     return (stateForObject(DescriptorSetObj, object, &descriptor_set_objects, &descriptor_set_state) orelse return false).* == .live;
@@ -7530,6 +7543,7 @@ fn prevalidateProfileVertexBindings(op: anytype, owner: *DeviceObj) bool {
         const buffer = op.vertex_bindings.buffers[input.binding] orelse return deadResource();
         if (!liveBufferObject(buffer) or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) return deadResource();
         if (buffer.owner != owner or buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+        if (!bufferStorageValid(buffer)) return false;
         const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[input.binding] else if (op.vertex_bindings.strides[input.binding] == 0) input.stride else op.vertex_bindings.strides[input.binding];
         const relative = std.math.add(u64, input.offset, std.math.mul(u64, last_vertex, stride) catch return false) catch return false;
         const end = std.math.add(u64, relative, 16) catch return false;
@@ -7548,6 +7562,7 @@ fn prevalidateProfileUniforms(op: anytype, owner: *DeviceObj) bool {
     const uniform = op.descriptors.uniform orelse return deadResource();
     if (!liveBufferObject(uniform) or uniform.memory == null or !liveMemoryObject(uniform.memory.?)) return deadResource();
     if (uniform.owner != owner or uniform.memory.?.owner != owner) return wrongSubmittingDevice();
+    if (!bufferStorageValid(uniform)) return false;
     if (op.descriptors.uniform_offset > uniform.size or op.descriptors.uniform_range == 0 or op.descriptors.uniform_range > uniform.size - op.descriptors.uniform_offset) return false;
     return true;
 }
@@ -7623,14 +7638,17 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
         .fill => |op| {
             if (!liveBufferObject(op.dst) or op.dst.memory == null or !liveMemoryObject(op.dst.memory.?)) return deadResource();
             if (op.dst.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
+            if (!bufferStorageValid(op.dst)) return false;
         },
         .update_buffer => |op| {
             if (!liveBufferObject(op.dst) or op.dst.memory == null or !liveMemoryObject(op.dst.memory.?)) return deadResource();
             if (op.dst.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
+            if (!bufferStorageValid(op.dst)) return false;
         },
         .copy_buffer => |op| {
             if (!liveBufferObject(op.src) or !liveBufferObject(op.dst) or op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
             if (op.src.owner != owner or op.dst.owner != owner or op.src.memory.?.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
+            if (!bufferStorageValid(op.src) or !bufferStorageValid(op.dst)) return false;
         },
         .clear => |op| {
             const slot = imageSlot(op.image) orelse return deadResource();
@@ -7713,11 +7731,13 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 if (descriptors.uniform) |uniform| {
                     if (!liveBufferObject(uniform) or uniform.memory == null or !liveMemoryObject(uniform.memory.?)) return deadResource();
                     if (uniform.owner != owner or uniform.memory.?.owner != owner) return wrongSubmittingDevice();
+                    if (!bufferStorageValid(uniform)) return false;
                     if (descriptors.uniform_offset > uniform.size or descriptors.uniform_range == 0 or descriptors.uniform_range > uniform.size - descriptors.uniform_offset) return false;
                 }
                 if (descriptors.storage) |storage| {
                     if (!liveBufferObject(storage) or storage.memory == null or !liveMemoryObject(storage.memory.?)) return deadResource();
                     if (storage.owner != owner or storage.memory.?.owner != owner) return wrongSubmittingDevice();
+                    if (!bufferStorageValid(storage)) return false;
                     if (descriptors.storage_offset > storage.size or descriptors.storage_range == 0 or descriptors.storage_range > storage.size - descriptors.storage_offset) return false;
                 }
                 if (descriptors.texture) |texture| {
@@ -7744,11 +7764,13 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 if (descriptors.uniform) |uniform| {
                     if (!liveBufferObject(uniform) or uniform.memory == null or !liveMemoryObject(uniform.memory.?)) return deadResource();
                     if (uniform.owner != owner or uniform.memory.?.owner != owner) return wrongSubmittingDevice();
+                    if (!bufferStorageValid(uniform)) return false;
                     if (descriptors.uniform_offset > uniform.size or descriptors.uniform_range == 0 or descriptors.uniform_range > uniform.size - descriptors.uniform_offset) return false;
                 }
                 if (descriptors.storage) |storage| {
                     if (!liveBufferObject(storage) or storage.memory == null or !liveMemoryObject(storage.memory.?)) return deadResource();
                     if (storage.owner != owner or storage.memory.?.owner != owner) return wrongSubmittingDevice();
+                    if (!bufferStorageValid(storage)) return false;
                     if (descriptors.storage_offset > storage.size or descriptors.storage_range == 0 or descriptors.storage_range > storage.size - descriptors.storage_offset) return false;
                 }
                 if (descriptors.texture) |texture| {
@@ -7762,6 +7784,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             }
             if (!liveBufferObject(op.buffer) or op.buffer.memory == null or !liveMemoryObject(op.buffer.memory.?)) return deadResource();
             if (op.buffer.owner != owner or op.buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+            if (!bufferStorageValid(op.buffer)) return false;
             if (op.buffer.usage & 0x100 == 0 or op.offset % 4 != 0 or op.offset > op.buffer.size or op.buffer.size - op.offset < 12) return false;
             const bytes = bufferBytes(op.buffer);
             const groups = .{ std.mem.readInt(u32, bytes[@intCast(op.offset)..][0..4], .little), std.mem.readInt(u32, bytes[@intCast(op.offset + 4)..][0..4], .little), std.mem.readInt(u32, bytes[@intCast(op.offset + 8)..][0..4], .little) };
@@ -7824,6 +7847,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                     const texture_image = texture orelse return deadResource();
                     if (uniform_buffer.owner != owner or texture_image.owner != owner or uniform_buffer.memory == null or texture_image.memory == null) return wrongSubmittingDevice();
                     if (!liveImageObject(texture_image) or !liveMemoryObject(uniform_buffer.memory.?) or !liveMemoryObject(texture_image.memory.?)) return deadResource();
+                    if (!bufferStorageValid(uniform_buffer)) return false;
                 }
                 if (profile_draw and !prevalidateProfileVertexBindings(op, owner)) return false;
                 if (profile_draw and !prevalidateProfileUniforms(op, owner)) return false;
@@ -7834,6 +7858,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 if (op.indexed) |indexed| {
                     if (!liveBufferObject(indexed.buffer) or indexed.buffer.memory == null or !liveMemoryObject(indexed.buffer.memory.?)) return deadResource();
                     if (indexed.buffer.owner != owner or indexed.buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+                    if (!bufferStorageValid(indexed.buffer)) return false;
                 }
                 return true;
             }
@@ -7865,6 +7890,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 const texture_image = texture orelse return deadResource();
                 if (uniform_buffer.owner != owner or texture_image.owner != owner or uniform_buffer.memory == null or texture_image.memory == null) return wrongSubmittingDevice();
                 if (!liveImageObject(texture_image) or !liveMemoryObject(uniform_buffer.memory.?) or !liveMemoryObject(texture_image.memory.?)) return deadResource();
+                if (!bufferStorageValid(uniform_buffer)) return false;
             }
             if (profile_draw and !prevalidateProfileVertexBindings(op, owner)) return false;
             if (profile_draw and !prevalidateProfileUniforms(op, owner)) return false;
@@ -7875,6 +7901,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             if (op.indexed) |indexed| {
                 if (!liveBufferObject(indexed.buffer) or indexed.buffer.memory == null or !liveMemoryObject(indexed.buffer.memory.?)) return deadResource();
                 if (indexed.buffer.owner != owner or indexed.buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+                if (!bufferStorageValid(indexed.buffer)) return false;
             }
         },
         .indirect_draw => |op| {
@@ -7911,18 +7938,22 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                     const texture_image = texture orelse return deadResource();
                     if (uniform_buffer.owner != owner or texture_image.owner != owner or uniform_buffer.memory == null or texture_image.memory == null) return wrongSubmittingDevice();
                     if (!liveImageObject(texture_image) or !liveMemoryObject(uniform_buffer.memory.?) or !liveMemoryObject(texture_image.memory.?)) return deadResource();
+                    if (!bufferStorageValid(uniform_buffer)) return false;
                 }
                 if (!liveBufferObject(op.indirect_buffer) or op.indirect_buffer.memory == null or !liveMemoryObject(op.indirect_buffer.memory.?)) return deadResource();
                 if (op.indirect_buffer.owner != owner or op.indirect_buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+                if (!bufferStorageValid(op.indirect_buffer)) return false;
                 if (op.count_source) |count| {
                     if (!liveBufferObject(count.buffer) or count.buffer.memory == null or !liveMemoryObject(count.buffer.memory.?)) return deadResource();
                     if (count.buffer.owner != owner or count.buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+                    if (!bufferStorageValid(count.buffer)) return false;
                     if (count.max_draw_count > max_indirect_draw_count or count.offset % 4 != 0 or count.offset > count.buffer.size or count.buffer.size - count.offset < 4) return false;
                 }
                 if (op.indexed) {
                     const index_buffer = op.index_buffer orelse return deadResource();
                     if (!liveBufferObject(index_buffer) or index_buffer.memory == null or !liveMemoryObject(index_buffer.memory.?)) return deadResource();
                     if (index_buffer.owner != owner or index_buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+                    if (!bufferStorageValid(index_buffer)) return false;
                 }
                 if (!indirectFirstInstanceValid(op)) return false;
                 if (profile_draw and !prevalidateIndirectProfileDraw(op, owner)) return false;
@@ -7965,6 +7996,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 const texture_image = texture orelse return deadResource();
                 if (uniform_buffer.owner != owner or texture_image.owner != owner or uniform_buffer.memory == null or texture_image.memory == null) return wrongSubmittingDevice();
                 if (!liveImageObject(texture_image) or !liveMemoryObject(uniform_buffer.memory.?) or !liveMemoryObject(texture_image.memory.?)) return deadResource();
+                if (!bufferStorageValid(uniform_buffer)) return false;
             }
             if ((op.indexed and op.index_buffer == null) or (!profile_draw and (uniform == null or texture == null))) return false;
             if (op.index_buffer) |index_buffer| {
@@ -7976,9 +8008,11 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             if (op.indirect_buffer.owner != owner or op.indirect_buffer.memory.?.owner != owner) {
                 return wrongSubmittingDevice();
             }
+            if (!bufferStorageValid(op.indirect_buffer)) return false;
             if (op.count_source) |count| {
                 if (!liveBufferObject(count.buffer) or count.buffer.memory == null or !liveMemoryObject(count.buffer.memory.?)) return deadResource();
                 if (count.buffer.owner != owner or count.buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+                if (!bufferStorageValid(count.buffer)) return false;
                 if (count.max_draw_count > max_indirect_draw_count or count.offset % 4 != 0 or count.offset > count.buffer.size or count.buffer.size - count.offset < 4) return false;
             }
             if (!indirectFirstInstanceValid(op)) return false;
@@ -7996,12 +8030,14 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 if (index_buffer.owner != owner or index_buffer.memory.?.owner != owner) {
                     return wrongSubmittingDevice();
                 }
+                if (!bufferStorageValid(index_buffer)) return false;
             }
         },
         .buffer_to_image => |op| {
             const slot = imageSlot(op.dst) orelse return deadResource();
             if (!liveBufferObject(op.src) or op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
             if (op.src.owner != owner or op.dst.owner != owner or op.src.memory.?.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
+            if (!bufferStorageValid(op.src)) return false;
             if (layouts[slot] != op.layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -8011,6 +8047,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             const slot = imageSlot(op.src) orelse return deadResource();
             if (!liveBufferObject(op.dst) or op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
             if (op.src.owner != owner or op.dst.owner != owner or op.src.memory.?.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
+            if (!bufferStorageValid(op.dst)) return false;
             if (layouts[slot] != op.layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -8058,6 +8095,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
         .query_copy => |op| {
             if (!liveQueryPoolObject(op.pool) or !liveBufferObject(op.destination) or op.destination.memory == null or !liveMemoryObject(op.destination.memory.?)) return deadResource();
             if (!op.pool.owner.eql(owner) or op.destination.owner != owner or op.destination.memory.?.owner != owner) return wrongSubmittingDevice();
+            if (!bufferStorageValid(op.destination)) return false;
         },
     }
     return true;
@@ -21100,6 +21138,24 @@ test "memory transfer objects execute against independently specified bytes" {
     try std.testing.expectEqual(@as(u16, 0), commands[0].impl.owned_update_count);
     try std.testing.expectEqual(Result.success, resetFences(device, 1, @ptrCast(&fence)));
     try std.testing.expectEqual(Result.timeout, waitForFences(device, 1, @ptrCast(&fence), 1, 0));
+
+    // Submission must re-check the bound span because command buffers retain
+    // buffer pointers for their entire executable lifetime.  Corrupting a
+    // bound offset after recording must reject atomically before bufferBytes
+    // can derive an out-of-range slice, and the warm rejection path remains
+    // allocation-free.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdFillBuffer(commands[0], buffer_b, 0, 4, 0xa5a5_a5a5);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const destination_object = validBufferLocked(buffer_b).?;
+    const saved_destination_offset = destination_object.offset;
+    destination_object.offset = std.math.maxInt(u64);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(queue, 1, @ptrCast(&submit), 0));
+    test_allocations_before_failure = null;
+    destination_object.offset = saved_destination_offset;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
 
     var format_output: ImageFormatProperties = undefined;
     try std.testing.expectEqual(Result.success, getImageFormatProperties(physical[0], 37, 1, 1, 3, 0, &format_output));

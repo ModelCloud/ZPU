@@ -799,6 +799,18 @@ Each slice must land with all of the following:
   merge is also lowered to compare/select; generic SPIR-V dynamic control flow,
   aggregate/descriptor-array indexing, atomics, shared-memory execution,
   and complete compute memory-visibility semantics remain.
+
+### Latest audit slice — submission-time buffer span validation
+
+Command buffers retain pointers to bound buffers until queue submission.  The
+submission prevalidator now rechecks each retained buffer's offset and size
+against the live allocation before any execution path calls `bufferBytes`.
+This covers fills, updates, copies, image transfers, query-result copies,
+indirect dispatch/draw argument and count buffers, index buffers, vertex
+bindings, descriptor-backed uniform/storage buffers, and the scalar graphics
+profile.  A malformed post-record bound offset is rejected failure-atomically;
+the regression runs 4096 times with allocation injection enabled and remains
+allocation-free on the warm path.
 - [ ] **A8 — secondary command buffers:** inheritance, execution, reset, and
   lifetime rules. Traditional render-pass inheritance now matches the active
   subpass for multi-subpass execution, and the bounded dynamic rendering
