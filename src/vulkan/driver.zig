@@ -326,7 +326,9 @@ pub const PhysicalDevicePipelineRobustnessProperties = extern struct {
     default_robustness_images: i32,
 };
 pub const PhysicalDevicePipelineRobustnessPropertiesEXT = PhysicalDevicePipelineRobustnessProperties;
-pub const PhysicalDeviceLineRasterizationProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
+pub const PhysicalDeviceLineRasterizationProperties = extern struct { s_type: i32, p_next: ?*anyopaque, line_sub_pixel_precision_bits: u32 };
+pub const PhysicalDeviceLineRasterizationPropertiesKHR = PhysicalDeviceLineRasterizationProperties;
+pub const PhysicalDeviceLineRasterizationPropertiesEXT = PhysicalDeviceLineRasterizationProperties;
 pub const PhysicalDeviceVertexAttributeDivisorProperties = extern struct {
     s_type: i32,
     p_next: ?*anyopaque,
@@ -16791,13 +16793,16 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceMaintenance6Properties, "block_texel_view_compatible_multiple_layers"));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(PhysicalDevicePipelineRobustnessProperties));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDevicePipelineRobustnessProperties, "default_robustness_storage_buffers"));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceLineRasterizationProperties));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceLineRasterizationProperties, "line_sub_pixel_precision_bits"));
     var maintenance3_properties = PhysicalDeviceMaintenance3Properties{ .s_type = 1000168000, .p_next = null, .payload = [_]u8{0xff} ** 16 };
     var subgroup_properties = PhysicalDeviceSubgroupProperties{ .s_type = 1000094000, .p_next = @ptrCast(&maintenance3_properties), .payload = [_]u8{0xff} ** 16 };
     var id_properties = PhysicalDeviceIDProperties{ .s_type = 1000071004, .p_next = null, .device_uuid = [_]u8{0xff} ** 16, .driver_uuid = [_]u8{0xff} ** 16, .device_luid = [_]u8{0xff} ** 8, .device_node_mask = 0xffff_ffff, .device_luid_valid = 0xffff_ffff };
     id_properties.p_next = @ptrCast(&subgroup_properties);
     var driver_properties = PhysicalDeviceDriverProperties{ .s_type = 1000196000, .p_next = @ptrCast(&id_properties), .driver_id = -1, .driver_name = [_]u8{0xff} ** 256, .driver_info = [_]u8{0xff} ** 256, .conformance_version = .{ .major = 0xff, .minor = 0xff, .subminor = 0xff, .patch = 0xff } };
     var host_copy_properties = PhysicalDeviceHostImageCopyProperties{ .s_type = 1000270001, .p_next = @ptrCast(&driver_properties), .payload = [_]u8{0xff} ** 56 };
-    var divisor_properties = PhysicalDeviceVertexAttributeDivisorProperties{ .s_type = 1000526000, .p_next = @ptrCast(&host_copy_properties), .max_vertex_attrib_divisor = 0xffff_ffff, .supports_non_zero_first_instance = 0xffff_ffff };
+    var line_properties = PhysicalDeviceLineRasterizationProperties{ .s_type = 1000259002, .p_next = @ptrCast(&host_copy_properties), .line_sub_pixel_precision_bits = 0xffff_ffff };
+    var divisor_properties = PhysicalDeviceVertexAttributeDivisorProperties{ .s_type = 1000526000, .p_next = @ptrCast(&line_properties), .max_vertex_attrib_divisor = 0xffff_ffff, .supports_non_zero_first_instance = 0xffff_ffff };
     var pipeline_robustness_properties = PhysicalDevicePipelineRobustnessProperties{ .s_type = 1000068002, .p_next = @ptrCast(&divisor_properties), .default_robustness_storage_buffers = -1, .default_robustness_uniform_buffers = -1, .default_robustness_vertex_inputs = -1, .default_robustness_images = -1 };
     var maintenance6_properties = PhysicalDeviceMaintenance6Properties{ .s_type = 1000545001, .p_next = @ptrCast(&pipeline_robustness_properties), .block_texel_view_compatible_multiple_layers = 0xffff_ffff, .max_combined_image_sampler_descriptor_count = 0xffff_ffff, .fragment_shading_rate_clamp_combiner_inputs = 0xffff_ffff };
     var maintenance5_properties = PhysicalDeviceMaintenance5Properties{ .s_type = 1000470001, .p_next = @ptrCast(&maintenance6_properties), .early_fragment_multisample_coverage_after_sample_counting = 0xffff_ffff, .early_fragment_sample_mask_test_before_sample_counting = 0xffff_ffff, .depth_stencil_swizzle_one_support = 0xffff_ffff, .polygon_mode_point_size = 0xffff_ffff, .non_strict_single_pixel_wide_lines_use_parallelogram = 0xffff_ffff, .non_strict_wide_lines_use_parallelogram = 0xffff_ffff };
@@ -16825,6 +16830,7 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(u32, 0), maintenance6_properties.block_texel_view_compatible_multiple_layers);
     try std.testing.expectEqual(@as(u32, 0), maintenance6_properties.max_combined_image_sampler_descriptor_count);
     try std.testing.expectEqual(@as(u32, 0), maintenance6_properties.fragment_shading_rate_clamp_combiner_inputs);
+    try std.testing.expectEqual(@as(u32, 4), line_properties.line_sub_pixel_precision_bits);
     try std.testing.expectEqual(@as(i32, 0), pipeline_robustness_properties.default_robustness_storage_buffers);
     try std.testing.expectEqual(@as(i32, 0), pipeline_robustness_properties.default_robustness_uniform_buffers);
     try std.testing.expectEqual(@as(i32, 0), pipeline_robustness_properties.default_robustness_vertex_inputs);
@@ -16844,7 +16850,8 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&maintenance6_properties)), maintenance5_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&pipeline_robustness_properties)), maintenance6_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&divisor_properties)), pipeline_robustness_properties.p_next);
-    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&host_copy_properties)), divisor_properties.p_next);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&line_properties)), divisor_properties.p_next);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&host_copy_properties)), line_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&driver_properties)), host_copy_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&maintenance5_properties)), vulkan14_individual_properties.p_next);
     test_allocations_before_failure = 0;
