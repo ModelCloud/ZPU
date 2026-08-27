@@ -281,7 +281,8 @@ pub const PhysicalDeviceVulkan14Properties = extern struct { s_type: i32, p_next
 // Individual core-promoted property structs use conservative zero payloads:
 // every optional capability is unadvertised, but each LP64 body remains the
 // exact size and alignment expected by callers.
-pub const PhysicalDeviceProtectedMemoryProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
+pub const PhysicalDeviceProtectedMemoryProperties = extern struct { s_type: i32, p_next: ?*anyopaque, protected_no_fault: u32 };
+pub const PhysicalDeviceProtectedMemoryPropertiesKHR = PhysicalDeviceProtectedMemoryProperties;
 pub const PhysicalDeviceIDProperties = extern struct {
     s_type: i32,
     p_next: ?*anyopaque,
@@ -291,10 +292,14 @@ pub const PhysicalDeviceIDProperties = extern struct {
     device_node_mask: u32,
     device_luid_valid: u32,
 };
-pub const PhysicalDeviceSubgroupProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [16]u8 };
-pub const PhysicalDeviceMaintenance3Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [16]u8 };
-pub const PhysicalDevicePointClippingProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
-pub const PhysicalDeviceMultiviewProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
+pub const PhysicalDeviceSubgroupProperties = extern struct { s_type: i32, p_next: ?*anyopaque, subgroup_size: u32, supported_stages: u32, supported_operations: u32, quad_operations_in_all_stages: u32 };
+pub const PhysicalDeviceSubgroupPropertiesKHR = PhysicalDeviceSubgroupProperties;
+pub const PhysicalDeviceMaintenance3Properties = extern struct { s_type: i32, p_next: ?*anyopaque, max_per_set_descriptors: u32, max_memory_allocation_size: u64 };
+pub const PhysicalDeviceMaintenance3PropertiesKHR = PhysicalDeviceMaintenance3Properties;
+pub const PhysicalDevicePointClippingProperties = extern struct { s_type: i32, p_next: ?*anyopaque, point_clipping_behavior: i32 };
+pub const PhysicalDevicePointClippingPropertiesKHR = PhysicalDevicePointClippingProperties;
+pub const PhysicalDeviceMultiviewProperties = extern struct { s_type: i32, p_next: ?*anyopaque, max_multiview_view_count: u32, max_multiview_instance_index: u32 };
+pub const PhysicalDeviceMultiviewPropertiesKHR = PhysicalDeviceMultiviewProperties;
 pub const ConformanceVersion = extern struct { major: u8, minor: u8, subminor: u8, patch: u8 };
 pub const PhysicalDeviceDriverProperties = extern struct {
     s_type: i32,
@@ -304,12 +309,16 @@ pub const PhysicalDeviceDriverProperties = extern struct {
     driver_info: [256]u8,
     conformance_version: ConformanceVersion,
 };
-pub const PhysicalDeviceTimelineSemaphoreProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
+pub const PhysicalDeviceTimelineSemaphoreProperties = extern struct { s_type: i32, p_next: ?*anyopaque, max_timeline_semaphore_value_difference: u64 };
+pub const PhysicalDeviceTimelineSemaphorePropertiesKHR = PhysicalDeviceTimelineSemaphoreProperties;
 pub const PhysicalDeviceFloatControlsProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [72]u8 };
 pub const PhysicalDeviceDescriptorIndexingProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [96]u8 };
-pub const PhysicalDeviceSamplerFilterMinmaxProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
-pub const PhysicalDeviceDepthStencilResolveProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [16]u8 };
-pub const PhysicalDeviceMaintenance4Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
+pub const PhysicalDeviceSamplerFilterMinmaxProperties = extern struct { s_type: i32, p_next: ?*anyopaque, filter_minmax_single_component_formats: u32, filter_minmax_image_component_mapping: u32 };
+pub const PhysicalDeviceSamplerFilterMinmaxPropertiesEXT = PhysicalDeviceSamplerFilterMinmaxProperties;
+pub const PhysicalDeviceDepthStencilResolveProperties = extern struct { s_type: i32, p_next: ?*anyopaque, supported_depth_resolve_modes: u32, supported_stencil_resolve_modes: u32, independent_resolve_none: u32, independent_resolve: u32 };
+pub const PhysicalDeviceDepthStencilResolvePropertiesKHR = PhysicalDeviceDepthStencilResolveProperties;
+pub const PhysicalDeviceMaintenance4Properties = extern struct { s_type: i32, p_next: ?*anyopaque, max_buffer_size: u64 };
+pub const PhysicalDeviceMaintenance4PropertiesKHR = PhysicalDeviceMaintenance4Properties;
 pub const PhysicalDeviceSubgroupSizeControlProperties = extern struct {
     s_type: i32,
     p_next: ?*anyopaque,
@@ -320,7 +329,8 @@ pub const PhysicalDeviceSubgroupSizeControlProperties = extern struct {
 };
 pub const PhysicalDeviceSubgroupSizeControlPropertiesKHR = PhysicalDeviceSubgroupSizeControlProperties;
 pub const PhysicalDeviceSubgroupSizeControlPropertiesEXT = PhysicalDeviceSubgroupSizeControlProperties;
-pub const PhysicalDeviceInlineUniformBlockProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [24]u8 };
+pub const PhysicalDeviceInlineUniformBlockProperties = extern struct { s_type: i32, p_next: ?*anyopaque, max_inline_uniform_block_size: u32, max_per_stage_descriptor_inline_uniform_blocks: u32, max_per_stage_descriptor_update_after_bind_inline_uniform_blocks: u32, max_descriptor_set_inline_uniform_blocks: u32, max_descriptor_set_update_after_bind_inline_uniform_blocks: u32 };
+pub const PhysicalDeviceInlineUniformBlockPropertiesEXT = PhysicalDeviceInlineUniformBlockProperties;
 pub const PhysicalDeviceShaderIntegerDotProductProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [120]u8 };
 pub const PhysicalDeviceTexelBufferAlignmentProperties = extern struct {
     s_type: i32,
@@ -351,7 +361,8 @@ pub const PhysicalDeviceMaintenance6Properties = extern struct {
 };
 pub const PhysicalDeviceMaintenance6PropertiesKHR = PhysicalDeviceMaintenance6Properties;
 pub const PhysicalDeviceHostImageCopyProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [56]u8 };
-pub const PhysicalDevicePushDescriptorProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
+pub const PhysicalDevicePushDescriptorProperties = extern struct { s_type: i32, p_next: ?*anyopaque, max_push_descriptors: u32 };
+pub const PhysicalDevicePushDescriptorPropertiesKHR = PhysicalDevicePushDescriptorProperties;
 pub const PhysicalDevicePipelineRobustnessProperties = extern struct {
     s_type: i32,
     p_next: ?*anyopaque,
@@ -16741,6 +16752,17 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 24), @offsetOf(PhysicalDeviceTexelBufferAlignmentProperties, "storage_texel_buffer_offset_single_texel_alignment"));
     try std.testing.expectEqual(@as(usize, 32), @offsetOf(PhysicalDeviceTexelBufferAlignmentProperties, "uniform_texel_buffer_offset_alignment"));
     try std.testing.expectEqual(@as(usize, 40), @offsetOf(PhysicalDeviceTexelBufferAlignmentProperties, "uniform_texel_buffer_offset_single_texel_alignment"));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceProtectedMemoryProperties));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(PhysicalDeviceSubgroupProperties));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(PhysicalDeviceMaintenance3Properties));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDevicePointClippingProperties));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceMultiviewProperties));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceTimelineSemaphoreProperties));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceSamplerFilterMinmaxProperties));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(PhysicalDeviceDepthStencilResolveProperties));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceMaintenance4Properties));
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(PhysicalDeviceInlineUniformBlockProperties));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDevicePushDescriptorProperties));
     getPhysicalDeviceFeatures2(ctx.physical, &features);
     try std.testing.expect(std.mem.allEqual(u32, &features.features.values, 0));
     try std.testing.expect(std.mem.allEqual(u32, &vulkan11_features.values, 0));
@@ -16870,6 +16892,36 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     test_allocations_before_failure = 0;
     for (0..4096) |_| getPhysicalDeviceProperties2(ctx.physical, &texel_properties_query);
     test_allocations_before_failure = null;
+    var typed_push_properties = PhysicalDevicePushDescriptorProperties{ .s_type = 1000080000, .p_next = null, .max_push_descriptors = 0xffff_ffff };
+    var typed_inline_properties = PhysicalDeviceInlineUniformBlockProperties{ .s_type = 1000138001, .p_next = @ptrCast(&typed_push_properties), .max_inline_uniform_block_size = 0xffff_ffff, .max_per_stage_descriptor_inline_uniform_blocks = 0xffff_ffff, .max_per_stage_descriptor_update_after_bind_inline_uniform_blocks = 0xffff_ffff, .max_descriptor_set_inline_uniform_blocks = 0xffff_ffff, .max_descriptor_set_update_after_bind_inline_uniform_blocks = 0xffff_ffff };
+    var typed_maintenance4_properties = PhysicalDeviceMaintenance4Properties{ .s_type = 1000413001, .p_next = @ptrCast(&typed_inline_properties), .max_buffer_size = 0xffff_ffff_ffff_ffff };
+    var typed_depth_resolve_properties = PhysicalDeviceDepthStencilResolveProperties{ .s_type = 1000199000, .p_next = @ptrCast(&typed_maintenance4_properties), .supported_depth_resolve_modes = 0xffff_ffff, .supported_stencil_resolve_modes = 0xffff_ffff, .independent_resolve_none = 0xffff_ffff, .independent_resolve = 0xffff_ffff };
+    var typed_minmax_properties = PhysicalDeviceSamplerFilterMinmaxProperties{ .s_type = 1000130000, .p_next = @ptrCast(&typed_depth_resolve_properties), .filter_minmax_single_component_formats = 0xffff_ffff, .filter_minmax_image_component_mapping = 0xffff_ffff };
+    var typed_timeline_properties = PhysicalDeviceTimelineSemaphoreProperties{ .s_type = 1000207001, .p_next = @ptrCast(&typed_minmax_properties), .max_timeline_semaphore_value_difference = 0xffff_ffff_ffff_ffff };
+    var typed_multiview_properties = PhysicalDeviceMultiviewProperties{ .s_type = 1000053002, .p_next = @ptrCast(&typed_timeline_properties), .max_multiview_view_count = 0xffff_ffff, .max_multiview_instance_index = 0xffff_ffff };
+    var typed_point_properties = PhysicalDevicePointClippingProperties{ .s_type = 1000117000, .p_next = @ptrCast(&typed_multiview_properties), .point_clipping_behavior = -1 };
+    var typed_maintenance3_properties = PhysicalDeviceMaintenance3Properties{ .s_type = 1000168000, .p_next = @ptrCast(&typed_point_properties), .max_per_set_descriptors = 0xffff_ffff, .max_memory_allocation_size = 0xffff_ffff_ffff_ffff };
+    var typed_subgroup_properties = PhysicalDeviceSubgroupProperties{ .s_type = 1000094000, .p_next = @ptrCast(&typed_maintenance3_properties), .subgroup_size = 0xffff_ffff, .supported_stages = 0xffff_ffff, .supported_operations = 0xffff_ffff, .quad_operations_in_all_stages = 0xffff_ffff };
+    var typed_protected_properties = PhysicalDeviceProtectedMemoryProperties{ .s_type = 1000145002, .p_next = @ptrCast(&typed_subgroup_properties), .protected_no_fault = 0xffff_ffff };
+    var typed_properties_query = properties;
+    typed_properties_query.p_next = @ptrCast(&typed_protected_properties);
+    getPhysicalDeviceProperties2(ctx.physical, &typed_properties_query);
+    try std.testing.expectEqual(@as(u32, 0), typed_protected_properties.protected_no_fault);
+    try std.testing.expectEqual(@as(u32, 0), typed_subgroup_properties.subgroup_size);
+    try std.testing.expectEqual(@as(u32, 1024), typed_maintenance3_properties.max_per_set_descriptors);
+    try std.testing.expectEqual(@as(u64, heap_size), typed_maintenance3_properties.max_memory_allocation_size);
+    try std.testing.expectEqual(@as(i32, 0), typed_point_properties.point_clipping_behavior);
+    try std.testing.expectEqual(@as(u32, max_image_array_layers), typed_multiview_properties.max_multiview_view_count);
+    try std.testing.expectEqual(@as(u32, 0xffff_ffff), typed_multiview_properties.max_multiview_instance_index);
+    try std.testing.expectEqual(@as(u64, 0), typed_timeline_properties.max_timeline_semaphore_value_difference);
+    try std.testing.expectEqual(@as(u32, 0), typed_minmax_properties.filter_minmax_single_component_formats);
+    try std.testing.expectEqual(@as(u32, 0), typed_depth_resolve_properties.supported_depth_resolve_modes);
+    try std.testing.expectEqual(@as(u64, heap_size), typed_maintenance4_properties.max_buffer_size);
+    try std.testing.expectEqual(@as(u32, 0), typed_inline_properties.max_inline_uniform_block_size);
+    try std.testing.expectEqual(@as(u32, 0), typed_push_properties.max_push_descriptors);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| getPhysicalDeviceProperties2(ctx.physical, &typed_properties_query);
+    test_allocations_before_failure = null;
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(PhysicalDeviceMaintenance5Properties));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceMaintenance5Properties, "early_fragment_multisample_coverage_after_sample_counting"));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(PhysicalDeviceMaintenance6Properties));
@@ -16878,8 +16930,8 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDevicePipelineRobustnessProperties, "default_robustness_storage_buffers"));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceLineRasterizationProperties));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceLineRasterizationProperties, "line_sub_pixel_precision_bits"));
-    var maintenance3_properties = PhysicalDeviceMaintenance3Properties{ .s_type = 1000168000, .p_next = null, .payload = [_]u8{0xff} ** 16 };
-    var subgroup_properties = PhysicalDeviceSubgroupProperties{ .s_type = 1000094000, .p_next = @ptrCast(&maintenance3_properties), .payload = [_]u8{0xff} ** 16 };
+    var maintenance3_properties = PhysicalDeviceMaintenance3Properties{ .s_type = 1000168000, .p_next = null, .max_per_set_descriptors = 0xffff_ffff, .max_memory_allocation_size = 0xffff_ffff_ffff_ffff };
+    var subgroup_properties = PhysicalDeviceSubgroupProperties{ .s_type = 1000094000, .p_next = @ptrCast(&maintenance3_properties), .subgroup_size = 0xffff_ffff, .supported_stages = 0xffff_ffff, .supported_operations = 0xffff_ffff, .quad_operations_in_all_stages = 0xffff_ffff };
     var id_properties = PhysicalDeviceIDProperties{ .s_type = 1000071004, .p_next = null, .device_uuid = [_]u8{0xff} ** 16, .driver_uuid = [_]u8{0xff} ** 16, .device_luid = [_]u8{0xff} ** 8, .device_node_mask = 0xffff_ffff, .device_luid_valid = 0xffff_ffff };
     id_properties.p_next = @ptrCast(&subgroup_properties);
     var driver_properties = PhysicalDeviceDriverProperties{ .s_type = 1000196000, .p_next = @ptrCast(&id_properties), .driver_id = -1, .driver_name = [_]u8{0xff} ** 256, .driver_info = [_]u8{0xff} ** 256, .conformance_version = .{ .major = 0xff, .minor = 0xff, .subminor = 0xff, .patch = 0xff } };
@@ -16901,9 +16953,12 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqualSlices(u8, driver_name, driver_properties.driver_name[0..driver_name.len]);
     try std.testing.expectEqualSlices(u8, driver_info, driver_properties.driver_info[0..driver_info.len]);
     try std.testing.expectEqual(@as(u8, 0), driver_properties.conformance_version.major);
-    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, subgroup_properties.payload[0..4], .little));
-    try std.testing.expectEqual(@as(u32, 1024), std.mem.readInt(u32, maintenance3_properties.payload[0..4], .little));
-    try std.testing.expectEqual(@as(u64, heap_size), std.mem.readInt(u64, maintenance3_properties.payload[8..16], .little));
+    try std.testing.expectEqual(@as(u32, 0), subgroup_properties.subgroup_size);
+    try std.testing.expectEqual(@as(u32, 0), subgroup_properties.supported_stages);
+    try std.testing.expectEqual(@as(u32, 0), subgroup_properties.supported_operations);
+    try std.testing.expectEqual(@as(u32, 0), subgroup_properties.quad_operations_in_all_stages);
+    try std.testing.expectEqual(@as(u32, 1024), maintenance3_properties.max_per_set_descriptors);
+    try std.testing.expectEqual(@as(u64, heap_size), maintenance3_properties.max_memory_allocation_size);
     try std.testing.expectEqual(@as(u32, 0), maintenance5_properties.early_fragment_multisample_coverage_after_sample_counting);
     try std.testing.expectEqual(@as(u32, 0), maintenance5_properties.early_fragment_sample_mask_test_before_sample_counting);
     try std.testing.expectEqual(@as(u32, 0), maintenance5_properties.depth_stencil_swizzle_one_support);

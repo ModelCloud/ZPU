@@ -86,6 +86,11 @@ control is outside the advertised execution profile.
 The promoted texel-buffer-alignment property node now exposes its four typed
 alignment fields (256-byte storage/uniform alignment and single-texel flags
 false) with the EXT alias sharing the same LP64 layout.
+The remaining small promoted physical-property nodes (protected memory,
+subgroup, multiview, point clipping, maintenance 3/4, timeline semaphore,
+sampler filter min/max, depth/stencil resolve, inline uniform block, and push
+descriptor) now likewise expose named typed fields and are populated through
+the same bounded, allocation-free query path.
 
 Graphics pipeline vertex-input chains accept the feature-disabled,
 zero-entry `VkPipelineVertexInputDivisorStateCreateInfo` form with bounded,
