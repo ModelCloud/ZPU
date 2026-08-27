@@ -567,8 +567,54 @@ pub const PhysicalDeviceDriverProperties = extern struct {
 };
 pub const PhysicalDeviceTimelineSemaphoreProperties = extern struct { s_type: i32, p_next: ?*anyopaque, max_timeline_semaphore_value_difference: u64 };
 pub const PhysicalDeviceTimelineSemaphorePropertiesKHR = PhysicalDeviceTimelineSemaphoreProperties;
-pub const PhysicalDeviceFloatControlsProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [72]u8 };
-pub const PhysicalDeviceDescriptorIndexingProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [96]u8 };
+pub const PhysicalDeviceFloatControlsProperties = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    denorm_behavior_independence: i32,
+    rounding_mode_independence: i32,
+    shader_signed_zero_inf_nan_preserve_float16: u32,
+    shader_signed_zero_inf_nan_preserve_float32: u32,
+    shader_signed_zero_inf_nan_preserve_float64: u32,
+    shader_denorm_preserve_float16: u32,
+    shader_denorm_preserve_float32: u32,
+    shader_denorm_preserve_float64: u32,
+    shader_denorm_flush_to_zero_float16: u32,
+    shader_denorm_flush_to_zero_float32: u32,
+    shader_denorm_flush_to_zero_float64: u32,
+    shader_rounding_mode_rte_float16: u32,
+    shader_rounding_mode_rte_float32: u32,
+    shader_rounding_mode_rte_float64: u32,
+    shader_rounding_mode_rtz_float16: u32,
+    shader_rounding_mode_rtz_float32: u32,
+    shader_rounding_mode_rtz_float64: u32,
+};
+pub const PhysicalDeviceDescriptorIndexingProperties = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    max_update_after_bind_descriptors_in_all_pools: u32,
+    shader_uniform_buffer_array_non_uniform_indexing_native: u32,
+    shader_sampled_image_array_non_uniform_indexing_native: u32,
+    shader_storage_buffer_array_non_uniform_indexing_native: u32,
+    shader_storage_image_array_non_uniform_indexing_native: u32,
+    shader_input_attachment_array_non_uniform_indexing_native: u32,
+    robust_buffer_access_update_after_bind: u32,
+    quad_divergent_implicit_lod: u32,
+    max_per_stage_descriptor_update_after_bind_samplers: u32,
+    max_per_stage_descriptor_update_after_bind_uniform_buffers: u32,
+    max_per_stage_descriptor_update_after_bind_storage_buffers: u32,
+    max_per_stage_descriptor_update_after_bind_sampled_images: u32,
+    max_per_stage_descriptor_update_after_bind_storage_images: u32,
+    max_per_stage_descriptor_update_after_bind_input_attachments: u32,
+    max_per_stage_update_after_bind_resources: u32,
+    max_descriptor_set_update_after_bind_samplers: u32,
+    max_descriptor_set_update_after_bind_uniform_buffers: u32,
+    max_descriptor_set_update_after_bind_uniform_buffers_dynamic: u32,
+    max_descriptor_set_update_after_bind_storage_buffers: u32,
+    max_descriptor_set_update_after_bind_storage_buffers_dynamic: u32,
+    max_descriptor_set_update_after_bind_sampled_images: u32,
+    max_descriptor_set_update_after_bind_storage_images: u32,
+    max_descriptor_set_update_after_bind_input_attachments: u32,
+};
 pub const PhysicalDeviceSamplerFilterMinmaxProperties = extern struct { s_type: i32, p_next: ?*anyopaque, filter_minmax_single_component_formats: u32, filter_minmax_image_component_mapping: u32 };
 pub const PhysicalDeviceSamplerFilterMinmaxPropertiesEXT = PhysicalDeviceSamplerFilterMinmaxProperties;
 pub const PhysicalDeviceDepthStencilResolveProperties = extern struct { s_type: i32, p_next: ?*anyopaque, supported_depth_resolve_modes: u32, supported_stencil_resolve_modes: u32, independent_resolve_none: u32, independent_resolve: u32 };
@@ -587,7 +633,40 @@ pub const PhysicalDeviceSubgroupSizeControlPropertiesKHR = PhysicalDeviceSubgrou
 pub const PhysicalDeviceSubgroupSizeControlPropertiesEXT = PhysicalDeviceSubgroupSizeControlProperties;
 pub const PhysicalDeviceInlineUniformBlockProperties = extern struct { s_type: i32, p_next: ?*anyopaque, max_inline_uniform_block_size: u32, max_per_stage_descriptor_inline_uniform_blocks: u32, max_per_stage_descriptor_update_after_bind_inline_uniform_blocks: u32, max_descriptor_set_inline_uniform_blocks: u32, max_descriptor_set_update_after_bind_inline_uniform_blocks: u32 };
 pub const PhysicalDeviceInlineUniformBlockPropertiesEXT = PhysicalDeviceInlineUniformBlockProperties;
-pub const PhysicalDeviceShaderIntegerDotProductProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [120]u8 };
+pub const PhysicalDeviceShaderIntegerDotProductProperties = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    integer_dot_product8_bit_unsigned_accelerated: u32,
+    integer_dot_product8_bit_signed_accelerated: u32,
+    integer_dot_product8_bit_mixed_signedness_accelerated: u32,
+    integer_dot_product4x8_bit_packed_unsigned_accelerated: u32,
+    integer_dot_product4x8_bit_packed_signed_accelerated: u32,
+    integer_dot_product4x8_bit_packed_mixed_signedness_accelerated: u32,
+    integer_dot_product16_bit_unsigned_accelerated: u32,
+    integer_dot_product16_bit_signed_accelerated: u32,
+    integer_dot_product16_bit_mixed_signedness_accelerated: u32,
+    integer_dot_product32_bit_unsigned_accelerated: u32,
+    integer_dot_product32_bit_signed_accelerated: u32,
+    integer_dot_product32_bit_mixed_signedness_accelerated: u32,
+    integer_dot_product64_bit_unsigned_accelerated: u32,
+    integer_dot_product64_bit_signed_accelerated: u32,
+    integer_dot_product64_bit_mixed_signedness_accelerated: u32,
+    integer_dot_product_accumulating_saturating8_bit_unsigned_accelerated: u32,
+    integer_dot_product_accumulating_saturating8_bit_signed_accelerated: u32,
+    integer_dot_product_accumulating_saturating8_bit_mixed_signedness_accelerated: u32,
+    integer_dot_product_accumulating_saturating4x8_bit_packed_unsigned_accelerated: u32,
+    integer_dot_product_accumulating_saturating4x8_bit_packed_signed_accelerated: u32,
+    integer_dot_product_accumulating_saturating4x8_bit_packed_mixed_signedness_accelerated: u32,
+    integer_dot_product_accumulating_saturating16_bit_unsigned_accelerated: u32,
+    integer_dot_product_accumulating_saturating16_bit_signed_accelerated: u32,
+    integer_dot_product_accumulating_saturating16_bit_mixed_signedness_accelerated: u32,
+    integer_dot_product_accumulating_saturating32_bit_unsigned_accelerated: u32,
+    integer_dot_product_accumulating_saturating32_bit_signed_accelerated: u32,
+    integer_dot_product_accumulating_saturating32_bit_mixed_signedness_accelerated: u32,
+    integer_dot_product_accumulating_saturating64_bit_unsigned_accelerated: u32,
+    integer_dot_product_accumulating_saturating64_bit_signed_accelerated: u32,
+    integer_dot_product_accumulating_saturating64_bit_mixed_signedness_accelerated: u32,
+};
 pub const PhysicalDeviceTexelBufferAlignmentProperties = extern struct {
     s_type: i32,
     p_next: ?*anyopaque,
@@ -616,7 +695,16 @@ pub const PhysicalDeviceMaintenance6Properties = extern struct {
     fragment_shading_rate_clamp_combiner_inputs: u32,
 };
 pub const PhysicalDeviceMaintenance6PropertiesKHR = PhysicalDeviceMaintenance6Properties;
-pub const PhysicalDeviceHostImageCopyProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [56]u8 };
+pub const PhysicalDeviceHostImageCopyProperties = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    copy_src_layout_count: u32,
+    p_copy_src_layouts: ?[*]i32,
+    copy_dst_layout_count: u32,
+    p_copy_dst_layouts: ?[*]i32,
+    optimal_tiling_layout_uuid: [16]u8,
+    identical_memory_type_requirements: u32,
+};
 pub const PhysicalDevicePushDescriptorProperties = extern struct { s_type: i32, p_next: ?*anyopaque, max_push_descriptors: u32 };
 pub const PhysicalDevicePushDescriptorPropertiesKHR = PhysicalDevicePushDescriptorProperties;
 pub const PhysicalDevicePipelineRobustnessProperties = extern struct {
@@ -2161,8 +2249,8 @@ fn corePropertyPayloadBytes(s_type: i32) ?usize {
         50 => 96,
         52 => 720,
         1000207001 => 8,
-        1000197000 => 72,
-        1000161002 => 96,
+        1000197000 => 68,
+        1000161002 => 92,
         54 => 200,
         1000138001 => 24,
         1000280001 => 120,
@@ -16892,6 +16980,17 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(ExternalImageFormatProperties));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(SamplerYcbcrConversionImageFormatProperties));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(HostImageCopyDevicePerformanceQuery));
+    try std.testing.expectEqual(@as(usize, 88), @sizeOf(PhysicalDeviceFloatControlsProperties));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceFloatControlsProperties, "denorm_behavior_independence"));
+    try std.testing.expectEqual(@as(usize, 20), @offsetOf(PhysicalDeviceFloatControlsProperties, "rounding_mode_independence"));
+    try std.testing.expectEqual(@as(usize, 80), @offsetOf(PhysicalDeviceFloatControlsProperties, "shader_rounding_mode_rtz_float64"));
+    try std.testing.expectEqual(@as(usize, 112), @sizeOf(PhysicalDeviceDescriptorIndexingProperties));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceDescriptorIndexingProperties, "max_update_after_bind_descriptors_in_all_pools"));
+    try std.testing.expectEqual(@as(usize, 48), @offsetOf(PhysicalDeviceDescriptorIndexingProperties, "max_per_stage_descriptor_update_after_bind_samplers"));
+    try std.testing.expectEqual(@as(usize, 104), @offsetOf(PhysicalDeviceDescriptorIndexingProperties, "max_descriptor_set_update_after_bind_input_attachments"));
+    try std.testing.expectEqual(@as(usize, 136), @sizeOf(PhysicalDeviceShaderIntegerDotProductProperties));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceShaderIntegerDotProductProperties, "integer_dot_product8_bit_unsigned_accelerated"));
+    try std.testing.expectEqual(@as(usize, 132), @offsetOf(PhysicalDeviceShaderIntegerDotProductProperties, "integer_dot_product_accumulating_saturating64_bit_mixed_signedness_accelerated"));
     try std.testing.expectEqual(@as(usize, 112), @sizeOf(PhysicalDeviceVulkan11Properties));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVulkan11Properties, "device_uuid"));
     try std.testing.expectEqual(@as(usize, 56), @offsetOf(PhysicalDeviceVulkan11Properties, "device_node_mask"));
@@ -16919,6 +17018,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(PhysicalDeviceIDProperties));
     try std.testing.expectEqual(@as(usize, 536), @sizeOf(PhysicalDeviceDriverProperties));
     try std.testing.expectEqual(@as(usize, 72), @sizeOf(PhysicalDeviceHostImageCopyProperties));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(PhysicalDeviceHostImageCopyProperties, "p_copy_src_layouts"));
+    try std.testing.expectEqual(@as(usize, 40), @offsetOf(PhysicalDeviceHostImageCopyProperties, "p_copy_dst_layouts"));
+    try std.testing.expectEqual(@as(usize, 48), @offsetOf(PhysicalDeviceHostImageCopyProperties, "optimal_tiling_layout_uuid"));
+    try std.testing.expectEqual(@as(usize, 64), @offsetOf(PhysicalDeviceHostImageCopyProperties, "identical_memory_type_requirements"));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(MemoryRequirements2));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(ImagePlaneMemoryRequirementsInfo));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(MemoryDedicatedAllocateInfo));
@@ -17318,6 +17421,42 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     test_allocations_before_failure = 0;
     for (0..4096) |_| getPhysicalDeviceProperties2(ctx.physical, &typed_properties_query);
     test_allocations_before_failure = null;
+    var float_properties = std.mem.zeroes(PhysicalDeviceFloatControlsProperties);
+    float_properties.s_type = 1000197000;
+    @memset(std.mem.asBytes(&float_properties)[16..], 0xff);
+    var float_properties_query = properties;
+    float_properties_query.p_next = @ptrCast(&float_properties);
+    getPhysicalDeviceProperties2(ctx.physical, &float_properties_query);
+    try std.testing.expectEqual(@as(i32, 0), float_properties.denorm_behavior_independence);
+    try std.testing.expectEqual(@as(i32, 0), float_properties.rounding_mode_independence);
+    try std.testing.expectEqual(@as(u32, 0), float_properties.shader_signed_zero_inf_nan_preserve_float16);
+    try std.testing.expectEqual(@as(u32, 0), float_properties.shader_rounding_mode_rtz_float64);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| getPhysicalDeviceProperties2(ctx.physical, &float_properties_query);
+    test_allocations_before_failure = null;
+    var descriptor_indexing_properties = std.mem.zeroes(PhysicalDeviceDescriptorIndexingProperties);
+    descriptor_indexing_properties.s_type = 1000161002;
+    @memset(std.mem.asBytes(&descriptor_indexing_properties)[16..], 0xff);
+    var descriptor_indexing_properties_query = properties;
+    descriptor_indexing_properties_query.p_next = @ptrCast(&descriptor_indexing_properties);
+    getPhysicalDeviceProperties2(ctx.physical, &descriptor_indexing_properties_query);
+    try std.testing.expectEqual(@as(u32, 0), descriptor_indexing_properties.max_update_after_bind_descriptors_in_all_pools);
+    try std.testing.expectEqual(@as(u32, 0), descriptor_indexing_properties.max_per_stage_descriptor_update_after_bind_samplers);
+    try std.testing.expectEqual(@as(u32, 0), descriptor_indexing_properties.max_descriptor_set_update_after_bind_input_attachments);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| getPhysicalDeviceProperties2(ctx.physical, &descriptor_indexing_properties_query);
+    test_allocations_before_failure = null;
+    var dot_product_properties = std.mem.zeroes(PhysicalDeviceShaderIntegerDotProductProperties);
+    dot_product_properties.s_type = 1000280001;
+    @memset(std.mem.asBytes(&dot_product_properties)[16..], 0xff);
+    var dot_product_properties_query = properties;
+    dot_product_properties_query.p_next = @ptrCast(&dot_product_properties);
+    getPhysicalDeviceProperties2(ctx.physical, &dot_product_properties_query);
+    try std.testing.expectEqual(@as(u32, 0), dot_product_properties.integer_dot_product8_bit_unsigned_accelerated);
+    try std.testing.expectEqual(@as(u32, 0), dot_product_properties.integer_dot_product_accumulating_saturating64_bit_mixed_signedness_accelerated);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| getPhysicalDeviceProperties2(ctx.physical, &dot_product_properties_query);
+    test_allocations_before_failure = null;
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(PhysicalDeviceMaintenance5Properties));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceMaintenance5Properties, "early_fragment_multisample_coverage_after_sample_counting"));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(PhysicalDeviceMaintenance6Properties));
@@ -17331,7 +17470,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     var id_properties = PhysicalDeviceIDProperties{ .s_type = 1000071004, .p_next = null, .device_uuid = [_]u8{0xff} ** 16, .driver_uuid = [_]u8{0xff} ** 16, .device_luid = [_]u8{0xff} ** 8, .device_node_mask = 0xffff_ffff, .device_luid_valid = 0xffff_ffff };
     id_properties.p_next = @ptrCast(&subgroup_properties);
     var driver_properties = PhysicalDeviceDriverProperties{ .s_type = 1000196000, .p_next = @ptrCast(&id_properties), .driver_id = -1, .driver_name = [_]u8{0xff} ** 256, .driver_info = [_]u8{0xff} ** 256, .conformance_version = .{ .major = 0xff, .minor = 0xff, .subminor = 0xff, .patch = 0xff } };
-    var host_copy_properties = PhysicalDeviceHostImageCopyProperties{ .s_type = 1000270001, .p_next = @ptrCast(&driver_properties), .payload = [_]u8{0xff} ** 56 };
+    var host_copy_properties = std.mem.zeroes(PhysicalDeviceHostImageCopyProperties);
+    host_copy_properties.s_type = 1000270001;
+    host_copy_properties.p_next = @ptrCast(&driver_properties);
+    @memset(std.mem.asBytes(&host_copy_properties)[16..], 0xff);
     var line_properties = PhysicalDeviceLineRasterizationProperties{ .s_type = 1000259002, .p_next = @ptrCast(&host_copy_properties), .line_sub_pixel_precision_bits = 0xffff_ffff };
     var divisor_properties = PhysicalDeviceVertexAttributeDivisorProperties{ .s_type = 1000526000, .p_next = @ptrCast(&line_properties), .max_vertex_attrib_divisor = 0xffff_ffff, .supports_non_zero_first_instance = 0xffff_ffff };
     var pipeline_robustness_properties = PhysicalDevicePipelineRobustnessProperties{ .s_type = 1000068002, .p_next = @ptrCast(&divisor_properties), .default_robustness_storage_buffers = -1, .default_robustness_uniform_buffers = -1, .default_robustness_vertex_inputs = -1, .default_robustness_images = -1 };
@@ -17374,8 +17516,8 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(i32, 0), pipeline_robustness_properties.default_robustness_images);
     try std.testing.expectEqual(@as(u32, 1), divisor_properties.max_vertex_attrib_divisor);
     try std.testing.expectEqual(@as(u32, 1), divisor_properties.supports_non_zero_first_instance);
-    try std.testing.expectEqualSlices(u8, &pipeline_cache_uuid, host_copy_properties.payload[32..48]);
-    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, host_copy_properties.payload[48..52], .little));
+    try std.testing.expectEqualSlices(u8, &pipeline_cache_uuid, &host_copy_properties.optimal_tiling_layout_uuid);
+    try std.testing.expectEqual(@as(u32, 1), host_copy_properties.identical_memory_type_requirements);
     try std.testing.expectEqual(@as(u32, 4), vulkan14_individual_properties.line_sub_pixel_precision_bits);
     try std.testing.expectEqual(@as(u32, 1), vulkan14_individual_properties.max_vertex_attrib_divisor);
     try std.testing.expectEqual(@as(u32, 1), vulkan14_individual_properties.supports_non_zero_first_instance);
