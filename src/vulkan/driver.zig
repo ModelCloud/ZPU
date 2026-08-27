@@ -529,6 +529,9 @@ pub const PipelineVertexInputDivisorStateCreateInfoEXT = PipelineVertexInputDivi
 pub const PipelineInputAssemblyStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, topology: i32, primitive_restart_enable: u32 };
 pub const PipelineViewportStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, viewport_count: u32, viewports: ?[*]const Viewport, scissor_count: u32, scissors: ?[*]const Rect2D };
 pub const PipelineRasterizationStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, depth_clamp_enable: u32, rasterizer_discard_enable: u32, polygon_mode: i32, cull_mode: u32, front_face: i32, depth_bias_enable: u32, depth_bias_constant_factor: f32, depth_bias_clamp: f32, depth_bias_slope_factor: f32, line_width: f32 };
+pub const PipelineRasterizationLineStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, line_rasterization_mode: i32, stippled_line_enable: u32, line_stipple_factor: u32, line_stipple_pattern: u16 };
+pub const PipelineRasterizationLineStateCreateInfoKHR = PipelineRasterizationLineStateCreateInfo;
+pub const PipelineRasterizationLineStateCreateInfoEXT = PipelineRasterizationLineStateCreateInfo;
 pub const PipelineMultisampleStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, rasterization_samples: u32, sample_shading_enable: u32, min_sample_shading: f32, sample_mask: ?[*]const u32, alpha_to_coverage_enable: u32, alpha_to_one_enable: u32 };
 pub const StencilOpState = extern struct { fail_op: i32, pass_op: i32, depth_fail_op: i32, compare_op: i32, compare_mask: u32, write_mask: u32, reference: u32 };
 pub const PipelineDepthStencilStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, depth_test_enable: u32, depth_write_enable: u32, depth_compare_op: i32, depth_bounds_test_enable: u32, stencil_test_enable: u32, front: StencilOpState, back: StencilOpState, min_depth_bounds: f32, max_depth_bounds: f32 };
@@ -1207,6 +1210,26 @@ fn pipelineVertexInputDivisorStateValid(raw: ?*const anyopaque) bool {
         // still a valid ABI extension and has no execution effect; nonzero
         // divisors would require the disabled feature and are rejected.
         if (info.vertex_binding_divisor_count > max_api_items or info.vertex_binding_divisor_count != 0) return false;
+        seen = true;
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
+}
+
+fn pipelineRasterizationLineStateValid(raw: ?*const anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    var seen = false;
+    while (next) |item| {
+        if (depth == 16) return false;
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (header.s_type != 1_000_259_001 or seen) return false;
+        const info: *const PipelineRasterizationLineStateCreateInfo = @ptrCast(@alignCast(item));
+        // Line-rasterization features are not advertised.  Accept only the
+        // default mode and disabled stippling; the default factor/pattern
+        // keep the complete promoted ABI deterministic.
+        if (info.line_rasterization_mode != 0 or info.stippled_line_enable != 0 or info.line_stipple_factor != 1 or info.line_stipple_pattern != 0) return false;
         seen = true;
         next = header.p_next;
         depth += 1;
@@ -8731,6 +8754,9 @@ test "Vulkan graphics pipeline ABI declarations match LP64 layouts" {
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PipelineCreateFlags2CreateInfo, "flags"));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(PipelineRobustnessCreateInfo));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PipelineRobustnessCreateInfo, "storage_buffers"));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(PipelineRasterizationLineStateCreateInfo));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PipelineRasterizationLineStateCreateInfo, "line_rasterization_mode"));
+    try std.testing.expectEqual(@as(usize, 28), @offsetOf(PipelineRasterizationLineStateCreateInfo, "line_stipple_pattern"));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(PipelineRenderingCreateInfo));
     try std.testing.expectEqual(@as(usize, 24), @offsetOf(PipelineRenderingCreateInfo, "color_attachment_formats"));
     try std.testing.expectEqual(@as(usize, 32), @offsetOf(PipelineRenderingCreateInfo, "depth_attachment_format"));
@@ -8782,6 +8808,38 @@ test "vertex input divisor pNext accepts only the feature-disabled default" {
     divisor.p_next = null;
     divisor.s_type = 1000525000;
     try std.testing.expect(!pipelineVertexInputDivisorStateValid(@ptrCast(&divisor)));
+}
+
+test "line rasterization pNext accepts only the feature-disabled default" {
+    var line = PipelineRasterizationLineStateCreateInfo{
+        .s_type = 1_000_259_001,
+        .p_next = null,
+        .line_rasterization_mode = 0,
+        .stippled_line_enable = 0,
+        .line_stipple_factor = 1,
+        .line_stipple_pattern = 0,
+    };
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..4096) |_| try std.testing.expect(pipelineRasterizationLineStateValid(@ptrCast(&line)));
+    line.line_rasterization_mode = 1;
+    try std.testing.expect(!pipelineRasterizationLineStateValid(@ptrCast(&line)));
+    line.line_rasterization_mode = 0;
+    line.stippled_line_enable = 1;
+    try std.testing.expect(!pipelineRasterizationLineStateValid(@ptrCast(&line)));
+    line.stippled_line_enable = 0;
+    line.line_stipple_factor = 0;
+    try std.testing.expect(!pipelineRasterizationLineStateValid(@ptrCast(&line)));
+    line.line_stipple_factor = 1;
+    line.line_stipple_pattern = 1;
+    try std.testing.expect(!pipelineRasterizationLineStateValid(@ptrCast(&line)));
+    line.line_stipple_pattern = 0;
+    var duplicate = line;
+    line.p_next = @ptrCast(&duplicate);
+    try std.testing.expect(!pipelineRasterizationLineStateValid(@ptrCast(&line)));
+    line.p_next = null;
+    line.s_type = 1_000_259_000;
+    try std.testing.expect(!pipelineRasterizationLineStateValid(@ptrCast(&line)));
 }
 
 test "dynamic rendering pipeline pNext validation is bounded and canonical" {
@@ -9206,7 +9264,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     const rs = ci.rasterization orelse return error.Invalid;
     const pipeline_rasterizer_discard_enable = try bool32(rs.rasterizer_discard_enable);
     const pipeline_depth_bias_enable = try bool32(rs.depth_bias_enable);
-    if (rs.s_type != 23 or rs.p_next != null or rs.flags != 0 or try bool32(rs.depth_clamp_enable) != 0 or rs.polygon_mode != 0 or rs.cull_mode & ~@as(u32, 3) != 0 or (rs.front_face != 0 and rs.front_face != 1) or (!dynamic_depth_bias_enable and pipeline_depth_bias_enable != 0) or (!dynamic_depth_bias and (rs.depth_bias_constant_factor != 0 or rs.depth_bias_clamp != 0 or rs.depth_bias_slope_factor != 0)) or (!dynamic_line_width and rs.line_width != 1)) return error.Invalid;
+    if (rs.s_type != 23 or !pipelineRasterizationLineStateValid(rs.p_next) or rs.flags != 0 or try bool32(rs.depth_clamp_enable) != 0 or rs.polygon_mode != 0 or rs.cull_mode & ~@as(u32, 3) != 0 or (rs.front_face != 0 and rs.front_face != 1) or (!dynamic_depth_bias_enable and pipeline_depth_bias_enable != 0) or (!dynamic_depth_bias and (rs.depth_bias_constant_factor != 0 or rs.depth_bias_clamp != 0 or rs.depth_bias_slope_factor != 0)) or (!dynamic_line_width and rs.line_width != 1)) return error.Invalid;
     try w.u32le(rs.cull_mode);
     try w.i32le(rs.front_face);
     try w.u32le(pipeline_rasterizer_discard_enable);
@@ -14009,6 +14067,29 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, graphics_cache, 1, @ptrCast(&divisor_pipeline_info), null, &divisor_pipeline));
     try std.testing.expect(divisor_pipeline[0] != 0xfeed_face);
     try std.testing.expect(validGraphicsPipelineLocked(divisor_pipeline[0]) != null);
+    var line_state = PipelineRasterizationLineStateCreateInfo{
+        .s_type = 1_000_259_001,
+        .p_next = null,
+        .line_rasterization_mode = 0,
+        .stippled_line_enable = 0,
+        .line_stipple_factor = 1,
+        .line_stipple_pattern = 0,
+    };
+    var line_rasterization = rasterization;
+    line_rasterization.p_next = @ptrCast(&line_state);
+    var line_pipeline_info = pipeline_info;
+    line_pipeline_info.rasterization = &line_rasterization;
+    var line_pipeline: [1]usize = .{0xfeed_face};
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, graphics_cache, 1, @ptrCast(&line_pipeline_info), null, &line_pipeline));
+    try std.testing.expect(line_pipeline[0] != 0xfeed_face);
+    try std.testing.expect(validGraphicsPipelineLocked(line_pipeline[0]) != null);
+    const graphics_states_before_line_rejection = graphics_pipeline_state;
+    line_state.line_rasterization_mode = 1;
+    var invalid_line_pipeline: [1]usize = .{0xfeed_face};
+    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, graphics_cache, 1, @ptrCast(&line_pipeline_info), null, &invalid_line_pipeline));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), invalid_line_pipeline[0]);
+    try std.testing.expectEqualSlices(SlotState, &graphics_states_before_line_rejection, &graphics_pipeline_state);
+    line_state.line_rasterization_mode = 0;
     // Traditional depth-only render passes use a zero-attachment color-blend
     // state and retain the D32 attachment as framebuffer slot zero.
     const depth_only_reference = AttachmentReference{ .attachment = 0, .layout = 3 };
@@ -15505,6 +15586,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     cmdBindDescriptorSets(commands[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
     destroyPipeline(device, pipelines[0], null);
     destroyPipeline(device, divisor_pipeline[0], null);
+    destroyPipeline(device, line_pipeline[0], null);
     destroyPipeline(device, dynamic_pipeline[0], null);
     cmdDraw(commands[0], 3, 1, 0, 0);
     try std.testing.expect(commands[0].impl.invalid);

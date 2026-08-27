@@ -81,6 +81,11 @@ Graphics pipeline vertex-input chains accept the feature-disabled,
 zero-entry `VkPipelineVertexInputDivisorStateCreateInfo` form with bounded,
 allocation-free validation; nonzero divisor entries and duplicate/unknown
 nodes remain transactional rejections.
+Graphics pipeline rasterization chains also accept the typed
+`VkPipelineRasterizationLineStateCreateInfo` ABI in its feature-disabled
+default form (default mode, stippling disabled, factor one, and zero pattern)
+with bounded, allocation-free validation; non-default line modes, stippling,
+and duplicate/unknown nodes remain transactional rejections.
 Graphics pipeline creation now also consumes the Vulkan 1.3
 `VkPipelineRenderingCreateInfo` pNext for `renderPass = VK_NULL_HANDLE`:
 the bounded dynamic-rendering profile records one BGRA8 color format and
