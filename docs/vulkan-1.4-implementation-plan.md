@@ -529,10 +529,14 @@ have exact meaning in the bounded CPU backend: copy/resolve/blit/clear stages,
 index/vertex-attribute input, compute, pre-rasterization vertex work, and
 sampled or storage shader access, together with the core generic `MEMORY_READ` and
 `MEMORY_WRITE` access domains. The mapping is applied consistently to dependency
-barriers, event/timestamp commands, and `vkQueueSubmit2`; unknown high bits
-remain rejected before command state or submission state is published. ABI,
-rollback, high-bit positive/negative, and 4096-iteration allocation-free tests
-cover the conversion path. `vkCmdSetEvent2`, `vkCmdResetEvent2`, and
+barriers, event/timestamp commands, and `vkQueueSubmit2`; promoted aliases are
+normalized before dynamic/traditional render-pass scope checks, and mixed
+barriers lower through the union of their canonical stages so graphics-only
+self-dependencies are not accidentally widened to `ALL_COMMANDS`. Unknown
+high bits remain rejected before command state or submission state is published.
+ABI, rollback, high-bit positive/negative, scoped graphics alias, transfer
+rejection, and 4096-iteration allocation-free tests cover the conversion path.
+`vkCmdSetEvent2`, `vkCmdResetEvent2`, and
 `vkCmdWaitEvents2` now also accept valid empty `VkDependencyInfo` nodes, which
 record the event operation without inventing a barrier; non-empty nodes still
 lower through the canonical barrier path.

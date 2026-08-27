@@ -6510,6 +6510,16 @@ fn sync2BarrierStageMaskToLegacy(stage_mask: u64, access_mask: u64) ?u32 {
     return sync2StageMaskToLegacy(stage_mask);
 }
 
+fn sync2ScopeStageMask(stage_mask: u64) ?u32 {
+    // Scope validation must see the same canonical stage domain as the
+    // legacy lowering, but NONE is a valid empty synchronization scope and
+    // therefore cannot pass through sync2StageMaskToLegacy (which requires a
+    // non-empty legacy mask).  Keep NONE as zero; non-empty promoted aliases
+    // are normalized before render-pass/dynamic-rendering restrictions run.
+    if (stage_mask == 0) return 0;
+    return sync2StageMaskToLegacy(stage_mask);
+}
+
 fn sync2AccessMaskToLegacy(mask: u64) ?u32 {
     const high_sampled = @as(u64, 0x1_0000_0000);
     const high_storage_read = @as(u64, 0x2_0000_0000);
@@ -6576,7 +6586,9 @@ fn dynamicRenderingDependencyValid(info: *const DependencyInfo) bool {
     if (info.buffer_memory_barrier_count != 0 or info.image_memory_barrier_count != 0) return false;
     if (info.memory_barriers) |items| for (items[0..info.memory_barrier_count]) |barrier| {
         const attachment_access: u64 = 0x780 | 0x18000; // attachment plus generic memory visibility
-        if (barrier.src_stage_mask & ~@as(u64, 0x700) != 0 or barrier.dst_stage_mask & ~@as(u64, 0x700) != 0 or barrier.src_access_mask & ~attachment_access != 0 or barrier.dst_access_mask & ~attachment_access != 0) return false;
+        const src_stage = sync2ScopeStageMask(barrier.src_stage_mask) orelse return false;
+        const dst_stage = sync2ScopeStageMask(barrier.dst_stage_mask) orelse return false;
+        if (src_stage & ~@as(u32, 0x700) != 0 or dst_stage & ~@as(u32, 0x700) != 0 or barrier.src_access_mask & ~attachment_access != 0 or barrier.dst_access_mask & ~attachment_access != 0) return false;
     };
     return true;
 }
@@ -6588,13 +6600,17 @@ fn renderPassDependencyValid(command_buffer: *const CommandBufferObj, info: *con
     if (info.buffer_memory_barrier_count != 0) return false;
     const graphics_stages: u64 = 0x8000 | 0x7ff; // ALL_GRAPHICS plus graphics stages
     if (info.memory_barriers) |items| for (items[0..info.memory_barrier_count]) |barrier| {
-        if (barrier.src_stage_mask & ~graphics_stages != 0 or barrier.dst_stage_mask & ~graphics_stages != 0) return false;
-        if (barrier.src_stage_mask & 0x700 != 0 and (barrier.dst_stage_mask & ~@as(u64, 0x700) != 0 or info.dependency_flags & 1 == 0)) return false;
+        const src_stage = sync2ScopeStageMask(barrier.src_stage_mask) orelse return false;
+        const dst_stage = sync2ScopeStageMask(barrier.dst_stage_mask) orelse return false;
+        if (@as(u64, src_stage) & ~graphics_stages != 0 or @as(u64, dst_stage) & ~graphics_stages != 0) return false;
+        if (src_stage & 0x700 != 0 and (dst_stage & ~@as(u32, 0x700) != 0 or info.dependency_flags & 1 == 0)) return false;
     };
     const framebuffer = command_buffer.impl.active_framebuffer orelse if (info.image_memory_barrier_count == 0) return true else return false;
     if (info.image_memory_barriers) |items| for (items[0..info.image_memory_barrier_count]) |barrier| {
-        if (barrier.src_stage_mask & ~graphics_stages != 0 or barrier.dst_stage_mask & ~graphics_stages != 0 or
-            (barrier.src_stage_mask & 0x700 != 0 and (barrier.dst_stage_mask & ~@as(u64, 0x700) != 0 or info.dependency_flags & 1 == 0)) or
+        const src_stage = sync2ScopeStageMask(barrier.src_stage_mask) orelse return false;
+        const dst_stage = sync2ScopeStageMask(barrier.dst_stage_mask) orelse return false;
+        if (@as(u64, src_stage) & ~graphics_stages != 0 or @as(u64, dst_stage) & ~graphics_stages != 0 or
+            (src_stage & 0x700 != 0 and (dst_stage & ~@as(u32, 0x700) != 0 or info.dependency_flags & 1 == 0)) or
             barrier.old_layout != barrier.new_layout or barrier.src_queue_family_index != barrier.dst_queue_family_index) return false;
         const image = validImageLocked(barrier.image) orelse return false;
         if (image.owner != command_buffer.impl.owner or (framebuffer.color_image != image and framebuffer.depth_image != image)) return false;
@@ -6654,12 +6670,14 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
         if (c.impl.state != 1 or c.impl.invalid) c.impl.invalid = true;
         return;
     }
-    // The legacy lowering uses ALL_COMMANDS for the compact backend's single
-    // synchronous execution stream. Each sync2 barrier is still validated
-    // against its own converted stage/access pair below; Vulkan does not
-    // require all barriers in one VkDependencyInfo to share stage masks.
-    const src_stage: u32 = 0x1_0000;
-    const dst_stage: u32 = 0x1_0000;
+    // Lower the per-barrier stage masks to the union consumed by the compact
+    // legacy command.  The previous unconditional ALL_COMMANDS lowering was
+    // conservative for an asynchronous backend, but it also made valid
+    // graphics-only synchronization2 barriers fail the traditional
+    // render-pass self-dependency scope check.  A union preserves every
+    // source/destination dependency while retaining the exact scope domain.
+    var lowered_src_stage: u32 = 0;
+    var lowered_dst_stage: u32 = 0;
     var memories: [max_api_items]MemoryBarrier = undefined;
     if (ci.memory_barriers) |items| for (items[0..ci.memory_barrier_count], 0..) |barrier, index| {
         const converted_src_stage = sync2BarrierStageMaskToLegacy(barrier.src_stage_mask, barrier.src_access_mask) orelse {
@@ -6682,6 +6700,8 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
             markCommandBufferInvalid(cb);
             return;
         }
+        lowered_src_stage |= sync2ScopeStageMask(barrier.src_stage_mask) orelse 0;
+        lowered_dst_stage |= sync2ScopeStageMask(barrier.dst_stage_mask) orelse 0;
         memories[index] = .{ .s_type = 46, .p_next = null, .src_access_mask = converted_src_access, .dst_access_mask = converted_dst_access };
     };
     var buffers: [max_api_items]BufferMemoryBarrier = undefined;
@@ -6706,6 +6726,8 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
             markCommandBufferInvalid(cb);
             return;
         }
+        lowered_src_stage |= sync2ScopeStageMask(barrier.src_stage_mask) orelse 0;
+        lowered_dst_stage |= sync2ScopeStageMask(barrier.dst_stage_mask) orelse 0;
         buffers[index] = .{ .s_type = 44, .p_next = null, .src_access_mask = converted_src_access, .dst_access_mask = converted_dst_access, .src_queue_family_index = barrier.src_queue_family_index, .dst_queue_family_index = barrier.dst_queue_family_index, .buffer = barrier.buffer, .offset = barrier.offset, .size = barrier.size };
     };
     var images: [max_api_items]ImageMemoryBarrier = undefined;
@@ -6730,8 +6752,12 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
             markCommandBufferInvalid(cb);
             return;
         }
+        lowered_src_stage |= sync2ScopeStageMask(barrier.src_stage_mask) orelse 0;
+        lowered_dst_stage |= sync2ScopeStageMask(barrier.dst_stage_mask) orelse 0;
         images[index] = .{ .s_type = 45, .p_next = null, .src_access_mask = converted_src_access, .dst_access_mask = converted_dst_access, .old_layout = barrier.old_layout, .new_layout = barrier.new_layout, .src_queue_family_index = barrier.src_queue_family_index, .dst_queue_family_index = barrier.dst_queue_family_index, .image = barrier.image, .subresource_range = barrier.subresource_range };
     };
+    const src_stage = if (lowered_src_stage == 0) 0x1_0000 else lowered_src_stage;
+    const dst_stage = if (lowered_dst_stage == 0) 0x1_0000 else lowered_dst_stage;
     cmdPipelineBarrier(cb, src_stage, dst_stage, ci.dependency_flags, ci.memory_barrier_count, if (ci.memory_barrier_count == 0) null else @ptrCast(&memories), ci.buffer_memory_barrier_count, if (ci.buffer_memory_barrier_count == 0) null else @ptrCast(&buffers), ci.image_memory_barrier_count, if (ci.image_memory_barrier_count == 0) null else @ptrCast(&images));
 }
 fn cmdSetEvent2(cb: ?CommandBuffer, event: usize, info: ?*const DependencyInfo) callconv(.c) void {
@@ -19492,6 +19518,18 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expectEqual(@as(?u32, 0x1000), sync2TimestampStageToLegacy(0x1000_0000_0));
     try std.testing.expect(sync2TimestampStageToLegacy(0) == null);
     try std.testing.expect(sync2TimestampStageToLegacy(0x1000 | 0x2000) == null);
+    try std.testing.expectEqual(@as(?u32, 0), sync2ScopeStageMask(0));
+    try std.testing.expectEqual(@as(?u32, 0x4), sync2ScopeStageMask(0x1000_0000_00));
+    try std.testing.expectEqual(@as(?u32, 0x8), sync2ScopeStageMask(0x4000_0000_00));
+    try std.testing.expectEqual(@as(?u32, 0x1000), sync2ScopeStageMask(0x1000_0000_0));
+    try std.testing.expect(sync2ScopeStageMask(0x8000_0000_0000_0000) == null);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(@as(?u32, 0x8), sync2ScopeStageMask(0x4000_0000_00));
+        try std.testing.expectEqual(@as(?u32, 0x4), sync2ScopeStageMask(0x1000_0000_00));
+        try std.testing.expect(sync2ScopeStageMask(0x8000_0000_0000_0000) == null);
+    }
+    test_allocations_before_failure = null;
     try std.testing.expect(stagesSupportAccess(0x1_0000, 0x8000));
     try std.testing.expect(stagesSupportAccess(0x800, 0x20 | 0x40));
     try std.testing.expect(stagesSupportAccess(0x1, 0x1_0000));
@@ -19785,6 +19823,34 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     var traditional_attachment_dependency = attachment_dependency;
     traditional_attachment_dependency.dependency_flags = 1;
     try std.testing.expect(renderPassDependencyValid(commands[0], &traditional_attachment_dependency));
+    // Promoted synchronization2 stage aliases must be normalized before the
+    // traditional render-pass scope restriction runs.  PRE_RASTERIZATION and
+    // VERTEX_INPUT map to the represented graphics stages and are valid for a
+    // self-dependency; COPY remains a transfer stage and is rejected inside a
+    // render-pass instance.  Both decisions are failure-atomic at recording.
+    const high_graphics_barrier = MemoryBarrier2{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 0x4000_0000_00, .dst_stage_mask = 0x1000_0000_00, .src_access_mask = 0, .dst_access_mask = 0 };
+    const high_graphics_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 1, .memory_barriers = @ptrCast(&high_graphics_barrier), .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
+    try std.testing.expect(renderPassDependencyValid(commands[0], &high_graphics_dependency));
+    const before_high_graphics = commands[0].impl.count;
+    cmdPipelineBarrier2(commands[0], &high_graphics_dependency);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(before_high_graphics, commands[0].impl.count);
+    const none_graphics_barriers = [_]MemoryBarrier2{
+        .{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 0, .dst_stage_mask = 0, .src_access_mask = 0, .dst_access_mask = 0 },
+        high_graphics_barrier,
+    };
+    const none_graphics_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = none_graphics_barriers.len, .memory_barriers = &none_graphics_barriers, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
+    const before_none_graphics = commands[0].impl.count;
+    cmdPipelineBarrier2(commands[0], &none_graphics_dependency);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(before_none_graphics, commands[0].impl.count);
+    const high_transfer_barrier = MemoryBarrier2{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 0x1000_0000_0, .dst_stage_mask = 0x1000_0000_0, .src_access_mask = 0, .dst_access_mask = 0 };
+    const high_transfer_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 1, .memory_barriers = @ptrCast(&high_transfer_barrier), .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
+    const before_high_transfer = commands[0].impl.count;
+    cmdPipelineBarrier2(commands[0], &high_transfer_dependency);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_high_transfer, commands[0].impl.count);
+    commands[0].impl.invalid = false;
     const before_traditional_scope = commands[0].impl.count;
     cmdPipelineBarrier2(commands[0], &dependency);
     try std.testing.expect(commands[0].impl.invalid);
