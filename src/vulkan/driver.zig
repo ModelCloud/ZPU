@@ -192,7 +192,22 @@ pub const PhysicalDeviceFeatures2 = extern struct { s_type: i32, p_next: ?*anyop
 // instead of treating every non-null pNext as an opaque rejection.  ZPU's
 // advertised profile has no optional features, so each payload is filled with
 // VK_FALSE while preserving the caller-owned chain links.
-pub const PhysicalDeviceVulkan11Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [12]u32 };
+pub const PhysicalDeviceVulkan11Features = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    storage_buffer16_bit_access: u32,
+    uniform_and_storage_buffer16_bit_access: u32,
+    storage_push_constant16: u32,
+    storage_input_output16: u32,
+    multiview: u32,
+    multiview_geometry_shader: u32,
+    multiview_tessellation_shader: u32,
+    variable_pointers_storage_buffer: u32,
+    variable_pointers: u32,
+    protected_memory: u32,
+    sampler_ycbcr_conversion: u32,
+    shader_draw_parameters: u32,
+};
 pub const PhysicalDeviceVulkan12Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [47]u32 };
 pub const PhysicalDeviceVulkan13Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [15]u32 };
 pub const PhysicalDeviceVulkan14Features = extern struct {
@@ -16782,7 +16797,22 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     test_allocations_before_failure = null;
     destroyPrivateDataSlot(ctx.device, private_slot, null);
 
-    var vulkan11_features = PhysicalDeviceVulkan11Features{ .s_type = 49, .p_next = null, .values = [_]u32{0xffff_ffff} ** 12 };
+    var vulkan11_features = PhysicalDeviceVulkan11Features{
+        .s_type = 49,
+        .p_next = null,
+        .storage_buffer16_bit_access = 0xffff_ffff,
+        .uniform_and_storage_buffer16_bit_access = 0xffff_ffff,
+        .storage_push_constant16 = 0xffff_ffff,
+        .storage_input_output16 = 0xffff_ffff,
+        .multiview = 0xffff_ffff,
+        .multiview_geometry_shader = 0xffff_ffff,
+        .multiview_tessellation_shader = 0xffff_ffff,
+        .variable_pointers_storage_buffer = 0xffff_ffff,
+        .variable_pointers = 0xffff_ffff,
+        .protected_memory = 0xffff_ffff,
+        .sampler_ycbcr_conversion = 0xffff_ffff,
+        .shader_draw_parameters = 0xffff_ffff,
+    };
     var vulkan12_features = PhysicalDeviceVulkan12Features{ .s_type = 51, .p_next = @ptrCast(&vulkan11_features), .values = [_]u32{0xffff_ffff} ** 47 };
     var features = PhysicalDeviceFeatures2{ .s_type = 1000059000, .p_next = @ptrCast(&vulkan12_features), .features = std.mem.zeroes(Features) };
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceVertexAttributeDivisorFeatures));
@@ -16815,9 +16845,12 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 104), @sizeOf(PhysicalDeviceVulkan14Features));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVulkan14Features, "global_priority_query"));
     try std.testing.expectEqual(@as(usize, 96), @offsetOf(PhysicalDeviceVulkan14Features, "push_descriptor"));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(PhysicalDeviceVulkan11Features));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVulkan11Features, "storage_buffer16_bit_access"));
+    try std.testing.expectEqual(@as(usize, 60), @offsetOf(PhysicalDeviceVulkan11Features, "shader_draw_parameters"));
     getPhysicalDeviceFeatures2(ctx.physical, &features);
     try std.testing.expect(std.mem.allEqual(u32, &features.features.values, 0));
-    try std.testing.expect(std.mem.allEqual(u32, &vulkan11_features.values, 0));
+    try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&vulkan11_features)[16..64], 0));
     try std.testing.expect(std.mem.allEqual(u32, &vulkan12_features.values, 0));
     try std.testing.expectEqual(@as(i32, 51), vulkan12_features.s_type);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan11_features)), vulkan12_features.p_next);
