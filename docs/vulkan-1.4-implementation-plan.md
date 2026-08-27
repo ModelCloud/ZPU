@@ -154,6 +154,9 @@ non-null `pNext`. It also accepts the individual core-promoted feature
 structures (16-bit storage, descriptor indexing, line rasterization, and the
 other 1.1–1.4 feature forms) with exact LP64-sized VkBool32 payloads; unknown
 feature chains remain transactional rejections.
+The base `VkPhysicalDeviceFeatures` payload is likewise represented by all 55
+registry field names (rather than an opaque word array), with the same 220-byte
+LP64 layout and allocation-free all-false query behavior.
 The Vulkan 1.1 individual storage, variable-pointer, sampler-YCbCr,
 multiview, protected-memory, and shader-draw-parameter nodes expose their
 registry field names directly, preserving the same all-false and failure-

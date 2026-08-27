@@ -22,7 +22,73 @@ pub const API_1_0: u32 = 1 << 22;
 pub const AppInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, app_name: ?[*:0]const u8, app_version: u32, engine_name: ?[*:0]const u8, engine_version: u32, api_version: u32 };
 pub const InstanceInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, app_info: ?*const AppInfo, layer_count: u32, layers: ?[*]const [*:0]const u8, extension_count: u32, extensions: ?[*]const [*:0]const u8 };
 pub const QueueInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, family: u32, count: u32, priorities: ?[*]const f32 };
-pub const Features = extern struct { values: [55]u32 };
+/// Exact VkPhysicalDeviceFeatures ABI (55 contiguous VkBool32 fields).
+///
+/// Keep this declaration named rather than exposing an opaque word array so
+/// callers can use the Vulkan field names while the C layout remains stable.
+pub const Features = extern struct {
+    robust_buffer_access: u32,
+    full_draw_index_uint32: u32,
+    image_cube_array: u32,
+    independent_blend: u32,
+    geometry_shader: u32,
+    tessellation_shader: u32,
+    sample_rate_shading: u32,
+    dual_src_blend: u32,
+    logic_op: u32,
+    multi_draw_indirect: u32,
+    draw_indirect_first_instance: u32,
+    depth_clamp: u32,
+    depth_bias_clamp: u32,
+    fill_mode_non_solid: u32,
+    depth_bounds: u32,
+    wide_lines: u32,
+    large_points: u32,
+    alpha_to_one: u32,
+    multi_viewport: u32,
+    sampler_anisotropy: u32,
+    texture_compression_etc2: u32,
+    texture_compression_astc_ldr: u32,
+    texture_compression_bc: u32,
+    occlusion_query_precise: u32,
+    pipeline_statistics_query: u32,
+    vertex_pipeline_stores_and_atomics: u32,
+    fragment_stores_and_atomics: u32,
+    shader_tessellation_and_geometry_point_size: u32,
+    shader_image_gather_extended: u32,
+    shader_storage_image_extended_formats: u32,
+    shader_storage_image_multisample: u32,
+    shader_storage_image_read_without_format: u32,
+    shader_storage_image_write_without_format: u32,
+    shader_uniform_buffer_array_dynamic_indexing: u32,
+    shader_sampled_image_array_dynamic_indexing: u32,
+    shader_storage_buffer_array_dynamic_indexing: u32,
+    shader_storage_image_array_dynamic_indexing: u32,
+    shader_clip_distance: u32,
+    shader_cull_distance: u32,
+    shader_float64: u32,
+    shader_int64: u32,
+    shader_int16: u32,
+    shader_resource_residency: u32,
+    shader_resource_min_lod: u32,
+    sparse_binding: u32,
+    sparse_residency_buffer: u32,
+    sparse_residency_image2_d: u32,
+    sparse_residency_image3_d: u32,
+    sparse_residency2_samples: u32,
+    sparse_residency4_samples: u32,
+    sparse_residency8_samples: u32,
+    sparse_residency16_samples: u32,
+    sparse_residency_aliased: u32,
+    variable_multisample_rate: u32,
+    inherited_queries: u32,
+};
+
+const feature_word_count: usize = 55;
+
+fn featureWords(features: *const Features) []const u32 {
+    return @as([*]const u32, @ptrCast(features))[0..feature_word_count];
+}
 pub const DeviceInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, queue_info_count: u32, queue_infos: ?[*]const QueueInfo, layer_count: u32, layers: ?[*]const [*:0]const u8, extension_count: u32, extensions: ?[*]const [*:0]const u8, features: ?*const Features };
 pub const ExtensionProperties = extern struct { name: [256]u8, spec_version: u32 };
 pub const LayerProperties = extern struct { layer_name: [256]u8, spec_version: u32, implementation_version: u32, description: [256]u8 };
@@ -2223,7 +2289,7 @@ fn deviceCreatePNextHasEnabledFeature(raw: ?*const anyopaque) bool {
         }
         if (header.s_type == 1000059000) {
             const feature2: *const PhysicalDeviceFeatures2 = @ptrCast(@alignCast(item));
-            for (feature2.features.values) |value| if (value != 0) return true;
+            for (featureWords(&feature2.features)) |value| if (value != 0) return true;
             return coreFeatureChainHasEnabledValue(feature2.p_next);
         }
         if (saw_loader and coreFeaturePayloadWords(header.s_type) == null) return false;
@@ -3139,7 +3205,7 @@ fn getFeaturesLocked(h: Physical, out: *Features) bool {
         while (overlap_hold.load(.acquire)) std.atomic.spinLoopHint();
         hit(.concurrent_overlap);
     }
-    out.* = .{ .values = [_]u32{0} ** 55 };
+    out.* = std.mem.zeroes(Features);
     return true;
 }
 fn getFeatures(physical: ?Physical, output: ?*Features) callconv(.c) void {
@@ -3560,7 +3626,7 @@ fn createDevice(physical: ?Physical, info: ?*const DeviceInfo, alloc: ?*const Al
     }
     if (!deviceCreatePNextValid(ci.p_next) or ci.flags != 0) return .error_initialization_failed;
     if (deviceCreatePNextHasEnabledFeature(ci.p_next)) return .error_feature_not_present;
-    if (ci.features) |features| for (features.values) |feature| if (feature != 0) return .error_feature_not_present;
+    if (ci.features) |features| for (featureWords(features)) |feature| if (feature != 0) return .error_feature_not_present;
     if (ci.queue_info_count != 1) return .error_initialization_failed;
     const qis = ci.queue_infos orelse return .error_initialization_failed;
     const qi = qis[0];
@@ -13971,8 +14037,8 @@ test "enumeration lifecycle and unsupported features" {
     try std.testing.expectEqual(Result.incomplete, enumeratePhysicalDevices(instance, &count, &ps));
     count = 1;
     try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &count, &ps));
-    var features = Features{ .values = [_]u32{0} ** 55 };
-    features.values[0] = 1;
+    var features = std.mem.zeroes(Features);
+    features.robust_buffer_access = 1;
     var priority: f32 = 1;
     const qi = QueueInfo{ .s_type = 2, .p_next = null, .flags = 0, .family = 0, .count = 1, .priorities = @ptrCast(&priority) };
     var di = DeviceInfo{ .s_type = 3, .p_next = null, .flags = 0, .queue_info_count = 1, .queue_infos = @ptrCast(&qi), .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null, .features = &features };
@@ -13989,9 +14055,9 @@ test "enumeration lifecycle and unsupported features" {
     di.p_next = @ptrCast(&feature2);
     try std.testing.expectEqual(Result.success, createDevice(ps[0], &di, null, &device));
     destroyDevice(device, null);
-    feature2.features.values[0] = 1;
+    feature2.features.robust_buffer_access = 1;
     try std.testing.expectEqual(Result.error_feature_not_present, createDevice(ps[0], &di, null, &device));
-    feature2.features.values[0] = 0;
+    feature2.features.robust_buffer_access = 0;
     var device_feature = PhysicalDevice16BitStorageFeatures{ .s_type = 1000083000, .p_next = null, .storage_buffer16_bit_access = 0, .uniform_and_storage_buffer16_bit_access = 0, .storage_push_constant16 = 0, .storage_input_output16 = 0 };
     feature2.p_next = @ptrCast(&device_feature);
     try std.testing.expectEqual(Result.success, createDevice(ps[0], &di, null, &device));
@@ -14026,6 +14092,9 @@ test "enumeration lifecycle and unsupported features" {
 
 test "core instance physical and device enumeration is bounded and allocation free" {
     try std.testing.expectEqual(@as(usize, 220), @sizeOf(Features));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(Features, "robust_buffer_access"));
+    try std.testing.expectEqual(@as(usize, 216), @offsetOf(Features, "inherited_queries"));
+    try std.testing.expectEqual(feature_word_count, @sizeOf(Features) / @sizeOf(u32));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(QueueProperties));
     try std.testing.expectEqual(@as(usize, 520), @sizeOf(MemoryProperties));
     const ci = InstanceInfo{ .s_type = 1, .p_next = null, .flags = 0, .app_info = null, .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null };
@@ -14057,9 +14126,10 @@ test "core instance physical and device enumeration is bounded and allocation fr
         count = device_extensions.len;
         try std.testing.expectEqual(Result.success, enumerateDeviceExtensions(physical[0], null, &count, &device_extensions));
         try std.testing.expectEqual(@as(u32, 2), count);
-        var features = Features{ .values = [_]u32{1} ** 55 };
+        var features = std.mem.zeroes(Features);
+        @memset(std.mem.asBytes(&features), 1);
         getFeatures(physical[0], &features);
-        try std.testing.expectEqualSlices(u32, &([_]u32{0} ** 55), &features.values);
+        try std.testing.expect(std.mem.allEqual(u32, featureWords(&features), 0));
         var sparse_count: u32 = 1;
         getSparseImageFormatProperties(physical[0], 37, 1, 1, 4, 0, &sparse_count, @ptrFromInt(8));
         try std.testing.expectEqual(@as(u32, 0), sparse_count);
@@ -16795,9 +16865,10 @@ test "all physical queries cover success boundaries and invalid handles" {
     const p = physical[0];
     getFeatures(p, null);
 
-    var features = Features{ .values = [_]u32{1} ** 55 };
+    var features = std.mem.zeroes(Features);
+    @memset(std.mem.asBytes(&features), 1);
     getFeatures(p, &features);
-    try std.testing.expectEqualSlices(u32, &([_]u32{0} ** 55), &features.values);
+    try std.testing.expect(std.mem.allEqual(u32, featureWords(&features), 0));
     var queue_count: u32 = 7;
     getQueueProperties(p, &queue_count, null);
     try std.testing.expectEqual(@as(u32, 1), queue_count);
@@ -16871,9 +16942,9 @@ test "all physical queries cover success boundaries and invalid handles" {
     try std.testing.expect(vk_icdGetInstanceProcAddr(instance, "notAnEntryPoint") == null);
 
     destroyInstance(instance, null);
-    features.values[0] = 7;
+    features.robust_buffer_access = 7;
     getFeatures(p, &features);
-    try std.testing.expectEqual(@as(u32, 7), features.values[0]);
+    try std.testing.expectEqual(@as(u32, 7), features.robust_buffer_access);
     try std.testing.expectEqual(Result.error_initialization_failed, getImageFormatProperties(p, 0, 0, 0, 0, 0, null));
     try std.testing.expectEqual(Result.error_initialization_failed, enumerateDeviceExtensions(p, null, &extension_count, null));
 }
@@ -17275,7 +17346,7 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVulkan12Features, "sampler_mirror_clamp_to_edge"));
     try std.testing.expectEqual(@as(usize, 200), @offsetOf(PhysicalDeviceVulkan12Features, "subgroup_broadcast_dynamic_id"));
     getPhysicalDeviceFeatures2(ctx.physical, &features);
-    try std.testing.expect(std.mem.allEqual(u32, &features.features.values, 0));
+    try std.testing.expect(std.mem.allEqual(u32, featureWords(&features.features), 0));
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&vulkan11_features)[16..64], 0));
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&vulkan12_features)[16..204], 0));
     try std.testing.expectEqual(@as(u32, 0), vulkan12_features.timeline_semaphore);
@@ -17352,9 +17423,9 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expect(!deviceQueuePNextValid(&queue_priority));
     var unknown_feature_chain = ChainHeader{ .s_type = 999, .p_next = null };
     features.p_next = @ptrCast(&unknown_feature_chain);
-    features.features.values[0] = 0xdead_beef;
+    features.features.robust_buffer_access = 0xdead_beef;
     getPhysicalDeviceFeatures2(ctx.physical, &features);
-    try std.testing.expectEqual(@as(u32, 0xdead_beef), features.features.values[0]);
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), features.features.robust_buffer_access);
     var line_features = PhysicalDeviceLineRasterizationFeatures{ .s_type = 1000259000, .p_next = null, .rectangular_lines = 0xffff_ffff, .bresenham_lines = 0xffff_ffff, .smooth_lines = 0xffff_ffff, .stippled_rectangular_lines = 0xffff_ffff, .stippled_bresenham_lines = 0xffff_ffff, .stippled_smooth_lines = 0xffff_ffff };
     var descriptor_features = std.mem.zeroes(PhysicalDeviceDescriptorIndexingFeatures);
     descriptor_features.s_type = 1000161001;
@@ -17382,18 +17453,18 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&storage_features)), divisor_features.p_next);
     var duplicate_line_features = PhysicalDeviceLineRasterizationFeatures{ .s_type = 1000259000, .p_next = null, .rectangular_lines = 0xaaaa_aaaa, .bresenham_lines = 0xaaaa_aaaa, .smooth_lines = 0xaaaa_aaaa, .stippled_rectangular_lines = 0xaaaa_aaaa, .stippled_bresenham_lines = 0xaaaa_aaaa, .stippled_smooth_lines = 0xaaaa_aaaa };
     line_features.p_next = @ptrCast(&duplicate_line_features);
-    features.features.values[0] = 0x1111_1111;
+    features.features.robust_buffer_access = 0x1111_1111;
     storage_features.storage_buffer16_bit_access = 0x2222_2222;
     try std.testing.expectEqual(@as(u32, 0xaaaa_aaaa), duplicate_line_features.rectangular_lines);
     getPhysicalDeviceFeatures2(ctx.physical, &features);
-    try std.testing.expectEqual(@as(u32, 0x1111_1111), features.features.values[0]);
+    try std.testing.expectEqual(@as(u32, 0x1111_1111), features.features.robust_buffer_access);
     try std.testing.expectEqual(@as(u32, 0x2222_2222), storage_features.storage_buffer16_bit_access);
     try std.testing.expectEqual(@as(u32, 0xaaaa_aaaa), duplicate_line_features.rectangular_lines);
     line_features.p_next = null;
-    features.features.values[0] = 0xdead_beef;
+    features.features.robust_buffer_access = 0xdead_beef;
     storage_features.storage_buffer16_bit_access = 0xcafe_f00d;
     getPhysicalDeviceFeatures2(@ptrFromInt(8), &features);
-    try std.testing.expectEqual(@as(u32, 0xdead_beef), features.features.values[0]);
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), features.features.robust_buffer_access);
     try std.testing.expectEqual(@as(u32, 0xcafe_f00d), storage_features.storage_buffer16_bit_access);
     features.p_next = null;
     var vulkan11_properties = std.mem.zeroes(PhysicalDeviceVulkan11Properties);
