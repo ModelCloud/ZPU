@@ -355,10 +355,10 @@ pub const Executor = struct {
                     if (instruction.operands.len == 1) {
                         if (!same(source.ty, instruction.ty)) return error.InvalidType;
                         result = source;
-                    } else if (self.program.instructions[instruction.operands[0]].op == .f_frexp_struct) {
+                    } else if (self.program.instructions[instruction.operands[0]].op == .f_frexp_struct or self.program.instructions[instruction.operands[0]].op == .f_modf_struct) {
                         if (instruction.operands[1] >= 2 or source.ty.scalar != .f32 or source.ty.rows != 1 or (source.ty.columns != 2 and source.ty.columns != 4)) return error.InvalidType;
                         const width: usize = source.ty.columns / 2;
-                        const member_scalar: ir.Scalar = if (instruction.operands[1] == 0) .f32 else .i32;
+                        const member_scalar: ir.Scalar = if (instruction.operands[1] == 0 or self.program.instructions[instruction.operands[0]].op == .f_modf_struct) .f32 else .i32;
                         if (instruction.ty.rows != 1 or instruction.ty.columns != width or instruction.ty.scalar != member_scalar) return error.InvalidType;
                         const start: usize = if (instruction.operands[1] == 0) 0 else width;
                         @memcpy(result.bits[0..width], source.bits[start .. start + width]);
@@ -888,10 +888,14 @@ pub const Executor = struct {
                 },
                 .f_modf_struct => {
                     const source = try valueRef(self.values, pc, instruction.operands[0]);
-                    const x: f32 = @bitCast(source.bits[0]);
-                    const parts = std.math.modf(x);
-                    result.bits[0] = canonicalFloat(@bitCast(parts.fpart));
-                    result.bits[1] = canonicalFloat(@bitCast(parts.ipart));
+                    if (source.ty.scalar != .f32 or source.ty.rows != 1 or (source.ty.columns != 1 and source.ty.columns != 2) or result.ty.scalar != .f32 or result.ty.rows != 1 or result.ty.columns != source.ty.columns * 2) return error.InvalidType;
+                    const width: usize = source.ty.columns;
+                    for (0..width) |i| {
+                        const x: f32 = @bitCast(source.bits[i]);
+                        const parts = std.math.modf(x);
+                        result.bits[i] = canonicalFloat(@bitCast(parts.fpart));
+                        result.bits[width + i] = canonicalFloat(@bitCast(parts.ipart));
+                    }
                 },
                 .f_frexp_struct => {
                     const source = try valueRef(self.values, pc, instruction.operands[0]);
@@ -1267,7 +1271,7 @@ fn validate(program: *const ir.Program) Error!void {
                 .f_modf, .f_frexp => if (oi == 0) {
                     if (source_ty.scalar != .f32 or source_ty.rows != 1 or !same(source_ty, instruction.ty)) return error.InvalidType;
                 },
-                .f_modf_struct => if (source_ty.scalar != .f32 or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
+                .f_modf_struct => if (source_ty.scalar != .f32 or source_ty.rows != 1 or (source_ty.columns != 1 and source_ty.columns != 2) or instruction.ty.columns != source_ty.columns * 2) return error.InvalidType,
                 .i_pack_snorm4x8, .i_pack_unorm4x8 => if (source_ty.scalar != .f32 or source_ty.columns != 4 or source_ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.rows != 1 or (instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32)) return error.InvalidType,
                 .i_pack_snorm2x16, .i_pack_unorm2x16 => if (source_ty.scalar != .f32 or source_ty.columns != 2 or source_ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.rows != 1 or (instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32)) return error.InvalidType,
                 .f_unpack_snorm2x16, .f_unpack_unorm2x16 => if ((source_ty.scalar != .i32 and source_ty.scalar != .u32) or source_ty.columns != 1 or source_ty.rows != 1 or instruction.ty.scalar != .f32 or instruction.ty.columns != 2 or instruction.ty.rows != 1) return error.InvalidType,
@@ -1348,9 +1352,9 @@ fn validate(program: *const ir.Program) Error!void {
                 const source = program.instructions[instruction.operands[0]].ty;
                 if (instruction.operands.len == 1) {
                     if (!same(source, instruction.ty)) return error.InvalidType;
-                } else if (program.instructions[instruction.operands[0]].op == .f_frexp_struct) {
+                } else if (program.instructions[instruction.operands[0]].op == .f_frexp_struct or program.instructions[instruction.operands[0]].op == .f_modf_struct) {
                     const member_width = source.columns / 2;
-                    const member_scalar: ir.Scalar = if (instruction.operands[1] == 0) .f32 else .i32;
+                    const member_scalar: ir.Scalar = if (program.instructions[instruction.operands[0]].op == .f_modf_struct or instruction.operands[1] == 0) .f32 else .i32;
                     if (source.scalar != .f32 or source.rows != 1 or (source.columns != 2 and source.columns != 4) or instruction.operands[1] >= 2 or instruction.ty.rows != 1 or instruction.ty.columns != member_width or instruction.ty.scalar != member_scalar) return error.InvalidType;
                 } else if (source.rows != 1 or instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != source.scalar) return error.InvalidType else if (instruction.operands[1] >= source.columns) return error.Bounds;
             },
@@ -1519,9 +1523,9 @@ fn validate(program: *const ir.Program) Error!void {
                 if (target.scalar != .i32 or target.rows != 1 or target.columns != instruction.ty.columns) return error.InvalidType;
             },
             .f_modf_struct => {
-                if (instruction.ty.scalar != .f32 or instruction.ty.columns != 2 or instruction.ty.rows != 1) return error.InvalidType;
+                if (instruction.ty.scalar != .f32 or (instruction.ty.columns != 2 and instruction.ty.columns != 4) or instruction.ty.rows != 1) return error.InvalidType;
                 const source = program.instructions[instruction.operands[0]].ty;
-                if (source.scalar != .f32 or source.columns != 1 or source.rows != 1) return error.InvalidType;
+                if (source.scalar != .f32 or source.rows != 1 or (source.columns != 1 and source.columns != 2) or instruction.ty.columns != source.columns * 2) return error.InvalidType;
             },
             .f_frexp_struct => {
                 if (instruction.ty.scalar != .f32 or (instruction.ty.columns != 2 and instruction.ty.columns != 4) or instruction.ty.rows != 1) return error.InvalidType;
@@ -2319,6 +2323,29 @@ test "GLSL ModfStruct returns fraction then integral scalar members" {
     try executor.execute(&.{}, &.{});
     try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, -0.75))), executor.values[1].bits[0]);
     try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, -2))), executor.values[1].bits[1]);
+    for (0..4096) |_| try executor.execute(&.{}, &.{});
+}
+
+test "GLSL ModfStruct flattens vec2 fraction and integral members" {
+    const first = f32bytes(-2.75);
+    const second = f32bytes(3.5);
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &first },
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &second },
+        .{ .op = .constant_composite, .ty = .{ .scalar = .f32, .columns = 2 }, .operands = &.{ 0, 1 }, .literal = &.{} },
+        .{ .op = .f_modf_struct, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{2}, .literal = &.{} },
+        .{ .op = .extract, .ty = .{ .scalar = .f32, .columns = 2 }, .operands = &.{ 3, 0 }, .literal = &.{} },
+        .{ .op = .extract, .ty = .{ .scalar = .f32, .columns = 2 }, .operands = &.{ 3, 1 }, .literal = &.{} },
+    };
+    var program = try testProgram(&.{}, &instructions);
+    defer std.testing.allocator.free(program.bytes);
+    var executor = try Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+    try executor.execute(&.{}, &.{});
+    try std.testing.expectApproxEqAbs(@as(f32, -0.75), @as(f32, @bitCast(executor.values[4].bits[0])), 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), @as(f32, @bitCast(executor.values[4].bits[1])), 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f32, -2), @as(f32, @bitCast(executor.values[5].bits[0])), 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f32, 3), @as(f32, @bitCast(executor.values[5].bits[1])), 0.000001);
     for (0..4096) |_| try executor.execute(&.{}, &.{});
 }
 

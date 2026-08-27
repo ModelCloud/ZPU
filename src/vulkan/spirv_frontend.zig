@@ -303,7 +303,8 @@ fn resultShape(nodes: []const Node, type_id: u32) Error!ir.Type {
             const first = try resultShape(nodes, node.words[0]);
             const second = try resultShape(nodes, node.words[1]);
             const mixed_frexp = first.scalar == .f32 and second.scalar == .i32 and first.columns == second.columns and first.rows == 1 and second.rows == 1 and first.columns <= 2;
-            if ((!mixed_frexp and (first.columns != 1 or first.rows != 1 or second.columns != 1 or second.rows != 1)) or (!sameShape(first, second) and !mixed_frexp)) return error.Unsupported;
+            const same_pair = sameShape(first, second) and first.rows == 1 and first.columns <= 2;
+            if ((!same_pair and !mixed_frexp) or (!sameShape(first, second) and !mixed_frexp)) return error.Unsupported;
             if (first.scalar != .i32 and first.scalar != .u32 and first.scalar != .f32) return error.Unsupported;
             var pair = first;
             pair.columns = @intCast(first.columns * 2);
@@ -329,7 +330,7 @@ fn supportedGlslExtInst(ext: u32, result: ir.Type, operand: ir.Type) bool {
         // validateGlslInterpolation.
         75, 76, 77 => result.scalar == .f32 and result.rows == 1 and result.columns >= 1 and result.columns <= 4 and sameShape(result, operand),
         35 => result.scalar == .f32 and result.rows == 1 and result.columns >= 1 and result.columns <= 4 and sameShape(result, operand),
-        36 => result.scalar == .f32 and result.columns == 2 and result.rows == 1 and operand.scalar == .f32 and operand.columns == 1 and operand.rows == 1,
+        36 => result.scalar == .f32 and result.rows == 1 and (result.columns == 2 or result.columns == 4) and operand.scalar == .f32 and operand.rows == 1 and (operand.columns == 1 or operand.columns == 2) and result.columns == operand.columns * 2,
         51 => result.scalar == .f32 and result.rows == 1 and result.columns >= 1 and result.columns <= 4 and sameShape(result, operand),
         52 => result.scalar == .f32 and result.rows == 1 and (result.columns == 2 or result.columns == 4) and operand.scalar == .f32 and operand.rows == 1 and (operand.columns == 1 or operand.columns == 2) and result.columns == operand.columns * 2,
         33 => result.scalar == .f32 and result.columns == 1 and result.rows == 1 and operand.scalar == .f32 and operand.columns == 4 and operand.rows == 4,
@@ -419,6 +420,18 @@ fn validateGlslFrexpStruct(nodes: []const Node, result_type: u32, result: ir.Typ
     const significand = try resultShape(nodes, structure.words[0]);
     const exponent = try resultShape(nodes, structure.words[1]);
     if (significand.scalar != .f32 or exponent.scalar != .i32 or significand.rows != 1 or exponent.rows != 1 or !sameShape(significand, operand) or exponent.columns != operand.columns or result.scalar != .f32 or result.rows != 1 or result.columns != operand.columns * 2) return error.Unsupported;
+}
+
+/// Validate the bounded GLSL.std.450 ModfStruct aggregate.  Both members are
+/// f32 vectors, so scalar and vec2 forms flatten directly into the canonical
+/// f32 lane vector without a mixed-type extraction ABI.
+fn validateGlslModfStruct(nodes: []const Node, result_type: u32, result: ir.Type, operand: ir.Type) Error!void {
+    if (!supportedGlslExtInst(36, result, operand) or operand.scalar != .f32 or operand.rows != 1 or (operand.columns != 1 and operand.columns != 2)) return error.Unsupported;
+    const structure = nodes[try id(nodes, result_type)];
+    if (structure.kind != .structure or structure.words.len != 2) return error.Unsupported;
+    const fraction = try resultShape(nodes, structure.words[0]);
+    const integral = try resultShape(nodes, structure.words[1]);
+    if (!sameShape(fraction, operand) or !sameShape(integral, operand) or result.scalar != .f32 or result.rows != 1 or result.columns != operand.columns * 2) return error.Unsupported;
 }
 
 fn glslOutputInterfaceIndex(nodes: []const Node, decorations: []const Decorations, interfaces: []const ir.Interface, stage: ir.Stage, pointer_id: u32) Error!u32 {
@@ -860,6 +873,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 if (!supportedGlslExtInst(w[3], result, operand)) return error.Unsupported;
                 try validateGlslInterpolation(nodes, requested_stage, w[3], result, operand, w[4..]);
                 if (w[3] == 35 or w[3] == 51) try validateGlslModfFrexp(nodes, requested_stage, w[3], result, operand, w[5]);
+                if (w[3] == 36) try validateGlslModfStruct(nodes, w[0], result, operand);
                 if (w[3] == 52) try validateGlslFrexpStruct(nodes, w[0], result, operand);
                 if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48 or w[3] == 79 or w[3] == 80) and !sameShape(result, try valueShape(nodes, w[5]))) return error.Unsupported;
                 if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50 or w[3] == 81) and (!sameShape(result, try valueShape(nodes, w[5])) or !sameShape(result, try valueShape(nodes, w[6])))) return error.Unsupported;
@@ -1007,6 +1021,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 if (!supportedGlslExtInst(w[3], result, operand)) return error.Unsupported;
                 try validateGlslInterpolation(nodes, requested_stage, w[3], result, operand, w[4..]);
                 if (w[3] == 35 or w[3] == 51) try validateGlslModfFrexp(nodes, requested_stage, w[3], result, operand, w[5]);
+                if (w[3] == 36) try validateGlslModfStruct(nodes, w[0], result, operand);
                 if (w[3] == 52) try validateGlslFrexpStruct(nodes, w[0], result, operand);
                 if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48 or w[3] == 79 or w[3] == 80) and !sameShape(result, try valueShape(nodes, w[5]))) return error.Unsupported;
                 if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50 or w[3] == 81) and (!sameShape(result, try valueShape(nodes, w[5])) or !sameShape(result, try valueShape(nodes, w[6])))) return error.Unsupported;
@@ -3021,6 +3036,10 @@ test "GLSL Modf and Frexp admissions validate bounded output pointers" {
     const vector_operand = ir.Type{ .scalar = .f32, .columns = 2 };
     try validateGlslFrexpStruct(&vector_nodes, 3, .{ .scalar = .f32, .columns = 4 }, vector_operand);
     try std.testing.expectError(error.Unsupported, validateGlslFrexpStruct(&vector_nodes, 3, .{ .scalar = .f32, .columns = 6 }, vector_operand));
+    vector_nodes[5] = .{ .kind = .vector, .a = 1, .b = 2 };
+    try validateGlslModfStruct(&vector_nodes, 3, .{ .scalar = .f32, .columns = 4 }, vector_operand);
+    vector_nodes[5] = .{ .kind = .vector, .a = 2, .b = 3 };
+    try std.testing.expectError(error.Unsupported, validateGlslModfStruct(&vector_nodes, 3, .{ .scalar = .f32, .columns = 4 }, vector_operand));
 }
 
 test "compute profile lowers bounded Modf pointer result" {
