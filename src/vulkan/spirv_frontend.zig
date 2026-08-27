@@ -1409,19 +1409,24 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 } else if (dynamic_switch) |switch_info| {
                     const selector_canonical = canonical_ids[try id(nodes, switch_info.selector)];
                     if (selector_canonical == std.math.maxInt(u32)) return error.Malformed;
+                    const selector_shape = try valueShape(nodes, switch_info.selector);
                     var case_literal: [4]u8 = undefined;
                     std.mem.writeInt(u32, &case_literal, switch_info.case_value, .little);
+                    lowered.ensureUnusedCapacity(allocator, 1) catch return error.OutOfMemory;
                     const constant_operands = allocator.dupe(u32, &.{}) catch return error.OutOfMemory;
-                    errdefer allocator.free(constant_operands);
-                    const constant_literal = allocator.dupe(u8, &case_literal) catch return error.OutOfMemory;
-                    errdefer allocator.free(constant_literal);
-                    try lowered.append(allocator, .{ .op = .constant, .ty = try valueShape(nodes, switch_info.selector), .operands = constant_operands, .literal = constant_literal });
+                    const constant_literal = allocator.dupe(u8, &case_literal) catch {
+                        allocator.free(constant_operands);
+                        return error.OutOfMemory;
+                    };
+                    lowered.appendAssumeCapacity(.{ .op = .constant, .ty = selector_shape, .operands = constant_operands, .literal = constant_literal });
                     const constant_canonical: u32 = @intCast(lowered.items.len - 1);
+                    lowered.ensureUnusedCapacity(allocator, 1) catch return error.OutOfMemory;
                     const compare_operands = allocator.dupe(u32, &.{ selector_canonical, constant_canonical }) catch return error.OutOfMemory;
-                    errdefer allocator.free(compare_operands);
-                    const compare_literal = allocator.dupe(u8, &.{}) catch return error.OutOfMemory;
-                    errdefer allocator.free(compare_literal);
-                    try lowered.append(allocator, .{ .op = .ieq, .ty = .{ .scalar = .bool }, .operands = compare_operands, .literal = compare_literal });
+                    const compare_literal = allocator.dupe(u8, &.{}) catch {
+                        allocator.free(compare_operands);
+                        return error.OutOfMemory;
+                    };
+                    lowered.appendAssumeCapacity(.{ .op = .ieq, .ty = .{ .scalar = .bool }, .operands = compare_operands, .literal = compare_literal });
                     condition_canonical = @intCast(lowered.items.len - 1);
                     true_label = switch_info.case_label;
                     false_label = switch_info.default_label;
@@ -1439,11 +1444,13 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const true_canonical = canonical_ids[try id(nodes, true_id)];
                 const false_canonical = canonical_ids[try id(nodes, false_id)];
                 if (true_canonical == std.math.maxInt(u32) or false_canonical == std.math.maxInt(u32)) return error.Malformed;
+                lowered.ensureUnusedCapacity(allocator, 1) catch return error.OutOfMemory;
                 const select_operands = allocator.dupe(u32, &.{ condition_canonical, true_canonical, false_canonical }) catch return error.OutOfMemory;
-                errdefer allocator.free(select_operands);
-                const select_literal = allocator.dupe(u8, &.{}) catch return error.OutOfMemory;
-                errdefer allocator.free(select_literal);
-                try lowered.append(allocator, .{ .op = .select, .ty = phi_shape, .operands = select_operands, .literal = select_literal });
+                const select_literal = allocator.dupe(u8, &.{}) catch {
+                    allocator.free(select_operands);
+                    return error.OutOfMemory;
+                };
+                lowered.appendAssumeCapacity(.{ .op = .select, .ty = phi_shape, .operands = select_operands, .literal = select_literal });
                 canonical_ids[phi_index] = @intCast(lowered.items.len - 1);
                 continue;
             }
