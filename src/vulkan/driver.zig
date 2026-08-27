@@ -319,6 +319,20 @@ pub const DeviceQueueGlobalPriorityCreateInfo = extern struct { s_type: i32, p_n
 pub const DeviceGroupCommandBufferBeginInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, device_mask: u32 };
 pub const DeviceGroupSubmitInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, wait_semaphore_count: u32, wait_semaphore_device_indices: ?[*]const u32, command_buffer_count: u32, command_buffer_device_masks: ?[*]const u32, signal_semaphore_count: u32, signal_semaphore_device_indices: ?[*]const u32 };
 pub const DeviceGroupBindSparseInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, resource_device_index: u32, memory_device_index: u32 };
+pub const BindSparseInfo = extern struct {
+    s_type: i32,
+    p_next: ?*const anyopaque,
+    wait_semaphore_count: u32,
+    wait_semaphores: ?[*]const usize,
+    buffer_bind_count: u32,
+    buffer_binds: ?*const anyopaque,
+    image_opaque_bind_count: u32,
+    image_opaque_binds: ?*const anyopaque,
+    image_bind_count: u32,
+    image_binds: ?*const anyopaque,
+    signal_semaphore_count: u32,
+    signal_semaphores: ?[*]const usize,
+};
 pub const BindBufferMemoryDeviceGroupInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, device_index_count: u32, device_indices: ?[*]const u32 };
 pub const BindImageMemoryDeviceGroupInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, device_index_count: u32, device_indices: ?[*]const u32, split_instance_bind_region_count: u32, split_instance_bind_regions: ?[*]const Rect2D };
 pub const DeviceGroupDeviceCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, physical_device_count: u32, physical_devices: ?[*]const Physical };
@@ -12599,14 +12613,39 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
     mutex.unlock();
     return .success;
 }
-fn queueBindSparse(queue: ?Queue, count: u32, infos: ?*const anyopaque, fence_handle: usize) callconv(.c) Result {
-    _ = infos;
+
+fn bindSparsePNextValid(raw: ?*const anyopaque) bool {
+    var next = raw;
+    var depth: usize = 0;
+    var seen_group = false;
+    while (next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (depth == 16 or header.s_type != 1000060006 or seen_group) return false;
+        const group: *const DeviceGroupBindSparseInfo = @ptrCast(@alignCast(item));
+        if (group.resource_device_index != 0 or group.memory_device_index != 0) return false;
+        seen_group = true;
+        next = header.p_next;
+        depth += 1;
+    }
+    return true;
+}
+
+fn bindSparseInfoValid(info: *const BindSparseInfo) bool {
+    if (info.s_type != 7 or !bindSparsePNextValid(info.p_next)) return false;
+    if (info.wait_semaphore_count > max_api_items or info.buffer_bind_count > max_api_items or info.image_opaque_bind_count > max_api_items or info.image_bind_count > max_api_items or info.signal_semaphore_count > max_api_items) return false;
+    if ((info.wait_semaphore_count != 0 and info.wait_semaphores == null) or (info.buffer_bind_count != 0 and info.buffer_binds == null) or (info.image_opaque_bind_count != 0 and info.image_opaque_binds == null) or (info.image_bind_count != 0 and info.image_binds == null) or (info.signal_semaphore_count != 0 and info.signal_semaphores == null)) return false;
+    return true;
+}
+
+fn queueBindSparse(queue: ?Queue, count: u32, infos: ?[*]const BindSparseInfo, fence_handle: usize) callconv(.c) Result {
     const q = queue orelse return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(q.owner)) return .error_initialization_failed;
     const fence = if (fence_handle == 0) null else validFenceLocked(fence_handle) orelse return .error_initialization_failed;
     if (fence) |item| if (!validOwner(q.owner, item.owner) or item.signaled.load(.acquire)) return .error_initialization_failed;
+    if (count > max_api_items or (count != 0 and infos == null)) return .error_initialization_failed;
+    if (infos) |items| for (items[0..count]) |item| if (!bindSparseInfoValid(&item)) return .error_initialization_failed;
     // No queue advertises VK_QUEUE_SPARSE_BINDING_BIT and all sparse features
     // are false. A zero-bind submission remains a valid synchronization op.
     if (count != 0) return .error_feature_not_present;
@@ -16227,6 +16266,7 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DeviceGroupCommandBufferBeginInfo));
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(DeviceGroupSubmitInfo));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DeviceGroupBindSparseInfo));
+    try std.testing.expectEqual(@as(usize, 96), @sizeOf(BindSparseInfo));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(BindBufferMemoryDeviceGroupInfo));
     try std.testing.expectEqual(@as(usize, 48), @sizeOf(BindImageMemoryDeviceGroupInfo));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(DeviceGroupDeviceCreateInfo));
@@ -21417,8 +21457,26 @@ test "administrative and sparse-disabled Vulkan 1.0 ABI behavior" {
     try std.testing.expectEqual(Result.success, queueBindSparse(ctx.queue, 0, null, fence));
     try std.testing.expectEqual(Result.success, getFenceStatus(ctx.device, fence));
     try std.testing.expectEqual(Result.success, resetFences(ctx.device, 1, @ptrCast(&fence)));
-    try std.testing.expectEqual(Result.error_feature_not_present, queueBindSparse(ctx.queue, 1, @ptrFromInt(8), fence));
+    try std.testing.expectEqual(Result.error_initialization_failed, queueBindSparse(ctx.queue, 1, null, fence));
+    var sparse_bind = BindSparseInfo{ .s_type = 7, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .buffer_bind_count = 0, .buffer_binds = null, .image_opaque_bind_count = 0, .image_opaque_binds = null, .image_bind_count = 0, .image_binds = null, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.error_feature_not_present, queueBindSparse(ctx.queue, 1, @ptrCast(&sparse_bind), fence));
     try std.testing.expectEqual(Result.not_ready, getFenceStatus(ctx.device, fence));
+    var sparse_unknown = ChainHeader{ .s_type = 999, .p_next = null };
+    sparse_bind.p_next = @ptrCast(&sparse_unknown);
+    try std.testing.expectEqual(Result.error_initialization_failed, queueBindSparse(ctx.queue, 1, @ptrCast(&sparse_bind), 0));
+    sparse_bind.p_next = null;
+    var sparse_group = DeviceGroupBindSparseInfo{ .s_type = 1000060006, .p_next = null, .resource_device_index = 0, .memory_device_index = 0 };
+    sparse_bind.p_next = @ptrCast(&sparse_group);
+    try std.testing.expectEqual(Result.error_feature_not_present, queueBindSparse(ctx.queue, 1, @ptrCast(&sparse_bind), 0));
+    sparse_group.resource_device_index = 1;
+    try std.testing.expectEqual(Result.error_initialization_failed, queueBindSparse(ctx.queue, 1, @ptrCast(&sparse_bind), 0));
+    sparse_bind.p_next = null;
+    var sparse_malformed = sparse_bind;
+    sparse_malformed.s_type = 999;
+    try std.testing.expectEqual(Result.error_initialization_failed, queueBindSparse(ctx.queue, 1, @ptrCast(&sparse_malformed), 0));
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| try std.testing.expectEqual(Result.error_feature_not_present, queueBindSparse(ctx.queue, 1, @ptrCast(&sparse_bind), 0));
+    test_allocations_before_failure = null;
     try std.testing.expectEqual(Result.error_initialization_failed, queueBindSparse(null, 0, null, 0));
 
     const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 0, .queue_family_index = 0 };
