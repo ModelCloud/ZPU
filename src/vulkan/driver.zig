@@ -5587,7 +5587,7 @@ fn cmdUpdateBuffer(cb: ?CommandBuffer, dst_handle: usize, offset: u64, size: u64
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.active_render_pass != null or c.impl.dynamic_rendering or c.impl.count == c.impl.commands.len or dst.owner != c.impl.owner or dst.usage & 0x2 == 0 or dst.memory == null or size == 0 or size > 65_536 or size % 4 != 0 or offset % 4 != 0 or offset > dst.size or size > dst.size - offset or data == null) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or c.impl.count == c.impl.commands.len or dst.owner != c.impl.owner or dst.usage & 0x2 == 0 or dst.memory == null or size == 0 or size > 65_536 or size % 4 != 0 or offset % 4 != 0 or offset > dst.size or size > dst.size - offset or data == null) {
         c.impl.invalid = true;
         return;
     }
@@ -21192,6 +21192,13 @@ test "memory transfer objects execute against independently specified bytes" {
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdUpdateBuffer(commands[0], buffer_a, 0, 0, &invalid_update);
     try std.testing.expect(commands[0].impl.invalid);
+    // An invalid command buffer must remain failure-atomic: a later
+    // valid-looking update cannot allocate a snapshot or append a command.
+    const invalid_update_count = commands[0].impl.count;
+    const invalid_update_owned_count = commands[0].impl.owned_update_count;
+    cmdUpdateBuffer(commands[0], buffer_a, 0, invalid_update.len, &invalid_update);
+    try std.testing.expectEqual(invalid_update_count, commands[0].impl.count);
+    try std.testing.expectEqual(invalid_update_owned_count, commands[0].impl.owned_update_count);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdUpdateBuffer(commands[0], buffer_a, 1, invalid_update.len, &invalid_update);
