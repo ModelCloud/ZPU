@@ -456,7 +456,9 @@ int main(void) {
     CHECK_VK(vkSetEvent(device, event));
     CHECK_VK(vkResetCommandBuffer(command, 0));
     CHECK_VK(vkBeginCommandBuffer(command, &begin));
-    vkCmdWaitEvents(command, 1, &event, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, NULL, 0, NULL, 0, NULL);
+    // A host-signaled event participates in a legacy wait only when HOST is
+    // included in the first synchronization scope.
+    vkCmdWaitEvents(command, 1, &event, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, NULL, 0, NULL, 0, NULL);
     CHECK_VK(vkEndCommandBuffer(command));
     CHECK_VK(submit_wait(device, queue, command, fence));
 

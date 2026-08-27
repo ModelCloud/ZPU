@@ -6852,6 +6852,18 @@ fn eventSetRecordedBefore(c: *const CommandBufferObj, event: *const EventObj, si
     };
     return false;
 }
+fn legacyEventWaitStageMask(c: *const CommandBufferObj, event: *const EventObj) u32 {
+    var required: u32 = 0;
+    const signal_kind = @as(EventSignalKind, @enumFromInt(event.signal_kind.load(.acquire)));
+    if (signal_kind == .host) required |= 0x4000 else if (signal_kind == .legacy) required |= event.signal_stage_mask.load(.acquire);
+    for (c.impl.commands[0..c.impl.count]) |command| switch (command) {
+        .event_set => |operation| if (operation.event == event and operation.signal_kind == .legacy) {
+            required |= operation.stage_mask;
+        },
+        else => {},
+    };
+    return required;
+}
 fn cmdWaitEventsCommon(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const usize, src_stage_mask: u32, dst_stage_mask: u32, memory_barrier_count: u32, memory_barriers: ?[*]const MemoryBarrier, buffer_barrier_count: u32, buffer_barriers: ?[*]const BufferMemoryBarrier, image_barrier_count: u32, image_barriers: ?[*]const ImageMemoryBarrier, allow_synchronization2_signal: bool) void {
     lock();
     defer mutex.unlock();
@@ -6871,7 +6883,8 @@ fn cmdWaitEventsCommon(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const 
             signal_kind == .legacy or eventSetRecordedBefore(c, event, .legacy)
         else
             signal_kind == .synchronization2 or eventSetRecordedBefore(c, event, .synchronization2);
-        if (event.owner != c.impl.owner or incompatible_signal) {
+        const missing_legacy_stage = !allow_synchronization2_signal and legacyEventWaitStageMask(c, event) & ~src_stage_mask != 0;
+        if (event.owner != c.impl.owner or incompatible_signal or missing_legacy_stage) {
             c.impl.invalid = true;
             return;
         }
@@ -18816,6 +18829,17 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
 
+    // A legacy wait must include every stage used by the preceding legacy
+    // signal operation.  Missing that stage is failure-atomic.
+    cmdSetEvent(commands[0], event, 0x1000);
+    try std.testing.expect(!commands[0].impl.invalid);
+    const before_missing_legacy_stage = commands[0].impl.count;
+    cmdWaitEvents(commands[0], 1, @ptrCast(&event), 0x1, 0x1000, 0, null, 0, null, 0, null);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_missing_legacy_stage, commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+
     // A synchronization2 wait must not consume a legacy signal recorded
     // earlier in the same command buffer.
     cmdSetEvent(commands[0], event, 0x1000);
@@ -21864,6 +21888,17 @@ test "event waits release the registry lock and synchronize with host set" {
     }
     test_allocations_before_failure = null;
 
+    // Replace the host signal with a legacy command signal before exercising
+    // a non-HOST source scope below; the legacy wait must carry that signal's
+    // stage mask rather than relying on the prior host provenance.
+    try std.testing.expectEqual(Result.success, resetEvent(ctx.device, event));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command_buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command_buffers[0], &begin));
+    cmdSetEvent(command_buffers[0], event, 0x1);
+    try std.testing.expect(!command_buffers[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command_buffers[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+
     const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 16, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
     var buffer: usize = 0;
     try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &buffer));
@@ -21944,7 +21979,7 @@ test "event waits release the registry lock and synchronize with host set" {
 
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command_buffers[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command_buffers[0], &begin));
-    cmdWaitEvents(command_buffers[0], 1, @ptrCast(&event), 0x1000, 0x1000, 0, null, 0, null, 0, null);
+    cmdWaitEvents(command_buffers[0], 1, @ptrCast(&event), 0x1, 0x1000, 0, null, 0, null, 0, null);
     try std.testing.expectEqual(Result.success, endCommandBuffer(command_buffers[0]));
     destroyEvent(ctx.device, event, null);
     try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));

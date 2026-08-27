@@ -537,9 +537,11 @@ covers every entry point.
 Event signal provenance is now retained through recording and submission.
 `vkCmdWaitEvents` rejects an event signaled by `vkCmdSetEvent2`, including a
 signal recorded earlier in the same command buffer and one completed by an
-earlier submission. Synchronization2 waits use the separate lowering path so
-they can consume synchronization2 signals. The rejection leaves the command
-count untouched and its warm path is covered by 4096 allocation-free iterations.
+earlier submission. It also requires `srcStageMask` to include the union of
+preceding legacy signal stages, or `HOST` for a host signal. Synchronization2
+waits use the separate lowering path, reject legacy signals, and can consume
+synchronization2 signals. These rejections leave the command count untouched;
+the warm rejection path is covered by 4096 allocation-free iterations.
 
 The bounded execution checkpoint for `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC`
 is complete. Descriptor writes and update templates preserve the dynamic type,
