@@ -322,7 +322,9 @@ fn supportedGlslExtInst(ext: u32, result: ir.Type, operand: ir.Type) bool {
         53 => result.scalar == .f32 and result.rows == 1 and sameShape(result, operand),
         54, 55 => (result.scalar == .i32 or result.scalar == .u32) and result.columns == 1 and result.rows == 1 and operand.scalar == .f32 and operand.columns == 4 and operand.rows == 1,
         56, 57 => (result.scalar == .i32 or result.scalar == .u32) and result.columns == 1 and result.rows == 1 and operand.scalar == .f32 and operand.columns == 2 and operand.rows == 1,
+        58 => (result.scalar == .i32 or result.scalar == .u32) and result.columns == 1 and result.rows == 1 and operand.scalar == .f32 and operand.columns == 2 and operand.rows == 1,
         59, 60 => result.scalar == .f32 and result.columns == 2 and result.rows == 1 and (operand.scalar == .i32 or operand.scalar == .u32) and operand.columns == 1 and operand.rows == 1,
+        61 => result.scalar == .f32 and result.columns == 2 and result.rows == 1 and (operand.scalar == .i32 or operand.scalar == .u32) and operand.columns == 1 and operand.rows == 1,
         62, 63 => result.scalar == .f32 and result.columns == 4 and result.rows == 1 and (operand.scalar == .i32 or operand.scalar == .u32) and operand.columns == 1 and operand.rows == 1,
         65 => result.scalar == .f32 and result.columns == 1 and result.rows == 1 and operand.scalar == .f32 and operand.rows == 1 and operand.columns >= 2 and operand.columns <= 4,
         66 => result.scalar == .f32 and result.columns == 1 and result.rows == 1 and operand.scalar == .f32 and operand.rows == 1 and operand.columns >= 2 and operand.columns <= 4,
@@ -744,8 +746,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 if (!in_function or !label_seen or terminated or block_terminated or w.len < 5 or w.len > 7) return error.Malformed;
                 const set = nodes[try id(nodes, w[2])];
                 if (set.kind != .ext_inst_import or set.a != 450) return error.Unsupported;
-                if (w[3] < 1 or w[3] > 24 and w[3] != 25 and w[3] != 26 and w[3] != 27 and w[3] != 28 and w[3] != 29 and w[3] != 30 and w[3] != 31 and w[3] != 32 and w[3] != 33 and w[3] != 34 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50 and w[3] != 53 and w[3] != 54 and w[3] != 55 and w[3] != 56 and w[3] != 57 and w[3] != 59 and w[3] != 60 and w[3] != 62 and w[3] != 63 and w[3] != 65 and w[3] != 66 and w[3] != 67 and w[3] != 68 and w[3] != 69 and w[3] != 70 and w[3] != 71 and w[3] != 72 and w[3] != 73 and w[3] != 74 and w[3] != 79 and w[3] != 80 and w[3] != 81) return error.Unsupported;
-                if ((w[3] >= 1 and w[3] <= 24 or w[3] >= 27 and w[3] <= 34 or w[3] >= 54 and w[3] <= 57 or w[3] == 59 or w[3] == 60 or w[3] == 62 or w[3] == 63 or w[3] == 65 or w[3] == 68 or w[3] >= 72 and w[3] <= 74) and w.len != 5) return error.Malformed;
+                if (w[3] < 1 or w[3] > 24 and w[3] != 25 and w[3] != 26 and w[3] != 27 and w[3] != 28 and w[3] != 29 and w[3] != 30 and w[3] != 31 and w[3] != 32 and w[3] != 33 and w[3] != 34 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50 and w[3] != 53 and w[3] != 54 and w[3] != 55 and w[3] != 56 and w[3] != 57 and w[3] != 58 and w[3] != 59 and w[3] != 60 and w[3] != 61 and w[3] != 62 and w[3] != 63 and w[3] != 65 and w[3] != 66 and w[3] != 67 and w[3] != 68 and w[3] != 69 and w[3] != 70 and w[3] != 71 and w[3] != 72 and w[3] != 73 and w[3] != 74 and w[3] != 79 and w[3] != 80 and w[3] != 81) return error.Unsupported;
+                if ((w[3] >= 1 and w[3] <= 24 or w[3] >= 27 and w[3] <= 34 or w[3] >= 54 and w[3] <= 61 or w[3] == 62 or w[3] == 63 or w[3] == 65 or w[3] == 68 or w[3] >= 72 and w[3] <= 74) and w.len != 5) return error.Malformed;
                 if ((w[3] == 25 or w[3] == 26 or w[3] == 53) and w.len != 6) return error.Malformed;
                 if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48 or w[3] == 66 or w[3] == 67 or w[3] == 70 or w[3] == 79 or w[3] == 80) and w.len != 6) return error.Malformed;
                 if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50 or w[3] == 69 or w[3] == 71 or w[3] == 81) and w.len != 7) return error.Malformed;
@@ -888,8 +890,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             12 => {
                 if (w.len < 5 or w.len > 7) return error.Malformed;
                 const set = nodes[try id(nodes, w[2])];
-                if (set.kind != .ext_inst_import or set.a != 450 or (w[3] < 1 or w[3] > 24 and w[3] != 25 and w[3] != 26 and w[3] != 27 and w[3] != 28 and w[3] != 29 and w[3] != 30 and w[3] != 31 and w[3] != 32 and w[3] != 33 and w[3] != 34 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50 and w[3] != 53 and w[3] != 54 and w[3] != 55 and w[3] != 56 and w[3] != 57 and w[3] != 59 and w[3] != 60 and w[3] != 62 and w[3] != 63 and w[3] != 65 and w[3] != 66 and w[3] != 67 and w[3] != 68 and w[3] != 69 and w[3] != 70 and w[3] != 71 and w[3] != 72 and w[3] != 73 and w[3] != 74 and w[3] != 79 and w[3] != 80 and w[3] != 81)) return error.Unsupported;
-                if ((w[3] >= 1 and w[3] <= 24 or w[3] >= 27 and w[3] <= 34 or w[3] >= 54 and w[3] <= 57 or w[3] == 59 or w[3] == 60 or w[3] == 62 or w[3] == 63 or w[3] == 65 or w[3] == 68 or w[3] >= 72 and w[3] <= 74) and w.len != 5) return error.Malformed;
+                if (set.kind != .ext_inst_import or set.a != 450 or (w[3] < 1 or w[3] > 24 and w[3] != 25 and w[3] != 26 and w[3] != 27 and w[3] != 28 and w[3] != 29 and w[3] != 30 and w[3] != 31 and w[3] != 32 and w[3] != 33 and w[3] != 34 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50 and w[3] != 53 and w[3] != 54 and w[3] != 55 and w[3] != 56 and w[3] != 57 and w[3] != 58 and w[3] != 59 and w[3] != 60 and w[3] != 61 and w[3] != 62 and w[3] != 63 and w[3] != 65 and w[3] != 66 and w[3] != 67 and w[3] != 68 and w[3] != 69 and w[3] != 70 and w[3] != 71 and w[3] != 72 and w[3] != 73 and w[3] != 74 and w[3] != 79 and w[3] != 80 and w[3] != 81)) return error.Unsupported;
+                if ((w[3] >= 1 and w[3] <= 24 or w[3] >= 27 and w[3] <= 34 or w[3] >= 54 and w[3] <= 61 or w[3] == 62 or w[3] == 63 or w[3] == 65 or w[3] == 68 or w[3] >= 72 and w[3] <= 74) and w.len != 5) return error.Malformed;
                 if ((w[3] == 25 or w[3] == 26 or w[3] == 53) and w.len != 6) return error.Malformed;
                 if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48 or w[3] == 66 or w[3] == 67 or w[3] == 70 or w[3] == 79 or w[3] == 80) and w.len != 6) return error.Malformed;
                 if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50 or w[3] == 69 or w[3] == 71 or w[3] == 81) and w.len != 7) return error.Malformed;
@@ -1635,8 +1637,10 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 55 => .i_pack_unorm4x8,
                 56 => .i_pack_snorm2x16,
                 57 => .i_pack_unorm2x16,
+                58 => .i_pack_half2x16,
                 59 => .f_unpack_snorm2x16,
                 60 => .f_unpack_unorm2x16,
+                61 => .f_unpack_half2x16,
                 62 => .f_unpack_snorm4x8,
                 63 => .f_unpack_unorm4x8,
                 65 => .f_length,
@@ -2824,11 +2828,13 @@ test "GLSL normalized pack and unpack admissions enforce fixed lane counts" {
     const u32_scalar = ir.Type{ .scalar = .u32 };
     try std.testing.expect(supportedGlslExtInst(54, u32_scalar, f32_vec4));
     try std.testing.expect(supportedGlslExtInst(56, u32_scalar, f32_vec2));
+    try std.testing.expect(supportedGlslExtInst(58, u32_scalar, f32_vec2));
     try std.testing.expect(supportedGlslExtInst(59, f32_vec2, u32_scalar));
+    try std.testing.expect(supportedGlslExtInst(61, f32_vec2, u32_scalar));
     try std.testing.expect(supportedGlslExtInst(62, f32_vec4, u32_scalar));
     try std.testing.expect(!supportedGlslExtInst(54, u32_scalar, f32_vec2));
     try std.testing.expect(!supportedGlslExtInst(59, f32_scalar, u32_scalar));
-    try std.testing.expect(!supportedGlslExtInst(58, u32_scalar, f32_vec2));
+    try std.testing.expect(!supportedGlslExtInst(58, u32_scalar, f32_vec4));
 }
 
 test "GLSL geometric admissions enforce vector arity and component shapes" {

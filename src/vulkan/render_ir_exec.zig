@@ -191,6 +191,22 @@ fn unpackNormalized(bits: u32, signed: bool, width: u5) f32 {
     }
     return @as(f32, @floatFromInt(@as(u16, @truncate(bits)))) / 65535.0;
 }
+
+fn packHalf(value: f32) u16 {
+    // GLSL's half pack operation preserves finite values and infinities in
+    // the binary16 domain.  Canonicalize NaNs so the bounded executor has a
+    // stable payload independent of the host floating-point implementation.
+    if (std.math.isNan(value)) return 0x7e00;
+    const half: f16 = @floatCast(value);
+    return @bitCast(half);
+}
+
+fn unpackHalf(bits: u16) f32 {
+    const half: f16 = @bitCast(bits);
+    const value: f32 = @floatCast(half);
+    if (std.math.isNan(value)) return @bitCast(@as(u32, 0x7fc00000));
+    return value;
+}
 fn readValue(ty: ir.Type, bytes: []const u8) Error!Value {
     const size = try byteSize(ty);
     if (bytes.len < size) return error.Bounds;
@@ -859,6 +875,20 @@ pub const Executor = struct {
                         result.bits[i] = canonicalFloat(@bitCast(unpackNormalized(component, signed, width)));
                     }
                 },
+                .i_pack_half2x16 => {
+                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const first: f32 = @bitCast(source.bits[0]);
+                    const second: f32 = @bitCast(source.bits[1]);
+                    const lo = packHalf(first);
+                    const hi = packHalf(second);
+                    result.bits[0] = @as(u32, lo) | (@as(u32, hi) << 16);
+                },
+                .f_unpack_half2x16 => {
+                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const word = source.bits[0];
+                    result.bits[0] = canonicalFloat(@bitCast(unpackHalf(@truncate(word))));
+                    result.bits[1] = canonicalFloat(@bitCast(unpackHalf(@truncate(word >> 16))));
+                },
                 .f_atan2, .f_pow => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
                     const b = try valueRef(self.values, pc, instruction.operands[1]);
@@ -1116,7 +1146,7 @@ fn validate(program: *const ir.Program) Error!void {
             .vector_insert_dynamic => n == 3,
             .composite_insert => n == 3,
             .shuffle => n == 2 + try lanes(instruction.ty),
-            .fneg, .ineg, .f_abs, .i_abs, .i_sign, .f_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .f_determinant, .f_matrix_inverse, .f_length, .f_normalize, .i_find_lsb, .i_find_s_msb, .i_find_u_msb, .i_pack_snorm4x8, .i_pack_unorm4x8, .i_pack_snorm2x16, .i_pack_unorm2x16, .f_unpack_snorm2x16, .f_unpack_unorm2x16, .f_unpack_snorm4x8, .f_unpack_unorm4x8, .bit_not, .logical_not, .transpose, .any, .all, .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set, .bit_reverse, .bit_count, .convert, .bitcast, .copy_object, .quantize_f16 => n == 1,
+            .fneg, .ineg, .f_abs, .i_abs, .i_sign, .f_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .f_determinant, .f_matrix_inverse, .f_length, .f_normalize, .i_find_lsb, .i_find_s_msb, .i_find_u_msb, .i_pack_snorm4x8, .i_pack_unorm4x8, .i_pack_snorm2x16, .i_pack_unorm2x16, .f_unpack_snorm2x16, .f_unpack_unorm2x16, .f_unpack_snorm4x8, .f_unpack_unorm4x8, .i_pack_half2x16, .f_unpack_half2x16, .bit_not, .logical_not, .transpose, .any, .all, .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set, .bit_reverse, .bit_count, .convert, .bitcast, .copy_object, .quantize_f16 => n == 1,
             .bit_field_insert => n == 4,
             .bit_field_s_extract, .bit_field_u_extract => n == 3,
             .select => n == 3,
@@ -1174,6 +1204,8 @@ fn validate(program: *const ir.Program) Error!void {
                 .i_pack_snorm2x16, .i_pack_unorm2x16 => if (source_ty.scalar != .f32 or source_ty.columns != 2 or source_ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.rows != 1 or (instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32)) return error.InvalidType,
                 .f_unpack_snorm2x16, .f_unpack_unorm2x16 => if ((source_ty.scalar != .i32 and source_ty.scalar != .u32) or source_ty.columns != 1 or source_ty.rows != 1 or instruction.ty.scalar != .f32 or instruction.ty.columns != 2 or instruction.ty.rows != 1) return error.InvalidType,
                 .f_unpack_snorm4x8, .f_unpack_unorm4x8 => if ((source_ty.scalar != .i32 and source_ty.scalar != .u32) or source_ty.columns != 1 or source_ty.rows != 1 or instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 1) return error.InvalidType,
+                .i_pack_half2x16 => if (source_ty.scalar != .f32 or source_ty.columns != 2 or source_ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.rows != 1 or (instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32)) return error.InvalidType,
+                .f_unpack_half2x16 => if ((source_ty.scalar != .i32 and source_ty.scalar != .u32) or source_ty.columns != 1 or source_ty.rows != 1 or instruction.ty.scalar != .f32 or instruction.ty.columns != 2 or instruction.ty.rows != 1) return error.InvalidType,
                 .i_find_lsb => if ((source_ty.scalar != .i32 and source_ty.scalar != .u32) or source_ty.rows != 1 or source_ty.columns != instruction.ty.columns or instruction.ty.scalar != .i32 or instruction.ty.rows != 1) return error.InvalidType,
                 .i_find_s_msb => if (source_ty.scalar != .i32 or source_ty.rows != 1 or source_ty.columns != instruction.ty.columns or instruction.ty.scalar != .i32 or instruction.ty.rows != 1) return error.InvalidType,
                 .i_find_u_msb => if (source_ty.scalar != .u32 or source_ty.rows != 1 or source_ty.columns != instruction.ty.columns or instruction.ty.scalar != .i32 or instruction.ty.rows != 1) return error.InvalidType,
@@ -1415,6 +1447,16 @@ fn validate(program: *const ir.Program) Error!void {
             },
             .f_unpack_snorm4x8, .f_unpack_unorm4x8 => {
                 if (instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 1) return error.InvalidType;
+                const source = program.instructions[instruction.operands[0]].ty;
+                if ((source.scalar != .i32 and source.scalar != .u32) or source.columns != 1 or source.rows != 1) return error.InvalidType;
+            },
+            .i_pack_half2x16 => {
+                if ((instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32) or instruction.ty.columns != 1 or instruction.ty.rows != 1) return error.InvalidType;
+                const source = program.instructions[instruction.operands[0]].ty;
+                if (source.scalar != .f32 or source.columns != 2 or source.rows != 1) return error.InvalidType;
+            },
+            .f_unpack_half2x16 => {
+                if (instruction.ty.scalar != .f32 or instruction.ty.columns != 2 or instruction.ty.rows != 1) return error.InvalidType;
                 const source = program.instructions[instruction.operands[0]].ty;
                 if ((source.scalar != .i32 and source.scalar != .u32) or source.columns != 1 or source.rows != 1) return error.InvalidType;
             },
@@ -2185,16 +2227,23 @@ test "GLSL NMin NMax and NClamp prefer non-NaN operands" {
 test "GLSL normalized pack and unpack operations preserve lane order" {
     var values4 = [_]u8{0} ** 16;
     var values2 = [_]u8{0} ** 8;
+    var half_values2 = [_]u8{0} ** 8;
     var packed_bytes = [_]u8{0} ** 4;
+    var half_packed_bytes = [_]u8{0} ** 4;
     const four = [_]f32{ -1.0, -0.5, 0.5, 1.0 };
     const two = [_]f32{ -1.0, -0.5 };
     for (four, 0..) |value, lane| std.mem.writeInt(u32, values4[lane * 4 ..][0..4], @bitCast(value), .little);
     for (two, 0..) |value, lane| std.mem.writeInt(u32, values2[lane * 4 ..][0..4], @bitCast(value), .little);
+    std.mem.writeInt(u32, half_values2[0..4], 0x7fc12345, .little);
+    std.mem.writeInt(u32, half_values2[4..8], 0x7f800000, .little);
     std.mem.writeInt(u32, &packed_bytes, 0x7f40c081, .little);
+    std.mem.writeInt(u32, &half_packed_bytes, 0x3c00c000, .little);
     var interfaces = [_]ir.Interface{
         .{ .storage = .input, .ty = .{ .scalar = .f32, .columns = 4 }, .location = 0 },
         .{ .storage = .input, .ty = .{ .scalar = .f32, .columns = 2 }, .location = 1 },
         .{ .storage = .input, .ty = .{ .scalar = .u32 }, .location = 2 },
+        .{ .storage = .input, .ty = .{ .scalar = .u32 }, .location = 3 },
+        .{ .storage = .input, .ty = .{ .scalar = .f32, .columns = 2 }, .location = 4 },
     };
     var instructions = [_]ir.Instruction{
         .{ .op = .input, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{0}, .literal = &.{} },
@@ -2208,12 +2257,17 @@ test "GLSL normalized pack and unpack operations preserve lane order" {
         .{ .op = .f_unpack_unorm2x16, .ty = .{ .scalar = .f32, .columns = 2 }, .operands = &.{2}, .literal = &.{} },
         .{ .op = .f_unpack_snorm4x8, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{2}, .literal = &.{} },
         .{ .op = .f_unpack_unorm4x8, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{2}, .literal = &.{} },
+        .{ .op = .input, .ty = .{ .scalar = .u32 }, .operands = &.{3}, .literal = &.{} },
+        .{ .op = .i_pack_half2x16, .ty = .{ .scalar = .u32 }, .operands = &.{1}, .literal = &.{} },
+        .{ .op = .f_unpack_half2x16, .ty = .{ .scalar = .f32, .columns = 2 }, .operands = &.{11}, .literal = &.{} },
+        .{ .op = .input, .ty = .{ .scalar = .f32, .columns = 2 }, .operands = &.{4}, .literal = &.{} },
+        .{ .op = .i_pack_half2x16, .ty = .{ .scalar = .u32 }, .operands = &.{14}, .literal = &.{} },
     };
     var source = try testProgram(&interfaces, &instructions);
     defer std.testing.allocator.free(source.bytes);
     var executor = try Executor.init(std.testing.allocator, &source);
     defer executor.deinit();
-    const bindings = [_]Binding{ .{ .interface = 0, .bytes = &values4 }, .{ .interface = 1, .bytes = &values2 }, .{ .interface = 2, .bytes = &packed_bytes } };
+    const bindings = [_]Binding{ .{ .interface = 0, .bytes = &values4 }, .{ .interface = 1, .bytes = &values2 }, .{ .interface = 2, .bytes = &packed_bytes }, .{ .interface = 3, .bytes = &half_packed_bytes }, .{ .interface = 4, .bytes = &half_values2 } };
     try executor.execute(&bindings, &.{});
     try std.testing.expectEqual(@as(u32, 0x7f40c081), executor.values[3].bits[0]);
     try std.testing.expectEqual(@as(u32, 0xff800000), executor.values[4].bits[0]);
@@ -2223,11 +2277,16 @@ test "GLSL normalized pack and unpack operations preserve lane order" {
     try std.testing.expectApproxEqAbs(@as(f32, -64.0 / 127.0), @as(f32, @bitCast(executor.values[9].bits[1])), 0.000001);
     try std.testing.expectApproxEqAbs(@as(f32, 64.0 / 127.0), @as(f32, @bitCast(executor.values[9].bits[2])), 0.000001);
     try std.testing.expectApproxEqAbs(@as(f32, 1), @as(f32, @bitCast(executor.values[9].bits[3])), 0.000001);
+    try std.testing.expectEqual(@as(u32, 0xb800bc00), executor.values[12].bits[0]);
+    try std.testing.expectApproxEqAbs(@as(f32, -2), @as(f32, @bitCast(executor.values[13].bits[0])), 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), @as(f32, @bitCast(executor.values[13].bits[1])), 0.000001);
     const prior_pack = executor.values[3];
     std.mem.writeInt(u32, values4[0..4], 0x7fc00000, .little);
     try std.testing.expectError(error.NumericDomain, executor.execute(&bindings, &.{}));
     try std.testing.expectEqual(prior_pack.bits[0], executor.values[3].bits[0]);
     std.mem.writeInt(u32, values4[0..4], @bitCast(@as(f32, -1)), .little);
+    try executor.execute(&bindings, &.{});
+    try std.testing.expectEqual(@as(u32, 0x7c007e00), executor.values[15].bits[0]);
     for (0..4096) |_| try executor.execute(&bindings, &.{});
 }
 
@@ -3618,6 +3677,14 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
             const source = try propertyConstant(arena, &instructions, .{ .scalar = .u32 });
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{source}, &.{});
         },
+        .i_pack_half2x16 => {
+            const source = try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 2 });
+            result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{source}, &.{});
+        },
+        .f_unpack_half2x16 => {
+            const source = try propertyConstant(arena, &instructions, .{ .scalar = .u32 });
+            result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{source}, &.{});
+        },
         .f_face_forward => {
             const source_ty = source_ty_override orelse return error.InvalidType;
             const normal = try propertyConstant(arena, &instructions, source_ty);
@@ -4016,6 +4083,10 @@ test "generated bounded operation by type-family property matrix is complete" {
     totals[@intFromEnum(ir.Op.f_unpack_snorm4x8)] += 1;
     try runPropertyCase(.f_unpack_unorm4x8, .{ .scalar = .f32, .columns = 4 }, null, null);
     totals[@intFromEnum(ir.Op.f_unpack_unorm4x8)] += 1;
+    try runPropertyCase(.i_pack_half2x16, .{ .scalar = .u32 }, null, null);
+    totals[@intFromEnum(ir.Op.i_pack_half2x16)] += 1;
+    try runPropertyCase(.f_unpack_half2x16, .{ .scalar = .f32, .columns = 2 }, null, null);
+    totals[@intFromEnum(ir.Op.f_unpack_half2x16)] += 1;
     try runPropertyCase(.any, .{ .scalar = .bool }, null, null);
     totals[@intFromEnum(ir.Op.any)] += 1;
     try runPropertyCase(.all, .{ .scalar = .bool }, null, null);
@@ -4047,15 +4118,15 @@ test "generated bounded operation by type-family property matrix is complete" {
         totals[@intFromEnum(op)] += 1;
     }
     const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14, 8, 4, 8, 8, 8, 8, 4, 4, 4, 4, 4, 8, 8, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4} ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1, 1 };
+    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4} ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 1, 1 };
     try std.testing.expectEqualSlices(usize, expected_full[0..totals.len], &totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 676), total);
-    std.debug.print("generated property matrix: operations=164 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 678), total);
+    std.debug.print("generated property matrix: operations=166 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -4187,13 +4258,13 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 164), malformed);
+    try std.testing.expectEqual(@as(usize, 166), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
     try std.testing.expectEqual(@as(usize, 5), runtime_nan);
     try std.testing.expectEqual(@as(usize, 5), signed_zero);
-    std.debug.print("generated property categories: malformed=164 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
+    std.debug.print("generated property categories: malformed=166 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
 }
 
 test "generated valid scalar DAGs are total and stable" {

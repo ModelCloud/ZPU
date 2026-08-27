@@ -715,7 +715,9 @@ Each slice must land with all of the following:
   Normalized pack/unpack operations now cover `PackSnorm4x8`, `PackUnorm4x8`,
   `PackSnorm2x16`, `PackUnorm2x16`, `UnpackSnorm2x16`, `UnpackUnorm2x16`,
   `UnpackSnorm4x8`, and `UnpackUnorm4x8` with fixed lane counts, little-endian
-  bit placement, and allocation-free warm execution; half/double variants
+  bit placement, and allocation-free warm execution. `PackHalf2x16` and
+  `UnpackHalf2x16` now preserve IEEE-754 binary16 payloads (with canonical
+  NaNs) through the same bounded path; double and aggregate-return variants
   remain capability-gated and unsupported.
   The frontend uses the normative GLSL.std.450 opcode numbers for the vector
   and bit-index families (`Length` 65 through `FindUMsb` 74); stale offset
