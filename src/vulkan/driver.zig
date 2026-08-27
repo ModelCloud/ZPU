@@ -3785,6 +3785,9 @@ fn imageCreateRequirements(info: *const ImageCreateInfo) ?MemoryRequirements {
 fn hostCopyLayoutValid(layout: i32) bool {
     return layout == 1 or layout == 6 or layout == 7;
 }
+fn hostCopyTransitionOldLayoutValid(layout: i32) bool {
+    return layout == 0 or layout == 8 or hostCopyLayoutValid(layout);
+}
 const host_copy_memcpy_bit: u32 = 1;
 fn hostCopyFlagsValid(flags: u32) bool {
     return flags & ~host_copy_memcpy_bit == 0;
@@ -3929,7 +3932,7 @@ fn transitionImageLayout(device: ?Device, count: u32, transitions: ?[*]const Hos
     if (!validDeviceLocked(d)) return .error_initialization_failed;
     for (transitions.?[0..count], 0..) |transition, index| {
         const image = validImageLocked(transition.image) orelse return .error_initialization_failed;
-        if (transition.s_type != 1000270006 or transition.p_next != null or image.owner != d or !hostCopyLayoutValid(transition.old_layout) or !supportedLayout(transition.new_layout) or image.layout != transition.old_layout or !validRangeForImage(image, transition.subresource_range)) return .error_initialization_failed;
+        if (transition.s_type != 1000270006 or transition.p_next != null or image.owner != d or !hostCopyTransitionOldLayoutValid(transition.old_layout) or !hostCopyLayoutValid(transition.new_layout) or image.layout != transition.old_layout or !validRangeForImage(image, transition.subresource_range)) return .error_initialization_failed;
         for (transitions.?[0..index]) |prior| if (prior.image == transition.image) return .error_initialization_failed;
     }
     for (transitions.?[0..count]) |transition| validImageLocked(transition.image).?.layout = transition.new_layout;
@@ -18041,12 +18044,26 @@ test "Vulkan 1.4 host image copies transitions and layout queries are bounded" {
     var copy_unbound_destination = copy_info;
     copy_unbound_destination.dst_image = unbound;
     try std.testing.expectEqual(Result.error_initialization_failed, copyImageToImage(ctx.device, &copy_unbound_destination));
-    validImageLocked(src).?.layout = 1;
+    validImageLocked(src).?.layout = 0;
+    const undefined_transition = HostImageLayoutTransitionInfo{ .s_type = 1000270006, .p_next = null, .image = src, .old_layout = 0, .new_layout = 1, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    try std.testing.expectEqual(Result.success, transitionImageLayout(ctx.device, 1, @ptrCast(&undefined_transition)));
+    var invalid_new_layout = undefined_transition;
+    invalid_new_layout.old_layout = 1;
+    invalid_new_layout.new_layout = 2;
+    try std.testing.expectEqual(Result.error_initialization_failed, transitionImageLayout(ctx.device, 1, @ptrCast(&invalid_new_layout)));
+    try std.testing.expectEqual(@as(i32, 1), validImageLocked(src).?.layout);
     const transition = HostImageLayoutTransitionInfo{ .s_type = 1000270006, .p_next = null, .image = src, .old_layout = 1, .new_layout = 7, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
     var duplicate_transitions = [_]HostImageLayoutTransitionInfo{ transition, transition };
     try std.testing.expectEqual(Result.error_initialization_failed, transitionImageLayout(ctx.device, duplicate_transitions.len, &duplicate_transitions));
     try std.testing.expectEqual(@as(i32, 1), validImageLocked(src).?.layout);
     try std.testing.expectEqual(Result.success, transitionImageLayout(ctx.device, 1, @ptrCast(&transition)));
+    const to_general = HostImageLayoutTransitionInfo{ .s_type = 1000270006, .p_next = null, .image = src, .old_layout = 7, .new_layout = 1, .subresource_range = transition.subresource_range };
+    test_allocations_before_failure = 0;
+    for (0..2048) |_| {
+        try std.testing.expectEqual(Result.success, transitionImageLayout(ctx.device, 1, @ptrCast(&to_general)));
+        try std.testing.expectEqual(Result.success, transitionImageLayout(ctx.device, 1, @ptrCast(&transition)));
+    }
+    test_allocations_before_failure = null;
     var layout2 = SubresourceLayout2{ .s_type = 1000338002, .p_next = null, .subresource_layout = std.mem.zeroes(SubresourceLayout) };
     const subresource2 = ImageSubresource2{ .s_type = 1000338003, .p_next = null, .image_subresource = .{ .aspect_mask = 1, .mip_level = 0, .array_layer = 0 } };
     getImageSubresourceLayout2(ctx.device, src, &subresource2, &layout2);
