@@ -518,6 +518,11 @@ conversion. Because the bounded executor has no asynchronous producer, a
 timeline wait is accepted only when its target is already satisfied by the
 current counter or an earlier submit in the same batch; unsatisfied waits fail
 before publication instead of spinning forever.
+Host and queue timeline signal operations additionally enforce the Vulkan
+strictly-increasing counter rule: values equal to or below the currently
+published value are rejected transactionally, and the counter remains
+unchanged. Positive, lower/equal negative, and queue-signal rollback cases are
+covered by the timeline semaphore ABI test.
 
 Legacy `vkCmdWaitEvents` now honors the Vulkan host-signal source-scope rule:
 `VK_PIPELINE_STAGE_HOST_BIT` is accepted in `srcStageMask` for an already

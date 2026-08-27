@@ -10505,7 +10505,11 @@ fn signalSemaphore(device: ?Device, info: ?*const SemaphoreSignalInfo) callconv(
     if (signal.s_type != 1000207005 or signal.p_next != null) return .error_initialization_failed;
     const semaphore = validSemaphoreLocked(signal.semaphore) orelse return .error_initialization_failed;
     if (!validDeviceLocked(d) or semaphore.owner != d or !semaphore.timeline) return .error_initialization_failed;
-    if (signal.value < semaphore.timeline_value.load(.acquire)) return .error_initialization_failed;
+    // Timeline signal operations must strictly advance the counter.  Equal
+    // values are not idempotent signals in Vulkan; accepting them would let a
+    // host signal silently satisfy an operation that should have been
+    // rejected and would diverge from queue-signal ordering rules.
+    if (signal.value <= semaphore.timeline_value.load(.acquire)) return .error_initialization_failed;
     semaphore.timeline_value.store(signal.value, .release);
     return .success;
 }
@@ -13716,7 +13720,9 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                 if (semaphore.timeline) {
                     const values = timeline_info orelse return .error_initialization_failed;
                     const signal_values = values.signal_semaphore_values orelse return .error_initialization_failed;
-                    if (signal_values[signal_index] < timeline_states[slot]) return .error_initialization_failed;
+                    // A timeline signal must be strictly greater than the
+                    // value visible when this signal operation executes.
+                    if (signal_values[signal_index] <= timeline_states[slot]) return .error_initialization_failed;
                     timeline_states[slot] = signal_values[signal_index];
                 } else {
                     if (timeline_info) |values| if (values.signal_semaphore_values) |signal_values| if (signal_values[signal_index] != 0) return .error_initialization_failed;
@@ -22599,11 +22605,26 @@ test "timeline semaphores expose monotonic counter wait signal and submit ABI" {
     const signal_info = SemaphoreSignalInfo{ .s_type = 1000207005, .p_next = null, .semaphore = timeline, .value = 5 };
     try std.testing.expectEqual(Result.success, signalSemaphore(ctx.device, &signal_info));
     try std.testing.expectEqual(Result.success, waitSemaphores(ctx.device, &wait_info, 0));
+    // Host timeline signals are strictly increasing; equal and lower values
+    // must fail without changing the published counter.
+    try std.testing.expectEqual(Result.error_initialization_failed, signalSemaphore(ctx.device, &signal_info));
+    var lower_signal = signal_info;
+    lower_signal.value = 4;
+    try std.testing.expectEqual(Result.error_initialization_failed, signalSemaphore(ctx.device, &lower_signal));
+    try std.testing.expectEqual(Result.success, getSemaphoreCounterValue(ctx.device, timeline, &counter));
+    try std.testing.expectEqual(@as(u64, 5), counter);
     const signal_values = [_]u64{7};
     const timeline_submit_info = TimelineSemaphoreSubmitInfo{ .s_type = 1000207003, .p_next = null, .wait_semaphore_value_count = 1, .wait_semaphore_values = &wait_values, .signal_semaphore_value_count = 1, .signal_semaphore_values = &signal_values };
     const timeline_wait_stage: u32 = 0x1000;
     const submit = SubmitInfo{ .s_type = 4, .p_next = &timeline_submit_info, .wait_semaphore_count = 1, .wait_semaphores = &wait_handles, .wait_dst_stage_mask = @ptrCast(&timeline_wait_stage), .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 1, .signal_semaphores = &wait_handles };
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(Result.success, getSemaphoreCounterValue(ctx.device, timeline, &counter));
+    try std.testing.expectEqual(@as(u64, 7), counter);
+    // Queue timeline signal values obey the same strict ordering rule.
+    const equal_signal_value = [_]u64{7};
+    const equal_signal_info = TimelineSemaphoreSubmitInfo{ .s_type = 1000207003, .p_next = null, .wait_semaphore_value_count = 0, .wait_semaphore_values = null, .signal_semaphore_value_count = 1, .signal_semaphore_values = &equal_signal_value };
+    const equal_signal_submit = SubmitInfo{ .s_type = 4, .p_next = &equal_signal_info, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 0, .command_buffers = null, .signal_semaphore_count = 1, .signal_semaphores = &wait_handles };
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&equal_signal_submit), 0));
     try std.testing.expectEqual(Result.success, getSemaphoreCounterValue(ctx.device, timeline, &counter));
     try std.testing.expectEqual(@as(u64, 7), counter);
     const duplicate_timeline_wait_handles = [_]usize{ timeline, timeline };
