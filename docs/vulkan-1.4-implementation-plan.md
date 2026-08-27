@@ -690,7 +690,9 @@ Each slice must land with all of the following:
   deterministic nearest, nearest-even, and toward-zero semantics while
   preserving finite IEEE values. Scalar/vector `Floor`, `Ceil`, and `Fract` now
   lower with signed-zero and non-finite canonicalization consistent with the
-  bounded floating-point executor. A single
+  bounded floating-point executor. Scalar/vector `Radians`, `Degrees`, `Sin`,
+  `Cos`, and `Tan` now lower through the same component-wise f32 path,
+  preserving signed zero and canonicalizing runtime NaNs. A single
   side-effect-free dynamic conditional or one-case runtime switch with a common
   merge is also lowered to compare/select; generic SPIR-V dynamic control flow,
   aggregate/descriptor-array indexing, atomics, shared-memory execution,
