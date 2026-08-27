@@ -13,7 +13,7 @@ pub const Error = error{ Malformed, Unsupported, LimitExceeded, OutOfMemory };
 
 pub const Specialization = struct { id: u32, bytes: []const u8 };
 
-const Kind = enum { none, void, bool, int, float, vector, matrix, pointer, structure, function, constant, variable, function_value, label };
+const Kind = enum { none, void, bool, int, float, vector, matrix, pointer, structure, function, ext_inst_import, constant, variable, function_value, label };
 const Node = struct {
     kind: Kind = .none,
     type_id: u32 = 0,
@@ -63,6 +63,8 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 6, .operands = .{ .min = 3, .max = 2 + max_debug_string_words } },
     .{ .opcode = 7, .operands = .{ .min = 2, .max = 1 + max_debug_string_words } },
     .{ .opcode = 8, .operands = .{ .min = 3, .max = 3 } },
+    .{ .opcode = 11, .operands = .{ .min = 2, .max = 1 + max_debug_string_words } }, // OpExtInstImport
+    .{ .opcode = 12, .operands = .{ .min = 4, .max = 5 } }, // OpExtInst (bounded GLSL.std.450)
     .{ .opcode = 14, .operands = .{ .min = 2, .max = 2 } },
     .{ .opcode = 15, .operands = .{ .min = 3, .max = max_entry_point_operands } },
     .{ .opcode = 16, .operands = .{ .min = 2, .max = 5 } },
@@ -537,6 +539,12 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         instruction_functions[instruction_index] = current_function;
         switch (instruction.opcode) {
             0, 2, 3, 4, 5, 6, 7, 8, 317 => {}, // bounded debug/non-semantic declarations are discarded
+            11 => {
+                if (w.len < 2) return error.Malformed;
+                const name = try stringOperand(w[1..]);
+                if (!std.mem.eql(u8, name.value, "GLSL.std.450")) return error.Unsupported;
+                try define(nodes, w[0], .{ .kind = .ext_inst_import, .a = 450 });
+            },
             17 => {
                 const meta = valueMeta(&capability_schema, w[0]) orelse return error.Unsupported;
                 if (!meta.supported or capability) return error.Unsupported;
@@ -693,6 +701,16 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 terminated = true;
                 block_terminated = true;
             },
+            12 => {
+                if (!in_function or !label_seen or terminated or block_terminated or w.len < 5 or w.len > 5) return error.Malformed;
+                const set = nodes[try id(nodes, w[2])];
+                if (set.kind != .ext_inst_import or set.a != 450) return error.Unsupported;
+                if (w[3] != 4 and w[3] != 5) return error.Unsupported;
+                const result = try resultShape(nodes, w[0]);
+                const operand = try valueShape(nodes, w[4]);
+                if (!sameShape(result, operand) or (w[3] == 4 and result.scalar != .f32) or (w[3] == 5 and result.scalar != .i32)) return error.Unsupported;
+                try define(nodes, w[1], .{ .kind = .function_value, .type_id = w[0], .opcode = 12, .a = w[2], .b = w[3], .words = w[4..] });
+            },
             56 => {
                 if (!in_function or !label_seen or !terminated or !block_terminated or w.len != 0) return error.Malformed;
                 in_function = false;
@@ -815,6 +833,14 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         if (instruction_function != 0 and instruction_function != entry.function) continue;
         const w = instruction.words;
         switch (instruction.opcode) {
+            12 => {
+                if (w.len != 5) return error.Malformed;
+                const set = nodes[try id(nodes, w[2])];
+                if (set.kind != .ext_inst_import or set.a != 450 or (w[3] != 4 and w[3] != 5)) return error.Unsupported;
+                const result = try resultShape(nodes, w[0]);
+                const operand = try valueShape(nodes, w[4]);
+                if (!sameShape(result, operand) or (w[3] == 4 and result.scalar != .f32) or (w[3] == 5 and result.scalar != .i32)) return error.Unsupported;
+            },
             44, 80 => {
                 const result = try resultShape(nodes, w[0]);
                 if (result.rows == 1 and result.columns > 1) {
@@ -1303,12 +1329,13 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
+                12, 41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
             if (!needed[try id(nodes, result)]) continue;
             const first_operand: usize = switch (instruction.opcode) {
+                12 => 4,
                 41, 42, 43, 48, 49, 50 => continue,
                 164...168 => if (try staticCondition(nodes, result) != null) continue else 2,
                 170...179 => if (try staticCondition(nodes, result) != null) continue else 2,
@@ -1359,6 +1386,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 continue;
             }
             const operand_end: usize = switch (instruction.opcode) {
+                12 => 5,
                 79 => 4,
                 81 => 3,
                 82 => 4,
@@ -1490,7 +1518,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
+            12, 41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
@@ -1502,6 +1530,11 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             break :blk try resultShape(nodes, pointer.b);
         } else try resultShape(nodes, node.type_id);
         var op: ir.Op = switch (instruction.opcode) {
+            12 => switch (node.b) {
+                4 => .f_abs,
+                5 => .i_abs,
+                else => unreachable,
+            },
             41, 42, 43, 48, 49, 50 => .constant,
             44 => .constant_composite,
             80 => .composite,
@@ -2452,6 +2485,37 @@ test "compute profile lowers 32-bit signed conversion through canonical IR" {
     const malformed_convert = testOpcodeOffset(&malformed, 114, 0).?;
     malformed[malformed_convert + 1] = 2; // OpSConvert must produce signed i32.
     try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, &malformed, .compute, "main", &.{}));
+}
+
+test "compute profile lowers bounded GLSL.std.450 absolute values" {
+    var base_words = try testInsertWords(std.testing.allocator, &compute_float_remainder_store, testOpcodeOffset(&compute_float_remainder_store, 54, 0).?, &.{
+        (6 << 16) | 11, 12, 0x4c534c47, 0x6474732e, 0x3035342e, 0,
+    });
+    defer std.testing.allocator.free(base_words);
+    base_words[3] = 14;
+    const store = testOpcodeOffset(base_words, 62, 0).?;
+    base_words[store + 2] = 13;
+    const label = testOpcodeOffset(base_words, 248, 0).?;
+    const words = try testInsertWords(std.testing.allocator, base_words, label + (base_words[label] >> 16), &.{
+        (6 << 16) | 12, 2, 13, 12, 4, 7,
+    });
+    defer std.testing.allocator.free(words);
+    var program = try compile(std.testing.allocator, words, .compute, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), program.instructions.len);
+    var saw_abs = false;
+    for (program.instructions) |instruction| if (instruction.op == .f_abs) {
+        saw_abs = true;
+        try std.testing.expectEqual(@as(usize, 1), instruction.operands.len);
+        try std.testing.expectEqual(@as(u32, 0), instruction.operands[0]);
+    };
+    try std.testing.expect(saw_abs);
+    try std.testing.expectEqual(@as(f32, 7), @as(f32, @bitCast(std.mem.readInt(u32, program.instructions[0].literal[0..4], .little))));
+    try std.testing.expectEqual(ir.Op.output, program.instructions[2].op);
+
+    const unsupported = try testReplaceInstruction(std.testing.allocator, words, testOpcodeOffset(words, 12, 0).?, &.{ (6 << 16) | 12, 2, 13, 12, 37, 7 });
+    defer std.testing.allocator.free(unsupported);
+    try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, unsupported, .compute, "main", &.{}));
 }
 
 test "compute profile lowers integer multiply before storage output" {
@@ -3436,7 +3500,6 @@ test "profile distinguishes malformed from unsupported" {
 
 test "every explicitly excluded instruction family capability type storage and constant is unsupported" {
     const excluded_opcodes = [_]u16{
-        12, // OpExtInst
         45, // OpUndef
         57, // OpFunctionCall
         87, // OpImageSampleImplicitLod

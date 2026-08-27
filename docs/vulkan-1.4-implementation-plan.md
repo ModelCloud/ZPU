@@ -669,7 +669,10 @@ Each slice must land with all of the following:
   dot), floating classification/reduction, and constant-folds
   scalar integer equality, and resolves predecessor-selected `OpPhi` values at
   static acyclic branch joins, preserving only the incoming value from the
-  selected predecessor before lowering to straight-line canonical IR. A single
+  selected predecessor before lowering to straight-line canonical IR. The
+  bounded `GLSL.std.450` import path now lowers component-wise `FAbs` and
+  `SAbs` with strict import/opcode/type checks; signed `INT_MIN` absolute value
+  is rejected as a numeric-domain error. A single
   side-effect-free dynamic conditional or one-case runtime switch with a common
   merge is also lowered to compare/select; generic SPIR-V dynamic control flow,
   aggregate/descriptor-array indexing, atomics, shared-memory execution,
