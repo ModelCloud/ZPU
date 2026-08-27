@@ -5554,7 +5554,13 @@ fn cmdFillBuffer(cb: ?CommandBuffer, dst_handle: usize, offset: u64, size: u64, 
     const actual = if (size == std.math.maxInt(u64)) dst.size -| offset else size;
     if (dst.usage & 0x2 == 0) hit(.missing_transfer_usage);
     if (actual == 0) hit(.zero_fill_rejected);
-    if (c.impl.active_render_pass != null or c.impl.dynamic_rendering or dst.owner != c.impl.owner or dst.usage & 0x2 == 0 or dst.memory == null or actual == 0 or offset % 4 != 0 or actual % 4 != 0 or offset > dst.size or actual > dst.size - offset) {
+    // Command recording is failure-atomic: once a command buffer has left
+    // the recording state, or an earlier command has invalidated it, this
+    // call must not append another command before the generic recorder gets
+    // a chance to reject it.  Keep the state/invalid checks here alongside
+    // the transfer-domain validation so a later valid-looking fill cannot
+    // mutate an already-invalid buffer.
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or dst.owner != c.impl.owner or dst.usage & 0x2 == 0 or dst.memory == null or actual == 0 or offset % 4 != 0 or actual % 4 != 0 or offset > dst.size or actual > dst.size - offset) {
         c.impl.invalid = true;
         return;
     }
@@ -20980,6 +20986,10 @@ test "memory transfer objects execute against independently specified bytes" {
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdFillBuffer(commands[0], buffer_a, 1, 4, 0);
     try std.testing.expect(commands[0].impl.invalid);
+    // A command buffer that is already invalid must remain failure-atomic:
+    // a later valid-looking fill cannot append work after the first error.
+    cmdFillBuffer(commands[0], buffer_a, 0, 4, 0x12345678);
+    try std.testing.expectEqual(@as(u16, 0), commands[0].impl.count);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdCopyBuffer(commands[0], 0, buffer_b, 1, @ptrCast(&copy));

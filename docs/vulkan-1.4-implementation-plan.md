@@ -672,6 +672,8 @@ Each slice must land with all of the following:
   host result reads, and buffer copies.
 - [ ] **A5 — complete transfer commands:** update, blit, resolve,
   depth/stencil clear, and attachment clear with format/layout handling.
+  Transfer recording is failure-atomic: `vkCmdFillBuffer` now rejects ended
+  or previously-invalid command buffers before appending any command.
 - [ ] **A6 — general graphics input and drawing:** vertex/index binding,
   indexed and indirect draws, dynamic state, push constants, subpasses, and
   removal of the vkcube-only execution restriction. Static/dynamic viewport and
