@@ -5242,7 +5242,12 @@ fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) 
     if (c.impl.level == 1) {
         const raw = bi.inheritance_info orelse return .error_initialization_failed;
         const inheritance: *const CommandBufferInheritanceInfo = @ptrCast(@alignCast(raw));
-        if (inheritance.s_type != 41 or inheritance.occlusion_query_enable > 1 or inheritance.occlusion_query_enable != 0 or inheritance.query_flags != 0 or inheritance.pipeline_statistics != 0) return .error_initialization_failed;
+        // A secondary may inherit the active occlusion query from its
+        // primary render-pass instance. The precise-query control flag is
+        // still rejected because ZPU does not advertise
+        // occlusionQueryPrecise; a zero queryFlags payload is the only
+        // supported inherited form.
+        if (inheritance.s_type != 41 or inheritance.occlusion_query_enable > 1 or inheritance.query_flags != 0 or inheritance.pipeline_statistics != 0) return .error_initialization_failed;
         inherited_occlusion = inheritance.occlusion_query_enable != 0;
         inherited_subpass = inheritance.subpass;
         if (inheritance.p_next) |raw_dynamic| {
@@ -16412,6 +16417,27 @@ test "vkcube presentation path records submits and presents two swapchain images
     test_allocations_before_failure = null;
     const render_inheritance = CommandBufferInheritanceInfo{ .s_type = 41, .p_next = null, .render_pass = compatible_render_pass, .subpass = 0, .framebuffer = 0, .occlusion_query_enable = 0, .query_flags = 0, .pipeline_statistics = 0 };
     const render_secondary_begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 2, .inheritance_info = &render_inheritance };
+
+    // A traditional render-pass secondary may inherit the active occlusion
+    // query from its primary. The inherited query flag is accepted and
+    // retained, while the precise-query control flag remains rejected above
+    // because occlusionQueryPrecise is not advertised.
+    var inherited_query = render_inheritance;
+    inherited_query.occlusion_query_enable = 1;
+    const inherited_query_begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 2, .inheritance_info = &inherited_query };
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(render_secondary[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(render_secondary[0], &inherited_query_begin));
+    try std.testing.expect(render_secondary[0].impl.inherited_occlusion);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(render_secondary[0]));
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(render_secondary[0], 0));
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(render_secondary[0], &inherited_query_begin));
+        try std.testing.expect(render_secondary[0].impl.inherited_occlusion);
+        try std.testing.expectEqual(Result.success, endCommandBuffer(render_secondary[0]));
+    }
+    test_allocations_before_failure = null;
+
     try std.testing.expectEqual(Result.success, beginCommandBuffer(render_secondary[0], &render_secondary_begin));
     cmdBindPipeline(render_secondary[0], 0, pipelines[0]);
     cmdBindDescriptorSets(render_secondary[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
@@ -16427,6 +16453,42 @@ test "vkcube presentation path records submits and presents two swapchain images
     cmdBindIndexBuffer(render_secondary[0], index_buffer, 0, 0);
     cmdDrawIndexed(render_secondary[0], 3, 1, 1, -1, 0);
     try std.testing.expectEqual(Result.success, endCommandBuffer(render_secondary[0]));
+
+    // Execute a query-inheriting secondary while the primary owns an active
+    // occlusion query.  The secondary draw contributes to the same query
+    // result, proving that inheritance is not merely an accepted ABI bit.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(render_secondary[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(render_secondary[0], &inherited_query_begin));
+    cmdBindPipeline(render_secondary[0], 0, pipelines[0]);
+    cmdBindDescriptorSets(render_secondary[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
+    cmdSetViewport(render_secondary[0], 0, 1, @ptrCast(&viewport));
+    cmdSetScissor(render_secondary[0], 0, 1, @ptrCast(&render_info.render_area));
+    cmdSetLineWidth(render_secondary[0], 1);
+    cmdSetBlendConstants(render_secondary[0], &dynamic_blend);
+    cmdSetDepthBias(render_secondary[0], 0, 0, 0);
+    cmdSetDepthBounds(render_secondary[0], 0, 1);
+    cmdSetStencilCompareMask(render_secondary[0], 3, 0);
+    cmdSetStencilWriteMask(render_secondary[0], 3, 0);
+    cmdSetStencilReference(render_secondary[0], 3, 0);
+    cmdBindIndexBuffer(render_secondary[0], index_buffer, 0, 0);
+    cmdDrawIndexed(render_secondary[0], 3, 1, 1, -1, 0);
+    try std.testing.expect(!render_secondary[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(render_secondary[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    cmdResetQueryPool(commands[0], occlusion_pool, 0, 1);
+    cmdBeginRenderPass(commands[0], &render_info, 1);
+    cmdBeginQuery(commands[0], occlusion_pool, 0, 0);
+    cmdExecuteCommands(commands[0], 1, &render_secondary);
+    try std.testing.expect(!commands[0].impl.invalid);
+    cmdEndQuery(commands[0], occlusion_pool, 0);
+    cmdEndRenderPass(commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const inherited_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&inherited_submit), 0));
+    var inherited_query_result: u64 = 0;
+    try std.testing.expectEqual(Result.success, getQueryPoolResults(device, occlusion_pool, 0, 1, @sizeOf(u64), &inherited_query_result, @sizeOf(u64), 1 | 2));
+    try std.testing.expect(inherited_query_result > 0);
 
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));

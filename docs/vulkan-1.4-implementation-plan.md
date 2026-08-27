@@ -345,7 +345,10 @@ depth-only inheritance; execution validates the inherited color/depth formats
 and sample count against the active primary scope, then binds the primary's
 live attachment images into the copied draw records. Malformed chains,
 mismatched scopes, and active-query secondary execution remain
-failure-atomic. Device
+failure-atomic. Traditional render-pass secondaries also accept
+`occlusionQueryEnable = VK_TRUE` with the active primary query inherited;
+`VK_QUERY_CONTROL_PRECISE_BIT` remains rejected while the precise-query
+feature is disabled. Device
 limits now also match the bounded
 execution profile: one sample, one indirect draw, and four color attachments;
 vertex-input binding/attribute stride, location, and offset bounds are checked
