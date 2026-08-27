@@ -14829,10 +14829,78 @@ fn bindSparsePNextValid(raw: ?*const anyopaque) bool {
     return true;
 }
 
-fn bindSparseInfoValid(info: *const BindSparseInfo) bool {
+fn sparseMemoryBindValidLocked(owner: Device, bind: *const SparseMemoryBind, resource_limit: u64) bool {
+    // Sparse binds are unsupported, but malformed requests must still be
+    // rejected before the feature gate.  Keep the arithmetic bounded so a
+    // hostile offset/size pair cannot wrap into an apparently valid range.
+    if (bind.flags & ~@as(u32, 1) != 0 or bind.size == 0 or bind.resource_offset > resource_limit or bind.size > resource_limit - bind.resource_offset) return false;
+    if (bind.memory == 0) return bind.memory_offset == 0;
+    const memory = validMemoryLocked(bind.memory) orelse return false;
+    if (memory.owner != owner) return false;
+    const memory_size: u64 = @intCast(memory.bytes.len);
+    return bind.memory_offset <= memory_size and bind.size <= memory_size - bind.memory_offset;
+}
+
+fn sparseSemaphoreArrayValidLocked(owner: Device, count: u32, handles: ?[*]const usize) bool {
+    if (count == 0) return true;
+    const list = handles orelse return false;
+    for (list[0..count], 0..) |handle, index| {
+        const semaphore = validSemaphoreLocked(handle) orelse return false;
+        if (semaphore.owner != owner or semaphore.timeline) return false;
+        for (list[0..index]) |prior| if (prior == handle) return false;
+    }
+    return true;
+}
+
+fn sparseBufferBindInfoValidLocked(owner: Device, info: *const SparseBufferMemoryBindInfo) bool {
+    if (info.bind_count > max_api_items) return false;
+    const buffer = validBufferLocked(info.buffer) orelse return false;
+    if (buffer.owner != owner) return false;
+    if (info.bind_count == 0) return true;
+    const binds = info.binds orelse return false;
+    for (binds[0..info.bind_count]) |*bind| if (!sparseMemoryBindValidLocked(owner, bind, buffer.size)) return false;
+    return true;
+}
+
+fn sparseImageOpaqueBindInfoValidLocked(owner: Device, info: *const SparseImageOpaqueMemoryBindInfo) bool {
+    if (info.bind_count > max_api_items) return false;
+    const image = validImageLocked(info.image) orelse return false;
+    if (image.owner != owner) return false;
+    const image_size = imageByteSize(image) orelse return false;
+    if (info.bind_count == 0) return true;
+    const binds = info.binds orelse return false;
+    for (binds[0..info.bind_count]) |*bind| if (!sparseMemoryBindValidLocked(owner, bind, image_size)) return false;
+    return true;
+}
+
+fn sparseImageBindInfoValidLocked(owner: Device, info: *const SparseImageMemoryBindInfo) bool {
+    if (info.bind_count > max_api_items) return false;
+    const image = validImageLocked(info.image) orelse return false;
+    if (image.owner != owner) return false;
+    if (info.bind_count == 0) return true;
+    const binds = info.binds orelse return false;
+    for (binds[0..info.bind_count]) |*bind| {
+        if (bind.flags & ~@as(u32, 1) != 0 or bind.subresource.aspect_mask != 1 or bind.subresource.mip_level != 0 or bind.subresource.array_layer >= image.array_layers or bind.offset.x < 0 or bind.offset.y < 0 or bind.offset.z < 0 or bind.extent.width == 0 or bind.extent.height == 0 or bind.extent.depth == 0) return false;
+        const end_x = std.math.add(u64, @intCast(bind.offset.x), bind.extent.width) catch return false;
+        const end_y = std.math.add(u64, @intCast(bind.offset.y), bind.extent.height) catch return false;
+        const end_z = std.math.add(u64, @intCast(bind.offset.z), bind.extent.depth) catch return false;
+        if (end_x > image.width or end_y > image.height or end_z > 1) return false;
+        if (bind.memory != 0) {
+            const memory = validMemoryLocked(bind.memory) orelse return false;
+            if (memory.owner != owner or bind.memory_offset > @as(u64, @intCast(memory.bytes.len))) return false;
+        } else if (bind.memory_offset != 0) return false;
+    }
+    return true;
+}
+
+fn bindSparseInfoValidLocked(owner: Device, info: *const BindSparseInfo) bool {
     if (info.s_type != 7 or !bindSparsePNextValid(info.p_next)) return false;
     if (info.wait_semaphore_count > max_api_items or info.buffer_bind_count > max_api_items or info.image_opaque_bind_count > max_api_items or info.image_bind_count > max_api_items or info.signal_semaphore_count > max_api_items) return false;
     if ((info.wait_semaphore_count != 0 and info.wait_semaphores == null) or (info.buffer_bind_count != 0 and info.buffer_binds == null) or (info.image_opaque_bind_count != 0 and info.image_opaque_binds == null) or (info.image_bind_count != 0 and info.image_binds == null) or (info.signal_semaphore_count != 0 and info.signal_semaphores == null)) return false;
+    if (!sparseSemaphoreArrayValidLocked(owner, info.wait_semaphore_count, info.wait_semaphores) or !sparseSemaphoreArrayValidLocked(owner, info.signal_semaphore_count, info.signal_semaphores)) return false;
+    if (info.buffer_binds) |items| for (items[0..info.buffer_bind_count]) |*item| if (!sparseBufferBindInfoValidLocked(owner, item)) return false;
+    if (info.image_opaque_binds) |items| for (items[0..info.image_opaque_bind_count]) |*item| if (!sparseImageOpaqueBindInfoValidLocked(owner, item)) return false;
+    if (info.image_binds) |items| for (items[0..info.image_bind_count]) |*item| if (!sparseImageBindInfoValidLocked(owner, item)) return false;
     return true;
 }
 
@@ -14844,7 +14912,7 @@ fn queueBindSparse(queue: ?Queue, count: u32, infos: ?[*]const BindSparseInfo, f
     const fence = if (fence_handle == 0) null else validFenceLocked(fence_handle) orelse return .error_initialization_failed;
     if (fence) |item| if (!validOwner(q.owner, item.owner) or item.signaled.load(.acquire)) return .error_initialization_failed;
     if (count > max_api_items or (count != 0 and infos == null)) return .error_initialization_failed;
-    if (infos) |items| for (items[0..count]) |item| if (!bindSparseInfoValid(&item)) return .error_initialization_failed;
+    if (infos) |items| for (items[0..count]) |item| if (!bindSparseInfoValidLocked(q.owner, &item)) return .error_initialization_failed;
     // No queue advertises VK_QUEUE_SPARSE_BINDING_BIT and all sparse features
     // are false. A zero-bind submission remains a valid synchronization op.
     if (count != 0) return .error_feature_not_present;
@@ -25377,6 +25445,37 @@ test "administrative and sparse-disabled Vulkan 1.0 ABI behavior" {
     var sparse_malformed = sparse_bind;
     sparse_malformed.s_type = 999;
     try std.testing.expectEqual(Result.error_initialization_failed, queueBindSparse(ctx.queue, 1, @ptrCast(&sparse_malformed), 0));
+
+    // Even though sparse residency is disabled, the nested bind envelope is
+    // still an ABI contract.  A valid owned request reaches the feature gate;
+    // stale handles and wrapping/out-of-range spans fail before it.
+    const sparse_buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 64, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    var sparse_buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &sparse_buffer_info, null, &sparse_buffer));
+    const sparse_memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 64, .memory_type_index = 0 };
+    var sparse_memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &sparse_memory_info, null, &sparse_memory));
+    var sparse_memory_bind = SparseMemoryBind{ .resource_offset = 0, .size = 16, .memory = sparse_memory, .memory_offset = 0, .flags = 0 };
+    var sparse_buffer_bind = SparseBufferMemoryBindInfo{ .buffer = sparse_buffer, .bind_count = 1, .binds = @ptrCast(&sparse_memory_bind) };
+    sparse_bind.buffer_bind_count = 1;
+    sparse_bind.buffer_binds = @ptrCast(&sparse_buffer_bind);
+    try std.testing.expectEqual(Result.error_feature_not_present, queueBindSparse(ctx.queue, 1, @ptrCast(&sparse_bind), 0));
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| try std.testing.expectEqual(Result.error_feature_not_present, queueBindSparse(ctx.queue, 1, @ptrCast(&sparse_bind), 0));
+    test_allocations_before_failure = null;
+    sparse_buffer_bind.buffer = 0xdead_beef;
+    try std.testing.expectEqual(Result.error_initialization_failed, queueBindSparse(ctx.queue, 1, @ptrCast(&sparse_bind), 0));
+    sparse_buffer_bind.buffer = sparse_buffer;
+    sparse_memory_bind.size = 65;
+    try std.testing.expectEqual(Result.error_initialization_failed, queueBindSparse(ctx.queue, 1, @ptrCast(&sparse_bind), 0));
+    sparse_memory_bind.size = 16;
+    sparse_memory_bind.flags = 2;
+    try std.testing.expectEqual(Result.error_initialization_failed, queueBindSparse(ctx.queue, 1, @ptrCast(&sparse_bind), 0));
+    sparse_memory_bind.flags = 0;
+    sparse_bind.buffer_bind_count = 0;
+    sparse_bind.buffer_binds = null;
+    destroyBuffer(ctx.device, sparse_buffer, null);
+    freeMemory(ctx.device, sparse_memory, null);
     test_allocations_before_failure = 0;
     for (0..4096) |_| try std.testing.expectEqual(Result.error_feature_not_present, queueBindSparse(ctx.queue, 1, @ptrCast(&sparse_bind), 0));
     test_allocations_before_failure = null;

@@ -902,6 +902,18 @@ parallel shutdown waits for an active render job to clear before requesting
 worker exit, and queue submissions keep a process-wide in-flight count so the
 last-device path cannot stop workers underneath an unlocked executor.
 
+### Latest audit slice — sparse-disabled bind validation
+
+`vkQueueBindSparse` retains its truthful sparse-disabled contract: a zero-bind
+submission can synchronize and signal an unsignaled fence, while any valid
+nonzero bind returns `VK_ERROR_FEATURE_NOT_PRESENT`.  Before that feature gate,
+the driver now validates the complete bounded nested envelope without
+allocation: semaphore ownership/type and duplicate handles, buffer and image
+bind object ownership, supported bind flags, checked resource and memory spans,
+and image subresource/extent domains.  Malformed nested requests return
+`VK_ERROR_INITIALIZATION_FAILED` without changing fence state; a 4096-call
+warm-path regression proves valid nested requests remain allocation-free.
+
 - [ ] **A8 — secondary command buffers:** inheritance, execution, reset, and
   lifetime rules. Traditional render-pass inheritance now matches the active
   subpass for multi-subpass execution, and the bounded dynamic rendering
