@@ -852,6 +852,15 @@ from racing queue execution. Destruction and device teardown remain
 tombstone/failure-atomic, and the warm-path regressions verify pinned
 destroy/release and reset rejection without allocations.
 
+### Latest audit slice — command-buffer submission pins
+
+Queue submission now pins primary and secondary command-buffer records before
+releasing the registry mutex. Free, pool-destroy, device-destroy, and reset
+paths defer recorded-command teardown while a pin is active, preventing owned
+update payloads and retained secondary references from being freed underneath
+the executor. One-time command buffers retire their records after the final
+pin release; the secondary-lifetime regression covers the deferred path.
+
 - [ ] **A8 — secondary command buffers:** inheritance, execution, reset, and
   lifetime rules. Traditional render-pass inheritance now matches the active
   subpass for multi-subpass execution, and the bounded dynamic rendering

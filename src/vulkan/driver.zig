@@ -1500,6 +1500,8 @@ var command_pool_state = [_]SlotState{.never} ** max_child_objects;
 var command_buffer_objects: [max_child_objects]CommandBufferObj = undefined;
 var command_buffer_impls: [max_child_objects]CommandBufferImpl = undefined;
 var command_buffer_state = [_]SlotState{.never} ** max_child_objects;
+var command_buffer_active_users = [_]std.atomic.Value(u32){std.atomic.Value(u32).init(0)} ** max_child_objects;
+var command_buffer_retire_pending = [_]bool{false} ** max_child_objects;
 var surface_objects: [max_child_objects]SurfaceObj = undefined;
 var surface_state = [_]SlotState{.never} ** max_child_objects;
 var image_view_objects: [max_child_objects]ImageViewObj = undefined;
@@ -3753,7 +3755,7 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
             _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
         };
         for (&command_buffer_objects, &command_buffer_state) |*cb, *child_state| if (child_state.* == .live and cb.impl.owner == d) {
-            deinitRecordedCommands(cb);
+            retireCommandBufferContentsLocked(cb);
             child_state.* = .tombstone;
             cb.loader_data = 0;
         };
@@ -4160,6 +4162,36 @@ fn pinQueryPoolsInCommandBufferLocked(command_buffer: *CommandBufferObj, owner: 
     for (command_buffer.impl.secondaries[0..command_buffer.impl.secondary_count]) |secondary| {
         if (!pinQueryPoolsInCommandBufferLocked(secondary, owner, pinned, pinned_count)) return false;
     }
+    return true;
+}
+fn commandBufferSlot(command_buffer: *CommandBufferObj) usize {
+    return (@intFromPtr(command_buffer) - @intFromPtr(&command_buffer_objects[0])) / @sizeOf(CommandBufferObj);
+}
+fn retireCommandBufferContentsLocked(command_buffer: *CommandBufferObj) void {
+    const slot = commandBufferSlot(command_buffer);
+    if (command_buffer_active_users[slot].load(.acquire) != 0) {
+        command_buffer_retire_pending[slot] = true;
+        return;
+    }
+    deinitRecordedCommands(command_buffer);
+    command_buffer_retire_pending[slot] = false;
+}
+fn pinCommandBufferLocked(command_buffer: *CommandBufferObj, owner: Device) bool {
+    const slot = commandBufferSlot(command_buffer);
+    if ((stateForObject(CommandBufferObj, command_buffer, &command_buffer_objects, &command_buffer_state) orelse return false).* != .live or command_buffer.impl.owner != owner) return false;
+    _ = command_buffer_active_users[slot].fetchAdd(1, .acq_rel);
+    return true;
+}
+fn releaseCommandBufferUserLocked(command_buffer: *CommandBufferObj) void {
+    const slot = commandBufferSlot(command_buffer);
+    const previous = command_buffer_active_users[slot].fetchSub(1, .acq_rel);
+    if (previous == 1 and command_buffer_retire_pending[slot]) retireCommandBufferContentsLocked(command_buffer);
+}
+fn pinCommandBufferForSubmissionLocked(command_buffer: *CommandBufferObj, owner: Device, pinned: *[max_child_objects]*CommandBufferObj, pinned_count: *usize) bool {
+    for (pinned[0..pinned_count.*]) |existing| if (existing == command_buffer) return true;
+    if (pinned_count.* == pinned.len or !pinCommandBufferLocked(command_buffer, owner)) return false;
+    pinned[pinned_count.*] = command_buffer;
+    pinned_count.* += 1;
     return true;
 }
 fn liveBufferObject(object: *BufferObj) bool {
@@ -5136,7 +5168,7 @@ fn destroyCommandPool(device: ?Device, handle: usize, alloc: ?*const Alloc) call
     if (!validDeviceLocked(d) or !validOwner(d, pool.owner)) return;
     for (&command_buffer_objects, command_buffer_state) |*cb, state| if (state == .live and cb.impl.pool == pool and cb.impl.level == 1) invalidatePrimariesReferencing(cb);
     for (&command_buffer_objects, &command_buffer_state) |*cb, *state| if (state.* == .live and cb.impl.pool == pool) {
-        deinitRecordedCommands(cb);
+        retireCommandBufferContentsLocked(cb);
         state.* = .tombstone;
         cb.loader_data = 0;
     };
@@ -5167,6 +5199,8 @@ fn allocateCommandBuffers(device: ?Device, info: ?*const CommandBufferAllocateIn
         };
         const cb = &command_buffer_objects[index];
         const impl = &command_buffer_impls[index];
+        command_buffer_active_users[index].store(0, .monotonic);
+        command_buffer_retire_pending[index] = false;
         impl.* = .{ .owner = d, .pool = pool, .level = @intCast(ci.level), .state = 0, .invalid = false, .begin_flags = 0, .count = 0, .owned_update_count = 0, .secondary_count = 0, .primary_ref_count = 0, .render_pass_continue = false, .render_contents = 0, .inherited_occlusion = false, .inherited_subpass = 0, .active_subpass = 0, .active_framebuffer = null, .active_render_pass = null, .active_query_pool = null, .active_query_index = 0, .bound_pipeline = null, .bound_pipeline_handle = 0, .bound_descriptors = null, .bound_descriptor_bind_point = 0, .bound_descriptor_stage_flags = 0, .bound_layout = null, .bound_layout_handle = 0, .dynamic = .{}, .vertex_bindings = .{}, .index_buffer = null, .index_buffer_handle = 0, .index_offset = 0, .index_size = 0, .index_type = 0, .index_buffer_set = false, .viewport = .{ .x = 0, .y = 0, .width = 0, .height = 0, .min_depth = 0, .max_depth = 1 }, .viewport_set = false, .scissor = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, .scissor_set = false, .line_width = 1, .line_width_set = false, .line_stipple_set = false, .blend_constants = .{ 0, 0, 0, 0 }, .blend_constants_set = false, .depth_bias = .{ 0, 0, 0 }, .depth_bias_set = false, .depth_bounds = .{ 0, 1 }, .depth_bounds_set = false, .stencil_compare_mask = .{ 0, 0 }, .stencil_compare_mask_set = 0, .stencil_write_mask = .{ 0, 0 }, .stencil_write_mask_set = 0, .stencil_reference = .{ 0, 0 }, .stencil_reference_set = 0, .push_constants = .{}, .commands = undefined, .owned_updates = undefined, .secondaries = undefined };
         cb.* = .{ .loader_data = MAGIC, .impl = impl };
         command_buffer_state[index] = .live;
@@ -5210,7 +5244,7 @@ fn freeCommandBuffers(device: ?Device, pool_handle: usize, count: u32, buffers: 
     }
     for (validated[0..count]) |cb| {
         if (cb.impl.level == 1) invalidatePrimariesReferencing(cb);
-        deinitRecordedCommands(cb);
+        retireCommandBufferContentsLocked(cb);
         stateForObject(CommandBufferObj, cb, &command_buffer_objects, &command_buffer_state).?.* = .tombstone;
         cb.loader_data = 0;
     }
@@ -5233,7 +5267,7 @@ fn invalidatePrimariesReferencing(secondary: *CommandBufferObj) void {
         if (referenced) {
             primary.impl.state = 3;
             primary.impl.invalid = true;
-            deinitRecordedCommands(primary);
+            retireCommandBufferContentsLocked(primary);
         }
     }
 }
@@ -5319,6 +5353,7 @@ fn resetCommandPoolBuffersLocked(d: Device, pool: *CommandPoolObj) u32 {
     var reset: u32 = 0;
     for (&command_buffer_objects, command_buffer_state) |*cb, state| if (state == .live and cb.impl.owner == d and cb.impl.pool == pool and cb.impl.level == 1) invalidatePrimariesReferencing(cb);
     for (&command_buffer_objects, command_buffer_state) |*cb, state| if (state == .live and cb.impl.owner == d and cb.impl.pool == pool) {
+        if (command_buffer_active_users[commandBufferSlot(cb)].load(.acquire) != 0) continue;
         resetCommandBufferState(cb);
         reset += 1;
     };
@@ -5348,7 +5383,7 @@ fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) 
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return .error_initialization_failed;
-    if (!validDeviceLocked(c.impl.owner) or c.impl.state == 1 or (c.impl.state != 0 and c.impl.pool.flags & 2 == 0) or (c.impl.level == 0 and (bi.flags & 2 != 0 or bi.flags & 5 == 5))) return .error_initialization_failed;
+    if (!validDeviceLocked(c.impl.owner) or command_buffer_active_users[commandBufferSlot(c)].load(.acquire) != 0 or c.impl.state == 1 or (c.impl.state != 0 and c.impl.pool.flags & 2 == 0) or (c.impl.level == 0 and (bi.flags & 2 != 0 or bi.flags & 5 == 5))) return .error_initialization_failed;
     var inherited_render_pass: ?*RenderPassObj = null;
     var inherited_framebuffer: ?*FramebufferObj = null;
     var inherited_subpass: u32 = 0;
@@ -5481,7 +5516,7 @@ fn resetCommandBuffer(cb: ?CommandBuffer, flags: u32) callconv(.c) Result {
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return .error_initialization_failed;
-    if (!validDeviceLocked(c.impl.owner) or c.impl.pool.flags & 2 == 0 or flags & ~@as(u32, 1) != 0) return .error_initialization_failed;
+    if (!validDeviceLocked(c.impl.owner) or command_buffer_active_users[commandBufferSlot(c)].load(.acquire) != 0 or c.impl.pool.flags & 2 == 0 or flags & ~@as(u32, 1) != 0) return .error_initialization_failed;
     if (c.impl.level == 1) invalidatePrimariesReferencing(c);
     resetCommandBufferState(c);
     return .success;
@@ -14449,6 +14484,8 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
     var submitted_command_buffers = [_]bool{false} ** max_child_objects;
     var pinned_query_pools: [max_child_objects]*QueryPoolObj = undefined;
     var pinned_query_pool_count: usize = 0;
+    var pinned_command_buffers: [max_child_objects]*CommandBufferObj = undefined;
+    var pinned_command_buffer_count: usize = 0;
     for (&semaphore_objects, semaphore_state, 0..) |*semaphore, state, index| {
         if (state == .live) {
             semaphore_states[index] = semaphore.signaled.load(.acquire);
@@ -14544,7 +14581,18 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
     const queue_owner = DeviceIdentity.capture(q.owner);
     for (list[0..count]) |submit| if (submit.command_buffer_count != 0) {
         for (submit.command_buffers.?[0..submit.command_buffer_count]) |cb| {
+            if (!pinCommandBufferForSubmissionLocked(cb, q.owner, &pinned_command_buffers, &pinned_command_buffer_count)) {
+                for (pinned_command_buffers[0..pinned_command_buffer_count]) |pinned| releaseCommandBufferUserLocked(pinned);
+                for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
+                return .error_initialization_failed;
+            }
+            for (cb.impl.secondaries[0..cb.impl.secondary_count]) |secondary| if (!pinCommandBufferForSubmissionLocked(secondary, q.owner, &pinned_command_buffers, &pinned_command_buffer_count)) {
+                for (pinned_command_buffers[0..pinned_command_buffer_count]) |pinned| releaseCommandBufferUserLocked(pinned);
+                for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
+                return .error_initialization_failed;
+            };
             if (!pinQueryPoolsInCommandBufferLocked(cb, queue_owner, &pinned_query_pools, &pinned_query_pool_count)) {
+                for (pinned_command_buffers[0..pinned_command_buffer_count]) |pinned| releaseCommandBufferUserLocked(pinned);
                 for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
                 return .error_initialization_failed;
             }
@@ -14555,6 +14603,10 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
     defer {
         lock();
         defer mutex.unlock();
+        for (pinned_command_buffers[0..pinned_command_buffer_count]) |command_buffer| {
+            releaseCommandBufferUserLocked(command_buffer);
+            if (command_buffer_active_users[commandBufferSlot(command_buffer)].load(.acquire) == 0 and command_buffer.impl.state == 3 and command_buffer.impl.begin_flags & 1 != 0 and command_buffer.impl.count != 0 and !command_buffer_retire_pending[commandBufferSlot(command_buffer)]) deinitRecordedCommands(command_buffer);
+        }
         for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
     }
     var query_context = QueryExecutionContext{};
@@ -14576,7 +14628,6 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                 if (secondary.impl.begin_flags & 1 != 0) secondary.impl.state = 3;
             }
             if (cb.impl.begin_flags & 1 != 0) {
-                deinitRecordedCommands(cb);
                 cb.impl.state = 3;
             }
         };
@@ -23406,7 +23457,21 @@ test "secondary command buffers inherit lifetime and execute in exact primary or
     try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &primary_begin));
     cmdExecuteCommands(primary[0], 1, &secondary);
     try std.testing.expectEqual(Result.success, endCommandBuffer(primary[0]));
+    // A queue submission may execute after the registry lock is released.
+    // Freeing that command buffer while it is pinned tombstones the handle but
+    // defers owned-update/secondary teardown until the executor releases it.
+    lock();
+    try std.testing.expect(pinCommandBufferLocked(secondary[0], ctx.device));
+    mutex.unlock();
+    test_allocations_before_failure = 0;
     freeCommandBuffers(ctx.device, pool, 1, &secondary);
+    test_allocations_before_failure = null;
+    try std.testing.expectEqual(@as(u8, 3), primary[0].impl.state);
+    try std.testing.expect(secondary[0].impl.count != 0);
+    lock();
+    releaseCommandBufferUserLocked(secondary[0]);
+    try std.testing.expectEqual(@as(u16, 0), secondary[0].impl.count);
+    mutex.unlock();
     try std.testing.expectEqual(@as(u8, 3), primary[0].impl.state);
     try std.testing.expectEqual(@as(u16, 0), primary[0].impl.secondary_count);
     freeCommandBuffers(ctx.device, pool, 1, &primary);
