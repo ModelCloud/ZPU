@@ -185,6 +185,9 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 204, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 205, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 248, .operands = .{ .min = 1, .max = 1 } },
+    // Structured selection metadata is semantically consumed by the CFG
+    // resolver; only the default control mask is admitted in profile v1.
+    .{ .opcode = 247, .operands = .{ .min = 2, .max = 2 } },
     .{ .opcode = 253, .operands = .{ .min = 0, .max = 0 } },
     .{ .opcode = 71, .operands = .{ .min = 2, .max = 3 } },
     .{ .opcode = 72, .operands = .{ .min = 3, .max = 4 } },
@@ -669,6 +672,12 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 try define(nodes, w[0], .{ .kind = .label });
                 label_seen = true;
                 block_terminated = false;
+            },
+            247 => {
+                if (requested_stage != .compute) return error.Unsupported;
+                if (!in_function or !label_seen or terminated or block_terminated or w.len != 2) return error.Malformed;
+                if (w[1] != 0) return error.Unsupported;
+                _ = try id(nodes, w[0]);
             },
             253 => {
                 if (!in_function or !label_seen or terminated or block_terminated or w.len != 0) return error.Malformed;
@@ -2970,6 +2979,14 @@ test "compute profile resolves a static conditional branch" {
     try std.testing.expectEqual(ir.Op.constant, program.instructions[0].op);
     try std.testing.expectEqual(ir.Op.output, program.instructions[1].op);
     try std.testing.expectEqual(@as(u32, 42), std.mem.readInt(u32, program.instructions[0].literal[0..4], .little));
+    const branch_offset = testOpcodeOffset(&compute_static_branch_store, 250, 0).?;
+    var structured = try testInsertWords(std.testing.allocator, &compute_static_branch_store, branch_offset, &.{ (3 << 16) | 247, 12, 0 });
+    defer std.testing.allocator.free(structured);
+    var structured_program = try compile(std.testing.allocator, structured, .compute, "main", &.{});
+    defer structured_program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), structured_program.instructions.len);
+    structured[testOpcodeOffset(structured, 247, 0).? + 2] = 1;
+    try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, structured, .compute, "main", &.{}));
     var dynamic = compute_static_branch_store;
     const branch = testOpcodeOffset(&dynamic, 250, 0).?;
     dynamic[branch + 1] = 7;
