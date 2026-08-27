@@ -687,6 +687,8 @@ Each slice must land with all of the following:
   depth/stencil clear, and attachment clear with format/layout handling.
   Transfer recording is failure-atomic: `vkCmdFillBuffer` now rejects ended
   or previously-invalid command buffers before appending any command.
+  Aliased buffer-copy overlap checks use checked endpoint arithmetic and reject
+  wrapping ranges conservatively before recording.
 - [ ] **A6 — general graphics input and drawing:** vertex/index binding,
   indexed and indirect draws, dynamic state, push constants, subpasses, and
   removal of the vkcube-only execution restriction. Static/dynamic viewport and

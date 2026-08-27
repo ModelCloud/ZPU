@@ -5585,7 +5585,19 @@ fn ownUpdateBytes(source: []const u8) error{OutOfMemory}![]u8 {
     return allocator.dupe(u8, source);
 }
 fn byteRangesOverlap(a_start: u64, a_size: u64, b_start: u64, b_size: u64) bool {
-    return a_start < b_start + b_size and b_start < a_start + a_size;
+    // Treat endpoint overflow conservatively as overlap.  The Vulkan transfer
+    // valid-usage rule forbids overlapping regions, and wrapping an endpoint
+    // could otherwise turn a malformed range into an apparent disjoint copy.
+    const a_end = std.math.add(u64, a_start, a_size) catch return true;
+    const b_end = std.math.add(u64, b_start, b_size) catch return true;
+    return a_start < b_end and b_start < a_end;
+}
+
+test "byte-range overlap rejects wrapping endpoints conservatively" {
+    try std.testing.expect(byteRangesOverlap(0, 8, 4, 8));
+    try std.testing.expect(!byteRangesOverlap(0, 4, 4, 4));
+    try std.testing.expect(byteRangesOverlap(std.math.maxInt(u64) - 3, 8, 0, 1));
+    try std.testing.expect(byteRangesOverlap(0, 1, std.math.maxInt(u64) - 3, 8));
 }
 fn cmdUpdateBuffer(cb: ?CommandBuffer, dst_handle: usize, offset: u64, size: u64, data: ?*const anyopaque) callconv(.c) void {
     lock();
