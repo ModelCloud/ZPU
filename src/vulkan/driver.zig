@@ -5872,7 +5872,7 @@ fn cmdBlitImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_hand
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or @as(usize, c.impl.count) + count > c.impl.commands.len or src == dst or src.owner != c.impl.owner or dst.owner != c.impl.owner or src.format != dst.format or src.format != 44 or src.usage & 1 == 0 or dst.usage & 2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 1 and dst_layout != 7)) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or @as(usize, c.impl.count) + count > c.impl.commands.len or src == dst or src.owner != c.impl.owner or dst.owner != c.impl.owner or src.format != dst.format or !transferableColorFormat(src.format) or src.usage & 1 == 0 or dst.usage & 2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 7)) {
         c.impl.invalid = true;
         return;
     }
@@ -5898,7 +5898,7 @@ fn cmdResolveImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_h
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or @as(usize, c.impl.count) + count > c.impl.commands.len or src == dst or src.owner != c.impl.owner or dst.owner != c.impl.owner or src.format != dst.format or src.format != 44 or src.usage & 1 == 0 or dst.usage & 2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 7)) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or @as(usize, c.impl.count) + count > c.impl.commands.len or src == dst or src.owner != c.impl.owner or dst.owner != c.impl.owner or src.format != dst.format or !transferableColorFormat(src.format) or src.usage & 1 == 0 or dst.usage & 2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 7)) {
         c.impl.invalid = true;
         return;
     }
@@ -6017,6 +6017,15 @@ fn imageCopyMemoryOverlap(src: *const ImageObj, source: ImageCopy, dst: *const I
     }
     return false;
 }
+
+// The advertised transfer profile exposes the two four-byte UNORM color
+// formats.  Their memory layout is byte-addressable and the CPU transfer
+// backend can copy/filter them without format conversion.  sRGB and depth
+// formats retain their narrower sampled/destination-only contracts.
+fn transferableColorFormat(format: i32) bool {
+    return format == 37 or format == 44;
+}
+
 fn cmdCopyBufferToImage(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize, layout: i32, count: u32, regions: ?[*]const BufferImageCopy) callconv(.c) void {
     lock();
     defer mutex.unlock();
@@ -6139,7 +6148,7 @@ fn cmdCopyImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_hand
         return;
     }
     for (list[0..count]) |region| {
-        if (src.owner != c.impl.owner or dst.owner != c.impl.owner or src.usage & 0x1 == 0 or dst.usage & 0x2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 7) or (src == dst and (src_layout != 1 or dst_layout != 1)) or region.src_subresource.layer_count != region.dst_subresource.layer_count or !validImageRegion(src, region.src_offset, region.extent, region.src_subresource) or !validImageRegion(dst, region.dst_offset, region.extent, region.dst_subresource)) {
+        if (src.owner != c.impl.owner or dst.owner != c.impl.owner or src.format != dst.format or src.usage & 0x1 == 0 or dst.usage & 0x2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 7) or (src == dst and (src_layout != 1 or dst_layout != 1)) or region.src_subresource.layer_count != region.dst_subresource.layer_count or !validImageRegion(src, region.src_offset, region.extent, region.src_subresource) or !validImageRegion(dst, region.dst_offset, region.extent, region.dst_subresource)) {
             c.impl.invalid = true;
             return;
         }
@@ -18750,7 +18759,9 @@ test "image blit and resolve commands preserve bounded pixels and ABI" {
     try std.testing.expectEqual(@as(usize, 80), @sizeOf(ImageBlit));
     try std.testing.expectEqual(@as(usize, 68), @sizeOf(ImageResolve));
     const ctx = try createTestDeviceContext();
-    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 44, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    // Exercise the RGBA8 UNORM transfer path as well as the existing BGRA8
+    // presentation format coverage in the array-transfer tests below.
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 37, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
     const destination_info = ImageCreateInfo{ .extent = .{ .width = 4, .height = 4, .depth = 1 }, .usage = 3, .initial_layout = 0, .s_type = image_info.s_type, .p_next = image_info.p_next, .flags = image_info.flags, .image_type = image_info.image_type, .format = image_info.format, .mip_levels = image_info.mip_levels, .array_layers = image_info.array_layers, .samples = image_info.samples, .tiling = image_info.tiling, .sharing_mode = image_info.sharing_mode, .queue_family_index_count = image_info.queue_family_index_count, .queue_family_indices = image_info.queue_family_indices };
     var src: usize = 0;
     var dst: usize = 0;
@@ -19894,6 +19905,16 @@ test "bounded 2D array images isolate layers across views clears and transfers" 
     try std.testing.expectEqual(Result.success, endCommandBuffer(command));
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     try std.testing.expectEqualSlices(u8, imageBytes(validImageLocked(image).?)[0..32], imageBytes(validImageLocked(copied_image).?)[0..32]);
+
+    // Image-copy regions are format-preserving.  A mismatched destination
+    // format must reject the whole command before recording any region.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command, 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command, &begin));
+    validImageLocked(copied_image).?.format = 37;
+    cmdCopyImage(command, image, 1, copied_image, 1, 1, @ptrCast(&image_copy_region));
+    try std.testing.expect(command.impl.invalid);
+    try std.testing.expectEqual(@as(u16, 0), command.impl.count);
+    validImageLocked(copied_image).?.format = 44;
 
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command, 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command, &begin));

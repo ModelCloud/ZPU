@@ -454,8 +454,10 @@ with matching image-format limits, requirements, subresource-layout offsets,
 2D-array views, host copies, clear ranges, attachment clears, buffer/image
 copies, image copies, and blit/resolve layer selection. Core buffer/image copies, image copies,
 blits, and resolves now execute matching multi-layer regions, with checked
-per-layer buffer strides honoring row length and image height. Invalid layer
-ranges fail before recording, and the array path has a positive
+per-layer buffer strides honoring row length and image height. Image copies
+reject mismatched formats before recording, while blit and resolve accept the
+advertised RGBA8 UNORM and BGRA8 UNORM transfer formats. Invalid layer ranges
+fail before recording, and the array path has a positive
 isolation/rollback test plus an allocation-free warm path. Swapchain images
 remain explicitly single-layer because the surface capability reports one
 layer.
