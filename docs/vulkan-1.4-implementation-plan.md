@@ -292,8 +292,9 @@ select, then apply scalar arithmetic before writing through a
 `VK_DESCRIPTOR_TYPE_STORAGE_BUFFER`;
 invocation multiplication is bounded, uniform/storage ranges are validated at
 record and submit time, and the output is written synchronously. One bounded,
-side-effect-free runtime conditional with a two-arm `OpPhi` merge is lowered to
-SSA `OpSelect`; generic SPIR-V compute control flow, dynamic loads, atomics,
+side-effect-free runtime conditional or one-case runtime `OpSwitch` with a
+two-arm `OpPhi` merge is lowered to SSA compare/select; generic SPIR-V compute
+control flow, dynamic loads, atomics,
 shared memory, and general arbitrary graphics execution remain explicitly
 deferred. A final dynamic vector component in an access chain is now lowered
 with runtime bounds checks; dynamic structure, matrix, aggregate, and
@@ -662,8 +663,9 @@ Each slice must land with all of the following:
   scalar integer equality, and resolves predecessor-selected `OpPhi` values at
   static acyclic branch joins, preserving only the incoming value from the
   selected predecessor before lowering to straight-line canonical IR. A single
-  side-effect-free dynamic conditional with a common merge is also lowered to
-  `OpSelect`; generic SPIR-V dynamic control flow, aggregate/descriptor-array indexing, atomics, shared-memory execution,
+  side-effect-free dynamic conditional or one-case runtime switch with a common
+  merge is also lowered to compare/select; generic SPIR-V dynamic control flow,
+  aggregate/descriptor-array indexing, atomics, shared-memory execution,
   and complete compute memory-visibility semantics remain.
 - [ ] **A8 — secondary command buffers:** inheritance, execution, reset, and
   lifetime rules. Traditional render-pass inheritance now matches the active
