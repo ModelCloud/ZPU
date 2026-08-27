@@ -7875,13 +7875,27 @@ fn descriptorSetLayoutSupportPNextValid(raw: ?*anyopaque) bool {
         next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
         depth += 1;
     }
-    next = raw;
+    return true;
+}
+
+fn populateDescriptorSetLayoutSupportPNext(raw: ?*anyopaque) void {
+    var next = raw;
     while (next) |item| {
         const support: *DescriptorSetVariableDescriptorCountLayoutSupport = @ptrCast(@alignCast(item));
         support.max_variable_descriptor_count = 0;
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
         next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
     }
+}
+
+fn descriptorSetLayoutSupportValid(ci: *const DescriptorSetLayoutCreateInfo) bool {
+    if (ci.s_type != 32 or !descriptorSetLayoutPNextValid(ci.p_next, ci.binding_count) or ci.flags & ~@as(u32, 1) != 0 or ci.binding_count > 64 or (ci.binding_count != 0 and ci.bindings == null)) return false;
+    const bindings = if (ci.bindings) |items| items[0..ci.binding_count] else &.{};
+    for (bindings, 0..) |binding, index| {
+        if (binding.descriptor_count == 0 or binding.descriptor_type < 0 or binding.descriptor_type > 10 or binding.stage_flags == 0 or binding.stage_flags & ~@as(u32, 0x7fff_ffff) != 0 or binding.immutable_samplers != null) return false;
+        for (bindings[0..index]) |prior| if (prior.binding == binding.binding) return false;
+    }
+    _ = descriptorCounts(ci) catch return false;
     return true;
 }
 
@@ -7960,12 +7974,12 @@ fn getDescriptorSetLayoutSupport(device: ?Device, info: ?*const DescriptorSetLay
     const valid = validDeviceLocked(d);
     mutex.unlock();
     if (!valid) return;
-    var canonical = buildDescriptorSetLayout(ci) catch {
+    if (!descriptorSetLayoutSupportValid(ci)) {
         out.supported = 0;
         return;
-    };
-    canonical.deinit();
+    }
     out.supported = 1;
+    populateDescriptorSetLayoutSupportPNext(out.p_next);
 }
 fn destroyDescriptorSetLayout(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
     if (alloc != null) return;
@@ -16918,6 +16932,16 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     support_with_chain.p_next = @ptrCast(&variable_support);
     getDescriptorSetLayoutSupport(ctx.device, &layout_info, &support_with_chain);
     try std.testing.expectEqual(@as(u32, 0), variable_support.max_variable_descriptor_count);
+    var unknown_support_chain = ChainHeader{ .s_type = 999, .p_next = null };
+    support_with_chain.supported = 0xcafe_f00d;
+    support_with_chain.p_next = @ptrCast(&unknown_support_chain);
+    getDescriptorSetLayoutSupport(ctx.device, &layout_info, &support_with_chain);
+    try std.testing.expectEqual(@as(u32, 0xcafe_f00d), support_with_chain.supported);
+    support_with_chain.p_next = @ptrCast(&variable_support);
+    variable_support.max_variable_descriptor_count = 0xdead_beef;
+    getDescriptorSetLayoutSupport(@ptrFromInt(8), &layout_info, &support_with_chain);
+    try std.testing.expectEqual(@as(u32, 0xcafe_f00d), support_with_chain.supported);
+    try std.testing.expectEqual(@as(u32, 0xdead_beef), variable_support.max_variable_descriptor_count);
     var multiview = RenderPassMultiviewCreateInfo{ .s_type = 1000053000, .p_next = null, .subpass_count = 0, .view_masks = null, .dependency_count = 0, .view_offsets = null, .correlation_mask_count = 0, .correlation_masks = null };
     try std.testing.expect(renderPassCreate2PNextValid(&multiview));
     multiview.subpass_count = 1;
@@ -16935,6 +16959,11 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
         try std.testing.expect(descriptorSetLayoutPNextValid(&binding_flags_info, 1));
         try std.testing.expect(descriptorSetAllocatePNextValid(&variable_allocate, 1));
         try std.testing.expect(renderPassCreate2PNextValid(&multiview));
+        support_with_chain.supported = 0;
+        variable_support.max_variable_descriptor_count = 0xffff_ffff;
+        getDescriptorSetLayoutSupport(ctx.device, &layout_info, &support_with_chain);
+        try std.testing.expectEqual(@as(u32, 1), support_with_chain.supported);
+        try std.testing.expectEqual(@as(u32, 0), variable_support.max_variable_descriptor_count);
     }
     test_allocations_before_failure = null;
     const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };

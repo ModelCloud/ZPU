@@ -537,8 +537,9 @@ Each slice must land with all of the following:
 - [ ] Device groups, bind-memory2 and requirements2, queue2, descriptor update
   templates, YCbCr conversion, and the remaining 1.1 commands and mandatory
   feature/property structures. External capability queries now have a
-  failure-atomic zero-capability contract; native external-handle support
-  remains intentionally unadvertised.
+  failure-atomic zero-capability contract; descriptor-layout support now
+  validates its output chain before publication; native external-handle
+  support remains intentionally unadvertised.
 
 ### C. Vulkan 1.2 core
 
