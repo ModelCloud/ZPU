@@ -1162,6 +1162,7 @@ const SamplerObj = struct {
     compare_op: i32 = 0,
     min_lod: f32 = 0,
     max_lod: f32 = 0,
+    reduction_mode: i32 = 0,
     border_color: i32 = 0,
     unnormalized_coordinates: bool = false,
 };
@@ -11336,6 +11337,7 @@ fn createSampler(device: ?Device, create_info: ?*const SamplerCreateInfo, alloc:
             .compare_op = info.compare_op,
             .min_lod = info.min_lod,
             .max_lod = info.max_lod,
+            .reduction_mode = pnext.reduction_mode,
             .border_color = info.border_color,
             .unnormalized_coordinates = info.unnormalized_coordinates != 0,
         };
@@ -16229,6 +16231,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     reduction_sampler_info.p_next = @ptrCast(&weighted_reduction);
     var reduction_sampler: usize = 0;
     try std.testing.expectEqual(Result.success, createSampler(device, &reduction_sampler_info, null, &reduction_sampler));
+    try std.testing.expectEqual(@as(i32, 0), validSamplerLocked(reduction_sampler).?.reduction_mode);
     destroySampler(device, reduction_sampler, null);
     weighted_reduction.reduction_mode = 1;
     var unsupported_reduction_info = sampler_info;
