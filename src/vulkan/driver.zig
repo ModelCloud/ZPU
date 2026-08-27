@@ -320,7 +320,30 @@ pub const PhysicalDeviceBufferDeviceAddressFeatures = extern struct { s_type: i3
 pub const PhysicalDevice8BitStorageFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [3]u32 };
 pub const PhysicalDeviceShaderAtomicInt64Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [2]u32 };
 pub const PhysicalDeviceShaderFloat16Int8Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [2]u32 };
-pub const PhysicalDeviceDescriptorIndexingFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [20]u32 };
+pub const PhysicalDeviceDescriptorIndexingFeatures = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    shader_input_attachment_array_dynamic_indexing: u32,
+    shader_uniform_texel_buffer_array_dynamic_indexing: u32,
+    shader_storage_texel_buffer_array_dynamic_indexing: u32,
+    shader_uniform_buffer_array_non_uniform_indexing: u32,
+    shader_sampled_image_array_non_uniform_indexing: u32,
+    shader_storage_buffer_array_non_uniform_indexing: u32,
+    shader_storage_image_array_non_uniform_indexing: u32,
+    shader_input_attachment_array_non_uniform_indexing: u32,
+    shader_uniform_texel_buffer_array_non_uniform_indexing: u32,
+    shader_storage_texel_buffer_array_non_uniform_indexing: u32,
+    descriptor_binding_uniform_buffer_update_after_bind: u32,
+    descriptor_binding_sampled_image_update_after_bind: u32,
+    descriptor_binding_storage_image_update_after_bind: u32,
+    descriptor_binding_storage_buffer_update_after_bind: u32,
+    descriptor_binding_uniform_texel_buffer_update_after_bind: u32,
+    descriptor_binding_storage_texel_buffer_update_after_bind: u32,
+    descriptor_binding_update_unused_while_pending: u32,
+    descriptor_binding_partially_bound: u32,
+    descriptor_binding_variable_descriptor_count: u32,
+    runtime_descriptor_array: u32,
+};
 pub const PhysicalDeviceScalarBlockLayoutFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
 pub const PhysicalDeviceUniformBufferStandardLayoutFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
 pub const PhysicalDeviceShaderSubgroupExtendedTypesFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
@@ -16972,6 +16995,8 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceProtectedMemoryFeatures));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(PhysicalDevice16BitStorageFeatures));
     try std.testing.expectEqual(@as(usize, 96), @sizeOf(PhysicalDeviceDescriptorIndexingFeatures));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceDescriptorIndexingFeatures, "shader_input_attachment_array_dynamic_indexing"));
+    try std.testing.expectEqual(@as(usize, 92), @offsetOf(PhysicalDeviceDescriptorIndexingFeatures, "runtime_descriptor_array"));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(PhysicalDeviceLineRasterizationFeatures));
     try std.testing.expectEqual(@as(usize, 840), @sizeOf(PhysicalDeviceProperties2));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceExternalImageFormatInfo));
@@ -17278,7 +17303,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     getPhysicalDeviceFeatures2(ctx.physical, &features);
     try std.testing.expectEqual(@as(u32, 0xdead_beef), features.features.values[0]);
     var line_features = PhysicalDeviceLineRasterizationFeatures{ .s_type = 1000259000, .p_next = null, .rectangular_lines = 0xffff_ffff, .bresenham_lines = 0xffff_ffff, .smooth_lines = 0xffff_ffff, .stippled_rectangular_lines = 0xffff_ffff, .stippled_bresenham_lines = 0xffff_ffff, .stippled_smooth_lines = 0xffff_ffff };
-    var descriptor_features = PhysicalDeviceDescriptorIndexingFeatures{ .s_type = 1000161001, .p_next = @ptrCast(&line_features), .values = [_]u32{0xffff_ffff} ** 20 };
+    var descriptor_features = std.mem.zeroes(PhysicalDeviceDescriptorIndexingFeatures);
+    descriptor_features.s_type = 1000161001;
+    descriptor_features.p_next = @ptrCast(&line_features);
+    @memset(std.mem.asBytes(&descriptor_features)[16..], 0xff);
     var storage_features = PhysicalDevice16BitStorageFeatures{ .s_type = 1000083000, .p_next = @ptrCast(&descriptor_features), .values = [_]u32{0xffff_ffff} ** 4 };
     var divisor_features = PhysicalDeviceVertexAttributeDivisorFeatures{ .s_type = 1000191002, .p_next = @ptrCast(&storage_features), .vertex_attribute_instance_rate_divisor = 0xffff_ffff, .vertex_attribute_instance_rate_zero_divisor = 0xffff_ffff };
     features.p_next = @ptrCast(&divisor_features);
@@ -17286,7 +17314,9 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(u32, 0), divisor_features.vertex_attribute_instance_rate_divisor);
     try std.testing.expectEqual(@as(u32, 0), divisor_features.vertex_attribute_instance_rate_zero_divisor);
     try std.testing.expect(std.mem.allEqual(u32, &storage_features.values, 0));
-    try std.testing.expect(std.mem.allEqual(u32, &descriptor_features.values, 0));
+    try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&descriptor_features)[16..], 0));
+    try std.testing.expectEqual(@as(u32, 0), descriptor_features.shader_input_attachment_array_dynamic_indexing);
+    try std.testing.expectEqual(@as(u32, 0), descriptor_features.runtime_descriptor_array);
     try std.testing.expectEqual(@as(u32, 0), line_features.rectangular_lines);
     try std.testing.expectEqual(@as(u32, 0), line_features.bresenham_lines);
     try std.testing.expectEqual(@as(u32, 0), line_features.smooth_lines);
