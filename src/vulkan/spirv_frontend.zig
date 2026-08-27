@@ -1131,7 +1131,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const condition = try valueShape(nodes, w[2]);
                 const when_true = try valueShape(nodes, w[3]);
                 const when_false = try valueShape(nodes, w[4]);
-                if (condition.scalar != .bool or condition.columns != 1 or condition.rows != 1 or !sameShape(result, when_true) or !sameShape(result, when_false)) return error.Malformed;
+                if (condition.scalar != .bool or condition.rows != 1 or condition.columns < 1 or condition.columns > 4 or !sameShape(result, when_true) or !sameShape(result, when_false) or (condition.columns != 1 and !sameShape(condition, result))) return error.Malformed;
             },
             194...196 => {
                 const result = try resultShape(nodes, w[0]);

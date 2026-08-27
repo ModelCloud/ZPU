@@ -1012,8 +1012,12 @@ pub const Executor = struct {
                     const condition = try valueRef(self.values, pc, instruction.operands[0]);
                     const when_true = try valueRef(self.values, pc, instruction.operands[1]);
                     const when_false = try valueRef(self.values, pc, instruction.operands[2]);
-                    if (condition.ty.scalar != .bool or condition.ty.columns != 1 or condition.ty.rows != 1 or !same(when_true.ty, when_false.ty) or !same(when_true.ty, instruction.ty)) return error.InvalidType;
-                    result = if (condition.bits[0] != 0) when_true else when_false;
+                    if (condition.ty.scalar != .bool or condition.ty.rows != 1 or condition.ty.columns < 1 or condition.ty.columns > 4 or !same(when_true.ty, when_false.ty) or !same(when_true.ty, instruction.ty) or (condition.ty.columns != 1 and (condition.ty.columns != instruction.ty.columns or instruction.ty.rows != 1))) return error.InvalidType;
+                    if (condition.ty.columns == 1) {
+                        result = if (condition.bits[0] != 0) when_true else when_false;
+                    } else {
+                        for (0..result.lanes()) |i| result.bits[i] = if (condition.bits[i] != 0) when_true.bits[i] else when_false.bits[i];
+                    }
                 },
                 .vector_times_scalar => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
@@ -1213,7 +1217,7 @@ fn validate(program: *const ir.Program) Error!void {
                 .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge => if (source_ty.scalar != .f32 or source_ty.columns < 1 or source_ty.columns > 4 or source_ty.rows != 1) return error.InvalidType,
                 .logical_eq, .logical_ne, .logical_or, .logical_and => if (source_ty.scalar != .bool or source_ty.columns < 1 or source_ty.columns > 4 or source_ty.rows != 1) return error.InvalidType,
                 .select => if (oi == 0) {
-                    if (source_ty.scalar != .bool or try lanes(source_ty) != 1) return error.InvalidType;
+                    if (source_ty.scalar != .bool or source_ty.rows != 1 or source_ty.columns < 1 or source_ty.columns > 4 or (try lanes(source_ty) != 1 and (source_ty.columns != instruction.ty.columns or instruction.ty.rows != 1))) return error.InvalidType;
                 } else if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .output => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .vector_times_scalar => if ((oi == 0 and !same(source_ty, instruction.ty)) or (oi == 1 and (source_ty.scalar != .f32 or try lanes(source_ty) != 1))) return error.InvalidType,
@@ -2886,6 +2890,34 @@ test "integer and floating comparisons preserve vector lanes and signedness" {
     try std.testing.expectEqualSlices(u32, &.{ 0, 0, 1, 0 }, executor.values[10].bits[0..4]);
     try std.testing.expectEqualSlices(u32, &.{ 1, 0, 1, 0 }, executor.values[11].bits[0..4]);
     for (0..4096) |_| try executor.execute(&bindings, &.{});
+}
+
+test "select accepts scalar or component-wise vector conditions" {
+    const one = f32bytes(1);
+    const two = f32bytes(2);
+    const three = f32bytes(3);
+    const four = f32bytes(4);
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = .{ .scalar = .bool }, .operands = &.{}, .literal = &.{1} },
+        .{ .op = .constant, .ty = .{ .scalar = .bool }, .operands = &.{}, .literal = &.{0} },
+        .{ .op = .constant_composite, .ty = .{ .scalar = .bool, .columns = 4 }, .operands = &.{ 0, 1, 0, 1 }, .literal = &.{} },
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &one },
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &two },
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &three },
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &four },
+        .{ .op = .constant_composite, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{ 3, 4, 5, 6 }, .literal = &.{} },
+        .{ .op = .constant_composite, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{ 6, 5, 4, 3 }, .literal = &.{} },
+        .{ .op = .select, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{ 2, 7, 8 }, .literal = &.{} },
+        .{ .op = .select, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{ 0, 7, 8 }, .literal = &.{} },
+    };
+    var source = try testProgram(&.{}, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    try executor.execute(&.{}, &.{});
+    try std.testing.expectEqualSlices(u32, &.{ @bitCast(@as(f32, 1)), @bitCast(@as(f32, 3)), @bitCast(@as(f32, 3)), @bitCast(@as(f32, 1)) }, executor.values[9].bits[0..4]);
+    try std.testing.expectEqualSlices(u32, &.{ @bitCast(@as(f32, 1)), @bitCast(@as(f32, 2)), @bitCast(@as(f32, 3)), @bitCast(@as(f32, 4)) }, executor.values[10].bits[0..4]);
+    for (0..4096) |_| try executor.execute(&.{}, &.{});
 }
 
 test "floating remainder uses truncating quotient and rejects zero divisor" {
