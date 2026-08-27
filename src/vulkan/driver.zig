@@ -4886,6 +4886,10 @@ fn setEvent(device: ?Device, handle: usize) callconv(.c) Result {
     defer mutex.unlock();
     const event = validEventLocked(handle) orelse return .error_initialization_failed;
     if (!validDeviceLocked(d) or !validOwner(d, event.owner)) return .error_initialization_failed;
+    // vkSetEvent is a no-op when the event is already signaled. Keep the
+    // prior signal provenance intact so a later wait observes the original
+    // host/device dependency rather than a synthetic host signal.
+    if (event.signaled.load(.acquire)) return .success;
     event.signal_stage_mask.store(0x4000, .release);
     event.signal_kind.store(@intFromEnum(EventSignalKind.host), .release);
     event.signal_dependency_key.store(0, .release);
@@ -4898,6 +4902,9 @@ fn resetEvent(device: ?Device, handle: usize) callconv(.c) Result {
     defer mutex.unlock();
     const event = validEventLocked(handle) orelse return .error_initialization_failed;
     if (!validDeviceLocked(d) or !validOwner(d, event.owner)) return .error_initialization_failed;
+    // vkResetEvent is a no-op when the event is already unsignaled. Do not
+    // mutate provenance on this path even if a stale test object carries it.
+    if (!event.signaled.load(.acquire)) return .success;
     event.signal_stage_mask.store(0, .release);
     event.signal_kind.store(@intFromEnum(EventSignalKind.none), .release);
     event.signal_dependency_key.store(0, .release);
@@ -23037,8 +23044,16 @@ test "event host and command-buffer ABI behavior is owned and failure atomic" {
     try std.testing.expectEqual(Result.event_reset, getEventStatus(ctx.device, event));
     try std.testing.expectEqual(Result.success, setEvent(ctx.device, event));
     try std.testing.expectEqual(Result.event_set, getEventStatus(ctx.device, event));
+    const event_object = validEventLocked(event).?;
+    // Repeated host set is a no-op and must preserve the existing source kind.
+    try std.testing.expectEqual(EventSignalKind.host, @as(EventSignalKind, @enumFromInt(event_object.signal_kind.load(.acquire))));
+    try std.testing.expectEqual(Result.success, setEvent(ctx.device, event));
+    try std.testing.expectEqual(EventSignalKind.host, @as(EventSignalKind, @enumFromInt(event_object.signal_kind.load(.acquire))));
     try std.testing.expectEqual(Result.success, resetEvent(ctx.device, event));
     try std.testing.expectEqual(Result.event_reset, getEventStatus(ctx.device, event));
+    // Repeated host reset is also a no-op.
+    try std.testing.expectEqual(Result.success, resetEvent(ctx.device, event));
+    try std.testing.expectEqual(EventSignalKind.none, @as(EventSignalKind, @enumFromInt(event_object.signal_kind.load(.acquire))));
     try std.testing.expectEqual(Result.error_initialization_failed, createEvent(null, &info, null, &event));
     info.flags = 1;
     try std.testing.expectEqual(Result.error_initialization_failed, createEvent(ctx.device, &info, null, &event));

@@ -553,6 +553,12 @@ every first-scope source stage in the dependency to be HOST or NONE, so a host
 signal cannot satisfy device-stage work. Host-only waits, mixed-stage rollback,
 and a 4096-iteration allocation-free predicate path are covered directly.
 
+Host event transitions are idempotent: `vkSetEvent` does not overwrite an
+already-signaled event (or its signal provenance), and `vkResetEvent` does not
+rewrite an already-unsignaled event. This matches the Vulkan host event
+operation rules and keeps subsequent legacy/synchronization2 waits tied to the
+signal that actually occurred.
+
 The bounded execution checkpoint for `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC`
 is complete. Descriptor writes and update templates preserve the dynamic type,
 require the advertised 256-byte uniform-buffer alignment, and
