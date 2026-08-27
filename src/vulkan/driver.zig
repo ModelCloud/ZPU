@@ -86,8 +86,27 @@ pub const Features = extern struct {
 
 const feature_word_count: usize = 55;
 
+// ZPU's bounded scalar raster profile can execute more than one indirect
+// command in a single vkCmdDraw*Indirect call.  Keep this limit explicit so
+// physical-device properties, feature negotiation, recording validation, and
+// submit-time decoding cannot drift apart.
+const max_indirect_draw_count: u32 = 4;
+
 fn featureWords(features: *const Features) []const u32 {
     return @as([*]const u32, @ptrCast(features))[0..feature_word_count];
+}
+
+fn coreFeaturesSupported(features: *const Features) bool {
+    // multiDrawIndirect is the sole advertised optional core feature.  Every
+    // other VkPhysicalDeviceFeatures bit remains disabled until its execution
+    // semantics are implemented and tested.
+    const multi_draw_index = @offsetOf(Features, "multi_draw_indirect") / @sizeOf(u32);
+    for (featureWords(features), 0..) |value, index| {
+        if (index == multi_draw_index) {
+            if (value > 1) return false;
+        } else if (value != 0) return false;
+    }
+    return true;
 }
 pub const DeviceInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, queue_info_count: u32, queue_infos: ?[*]const QueueInfo, layer_count: u32, layers: ?[*]const [*:0]const u8, extension_count: u32, extensions: ?[*]const [*:0]const u8, features: ?*const Features };
 pub const ExtensionProperties = extern struct { name: [256]u8, spec_version: u32 };
@@ -2313,7 +2332,7 @@ fn deviceCreatePNextHasEnabledFeature(raw: ?*const anyopaque) bool {
         }
         if (header.s_type == 1000059000) {
             const feature2: *const PhysicalDeviceFeatures2 = @ptrCast(@alignCast(item));
-            for (featureWords(&feature2.features)) |value| if (value != 0) return true;
+            if (!coreFeaturesSupported(&feature2.features)) return true;
             return coreFeatureChainHasEnabledValue(feature2.p_next);
         }
         if (saw_loader and coreFeaturePayloadWords(header.s_type) == null) return false;
@@ -3230,6 +3249,7 @@ fn getFeaturesLocked(h: Physical, out: *Features) bool {
         hit(.concurrent_overlap);
     }
     out.* = std.mem.zeroes(Features);
+    out.multi_draw_indirect = 1;
     return true;
 }
 fn getFeatures(physical: ?Physical, output: ?*Features) callconv(.c) void {
@@ -3288,7 +3308,7 @@ fn conservativeLimits() Limits {
     v.sub_texel_precision_bits = 4;
     v.mipmap_precision_bits = 4;
     v.max_draw_indexed_index_value = 0x00ff_ffff;
-    v.max_draw_indirect_count = 1;
+    v.max_draw_indirect_count = max_indirect_draw_count;
     v.max_sampler_lod_bias = 2;
     v.max_sampler_anisotropy = 1;
     v.max_viewports = 1;
@@ -3651,7 +3671,7 @@ fn createDevice(physical: ?Physical, info: ?*const DeviceInfo, alloc: ?*const Al
     }
     if (!deviceCreatePNextValid(ci.p_next) or ci.flags != 0) return .error_initialization_failed;
     if (deviceCreatePNextHasEnabledFeature(ci.p_next)) return .error_feature_not_present;
-    if (ci.features) |features| for (featureWords(features)) |feature| if (feature != 0) return .error_feature_not_present;
+    if (ci.features) |features| if (!coreFeaturesSupported(features)) return .error_feature_not_present;
     if (ci.queue_info_count != 1) return .error_initialization_failed;
     const qis = ci.queue_infos orelse return .error_initialization_failed;
     const qi = qis[0];
@@ -7490,25 +7510,33 @@ fn prevalidateIndirectProfileDraw(op: IndirectDrawState, owner: *DeviceObj) bool
         break :blk @min(std.mem.readInt(u32, count_bytes[@intCast(count.offset)..][0..4], .little), count.max_draw_count);
     } else op.draw_count;
     if (draw_count == 0) return true;
-    if (draw_count > 1) return false;
-    const base = @as(usize, @intCast(op.offset));
+    if (draw_count > max_indirect_draw_count) return false;
     const indirect_size: usize = if (op.indexed) 20 else 16;
-    if (base > bytes.len or indirect_size > bytes.len - base) return false;
-    const words = bytes[base..];
-    const vertex_count = std.mem.readInt(u32, words[0..4], .little);
-    var cube: Command = undefined;
-    if (op.indexed) {
-        const first_index = std.mem.readInt(u32, words[8..12], .little);
-        const vertex_offset = std.mem.readInt(i32, words[12..16], .little);
-        const index_buffer = op.index_buffer orelse return false;
-        const index_size: u64 = if (op.index_type == 0) 2 else if (op.index_type == 1) 4 else return false;
-        const index_start = std.math.add(u64, op.index_offset, std.math.mul(u64, first_index, index_size) catch return false) catch return false;
-        const index_bytes = std.math.mul(u64, vertex_count, index_size) catch return false;
-        cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = vertex_count, .base_vertex = 0, .instance_count = std.mem.readInt(u32, words[4..8], .little), .indexed = .{ .buffer = index_buffer, .offset = index_start, .byte_count = index_bytes, .index_type = op.index_type, .vertex_offset = vertex_offset }, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .vertex_bindings = op.vertex_bindings } };
-    } else {
-        cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = vertex_count, .base_vertex = std.mem.readInt(u32, words[8..12], .little), .instance_count = std.mem.readInt(u32, words[4..8], .little), .indexed = null, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .vertex_bindings = op.vertex_bindings } };
+    var draw_index: u32 = 0;
+    while (draw_index < draw_count) : (draw_index += 1) {
+        const relative = std.math.mul(u64, @as(u64, draw_index), op.stride) catch return false;
+        const base_u64 = std.math.add(u64, op.offset, relative) catch return false;
+        if (base_u64 > std.math.maxInt(usize)) return false;
+        const base: usize = @intCast(base_u64);
+        if (base > bytes.len or indirect_size > bytes.len - base) return false;
+        const words = bytes[base..];
+        const vertex_count = std.mem.readInt(u32, words[0..4], .little);
+        var cube: Command = undefined;
+        if (op.indexed) {
+            const first_index = std.mem.readInt(u32, words[8..12], .little);
+            const vertex_offset = std.mem.readInt(i32, words[12..16], .little);
+            const index_buffer = op.index_buffer orelse return false;
+            const index_size: u64 = if (op.index_type == 0) 2 else if (op.index_type == 1) 4 else return false;
+            const index_start = std.math.add(u64, op.index_offset, std.math.mul(u64, first_index, index_size) catch return false) catch return false;
+            const index_bytes = std.math.mul(u64, vertex_count, index_size) catch return false;
+            if (index_start > index_buffer.size or index_bytes > index_buffer.size - index_start) return false;
+            cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = vertex_count, .base_vertex = 0, .instance_count = std.mem.readInt(u32, words[4..8], .little), .indexed = .{ .buffer = index_buffer, .offset = index_start, .byte_count = index_bytes, .index_type = op.index_type, .vertex_offset = vertex_offset }, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .vertex_bindings = op.vertex_bindings } };
+        } else {
+            cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = vertex_count, .base_vertex = std.mem.readInt(u32, words[8..12], .little), .instance_count = std.mem.readInt(u32, words[4..8], .little), .indexed = null, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .vertex_bindings = op.vertex_bindings } };
+        }
+        if (!prevalidateProfileVertexBindings(cube.cube_draw, owner)) return false;
     }
-    return prevalidateProfileVertexBindings(cube.cube_draw, owner);
+    return true;
 }
 
 fn indirectFirstInstanceValid(op: IndirectDrawState) bool {
@@ -7522,12 +7550,18 @@ fn indirectFirstInstanceValid(op: IndirectDrawState) bool {
         break :blk @min(std.mem.readInt(u32, count_bytes[@intCast(count.offset)..][0..4], .little), count.max_draw_count);
     } else op.draw_count;
     if (draw_count == 0) return true;
-    if (draw_count > 1) return false;
-    const base = @as(usize, @intCast(op.offset));
     const indirect_size: usize = if (op.indexed) 20 else 16;
-    if (base > bytes.len or indirect_size > bytes.len - base) return false;
     const first_instance_offset: usize = if (op.indexed) 16 else 12;
-    return std.mem.readInt(u32, bytes[base + first_instance_offset ..][0..4], .little) == 0;
+    var draw_index: u32 = 0;
+    while (draw_index < draw_count) : (draw_index += 1) {
+        const relative = std.math.mul(u64, @as(u64, draw_index), op.stride) catch return false;
+        const base_u64 = std.math.add(u64, op.offset, relative) catch return false;
+        if (base_u64 > std.math.maxInt(usize)) return false;
+        const base: usize = @intCast(base_u64);
+        if (base > bytes.len or indirect_size > bytes.len - base) return false;
+        if (std.mem.readInt(u32, bytes[base + first_instance_offset ..][0..4], .little) != 0) return false;
+    }
+    return true;
 }
 
 fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_objects]i32) bool {
@@ -7829,7 +7863,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 if (op.count_source) |count| {
                     if (!liveBufferObject(count.buffer) or count.buffer.memory == null or !liveMemoryObject(count.buffer.memory.?)) return deadResource();
                     if (count.buffer.owner != owner or count.buffer.memory.?.owner != owner) return wrongSubmittingDevice();
-                    if (count.max_draw_count > 1 or count.offset % 4 != 0 or count.offset > count.buffer.size or count.buffer.size - count.offset < 4) return false;
+                    if (count.max_draw_count > max_indirect_draw_count or count.offset % 4 != 0 or count.offset > count.buffer.size or count.buffer.size - count.offset < 4) return false;
                 }
                 if (op.indexed) {
                     const index_buffer = op.index_buffer orelse return deadResource();
@@ -7891,7 +7925,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             if (op.count_source) |count| {
                 if (!liveBufferObject(count.buffer) or count.buffer.memory == null or !liveMemoryObject(count.buffer.memory.?)) return deadResource();
                 if (count.buffer.owner != owner or count.buffer.memory.?.owner != owner) return wrongSubmittingDevice();
-                if (count.max_draw_count > 1 or count.offset % 4 != 0 or count.offset > count.buffer.size or count.buffer.size - count.offset < 4) return false;
+                if (count.max_draw_count > max_indirect_draw_count or count.offset % 4 != 0 or count.offset > count.buffer.size or count.buffer.size - count.offset < 4) return false;
             }
             if (!indirectFirstInstanceValid(op)) return false;
             if (profile_draw and !prevalidateIndirectProfileDraw(op, owner)) return false;
@@ -12893,9 +12927,11 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     try std.testing.expect(std.mem.readInt(u32, color_bytes[0..4], .little) != 0 or std.mem.readInt(u32, color_bytes[4..8], .little) != 0);
     @memset(color_bytes[0..], 0);
     for (0..16) |index| std.mem.writeInt(u32, depth_bytes[index * 4 ..][0..4], 0x3f80_0000, .little);
-    var indirect_bytes: [16]u8 align(64) = [_]u8{0} ** 16;
+    var indirect_bytes: [32]u8 align(64) = [_]u8{0} ** 32;
     std.mem.writeInt(u32, indirect_bytes[0..4], 3, .little);
     std.mem.writeInt(u32, indirect_bytes[4..8], 2, .little);
+    std.mem.writeInt(u32, indirect_bytes[16..20], 3, .little);
+    std.mem.writeInt(u32, indirect_bytes[20..24], 1, .little);
     var indirect_memory = MemoryObj{ .owner = undefined, .bytes = indirect_bytes[0..], .mapped = true };
     var indirect_buffer = BufferObj{ .owner = undefined, .size = indirect_bytes.len, .usage = 0x100, .memory = &indirect_memory };
     const indirect_command = Command{ .indirect_draw = .{
@@ -12906,7 +12942,7 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
         .descriptors = &descriptors,
         .indirect_buffer = &indirect_buffer,
         .offset = 0,
-        .draw_count = 1,
+        .draw_count = 2,
         .stride = 16,
         .indexed = false,
         .index_buffer = null,
@@ -12923,6 +12959,7 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     for (0..4096) |_| executeValidatedCommand(command, &context);
+    for (0..4096) |_| executeValidatedCommand(indirect_command, &context);
 }
 
 test "scalar graphics profile contract is explicit and allocation free" {
@@ -13273,12 +13310,12 @@ fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    // The physical-device limits advertise one indirect draw per command.
+    // The physical-device limits advertise a bounded multi-draw profile.
     // Keep recording validation in lockstep with that limit instead of
-    // accepting a larger batch that the executor/profile cannot promise.
+    // accepting an unbounded batch that the executor cannot promise.
     const dynamic_rendering = command_buffer.impl.dynamic_rendering;
     const render_pass = command_buffer.impl.active_render_pass;
-    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or (render_pass == null and !dynamic_rendering) or draw_count > 1) {
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or (render_pass == null and !dynamic_rendering) or draw_count > max_indirect_draw_count) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -13334,8 +13371,8 @@ fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64
     const range_valid = if (draw_count == 0) offset_valid else offset_valid and required <= indirect_buffer.size - offset;
     // Vulkan requires each positive-count indirect command to use a stride at
     // least as large as its command structure and aligned to four bytes.  The
-    // previous draw_count <= 1 shortcut accidentally admitted zero/short
-    // strides for the advertised one-draw path.
+    // Zero-count commands are the only form that may omit the structure
+    // stride; positive batches always carry a complete aligned command.
     const stride_valid = draw_count == 0 or (stride >= indirect_size and stride % 4 == 0);
     if (!graphicsDescriptorBindingValid(command_buffer.impl) or pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or (dynamic_rendering and !dynamicPipelineRenderingCompatible(command_buffer.impl, pipeline)) or indirect_buffer.owner != command_buffer.impl.owner or indirect_buffer.usage & 0x100 == 0 or indirect_buffer.memory == null or !liveMemoryObject(indirect_buffer.memory.?) or offset % 4 != 0 or !stride_valid or (draw_count != 0 and offset > indirect_buffer.size) or !range_valid or invalid_index_state) {
         command_buffer.impl.invalid = true;
@@ -13369,7 +13406,7 @@ fn indirectCountSource(cb: ?CommandBuffer, count_buffer_handle: usize, count_off
         c.impl.invalid = true;
         return null;
     };
-    if (c.impl.state != 1 or c.impl.invalid or max_draw_count > 1 or count_buffer.owner != c.impl.owner or count_buffer.usage & 0x100 == 0 or count_buffer.memory == null or !liveMemoryObject(count_buffer.memory.?) or count_offset % 4 != 0 or count_offset > count_buffer.size or count_buffer.size - count_offset < 4) {
+    if (c.impl.state != 1 or c.impl.invalid or max_draw_count > max_indirect_draw_count or count_buffer.owner != c.impl.owner or count_buffer.usage & 0x100 == 0 or count_buffer.memory == null or !liveMemoryObject(count_buffer.memory.?) or count_offset % 4 != 0 or count_offset > count_buffer.size or count_buffer.size - count_offset < 4) {
         c.impl.invalid = true;
         return null;
     }
@@ -13377,11 +13414,11 @@ fn indirectCountSource(cb: ?CommandBuffer, count_buffer_handle: usize, count_off
 }
 fn cmdDrawIndirectCount(cb: ?CommandBuffer, indirect: usize, offset: u64, count_buffer: usize, count_offset: u64, max_draw_count: u32, stride: u64) callconv(.c) void {
     const source = indirectCountSource(cb, count_buffer, count_offset, max_draw_count) orelse return;
-    cmdDrawIndirectCommon(cb, indirect, offset, if (max_draw_count != 0) 1 else 0, stride, false, source);
+    cmdDrawIndirectCommon(cb, indirect, offset, max_draw_count, stride, false, source);
 }
 fn cmdDrawIndexedIndirectCount(cb: ?CommandBuffer, indirect: usize, offset: u64, count_buffer: usize, count_offset: u64, max_draw_count: u32, stride: u64) callconv(.c) void {
     const source = indirectCountSource(cb, count_buffer, count_offset, max_draw_count) orelse return;
-    cmdDrawIndirectCommon(cb, indirect, offset, if (max_draw_count != 0) 1 else 0, stride, true, source);
+    cmdDrawIndirectCommon(cb, indirect, offset, max_draw_count, stride, true, source);
 }
 fn dispatchGroupsValid(groups: [3]u32) bool {
     for (groups) |value| if (value > 65_535) return false;
@@ -14714,6 +14751,13 @@ test "enumeration lifecycle and unsupported features" {
     var di = DeviceInfo{ .s_type = 3, .p_next = null, .flags = 0, .queue_info_count = 1, .queue_infos = @ptrCast(&qi), .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null, .features = &features };
     var device: Device = undefined;
     try std.testing.expectEqual(Result.error_feature_not_present, createDevice(ps[0], &di, null, &device));
+    features.robust_buffer_access = 0;
+    features.multi_draw_indirect = 1;
+    try std.testing.expectEqual(Result.success, createDevice(ps[0], &di, null, &device));
+    destroyDevice(device, null);
+    features.multi_draw_indirect = 2;
+    try std.testing.expectEqual(Result.error_feature_not_present, createDevice(ps[0], &di, null, &device));
+    features.multi_draw_indirect = 0;
     di.features = null;
     try std.testing.expectEqual(Result.success, createDevice(ps[0], &di, null, &device));
     var queue: Queue = undefined;
@@ -14809,7 +14853,8 @@ test "core instance physical and device enumeration is bounded and allocation fr
         var features = std.mem.zeroes(Features);
         @memset(std.mem.asBytes(&features), 1);
         getFeatures(physical[0], &features);
-        try std.testing.expect(std.mem.allEqual(u32, featureWords(&features), 0));
+        try std.testing.expectEqual(@as(u32, 1), features.multi_draw_indirect);
+        for (featureWords(&features), 0..) |value, index| if (index != 9) try std.testing.expectEqual(@as(u32, 0), value);
         var sparse_count: u32 = 1;
         getSparseImageFormatProperties(physical[0], 37, 1, 1, 4, 0, &sparse_count, @ptrFromInt(8));
         try std.testing.expectEqual(@as(u32, 0), sparse_count);
@@ -15900,20 +15945,20 @@ test "vkcube presentation path records submits and presents two swapchain images
     const indices: [*]u16 = @ptrCast(@alignCast(mapped_indices.?));
     indices[0..4].* = .{ 99, 1, 2, 3 };
     unmapMemory(device, index_memory);
-    const indirect_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 20, .usage = 0x100, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
+    const indirect_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 40, .usage = 0x100, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
     var indirect_buffer: usize = 0;
     try std.testing.expectEqual(Result.success, createBuffer(device, &indirect_info, null, &indirect_buffer));
-    const indirect_alloc = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 20, .memory_type_index = 0 };
+    const indirect_alloc = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 40, .memory_type_index = 0 };
     var indirect_memory: usize = 0;
     try std.testing.expectEqual(Result.success, allocateMemory(device, &indirect_alloc, null, &indirect_memory));
     try std.testing.expectEqual(Result.success, bindBufferMemory(device, indirect_buffer, indirect_memory, 0));
     var mapped_indirect: ?*anyopaque = null;
-    try std.testing.expectEqual(Result.success, mapMemory(device, indirect_memory, 0, 20, 0, &mapped_indirect));
+    try std.testing.expectEqual(Result.success, mapMemory(device, indirect_memory, 0, 40, 0, &mapped_indirect));
     const indirect_words: [*]u32 = @ptrCast(@alignCast(mapped_indirect.?));
     // Keep both the non-indexed and indexed command interpretations valid:
     // the fourth word is firstInstance for the former and vertexOffset for
     // the latter, while the advertised profile disables indirect firstInstance.
-    indirect_words[0..5].* = .{ 3, 2, 1, 0, 0 };
+    indirect_words[0..10].* = .{ 3, 2, 1, 0, 0, 3, 1, 0, 0, 0 };
     unmapMemory(device, indirect_memory);
     const draw_sampler_info = SamplerCreateInfo{ .s_type = 31, .p_next = null, .flags = 0, .mag_filter = 0, .min_filter = 0, .mipmap_mode = 0, .address_mode_u = 0, .address_mode_v = 0, .address_mode_w = 0, .mip_lod_bias = 0, .anisotropy_enable = 0, .max_anisotropy = 0, .compare_enable = 0, .compare_op = 0, .min_lod = 0, .max_lod = 0, .border_color = 0, .unnormalized_coordinates = 0 };
     var draw_sampler: usize = 0;
@@ -16221,13 +16266,25 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(indirect_count_before_zero_stride, commands[0].impl.count);
     commands[0].impl.invalid = false;
-    const indirect_count_before_limit_failure = commands[0].impl.count;
+    const indirect_count_before_multi_draw = commands[0].impl.count;
     cmdDrawIndirect(commands[0], indirect_buffer, 0, 2, 20);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(indirect_count_before_multi_draw + 1, commands[0].impl.count);
+    try std.testing.expectEqual(@as(u32, 2), commands[0].impl.commands[commands[0].impl.count - 1].indirect_draw.draw_count);
+    commands[0].impl.invalid = false;
+    const indirect_count_before_count_limit = commands[0].impl.count;
+    cmdDrawIndirectCount(commands[0], indirect_buffer, 0, indirect_buffer, 0, 2, 20);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(indirect_count_before_count_limit + 1, commands[0].impl.count);
+    try std.testing.expectEqual(@as(u32, 2), commands[0].impl.commands[commands[0].impl.count - 1].indirect_draw.draw_count);
+    commands[0].impl.invalid = false;
+    const indirect_count_before_limit_failure = commands[0].impl.count;
+    cmdDrawIndirect(commands[0], indirect_buffer, 0, max_indirect_draw_count + 1, 20);
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(indirect_count_before_limit_failure, commands[0].impl.count);
     commands[0].impl.invalid = false;
     const indirect_count_before_count_limit_failure = commands[0].impl.count;
-    cmdDrawIndirectCount(commands[0], indirect_buffer, 0, indirect_buffer, 0, 2, 20);
+    cmdDrawIndirectCount(commands[0], indirect_buffer, 0, indirect_buffer, 0, max_indirect_draw_count + 1, 20);
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(indirect_count_before_count_limit_failure, commands[0].impl.count);
     commands[0].impl.invalid = false;
@@ -16269,15 +16326,25 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.success, acquireNextImage(device, swapchain, std.math.maxInt(u64), acquired, 0, &image_index));
     const wait_stage: u32 = 0x400;
     const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 1, .wait_semaphores = @ptrCast(&acquired), .wait_dst_stage_mask = @ptrCast(&wait_stage), .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 1, .signal_semaphores = @ptrCast(&rendered) };
-    try std.testing.expectEqual(Result.success, mapMemory(device, indirect_memory, 0, 20, 0, &mapped_indirect));
+    try std.testing.expectEqual(Result.success, mapMemory(device, indirect_memory, 0, 40, 0, &mapped_indirect));
     const remapped_indirect_words: [*]u32 = @ptrCast(@alignCast(mapped_indirect.?));
     remapped_indirect_words[3] = 1;
     unmapMemory(device, indirect_memory);
     try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(queue, 1, @ptrCast(&submit), 0));
     try std.testing.expect(validSemaphoreLocked(acquired).?.signaled.load(.acquire));
-    try std.testing.expectEqual(Result.success, mapMemory(device, indirect_memory, 0, 20, 0, &mapped_indirect));
+    try std.testing.expectEqual(Result.success, mapMemory(device, indirect_memory, 0, 40, 0, &mapped_indirect));
     const restored_indirect_words: [*]u32 = @ptrCast(@alignCast(mapped_indirect.?));
     restored_indirect_words[3] = 0;
+    unmapMemory(device, indirect_memory);
+    try std.testing.expectEqual(Result.success, mapMemory(device, indirect_memory, 0, 40, 0, &mapped_indirect));
+    const late_invalid_indirect_words: [*]u32 = @ptrCast(@alignCast(mapped_indirect.?));
+    late_invalid_indirect_words[8] = 1;
+    unmapMemory(device, indirect_memory);
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expect(validSemaphoreLocked(acquired).?.signaled.load(.acquire));
+    try std.testing.expectEqual(Result.success, mapMemory(device, indirect_memory, 0, 40, 0, &mapped_indirect));
+    const restored_late_indirect_words: [*]u32 = @ptrCast(@alignCast(mapped_indirect.?));
+    restored_late_indirect_words[8] = 0;
     unmapMemory(device, indirect_memory);
     try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&submit), 0));
     var occlusion_result: u64 = 0;
@@ -17705,7 +17772,7 @@ test "physical properties start with coherent conservative limits" {
     try std.testing.expect(l.sub_texel_precision_bits >= 4);
     try std.testing.expect(l.mipmap_precision_bits >= 4);
     try std.testing.expect(l.max_draw_indexed_index_value >= 0x00ff_ffff);
-    try std.testing.expect(l.max_draw_indirect_count >= 1);
+    try std.testing.expectEqual(max_indirect_draw_count, l.max_draw_indirect_count);
     try std.testing.expect(l.max_sampler_lod_bias >= 2);
     try std.testing.expectEqual(@as(f32, 1), l.max_sampler_anisotropy);
     try std.testing.expectEqual(@as(u32, 1), l.max_viewports);
@@ -17772,7 +17839,8 @@ test "all physical queries cover success boundaries and invalid handles" {
     var features = std.mem.zeroes(Features);
     @memset(std.mem.asBytes(&features), 1);
     getFeatures(p, &features);
-    try std.testing.expect(std.mem.allEqual(u32, featureWords(&features), 0));
+    try std.testing.expectEqual(@as(u32, 1), features.multi_draw_indirect);
+    for (featureWords(&features), 0..) |value, index| if (index != 9) try std.testing.expectEqual(@as(u32, 0), value);
     var queue_count: u32 = 7;
     getQueueProperties(p, &queue_count, null);
     try std.testing.expectEqual(@as(u32, 1), queue_count);
@@ -18251,7 +18319,8 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVulkan12Features, "sampler_mirror_clamp_to_edge"));
     try std.testing.expectEqual(@as(usize, 200), @offsetOf(PhysicalDeviceVulkan12Features, "subgroup_broadcast_dynamic_id"));
     getPhysicalDeviceFeatures2(ctx.physical, &features);
-    try std.testing.expect(std.mem.allEqual(u32, featureWords(&features.features), 0));
+    try std.testing.expectEqual(@as(u32, 1), features.features.multi_draw_indirect);
+    for (featureWords(&features.features), 0..) |value, index| if (index != 9) try std.testing.expectEqual(@as(u32, 0), value);
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&vulkan11_features)[16..64], 0));
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&vulkan12_features)[16..204], 0));
     try std.testing.expectEqual(@as(u32, 0), vulkan12_features.timeline_semaphore);

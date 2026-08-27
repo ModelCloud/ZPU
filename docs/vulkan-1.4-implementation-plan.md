@@ -303,7 +303,7 @@ descriptor-array indexing remain deferred. A bounded scalar graphics profile
 now executes f32x4 vertex-input
 triangles with builtin-position output, perspective-correct f32x4 fragment
 varyings, bool/f32x4 fragment output, and descriptor-backed set-0 binding-0
-uniform blocks for direct, indexed, and bounded single-draw indirect commands;
+uniform blocks for direct, indexed, and bounded multi-draw indirect commands;
 indirect profile bindings are snapshotted at record time and their post-record
 argument ranges are revalidated at submit. The scalar profile now applies the
 static RGBA color-write mask in logical channel order to its BGRA8 attachment;
@@ -313,11 +313,14 @@ remains fail-closed for partial masks or enabled blending.
 The unrestricted SPIR-V graphics space is still intentionally deferred.
 Because `drawIndirectFirstInstance` remains disabled in the truthful feature
 policy, all positive indexed and non-indexed indirect argument records now
-validate `firstInstance == 0` at submission, including the indirect-count
-variants; zero-count commands remain no-ops.
+validate `firstInstance == 0` at submission, including every record in the
+bounded four-draw indirect-count variants; zero-count commands remain no-ops.
 Positive indirect draws also enforce the Vulkan command-structure stride
 minimum (16 bytes non-indexed, 20 bytes indexed) and four-byte alignment;
 short or zero strides fail before recording without mutating command state.
+The `multiDrawIndirect` feature is now advertised and accepted at device
+creation, with `maxDrawIndirectCount = 4`; every post-record argument and
+indexed range is prevalidated before the first draw executes.
 Indirect dispatch now retains its argument buffer and consumes the three group
 counts at submission, including post-record writes and failure-atomic invalid
 group rejection.
@@ -357,7 +360,8 @@ render-pass secondaries also accept
 `VK_QUERY_CONTROL_PRECISE_BIT` remains rejected while the precise-query
 feature is disabled. Device
 limits now also match the bounded
-execution profile: one sample, one indirect draw, and four color attachments;
+execution profile: one sample, four indirect draws per command, and four color
+attachments;
 vertex-input binding/attribute stride, location, and offset bounds are checked
 against the same reported limits; viewport/scissor setters also reject
 non-finite or oversized domains, and oversized requests reject atomically.
@@ -668,9 +672,10 @@ Each slice must land with all of the following:
   indexed and indirect draws, dynamic state, push constants, subpasses, and
   removal of the vkcube-only execution restriction. Static/dynamic viewport and
   scissor selection plus aligned dynamic uniform-buffer descriptor offsets and
-  maintenance-4 binding ranges/strides are now covered; indirect draw and
-  indirect-count argument buffers are consumed at submission, but the
-  vkcube-only shader/draw execution restriction remains.
+  maintenance-4 binding ranges/strides are now covered; bounded scalar
+  graphics now advertises and executes up to four multi-draw indirect records
+  per command, while indirect-count argument buffers are consumed at
+  submission. The vkcube-only shader/draw execution restriction remains.
 - [ ] **A7 — compute:** compute pipeline records, dispatch envelopes, and the
   bounded straight-line storage-buffer read/write profile are implemented with
   ownership, submit-time validation, transactional descriptor aliasing, and
