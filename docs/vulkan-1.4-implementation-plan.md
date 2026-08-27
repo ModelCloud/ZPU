@@ -520,6 +520,9 @@ Each slice must land with all of the following:
   full command-scope rules remain.
 - [ ] **A9 — sparse-disabled core contracts:** sparse-requirement queries and
   zero-bind queue behavior remain truthful while sparse features stay false.
+  The Vulkan 1.1–1.3 `*Sparse*2` query paths now validate supplied output
+  entry sTypes/pNext chains and preserve count/output bytes on malformed input;
+  sparse residency and nonzero sparse binds remain deferred.
 - [ ] **A10 — replace opaque placeholders:** samplers, descriptor pools,
   descriptor frees/resets, and pipeline caches become typed, owned objects.
 - [ ] **A11 — mandatory features, formats, and limits:** run the Vulkan 1.0 CTS

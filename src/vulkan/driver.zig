@@ -2781,6 +2781,21 @@ fn populateQueueFamilyProperties2Chain(raw: ?*anyopaque) void {
         next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
     }
 }
+
+fn sparseImageFormatProperties2OutputValid(output: ?[*]SparseImageFormatProperties2, count: u32) bool {
+    if (output == null or count == 0) return true;
+    if (count > max_api_items) return false;
+    for (output.?[0..count]) |item| if (item.s_type != 1000059009 or item.p_next != null) return false;
+    return true;
+}
+
+fn sparseImageMemoryRequirements2OutputValid(output: ?[*]SparseImageMemoryRequirements2, count: u32) bool {
+    if (output == null or count == 0) return true;
+    if (count > max_api_items) return false;
+    for (output.?[0..count]) |item| if (item.s_type != 1000146004 or item.p_next != null) return false;
+    return true;
+}
+
 fn getPhysicalDeviceQueueFamilyProperties2(physical: ?Physical, count: ?*u32, output: ?[*]PhysicalDeviceQueueFamilyProperties2) callconv(.c) void {
     const n = count orelse return;
     if (output) |items| {
@@ -2810,10 +2825,9 @@ fn getPhysicalDeviceMemoryProperties2(physical: ?Physical, output: ?*PhysicalDev
     getMemoryProperties(physical, &out.memory_properties);
 }
 fn getPhysicalDeviceSparseImageFormatProperties2(physical: ?Physical, info: ?*const PhysicalDeviceSparseImageFormatInfo2, count: ?*u32, output: ?[*]SparseImageFormatProperties2) callconv(.c) void {
-    _ = output;
     const n = count orelse return;
     const i = info orelse return;
-    if (i.s_type != 1000059008 or i.p_next != null) return;
+    if (i.s_type != 1000059008 or i.p_next != null or !sparseImageFormatProperties2OutputValid(output, n.*)) return;
     lock();
     defer mutex.unlock();
     if (!validPhysicalLocked(physical orelse return)) return;
@@ -3933,8 +3947,7 @@ fn getDeviceImageSparseMemoryRequirements(device: ?Device, info: ?*const DeviceI
     const d = device orelse return;
     const query = info orelse return;
     const n = count orelse return;
-    if (query.s_type != 1000413003 or query.p_next != null or query.plane_aspect != 0 or imageCreateRequirements(query.create_info orelse return) == null) return;
-    _ = output;
+    if (query.s_type != 1000413003 or query.p_next != null or query.plane_aspect != 0 or imageCreateRequirements(query.create_info orelse return) == null or !sparseImageMemoryRequirements2OutputValid(output, n.*)) return;
     lock();
     defer mutex.unlock();
     if (validDeviceLocked(d)) n.* = 0;
@@ -3942,8 +3955,7 @@ fn getDeviceImageSparseMemoryRequirements(device: ?Device, info: ?*const DeviceI
 fn getImageSparseMemoryRequirements2(device: ?Device, info: ?*const ImageSparseMemoryRequirementsInfo2, count: ?*u32, output: ?[*]SparseImageMemoryRequirements2) callconv(.c) void {
     const i = info orelse return;
     const n = count orelse return;
-    if (i.s_type != 1000146002 or i.p_next != null) return;
-    _ = output;
+    if (i.s_type != 1000146002 or i.p_next != null or !sparseImageMemoryRequirements2OutputValid(output, n.*)) return;
     getImageSparseMemoryRequirements(device, i.image, n, null);
 }
 fn bindBufferMemory2(device: ?Device, count: u32, infos: ?[*]const BindBufferMemoryInfo) callconv(.c) Result {
@@ -16593,6 +16605,21 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     var sparse_count: u32 = 1;
     getPhysicalDeviceSparseImageFormatProperties2(ctx.physical, &sparse_info, &sparse_count, null);
     try std.testing.expectEqual(@as(u32, 0), sparse_count);
+    var sparse_property = SparseImageFormatProperties2{ .s_type = 1000059009, .p_next = null, .properties = .{ .aspect_mask = 0xcafe_f00d, .image_granularity = .{ .width = 7, .height = 11, .depth = 1 }, .flags = 3 } };
+    sparse_count = 1;
+    getPhysicalDeviceSparseImageFormatProperties2(ctx.physical, &sparse_info, &sparse_count, @ptrCast(&sparse_property));
+    try std.testing.expectEqual(@as(u32, 0), sparse_count);
+    try std.testing.expectEqual(@as(u32, 0xcafe_f00d), sparse_property.properties.aspect_mask);
+    var malformed_sparse_property = sparse_property;
+    malformed_sparse_property.s_type = 999;
+    sparse_count = 7;
+    getPhysicalDeviceSparseImageFormatProperties2(ctx.physical, &sparse_info, &sparse_count, @ptrCast(&malformed_sparse_property));
+    try std.testing.expectEqual(@as(u32, 7), sparse_count);
+    malformed_sparse_property = sparse_property;
+    malformed_sparse_property.p_next = @ptrCast(&unknown_feature_chain);
+    sparse_count = 8;
+    getPhysicalDeviceSparseImageFormatProperties2(ctx.physical, &sparse_info, &sparse_count, @ptrCast(&malformed_sparse_property));
+    try std.testing.expectEqual(@as(u32, 8), sparse_count);
     sparse_count = 7;
     getPhysicalDeviceSparseImageFormatProperties2(@ptrFromInt(8), &sparse_info, &sparse_count, null);
     try std.testing.expectEqual(@as(u32, 7), sparse_count);
@@ -16800,6 +16827,20 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     var device_sparse_count: u32 = 1;
     getDeviceImageSparseMemoryRequirements(ctx.device, &device_image_info, &device_sparse_count, null);
     try std.testing.expectEqual(@as(u32, 0), device_sparse_count);
+    var device_sparse_requirement = SparseImageMemoryRequirements2{ .s_type = 1000146004, .p_next = null, .memory_requirements = std.mem.zeroes(SparseImageMemoryRequirements) };
+    device_sparse_count = 1;
+    getDeviceImageSparseMemoryRequirements(ctx.device, &device_image_info, &device_sparse_count, @ptrCast(&device_sparse_requirement));
+    try std.testing.expectEqual(@as(u32, 0), device_sparse_count);
+    var malformed_device_sparse_requirement = device_sparse_requirement;
+    malformed_device_sparse_requirement.s_type = 999;
+    device_sparse_count = 11;
+    getDeviceImageSparseMemoryRequirements(ctx.device, &device_image_info, &device_sparse_count, @ptrCast(&malformed_device_sparse_requirement));
+    try std.testing.expectEqual(@as(u32, 11), device_sparse_count);
+    malformed_device_sparse_requirement = device_sparse_requirement;
+    malformed_device_sparse_requirement.p_next = @ptrCast(&unknown_feature_chain);
+    device_sparse_count = 12;
+    getDeviceImageSparseMemoryRequirements(ctx.device, &device_image_info, &device_sparse_count, @ptrCast(&malformed_device_sparse_requirement));
+    try std.testing.expectEqual(@as(u32, 12), device_sparse_count);
     var sparse_requirements_count: u32 = 1;
     const sparse_requirements = ImageSparseMemoryRequirementsInfo2{ .s_type = 1000146002, .p_next = null, .image = image };
     var sparse_requirement = SparseImageMemoryRequirements2{ .s_type = 1000146004, .p_next = null, .memory_requirements = std.mem.zeroes(SparseImageMemoryRequirements) };
@@ -16807,6 +16848,24 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     getImageSparseMemoryRequirements2(ctx.device, &sparse_requirements, &sparse_requirements_count, @ptrCast(&sparse_requirement));
     try std.testing.expectEqual(@as(u32, 0), sparse_requirements_count);
     try std.testing.expectEqual(@as(u64, 0xdead_beef), sparse_requirement.memory_requirements.image_mip_tail_size);
+    var malformed_sparse_requirement = sparse_requirement;
+    malformed_sparse_requirement.s_type = 999;
+    sparse_requirements_count = 9;
+    getImageSparseMemoryRequirements2(ctx.device, &sparse_requirements, &sparse_requirements_count, @ptrCast(&malformed_sparse_requirement));
+    try std.testing.expectEqual(@as(u32, 9), sparse_requirements_count);
+    malformed_sparse_requirement = sparse_requirement;
+    malformed_sparse_requirement.p_next = @ptrCast(&unknown_feature_chain);
+    sparse_requirements_count = 10;
+    getImageSparseMemoryRequirements2(ctx.device, &sparse_requirements, &sparse_requirements_count, @ptrCast(&malformed_sparse_requirement));
+    try std.testing.expectEqual(@as(u32, 10), sparse_requirements_count);
+    sparse_requirements_count = 1;
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        sparse_requirements_count = 1;
+        getImageSparseMemoryRequirements2(ctx.device, &sparse_requirements, &sparse_requirements_count, @ptrCast(&sparse_requirement));
+        try std.testing.expectEqual(@as(u32, 0), sparse_requirements_count);
+    }
+    test_allocations_before_failure = null;
 
     const layout_binding = DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null };
     const layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&layout_binding) };
