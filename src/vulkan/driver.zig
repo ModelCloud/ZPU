@@ -22664,6 +22664,19 @@ test "timeline semaphores expose monotonic counter wait signal and submit ABI" {
     test_allocations_before_failure = 0;
     for (0..4096) |_| try std.testing.expectEqual(Result.success, getSemaphoreCounterValue(ctx.device, timeline, &counter));
     test_allocations_before_failure = null;
+    // Strict host signaling remains allocation-free on the warm path while
+    // advancing the timeline one value at a time.
+    test_allocations_before_failure = 0;
+    var warm_signal = counter;
+    for (0..4096) |_| {
+        warm_signal += 1;
+        var warm_info = signal_info;
+        warm_info.value = warm_signal;
+        try std.testing.expectEqual(Result.success, signalSemaphore(ctx.device, &warm_info));
+    }
+    test_allocations_before_failure = null;
+    try std.testing.expectEqual(Result.success, getSemaphoreCounterValue(ctx.device, timeline, &counter));
+    try std.testing.expectEqual(warm_signal, counter);
     destroySemaphore(ctx.device, binary, null);
     destroySemaphore(ctx.device, timeline, null);
     destroyDevice(ctx.device, null);
