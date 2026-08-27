@@ -547,6 +547,10 @@ synchronization2 lowering. Unknown high bits remain rejected before command
 state or submission state is published. ABI, rollback, high-bit
 positive/negative, scoped graphics alias, transfer rejection, missing-BY_REGION
 negative, and 4096-iteration allocation-free tests cover the conversion path.
+The legacy stage-mask validator now accepts the complete Vulkan 1.0 stage
+domain, including tessellation-control/evaluation and geometry stages; those
+stages remain synchronization-only because their shader features are not
+advertised.
 `vkCmdSetEvent2`, `vkCmdResetEvent2`, and
 `vkCmdWaitEvents2` now also accept valid empty `VkDependencyInfo` nodes, which
 record the event operation without inventing a barrier; non-empty nodes still

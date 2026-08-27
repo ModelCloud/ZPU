@@ -7018,7 +7018,7 @@ fn validPipelineStageMask(stage_mask: u32) bool {
     // Tessellation and geometry stages are not enabled by the device profile.
     // HOST remains valid for pipeline barriers as a host synchronization
     // source/sink, subject to the barrier queue-family rules.
-    const supported: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x80 | 0x100 | 0x200 | 0x400 | 0x800 | 0x1000 | 0x2000 | 0x4000 | 0x8000 | 0x1_0000;
+    const supported: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40 | 0x80 | 0x100 | 0x200 | 0x400 | 0x800 | 0x1000 | 0x2000 | 0x4000 | 0x8000 | 0x1_0000;
     return stage_mask != 0 and stage_mask & ~supported == 0;
 }
 fn validEventStageMask(stage_mask: u32) bool {
@@ -19602,7 +19602,8 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expectEqual(@as(?u32, 0x1000), sync2StageMaskToLegacy(0x1000_0000_0));
     try std.testing.expectEqual(@as(?u32, 0x1_0000), sync2BarrierStageMaskToLegacy(0, 0));
     try std.testing.expect(sync2BarrierStageMaskToLegacy(0, 1) == null);
-    try std.testing.expect(sync2StageMaskToLegacy(0x40) == null);
+    try std.testing.expectEqual(@as(?u32, 0x40), sync2StageMaskToLegacy(0x40));
+    try std.testing.expect(validPipelineStageMask(0x10 | 0x20 | 0x40));
     try std.testing.expectEqual(@as(?u32, 0x800), sync2StageMaskToLegacy(0x800));
     try std.testing.expectEqual(@as(?u32, 0x4000), sync2StageMaskToLegacy(0x4000));
     try std.testing.expect(validEventStageMask(0x1000));
@@ -23400,7 +23401,7 @@ test "binary semaphores chain ordered submissions with allocation-free warm stat
     missing_wait_stage.wait_dst_stage_mask = null;
     try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&missing_wait_stage), 0));
     var unsupported_wait_stage = unsignaled_wait;
-    unsupported_wait_stage.wait_dst_stage_mask = @ptrCast(&[_]u32{0x40});
+    unsupported_wait_stage.wait_dst_stage_mask = @ptrCast(&[_]u32{0x20_000});
     try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&unsupported_wait_stage), 0));
     unsupported_wait_stage.wait_dst_stage_mask = @ptrCast(&[_]u32{0x800});
     try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&unsupported_wait_stage), 0));
