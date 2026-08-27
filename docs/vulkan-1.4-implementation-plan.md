@@ -519,6 +519,13 @@ timeline wait is accepted only when its target is already satisfied by the
 current counter or an earlier submit in the same batch; unsatisfied waits fail
 before publication instead of spinning forever.
 
+Legacy `vkCmdWaitEvents` now honors the Vulkan host-signal source-scope rule:
+`VK_PIPELINE_STAGE_HOST_BIT` is accepted in `srcStageMask` for an already
+host-signaled event outside a render-pass instance, while HOST remains invalid
+as a destination stage and inside render-pass scope. The rejection paths leave
+the command buffer count untouched and the positive path is covered by the
+allocation-free event tests.
+
 The bounded execution checkpoint for `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC`
 is complete. Descriptor writes and update templates preserve the dynamic type,
 require the advertised 256-byte uniform-buffer alignment, and

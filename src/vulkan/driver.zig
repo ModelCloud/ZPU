@@ -6768,8 +6768,19 @@ fn validPipelineStageMask(stage_mask: u32) bool {
     return stage_mask != 0 and stage_mask & ~supported == 0;
 }
 fn validEventStageMask(stage_mask: u32) bool {
-    // Event, timestamp, and semaphore-wait stage masks cannot use HOST.
+    // Event set/reset, timestamp, and semaphore-wait stage masks cannot use
+    // HOST.  Legacy vkCmdWaitEvents has a separate source-stage exception
+    // for host-signaled events (see validEventWaitStageMasks below).
     return validPipelineStageMask(stage_mask) and stage_mask & 0x4000 == 0;
+}
+fn validEventWaitStageMasks(command_buffer: *const CommandBufferObj, src_stage_mask: u32, dst_stage_mask: u32) bool {
+    // vkCmdWaitEvents may include HOST in the first synchronization scope so
+    // a host vkSetEvent can release the wait.  HOST is never a destination
+    // stage, and render-pass instances prohibit HOST in the source scope.
+    if (!validPipelineStageMask(src_stage_mask) or !validPipelineStageMask(dst_stage_mask)) return false;
+    if (dst_stage_mask & 0x4000 != 0) return false;
+    if ((command_buffer.impl.active_render_pass != null or command_buffer.impl.dynamic_rendering) and src_stage_mask & 0x4000 != 0) return false;
+    return true;
 }
 fn stagesSupportAccess(stage_mask: u32, access_mask: u32) bool {
     if (access_mask & ~@as(u32, 0x1_ffff) != 0) return false;
@@ -6822,7 +6833,7 @@ fn cmdWaitEvents(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const usize,
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
-    if (event_count == 0 or event_count > max_api_items or handles == null or !validEventStageMask(src_stage_mask) or !validEventStageMask(dst_stage_mask) or memory_barrier_count > max_api_items or buffer_barrier_count > max_api_items or image_barrier_count > max_api_items or @as(usize, c.impl.count) + event_count + buffer_barrier_count + image_barrier_count > c.impl.commands.len) {
+    if (event_count == 0 or event_count > max_api_items or handles == null or !validEventWaitStageMasks(c, src_stage_mask, dst_stage_mask) or memory_barrier_count > max_api_items or buffer_barrier_count > max_api_items or image_barrier_count > max_api_items or @as(usize, c.impl.count) + event_count + buffer_barrier_count + image_barrier_count > c.impl.commands.len) {
         c.impl.invalid = true;
         return;
     }
@@ -22716,6 +22727,45 @@ test "event host and command-buffer ABI behavior is owned and failure atomic" {
     try std.testing.expectEqual(Result.success, endCommandBuffer(buffers[0]));
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     try std.testing.expectEqual(Result.event_reset, getEventStatus(ctx.device, event));
+
+    // A host signal participates in the first scope of legacy
+    // vkCmdWaitEvents when HOST is present in srcStageMask.  It must be
+    // accepted outside a render pass and complete without spinning because
+    // the event is already signaled by the host.
+    try std.testing.expectEqual(Result.success, setEvent(ctx.device, event));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(buffers[0], &begin));
+    var wait_events = [_]usize{event};
+    cmdWaitEvents(buffers[0], 1, &wait_events, 0x4000, 0x1000, 0, null, 0, null, 0, null);
+    try std.testing.expect(!buffers[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(buffers[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+
+    // The host-source wait remains allocation-free when repeatedly submitted
+    // through the completed command buffer.
+    {
+        test_allocations_before_failure = 0;
+        defer test_allocations_before_failure = null;
+        for (0..4096) |_| try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    }
+
+    // HOST is not a destination stage.  The rejection is failure-atomic and
+    // does not append a partial event operation.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(buffers[0], &begin));
+    const host_dst_count = buffers[0].impl.count;
+    cmdWaitEvents(buffers[0], 1, &wait_events, 0x1000, 0x4000, 0, null, 0, null, 0, null);
+    try std.testing.expect(buffers[0].impl.invalid);
+    try std.testing.expectEqual(host_dst_count, buffers[0].impl.count);
+
+    // The HOST source exception does not apply to a render-pass instance.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(buffers[0], &begin));
+    buffers[0].impl.dynamic_rendering = true;
+    const host_render_count = buffers[0].impl.count;
+    cmdWaitEvents(buffers[0], 1, &wait_events, 0x4000, 0x1000, 0, null, 0, null, 0, null);
+    try std.testing.expect(buffers[0].impl.invalid);
+    try std.testing.expectEqual(host_render_count, buffers[0].impl.count);
 
     try std.testing.expectEqual(Result.success, resetCommandBuffer(buffers[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(buffers[0], &begin));
