@@ -698,7 +698,9 @@ Each slice must land with all of the following:
   single bounded family of `Exp`, `Log`, `Exp2`, `Log2`, `Sqrt`, and
   `InverseSqrt` operations now follows IEEE zero/infinity/NaN behavior through
   the same executor. `Atan2` and `Pow` now lower as strict binary f32
-  operations with operand-order and poison-domain validation. A single
+  operations with operand-order and poison-domain validation. `Determinant`
+  and `MatrixInverse` now lower for column-major f32 4x4 matrices, with
+  singular inverses rejected atomically and NaN results canonicalized. A single
   side-effect-free dynamic conditional or one-case runtime switch with a common
   merge is also lowered to compare/select; generic SPIR-V dynamic control flow,
   aggregate/descriptor-array indexing, atomics, shared-memory execution,

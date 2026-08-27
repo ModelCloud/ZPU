@@ -316,23 +316,29 @@ fn sameShape(a: ir.Type, b: ir.Type) bool {
 }
 
 fn supportedGlslExtInst(ext: u32, result: ir.Type, operand: ir.Type) bool {
-    if (!sameShape(result, operand)) return false;
     return switch (ext) {
-        1, 2, 3, 4, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 27, 28, 29, 30, 31, 32 => result.scalar == .f32,
-        25, 26 => result.scalar == .f32 and result.rows == 1,
-        5 => result.scalar == .i32,
-        6 => result.scalar == .f32 and result.rows == 1,
-        7 => result.scalar == .i32 and result.rows == 1,
-        // GLSL.std.450 FMin/FMax and integer min/max accept scalar or vector
-        // values; the bounded IR deliberately excludes matrix operands.
-        37, 40 => result.scalar == .f32 and result.rows == 1,
-        38, 41 => result.scalar == .u32 and result.rows == 1,
-        39, 42 => result.scalar == .i32 and result.rows == 1,
-        43 => result.scalar == .f32 and result.rows == 1,
-        44 => result.scalar == .u32 and result.rows == 1,
-        45 => result.scalar == .i32 and result.rows == 1,
-        46, 48, 49, 50 => result.scalar == .f32 and result.rows == 1,
-        else => false,
+        33 => result.scalar == .f32 and result.columns == 1 and result.rows == 1 and operand.scalar == .f32 and operand.columns == 4 and operand.rows == 4,
+        34 => result.scalar == .f32 and result.columns == 4 and result.rows == 4 and sameShape(result, operand),
+        else => blk: {
+            if (!sameShape(result, operand)) break :blk false;
+            break :blk switch (ext) {
+                1, 2, 3, 4, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 27, 28, 29, 30, 31, 32 => result.scalar == .f32,
+                25, 26 => result.scalar == .f32 and result.rows == 1,
+                5 => result.scalar == .i32,
+                6 => result.scalar == .f32 and result.rows == 1,
+                7 => result.scalar == .i32 and result.rows == 1,
+                // GLSL.std.450 FMin/FMax and integer min/max accept scalar or vector
+                // values; the bounded IR deliberately excludes matrix operands.
+                37, 40 => result.scalar == .f32 and result.rows == 1,
+                38, 41 => result.scalar == .u32 and result.rows == 1,
+                39, 42 => result.scalar == .i32 and result.rows == 1,
+                43 => result.scalar == .f32 and result.rows == 1,
+                44 => result.scalar == .u32 and result.rows == 1,
+                45 => result.scalar == .i32 and result.rows == 1,
+                46, 48, 49, 50 => result.scalar == .f32 and result.rows == 1,
+                else => false,
+            };
+        },
     };
 }
 
@@ -726,8 +732,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 if (!in_function or !label_seen or terminated or block_terminated or w.len < 5 or w.len > 7) return error.Malformed;
                 const set = nodes[try id(nodes, w[2])];
                 if (set.kind != .ext_inst_import or set.a != 450) return error.Unsupported;
-                if (w[3] < 1 or w[3] > 24 and w[3] != 25 and w[3] != 26 and w[3] != 27 and w[3] != 28 and w[3] != 29 and w[3] != 30 and w[3] != 31 and w[3] != 32 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50) return error.Unsupported;
-                if ((w[3] >= 1 and w[3] <= 24 or w[3] >= 27 and w[3] <= 32) and w.len != 5) return error.Malformed;
+                if (w[3] < 1 or w[3] > 24 and w[3] != 25 and w[3] != 26 and w[3] != 27 and w[3] != 28 and w[3] != 29 and w[3] != 30 and w[3] != 31 and w[3] != 32 and w[3] != 33 and w[3] != 34 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50) return error.Unsupported;
+                if ((w[3] >= 1 and w[3] <= 24 or w[3] >= 27 and w[3] <= 34) and w.len != 5) return error.Malformed;
                 if ((w[3] == 25 or w[3] == 26) and w.len != 6) return error.Malformed;
                 if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48) and w.len != 6) return error.Malformed;
                 if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50) and w.len != 7) return error.Malformed;
@@ -863,8 +869,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             12 => {
                 if (w.len < 5 or w.len > 7) return error.Malformed;
                 const set = nodes[try id(nodes, w[2])];
-                if (set.kind != .ext_inst_import or set.a != 450 or (w[3] < 1 or w[3] > 24 and w[3] != 25 and w[3] != 26 and w[3] != 27 and w[3] != 28 and w[3] != 29 and w[3] != 30 and w[3] != 31 and w[3] != 32 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50)) return error.Unsupported;
-                if ((w[3] >= 1 and w[3] <= 24 or w[3] >= 27 and w[3] <= 32) and w.len != 5) return error.Malformed;
+                if (set.kind != .ext_inst_import or set.a != 450 or (w[3] < 1 or w[3] > 24 and w[3] != 25 and w[3] != 26 and w[3] != 27 and w[3] != 28 and w[3] != 29 and w[3] != 30 and w[3] != 31 and w[3] != 32 and w[3] != 33 and w[3] != 34 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50)) return error.Unsupported;
+                if ((w[3] >= 1 and w[3] <= 24 or w[3] >= 27 and w[3] <= 34) and w.len != 5) return error.Malformed;
                 if ((w[3] == 25 or w[3] == 26) and w.len != 6) return error.Malformed;
                 if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48) and w.len != 6) return error.Malformed;
                 if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50) and w.len != 7) return error.Malformed;
@@ -1596,6 +1602,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 30 => .f_log2,
                 31 => .f_sqrt,
                 32 => .f_inverse_sqrt,
+                33 => .f_determinant,
+                34 => .f_matrix_inverse,
                 37 => .f_min,
                 38 => .u_min,
                 39 => .i_min,
@@ -2729,6 +2737,16 @@ test "compute profile lowers bounded GLSL.std.450 absolute values" {
         try std.testing.expectEqual(if (ext == 25) ir.Op.f_atan2 else ir.Op.f_pow, binary_program.instructions[1].op);
         try std.testing.expectEqual(@as(usize, 2), binary_program.instructions[1].operands.len);
     }
+}
+
+test "GLSL determinant and matrix inverse admissions enforce 4x4 f32 shapes" {
+    const scalar = ir.Type{ .scalar = .f32 };
+    const matrix = ir.Type{ .scalar = .f32, .columns = 4, .rows = 4 };
+    try std.testing.expect(supportedGlslExtInst(33, scalar, matrix));
+    try std.testing.expect(supportedGlslExtInst(34, matrix, matrix));
+    try std.testing.expect(!supportedGlslExtInst(33, matrix, matrix));
+    try std.testing.expect(!supportedGlslExtInst(34, scalar, scalar));
+    try std.testing.expect(!supportedGlslExtInst(33, scalar, ir.Type{ .scalar = .f32, .columns = 3, .rows = 3 }));
 }
 
 test "compute profile lowers bounded GLSL.std.450 integer min/max" {
