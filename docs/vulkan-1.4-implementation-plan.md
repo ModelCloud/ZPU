@@ -672,7 +672,9 @@ Each slice must land with all of the following:
   selected predecessor before lowering to straight-line canonical IR. The
   bounded `GLSL.std.450` import path now lowers component-wise `FAbs` and
   `SAbs` with strict import/opcode/type checks; signed `INT_MIN` absolute value
-  is rejected as a numeric-domain error. A single
+  is rejected as a numeric-domain error. It also lowers scalar/vector `FMin`
+  and `FMax` with strict floating-point shape checks and a deterministic
+  implementation-defined NaN operand choice. A single
   side-effect-free dynamic conditional or one-case runtime switch with a common
   merge is also lowered to compare/select; generic SPIR-V dynamic control flow,
   aggregate/descriptor-array indexing, atomics, shared-memory execution,
