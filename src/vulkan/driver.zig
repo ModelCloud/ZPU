@@ -840,6 +840,11 @@ pub const PhysicalDeviceSparseImageFormatInfo2 = extern struct { s_type: i32, p_
 pub const SparseImageFormatProperties2 = extern struct { s_type: i32, p_next: ?*anyopaque, properties: SparseImageFormatProperties };
 pub const SparseImageMemoryRequirements = extern struct { format_properties: SparseImageFormatProperties, image_mip_tail_first_lod: u32, image_mip_tail_size: u64, image_mip_tail_offset: u64, image_mip_tail_stride: u64 };
 pub const SparseImageMemoryRequirements2 = extern struct { s_type: i32, p_next: ?*anyopaque, memory_requirements: SparseImageMemoryRequirements };
+pub const SparseMemoryBind = extern struct { resource_offset: u64, size: u64, memory: usize, memory_offset: u64, flags: u32 };
+pub const SparseBufferMemoryBindInfo = extern struct { buffer: usize, bind_count: u32, binds: ?[*]const SparseMemoryBind };
+pub const SparseImageOpaqueMemoryBindInfo = extern struct { image: usize, bind_count: u32, binds: ?[*]const SparseMemoryBind };
+pub const SparseImageMemoryBind = extern struct { subresource: ImageSubresource, offset: Offset3D, extent: Extent3D, memory: usize, memory_offset: u64, flags: u32 };
+pub const SparseImageMemoryBindInfo = extern struct { image: usize, bind_count: u32, binds: ?[*]const SparseImageMemoryBind };
 pub const PhysicalDeviceGroupProperties = extern struct { s_type: i32, p_next: ?*anyopaque, physical_device_count: u32, physical_devices: [32]Physical, subset_allocation: u32 };
 pub const DeviceQueueInfo2 = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, queue_family_index: u32, queue_index: u32 };
 pub const DeviceQueueGlobalPriorityCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, global_priority: i32 };
@@ -852,11 +857,11 @@ pub const BindSparseInfo = extern struct {
     wait_semaphore_count: u32,
     wait_semaphores: ?[*]const usize,
     buffer_bind_count: u32,
-    buffer_binds: ?*const anyopaque,
+    buffer_binds: ?[*]const SparseBufferMemoryBindInfo,
     image_opaque_bind_count: u32,
-    image_opaque_binds: ?*const anyopaque,
+    image_opaque_binds: ?[*]const SparseImageOpaqueMemoryBindInfo,
     image_bind_count: u32,
-    image_binds: ?*const anyopaque,
+    image_binds: ?[*]const SparseImageMemoryBindInfo,
     signal_semaphore_count: u32,
     signal_semaphores: ?[*]const usize,
 };
@@ -879,7 +884,7 @@ pub const SamplerYcbcrConversionCreateInfo = extern struct { s_type: i32, p_next
 pub const DescriptorSetLayoutSupport = extern struct { s_type: i32, p_next: ?*anyopaque, supported: u32 };
 pub const CommandPoolCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, queue_family_index: u32 };
 pub const CommandBufferAllocateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, command_pool: usize, level: i32, command_buffer_count: u32 };
-pub const CommandBufferBeginInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, inheritance_info: ?*const anyopaque };
+pub const CommandBufferBeginInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, inheritance_info: ?*const CommandBufferInheritanceInfo };
 pub const CommandBufferInheritanceInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, render_pass: usize, subpass: u32, framebuffer: usize, occlusion_query_enable: u32, query_flags: u32, pipeline_statistics: u32 };
 pub const CommandBufferInheritanceRenderingInfo = extern struct {
     s_type: i32,
@@ -992,6 +997,7 @@ pub const PipelineShaderStageCreateInfo = extern struct { s_type: i32, p_next: ?
 pub const PipelineRobustnessCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, storage_buffers: i32, uniform_buffers: i32, vertex_inputs: i32, images: i32 };
 pub const PipelineRobustnessCreateInfoEXT = PipelineRobustnessCreateInfo;
 pub const ComputePipelineCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, stage: PipelineShaderStageCreateInfo, layout: usize, base_pipeline: usize, base_pipeline_index: i32 };
+pub const PipelineTessellationStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, patch_control_points: u32 };
 pub const PipelineCreateFlags2CreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u64 };
 pub const DescriptorSetLayoutBinding = extern struct { binding: u32, descriptor_type: i32, descriptor_count: u32, stage_flags: u32, immutable_samplers: ?[*]const usize };
 pub const DescriptorSetLayoutCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, binding_count: u32, bindings: ?[*]const DescriptorSetLayoutBinding };
@@ -1028,7 +1034,7 @@ pub const PipelineColorBlendAttachmentState = extern struct { blend_enable: u32,
 pub const PipelineColorBlendStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, logic_op_enable: u32, logic_op: i32, attachment_count: u32, attachments: ?[*]const PipelineColorBlendAttachmentState, blend_constants: [4]f32 };
 pub const PipelineDynamicStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, dynamic_state_count: u32, dynamic_states: ?[*]const i32 };
 pub const PipelineRenderingCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, view_mask: u32, color_attachment_count: u32, color_attachment_formats: ?[*]const i32, depth_attachment_format: i32, stencil_attachment_format: i32 };
-pub const GraphicsPipelineCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, stage_count: u32, stages: ?[*]const PipelineShaderStageCreateInfo, vertex_input: ?*const PipelineVertexInputStateCreateInfo, input_assembly: ?*const PipelineInputAssemblyStateCreateInfo, tessellation: ?*const anyopaque, viewport: ?*const PipelineViewportStateCreateInfo, rasterization: ?*const PipelineRasterizationStateCreateInfo, multisample: ?*const PipelineMultisampleStateCreateInfo, depth_stencil: ?*const PipelineDepthStencilStateCreateInfo, color_blend: ?*const PipelineColorBlendStateCreateInfo, dynamic: ?*const PipelineDynamicStateCreateInfo, layout: usize, render_pass: usize, subpass: u32, base_pipeline: usize, base_pipeline_index: i32 };
+pub const GraphicsPipelineCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, stage_count: u32, stages: ?[*]const PipelineShaderStageCreateInfo, vertex_input: ?*const PipelineVertexInputStateCreateInfo, input_assembly: ?*const PipelineInputAssemblyStateCreateInfo, tessellation: ?*const PipelineTessellationStateCreateInfo, viewport: ?*const PipelineViewportStateCreateInfo, rasterization: ?*const PipelineRasterizationStateCreateInfo, multisample: ?*const PipelineMultisampleStateCreateInfo, depth_stencil: ?*const PipelineDepthStencilStateCreateInfo, color_blend: ?*const PipelineColorBlendStateCreateInfo, dynamic: ?*const PipelineDynamicStateCreateInfo, layout: usize, render_pass: usize, subpass: u32, base_pipeline: usize, base_pipeline_index: i32 };
 pub const AttachmentDescription = extern struct { flags: u32, format: i32, samples: u32, load_op: i32, store_op: i32, stencil_load_op: i32, stencil_store_op: i32, initial_layout: i32, final_layout: i32 };
 pub const AttachmentReference = extern struct { attachment: u32, layout: i32 };
 pub const SubpassDescription = extern struct { flags: u32, pipeline_bind_point: i32, input_attachment_count: u32, input_attachments: ?[*]const AttachmentReference, color_attachment_count: u32, color_attachments: ?[*]const AttachmentReference, resolve_attachments: ?[*]const AttachmentReference, depth_stencil_attachment: ?*const AttachmentReference, preserve_attachment_count: u32, preserve_attachments: ?[*]const u32 };
@@ -14098,6 +14104,13 @@ test "core instance physical and device enumeration is bounded and allocation fr
     try std.testing.expectEqual(@as(usize, 56), @sizeOf(CopyDescriptorSet));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(CopyDescriptorSet, "src_set"));
     try std.testing.expectEqual(@as(usize, 48), @offsetOf(CopyDescriptorSet, "descriptor_count"));
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(SparseMemoryBind));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(SparseBufferMemoryBindInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(SparseImageOpaqueMemoryBindInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(SparseImageMemoryBindInfo));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(SparseImageMemoryBind));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(CommandBufferBeginInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PipelineTessellationStateCreateInfo));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(QueueProperties));
     try std.testing.expectEqual(@as(usize, 520), @sizeOf(MemoryProperties));
     const ci = InstanceInfo{ .s_type = 1, .p_next = null, .flags = 0, .app_info = null, .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null };
