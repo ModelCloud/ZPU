@@ -71,7 +71,10 @@ without allocating a synthetic attachment.
 Dynamic-rendering begin also enforces the advertised 256-layer device limit
 for attachmentless scopes and bounds their render areas to the same 8192x8192
 framebuffer envelope used by image creation and device limits; malformed
-values fail before command state or recording mutation.
+values fail before command state or recording mutation. The secondary-command
+contents bit is accepted and carried into the primary scope so direct draws
+are rejected while inherited secondary execution remains legal; suspend and
+resume scopes remain intentionally rejected.
 The bounded compute profile now also admits direct scalar StorageBuffer
 `OpLoad` reads (including read/write aliasing of the descriptor range) with
 transactional output commits; static access-chain reads share the same

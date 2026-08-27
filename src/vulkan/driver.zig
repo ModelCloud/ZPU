@@ -852,6 +852,7 @@ const max_2d_extent: u32 = 8192;
 const max_image_array_layers: u32 = 256;
 const max_api_items: u32 = 256;
 const swapchain_present_timing_bit: u32 = 1 << 9;
+const rendering_contents_secondary_bit: u32 = 1;
 const pipeline_create_dispatch_base_bit: u32 = 0x00000010;
 const pipeline_create_flags2_stype: i32 = 1_000_470_005;
 const dynamic_state_cull_mode: i32 = 1000267000;
@@ -10267,7 +10268,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
         command_buffer.impl.invalid = true;
         return;
     };
-    if (ci.s_type != 1000044001 or ci.p_next != null or ci.flags != 0 or ci.layer_count == 0 or ci.layer_count > max_image_array_layers or ci.view_mask != 0 or ci.color_attachment_count > 1 or (ci.color_attachment_count != 0 and ci.color_attachments == null) or command_buffer.impl.state != 1 or command_buffer.impl.invalid or command_buffer.impl.active_render_pass != null or command_buffer.impl.active_framebuffer != null or command_buffer.impl.dynamic_rendering or command_buffer.impl.dynamic_inheritance) {
+    if (ci.s_type != 1000044001 or ci.p_next != null or ci.flags & ~@as(u32, rendering_contents_secondary_bit) != 0 or ci.layer_count == 0 or ci.layer_count > max_image_array_layers or ci.view_mask != 0 or ci.color_attachment_count > 1 or (ci.color_attachment_count != 0 and ci.color_attachments == null) or command_buffer.impl.state != 1 or command_buffer.impl.invalid or command_buffer.impl.active_render_pass != null or command_buffer.impl.active_framebuffer != null or command_buffer.impl.dynamic_rendering or command_buffer.impl.dynamic_inheritance) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -10368,6 +10369,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
     }
     command_buffer.impl.dynamic_rendering = true;
     command_buffer.impl.dynamic_inheritance = false;
+    command_buffer.impl.render_contents = if (ci.flags & rendering_contents_secondary_bit != 0) 1 else 0;
     command_buffer.impl.dynamic_color_image = color;
     command_buffer.impl.dynamic_depth_image = depth;
     command_buffer.impl.dynamic_color_base_layer = if (color_view) |view| view.base_array_layer else 0;
@@ -17896,6 +17898,22 @@ test "dynamic rendering begin and end own attachment scope" {
     var empty_submit_commands = [_]CommandBuffer{commands[0]};
     const empty_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &empty_submit_commands, .signal_semaphore_count = 0, .signal_semaphores = null };
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&empty_submit), 0));
+    var secondary_contents_rendering = empty_rendering;
+    secondary_contents_rendering.flags = rendering_contents_secondary_bit;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    cmdBeginRendering(commands[1], &secondary_contents_rendering);
+    try std.testing.expect(!commands[1].impl.invalid);
+    try std.testing.expectEqual(@as(i32, 1), commands[1].impl.render_contents);
+    cmdEndRendering(commands[1]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[1]));
+    var suspended_rendering = empty_rendering;
+    suspended_rendering.flags = 2;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    cmdBeginRendering(commands[1], &suspended_rendering);
+    try std.testing.expect(commands[1].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 0), commands[1].impl.count);
     // Attachmentless rendering still consumes the device's framebuffer
     // envelope.  Reject oversized layer counts and extents before publishing
     // any dynamic-rendering state, including on the allocation-free warm path.
