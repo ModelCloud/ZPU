@@ -405,9 +405,12 @@ contract; because the advertised attachment policy is D32-only, an enabled
 resolved stencil test rejects the draw rather than silently dropping stencil
 semantics.
 The promoted depth-bias-enable state is initialized and resolved in the same
-draw snapshot. Since the bounded CPU raster profile does not implement depth
-bias, an enabled resolved value rejects the draw instead of silently changing
-depth output.
+draw snapshot. The bounded scalar CPU raster profile now applies finite
+constant-factor and slope-factor bias in post-projection depth space, clamps
+the result to the requested finite depth-bias clamp, and carries the exact
+state through direct, indexed, and indirect draws. The legacy CPU-cube path
+continues to reject enabled depth bias rather than silently changing its fixed
+depth behavior.
 Core dynamic line width, depth-bias values, blend constants, and stencil
 compare/write/reference masks are now decoded into pipeline-owned requirements.
 The command buffer must initialize each declared value before a direct, indexed,
