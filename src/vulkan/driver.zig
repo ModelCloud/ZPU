@@ -8472,10 +8472,18 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
             hit(.barrier_transition);
         },
         .event_set => |operation| {
-            operation.event.signal_stage_mask.store(operation.stage_mask, .release);
-            operation.event.signal_kind.store(@intFromEnum(operation.signal_kind), .release);
-            operation.event.signal_dependency_key.store(operation.dependency_key, .release);
-            operation.event.signaled.store(true, .release);
+            // vkCmdSetEvent2 has no effect when the event is already
+            // signaled. Serialize the check and provenance publication with
+            // host set/reset so a no-op cannot overwrite a host signal's
+            // source scope for a later wait.
+            lock();
+            defer mutex.unlock();
+            if (!operation.event.signaled.load(.acquire)) {
+                operation.event.signal_stage_mask.store(operation.stage_mask, .release);
+                operation.event.signal_kind.store(@intFromEnum(operation.signal_kind), .release);
+                operation.event.signal_dependency_key.store(operation.dependency_key, .release);
+                operation.event.signaled.store(true, .release);
+            }
         },
         .event_reset => |event| {
             event.signal_stage_mask.store(0, .release);
@@ -18901,6 +18909,16 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&host_wait_dependency));
     try std.testing.expect(!commands[0].impl.invalid);
     try std.testing.expectEqual(@as(u16, 1), commands[0].impl.count);
+    // A device event signal is a no-op when the host has already signaled the
+    // event. Its host provenance must survive so subsequent waits cannot
+    // accidentally treat the command as a synchronization2 signal.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdSetEvent2(commands[0], event, &empty_event_dependency);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const host_signal_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&host_signal_submit), 0));
+    try std.testing.expectEqual(EventSignalKind.host, @as(EventSignalKind, @enumFromInt(validEventLocked(event).?.signal_kind.load(.acquire))));
     try std.testing.expectEqual(Result.success, resetEvent(ctx.device, event));
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
