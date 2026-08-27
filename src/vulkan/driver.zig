@@ -4814,7 +4814,9 @@ fn getDeviceImageSubresourceLayout(device: ?Device, info: ?*const DeviceImageSub
     const expected_aspect: u32 = if (create_info.format == 126) 2 else 1;
     if (subresource.image_subresource.aspect_mask != expected_aspect or subresource.image_subresource.mip_level != 0 or subresource.image_subresource.array_layer >= create_info.array_layers) return;
     const layer_size = requirements.size / create_info.array_layers;
-    out.subresource_layout = .{ .offset = layer_size * subresource.image_subresource.array_layer, .size = layer_size, .row_pitch = @as(u64, create_info.extent.width) * 4, .array_pitch = layer_size, .depth_pitch = layer_size };
+    const offset = std.math.mul(u64, layer_size, subresource.image_subresource.array_layer) catch return;
+    const row_pitch = std.math.mul(u64, create_info.extent.width, 4) catch return;
+    out.subresource_layout = .{ .offset = offset, .size = layer_size, .row_pitch = row_pitch, .array_pitch = layer_size, .depth_pitch = layer_size };
     populateSubresourceLayout2PNext(out.p_next, layer_size);
 }
 fn getRenderingAreaGranularity(device: ?Device, info: ?*const RenderingAreaInfo, output: ?*Extent2D) callconv(.c) void {
@@ -20846,6 +20848,15 @@ test "Vulkan 1.4 host image copies transitions and layout queries are bounded" {
     getDeviceImageSubresourceLayout(ctx.device, &device_subresource_info, &device_layout);
     try std.testing.expectEqual(@as(u64, 16), device_layout.subresource_layout.size);
     try std.testing.expectEqual(@as(u64, 16), host_memcpy_size.size);
+    var malformed_device_create_info = image_info;
+    malformed_device_create_info.extent.width = std.math.maxInt(u32);
+    var malformed_device_subresource_info = device_subresource_info;
+    malformed_device_subresource_info.create_info = &malformed_device_create_info;
+    var unchanged_device_layout = SubresourceLayout2{ .s_type = 1000338002, .p_next = null, .subresource_layout = .{ .offset = 21, .size = 22, .row_pitch = 23, .array_pitch = 24, .depth_pitch = 25 } };
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| getDeviceImageSubresourceLayout(ctx.device, &malformed_device_subresource_info, &unchanged_device_layout);
+    test_allocations_before_failure = null;
+    try std.testing.expectEqual(SubresourceLayout{ .offset = 21, .size = 22, .row_pitch = 23, .array_pitch = 24, .depth_pitch = 25 }, unchanged_device_layout.subresource_layout);
     var invalid_device_layout = SubresourceLayout2{ .s_type = 1000338002, .p_next = null, .subresource_layout = .{ .offset = 11, .size = 12, .row_pitch = 13, .array_pitch = 14, .depth_pitch = 15 } };
     getDeviceImageSubresourceLayout(null, &device_subresource_info, &invalid_device_layout);
     try std.testing.expectEqual(SubresourceLayout{ .offset = 11, .size = 12, .row_pitch = 13, .array_pitch = 14, .depth_pitch = 15 }, invalid_device_layout.subresource_layout);
