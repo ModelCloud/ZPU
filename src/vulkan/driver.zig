@@ -7524,7 +7524,7 @@ fn resetQueryPool(device: ?Device, handle: usize, first: u32, count: u32) callco
     lock();
     defer mutex.unlock();
     const pool = validQueryPoolLocked(handle) orelse return;
-    if (!validDeviceLocked(d) or !pool.owner.eql(d) or !validQueryRange(pool, first, count)) return;
+    if (!validDeviceLocked(d) or !pool.owner.eql(d) or !validQueryRange(pool, first, count) or pool.active_users.load(.acquire) != 0) return;
     if (queryRangeOverlapsActiveCommandLocked(d, pool, first, count)) return;
     for (pool.slots[first .. first + count]) |*slot| {
         slot.value.store(0, .monotonic);
@@ -23663,6 +23663,23 @@ test "query pools expose exact availability timestamps copies and lifecycle" {
     test_allocations_before_failure = null;
     try std.testing.expectEqual(@as(u64, 0x1234), active_query_pool.slots[0].value.load(.acquire));
     try std.testing.expectEqual(@as(u8, 2), active_query_pool.slots[0].state.load(.acquire));
+    // Submission pins also exclude a concurrent host reset from racing the
+    // executor's atomic slot writes.  The rejected warm path leaves the
+    // completed result untouched and performs no allocations.
+    const reset_guard_pool = validQueryPoolLocked(timestamp_pool).?;
+    reset_guard_pool.slots[0].value.store(0x5678, .monotonic);
+    reset_guard_pool.slots[0].state.store(2, .release);
+    lock();
+    try std.testing.expect(pinQueryPoolLocked(reset_guard_pool, DeviceIdentity.capture(ctx.device)));
+    mutex.unlock();
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| resetQueryPool(ctx.device, timestamp_pool, 0, 1);
+    test_allocations_before_failure = null;
+    try std.testing.expectEqual(@as(u64, 0x5678), reset_guard_pool.slots[0].value.load(.acquire));
+    try std.testing.expectEqual(@as(u8, 2), reset_guard_pool.slots[0].state.load(.acquire));
+    lock();
+    releaseQueryPoolUserLocked(reset_guard_pool);
+    mutex.unlock();
     cmdEndQuery(commands[0], occlusion_pool, 0);
     commands[0].impl.active_render_pass = null;
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
