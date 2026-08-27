@@ -548,6 +548,10 @@ for each `VkDependencyInfo`. A wait on a synchronization2 signal is rejected
 unless its dependency payload matches the latest signal payload; same-buffer
 mismatches and mismatches from an earlier submission are failure-atomic and
 covered directly.
+When the last signal is a host `vkSetEvent`, `vkCmdWaitEvents2` now requires
+every first-scope source stage in the dependency to be HOST or NONE, so a host
+signal cannot satisfy device-stage work. Host-only waits, mixed-stage rollback,
+and a 4096-iteration allocation-free predicate path are covered directly.
 
 The bounded execution checkpoint for `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC`
 is complete. Descriptor writes and update templates preserve the dynamic type,

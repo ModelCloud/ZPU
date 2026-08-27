@@ -6346,6 +6346,25 @@ fn eventSetDependencyStagesValid(info: *const DependencyInfo) bool {
     return true;
 }
 
+fn sync2WaitHostSourceScopeValid(info: *const DependencyInfo) bool {
+    // A host-signaled event may only contribute host operations to the first
+    // synchronization scope of vkCmdWaitEvents2. NONE is also harmless for
+    // an individual barrier; a non-host source stage would incorrectly make
+    // a host signal stand in for device work. Destination stages are not
+    // constrained here because they describe work after the wait.
+    const host_stage: u64 = 0x4000;
+    if (info.memory_barriers) |items| for (items[0..info.memory_barrier_count]) |barrier| {
+        if (barrier.src_stage_mask & ~host_stage != 0) return false;
+    };
+    if (info.buffer_memory_barriers) |items| for (items[0..info.buffer_memory_barrier_count]) |barrier| {
+        if (barrier.src_stage_mask & ~host_stage != 0) return false;
+    };
+    if (info.image_memory_barriers) |items| for (items[0..info.image_memory_barrier_count]) |barrier| {
+        if (barrier.src_stage_mask & ~host_stage != 0) return false;
+    };
+    return true;
+}
+
 // Synchronization2 promotes several stage/access bits into the 64-bit ABI.
 // ZPU's execution core intentionally retains the compact Vulkan 1.0 masks,
 // so normalize only aliases whose semantics are represented exactly by that
@@ -6694,8 +6713,13 @@ fn cmdWaitEvents2(cb: ?CommandBuffer, event_count: u32, events: ?[*]const usize,
             dynamicRenderingDependencyValid(info)
         else
             renderPassDependencyValid(current, info);
+        const host_scope_valid = blk: {
+            const event = validEventLocked(events.?[index]) orelse break :blk false;
+            const signal_kind = @as(EventSignalKind, @enumFromInt(event.signal_kind.load(.acquire)));
+            break :blk signal_kind != .host or sync2WaitHostSourceScopeValid(info);
+        };
         const still_recording = current.impl.state == 1 and !current.impl.invalid;
-        if (!scope_valid or !still_recording) {
+        if (!scope_valid or !host_scope_valid or !still_recording) {
             current.impl.invalid = true;
             mutex.unlock();
             return;
@@ -18851,8 +18875,38 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     };
     const mixed_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = mixed_memory_barriers.len, .memory_barriers = &mixed_memory_barriers, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
     const empty_event_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 0, .memory_barriers = null, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
+    const host_wait_barrier = MemoryBarrier2{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 0x4000, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0 };
+    const host_wait_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 1, .memory_barriers = @ptrCast(&host_wait_barrier), .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
+    try std.testing.expect(sync2WaitHostSourceScopeValid(&empty_event_dependency));
+    try std.testing.expect(sync2WaitHostSourceScopeValid(&host_wait_dependency));
+    var mixed_host_wait_dependency = host_wait_dependency;
+    var mixed_host_wait_barrier = host_wait_barrier;
+    mixed_host_wait_barrier.src_stage_mask |= 1;
+    mixed_host_wait_dependency.memory_barriers = @ptrCast(&mixed_host_wait_barrier);
+    try std.testing.expect(!sync2WaitHostSourceScopeValid(&mixed_host_wait_dependency));
     const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+
+    // A host-signaled event may only be consumed by synchronization2 when
+    // every source stage in its first scope is HOST (or NONE). A device stage
+    // must not be smuggled through a host signal, while the host-only form is
+    // a valid wait and remains allocation-free.
+    try std.testing.expectEqual(Result.success, setEvent(ctx.device, event));
+    const before_host_scope_rejection = commands[0].impl.count;
+    cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&mixed_host_wait_dependency));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_host_scope_rejection, commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&host_wait_dependency));
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 1), commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetEvent(ctx.device, event));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| try std.testing.expect(!sync2WaitHostSourceScopeValid(&mixed_host_wait_dependency));
+    test_allocations_before_failure = null;
 
     // Event commands are single-device operations.  Corrupting the internal
     // mask models a device-group command buffer that selected multiple
