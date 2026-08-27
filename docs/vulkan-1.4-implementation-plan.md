@@ -345,9 +345,14 @@ depth-only inheritance; execution validates the inherited color/depth formats
 and sample count against the active primary scope, requires
 `VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT` on dynamic-rendering
 primaries, and then binds the primary's live attachment images into the copied
-draw records. Malformed chains, mismatched scopes, inline dynamic-rendering
-secondary execution, and non-inherited active-query secondary execution remain
-failure-atomic. Traditional render-pass secondaries also accept
+draw records. `vkCmdClearAttachments` in a secondary follows the same
+deferred-binding path when inheritance omits a framebuffer: the clear value and
+bounded rectangle are recorded without allocation, then the primary's live
+color/depth image, layer range, extent, and layout are resolved atomically by
+`vkCmdExecuteCommands`. Malformed chains, mismatched scopes, unresolved
+attachment targets, inline dynamic-rendering secondary execution, and
+non-inherited active-query secondary execution remain failure-atomic. Traditional
+render-pass secondaries also accept
 `occlusionQueryEnable = VK_TRUE` with the active primary query inherited;
 `VK_QUERY_CONTROL_PRECISE_BIT` remains rejected while the precise-query
 feature is disabled. Device

@@ -1402,7 +1402,7 @@ const DispatchCommand = struct { base: [3]u32, groups: [3]u32, pipeline: *Comput
 const DispatchIndirectCommand = struct { buffer: *BufferObj, offset: u64, pipeline: *ComputePipelineObj, layout: ?*PipelineLayoutObj, descriptors: ?*DescriptorSetObj };
 const PrivateDataEntry = struct { object_type: i32 = 0, object: u64 = 0, data: u64 = 0 };
 const PrivateDataSlotObj = struct { owner: Device, entries: [max_api_items]PrivateDataEntry };
-const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: struct { image: *ImageObj, layout: i32, depth: f32, base_layer: u32 = 0, layer_count: u32 = 1 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, clear_color: bool = true, clear_depth: bool = true }, discard_image: struct { image: *ImageObj, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_attachments: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 }, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, depth_bias_enable: u32 = 0, depth_bias: [3]f32 = .{ 0, 0, 0 }, blend_constants: [4]f32 = .{ 0, 0, 0, 0 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{} }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 }, event_set: EventSetCommand, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
+const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: struct { image: *ImageObj, layout: i32, depth: f32, base_layer: u32 = 0, layer_count: u32 = 1 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, clear_color: bool = true, clear_depth: bool = true }, discard_image: struct { image: *ImageObj, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_attachments: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 }, clear_attachments_deferred: struct { color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 }, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, depth_bias_enable: u32 = 0, depth_bias: [3]f32 = .{ 0, 0, 0 }, blend_constants: [4]f32 = .{ 0, 0, 0, 0 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{} }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 }, event_set: EventSetCommand, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
 const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_inheritance: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, dynamic_color_base_layer: u32 = 0, dynamic_depth_base_layer: u32 = 0, dynamic_layer_count: u32 = 1, dynamic_color_store_none: bool = false, dynamic_depth_store_none: bool = false, inherited_dynamic_view_mask: u32 = 0, inherited_dynamic_color_format: i32 = 0, inherited_dynamic_depth_format: i32 = 0, inherited_dynamic_stencil_format: i32 = 0, inherited_dynamic_samples: u32 = 0, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_descriptor_bind_point: i32 = 0, bound_descriptor_stage_flags: u32 = 0, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, push_descriptor_bind_point: i32 = 0, push_descriptor_stage_flags: u32 = 0, descriptor_snapshots: [256]DescriptorSetObj = undefined, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, line_stipple_set: bool, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: [256]Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
 pub const CommandBuffer = *CommandBufferObj;
@@ -5401,7 +5401,7 @@ fn record(cb: CommandBuffer, command: Command) void {
     cb.impl.commands[cb.impl.count] = owned;
     cb.impl.count += 1;
 }
-fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj, dynamic_color: ?*ImageObj, dynamic_depth: ?*ImageObj, color_layout: i32, depth_layout: i32, dynamic_color_base_layer: u32, dynamic_depth_base_layer: u32, dynamic_layer_count: u32) Command {
+fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj, dynamic_color: ?*ImageObj, dynamic_depth: ?*ImageObj, color_layout: i32, depth_layout: i32, dynamic_color_base_layer: u32, dynamic_depth_base_layer: u32, dynamic_layer_count: u32) ?Command {
     var result = command;
     switch (result) {
         .cube_draw => |*draw| if (draw.framebuffer == null) {
@@ -5433,6 +5433,17 @@ fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj,
                 draw.expected_color_layout = color_layout;
                 draw.expected_depth_layout = depth_layout;
             }
+        },
+        .clear_attachments_deferred => |op| {
+            const dynamic = dynamic_color != null or dynamic_depth != null;
+            const image = if (op.aspect_mask == 1) dynamic_color orelse (if (framebuffer) |fb| fb.color_image else null) else if (op.aspect_mask == 2) dynamic_depth orelse (if (framebuffer) |fb| fb.depth_image else null) else null;
+            const target = image orelse return null;
+            const base_layer = std.math.add(u32, op.base_layer, if (dynamic) (if (op.aspect_mask == 1) dynamic_color_base_layer else dynamic_depth_base_layer) else 0) catch return null;
+            if (op.layer_count == 0 or base_layer >= target.array_layers or op.layer_count > target.array_layers - base_layer or op.rect.offset.x < 0 or op.rect.offset.y < 0 or op.rect.extent.width == 0 or op.rect.extent.height == 0) return null;
+            const end_x = std.math.add(u64, @intCast(op.rect.offset.x), op.rect.extent.width) catch return null;
+            const end_y = std.math.add(u64, @intCast(op.rect.offset.y), op.rect.extent.height) catch return null;
+            if (end_x > target.width or end_y > target.height) return null;
+            result = .{ .clear_attachments = .{ .image = target, .depth = if (dynamic) dynamic_depth else if (framebuffer) |fb| fb.depth_image else null, .color = op.color, .depth_value = op.depth_value, .rect = op.rect, .aspect_mask = op.aspect_mask, .base_layer = base_layer, .layer_count = op.layer_count, .expected_color_layout = color_layout, .expected_depth_layout = depth_layout } };
         },
         else => {},
     }
@@ -5492,10 +5503,19 @@ fn cmdExecuteCommands(cb: ?CommandBuffer, count: u32, buffers: ?[*]const Command
     }
     const color_layout = if (execute_dynamic) (if (primary.impl.dynamic_color_image) |color| commandBufferImageLayout(primary, color) else -1) else renderPassAttachmentLayout(primary, true);
     const depth_layout = if (execute_dynamic) (if (primary.impl.dynamic_depth_image) |depth| commandBufferImageLayout(primary, depth) else -1) else renderPassAttachmentLayout(primary, false);
+    // Resolve deferred secondary attachment clears before publishing any
+    // command or retained-secondary reference. This keeps malformed target
+    // bindings and layer/rect ranges failure-atomic at ExecuteCommands time.
+    for (list) |raw| for (raw.impl.commands[0..raw.impl.count]) |command| {
+        if (commandForSecondaryExecution(command, primary.impl.active_framebuffer, if (execute_dynamic) primary.impl.dynamic_color_image else null, if (execute_dynamic) primary.impl.dynamic_depth_image else null, color_layout, depth_layout, if (execute_dynamic) primary.impl.dynamic_color_base_layer else 0, if (execute_dynamic) primary.impl.dynamic_depth_base_layer else 0, if (execute_dynamic) primary.impl.dynamic_layer_count else 1) == null) {
+            primary.impl.invalid = true;
+            return;
+        }
+    };
     for (list) |raw| {
         const secondary = raw;
         for (secondary.impl.commands[0..secondary.impl.count]) |command| {
-            primary.impl.commands[primary.impl.count] = commandForSecondaryExecution(command, primary.impl.active_framebuffer, if (execute_dynamic) primary.impl.dynamic_color_image else null, if (execute_dynamic) primary.impl.dynamic_depth_image else null, color_layout, depth_layout, if (execute_dynamic) primary.impl.dynamic_color_base_layer else 0, if (execute_dynamic) primary.impl.dynamic_depth_base_layer else 0, if (execute_dynamic) primary.impl.dynamic_layer_count else 1);
+            primary.impl.commands[primary.impl.count] = commandForSecondaryExecution(command, primary.impl.active_framebuffer, if (execute_dynamic) primary.impl.dynamic_color_image else null, if (execute_dynamic) primary.impl.dynamic_depth_image else null, color_layout, depth_layout, if (execute_dynamic) primary.impl.dynamic_color_base_layer else 0, if (execute_dynamic) primary.impl.dynamic_depth_base_layer else 0, if (execute_dynamic) primary.impl.dynamic_layer_count else 1).?;
             primary.impl.count += 1;
         }
         primary.impl.secondaries[primary.impl.secondary_count] = secondary;
@@ -5599,14 +5619,17 @@ fn cmdCopyBuffer(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize, count
     };
     for (list[0..count]) |region| record(c, .{ .copy_buffer = .{ .src = src, .dst = dst, .region = region } });
 }
-fn colorBytes(image: *const ImageObj, value: *const ClearColorValue) ?[4]u8 {
+fn colorBytesForFormat(format: i32, value: *const ClearColorValue) ?[4]u8 {
     var rgba: [4]u8 = undefined;
     for (value.float32, 0..) |component, i| {
         if (!std.math.isFinite(component)) return null;
         rgba[i] = @intFromFloat(@round(std.math.clamp(component, 0, 1) * 255));
     }
-    if (image.format == 44) std.mem.swap(u8, &rgba[0], &rgba[2]);
+    if (format == 44) std.mem.swap(u8, &rgba[0], &rgba[2]);
     return rgba;
+}
+fn colorBytes(image: *const ImageObj, value: *const ClearColorValue) ?[4]u8 {
+    return colorBytesForFormat(image.format, value);
 }
 fn validLayers(l: ImageSubresourceLayers) bool {
     return l.aspect_mask == 1 and l.mip_level == 0 and l.layer_count != 0 and l.layer_count <= max_image_array_layers;
@@ -5741,47 +5764,70 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
     const color = if (dynamic_rendering) c.impl.dynamic_color_image else (if (framebuffer) |value| value.color_image else null);
     const color_image = color;
     const depth_image = if (dynamic_rendering) c.impl.dynamic_depth_image else (if (framebuffer) |value| value.depth_image else null);
-    const bounds_image = color_image orelse depth_image orelse {
-        c.impl.invalid = true;
-        return;
-    };
-    if (c.impl.state != 1 or c.impl.invalid or (!dynamic_rendering and c.impl.active_render_pass == null) or c.impl.level != 0 or attachment_count == 0 or attachment_count > max_api_items or rect_count == 0 or rect_count > max_api_items or attachments == null or rects == null or @as(usize, c.impl.count) + @as(usize, attachment_count) * rect_count > c.impl.commands.len) {
+    const inherited_secondary = c.impl.level == 1 and c.impl.render_pass_continue and ((dynamic_rendering and c.impl.dynamic_inheritance) or (!dynamic_rendering and c.impl.active_render_pass != null and framebuffer == null));
+    if (color_image == null and depth_image == null and !inherited_secondary) {
         c.impl.invalid = true;
         return;
     }
-    const framebuffer_layers = if (dynamic_rendering) c.impl.dynamic_layer_count else framebuffer.?.layers;
-    for (rects.?[0..rect_count]) |rect| if (!clearRectValid(rect, bounds_image.width, bounds_image.height, framebuffer_layers)) {
+    if (c.impl.state != 1 or c.impl.invalid or (!dynamic_rendering and c.impl.active_render_pass == null) or attachment_count == 0 or attachment_count > max_api_items or rect_count == 0 or rect_count > max_api_items or attachments == null or rects == null or @as(usize, c.impl.count) + @as(usize, attachment_count) * rect_count > c.impl.commands.len) {
         c.impl.invalid = true;
         return;
-    };
+    }
+    if (color_image orelse depth_image) |bounds_image| {
+        const framebuffer_layers = if (dynamic_rendering) c.impl.dynamic_layer_count else framebuffer.?.layers;
+        for (rects.?[0..rect_count]) |rect| if (!clearRectValid(rect, bounds_image.width, bounds_image.height, framebuffer_layers)) {
+            c.impl.invalid = true;
+            return;
+        };
+    } else {
+        // A secondary without an inherited framebuffer cannot know the
+        // primary's concrete extent while recording. Keep the deferred
+        // command bounded by the device profile; ExecuteCommands performs the
+        // exact target/extent/layer validation before publishing it.
+        for (rects.?[0..rect_count]) |rect| if (!clearRectValid(rect, max_2d_extent, max_2d_extent, max_image_array_layers)) {
+            c.impl.invalid = true;
+            return;
+        };
+    }
+    const inherited_color_format = if (dynamic_rendering) c.impl.inherited_dynamic_color_format else if (c.impl.active_render_pass) |render_pass| blk: {
+        break :blk if (render_pass.framebuffer_attachment_count > 0) render_pass.framebuffer_attachments[0].format else 0;
+    } else 0;
+    const inherited_depth_format = if (dynamic_rendering) c.impl.inherited_dynamic_depth_format else if (c.impl.active_render_pass) |render_pass| blk: {
+        var format: i32 = 0;
+        for (render_pass.framebuffer_attachments[0..render_pass.framebuffer_attachment_count]) |attachment| if (attachment.role == .depth) {
+            format = attachment.format;
+            break;
+        };
+        break :blk format;
+    } else 0;
     for (attachments.?[0..attachment_count]) |attachment| {
         if (attachment.aspect_mask != 1 and attachment.aspect_mask != 2) {
             c.impl.invalid = true;
             return;
         }
         if (attachment.aspect_mask == 1) {
-            const color_target = color_image orelse {
-                c.impl.invalid = true;
-                return;
-            };
             if (attachment.color_attachment != 0) {
                 c.impl.invalid = true;
                 return;
             }
-            if (colorBytes(color_target, &attachment.clear_value.color) == null) {
+            if (color_image == null and inherited_color_format != 44) {
+                c.impl.invalid = true;
+                return;
+            }
+            const bytes = if (color_image) |color_target| colorBytes(color_target, &attachment.clear_value.color) else colorBytesForFormat(inherited_color_format, &attachment.clear_value.color);
+            if (bytes == null) {
                 c.impl.invalid = true;
                 return;
             }
         } else {
-            const depth = depth_image orelse {
+            if (depth_image == null and inherited_depth_format != 126) {
                 c.impl.invalid = true;
                 return;
-            };
+            }
             if (!std.math.isFinite(attachment.clear_value.depth_stencil.depth) or attachment.clear_value.depth_stencil.depth < 0 or attachment.clear_value.depth_stencil.depth > 1) {
                 c.impl.invalid = true;
                 return;
             }
-            _ = depth;
         }
     }
     for (rects.?[0..rect_count]) |rect| {
@@ -5806,14 +5852,51 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
             }
         }
     }
-    const expected_color_layout = if (color_image != null) recordedAttachmentLayout(c, true) else -1;
-    const expected_depth_layout = if (depth_image != null) recordedAttachmentLayout(c, false) else -1;
+    const expected_color_layout = if (color_image != null) recordedAttachmentLayout(c, true) else if (dynamic_rendering) -1 else renderPassAttachmentLayout(c, true);
+    const expected_depth_layout = if (depth_image != null) recordedAttachmentLayout(c, false) else if (dynamic_rendering) -1 else renderPassAttachmentLayout(c, false);
     for (attachments.?[0..attachment_count]) |attachment| for (rects.?[0..rect_count]) |rect| {
-        const image = if (attachment.aspect_mask == 1) color_image.? else depth_image.?;
-        const bytes = if (attachment.aspect_mask == 1) colorBytes(color_image.?, &attachment.clear_value.color).? else .{ 0, 0, 0, 0 };
+        const bytes = if (attachment.aspect_mask == 1) (if (color_image) |target| colorBytes(target, &attachment.clear_value.color).? else colorBytesForFormat(inherited_color_format, &attachment.clear_value.color).?) else .{ 0, 0, 0, 0 };
         const base_layer = rect.base_array_layer + if (dynamic_rendering) (if (attachment.aspect_mask == 1) c.impl.dynamic_color_base_layer else c.impl.dynamic_depth_base_layer) else 0;
-        record(c, .{ .clear_attachments = .{ .image = image, .depth = depth_image, .color = bytes, .depth_value = attachment.clear_value.depth_stencil.depth, .rect = rect.rect, .aspect_mask = attachment.aspect_mask, .base_layer = base_layer, .layer_count = rect.layer_count, .expected_color_layout = expected_color_layout, .expected_depth_layout = expected_depth_layout } });
+        if (inherited_secondary and color_image == null and depth_image == null) {
+            record(c, .{ .clear_attachments_deferred = .{ .color = bytes, .depth_value = attachment.clear_value.depth_stencil.depth, .rect = rect.rect, .aspect_mask = attachment.aspect_mask, .base_layer = rect.base_array_layer, .layer_count = rect.layer_count, .expected_color_layout = expected_color_layout, .expected_depth_layout = expected_depth_layout } });
+        } else {
+            const image = if (attachment.aspect_mask == 1) color_image.? else depth_image.?;
+            record(c, .{ .clear_attachments = .{ .image = image, .depth = depth_image, .color = bytes, .depth_value = attachment.clear_value.depth_stencil.depth, .rect = rect.rect, .aspect_mask = attachment.aspect_mask, .base_layer = base_layer, .layer_count = rect.layer_count, .expected_color_layout = expected_color_layout, .expected_depth_layout = expected_depth_layout } });
+        }
     };
+}
+
+test "secondary attachment clears bind inherited targets atomically" {
+    var color_bytes: [64]u8 align(64) = undefined;
+    @memset(&color_bytes, 0x11);
+    var image = ImageObj{ .owner = undefined, .width = 4, .height = 4, .array_layers = 1, .samples = 1, .format = 44, .usage = 0x10, .layout = 2, .owned_bytes = color_bytes[0..] };
+    var framebuffer = FramebufferObj{ .owner = undefined, .color_image = &image, .depth_image = null, .render_compatibility = .{}, .width = 4, .height = 4, .layers = 1 };
+    const deferred = Command{ .clear_attachments_deferred = .{ .color = .{ 0x21, 0x43, 0x65, 0x87 }, .depth_value = 0, .rect = .{ .offset = .{ .x = 1, .y = 1 }, .extent = .{ .width = 2, .height = 2 } }, .aspect_mask = 1, .base_layer = 0, .layer_count = 1 } };
+    const resolved = commandForSecondaryExecution(deferred, &framebuffer, null, null, 2, -1, 0, 0, 1) orelse return error.TestUnexpectedResult;
+    switch (resolved) {
+        .clear_attachments => |op| {
+            try std.testing.expectEqual(&image, op.image);
+            try std.testing.expectEqual(@as(u32, 0), op.base_layer);
+            try std.testing.expectEqual(@as(i32, 2), op.expected_color_layout);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    var query_context = QueryExecutionContext{};
+    executeValidatedCommand(resolved, &query_context);
+    const pattern = [_]u8{ 0x21, 0x43, 0x65, 0x87 };
+    for (0..4) |y| for (0..4) |x| {
+        const pixel = color_bytes[(y * 4 + x) * 4 ..][0..4];
+        if (x >= 1 and x < 3 and y >= 1 and y < 3) try std.testing.expectEqualSlices(u8, &pattern, pixel) else try std.testing.expectEqualSlices(u8, &[_]u8{ 0x11, 0x11, 0x11, 0x11 }, pixel);
+    };
+    try std.testing.expect(commandForSecondaryExecution(deferred, null, null, null, 2, -1, 0, 0, 1) == null);
+    var out_of_bounds = deferred;
+    out_of_bounds.clear_attachments_deferred.rect.extent.width = 5;
+    try std.testing.expect(commandForSecondaryExecution(out_of_bounds, &framebuffer, null, null, 2, -1, 0, 0, 1) == null);
+    var layouts = [_]i32{2} ** max_child_objects;
+    try std.testing.expect(!prevalidateCommand(deferred, undefined, &layouts));
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| _ = commandForSecondaryExecution(deferred, &framebuffer, null, null, 2, -1, 0, 0, 1).?;
+    test_allocations_before_failure = null;
 }
 fn cmdNextSubpass(cb: ?CommandBuffer, contents: i32) callconv(.c) void {
     lock();
@@ -7493,6 +7576,9 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 }
             }
         },
+        // Deferred secondary clears must be rebound to the active primary by
+        // vkCmdExecuteCommands before they can reach submission.
+        .clear_attachments_deferred => return false,
         .next_subpass => {},
         .dispatch => |op| {
             if ((stateForObject(ComputePipelineObj, op.pipeline, &compute_pipeline_objects, &compute_pipeline_state) orelse return deadResource()).* != .live) return deadResource();
@@ -8526,6 +8612,7 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
             if (op.aspect_mask == 1) op.image.force_full_present = true;
             op.image.complex_3d_content = false;
         },
+        .clear_attachments_deferred => {},
         .next_subpass => {},
         .cube_draw => |op| {
             if (op.rasterizer_discard_enable != 0) return;
@@ -16231,6 +16318,12 @@ test "vkcube presentation path records submits and presents two swapchain images
     dynamic_secondary_inheritance.p_next = &dynamic_secondary_rendering;
     const dynamic_secondary_begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 2, .inheritance_info = &dynamic_secondary_inheritance };
     try std.testing.expectEqual(Result.success, beginCommandBuffer(render_secondary[0], &dynamic_secondary_begin));
+    const deferred_secondary_clear = [_]ClearAttachment{.{ .aspect_mask = 1, .color_attachment = 0, .clear_value = .{ .color = .{ .float32 = .{ 1, 0, 0, 1 } } } }};
+    const deferred_secondary_rect = [_]ClearRect{.{ .rect = .{ .offset = .{ .x = 1, .y = 1 }, .extent = .{ .width = 2, .height = 2 } }, .base_array_layer = 0, .layer_count = 1 }};
+    const deferred_clear_count = render_secondary[0].impl.count;
+    cmdClearAttachments(render_secondary[0], 1, &deferred_secondary_clear, 1, &deferred_secondary_rect);
+    try std.testing.expectEqual(deferred_clear_count + 1, render_secondary[0].impl.count);
+    try std.testing.expectEqual(@as(std.meta.Tag(Command), .clear_attachments_deferred), std.meta.activeTag(render_secondary[0].impl.commands[deferred_clear_count]));
     cmdBindPipeline(render_secondary[0], 0, dynamic_pipeline[0]);
     cmdBindDescriptorSets(render_secondary[0], 0, compatible_pipeline_layout, 0, 1, &sets, 0, null);
     cmdBindIndexBuffer(render_secondary[0], index_buffer, 0, 0);
@@ -16471,6 +16564,31 @@ test "vkcube presentation path records submits and presents two swapchain images
     test_allocations_before_failure = null;
     const render_inheritance = CommandBufferInheritanceInfo{ .s_type = 41, .p_next = null, .render_pass = compatible_render_pass, .subpass = 0, .framebuffer = 0, .occlusion_query_enable = 0, .query_flags = 0, .pipeline_statistics = 0 };
     const render_secondary_begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 2, .inheritance_info = &render_inheritance };
+
+    // Traditional secondaries also defer attachment clears when inheritance
+    // omits a framebuffer. The primary's active framebuffer is resolved only
+    // at ExecuteCommands, keeping the recording path allocation-free.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(render_secondary[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(render_secondary[0], &render_secondary_begin));
+    const traditional_secondary_clear_count = render_secondary[0].impl.count;
+    cmdClearAttachments(render_secondary[0], 1, &deferred_secondary_clear, 1, &deferred_secondary_rect);
+    try std.testing.expectEqual(traditional_secondary_clear_count + 1, render_secondary[0].impl.count);
+    try std.testing.expectEqual(@as(std.meta.Tag(Command), .clear_attachments_deferred), std.meta.activeTag(render_secondary[0].impl.commands[traditional_secondary_clear_count]));
+    try std.testing.expectEqual(Result.success, endCommandBuffer(render_secondary[0]));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    cmdBeginRenderPass(commands[0], &render_info, 1);
+    const traditional_secondary_primary_count = commands[0].impl.count;
+    cmdExecuteCommands(commands[0], 1, &render_secondary);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expect(commands[0].impl.count > traditional_secondary_primary_count);
+    cmdEndRenderPass(commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const traditional_secondary_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&traditional_secondary_submit), 0));
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, imageBytes(validImageLocked(images[0]).?)[4 * (1 * 8 + 1) ..][0..4]);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(render_secondary[0], 0));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
 
     // A traditional render-pass secondary may inherit the active occlusion
     // query from its primary. The inherited query flag is accepted and
