@@ -252,6 +252,18 @@ pub const Op = enum(u8) {
     f_acos,
     /// Component-wise inverse tangent from GLSL.std.450.
     f_atan,
+    /// Component-wise hyperbolic sine from GLSL.std.450.
+    f_sinh,
+    /// Component-wise hyperbolic cosine from GLSL.std.450.
+    f_cosh,
+    /// Component-wise hyperbolic tangent from GLSL.std.450.
+    f_tanh,
+    /// Component-wise inverse hyperbolic sine from GLSL.std.450.
+    f_asinh,
+    /// Component-wise inverse hyperbolic cosine from GLSL.std.450.
+    f_acosh,
+    /// Component-wise inverse hyperbolic tangent from GLSL.std.450.
+    f_atanh,
 };
 
 pub const Instruction = struct {
@@ -413,7 +425,7 @@ fn valueOperand(op: Op, operand_index: usize) bool {
         .f_smooth_step => operand_index < 3,
         .f_round, .f_round_even, .f_trunc => operand_index == 0,
         .f_floor, .f_ceil, .f_fract => operand_index == 0,
-        .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan => operand_index == 0,
+        .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh => operand_index == 0,
         .iadd, .isub, .imul, .iadd_carry, .isub_borrow, .umul_extended, .smul_extended, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge, .logical_eq, .logical_ne, .logical_or, .logical_and, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .vector_times_scalar, .matrix_times_vector, .matrix_times_scalar, .vector_times_matrix, .matrix_times_matrix, .outer_product, .dot, .less_or_greater, .ordered, .unordered => operand_index < 2,
         .transpose, .any, .all, .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set, .bit_reverse, .bit_count => operand_index == 0,
         .bit_field_insert => operand_index < 4,

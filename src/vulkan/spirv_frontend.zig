@@ -318,7 +318,7 @@ fn sameShape(a: ir.Type, b: ir.Type) bool {
 fn supportedGlslExtInst(ext: u32, result: ir.Type, operand: ir.Type) bool {
     if (!sameShape(result, operand)) return false;
     return switch (ext) {
-        1, 2, 3, 4, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18 => result.scalar == .f32,
+        1, 2, 3, 4, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24 => result.scalar == .f32,
         5 => result.scalar == .i32,
         6 => result.scalar == .f32 and result.rows == 1,
         7 => result.scalar == .i32 and result.rows == 1,
@@ -725,8 +725,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 if (!in_function or !label_seen or terminated or block_terminated or w.len < 5 or w.len > 7) return error.Malformed;
                 const set = nodes[try id(nodes, w[2])];
                 if (set.kind != .ext_inst_import or set.a != 450) return error.Unsupported;
-                if (w[3] < 1 or w[3] > 18 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50) return error.Unsupported;
-                if ((w[3] >= 1 and w[3] <= 18) and w.len != 5) return error.Malformed;
+                if (w[3] < 1 or w[3] > 24 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50) return error.Unsupported;
+                if ((w[3] >= 1 and w[3] <= 24) and w.len != 5) return error.Malformed;
                 if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48) and w.len != 6) return error.Malformed;
                 if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50) and w.len != 7) return error.Malformed;
                 const result = try resultShape(nodes, w[0]);
@@ -861,8 +861,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             12 => {
                 if (w.len < 5 or w.len > 7) return error.Malformed;
                 const set = nodes[try id(nodes, w[2])];
-                if (set.kind != .ext_inst_import or set.a != 450 or (w[3] < 1 or w[3] > 18 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50)) return error.Unsupported;
-                if ((w[3] >= 1 and w[3] <= 18) and w.len != 5) return error.Malformed;
+                if (set.kind != .ext_inst_import or set.a != 450 or (w[3] < 1 or w[3] > 24 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50)) return error.Unsupported;
+                if ((w[3] >= 1 and w[3] <= 24) and w.len != 5) return error.Malformed;
                 if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48) and w.len != 6) return error.Malformed;
                 if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50) and w.len != 7) return error.Malformed;
                 const result = try resultShape(nodes, w[0]);
@@ -1579,6 +1579,12 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 16 => .f_asin,
                 17 => .f_acos,
                 18 => .f_atan,
+                19 => .f_sinh,
+                20 => .f_cosh,
+                21 => .f_tanh,
+                22 => .f_asinh,
+                23 => .f_acosh,
+                24 => .f_atanh,
                 37 => .f_min,
                 38 => .u_min,
                 39 => .i_min,
@@ -2661,7 +2667,7 @@ test "compute profile lowers bounded GLSL.std.450 absolute values" {
         };
         try std.testing.expectEqual(expected, elementary_program.instructions[1].op);
     }
-    for ([_]u32{ 11, 12, 13, 14, 15, 16, 17, 18 }) |ext| {
+    for ([_]u32{ 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24 }) |ext| {
         const conversion = try testReplaceInstruction(std.testing.allocator, words, testOpcodeOffset(words, 12, 0).?, &.{ (6 << 16) | 12, 2, 13, 12, ext, 7 });
         defer std.testing.allocator.free(conversion);
         var conversion_program = try compile(std.testing.allocator, conversion, .compute, "main", &.{});
@@ -2675,6 +2681,12 @@ test "compute profile lowers bounded GLSL.std.450 absolute values" {
             16 => .f_asin,
             17 => .f_acos,
             18 => .f_atan,
+            19 => .f_sinh,
+            20 => .f_cosh,
+            21 => .f_tanh,
+            22 => .f_asinh,
+            23 => .f_acosh,
+            24 => .f_atanh,
             else => unreachable,
         };
         try std.testing.expectEqual(expected, conversion_program.instructions[1].op);

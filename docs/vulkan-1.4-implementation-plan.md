@@ -693,7 +693,9 @@ Each slice must land with all of the following:
   bounded floating-point executor. Scalar/vector `Radians`, `Degrees`, `Sin`,
   `Cos`, `Tan`, `Asin`, `Acos`, and `Atan` now lower through the same
   component-wise f32 path, preserving signed zero and canonicalizing runtime
-  NaNs. A single
+  NaNs. `Sinh`, `Cosh`, `Tanh`, `Asinh`, `Acosh`, and `Atanh` now use the same
+  strict component-wise path with explicit domain-result canonicalization. A
+  single
   side-effect-free dynamic conditional or one-case runtime switch with a common
   merge is also lowered to compare/select; generic SPIR-V dynamic control flow,
   aggregate/descriptor-array indexing, atomics, shared-memory execution,
