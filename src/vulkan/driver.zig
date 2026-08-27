@@ -834,7 +834,10 @@ pub const ExternalImageFormatProperties = extern struct { s_type: i32, p_next: ?
 pub const SamplerYcbcrConversionImageFormatProperties = extern struct { s_type: i32, p_next: ?*anyopaque, combined_image_sampler_descriptor_count: u32 };
 pub const HostImageCopyDevicePerformanceQuery = extern struct { s_type: i32, p_next: ?*anyopaque, optimal_device_access: u32, identical_memory_layout: u32 };
 pub const PhysicalDeviceQueueFamilyProperties2 = extern struct { s_type: i32, p_next: ?*anyopaque, queue_family_properties: QueueProperties };
-pub const QueueFamilyGlobalPriorityProperties = extern struct { s_type: i32, p_next: ?*anyopaque, priority_count: u32, priorities: [4]i32 };
+/// Exact VkQueueFamilyGlobalPriorityProperties ABI.  Vulkan reserves space
+/// for VK_MAX_GLOBAL_PRIORITY_SIZE (16) priority values; keeping all entries
+/// is required even though ZPU currently reports only the ordinary priority.
+pub const QueueFamilyGlobalPriorityProperties = extern struct { s_type: i32, p_next: ?*anyopaque, priority_count: u32, priorities: [16]i32 };
 pub const PhysicalDeviceMemoryProperties2 = extern struct { s_type: i32, p_next: ?*anyopaque, memory_properties: MemoryProperties };
 pub const PhysicalDeviceSparseImageFormatInfo2 = extern struct { s_type: i32, p_next: ?*const anyopaque, format: i32, image_type: i32, samples: u32, usage: u32, tiling: i32 };
 pub const SparseImageFormatProperties2 = extern struct { s_type: i32, p_next: ?*anyopaque, properties: SparseImageFormatProperties };
@@ -880,7 +883,9 @@ pub const PhysicalDeviceExternalFenceInfo = extern struct { s_type: i32, p_next:
 pub const ExternalFenceProperties = extern struct { s_type: i32, p_next: ?*anyopaque, export_from_imported_handle_types: u32, compatible_handle_types: u32, external_fence_features: u32 };
 pub const PhysicalDeviceExternalSemaphoreInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, handle_type: u32 };
 pub const ExternalSemaphoreProperties = extern struct { s_type: i32, p_next: ?*anyopaque, export_from_imported_handle_types: u32, compatible_handle_types: u32, external_semaphore_features: u32 };
-pub const SamplerYcbcrConversionCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, format: i32, model: i32, range: i32, components: [4]i32, x_chroma_offset: i32, y_chroma_offset: i32, chroma_filter: i32, force_explicit_reconstruction: u32, external_format: u64 };
+/// Exact VkSamplerYcbcrConversionCreateInfo ABI.  externalFormat belongs to
+/// the Android external-format pNext extension, not this core struct.
+pub const SamplerYcbcrConversionCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, format: i32, model: i32, range: i32, components: [4]i32, x_chroma_offset: i32, y_chroma_offset: i32, chroma_filter: i32, force_explicit_reconstruction: u32 };
 pub const DescriptorSetLayoutSupport = extern struct { s_type: i32, p_next: ?*anyopaque, supported: u32 };
 pub const CommandPoolCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, queue_family_index: u32 };
 pub const CommandBufferAllocateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, command_pool: usize, level: i32, command_buffer_count: u32 };
@@ -3462,7 +3467,8 @@ fn populateQueueFamilyProperties2Chain(raw: ?*anyopaque) void {
     while (next) |item| {
         const priorities: *QueueFamilyGlobalPriorityProperties = @ptrCast(@alignCast(item));
         priorities.priority_count = 1;
-        priorities.priorities = .{ 256, 0, 0, 0 };
+        priorities.priorities = std.mem.zeroes([16]i32);
+        priorities.priorities[0] = 256;
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
         next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
     }
@@ -10049,7 +10055,7 @@ fn samplerYcbcrConversionCreateInfoValid(ci: *const SamplerYcbcrConversionCreate
         ci.x_chroma_offset >= 0 and ci.x_chroma_offset <= 1 and
         ci.y_chroma_offset >= 0 and ci.y_chroma_offset <= 1 and
         ci.chroma_filter >= 0 and ci.chroma_filter <= 1 and
-        ci.force_explicit_reconstruction <= 1 and ci.external_format == 0;
+        ci.force_explicit_reconstruction <= 1;
 }
 fn createSamplerYcbcrConversion(device: ?Device, info: ?*const SamplerYcbcrConversionCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     const ci = info orelse return .error_initialization_failed;
@@ -17214,16 +17220,17 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DescriptorSetVariableDescriptorCountLayoutSupport));
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(RenderPassMultiviewCreateInfo));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(RenderPassInputAttachmentAspectCreateInfo));
-    try std.testing.expectEqual(@as(usize, 40), @sizeOf(QueueFamilyGlobalPriorityProperties));
+    try std.testing.expectEqual(@as(usize, 88), @sizeOf(QueueFamilyGlobalPriorityProperties));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DeviceQueueGlobalPriorityCreateInfo));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(SubresourceHostMemcpySize));
     const ctx = try createTestDeviceContext();
-    try std.testing.expectEqual(@as(usize, 72), @sizeOf(SamplerYcbcrConversionCreateInfo));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(SamplerYcbcrConversionCreateInfo));
+    try std.testing.expectEqual(@as(usize, 56), @offsetOf(SamplerYcbcrConversionCreateInfo, "force_explicit_reconstruction"));
     var peer_features: u32 = 0xffff_ffff;
     getDeviceGroupPeerMemoryFeatures(ctx.device, 0, 0, 0, &peer_features);
     try std.testing.expectEqual(@as(u32, 0), peer_features);
     var ycbcr_handle: usize = 0xfeed;
-    const ycbcr_info = SamplerYcbcrConversionCreateInfo{ .s_type = 1000156000, .p_next = null, .format = 1000156000, .model = 0, .range = 0, .components = .{ 0, 0, 0, 0 }, .x_chroma_offset = 0, .y_chroma_offset = 0, .chroma_filter = 0, .force_explicit_reconstruction = 0, .external_format = 0 };
+    const ycbcr_info = SamplerYcbcrConversionCreateInfo{ .s_type = 1000156000, .p_next = null, .format = 1000156000, .model = 0, .range = 0, .components = .{ 0, 0, 0, 0 }, .x_chroma_offset = 0, .y_chroma_offset = 0, .chroma_filter = 0, .force_explicit_reconstruction = 0 };
     try std.testing.expectEqual(Result.error_format_not_supported, createSamplerYcbcrConversion(ctx.device, &ycbcr_info, null, &ycbcr_handle));
     try std.testing.expectEqual(@as(usize, 0xfeed), ycbcr_handle);
     // Unsupported multi-planar formats still receive full ABI-domain
@@ -17848,13 +17855,15 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     getPhysicalDeviceQueueFamilyProperties2(ctx.physical, &queue_count, &queue_properties);
     try std.testing.expectEqual(@as(u32, 1), queue_count);
     try std.testing.expectEqual(@as(u32, 64), queue_properties[0].queue_family_properties.timestamp_bits);
-    var global_priorities = QueueFamilyGlobalPriorityProperties{ .s_type = 1000388000, .p_next = null, .priority_count = 0xffff_ffff, .priorities = .{ -1, -1, -1, -1 } };
+    var global_priorities = QueueFamilyGlobalPriorityProperties{ .s_type = 1000388000, .p_next = null, .priority_count = 0xffff_ffff, .priorities = [_]i32{-1} ** 16 };
     queue_properties[0].p_next = @ptrCast(&global_priorities);
     getPhysicalDeviceQueueFamilyProperties2(ctx.physical, &queue_count, &queue_properties);
     try std.testing.expectEqual(@as(u32, 1), global_priorities.priority_count);
     try std.testing.expectEqual(@as(i32, 256), global_priorities.priorities[0]);
+    try std.testing.expectEqual(@as(i32, 0), global_priorities.priorities[15]);
+    try std.testing.expectEqual(@as(usize, 20), @offsetOf(QueueFamilyGlobalPriorityProperties, "priorities"));
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&global_priorities)), queue_properties[0].p_next);
-    var duplicate_global_priorities = QueueFamilyGlobalPriorityProperties{ .s_type = 1000388000, .p_next = null, .priority_count = 0xcafe_f00d, .priorities = .{ -1, -1, -1, -1 } };
+    var duplicate_global_priorities = QueueFamilyGlobalPriorityProperties{ .s_type = 1000388000, .p_next = null, .priority_count = 0xcafe_f00d, .priorities = [_]i32{-1} ** 16 };
     global_priorities.p_next = @ptrCast(&duplicate_global_priorities);
     queue_properties[0].queue_family_properties.timestamp_bits = 0xdead_beef;
     try std.testing.expectEqual(@as(u32, 0xcafe_f00d), duplicate_global_priorities.priority_count);

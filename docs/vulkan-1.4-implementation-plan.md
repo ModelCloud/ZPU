@@ -275,10 +275,15 @@ have a 4096-iteration allocation-free warm path.
 Queue-family-properties2 now preserves and populates the promoted
 `VkQueueFamilyGlobalPriorityProperties` output chain, reporting the ordinary
 medium priority (`VK_QUEUE_GLOBAL_PRIORITY_MEDIUM`) for the single ZPU queue;
+the full 16-entry `VK_MAX_GLOBAL_PRIORITY_SIZE` array is retained for the
+exact LP64 output ABI, with unused entries zeroed;
 invalid counts leave the caller’s chain untouched.
 Logical-device queue creation accepts the promoted
 `VkDeviceQueueGlobalPriorityCreateInfo` chain for the ordinary medium queue
 priority and rejects other priorities before publishing device state.
+The sampler-YCbCr conversion create record is also ABI-exact: its core body
+ends at `forceExplicitReconstruction`; Android `externalFormat`, when used,
+belongs to a separate pNext extension and is not folded into the core struct.
 The first execution slice now compiles and runs a bounded straight-line
 SPIR-V compute profiles that either store a constant `u32`, load one
 statically indexed uniform-block `u32`, or choose scalar values with a boolean
