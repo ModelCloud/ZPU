@@ -400,7 +400,62 @@ pub const PhysicalDeviceVulkan11Properties = extern struct {
     max_per_set_descriptors: u32,
     max_memory_allocation_size: u64,
 };
-pub const PhysicalDeviceVulkan12Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [720]u8 };
+pub const PhysicalDeviceVulkan12Properties = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    driver_id: i32,
+    driver_name: [256]u8,
+    driver_info: [256]u8,
+    conformance_version: ConformanceVersion,
+    denorm_behavior_independence: i32,
+    rounding_mode_independence: i32,
+    shader_signed_zero_inf_nan_preserve_float16: u32,
+    shader_signed_zero_inf_nan_preserve_float32: u32,
+    shader_signed_zero_inf_nan_preserve_float64: u32,
+    shader_denorm_preserve_float16: u32,
+    shader_denorm_preserve_float32: u32,
+    shader_denorm_preserve_float64: u32,
+    shader_denorm_flush_to_zero_float16: u32,
+    shader_denorm_flush_to_zero_float32: u32,
+    shader_denorm_flush_to_zero_float64: u32,
+    shader_rounding_mode_rte_float16: u32,
+    shader_rounding_mode_rte_float32: u32,
+    shader_rounding_mode_rte_float64: u32,
+    shader_rounding_mode_rtz_float16: u32,
+    shader_rounding_mode_rtz_float32: u32,
+    shader_rounding_mode_rtz_float64: u32,
+    max_update_after_bind_descriptors_in_all_pools: u32,
+    shader_uniform_buffer_array_non_uniform_indexing_native: u32,
+    shader_sampled_image_array_non_uniform_indexing_native: u32,
+    shader_storage_buffer_array_non_uniform_indexing_native: u32,
+    shader_storage_image_array_non_uniform_indexing_native: u32,
+    shader_input_attachment_array_non_uniform_indexing_native: u32,
+    robust_buffer_access_update_after_bind: u32,
+    quad_divergent_implicit_lod: u32,
+    max_per_stage_descriptor_update_after_bind_samplers: u32,
+    max_per_stage_descriptor_update_after_bind_uniform_buffers: u32,
+    max_per_stage_descriptor_update_after_bind_storage_buffers: u32,
+    max_per_stage_descriptor_update_after_bind_sampled_images: u32,
+    max_per_stage_descriptor_update_after_bind_storage_images: u32,
+    max_per_stage_descriptor_update_after_bind_input_attachments: u32,
+    max_per_stage_update_after_bind_resources: u32,
+    max_descriptor_set_update_after_bind_samplers: u32,
+    max_descriptor_set_update_after_bind_uniform_buffers: u32,
+    max_descriptor_set_update_after_bind_uniform_buffers_dynamic: u32,
+    max_descriptor_set_update_after_bind_storage_buffers: u32,
+    max_descriptor_set_update_after_bind_storage_buffers_dynamic: u32,
+    max_descriptor_set_update_after_bind_sampled_images: u32,
+    max_descriptor_set_update_after_bind_storage_images: u32,
+    max_descriptor_set_update_after_bind_input_attachments: u32,
+    supported_depth_resolve_modes: u32,
+    supported_stencil_resolve_modes: u32,
+    independent_resolve_none: u32,
+    independent_resolve: u32,
+    filter_minmax_single_component_formats: u32,
+    filter_minmax_image_component_mapping: u32,
+    max_timeline_semaphore_value_difference: u64,
+    framebuffer_integer_color_sample_counts: u32,
+};
 pub const PhysicalDeviceVulkan13Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [200]u8 };
 pub const PhysicalDeviceVulkan14Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [128]u8 };
 // Individual core-promoted property structs use conservative zero payloads:
@@ -16767,6 +16822,11 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 84), @offsetOf(PhysicalDeviceVulkan11Properties, "max_multiview_view_count"));
     try std.testing.expectEqual(@as(usize, 104), @offsetOf(PhysicalDeviceVulkan11Properties, "max_memory_allocation_size"));
     try std.testing.expectEqual(@as(usize, 736), @sizeOf(PhysicalDeviceVulkan12Properties));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVulkan12Properties, "driver_id"));
+    try std.testing.expectEqual(@as(usize, 20), @offsetOf(PhysicalDeviceVulkan12Properties, "driver_name"));
+    try std.testing.expectEqual(@as(usize, 532), @offsetOf(PhysicalDeviceVulkan12Properties, "conformance_version"));
+    try std.testing.expectEqual(@as(usize, 720), @offsetOf(PhysicalDeviceVulkan12Properties, "max_timeline_semaphore_value_difference"));
+    try std.testing.expectEqual(@as(usize, 728), @offsetOf(PhysicalDeviceVulkan12Properties, "framebuffer_integer_color_sample_counts"));
     try std.testing.expectEqual(@as(usize, 216), @sizeOf(PhysicalDeviceVulkan13Properties));
     try std.testing.expectEqual(@as(usize, 144), @sizeOf(PhysicalDeviceVulkan14Properties));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceProtectedMemoryProperties));
@@ -17067,7 +17127,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     vulkan11_properties.s_type = 50;
     vulkan11_properties.p_next = null;
     @memset(std.mem.asBytes(&vulkan11_properties)[16..], 0xff);
-    var vulkan12_properties = PhysicalDeviceVulkan12Properties{ .s_type = 52, .p_next = @ptrCast(&vulkan11_properties), .payload = [_]u8{0xff} ** 720 };
+    var vulkan12_properties = std.mem.zeroes(PhysicalDeviceVulkan12Properties);
+    vulkan12_properties.s_type = 52;
+    vulkan12_properties.p_next = @ptrCast(&vulkan11_properties);
+    @memset(std.mem.asBytes(&vulkan12_properties)[16..], 0xff);
     var vulkan13_properties = PhysicalDeviceVulkan13Properties{ .s_type = 54, .p_next = @ptrCast(&vulkan12_properties), .payload = [_]u8{0xff} ** 200 };
     var vulkan14_properties = PhysicalDeviceVulkan14Properties{ .s_type = 56, .p_next = @ptrCast(&vulkan13_properties), .payload = [_]u8{0xff} ** 128 };
     var properties = PhysicalDeviceProperties2{ .s_type = 1000059001, .p_next = @ptrCast(&vulkan14_properties), .properties = std.mem.zeroes(Properties) };
@@ -17078,9 +17141,9 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(u32, 1), vulkan11_properties.device_node_mask);
     try std.testing.expectEqual(@as(u32, 256), vulkan11_properties.max_multiview_view_count);
     try std.testing.expectEqual(@as(u64, heap_size), vulkan11_properties.max_memory_allocation_size);
-    try std.testing.expectEqual(@as(u32, 13), std.mem.readInt(u32, vulkan12_properties.payload[0..4], .little));
-    try std.testing.expectEqualSlices(u8, driver_name, vulkan12_properties.payload[4 .. 4 + driver_name.len]);
-    try std.testing.expectEqualSlices(u8, driver_info, vulkan12_properties.payload[260 .. 260 + driver_info.len]);
+    try std.testing.expectEqual(@as(i32, 13), vulkan12_properties.driver_id);
+    try std.testing.expectEqualSlices(u8, driver_name, vulkan12_properties.driver_name[0..driver_name.len]);
+    try std.testing.expectEqualSlices(u8, driver_info, vulkan12_properties.driver_info[0..driver_info.len]);
     try std.testing.expectEqual(@as(u64, heap_size), std.mem.readInt(u64, vulkan13_properties.payload[192..200], .little));
     try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, vulkan14_properties.payload[0..4], .little));
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, vulkan14_properties.payload[4..8], .little));
