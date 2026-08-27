@@ -8364,7 +8364,7 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 .src_alpha_factor = op.pipeline.src_alpha_blend_factor,
                 .dst_alpha_factor = op.pipeline.dst_alpha_blend_factor,
                 .alpha_op = op.pipeline.alpha_blend_op,
-                .constants = op.blend_constants,
+                .constants = if (op.pipeline.dynamic_blend_constants) op.blend_constants else op.pipeline.blend_constants,
             }) == null) return;
             if (depth_bytes) |depth_storage| if (op.depth_write_enable != 0) std.mem.writeInt(u32, depth_storage[offset..][0..4], @bitCast(depth_value), .little);
             bounds = unionRect(bounds, .{ .x = @intCast(x), .y = @intCast(y), .width = 1, .height = 1 });
@@ -12313,6 +12313,7 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     pipeline.dst_alpha_blend_factor = 0;
     pipeline.alpha_blend_op = 0;
     pipeline.blend_constants = .{ 0, 0, 0, 0 };
+    pipeline.dynamic_blend_constants = false;
     pipeline.stencil_test_enable = 0;
     pipeline.depth_bias_enable = 0;
     pipeline.vertex_input_binding_mask = 0;
@@ -12605,6 +12606,7 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     pipeline.dst_alpha_blend_factor = 0;
     pipeline.alpha_blend_op = 0;
     pipeline.blend_constants = .{ 0, 0, 0, 0 };
+    pipeline.dynamic_blend_constants = false;
     pipeline.dynamic_vertex_input_binding_stride = false;
     var vertex_bytes: [48]u8 align(64) = [_]u8{0} ** 48;
     const positions = [_][4]f32{ .{ -0.8, -0.8, 0.5, 1 }, .{ 0.8, -0.8, 0.5, 1 }, .{ 0, 0.8, 0.5, 1 } };
@@ -12642,6 +12644,30 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
         if (color_bytes[at + 0] == 11 and color_bytes[at + 1] == 22 and color_bytes[at + 2] != 33 and color_bytes[at + 3] == 44) saw_masked_pixel = true;
     }
     try std.testing.expect(saw_masked_pixel);
+    var blend_pipeline = pipeline;
+    blend_pipeline.color_blend_enable = 1;
+    blend_pipeline.src_color_blend_factor = 10;
+    blend_pipeline.dst_color_blend_factor = 11;
+    blend_pipeline.src_alpha_blend_factor = 10;
+    blend_pipeline.dst_alpha_blend_factor = 11;
+    blend_pipeline.blend_constants = .{ 0.5, 0.5, 0.5, 0.5 };
+    var blend_command = command;
+    blend_command.cube_draw.pipeline = &blend_pipeline;
+    @memset(color_bytes[0..], 0);
+    for (0..16) |pixel| {
+        color_bytes[pixel * 4 + 0] = 20;
+        color_bytes[pixel * 4 + 1] = 40;
+        color_bytes[pixel * 4 + 2] = 60;
+        color_bytes[pixel * 4 + 3] = 80;
+    }
+    for (0..16) |pixel| std.mem.writeInt(u32, depth_bytes[pixel * 4 ..][0..4], 0x3f80_0000, .little);
+    executeValidatedCommand(blend_command, &context);
+    var saw_blend_pixel = false;
+    for (0..16) |pixel| {
+        const at = pixel * 4;
+        if (color_bytes[at + 0] != 20 or color_bytes[at + 1] != 40 or color_bytes[at + 2] != 60 or color_bytes[at + 3] != 80) saw_blend_pixel = true;
+    }
+    try std.testing.expect(saw_blend_pixel);
     // Dynamic vertex-input stride overrides the pipeline stride exactly.  A
     // supplied zero is not treated as "use the baked stride" and therefore
     // produces a degenerate triangle in this bounded profile.
@@ -12819,6 +12845,7 @@ test "scalar graphics profile executes descriptor uniform blocks" {
     var uniform_memory = MemoryObj{ .owner = undefined, .bytes = uniform_bytes[0..], .mapped = true };
     var uniform_buffer = BufferObj{ .owner = undefined, .size = uniform_bytes.len, .usage = 0x10, .memory = &uniform_memory };
     var descriptors = DescriptorSetObj{ .uniform = &uniform_buffer, .uniform_range = uniform_bytes.len };
+    pipeline.dynamic_blend_constants = false;
     var color_bytes: [64]u8 align(64) = [_]u8{0} ** 64;
     var depth_bytes: [64]u8 align(64) = [_]u8{0} ** 64;
     for (0..16) |index| std.mem.writeInt(u32, depth_bytes[index * 4 ..][0..4], 0x3f80_0000, .little);
