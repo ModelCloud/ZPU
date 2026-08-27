@@ -1276,6 +1276,7 @@ const GraphicsPipelineObj = struct {
     depth_bounds: [2]f32 = .{ 0, 1 },
     depth_bias_enable: u32 = 0,
     depth_bias: [3]f32 = .{ 0, 0, 0 },
+    color_write_mask: u32 = 0xf,
     vertex_input_binding_mask: u16 = 0,
     dynamic_viewport: bool,
     dynamic_scissor: bool,
@@ -8039,28 +8040,40 @@ fn profileReadClip(bytes: []const u8) ?[4]f32 {
     return result;
 }
 
-fn profileWriteColor(bytes: []u8, fragment_bool: bool, output: []const u8) ?u32 {
+fn profileWriteColor(bytes: []u8, fragment_bool: bool, output: []const u8, color_write_mask: u32) ?u32 {
+    if (bytes.len < 4 or color_write_mask & ~@as(u32, 0xf) != 0) return null;
+    var rgba: [4]u8 = undefined;
     if (fragment_bool) {
         if (output.len < 4) return null;
         const value = std.mem.readInt(u32, output[0..4], .little) != 0;
-        bytes[0] = if (value) 255 else 0;
-        bytes[1] = if (value) 255 else 0;
-        bytes[2] = if (value) 255 else 0;
-        bytes[3] = 255;
-        return 1;
+        rgba = .{ if (value) 255 else 0, if (value) 255 else 0, if (value) 255 else 0, 255 };
+    } else {
+        if (output.len < 16) return null;
+        for (&rgba, 0..) |*value, index| {
+            const component: f32 = @bitCast(std.mem.readInt(u32, output[index * 4 ..][0..4], .little));
+            if (!std.math.isFinite(component)) return null;
+            value.* = @intFromFloat(std.math.clamp(component, 0, 1) * 255.0);
+        }
     }
-    if (output.len < 16) return null;
-    var rgba: [4]u8 = undefined;
-    for (&rgba, 0..) |*value, index| {
-        const component: f32 = @bitCast(std.mem.readInt(u32, output[index * 4 ..][0..4], .little));
-        if (!std.math.isFinite(component)) return null;
-        value.* = @intFromFloat(std.math.clamp(component, 0, 1) * 255.0);
+    // Vulkan's color-write mask is expressed in logical RGBA order while
+    // ZPU's BGRA8 image bytes are stored in B,G,R,A order.
+    const storage_indices = [_]usize{ 2, 1, 0, 3 };
+    for (storage_indices, 0..) |storage_index, channel| {
+        if (color_write_mask & (@as(u32, 1) << @intCast(channel)) != 0) bytes[storage_index] = rgba[channel];
     }
-    bytes[0] = rgba[2];
-    bytes[1] = rgba[1];
-    bytes[2] = rgba[0];
-    bytes[3] = rgba[3];
     return 1;
+}
+
+test "scalar profile color write mask preserves disabled channels" {
+    var bytes = [_]u8{ 11, 22, 33, 44 };
+    var output = [_]u8{0} ** 16;
+    for ([_]f32{ 1, 0.5, 0, 0.25 }, 0..) |value, index| std.mem.writeInt(u32, output[index * 4 ..][0..4], @bitCast(value), .little);
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bytes, false, &output, 0x5));
+    try std.testing.expectEqual([_]u8{ 0, 22, 255, 44 }, bytes);
+    bytes = .{ 11, 22, 33, 44 };
+    var boolean = [_]u8{ 0xff, 0, 0, 0 };
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bytes, true, &boolean, 0x8));
+    try std.testing.expectEqual([_]u8{ 11, 22, 33, 255 }, bytes);
 }
 
 fn profileDepthCompare(op: i32, incoming: f32, stored: f32) bool {
@@ -8253,7 +8266,7 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 const stored_depth: f32 = @bitCast(std.mem.readInt(u32, depth_storage[offset..][0..4], .little));
                 if (op.depth_test_enable != 0 and (!std.math.isFinite(stored_depth) or !profileDepthCompare(op.depth_compare_op, depth_value, stored_depth))) continue;
             }
-            if (color_bytes) |color_storage| if (profileWriteColor(color_storage[offset..][0..4], profile.fragment_bool, &fragment_output_bytes) == null) return;
+            if (color_bytes) |color_storage| if (profileWriteColor(color_storage[offset..][0..4], profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask) == null) return;
             if (depth_bytes) |depth_storage| if (op.depth_write_enable != 0) std.mem.writeInt(u32, depth_storage[offset..][0..4], @bitCast(depth_value), .little);
             bounds = unionRect(bounds, .{ .x = @intCast(x), .y = @intCast(y), .width = 1, .height = 1 });
             pixels_written += 1;
@@ -8425,6 +8438,9 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
                 }
                 return;
             }
+            // The legacy vkcube bridge has no color-mask execution contract;
+            // keep partial writes fail-closed until that backend is upgraded.
+            if (op.pipeline.color_write_mask != 0xf) return;
             if (op.depth_test_enable != 1 or op.depth_write_enable != 1 or op.depth_compare_op != 3 or op.depth_bounds_test_enable != 0 or op.depth_bounds[0] != 0 or op.depth_bounds[1] != 1 or op.depth_bias_enable != 0) return;
             const operation_start = frame_pacing.monotonicNs();
             const uniform_buffer = op.descriptors.uniform.?;
@@ -10037,14 +10053,14 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     try w.u32le(color_attachment_count);
     if (color_attachment_count != 0) {
         const attachment = cb.attachments.?[0];
-        if (try bool32(attachment.blend_enable) != 0 or attachment.src_color_blend_factor < 0 or attachment.src_color_blend_factor > 18 or attachment.dst_color_blend_factor < 0 or attachment.dst_color_blend_factor > 18 or attachment.color_blend_op < 0 or attachment.color_blend_op > 4 or attachment.src_alpha_blend_factor < 0 or attachment.src_alpha_blend_factor > 18 or attachment.dst_alpha_blend_factor < 0 or attachment.dst_alpha_blend_factor > 18 or attachment.alpha_blend_op < 0 or attachment.alpha_blend_op > 4 or attachment.color_write_mask != 0xf) return error.Invalid;
+        if (try bool32(attachment.blend_enable) != 0 or attachment.src_color_blend_factor < 0 or attachment.src_color_blend_factor > 18 or attachment.dst_color_blend_factor < 0 or attachment.dst_color_blend_factor > 18 or attachment.color_blend_op < 0 or attachment.color_blend_op > 4 or attachment.src_alpha_blend_factor < 0 or attachment.src_alpha_blend_factor > 18 or attachment.dst_alpha_blend_factor < 0 or attachment.dst_alpha_blend_factor > 18 or attachment.alpha_blend_op < 0 or attachment.alpha_blend_op > 4 or attachment.color_write_mask & ~@as(u32, 0xf) != 0) return error.Invalid;
         try w.i32le(attachment.src_color_blend_factor);
         try w.i32le(attachment.dst_color_blend_factor);
         try w.i32le(attachment.color_blend_op);
         try w.i32le(attachment.src_alpha_blend_factor);
         try w.i32le(attachment.dst_alpha_blend_factor);
         try w.i32le(attachment.alpha_blend_op);
-        try w.u32le(0xf);
+        try w.u32le(attachment.color_write_mask);
     }
     var canonical = try w.done();
     errdefer canonical.deinit();
@@ -10782,6 +10798,10 @@ fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?[*
             }
             return creationFailure(err);
         };
+        built[index].color_write_mask = 0xf;
+        if (create_infos[index].color_blend) |color_blend| {
+            if (color_blend.attachment_count != 0 and color_blend.attachments != null) built[index].color_write_mask = color_blend.attachments.?[0].color_write_mask;
+        }
         built_count += 1;
     }
     var cache_candidate: ?Canonical = null;
@@ -12440,6 +12460,7 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     const profile = ProfileGraphics{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     var pipeline: GraphicsPipelineObj = undefined;
     pipeline.execution_abi = .{ .profile_v1_scalar_graphics = profile };
+    pipeline.color_write_mask = 0xf;
     pipeline.dynamic_vertex_input_binding_stride = false;
     var vertex_bytes: [48]u8 align(64) = [_]u8{0} ** 48;
     const positions = [_][4]f32{ .{ -0.8, -0.8, 0.5, 1 }, .{ 0.8, -0.8, 0.5, 1 }, .{ 0, 0.8, 0.5, 1 } };
@@ -12458,6 +12479,25 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     var context = QueryExecutionContext{ .pool = null, .index = 0 };
     executeValidatedCommand(command, &context);
     try std.testing.expect(std.mem.readInt(u32, color_bytes[0..4], .little) != 0 or std.mem.readInt(u32, color_bytes[4..8], .little) != 0);
+    var masked_pipeline = pipeline;
+    masked_pipeline.color_write_mask = 0x1;
+    var masked_command = command;
+    masked_command.cube_draw.pipeline = &masked_pipeline;
+    @memset(color_bytes[0..], 0);
+    for (0..16) |pixel| {
+        color_bytes[pixel * 4 + 0] = 11;
+        color_bytes[pixel * 4 + 1] = 22;
+        color_bytes[pixel * 4 + 2] = 33;
+        color_bytes[pixel * 4 + 3] = 44;
+    }
+    for (0..16) |pixel| std.mem.writeInt(u32, depth_bytes[pixel * 4 ..][0..4], 0x3f80_0000, .little);
+    executeValidatedCommand(masked_command, &context);
+    var saw_masked_pixel = false;
+    for (0..16) |pixel| {
+        const at = pixel * 4;
+        if (color_bytes[at + 0] == 11 and color_bytes[at + 1] == 22 and color_bytes[at + 2] != 33 and color_bytes[at + 3] == 44) saw_masked_pixel = true;
+    }
+    try std.testing.expect(saw_masked_pixel);
     // Dynamic vertex-input stride overrides the pipeline stride exactly.  A
     // supplied zero is not treated as "use the baked stride" and therefore
     // produces a degenerate triangle in this bounded profile.
@@ -12615,6 +12655,7 @@ test "scalar graphics profile executes descriptor uniform blocks" {
     const profile = ProfileGraphics{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     var pipeline: GraphicsPipelineObj = undefined;
     pipeline.execution_abi = .{ .profile_v1_scalar_graphics = profile };
+    pipeline.color_write_mask = 0xf;
     pipeline.dynamic_vertex_input_binding_stride = false;
     var vertex_bytes: [48]u8 align(64) = [_]u8{0} ** 48;
     const positions = [_][4]f32{ .{ -0.8, -0.8, 0.5, 1 }, .{ 0.8, -0.8, 0.5, 1 }, .{ 0, 0.8, 0.5, 1 } };
@@ -14850,6 +14891,20 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(baseline_pipeline.dynamic_stencil_compare_mask);
     try std.testing.expect(baseline_pipeline.dynamic_stencil_write_mask);
     try std.testing.expect(baseline_pipeline.dynamic_stencil_reference);
+    var masked_attachment = blend_attachment;
+    masked_attachment.color_write_mask = 0x5;
+    var masked_blend = color_blend;
+    masked_blend.attachments = @ptrCast(&masked_attachment);
+    var masked_pipeline_info = pipeline_info;
+    masked_pipeline_info.color_blend = &masked_blend;
+    var masked_pipeline: [1]usize = .{0xfeed_face};
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&masked_pipeline_info), null, &masked_pipeline));
+    try std.testing.expectEqual(@as(u32, 0x5), validGraphicsPipelineLocked(masked_pipeline[0]).?.color_write_mask);
+    destroyPipeline(device, masked_pipeline[0], null);
+    masked_attachment.color_write_mask = 0x10;
+    var invalid_masked_pipeline: [1]usize = .{0xfeed_face};
+    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&masked_pipeline_info), null, &invalid_masked_pipeline));
+    try std.testing.expectEqual(@as(usize, 0xfeed_face), invalid_masked_pipeline[0]);
     var biased_rasterization = rasterization;
     biased_rasterization.depth_bias_constant_factor = 8;
     biased_rasterization.depth_bias_clamp = 0.25;
