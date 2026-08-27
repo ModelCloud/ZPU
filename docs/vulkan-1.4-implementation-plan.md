@@ -179,6 +179,10 @@ form: `VkDeviceGroupDeviceCreateInfo`, `VkDeviceGroupSubmitInfo`,
 split-instance regions, and mismatched physical members fail transactionally;
 the valid chains are covered by LP64 size assertions and 4096-iteration
 allocation-free warm-path tests.
+The Vulkan 1.4 `VkBindMemoryStatus` pNext node is also accepted by both
+`vkBindBufferMemory2` and `vkBindImageMemory2`. Its non-null result pointer is
+validated with the rest of the batch, and each per-bind result is written only
+after every bind in the batch has passed validation and been committed.
 Descriptor-set layout support and allocation now also consume the promoted
 descriptor-indexing pNext ABI: zero-valued
 `VkDescriptorSetLayoutBindingFlagsCreateInfo`,

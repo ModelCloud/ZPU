@@ -334,6 +334,8 @@ pub const BindSparseInfo = extern struct {
     signal_semaphores: ?[*]const usize,
 };
 pub const BindBufferMemoryDeviceGroupInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, device_index_count: u32, device_indices: ?[*]const u32 };
+pub const BindMemoryStatus = extern struct { s_type: i32, p_next: ?*const anyopaque, p_result: ?*Result };
+pub const BindMemoryStatusKHR = BindMemoryStatus;
 pub const BindImageMemoryDeviceGroupInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, device_index_count: u32, device_indices: ?[*]const u32, split_instance_bind_region_count: u32, split_instance_bind_regions: ?[*]const Rect2D };
 pub const DeviceGroupDeviceCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, physical_device_count: u32, physical_devices: ?[*]const Physical };
 pub const ProtectedSubmitInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, protected_submit: u32 };
@@ -1358,17 +1360,46 @@ fn memoryAllocateDedicatedObjectsValidLocked(d: Device, raw: ?*const anyopaque) 
 fn bindBufferMemoryPNextValid(raw: ?*const anyopaque) bool {
     var next = raw;
     var depth: usize = 0;
-    var seen = false;
+    var seen_group = false;
+    var seen_status = false;
     while (next) |item| {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
-        if (depth == 16 or header.s_type != 1000060013 or seen) return false;
-        seen = true;
-        const group: *const BindBufferMemoryDeviceGroupInfo = @ptrCast(@alignCast(item));
-        if (group.device_index_count > 1 or (group.device_index_count != 0 and group.device_indices == null) or (group.device_index_count == 1 and group.device_indices.?[0] != 0)) return false;
+        if (depth == 16) return false;
+        switch (header.s_type) {
+            1000060013 => {
+                if (seen_group) return false;
+                seen_group = true;
+                const group: *const BindBufferMemoryDeviceGroupInfo = @ptrCast(@alignCast(item));
+                if (group.device_index_count > 1 or (group.device_index_count != 0 and group.device_indices == null) or (group.device_index_count == 1 and group.device_indices.?[0] != 0)) return false;
+            },
+            1000546002 => {
+                if (seen_status) return false;
+                seen_status = true;
+                const status: *const BindMemoryStatus = @ptrCast(@alignCast(item));
+                if (status.p_result == null) return false;
+            },
+            else => return false,
+        }
         next = header.p_next;
         depth += 1;
     }
     return true;
+}
+
+fn bindMemoryStatusResult(raw: ?*const anyopaque) ?*Result {
+    var next = raw;
+    var depth: usize = 0;
+    while (next) |item| {
+        if (depth == 16) return null;
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (header.s_type == 1000546002) {
+            const status: *const BindMemoryStatus = @ptrCast(@alignCast(item));
+            return status.p_result;
+        }
+        next = header.p_next;
+        depth += 1;
+    }
+    return null;
 }
 
 fn bindImageMemoryPNextValid(raw: ?*const anyopaque) bool {
@@ -1376,6 +1407,7 @@ fn bindImageMemoryPNextValid(raw: ?*const anyopaque) bool {
     var depth: usize = 0;
     var seen_group = false;
     var seen_plane = false;
+    var seen_status = false;
     while (next) |item| {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
         switch (header.s_type) {
@@ -1390,6 +1422,12 @@ fn bindImageMemoryPNextValid(raw: ?*const anyopaque) bool {
                 const plane: *const BindImagePlaneMemoryInfo = @ptrCast(@alignCast(item));
                 if (plane.plane_aspect != 0) return false;
                 seen_plane = true;
+            },
+            1000546002 => {
+                if (seen_status) return false;
+                const status: *const BindMemoryStatus = @ptrCast(@alignCast(item));
+                if (status.p_result == null) return false;
+                seen_status = true;
             },
             else => return false,
         }
@@ -4003,6 +4041,9 @@ fn bindBufferMemory2(device: ?Device, count: u32, infos: ?[*]const BindBufferMem
         buffer.memory = memory;
         buffer.offset = item.memory_offset;
     }
+    for (list) |item| {
+        if (bindMemoryStatusResult(item.p_next)) |p_result| p_result.* = .success;
+    }
     return .success;
 }
 fn bindImageMemory2(device: ?Device, count: u32, infos: ?[*]const BindImageMemoryInfo) callconv(.c) Result {
@@ -4025,6 +4066,9 @@ fn bindImageMemory2(device: ?Device, count: u32, infos: ?[*]const BindImageMemor
         const memory = validMemoryLocked(item.memory).?;
         image.memory = memory;
         image.offset = item.memory_offset;
+    }
+    for (list) |item| {
+        if (bindMemoryStatusResult(item.p_next)) |p_result| p_result.* = .success;
     }
     return .success;
 }
@@ -16280,6 +16324,7 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DeviceGroupBindSparseInfo));
     try std.testing.expectEqual(@as(usize, 96), @sizeOf(BindSparseInfo));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(BindBufferMemoryDeviceGroupInfo));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(BindMemoryStatus));
     try std.testing.expectEqual(@as(usize, 48), @sizeOf(BindImageMemoryDeviceGroupInfo));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(DeviceGroupDeviceCreateInfo));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(ProtectedSubmitInfo));
@@ -16824,11 +16869,31 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     var rejected_memory: usize = 0xdead_beef;
     try std.testing.expectEqual(Result.error_out_of_host_memory, allocateMemory(ctx.device, &dedicated_allocation, null, &rejected_memory));
     try std.testing.expectEqual(@as(usize, 0xdead_beef), rejected_memory);
-    const buffer_bind = BindBufferMemoryInfo{ .s_type = 1000157000, .p_next = null, .buffer = buffer, .memory = memory, .memory_offset = 0 };
+    var buffer_bind_status_result: Result = .error_initialization_failed;
+    var buffer_bind_status = BindMemoryStatus{ .s_type = 1000546002, .p_next = null, .p_result = &buffer_bind_status_result };
+    const buffer_bind = BindBufferMemoryInfo{ .s_type = 1000157000, .p_next = &buffer_bind_status, .buffer = buffer, .memory = memory, .memory_offset = 0 };
     try std.testing.expectEqual(Result.success, bindBufferMemory2(ctx.device, 1, @ptrCast(&buffer_bind)));
+    try std.testing.expectEqual(Result.success, buffer_bind_status_result);
     try std.testing.expectEqual(Result.error_initialization_failed, bindBufferMemory2(ctx.device, 0, null));
+    var rollback_status_result: Result = .error_initialization_failed;
+    var rollback_status = BindMemoryStatus{ .s_type = 1000546002, .p_next = null, .p_result = &rollback_status_result };
+    var rollback_bind = BindBufferMemoryInfo{ .s_type = 1000157000, .p_next = &rollback_status, .buffer = buffer_with_chain, .memory = memory, .memory_offset = 32 };
+    var invalid_rollback_bind = rollback_bind;
+    invalid_rollback_bind.buffer = 0xdead_beef;
+    var rollback_binds = [_]BindBufferMemoryInfo{ rollback_bind, invalid_rollback_bind };
+    try std.testing.expectEqual(Result.error_initialization_failed, bindBufferMemory2(ctx.device, rollback_binds.len, &rollback_binds));
+    try std.testing.expectEqual(Result.error_initialization_failed, rollback_status_result);
+    try std.testing.expect(validBufferLocked(buffer_with_chain).?.memory == null);
+    rollback_bind = .{ .s_type = 1000157000, .p_next = &rollback_status, .buffer = buffer_with_chain, .memory = memory, .memory_offset = 32 };
+    try std.testing.expectEqual(Result.success, bindBufferMemory2(ctx.device, 1, @ptrCast(&rollback_bind)));
+    try std.testing.expectEqual(Result.success, rollback_status_result);
+    var image_bind_status_result: Result = .error_initialization_failed;
+    var image_bind_status = BindMemoryStatus{ .s_type = 1000546002, .p_next = null, .p_result = &image_bind_status_result };
     const image_bind = BindImageMemoryInfo{ .s_type = 1000157001, .p_next = null, .image = image, .memory = memory, .memory_offset = 16 };
     try std.testing.expectEqual(Result.success, bindImageMemory2(ctx.device, 1, @ptrCast(&image_bind)));
+    const image_bind_with_status = BindImageMemoryInfo{ .s_type = 1000157001, .p_next = &image_bind_status, .image = image_with_chain, .memory = memory, .memory_offset = 48 };
+    try std.testing.expectEqual(Result.success, bindImageMemory2(ctx.device, 1, @ptrCast(&image_bind_with_status)));
+    try std.testing.expectEqual(Result.success, image_bind_status_result);
     try std.testing.expectEqual(Result.error_initialization_failed, bindImageMemory2(ctx.device, 0, null));
     var requirements = MemoryRequirements2{ .s_type = 1000146003, .p_next = null, .memory_requirements = std.mem.zeroes(MemoryRequirements) };
     const buffer_requirements = BufferMemoryRequirementsInfo2{ .s_type = 1000146000, .p_next = null, .buffer = buffer };
@@ -17069,9 +17134,24 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
         var group_memory: usize = 0;
         try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &group_memory));
         var device_index: u32 = 0;
+        var bind_status_result: Result = .error_initialization_failed;
+        var bind_status = BindMemoryStatus{ .s_type = 1000546002, .p_next = null, .p_result = &bind_status_result };
         var bind_group = BindBufferMemoryDeviceGroupInfo{ .s_type = 1000060013, .p_next = null, .device_index_count = 1, .device_indices = @ptrCast(&device_index) };
+        bind_group.p_next = &bind_status;
         var bind = BindBufferMemoryInfo{ .s_type = 1000157000, .p_next = &bind_group, .buffer = group_buffer, .memory = group_memory, .memory_offset = 0 };
         try std.testing.expectEqual(Result.success, bindBufferMemory2(ctx.device, 1, @ptrCast(&bind)));
+        try std.testing.expectEqual(Result.success, bind_status_result);
+        var invalid_bind_status = BindMemoryStatus{ .s_type = 1000546002, .p_next = null, .p_result = null };
+        try std.testing.expect(!bindBufferMemoryPNextValid(&invalid_bind_status));
+        try std.testing.expect(!bindImageMemoryPNextValid(&invalid_bind_status));
+        try std.testing.expect(bindBufferMemoryPNextValid(&bind_status));
+        try std.testing.expect(bindImageMemoryPNextValid(&bind_status));
+        var duplicate_bind_status = bind_status;
+        bind_status.p_next = &duplicate_bind_status;
+        try std.testing.expect(!bindBufferMemoryPNextValid(&bind_status));
+        try std.testing.expect(!bindImageMemoryPNextValid(&bind_status));
+        bind_status.p_next = null;
+        bind_group.p_next = null;
         destroyBuffer(ctx.device, group_buffer, null);
         freeMemory(ctx.device, group_memory, null);
 
@@ -17097,9 +17177,13 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
         try std.testing.expect(bindImageMemoryPNextValid(null));
         var plane = BindImagePlaneMemoryInfo{ .s_type = 1000156002, .p_next = null, .plane_aspect = 0 };
         try std.testing.expect(bindImageMemoryPNextValid(&plane));
+        plane.p_next = &bind_status;
+        try std.testing.expect(bindImageMemoryPNextValid(&plane));
+        plane.p_next = null;
         plane.plane_aspect = 1;
         try std.testing.expect(!bindImageMemoryPNextValid(&plane));
         begin_group.device_mask = 1;
+        bind_group.p_next = &bind_status;
         test_allocations_before_failure = 0;
         for (0..4096) |_| {
             try std.testing.expect(submitPNextValid(&group_submit, 0, 0, 0));
@@ -17107,6 +17191,7 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
             try std.testing.expect(bindBufferMemoryPNextValid(&bind_group));
         }
         test_allocations_before_failure = null;
+        bind_group.p_next = null;
     }
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
