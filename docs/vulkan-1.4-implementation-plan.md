@@ -480,7 +480,9 @@ promoted LOAD_OP_NONE/STORE_OP_NONE enum values are accepted as well;
 store-none records a bounded content discard at end-of-pass while retaining
 bytes until submission.
 
-The Vulkan 1.4 host-image-copy layout queries now also consume the promoted
+The Vulkan 1.4 host-image-copy commands accept both advertised four-byte color
+formats (RGBA8 UNORM and BGRA8 UNORM) with identical row/layer addressing and
+format-preserving copies. The host-image-copy layout queries now also consume the promoted
 `VkSubresourceHostMemcpySize` output chain.  The chain is ABI-checked, links are
 preserved, the reported byte count matches the exact selected subresource, and
 unknown or duplicate output nodes leave the layout untouched; a 4096-call

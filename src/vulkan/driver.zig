@@ -4520,7 +4520,7 @@ fn copyMemoryToImage(device: ?Device, info: ?*const CopyMemoryToImageInfo) callc
     defer mutex.unlock();
     const d = device orelse return .error_initialization_failed;
     const image = validImageLocked(ci.dst_image) orelse return .error_initialization_failed;
-    if (!validDeviceLocked(d) or image.owner != d or image.format != 44 or !hostCopyLayoutValid(ci.dst_image_layout) or image.layout != ci.dst_image_layout or image.memory == null or !liveMemoryObject(image.memory.?)) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or image.owner != d or !transferableColorFormat(image.format) or !hostCopyLayoutValid(ci.dst_image_layout) or image.layout != ci.dst_image_layout or image.memory == null or !liveMemoryObject(image.memory.?)) return .error_initialization_failed;
     const dst = imageBytes(image);
     for (ci.regions.?[0..ci.region_count]) |region| {
         if (!validMemoryToImageRegion(image, region) or (ci.flags & host_copy_memcpy_bit != 0 and !hostCopyMemcpyRegionValid(image, region.image_offset, region.image_extent))) return .error_initialization_failed;
@@ -4550,7 +4550,7 @@ fn copyImageToMemory(device: ?Device, info: ?*const CopyImageToMemoryInfo) callc
     defer mutex.unlock();
     const d = device orelse return .error_initialization_failed;
     const image = validImageLocked(ci.src_image) orelse return .error_initialization_failed;
-    if (!validDeviceLocked(d) or image.owner != d or image.format != 44 or !hostCopyLayoutValid(ci.src_image_layout) or image.layout != ci.src_image_layout or image.memory == null or !liveMemoryObject(image.memory.?)) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or image.owner != d or !transferableColorFormat(image.format) or !hostCopyLayoutValid(ci.src_image_layout) or image.layout != ci.src_image_layout or image.memory == null or !liveMemoryObject(image.memory.?)) return .error_initialization_failed;
     const src = imageBytes(image);
     for (ci.regions.?[0..ci.region_count]) |region| {
         if (!validImageToMemoryRegion(image, region) or (ci.flags & host_copy_memcpy_bit != 0 and !hostCopyMemcpyRegionValid(image, region.image_offset, region.image_extent))) return .error_initialization_failed;
@@ -4580,7 +4580,7 @@ fn copyImageToImage(device: ?Device, info: ?*const CopyImageToImageInfo) callcon
     const d = device orelse return .error_initialization_failed;
     const src_image = validImageLocked(ci.src_image) orelse return .error_initialization_failed;
     const dst_image = validImageLocked(ci.dst_image) orelse return .error_initialization_failed;
-    if (!validDeviceLocked(d) or src_image.owner != d or dst_image.owner != d or src_image.format != 44 or dst_image.format != 44 or src_image.width != dst_image.width or src_image.height != dst_image.height or src_image.array_layers != dst_image.array_layers or src_image.samples != dst_image.samples or src_image.usage != dst_image.usage or !hostCopyLayoutValid(ci.src_image_layout) or !hostCopyLayoutValid(ci.dst_image_layout) or src_image.layout != ci.src_image_layout or dst_image.layout != ci.dst_image_layout or src_image == dst_image or src_image.memory == null or dst_image.memory == null or !liveMemoryObject(src_image.memory.?) or !liveMemoryObject(dst_image.memory.?) or hostImageMemoryRangesOverlap(src_image, dst_image)) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or src_image.owner != d or dst_image.owner != d or src_image.format != dst_image.format or !transferableColorFormat(src_image.format) or src_image.width != dst_image.width or src_image.height != dst_image.height or src_image.array_layers != dst_image.array_layers or src_image.samples != dst_image.samples or src_image.usage != dst_image.usage or !hostCopyLayoutValid(ci.src_image_layout) or !hostCopyLayoutValid(ci.dst_image_layout) or src_image.layout != ci.src_image_layout or dst_image.layout != ci.dst_image_layout or src_image == dst_image or src_image.memory == null or dst_image.memory == null or !liveMemoryObject(src_image.memory.?) or !liveMemoryObject(dst_image.memory.?) or hostImageMemoryRangesOverlap(src_image, dst_image)) return .error_initialization_failed;
     const src = imageBytes(src_image);
     const dst = imageBytes(dst_image);
     for (ci.regions.?[0..ci.region_count]) |region| {
@@ -19678,6 +19678,14 @@ test "Vulkan 1.4 host image copies transitions and layout queries are bounded" {
     const to_image_region = MemoryToImageCopy{ .s_type = 1000270000, .p_next = null, .host_pointer = &source, .memory_row_length = 0, .memory_image_height = 0, .image_subresource = layers, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
     const to_image = CopyMemoryToImageInfo{ .s_type = 1000270005, .p_next = null, .flags = 0, .dst_image = src, .dst_image_layout = 1, .region_count = 1, .regions = @ptrCast(&to_image_region) };
     try std.testing.expectEqual(Result.success, copyMemoryToImage(ctx.device, &to_image));
+    // Host image-copy commands share the same advertised RGBA8/BGRA8
+    // four-byte transfer profile.  Exercise the non-presentation RGBA8
+    // format without changing the later rendering-area contract.
+    validImageLocked(src).?.format = 37;
+    validImageLocked(dst).?.format = 37;
+    try std.testing.expectEqual(Result.success, copyMemoryToImage(ctx.device, &to_image));
+    validImageLocked(src).?.format = 44;
+    validImageLocked(dst).?.format = 44;
     var memcpy_to_image = to_image;
     memcpy_to_image.flags = host_copy_memcpy_bit;
     try std.testing.expectEqual(Result.success, copyMemoryToImage(ctx.device, &memcpy_to_image));
@@ -19704,6 +19712,9 @@ test "Vulkan 1.4 host image copies transitions and layout queries are bounded" {
     const from_image_region = ImageToMemoryCopy{ .s_type = 1000270001, .p_next = null, .host_pointer = &destination, .memory_row_length = 0, .memory_image_height = 0, .image_subresource = layers, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
     const from_image = CopyImageToMemoryInfo{ .s_type = 1000270004, .p_next = null, .flags = 0, .src_image = src, .src_image_layout = 1, .region_count = 1, .regions = @ptrCast(&from_image_region) };
     try std.testing.expectEqual(Result.success, copyImageToMemory(ctx.device, &from_image));
+    validImageLocked(src).?.format = 37;
+    try std.testing.expectEqual(Result.success, copyImageToMemory(ctx.device, &from_image));
+    validImageLocked(src).?.format = 44;
     var memcpy_from_image = from_image;
     memcpy_from_image.flags = host_copy_memcpy_bit;
     try std.testing.expectEqual(Result.success, copyImageToMemory(ctx.device, &memcpy_from_image));
@@ -19718,6 +19729,11 @@ test "Vulkan 1.4 host image copies transitions and layout queries are bounded" {
     const copy_region = ImageCopy2{ .s_type = 1000337003, .p_next = null, .src_subresource = layers, .src_offset = .{ .x = 0, .y = 0, .z = 0 }, .dst_subresource = layers, .dst_offset = .{ .x = 0, .y = 0, .z = 0 }, .extent = .{ .width = 2, .height = 2, .depth = 1 } };
     const copy_info = CopyImageToImageInfo{ .s_type = 1000270007, .p_next = null, .flags = 0, .src_image = src, .src_image_layout = 1, .dst_image = dst, .dst_image_layout = 1, .region_count = 1, .regions = @ptrCast(&copy_region) };
     try std.testing.expectEqual(Result.success, copyImageToImage(ctx.device, &copy_info));
+    validImageLocked(src).?.format = 37;
+    validImageLocked(dst).?.format = 37;
+    try std.testing.expectEqual(Result.success, copyImageToImage(ctx.device, &copy_info));
+    validImageLocked(src).?.format = 44;
+    validImageLocked(dst).?.format = 44;
     var memcpy_copy_info = copy_info;
     memcpy_copy_info.flags = host_copy_memcpy_bit;
     try std.testing.expectEqual(Result.success, copyImageToImage(ctx.device, &memcpy_copy_info));
