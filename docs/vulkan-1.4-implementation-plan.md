@@ -673,6 +673,9 @@ Each slice must land with all of the following:
 - [ ] **A2 — administrative objects:** layer enumeration, command-pool and
   descriptor-pool reset/free, real pipeline-cache data/merge behavior,
   buffer views, and render-area granularity.
+  `vkFreeCommandBuffers` now prevalidates the complete void-returning batch
+  (device/pool ownership and duplicate handles) so malformed input cannot
+  partially release command buffers; the rejection path is allocation-free.
 - [ ] **A3 — events and synchronization:** typed host events and command-buffer
   set/reset operations are complete; wait-event semantics, full stage/access
   masks, and asynchronous queue ordering remain.

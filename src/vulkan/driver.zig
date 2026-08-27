@@ -5109,14 +5109,22 @@ fn freeCommandBuffers(device: ?Device, pool_handle: usize, count: u32, buffers: 
     defer mutex.unlock();
     const pool = validCommandPoolLocked(pool_handle) orelse return;
     if (!validDeviceLocked(d) or !validOwner(d, pool.owner)) return;
-    for (list[0..count]) |raw| {
-        const cb = validCommandBufferLocked(raw) orelse continue;
-        if (cb.impl.owner == d and cb.impl.pool == pool) {
-            if (cb.impl.level == 1) invalidatePrimariesReferencing(cb);
-            deinitRecordedCommands(cb);
-            stateForObject(CommandBufferObj, cb, &command_buffer_objects, &command_buffer_state).?.* = .tombstone;
-            cb.loader_data = 0;
-        }
+    // vkFreeCommandBuffers has no return value, so malformed batches must be
+    // handled as a safe no-op rather than partially freeing the valid prefix.
+    // Prevalidate every handle, ownership, pool, and duplicate before any
+    // command-buffer state is changed.
+    var validated: [max_api_items]*CommandBufferObj = undefined;
+    for (list[0..count], 0..) |raw, index| {
+        const cb = validCommandBufferLocked(raw) orelse return;
+        if (cb.impl.owner != d or cb.impl.pool != pool) return;
+        for (validated[0..index]) |prior| if (prior == cb) return;
+        validated[index] = cb;
+    }
+    for (validated[0..count]) |cb| {
+        if (cb.impl.level == 1) invalidatePrimariesReferencing(cb);
+        deinitRecordedCommands(cb);
+        stateForObject(CommandBufferObj, cb, &command_buffer_objects, &command_buffer_state).?.* = .tombstone;
+        cb.loader_data = 0;
     }
 }
 fn deinitRecordedCommands(c: *CommandBufferObj) void {
@@ -24399,6 +24407,20 @@ test "administrative and sparse-disabled Vulkan 1.0 ABI behavior" {
     granularity = .{ .width = 7, .height = 9 };
     getRenderAreaGranularity(ctx.device, 0, &granularity);
     try std.testing.expectEqual(Extent2D{ .width = 7, .height = 9 }, granularity);
+
+    // Freeing a command-buffer batch is void-returning; malformed entries
+    // therefore leave the entire batch untouched instead of partially
+    // releasing valid command buffers.  Duplicate handles are rejected by the
+    // same prevalidation path.  Keep the rejection path allocation-free.
+    const mixed_free = [_]CommandBuffer{ first_buffers[0], other_buffer[0] };
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| freeCommandBuffers(ctx.device, pools[0], mixed_free.len, &mixed_free);
+    test_allocations_before_failure = null;
+    try std.testing.expect(validCommandBufferLocked(first_buffers[0]) != null);
+    try std.testing.expect(validCommandBufferLocked(other_buffer[0]) != null);
+    const duplicate_free = [_]CommandBuffer{ first_buffers[0], first_buffers[0] };
+    freeCommandBuffers(ctx.device, pools[0], duplicate_free.len, &duplicate_free);
+    try std.testing.expect(validCommandBufferLocked(first_buffers[0]) != null);
 
     destroyRenderPass(ctx.device, render_pass, null);
     freeCommandBuffers(ctx.device, pools[0], first_buffers.len, &first_buffers);
