@@ -686,7 +686,9 @@ Each slice must land with all of the following:
   fused multiply-add with canonical NaN output. Scalar/vector `Step` and
   `SmoothStep` now lower with exact threshold and Hermite interpolation
   semantics; inverted smooth-step edges are rejected as a numeric-domain
-  error. A single
+  error. Scalar/vector `Round`, `RoundEven`, and `Trunc` now lower with
+  deterministic nearest, nearest-even, and toward-zero semantics while
+  preserving finite IEEE values. A single
   side-effect-free dynamic conditional or one-case runtime switch with a common
   merge is also lowered to compare/select; generic SPIR-V dynamic control flow,
   aggregate/descriptor-array indexing, atomics, shared-memory execution,
