@@ -737,7 +737,9 @@ Each slice must land with all of the following:
   entry-point output interface. Scalar `ModfStruct` and `FrexpStruct` forms are
   represented as two-lane values (`(fraction, integral)` and `(significand,
   exponent-bits)` respectively); `FrexpStruct` exponent extraction preserves
-  its signed i32 result type. Vector aggregate forms remain rejected because
+  its signed i32 result type; vec2 aggregate forms flatten to a four-lane
+  value while extracting significand/exponent members with their original
+  f32/i32 vector types. Wider vector aggregate forms remain rejected because
   the canonical IR has no mixed vector-member ABI. Function-local pointers
   remain outside the bounded profile; non-finite `Frexp`/`FrexpStruct` inputs
   are surfaced as numeric-domain errors and warm execution remains

@@ -355,6 +355,13 @@ pub const Executor = struct {
                     if (instruction.operands.len == 1) {
                         if (!same(source.ty, instruction.ty)) return error.InvalidType;
                         result = source;
+                    } else if (self.program.instructions[instruction.operands[0]].op == .f_frexp_struct) {
+                        if (instruction.operands[1] >= 2 or source.ty.scalar != .f32 or source.ty.rows != 1 or (source.ty.columns != 2 and source.ty.columns != 4)) return error.InvalidType;
+                        const width: usize = source.ty.columns / 2;
+                        const member_scalar: ir.Scalar = if (instruction.operands[1] == 0) .f32 else .i32;
+                        if (instruction.ty.rows != 1 or instruction.ty.columns != width or instruction.ty.scalar != member_scalar) return error.InvalidType;
+                        const start: usize = if (instruction.operands[1] == 0) 0 else width;
+                        @memcpy(result.bits[0..width], source.bits[start .. start + width]);
                     } else {
                         const selector = instruction.operands[1];
                         if (selector >= source.lanes()) return error.Bounds;
@@ -888,14 +895,20 @@ pub const Executor = struct {
                 },
                 .f_frexp_struct => {
                     const source = try valueRef(self.values, pc, instruction.operands[0]);
-                    const x: f32 = @bitCast(source.bits[0]);
-                    // The significand is poison for non-finite values in the
-                    // GLSL.std.450 FrexpStruct contract. Reject before
-                    // publishing either member so execute remains atomic.
-                    if (!std.math.isFinite(x)) return error.NumericDomain;
-                    const parts = std.math.frexp(x);
-                    result.bits[0] = canonicalFloat(@bitCast(parts.significand));
-                    result.bits[1] = @bitCast(parts.exponent);
+                    if (source.ty.scalar != .f32 or source.ty.rows != 1 or (source.ty.columns != 1 and source.ty.columns != 2) or result.ty.scalar != .f32 or result.ty.rows != 1 or result.ty.columns != source.ty.columns * 2) return error.InvalidType;
+                    const width: usize = source.ty.columns;
+                    // Validate every lane before publishing any result so a
+                    // non-finite lane cannot leave a partially updated value.
+                    for (0..width) |i| {
+                        const x: f32 = @bitCast(source.bits[i]);
+                        if (!std.math.isFinite(x)) return error.NumericDomain;
+                    }
+                    for (0..width) |i| {
+                        const x: f32 = @bitCast(source.bits[i]);
+                        const split = std.math.frexp(x);
+                        result.bits[i] = canonicalFloat(@bitCast(split.significand));
+                        result.bits[width + i] = @bitCast(split.exponent);
+                    }
                 },
                 .i_pack_snorm4x8, .i_pack_unorm4x8, .i_pack_snorm2x16, .i_pack_unorm2x16 => {
                     const source = try valueRef(self.values, pc, instruction.operands[0]);
@@ -1335,6 +1348,10 @@ fn validate(program: *const ir.Program) Error!void {
                 const source = program.instructions[instruction.operands[0]].ty;
                 if (instruction.operands.len == 1) {
                     if (!same(source, instruction.ty)) return error.InvalidType;
+                } else if (program.instructions[instruction.operands[0]].op == .f_frexp_struct) {
+                    const member_width = source.columns / 2;
+                    const member_scalar: ir.Scalar = if (instruction.operands[1] == 0) .f32 else .i32;
+                    if (source.scalar != .f32 or source.rows != 1 or (source.columns != 2 and source.columns != 4) or instruction.operands[1] >= 2 or instruction.ty.rows != 1 or instruction.ty.columns != member_width or instruction.ty.scalar != member_scalar) return error.InvalidType;
                 } else if (source.rows != 1 or instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != source.scalar) return error.InvalidType else if (instruction.operands[1] >= source.columns) return error.Bounds;
             },
             .shuffle => {
@@ -1507,9 +1524,9 @@ fn validate(program: *const ir.Program) Error!void {
                 if (source.scalar != .f32 or source.columns != 1 or source.rows != 1) return error.InvalidType;
             },
             .f_frexp_struct => {
-                if (instruction.ty.scalar != .f32 or instruction.ty.columns != 2 or instruction.ty.rows != 1) return error.InvalidType;
+                if (instruction.ty.scalar != .f32 or (instruction.ty.columns != 2 and instruction.ty.columns != 4) or instruction.ty.rows != 1) return error.InvalidType;
                 const source = program.instructions[instruction.operands[0]].ty;
-                if (source.scalar != .f32 or source.columns != 1 or source.rows != 1) return error.InvalidType;
+                if (source.scalar != .f32 or source.rows != 1 or (source.columns != 1 and source.columns != 2) or instruction.ty.columns != source.columns * 2) return error.InvalidType;
             },
             .i_pack_snorm4x8, .i_pack_unorm4x8 => {
                 if ((instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32) or instruction.ty.columns != 1 or instruction.ty.rows != 1) return error.InvalidType;
@@ -2325,6 +2342,29 @@ test "GLSL FrexpStruct returns significand then signed exponent scalar members" 
     var invalid_source = try testProgram(&interfaces, &instructions);
     defer std.testing.allocator.free(invalid_source.bytes);
     try std.testing.expectError(error.NumericDomain, Executor.init(std.testing.allocator, &invalid_source));
+}
+
+test "GLSL FrexpStruct flattens vec2 members with typed extraction" {
+    const first = f32bytes(12);
+    const second = f32bytes(-0.75);
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &first },
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &second },
+        .{ .op = .constant_composite, .ty = .{ .scalar = .f32, .columns = 2 }, .operands = &.{ 0, 1 }, .literal = &.{} },
+        .{ .op = .f_frexp_struct, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{2}, .literal = &.{} },
+        .{ .op = .extract, .ty = .{ .scalar = .f32, .columns = 2 }, .operands = &.{ 3, 0 }, .literal = &.{} },
+        .{ .op = .extract, .ty = .{ .scalar = .i32, .columns = 2 }, .operands = &.{ 3, 1 }, .literal = &.{} },
+    };
+    var program = try testProgram(&.{}, &instructions);
+    defer std.testing.allocator.free(program.bytes);
+    var executor = try Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+    try executor.execute(&.{}, &.{});
+    try std.testing.expectApproxEqAbs(@as(f32, 0.75), @as(f32, @bitCast(executor.values[4].bits[0])), 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f32, -0.75), @as(f32, @bitCast(executor.values[4].bits[1])), 0.000001);
+    try std.testing.expectEqual(@as(i32, 4), @as(i32, @bitCast(executor.values[5].bits[0])));
+    try std.testing.expectEqual(@as(i32, 0), @as(i32, @bitCast(executor.values[5].bits[1])));
+    for (0..4096) |_| try executor.execute(&.{}, &.{});
 }
 
 test "GLSL NMin NMax and NClamp prefer non-NaN operands" {

@@ -302,11 +302,15 @@ fn resultShape(nodes: []const Node, type_id: u32) Error!ir.Type {
             if (node.words.len != 2) return error.Unsupported;
             const first = try resultShape(nodes, node.words[0]);
             const second = try resultShape(nodes, node.words[1]);
-            if (first.columns != 1 or first.rows != 1 or second.columns != 1 or second.rows != 1) return error.Unsupported;
-            if (!sameShape(first, second) and !(first.scalar == .f32 and second.scalar == .i32)) return error.Unsupported;
+            const mixed_frexp = first.scalar == .f32 and second.scalar == .i32 and first.columns == second.columns and first.rows == 1 and second.rows == 1 and first.columns <= 2;
+            if ((!mixed_frexp and (first.columns != 1 or first.rows != 1 or second.columns != 1 or second.rows != 1)) or (!sameShape(first, second) and !mixed_frexp)) return error.Unsupported;
             if (first.scalar != .i32 and first.scalar != .u32 and first.scalar != .f32) return error.Unsupported;
             var pair = first;
-            pair.columns = 2;
+            pair.columns = @intCast(first.columns * 2);
+            // A mixed FrexpStruct aggregate is flattened as f32 lanes for
+            // the canonical IR; the exponent member retains its i32 shape
+            // when OpCompositeExtract materializes it.
+            if (first.scalar == .f32 and second.scalar == .i32) pair.scalar = .f32;
             break :blk pair;
         },
         else => error.Unsupported,
@@ -327,7 +331,7 @@ fn supportedGlslExtInst(ext: u32, result: ir.Type, operand: ir.Type) bool {
         35 => result.scalar == .f32 and result.rows == 1 and result.columns >= 1 and result.columns <= 4 and sameShape(result, operand),
         36 => result.scalar == .f32 and result.columns == 2 and result.rows == 1 and operand.scalar == .f32 and operand.columns == 1 and operand.rows == 1,
         51 => result.scalar == .f32 and result.rows == 1 and result.columns >= 1 and result.columns <= 4 and sameShape(result, operand),
-        52 => result.scalar == .f32 and result.columns == 2 and result.rows == 1 and operand.scalar == .f32 and operand.columns == 1 and operand.rows == 1,
+        52 => result.scalar == .f32 and result.rows == 1 and (result.columns == 2 or result.columns == 4) and operand.scalar == .f32 and operand.rows == 1 and (operand.columns == 1 or operand.columns == 2) and result.columns == operand.columns * 2,
         33 => result.scalar == .f32 and result.columns == 1 and result.rows == 1 and operand.scalar == .f32 and operand.columns == 4 and operand.rows == 4,
         34 => result.scalar == .f32 and result.columns == 4 and result.rows == 4 and sameShape(result, operand),
         53 => result.scalar == .f32 and result.rows == 1 and sameShape(result, operand),
@@ -404,18 +408,17 @@ fn validateGlslModfFrexp(nodes: []const Node, stage: ir.Stage, ext: u32, result:
     } else if (pointee.scalar != .i32) return error.Unsupported;
 }
 
-/// Validate the bounded scalar GLSL.std.450 FrexpStruct form.  The canonical
-/// IR represents the mixed f32/i32 structure as two raw lanes: significand
-/// bits followed by signed exponent bits.  Vector aggregate forms remain
-/// outside the profile until a mixed-component ABI is available.
+/// Validate the bounded GLSL.std.450 FrexpStruct form.  The canonical IR
+/// represents the mixed f32/i32 structure as flattened f32 lanes: all
+/// significands followed by signed exponent bits.  Scalar and vec2 members
+/// fit the four-lane IR value; wider aggregate members remain unsupported.
 fn validateGlslFrexpStruct(nodes: []const Node, result_type: u32, result: ir.Type, operand: ir.Type) Error!void {
-    if (!supportedGlslExtInst(52, result, operand) or operand.scalar != .f32 or operand.columns != 1 or operand.rows != 1) return error.Unsupported;
+    if (!supportedGlslExtInst(52, result, operand) or operand.scalar != .f32 or operand.rows != 1 or (operand.columns != 1 and operand.columns != 2)) return error.Unsupported;
     const structure = nodes[try id(nodes, result_type)];
     if (structure.kind != .structure or structure.words.len != 2) return error.Unsupported;
     const significand = try resultShape(nodes, structure.words[0]);
     const exponent = try resultShape(nodes, structure.words[1]);
-    if (significand.scalar != .f32 or significand.columns != 1 or significand.rows != 1 or exponent.scalar != .i32 or exponent.columns != 1 or exponent.rows != 1) return error.Unsupported;
-    if (!sameShape(significand, operand) or result.scalar != .f32 or result.columns != 2 or result.rows != 1) return error.Unsupported;
+    if (significand.scalar != .f32 or exponent.scalar != .i32 or significand.rows != 1 or exponent.rows != 1 or !sameShape(significand, operand) or exponent.columns != operand.columns or result.scalar != .f32 or result.rows != 1 or result.columns != operand.columns * 2) return error.Unsupported;
 }
 
 fn glslOutputInterfaceIndex(nodes: []const Node, decorations: []const Decorations, interfaces: []const ir.Interface, stage: ir.Stage, pointer_id: u32) Error!u32 {
@@ -3007,6 +3010,17 @@ test "GLSL Modf and Frexp admissions validate bounded output pointers" {
     try validateGlslFrexpStruct(&frexp_nodes, 3, .{ .scalar = .f32, .columns = 2 }, scalar);
     frexp_nodes[2] = .{ .kind = .int, .a = 32, .b = 0 };
     try std.testing.expectError(error.Unsupported, validateGlslFrexpStruct(&frexp_nodes, 3, .{ .scalar = .f32, .columns = 2 }, scalar));
+
+    var vector_nodes = [_]Node{.{}} ** 8;
+    vector_nodes[1] = .{ .kind = .float, .a = 32 };
+    vector_nodes[2] = .{ .kind = .int, .a = 32, .b = 1 };
+    vector_nodes[4] = .{ .kind = .vector, .a = 1, .b = 2 };
+    vector_nodes[5] = .{ .kind = .vector, .a = 2, .b = 2 };
+    const vector_members = [_]u32{ 4, 5 };
+    vector_nodes[3] = .{ .kind = .structure, .words = &vector_members };
+    const vector_operand = ir.Type{ .scalar = .f32, .columns = 2 };
+    try validateGlslFrexpStruct(&vector_nodes, 3, .{ .scalar = .f32, .columns = 4 }, vector_operand);
+    try std.testing.expectError(error.Unsupported, validateGlslFrexpStruct(&vector_nodes, 3, .{ .scalar = .f32, .columns = 6 }, vector_operand));
 }
 
 test "compute profile lowers bounded Modf pointer result" {
