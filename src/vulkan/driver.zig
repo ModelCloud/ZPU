@@ -11883,7 +11883,7 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    if ((bind_point != 0 and bind_point != 1) or first_set != 0 or count != 1 or sets == null or command_buffer.impl.state != 1 or command_buffer.impl.invalid) {
+    if ((bind_point != 0 and bind_point != 1) or first_set != 0 or command_buffer.impl.state != 1 or command_buffer.impl.invalid) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -11891,6 +11891,17 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
         command_buffer.impl.invalid = true;
         return;
     };
+    // Vulkan permits descriptorSetCount == 0 as a validated no-op.  Keep the
+    // existing descriptor binding and dynamic-offset state intact, while
+    // still requiring the layout and dynamic-offset arrays to be coherent.
+    if (count == 0) {
+        if (dynamic_count != 0 or offsets != null) command_buffer.impl.invalid = true;
+        return;
+    }
+    if (count != 1 or sets == null) {
+        command_buffer.impl.invalid = true;
+        return;
+    }
     const descriptor = validDescriptorSetLocked(sets.?[0]) orelse {
         command_buffer.impl.invalid = true;
         return;
@@ -11952,7 +11963,7 @@ fn cmdBindDescriptorSets2(cb: ?CommandBuffer, info: ?*const BindDescriptorSetsIn
     lock();
     defer mutex.unlock();
     if (validCommandBufferLocked(cb)) |command_buffer| {
-        if (!command_buffer.impl.invalid) command_buffer.impl.bound_descriptor_stage_flags = stages;
+        if (!command_buffer.impl.invalid and ci.descriptor_set_count != 0) command_buffer.impl.bound_descriptor_stage_flags = stages;
     }
 }
 fn bindIndexBufferLocked(command_buffer: *CommandBufferObj, handle: usize, offset: u64, size: u64, index_type: i32, explicit_size: bool) void {
@@ -22013,6 +22024,20 @@ test "descriptor updates and binds are atomic and allocation free" {
     try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &command_info, &command));
     const begin_info = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin_info));
+    // Zero descriptor-set counts are legal no-ops.  They still validate the
+    // pipeline layout and must leave any prior descriptor binding untouched;
+    // exercise both the legacy bind and the Vulkan 1.4 stage-based wrapper.
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 0, null, 0, null);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expect(command[0].impl.bound_descriptors == null);
+    const empty_bind2 = BindDescriptorSetsInfo{ .s_type = 1000545003, .p_next = null, .stage_flags = 1, .layout = pipeline_layout, .first_set = 0, .descriptor_set_count = 0, .descriptor_sets = null, .dynamic_offset_count = 0, .dynamic_offsets = null };
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 0, null, 0, null);
+        cmdBindDescriptorSets2(command[0], &empty_bind2);
+        try std.testing.expect(!command[0].impl.invalid);
+    }
+    test_allocations_before_failure = null;
     for (0..4096) |_| cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 0, null);
     try std.testing.expect(!command[0].impl.invalid);
     try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
