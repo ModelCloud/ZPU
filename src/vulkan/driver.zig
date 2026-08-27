@@ -209,7 +209,25 @@ pub const PhysicalDeviceVulkan11Features = extern struct {
     shader_draw_parameters: u32,
 };
 pub const PhysicalDeviceVulkan12Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [47]u32 };
-pub const PhysicalDeviceVulkan13Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [15]u32 };
+pub const PhysicalDeviceVulkan13Features = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    robust_image_access: u32,
+    inline_uniform_block: u32,
+    descriptor_binding_inline_uniform_block_update_after_bind: u32,
+    pipeline_creation_cache_control: u32,
+    private_data: u32,
+    shader_demote_to_helper_invocation: u32,
+    shader_terminate_invocation: u32,
+    subgroup_size_control: u32,
+    compute_full_subgroups: u32,
+    synchronization2: u32,
+    texture_compression_astc_hdr: u32,
+    shader_zero_initialize_workgroup_memory: u32,
+    dynamic_rendering: u32,
+    shader_integer_dot_product: u32,
+    maintenance4: u32,
+};
 pub const PhysicalDeviceVulkan14Features = extern struct {
     s_type: i32,
     p_next: ?*anyopaque,
@@ -16848,6 +16866,9 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(PhysicalDeviceVulkan11Features));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVulkan11Features, "storage_buffer16_bit_access"));
     try std.testing.expectEqual(@as(usize, 60), @offsetOf(PhysicalDeviceVulkan11Features, "shader_draw_parameters"));
+    try std.testing.expectEqual(@as(usize, 80), @sizeOf(PhysicalDeviceVulkan13Features));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVulkan13Features, "robust_image_access"));
+    try std.testing.expectEqual(@as(usize, 72), @offsetOf(PhysicalDeviceVulkan13Features, "maintenance4"));
     getPhysicalDeviceFeatures2(ctx.physical, &features);
     try std.testing.expect(std.mem.allEqual(u32, &features.features.values, 0));
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&vulkan11_features)[16..64], 0));
@@ -16893,6 +16914,19 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&vulkan14_features)[16..100], 0));
     test_allocations_before_failure = 0;
     for (0..4096) |_| getPhysicalDeviceFeatures2(ctx.physical, &vulkan14_query);
+    test_allocations_before_failure = null;
+    var vulkan13_features = std.mem.zeroes(PhysicalDeviceVulkan13Features);
+    vulkan13_features.s_type = 53;
+    @memset(std.mem.asBytes(&vulkan13_features)[16..76], 0xff);
+    var vulkan13_query = features;
+    vulkan13_query.p_next = @ptrCast(&vulkan13_features);
+    getPhysicalDeviceFeatures2(ctx.physical, &vulkan13_query);
+    try std.testing.expectEqual(@as(u32, 0), vulkan13_features.robust_image_access);
+    try std.testing.expectEqual(@as(u32, 0), vulkan13_features.dynamic_rendering);
+    try std.testing.expectEqual(@as(u32, 0), vulkan13_features.maintenance4);
+    try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&vulkan13_features)[16..76], 0));
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| getPhysicalDeviceFeatures2(ctx.physical, &vulkan13_query);
     test_allocations_before_failure = null;
     test_allocations_before_failure = 0;
     for (0..4096) |_| getPhysicalDeviceFeatures2(ctx.physical, &subgroup_query);
