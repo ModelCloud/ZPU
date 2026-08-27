@@ -5655,10 +5655,20 @@ fn cmdCopyBuffer(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize, count
             return;
         }
     }
+    for (list[0..count]) |source| {
+        _ = std.math.add(u64, src.offset, source.src_offset) catch {
+            c.impl.invalid = true;
+            return;
+        };
+        _ = std.math.add(u64, dst.offset, source.dst_offset) catch {
+            c.impl.invalid = true;
+            return;
+        };
+    }
     if (src.memory.? == dst.memory.?) {
         for (list[0..count]) |source| for (list[0..count]) |destination| {
-            const source_start = src.offset + source.src_offset;
-            const destination_start = dst.offset + destination.dst_offset;
+            const source_start = std.math.add(u64, src.offset, source.src_offset) catch unreachable;
+            const destination_start = std.math.add(u64, dst.offset, destination.dst_offset) catch unreachable;
             if (byteRangesOverlap(source_start, source.size, destination_start, destination.size)) {
                 c.impl.invalid = true;
                 return;
@@ -21114,6 +21124,18 @@ test "memory transfer objects execute against independently specified bytes" {
     cmdCopyBuffer(commands[0], 0, buffer_b, 1, @ptrCast(&copy));
     cmdCopyBuffer(commands[0], buffer_a, 0, 1, @ptrCast(&copy));
     cmdCopyBuffer(commands[0], buffer_a, buffer_b, 1, null);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    // A wrapped bound-memory offset must invalidate recording before any
+    // overlap check or submit-time byte pointer is derived from it.
+    const source_object = validBufferLocked(buffer_a).?;
+    const saved_source_offset = source_object.offset;
+    source_object.offset = std.math.maxInt(u64);
+    const wrapped_copy = BufferCopy{ .src_offset = 4, .dst_offset = 0, .size = 4 };
+    cmdCopyBuffer(commands[0], buffer_a, buffer_b, 1, @ptrCast(&wrapped_copy));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 0), commands[0].impl.count);
+    source_object.offset = saved_source_offset;
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     const bad_copy = BufferCopy{ .src_offset = 63, .dst_offset = 0, .size = 2 };
