@@ -675,7 +675,9 @@ Each slice must land with all of the following:
   set/reset operations are complete; wait-event semantics, full stage/access
   masks, and asynchronous queue ordering remain.
 - [ ] **A4 — query pools:** reset, begin/end, timestamps, result availability,
-  host result reads, and buffer copies.
+  host result reads, and buffer copies. Host resets reject ranges that overlap
+  a query actively begun by any recording command buffer; empty in-range
+  resets remain allocation-free no-ops.
 - [ ] **A5 — complete transfer commands:** update, blit, resolve,
   depth/stencil clear, and attachment clear with format/layout handling.
   Transfer recording is failure-atomic: `vkCmdFillBuffer` now rejects ended

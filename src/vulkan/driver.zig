@@ -7229,6 +7229,17 @@ fn validQueryRange(pool: *const QueryPoolObj, first: u32, count: u32) bool {
     // existing query and the range arithmetic must remain bounded.
     return first < pool.slots.len and count <= pool.slots.len - first;
 }
+fn queryRangeOverlapsActiveCommandLocked(device: Device, pool: *const QueryPoolObj, first: u32, count: u32) bool {
+    // Host resets are forbidden while any recording command buffer has the
+    // affected query begun.  Submission is synchronous in ZPU, so the live
+    // command-buffer state is the complete in-use set for this contract.
+    if (count == 0) return false;
+    for (&command_buffer_objects, command_buffer_state) |*command_buffer, state| {
+        if (state != .live or command_buffer.impl.owner != device) continue;
+        if (command_buffer.impl.active_query_pool == pool and first <= command_buffer.impl.active_query_index and command_buffer.impl.active_query_index - first < count) return true;
+    }
+    return false;
+}
 fn validQueryCopyRange(pool: *const QueryPoolObj, first: u32, count: u32) bool {
     // Vulkan requires firstQuery to identify an actual query even when the
     // requested range is empty.  Keep reset/begin validation strict while
@@ -7349,6 +7360,7 @@ fn resetQueryPool(device: ?Device, handle: usize, first: u32, count: u32) callco
     defer mutex.unlock();
     const pool = validQueryPoolLocked(handle) orelse return;
     if (!validDeviceLocked(d) or !pool.owner.eql(d) or !validQueryRange(pool, first, count)) return;
+    if (queryRangeOverlapsActiveCommandLocked(d, pool, first, count)) return;
     for (pool.slots[first .. first + count]) |*slot| {
         slot.value.store(0, .monotonic);
         slot.state.store(0, .release);
@@ -23238,9 +23250,21 @@ test "query pools expose exact availability timestamps copies and lifecycle" {
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     commands[0].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
     cmdBeginQuery(commands[0], occlusion_pool, 0, 0);
+    // A host reset must not touch a query that is currently begun by any
+    // recording command buffer.  Seed the slot with a completed value so the
+    // rejection is observable, then exercise the allocation-free path.
+    const active_query_pool = validQueryPoolLocked(occlusion_pool).?;
+    active_query_pool.slots[0].value.store(0x1234, .monotonic);
+    active_query_pool.slots[0].state.store(2, .release);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| resetQueryPool(ctx.device, occlusion_pool, 0, 1);
+    test_allocations_before_failure = null;
+    try std.testing.expectEqual(@as(u64, 0x1234), active_query_pool.slots[0].value.load(.acquire));
+    try std.testing.expectEqual(@as(u8, 2), active_query_pool.slots[0].state.load(.acquire));
     cmdEndQuery(commands[0], occlusion_pool, 0);
     commands[0].impl.active_render_pass = null;
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    resetQueryPool(ctx.device, occlusion_pool, 0, 1);
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
     commands[1].impl.active_render_pass = @ptrFromInt(@alignOf(RenderPassObj));
     cmdBeginQuery(commands[1], occlusion_pool, 0, 0);
