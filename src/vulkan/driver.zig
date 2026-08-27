@@ -6688,10 +6688,9 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
             } else if (op.expected_depth_layout >= 0) return false;
             if (color_image == null) {
                 // Attachmentless non-discard draws are valid when a depth
-                // image is present; the bounded CPU rasterizer updates depth
-                // without requiring a color target. Profile shaders still
-                // require a color attachment and are rejected atomically.
-                if (op.rasterizer_discard_enable == 0 and (depth == null or profile_draw)) return deadResource();
+                // image is present; both CPU-cube and scalar-profile paths
+                // update depth without requiring a color target.
+                if (op.rasterizer_discard_enable == 0 and depth == null) return deadResource();
                 if (!profile_draw) {
                     const uniform_buffer = uniform orelse return deadResource();
                     const texture_image = texture orelse return deadResource();
@@ -6778,7 +6777,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
                 if (op.layer_count == 0 or op.depth_base_layer >= depth_image.array_layers or op.layer_count > depth_image.array_layers - op.depth_base_layer) return false;
             } else if (op.expected_depth_layout >= 0) return false;
             if (color_image == null) {
-                if (op.rasterizer_discard_enable == 0 and (depth == null or profile_draw)) return deadResource();
+                if (op.rasterizer_discard_enable == 0 and depth == null) return deadResource();
                 if (!profile_draw) {
                     const uniform_buffer = uniform orelse return deadResource();
                     const texture_image = texture orelse return deadResource();
@@ -7181,9 +7180,10 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
         .profile_v1_scalar_graphics => |*value| value,
         else => return,
     };
-    const color = op.color_image orelse op.framebuffer.?.color_image.?;
+    const color = op.color_image orelse if (op.framebuffer) |fb| fb.color_image else null;
     const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
-    const color_bytes = imageLayerBytes(color, op.color_base_layer + layer);
+    const target = color orelse depth orelse return;
+    const color_bytes = if (color) |color_image| imageLayerBytes(color_image, op.color_base_layer + layer) else null;
     const depth_bytes = if (depth) |depth_image| imageLayerBytes(depth_image, op.depth_base_layer + layer) else null;
     if (op.vertex_count < 3 or op.vertex_count % 3 != 0 or op.vertex_count > 4096 or op.instance_count == 0) return;
     var bounds = emptyRect();
@@ -7264,8 +7264,8 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
         const inverse_area = 1.0 / area;
         const min_x = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].x, @min(vertices[1].x, vertices[2].x))))), op.scissor.x, 0);
         const min_y = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].y, @min(vertices[1].y, vertices[2].y))))), op.scissor.y, 0);
-        const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].x, @max(vertices[1].x, vertices[2].x))))), op.scissor.x + @as(i32, @intCast(op.scissor.width)), @as(i32, @intCast(color.width)));
-        const max_y = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].y, @max(vertices[1].y, vertices[2].y))))), op.scissor.y + @as(i32, @intCast(op.scissor.height)), @as(i32, @intCast(color.height)));
+        const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].x, @max(vertices[1].x, vertices[2].x))))), op.scissor.x + @as(i32, @intCast(op.scissor.width)), @as(i32, @intCast(target.width)));
+        const max_y = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].y, @max(vertices[1].y, vertices[2].y))))), op.scissor.y + @as(i32, @intCast(op.scissor.height)), @as(i32, @intCast(target.height)));
         if (max_x <= min_x or max_y <= min_y) continue;
         for (@intCast(min_y)..@intCast(max_y)) |y| for (@intCast(min_x)..@intCast(max_x)) |x| {
             const px = @as(f32, @floatFromInt(x)) + 0.5;
@@ -7300,23 +7300,25 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
             }
             const depth_value = b0 * vertices[0].z + b1 * vertices[1].z + b2 * vertices[2].z;
             if (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1) continue;
-            const offset = (@as(usize, @intCast(y)) * color.width + @as(usize, @intCast(x))) * 4;
+            const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
             if (depth_bytes != null and op.depth_bounds_test_enable != 0 and (depth_value < op.depth_bounds[0] or depth_value > op.depth_bounds[1])) continue;
             if (depth_bytes) |depth_storage| {
                 const stored_depth: f32 = @bitCast(std.mem.readInt(u32, depth_storage[offset..][0..4], .little));
                 if (op.depth_test_enable != 0 and (!std.math.isFinite(stored_depth) or !profileDepthCompare(op.depth_compare_op, depth_value, stored_depth))) continue;
             }
-            if (profileWriteColor(color_bytes[offset..][0..4], profile.fragment_bool, &fragment_output_bytes) == null) return;
+            if (color_bytes) |color_storage| if (profileWriteColor(color_storage[offset..][0..4], profile.fragment_bool, &fragment_output_bytes) == null) return;
             if (depth_bytes) |depth_storage| if (op.depth_write_enable != 0) std.mem.writeInt(u32, depth_storage[offset..][0..4], @bitCast(depth_value), .little);
             bounds = unionRect(bounds, .{ .x = @intCast(x), .y = @intCast(y), .width = 1, .height = 1 });
             pixels_written += 1;
         };
     }
     if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(pixels_written, .monotonic);
-    color.content_bounds = unionRect(color.content_bounds, bounds);
+    if (color) |color_image| {
+        color_image.content_bounds = unionRect(color_image.content_bounds, bounds);
+        color_image.complex_3d_content = true;
+        color_image.force_full_present = true;
+    }
     if (depth) |depth_image| depth_image.content_bounds = unionRect(depth_image.content_bounds, bounds);
-    color.complex_3d_content = true;
-    color.force_full_present = true;
 }
 fn executeValidatedCommand(command: Command, query_context: *QueryExecutionContext) void {
     switch (command) {
@@ -7466,10 +7468,6 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
             const color = op.color_image orelse if (op.framebuffer) |fb| fb.color_image else null;
             const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
             if (op.pipeline.execution_abi == .profile_v1_scalar_graphics) {
-                // The profile shader path currently writes a fragment color;
-                // attachmentless profile draws are rejected during submit
-                // prevalidation and must not reach its color dereference.
-                if (color == null) return;
                 var draw = op;
                 const instance_count = draw.instance_count;
                 draw.instance_count = 1;
@@ -11521,6 +11519,21 @@ test "scalar graphics profile executes descriptor uniform blocks" {
         if (color_bytes[pixel * 4 + 2] == 255 and color_bytes[pixel * 4] == 0) saw_red = true;
     }
     try std.testing.expect(saw_red);
+
+    // A scalar profile may also run with no color attachment.  Fragment
+    // outputs are evaluated for the same shader contract but discarded while
+    // the depth test/write path remains active.
+    @memset(color_bytes[0..], 0);
+    for (0..16) |index| std.mem.writeInt(u32, depth_bytes[index * 4 ..][0..4], 0x3f80_0000, .little);
+    var profile_depth_only_command = command;
+    profile_depth_only_command.cube_draw.color_image = null;
+    executeValidatedCommand(profile_depth_only_command, &context);
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, color_bytes[0..4], .little));
+    var changed_depth = false;
+    for (0..16) |pixel| {
+        if (std.mem.readInt(u32, depth_bytes[pixel * 4 ..][0..4], .little) != 0x3f80_0000) changed_depth = true;
+    }
+    try std.testing.expect(changed_depth);
 
     // The same descriptor snapshot must work for indexed and indirect draws;
     // these paths share the profile executor but take different argument
