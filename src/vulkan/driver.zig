@@ -320,13 +320,13 @@ pub const PhysicalDeviceVariablePointersFeatures = extern struct { s_type: i32, 
 pub const PhysicalDeviceSamplerYcbcrConversionFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, sampler_ycbcr_conversion: u32 };
 pub const PhysicalDeviceMultiviewFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, multiview: u32, multiview_geometry_shader: u32, multiview_tessellation_shader: u32 };
 pub const PhysicalDeviceShaderDrawParametersFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, shader_draw_parameters: u32 };
-pub const PhysicalDeviceVulkanMemoryModelFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [3]u32 };
-pub const PhysicalDeviceHostQueryResetFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceTimelineSemaphoreFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceBufferDeviceAddressFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [3]u32 };
-pub const PhysicalDevice8BitStorageFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [3]u32 };
-pub const PhysicalDeviceShaderAtomicInt64Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [2]u32 };
-pub const PhysicalDeviceShaderFloat16Int8Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [2]u32 };
+pub const PhysicalDeviceVulkanMemoryModelFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, vulkan_memory_model: u32, vulkan_memory_model_device_scope: u32, vulkan_memory_model_availability_visibility_chains: u32 };
+pub const PhysicalDeviceHostQueryResetFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, host_query_reset: u32 };
+pub const PhysicalDeviceTimelineSemaphoreFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, timeline_semaphore: u32 };
+pub const PhysicalDeviceBufferDeviceAddressFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, buffer_device_address: u32, buffer_device_address_capture_replay: u32, buffer_device_address_multi_device: u32 };
+pub const PhysicalDevice8BitStorageFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, storage_buffer8_bit_access: u32, uniform_and_storage_buffer8_bit_access: u32, storage_push_constant8: u32 };
+pub const PhysicalDeviceShaderAtomicInt64Features = extern struct { s_type: i32, p_next: ?*anyopaque, shader_buffer_int64_atomics: u32, shader_shared_int64_atomics: u32 };
+pub const PhysicalDeviceShaderFloat16Int8Features = extern struct { s_type: i32, p_next: ?*anyopaque, shader_float16: u32, shader_int8: u32 };
 pub const PhysicalDeviceDescriptorIndexingFeatures = extern struct {
     s_type: i32,
     p_next: ?*anyopaque,
@@ -351,20 +351,20 @@ pub const PhysicalDeviceDescriptorIndexingFeatures = extern struct {
     descriptor_binding_variable_descriptor_count: u32,
     runtime_descriptor_array: u32,
 };
-pub const PhysicalDeviceScalarBlockLayoutFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceUniformBufferStandardLayoutFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceShaderSubgroupExtendedTypesFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceImagelessFramebufferFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceSeparateDepthStencilLayoutsFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDevicePrivateDataFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceSynchronization2Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceTextureCompressionASTCHDRFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceMaintenance4Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceShaderTerminateInvocationFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceShaderDemoteToHelperInvocationFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDevicePipelineCreationCacheControlFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceZeroInitializeWorkgroupMemoryFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceImageRobustnessFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceScalarBlockLayoutFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, scalar_block_layout: u32 };
+pub const PhysicalDeviceUniformBufferStandardLayoutFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, uniform_buffer_standard_layout: u32 };
+pub const PhysicalDeviceShaderSubgroupExtendedTypesFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, shader_subgroup_extended_types: u32 };
+pub const PhysicalDeviceImagelessFramebufferFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, imageless_framebuffer: u32 };
+pub const PhysicalDeviceSeparateDepthStencilLayoutsFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, separate_depth_stencil_layouts: u32 };
+pub const PhysicalDevicePrivateDataFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, private_data: u32 };
+pub const PhysicalDeviceSynchronization2Features = extern struct { s_type: i32, p_next: ?*anyopaque, synchronization2: u32 };
+pub const PhysicalDeviceTextureCompressionASTCHDRFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, texture_compression_astc_hdr: u32 };
+pub const PhysicalDeviceMaintenance4Features = extern struct { s_type: i32, p_next: ?*anyopaque, maintenance4: u32 };
+pub const PhysicalDeviceShaderTerminateInvocationFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, shader_terminate_invocation: u32 };
+pub const PhysicalDeviceShaderDemoteToHelperInvocationFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, shader_demote_to_helper_invocation: u32 };
+pub const PhysicalDevicePipelineCreationCacheControlFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, pipeline_creation_cache_control: u32 };
+pub const PhysicalDeviceZeroInitializeWorkgroupMemoryFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, shader_zero_initialize_workgroup_memory: u32 };
+pub const PhysicalDeviceImageRobustnessFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, robust_image_access: u32 };
 pub const PhysicalDeviceSubgroupSizeControlFeatures = extern struct {
     s_type: i32,
     p_next: ?*anyopaque,
@@ -373,19 +373,19 @@ pub const PhysicalDeviceSubgroupSizeControlFeatures = extern struct {
 };
 pub const PhysicalDeviceSubgroupSizeControlFeaturesKHR = PhysicalDeviceSubgroupSizeControlFeatures;
 pub const PhysicalDeviceSubgroupSizeControlFeaturesEXT = PhysicalDeviceSubgroupSizeControlFeatures;
-pub const PhysicalDeviceInlineUniformBlockFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [2]u32 };
-pub const PhysicalDeviceShaderIntegerDotProductFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceDynamicRenderingFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceGlobalPriorityQueryFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceIndexTypeUint8Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceMaintenance5Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceMaintenance6Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceHostImageCopyFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceShaderSubgroupRotateFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [2]u32 };
-pub const PhysicalDeviceShaderFloatControls2Features = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceShaderExpectAssumeFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDevicePipelineProtectedAccessFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDevicePipelineRobustnessFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceInlineUniformBlockFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, inline_uniform_block: u32, descriptor_binding_inline_uniform_block_update_after_bind: u32 };
+pub const PhysicalDeviceShaderIntegerDotProductFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, shader_integer_dot_product: u32 };
+pub const PhysicalDeviceDynamicRenderingFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, dynamic_rendering: u32 };
+pub const PhysicalDeviceGlobalPriorityQueryFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, global_priority_query: u32 };
+pub const PhysicalDeviceIndexTypeUint8Features = extern struct { s_type: i32, p_next: ?*anyopaque, index_type_uint8: u32 };
+pub const PhysicalDeviceMaintenance5Features = extern struct { s_type: i32, p_next: ?*anyopaque, maintenance5: u32 };
+pub const PhysicalDeviceMaintenance6Features = extern struct { s_type: i32, p_next: ?*anyopaque, maintenance6: u32 };
+pub const PhysicalDeviceHostImageCopyFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, host_image_copy: u32 };
+pub const PhysicalDeviceShaderSubgroupRotateFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, shader_subgroup_rotate: u32, shader_subgroup_rotate_clustered: u32 };
+pub const PhysicalDeviceShaderFloatControls2Features = extern struct { s_type: i32, p_next: ?*anyopaque, shader_float_controls2: u32 };
+pub const PhysicalDeviceShaderExpectAssumeFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, shader_expect_assume: u32 };
+pub const PhysicalDevicePipelineProtectedAccessFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, pipeline_protected_access: u32 };
+pub const PhysicalDevicePipelineRobustnessFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, pipeline_robustness: u32 };
 pub const PhysicalDeviceLineRasterizationFeatures = extern struct {
     s_type: i32,
     p_next: ?*anyopaque,
@@ -406,7 +406,7 @@ pub const PhysicalDeviceVertexAttributeDivisorFeatures = extern struct {
 };
 pub const PhysicalDeviceVertexAttributeDivisorFeaturesKHR = PhysicalDeviceVertexAttributeDivisorFeatures;
 pub const PhysicalDeviceVertexAttributeDivisorFeaturesEXT = PhysicalDeviceVertexAttributeDivisorFeatures;
-pub const PhysicalDeviceDynamicRenderingLocalReadFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
+pub const PhysicalDeviceDynamicRenderingLocalReadFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, dynamic_rendering_local_read: u32 };
 pub const PhysicalDeviceProperties2 = extern struct { s_type: i32, p_next: ?*anyopaque, properties: Properties };
 // The promoted properties carry a large, version-specific payload.  Their
 // declarations retain the exact LP64 ABI size while keeping the currently
@@ -17017,6 +17017,40 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceDescriptorIndexingFeatures, "shader_input_attachment_array_dynamic_indexing"));
     try std.testing.expectEqual(@as(usize, 92), @offsetOf(PhysicalDeviceDescriptorIndexingFeatures, "runtime_descriptor_array"));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(PhysicalDeviceLineRasterizationFeatures));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(PhysicalDeviceVulkanMemoryModelFeatures));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVulkanMemoryModelFeatures, "vulkan_memory_model"));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(PhysicalDeviceBufferDeviceAddressFeatures));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(PhysicalDevice8BitStorageFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceShaderAtomicInt64Features));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceShaderFloat16Int8Features));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceScalarBlockLayoutFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceUniformBufferStandardLayoutFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceShaderSubgroupExtendedTypesFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceImagelessFramebufferFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceSeparateDepthStencilLayoutsFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDevicePrivateDataFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceSynchronization2Features));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceTextureCompressionASTCHDRFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceMaintenance4Features));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceShaderTerminateInvocationFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceShaderDemoteToHelperInvocationFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDevicePipelineCreationCacheControlFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceZeroInitializeWorkgroupMemoryFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceImageRobustnessFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceInlineUniformBlockFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceShaderIntegerDotProductFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceDynamicRenderingFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceGlobalPriorityQueryFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceIndexTypeUint8Features));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceMaintenance5Features));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceMaintenance6Features));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceHostImageCopyFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceShaderSubgroupRotateFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceShaderFloatControls2Features));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceShaderExpectAssumeFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDevicePipelineProtectedAccessFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDevicePipelineRobustnessFeatures));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceDynamicRenderingLocalReadFeatures));
     try std.testing.expectEqual(@as(usize, 840), @sizeOf(PhysicalDeviceProperties2));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceExternalImageFormatInfo));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(ImageFormatListCreateInfo));
