@@ -342,9 +342,11 @@ accepted for dynamic attachments; load-none skips clears and store-none records
 a submission-time content discard at the end of the rendering scope. Secondary command buffers can now carry the bounded
 `VkCommandBufferInheritanceRenderingInfo` chain, including zero-color
 depth-only inheritance; execution validates the inherited color/depth formats
-and sample count against the active primary scope, then binds the primary's
-live attachment images into the copied draw records. Malformed chains,
-mismatched scopes, and non-inherited active-query secondary execution remain
+and sample count against the active primary scope, requires
+`VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT` on dynamic-rendering
+primaries, and then binds the primary's live attachment images into the copied
+draw records. Malformed chains, mismatched scopes, inline dynamic-rendering
+secondary execution, and non-inherited active-query secondary execution remain
 failure-atomic. Traditional render-pass secondaries also accept
 `occlusionQueryEnable = VK_TRUE` with the active primary query inherited;
 `VK_QUERY_CONTROL_PRECISE_BIT` remains rejected while the precise-query

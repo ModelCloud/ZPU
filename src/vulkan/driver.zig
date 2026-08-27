@@ -5475,7 +5475,7 @@ fn cmdExecuteCommands(cb: ?CommandBuffer, count: u32, buffers: ?[*]const Command
         } else if (primary.impl.dynamic_rendering) {
             const primary_color_format = if (primary.impl.dynamic_color_image) |color| color.format else 0;
             const primary_samples = if (primary.impl.dynamic_color_image) |color| color.samples else if (primary.impl.dynamic_depth_image) |depth| depth.samples else 1;
-            if (!secondary.impl.render_pass_continue or !secondary.impl.dynamic_inheritance or (primary.impl.active_query_pool != null and !secondary.impl.inherited_occlusion) or secondary.impl.inherited_dynamic_view_mask != 0 or secondary.impl.inherited_dynamic_color_format != primary_color_format or secondary.impl.inherited_dynamic_depth_format != (if (primary.impl.dynamic_depth_image) |depth| depth.format else 0) or secondary.impl.inherited_dynamic_stencil_format != 0 or secondary.impl.inherited_dynamic_samples != primary_samples) {
+            if (primary.impl.render_contents != 1 or !secondary.impl.render_pass_continue or !secondary.impl.dynamic_inheritance or (primary.impl.active_query_pool != null and !secondary.impl.inherited_occlusion) or secondary.impl.inherited_dynamic_view_mask != 0 or secondary.impl.inherited_dynamic_color_format != primary_color_format or secondary.impl.inherited_dynamic_depth_format != (if (primary.impl.dynamic_depth_image) |depth| depth.format else 0) or secondary.impl.inherited_dynamic_stencil_format != 0 or secondary.impl.inherited_dynamic_samples != primary_samples) {
                 primary.impl.invalid = true;
                 return;
             }
@@ -16153,6 +16153,8 @@ test "vkcube presentation path records submits and presents two swapchain images
         .depth_attachment = &dynamic_depth_attachment,
         .stencil_attachment = null,
     };
+    var dynamic_secondary_primary = dynamic_rendering;
+    dynamic_secondary_primary.flags = rendering_contents_secondary_bit;
     try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
     validImageLocked(images[0]).?.layout = 0;
@@ -16263,7 +16265,9 @@ test "vkcube presentation path records submits and presents two swapchain images
     var depth_only_rendering = dynamic_rendering;
     depth_only_rendering.color_attachment_count = 0;
     depth_only_rendering.color_attachments = null;
-    cmdBeginRendering(multi_commands[0], &depth_only_rendering);
+    var depth_only_secondary_primary = depth_only_rendering;
+    depth_only_secondary_primary.flags = rendering_contents_secondary_bit;
+    cmdBeginRendering(multi_commands[0], &depth_only_secondary_primary);
     cmdExecuteCommands(multi_commands[0], 1, &render_secondary);
     try std.testing.expect(!multi_commands[0].impl.invalid);
     cmdEndRendering(multi_commands[0]);
@@ -16345,7 +16349,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     validImageLocked(images[0]).?.layout = 1;
     validImageLocked(depth_image).?.layout = 3;
     resetQueryPool(device, occlusion_pool, 0, 1);
-    cmdBeginRendering(multi_commands[0], &dynamic_rendering);
+    cmdBeginRendering(multi_commands[0], &dynamic_secondary_primary);
     cmdBeginQuery(multi_commands[0], occlusion_pool, 0, 0);
     cmdExecuteCommands(multi_commands[0], 1, &render_secondary);
     try std.testing.expect(!multi_commands[0].impl.invalid);
@@ -16374,11 +16378,24 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(!render_secondary[0].impl.invalid);
     try std.testing.expectEqual(Result.success, endCommandBuffer(render_secondary[0]));
 
+    // Secondary command execution is only legal when the dynamic rendering
+    // scope explicitly opts into secondary contents.  An inline scope must
+    // reject the execute without flattening any child commands.
     try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
     validImageLocked(images[0]).?.layout = 1;
     validImageLocked(depth_image).?.layout = 3;
     cmdBeginRendering(multi_commands[0], &dynamic_rendering);
+    const inline_secondary_count = multi_commands[0].impl.count;
+    cmdExecuteCommands(multi_commands[0], 1, &render_secondary);
+    try std.testing.expect(multi_commands[0].impl.invalid);
+    try std.testing.expectEqual(inline_secondary_count, multi_commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    validImageLocked(images[0]).?.layout = 1;
+    validImageLocked(depth_image).?.layout = 3;
+    cmdBeginRendering(multi_commands[0], &dynamic_secondary_primary);
     cmdExecuteCommands(multi_commands[0], 1, &render_secondary);
     try std.testing.expect(!multi_commands[0].impl.invalid);
     cmdEndRendering(multi_commands[0]);
@@ -16389,7 +16406,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
     validImageLocked(images[0]).?.layout = 1;
     validImageLocked(depth_image).?.layout = 3;
-    cmdBeginRendering(multi_commands[0], &dynamic_rendering);
+    cmdBeginRendering(multi_commands[0], &dynamic_secondary_primary);
     cmdBeginQuery(multi_commands[0], occlusion_pool, 0, 0);
     try std.testing.expect(!multi_commands[0].impl.invalid);
     cmdExecuteCommands(multi_commands[0], 1, &render_secondary);
@@ -16401,7 +16418,7 @@ test "vkcube presentation path records submits and presents two swapchain images
         try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
         validImageLocked(images[0]).?.layout = 1;
         validImageLocked(depth_image).?.layout = 3;
-        cmdBeginRendering(multi_commands[0], &dynamic_rendering);
+        cmdBeginRendering(multi_commands[0], &dynamic_secondary_primary);
         cmdExecuteCommands(multi_commands[0], 1, &render_secondary);
         try std.testing.expect(!multi_commands[0].impl.invalid);
         cmdEndRendering(multi_commands[0]);
