@@ -10267,7 +10267,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
         command_buffer.impl.invalid = true;
         return;
     };
-    if (ci.s_type != 1000044001 or ci.p_next != null or ci.flags != 0 or ci.layer_count == 0 or ci.view_mask != 0 or ci.color_attachment_count > 1 or (ci.color_attachment_count != 0 and ci.color_attachments == null) or command_buffer.impl.state != 1 or command_buffer.impl.invalid or command_buffer.impl.active_render_pass != null or command_buffer.impl.active_framebuffer != null or command_buffer.impl.dynamic_rendering or command_buffer.impl.dynamic_inheritance) {
+    if (ci.s_type != 1000044001 or ci.p_next != null or ci.flags != 0 or ci.layer_count == 0 or ci.layer_count > max_image_array_layers or ci.view_mask != 0 or ci.color_attachment_count > 1 or (ci.color_attachment_count != 0 and ci.color_attachments == null) or command_buffer.impl.state != 1 or command_buffer.impl.invalid or command_buffer.impl.active_render_pass != null or command_buffer.impl.active_framebuffer != null or command_buffer.impl.dynamic_rendering or command_buffer.impl.dynamic_inheritance) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -10355,7 +10355,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
     }
     const render_width = if (color) |image| image.width else if (depth) |image| image.width else 0;
     const render_height = if (color) |image| image.height else if (depth) |image| image.height else 0;
-    if ((render_width != 0 and (@as(u64, @intCast(ci.render_area.offset.x)) + ci.render_area.extent.width > render_width or @as(u64, @intCast(ci.render_area.offset.y)) + ci.render_area.extent.height > render_height))) {
+    if ((render_width != 0 and (@as(u64, @intCast(ci.render_area.offset.x)) + ci.render_area.extent.width > render_width or @as(u64, @intCast(ci.render_area.offset.y)) + ci.render_area.extent.height > render_height)) or (render_width == 0 and (ci.render_area.extent.width > max_2d_extent or ci.render_area.extent.height > max_2d_extent))) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -17896,6 +17896,36 @@ test "dynamic rendering begin and end own attachment scope" {
     var empty_submit_commands = [_]CommandBuffer{commands[0]};
     const empty_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &empty_submit_commands, .signal_semaphore_count = 0, .signal_semaphores = null };
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&empty_submit), 0));
+    // Attachmentless rendering still consumes the device's framebuffer
+    // envelope.  Reject oversized layer counts and extents before publishing
+    // any dynamic-rendering state, including on the allocation-free warm path.
+    var oversized_empty_layers = empty_rendering;
+    oversized_empty_layers.layer_count = max_image_array_layers + 1;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    const oversized_layers_count = commands[1].impl.count;
+    cmdBeginRendering(commands[1], &oversized_empty_layers);
+    try std.testing.expect(commands[1].impl.invalid);
+    try std.testing.expect(!commands[1].impl.dynamic_rendering);
+    try std.testing.expectEqual(oversized_layers_count, commands[1].impl.count);
+    var oversized_empty_extent = empty_rendering;
+    oversized_empty_extent.render_area.extent.width = max_2d_extent + 1;
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    const oversized_extent_count = commands[1].impl.count;
+    cmdBeginRendering(commands[1], &oversized_empty_extent);
+    try std.testing.expect(commands[1].impl.invalid);
+    try std.testing.expect(!commands[1].impl.dynamic_rendering);
+    try std.testing.expectEqual(oversized_extent_count, commands[1].impl.count);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+        try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+        cmdBeginRendering(commands[1], &oversized_empty_extent);
+        try std.testing.expect(commands[1].impl.invalid);
+        try std.testing.expectEqual(@as(u16, 0), commands[1].impl.count);
+    }
+    test_allocations_before_failure = null;
     // A depth-only dynamic-rendering scope is valid even when no color
     // attachment is supplied. It can clear and store depth; executable
     // CPU-cube draws use the same optional-color raster path as the primary

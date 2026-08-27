@@ -68,6 +68,10 @@ buffers validate against their inherited rendering formats before execution.
 Color-only dynamic scopes now carry the optional-depth contract through
 submission prevalidation and both scalar raster paths, skipping depth storage
 without allocating a synthetic attachment.
+Dynamic-rendering begin also enforces the advertised 256-layer device limit
+for attachmentless scopes and bounds their render areas to the same 8192x8192
+framebuffer envelope used by image creation and device limits; malformed
+values fail before command state or recording mutation.
 The bounded compute profile now also admits direct scalar StorageBuffer
 `OpLoad` reads (including read/write aliasing of the descriptor range) with
 transactional output commits; static access-chain reads share the same
