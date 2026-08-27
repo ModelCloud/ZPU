@@ -11614,7 +11614,14 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     const first_depth_layout = render_pass.subpass_depth_layouts[0];
     const layout_count: usize = @as(usize, @intFromBool(color_image != null)) + @as(usize, @intFromBool(depth != null));
     const clear_count: usize = @as(usize, if (clear_color or clear_depth) 1 else 0);
-    const layout_capacity = @as(usize, command_buffer.impl.count) + layout_count + clear_count;
+    // DONT_CARE (and the promoted LOAD_OP_NONE) invalidate attachment
+    // contents at the start of the render pass. Record an explicit discard
+    // after any initial-layout transition so the undefined-content contract
+    // is visible to submission prevalidation and the CPU image metadata.
+    const color_discard = color_image != null and (render_pass.color_load_op == 2 or render_pass.color_load_op == attachment_load_op_none);
+    const depth_discard = depth != null and (render_pass.depth_load_op == 2 or render_pass.depth_load_op == attachment_load_op_none);
+    const discard_count: usize = @as(usize, @intFromBool(color_discard)) + @as(usize, @intFromBool(depth_discard));
+    const layout_capacity = @as(usize, command_buffer.impl.count) + layout_count + clear_count + discard_count;
     if ((contents != 0 and contents != 1) or begin.s_type != 43 or !renderPassBeginPNextValid(begin.p_next) or command_buffer.impl.level != 0 or command_buffer.impl.state != 1 or command_buffer.impl.active_framebuffer != null or layout_capacity > command_buffer.impl.commands.len or !clear_values_valid or !render_pass.owner.eql(command_buffer.impl.owner) or framebuffer.owner != command_buffer.impl.owner or (image != null and image.?.owner != command_buffer.impl.owner) or !framebuffer.render_compatibility.eql(&render_pass.compatibility) or (color_image != null and render_pass.color_initial_layout != 0 and tracked_color_layout != render_pass.color_initial_layout) or (depth != null and render_pass.depth_initial_layout != 0 and tracked_depth_layout != render_pass.depth_initial_layout) or begin.render_area.extent.width == 0 or begin.render_area.extent.height == 0 or area_end_x > render_width or area_end_y > render_height) {
         command_buffer.impl.invalid = true;
         return;
@@ -11625,6 +11632,8 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     command_buffer.impl.render_contents = contents;
     if (color_image) |color_target| if (color_old_layout != first_color_layout) record(command_buffer, .{ .transition = .{ .image = color_target, .old_layout = color_old_layout, .new_layout = first_color_layout } });
     if (depth) |depth_image| if (depth_old_layout != first_depth_layout) record(command_buffer, .{ .transition = .{ .image = depth_image, .old_layout = depth_old_layout, .new_layout = first_depth_layout } });
+    if (color_discard) record(command_buffer, .{ .discard_image = .{ .image = color_image.?, .layer_count = framebuffer.layers } });
+    if (depth_discard) record(command_buffer, .{ .discard_image = .{ .image = depth.?, .layer_count = framebuffer.layers } });
     if (clear_color or clear_depth) {
         if (color_image) |color_target| {
             record(command_buffer, .{ .render_clear = .{ .image = color_target, .depth = depth, .color = .{ @intFromFloat(std.math.clamp(color[2], 0, 1) * 255), @intFromFloat(std.math.clamp(color[1], 0, 1) * 255), @intFromFloat(std.math.clamp(color[0], 0, 1) * 255), @intFromFloat(std.math.clamp(color[3], 0, 1) * 255) }, .depth_value = depth_value, .expected_color_layout = first_color_layout, .expected_depth_layout = if (depth != null) first_depth_layout else -1, .clear_color = clear_color, .clear_depth = clear_depth } });
@@ -11717,7 +11726,15 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
             clear_depth = true;
         }
     }
-    if ((clear_color or clear_depth) and command_buffer.impl.count == command_buffer.impl.commands.len) {
+    // DONT_CARE and LOAD_OP_NONE make attachment contents undefined at the
+    // beginning of dynamic rendering. Keep that operation explicit and
+    // ordered before any load-op clear, while retaining the view's layer
+    // range for arrayed attachments.
+    const color_discard = color_attachment != null and (color_attachment.?.load_op == 2 or color_attachment.?.load_op == attachment_load_op_none);
+    const depth_discard = depth != null and (ci.depth_attachment.?.load_op == 2 or ci.depth_attachment.?.load_op == attachment_load_op_none);
+    const discard_count: usize = @as(usize, @intFromBool(color_discard)) + @as(usize, @intFromBool(depth_discard));
+    const clear_count: usize = @as(usize, @intFromBool(clear_color or clear_depth));
+    if (@as(usize, command_buffer.impl.count) + discard_count + clear_count > command_buffer.impl.commands.len) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -11731,6 +11748,8 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
         command_buffer.impl.invalid = true;
         return;
     }
+    if (color_discard) record(command_buffer, .{ .discard_image = .{ .image = color.?, .base_layer = color_view.?.base_array_layer, .layer_count = ci.layer_count } });
+    if (depth_discard) record(command_buffer, .{ .discard_image = .{ .image = depth.?, .base_layer = depth_view.?.base_array_layer, .layer_count = ci.layer_count } });
     if (clear_color or clear_depth) {
         if (color) |color_image| {
             record(command_buffer, .{ .render_clear = .{ .image = color_image, .depth = depth, .color = clear_color_value, .depth_value = clear_depth_value, .layer_count = ci.layer_count, .expected_color_layout = tracked_color_layout, .expected_depth_layout = tracked_depth_layout, .clear_color = clear_color, .clear_depth = clear_depth } });
@@ -20326,9 +20345,34 @@ test "dynamic rendering begin and end own attachment scope" {
     try std.testing.expectEqual(@as(u32, 1), commands[1].impl.line_stipple_factor);
     try std.testing.expectEqual(@as(u16, 0xffff), commands[1].impl.line_stipple_pattern);
     try std.testing.expect(!commands[1].impl.line_stipple_set);
+    // DONT_CARE invalidates dynamic-rendering attachment contents at begin,
+    // without requiring a clear value or changing the attachment layout.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
+    var dont_care_attachment = attachment;
+    dont_care_attachment.load_op = 2;
+    dont_care_attachment.store_op = 0;
+    var dont_care_rendering = rendering;
+    dont_care_rendering.color_attachments = @ptrCast(&dont_care_attachment);
+    const dont_care_bytes_before = std.mem.readInt(u32, imageBytes(validImageLocked(image).?)[0..4], .little);
+    cmdBeginRendering(commands[1], &dont_care_rendering);
+    try std.testing.expect(!commands[1].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 1), commands[1].impl.count);
+    try std.testing.expectEqual(@as(std.meta.Tag(Command), .discard_image), std.meta.activeTag(commands[1].impl.commands[0]));
+    cmdEndRendering(commands[1]);
+    try std.testing.expect(!commands[1].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 1), commands[1].impl.count);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[1]));
+    var dont_care_submit_commands = [_]CommandBuffer{commands[1]};
+    const dont_care_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &dont_care_submit_commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&dont_care_submit), 0));
+    try std.testing.expectEqual(dont_care_bytes_before, std.mem.readInt(u32, imageBytes(validImageLocked(image).?)[0..4], .little));
+    try std.testing.expect(validImageLocked(image).?.force_full_present);
+
     // Vulkan 1.3/1.4 NONE load/store operations are valid dynamic-rendering
-    // attachment controls.  LOAD_OP_NONE skips the clear and STORE_OP_NONE
-    // records a post-render discard without touching the attachment bytes.
+    // attachment controls.  LOAD_OP_NONE records a begin-time discard and
+    // STORE_OP_NONE records a post-render discard without touching bytes.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[1], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[1], &begin));
     var none_attachment = attachment;
     none_attachment.load_op = attachment_load_op_none;
@@ -20339,11 +20383,12 @@ test "dynamic rendering begin and end own attachment scope" {
     cmdBeginRendering(commands[1], &none_rendering);
     try std.testing.expect(!commands[1].impl.invalid);
     try std.testing.expect(commands[1].impl.dynamic_color_store_none);
-    try std.testing.expectEqual(@as(u16, 0), commands[1].impl.count);
-    cmdEndRendering(commands[1]);
-    try std.testing.expect(!commands[1].impl.invalid);
     try std.testing.expectEqual(@as(u16, 1), commands[1].impl.count);
     try std.testing.expectEqual(@as(std.meta.Tag(Command), .discard_image), std.meta.activeTag(commands[1].impl.commands[0]));
+    cmdEndRendering(commands[1]);
+    try std.testing.expect(!commands[1].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 2), commands[1].impl.count);
+    try std.testing.expectEqual(@as(std.meta.Tag(Command), .discard_image), std.meta.activeTag(commands[1].impl.commands[1]));
     try std.testing.expectEqual(Result.success, endCommandBuffer(commands[1]));
     var none_submit_commands = [_]CommandBuffer{commands[1]};
     const none_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &none_submit_commands, .signal_semaphore_count = 0, .signal_semaphores = null };
@@ -24778,7 +24823,44 @@ test "traditional render passes honor load operations and image layout transitio
     try std.testing.expect(image_object.force_full_present);
     destroyFramebuffer(ctx.device, none_framebuffer, null);
     destroyRenderPass(ctx.device, none_render_pass, null);
+
+    // DONT_CARE load operations discard prior attachment contents at begin,
+    // after the initial-layout transition, without requiring a clear value.
+    attachment.load_op = 2;
     attachment.store_op = 0;
+    attachment.initial_layout = 1;
+    attachment.final_layout = 1;
+    render_info.attachments = @ptrCast(&attachment);
+    var dont_care_render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(ctx.device, &render_info, null, &dont_care_render_pass));
+    var dont_care_framebuffer_info = framebuffer_info;
+    dont_care_framebuffer_info.render_pass = dont_care_render_pass;
+    var dont_care_framebuffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createFramebuffer(ctx.device, &dont_care_framebuffer_info, null, &dont_care_framebuffer));
+    render_begin.render_pass = dont_care_render_pass;
+    render_begin.framebuffer = dont_care_framebuffer;
+    render_begin.clear_value_count = 0;
+    render_begin.clear_values = null;
+    std.mem.writeInt(u32, imageBytes(image_object)[0..4], 0x55667788, .little);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdBeginRenderPass(command[0], &render_begin, 0);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 2), command[0].impl.count);
+    try std.testing.expectEqual(@as(std.meta.Tag(Command), .discard_image), std.meta.activeTag(command[0].impl.commands[1]));
+    cmdEndRenderPass(command[0]);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(@as(u16, 3), command[0].impl.count);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expect(image_object.force_full_present);
+    try std.testing.expectEqual(@as(i32, 1), image_object.layout);
+    destroyFramebuffer(ctx.device, dont_care_framebuffer, null);
+    destroyRenderPass(ctx.device, dont_care_render_pass, null);
+    attachment.store_op = 0;
+    attachment.load_op = 0;
+    attachment.initial_layout = 0;
+    attachment.final_layout = 1;
     render_info.attachments = @ptrCast(&attachment);
 
     // A CLEAR attachment needs the corresponding indexed clear value.  The

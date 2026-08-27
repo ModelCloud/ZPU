@@ -341,8 +341,9 @@ are recorded (including transitions earlier in the same command buffer) and
 checked again at submit, so a post-record host layout change fails atomically
 instead of executing against stale state. The promoted
 `VK_ATTACHMENT_LOAD_OP_NONE` and `VK_ATTACHMENT_STORE_OP_NONE` values are
-accepted for dynamic attachments; load-none skips clears and store-none records
-a submission-time content discard at the end of the rendering scope. Secondary command buffers can now carry the bounded
+accepted for dynamic attachments; DONT_CARE and load-none record a
+submission-time content discard at begin, while store-none records another
+discard at the end of the rendering scope. Secondary command buffers can now carry the bounded
 `VkCommandBufferInheritanceRenderingInfo` chain, including zero-color
 depth-only inheritance; execution validates the inherited color/depth formats
 and sample count against the active primary scope, requires
@@ -492,7 +493,9 @@ Traditional render-pass begin/end now honor the canonical attachment load
 operation and image-layout contract for color-only, color+depth, and depth-only
 D32 subpasses: LOAD preserves existing pixels, CLEAR requires only the
 attachment-indexed clear values it consumes, UNDEFINED captures the tracked
-prior layout as a discard transition, and begin/end record the subpass, each
+prior layout as a discard transition, DONT_CARE and promoted LOAD_OP_NONE record
+an explicit begin-time content discard after any initial-layout transition, and
+begin/end record the subpass, each
 declared inter-subpass, and final layout transitions for submission-time
 validation. Depth-only framebuffers bind a single depth view and use the same
 draw/clear lifecycle without fabricating a color target. Legal zero-attachment
@@ -504,8 +507,8 @@ attachmentless, and 4096-iteration allocation-free tests cover the paths. Clear 
 subpass layouts, rejecting host-side layout changes after recording and
 propagating those expectations into secondary command-buffer execution. The
 promoted LOAD_OP_NONE/STORE_OP_NONE enum values are accepted as well;
-store-none records a bounded content discard at end-of-pass while retaining
-bytes until submission.
+load-none records a bounded content discard at begin, while store-none records
+a bounded content discard at end-of-pass; both retain bytes until submission.
 
 The Vulkan 1.4 host-image-copy commands accept both advertised four-byte color
 formats (RGBA8 UNORM and BGRA8 UNORM) with identical row/layer addressing and
