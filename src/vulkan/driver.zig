@@ -243,7 +243,14 @@ pub const PhysicalDeviceShaderExpectAssumeFeatures = extern struct { s_type: i32
 pub const PhysicalDevicePipelineProtectedAccessFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
 pub const PhysicalDevicePipelineRobustnessFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
 pub const PhysicalDeviceLineRasterizationFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [6]u32 };
-pub const PhysicalDeviceVertexAttributeDivisorFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [2]u32 };
+pub const PhysicalDeviceVertexAttributeDivisorFeatures = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    vertex_attribute_instance_rate_divisor: u32,
+    vertex_attribute_instance_rate_zero_divisor: u32,
+};
+pub const PhysicalDeviceVertexAttributeDivisorFeaturesKHR = PhysicalDeviceVertexAttributeDivisorFeatures;
+pub const PhysicalDeviceVertexAttributeDivisorFeaturesEXT = PhysicalDeviceVertexAttributeDivisorFeatures;
 pub const PhysicalDeviceDynamicRenderingLocalReadFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
 pub const PhysicalDeviceProperties2 = extern struct { s_type: i32, p_next: ?*anyopaque, properties: Properties };
 // The promoted properties carry a large, version-specific payload.  Their
@@ -320,7 +327,14 @@ pub const PhysicalDevicePipelineRobustnessProperties = extern struct {
 };
 pub const PhysicalDevicePipelineRobustnessPropertiesEXT = PhysicalDevicePipelineRobustnessProperties;
 pub const PhysicalDeviceLineRasterizationProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
-pub const PhysicalDeviceVertexAttributeDivisorProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
+pub const PhysicalDeviceVertexAttributeDivisorProperties = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    max_vertex_attrib_divisor: u32,
+    supports_non_zero_first_instance: u32,
+};
+pub const PhysicalDeviceVertexAttributeDivisorPropertiesKHR = PhysicalDeviceVertexAttributeDivisorProperties;
+pub const PhysicalDeviceVertexAttributeDivisorPropertiesEXT = PhysicalDeviceVertexAttributeDivisorProperties;
 pub const PhysicalDeviceFormatProperties2 = extern struct { s_type: i32, p_next: ?*anyopaque, format_properties: FormatProperties };
 pub const FormatProperties3 = extern struct { s_type: i32, p_next: ?*anyopaque, linear_tiling_features: u64, optimal_tiling_features: u64, buffer_features: u64 };
 pub const PhysicalDeviceImageFormatInfo2 = extern struct { s_type: i32, p_next: ?*const anyopaque, format: i32, image_type: i32, tiling: i32, usage: u32, flags: u32 };
@@ -1630,6 +1644,7 @@ fn coreFeaturePayloadWords(s_type: i32) ?usize {
         1000053001, 1000211000, 1000257000, 1000177000 => 3,
         1000083000 => 4,
         1000259000 => 6,
+        1000191002 => 2,
         49 => 12,
         53 => 15,
         1000161001 => 20,
@@ -1788,7 +1803,7 @@ fn corePropertyPayloadBytes(s_type: i32) ?usize {
         1000145002 => 8,
         1000071004 => 48,
         1000094000, 1000168000, 1000199000, 1000225000, 1000068002 => 16,
-        1000117000, 1000053002, 1000413001, 1000130000, 1000259002, 1000525000 => 8,
+        1000117000, 1000053002, 1000413001, 1000130000, 1000259002, 1000526000 => 8,
         1000196000 => 520,
         50 => 96,
         52 => 720,
@@ -1904,7 +1919,7 @@ fn populatePromotedPropertyPayload(s_type: i32, bytes: []u8) void {
         1000259002 => { // VkPhysicalDeviceLineRasterizationProperties
             propertyWriteU32(bytes, 0, 4);
         },
-        1000525000 => { // VkPhysicalDeviceVertexAttributeDivisorProperties
+        1000526000 => { // VkPhysicalDeviceVertexAttributeDivisorProperties
             propertyWriteU32(bytes, 0, 1);
             propertyWriteU32(bytes, 4, 1);
         },
@@ -16536,6 +16551,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     var vulkan11_features = PhysicalDeviceVulkan11Features{ .s_type = 49, .p_next = null, .values = [_]u32{0xffff_ffff} ** 12 };
     var vulkan12_features = PhysicalDeviceVulkan12Features{ .s_type = 51, .p_next = @ptrCast(&vulkan11_features), .values = [_]u32{0xffff_ffff} ** 47 };
     var features = PhysicalDeviceFeatures2{ .s_type = 1000059000, .p_next = @ptrCast(&vulkan12_features), .features = std.mem.zeroes(Features) };
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceVertexAttributeDivisorFeatures));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVertexAttributeDivisorFeatures, "vertex_attribute_instance_rate_divisor"));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceVertexAttributeDivisorProperties));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVertexAttributeDivisorProperties, "max_vertex_attrib_divisor"));
     getPhysicalDeviceFeatures2(ctx.physical, &features);
     try std.testing.expect(std.mem.allEqual(u32, &features.features.values, 0));
     try std.testing.expect(std.mem.allEqual(u32, &vulkan11_features.values, 0));
@@ -16561,13 +16580,17 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     var line_features = PhysicalDeviceLineRasterizationFeatures{ .s_type = 1000259000, .p_next = null, .values = [_]u32{0xffff_ffff} ** 6 };
     var descriptor_features = PhysicalDeviceDescriptorIndexingFeatures{ .s_type = 1000161001, .p_next = @ptrCast(&line_features), .values = [_]u32{0xffff_ffff} ** 20 };
     var storage_features = PhysicalDevice16BitStorageFeatures{ .s_type = 1000083000, .p_next = @ptrCast(&descriptor_features), .values = [_]u32{0xffff_ffff} ** 4 };
-    features.p_next = @ptrCast(&storage_features);
+    var divisor_features = PhysicalDeviceVertexAttributeDivisorFeatures{ .s_type = 1000191002, .p_next = @ptrCast(&storage_features), .vertex_attribute_instance_rate_divisor = 0xffff_ffff, .vertex_attribute_instance_rate_zero_divisor = 0xffff_ffff };
+    features.p_next = @ptrCast(&divisor_features);
     getPhysicalDeviceFeatures2(ctx.physical, &features);
+    try std.testing.expectEqual(@as(u32, 0), divisor_features.vertex_attribute_instance_rate_divisor);
+    try std.testing.expectEqual(@as(u32, 0), divisor_features.vertex_attribute_instance_rate_zero_divisor);
     try std.testing.expect(std.mem.allEqual(u32, &storage_features.values, 0));
     try std.testing.expect(std.mem.allEqual(u32, &descriptor_features.values, 0));
     try std.testing.expect(std.mem.allEqual(u32, &line_features.values, 0));
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&descriptor_features)), storage_features.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&line_features)), descriptor_features.p_next);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&storage_features)), divisor_features.p_next);
     var duplicate_line_features = PhysicalDeviceLineRasterizationFeatures{ .s_type = 1000259000, .p_next = null, .values = [_]u32{0xaaaa_aaaa} ** 6 };
     line_features.p_next = @ptrCast(&duplicate_line_features);
     features.features.values[0] = 0x1111_1111;
@@ -16637,7 +16660,8 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     id_properties.p_next = @ptrCast(&subgroup_properties);
     var driver_properties = PhysicalDeviceDriverProperties{ .s_type = 1000196000, .p_next = @ptrCast(&id_properties), .driver_id = -1, .driver_name = [_]u8{0xff} ** 256, .driver_info = [_]u8{0xff} ** 256, .conformance_version = .{ .major = 0xff, .minor = 0xff, .subminor = 0xff, .patch = 0xff } };
     var host_copy_properties = PhysicalDeviceHostImageCopyProperties{ .s_type = 1000270001, .p_next = @ptrCast(&driver_properties), .payload = [_]u8{0xff} ** 56 };
-    var pipeline_robustness_properties = PhysicalDevicePipelineRobustnessProperties{ .s_type = 1000068002, .p_next = @ptrCast(&host_copy_properties), .default_robustness_storage_buffers = -1, .default_robustness_uniform_buffers = -1, .default_robustness_vertex_inputs = -1, .default_robustness_images = -1 };
+    var divisor_properties = PhysicalDeviceVertexAttributeDivisorProperties{ .s_type = 1000526000, .p_next = @ptrCast(&host_copy_properties), .max_vertex_attrib_divisor = 0xffff_ffff, .supports_non_zero_first_instance = 0xffff_ffff };
+    var pipeline_robustness_properties = PhysicalDevicePipelineRobustnessProperties{ .s_type = 1000068002, .p_next = @ptrCast(&divisor_properties), .default_robustness_storage_buffers = -1, .default_robustness_uniform_buffers = -1, .default_robustness_vertex_inputs = -1, .default_robustness_images = -1 };
     var maintenance6_properties = PhysicalDeviceMaintenance6Properties{ .s_type = 1000545001, .p_next = @ptrCast(&pipeline_robustness_properties), .block_texel_view_compatible_multiple_layers = 0xffff_ffff, .max_combined_image_sampler_descriptor_count = 0xffff_ffff, .fragment_shading_rate_clamp_combiner_inputs = 0xffff_ffff };
     var maintenance5_properties = PhysicalDeviceMaintenance5Properties{ .s_type = 1000470001, .p_next = @ptrCast(&maintenance6_properties), .early_fragment_multisample_coverage_after_sample_counting = 0xffff_ffff, .early_fragment_sample_mask_test_before_sample_counting = 0xffff_ffff, .depth_stencil_swizzle_one_support = 0xffff_ffff, .polygon_mode_point_size = 0xffff_ffff, .non_strict_single_pixel_wide_lines_use_parallelogram = 0xffff_ffff, .non_strict_wide_lines_use_parallelogram = 0xffff_ffff };
     var vulkan14_individual_properties = PhysicalDeviceVulkan14Properties{ .s_type = 56, .p_next = @ptrCast(&maintenance5_properties), .payload = [_]u8{0xff} ** 128 };
@@ -16668,6 +16692,8 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(i32, 0), pipeline_robustness_properties.default_robustness_uniform_buffers);
     try std.testing.expectEqual(@as(i32, 0), pipeline_robustness_properties.default_robustness_vertex_inputs);
     try std.testing.expectEqual(@as(i32, 0), pipeline_robustness_properties.default_robustness_images);
+    try std.testing.expectEqual(@as(u32, 1), divisor_properties.max_vertex_attrib_divisor);
+    try std.testing.expectEqual(@as(u32, 1), divisor_properties.supports_non_zero_first_instance);
     try std.testing.expectEqualSlices(u8, &pipeline_cache_uuid, host_copy_properties.payload[32..48]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, host_copy_properties.payload[48..52], .little));
     try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, vulkan14_individual_properties.payload[0..4], .little));
@@ -16680,7 +16706,8 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&maintenance3_properties)), subgroup_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&maintenance6_properties)), maintenance5_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&pipeline_robustness_properties)), maintenance6_properties.p_next);
-    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&host_copy_properties)), pipeline_robustness_properties.p_next);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&divisor_properties)), pipeline_robustness_properties.p_next);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&host_copy_properties)), divisor_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&driver_properties)), host_copy_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&maintenance5_properties)), vulkan14_individual_properties.p_next);
     test_allocations_before_failure = 0;
@@ -16693,6 +16720,12 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(u32, 0x1111_1111), maintenance5_properties.early_fragment_multisample_coverage_after_sample_counting);
     try std.testing.expectEqual(@as(u32, 0xaaaa_aaaa), duplicate_maintenance6_properties.block_texel_view_compatible_multiple_layers);
     maintenance6_properties.p_next = @ptrCast(&pipeline_robustness_properties);
+    var wrong_divisor_properties = divisor_properties;
+    wrong_divisor_properties.s_type = 1000525000;
+    wrong_divisor_properties.max_vertex_attrib_divisor = 0x1111_1111;
+    properties.p_next = @ptrCast(&wrong_divisor_properties);
+    getPhysicalDeviceProperties2(ctx.physical, &properties);
+    try std.testing.expectEqual(@as(u32, 0x1111_1111), wrong_divisor_properties.max_vertex_attrib_divisor);
     properties.p_next = @ptrCast(&unknown_feature_chain);
     properties.properties.api_version = 0xdead_beef;
     getPhysicalDeviceProperties2(ctx.physical, &properties);

@@ -71,6 +71,11 @@ field layouts (including the 12-byte Maintenance 6 payload) and return the
 truthful all-zero optional-capability/device-default policy. Duplicate or
 unknown property nodes leave the complete `vkGetPhysicalDeviceProperties2`
 output untouched.
+
+The promoted vertex-attribute-divisor feature and property nodes now use the
+registry sTypes (`1000191002` and `1000526000`) and typed two-field bodies;
+feature queries report both controls disabled, while property queries report
+the bounded divisor policy and reject the former incorrect sType.
 Graphics pipeline creation now also consumes the Vulkan 1.3
 `VkPipelineRenderingCreateInfo` pNext for `renderPass = VK_NULL_HANDLE`:
 the bounded dynamic-rendering profile records one BGRA8 color format and
