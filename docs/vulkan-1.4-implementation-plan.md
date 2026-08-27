@@ -878,6 +878,14 @@ Shared swapchain transport storage follows the same rule: transport teardown
 waits for all pinned swapchain images instead of freeing shared presentation
 bytes underneath a submitted image.
 
+Pipeline execution state follows the same submission lifetime boundary.  Queue
+submission pins graphics and compute pipeline records before dropping the
+registry mutex; destroying a pipeline therefore tombstones it immediately but
+defers executor, canonical-key, and owned SPIR-V program teardown until the
+last execution pin is released.  The compute-profile regression covers the
+destroy-while-pinned path and verifies that the executor remains usable until
+release.
+
 - [ ] **A8 — secondary command buffers:** inheritance, execution, reset, and
   lifetime rules. Traditional render-pass inheritance now matches the active
   subpass for multi-subpass execution, and the bounded dynamic rendering

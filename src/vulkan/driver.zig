@@ -1374,8 +1374,18 @@ const GraphicsPipelineObj = struct {
     stencil_test_enable: u32 = 0,
     viewport: Viewport,
     scissor: cpu_cube.Rect,
+    active_users: std.atomic.Value(u32) = .init(0),
+    retire_pending: bool = false,
 };
-const ComputePipelineObj = struct { owner: DeviceIdentity, canonical: Canonical, layout: Canonical, executor: ?render_ir_exec.Executor = null, dispatch_base: bool = false };
+const ComputePipelineObj = struct {
+    owner: DeviceIdentity,
+    canonical: Canonical,
+    layout: Canonical,
+    executor: ?render_ir_exec.Executor = null,
+    dispatch_base: bool = false,
+    active_users: std.atomic.Value(u32) = .init(0),
+    retire_pending: bool = false,
+};
 const SyntheticError = render_ir_exec.Error || error{ InvalidDevice, InvalidPipeline, InvalidAbi, InvalidStage };
 
 // Deliberately private: this scalar proof hook is not a Vulkan command, entry
@@ -3842,10 +3852,16 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
             if (child_state.* == .live and object.owner.eql(d)) child_state.* = .tombstone;
         }
         for (&graphics_pipeline_objects, &graphics_pipeline_state) |*object, *child_state| {
-            if (child_state.* == .live and object.owner.eql(d)) child_state.* = .tombstone;
+            if (child_state.* == .live and object.owner.eql(d)) {
+                child_state.* = .tombstone;
+                object.retire_pending = true;
+            }
         }
         for (&compute_pipeline_objects, &compute_pipeline_state) |*object, *child_state| {
-            if (child_state.* == .live and object.owner.eql(d)) child_state.* = .tombstone;
+            if (child_state.* == .live and object.owner.eql(d)) {
+                child_state.* = .tombstone;
+                object.retire_pending = true;
+            }
         }
         for (&private_data_slot_objects, &private_data_slot_state) |*slot, *child_state| if (child_state.* == .live and slot.owner == d) {
             child_state.* = .tombstone;
@@ -3870,17 +3886,12 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
             object.compatibility.deinit();
         };
         for (&graphics_pipeline_objects, graphics_pipeline_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) {
-            object.execution_abi.deinit();
-            object.canonical.deinit();
-            object.layout.deinit();
-            object.set0.deinit();
-            object.render_compatibility.deinit();
-            if (object.vertex_program) |*program| program.deinit(allocator);
-            if (object.fragment_program) |*program| program.deinit(allocator);
+            object.retire_pending = true;
+            retireGraphicsPipelineLocked(object);
         };
         for (&compute_pipeline_objects, compute_pipeline_state) |*object, child_state| if (child_state != .never and object.owner.eql(d)) {
-            object.canonical.deinit();
-            object.layout.deinit();
+            object.retire_pending = true;
+            retireComputePipelineLocked(object);
         };
         for (&swapchain_objects, &swapchain_state) |*swapchain, *child_state| if (child_state.* == .live and swapchain.owner == d) {
             swapchain.transport_retire_pending = true;
@@ -4271,6 +4282,72 @@ const PinnedResources = struct {
     memory_count: usize = 0,
 };
 
+const PinnedPipelines = struct {
+    graphics: [max_resource_pins]*GraphicsPipelineObj = undefined,
+    graphics_count: usize = 0,
+    compute: [max_resource_pins]*ComputePipelineObj = undefined,
+    compute_count: usize = 0,
+};
+
+fn retireGraphicsPipelineLocked(pipeline: *GraphicsPipelineObj) void {
+    if (!pipeline.retire_pending or pipeline.active_users.load(.acquire) != 0) return;
+    pipeline.execution_abi.deinit();
+    pipeline.canonical.deinit();
+    pipeline.layout.deinit();
+    pipeline.set0.deinit();
+    pipeline.render_compatibility.deinit();
+    if (pipeline.vertex_program) |*program| {
+        program.deinit(allocator);
+        pipeline.vertex_program = null;
+    }
+    if (pipeline.fragment_program) |*program| {
+        program.deinit(allocator);
+        pipeline.fragment_program = null;
+    }
+    pipeline.retire_pending = false;
+}
+
+fn retireComputePipelineLocked(pipeline: *ComputePipelineObj) void {
+    if (!pipeline.retire_pending or pipeline.active_users.load(.acquire) != 0) return;
+    if (pipeline.executor) |*executor| {
+        executor.deinit();
+        pipeline.executor = null;
+    }
+    pipeline.canonical.deinit();
+    pipeline.layout.deinit();
+    pipeline.retire_pending = false;
+}
+
+fn releaseGraphicsPipelineUserLocked(pipeline: *GraphicsPipelineObj) void {
+    const previous = pipeline.active_users.fetchSub(1, .acq_rel);
+    if (previous == 1) retireGraphicsPipelineLocked(pipeline);
+}
+
+fn releaseComputePipelineUserLocked(pipeline: *ComputePipelineObj) void {
+    const previous = pipeline.active_users.fetchSub(1, .acq_rel);
+    if (previous == 1) retireComputePipelineLocked(pipeline);
+}
+
+fn pinGraphicsPipelineLocked(pipeline: *GraphicsPipelineObj, owner: Device, pinned: *PinnedPipelines) bool {
+    if ((stateForObject(GraphicsPipelineObj, pipeline, &graphics_pipeline_objects, &graphics_pipeline_state) orelse return false).* != .live or pipeline.retire_pending or !pipeline.owner.eql(owner)) return false;
+    for (pinned.graphics[0..pinned.graphics_count]) |existing| if (existing == pipeline) return true;
+    if (pinned.graphics_count == pinned.graphics.len) return false;
+    _ = pipeline.active_users.fetchAdd(1, .acq_rel);
+    pinned.graphics[pinned.graphics_count] = pipeline;
+    pinned.graphics_count += 1;
+    return true;
+}
+
+fn pinComputePipelineLocked(pipeline: *ComputePipelineObj, owner: Device, pinned: *PinnedPipelines) bool {
+    if ((stateForObject(ComputePipelineObj, pipeline, &compute_pipeline_objects, &compute_pipeline_state) orelse return false).* != .live or pipeline.retire_pending or !pipeline.owner.eql(owner)) return false;
+    for (pinned.compute[0..pinned.compute_count]) |existing| if (existing == pipeline) return true;
+    if (pinned.compute_count == pinned.compute.len) return false;
+    _ = pipeline.active_users.fetchAdd(1, .acq_rel);
+    pinned.compute[pinned.compute_count] = pipeline;
+    pinned.compute_count += 1;
+    return true;
+}
+
 /// Shared swapchain image bytes are owned by the presentation transport, not
 /// by ImageObj.  Keep that transport alive until every image pin has drained.
 fn maybeRetireSwapchainTransportLocked(handle: usize) void {
@@ -4415,11 +4492,33 @@ fn pinCommandResourcesInBufferLocked(command_buffer: *CommandBufferObj, owner: D
     return true;
 }
 
+fn pinCommandPipelinesLocked(command: Command, owner: Device, pinned: *PinnedPipelines) bool {
+    switch (command) {
+        .dispatch => |op| return pinComputePipelineLocked(op.pipeline, owner, pinned),
+        .dispatch_indirect => |op| return pinComputePipelineLocked(op.pipeline, owner, pinned),
+        .cube_draw => |op| return pinGraphicsPipelineLocked(op.pipeline, owner, pinned),
+        .indirect_draw => |op| return pinGraphicsPipelineLocked(op.pipeline, owner, pinned),
+        else => return true,
+    }
+}
+
+fn pinCommandPipelinesInBufferLocked(command_buffer: *CommandBufferObj, owner: Device, pinned: *PinnedPipelines) bool {
+    for (command_buffer.impl.commands[0..command_buffer.impl.count]) |command| if (!pinCommandPipelinesLocked(command, owner, pinned)) return false;
+    return true;
+}
+
 fn releasePinnedResourcesLocked(pinned: *PinnedResources) void {
     for (pinned.images[0..pinned.image_count]) |image| releaseImageUserLocked(image);
     for (pinned.memories[0..pinned.memory_count]) |memory| releaseMemoryUserLocked(memory);
     pinned.image_count = 0;
     pinned.memory_count = 0;
+}
+
+fn releasePinnedPipelinesLocked(pinned: *PinnedPipelines) void {
+    for (pinned.graphics[0..pinned.graphics_count]) |pipeline| releaseGraphicsPipelineUserLocked(pipeline);
+    for (pinned.compute[0..pinned.compute_count]) |pipeline| releaseComputePipelineUserLocked(pipeline);
+    pinned.graphics_count = 0;
+    pinned.compute_count = 0;
 }
 fn allocateMemory(device: ?Device, info: ?*const MemoryAllocateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     const d = device orelse return .error_initialization_failed;
@@ -11642,28 +11741,16 @@ fn destroyPipeline(device: ?Device, handle: usize, alloc: ?*const Alloc) callcon
     const d = device orelse return;
     if (validGraphicsPipelineLocked(handle)) |object| {
         if (!validDeviceLocked(d) or !object.owner.eql(d)) return;
-        object.execution_abi.deinit();
-        object.canonical.deinit();
-        object.layout.deinit();
-        object.set0.deinit();
-        object.render_compatibility.deinit();
-        if (object.vertex_program) |*program| {
-            program.deinit(allocator);
-            object.vertex_program = null;
-        }
-        if (object.fragment_program) |*program| {
-            program.deinit(allocator);
-            object.fragment_program = null;
-        }
         stateForObject(GraphicsPipelineObj, object, &graphics_pipeline_objects, &graphics_pipeline_state).?.* = .tombstone;
+        object.retire_pending = true;
+        retireGraphicsPipelineLocked(object);
         return;
     }
     const compute = validComputePipelineLocked(handle) orelse return;
     if (validDeviceLocked(d) and compute.owner.eql(d)) {
-        if (compute.executor) |*executor| executor.deinit();
-        compute.canonical.deinit();
-        compute.layout.deinit();
         stateForObject(ComputePipelineObj, compute, &compute_pipeline_objects, &compute_pipeline_state).?.* = .tombstone;
+        compute.retire_pending = true;
+        retireComputePipelineLocked(compute);
     }
 }
 fn createPrivateDataSlot(device: ?Device, info: ?*const PrivateDataSlotCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
@@ -14674,6 +14761,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
     var pinned_command_buffers: [max_child_objects]*CommandBufferObj = undefined;
     var pinned_command_buffer_count: usize = 0;
     var pinned_resources = PinnedResources{};
+    var pinned_pipelines = PinnedPipelines{};
     for (&semaphore_objects, semaphore_state, 0..) |*semaphore, state, index| {
         if (state == .live) {
             semaphore_states[index] = semaphore.signaled.load(.acquire);
@@ -14773,24 +14861,35 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                 for (pinned_command_buffers[0..pinned_command_buffer_count]) |pinned| releaseCommandBufferUserLocked(pinned);
                 for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
                 releasePinnedResourcesLocked(&pinned_resources);
+                releasePinnedPipelinesLocked(&pinned_pipelines);
                 return .error_initialization_failed;
             }
             for (cb.impl.secondaries[0..cb.impl.secondary_count]) |secondary| if (!pinCommandBufferForSubmissionLocked(secondary, q.owner, &pinned_command_buffers, &pinned_command_buffer_count)) {
                 for (pinned_command_buffers[0..pinned_command_buffer_count]) |pinned| releaseCommandBufferUserLocked(pinned);
                 for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
                 releasePinnedResourcesLocked(&pinned_resources);
+                releasePinnedPipelinesLocked(&pinned_pipelines);
                 return .error_initialization_failed;
             };
             if (!pinQueryPoolsInCommandBufferLocked(cb, queue_owner, &pinned_query_pools, &pinned_query_pool_count)) {
                 for (pinned_command_buffers[0..pinned_command_buffer_count]) |pinned| releaseCommandBufferUserLocked(pinned);
                 for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
                 releasePinnedResourcesLocked(&pinned_resources);
+                releasePinnedPipelinesLocked(&pinned_pipelines);
                 return .error_initialization_failed;
             }
             if (!pinCommandResourcesInBufferLocked(cb, q.owner, &pinned_resources)) {
                 for (pinned_command_buffers[0..pinned_command_buffer_count]) |pinned| releaseCommandBufferUserLocked(pinned);
                 for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
                 releasePinnedResourcesLocked(&pinned_resources);
+                releasePinnedPipelinesLocked(&pinned_pipelines);
+                return .error_initialization_failed;
+            }
+            if (!pinCommandPipelinesInBufferLocked(cb, q.owner, &pinned_pipelines)) {
+                for (pinned_command_buffers[0..pinned_command_buffer_count]) |pinned| releaseCommandBufferUserLocked(pinned);
+                for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
+                releasePinnedResourcesLocked(&pinned_resources);
+                releasePinnedPipelinesLocked(&pinned_pipelines);
                 return .error_initialization_failed;
             }
         }
@@ -14806,6 +14905,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
         }
         for (pinned_query_pools[0..pinned_query_pool_count]) |pool| releaseQueryPoolUserLocked(pool);
         releasePinnedResourcesLocked(&pinned_resources);
+        releasePinnedPipelinesLocked(&pinned_pipelines);
     }
     var query_context = QueryExecutionContext{};
     for (list[0..count]) |submit| {
@@ -24647,6 +24747,23 @@ fn computeStorageProfileTest() !void {
     test_allocations_before_failure = 0;
     for (0..4096) |_| executeComputeDispatch(.{ .base = .{ 0, 0, 0 }, .groups = .{ 1, 1, 1 }, .pipeline = warm_pipeline, .layout = validPipelineLayoutLocked(pipeline_layout), .descriptors = warm_descriptors });
     test_allocations_before_failure = null;
+
+    // Pipeline execution state is also retained outside the registry lock.
+    // A destroy racing that window tombstones the handle but defers executor
+    // teardown until the final submission pin is released.
+    var pipeline_pins = PinnedPipelines{};
+    lock();
+    const pipeline_object = validComputePipelineLocked(pipeline).?;
+    const pipeline_pinned = pinComputePipelineLocked(pipeline_object, ctx.device, &pipeline_pins);
+    mutex.unlock();
+    try std.testing.expect(pipeline_pinned);
+    destroyPipeline(ctx.device, pipeline, null);
+    try std.testing.expect(pipeline_object.executor != null);
+    lock();
+    releasePinnedPipelinesLocked(&pipeline_pins);
+    const pipeline_released = pipeline_object.executor == null;
+    mutex.unlock();
+    try std.testing.expect(pipeline_released);
 
     freeCommandBuffers(ctx.device, command_pool, 1, &command);
     destroyCommandPool(ctx.device, command_pool, null);
