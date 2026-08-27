@@ -1080,7 +1080,8 @@ pub const SubpassDescriptionDepthStencilResolve = extern struct { s_type: i32, p
 pub const SubpassDependency2 = extern struct { s_type: i32, p_next: ?*const anyopaque, src_subpass: u32, dst_subpass: u32, src_stage_mask: u32, dst_stage_mask: u32, src_access_mask: u32, dst_access_mask: u32, dependency_flags: u32, view_offset: i32 };
 pub const RenderPassCreateInfo2 = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, attachment_count: u32, attachments: ?[*]const AttachmentDescription2, subpass_count: u32, subpasses: ?[*]const SubpassDescription2, dependency_count: u32, dependencies: ?[*]const SubpassDependency2, correlated_view_mask_count: u32, correlated_view_masks: ?[*]const u32 };
 pub const RenderPassMultiviewCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, subpass_count: u32, view_masks: ?[*]const u32, dependency_count: u32, view_offsets: ?[*]const i32, correlation_mask_count: u32, correlation_masks: ?[*]const u32 };
-pub const RenderPassInputAttachmentAspectCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, aspect_reference_count: u32, aspect_references: ?[*]const u32 };
+pub const InputAttachmentAspectReference = extern struct { subpass: u32, input_attachment_index: u32, aspect_mask: u32 };
+pub const RenderPassInputAttachmentAspectCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, aspect_reference_count: u32, aspect_references: ?[*]const InputAttachmentAspectReference };
 pub const RenderingAttachmentInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, image_view: usize, image_layout: i32, resolve_mode: i32, resolve_image_view: usize, resolve_image_layout: i32, load_op: i32, store_op: i32, clear_value: ClearValue };
 pub const RenderingInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, render_area: Rect2D, layer_count: u32, view_mask: u32, color_attachment_count: u32, color_attachments: ?[*]const RenderingAttachmentInfo, depth_attachment: ?*const RenderingAttachmentInfo, stencil_attachment: ?*const RenderingAttachmentInfo };
 pub const RenderingAreaInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, view_mask: u32, color_attachment_count: u32, color_attachment_formats: ?[*]const i32, depth_attachment_format: i32, stencil_attachment_format: i32 };
@@ -10106,8 +10107,15 @@ fn renderPassCreate2PNextValid(raw: ?*const anyopaque) bool {
     }
     return true;
 }
+// The legacy VkRenderPassCreateInfo shares the same promoted core pNext
+// nodes as VkRenderPassCreateInfo2.  Keep the validation in one bounded path
+// so a feature-disabled zero-valued node is accepted consistently by both
+// entry points.
+fn renderPassCreatePNextValid(raw: ?*const anyopaque) bool {
+    return renderPassCreate2PNextValid(raw);
+}
 fn buildRenderPass(ci: *const RenderPassCreateInfo, compatibility_only: bool) CanonicalError!Canonical {
-    if (ci.s_type != 38 or ci.p_next != null or ci.flags != 0 or ci.attachment_count > 16 or ci.subpass_count == 0 or ci.subpass_count > 8 or ci.dependency_count > 32 or (ci.attachment_count != 0 and ci.attachments == null) or ci.subpasses == null or (ci.dependency_count != 0 and ci.dependencies == null)) return error.Invalid;
+    if (ci.s_type != 38 or !renderPassCreatePNextValid(ci.p_next) or ci.flags != 0 or ci.attachment_count > 16 or ci.subpass_count == 0 or ci.subpass_count > 8 or ci.dependency_count > 32 or (ci.attachment_count != 0 and ci.attachments == null) or ci.subpasses == null or (ci.dependency_count != 0 and ci.dependencies == null)) return error.Invalid;
     var w: CanonicalWriter = .{};
     defer w.deinit();
     try w.header(if (compatibility_only) 4 else 3);
@@ -19264,6 +19272,7 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(DescriptorSetVariableDescriptorCountAllocateInfo));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DescriptorSetVariableDescriptorCountLayoutSupport));
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(RenderPassMultiviewCreateInfo));
+    try std.testing.expectEqual(@as(usize, 12), @sizeOf(InputAttachmentAspectReference));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(RenderPassInputAttachmentAspectCreateInfo));
     try std.testing.expectEqual(@as(usize, 88), @sizeOf(QueueFamilyGlobalPriorityProperties));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DeviceQueueGlobalPriorityCreateInfo));
@@ -26258,6 +26267,23 @@ test "traditional render passes honor load operations and image layout transitio
     try std.testing.expectEqual(@as(i32, 0), validRenderPassLocked(render_pass).?.color_initial_layout);
     try std.testing.expectEqual(@as(i32, 2), validRenderPassLocked(render_pass).?.color_subpass_layout);
     try std.testing.expectEqual(@as(i32, 1), validRenderPassLocked(render_pass).?.color_final_layout);
+    // Vulkan 1.1 promotes the render-pass multiview and input-attachment
+    // aspect nodes.  ZPU has those features disabled, but a well-formed
+    // zero-valued chain is still an ABI-valid request and must not be
+    // rejected merely because the legacy create entry point was used.
+    var zero_aspects = RenderPassInputAttachmentAspectCreateInfo{ .s_type = 1000117000, .p_next = null, .aspect_reference_count = 0, .aspect_references = null };
+    var zero_multiview = RenderPassMultiviewCreateInfo{ .s_type = 1000053000, .p_next = @ptrCast(&zero_aspects), .subpass_count = 0, .view_masks = null, .dependency_count = 0, .view_offsets = null, .correlation_mask_count = 0, .correlation_masks = null };
+    render_info.p_next = @ptrCast(&zero_multiview);
+    var promoted_render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(ctx.device, &render_info, null, &promoted_render_pass));
+    try std.testing.expect(promoted_render_pass != 0);
+    destroyRenderPass(ctx.device, promoted_render_pass, null);
+    zero_multiview.subpass_count = 1;
+    const promoted_output_sentinel: usize = 0xd00d;
+    var rejected_promoted_render_pass = promoted_output_sentinel;
+    try std.testing.expectEqual(Result.error_initialization_failed, createRenderPass(ctx.device, &render_info, null, &rejected_promoted_render_pass));
+    try std.testing.expectEqual(promoted_output_sentinel, rejected_promoted_render_pass);
+    render_info.p_next = null;
     const framebuffer_info = FramebufferCreateInfo{ .s_type = 37, .p_next = null, .flags = 0, .render_pass = render_pass, .attachment_count = 1, .attachments = @ptrCast(&view), .width = 2, .height = 2, .layers = 1 };
     var framebuffer: usize = 0;
     try std.testing.expectEqual(Result.success, createFramebuffer(ctx.device, &framebuffer_info, null, &framebuffer));

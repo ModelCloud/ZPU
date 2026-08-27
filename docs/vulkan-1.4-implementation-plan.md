@@ -56,6 +56,11 @@ the caller's output pointer, and an unmap of an allocation that is not
 currently mapped returns `VK_ERROR_MEMORY_MAP_FAILED` without changing state.
 Both commands share the host-coherent mapper and a 1024-iteration
 allocation-free warm-path regression.
+Legacy `vkCreateRenderPass` now shares the bounded promoted-chain validator
+with `vkCreateRenderPass2`, accepting feature-disabled zero-valued
+`VkRenderPassMultiviewCreateInfo` and
+`VkRenderPassInputAttachmentAspectCreateInfo` nodes while rejecting
+non-default multiview state transactionally.
 Compute command recording now requires an owned bound compute
 pipeline, carries pipeline/layout/descriptor lifetime snapshots through
 submission prevalidation, and has a 4096-iteration allocation-free warm path.
