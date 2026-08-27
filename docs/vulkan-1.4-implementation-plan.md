@@ -532,10 +532,13 @@ sampled or storage shader access, together with the core generic `MEMORY_READ` a
 barriers, event/timestamp commands, and `vkQueueSubmit2`; promoted aliases are
 normalized before dynamic/traditional render-pass scope checks, and mixed
 barriers lower through the union of their canonical stages so graphics-only
-self-dependencies are not accidentally widened to `ALL_COMMANDS`. Unknown
-high bits remain rejected before command state or submission state is published.
-ABI, rollback, high-bit positive/negative, scoped graphics alias, transfer
-rejection, and 4096-iteration allocation-free tests cover the conversion path.
+self-dependencies are not accidentally widened to `ALL_COMMANDS`. Dynamic and
+traditional framebuffer-space source stages now require
+`VK_DEPENDENCY_BY_REGION_BIT`, with the same rule enforced by legacy and
+synchronization2 lowering. Unknown high bits remain rejected before command
+state or submission state is published. ABI, rollback, high-bit
+positive/negative, scoped graphics alias, transfer rejection, missing-BY_REGION
+negative, and 4096-iteration allocation-free tests cover the conversion path.
 `vkCmdSetEvent2`, `vkCmdResetEvent2`, and
 `vkCmdWaitEvents2` now also accept valid empty `VkDependencyInfo` nodes, which
 record the event operation without inventing a barrier; non-empty nodes still

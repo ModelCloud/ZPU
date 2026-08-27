@@ -6588,7 +6588,9 @@ fn dynamicRenderingDependencyValid(info: *const DependencyInfo) bool {
         const attachment_access: u64 = 0x780 | 0x18000; // attachment plus generic memory visibility
         const src_stage = sync2ScopeStageMask(barrier.src_stage_mask) orelse return false;
         const dst_stage = sync2ScopeStageMask(barrier.dst_stage_mask) orelse return false;
-        if (src_stage & ~@as(u32, 0x700) != 0 or dst_stage & ~@as(u32, 0x700) != 0 or barrier.src_access_mask & ~attachment_access != 0 or barrier.dst_access_mask & ~attachment_access != 0) return false;
+        if (src_stage & ~@as(u32, 0x700) != 0 or dst_stage & ~@as(u32, 0x700) != 0 or
+            (src_stage & 0x700 != 0 and info.dependency_flags & 1 == 0) or
+            barrier.src_access_mask & ~attachment_access != 0 or barrier.dst_access_mask & ~attachment_access != 0) return false;
     };
     return true;
 }
@@ -6622,7 +6624,7 @@ fn legacyDependencyScopeValid(command_buffer: *const CommandBufferObj, src_stage
         if (buffer_list.len != 0 or image_list.len != 0) return false;
         if (memory_list.len == 0) return true;
         const lowered_all_commands = src_stage_mask == 0x1_0000 and dst_stage_mask == 0x1_0000;
-        if (!lowered_all_commands and (src_stage_mask & ~@as(u32, 0x700) != 0 or dst_stage_mask & ~@as(u32, 0x700) != 0)) return false;
+        if (!lowered_all_commands and (src_stage_mask & ~@as(u32, 0x700) != 0 or dst_stage_mask & ~@as(u32, 0x700) != 0 or (src_stage_mask & 0x700 != 0 and dependency_flags != null and dependency_flags.? & 1 == 0))) return false;
         for (memory_list) |barrier| if (barrier.src_access_mask & ~@as(u32, 0x18780) != 0 or barrier.dst_access_mask & ~@as(u32, 0x18780) != 0) return false;
         return true;
     }
@@ -19561,8 +19563,11 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expect(eventDependencyInfoFlagsValid(&dependency));
     try std.testing.expect(!eventDependencyInfoFlagsValid(&by_region_dependency));
     const attachment_memory_barrier = MemoryBarrier2{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 0x400, .dst_stage_mask = 0x400, .src_access_mask = 0x80, .dst_access_mask = 0x100 };
-    const attachment_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 1, .memory_barriers = @ptrCast(&attachment_memory_barrier), .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
+    const attachment_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 1, .memory_barrier_count = 1, .memory_barriers = @ptrCast(&attachment_memory_barrier), .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
     try std.testing.expect(dynamicRenderingDependencyValid(&attachment_dependency));
+    var attachment_without_by_region = attachment_dependency;
+    attachment_without_by_region.dependency_flags = 0;
+    try std.testing.expect(!dynamicRenderingDependencyValid(&attachment_without_by_region));
     try std.testing.expect(!dynamicRenderingDependencyValid(&dependency));
     var generic_memory_barrier = attachment_memory_barrier;
     generic_memory_barrier.src_access_mask = 0x8000;
@@ -19808,6 +19813,14 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     cmdPipelineBarrier2(commands[0], &generic_memory_dependency);
     try std.testing.expect(!commands[0].impl.invalid);
     try std.testing.expectEqual(before_dynamic_generic_barrier, commands[0].impl.count);
+    const before_dynamic_sync2_framebuffer = commands[0].impl.count;
+    cmdPipelineBarrier2(commands[0], &attachment_without_by_region);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_dynamic_sync2_framebuffer, commands[0].impl.count);
+    commands[0].impl.invalid = false;
+    cmdPipelineBarrier2(commands[0], &attachment_dependency);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(before_dynamic_sync2_framebuffer, commands[0].impl.count);
     const before_dynamic_wait_scope = commands[0].impl.count;
     cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&dependency));
     try std.testing.expect(commands[0].impl.invalid);
@@ -19818,6 +19831,14 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(before_dynamic_legacy_barrier, commands[0].impl.count);
     commands[0].impl.invalid = false;
+    const before_dynamic_legacy_framebuffer = commands[0].impl.count;
+    cmdPipelineBarrier(commands[0], 0x400, 0x400, 0, 1, @ptrCast(&legacy_memory_barrier), 0, null, 0, null);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_dynamic_legacy_framebuffer, commands[0].impl.count);
+    commands[0].impl.invalid = false;
+    cmdPipelineBarrier(commands[0], 0x400, 0x400, 1, 1, @ptrCast(&legacy_memory_barrier), 0, null, 0, null);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(before_dynamic_legacy_framebuffer, commands[0].impl.count);
     commands[0].impl.dynamic_rendering = false;
     commands[0].impl.active_render_pass = @ptrFromInt(@as(usize, @alignOf(RenderPassObj)));
     var traditional_attachment_dependency = attachment_dependency;
