@@ -314,7 +314,9 @@ The unrestricted SPIR-V graphics space is still intentionally deferred.
 Because `drawIndirectFirstInstance` remains disabled in the truthful feature
 policy, all positive indexed and non-indexed indirect argument records now
 validate `firstInstance == 0` at submission, including every record in the
-bounded four-draw indirect-count variants; zero-count commands remain no-ops.
+bounded four-draw indirect-count variants; commands whose Vulkan valid usage
+permits an empty range remain no-ops, while required-positive descriptor bind
+and push-update counts are rejected.
 Positive indirect draws also enforce the Vulkan command-structure stride
 minimum (16 bytes non-indexed, 20 bytes indexed) and four-byte alignment;
 short or zero strides fail before recording without mutating command state.
