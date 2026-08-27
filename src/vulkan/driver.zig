@@ -16620,6 +16620,13 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     sparse_count = 8;
     getPhysicalDeviceSparseImageFormatProperties2(ctx.physical, &sparse_info, &sparse_count, @ptrCast(&malformed_sparse_property));
     try std.testing.expectEqual(@as(u32, 8), sparse_count);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        sparse_count = 1;
+        getPhysicalDeviceSparseImageFormatProperties2(ctx.physical, &sparse_info, &sparse_count, @ptrCast(&sparse_property));
+        try std.testing.expectEqual(@as(u32, 0), sparse_count);
+    }
+    test_allocations_before_failure = null;
     sparse_count = 7;
     getPhysicalDeviceSparseImageFormatProperties2(@ptrFromInt(8), &sparse_info, &sparse_count, null);
     try std.testing.expectEqual(@as(u32, 7), sparse_count);
@@ -16841,6 +16848,13 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     device_sparse_count = 12;
     getDeviceImageSparseMemoryRequirements(ctx.device, &device_image_info, &device_sparse_count, @ptrCast(&malformed_device_sparse_requirement));
     try std.testing.expectEqual(@as(u32, 12), device_sparse_count);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        device_sparse_count = 1;
+        getDeviceImageSparseMemoryRequirements(ctx.device, &device_image_info, &device_sparse_count, @ptrCast(&device_sparse_requirement));
+        try std.testing.expectEqual(@as(u32, 0), device_sparse_count);
+    }
+    test_allocations_before_failure = null;
     var sparse_requirements_count: u32 = 1;
     const sparse_requirements = ImageSparseMemoryRequirementsInfo2{ .s_type = 1000146002, .p_next = null, .image = image };
     var sparse_requirement = SparseImageMemoryRequirements2{ .s_type = 1000146004, .p_next = null, .memory_requirements = std.mem.zeroes(SparseImageMemoryRequirements) };
