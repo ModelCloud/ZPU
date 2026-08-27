@@ -322,6 +322,8 @@ fn supportedGlslExtInst(ext: u32, result: ir.Type, operand: ir.Type) bool {
         // value, subject to the operand-specific validation in
         // validateGlslInterpolation.
         75, 76, 77 => result.scalar == .f32 and result.rows == 1 and result.columns >= 1 and result.columns <= 4 and sameShape(result, operand),
+        35 => result.scalar == .f32 and result.rows == 1 and result.columns >= 1 and result.columns <= 4 and sameShape(result, operand),
+        51 => result.scalar == .f32 and result.rows == 1 and result.columns >= 1 and result.columns <= 4 and sameShape(result, operand),
         33 => result.scalar == .f32 and result.columns == 1 and result.rows == 1 and operand.scalar == .f32 and operand.columns == 4 and operand.rows == 4,
         34 => result.scalar == .f32 and result.columns == 4 and result.rows == 4 and sameShape(result, operand),
         53 => result.scalar == .f32 and result.rows == 1 and sameShape(result, operand),
@@ -377,6 +379,40 @@ fn validateGlslInterpolation(nodes: []const Node, stage: ir.Stage, ext: u32, res
         const offset = try valueShape(nodes, words[1]);
         if (offset.scalar != .f32 or offset.columns != 2 or offset.rows != 1 or !try constantZero(nodes, words[1])) return error.Unsupported;
     }
+}
+
+/// Validate the bounded pointer-result forms of GLSL.std.450 Modf/Frexp.
+/// Function-local pointers are intentionally excluded: the profile has no
+/// general local-memory representation, while entry-point output/storage
+/// interfaces have a stable scratch location that can carry the second
+/// result without introducing an aggregate ABI.
+fn validateGlslModfFrexp(nodes: []const Node, stage: ir.Stage, ext: u32, result: ir.Type, operand: ir.Type, pointer_id: u32) Error!void {
+    if (ext != 35 and ext != 51) return;
+    if (!supportedGlslExtInst(ext, result, operand) or result.scalar != .f32 or result.rows != 1 or result.columns < 1 or result.columns > 4) return error.Unsupported;
+    const pointer = nodes[try id(nodes, pointer_id)];
+    if (pointer.kind != .variable or (pointer.a != 3 and !(stage == .compute and pointer.a == 12))) return error.Unsupported;
+    const pointer_type = nodes[try id(nodes, pointer.type_id)];
+    if (pointer_type.kind != .pointer) return error.Malformed;
+    const pointee = try resultShape(nodes, pointer_type.b);
+    if (pointee.rows != 1 or pointee.columns != result.columns) return error.Unsupported;
+    if (ext == 35) {
+        if (pointee.scalar != .f32 or !sameShape(pointee, result)) return error.Unsupported;
+    } else if (pointee.scalar != .i32) return error.Unsupported;
+}
+
+fn glslOutputInterfaceIndex(nodes: []const Node, decorations: []const Decorations, interfaces: []const ir.Interface, stage: ir.Stage, pointer_id: u32) Error!u32 {
+    const pointer = nodes[try id(nodes, pointer_id)];
+    if (pointer.kind != .variable or (pointer.a != 3 and !(stage == .compute and pointer.a == 12))) return error.Unsupported;
+    const decoration = decorations[try id(nodes, pointer_id)];
+    for (interfaces, 0..) |item, index| {
+        if (item.storage != .output) continue;
+        if (stage == .compute and pointer.a == 12) {
+            if (item.binding == decoration.binding and item.descriptor_set == decoration.descriptor_set) return @intCast(index);
+        } else if (item.location == decoration.location and item.builtin_position == decoration.builtin_position) {
+            return @intCast(index);
+        }
+    }
+    return error.Unsupported;
 }
 
 /// Return whether a scalar or composite constant consists entirely of zero
@@ -793,15 +829,16 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 if (!in_function or !label_seen or terminated or block_terminated or w.len < 5 or w.len > 7) return error.Malformed;
                 const set = nodes[try id(nodes, w[2])];
                 if (set.kind != .ext_inst_import or set.a != 450) return error.Unsupported;
-                if (w[3] < 1 or w[3] > 24 and w[3] != 25 and w[3] != 26 and w[3] != 27 and w[3] != 28 and w[3] != 29 and w[3] != 30 and w[3] != 31 and w[3] != 32 and w[3] != 33 and w[3] != 34 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50 and w[3] != 53 and w[3] != 54 and w[3] != 55 and w[3] != 56 and w[3] != 57 and w[3] != 58 and w[3] != 59 and w[3] != 60 and w[3] != 61 and w[3] != 62 and w[3] != 63 and w[3] != 65 and w[3] != 66 and w[3] != 67 and w[3] != 68 and w[3] != 69 and w[3] != 70 and w[3] != 71 and w[3] != 72 and w[3] != 73 and w[3] != 74 and w[3] != 75 and w[3] != 76 and w[3] != 77 and w[3] != 79 and w[3] != 80 and w[3] != 81) return error.Unsupported;
+                if (w[3] < 1 or w[3] > 24 and w[3] != 25 and w[3] != 26 and w[3] != 27 and w[3] != 28 and w[3] != 29 and w[3] != 30 and w[3] != 31 and w[3] != 32 and w[3] != 33 and w[3] != 34 and w[3] != 35 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50 and w[3] != 51 and w[3] != 53 and w[3] != 54 and w[3] != 55 and w[3] != 56 and w[3] != 57 and w[3] != 58 and w[3] != 59 and w[3] != 60 and w[3] != 61 and w[3] != 62 and w[3] != 63 and w[3] != 65 and w[3] != 66 and w[3] != 67 and w[3] != 68 and w[3] != 69 and w[3] != 70 and w[3] != 71 and w[3] != 72 and w[3] != 73 and w[3] != 74 and w[3] != 75 and w[3] != 76 and w[3] != 77 and w[3] != 79 and w[3] != 80 and w[3] != 81) return error.Unsupported;
                 if ((w[3] >= 1 and w[3] <= 24 or w[3] >= 27 and w[3] <= 34 or w[3] >= 54 and w[3] <= 61 or w[3] == 62 or w[3] == 63 or w[3] == 65 or w[3] == 68 or w[3] >= 72 and w[3] <= 75) and w.len != 5) return error.Malformed;
-                if ((w[3] == 25 or w[3] == 26 or w[3] == 53 or w[3] == 76 or w[3] == 77) and w.len != 6) return error.Malformed;
+                if ((w[3] == 25 or w[3] == 26 or w[3] == 35 or w[3] == 51 or w[3] == 53 or w[3] == 76 or w[3] == 77) and w.len != 6) return error.Malformed;
                 if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48 or w[3] == 66 or w[3] == 67 or w[3] == 70 or w[3] == 79 or w[3] == 80) and w.len != 6) return error.Malformed;
                 if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50 or w[3] == 69 or w[3] == 71 or w[3] == 81) and w.len != 7) return error.Malformed;
                 const result = try resultShape(nodes, w[0]);
                 const operand = try valueShape(nodes, w[4]);
                 if (!supportedGlslExtInst(w[3], result, operand)) return error.Unsupported;
                 try validateGlslInterpolation(nodes, requested_stage, w[3], result, operand, w[4..]);
+                if (w[3] == 35 or w[3] == 51) try validateGlslModfFrexp(nodes, requested_stage, w[3], result, operand, w[5]);
                 if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48 or w[3] == 79 or w[3] == 80) and !sameShape(result, try valueShape(nodes, w[5]))) return error.Unsupported;
                 if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50 or w[3] == 81) and (!sameShape(result, try valueShape(nodes, w[5])) or !sameShape(result, try valueShape(nodes, w[6])))) return error.Unsupported;
                 if ((w[3] == 66 or w[3] == 67 or w[3] == 70) and !sameShape(operand, try valueShape(nodes, w[5]))) return error.Unsupported;
@@ -938,15 +975,16 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             12 => {
                 if (w.len < 5 or w.len > 7) return error.Malformed;
                 const set = nodes[try id(nodes, w[2])];
-                if (set.kind != .ext_inst_import or set.a != 450 or (w[3] < 1 or w[3] > 24 and w[3] != 25 and w[3] != 26 and w[3] != 27 and w[3] != 28 and w[3] != 29 and w[3] != 30 and w[3] != 31 and w[3] != 32 and w[3] != 33 and w[3] != 34 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50 and w[3] != 53 and w[3] != 54 and w[3] != 55 and w[3] != 56 and w[3] != 57 and w[3] != 58 and w[3] != 59 and w[3] != 60 and w[3] != 61 and w[3] != 62 and w[3] != 63 and w[3] != 65 and w[3] != 66 and w[3] != 67 and w[3] != 68 and w[3] != 69 and w[3] != 70 and w[3] != 71 and w[3] != 72 and w[3] != 73 and w[3] != 74 and w[3] != 75 and w[3] != 76 and w[3] != 77 and w[3] != 79 and w[3] != 80 and w[3] != 81)) return error.Unsupported;
+                if (set.kind != .ext_inst_import or set.a != 450 or (w[3] < 1 or w[3] > 24 and w[3] != 25 and w[3] != 26 and w[3] != 27 and w[3] != 28 and w[3] != 29 and w[3] != 30 and w[3] != 31 and w[3] != 32 and w[3] != 33 and w[3] != 34 and w[3] != 35 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45 and w[3] != 46 and w[3] != 48 and w[3] != 49 and w[3] != 50 and w[3] != 51 and w[3] != 53 and w[3] != 54 and w[3] != 55 and w[3] != 56 and w[3] != 57 and w[3] != 58 and w[3] != 59 and w[3] != 60 and w[3] != 61 and w[3] != 62 and w[3] != 63 and w[3] != 65 and w[3] != 66 and w[3] != 67 and w[3] != 68 and w[3] != 69 and w[3] != 70 and w[3] != 71 and w[3] != 72 and w[3] != 73 and w[3] != 74 and w[3] != 75 and w[3] != 76 and w[3] != 77 and w[3] != 79 and w[3] != 80 and w[3] != 81)) return error.Unsupported;
                 if ((w[3] >= 1 and w[3] <= 24 or w[3] >= 27 and w[3] <= 34 or w[3] >= 54 and w[3] <= 61 or w[3] == 62 or w[3] == 63 or w[3] == 65 or w[3] == 68 or w[3] >= 72 and w[3] <= 75) and w.len != 5) return error.Malformed;
-                if ((w[3] == 25 or w[3] == 26 or w[3] == 53 or w[3] == 76 or w[3] == 77) and w.len != 6) return error.Malformed;
+                if ((w[3] == 25 or w[3] == 26 or w[3] == 35 or w[3] == 51 or w[3] == 53 or w[3] == 76 or w[3] == 77) and w.len != 6) return error.Malformed;
                 if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48 or w[3] == 66 or w[3] == 67 or w[3] == 70 or w[3] == 79 or w[3] == 80) and w.len != 6) return error.Malformed;
                 if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50 or w[3] == 69 or w[3] == 71 or w[3] == 81) and w.len != 7) return error.Malformed;
                 const result = try resultShape(nodes, w[0]);
                 const operand = try valueShape(nodes, w[4]);
                 if (!supportedGlslExtInst(w[3], result, operand)) return error.Unsupported;
                 try validateGlslInterpolation(nodes, requested_stage, w[3], result, operand, w[4..]);
+                if (w[3] == 35 or w[3] == 51) try validateGlslModfFrexp(nodes, requested_stage, w[3], result, operand, w[5]);
                 if ((w[3] >= 37 and w[3] <= 42 or w[3] == 48 or w[3] == 79 or w[3] == 80) and !sameShape(result, try valueShape(nodes, w[5]))) return error.Unsupported;
                 if ((w[3] >= 43 and w[3] <= 46 or w[3] == 49 or w[3] == 50 or w[3] == 81) and (!sameShape(result, try valueShape(nodes, w[5])) or !sameShape(result, try valueShape(nodes, w[6])))) return error.Unsupported;
                 if ((w[3] == 66 or w[3] == 67 or w[3] == 70) and !sameShape(operand, try valueShape(nodes, w[5]))) return error.Unsupported;
@@ -1681,7 +1719,9 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 32 => .f_inverse_sqrt,
                 33 => .f_determinant,
                 34 => .f_matrix_inverse,
+                35 => .f_modf,
                 53 => .f_ldexp,
+                51 => .f_frexp,
                 54 => .i_pack_snorm4x8,
                 55 => .i_pack_unorm4x8,
                 56 => .i_pack_snorm2x16,
@@ -1862,7 +1902,11 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             // Interpolation queries carry a sample/offset operand that is
             // validated above but has no representation in the single-sample
             // profile.  Lower only the interpolated value into copy_object.
-            const source_operands = if (instruction.opcode == 12 and node.b >= 75 and node.b <= 77) node.words[0..1] else node.words;
+            var ext_output_interface: ?u32 = null;
+            const source_operands = if (instruction.opcode == 12 and node.b >= 75 and node.b <= 77) node.words[0..1] else if (instruction.opcode == 12 and (node.b == 35 or node.b == 51)) blk: {
+                ext_output_interface = try glslOutputInterfaceIndex(nodes, decorations, interfaces.items, requested_stage, node.words[1]);
+                break :blk node.words[0..1];
+            } else node.words;
             const value_operand_count: usize = switch (instruction.opcode) {
                 79 => 2,
                 81 => 1,
@@ -1897,6 +1941,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 }
                 try operands.append(allocator, canonical_ids[source_index]);
             }
+            if (ext_output_interface) |interface_index| try operands.append(allocator, interface_index);
             if (instruction.opcode == 61) {
                 const pointer_id = node.words[0];
                 const pointer_node = nodes[try id(nodes, pointer_id)];
@@ -2892,6 +2937,33 @@ test "GLSL Ldexp admissions preserve f32 value shape" {
     try std.testing.expect(supportedGlslExtInst(53, vec4, vec4));
     try std.testing.expect(!supportedGlslExtInst(53, scalar, matrix));
     try std.testing.expect(!supportedGlslExtInst(53, matrix, matrix));
+}
+
+test "GLSL Modf and Frexp admissions validate bounded output pointers" {
+    const scalar = ir.Type{ .scalar = .f32 };
+    const integer = ir.Type{ .scalar = .i32 };
+    try std.testing.expect(supportedGlslExtInst(35, scalar, scalar));
+    try std.testing.expect(supportedGlslExtInst(51, scalar, scalar));
+    try std.testing.expect(!supportedGlslExtInst(35, integer, scalar));
+
+    var nodes = [_]Node{.{}} ** 6;
+    nodes[1] = .{ .kind = .variable, .type_id = 2, .a = 3 };
+    nodes[2] = .{ .kind = .pointer, .b = 3 };
+    nodes[3] = .{ .kind = .float, .a = 32 };
+    try validateGlslModfFrexp(&nodes, .vertex, 35, scalar, scalar, 1);
+    nodes[1].a = 7;
+    try std.testing.expectError(error.Unsupported, validateGlslModfFrexp(&nodes, .vertex, 35, scalar, scalar, 1));
+    nodes[1].a = 3;
+    nodes[2].b = 4;
+    nodes[4] = .{ .kind = .int, .a = 32, .b = 1 };
+    try validateGlslModfFrexp(&nodes, .vertex, 51, scalar, scalar, 1);
+    try std.testing.expectError(error.Unsupported, validateGlslModfFrexp(&nodes, .vertex, 35, scalar, scalar, 1));
+
+    nodes[2].b = 3;
+    var decorations = [_]Decorations{.{}} ** 6;
+    decorations[1].location = 0;
+    const interfaces = [_]ir.Interface{.{ .storage = .output, .ty = scalar, .location = 0 }};
+    try std.testing.expectEqual(@as(u32, 0), try glslOutputInterfaceIndex(&nodes, &decorations, &interfaces, .vertex, 1));
 }
 
 test "GLSL non-NaN min/max/clamp admissions preserve f32 shapes" {

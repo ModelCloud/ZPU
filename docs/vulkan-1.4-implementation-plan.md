@@ -731,6 +731,14 @@ Each slice must land with all of the following:
   which are lowered to an exact value copy.  Non-fragment stages, nonzero
   samples, and nonzero offsets remain rejected because the profile does not
   expose multisample coverage data.
+  The deprecated `GLSL.std.450` `Modf` and `Frexp` forms now have a bounded
+  pointer-result lowering: scalar/vector f32 inputs return the fractional part
+  or significand while writing the integral part or signed exponent to an
+  entry-point output interface. Function-local pointers and the aggregate
+  `ModfStruct`/`FrexpStruct` forms remain rejected because the canonical IR has
+  no general local-memory or aggregate-result ABI; non-finite `Frexp` inputs
+  are surfaced as numeric-domain errors and warm execution remains
+  allocation-free.
   A single
   side-effect-free dynamic conditional or one-case runtime switch with a common
   merge is also lowered to compare/select; generic SPIR-V dynamic control flow,

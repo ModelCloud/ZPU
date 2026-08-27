@@ -852,6 +852,33 @@ pub const Executor = struct {
                         result.bits[i] = canonicalFloat(@bitCast(scaled));
                     }
                 },
+                .f_modf, .f_frexp => {
+                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const interface_index = instruction.operands[1];
+                    if (interface_index >= self.program.interfaces.len or self.program.interfaces[interface_index].storage != .output) return error.InvalidStorage;
+                    var offset: usize = 0;
+                    for (self.program.interfaces[0..interface_index]) |item| if (item.storage == .output) {
+                        offset += try byteSize(item.ty);
+                    };
+                    const target = self.program.interfaces[interface_index];
+                    const target_lanes = try lanes(target.ty);
+                    if (target_lanes != result.lanes()) return error.InvalidType;
+                    for (0..result.lanes()) |i| {
+                        const x: f32 = @bitCast(source.bits[i]);
+                        if (instruction.op == .f_modf) {
+                            const parts = std.math.modf(x);
+                            result.bits[i] = canonicalFloat(@bitCast(parts.fpart));
+                            std.mem.writeInt(u32, self.output_scratch[offset + i * 4 ..][0..4], canonicalFloat(@bitCast(parts.ipart)), .little);
+                        } else {
+                            // The GLSL Frexp contract leaves NaN/Inf outside
+                            // the defined numeric domain for this bounded IR.
+                            if (!std.math.isFinite(x)) return error.NumericDomain;
+                            const parts = std.math.frexp(x);
+                            result.bits[i] = canonicalFloat(@bitCast(parts.significand));
+                            std.mem.writeInt(u32, self.output_scratch[offset + i * 4 ..][0..4], @bitCast(parts.exponent), .little);
+                        }
+                    }
+                },
                 .i_pack_snorm4x8, .i_pack_unorm4x8, .i_pack_snorm2x16, .i_pack_unorm2x16 => {
                     const source = try valueRef(self.values, pc, instruction.operands[0]);
                     const signed = instruction.op == .i_pack_snorm4x8 or instruction.op == .i_pack_snorm2x16;
@@ -1151,6 +1178,7 @@ fn validate(program: *const ir.Program) Error!void {
             .composite_insert => n == 3,
             .shuffle => n == 2 + try lanes(instruction.ty),
             .fneg, .ineg, .f_abs, .i_abs, .i_sign, .f_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .f_determinant, .f_matrix_inverse, .f_length, .f_normalize, .i_find_lsb, .i_find_s_msb, .i_find_u_msb, .i_pack_snorm4x8, .i_pack_unorm4x8, .i_pack_snorm2x16, .i_pack_unorm2x16, .f_unpack_snorm2x16, .f_unpack_unorm2x16, .f_unpack_snorm4x8, .f_unpack_unorm4x8, .i_pack_half2x16, .f_unpack_half2x16, .bit_not, .logical_not, .transpose, .any, .all, .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set, .bit_reverse, .bit_count, .convert, .bitcast, .copy_object, .quantize_f16 => n == 1,
+            .f_modf, .f_frexp => n == 2,
             .bit_field_insert => n == 4,
             .bit_field_s_extract, .bit_field_u_extract => n == 3,
             .select => n == 3,
@@ -1204,6 +1232,9 @@ fn validate(program: *const ir.Program) Error!void {
                 .f_ldexp => if (oi == 0) {
                     if (source_ty.scalar != .f32 or source_ty.rows != 1 or source_ty.columns != instruction.ty.columns or instruction.ty.scalar != .f32 or instruction.ty.rows != 1) return error.InvalidType;
                 } else if (source_ty.scalar != .i32 or source_ty.rows != 1 or source_ty.columns != instruction.ty.columns) return error.InvalidType,
+                .f_modf, .f_frexp => if (oi == 0) {
+                    if (source_ty.scalar != .f32 or source_ty.rows != 1 or !same(source_ty, instruction.ty)) return error.InvalidType;
+                },
                 .i_pack_snorm4x8, .i_pack_unorm4x8 => if (source_ty.scalar != .f32 or source_ty.columns != 4 or source_ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.rows != 1 or (instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32)) return error.InvalidType,
                 .i_pack_snorm2x16, .i_pack_unorm2x16 => if (source_ty.scalar != .f32 or source_ty.columns != 2 or source_ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.rows != 1 or (instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32)) return error.InvalidType,
                 .f_unpack_snorm2x16, .f_unpack_unorm2x16 => if ((source_ty.scalar != .i32 and source_ty.scalar != .u32) or source_ty.columns != 1 or source_ty.rows != 1 or instruction.ty.scalar != .f32 or instruction.ty.columns != 2 or instruction.ty.rows != 1) return error.InvalidType,
@@ -1434,6 +1465,22 @@ fn validate(program: *const ir.Program) Error!void {
                 const exponent = program.instructions[instruction.operands[1]].ty;
                 if (source.scalar != .f32 or source.rows != 1 or !same(source, instruction.ty) or exponent.scalar != .i32 or exponent.rows != 1 or exponent.columns != source.columns) return error.InvalidType;
             },
+            .f_modf => {
+                if (instruction.ty.scalar != .f32 or instruction.ty.rows != 1 or instruction.ty.columns < 1 or instruction.ty.columns > 4) return error.InvalidType;
+                const source = program.instructions[instruction.operands[0]].ty;
+                if (source.scalar != .f32 or source.rows != 1 or !same(source, instruction.ty)) return error.InvalidType;
+                const interface_index = instruction.operands[1];
+                if (interface_index >= program.interfaces.len or program.interfaces[interface_index].storage != .output or !same(program.interfaces[interface_index].ty, instruction.ty)) return error.InvalidType;
+            },
+            .f_frexp => {
+                if (instruction.ty.scalar != .f32 or instruction.ty.rows != 1 or instruction.ty.columns < 1 or instruction.ty.columns > 4) return error.InvalidType;
+                const source = program.instructions[instruction.operands[0]].ty;
+                if (source.scalar != .f32 or source.rows != 1 or !same(source, instruction.ty)) return error.InvalidType;
+                const interface_index = instruction.operands[1];
+                if (interface_index >= program.interfaces.len or program.interfaces[interface_index].storage != .output) return error.InvalidType;
+                const target = program.interfaces[interface_index].ty;
+                if (target.scalar != .i32 or target.rows != 1 or target.columns != instruction.ty.columns) return error.InvalidType;
+            },
             .i_pack_snorm4x8, .i_pack_unorm4x8 => {
                 if ((instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32) or instruction.ty.columns != 1 or instruction.ty.rows != 1) return error.InvalidType;
                 const source = program.instructions[instruction.operands[0]].ty;
@@ -1527,6 +1574,7 @@ fn isValueOperand(op: ir.Op, i: usize) bool {
         .bitcast => i == 0,
         .copy_object => i == 0,
         .output => i == 1,
+        .f_modf, .f_frexp => i == 0,
         else => true,
     };
 }
@@ -2165,6 +2213,49 @@ test "GLSL Ldexp scales f32 lanes with signed exponents and stays failure atomic
     try std.testing.expectEqualSlices(u32, prior.bits[0..4], executor.values[2].bits[0..4]);
     std.mem.writeInt(u32, exponents[12..16], @bitCast(@as(i32, 0)), .little);
     for (0..4096) |_| try executor.execute(&bindings, &.{});
+}
+
+test "GLSL Modf writes integral output and stays allocation-free when warm" {
+    const literal = f32bytes(3.25);
+    var whole = [_]u8{0} ** 4;
+    var interfaces = [_]ir.Interface{.{ .storage = .output, .ty = .{ .scalar = .f32 }, .location = 0 }};
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &literal },
+        .{ .op = .f_modf, .ty = .{ .scalar = .f32 }, .operands = &.{ 0, 0 }, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    const output = [_]Output{.{ .interface = 0, .bytes = &whole }};
+    try executor.execute(&.{}, &output);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), @as(f32, @bitCast(executor.values[1].bits[0])), 0.000001);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 3))), std.mem.readInt(u32, whole[0..4], .little));
+    for (0..4096) |_| try executor.execute(&.{}, &output);
+}
+
+test "GLSL Frexp writes signed exponents and rejects non-finite inputs" {
+    const literal = f32bytes(12.0);
+    var exponent = [_]u8{0} ** 4;
+    var interfaces = [_]ir.Interface{.{ .storage = .output, .ty = .{ .scalar = .i32 }, .location = 0 }};
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &literal },
+        .{ .op = .f_frexp, .ty = .{ .scalar = .f32 }, .operands = &.{ 0, 0 }, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    const output = [_]Output{.{ .interface = 0, .bytes = &exponent }};
+    try executor.execute(&.{}, &output);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.75), @as(f32, @bitCast(executor.values[1].bits[0])), 0.000001);
+    try std.testing.expectEqual(@as(i32, 4), @as(i32, @bitCast(std.mem.readInt(u32, exponent[0..4], .little))));
+    for (0..4096) |_| try executor.execute(&.{}, &output);
+    const inf_literal = f32bytes(std.math.inf(f32));
+    instructions[0].literal = &inf_literal;
+    var invalid_source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(invalid_source.bytes);
+    try std.testing.expectError(error.NumericDomain, Executor.init(std.testing.allocator, &invalid_source));
 }
 
 test "GLSL NMin NMax and NClamp prefer non-NaN operands" {
@@ -3775,6 +3866,15 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
             const exponent = try propertyConstant(arena, &instructions, .{ .scalar = .i32, .columns = source_ty.columns, .rows = source_ty.rows });
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ value, exponent }, &.{});
         },
+        .f_modf, .f_frexp => {
+            const target_ty = if (op == .f_modf) result_ty else ir.Type{ .scalar = .i32, .columns = result_ty.columns, .rows = result_ty.rows };
+            interfaces[0] = .{ .storage = .output, .ty = target_ty, .location = 0 };
+            interface_count = 1;
+            const value = try propertyConstant(arena, &instructions, result_ty);
+            result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ value, 0 }, &.{});
+            outputs[0] = .{ .interface = 0, .bytes = output_bytes[0..try byteSize(target_ty)] };
+            output_count = 1;
+        },
         .i_pack_snorm4x8, .i_pack_unorm4x8 => {
             const source = try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 4 });
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{source}, &.{});
@@ -4037,6 +4137,10 @@ test "generated bounded operation by type-family property matrix is complete" {
             }
             try runPropertyCase(.f_ldexp, ty, ty, null);
             totals[@intFromEnum(ir.Op.f_ldexp)] += 1;
+            try runPropertyCase(.f_modf, ty, null, null);
+            totals[@intFromEnum(ir.Op.f_modf)] += 1;
+            try runPropertyCase(.f_frexp, ty, null, null);
+            totals[@intFromEnum(ir.Op.f_frexp)] += 1;
             try runPropertyCase(.f_sign, ty, null, null);
             totals[@intFromEnum(ir.Op.f_sign)] += 1;
             try runPropertyCase(.f_clamp, ty, null, null);
@@ -4232,15 +4336,15 @@ test "generated bounded operation by type-family property matrix is complete" {
         totals[@intFromEnum(op)] += 1;
     }
     const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14, 8, 4, 8, 8, 8, 8, 4, 4, 4, 4, 4, 8, 8, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4} ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 1, 1 };
+    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4} ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 4, 4 };
     try std.testing.expectEqualSlices(usize, expected_full[0..totals.len], &totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 678), total);
-    std.debug.print("generated property matrix: operations=166 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 686), total);
+    std.debug.print("generated property matrix: operations=168 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -4372,13 +4476,13 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 166), malformed);
+    try std.testing.expectEqual(@as(usize, 168), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
     try std.testing.expectEqual(@as(usize, 5), runtime_nan);
     try std.testing.expectEqual(@as(usize, 5), signed_zero);
-    std.debug.print("generated property categories: malformed=166 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
+    std.debug.print("generated property categories: malformed=168 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
 }
 
 test "generated valid scalar DAGs are total and stable" {
