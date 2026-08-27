@@ -23072,6 +23072,12 @@ test "event host and command-buffer ABI behavior is owned and failure atomic" {
     const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &buffers, .signal_semaphore_count = 0, .signal_semaphores = null };
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     try std.testing.expectEqual(Result.event_set, getEventStatus(ctx.device, event));
+    // A host set cannot overwrite a device signal that already left the event
+    // signaled; provenance must remain legacy for subsequent waits.
+    const command_signal_event = validEventLocked(event).?;
+    try std.testing.expectEqual(EventSignalKind.legacy, @as(EventSignalKind, @enumFromInt(command_signal_event.signal_kind.load(.acquire))));
+    try std.testing.expectEqual(Result.success, setEvent(ctx.device, event));
+    try std.testing.expectEqual(EventSignalKind.legacy, @as(EventSignalKind, @enumFromInt(command_signal_event.signal_kind.load(.acquire))));
     try std.testing.expectEqual(Result.success, resetCommandBuffer(buffers[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(buffers[0], &begin));
     cmdResetEvent(buffers[0], event, 0x1000);
