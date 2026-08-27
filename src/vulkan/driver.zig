@@ -1616,6 +1616,11 @@ var swapchain_objects: [8]SwapchainObj = undefined;
 var swapchain_state = [_]SlotState{.never} ** 8;
 var generic_handle: usize = 0x10000;
 var mutex: std.atomic.Mutex = .unlocked;
+// Queue execution intentionally runs without the registry mutex.  Keep the
+// process-wide worker pool alive until the final in-flight submission drains;
+// otherwise device teardown could stop workers while dispatchParallel waits
+// for their completion counters.
+var active_queue_submissions = std.atomic.Value(u32).init(0);
 
 const max_present_entries = 24;
 
@@ -3964,7 +3969,7 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
         for (device_state) |candidate_state| if (candidate_state == .live) {
             devices_remain = true;
         };
-        if (!devices_remain) {
+        if (!devices_remain and active_queue_submissions.load(.acquire) == 0) {
             present_worker.shutdown();
             cpu_cube.shutdownParallelWorkers();
         }
@@ -15022,6 +15027,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
             }
         }
     };
+    _ = active_queue_submissions.fetchAdd(1, .acq_rel);
     mutex.unlock();
     mutex_held = false;
     defer {
@@ -15036,6 +15042,17 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
         releasePinnedPipelinesLocked(&pinned_pipelines);
         releasePinnedDescriptorSetsLocked(&pinned_descriptor_sets);
         releasePinnedPipelineLayoutsLocked(&pinned_pipeline_layouts);
+        const previous_submissions = active_queue_submissions.fetchSub(1, .acq_rel);
+        if (previous_submissions == 1) {
+            var devices_remain = false;
+            for (device_state) |candidate_state| if (candidate_state == .live) {
+                devices_remain = true;
+            };
+            if (!devices_remain) {
+                present_worker.shutdown();
+                cpu_cube.shutdownParallelWorkers();
+            }
+        }
     }
     var query_context = QueryExecutionContext{};
     for (list[0..count]) |submit| {

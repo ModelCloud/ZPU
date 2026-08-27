@@ -618,6 +618,11 @@ pub fn shutdownParallelWorkers() void {
         _ = std.c.pthread_mutex_unlock(&parallel_mutex);
         return;
     }
+    // A device can be torn down while queue execution is rendering on the
+    // shared workers.  Wait for dispatchParallel to clear its active job
+    // before requesting worker exit; stopping here would leave the render
+    // thread spinning forever on parallel_completed.
+    while (parallel_active != null) _ = std.c.pthread_cond_wait(&parallel_condition, &parallel_mutex);
     parallel_stop.store(true, .release);
     _ = parallel_generation.fetchAdd(1, .release);
     _ = std.c.pthread_cond_broadcast(&parallel_condition);

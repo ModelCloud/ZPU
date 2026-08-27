@@ -897,6 +897,11 @@ pipeline layout, verifies both canonical payloads remain available during the
 pin, and confirms they retire after release without adding work to the warm
 recording path.
 
+The shared CPU raster worker pool is also protected across device teardown:
+parallel shutdown waits for an active render job to clear before requesting
+worker exit, and queue submissions keep a process-wide in-flight count so the
+last-device path cannot stop workers underneath an unlocked executor.
+
 - [ ] **A8 — secondary command buffers:** inheritance, execution, reset, and
   lifetime rules. Traditional render-pass inheritance now matches the active
   subpass for multi-subpass execution, and the bounded dynamic rendering
