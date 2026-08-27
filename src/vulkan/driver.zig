@@ -5925,7 +5925,10 @@ fn cmdNextSubpass(cb: ?CommandBuffer, contents: i32) callconv(.c) void {
     const color_transition = render_pass.subpass_color_layouts[current_subpass] != render_pass.subpass_color_layouts[next_subpass];
     const depth_transition = depth != null and render_pass.subpass_depth_layouts[current_subpass] != render_pass.subpass_depth_layouts[next_subpass];
     const required_commands: usize = 1 + @as(usize, @intFromBool(color_transition)) + @as(usize, @intFromBool(depth_transition));
-    if (c.impl.state != 1 or c.impl.invalid or c.impl.level != 0 or (contents != 0 and contents != 1) or @as(usize, c.impl.count) + required_commands > c.impl.commands.len) {
+    // Query scope is nested inside one subpass.  A transition to the next
+    // subpass while an occlusion query is active is invalid and must not
+    // append layout transitions or advance the active-subpass state.
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.level != 0 or c.impl.active_query_pool != null or (contents != 0 and contents != 1) or @as(usize, c.impl.count) + required_commands > c.impl.commands.len) {
         c.impl.invalid = true;
         return;
     }
@@ -15935,6 +15938,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     const multi_submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &multi_commands, .signal_semaphore_count = 0, .signal_semaphores = null };
     try std.testing.expectEqual(Result.success, queueSubmit(queue, 1, @ptrCast(&multi_submit), 0));
     try std.testing.expect(validImageLocked(images[0]).?.complex_3d_content);
+
     try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
     cmdBeginRenderPass(multi_commands[0], &multi_render_begin, 0);
@@ -16019,6 +16023,23 @@ test "vkcube presentation path records submits and presents two swapchain images
         .{ .depth_stencil = .{ .depth = 1, .stencil = 0 } },
     };
     const render_info = RenderPassBeginInfo{ .s_type = 43, .p_next = null, .render_pass = compatible_render_pass, .framebuffer = framebuffer, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 8, .height = 8 } }, .clear_value_count = 2, .clear_values = &clears };
+
+    // An active occlusion query cannot cross a subpass boundary.  The
+    // NEXT_SUBPASS rejection leaves both the query and the current subpass
+    // unchanged so the caller can end the query and recover by resetting.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+    resetQueryPool(device, occlusion_pool, 0, 1);
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    cmdBeginRenderPass(multi_commands[0], &multi_render_begin, 0);
+    cmdBeginQuery(multi_commands[0], occlusion_pool, 0, 0);
+    const active_query_next_count = multi_commands[0].impl.count;
+    cmdNextSubpass(multi_commands[0], 0);
+    try std.testing.expect(multi_commands[0].impl.invalid);
+    try std.testing.expectEqual(active_query_next_count, multi_commands[0].impl.count);
+    try std.testing.expectEqual(@as(u32, 0), multi_commands[0].impl.active_subpass);
+    try std.testing.expect(multi_commands[0].impl.active_query_pool != null);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
     cmdResetQueryPool(commands[0], occlusion_pool, 0, 1);
     cmdBeginRenderPass(commands[0], &render_info, 0);
     const attachment_clear = [_]ClearAttachment{.{ .aspect_mask = 1, .color_attachment = 0, .clear_value = .{ .color = .{ .float32 = .{ 0.25, 0.5, 0.75, 1 } } } }};
