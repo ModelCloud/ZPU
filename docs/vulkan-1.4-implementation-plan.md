@@ -701,6 +701,10 @@ Each slice must land with all of the following:
   operations with operand-order and poison-domain validation. `Determinant`
   and `MatrixInverse` now lower for column-major f32 4x4 matrices, with
   singular inverses rejected atomically and NaN results canonicalized. A single
+  bounded vector family now also lowers `Length`, `Distance`, `Cross`,
+  `Normalize`, `FaceForward`, `Reflect`, and `Refract` for f32 vectors with
+  strict arity/shape checks, explicit zero-normal and total-internal-reflection
+  behavior, and allocation-free warm execution. A single
   side-effect-free dynamic conditional or one-case runtime switch with a common
   merge is also lowered to compare/select; generic SPIR-V dynamic control flow,
   aggregate/descriptor-array indexing, atomics, shared-memory execution,
