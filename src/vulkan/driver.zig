@@ -11661,7 +11661,11 @@ fn cmdEndRendering(cb: ?CommandBuffer) callconv(.c) void {
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or !command_buffer.impl.dynamic_rendering or command_buffer.impl.dynamic_inheritance) {
+    // An occlusion query begun in this rendering instance must be ended
+    // before the instance can close.  Ending the scope first would leave the
+    // query state detached from its required render-pass lifetime and would
+    // incorrectly allow submission of an unterminated query.
+    if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or !command_buffer.impl.dynamic_rendering or command_buffer.impl.dynamic_inheritance or command_buffer.impl.active_query_pool != null) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -13517,7 +13521,11 @@ fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
     const command_buffer = validCommandBufferLocked(cb) orelse return;
     const render_pass = command_buffer.impl.active_render_pass;
     const framebuffer = command_buffer.impl.active_framebuffer;
-    if (command_buffer.impl.level != 0 or command_buffer.impl.state != 1 or render_pass == null or framebuffer == null) {
+    // Vulkan query scope is nested inside the render-pass instance.  Do not
+    // close the pass while an occlusion query is still active; preserving the
+    // active state on rejection keeps the command stream failure-atomic and
+    // makes the subsequent end-query diagnostic deterministic.
+    if (command_buffer.impl.level != 0 or command_buffer.impl.state != 1 or render_pass == null or framebuffer == null or command_buffer.impl.active_query_pool != null) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -16267,6 +16275,23 @@ test "vkcube presentation path records submits and presents two swapchain images
     const dynamic_rendered_bytes = imageBytes(validImageLocked(images[0]).?);
     try std.testing.expect(!std.mem.eql(u8, &[_]u8{ 0, 0, 0, 255 }, dynamic_rendered_bytes[4 * (4 * 8 + 4) ..][0..4]));
 
+    // Dynamic rendering has the same nested occlusion-query rule as a
+    // traditional render pass.  EndRendering must reject an active query
+    // without recording a close operation or dropping either active scope.
+    resetQueryPool(device, occlusion_pool, 0, 1);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(multi_commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(multi_commands[0], &multi_begin_info));
+    validImageLocked(images[0]).?.layout = 1;
+    validImageLocked(depth_image).?.layout = 3;
+    cmdBeginRendering(multi_commands[0], &dynamic_rendering);
+    cmdBeginQuery(multi_commands[0], occlusion_pool, 0, 0);
+    const dynamic_active_query_end_count = multi_commands[0].impl.count;
+    cmdEndRendering(multi_commands[0]);
+    try std.testing.expect(multi_commands[0].impl.invalid);
+    try std.testing.expectEqual(dynamic_active_query_end_count, multi_commands[0].impl.count);
+    try std.testing.expect(multi_commands[0].impl.dynamic_rendering);
+    try std.testing.expect(multi_commands[0].impl.active_query_pool != null);
+
     // A dynamic pipeline may omit the depth attachment entirely.  Exercise
     // the submission prevalidation and CPU raster path with a color-only
     // rendering scope so this ABI promise is not merely parser coverage.
@@ -16661,6 +16686,21 @@ test "vkcube presentation path records submits and presents two swapchain images
     var inherited_query_result: u64 = 0;
     try std.testing.expectEqual(Result.success, getQueryPoolResults(device, occlusion_pool, 0, 1, @sizeOf(u64), &inherited_query_result, @sizeOf(u64), 1 | 2));
     try std.testing.expect(inherited_query_result > 0);
+
+    // Query scope is nested inside a traditional render pass.  Closing the
+    // pass before ending the query must invalidate atomically and leave the
+    // active pass/query state intact for diagnostics.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));
+    cmdResetQueryPool(commands[0], occlusion_pool, 0, 1);
+    cmdBeginRenderPass(commands[0], &render_info, 1);
+    cmdBeginQuery(commands[0], occlusion_pool, 0, 0);
+    const active_query_end_count = commands[0].impl.count;
+    cmdEndRenderPass(commands[0]);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(active_query_end_count, commands[0].impl.count);
+    try std.testing.expect(commands[0].impl.active_render_pass != null);
+    try std.testing.expect(commands[0].impl.active_query_pool != null);
 
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin_info));

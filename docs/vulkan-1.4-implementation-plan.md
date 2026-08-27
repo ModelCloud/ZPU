@@ -436,7 +436,9 @@ Query commands now enforce Vulkan render-scope rules: occlusion begin/end
 must be inside a traditional or dynamic render-pass instance, while timestamp
 writes must be outside one. The existing reset-history, availability,
 submission-lifetime, exact result, rollback, and allocation-free warm paths
-remain covered.
+remain covered. Ending either rendering form while an occlusion query is
+active is now rejected atomically; the active query and render scope remain
+open until the application records `vkCmdEndQuery`.
 Swapchain acquisition and presentation now validate synchronization ownership
 and type before mutating image state: acquire accepts only same-device binary
 semaphores and unsignaled fences, while present rejects foreign or timeline
