@@ -1722,9 +1722,16 @@ fn releasePresentedLocked(swapchain: *SwapchainObj, image_index: u32) void {
 
 fn releasePresented(context: *anyopaque, image_index: u32) void {
     const swapchain: *SwapchainObj = @ptrCast(@alignCast(context));
-    lock();
-    releasePresentedLocked(swapchain, image_index);
-    mutex.unlock();
+    // Drop the swapchain pending count before taking the registry mutex.  The
+    // destroy path waits on this condition while unlocked; acquiring the
+    // mutex first would invert that order and deadlock a worker completion.
+    const image: ?*ImageObj = if (image_index < swapchain.image_count) @ptrFromInt(swapchain.images[image_index]) else null;
+    releasePresentedState(swapchain, image_index);
+    if (image) |value| {
+        lock();
+        if (value.active_users.load(.acquire) != 0) releaseImageUserLocked(value);
+        mutex.unlock();
+    }
 }
 
 const Requirement = enum(u6) {
