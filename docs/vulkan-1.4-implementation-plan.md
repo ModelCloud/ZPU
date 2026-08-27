@@ -812,6 +812,16 @@ bindings, descriptor-backed uniform/storage buffers, and the scalar graphics
 profile.  A malformed post-record bound offset is rejected failure-atomically;
 the regression runs 4096 times with allocation injection enabled and remains
 allocation-free on the warm path.
+
+### Latest audit slice — immediate host-image span validation
+
+Immediate Vulkan 1.4 host-image-copy commands now share the same retained
+storage-span check before deriving CPU slices.  `vkGetImageMemoryRequirements`
+also leaves its output untouched when an internally malformed image size cannot
+be represented, instead of unwrapping a missing size.  The host-copy regression
+corrupts a bound image offset and exercises memory-to-image, image-to-memory,
+and image-to-image rejection 4096 times with allocation injection enabled;
+the malformed-size requirements query remains failure-atomic.
 - [ ] **A8 — secondary command buffers:** inheritance, execution, reset, and
   lifetime rules. Traditional render-pass inheritance now matches the active
   subpass for multi-subpass execution, and the bounded dynamic rendering

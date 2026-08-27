@@ -4461,7 +4461,9 @@ fn getImageMemoryRequirements(device: ?Device, handle: usize, output: ?*MemoryRe
     lock();
     defer mutex.unlock();
     const image = validImageLocked(handle) orelse return;
-    if (validDeviceLocked(d) and validOwner(d, image.owner)) out.* = .{ .size = imageByteSize(image).?, .alignment = 4, .memory_type_bits = 1 };
+    if (!validDeviceLocked(d) or !validOwner(d, image.owner)) return;
+    const size = imageByteSize(image) orelse return;
+    out.* = .{ .size = size, .alignment = 4, .memory_type_bits = 1 };
 }
 fn getImageSparseMemoryRequirements(device: ?Device, handle: usize, count: ?*u32, output: ?[*]SparseImageMemoryRequirements) callconv(.c) void {
     _ = output;
@@ -4577,7 +4579,7 @@ fn copyMemoryToImage(device: ?Device, info: ?*const CopyMemoryToImageInfo) callc
     defer mutex.unlock();
     const d = device orelse return .error_initialization_failed;
     const image = validImageLocked(ci.dst_image) orelse return .error_initialization_failed;
-    if (!validDeviceLocked(d) or image.owner != d or !transferableColorFormat(image.format) or !hostCopyLayoutValid(ci.dst_image_layout) or image.layout != ci.dst_image_layout or image.memory == null or !liveMemoryObject(image.memory.?)) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or image.owner != d or !transferableColorFormat(image.format) or !hostCopyLayoutValid(ci.dst_image_layout) or image.layout != ci.dst_image_layout or !imageStorageValid(image)) return .error_initialization_failed;
     const dst = imageBytes(image);
     for (ci.regions.?[0..ci.region_count]) |region| {
         if (!validMemoryToImageRegion(image, region) or (ci.flags & host_copy_memcpy_bit != 0 and !hostCopyMemcpyRegionValid(image, region.image_offset, region.image_extent))) return .error_initialization_failed;
@@ -4607,7 +4609,7 @@ fn copyImageToMemory(device: ?Device, info: ?*const CopyImageToMemoryInfo) callc
     defer mutex.unlock();
     const d = device orelse return .error_initialization_failed;
     const image = validImageLocked(ci.src_image) orelse return .error_initialization_failed;
-    if (!validDeviceLocked(d) or image.owner != d or !transferableColorFormat(image.format) or !hostCopyLayoutValid(ci.src_image_layout) or image.layout != ci.src_image_layout or image.memory == null or !liveMemoryObject(image.memory.?)) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or image.owner != d or !transferableColorFormat(image.format) or !hostCopyLayoutValid(ci.src_image_layout) or image.layout != ci.src_image_layout or !imageStorageValid(image)) return .error_initialization_failed;
     const src = imageBytes(image);
     for (ci.regions.?[0..ci.region_count]) |region| {
         if (!validImageToMemoryRegion(image, region) or (ci.flags & host_copy_memcpy_bit != 0 and !hostCopyMemcpyRegionValid(image, region.image_offset, region.image_extent))) return .error_initialization_failed;
@@ -4637,7 +4639,7 @@ fn copyImageToImage(device: ?Device, info: ?*const CopyImageToImageInfo) callcon
     const d = device orelse return .error_initialization_failed;
     const src_image = validImageLocked(ci.src_image) orelse return .error_initialization_failed;
     const dst_image = validImageLocked(ci.dst_image) orelse return .error_initialization_failed;
-    if (!validDeviceLocked(d) or src_image.owner != d or dst_image.owner != d or src_image.format != dst_image.format or !transferableColorFormat(src_image.format) or src_image.width != dst_image.width or src_image.height != dst_image.height or src_image.array_layers != dst_image.array_layers or src_image.samples != dst_image.samples or src_image.usage != dst_image.usage or !hostCopyLayoutValid(ci.src_image_layout) or !hostCopyLayoutValid(ci.dst_image_layout) or src_image.layout != ci.src_image_layout or dst_image.layout != ci.dst_image_layout or src_image == dst_image or src_image.memory == null or dst_image.memory == null or !liveMemoryObject(src_image.memory.?) or !liveMemoryObject(dst_image.memory.?) or hostImageMemoryRangesOverlap(src_image, dst_image)) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or src_image.owner != d or dst_image.owner != d or src_image.format != dst_image.format or !transferableColorFormat(src_image.format) or src_image.width != dst_image.width or src_image.height != dst_image.height or src_image.array_layers != dst_image.array_layers or src_image.samples != dst_image.samples or src_image.usage != dst_image.usage or !hostCopyLayoutValid(ci.src_image_layout) or !hostCopyLayoutValid(ci.dst_image_layout) or src_image.layout != ci.src_image_layout or dst_image.layout != ci.dst_image_layout or src_image == dst_image or !imageStorageValid(src_image) or !imageStorageValid(dst_image) or hostImageMemoryRangesOverlap(src_image, dst_image)) return .error_initialization_failed;
     const src = imageBytes(src_image);
     const dst = imageBytes(dst_image);
     for (ci.regions.?[0..ci.region_count]) |region| {
@@ -20762,6 +20764,31 @@ test "Vulkan 1.4 host image copies transitions and layout queries are bounded" {
     var memcpy_copy_info = copy_info;
     memcpy_copy_info.flags = host_copy_memcpy_bit;
     try std.testing.expectEqual(Result.success, copyImageToImage(ctx.device, &memcpy_copy_info));
+
+    // Host-copy entry points execute immediately, so they must validate the
+    // retained memory span before deriving an unchecked image slice.  A
+    // post-bind offset corruption is rejected atomically and remains
+    // allocation-free across the hot failure path.
+    const malformed_src = validImageLocked(src).?;
+    const saved_src_offset = malformed_src.offset;
+    malformed_src.offset = std.math.maxInt(u64);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| {
+        try std.testing.expectEqual(Result.error_initialization_failed, copyMemoryToImage(ctx.device, &to_image));
+        try std.testing.expectEqual(Result.error_initialization_failed, copyImageToMemory(ctx.device, &from_image));
+        try std.testing.expectEqual(Result.error_initialization_failed, copyImageToImage(ctx.device, &copy_info));
+    }
+    test_allocations_before_failure = null;
+    malformed_src.offset = saved_src_offset;
+    var unchanged_requirements = MemoryRequirements{ .size = 11, .alignment = 12, .memory_type_bits = 13 };
+    const saved_src_dimensions = .{ malformed_src.width, malformed_src.height };
+    malformed_src.width = std.math.maxInt(u32);
+    malformed_src.height = std.math.maxInt(u32);
+    getImageMemoryRequirements(ctx.device, src, &unchanged_requirements);
+    try std.testing.expectEqual(MemoryRequirements{ .size = 11, .alignment = 12, .memory_type_bits = 13 }, unchanged_requirements);
+    malformed_src.width = saved_src_dimensions[0];
+    malformed_src.height = saved_src_dimensions[1];
+
     var invalid_memcpy_copy_region = copy_region;
     invalid_memcpy_copy_region.dst_offset.y = 1;
     memcpy_copy_info.regions = @ptrCast(&invalid_memcpy_copy_region);
