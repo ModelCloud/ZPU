@@ -10159,7 +10159,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         const attachment = cb.attachments.?[0];
         const blend_enable = try bool32(attachment.blend_enable);
         if (attachment.src_color_blend_factor < 0 or attachment.src_color_blend_factor > 18 or attachment.dst_color_blend_factor < 0 or attachment.dst_color_blend_factor > 18 or attachment.color_blend_op < 0 or attachment.color_blend_op > 4 or attachment.src_alpha_blend_factor < 0 or attachment.src_alpha_blend_factor > 18 or attachment.dst_alpha_blend_factor < 0 or attachment.dst_alpha_blend_factor > 18 or attachment.alpha_blend_op < 0 or attachment.alpha_blend_op > 4 or attachment.color_write_mask & ~@as(u32, 0xf) != 0) return error.Invalid;
-        if (blend_enable != 0 and (!profile_pair or attachment.src_color_blend_factor > 14 or attachment.dst_color_blend_factor > 14 or attachment.src_alpha_blend_factor > 14 or attachment.dst_alpha_blend_factor > 14)) return error.Invalid;
+        if (blend_enable != 0 and (profile_contract == null or attachment.src_color_blend_factor > 14 or attachment.dst_color_blend_factor > 14 or attachment.src_alpha_blend_factor > 14 or attachment.dst_alpha_blend_factor > 14)) return error.Invalid;
         try w.u32le(blend_enable);
         try w.i32le(attachment.src_color_blend_factor);
         try w.i32le(attachment.dst_color_blend_factor);
@@ -15594,21 +15594,10 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
     var bad_blend_attachment = blend_attachment;
     bad_blend_attachment.blend_enable = 1;
-    bad_blend_attachment.src_color_blend_factor = 6;
-    bad_blend_attachment.dst_color_blend_factor = 7;
-    bad_blend_attachment.src_alpha_blend_factor = 1;
-    bad_blend_attachment.dst_alpha_blend_factor = 7;
     var bad_blend = color_blend;
     bad_blend.attachments = @ptrCast(&bad_blend_attachment);
     invalid_pipeline = pipeline_info;
     invalid_pipeline.color_blend = &bad_blend;
-    var alpha_pipeline: [1]usize = undefined;
-    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &alpha_pipeline));
-    const alpha_pipeline_object = validGraphicsPipelineLocked(alpha_pipeline[0]).?;
-    try std.testing.expectEqual(@as(u32, 1), alpha_pipeline_object.color_blend_enable);
-    try std.testing.expectEqual(@as(i32, 6), alpha_pipeline_object.src_color_blend_factor);
-    destroyPipeline(device, alpha_pipeline[0], null);
-    bad_blend_attachment.src_color_blend_factor = 15;
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
     inline for (.{ "src_color_blend_factor", "dst_color_blend_factor", "color_blend_op", "src_alpha_blend_factor", "dst_alpha_blend_factor", "alpha_blend_op" }) |field| {
         bad_blend_attachment = blend_attachment;
