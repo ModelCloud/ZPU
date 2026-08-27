@@ -306,7 +306,9 @@ uniform blocks for direct, indexed, and bounded single-draw indirect commands;
 indirect profile bindings are snapshotted at record time and their post-record
 argument ranges are revalidated at submit. The scalar profile now applies the
 static RGBA color-write mask in logical channel order to its BGRA8 attachment;
-the legacy CPU-cube bridge remains fail-closed for partial masks.
+bounded source/destination color and alpha blend factors, equations, and finite
+blend constants are applied before the masked write; the legacy CPU-cube bridge
+remains fail-closed for partial masks or enabled blending.
 The unrestricted SPIR-V graphics space is still intentionally deferred.
 Because `drawIndirectFirstInstance` remains disabled in the truthful feature
 policy, all positive indexed and non-indexed indirect argument records now
