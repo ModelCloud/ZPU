@@ -16272,6 +16272,12 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(indirect_count_before_multi_draw + 1, commands[0].impl.count);
     try std.testing.expectEqual(@as(u32, 2), commands[0].impl.commands[commands[0].impl.count - 1].indirect_draw.draw_count);
     commands[0].impl.invalid = false;
+    const indirect_count_before_indexed_multi = commands[0].impl.count;
+    cmdDrawIndexedIndirect(commands[0], indirect_buffer, 0, 2, 20);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(indirect_count_before_indexed_multi + 1, commands[0].impl.count);
+    try std.testing.expectEqual(@as(u32, 2), commands[0].impl.commands[commands[0].impl.count - 1].indirect_draw.draw_count);
+    commands[0].impl.invalid = false;
     const indirect_count_before_count_limit = commands[0].impl.count;
     cmdDrawIndirectCount(commands[0], indirect_buffer, 0, indirect_buffer, 0, 2, 20);
     try std.testing.expect(!commands[0].impl.invalid);
