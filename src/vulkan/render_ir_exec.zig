@@ -1209,8 +1209,8 @@ fn validate(program: *const ir.Program) Error!void {
                 .i_find_lsb => if ((source_ty.scalar != .i32 and source_ty.scalar != .u32) or source_ty.rows != 1 or source_ty.columns != instruction.ty.columns or instruction.ty.scalar != .i32 or instruction.ty.rows != 1) return error.InvalidType,
                 .i_find_s_msb => if (source_ty.scalar != .i32 or source_ty.rows != 1 or source_ty.columns != instruction.ty.columns or instruction.ty.scalar != .i32 or instruction.ty.rows != 1) return error.InvalidType,
                 .i_find_u_msb => if (source_ty.scalar != .u32 or source_ty.rows != 1 or source_ty.columns != instruction.ty.columns or instruction.ty.scalar != .i32 or instruction.ty.rows != 1) return error.InvalidType,
-                .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle => if (source_ty.scalar != .i32 and source_ty.scalar != .u32 or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
-                .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge => if (source_ty.scalar != .f32 or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
+                .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle => if (source_ty.scalar != .i32 and source_ty.scalar != .u32 or source_ty.columns < 1 or source_ty.columns > 4 or source_ty.rows != 1) return error.InvalidType,
+                .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge => if (source_ty.scalar != .f32 or source_ty.columns < 1 or source_ty.columns > 4 or source_ty.rows != 1) return error.InvalidType,
                 .logical_eq, .logical_ne, .logical_or, .logical_and => if (source_ty.scalar != .bool or source_ty.columns < 1 or source_ty.columns > 4 or source_ty.rows != 1) return error.InvalidType,
                 .select => if (oi == 0) {
                     if (source_ty.scalar != .bool or try lanes(source_ty) != 1) return error.InvalidType;
@@ -1312,10 +1312,10 @@ fn validate(program: *const ir.Program) Error!void {
             .shl_logical, .shr_logical => if (instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32) return error.InvalidType,
             .shr_arithmetic => if (instruction.ty.scalar != .i32) return error.InvalidType,
             .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle => {
-                if (instruction.ty.scalar != .bool or instruction.ty.columns != 1 or instruction.ty.rows != 1) return error.InvalidType;
+                if (instruction.ty.scalar != .bool or instruction.ty.columns < 1 or instruction.ty.columns > 4 or instruction.ty.rows != 1) return error.InvalidType;
                 const left = program.instructions[instruction.operands[0]].ty;
                 const right = program.instructions[instruction.operands[1]].ty;
-                if (!same(left, right) or left.columns != 1 or left.rows != 1 or (left.scalar != .i32 and left.scalar != .u32)) return error.InvalidType;
+                if (!same(left, right) or left.columns != instruction.ty.columns or left.rows != instruction.ty.rows or left.columns < 1 or left.columns > 4 or left.rows != 1 or (left.scalar != .i32 and left.scalar != .u32)) return error.InvalidType;
                 switch (instruction.op) {
                     .ugt, .uge, .ult, .ule => if (left.scalar != .u32) return error.InvalidType,
                     .sgt, .sge, .slt, .sle => if (left.scalar != .i32) return error.InvalidType,
@@ -1323,10 +1323,10 @@ fn validate(program: *const ir.Program) Error!void {
                 }
             },
             .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge => {
-                if (instruction.ty.scalar != .bool or instruction.ty.columns != 1 or instruction.ty.rows != 1) return error.InvalidType;
+                if (instruction.ty.scalar != .bool or instruction.ty.columns < 1 or instruction.ty.columns > 4 or instruction.ty.rows != 1) return error.InvalidType;
                 const left = program.instructions[instruction.operands[0]].ty;
                 const right = program.instructions[instruction.operands[1]].ty;
-                if (!same(left, right) or left.scalar != .f32 or left.columns != 1 or left.rows != 1) return error.InvalidType;
+                if (!same(left, right) or left.columns != instruction.ty.columns or left.rows != instruction.ty.rows or left.scalar != .f32 or left.columns < 1 or left.columns > 4 or left.rows != 1) return error.InvalidType;
             },
             .logical_eq, .logical_ne, .logical_or, .logical_and => {
                 if (instruction.ty.scalar != .bool or instruction.ty.rows != 1 or instruction.ty.columns < 1 or instruction.ty.columns > 4) return error.InvalidType;
@@ -2834,6 +2834,58 @@ test "boolean logical operations preserve vector lanes on the warm path" {
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, output[0..4], .little));
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, output[4..8], .little));
     for (0..4096) |_| try executor.execute(&.{}, &.{.{ .interface = 0, .bytes = &output }});
+}
+
+test "integer and floating comparisons preserve vector lanes and signedness" {
+    var signed_a = [_]u8{0} ** 16;
+    var signed_b = [_]u8{0} ** 16;
+    var float_a = [_]u8{0} ** 16;
+    var float_b = [_]u8{0} ** 16;
+    const ia = [_]i32{ -2, 0, 3, 4 };
+    const ib = [_]i32{ -1, 0, 2, 5 };
+    const fa = [_]u32{ 0x7fc12345, 0x80000000, @bitCast(@as(f32, 1)), 0x7f800000 };
+    const fb = [_]u32{ 0, 0, @bitCast(@as(f32, 2)), 0x7f800000 };
+    for (0..4) |lane| {
+        std.mem.writeInt(u32, signed_a[lane * 4 ..][0..4], @bitCast(ia[lane]), .little);
+        std.mem.writeInt(u32, signed_b[lane * 4 ..][0..4], @bitCast(ib[lane]), .little);
+        std.mem.writeInt(u32, float_a[lane * 4 ..][0..4], fa[lane], .little);
+        std.mem.writeInt(u32, float_b[lane * 4 ..][0..4], fb[lane], .little);
+    }
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .input, .ty = .{ .scalar = .i32, .columns = 4 }, .location = 0 },
+        .{ .storage = .input, .ty = .{ .scalar = .i32, .columns = 4 }, .location = 1 },
+        .{ .storage = .input, .ty = .{ .scalar = .f32, .columns = 4 }, .location = 2 },
+        .{ .storage = .input, .ty = .{ .scalar = .f32, .columns = 4 }, .location = 3 },
+    };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .input, .ty = .{ .scalar = .i32, .columns = 4 }, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .input, .ty = .{ .scalar = .i32, .columns = 4 }, .operands = &.{1}, .literal = &.{} },
+        .{ .op = .input, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{2}, .literal = &.{} },
+        .{ .op = .input, .ty = .{ .scalar = .f32, .columns = 4 }, .operands = &.{3}, .literal = &.{} },
+        .{ .op = .ieq, .ty = .{ .scalar = .bool, .columns = 4 }, .operands = &.{ 0, 1 }, .literal = &.{} },
+        .{ .op = .ine, .ty = .{ .scalar = .bool, .columns = 4 }, .operands = &.{ 0, 1 }, .literal = &.{} },
+        .{ .op = .sgt, .ty = .{ .scalar = .bool, .columns = 4 }, .operands = &.{ 0, 1 }, .literal = &.{} },
+        .{ .op = .slt, .ty = .{ .scalar = .bool, .columns = 4 }, .operands = &.{ 0, 1 }, .literal = &.{} },
+        .{ .op = .ford_eq, .ty = .{ .scalar = .bool, .columns = 4 }, .operands = &.{ 2, 3 }, .literal = &.{} },
+        .{ .op = .funord_eq, .ty = .{ .scalar = .bool, .columns = 4 }, .operands = &.{ 2, 3 }, .literal = &.{} },
+        .{ .op = .ford_lt, .ty = .{ .scalar = .bool, .columns = 4 }, .operands = &.{ 2, 3 }, .literal = &.{} },
+        .{ .op = .funord_lt, .ty = .{ .scalar = .bool, .columns = 4 }, .operands = &.{ 2, 3 }, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    const bindings = [_]Binding{ .{ .interface = 0, .bytes = &signed_a }, .{ .interface = 1, .bytes = &signed_b }, .{ .interface = 2, .bytes = &float_a }, .{ .interface = 3, .bytes = &float_b } };
+    try executor.execute(&bindings, &.{});
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 0, 0 }, executor.values[4].bits[0..4]);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 0, 1, 1 }, executor.values[5].bits[0..4]);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 0, 1, 0 }, executor.values[6].bits[0..4]);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 0, 0, 1 }, executor.values[7].bits[0..4]);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 0, 1 }, executor.values[8].bits[0..4]);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 1, 0, 1 }, executor.values[9].bits[0..4]);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 0, 1, 0 }, executor.values[10].bits[0..4]);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 0, 1, 0 }, executor.values[11].bits[0..4]);
+    for (0..4096) |_| try executor.execute(&bindings, &.{});
 }
 
 test "floating remainder uses truncating quotient and rejects zero divisor" {

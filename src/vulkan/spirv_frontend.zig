@@ -1176,13 +1176,13 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     176, 177, 178, 179 => left.scalar == .i32,
                     else => unreachable,
                 };
-                if (result.scalar != .bool or result.columns != 1 or result.rows != 1 or !scalar_ok or !sameShape(left, right)) return error.Malformed;
+                if (result.scalar != .bool or result.columns < 1 or result.columns > 4 or result.rows != 1 or !scalar_ok or !sameShape(left, right) or result.columns != left.columns or result.rows != left.rows) return error.Malformed;
             },
             182...193 => {
                 const result = try resultShape(nodes, w[0]);
                 const left = try valueShape(nodes, w[2]);
                 const right = try valueShape(nodes, w[3]);
-                if (result.scalar != .bool or result.columns != 1 or result.rows != 1 or left.scalar != .f32 or left.columns != 1 or left.rows != 1 or !sameShape(left, right)) return error.Malformed;
+                if (result.scalar != .bool or result.columns < 1 or result.columns > 4 or result.rows != 1 or left.scalar != .f32 or left.columns < 1 or left.columns > 4 or left.rows != 1 or !sameShape(left, right) or result.columns != left.columns or result.rows != left.rows) return error.Malformed;
             },
             else => {},
         }

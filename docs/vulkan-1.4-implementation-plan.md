@@ -134,9 +134,10 @@ carry/borrow and high-word arithmetic with pair extraction,
 exact 32-bit `OpSConvert`, `OpUConvert`, and `OpFConvert` type conversions,
 integer division/remainder, and bounded
 integer shifts, floating remainder/modulo
-with truncating/flooring quotient, dynamic scalar integer comparisons, ordered/unordered scalar
-floating-point comparisons with NaN semantics, and component-wise scalar/vector
-boolean logical operations, bounded f32 4x4 column-major matrix/vector arithmetic
+with truncating/flooring quotient, component-wise scalar/vector integer
+comparisons, ordered/unordered scalar/vector floating-point comparisons with NaN
+semantics, and component-wise scalar/vector boolean logical operations, bounded
+f32 4x4 column-major matrix/vector arithmetic
 (`OpMatrixTimesScalar`, `OpVectorTimesMatrix`, `OpMatrixTimesMatrix`,
 `OpTranspose`, `OpOuterProduct`, and `OpDot`), plus
 bounded floating classification/reduction (`OpIsNan`, `OpIsInf`, `OpIsFinite`,
@@ -662,8 +663,8 @@ Each slice must land with all of the following:
   subnormal flush-to-signed-zero semantics, plus scalar extended integer
   carry/borrow and high-word arithmetic with pair extraction,
   and executes bounded floating
-  remainder/modulo and dynamic scalar integer comparisons,
-  ordered/unordered scalar floating-point comparisons with NaN semantics, and
+  remainder/modulo and dynamic scalar/vector integer comparisons,
+  ordered/unordered scalar/vector floating-point comparisons with NaN semantics, and
   component-wise scalar/vector boolean logical operations, bounded f32 4x4 column-major
   matrix/vector arithmetic (including transpose, outer-product, and vector
   dot), floating classification/reduction, and constant-folds
