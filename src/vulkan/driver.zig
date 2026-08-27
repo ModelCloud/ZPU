@@ -228,7 +228,14 @@ pub const PhysicalDeviceShaderDemoteToHelperInvocationFeatures = extern struct {
 pub const PhysicalDevicePipelineCreationCacheControlFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
 pub const PhysicalDeviceZeroInitializeWorkgroupMemoryFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
 pub const PhysicalDeviceImageRobustnessFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceSubgroupSizeControlFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [2]u32 };
+pub const PhysicalDeviceSubgroupSizeControlFeatures = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    subgroup_size_control: u32,
+    compute_full_subgroups: u32,
+};
+pub const PhysicalDeviceSubgroupSizeControlFeaturesKHR = PhysicalDeviceSubgroupSizeControlFeatures;
+pub const PhysicalDeviceSubgroupSizeControlFeaturesEXT = PhysicalDeviceSubgroupSizeControlFeatures;
 pub const PhysicalDeviceInlineUniformBlockFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [2]u32 };
 pub const PhysicalDeviceShaderIntegerDotProductFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
 pub const PhysicalDeviceDynamicRenderingFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
@@ -303,7 +310,16 @@ pub const PhysicalDeviceDescriptorIndexingProperties = extern struct { s_type: i
 pub const PhysicalDeviceSamplerFilterMinmaxProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
 pub const PhysicalDeviceDepthStencilResolveProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [16]u8 };
 pub const PhysicalDeviceMaintenance4Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [8]u8 };
-pub const PhysicalDeviceSubgroupSizeControlProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [16]u8 };
+pub const PhysicalDeviceSubgroupSizeControlProperties = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    min_subgroup_size: u32,
+    max_subgroup_size: u32,
+    max_compute_workgroup_subgroups: u32,
+    required_subgroup_size_stages: u32,
+};
+pub const PhysicalDeviceSubgroupSizeControlPropertiesKHR = PhysicalDeviceSubgroupSizeControlProperties;
+pub const PhysicalDeviceSubgroupSizeControlPropertiesEXT = PhysicalDeviceSubgroupSizeControlProperties;
 pub const PhysicalDeviceInlineUniformBlockProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [24]u8 };
 pub const PhysicalDeviceShaderIntegerDotProductProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [120]u8 };
 pub const PhysicalDeviceTexelBufferAlignmentProperties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [32]u8 };
@@ -16708,12 +16724,25 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(PhysicalDeviceLineRasterizationFeatures));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceLineRasterizationFeatures, "rectangular_lines"));
     try std.testing.expectEqual(@as(usize, 36), @offsetOf(PhysicalDeviceLineRasterizationFeatures, "stippled_smooth_lines"));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceSubgroupSizeControlFeatures));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceSubgroupSizeControlFeatures, "subgroup_size_control"));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(PhysicalDeviceSubgroupSizeControlProperties));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceSubgroupSizeControlProperties, "min_subgroup_size"));
     getPhysicalDeviceFeatures2(ctx.physical, &features);
     try std.testing.expect(std.mem.allEqual(u32, &features.features.values, 0));
     try std.testing.expect(std.mem.allEqual(u32, &vulkan11_features.values, 0));
     try std.testing.expect(std.mem.allEqual(u32, &vulkan12_features.values, 0));
     try std.testing.expectEqual(@as(i32, 51), vulkan12_features.s_type);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan11_features)), vulkan12_features.p_next);
+    var subgroup_features = PhysicalDeviceSubgroupSizeControlFeatures{ .s_type = 1000225002, .p_next = null, .subgroup_size_control = 0xffff_ffff, .compute_full_subgroups = 0xffff_ffff };
+    var subgroup_query = features;
+    subgroup_query.p_next = @ptrCast(&subgroup_features);
+    getPhysicalDeviceFeatures2(ctx.physical, &subgroup_query);
+    try std.testing.expectEqual(@as(u32, 0), subgroup_features.subgroup_size_control);
+    try std.testing.expectEqual(@as(u32, 0), subgroup_features.compute_full_subgroups);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| getPhysicalDeviceFeatures2(ctx.physical, &subgroup_query);
+    test_allocations_before_failure = null;
     test_allocations_before_failure = 0;
     for (0..4096) |_| getPhysicalDeviceFeatures2(ctx.physical, &features);
     test_allocations_before_failure = null;
@@ -16805,6 +16834,17 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     properties.p_next = null;
     test_allocations_before_failure = 0;
     for (0..4096) |_| getPhysicalDeviceProperties2(ctx.physical, &properties);
+    test_allocations_before_failure = null;
+    var subgroup_size_properties = PhysicalDeviceSubgroupSizeControlProperties{ .s_type = 1000225000, .p_next = null, .min_subgroup_size = 0xffff_ffff, .max_subgroup_size = 0xffff_ffff, .max_compute_workgroup_subgroups = 0xffff_ffff, .required_subgroup_size_stages = 0xffff_ffff };
+    var subgroup_properties_query = properties;
+    subgroup_properties_query.p_next = @ptrCast(&subgroup_size_properties);
+    getPhysicalDeviceProperties2(ctx.physical, &subgroup_properties_query);
+    try std.testing.expectEqual(@as(u32, 0), subgroup_size_properties.min_subgroup_size);
+    try std.testing.expectEqual(@as(u32, 0), subgroup_size_properties.max_subgroup_size);
+    try std.testing.expectEqual(@as(u32, 0), subgroup_size_properties.max_compute_workgroup_subgroups);
+    try std.testing.expectEqual(@as(u32, 0), subgroup_size_properties.required_subgroup_size_stages);
+    test_allocations_before_failure = 0;
+    for (0..4096) |_| getPhysicalDeviceProperties2(ctx.physical, &subgroup_properties_query);
     test_allocations_before_failure = null;
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(PhysicalDeviceMaintenance5Properties));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceMaintenance5Properties, "early_fragment_multisample_coverage_after_sample_counting"));

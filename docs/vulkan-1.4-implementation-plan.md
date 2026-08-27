@@ -80,6 +80,9 @@ The promoted line-rasterization feature and property nodes now expose typed
 LP64 fields (all six feature controls remain `VK_FALSE`; the property reports
 `lineSubPixelPrecisionBits = 4`) instead of opaque payloads, with the KHR/EXT
 aliases sharing the same layouts.
+The promoted subgroup-size-control feature and property nodes likewise expose
+typed LP64 fields; all controls and limits remain zero because subgroup-size
+control is outside the advertised execution profile.
 
 Graphics pipeline vertex-input chains accept the feature-disabled,
 zero-entry `VkPipelineVertexInputDivisorStateCreateInfo` form with bounded,
