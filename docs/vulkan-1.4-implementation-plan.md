@@ -839,7 +839,11 @@ owned backing span before consuming waits or transitioning the image lifecycle.
 Malformed image dimensions therefore fail atomically instead of reaching the
 presentation transport with an inconsistent byte envelope; the regression
 repeats that rejection 4096 times without allocations before presenting the
-restored image successfully.
+restored image successfully.  The present handoff also pins each swapchain
+image until the synchronous/worker completion callback, so concurrent image or
+device teardown defers shared transport retirement until the callback drains;
+the lifecycle regression destroys a pinned image and verifies the bytes retire
+only after release.
 
 ### Latest audit slice — query-pool retirement pins
 

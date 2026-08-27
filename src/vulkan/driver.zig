@@ -1700,13 +1700,31 @@ fn usePresentWorker(complex_3d_content: bool, force_one_core: bool) bool {
     return complex_3d_content and !force_one_core;
 }
 
-fn releasePresented(context: *anyopaque, image_index: u32) void {
-    const swapchain: *SwapchainObj = @ptrCast(@alignCast(context));
+fn releasePresentedState(swapchain: *SwapchainObj, image_index: u32) void {
     _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
     std.debug.assert(frame_lifecycle.release(swapchain.image_states[0..swapchain.image_count], image_index));
     swapchain.pending -= 1;
     _ = std.c.pthread_cond_broadcast(&swapchain.present_condition);
     _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+}
+
+/// Queue presentation retains swapchain image bytes after dropping the global
+/// registry lock.  Release the image pin before publishing the image as
+/// available again; destroyImage/device teardown can then safely reclaim the
+/// private payload only after the worker is finished.
+fn releasePresentedLocked(swapchain: *SwapchainObj, image_index: u32) void {
+    if (image_index < swapchain.image_count) {
+        const image: *ImageObj = @ptrFromInt(swapchain.images[image_index]);
+        if (image.active_users.load(.acquire) != 0) releaseImageUserLocked(image);
+    }
+    releasePresentedState(swapchain, image_index);
+}
+
+fn releasePresented(context: *anyopaque, image_index: u32) void {
+    const swapchain: *SwapchainObj = @ptrCast(@alignCast(context));
+    lock();
+    releasePresentedLocked(swapchain, image_index);
+    mutex.unlock();
 }
 
 const Requirement = enum(u6) {
@@ -14703,9 +14721,19 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
             mutex.unlock();
             return .error_initialization_failed;
         }
+        const image: *ImageObj = @ptrFromInt(swapchain.images[index]);
+        if (!liveImageObject(image) or image.retire_pending or image.owner != q.owner) {
+            mutex.unlock();
+            return .error_initialization_failed;
+        }
+        // Present execution may run on the shared worker after this function
+        // drops the registry mutex.  Keep the swapchain image's owned bytes
+        // alive across that handoff just like queue-submit resources.
+        _ = image.active_users.fetchAdd(1, .acq_rel);
         _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
         if (!frame_lifecycle.queue(swapchain.image_states[0..swapchain.image_count], index)) {
             _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+            releaseImageUserLocked(image);
             mutex.unlock();
             return .error_initialization_failed;
         }
@@ -14727,7 +14755,6 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
                 .queue_operations_end_ns = frame_pacing.monotonicNs(),
             };
         }
-        const image: *ImageObj = @ptrFromInt(swapchain.images[index]);
         const content = xcb_present.Region{ .x = @intCast(@max(image.content_bounds.x, 0)), .y = @intCast(@max(image.content_bounds.y, 0)), .width = image.content_bounds.width, .height = image.content_bounds.height };
         const force_full = image.force_full_present;
         if (builtin.is_test) {
@@ -14742,7 +14769,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
                 recordPresentTiming(@ptrCast(swapchain), completed);
             }
             image.force_full_present = false;
-            releasePresented(swapchain, index);
+            releasePresentedLocked(swapchain, index);
         } else if (!usePresentWorker(image.complex_3d_content, synchronousOneCore())) {
             const before = frame_pacing.monotonicNs();
             if (swapchain.cadence == null) swapchain.cadence = frame_pacing.Clock.init(before, frame_pacing.configuredRate());
@@ -14753,7 +14780,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
                     failed.completed = false;
                     recordPresentTiming(@ptrCast(swapchain), failed);
                 }
-                releasePresented(swapchain, index);
+                releasePresentedLocked(swapchain, index);
                 mutex.unlock();
                 return .error_initialization_failed;
             }
@@ -14767,7 +14794,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
                     failed.completed = false;
                     recordPresentTiming(@ptrCast(swapchain), failed);
                 }
-                releasePresented(swapchain, index);
+                releasePresentedLocked(swapchain, index);
                 mutex.unlock();
                 return .error_initialization_failed;
             }
@@ -14796,14 +14823,14 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
                 recordPresentTiming(@ptrCast(swapchain), completed);
             }
             image.force_full_present = false;
-            releasePresented(swapchain, index);
+            releasePresentedLocked(swapchain, index);
         } else if (!present_worker.ensureStarted() or !present_worker.enqueue(.{ .transport = &swapchain.transport, .cadence = &swapchain.cadence, .pixels = imageBytes(image), .content = content, .force_full = force_full, .context = swapchain, .image_index = index, .release = releasePresented, .trace = if (traceLimit() != 0) recordPresentWorkerTrace else null, .render_clear_ns = image.last_clear_ns, .render_draw_ns = image.last_draw_ns, .target_ns = target_ns, .timing = timing_payload, .timing_context = @ptrCast(swapchain), .timing_record = recordPresentTiming })) {
             if (timing_payload) |timing| {
                 var failed = timing;
                 failed.completed = false;
                 recordPresentTiming(@ptrCast(swapchain), failed);
             }
-            releasePresented(swapchain, index);
+            releasePresentedLocked(swapchain, index);
             mutex.unlock();
             return .error_initialization_failed;
         } else image.force_full_present = false;
@@ -15829,6 +15856,21 @@ test "XCB and headless surface lifecycle and physical presentation queries" {
     test_allocations_before_failure = null;
     headless_image.width = saved_headless_width;
     try std.testing.expectEqual(Result.success, queuePresent(queue, &headless_present));
+    // A present handoff owns the image payload until its completion callback.
+    // Exercise destruction during that lifetime explicitly; the shared
+    // transport bytes must retire only after the pin drains.
+    const pinned_present_image_handle = validSwapchainLocked(headless_swapchain).?.images[headless_image_index];
+    lock();
+    const pinned_present_image = validImageLocked(pinned_present_image_handle).?;
+    _ = pinned_present_image.active_users.fetchAdd(1, .acq_rel);
+    mutex.unlock();
+    destroyImage(device, pinned_present_image_handle, null);
+    try std.testing.expect(pinned_present_image.retire_pending);
+    lock();
+    releaseImageUserLocked(pinned_present_image);
+    const present_storage_retired = !pinned_present_image.retire_pending;
+    mutex.unlock();
+    try std.testing.expect(present_storage_retired);
     test_allocations_before_failure = 0;
     for (0..4096) |_| {
         var warm_supported: u32 = 0;
