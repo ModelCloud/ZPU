@@ -526,6 +526,14 @@ as a destination stage and inside render-pass scope. The rejection paths leave
 the command buffer count untouched and the positive path is covered by the
 allocation-free event tests.
 
+All four event command families now enforce the device-group execution rule as
+well: `vkCmdSetEvent`, `vkCmdResetEvent`, `vkCmdWaitEvents`, and their
+synchronization2 counterparts reject a command buffer whose current device mask
+does not select exactly one physical device. ZPU advertises a single-device
+profile, so mask `1` is the only valid value. Each rejection is failure-atomic,
+including the synchronization2 lowering wrappers, and the direct event fixture
+covers every entry point.
+
 The bounded execution checkpoint for `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC`
 is complete. Descriptor writes and update templates preserve the dynamic type,
 require the advertised 256-byte uniform-buffer alignment, and

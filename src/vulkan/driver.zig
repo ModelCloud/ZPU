@@ -6782,6 +6782,13 @@ fn validEventWaitStageMasks(command_buffer: *const CommandBufferObj, src_stage_m
     if ((command_buffer.impl.active_render_pass != null or command_buffer.impl.dynamic_rendering) and src_stage_mask & 0x4000 != 0) return false;
     return true;
 }
+fn commandBufferSingleDeviceMaskValid(command_buffer: *const CommandBufferObj) bool {
+    // This implementation exposes one physical device.  Event commands have
+    // an explicit Vulkan VUID requiring the current command-buffer device
+    // mask to include exactly one physical device, so mask 1 is the only
+    // valid value even when the internal state is manipulated by tests.
+    return command_buffer.impl.device_mask == 1;
+}
 fn stagesSupportAccess(stage_mask: u32, access_mask: u32) bool {
     if (access_mask & ~@as(u32, 0x1_ffff) != 0) return false;
     if (access_mask == 0 or stage_mask & 0x1_0000 != 0) return true; // ALL_COMMANDS
@@ -6809,7 +6816,7 @@ fn cmdSetEvent(cb: ?CommandBuffer, handle: usize, stage_mask: u32) callconv(.c) 
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or !commandBufferOutsideRenderPass(c) or event.owner != c.impl.owner or !validEventStageMask(stage_mask)) {
+    if (c.impl.state != 1 or c.impl.invalid or !commandBufferSingleDeviceMaskValid(c) or !commandBufferOutsideRenderPass(c) or event.owner != c.impl.owner or !validEventStageMask(stage_mask)) {
         c.impl.invalid = true;
         return;
     }
@@ -6823,7 +6830,7 @@ fn cmdResetEvent(cb: ?CommandBuffer, handle: usize, stage_mask: u32) callconv(.c
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or !commandBufferOutsideRenderPass(c) or event.owner != c.impl.owner or !validEventStageMask(stage_mask)) {
+    if (c.impl.state != 1 or c.impl.invalid or !commandBufferSingleDeviceMaskValid(c) or !commandBufferOutsideRenderPass(c) or event.owner != c.impl.owner or !validEventStageMask(stage_mask)) {
         c.impl.invalid = true;
         return;
     }
@@ -6833,7 +6840,7 @@ fn cmdWaitEvents(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const usize,
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
-    if (event_count == 0 or event_count > max_api_items or handles == null or !validEventWaitStageMasks(c, src_stage_mask, dst_stage_mask) or memory_barrier_count > max_api_items or buffer_barrier_count > max_api_items or image_barrier_count > max_api_items or @as(usize, c.impl.count) + event_count + buffer_barrier_count + image_barrier_count > c.impl.commands.len) {
+    if (event_count == 0 or event_count > max_api_items or handles == null or !commandBufferSingleDeviceMaskValid(c) or !validEventWaitStageMasks(c, src_stage_mask, dst_stage_mask) or memory_barrier_count > max_api_items or buffer_barrier_count > max_api_items or image_barrier_count > max_api_items or @as(usize, c.impl.count) + event_count + buffer_barrier_count + image_barrier_count > c.impl.commands.len) {
         c.impl.invalid = true;
         return;
     }
@@ -18723,7 +18730,54 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
         .{ .s_type = 1000314000, .p_next = null, .src_stage_mask = 0x2000, .dst_stage_mask = 0x1000, .src_access_mask = 0, .dst_access_mask = 0 },
     };
     const mixed_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = mixed_memory_barriers.len, .memory_barriers = &mixed_memory_barriers, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
+    const empty_event_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 0, .memory_barriers = null, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
     const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+
+    // Event commands are single-device operations.  Corrupting the internal
+    // mask models a device-group command buffer that selected multiple
+    // physical devices; each command must reject it without recording.
+    commands[0].impl.device_mask = 2;
+    const before_mask_set = commands[0].impl.count;
+    cmdSetEvent(commands[0], event, 0x1000);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_mask_set, commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.device_mask = 2;
+    const before_mask_reset = commands[0].impl.count;
+    cmdResetEvent(commands[0], event, 0x1000);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_mask_reset, commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.device_mask = 2;
+    const before_mask_wait = commands[0].impl.count;
+    cmdWaitEvents(commands[0], 1, @ptrCast(&event), 0x1000, 0x1000, 0, null, 0, null, 0, null);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_mask_wait, commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.device_mask = 2;
+    const before_mask_set2 = commands[0].impl.count;
+    cmdSetEvent2(commands[0], event, &empty_event_dependency);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_mask_set2, commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.device_mask = 2;
+    const before_mask_reset2 = commands[0].impl.count;
+    cmdResetEvent2(commands[0], event, 0x1_0000);
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_mask_reset2, commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    commands[0].impl.device_mask = 2;
+    const before_mask_wait2 = commands[0].impl.count;
+    cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&empty_event_dependency));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_mask_wait2, commands[0].impl.count);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
     cmdPipelineBarrier2(commands[0], &mixed_dependency);
     try std.testing.expect(!commands[0].impl.invalid);
