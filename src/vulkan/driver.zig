@@ -11402,8 +11402,20 @@ fn validSamplerYcbcrComponent(component: i32) bool {
     // malformed request cannot be misreported as a capability rejection.
     return component >= 0 and component <= 6;
 }
+fn validSamplerYcbcrFormat(format: i32) bool {
+    // The sampler-YCbCr conversion format domain is the set of formats
+    // introduced by VK_KHR_sampler_ycbcr_conversion (promoted to 1.1), plus
+    // the four 4:4:4 two-plane formats from VK_EXT_ycbcr_2plane_444. Keep
+    // this explicit so ordinary color formats are rejected as malformed
+    // input instead of being reported as an unsupported ZPU capability.
+    return switch (format) {
+        1000156000...1000156033, 1000330000...1000330003 => true,
+        else => false,
+    };
+}
 fn samplerYcbcrConversionCreateInfoValid(ci: *const SamplerYcbcrConversionCreateInfo) bool {
     return ci.s_type == 1000156000 and ci.p_next == null and
+        validSamplerYcbcrFormat(ci.format) and
         ci.model >= 0 and ci.model <= 4 and
         ci.range >= 0 and ci.range <= 1 and
         validSamplerYcbcrComponent(ci.components[0]) and
@@ -19291,6 +19303,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     // validation before the capability result.  Every malformed payload must
     // leave the output handle untouched and return initialization failure.
     var malformed_ycbcr = ycbcr_info;
+    malformed_ycbcr.format = 37;
+    try std.testing.expectEqual(Result.error_initialization_failed, createSamplerYcbcrConversion(ctx.device, &malformed_ycbcr, null, &ycbcr_handle));
+    try std.testing.expectEqual(@as(usize, 0xfeed), ycbcr_handle);
+    malformed_ycbcr = ycbcr_info;
     malformed_ycbcr.model = 5;
     try std.testing.expectEqual(Result.error_initialization_failed, createSamplerYcbcrConversion(ctx.device, &malformed_ycbcr, null, &ycbcr_handle));
     malformed_ycbcr = ycbcr_info;
@@ -19305,6 +19321,9 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 0xfeed), ycbcr_handle);
     test_allocations_before_failure = 0;
     for (0..4096) |_| try std.testing.expectEqual(Result.error_format_not_supported, createSamplerYcbcrConversion(ctx.device, &ycbcr_info, null, &ycbcr_handle));
+    malformed_ycbcr = ycbcr_info;
+    malformed_ycbcr.format = 37;
+    for (0..4096) |_| try std.testing.expectEqual(Result.error_initialization_failed, createSamplerYcbcrConversion(ctx.device, &malformed_ycbcr, null, &ycbcr_handle));
     test_allocations_before_failure = null;
     try std.testing.expectEqual(@as(usize, 0xfeed), ycbcr_handle);
     var version: u32 = 0;

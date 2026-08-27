@@ -297,6 +297,12 @@ priority and rejects other priorities before publishing device state.
 The sampler-YCbCr conversion create record is also ABI-exact: its core body
 ends at `forceExplicitReconstruction`; Android `externalFormat`, when used,
 belongs to a separate pNext extension and is not folded into the core struct.
+Its `format` field is checked against the enumerated sampler-conversion format
+domain (including the promoted 1.1 formats and the later 4:4:4 two-plane
+formats), so ordinary color formats fail as malformed input before capability
+classification; valid unsupported formats retain the explicit
+`VK_ERROR_FORMAT_NOT_SUPPORTED` policy and both paths have allocation-free
+warm coverage.
 `vkCreateSampler` now accepts the promoted `VkSamplerReductionModeCreateInfo`
 chain in its default weighted-average form, rejects MIN/MAX with
 `VK_ERROR_FEATURE_NOT_PRESENT` because `samplerFilterMinmax` is not advertised,
