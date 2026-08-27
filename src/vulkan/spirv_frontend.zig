@@ -2817,12 +2817,14 @@ test "compute profile lowers dynamic integer comparison before select" {
 test "compute profile lowers a side-effect-free dynamic branch phi to select" {
     const select_offset = testOpcodeOffset(&compute_dynamic_compare_store, 169, 0).?;
     const branch_and_merge = [_]u32{
-        (4 << 16) | 250, 13, 18,              19,
-        (2 << 16) | 248, 18, (2 << 16) | 249, 20,
-        (2 << 16) | 248, 19, (2 << 16) | 249, 20,
-        (2 << 16) | 248, 20, (7 << 16) | 245, 2,
-        16,              14, 18,              15,
-        19,
+        (3 << 16) | 247, 20,              0,
+        (4 << 16) | 250, 13,              18,
+        19,              (2 << 16) | 248, 18,
+        (2 << 16) | 249, 20,              (2 << 16) | 248,
+        19,              (2 << 16) | 249, 20,
+        (2 << 16) | 248, 20,              (7 << 16) | 245,
+        2,               16,              14,
+        18,              15,              19,
     };
     var words = try testReplaceInstruction(std.testing.allocator, &compute_dynamic_compare_store, select_offset, &branch_and_merge);
     defer std.testing.allocator.free(words);
@@ -2860,12 +2862,14 @@ test "compute profile lowers a side-effect-free dynamic branch phi to select" {
 test "dynamic branch frontend warm path remains bounded and deterministic" {
     const select_offset = testOpcodeOffset(&compute_dynamic_compare_store, 169, 0).?;
     const branch_and_merge = [_]u32{
-        (4 << 16) | 250, 13, 18,              19,
-        (2 << 16) | 248, 18, (2 << 16) | 249, 20,
-        (2 << 16) | 248, 19, (2 << 16) | 249, 20,
-        (2 << 16) | 248, 20, (7 << 16) | 245, 2,
-        16,              14, 18,              15,
-        19,
+        (3 << 16) | 247, 20,              0,
+        (4 << 16) | 250, 13,              18,
+        19,              (2 << 16) | 248, 18,
+        (2 << 16) | 249, 20,              (2 << 16) | 248,
+        19,              (2 << 16) | 249, 20,
+        (2 << 16) | 248, 20,              (7 << 16) | 245,
+        2,               16,              14,
+        18,              15,              19,
     };
     var words = try testReplaceInstruction(std.testing.allocator, &compute_dynamic_compare_store, select_offset, &branch_and_merge);
     defer std.testing.allocator.free(words);
@@ -2883,11 +2887,15 @@ test "dynamic branch frontend warm path remains bounded and deterministic" {
 test "compute profile lowers a one-case dynamic switch phi to compare and select" {
     const select_offset = testOpcodeOffset(&compute_dynamic_compare_store, 169, 0).?;
     const switch_and_merge = [_]u32{
-        (5 << 16) | 251, 10,              19,              14,              18,
-        (2 << 16) | 248, 18,              (2 << 16) | 249, 20,              (2 << 16) | 248,
-        19,              (2 << 16) | 249, 20,              (2 << 16) | 248, 20,
-        (7 << 16) | 245, 2,               16,              14,              18,
-        15,              19,
+        (3 << 16) | 247, 20,              0,
+        (5 << 16) | 251, 10,              19,
+        14,              18,              (2 << 16) | 248,
+        18,              (2 << 16) | 249, 20,
+        (2 << 16) | 248, 19,              (2 << 16) | 249,
+        20,              (2 << 16) | 248, 20,
+        (7 << 16) | 245, 2,               16,
+        14,              18,              15,
+        19,
     };
     var words = try testReplaceInstruction(std.testing.allocator, &compute_dynamic_compare_store, select_offset, &switch_and_merge);
     defer std.testing.allocator.free(words);
