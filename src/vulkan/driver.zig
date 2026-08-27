@@ -4782,6 +4782,12 @@ fn unmapMemory2(device: ?Device, info: ?*const MemoryUnmapInfo) callconv(.c) Res
     defer mutex.unlock();
     const object = validMemoryLocked(ci.memory) orelse return .error_memory_map_failed;
     if (!validDeviceLocked(d) or !validOwner(d, object.owner)) return .error_memory_map_failed;
+    // Unlike the legacy void vkUnmapMemory entry point, the Vulkan 1.4
+    // result-returning form can report a failed unmap.  Treat an unmap of an
+    // allocation that is not currently mapped as VK_ERROR_MEMORY_MAP_FAILED
+    // and leave its state unchanged.  This keeps the operation transactional
+    // for callers that use the promoted ABI.
+    if (!object.mapped) return .error_memory_map_failed;
     object.mapped = false;
     return .success;
 }
@@ -26153,10 +26159,28 @@ test "mapped-memory coherency ABI layout and behavior" {
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(MemoryUnmapInfo));
     var mapped2: ?*anyopaque = null;
     const map_info2 = MemoryMapInfo{ .s_type = 1000271000, .p_next = null, .flags = 0, .memory = memory, .offset = 8, .size = 16 };
+    mapped2 = @ptrFromInt(0xfeed);
+    var malformed_map_info2 = map_info2;
+    malformed_map_info2.s_type = 5;
+    try std.testing.expectEqual(Result.error_memory_map_failed, mapMemory2(ctx.device, &malformed_map_info2, &mapped2));
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrFromInt(0xfeed)), mapped2);
+    malformed_map_info2 = map_info2;
+    malformed_map_info2.p_next = @ptrFromInt(8);
+    try std.testing.expectEqual(Result.error_memory_map_failed, mapMemory2(ctx.device, &malformed_map_info2, &mapped2));
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrFromInt(0xfeed)), mapped2);
+    malformed_map_info2 = map_info2;
+    malformed_map_info2.flags = 1;
+    try std.testing.expectEqual(Result.error_memory_map_failed, mapMemory2(ctx.device, &malformed_map_info2, &mapped2));
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrFromInt(0xfeed)), mapped2);
     try std.testing.expectEqual(Result.success, mapMemory2(ctx.device, &map_info2, &mapped2));
     try std.testing.expect(mapped2 != null);
     const unmap_info2 = MemoryUnmapInfo{ .s_type = 1000271001, .p_next = null, .flags = 0, .memory = memory };
+    var malformed_unmap_info2 = unmap_info2;
+    malformed_unmap_info2.flags = 1;
+    try std.testing.expectEqual(Result.error_memory_map_failed, unmapMemory2(ctx.device, &malformed_unmap_info2));
+    try std.testing.expect(@as(*MemoryObj, @ptrFromInt(memory)).mapped);
     try std.testing.expectEqual(Result.success, unmapMemory2(ctx.device, &unmap_info2));
+    try std.testing.expectEqual(Result.error_memory_map_failed, unmapMemory2(ctx.device, &unmap_info2));
     try std.testing.expectEqual(Result.error_initialization_failed, invalidateMappedMemoryRanges(ctx.device, 1, &ranges));
 
     freeMemory(ctx.device, memory, null);
@@ -26193,6 +26217,19 @@ test "mapped-memory coherency performance regression is bounded and allocation f
     try std.testing.expect(@as(*MemoryObj, @ptrFromInt(memory)).mapped);
 
     unmapMemory(ctx.device, memory);
+    // The promoted Vulkan 1.4 map/unmap pair must retain the same bounded,
+    // allocation-free warm-path guarantee as the legacy mapper.
+    var map_info2 = MemoryMapInfo{ .s_type = 1000271000, .p_next = null, .flags = 0, .memory = memory, .offset = 0, .size = 64 };
+    const unmap_info2 = MemoryUnmapInfo{ .s_type = 1000271001, .p_next = null, .flags = 0, .memory = memory };
+    var mapped2: ?*anyopaque = null;
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..1024) |_| {
+        try std.testing.expectEqual(Result.success, mapMemory2(ctx.device, &map_info2, &mapped2));
+        try std.testing.expect(mapped2 != null);
+        try std.testing.expectEqual(Result.success, unmapMemory2(ctx.device, &unmap_info2));
+    }
+    test_allocations_before_failure = null;
     freeMemory(ctx.device, memory, null);
     destroyDevice(ctx.device, null);
     destroyInstance(ctx.instance, null);

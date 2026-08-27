@@ -50,6 +50,12 @@ ID, requested stage timestamps, and completion metadata through
 retained when provided, with monotonic per-swapchain IDs otherwise. Count/
 incomplete behavior, queue-full backpressure, and the allocation-free warm
 path are covered by direct tests.
+The promoted Vulkan 1.4 `vkMapMemory2`/`vkUnmapMemory2` pair now has an
+explicit result-bearing lifecycle contract: malformed map requests preserve
+the caller's output pointer, and an unmap of an allocation that is not
+currently mapped returns `VK_ERROR_MEMORY_MAP_FAILED` without changing state.
+Both commands share the host-coherent mapper and a 1024-iteration
+allocation-free warm-path regression.
 Compute command recording now requires an owned bound compute
 pipeline, carries pipeline/layout/descriptor lifetime snapshots through
 submission prevalidation, and has a 4096-iteration allocation-free warm path.
