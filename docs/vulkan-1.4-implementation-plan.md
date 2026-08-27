@@ -705,6 +705,9 @@ Each slice must land with all of the following:
   `Normalize`, `FaceForward`, `Reflect`, and `Refract` for f32 vectors with
   strict arity/shape checks, explicit zero-normal and total-internal-reflection
   behavior, and allocation-free warm execution. A single
+  integer bit-index family now lowers `FindILsb`, `FindSMsb`, and `FindUMsb`
+  to signed lane positions with the specified `-1` zero/sentinel behavior.
+  A single
   side-effect-free dynamic conditional or one-case runtime switch with a common
   merge is also lowered to compare/select; generic SPIR-V dynamic control flow,
   aggregate/descriptor-array indexing, atomics, shared-memory execution,
