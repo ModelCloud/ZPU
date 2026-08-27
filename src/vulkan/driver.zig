@@ -18945,6 +18945,11 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     cmdWaitEvents(commands[0], 1, @ptrCast(&event), 0x1_0000, 0x1_0000, 0, null, 0, null, 0, null);
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(before_submitted_event2_wait, commands[0].impl.count);
+    commands[0].impl.invalid = false;
+    const before_submitted_mismatched_event2_wait = commands[0].impl.count;
+    cmdWaitEvents2(commands[0], 1, @ptrCast(&event), @ptrCast(&dependency));
+    try std.testing.expect(commands[0].impl.invalid);
+    try std.testing.expectEqual(before_submitted_mismatched_event2_wait, commands[0].impl.count);
     try std.testing.expectEqual(Result.success, resetEvent(ctx.device, event));
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
