@@ -505,7 +505,35 @@ pub const PhysicalDeviceVulkan13Properties = extern struct {
     uniform_texel_buffer_offset_single_texel_alignment: u32,
     max_buffer_size: u64,
 };
-pub const PhysicalDeviceVulkan14Properties = extern struct { s_type: i32, p_next: ?*anyopaque, payload: [128]u8 };
+pub const PhysicalDeviceVulkan14Properties = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    line_sub_pixel_precision_bits: u32,
+    max_vertex_attrib_divisor: u32,
+    supports_non_zero_first_instance: u32,
+    max_push_descriptors: u32,
+    dynamic_rendering_local_read_depth_stencil_attachments: u32,
+    dynamic_rendering_local_read_multisampled_attachments: u32,
+    early_fragment_multisample_coverage_after_sample_counting: u32,
+    early_fragment_sample_mask_test_before_sample_counting: u32,
+    depth_stencil_swizzle_one_support: u32,
+    polygon_mode_point_size: u32,
+    non_strict_single_pixel_wide_lines_use_parallelogram: u32,
+    non_strict_wide_lines_use_parallelogram: u32,
+    block_texel_view_compatible_multiple_layers: u32,
+    max_combined_image_sampler_descriptor_count: u32,
+    fragment_shading_rate_clamp_combiner_inputs: u32,
+    default_robustness_storage_buffers: i32,
+    default_robustness_uniform_buffers: i32,
+    default_robustness_vertex_inputs: i32,
+    default_robustness_images: i32,
+    copy_src_layout_count: u32,
+    p_copy_src_layouts: ?[*]const i32,
+    copy_dst_layout_count: u32,
+    p_copy_dst_layouts: ?[*]const i32,
+    optimal_tiling_layout_uuid: [16]u8,
+    identical_memory_type_requirements: u32,
+};
 // Individual core-promoted property structs use conservative zero payloads:
 // every optional capability is unadvertised, but each LP64 body remains the
 // exact size and alignment expected by callers.
@@ -16882,6 +16910,11 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 192), @offsetOf(PhysicalDeviceVulkan13Properties, "uniform_texel_buffer_offset_alignment_bytes"));
     try std.testing.expectEqual(@as(usize, 208), @offsetOf(PhysicalDeviceVulkan13Properties, "max_buffer_size"));
     try std.testing.expectEqual(@as(usize, 144), @sizeOf(PhysicalDeviceVulkan14Properties));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVulkan14Properties, "line_sub_pixel_precision_bits"));
+    try std.testing.expectEqual(@as(usize, 96), @offsetOf(PhysicalDeviceVulkan14Properties, "p_copy_src_layouts"));
+    try std.testing.expectEqual(@as(usize, 112), @offsetOf(PhysicalDeviceVulkan14Properties, "p_copy_dst_layouts"));
+    try std.testing.expectEqual(@as(usize, 120), @offsetOf(PhysicalDeviceVulkan14Properties, "optimal_tiling_layout_uuid"));
+    try std.testing.expectEqual(@as(usize, 136), @offsetOf(PhysicalDeviceVulkan14Properties, "identical_memory_type_requirements"));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceProtectedMemoryProperties));
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(PhysicalDeviceIDProperties));
     try std.testing.expectEqual(@as(usize, 536), @sizeOf(PhysicalDeviceDriverProperties));
@@ -17188,7 +17221,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     vulkan13_properties.s_type = 54;
     vulkan13_properties.p_next = @ptrCast(&vulkan12_properties);
     @memset(std.mem.asBytes(&vulkan13_properties)[16..], 0xff);
-    var vulkan14_properties = PhysicalDeviceVulkan14Properties{ .s_type = 56, .p_next = @ptrCast(&vulkan13_properties), .payload = [_]u8{0xff} ** 128 };
+    var vulkan14_properties = std.mem.zeroes(PhysicalDeviceVulkan14Properties);
+    vulkan14_properties.s_type = 56;
+    vulkan14_properties.p_next = @ptrCast(&vulkan13_properties);
+    @memset(std.mem.asBytes(&vulkan14_properties)[16..], 0xff);
     var properties = PhysicalDeviceProperties2{ .s_type = 1000059001, .p_next = @ptrCast(&vulkan14_properties), .properties = std.mem.zeroes(Properties) };
     getPhysicalDeviceProperties2(ctx.physical, &properties);
     try std.testing.expectEqual(API_1_0, properties.properties.api_version);
@@ -17201,9 +17237,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqualSlices(u8, driver_name, vulkan12_properties.driver_name[0..driver_name.len]);
     try std.testing.expectEqualSlices(u8, driver_info, vulkan12_properties.driver_info[0..driver_info.len]);
     try std.testing.expectEqual(@as(u64, heap_size), vulkan13_properties.max_buffer_size);
-    try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, vulkan14_properties.payload[0..4], .little));
-    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, vulkan14_properties.payload[4..8], .little));
-    try std.testing.expectEqualSlices(u8, &pipeline_cache_uuid, vulkan14_properties.payload[104..120]);
+    try std.testing.expectEqual(@as(u32, 4), vulkan14_properties.line_sub_pixel_precision_bits);
+    try std.testing.expectEqual(@as(u32, 1), vulkan14_properties.max_vertex_attrib_divisor);
+    try std.testing.expectEqualSlices(u8, &pipeline_cache_uuid, &vulkan14_properties.optimal_tiling_layout_uuid);
+    try std.testing.expectEqual(@as(u32, 1), vulkan14_properties.identical_memory_type_requirements);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan11_properties)), vulkan12_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan12_properties)), vulkan13_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&vulkan13_properties)), vulkan14_properties.p_next);
@@ -17213,18 +17250,18 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     @memset(std.mem.asBytes(&duplicate_vulkan11_properties)[16..], 0xee);
     vulkan11_properties.p_next = @ptrCast(&duplicate_vulkan11_properties);
     properties.properties.api_version = 0x1111_1111;
-    vulkan14_properties.payload[0] = 0x22;
+    vulkan14_properties.line_sub_pixel_precision_bits = 0x22;
     try std.testing.expectEqual(@as(u8, 0xee), duplicate_vulkan11_properties.device_uuid[0]);
     getPhysicalDeviceProperties2(ctx.physical, &properties);
     try std.testing.expectEqual(@as(u32, 0x1111_1111), properties.properties.api_version);
-    try std.testing.expectEqual(@as(u8, 0x22), vulkan14_properties.payload[0]);
+    try std.testing.expectEqual(@as(u32, 0x22), vulkan14_properties.line_sub_pixel_precision_bits);
     try std.testing.expectEqual(@as(u8, 0xee), duplicate_vulkan11_properties.device_uuid[0]);
     vulkan11_properties.p_next = null;
     properties.properties.api_version = 0xdead_beef;
-    vulkan14_properties.payload[0] = 0xca;
+    vulkan14_properties.line_sub_pixel_precision_bits = 0xca;
     getPhysicalDeviceProperties2(@ptrFromInt(8), &properties);
     try std.testing.expectEqual(@as(u32, 0xdead_beef), properties.properties.api_version);
-    try std.testing.expectEqual(@as(u8, 0xca), vulkan14_properties.payload[0]);
+    try std.testing.expectEqual(@as(u32, 0xca), vulkan14_properties.line_sub_pixel_precision_bits);
     properties.p_next = null;
     test_allocations_before_failure = 0;
     for (0..4096) |_| getPhysicalDeviceProperties2(ctx.physical, &properties);
@@ -17300,7 +17337,10 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     var pipeline_robustness_properties = PhysicalDevicePipelineRobustnessProperties{ .s_type = 1000068002, .p_next = @ptrCast(&divisor_properties), .default_robustness_storage_buffers = -1, .default_robustness_uniform_buffers = -1, .default_robustness_vertex_inputs = -1, .default_robustness_images = -1 };
     var maintenance6_properties = PhysicalDeviceMaintenance6Properties{ .s_type = 1000545001, .p_next = @ptrCast(&pipeline_robustness_properties), .block_texel_view_compatible_multiple_layers = 0xffff_ffff, .max_combined_image_sampler_descriptor_count = 0xffff_ffff, .fragment_shading_rate_clamp_combiner_inputs = 0xffff_ffff };
     var maintenance5_properties = PhysicalDeviceMaintenance5Properties{ .s_type = 1000470001, .p_next = @ptrCast(&maintenance6_properties), .early_fragment_multisample_coverage_after_sample_counting = 0xffff_ffff, .early_fragment_sample_mask_test_before_sample_counting = 0xffff_ffff, .depth_stencil_swizzle_one_support = 0xffff_ffff, .polygon_mode_point_size = 0xffff_ffff, .non_strict_single_pixel_wide_lines_use_parallelogram = 0xffff_ffff, .non_strict_wide_lines_use_parallelogram = 0xffff_ffff };
-    var vulkan14_individual_properties = PhysicalDeviceVulkan14Properties{ .s_type = 56, .p_next = @ptrCast(&maintenance5_properties), .payload = [_]u8{0xff} ** 128 };
+    var vulkan14_individual_properties = std.mem.zeroes(PhysicalDeviceVulkan14Properties);
+    vulkan14_individual_properties.s_type = 56;
+    vulkan14_individual_properties.p_next = @ptrCast(&maintenance5_properties);
+    @memset(std.mem.asBytes(&vulkan14_individual_properties)[16..], 0xff);
     properties.p_next = @ptrCast(&vulkan14_individual_properties);
     getPhysicalDeviceProperties2(ctx.physical, &properties);
     try std.testing.expectEqualSlices(u8, &device_uuid, &id_properties.device_uuid);
@@ -17336,11 +17376,11 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(u32, 1), divisor_properties.supports_non_zero_first_instance);
     try std.testing.expectEqualSlices(u8, &pipeline_cache_uuid, host_copy_properties.payload[32..48]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, host_copy_properties.payload[48..52], .little));
-    try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, vulkan14_individual_properties.payload[0..4], .little));
-    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, vulkan14_individual_properties.payload[4..8], .little));
-    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, vulkan14_individual_properties.payload[8..12], .little));
-    try std.testing.expectEqualSlices(u8, &pipeline_cache_uuid, vulkan14_individual_properties.payload[104..120]);
-    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, vulkan14_individual_properties.payload[120..124], .little));
+    try std.testing.expectEqual(@as(u32, 4), vulkan14_individual_properties.line_sub_pixel_precision_bits);
+    try std.testing.expectEqual(@as(u32, 1), vulkan14_individual_properties.max_vertex_attrib_divisor);
+    try std.testing.expectEqual(@as(u32, 1), vulkan14_individual_properties.supports_non_zero_first_instance);
+    try std.testing.expectEqualSlices(u8, &pipeline_cache_uuid, &vulkan14_individual_properties.optimal_tiling_layout_uuid);
+    try std.testing.expectEqual(@as(u32, 1), vulkan14_individual_properties.identical_memory_type_requirements);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&id_properties)), driver_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&subgroup_properties)), id_properties.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&maintenance3_properties)), subgroup_properties.p_next);
