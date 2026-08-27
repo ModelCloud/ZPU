@@ -64,7 +64,7 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 7, .operands = .{ .min = 2, .max = 1 + max_debug_string_words } },
     .{ .opcode = 8, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 11, .operands = .{ .min = 2, .max = 1 + max_debug_string_words } }, // OpExtInstImport
-    .{ .opcode = 12, .operands = .{ .min = 4, .max = 6 } }, // OpExtInst (bounded GLSL.std.450)
+    .{ .opcode = 12, .operands = .{ .min = 4, .max = 7 } }, // OpExtInst (bounded GLSL.std.450)
     .{ .opcode = 14, .operands = .{ .min = 2, .max = 2 } },
     .{ .opcode = 15, .operands = .{ .min = 3, .max = max_entry_point_operands } },
     .{ .opcode = 16, .operands = .{ .min = 2, .max = 5 } },
@@ -327,6 +327,9 @@ fn supportedGlslExtInst(ext: u32, result: ir.Type, operand: ir.Type) bool {
         37, 40 => result.scalar == .f32 and result.rows == 1,
         38, 41 => result.scalar == .u32 and result.rows == 1,
         39, 42 => result.scalar == .i32 and result.rows == 1,
+        43 => result.scalar == .f32 and result.rows == 1,
+        44 => result.scalar == .u32 and result.rows == 1,
+        45 => result.scalar == .i32 and result.rows == 1,
         else => false,
     };
 }
@@ -718,16 +721,18 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 block_terminated = true;
             },
             12 => {
-                if (!in_function or !label_seen or terminated or block_terminated or w.len < 5 or w.len > 6) return error.Malformed;
+                if (!in_function or !label_seen or terminated or block_terminated or w.len < 5 or w.len > 7) return error.Malformed;
                 const set = nodes[try id(nodes, w[2])];
                 if (set.kind != .ext_inst_import or set.a != 450) return error.Unsupported;
-                if (w[3] != 4 and w[3] != 5 and w[3] != 6 and w[3] != 7 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42) return error.Unsupported;
+                if (w[3] != 4 and w[3] != 5 and w[3] != 6 and w[3] != 7 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45) return error.Unsupported;
                 if ((w[3] == 4 or w[3] == 5 or w[3] == 6 or w[3] == 7) and w.len != 5) return error.Malformed;
                 if ((w[3] >= 37 and w[3] <= 42) and w.len != 6) return error.Malformed;
+                if ((w[3] >= 43 and w[3] <= 45) and w.len != 7) return error.Malformed;
                 const result = try resultShape(nodes, w[0]);
                 const operand = try valueShape(nodes, w[4]);
                 if (!supportedGlslExtInst(w[3], result, operand)) return error.Unsupported;
                 if ((w[3] >= 37 and w[3] <= 42) and !sameShape(result, try valueShape(nodes, w[5]))) return error.Unsupported;
+                if ((w[3] >= 43 and w[3] <= 45) and (!sameShape(result, try valueShape(nodes, w[5])) or !sameShape(result, try valueShape(nodes, w[6])))) return error.Unsupported;
                 try define(nodes, w[1], .{ .kind = .function_value, .type_id = w[0], .opcode = 12, .a = w[2], .b = w[3], .words = w[4..] });
             },
             56 => {
@@ -853,15 +858,17 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         const w = instruction.words;
         switch (instruction.opcode) {
             12 => {
-                if (w.len < 5 or w.len > 6) return error.Malformed;
+                if (w.len < 5 or w.len > 7) return error.Malformed;
                 const set = nodes[try id(nodes, w[2])];
-                if (set.kind != .ext_inst_import or set.a != 450 or (w[3] != 4 and w[3] != 5 and w[3] != 6 and w[3] != 7 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42)) return error.Unsupported;
+                if (set.kind != .ext_inst_import or set.a != 450 or (w[3] != 4 and w[3] != 5 and w[3] != 6 and w[3] != 7 and w[3] != 37 and w[3] != 38 and w[3] != 39 and w[3] != 40 and w[3] != 41 and w[3] != 42 and w[3] != 43 and w[3] != 44 and w[3] != 45)) return error.Unsupported;
                 if ((w[3] == 4 or w[3] == 5 or w[3] == 6 or w[3] == 7) and w.len != 5) return error.Malformed;
                 if ((w[3] >= 37 and w[3] <= 42) and w.len != 6) return error.Malformed;
+                if ((w[3] >= 43 and w[3] <= 45) and w.len != 7) return error.Malformed;
                 const result = try resultShape(nodes, w[0]);
                 const operand = try valueShape(nodes, w[4]);
                 if (!supportedGlslExtInst(w[3], result, operand)) return error.Unsupported;
                 if ((w[3] >= 37 and w[3] <= 42) and !sameShape(result, try valueShape(nodes, w[5]))) return error.Unsupported;
+                if ((w[3] >= 43 and w[3] <= 45) and (!sameShape(result, try valueShape(nodes, w[5])) or !sameShape(result, try valueShape(nodes, w[6])))) return error.Unsupported;
             },
             44, 80 => {
                 const result = try resultShape(nodes, w[0]);
@@ -1563,6 +1570,9 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 40 => .f_max,
                 41 => .u_max,
                 42 => .i_max,
+                43 => .f_clamp,
+                44 => .u_clamp,
+                45 => .i_clamp,
                 else => unreachable,
             },
             41, 42, 43, 48, 49, 50 => .constant,
@@ -2575,6 +2585,17 @@ test "compute profile lowers bounded GLSL.std.450 absolute values" {
     var saw_sign = false;
     for (sign_program.instructions) |instruction| saw_sign = saw_sign or instruction.op == .f_sign;
     try std.testing.expect(saw_sign);
+
+    const clamp_words = try testReplaceInstruction(std.testing.allocator, words, testOpcodeOffset(words, 12, 0).?, &.{ (8 << 16) | 12, 2, 13, 12, 43, 7, 7, 7 });
+    defer std.testing.allocator.free(clamp_words);
+    var clamp_program = try compile(std.testing.allocator, clamp_words, .compute, "main", &.{});
+    defer clamp_program.deinit(std.testing.allocator);
+    var saw_clamp = false;
+    for (clamp_program.instructions) |instruction| saw_clamp = saw_clamp or instruction.op == .f_clamp;
+    try std.testing.expect(saw_clamp);
+    const malformed_clamp = try testReplaceInstruction(std.testing.allocator, words, testOpcodeOffset(words, 12, 0).?, &.{ (7 << 16) | 12, 2, 13, 12, 43, 7, 7 });
+    defer std.testing.allocator.free(malformed_clamp);
+    try std.testing.expectError(error.Malformed, compile(std.testing.allocator, malformed_clamp, .compute, "main", &.{}));
 }
 
 test "compute profile lowers bounded GLSL.std.450 integer min/max" {
@@ -2604,6 +2625,28 @@ test "compute profile lowers bounded GLSL.std.450 integer min/max" {
         try std.testing.expectEqual(expected, program.instructions[1].op);
         try std.testing.expectEqual(if (ext == 38 or ext == 41) ir.Scalar.u32 else ir.Scalar.i32, program.instructions[1].ty.scalar);
         try std.testing.expectEqual(ir.Op.output, program.instructions[2].op);
+    }
+}
+
+test "compute profile lowers bounded GLSL.std.450 integer clamps" {
+    for ([_]u32{ 44, 45 }) |ext| {
+        var words = compute_ineg_store;
+        words[3] = 13;
+        const integer_type = testOpcodeOffset(&words, 21, 0).?;
+        words[integer_type + 3] = if (ext == 44) 0 else 1;
+        const function = testOpcodeOffset(&words, 54, 0).?;
+        const imported = try testInsertWords(std.testing.allocator, &words, function, &.{
+            (6 << 16) | 11, 12, 0x4c534c47, 0x6474732e, 0x3035342e, 0,
+        });
+        defer std.testing.allocator.free(imported);
+        const sneg = testOpcodeOffset(imported, 126, 0).?;
+        const ext_clamp = try testReplaceInstruction(std.testing.allocator, imported, sneg, &.{ (8 << 16) | 12, 2, 10, 12, ext, 7, 7, 7 });
+        defer std.testing.allocator.free(ext_clamp);
+        var program = try compile(std.testing.allocator, ext_clamp, .compute, "main", &.{});
+        defer program.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 3), program.instructions.len);
+        try std.testing.expectEqual(if (ext == 44) ir.Op.u_clamp else ir.Op.i_clamp, program.instructions[1].op);
+        try std.testing.expectEqual(if (ext == 44) ir.Scalar.u32 else ir.Scalar.i32, program.instructions[1].ty.scalar);
     }
 }
 

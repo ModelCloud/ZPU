@@ -679,7 +679,9 @@ Each slice must land with all of the following:
   deterministically to canonical `+0`, signed zero keeps its sign bit, and
   signed integer extrema map to `-1` without overflow. Scalar/vector unsigned
   and signed integer `UMin`/`SMin`/`UMax`/`SMax` are also lowered with exact
-  32-bit ordering. A single
+  32-bit ordering. Scalar/vector `FClamp`/`UClamp`/`SClamp` use the same
+  component-wise min/max ordering and reject inverted bounds as a numeric
+  domain error. A single
   side-effect-free dynamic conditional or one-case runtime switch with a common
   merge is also lowered to compare/select; generic SPIR-V dynamic control flow,
   aggregate/descriptor-array indexing, atomics, shared-memory execution,
