@@ -10606,16 +10606,24 @@ fn ownPipelineCachePayload(payload: []const u8) CanonicalError!Canonical {
     result.finish();
     return result;
 }
+fn pipelineCacheNextRecord(payload: []const u8, cursor: *usize) ?[]const u8 {
+    if (cursor.* > payload.len or payload.len - cursor.* < 4) return null;
+    const record_size = std.mem.readInt(u32, payload[cursor.*..][0..4], .little);
+    cursor.* += 4;
+    const body_size: usize = @intCast(record_size);
+    if (body_size > payload.len - cursor.*) return null;
+    const entry = payload[cursor.*..][0..body_size];
+    cursor.* += body_size;
+    return entry;
+}
+fn pipelineCacheRecordsValid(payload: []const u8) bool {
+    var cursor: usize = 0;
+    while (cursor < payload.len) _ = pipelineCacheNextRecord(payload, &cursor) orelse return false;
+    return true;
+}
 fn pipelineCacheHasRecord(payload: []const u8, entry: []const u8) bool {
     var cursor: usize = 0;
-    while (cursor <= payload.len and payload.len - cursor >= 4) {
-        const record_size = std.mem.readInt(u32, payload[cursor..][0..4], .little);
-        const body_start = cursor + 4;
-        const body_size: usize = @intCast(record_size);
-        if (body_size > payload.len - body_start) break;
-        if (body_size == entry.len and std.mem.eql(u8, payload[body_start..][0..body_size], entry)) return true;
-        cursor = body_start + body_size;
-    }
+    while (pipelineCacheNextRecord(payload, &cursor)) |candidate| if (std.mem.eql(u8, candidate, entry)) return true;
     return false;
 }
 fn appendPipelineCacheRecord(writer: *CanonicalWriter, entry: []const u8) CanonicalError!void {
@@ -10696,8 +10704,23 @@ fn mergePipelineCaches(device: ?Device, dst_handle: usize, count: u32, src_handl
         if (src == dst or !src.owner.eql(d)) return .error_initialization_failed;
         sources[index] = src;
     };
+    const destination_records = pipelineCacheRecordsValid(dst.data.bytes);
+    var all_source_records = destination_records;
+    if (all_source_records) for (sources[0..count]) |src| if (!pipelineCacheRecordsValid(src.data.bytes)) {
+        all_source_records = false;
+        break;
+    };
     var changed = false;
-    for (sources[0..count]) |src| if (src.data.bytes.len != 0 and std.mem.indexOf(u8, dst.data.bytes, src.data.bytes) == null) {
+    if (all_source_records) {
+        for (sources[0..count]) |src| {
+            var cursor: usize = 0;
+            while (pipelineCacheNextRecord(src.data.bytes, &cursor)) |candidate| if (!pipelineCacheHasRecord(dst.data.bytes, candidate)) {
+                changed = true;
+                break;
+            };
+            if (changed) break;
+        }
+    } else for (sources[0..count]) |src| if (src.data.bytes.len != 0 and std.mem.indexOf(u8, dst.data.bytes, src.data.bytes) == null) {
         changed = true;
         break;
     };
@@ -10705,7 +10728,12 @@ fn mergePipelineCaches(device: ?Device, dst_handle: usize, count: u32, src_handl
     var writer: CanonicalWriter = .{};
     defer writer.deinit();
     writer.raw(dst.data.bytes) catch return .error_out_of_host_memory;
-    for (sources[0..count]) |src| if (src.data.bytes.len != 0 and std.mem.indexOf(u8, writer.list.items, src.data.bytes) == null) writer.raw(src.data.bytes) catch return .error_out_of_host_memory;
+    if (all_source_records) {
+        for (sources[0..count]) |src| {
+            var cursor: usize = 0;
+            while (pipelineCacheNextRecord(src.data.bytes, &cursor)) |candidate| appendPipelineCacheRecord(&writer, candidate) catch return .error_out_of_host_memory;
+        }
+    } else for (sources[0..count]) |src| if (src.data.bytes.len != 0 and std.mem.indexOf(u8, writer.list.items, src.data.bytes) == null) writer.raw(src.data.bytes) catch return .error_out_of_host_memory;
     const merged = writer.done() catch return .error_out_of_host_memory;
     dst.data.deinit();
     dst.data = merged;
@@ -21526,24 +21554,35 @@ test "pipeline cache header lifecycle merge and partial reads are exact" {
     size = bytes.len;
     try std.testing.expectEqual(Result.success, getPipelineCacheData(ctx.device, caches[0], &size, &bytes));
     try std.testing.expectEqualSlices(u8, &pipelineCacheHeader(), &bytes);
-    var seeded = [_]u8{0} ** 40;
-    @memcpy(seeded[0..32], &pipelineCacheHeader());
-    @memset(seeded[32..], 0x5a);
+    const cache_record = [_]u8{ 0x5a, 0x5a, 0x5a, 0x5a };
+    const cache_record_b = [_]u8{ 0x6a, 0x6a, 0x6a, 0x6a };
+    var seeded = [_]u8{0} ** 48;
+    @memcpy(seeded[0..pipeline_cache_header_size], &pipelineCacheHeader());
+    std.mem.writeInt(u32, seeded[pipeline_cache_header_size..][0..4], @intCast(cache_record.len), .little);
+    @memcpy(seeded[pipeline_cache_header_size + 4 ..][0..cache_record.len], &cache_record);
+    const second_record_offset = pipeline_cache_header_size + 4 + cache_record.len;
+    std.mem.writeInt(u32, seeded[second_record_offset..][0..4], @intCast(cache_record_b.len), .little);
+    @memcpy(seeded[second_record_offset + 4 ..], &cache_record_b);
     info.initial_data_size = seeded.len;
     info.initial_data = &seeded;
     try std.testing.expectEqual(Result.success, createPipelineCache(ctx.device, &info, null, &caches[1]));
     var seeded_size: usize = 0;
     try std.testing.expectEqual(Result.success, getPipelineCacheData(ctx.device, caches[1], &seeded_size, null));
-    try std.testing.expectEqual(@as(usize, 40), seeded_size);
-    seeded[32] = 0xa5;
-    var seeded_output = [_]u8{0} ** 40;
+    try std.testing.expectEqual(@as(usize, 48), seeded_size);
+    seeded[pipeline_cache_header_size + 4] = 0xa5;
+    var seeded_output = [_]u8{0} ** 48;
     seeded_size = seeded_output.len;
     try std.testing.expectEqual(Result.success, getPipelineCacheData(ctx.device, caches[1], &seeded_size, &seeded_output));
-    try std.testing.expectEqual(@as(u8, 0x5a), seeded_output[32]);
+    try std.testing.expectEqual(@as(u8, 0x5a), seeded_output[pipeline_cache_header_size + 4]);
+    try std.testing.expectEqual(@as(u8, 0x6a), seeded_output[second_record_offset + 4]);
     try std.testing.expectEqual(Result.success, mergePipelineCaches(ctx.device, caches[0], 1, @ptrCast(&caches[1])));
     size = 0;
     try std.testing.expectEqual(Result.success, getPipelineCacheData(ctx.device, caches[0], &size, null));
-    try std.testing.expectEqual(@as(usize, 40), size);
+    try std.testing.expectEqual(@as(usize, 48), size);
+    try std.testing.expectEqual(Result.success, mergePipelineCaches(ctx.device, caches[0], 1, @ptrCast(&caches[1])));
+    size = 0;
+    try std.testing.expectEqual(Result.success, getPipelineCacheData(ctx.device, caches[0], &size, null));
+    try std.testing.expectEqual(@as(usize, 48), size);
     var third_seeded = [_]u8{0} ** 41;
     @memcpy(third_seeded[0..32], &pipelineCacheHeader());
     @memset(third_seeded[32..], 0x6b);
@@ -21557,7 +21596,7 @@ test "pipeline cache header lifecycle merge and partial reads are exact" {
     test_allocations_before_failure = null;
     var unchanged_size: usize = 0;
     try std.testing.expectEqual(Result.success, getPipelineCacheData(ctx.device, caches[0], &unchanged_size, null));
-    try std.testing.expectEqual(@as(usize, 40), unchanged_size);
+    try std.testing.expectEqual(@as(usize, 48), unchanged_size);
     try std.testing.expectEqual(Result.error_initialization_failed, mergePipelineCaches(ctx.device, caches[0], 0, null));
     try std.testing.expectEqual(Result.error_initialization_failed, mergePipelineCaches(ctx.device, caches[0], 1, @ptrCast(&caches[0])));
     seeded[8] ^= 1;

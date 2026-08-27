@@ -516,6 +516,10 @@ Descriptor-update-template writes now stage every decoded descriptor in a local
 candidate before publishing it to the destination set. Invalid handles, ranges,
 alignment, or a null data pointer therefore leave all prior bindings untouched;
 the valid path remains allocation-free and is exercised for 4096 updates.
+Pipeline-cache merges now parse ZPU's valid length-prefixed canonical records and
+deduplicate by record identity before publication, while retaining opaque initial
+payloads byte-for-byte; repeated duplicate merges remain allocation-free and
+failure-atomic.
 Combined-image-sampler descriptors now retain the typed sampler state and the
 sampler object identity in every ordinary, template, push-descriptor, and
 recorded-draw snapshot. Submit-time validation rejects a destroyed or
@@ -781,8 +785,10 @@ Each slice must land with all of the following:
   `vkQueueBindSparse` now validates top-level bind-info ABI before reporting
   unsupported, while sparse residency and nonzero sparse binds remain
   deferred.
-- [ ] **A10 — replace opaque placeholders:** samplers, descriptor pools,
-  descriptor frees/resets, and pipeline caches become typed, owned objects.
+- [ ] **A10 — replace opaque placeholders:** samplers, descriptor pools, and
+  descriptor frees/resets become typed, owned objects. Pipeline caches are
+  typed and owned, and valid canonical records now merge with identity-based
+  deduplication while opaque initial payloads remain byte-preserving.
 - [ ] **A11 — mandatory features, formats, and limits:** run the Vulkan 1.0 CTS
   subset and correct every remaining reporting/execution mismatch. The sample
   count masks are now truthful: ZPU advertises only `VK_SAMPLE_COUNT_1_BIT`,
