@@ -24086,6 +24086,47 @@ test "event waits release the registry lock and synchronize with host set" {
     destroyInstance(ctx.instance, null);
 }
 
+test "device teardown preserves an unlocked queue submission" {
+    // This test intentionally destroys a live device while its submission is
+    // still waiting outside the registry lock.  Reset the handle tombstone
+    // pools first so the test does not consume capacity needed by the later
+    // exhaustion assertions when the direct suite runs in source order.
+    instance_state = [_]SlotState{.never} ** max_objects;
+    device_state = [_]SlotState{.never} ** max_objects;
+    const ctx = try createTestDeviceContext();
+    const event_info = EventCreateInfo{ .s_type = 10, .p_next = null, .flags = 0 };
+    var event: usize = 0;
+    try std.testing.expectEqual(Result.success, createEvent(ctx.device, &event_info, null, &event));
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    const allocate = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &commands));
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdWaitEvents(commands[0], 1, @ptrCast(&event), 0x1, 0x1000, 0, null, 0, null, 0, null);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    var started = std.atomic.Value(bool).init(false);
+    var submit_result = Result.error_initialization_failed;
+    const event_object = validEventLocked(event).?;
+    const context = EventWaitSubmitContext{ .queue = ctx.queue, .submit = &submit, .started = &started, .result = &submit_result };
+    const waiter = try std.Thread.spawn(.{}, submitEventWait, .{&context});
+    while (!started.load(.acquire)) std.atomic.spinLoopHint();
+    while (event_object.waiters.load(.acquire) == 0) std.atomic.spinLoopHint();
+    try std.testing.expectEqual(@as(u32, 1), active_queue_submissions.load(.acquire));
+
+    // Destroying the last device must not stop shared workers while this
+    // submission still owns command storage and is waiting outside the lock.
+    destroyDevice(ctx.device, null);
+    event_object.signaled.store(true, .release);
+    waiter.join();
+    try std.testing.expectEqual(Result.success, submit_result);
+    try std.testing.expectEqual(@as(u32, 0), active_queue_submissions.load(.acquire));
+    destroyInstance(ctx.instance, null);
+}
+
 test "query pools expose exact availability timestamps copies and lifecycle" {
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(QueryPoolCreateInfo));
     const ctx = try createTestDeviceContext();
