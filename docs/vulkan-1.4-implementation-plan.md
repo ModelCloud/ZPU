@@ -76,10 +76,10 @@ The promoted vertex-attribute-divisor feature and property nodes now use the
 registry sTypes (`1000191002` and `1000526000`) and typed two-field bodies;
 feature queries report both controls disabled, while property queries report
 the bounded divisor policy and reject the former incorrect sType.
-The promoted line-rasterization property node now exposes its typed
-`lineSubPixelPrecisionBits` field (value four for the advertised profile)
-instead of an opaque payload, with the KHR/EXT aliases sharing the same LP64
-layout.
+The promoted line-rasterization feature and property nodes now expose typed
+LP64 fields (all six feature controls remain `VK_FALSE`; the property reports
+`lineSubPixelPrecisionBits = 4`) instead of opaque payloads, with the KHR/EXT
+aliases sharing the same layouts.
 
 Graphics pipeline vertex-input chains accept the feature-disabled,
 zero-entry `VkPipelineVertexInputDivisorStateCreateInfo` form with bounded,

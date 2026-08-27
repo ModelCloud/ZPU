@@ -242,7 +242,18 @@ pub const PhysicalDeviceShaderFloatControls2Features = extern struct { s_type: i
 pub const PhysicalDeviceShaderExpectAssumeFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
 pub const PhysicalDevicePipelineProtectedAccessFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
 pub const PhysicalDevicePipelineRobustnessFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [1]u32 };
-pub const PhysicalDeviceLineRasterizationFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, values: [6]u32 };
+pub const PhysicalDeviceLineRasterizationFeatures = extern struct {
+    s_type: i32,
+    p_next: ?*anyopaque,
+    rectangular_lines: u32,
+    bresenham_lines: u32,
+    smooth_lines: u32,
+    stippled_rectangular_lines: u32,
+    stippled_bresenham_lines: u32,
+    stippled_smooth_lines: u32,
+};
+pub const PhysicalDeviceLineRasterizationFeaturesKHR = PhysicalDeviceLineRasterizationFeatures;
+pub const PhysicalDeviceLineRasterizationFeaturesEXT = PhysicalDeviceLineRasterizationFeatures;
 pub const PhysicalDeviceVertexAttributeDivisorFeatures = extern struct {
     s_type: i32,
     p_next: ?*anyopaque,
@@ -16694,6 +16705,9 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVertexAttributeDivisorFeatures, "vertex_attribute_instance_rate_divisor"));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(PhysicalDeviceVertexAttributeDivisorProperties));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceVertexAttributeDivisorProperties, "max_vertex_attrib_divisor"));
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(PhysicalDeviceLineRasterizationFeatures));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PhysicalDeviceLineRasterizationFeatures, "rectangular_lines"));
+    try std.testing.expectEqual(@as(usize, 36), @offsetOf(PhysicalDeviceLineRasterizationFeatures, "stippled_smooth_lines"));
     getPhysicalDeviceFeatures2(ctx.physical, &features);
     try std.testing.expect(std.mem.allEqual(u32, &features.features.values, 0));
     try std.testing.expect(std.mem.allEqual(u32, &vulkan11_features.values, 0));
@@ -16716,7 +16730,7 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     features.features.values[0] = 0xdead_beef;
     getPhysicalDeviceFeatures2(ctx.physical, &features);
     try std.testing.expectEqual(@as(u32, 0xdead_beef), features.features.values[0]);
-    var line_features = PhysicalDeviceLineRasterizationFeatures{ .s_type = 1000259000, .p_next = null, .values = [_]u32{0xffff_ffff} ** 6 };
+    var line_features = PhysicalDeviceLineRasterizationFeatures{ .s_type = 1000259000, .p_next = null, .rectangular_lines = 0xffff_ffff, .bresenham_lines = 0xffff_ffff, .smooth_lines = 0xffff_ffff, .stippled_rectangular_lines = 0xffff_ffff, .stippled_bresenham_lines = 0xffff_ffff, .stippled_smooth_lines = 0xffff_ffff };
     var descriptor_features = PhysicalDeviceDescriptorIndexingFeatures{ .s_type = 1000161001, .p_next = @ptrCast(&line_features), .values = [_]u32{0xffff_ffff} ** 20 };
     var storage_features = PhysicalDevice16BitStorageFeatures{ .s_type = 1000083000, .p_next = @ptrCast(&descriptor_features), .values = [_]u32{0xffff_ffff} ** 4 };
     var divisor_features = PhysicalDeviceVertexAttributeDivisorFeatures{ .s_type = 1000191002, .p_next = @ptrCast(&storage_features), .vertex_attribute_instance_rate_divisor = 0xffff_ffff, .vertex_attribute_instance_rate_zero_divisor = 0xffff_ffff };
@@ -16726,19 +16740,24 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(u32, 0), divisor_features.vertex_attribute_instance_rate_zero_divisor);
     try std.testing.expect(std.mem.allEqual(u32, &storage_features.values, 0));
     try std.testing.expect(std.mem.allEqual(u32, &descriptor_features.values, 0));
-    try std.testing.expect(std.mem.allEqual(u32, &line_features.values, 0));
+    try std.testing.expectEqual(@as(u32, 0), line_features.rectangular_lines);
+    try std.testing.expectEqual(@as(u32, 0), line_features.bresenham_lines);
+    try std.testing.expectEqual(@as(u32, 0), line_features.smooth_lines);
+    try std.testing.expectEqual(@as(u32, 0), line_features.stippled_rectangular_lines);
+    try std.testing.expectEqual(@as(u32, 0), line_features.stippled_bresenham_lines);
+    try std.testing.expectEqual(@as(u32, 0), line_features.stippled_smooth_lines);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&descriptor_features)), storage_features.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&line_features)), descriptor_features.p_next);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&storage_features)), divisor_features.p_next);
-    var duplicate_line_features = PhysicalDeviceLineRasterizationFeatures{ .s_type = 1000259000, .p_next = null, .values = [_]u32{0xaaaa_aaaa} ** 6 };
+    var duplicate_line_features = PhysicalDeviceLineRasterizationFeatures{ .s_type = 1000259000, .p_next = null, .rectangular_lines = 0xaaaa_aaaa, .bresenham_lines = 0xaaaa_aaaa, .smooth_lines = 0xaaaa_aaaa, .stippled_rectangular_lines = 0xaaaa_aaaa, .stippled_bresenham_lines = 0xaaaa_aaaa, .stippled_smooth_lines = 0xaaaa_aaaa };
     line_features.p_next = @ptrCast(&duplicate_line_features);
     features.features.values[0] = 0x1111_1111;
     storage_features.values[0] = 0x2222_2222;
-    try std.testing.expectEqual(@as(u32, 0xaaaa_aaaa), duplicate_line_features.values[0]);
+    try std.testing.expectEqual(@as(u32, 0xaaaa_aaaa), duplicate_line_features.rectangular_lines);
     getPhysicalDeviceFeatures2(ctx.physical, &features);
     try std.testing.expectEqual(@as(u32, 0x1111_1111), features.features.values[0]);
     try std.testing.expectEqual(@as(u32, 0x2222_2222), storage_features.values[0]);
-    try std.testing.expectEqual(@as(u32, 0xaaaa_aaaa), duplicate_line_features.values[0]);
+    try std.testing.expectEqual(@as(u32, 0xaaaa_aaaa), duplicate_line_features.rectangular_lines);
     line_features.p_next = null;
     features.features.values[0] = 0xdead_beef;
     storage_features.values[0] = 0xcafe_f00d;
