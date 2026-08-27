@@ -6722,8 +6722,12 @@ fn cmdWaitEvents2(cb: ?CommandBuffer, event_count: u32, events: ?[*]const usize,
             renderPassDependencyValid(current, info);
         const host_scope_valid = blk: {
             const event = validEventLocked(events.?[index]) orelse break :blk false;
-            const signal_kind = @as(EventSignalKind, @enumFromInt(event.signal_kind.load(.acquire)));
-            break :blk signal_kind != .host or sync2WaitHostSourceScopeValid(info);
+            // A reset recorded earlier in this command buffer clears the
+            // prior host signal for this wait. Use the same bounded latest
+            // signal fold as the common event validator instead of consulting
+            // only the event's global atomic provenance.
+            const recorded_signal = eventSignalRecordedBeforeWait(current, event);
+            break :blk recorded_signal.kind != .host or sync2WaitHostSourceScopeValid(info);
         };
         const still_recording = current.impl.state == 1 and !current.impl.invalid;
         if (!scope_valid or !host_scope_valid or !still_recording) {
@@ -6931,34 +6935,46 @@ fn cmdResetEvent(cb: ?CommandBuffer, handle: usize, stage_mask: u32) callconv(.c
     }
     record(c, .{ .event_reset = event });
 }
+const RecordedEventSignal = struct {
+    kind: EventSignalKind = .none,
+    stage_mask: u32 = 0,
+    dependency_key: u64 = 0,
+};
+
+fn eventSignalRecordedBeforeWait(c: *const CommandBufferObj, event: *const EventObj) RecordedEventSignal {
+    var signal = RecordedEventSignal{};
+    if (event.signaled.load(.acquire)) {
+        signal.kind = @enumFromInt(event.signal_kind.load(.acquire));
+        signal.stage_mask = event.signal_stage_mask.load(.acquire);
+        signal.dependency_key = event.signal_dependency_key.load(.acquire);
+    }
+    for (c.impl.commands[0..c.impl.count]) |command| switch (command) {
+        .event_set => |operation| if (operation.event == event and signal.kind == .none) {
+            // A signal operation is a no-op while the event is already
+            // signaled. This fold mirrors executeValidatedCommand without
+            // requiring a mutable event state during recording.
+            signal = .{ .kind = operation.signal_kind, .stage_mask = operation.stage_mask, .dependency_key = operation.dependency_key };
+        },
+        .event_reset => |reset_event| {
+            if (reset_event == event) signal = .{};
+        },
+        else => {},
+    };
+    return signal;
+}
+
 fn eventSetRecordedBefore(c: *const CommandBufferObj, event: *const EventObj, signal_kind: EventSignalKind) bool {
-    for (c.impl.commands[0..c.impl.count]) |command| switch (command) {
-        .event_set => |operation| if (operation.event == event and operation.signal_kind == signal_kind) return true,
-        else => {},
-    };
-    return false;
+    return eventSignalRecordedBeforeWait(c, event).kind == signal_kind;
 }
+
 fn eventSet2DependencyKeyRecordedBefore(c: *const CommandBufferObj, event: *const EventObj) ?u64 {
-    var key: ?u64 = null;
-    for (c.impl.commands[0..c.impl.count]) |command| switch (command) {
-        .event_set => |operation| if (operation.event == event and operation.signal_kind == .synchronization2) {
-            key = operation.dependency_key;
-        },
-        else => {},
-    };
-    return key;
+    const signal = eventSignalRecordedBeforeWait(c, event);
+    return if (signal.kind == .synchronization2) signal.dependency_key else null;
 }
+
 fn legacyEventWaitStageMask(c: *const CommandBufferObj, event: *const EventObj) u32 {
-    var required: u32 = 0;
-    const signal_kind = @as(EventSignalKind, @enumFromInt(event.signal_kind.load(.acquire)));
-    if (signal_kind == .host) required |= 0x4000 else if (signal_kind == .legacy) required |= event.signal_stage_mask.load(.acquire);
-    for (c.impl.commands[0..c.impl.count]) |command| switch (command) {
-        .event_set => |operation| if (operation.event == event and operation.signal_kind == .legacy) {
-            required |= operation.stage_mask;
-        },
-        else => {},
-    };
-    return required;
+    const signal = eventSignalRecordedBeforeWait(c, event);
+    return if (signal.kind == .host or signal.kind == .legacy) signal.stage_mask else 0;
 }
 fn cmdWaitEventsCommon(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const usize, src_stage_mask: u32, dst_stage_mask: u32, memory_barrier_count: u32, memory_barriers: ?[*]const MemoryBarrier, buffer_barrier_count: u32, buffer_barriers: ?[*]const BufferMemoryBarrier, image_barrier_count: u32, image_barriers: ?[*]const ImageMemoryBarrier, allow_synchronization2_signal: bool, dependency_key: u64) void {
     lock();
@@ -6974,16 +6990,13 @@ fn cmdWaitEventsCommon(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const 
             c.impl.invalid = true;
             return;
         };
-        const signal_kind = @as(EventSignalKind, @enumFromInt(event.signal_kind.load(.acquire)));
+        const recorded_signal = eventSignalRecordedBeforeWait(c, event);
         const incompatible_signal = if (allow_synchronization2_signal)
-            signal_kind == .legacy or eventSetRecordedBefore(c, event, .legacy)
+            recorded_signal.kind == .legacy
         else
-            signal_kind == .synchronization2 or eventSetRecordedBefore(c, event, .synchronization2);
-        const sync2_dependency_mismatch = if (allow_synchronization2_signal) blk: {
-            if (eventSet2DependencyKeyRecordedBefore(c, event)) |recorded_key| break :blk recorded_key != dependency_key;
-            break :blk signal_kind == .synchronization2 and event.signal_dependency_key.load(.acquire) != dependency_key;
-        } else false;
-        const missing_legacy_stage = !allow_synchronization2_signal and legacyEventWaitStageMask(c, event) & ~src_stage_mask != 0;
+            recorded_signal.kind == .synchronization2;
+        const sync2_dependency_mismatch = allow_synchronization2_signal and recorded_signal.kind == .synchronization2 and recorded_signal.dependency_key != dependency_key;
+        const missing_legacy_stage = !allow_synchronization2_signal and recorded_signal.kind != .none and recorded_signal.kind != .synchronization2 and recorded_signal.stage_mask & ~src_stage_mask != 0;
         if (event.owner != c.impl.owner or incompatible_signal or sync2_dependency_mismatch or missing_legacy_stage) {
             c.impl.invalid = true;
             return;
@@ -19060,7 +19073,9 @@ test "synchronization2 wrappers preserve exact pNext ABI and bounded execution" 
     const legacy_image_barrier = ImageMemoryBarrier{ .s_type = 45, .p_next = null, .src_access_mask = 0, .dst_access_mask = 0x1800, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
     // The wait must match the latest synchronization2 signal's dependency
     // payload exactly, so signal the same image dependency immediately before
-    // recording the paired wait.
+    // recording the paired wait. Reset the event first because a second set
+    // while already signaled is a Vulkan no-op.
+    cmdResetEvent2(commands[0], event, 0x1_0000);
     cmdSetEvent2(commands[0], event, &image_dependency);
     const legacy_memory_barrier = MemoryBarrier{ .s_type = 46, .p_next = null, .src_access_mask = 0, .dst_access_mask = 0 };
     const wait_before = commands[0].impl.count;
@@ -23066,6 +23081,22 @@ test "event host and command-buffer ABI behavior is owned and failure atomic" {
     var buffers: [1]CommandBuffer = undefined;
     try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate, &buffers));
     const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(buffers[0], &begin));
+    // A reset recorded before a wait clears any earlier signal provenance;
+    // the wait must not inherit the stale legacy stage requirement.
+    var history_wait_events = [_]usize{event};
+    cmdSetEvent(buffers[0], event, 0x1);
+    cmdResetEvent(buffers[0], event, 0x1);
+    cmdWaitEvents(buffers[0], 1, &history_wait_events, 0x2, 0x1000, 0, null, 0, null, 0, null);
+    try std.testing.expect(!buffers[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(buffers[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(buffers[0], &begin));
+    const history_dependency = DependencyInfo{ .s_type = 1000314003, .p_next = null, .dependency_flags = 0, .memory_barrier_count = 0, .memory_barriers = null, .buffer_memory_barrier_count = 0, .buffer_memory_barriers = null, .image_memory_barrier_count = 0, .image_memory_barriers = null };
+    cmdSetEvent2(buffers[0], event, &history_dependency);
+    cmdResetEvent2(buffers[0], event, 0x1_0000);
+    cmdWaitEvents2(buffers[0], 1, &history_wait_events, @ptrCast(&history_dependency));
+    try std.testing.expect(!buffers[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(buffers[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(buffers[0], &begin));
     cmdSetEvent(buffers[0], event, 0x1000);
     try std.testing.expectEqual(Result.success, endCommandBuffer(buffers[0]));

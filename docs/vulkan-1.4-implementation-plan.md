@@ -543,6 +543,11 @@ waits use the separate lowering path, reject legacy signals, and can consume
 synchronization2 signals. These rejections leave the command count untouched;
 the warm rejection path is covered by 4096 allocation-free iterations.
 
+Event wait validation now folds the latest recorded signal state, including
+resets in the same command buffer. A `vkCmdResetEvent`/`vkCmdResetEvent2`
+therefore clears stale stage or dependency provenance before a following wait,
+while already-signaled set operations remain no-ops.
+
 Synchronization2 event waits also retain a canonical pointer-independent key
 for each `VkDependencyInfo`. A wait on a synchronization2 signal is rejected
 unless its dependency payload matches the latest signal payload; same-buffer
