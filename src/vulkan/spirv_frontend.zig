@@ -1410,6 +1410,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     const selector_canonical = canonical_ids[try id(nodes, switch_info.selector)];
                     if (selector_canonical == std.math.maxInt(u32)) return error.Malformed;
                     const selector_shape = try valueShape(nodes, switch_info.selector);
+                    if (lowered.items.len > ir.max_instructions - 3) return error.LimitExceeded;
                     var case_literal: [4]u8 = undefined;
                     std.mem.writeInt(u32, &case_literal, switch_info.case_value, .little);
                     lowered.ensureUnusedCapacity(allocator, 1) catch return error.OutOfMemory;
@@ -1444,6 +1445,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const true_canonical = canonical_ids[try id(nodes, true_id)];
                 const false_canonical = canonical_ids[try id(nodes, false_id)];
                 if (true_canonical == std.math.maxInt(u32) or false_canonical == std.math.maxInt(u32)) return error.Malformed;
+                if (lowered.items.len >= ir.max_instructions) return error.LimitExceeded;
                 lowered.ensureUnusedCapacity(allocator, 1) catch return error.OutOfMemory;
                 const select_operands = allocator.dupe(u32, &.{ condition_canonical, true_canonical, false_canonical }) catch return error.OutOfMemory;
                 const select_literal = allocator.dupe(u8, &.{}) catch {
