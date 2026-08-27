@@ -4778,7 +4778,9 @@ fn imageSubresourceLayout(device: ?Device, handle: usize, subresource: ImageSubr
     const expected_aspect: u32 = if (image.format == 126) 2 else 1;
     if (!validDeviceLocked(d) or !validOwner(d, image.owner) or subresource.aspect_mask != expected_aspect or subresource.mip_level != 0 or subresource.array_layer >= image.array_layers) return null;
     const layer_size = imageLayerByteSize(image) orelse return null;
-    return .{ .offset = layer_size * subresource.array_layer, .size = layer_size, .row_pitch = @as(u64, image.width) * 4, .array_pitch = layer_size, .depth_pitch = layer_size };
+    const offset = std.math.mul(u64, layer_size, subresource.array_layer) catch return null;
+    const row_pitch = std.math.mul(u64, image.width, 4) catch return null;
+    return .{ .offset = offset, .size = layer_size, .row_pitch = row_pitch, .array_pitch = layer_size, .depth_pitch = layer_size };
 }
 
 fn getImageSubresourceLayout(device: ?Device, handle: usize, subresource: ?*const ImageSubresource, output: ?*SubresourceLayout) callconv(.c) void {
@@ -20872,6 +20874,21 @@ test "bounded 2D array images isolate layers across views clears and transfers" 
     getImageSubresourceLayout(ctx.device, image, &layer_subresource, &layer_layout);
     try std.testing.expectEqual(@as(u64, 16), layer_layout.offset);
     try std.testing.expectEqual(@as(u64, 16), layer_layout.size);
+    // Layer-offset arithmetic must remain failure-atomic even if malformed
+    // internal dimensions make a single-layer size representable while the
+    // selected array-layer product overflows u64.
+    const malformed_image = validImageLocked(image).?;
+    const saved_dimensions = .{ malformed_image.width, malformed_image.height, malformed_image.array_layers };
+    malformed_image.width = 4_000_000_000;
+    malformed_image.height = 1;
+    malformed_image.array_layers = std.math.maxInt(u32);
+    var unchanged_layer_layout = SubresourceLayout{ .offset = 11, .size = 12, .row_pitch = 13, .array_pitch = 14, .depth_pitch = 15 };
+    const overflowing_layer = ImageSubresource{ .aspect_mask = 1, .mip_level = 0, .array_layer = std.math.maxInt(u32) - 1 };
+    for (0..4096) |_| getImageSubresourceLayout(ctx.device, image, &overflowing_layer, &unchanged_layer_layout);
+    try std.testing.expectEqual(SubresourceLayout{ .offset = 11, .size = 12, .row_pitch = 13, .array_pitch = 14, .depth_pitch = 15 }, unchanged_layer_layout);
+    malformed_image.width = saved_dimensions[0];
+    malformed_image.height = saved_dimensions[1];
+    malformed_image.array_layers = saved_dimensions[2];
     const view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = image, .view_type = 5, .format = 44, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 1, .layer_count = 1 } };
     var view: usize = 0;
     try std.testing.expectEqual(Result.success, createImageView(ctx.device, &view_info, null, &view));
