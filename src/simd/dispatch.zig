@@ -22,6 +22,7 @@ const vector = @import("vector.zig");
 /// AVX-512 remains excluded pending controlled frame-time-tail evidence.
 pub const Backend = enum { scalar, portable_vector, avx2 };
 pub const SpriteRegion = struct { destination: s.Rect, source: s.Rect };
+pub const RectColorCommand = abi.RectColorCommand;
 
 /// Comptime-known availability of the separately compiled eight-lane kernel
 /// objects for this artifact. True exactly when `build.zig` linked the
@@ -78,6 +79,7 @@ const v3 = struct {
     const fill_rows_8: abi.FillRows8Fn = @extern(abi.FillRows8Fn, .{ .name = abi.fill_rows_8_name });
     const blend_rows_8: abi.BlendRows8Fn = @extern(abi.BlendRows8Fn, .{ .name = abi.blend_rows_8_name });
     const blend_pixels_rows_8: abi.BlendPixelsRows8Fn = @extern(abi.BlendPixelsRows8Fn, .{ .name = abi.blend_pixels_rows_8_name });
+    const fill_rects_8: abi.FillRects8Fn = @extern(abi.FillRects8Fn, .{ .name = abi.fill_rects_8_name });
 };
 
 /// Linkage consistency proof (build-time): an artifact whose comptime
@@ -89,13 +91,14 @@ const v3 = struct {
 /// kernel-free artifacts cannot carry them (asserted by the disassembly
 /// gate's `--no-kernel-symbols` mode).
 const linkage_proof = if (eight_lane_boundary)
-    [6]*const anyopaque{
+    [7]*const anyopaque{
         @ptrCast(v3.fill_span_8),
         @ptrCast(v3.blend_span_8),
         @ptrCast(v3.blend_pixels_8),
         @ptrCast(v3.fill_rows_8),
         @ptrCast(v3.blend_rows_8),
         @ptrCast(v3.blend_pixels_rows_8),
+        @ptrCast(v3.fill_rects_8),
     }
 else
     [0]*const anyopaque{};
@@ -187,6 +190,16 @@ pub fn blendRowsRuntime(backend: Backend, surface: *s.Surface, rectangle: s.Rect
         .portable_vector => blendRows(.portable_vector, surface, rectangle, color),
         .avx2 => blendRows(.avx2, surface, rectangle, color),
     }
+}
+
+/// Submit a batch of fully in-bounds rectangle fills through one validated
+/// AVX2 ABI call. The command layout is shared with raster.ColoredRect, so
+/// draw order and per-command colors remain unchanged.
+pub fn fillRects8(surface: *s.Surface, draws: []const RectColorCommand) void {
+    if (comptime eight_lane_boundary) {
+        requireEightLaneSupport();
+        v3.fill_rects_8(surface.pixels.ptr, surface.pixels.len, surface.stride, draws.ptr, draws.len, @intFromEnum(surface.format));
+    } else @panic("eight-lane kernels require an x86_64 artifact target");
 }
 
 pub fn blendPixels(backend: Backend, row: []u8, start: usize, source: []const u8, count: usize, format: s.Format) void {

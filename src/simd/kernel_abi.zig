@@ -10,12 +10,20 @@
 //!   the only legitimate VEX-carrying functions; a test below asserts the
 //!   gate script stays in sync with this list.
 
+const s = @import("../surface.zig");
+
+/// Command shape shared by the raster batch API and the v3 kernel built from
+/// this same source tree. Keeping geometry/color adjacent preserves draw order
+/// while allowing the kernel to consume a batch without per-rectangle calls.
+pub const RectColorCommand = struct { rect: s.Rect, color: s.Color };
+
 pub const fill_span_8_name = "zpu_v3_fill_span_8";
 pub const blend_span_8_name = "zpu_v3_blend_span_8";
 pub const blend_pixels_8_name = "zpu_v3_blend_pixels_8";
 pub const fill_rows_8_name = "zpu_v3_fill_rows_8";
 pub const blend_rows_8_name = "zpu_v3_blend_rows_8";
 pub const blend_pixels_rows_8_name = "zpu_v3_blend_pixels_rows_8";
+pub const fill_rects_8_name = "zpu_v3_fill_rects_8";
 
 pub const FillSpan8Fn = *const fn ([*]u8, usize, usize, usize, u8, u32) callconv(.c) void;
 pub const BlendSpan8Fn = *const fn ([*]u8, usize, usize, usize, u8, u32) callconv(.c) void;
@@ -23,6 +31,7 @@ pub const BlendPixels8Fn = *const fn ([*]u8, usize, usize, [*]const u8, usize, u
 pub const FillRows8Fn = *const fn ([*]u8, usize, usize, usize, usize, usize, u8, u32) callconv(.c) void;
 pub const BlendRows8Fn = *const fn ([*]u8, usize, usize, usize, usize, usize, u8, u32) callconv(.c) void;
 pub const BlendPixelsRows8Fn = *const fn ([*]u8, usize, usize, [*]const u8, usize, usize, usize, usize, usize, u8) callconv(.c) void;
+pub const FillRects8Fn = *const fn ([*]u8, usize, usize, [*]const RectColorCommand, usize, u8) callconv(.c) void;
 
 /// Exact exported symbol names. The disassembly gate treats these (matched on
 /// the final dot-separated component) as the only functions allowed to carry
@@ -34,6 +43,7 @@ pub const exported_symbols = [_][]const u8{
     fill_rows_8_name,
     blend_rows_8_name,
     blend_pixels_rows_8_name,
+    fill_rects_8_name,
 };
 
 test "gate script pins the same kernel symbol set" {

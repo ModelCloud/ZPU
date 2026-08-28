@@ -124,7 +124,7 @@ pub fn blendRectWith(surface: *s.Surface, rect: s.Rect, color: s.Color, backend:
 /// A colored rectangle command used by retained-mode UI/compositor callers.
 /// Keeping the color next to the geometry lets one batch contain window
 /// shadows, panels, controls, and guides without allocating per draw.
-pub const ColoredRect = struct { rect: s.Rect, color: s.Color };
+pub const ColoredRect = dispatch.RectColorCommand;
 pub const SpriteRegion = dispatch.SpriteRegion;
 
 fn hasBinaryAlpha(source: []const u8, source_width: u32, source_height: u32) bool {
@@ -193,13 +193,32 @@ fn blendRectBackend(comptime backend: dispatch.Backend, surface: *s.Surface, rec
     dispatch.blendRows(backend, surface, clipped, color);
 }
 
+fn canBatchFill(surface: *s.Surface, draws: []const ColoredRect) bool {
+    if (draws.len < 2) return false;
+    for (draws) |draw| {
+        const rect = draw.rect;
+        if (rect.x < 0 or rect.y < 0) return false;
+        if (rect.width <= 2) return false;
+        const x: u32 = @intCast(rect.x);
+        const y: u32 = @intCast(rect.y);
+        if (x > surface.width or rect.width > surface.width - x or y > surface.height or rect.height > surface.height - y) return false;
+    }
+    return true;
+}
+
 /// Fill many independently clipped rectangles with one backend route. The
 /// individual geometry and color values remain observable in draw order.
 pub fn fillRectsWith(surface: *s.Surface, draws: []const ColoredRect, backend: dispatch.Backend) void {
     switch (backend) {
         .scalar => for (draws) |draw| fillRectBackend(.scalar, surface, draw.rect, draw.color),
         .portable_vector => for (draws) |draw| fillRectBackend(.portable_vector, surface, draw.rect, draw.color),
-        .avx2 => for (draws) |draw| fillRectBackend(.avx2, surface, draw.rect, draw.color),
+        .avx2 => {
+            if (canBatchFill(surface, draws)) {
+                dispatch.fillRects8(surface, draws);
+                return;
+            }
+            for (draws) |draw| fillRectBackend(.avx2, surface, draw.rect, draw.color);
+        },
     }
 }
 
@@ -342,6 +361,23 @@ test "colored rectangle batches preserve draw order and clipping" {
     blendRectsWith(&batched, &blends, .scalar);
     for (blends) |draw| blendRectWith(&individual, draw.rect, draw.color, .scalar);
     try std.testing.expectEqualSlices(u8, &individual_pixels, &batched_pixels);
+
+    // Exercise the AVX2 multi-command ABI path with fully in-bounds spans;
+    // clipped and narrow commands above intentionally remain on the scalar
+    // fallback so both routes are covered by the same oracle.
+    if (dispatch.available(.avx2)) {
+        var avx_pixels = [_]u8{0} ** (8 * 6 * 4);
+        var scalar_fast_pixels = [_]u8{0} ** (8 * 6 * 4);
+        var avx_surface = try s.Surface.init(&avx_pixels, 8, 6, 32, .rgba8_unorm);
+        var scalar_fast_surface = try s.Surface.init(&scalar_fast_pixels, 8, 6, 32, .rgba8_unorm);
+        const fast_fills = [_]ColoredRect{
+            .{ .rect = .{ .x = 0, .y = 0, .width = 5, .height = 3 }, .color = .rgba(210, 30, 40, 255) },
+            .{ .rect = .{ .x = 2, .y = 1, .width = 6, .height = 4 }, .color = .rgba(30, 180, 70, 255) },
+        };
+        fillRectsWith(&avx_surface, &fast_fills, .avx2);
+        fillRectsWith(&scalar_fast_surface, &fast_fills, .scalar);
+        try std.testing.expectEqualSlices(u8, &scalar_fast_pixels, &avx_pixels);
+    }
 }
 
 test "atlas sprite batches preserve source rectangles and clipping" {

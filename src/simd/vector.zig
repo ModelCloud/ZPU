@@ -29,6 +29,22 @@ fn storeNativePacked(comptime lanes: usize, bytes: []u8, offset: usize, values: 
     ptr.* = @bitCast(native);
 }
 
+fn storeNativeWord(bytes: []u8, offset: usize, value: u32) void {
+    const ptr: *align(1) u32 = @ptrCast(bytes.ptr + offset);
+    ptr.* = if (comptime builtin.cpu.arch.endian() == .little) value else @byteSwap(value);
+}
+
+/// Fill a span from an already packed native-order pixel. Keeping this
+/// separate from the format-aware wrapper lets multi-row kernels compute the
+/// color packing once per draw instead of once per scanline.
+pub inline fn fillPacked(comptime lanes: usize, row: []u8, start: usize, count: usize, pixel_bits: u32) void {
+    const V = @Vector(lanes, u32);
+    const values: V = @splat(pixel_bits);
+    var i: usize = 0;
+    while (i + lanes <= count) : (i += lanes) storeNativePacked(lanes, row, (start + i) * 4, values);
+    while (i < count) : (i += 1) storeNativeWord(row, (start + i) * 4, pixel_bits);
+}
+
 pub fn fill(comptime lanes: usize, row: []u8, start: usize, count: usize, format: s.Format, color: s.Color) void {
     const V = @Vector(lanes, u32);
     const pixel_bits: u32 = switch (format) {
@@ -37,13 +53,11 @@ pub fn fill(comptime lanes: usize, row: []u8, start: usize, count: usize, format
     };
     const values: V = @splat(pixel_bits);
     var i: usize = 0;
-    while (i + lanes <= count) : (i += lanes) {
-        storeNativePacked(lanes, row, (start + i) * 4, values);
-    }
+    while (i + lanes <= count) : (i += lanes) storeNativePacked(lanes, row, (start + i) * 4, values);
     scalar.fillSpan(row, start + i, count - i, format, color);
 }
 
-pub fn blend(comptime lanes: usize, row: []u8, start: usize, count: usize, format: s.Format, color: s.Color) void {
+pub inline fn blend(comptime lanes: usize, row: []u8, start: usize, count: usize, format: s.Format, color: s.Color) void {
     if (color.a == 0) return;
     if (color.a == 255) return fill(lanes, row, start, count, format, color);
     const V = @Vector(lanes, u32);
@@ -89,7 +103,7 @@ pub fn blend(comptime lanes: usize, row: []u8, start: usize, count: usize, forma
     scalar.blendSpan(row, start + i, count - i, format, color);
 }
 
-pub fn blendPixels(comptime lanes: usize, row: []u8, start: usize, source: []const u8, count: usize, format: s.Format) void {
+pub inline fn blendPixels(comptime lanes: usize, row: []u8, start: usize, source: []const u8, count: usize, format: s.Format) void {
     const V = @Vector(lanes, u32);
     const channel_mask: V = @splat(0xff);
     const half: V = @splat(127);

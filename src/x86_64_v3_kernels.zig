@@ -38,6 +38,13 @@ fn unpackColor(packed_color: u32) s.Color {
     };
 }
 
+fn packedColor(color: s.Color, format: s.Format) u32 {
+    return switch (format) {
+        .rgba8_unorm => @as(u32, color.r) | (@as(u32, color.g) << 8) | (@as(u32, color.b) << 16) | (@as(u32, color.a) << 24),
+        .bgra8_unorm => @as(u32, color.b) | (@as(u32, color.g) << 8) | (@as(u32, color.r) << 16) | (@as(u32, color.a) << 24),
+    };
+}
+
 fn checkedFormat(format_tag: u8) s.Format {
     return switch (format_tag) {
         0 => .rgba8_unorm,
@@ -90,9 +97,10 @@ fn fillRowsImpl(row_ptr: [*]u8, row_len: usize, stride: usize, start: usize, cou
     checkRowsBounds(row_len, stride, start, count, rows);
     const format = checkedFormat(format_tag);
     const color = unpackColor(packed_color);
+    const pixel_bits = packedColor(color, format);
     for (0..rows) |y| {
         const offset = std.math.mul(usize, y, stride) catch @trap();
-        vector.fill(8, row_ptr[offset..row_len], start, count, format, color);
+        vector.fillPacked(8, row_ptr[offset..row_len], start, count, pixel_bits);
     }
 }
 
@@ -117,6 +125,24 @@ fn blendPixelsRowsImpl(row_ptr: [*]u8, row_len: usize, stride: usize, source_ptr
     }
 }
 
+fn fillRectsImpl(row_ptr: [*]u8, row_len: usize, stride: usize, commands: [*]const abi.RectColorCommand, command_count: usize, format_tag: u8) callconv(.c) void {
+    const format = checkedFormat(format_tag);
+    for (0..command_count) |index| {
+        const command = commands[index];
+        if (command.rect.x < 0 or command.rect.y < 0) @trap();
+        const start = @as(usize, @intCast(command.rect.x));
+        const row = @as(usize, @intCast(command.rect.y));
+        const row_offset = std.math.mul(usize, row, stride) catch @trap();
+        if (row_offset > row_len) @trap();
+        checkRowsBounds(row_len - row_offset, stride, start, command.rect.width, command.rect.height);
+        const pixel_bits = packedColor(command.color, format);
+        for (0..command.rect.height) |dy| {
+            const offset = std.math.mul(usize, dy, stride) catch @trap();
+            vector.fillPacked(8, row_ptr[row_offset + offset .. row_len], start, command.rect.width, pixel_bits);
+        }
+    }
+}
+
 comptime {
     @export(&fillImpl, .{ .name = abi.fill_span_8_name });
     @export(&blendSpanImpl, .{ .name = abi.blend_span_8_name });
@@ -124,4 +150,5 @@ comptime {
     @export(&fillRowsImpl, .{ .name = abi.fill_rows_8_name });
     @export(&blendRowsImpl, .{ .name = abi.blend_rows_8_name });
     @export(&blendPixelsRowsImpl, .{ .name = abi.blend_pixels_rows_8_name });
+    @export(&fillRectsImpl, .{ .name = abi.fill_rects_8_name });
 }
