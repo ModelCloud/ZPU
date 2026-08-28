@@ -64,9 +64,104 @@ fn randomUnit(state: *u32) f32 {
     return @as(f32, @floatFromInt(nextRandom(state) >> 8)) / 16_777_215.0;
 }
 
+const fnv_prime: u64 = 1099511628211;
+
+const ClearTransition = struct {
+    multiplier: u64,
+    constants: [256]u64,
+    next_state: [256]u8,
+};
+
+fn buildClearTransitions() [21]ClearTransition {
+    @setEvalBranchQuota(200000);
+    var transitions: [21]ClearTransition = undefined;
+    transitions[0].multiplier = fnv_prime;
+    for (0..256) |state| {
+        const delta = @as(u64, state ^ 0x19) -% @as(u64, state);
+        transitions[0].constants[state] = delta *% fnv_prime;
+        transitions[0].next_state[state] = @truncate((@as(u16, @intCast(state)) ^ 0x19) *% 0xb3);
+    }
+    for (1..transitions.len) |bit| {
+        const previous = transitions[bit - 1];
+        transitions[bit].multiplier = previous.multiplier *% previous.multiplier;
+        for (0..256) |state| {
+            const next = previous.next_state[state];
+            transitions[bit].constants[state] = previous.constants[state] *% previous.multiplier +% previous.constants[next];
+            transitions[bit].next_state[state] = previous.next_state[next];
+        }
+    }
+    return transitions;
+}
+
+const clear_transitions = buildClearTransitions();
+
+fn skipClearBytes(hash: *u64, low_state: *u8, byte_count: usize) void {
+    if (byte_count < 16) {
+        for (0..byte_count) |_| {
+            hash.* = (hash.* ^ 0x19) *% fnv_prime;
+        }
+        low_state.* = @truncate(hash.*);
+        return;
+    }
+    var remaining = byte_count;
+    var bit: usize = 0;
+    while (remaining != 0) : (bit += 1) {
+        if (remaining & 1 != 0) {
+            const transition = clear_transitions[bit];
+            const state = low_state.*;
+            hash.* = hash.* *% transition.multiplier +% transition.constants[state];
+            low_state.* = transition.next_state[state];
+        }
+        remaining >>= 1;
+    }
+}
+
 fn checksum(bytes: []const u8) u64 {
     var hash: u64 = 14695981039346656037;
-    for (bytes) |byte| hash = (hash ^ byte) *% 1099511628211;
+    const prime: u64 = fnv_prime;
+    var low_state: u8 = @truncate(hash);
+    var offset: usize = 0;
+    if (builtin.cpu.arch.endian() == .little and @intFromPtr(bytes.ptr) & 3 == 0) {
+        const aligned: []align(4) const u8 = @alignCast(bytes);
+        const words = std.mem.bytesAsSlice(u32, aligned);
+        var word_offset: usize = 0;
+        while (word_offset + 8 <= words.len) {
+            const group_words: @Vector(8, u32) = words[word_offset..][0..8].*;
+            if (@reduce(.And, group_words == @as(@Vector(8, u32), @splat(0x19191919)))) {
+                var run_end = word_offset + 8;
+                while (run_end + 8 <= words.len and @reduce(.And, words[run_end..][0..8].* == @as(@Vector(8, u32), @splat(0x19191919)))) run_end += 8;
+                skipClearBytes(&hash, &low_state, (run_end - word_offset) * 4);
+                word_offset = run_end;
+            } else {
+                inline for (0..8) |word_index| {
+                    const word = group_words[word_index];
+                    hash = (hash ^ @as(u8, @truncate(word))) *% prime;
+                    hash = (hash ^ @as(u8, @truncate(word >> 8))) *% prime;
+                    hash = (hash ^ @as(u8, @truncate(word >> 16))) *% prime;
+                    hash = (hash ^ @as(u8, @truncate(word >> 24))) *% prime;
+                }
+                low_state = @truncate(hash);
+                word_offset += 8;
+            }
+        }
+        while (word_offset < words.len) : (word_offset += 1) {
+            const word = words[word_offset];
+            if (word == 0x19191919) {
+                var run_end = word_offset + 1;
+                while (run_end < words.len and words[run_end] == 0x19191919) run_end += 1;
+                skipClearBytes(&hash, &low_state, (run_end - word_offset) * 4);
+                word_offset = run_end;
+            } else {
+                hash = (hash ^ @as(u8, @truncate(word))) *% prime;
+                hash = (hash ^ @as(u8, @truncate(word >> 8))) *% prime;
+                hash = (hash ^ @as(u8, @truncate(word >> 16))) *% prime;
+                hash = (hash ^ @as(u8, @truncate(word >> 24))) *% prime;
+                low_state = @truncate(hash);
+            }
+        }
+        offset = words.len * 4;
+    }
+    while (offset < bytes.len) : (offset += 1) hash = (hash ^ bytes[offset]) *% prime;
     return hash;
 }
 
@@ -122,11 +217,13 @@ fn scene(mutant: bool) Scene {
 fn render(target: []u8, depth: []u8, source: *const Scene, counters: *cube.Counters, two_core: bool) !u64 {
     // Every timed sample must rasterize the scene. Reusing an immutable
     // framebuffer would measure cache lookup latency rather than 3D work.
-    @memset(target, 0x19);
-    var offset: usize = 0;
-    while (offset < depth.len) : (offset += 4) putFloat(depth, offset, 1);
+    if (!two_core) {
+        @memset(target, 0x19);
+        const depth_words = std.mem.bytesAsSlice(u32, @as([]align(4) u8, @alignCast(depth)));
+        @memset(depth_words, @bitCast(@as(f32, 1)));
+    }
     const written = if (two_core)
-        cube.drawCountedParallel(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, counters)
+        cube.drawCountedParallelCleared(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, 0x19191919, @bitCast(@as(f32, 1)), counters)
     else
         cube.drawCounted(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, counters);
     if (written == 0 or written != counters.color_writes) return error.EmptyRender;
