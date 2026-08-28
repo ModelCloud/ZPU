@@ -1432,6 +1432,8 @@ const ParallelBatchDraw = struct {
     tile_count: usize = 0,
     prepare: ?*ParallelBatchPrepare = null,
     prepare_completed: ?*std.atomic.Value(usize) = null,
+    command_lanes: ?[]u8 = null,
+    ownership_ready: ?*std.atomic.Value(bool) = null,
     color_only: bool = false,
     bands: [parallel_band_count]ParallelBand = [_]ParallelBand{.{}} ** parallel_band_count,
 };
@@ -1452,6 +1454,8 @@ var parallel_active: ?ParallelJob = null;
 var batch_prepared_storage: [max_batch_commands]PreparedDraw = undefined;
 var batch_command_cache: [max_batch_commands]BatchCommandCache = undefined;
 var batch_span_cache: [max_batch_commands]BatchSpanCache = undefined;
+var batch_command_lanes: [max_batch_commands]u8 = undefined;
+var batch_ownership_ready = std.atomic.Value(bool).init(false);
 var batch_tile_min: [max_batch_tiles * parallel_band_count]u32 = undefined;
 var batch_tile_max: [max_batch_tiles * parallel_band_count]u32 = undefined;
 const BatchStaticReplayCache = struct {
@@ -1658,6 +1662,19 @@ fn refreshBatchPreparedUvs(prepared: *PreparedDraw, uniform: []const u8, vertex_
         triangle.unit_uv = unit_uv and ((triangle.vertices[0].clip_w > 0 and triangle.vertices[1].clip_w > 0 and triangle.vertices[2].clip_w > 0) or
             (triangle.vertices[0].clip_w < 0 and triangle.vertices[1].clip_w < 0 and triangle.vertices[2].clip_w < 0));
         triangle.flat_color = null;
+        if (triangle.unit_uv and triangle.vertices[0].clip_w == triangle.vertices[1].clip_w and triangle.vertices[0].clip_w == triangle.vertices[2].clip_w and
+            triangle.vertices[0].uv[0] == triangle.vertices[1].uv[0] and triangle.vertices[0].uv[0] == triangle.vertices[2].uv[0] and
+            triangle.vertices[0].uv[1] == triangle.vertices[1].uv[1] and triangle.vertices[0].uv[1] == triangle.vertices[2].uv[1])
+        {
+            triangle.flat_color = if (triangle.has_prelit_texture)
+                shadeUnitTexture4x4(triangle.vertices[0].uv[0], triangle.vertices[0].uv[1], &triangle.prelit_texture)
+            else if (triangle.prelit_texture_16x16_ptr) |colors|
+                shadeUnitTexture16x16(triangle.vertices[0].uv[0], triangle.vertices[0].uv[1], colors)
+            else if (triangle.has_prelit_texture_16x16)
+                shadeUnitTexture16x16(triangle.vertices[0].uv[0], triangle.vertices[0].uv[1], &triangle.prelit_texture_16x16)
+            else
+                null;
+        }
         if (!triangle.unit_uv) {
             triangle.has_prelit_texture = false;
             triangle.prelit_texture_16x16_ptr = null;
@@ -1764,9 +1781,28 @@ fn drawPreparedBatchFast(comptime color_only: bool, target: []u8, depth: []u8, w
     return pixels_written;
 }
 
+fn prepareBatchCommandLanes(context: *ParallelBatchDraw, lane_index: usize) void {
+    const lanes = context.command_lanes orelse return;
+    if (lane_index != 0) return;
+    @memset(lanes[0..context.commands.len], 3);
+    if (context.count_work or context.color_only or parallel_band_count != 2) return;
+
+    const split: i32 = @intCast(context.height / 2);
+    for (context.commands, 0..) |command, index| {
+        const draw_bounds = preparedBounds(&context.prepared[index], context.width, context.height, command.scissor);
+        if (draw_bounds.width == 0 or draw_bounds.height == 0) continue;
+        if (draw_bounds.y >= split) {
+            lanes[index] = 2;
+        } else if (draw_bounds.y + @as(i32, @intCast(draw_bounds.height)) <= split) {
+            lanes[index] = 1;
+        }
+    }
+}
+
 fn runParallelBatchBand(context: *ParallelBatchDraw, band_index: usize, comptime count_work: bool) void {
     const band = &context.bands[band_index];
     for (context.commands, 0..) |command, command_index| {
+        if (context.command_lanes) |lanes| if (lanes[command_index] & (@as(u8, 1) << @intCast(band_index)) == 0) continue;
         const prepared_ptr = &context.prepared[command_index];
         var draw_counters = Counters{};
         if (comptime !count_work) {
@@ -1788,11 +1824,17 @@ fn runParallelBatchBand(context: *ParallelBatchDraw, band_index: usize, comptime
 }
 
 fn waitForBatchPreparation(context: *ParallelBatchDraw, lane_index: usize) void {
-    const prepare = context.prepare orelse return;
-    runParallelBatchPrepare(prepare, lane_index);
-    const completed = context.prepare_completed orelse return;
-    _ = completed.fetchAdd(1, .release);
-    while (completed.load(.acquire) != parallel_band_count) std.atomic.spinLoopHint();
+    if (context.prepare) |prepare| {
+        runParallelBatchPrepare(prepare, lane_index);
+        const completed = context.prepare_completed orelse return;
+        _ = completed.fetchAdd(1, .release);
+        while (completed.load(.acquire) != parallel_band_count) std.atomic.spinLoopHint();
+    }
+    prepareBatchCommandLanes(context, lane_index);
+    if (context.ownership_ready) |ready| {
+        if (lane_index == 0) ready.store(true, .release);
+        while (!ready.load(.acquire)) std.atomic.spinLoopHint();
+    }
 }
 
 fn runParallelBatchPrepare(context: *ParallelBatchPrepare, lane_index: usize) void {
@@ -1851,7 +1893,147 @@ fn rasterOpaqueTexturedQuad(color_words: []align(4) u32, depth_words: []align(4)
     return pixels_written;
 }
 
+fn rasterFlatSpanTriangleTexture4x4(color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, stripe_count: usize, lane_index: usize, p0: [2]f32, p1: [2]f32, p2: [2]f32, inverse_area: f32, min_x: i32, min_y: i32, max_x: i32, max_y: i32, lane_min_y: i32, lane_max_y: i32, cached_spans: ?*const [flat_span_rows]FlatSpan, flat_depth_bits: u32, prelit: *const [16]u32, flat_reciprocal_w: f32, u_over_w0: f32, u_over_w1: f32, u_over_w2: f32, v_over_w0: f32, v_over_w1: f32, v_over_w2: f32, u_over_w_dx: f32, v_over_w_dx: f32) usize {
+    var pixels_written: usize = 0;
+    const first_lane_y = @max(min_y, lane_min_y);
+    const last_lane_y = @min(max_y, lane_max_y);
+    var span_stepper: ?FlatSpanStepper = if (cached_spans == null and stripe_count <= parallel_band_count)
+        FlatSpanStepper.init(p0, p1, p2, inverse_area, min_x, max_x, first_lane_y)
+    else
+        null;
+    var y = first_lane_y;
+    while (y < last_lane_y) : (y += 1) {
+        if (stripe_count > parallel_band_count and (@as(usize, @intCast(y)) * stripe_count / height) % parallel_band_count != lane_index) continue;
+        const y_offset = @as(f32, @floatFromInt(y)) + 0.5;
+        const span = if (cached_spans) |spans| spans[@intCast(y)] else if (span_stepper) |*stepper| stepper.next() else flatSpanForRow(p0, p1, p2, inverse_area, min_x, max_x, y);
+        if (span.last <= span.first) continue;
+        const first = @max(min_x, @as(i32, @intCast(span.first)));
+        const last = @min(max_x, @as(i32, @intCast(span.last)));
+        if (first >= last) continue;
+        const first_sample = [2]f32{ @as(f32, @floatFromInt(first)) + 0.5, y_offset };
+        const b0 = edge(p1, p2, first_sample) * inverse_area;
+        const b1 = edge(p2, p0, first_sample) * inverse_area;
+        const b2 = edge(p0, p1, first_sample) * inverse_area;
+        var stepped_u_over_w = b0 * u_over_w0 + b1 * u_over_w1 + b2 * u_over_w2;
+        var stepped_v_over_w = b0 * v_over_w0 + b1 * v_over_w1 + b2 * v_over_w2;
+        const du = u_over_w_dx * flat_reciprocal_w;
+        const dv = v_over_w_dx * flat_reciprocal_w;
+        var x = first;
+        while (x < last) {
+            const sampled_u = stepped_u_over_w * flat_reciprocal_w;
+            const sampled_v = stepped_v_over_w * flat_reciprocal_w;
+            const color = shadeUnitTexture4x4(sampled_u, sampled_v, prelit);
+            var run_last = x + 1;
+            if (du > 0) {
+                const scaled_u = sampled_u * 3.999999;
+                const scaled_du = du * 3.999999;
+                const next_texel = @as(f32, @floatFromInt(unitTextureCoordinate(sampled_u) + 1));
+                run_last = @min(last, x + @max(@as(i32, @intFromFloat((next_texel - scaled_u) / scaled_du)), 1));
+            } else if (du < 0) {
+                const scaled_u = sampled_u * 3.999999;
+                const scaled_du = -du * 3.999999;
+                const texel = unitTextureCoordinate(sampled_u);
+                run_last = @min(last, x + @max(@as(i32, @intFromFloat((scaled_u - @as(f32, @floatFromInt(texel))) / scaled_du)) + 1, 1));
+            }
+            if (dv > 0) {
+                const scaled_v = sampled_v * 3.999999;
+                const scaled_dv = dv * 3.999999;
+                const next_texel = @as(f32, @floatFromInt(unitTextureCoordinate(sampled_v) + 1));
+                run_last = @min(run_last, x + @max(@as(i32, @intFromFloat((next_texel - scaled_v) / scaled_dv)), 1));
+            } else if (dv < 0) {
+                const scaled_v = sampled_v * 3.999999;
+                const scaled_dv = -dv * 3.999999;
+                const texel = unitTextureCoordinate(sampled_v);
+                run_last = @min(run_last, x + @max(@as(i32, @intFromFloat((scaled_v - @as(f32, @floatFromInt(texel))) / scaled_dv)) + 1, 1));
+            } else if (du == 0) {
+                run_last = last;
+            }
+            while (run_last < last and shadeUnitTexture4x4((stepped_u_over_w + du * @as(f32, @floatFromInt(run_last - x))) * flat_reciprocal_w, (stepped_v_over_w + dv * @as(f32, @floatFromInt(run_last - x))) * flat_reciprocal_w, prelit) == color) run_last += 1;
+            while (run_last > x + 1 and shadeUnitTexture4x4((stepped_u_over_w + du * @as(f32, @floatFromInt(run_last - 1 - x))) * flat_reciprocal_w, (stepped_v_over_w + dv * @as(f32, @floatFromInt(run_last - 1 - x))) * flat_reciprocal_w, prelit) != color) run_last -= 1;
+            pixels_written += writeFlatColorSpan(true, color_words, depth_words, width, @intCast(y), @intCast(x), @intCast(run_last), flat_depth_bits, color);
+            const run_length: f32 = @floatFromInt(run_last - x);
+            stepped_u_over_w += u_over_w_dx * run_length;
+            stepped_v_over_w += v_over_w_dx * run_length;
+            x = run_last;
+        }
+    }
+    return pixels_written;
+}
+
+fn rasterFlatSpanTriangleTexture16x16(color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, stripe_count: usize, lane_index: usize, p0: [2]f32, p1: [2]f32, p2: [2]f32, inverse_area: f32, min_x: i32, min_y: i32, max_x: i32, max_y: i32, lane_min_y: i32, lane_max_y: i32, cached_spans: ?*const [flat_span_rows]FlatSpan, flat_depth_bits: u32, prelit: *const [256]u32, flat_reciprocal_w: f32, u_over_w0: f32, u_over_w1: f32, u_over_w2: f32, v_over_w0: f32, v_over_w1: f32, v_over_w2: f32, u_over_w_dx: f32, v_over_w_dx: f32) usize {
+    var pixels_written: usize = 0;
+    const first_lane_y = @max(min_y, lane_min_y);
+    const last_lane_y = @min(max_y, lane_max_y);
+    var span_stepper: ?FlatSpanStepper = if (cached_spans == null and stripe_count <= parallel_band_count)
+        FlatSpanStepper.init(p0, p1, p2, inverse_area, min_x, max_x, first_lane_y)
+    else
+        null;
+    var y = first_lane_y;
+    while (y < last_lane_y) : (y += 1) {
+        if (stripe_count > parallel_band_count and (@as(usize, @intCast(y)) * stripe_count / height) % parallel_band_count != lane_index) continue;
+        const y_offset = @as(f32, @floatFromInt(y)) + 0.5;
+        const span = if (cached_spans) |spans| spans[@intCast(y)] else if (span_stepper) |*stepper| stepper.next() else flatSpanForRow(p0, p1, p2, inverse_area, min_x, max_x, y);
+        if (span.last <= span.first) continue;
+        const first = @max(min_x, @as(i32, @intCast(span.first)));
+        const last = @min(max_x, @as(i32, @intCast(span.last)));
+        if (first >= last) continue;
+        const first_sample = [2]f32{ @as(f32, @floatFromInt(first)) + 0.5, y_offset };
+        const b0 = edge(p1, p2, first_sample) * inverse_area;
+        const b1 = edge(p2, p0, first_sample) * inverse_area;
+        const b2 = edge(p0, p1, first_sample) * inverse_area;
+        var stepped_u_over_w = b0 * u_over_w0 + b1 * u_over_w1 + b2 * u_over_w2;
+        var stepped_v_over_w = b0 * v_over_w0 + b1 * v_over_w1 + b2 * v_over_w2;
+        const du = u_over_w_dx * flat_reciprocal_w;
+        const dv = v_over_w_dx * flat_reciprocal_w;
+        var x = first;
+        while (x < last) {
+            const sampled_u = stepped_u_over_w * flat_reciprocal_w;
+            const sampled_v = stepped_v_over_w * flat_reciprocal_w;
+            const color = shadeUnitTexture16x16(sampled_u, sampled_v, prelit);
+            var run_last = x + 1;
+            if (du > 0) {
+                const scaled_u = sampled_u * 15.999999;
+                const scaled_du = du * 15.999999;
+                const next_texel = @as(f32, @floatFromInt(unitTextureCoordinate16(sampled_u) + 1));
+                run_last = @min(last, x + @max(@as(i32, @intFromFloat((next_texel - scaled_u) / scaled_du)), 1));
+            } else if (du < 0) {
+                const scaled_u = sampled_u * 15.999999;
+                const scaled_du = -du * 15.999999;
+                const texel = unitTextureCoordinate16(sampled_u);
+                run_last = @min(last, x + @max(@as(i32, @intFromFloat((scaled_u - @as(f32, @floatFromInt(texel))) / scaled_du)) + 1, 1));
+            }
+            if (dv > 0) {
+                const scaled_v = sampled_v * 15.999999;
+                const scaled_dv = dv * 15.999999;
+                const next_texel = @as(f32, @floatFromInt(unitTextureCoordinate16(sampled_v) + 1));
+                run_last = @min(run_last, x + @max(@as(i32, @intFromFloat((next_texel - scaled_v) / scaled_dv)), 1));
+            } else if (dv < 0) {
+                const scaled_v = sampled_v * 15.999999;
+                const scaled_dv = -dv * 15.999999;
+                const texel = unitTextureCoordinate16(sampled_v);
+                run_last = @min(run_last, x + @max(@as(i32, @intFromFloat((scaled_v - @as(f32, @floatFromInt(texel))) / scaled_dv)) + 1, 1));
+            } else if (du == 0) {
+                run_last = last;
+            }
+            while (run_last < last and shadeUnitTexture16x16((stepped_u_over_w + du * @as(f32, @floatFromInt(run_last - x))) * flat_reciprocal_w, (stepped_v_over_w + dv * @as(f32, @floatFromInt(run_last - x))) * flat_reciprocal_w, prelit) == color) run_last += 1;
+            while (run_last > x + 1 and shadeUnitTexture16x16((stepped_u_over_w + du * @as(f32, @floatFromInt(run_last - 1 - x))) * flat_reciprocal_w, (stepped_v_over_w + dv * @as(f32, @floatFromInt(run_last - 1 - x))) * flat_reciprocal_w, prelit) != color) run_last -= 1;
+            pixels_written += writeFlatColorSpan(true, color_words, depth_words, width, @intCast(y), @intCast(x), @intCast(run_last), flat_depth_bits, color);
+            const run_length: f32 = @floatFromInt(run_last - x);
+            stepped_u_over_w += u_over_w_dx * run_length;
+            stepped_v_over_w += v_over_w_dx * run_length;
+            x = run_last;
+        }
+    }
+    return pixels_written;
+}
+
 fn rasterFlatSpanTriangle(comptime depth_test: bool, color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, stripe_count: usize, lane_index: usize, p0: [2]f32, p1: [2]f32, p2: [2]f32, inverse_area: f32, min_x: i32, min_y: i32, max_x: i32, max_y: i32, lane_min_y: i32, lane_max_y: i32, cached_spans: ?*const [flat_span_rows]FlatSpan, cached_colors: ?*const [flat_span_rows][max_color_runs]ColorRun, flat_depth_bits: u32, flat_color: ?u32, prelit_texture: ?*const [16]u32, prelit_texture_16x16: ?*const [256]u32, tile_min: ?[]u32, tile_max: ?[]u32, tile_columns: usize, tile_count: usize, flat_reciprocal_w: f32, u_over_w0: f32, u_over_w1: f32, u_over_w2: f32, v_over_w0: f32, v_over_w1: f32, v_over_w2: f32, u_over_w_dx: f32, v_over_w_dx: f32) usize {
+    if (tile_min == null and cached_colors == null and flat_color == null and prelit_texture_16x16 == null) if (prelit_texture) |prelit| {
+        return rasterFlatSpanTriangleTexture4x4(color_words, depth_words, width, height, stripe_count, lane_index, p0, p1, p2, inverse_area, min_x, min_y, max_x, max_y, lane_min_y, lane_max_y, cached_spans, flat_depth_bits, prelit, flat_reciprocal_w, u_over_w0, u_over_w1, u_over_w2, v_over_w0, v_over_w1, v_over_w2, u_over_w_dx, v_over_w_dx);
+    };
+    if (tile_min == null and cached_colors == null and flat_color == null) if (prelit_texture_16x16) |prelit| {
+        return rasterFlatSpanTriangleTexture16x16(color_words, depth_words, width, height, stripe_count, lane_index, p0, p1, p2, inverse_area, min_x, min_y, max_x, max_y, lane_min_y, lane_max_y, cached_spans, flat_depth_bits, prelit, flat_reciprocal_w, u_over_w0, u_over_w1, u_over_w2, v_over_w0, v_over_w1, v_over_w2, u_over_w_dx, v_over_w_dx);
+    };
     var pixels_written: usize = 0;
     const first_lane_y = @max(min_y, lane_min_y);
     const last_lane_y = @min(max_y, lane_max_y);
@@ -2349,6 +2531,7 @@ fn drawParallelBatchImpl(target: []u8, depth: []u8, width: u32, height: u32, com
     // Batched application quads are small enough that direct vector depth
     // tests beat the extra tile metadata loads and coordinate divisions.
     const use_tile_depth = false;
+    batch_ownership_ready.store(false, .release);
     if (use_tile_depth) {
         @memset(batch_tile_min[0 .. tile_count * parallel_band_count], clear_depth_pattern.?);
         @memset(batch_tile_max[0 .. tile_count * parallel_band_count], clear_depth_pattern.?);
@@ -2369,6 +2552,8 @@ fn drawParallelBatchImpl(target: []u8, depth: []u8, width: u32, height: u32, com
         .tile_count = tile_count,
         .prepare = if (needs_preparation) &prepare_context else null,
         .prepare_completed = if (needs_preparation) &prepare_completed else null,
+        .command_lanes = if (!color_only and counters == null) batch_command_lanes[0..commands.len] else null,
+        .ownership_ready = if (!color_only and counters == null) &batch_ownership_ready else null,
         .color_only = color_only,
     };
     if (!dispatchParallel(.{ .batch = &context })) return 0;
