@@ -17,12 +17,51 @@ const spirv_frontend = @import("spirv_frontend.zig");
 const render_ir = @import("render_ir.zig");
 const render_ir_exec = @import("render_ir_exec.zig");
 const core_command_inventory = @import("core_command_inventory.zig");
-pub const Result = enum(i32) { success = 0, not_ready = 1, timeout = 2, event_set = 3, event_reset = 4, incomplete = 5, error_out_of_host_memory = -1, error_initialization_failed = -3, error_memory_map_failed = -5, error_layer_not_present = -6, error_extension_not_present = -7, error_feature_not_present = -8, error_format_not_supported = -11, error_validation_failed = -1_000_011_001, error_out_of_pool_memory = -1_000_069_000, error_invalid_shader = -1_000_012_000, error_present_timing_queue_full = -1_000_208_000 };
+pub const Result = enum(i32) { success = 0, not_ready = 1, timeout = 2, event_set = 3, event_reset = 4, incomplete = 5, error_out_of_host_memory = -1, error_initialization_failed = -3, error_memory_map_failed = -5, error_layer_not_present = -6, error_extension_not_present = -7, error_feature_not_present = -8, error_incompatible_driver = -9, error_format_not_supported = -11, error_validation_failed = -1_000_011_001, error_out_of_pool_memory = -1_000_069_000, error_invalid_shader = -1_000_012_000, error_present_timing_queue_full = -1_000_208_000 };
 pub const Fn = ?*const fn () callconv(.c) void;
 pub const Alloc = opaque {};
 pub const MAGIC: usize = 0x01CDC0DE;
 pub const API_1_0: u32 = 1 << 22;
 pub const API_1_1: u32 = (1 << 22) | (1 << 12);
+pub const API_1_2: u32 = (1 << 22) | (2 << 12);
+pub const API_1_3: u32 = (1 << 22) | (3 << 12);
+pub const API_1_4: u32 = (1 << 22) | (4 << 12);
+/// Vulkan-Headers v1.4.360 is the pinned registry revision for this ICD.
+pub const API_1_4_360: u32 = API_1_4 | 360;
+pub const MAX_API_VERSION: u32 = API_1_4_360;
+
+const api_variant_shift: u5 = 29;
+const api_major_shift: u5 = 22;
+const api_minor_shift: u5 = 12;
+const api_variant_mask: u32 = 0x7;
+const api_major_mask: u32 = 0x7f;
+const api_minor_mask: u32 = 0x3ff;
+
+fn apiVersionVariant(version: u32) u32 {
+    return (version >> api_variant_shift) & api_variant_mask;
+}
+
+fn apiVersionMajor(version: u32) u32 {
+    return (version >> api_major_shift) & api_major_mask;
+}
+
+fn apiVersionMinor(version: u32) u32 {
+    return (version >> api_minor_shift) & api_minor_mask;
+}
+
+/// Return the API version selected for an instance, or null when the caller
+/// requested a version this ICD cannot provide. Vulkan treats apiVersion=0 as
+/// a request for 1.0; every other version is compared against the single
+/// maximum implementation version. This is the dynamic per-application part
+/// of the contract: each instance retains its own selected version.
+pub fn normalizeApiVersion(requested: u32) ?u32 {
+    const version = if (requested == 0) API_1_0 else requested;
+    if (apiVersionVariant(version) != 0 or apiVersionMajor(version) != 1) return null;
+    if (apiVersionMinor(version) > 4) return null;
+    if (version > MAX_API_VERSION) return null;
+    return version;
+}
+
 pub const AppInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, app_name: ?[*:0]const u8, app_version: u32, engine_name: ?[*:0]const u8, engine_version: u32, api_version: u32 };
 pub const InstanceInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, app_info: ?*const AppInfo, layer_count: u32, layers: ?[*]const [*:0]const u8, extension_count: u32, extensions: ?[*]const [*:0]const u8 };
 pub const QueueInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, family: u32, count: u32, priorities: ?[*]const f32 };
@@ -1100,7 +1139,7 @@ pub const RenderingAttachmentLocationInfo = extern struct { s_type: i32, p_next:
 pub const RenderingInputAttachmentIndexInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, color_attachment_count: u32, color_attachment_input_indices: ?[*]const u32, depth_input_attachment_index: ?*const u32, stencil_input_attachment_index: ?*const u32 };
 const SetInstanceLoaderData = *const fn (Instance, *anyopaque) callconv(.c) Result;
 const SetDeviceLoaderData = *const fn (Device, *anyopaque) callconv(.c) Result;
-pub const InstanceObj = extern struct { loader_data: usize, set_loader_data: ?SetInstanceLoaderData };
+pub const InstanceObj = extern struct { loader_data: usize, set_loader_data: ?SetInstanceLoaderData, api_version: u32 };
 pub const PhysicalObj = extern struct { loader_data: usize, owner: *InstanceObj, loader_initialized: bool };
 pub const DeviceObj = extern struct { loader_data: usize, physical: *PhysicalObj, set_loader_data: ?SetDeviceLoaderData, heap_used: u64, generation: u64 };
 pub const QueueObj = extern struct { loader_data: usize, owner: *DeviceObj, loader_initialized: bool };
@@ -3201,8 +3240,8 @@ fn enumerateInstanceExtensions(layer: ?[*:0]const u8, count: ?*u32, props: ?[*]E
     };
     if (layer != null) return .error_extension_not_present;
     // Chromium's headless Vulkan bootstrap enables the two promoted
-    // external-capability names by string even when the driver reports a
-    // Vulkan 1.0 API version.  The headless name is a real offscreen surface
+    // external-capability names by string even when an application requests a
+    // Vulkan 1.0 instance. The headless name is a real offscreen surface
     // path; the capability names remain zero-handle query aliases only.
     const names = [_][]const u8{ "VK_KHR_surface", "VK_KHR_xcb_surface", "VK_EXT_headless_surface", "VK_KHR_external_memory_capabilities", "VK_KHR_external_semaphore_capabilities" };
     const versions = [_]u32{ 25, 6, 1, 1, 1 };
@@ -3246,15 +3285,19 @@ fn createInstance(info: ?*const InstanceInfo, alloc: ?*const Alloc, output: ?*In
         return .error_initialization_failed;
     }
     if (!hasValidLoaderHead(ci.p_next, 47) or ci.flags != 0) return .error_initialization_failed;
-    if (ci.app_info) |app| if (app.s_type != 0) {
-        hit(.app_stype);
-        return .error_initialization_failed;
-    } else if (app.p_next != null or app.api_version > API_1_1) return .error_initialization_failed;
+    const requested_api_version: u32 = if (ci.app_info) |app| blk: {
+        if (app.s_type != 0) {
+            hit(.app_stype);
+            return .error_initialization_failed;
+        }
+        if (app.p_next != null) return .error_initialization_failed;
+        break :blk normalizeApiVersion(app.api_version) orelse return .error_incompatible_driver;
+    } else API_1_0;
     lock();
     defer mutex.unlock();
     const set_loader_data = findInstanceLoaderCallback(ci.p_next);
     for (&instance_objects, &physical_objects, &instance_state) |*o, *p, *state| if (state.* == .never) {
-        o.* = .{ .loader_data = MAGIC, .set_loader_data = set_loader_data };
+        o.* = .{ .loader_data = MAGIC, .set_loader_data = set_loader_data, .api_version = requested_api_version };
         p.* = .{ .loader_data = MAGIC, .owner = o, .loader_initialized = false };
         state.* = .live;
         out.* = o;
@@ -3410,7 +3453,7 @@ fn enumeratePhysicalDevices(instance: ?Instance, count: ?*u32, output: ?[*]Physi
 }
 fn enumerateInstanceVersion(count: ?*u32) callconv(.c) Result {
     const out = count orelse return .error_initialization_failed;
-    out.* = API_1_1;
+    out.* = MAX_API_VERSION;
     return .success;
 }
 fn enumeratePhysicalDeviceGroups(instance: ?Instance, count: ?*u32, output: ?[*]PhysicalDeviceGroupProperties) callconv(.c) Result {
@@ -3547,7 +3590,7 @@ fn conservativeLimits() Limits {
 fn getPropertiesLocked(h: Physical, out: *Properties) bool {
     if (!validPhysicalLocked(h)) return false;
     out.* = std.mem.zeroes(Properties);
-    out.api_version = API_1_1;
+    out.api_version = MAX_API_VERSION;
     out.driver_version = 1;
     out.vendor_id = 0x1cdc;
     out.device_id = 1;
@@ -19078,7 +19121,7 @@ test "physical properties start with coherent conservative limits" {
     try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &count, &physical));
     var properties: Properties = undefined;
     getProperties(physical[0], &properties);
-    try std.testing.expectEqual(API_1_1, properties.api_version);
+    try std.testing.expectEqual(MAX_API_VERSION, properties.api_version);
     try std.testing.expectEqual(@as(u32, 0x1cdc), properties.vendor_id);
     try std.testing.expectEqual(@as(u32, 1), properties.device_id);
     try std.testing.expectEqual(@as(u32, 4), properties.device_type);
@@ -19332,10 +19375,10 @@ test "creation rejects every supported invalid-input class" {
     ci.flags = 1;
     try std.testing.expectEqual(Result.error_initialization_failed, createInstance(&ci, null, &instance));
     ci.flags = 0;
-    var app = AppInfo{ .s_type = 0, .p_next = null, .app_name = null, .app_version = 0, .engine_name = null, .engine_version = 0, .api_version = API_1_1 + 1 };
+    var app = AppInfo{ .s_type = 0, .p_next = null, .app_name = null, .app_version = 0, .engine_name = null, .engine_version = 0, .api_version = MAX_API_VERSION + 1 };
     ci.app_info = &app;
-    try std.testing.expectEqual(Result.error_initialization_failed, createInstance(&ci, null, &instance));
-    app.api_version = API_1_1;
+    try std.testing.expectEqual(Result.error_incompatible_driver, createInstance(&ci, null, &instance));
+    app.api_version = API_1_4;
     app.s_type = 99;
     try std.testing.expectEqual(Result.error_initialization_failed, createInstance(&ci, null, &instance));
     ci.app_info = null;
@@ -19602,7 +19645,7 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 0xfeed), ycbcr_handle);
     var version: u32 = 0;
     try std.testing.expectEqual(Result.success, enumerateInstanceVersion(&version));
-    try std.testing.expectEqual(API_1_1, version);
+    try std.testing.expectEqual(MAX_API_VERSION, version);
     var groups = [_]PhysicalDeviceGroupProperties{std.mem.zeroes(PhysicalDeviceGroupProperties)};
     groups[0].s_type = 1000070000;
     var group_count: u32 = 1;
@@ -19867,7 +19910,7 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     @memset(std.mem.asBytes(&vulkan14_properties)[16..], 0xff);
     var properties = PhysicalDeviceProperties2{ .s_type = 1000059001, .p_next = @ptrCast(&vulkan14_properties), .properties = std.mem.zeroes(Properties) };
     getPhysicalDeviceProperties2(ctx.physical, &properties);
-    try std.testing.expectEqual(API_1_1, properties.properties.api_version);
+    try std.testing.expectEqual(MAX_API_VERSION, properties.properties.api_version);
     try std.testing.expectEqualSlices(u8, &device_uuid, &vulkan11_properties.device_uuid);
     try std.testing.expectEqualSlices(u8, &driver_uuid, &vulkan11_properties.driver_uuid);
     try std.testing.expectEqual(@as(u32, 1), vulkan11_properties.device_node_mask);
@@ -20756,6 +20799,24 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     freeMemory(ctx.device, memory, null);
     destroyDevice(ctx.device, null);
     destroyInstance(ctx.instance, null);
+}
+
+test "instance API version negotiation is per-application from 1.0 through 1.4" {
+    const requested_versions = [_]u32{ 0, API_1_0, API_1_1, API_1_2, API_1_3, API_1_4, MAX_API_VERSION };
+    for (requested_versions) |requested| {
+        var app = AppInfo{ .s_type = 0, .p_next = null, .app_name = null, .app_version = 0, .engine_name = null, .engine_version = 0, .api_version = requested };
+        const ci = InstanceInfo{ .s_type = 1, .p_next = null, .flags = 0, .app_info = &app, .layer_count = 0, .layers = null, .extension_count = 0, .extensions = null };
+        var instance: Instance = undefined;
+        try std.testing.expectEqual(Result.success, createInstance(&ci, null, &instance));
+        try std.testing.expectEqual(if (requested == 0) API_1_0 else requested, instance.api_version);
+        destroyInstance(instance, null);
+    }
+
+    // A request above the pinned 1.4.360 ceiling is an incompatible-driver
+    // result, while malformed variant/major fields are never accepted.
+    try std.testing.expect(normalizeApiVersion(MAX_API_VERSION + 1) == null);
+    try std.testing.expect(normalizeApiVersion((2 << 22)) == null);
+    try std.testing.expect(normalizeApiVersion((1 << 29) | API_1_4) == null);
 }
 
 test "promoted device-group pNext chains validate atomically and stay allocation free" {
@@ -26419,7 +26480,7 @@ test "installed manifest contract" {
     const icd = root.get("ICD").?.object;
     try std.testing.expectEqualStrings("../../../lib/libvulkan_zpu.so", icd.get("library_path").?.string);
     try std.testing.expectEqualStrings("64", icd.get("library_arch").?.string);
-    try std.testing.expectEqualStrings("1.1.0", icd.get("api_version").?.string);
+    try std.testing.expectEqualStrings("1.4.360", icd.get("api_version").?.string);
     try std.testing.expect(!icd.get("is_portability_driver").?.bool);
 }
 

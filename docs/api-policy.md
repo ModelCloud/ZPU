@@ -11,7 +11,7 @@ permitted to advertise, and when an advertised version may change.
 This document is normative about the **target**. It is not a conformance claim
 and it does not describe what is implemented today. ZPU is not a conformant
 Vulkan implementation; the driver, the ICD manifest, and CI all advertise and
-assert Vulkan **1.1.0** right now. See
+assert a **1.4.360 ABI ceiling** right now. See
 [Current state versus target](#current-state-versus-target) for the honest
 inventory, and treat every statement in sections 1–6 as a requirement on future
 work rather than a description of the shipped ICD.
@@ -121,10 +121,15 @@ carries none of the compatibility surface that a long-lived driver accumulates.
 
 ## 6. Version advertisement gates
 
-The advertised version is a claim about the implementation, so it moves last.
+The reported version is a claim about the implementation, so it moves last.
+ZPU's current report is an **ABI ceiling**: it covers the cumulative command and
+dispatch contract through 1.4.360 and enables applications to negotiate a lower
+core version per instance. It is deliberately not a claim that every optional
+feature, profile requirement, or Vulkan CTS test passes; those remain governed
+by the feature and conformance gates below.
 
-ZPU **MUST NOT** raise the version reported by any of the following until every
-gate below passes:
+For a full Vulkan feature/profile claim, ZPU **MUST NOT** raise the version
+reported by any of the following until every gate below passes:
 
 - `VkPhysicalDeviceProperties::apiVersion` returned by the driver
 - the `api_version` field of the ICD manifest
@@ -144,7 +149,7 @@ gate below passes:
    (`zig build transfer`) and the system-loader discovery gate are the existing
    examples of this shape.
 4. **Loader discovery.** The system Vulkan loader discovers ZPU and reports the
-   new version, asserted in CI, exactly as the current gate asserts `1.0.0`.
+   new version, asserted in CI, exactly as the current gate asserts `1.4.360`.
 5. **Simultaneous update.** The driver, the manifest, the CI assertion, and the
    documentation change in the same commit. A version claim that is true in one
    of those and false in another is a broken claim.
@@ -161,10 +166,10 @@ Everything in this column is the honest present state, not an aspiration.
 | Subject | Current | Target under this policy |
 | --- | --- | --- |
 | Cumulative core command ABI | `234/234` command entry points documented, dispatched, and regression-covered; bounded feature policies remain explicit | Complete mandatory core behavior and independent conformance |
-| Core version reported by the driver | `1.1.0` | `1.4.360` |
-| ICD manifest `api_version` | `1.1.0` | `1.4.360` |
-| CI loader-discovery assertion | asserts `apiVersion = 1.1.0` | asserts the pinned version |
-| Max `VkApplicationInfo::apiVersion` accepted | Vulkan 1.1 | the pinned version |
+| Core version reported by the driver | `1.4.360` ABI ceiling | `1.4.360` full feature claim |
+| ICD manifest `api_version` | `1.4.360` | `1.4.360` |
+| CI loader-discovery assertion | asserts `apiVersion = 1.4.360` | asserts the pinned version |
+| Max `VkApplicationInfo::apiVersion` accepted | Vulkan 1.4.360 (per-instance negotiation) | the pinned version |
 | Profile | none claimed | `VP_KHR_roadmap_2026` targeted, not claimed |
 | Loader–ICD interface | negotiates `min(requested, 7)`; **accepts lower interfaces** | 7 only |
 | Instance extensions | `VK_KHR_surface`, `VK_KHR_xcb_surface`, `VK_EXT_headless_surface`, `VK_KHR_external_memory_capabilities`, `VK_KHR_external_semaphore_capabilities` | minimum surface per sections 2–3 |
@@ -172,12 +177,14 @@ Everything in this column is the honest present state, not an aspiration.
 | Optional features | none advertised | minimum surface per sections 2–3 |
 | Conformance | non-conformant; no CTS run exists in this repository | conformance investigation only after the mandatory core is complete |
 
-ZPU implements a narrow, deliberately non-conformant slice of Vulkan 1.0:
+ZPU implements a narrow, deliberately non-conformant feature profile while
+exposing the cumulative Vulkan 1.0–1.4 command ABI ceiling:
 host-visible memory, buffers, linear 2D images in two formats, a small transfer
 command set, synchronous fences, one narrow image-barrier form, XCB
 presentation, and a vkcube-specific CPU draw path. There is no general SPIR-V
 execution. The gap between the two columns above is the entire remaining
-project, and this document does not shorten it.
+project; the ABI ceiling does not make unsupported feature bits or profiles
+available.
 
 ## Changing this policy
 

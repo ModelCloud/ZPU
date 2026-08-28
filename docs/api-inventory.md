@@ -41,5 +41,6 @@ regression-evidence rows; it is the authoritative documentation for ZPU's
 100% command-level Vulkan 1.4 ABI result. The inventory remains broader than
 that command claim: its 603 types and 390 enums describe the future
 field-by-field conformance target and do not imply that every optional feature
-is enabled. ZPU continues to advertise and accept only its truthful Vulkan
-1.0 runtime surface as documented in `docs/api-policy.md`.
+is enabled. ZPU reports a Vulkan 1.4.360 ABI ceiling and accepts per-instance
+requests from Vulkan 1.0 through 1.4; its bounded feature surface remains
+documented in `docs/api-policy.md`.

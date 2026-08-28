@@ -38,7 +38,8 @@ Reproduce the Chromium screenshot with [`tools/smolvm-chrome.sh`](tools/smolvm-c
 | Area | State | Evidence / scope |
 | --- | --- | --- |
 | Vulkan 1.4 core command ABI | ✅ **234/234** | Every cumulative 1.0–1.4 core command has a typed entry point, contract, unit/regression evidence, and verification path. See [`docs/vulkan-abi.md`](docs/vulkan-abi.md). |
-| Runtime Vulkan feature set | ⚠️ Bounded Vulkan 1.1 | The ICD advertises 1.1 today. Command-level ABI coverage is not a full feature, profile, or CTS-conformance claim. [`docs/api-policy.md`](docs/api-policy.md) is normative. |
+| Runtime Vulkan API ceiling | ✅ Vulkan **1.4.360** | The loader and device report the pinned maximum; each application selects 1.0, 1.1, 1.2, 1.3, or 1.4 at `vkCreateInstance`. |
+| Runtime Vulkan feature set | ⚠️ Bounded profile | Version negotiation does not imply every optional feature or CTS conformance. Feature bits and limits remain truthful and bounded; [`docs/api-policy.md`](docs/api-policy.md) is normative. |
 | Chromium / ANGLE headless | ✅ `google.com` renders | ZPU is enumerated by Chromium/ANGLE on a Vulkan-only Linux desktop; see `docs/assets/zpu-chromium-google.png`. |
 || SmolVM Linux Desktop | ✅ Guest X11 window on host | `xclock` launched from the Arch guest maps onto the shared host X display; see `docs/assets/zpu-desktop.png`. |
 | Zig implementation | ✅ Zig 0.16.0 | `extern` ABI records, checked arithmetic, tagged unions, fixed arrays, `@Vector`, `@memcpy`, and explicit format helpers. |
@@ -50,6 +51,29 @@ Reproduce the Chromium screenshot with [`tools/smolvm-chrome.sh`](tools/smolvm-c
 The central performance rule is simple: a target is a **p99 frame-time gate**,
 not an average-FPS slogan. For a target of `H` Hz, the frame budget is
 `1_000_000_000 / H` ns. ⏱️
+
+## 🔀 Dynamic Vulkan API versions
+
+Vulkan exposes one implementation maximum, not five simultaneously installed
+ICDs. ZPU reports **1.4.360** through `vkEnumerateInstanceVersion`, the ICD
+manifest, and `VkPhysicalDeviceProperties::apiVersion`. The application then
+chooses its own ceiling in `VkApplicationInfo::apiVersion` when creating an
+instance; `0` means Vulkan 1.0. Every request through 1.4 is accepted
+independently, while a request above 1.4.360 returns
+`VK_ERROR_INCOMPATIBLE_DRIVER`.
+
+| Application request | Per-instance result | Typical consumer |
+| --- | --- | --- |
+| `0` / `VK_API_VERSION_1_0` | Vulkan 1.0 | legacy 1.0 applications |
+| `VK_API_VERSION_1_1` | Vulkan 1.1 | Chromium / ANGLE minimum |
+| `VK_API_VERSION_1_2` | Vulkan 1.2 | synchronization and timeline users |
+| `VK_API_VERSION_1_3` | Vulkan 1.3 | dynamic-rendering users |
+| `VK_API_VERSION_1_4` (or `1.4.360`) | Vulkan 1.4 | applications using the pinned ABI |
+
+The selected value is stored on the instance, so two processes—or two
+instances in one process—may use different API ceilings without an environment
+variable or global mutable switch. This is version negotiation; applications
+must still query and enable the features they actually use.
 
 ## 🧭 Linux userspace path
 

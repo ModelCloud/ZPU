@@ -35,8 +35,10 @@ citation next to it.
       `apiVersion` is skipped in `vulkan_device_queue.cc`
       (`if (device_properties.apiVersion < info.used_api_version) continue;`).
 
-      ZPU now reports `1.1.0` — in the driver, in the ICD manifest, and in
-      the CI loader-discovery assertion.
+      ZPU reports a `1.4.360` maximum — in the driver, in the ICD manifest, and
+      in the CI loader-discovery assertion. Chromium still requests 1.1 at
+      instance creation, so its minimum remains satisfied without forcing all
+      applications to use the newest core version.
 
 `VK_API_VERSION_1_1` is Chromium's floor, not ZPU's destination. The pinned
 target is Vulkan **1.4.360**, whose mandatory core is cumulative and already

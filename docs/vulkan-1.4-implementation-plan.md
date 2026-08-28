@@ -8,13 +8,14 @@ rendering, native APIs, and unrelated VM integration are outside its scope.
 
 The normative inputs are the pinned Khronos Vulkan-Headers `v1.4.360`
 `vk.xml`, the Vulkan 1.4.360 specification, and `VP_KHR_roadmap_2026`; see
-`api/registry/README.md`. Runtime version reporting stays at Vulkan 1.0 until
-all gates in `docs/api-policy.md` pass. The command-level ABI milestone is
+`api/registry/README.md`. Runtime version reporting now exposes a Vulkan
+1.4.360 **command/dispatch ABI ceiling** and negotiates each application's
+requested 1.0–1.4 version independently. The command-level ABI milestone is
 complete: every cumulative core entry point is declared, dispatched, documented,
 unit/regression-tested, and verified. Landing a command name is not enough for
 feature conformance: its object lifetime, valid execution behavior,
 synchronization, failure atomicity, feature/limit reporting, and required
-formats must all work before the runtime version can be raised.
+formats must all work before ZPU can claim full Vulkan feature/profile support.
 
 ## Baseline gap
 
@@ -521,8 +522,9 @@ The memory and sampler handle registries now meet the required 4096 and 4000
 allocation limits respectively. The generated command matrix is a
 234/234 dispatch/name-coverage artifact, not a Vulkan-conformance claim:
 several commands intentionally expose only the narrow behavior behind the
-currently advertised Vulkan 1.0 profile. Runtime version reporting remains at
-Vulkan 1.0 until the broader feature, CTS, and performance gates below pass.
+bounded feature profile. Runtime version reporting is a 1.4.360 ABI ceiling;
+the broader feature, CTS, and performance gates below still determine whether
+ZPU can claim full Vulkan 1.4 feature support.
 The two promoted instance capability names required by Chromium's headless
 bootstrap, `VK_KHR_external_memory_capabilities` and
 `VK_KHR_external_semaphore_capabilities`, are now enumerated and accepted;
@@ -717,8 +719,9 @@ Each slice must land with all of the following:
    enter the controlled baseline benchmark with p50/p95/p99 comparison.
 5. `zig build behavior`, 100% driver executed-line coverage, the independent
    client, and the full limited-CPU test suite.
-6. No feature, format, limit, extension, or core-version advertisement before
-   the behavior behind it is complete.
+6. No feature, format, limit, extension, or full feature/profile version claim
+   before the behavior behind it is complete. The current 1.4.360 report is
+   limited to the command/dispatch ABI ceiling described above.
 
 ## Dependency order
 
@@ -1028,12 +1031,15 @@ warm-path regression proves valid nested requests remain allocation-free.
   rendering local read, map/unmap2, remaining 1.4 commands, feature/property
   chains, mandatory formats, and promoted-core behavior.
 
-### F. Final advertisement and profile gates
+### F. Final feature advertisement and profile gates
 
 - [ ] Generate and compile-check the full pinned command/type/enum ABI rather
   than extending the handwritten declaration block indefinitely.
 - [ ] Pass the complete applicable Vulkan CTS with no validation errors.
 - [ ] Pass every `VP_KHR_roadmap_2026` required capability and format gate.
-- [ ] Require loader–ICD interface 7, then update driver properties, instance
-  version, manifest, loader discovery, CI, and documentation to 1.4.360 in one
-  final version-advertisement change.
+- [x] Expose the 1.4.360 ABI ceiling through driver properties, instance
+  version enumeration, manifest, loader discovery, CI, and documentation;
+  negotiate 1.0–1.4 per application and reject versions above the pinned
+  ceiling.
+- [ ] Claim complete Vulkan 1.4 feature/profile support only after the
+  mandatory feature, limit, format, CTS, and loader-interface gates above pass.

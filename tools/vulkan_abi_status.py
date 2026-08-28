@@ -15,6 +15,7 @@ INVENTORY = ROOT / "api/vulkan-1.4.360.json"
 IMPLEMENTATION = ROOT / "api/command-implementation.json"
 DRIVER = ROOT / "src/vulkan/driver.zig"
 OUTPUT = ROOT / "docs/vulkan-abi.md"
+HEADER = "<!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->\n<!-- SPDX-License-Identifier: Apache-2.0 -->\n\n"
 
 
 def command_description(command: str) -> str:
@@ -82,7 +83,7 @@ def render() -> str:
         f"| {version} | {count} | {count} | {count} | {count} | {count} |"
         for version, count in totals
     ]
-    return "\n".join(
+    return HEADER + "\n".join(
         (
             "# Vulkan 1.4.360 ABI status",
             "",
