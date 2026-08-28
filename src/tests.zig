@@ -70,6 +70,34 @@ test "all SIMD-width backends match scalar exactly" {
     }
 }
 
+test "repeated source-over stable color matches scalar on packed surfaces" {
+    const width = 16;
+    const height = 8;
+    const bytes = width * height * 4;
+    const color = s.Color.rgba(220, 31, 77, 128);
+    var initial: [bytes]u8 = undefined;
+    var scalar_pixels: [bytes]u8 = undefined;
+    var test_pixels: [bytes]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(0x4c8f_2d5a_b1e0_0001);
+    prng.random().bytes(&initial);
+    for ([_]s.Format{ .rgba8_unorm, .bgra8_unorm }) |format| {
+        @memcpy(&scalar_pixels, &initial);
+        @memcpy(&test_pixels, &initial);
+        var scalar_surface = try s.Surface.init(&scalar_pixels, width, height, width * 4, format);
+        var test_surface = try s.Surface.init(&test_pixels, width, height, width * 4, format);
+        for (0..16) |_| {
+            raster.blendRectWith(&scalar_surface, .{ .x = 0, .y = 0, .width = width, .height = height }, color, .scalar);
+            raster.blendRectWith(&test_surface, .{ .x = 0, .y = 0, .width = width, .height = height }, color, .portable_vector);
+        }
+        try std.testing.expectEqualSlices(u8, &scalar_pixels, &test_pixels);
+        if (dispatch.available(.avx2)) {
+            @memcpy(&test_pixels, &initial);
+            for (0..16) |_| raster.blendRectWith(&test_surface, .{ .x = 0, .y = 0, .width = width, .height = height }, color, .avx2);
+            try std.testing.expectEqualSlices(u8, &scalar_pixels, &test_pixels);
+        }
+    }
+}
+
 test "runtime selection never selects unavailable ISA" {
     const selected = dispatch.best();
     try std.testing.expect(dispatch.available(selected));
