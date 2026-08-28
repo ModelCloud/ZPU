@@ -19,6 +19,23 @@ fn cachedKernel(format: s.Format, operation: pipeline.Operation) pipeline.Kernel
     return kernel_cache.get(pipeline.Key.init(format, operation, backend)) catch unreachable;
 }
 
+// A tightly packed full-width rectangle is one contiguous pixel span. Keep
+// the row loop out of the hot path so SIMD kernels pay their dispatch/setup
+// cost once instead of once per scanline. Surfaces with padding (or a partial
+// width) retain the row-wise path below.
+const ContiguousSpan = struct { bytes: []u8, pixels: usize };
+
+fn contiguousSpan(surface: *s.Surface, clipped: s.Rect) ?ContiguousSpan {
+    if (clipped.x != 0 or clipped.width != surface.width) return null;
+    const row_bytes = std.math.mul(usize, @as(usize, surface.width), 4) catch return null;
+    if (surface.stride != row_bytes) return null;
+    const start = std.math.mul(usize, @as(usize, @intCast(clipped.y)), row_bytes) catch return null;
+    const pixels = std.math.mul(usize, @as(usize, @intCast(clipped.width)), @as(usize, @intCast(clipped.height))) catch return null;
+    const bytes = std.math.mul(usize, pixels, 4) catch return null;
+    if (start > surface.pixels.len or bytes > surface.pixels.len - start) return null;
+    return .{ .bytes = surface.pixels[start .. start + bytes], .pixels = pixels };
+}
+
 pub fn resetKernelCache() void {
     kernel_cache.reset();
     selected_backend = null;
@@ -31,24 +48,41 @@ pub fn clear(surface: *s.Surface, color: s.Color) void {
     fillRect(surface, .{ .x = 0, .y = 0, .width = surface.width, .height = surface.height }, color);
 }
 pub fn fillRect(surface: *s.Surface, rect: s.Rect, color: s.Color) void {
-    const clipped = s.clip(rect, surface.width, surface.height) orelse return;
-    if (clipped.width == 1 and clipped.height == 1) {
-        s.Surface.write(surface.row(@intCast(clipped.y)), @as(usize, @intCast(clipped.x)) * 4, surface.format, color);
+    // Pixel pushes are a hot API path. Avoid the i64 rectangle clipper when
+    // the caller has already supplied a one-pixel rectangle; retain the exact
+    // out-of-bounds no-op semantics before narrowing the coordinates.
+    if (rect.width == 1 and rect.height == 1) {
+        if (rect.x < 0 or rect.y < 0 or @as(u32, @intCast(rect.x)) >= surface.width or @as(u32, @intCast(rect.y)) >= surface.height) return;
+        s.Surface.write(surface.row(@intCast(rect.y)), @as(usize, @intCast(rect.x)) * 4, surface.format, color);
         return;
     }
+    const clipped = s.clip(rect, surface.width, surface.height) orelse return;
     const kernel = cachedKernel(surface.format, .fill);
+    if (contiguousSpan(surface, clipped)) |span| {
+        kernel.fillSpan(span.bytes, 0, span.pixels, color) catch unreachable;
+        return;
+    }
     for (@intCast(clipped.y)..@as(usize, @intCast(clipped.y)) + clipped.height) |y| kernel.fillSpan(surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, color) catch unreachable;
 }
 pub fn blendRect(surface: *s.Surface, rect: s.Rect, color: s.Color) void {
     const clipped = s.clip(rect, surface.width, surface.height) orelse return;
     const kernel = cachedKernel(surface.format, .source_over);
+    if (contiguousSpan(surface, clipped)) |span| {
+        kernel.blendSpan(span.bytes, 0, span.pixels, color) catch unreachable;
+        return;
+    }
     for (@intCast(clipped.y)..@as(usize, @intCast(clipped.y)) + clipped.height) |y| kernel.blendSpan(surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, color) catch unreachable;
 }
 
 pub fn fillRectWith(surface: *s.Surface, rect: s.Rect, color: s.Color, backend: dispatch.Backend) void {
+    if (rect.width == 1 and rect.height == 1) {
+        if (rect.x < 0 or rect.y < 0 or @as(u32, @intCast(rect.x)) >= surface.width or @as(u32, @intCast(rect.y)) >= surface.height) return;
+        s.Surface.write(surface.row(@intCast(rect.y)), @as(usize, @intCast(rect.x)) * 4, surface.format, color);
+        return;
+    }
     const clipped = s.clip(rect, surface.width, surface.height) orelse return;
-    if (clipped.width == 1 and clipped.height == 1) {
-        s.Surface.write(surface.row(@intCast(clipped.y)), @as(usize, @intCast(clipped.x)) * 4, surface.format, color);
+    if (contiguousSpan(surface, clipped)) |span| {
+        dispatch.fillSpan(backend, span.bytes, 0, span.pixels, surface.format, color);
         return;
     }
     for (@intCast(clipped.y)..@as(usize, @intCast(clipped.y)) + clipped.height) |y| dispatch.fillSpan(backend, surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, surface.format, color);
@@ -59,6 +93,10 @@ pub fn blendRectWith(surface: *s.Surface, rect: s.Rect, color: s.Color, backend:
         const row = surface.row(@intCast(clipped.y));
         const offset = @as(usize, @intCast(clipped.x)) * 4;
         s.Surface.write(row, offset, surface.format, scalar.blendPixel(s.Surface.read(row, offset, surface.format), color));
+        return;
+    }
+    if (contiguousSpan(surface, clipped)) |span| {
+        dispatch.blendSpan(backend, span.bytes, 0, span.pixels, surface.format, color);
         return;
     }
     for (@intCast(clipped.y)..@as(usize, @intCast(clipped.y)) + clipped.height) |y| dispatch.blendSpan(backend, surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, surface.format, color);

@@ -45,11 +45,21 @@ pub fn blend(comptime lanes: usize, row: []u8, start: usize, count: usize, forma
     const inverse: V = @splat(255 - @as(u32, color.a));
     const half: V = @splat(127);
     const scale: V = @splat(255);
+    // Source-over with a partially transparent color is idempotent once an
+    // opaque destination already contains that color. This commonly occurs
+    // in repeated compositing passes; recognize the stable packed value
+    // before doing any channel arithmetic or issuing a store.
+    const stable_bits: u32 = switch (format) {
+        .rgba8_unorm => @as(u32, color.r) | (@as(u32, color.g) << 8) | (@as(u32, color.b) << 16) | 0xff000000,
+        .bgra8_unorm => @as(u32, color.b) | (@as(u32, color.g) << 8) | (@as(u32, color.r) << 16) | 0xff000000,
+    };
+    const stable: V = @splat(stable_bits);
     var i: usize = 0;
     while (i + lanes <= count) : (i += lanes) {
         var destination_bytes: [lanes * 4]u8 = undefined;
         @memcpy(&destination_bytes, row[(start + i) * 4 ..][0 .. lanes * 4]);
         const destination_packed: V = nativePacked(lanes, destination_bytes);
+        if (@reduce(.And, destination_packed == stable)) continue;
         const low = destination_packed & channel_mask;
         const dg = (destination_packed >> @as(V, @splat(8))) & channel_mask;
         const high = (destination_packed >> @as(V, @splat(16))) & channel_mask;
