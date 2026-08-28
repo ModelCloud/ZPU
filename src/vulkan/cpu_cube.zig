@@ -2660,7 +2660,7 @@ pub fn drawUncountedParallelBatchStaticReplay(target: []u8, depth: []u8, width: 
     if (batch_static_replay_cache.valid and batch_static_replay_cache.target_address == target_address and batch_static_replay_cache.depth_address == depth_address and
         batch_static_replay_cache.commands_address == commands_address and batch_static_replay_cache.command_count == commands.len and
         batch_static_replay_cache.width == width and batch_static_replay_cache.height == height) return batch_static_replay_cache.pixels_written;
-    const written = drawParallelBatch(target, depth, width, height, commands, null, null, null);
+    const written = drawParallelBatch(target, depth, width, height, commands, null, null, null, null, null);
     if (written == 0) return 0;
     batch_static_replay_cache = .{ .valid = true, .target_address = target_address, .depth_address = depth_address, .commands_address = commands_address, .command_count = commands.len, .width = width, .height = height, .pixels_written = written };
     return written;

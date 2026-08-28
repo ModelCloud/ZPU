@@ -5267,12 +5267,9 @@ fn copyMemoryToImage(device: ?Device, info: ?*const CopyMemoryToImageInfo) callc
         const source: [*]const u8 = @ptrCast(region.host_pointer.?);
         for (0..region.image_subresource.layer_count) |layer| {
             const layer_offset = imageLayerOffset(image, region.image_subresource.base_array_layer + @as(u32, @intCast(layer))) orelse return .error_initialization_failed;
-            const source_layer = source[layer * layer_stride ..];
-            for (0..region.image_extent.height) |row| {
-                const src = source_layer[row * @as(usize, row_length) * 4 ..][0 .. @as(usize, region.image_extent.width) * 4];
-                const dst_offset = layer_offset + ((@as(usize, @intCast(region.image_offset.y)) + row) * image.width + @as(usize, @intCast(region.image_offset.x))) * 4;
-                std.mem.copyForwards(u8, dst[dst_offset..][0..src.len], src);
-            }
+            const source_layer = source[layer * layer_stride ..][0..layer_stride];
+            const dst_offset = layer_offset + (@as(usize, @intCast(region.image_offset.y)) * image.width + @as(usize, @intCast(region.image_offset.x))) * 4;
+            copyHostRows(dst[dst_offset..], @as(usize, image.width) * 4, source_layer, @as(usize, row_length) * 4, @as(usize, region.image_extent.width) * 4, region.image_extent.height);
         }
     }
     invalidateImageContents(image);
@@ -5297,12 +5294,9 @@ fn copyImageToMemory(device: ?Device, info: ?*const CopyImageToMemoryInfo) callc
         const destination: [*]u8 = @ptrCast(region.host_pointer.?);
         for (0..region.image_subresource.layer_count) |layer| {
             const layer_offset = imageLayerOffset(image, region.image_subresource.base_array_layer + @as(u32, @intCast(layer))) orelse return .error_initialization_failed;
-            const destination_layer = destination[layer * layer_stride ..];
-            for (0..region.image_extent.height) |row| {
-                const dst = destination_layer[row * @as(usize, row_length) * 4 ..][0 .. @as(usize, region.image_extent.width) * 4];
-                const src_offset = layer_offset + ((@as(usize, @intCast(region.image_offset.y)) + row) * image.width + @as(usize, @intCast(region.image_offset.x))) * 4;
-                std.mem.copyForwards(u8, dst, src[src_offset..][0..dst.len]);
-            }
+            const destination_layer = destination[layer * layer_stride ..][0..layer_stride];
+            const src_offset = layer_offset + (@as(usize, @intCast(region.image_offset.y)) * image.width + @as(usize, @intCast(region.image_offset.x))) * 4;
+            copyHostRows(destination_layer, @as(usize, row_length) * 4, src[src_offset..], @as(usize, image.width) * 4, @as(usize, region.image_extent.width) * 4, region.image_extent.height);
         }
     }
     return .success;
@@ -9949,10 +9943,50 @@ fn copyTransferRows(dst: []u8, dst_stride: usize, src: []const u8, src_stride: u
     }
 }
 
+fn copyHostRows(dst: []u8, dst_stride: usize, src: []const u8, src_stride: usize, row_bytes: usize, rows: usize) void {
+    if (rows == 0 or row_bytes == 0) return;
+    const dst_span = (std.math.mul(usize, rows - 1, dst_stride) catch std.math.maxInt(usize)) +| row_bytes;
+    const src_span = (std.math.mul(usize, rows - 1, src_stride) catch std.math.maxInt(usize)) +| row_bytes;
+    const dst_start = @intFromPtr(dst.ptr);
+    const src_start = @intFromPtr(src.ptr);
+    const dst_end = dst_start +| dst_span;
+    const src_end = src_start +| src_span;
+    const overlap = dst_start < src_end and src_start < dst_end;
+    for (0..rows) |row| {
+        const destination = dst[row * dst_stride ..][0..row_bytes];
+        const source = src[row * src_stride ..][0..row_bytes];
+        if (overlap) std.mem.copyForwards(u8, destination, source) else @memcpy(destination, source);
+    }
+}
+
 pub fn benchmarkVulkanBufferImageCopy(dst: []u8, src: []const u8, width: u32, height: u32, row_length: u32) void {
     const image_stride = @as(usize, width) * 4;
     const buffer_stride = @as(usize, if (row_length == 0) width else row_length) * 4;
     copyTransferRows(dst, image_stride, src, buffer_stride, image_stride, height);
+}
+
+pub fn benchmarkVulkanHostImageCopy(dst: []u8, src: []const u8, width: u32, height: u32, row_length: u32) void {
+    const image_stride = @as(usize, width) * 4;
+    const host_stride = @as(usize, if (row_length == 0) width else row_length) * 4;
+    copyHostRows(dst, image_stride, src, host_stride, image_stride, height);
+}
+
+test "host image rows bulk-copy disjoint memory and preserve overlap semantics" {
+    var source: [2 * 8]u8 = undefined;
+    var destination: [2 * 6]u8 = undefined;
+    for (&source, 0..) |*byte, index| byte.* = @truncate(index * 17 + 3);
+    @memset(&destination, 0);
+    copyHostRows(&destination, 6, &source, 8, 6, 2);
+    try std.testing.expectEqualSlices(u8, source[0..6], destination[0..6]);
+    try std.testing.expectEqualSlices(u8, source[8..14], destination[6..12]);
+
+    var overlapping: [24]u8 = undefined;
+    for (&overlapping, 0..) |*byte, index| byte.* = @truncate(index * 11 + 5);
+    var expected = overlapping;
+    std.mem.copyForwards(u8, expected[2..][0..4], expected[0..4]);
+    std.mem.copyForwards(u8, expected[10..][0..4], expected[8..12]);
+    copyHostRows(overlapping[2..], 8, overlapping[0..], 8, 4, 2);
+    try std.testing.expectEqualSlices(u8, &expected, &overlapping);
 }
 
 fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy, to_image: bool) void {
