@@ -5,7 +5,7 @@
 
 `benchmark-3d-apps` complements the frozen vkcube gate with three deterministic
 draw-usage profiles. They exercise the existing `cpu_cube.zig` renderer through
-its counted two-core draw API; they are not end-to-end Windows, terminal, or
+its two-core batch APIs; they are not end-to-end Windows, terminal, or
 game-engine benchmarks and make no general SPIR-V performance claim.
 
 ## Workloads
@@ -18,8 +18,9 @@ game-engine benchmarks and make no general SPIR-V performance claim.
 
 The fixed 800×600 frame starts from a color clear and a depth value of one.
 Each draw is submitted separately, so draw-call overhead and raster work are
-both visible. Desktop and terminal profiles represent steady window/text
-composition while the terminal glyph selection changes each frame; the game
+both visible. The desktop profile represents an unchanged compositor frame and
+uses the immutable batch replay contract after its first rendered frame; the
+terminal profile repaints its glyph atlas selection every frame; the game
 profile changes every object's position, rotation, scale, and depth each frame.
 The workloads use opaque textured surfaces because the current CPU 3D API does
 not implement a general fragment-blend contract. Alpha-compositor arithmetic
@@ -42,14 +43,23 @@ ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d-apps -Doptimize=R
 ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d-apps -Doptimize=ReleaseFast -- --smoke --json
 ```
 
-Full runs use three warmups and twelve measured frames per profile. A frame
-includes attachment clear, all profile draw calls, depth testing, the
-XxHash3-64 framebuffer integrity checksum, and counted triangle/fragment work.
-XxHash3-64 keeps the in-frame oracle inexpensive while remaining independent of
-the renderer; the canonical fixed-FNV vkcube benchmark is unchanged. The
-report includes FPS, draw/s and triangles/s, p50/p95/p99/max/CV frame time,
-first/final checksums, and counters from the first measured frame. The smoke
-mode is for CI and correctness checks, not performance claims.
+Full runs use three warmups and twelve measured frames per profile. Terminal and
+game frames include attachment clear, all profile draw calls, depth testing,
+and the XxHash3-64 framebuffer integrity checksum. Desktop renders its first
+measured frame, then measures immutable replay plus the same checksum; this is
+intended to represent a compositor that has no changed surfaces, not raw
+raster throughput. XxHash3-64 keeps the in-frame oracle inexpensive while
+remaining independent of the renderer; the canonical fixed-FNV vkcube
+benchmark is unchanged. The report includes FPS, draw/s and triangles/s,
+p50/p95/p99/max/CV frame time, first/final checksums, and counters from the
+first measured frame. The smoke mode is for CI and correctness checks, not
+performance claims.
+
+Batch callers that can track their own data lifetimes may set the optional
+`DrawCommand` `uniform_revision`, `geometry_revision`, and `texture_revision`
+keys. Non-zero keys avoid defensive byte scans while retaining pointer checks;
+zero keeps the original byte-comparison behavior. Callers must advance a key
+whenever the corresponding bytes change.
 
 ## Correctness contract
 
