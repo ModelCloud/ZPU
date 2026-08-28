@@ -175,6 +175,7 @@ const OpaqueQuad = struct {
 };
 const PreparedDraw = struct {
     count: usize = 0,
+    bounds: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
     triangles: [max_prepared_triangles]PreparedTriangle = [_]PreparedTriangle{.{}} ** max_prepared_triangles,
     spans: [max_prepared_triangles][flat_span_rows]FlatSpan = [_][flat_span_rows]FlatSpan{[_]FlatSpan{.{}} ** flat_span_rows} ** max_prepared_triangles,
     spans_valid: bool = false,
@@ -741,6 +742,23 @@ fn shadeUnitTexture16x16(u: f32, v: f32, colors: *const [256]u32) u32 {
     return colors[y * 16 + x];
 }
 
+fn refreshFlatTextureColor(triangle: *PreparedTriangle) void {
+    triangle.flat_color = null;
+    if (!triangle.unit_uv) return;
+    if (triangle.has_prelit_texture) {
+        const x = unitTextureCoordinate(triangle.vertices[0].uv[0]);
+        const y = unitTextureCoordinate(triangle.vertices[0].uv[1]);
+        for (triangle.vertices) |vertex| if (unitTextureCoordinate(vertex.uv[0]) != x or unitTextureCoordinate(vertex.uv[1]) != y) return;
+        triangle.flat_color = triangle.prelit_texture[y * 4 + x];
+    } else if (triangle.has_prelit_texture_16x16) {
+        const x = unitTextureCoordinate16(triangle.vertices[0].uv[0]);
+        const y = unitTextureCoordinate16(triangle.vertices[0].uv[1]);
+        for (triangle.vertices) |vertex| if (unitTextureCoordinate16(vertex.uv[0]) != x or unitTextureCoordinate16(vertex.uv[1]) != y) return;
+        const colors = if (triangle.prelit_texture_16x16_ptr) |ptr| ptr else &triangle.prelit_texture_16x16;
+        triangle.flat_color = colors[y * 16 + x];
+    }
+}
+
 fn prelitTexture4x4(texture: []const u8, table: *const [256]u8) [16]u32 {
     var colors: [16]u32 = undefined;
     for (0..16) |texel| {
@@ -828,20 +846,7 @@ fn prepareLitTextures(prepared: *PreparedDraw, texture: []const u8, texture_widt
             }
             triangle.has_prelit_texture_16x16 = true;
         } else continue;
-        if (triangle.vertices[0].clip_w == triangle.vertices[1].clip_w and
-            triangle.vertices[0].clip_w == triangle.vertices[2].clip_w and
-            triangle.vertices[0].uv[0] == triangle.vertices[1].uv[0] and
-            triangle.vertices[0].uv[0] == triangle.vertices[2].uv[0] and
-            triangle.vertices[0].uv[1] == triangle.vertices[1].uv[1] and
-            triangle.vertices[0].uv[1] == triangle.vertices[2].uv[1])
-        {
-            triangle.flat_color = if (triangle.has_prelit_texture)
-                shadeUnitTexture4x4(triangle.vertices[0].uv[0], triangle.vertices[0].uv[1], &triangle.prelit_texture)
-            else if (triangle.prelit_texture_16x16_ptr) |colors|
-                shadeUnitTexture16x16(triangle.vertices[0].uv[0], triangle.vertices[0].uv[1], colors)
-            else
-                shadeUnitTexture16x16(triangle.vertices[0].uv[0], triangle.vertices[0].uv[1], &triangle.prelit_texture_16x16);
-        }
+        refreshFlatTextureColor(triangle);
     }
 }
 
@@ -1661,20 +1666,7 @@ fn refreshBatchPreparedUvs(prepared: *PreparedDraw, uniform: []const u8, vertex_
         }
         triangle.unit_uv = unit_uv and ((triangle.vertices[0].clip_w > 0 and triangle.vertices[1].clip_w > 0 and triangle.vertices[2].clip_w > 0) or
             (triangle.vertices[0].clip_w < 0 and triangle.vertices[1].clip_w < 0 and triangle.vertices[2].clip_w < 0));
-        triangle.flat_color = null;
-        if (triangle.unit_uv and triangle.vertices[0].clip_w == triangle.vertices[1].clip_w and triangle.vertices[0].clip_w == triangle.vertices[2].clip_w and
-            triangle.vertices[0].uv[0] == triangle.vertices[1].uv[0] and triangle.vertices[0].uv[0] == triangle.vertices[2].uv[0] and
-            triangle.vertices[0].uv[1] == triangle.vertices[1].uv[1] and triangle.vertices[0].uv[1] == triangle.vertices[2].uv[1])
-        {
-            triangle.flat_color = if (triangle.has_prelit_texture)
-                shadeUnitTexture4x4(triangle.vertices[0].uv[0], triangle.vertices[0].uv[1], &triangle.prelit_texture)
-            else if (triangle.prelit_texture_16x16_ptr) |colors|
-                shadeUnitTexture16x16(triangle.vertices[0].uv[0], triangle.vertices[0].uv[1], colors)
-            else if (triangle.has_prelit_texture_16x16)
-                shadeUnitTexture16x16(triangle.vertices[0].uv[0], triangle.vertices[0].uv[1], &triangle.prelit_texture_16x16)
-            else
-                null;
-        }
+        refreshFlatTextureColor(triangle);
         if (!triangle.unit_uv) {
             triangle.has_prelit_texture = false;
             triangle.prelit_texture_16x16_ptr = null;
@@ -1734,6 +1726,7 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
     // used instead of retaining a pointer into one worker's scratch buffer.
     output.color_runs = null;
     refreshOpaqueQuad(output);
+    output.bounds = preparedBounds(output, width, height, command.scissor);
     rememberBatchCommandCache(command_cache, command, commands_address, width, height, lighting_generation);
 }
 
@@ -1788,8 +1781,8 @@ fn prepareBatchCommandLanes(context: *ParallelBatchDraw, lane_index: usize) void
     if (context.count_work or context.color_only or parallel_band_count != 2) return;
 
     const split: i32 = @intCast(context.height / 2);
-    for (context.commands, 0..) |command, index| {
-        const draw_bounds = preparedBounds(&context.prepared[index], context.width, context.height, command.scissor);
+    for (context.commands, 0..) |_, index| {
+        const draw_bounds = context.prepared[index].bounds;
         if (draw_bounds.width == 0 or draw_bounds.height == 0) continue;
         if (draw_bounds.y >= split) {
             lanes[index] = 2;
@@ -2564,8 +2557,8 @@ fn drawParallelBatchImpl(target: []u8, depth: []u8, width: u32, height: u32, com
     };
     if (bounds) |output| {
         output.* = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
-        for (commands, 0..) |command, index| {
-            const draw_bounds = preparedBounds(&context.prepared[index], width, height, command.scissor);
+        for (commands, 0..) |_, index| {
+            const draw_bounds = context.prepared[index].bounds;
             if (draw_bounds.width == 0 or draw_bounds.height == 0) continue;
             if (output.width == 0 or output.height == 0) {
                 output.* = draw_bounds;
