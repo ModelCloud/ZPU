@@ -397,7 +397,10 @@ fn renderParallel(workload: *const Workload, color: []u8, depth: []u8, counted: 
     else if (counted) blk: {
         clearAttachments(color, depth);
         break :blk cube.drawCountedParallelBatch(color, depth, width, height, workload.commands, &counters);
-    } else cube.drawUncountedParallelBatchCleared(color, depth, width, height, workload.commands, clear_color, clear_depth);
+    } else if (workload.kind == .terminal)
+        cube.drawUncountedParallelBatchOpaqueOverlay(color, depth, width, height, workload.commands[1..])
+    else
+        cube.drawUncountedParallelBatchCleared(color, depth, width, height, workload.commands, clear_color, clear_depth);
     if (written == 0) return error.EmptyRender;
     return .{ .checksum = checksum(color), .counters = counters };
 }
@@ -631,4 +634,29 @@ test "application workloads match the serial raster oracle" {
             try std.testing.expectEqualSlices(u8, serial_depth, parallel_depth);
         }
     }
+}
+
+test "opaque terminal overlay matches a cleared redraw" {
+    const allocator = std.testing.allocator;
+    defer cube.shutdownParallelWorkers();
+    var workload = try buildWorkload(allocator, .terminal);
+    defer workload.deinit(allocator);
+    const overlay_color = try allocator.alloc(u8, surface_bytes);
+    defer allocator.free(overlay_color);
+    const overlay_depth = try allocator.alloc(u8, surface_bytes);
+    defer allocator.free(overlay_depth);
+    const expected_color = try allocator.alloc(u8, surface_bytes);
+    defer allocator.free(expected_color);
+    const expected_depth = try allocator.alloc(u8, surface_bytes);
+    defer allocator.free(expected_depth);
+
+    clearAttachments(overlay_color, overlay_depth);
+    _ = cube.drawUncountedParallelBatchCleared(overlay_color, overlay_depth, width, height, workload.commands, clear_color, clear_depth);
+    updateWorkload(&workload, 1);
+    clearAttachments(expected_color, expected_depth);
+    _ = cube.drawUncountedParallelBatchCleared(expected_color, expected_depth, width, height, workload.commands, clear_color, clear_depth);
+    _ = cube.drawUncountedParallelBatchOpaqueOverlay(overlay_color, overlay_depth, width, height, workload.commands[1..]);
+
+    try std.testing.expectEqualSlices(u8, expected_color, overlay_color);
+    try std.testing.expectEqualSlices(u8, expected_depth, overlay_depth);
 }
