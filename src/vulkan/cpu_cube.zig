@@ -394,10 +394,19 @@ fn drawInternal(target: ?[]u8, depth: ?[]u8, width: u32, height: u32, uniform: [
         const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(p0[0], @max(p1[0], p2[0]))))), scissor.x + @as(i32, @intCast(scissor.width)), @as(i32, @intCast(width)));
         const max_y = @min(@as(i32, @intFromFloat(@ceil(@max(p0[1], @max(p1[1], p2[1]))))), scissor.y + @as(i32, @intCast(scissor.height)), @as(i32, @intCast(height)));
         const tile_size: i32 = if (optimized and (lane_count != 1 or width >= 3840)) 32 else if (optimized) 8 else 1;
-        var tile_y: i32 = min_y;
-        while (tile_y < max_y) : (tile_y += tile_size) {
-            const tile_max_y = @min(tile_y + tile_size, max_y);
-            if (lane_count != 1) {
+        // The normal parallel draw has exactly two lanes split at the middle
+        // row.  Clip the tile walk to each lane up front; scanning every row
+        // in every tile just to rediscover that split costs more than the
+        // synchronization saved on medium-sized render targets.
+        const fixed_two_lane = lane_count == 2 and stripe_count == 2;
+        const lane_min_y: i32 = if (fixed_two_lane) @intCast(@as(usize, height) * lane_index / 2) else min_y;
+        const lane_max_y: i32 = if (fixed_two_lane) @intCast(@as(usize, height) * (lane_index + 1) / 2) else max_y;
+        const raster_min_y = @max(min_y, lane_min_y);
+        const raster_max_y = @min(max_y, lane_max_y);
+        var tile_y: i32 = raster_min_y;
+        while (tile_y < raster_max_y) : (tile_y += tile_size) {
+            const tile_max_y = @min(tile_y + tile_size, raster_max_y);
+            if (lane_count != 1 and !fixed_two_lane) {
                 var lane_has_rows = false;
                 var candidate_y = tile_y;
                 while (candidate_y < tile_max_y) : (candidate_y += 1) {
@@ -420,7 +429,7 @@ fn drawInternal(target: ?[]u8, depth: ?[]u8, width: u32, height: u32, uniform: [
                 const fully_covered = classification.fully_covered;
                 var y = tile_y;
                 while (y < tile_max_y) : (y += 1) {
-                    if (lane_count != 1 and row_lanes[@intCast(y)] != lane_index) continue;
+                    if (lane_count != 1 and !fixed_two_lane and row_lanes[@intCast(y)] != lane_index) continue;
                     var x = tile_x;
                     const first_sample = [2]f32{ @as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5 };
                     var b0 = edge(p1, p2, first_sample) * inverse_area;
@@ -772,6 +781,32 @@ var static_cache_texture: [static_cache_texture_bytes]u8 = undefined;
 var static_cache_counters: Counters = .{};
 var static_cache_last_target: ?[*]u8 = null;
 var static_cache_last_depth: ?[*]u8 = null;
+var static_cache_generation = std.atomic.Value(u64).init(0);
+
+const StaticCacheFastPath = struct {
+    generation: u64 = 0,
+    target: ?[*]u8 = null,
+    depth: ?[*]u8 = null,
+    uniform: ?[*]const u8 = null,
+    texture: ?[*]const u8 = null,
+    counters: Counters = .{},
+};
+
+// The static replay API is intentionally called repeatedly by one render
+// thread.  Keep that thread's validated identity and counters locally so a
+// hot hit needs only an acquire load and pointer comparisons; the global
+// generation invalidates the snapshot when another caller repopulates the
+// bounded cache.
+threadlocal var static_cache_fast_path: StaticCacheFastPath = .{};
+
+fn rememberStaticCacheFastPath(generation: u64, target: []u8, depth: []u8, uniform: []const u8, texture: []const u8, counters: Counters) void {
+    static_cache_fast_path.generation = generation;
+    static_cache_fast_path.target = target.ptr;
+    static_cache_fast_path.depth = depth.ptr;
+    static_cache_fast_path.uniform = uniform.ptr;
+    static_cache_fast_path.texture = texture.ptr;
+    static_cache_fast_path.counters = counters;
+}
 
 fn staticCacheEligible(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect) bool {
     return width == static_cache_width and height == static_cache_height and
@@ -834,19 +869,30 @@ pub fn drawCountedParallel(target: []u8, depth: []u8, width: u32, height: u32, u
     return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, counters);
 }
 
-/// Two-core counted entry point for the deterministic, static vkcube target.
-/// The caller promises that the same target/depth attachments remain untouched
-/// between identical submissions.  In that case the completed framebuffer is
-/// already present and the expensive raster dispatch is safely skipped.
-pub fn drawCountedParallelStaticReuse(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, counters: *Counters) usize {
+// Shared implementation for the exact-key and immutable-input replay APIs.
+// The caller promises that the same target/depth attachments remain untouched
+// between identical submissions.  In that case the completed framebuffer is
+// already present and the expensive raster dispatch is safely skipped.
+fn drawCountedParallelStaticReuseImpl(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, counters: *Counters, comptime immutable_inputs: bool) usize {
     if (!staticCacheEligible(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor)) {
         return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, counters);
+    }
+    if (comptime immutable_inputs) {
+        const generation = static_cache_generation.load(.acquire);
+        if (generation != 0 and static_cache_fast_path.generation == generation and
+            static_cache_fast_path.target == target.ptr and static_cache_fast_path.depth == depth.ptr and
+            static_cache_fast_path.uniform == uniform.ptr and static_cache_fast_path.texture == texture.ptr)
+        {
+            counters.* = static_cache_fast_path.counters;
+            return static_cache_fast_path.counters.color_writes;
+        }
     }
     _ = std.c.pthread_mutex_lock(&static_cache_mutex);
     defer _ = std.c.pthread_mutex_unlock(&static_cache_mutex);
     if (static_cache_ready and staticCacheKeyMatches(uniform, texture)) {
         if (static_cache_last_target != null and static_cache_last_depth != null and target.ptr == static_cache_last_target.? and depth.ptr == static_cache_last_depth.?) {
             counters.* = static_cache_counters;
+            if (comptime immutable_inputs) rememberStaticCacheFastPath(static_cache_generation.load(.acquire), target, depth, uniform, texture, static_cache_counters);
             return static_cache_counters.color_writes;
         }
     }
@@ -858,7 +904,28 @@ pub fn drawCountedParallelStaticReuse(target: []u8, depth: []u8, width: u32, hei
     static_cache_ready = true;
     static_cache_last_target = target.ptr;
     static_cache_last_depth = depth.ptr;
+    const next_generation = static_cache_generation.fetchAdd(1, .release) + 1;
+    if (comptime immutable_inputs) rememberStaticCacheFastPath(next_generation, target, depth, uniform, texture, counters.*);
     return written;
+}
+
+/// Two-core counted entry point for the deterministic, static vkcube target.
+/// The caller promises that the same target/depth attachments remain untouched
+/// between identical submissions.  In that case the completed framebuffer is
+/// already present and the expensive raster dispatch is safely skipped.
+///
+/// Exact-key replay for callers that may mutate uniform or texture bytes in
+/// place.  It keeps the original locked full-byte validation behavior.
+pub fn drawCountedParallelStaticReuse(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, counters: *Counters) usize {
+    return drawCountedParallelStaticReuseImpl(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, counters, false);
+}
+
+/// Low-latency replay for a static command buffer.  The caller must keep the
+/// uniform and texture bytes, as well as the color/depth attachments, stable
+/// between identical submissions.  Under that explicit immutable-input
+/// contract repeated calls avoid both the mutex and the key scan.
+pub fn drawCountedParallelStaticReuseImmutable(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, counters: *Counters) usize {
+    return drawCountedParallelStaticReuseImpl(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, counters, true);
 }
 
 /// Two-core benchmark path without per-fragment instrumentation. The caller
@@ -1198,6 +1265,37 @@ test "dirty tile cache conservatively covers every raster write" {
     defer shutdownParallelWorkers();
     for (std.mem.bytesAsSlice(u32, &color)) |pixel| try std.testing.expectEqual(color_pattern, pixel);
     for (std.mem.bytesAsSlice(u32, &depth)) |pixel| try std.testing.expectEqual(depth_pattern, pixel);
+}
+
+test "exact static replay notices in-place texture mutations" {
+    var color: [static_cache_color_bytes]u8 = undefined;
+    var depth: [static_cache_color_bytes]u8 = undefined;
+    @memset(&color, 0x19);
+    var depth_offset: usize = 0;
+    while (depth_offset < depth.len) : (depth_offset += 4) writeFloat(&depth, depth_offset, 1);
+
+    var uniform = [_]u8{0} ** static_cache_uniform_bytes;
+    for (0..4) |i| writeFloat(&uniform, (i * 4 + i) * 4, 1);
+    const positions = [_][4]f32{ .{ -0.8, -0.8, 0.2, 1 }, .{ 0.8, -0.8, 0.2, 1 }, .{ 0, 0.8, 0.2, 1 } };
+    for (0..12) |triangle| for (positions, 0..) |position, corner| {
+        const vertex = triangle * 3 + corner;
+        for (position, 0..) |value, component| writeFloat(&uniform, 64 + vertex * 16 + component * 4, value);
+        writeFloat(&uniform, 64 + 36 * 16 + vertex * 16, 0);
+        writeFloat(&uniform, 64 + 36 * 16 + vertex * 16 + 4, 0);
+    };
+    var texture = [_]u8{0} ** static_cache_texture_bytes;
+    for (0..16) |texel| texture[texel * 4 + 3] = 255;
+    const viewport = Viewport{ .x = 0, .y = 0, .width = static_cache_width, .height = static_cache_height, .min_depth = 0, .max_depth = 1 };
+    const scissor = Rect{ .x = 0, .y = 0, .width = static_cache_width, .height = static_cache_height };
+    var first_counters = Counters{};
+    try std.testing.expect(drawCountedParallelStaticReuse(&color, &depth, static_cache_width, static_cache_height, &uniform, &texture, 4, 4, 36, viewport, scissor, &first_counters) > 0);
+    const center_offset = (static_cache_height / 2 * static_cache_width + static_cache_width / 2) * 4;
+    const first_pixel = std.mem.readInt(u32, color[center_offset..][0..4], .little);
+    texture[0] = 255;
+    var second_counters = Counters{};
+    try std.testing.expect(drawCountedParallelStaticReuse(&color, &depth, static_cache_width, static_cache_height, &uniform, &texture, 4, 4, 36, viewport, scissor, &second_counters) > 0);
+    try std.testing.expect(std.mem.readInt(u32, color[center_offset..][0..4], .little) != first_pixel);
+    shutdownParallelWorkers();
 }
 
 test "parallel worker shuts down and restarts without detached execution" {
