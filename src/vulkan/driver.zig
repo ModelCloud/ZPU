@@ -2825,7 +2825,7 @@ fn bufferCreatePNextState(raw: ?*const anyopaque) BufferCreatePNextState {
                     return state;
                 }
                 const external: *const ExternalMemoryBufferCreateInfo = @ptrCast(@alignCast(item));
-                if (external.handle_types != 0) {
+                if (!validExternalHandleTypes(external.handle_types)) {
                     state.valid = false;
                     return state;
                 }
@@ -2949,7 +2949,7 @@ fn imageCreatePNextValid(raw: ?*const anyopaque, format: i32) bool {
                 if (saw_external) return false;
                 saw_external = true;
                 const external: *const ExternalMemoryImageCreateInfo = @ptrCast(@alignCast(item));
-                if (external.handle_types != 0) return false;
+                if (!validExternalHandleTypes(external.handle_types)) return false;
             },
             else => return false,
         }
@@ -3604,7 +3604,7 @@ fn imageFormatUsage(format: i32, tiling: i32) u32 {
     return switch (format) {
         37 => 0x1 | 0x2 | 0x4,
         43 => 0x4,
-        44 => 0x1 | 0x2 | 0x10,
+        44 => 0x1 | 0x2 | 0x4 | 0x10,
         124 => 0x2 | 0x20,
         126 => 0x2 | 0x20,
         else => 0,
@@ -3637,7 +3637,7 @@ fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatPr
     out.* = switch (format) {
         37 => .{ .linear_tiling_features = 0x1 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         43 => .{ .linear_tiling_features = 0x1, .optimal_tiling_features = 0x1, .buffer_features = 0 },
-        44 => .{ .linear_tiling_features = 0x80 | 0x4000 | 0x8000, .optimal_tiling_features = 0x80 | 0x4000 | 0x8000, .buffer_features = 0 },
+        44 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         124 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
         126 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
         else => std.mem.zeroes(FormatProperties),
@@ -3654,7 +3654,7 @@ fn getImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, t
     defer mutex.unlock();
     if (!validPhysicalLocked(physical orelse return .error_initialization_failed)) return .error_initialization_failed;
     const allowed_usage = imageFormatUsage(format, tiling);
-    if (allowed_usage == 0 or image_type != 1 or (tiling != 0 and tiling != 1) or flags != 0 or usage == 0 or usage & ~allowed_usage != 0 or (isDepthFormat(format) and tiling != 0)) return .error_format_not_supported;
+    if (allowed_usage == 0 or image_type != 1 or (tiling != 0 and tiling != 1) or !imageCreateFlagsValid(flags) or usage == 0 or usage & ~allowed_usage != 0 or (isDepthFormat(format) and tiling != 0)) return .error_format_not_supported;
     const out = output orelse return .error_initialization_failed;
     out.* = .{ .max_extent = .{ .width = max_2d_extent, .height = max_2d_extent, .depth = 1 }, .max_mip_levels = 1, .max_array_layers = max_image_array_layers, .sample_counts = 1, .max_resource_size = heap_size };
     return .success;
@@ -3697,7 +3697,11 @@ fn getPhysicalDeviceImageFormatProperties2(physical: ?Physical, info: ?*const Ph
     const i = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
     if (i.s_type != 1000059004 or !physicalDeviceImageFormatInfo2ChainValid(i.p_next, i.format) or out.s_type != 1000059003 or !imageFormatProperties2ChainValid(out.p_next)) return .error_initialization_failed;
-    if (physicalDeviceImageFormatInfo2ExternalHandleType(i.p_next) != 0) return .error_format_not_supported;
+    const external_handle_type = physicalDeviceImageFormatInfo2ExternalHandleType(i.p_next);
+    if (external_handle_type != 0) {
+        if (!validExternalHandleType(external_handle_type)) return .error_initialization_failed;
+        return .error_format_not_supported;
+    }
     const result = getImageFormatProperties(physical, i.format, i.image_type, i.tiling, i.usage, i.flags, &out.image_format_properties);
     if (result != .success) return result;
     populateImageFormatProperties2Chain(out.p_next);
@@ -3802,6 +3806,12 @@ fn getPhysicalDeviceToolProperties(physical: ?Physical, count: ?*u32, output: ?[
 const external_handle_type_mask: u32 = 0x0000_3fff;
 fn validExternalHandleType(handle_type: u32) bool {
     return handle_type == 0 or (handle_type & ~external_handle_type_mask == 0 and (handle_type & (handle_type - 1)) == 0);
+}
+fn validExternalHandleTypes(handle_types: u32) bool {
+    return handle_types & ~external_handle_type_mask == 0;
+}
+fn imageCreateFlagsValid(flags: u32) bool {
+    return flags == 0 or flags == 8;
 }
 fn getPhysicalDeviceExternalBufferProperties(physical: ?Physical, info: ?*const PhysicalDeviceExternalBufferInfo, output: ?*ExternalBufferProperties) callconv(.c) void {
     const h = physical orelse return;
@@ -5052,7 +5062,7 @@ fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Al
         hit(.invalid_image_usage);
         return .error_initialization_failed;
     }
-    if (alloc != null or ci.s_type != 14 or !imageCreatePNextValid(ci.p_next, ci.format) or ci.flags != 0 or ci.image_type != 1 or allowed_usage == 0 or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or ci.mip_levels != 1 or ci.array_layers == 0 or ci.array_layers > max_image_array_layers or ci.samples != 1 or (ci.tiling != 0 and ci.tiling != 1) or (isDepthFormat(ci.format) and ci.tiling != 0) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) return if (allowed_usage == 0) .error_format_not_supported else .error_initialization_failed;
+    if (alloc != null or ci.s_type != 14 or !imageCreatePNextValid(ci.p_next, ci.format) or !imageCreateFlagsValid(ci.flags) or ci.image_type != 1 or allowed_usage == 0 or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or ci.mip_levels != 1 or ci.array_layers == 0 or ci.array_layers > max_image_array_layers or ci.samples != 1 or (ci.tiling != 0 and ci.tiling != 1) or (isDepthFormat(ci.format) and ci.tiling != 0) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) return if (allowed_usage == 0) .error_format_not_supported else .error_initialization_failed;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
@@ -5138,7 +5148,7 @@ fn getImageMemoryRequirements2(device: ?Device, info: ?*const ImageMemoryRequire
 }
 fn imageCreateRequirements(info: *const ImageCreateInfo) ?MemoryRequirements {
     const allowed_usage = imageFormatUsage(info.format, info.tiling);
-    if (info.s_type != 14 or !imageCreatePNextValid(info.p_next, info.format) or info.flags != 0 or info.image_type != 1 or allowed_usage == 0 or info.usage == 0 or info.usage & ~allowed_usage != 0 or info.extent.width == 0 or info.extent.height == 0 or info.extent.depth != 1 or info.extent.width > max_2d_extent or info.extent.height > max_2d_extent or info.mip_levels != 1 or info.array_layers == 0 or info.array_layers > max_image_array_layers or info.samples != 1 or (info.tiling != 0 and info.tiling != 1) or (isDepthFormat(info.format) and info.tiling != 0) or info.sharing_mode != 0 or info.queue_family_index_count != 0 or (info.initial_layout != 0 and info.initial_layout != 8)) return null;
+    if (info.s_type != 14 or !imageCreatePNextValid(info.p_next, info.format) or !imageCreateFlagsValid(info.flags) or info.image_type != 1 or allowed_usage == 0 or info.usage == 0 or info.usage & ~allowed_usage != 0 or info.extent.width == 0 or info.extent.height == 0 or info.extent.depth != 1 or info.extent.width > max_2d_extent or info.extent.height > max_2d_extent or info.mip_levels != 1 or info.array_layers == 0 or info.array_layers > max_image_array_layers or info.samples != 1 or (info.tiling != 0 and info.tiling != 1) or (isDepthFormat(info.format) and info.tiling != 0) or info.sharing_mode != 0 or info.queue_family_index_count != 0 or (info.initial_layout != 0 and info.initial_layout != 8)) return null;
     const pixels = std.math.mul(u64, info.extent.width, info.extent.height) catch return null;
     const layer_bytes = std.math.mul(u64, pixels, 4) catch return null;
     const bytes = std.math.mul(u64, layer_bytes, info.array_layers) catch return null;
@@ -16113,7 +16123,7 @@ test "core instance physical and device enumeration is bounded and allocation fr
         try std.testing.expectEqual(@as(u64, heap_size), memory_properties.memory_heaps[0].size);
         var format_properties: FormatProperties = undefined;
         getFormatProperties(physical[0], 44, &format_properties);
-        try std.testing.expectEqual(@as(u32, 0xc080), format_properties.optimal_tiling_features);
+        try std.testing.expectEqual(@as(u32, 0xd081), format_properties.optimal_tiling_features);
         var image_format_properties: ImageFormatProperties = undefined;
         try std.testing.expectEqual(Result.success, getImageFormatProperties(physical[0], 44, 1, 0, 0x13, 0, &image_format_properties));
         try std.testing.expectEqual(@as(u32, 1), image_format_properties.sample_counts);
@@ -19229,7 +19239,7 @@ test "all physical queries cover success boundaries and invalid handles" {
     const format_cases = [_]struct { format: i32, linear: u32, optimal: u32, buffer: u32, linear_usage: u32, optimal_usage: u32 }{
         .{ .format = 37, .linear = 0xd001, .optimal = 0xd001, .buffer = 0, .linear_usage = 0x7, .optimal_usage = 0x7 },
         .{ .format = 43, .linear = 0x1, .optimal = 0x1, .buffer = 0, .linear_usage = 0x4, .optimal_usage = 0x4 },
-        .{ .format = 44, .linear = 0xc080, .optimal = 0xc080, .buffer = 0, .linear_usage = 0x13, .optimal_usage = 0x13 },
+        .{ .format = 44, .linear = 0xd081, .optimal = 0xd081, .buffer = 0, .linear_usage = 0x17, .optimal_usage = 0x17 },
         .{ .format = 126, .linear = 0, .optimal = 0x8200, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x22 },
     };
     for (format_cases) |case| {
