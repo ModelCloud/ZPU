@@ -6,10 +6,11 @@ CFLAGS ?= -O2 -Wall -Wextra -Werror
 LDFLAGS ?=
 
 ZINPUT_BINARIES = zmouse zkeyboard
+ZINPUT_LIBRARIES = libzinput.so
 
 .PHONY: all clean
 
-all: $(ZINPUT_BINARIES)
+all: $(ZINPUT_BINARIES) $(ZINPUT_LIBRARIES)
 
 zmouse: zmouse.c zinput.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $< $(LDFLAGS)
@@ -17,5 +18,8 @@ zmouse: zmouse.c zinput.h
 zkeyboard: zkeyboard.c zinput.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $< $(LDFLAGS)
 
+libzinput.so: libzinput.c zinput.h
+	$(CC) $(CFLAGS) -fPIC -shared $(CPPFLAGS) -o $@ $< $(LDFLAGS)
+
 clean:
-	rm -f $(ZINPUT_BINARIES)
+	rm -f $(ZINPUT_BINARIES) $(ZINPUT_LIBRARIES)

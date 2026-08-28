@@ -11,3 +11,4 @@ smolvm-stage/
 .monitor_pr33*
 tools/zmouse
 tools/zkeyboard
+tools/libzinput.so

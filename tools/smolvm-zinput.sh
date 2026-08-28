@@ -81,21 +81,24 @@ ensure_machine() {
 
 build_drivers() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
-        printf '+ make -C %q zmouse zkeyboard (static)\n' "$host_tools"
+        printf '+ make -C %q zmouse zkeyboard (static) libzinput.so zinput.py\n' "$host_tools"
         return 0
     fi
     run make -C "$host_tools" clean >/dev/null
     run make -C "$host_tools" CFLAGS='-O2 -Wall -Wextra -Werror -static' LDFLAGS='-static' zmouse zkeyboard
+    run make -C "$host_tools" libzinput.so
 }
 
 stage_drivers() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
-        printf '+ stage zmouse/zkeyboard into %s on %s\n' "$guest_runtime" "$machine"
+        printf '+ stage zmouse/zkeyboard/libzinput.so/zinput.py into %s on %s\n' "$guest_runtime" "$machine"
         return 0
     fi
     run smolvm machine exec --name "$machine" -- sh -c "install -d -m 755 $guest_runtime"
     run smolvm machine cp "$host_tools/zmouse" "$machine:$guest_runtime/zmouse"
     run smolvm machine cp "$host_tools/zkeyboard" "$machine:$guest_runtime/zkeyboard"
+    run smolvm machine cp "$host_tools/libzinput.so" "$machine:$guest_runtime/libzinput.so"
+    run smolvm machine cp "$host_tools/zinput.py" "$machine:$guest_runtime/zinput.py"
     run smolvm machine exec --name "$machine" -- sh -c "chmod +x $guest_runtime/zmouse $guest_runtime/zkeyboard"
 }
 
@@ -120,9 +123,19 @@ start_drivers() {
 echo_dry_run_note() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
         cat <<'EOF'
-# To control the drivers once they are running, send line commands to the sockets:
+# To control the drivers once they are running:
+#
+# Shell over Unix sockets:
 #   printf 'm 50 0\n' | nc -U /run/zmouse.sock       # move right
 #   printf 'k 30 1\nk 30 0\n' | nc -U /run/zkeyboard.sock  # press/release 'a'
+#
+# Python (from inside the guest, with PYTHONPATH set to /run/zpu-runtime):
+#   from zinput import MouseClient, KeyboardClient
+#   with MouseClient('/run/zmouse.sock') as m:
+#       m.move(50, 0)
+#       m.click(1)
+#   with KeyboardClient('/run/zkeyboard.sock') as k:
+#       k.key_tap(30)  # 'a'
 EOF
     fi
 }
