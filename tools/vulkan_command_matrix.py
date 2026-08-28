@@ -14,6 +14,7 @@ INVENTORY = ROOT / "api/vulkan-1.4.360.json"
 IMPLEMENTATION = ROOT / "api/command-implementation.json"
 DRIVER = ROOT / "src/vulkan/driver.zig"
 OUTPUT = ROOT / "docs/vulkan-command-matrix.md"
+HEADER = "<!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->\n<!-- SPDX-License-Identifier: Apache-2.0 -->\n\n"
 
 
 def words(name: str) -> str:
@@ -79,7 +80,7 @@ def render() -> str:
                 f"{'Yes' if command in dispatched else 'No'} | "
                 f"{'Yes' if command in implemented else 'No'} |"
             )
-    return "\n".join((
+    return HEADER + "\n".join((
         "# Vulkan 1.0–1.4 core command matrix",
         "",
         f"Generated from the pinned Vulkan {inventory['target_api_version']} inventory. Do not edit by hand; run `python3 tools/vulkan_command_matrix.py --write`.",

@@ -85,8 +85,11 @@ sequenceDiagram
     Note over L,Z: Dispatchable handles receive loader dispatch data
 ```
 
-ZPU currently advertises Vulkan 1.0 and one CPU physical device. Its loader ICD
-negotiation accepts the loader's supported version up to interface version 7.
+ZPU reports a Vulkan 1.4.360 ABI ceiling and one CPU physical device. Each
+`vkCreateInstance` call independently negotiates `VkApplicationInfo::apiVersion`
+from 1.0 through 1.4 (`0` means 1.0); requests above 1.4.360 return
+`VK_ERROR_INCOMPATIBLE_DRIVER`. Its loader ICD negotiation accepts the loader's
+supported version up to interface version 7.
 The loader initializes dispatchable objects such as the instance, physical
 device, device, queue, and command buffers; ZPU owns their backing storage and
 lifetime validation.
