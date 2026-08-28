@@ -328,6 +328,9 @@ fn buildWorkload(allocator: std.mem.Allocator, kind: Kind) !Workload {
             .vertex_count = draw.vertex_count,
             .viewport = viewport,
             .scissor = scissor,
+            .uniform_revision = 1,
+            .geometry_revision = 1,
+            .texture_revision = 1,
         };
     }
     return workload;
@@ -336,8 +339,17 @@ fn buildWorkload(allocator: std.mem.Allocator, kind: Kind) !Workload {
 fn updateWorkload(workload: *Workload, frame: usize) void {
     switch (workload.kind) {
         .desktop => {},
-        .terminal => for (workload.draws[1..], 0..) |draw, glyph| writeTerminalDraw(draw.uniform, glyph, (glyph + frame) % 16),
-        .game => for (workload.draws, 0..) |draw, object| writeGameDraw(draw.uniform, object, frame),
+        .terminal => {
+            for (workload.draws[1..], 0..) |draw, glyph| writeTerminalDraw(draw.uniform, glyph, (glyph + frame) % 16);
+            for (workload.commands[1..]) |*command| command.uniform_revision = @intCast(frame + 2);
+        },
+        .game => {
+            for (workload.draws, 0..) |draw, object| writeGameDraw(draw.uniform, object, frame);
+            for (workload.commands) |*command| {
+                command.uniform_revision = @intCast(frame + 2);
+                command.geometry_revision = @intCast(frame + 2);
+            }
+        },
     }
 }
 
@@ -380,7 +392,9 @@ fn renderSerial(workload: *const Workload, color: []u8, depth: []u8) !FrameResul
 
 fn renderParallel(workload: *const Workload, color: []u8, depth: []u8, counted: bool) !FrameResult {
     var counters = cube.Counters{};
-    const written = if (counted) blk: {
+    const written = if (workload.kind == .desktop and !counted)
+        cube.drawUncountedParallelBatchStaticReplay(color, depth, width, height, workload.commands)
+    else if (counted) blk: {
         clearAttachments(color, depth);
         break :blk cube.drawCountedParallelBatch(color, depth, width, height, workload.commands, &counters);
     } else cube.drawUncountedParallelBatchCleared(color, depth, width, height, workload.commands, clear_color, clear_depth);
