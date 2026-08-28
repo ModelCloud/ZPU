@@ -10,6 +10,7 @@
 const std = @import("std");
 const abi = @import("abi.zig");
 const surface = @import("../surface.zig");
+const raster = @import("../raster/raster.zig");
 
 pub const Stats = struct {
     primitives_submitted: u64 = 0,
@@ -261,10 +262,8 @@ pub fn draw(target: *surface.Surface, depth: ?[]f32, vertices: []const abi.Verte
 }
 
 fn clearSurfaceBand(target: *surface.Surface, color: surface.Color, y0: usize, y1: usize) void {
-    for (y0..y1) |y| {
-        const row = target.row(@intCast(y));
-        for (0..target.width) |x| surface.Surface.write(row, x * 4, target.format, color);
-    }
+    if (y1 <= y0) return;
+    raster.fillRect(target, .{ .x = 0, .y = @intCast(y0), .width = target.width, .height = @intCast(y1 - y0) }, color);
 }
 
 pub fn clearSurface(target: *surface.Surface, color: surface.Color) void {
