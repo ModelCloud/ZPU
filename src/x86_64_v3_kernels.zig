@@ -46,7 +46,7 @@ fn packedColor(color: s.Color, format: s.Format) u32 {
 }
 
 fn checkedFormat(format_tag: u8) s.Format {
-    return switch (format_tag) {
+    return switch (format_tag & ~abi.opaque_format_bit) {
         0 => .rgba8_unorm,
         1 => .bgra8_unorm,
         // Only dispatch.zig calls these wrappers; a tag outside the two known
@@ -83,14 +83,22 @@ fn fillImpl(row_ptr: [*]u8, row_len: usize, start: usize, count: usize, format_t
 
 fn blendSpanImpl(row_ptr: [*]u8, row_len: usize, start: usize, count: usize, format_tag: u8, packed_color: u32) callconv(.c) void {
     checkSpanBounds(row_len, start, count);
-    vector.blend(8, row_ptr[0..row_len], start, count, checkedFormat(format_tag), unpackColor(packed_color));
+    const format = checkedFormat(format_tag);
+    if (format_tag & abi.opaque_format_bit != 0)
+        vector.blendOpaque(8, row_ptr[0..row_len], start, count, format, unpackColor(packed_color))
+    else
+        vector.blend(8, row_ptr[0..row_len], start, count, format, unpackColor(packed_color));
 }
 
 fn blendPixelsImpl(row_ptr: [*]u8, row_len: usize, start: usize, source_ptr: [*]const u8, source_len: usize, count: usize, format_tag: u8) callconv(.c) void {
     checkSpanBounds(row_len, start, count);
     const source_bytes = std.math.mul(usize, count, 4) catch @trap();
     if (source_bytes > source_len) @trap();
-    vector.blendPixels(8, row_ptr[0..row_len], start, source_ptr[0..source_len], count, checkedFormat(format_tag));
+    const format = checkedFormat(format_tag);
+    if (format_tag & abi.opaque_format_bit != 0)
+        vector.blendPixelsOpaque(8, row_ptr[0..row_len], start, source_ptr[0..source_len], count, format)
+    else
+        vector.blendPixels(8, row_ptr[0..row_len], start, source_ptr[0..source_len], count, format);
 }
 
 fn fillRowsImpl(row_ptr: [*]u8, row_len: usize, stride: usize, start: usize, count: usize, rows: usize, format_tag: u8, packed_color: u32) callconv(.c) void {
@@ -110,7 +118,10 @@ fn blendRowsImpl(row_ptr: [*]u8, row_len: usize, stride: usize, start: usize, co
     const color = unpackColor(packed_color);
     for (0..rows) |y| {
         const offset = std.math.mul(usize, y, stride) catch @trap();
-        vector.blend(8, row_ptr[offset..row_len], start, count, format, color);
+        if (format_tag & abi.opaque_format_bit != 0)
+            vector.blendOpaque(8, row_ptr[offset..row_len], start, count, format, color)
+        else
+            vector.blend(8, row_ptr[offset..row_len], start, count, format, color);
     }
 }
 
@@ -121,12 +132,42 @@ fn blendPixelsRowsImpl(row_ptr: [*]u8, row_len: usize, stride: usize, source_ptr
     for (0..rows) |y| {
         const destination_offset = std.math.mul(usize, y, stride) catch @trap();
         const source_offset = std.math.mul(usize, y, source_stride) catch @trap();
-        vector.blendPixels(8, row_ptr[destination_offset..row_len], start, source_ptr[source_offset..source_len], count, format);
+        if (format_tag & abi.opaque_format_bit != 0)
+            vector.blendPixelsOpaque(8, row_ptr[destination_offset..row_len], start, source_ptr[source_offset..source_len], count, format)
+        else
+            vector.blendPixels(8, row_ptr[destination_offset..row_len], start, source_ptr[source_offset..source_len], count, format);
     }
 }
 
-fn fillRectsImpl(row_ptr: [*]u8, row_len: usize, stride: usize, commands: [*]const abi.RectColorCommand, command_count: usize, format_tag: u8) callconv(.c) void {
+fn blendSpriteBatchImpl(row_ptr: [*]u8, row_len: usize, stride: usize, commands: [*]const abi.SpriteCommand, command_count: usize, source_ptr: [*]const u8, source_len: usize, source_stride: usize, format_tag: u8) callconv(.c) void {
     const format = checkedFormat(format_tag);
+    const opaque_destination = format_tag & abi.opaque_format_bit != 0;
+    for (0..command_count) |index| {
+        const command = commands[index];
+        if (command.x < 0 or command.y < 0) @trap();
+        const destination_start = @as(usize, @intCast(command.x));
+        const destination_row = @as(usize, @intCast(command.y));
+        const destination_offset = std.math.mul(usize, destination_row, stride) catch @trap();
+        if (destination_offset > row_len) @trap();
+        checkRowsBounds(row_len - destination_offset, stride, destination_start, command.width, command.height);
+        const source_offset = std.math.mul(usize, @as(usize, command.source_y), source_stride) catch @trap();
+        if (source_offset > source_len) @trap();
+        const source_x_offset = std.math.mul(usize, @as(usize, command.source_x), 4) catch @trap();
+        const source_origin = std.math.add(usize, source_offset, source_x_offset) catch @trap();
+        if (source_origin > source_len) @trap();
+        checkRowsBounds(source_len - source_origin, source_stride, 0, command.width, command.height);
+        for (0..command.height) |dy| {
+            const destination_dy = std.math.mul(usize, dy, stride) catch @trap();
+            const source_dy = std.math.mul(usize, dy, source_stride) catch @trap();
+            if (opaque_destination)
+                vector.blendPixelsOpaque(8, row_ptr[destination_offset + destination_dy .. row_len], destination_start, source_ptr[source_origin + source_dy .. source_len], command.width, format)
+            else
+                vector.blendPixels(8, row_ptr[destination_offset + destination_dy .. row_len], destination_start, source_ptr[source_origin + source_dy .. source_len], command.width, format);
+        }
+    }
+}
+
+fn fillRectsNormalImpl(row_ptr: [*]u8, row_len: usize, stride: usize, commands: [*]const abi.RectColorCommand, command_count: usize, format: s.Format) void {
     for (0..command_count) |index| {
         const command = commands[index];
         if (command.rect.x < 0 or command.rect.y < 0) @trap();
@@ -143,6 +184,30 @@ fn fillRectsImpl(row_ptr: [*]u8, row_len: usize, stride: usize, commands: [*]con
     }
 }
 
+fn blendOpaqueRectsImpl(row_ptr: [*]u8, row_len: usize, stride: usize, commands: [*]const abi.RectColorCommand, command_count: usize, format: s.Format) void {
+    for (0..command_count) |index| {
+        const command = commands[index];
+        if (command.rect.x < 0 or command.rect.y < 0) @trap();
+        const start = @as(usize, @intCast(command.rect.x));
+        const row = @as(usize, @intCast(command.rect.y));
+        const row_offset = std.math.mul(usize, row, stride) catch @trap();
+        if (row_offset > row_len) @trap();
+        checkRowsBounds(row_len - row_offset, stride, start, command.rect.width, command.rect.height);
+        for (0..command.rect.height) |dy| {
+            const offset = std.math.mul(usize, dy, stride) catch @trap();
+            vector.blendOpaque(8, row_ptr[row_offset + offset .. row_len], start, command.rect.width, format, command.color);
+        }
+    }
+}
+
+fn fillRectsImpl(row_ptr: [*]u8, row_len: usize, stride: usize, commands: [*]const abi.RectColorCommand, command_count: usize, format_tag: u8) callconv(.c) void {
+    const format = checkedFormat(format_tag);
+    if (format_tag & abi.opaque_format_bit != 0)
+        blendOpaqueRectsImpl(row_ptr, row_len, stride, commands, command_count, format)
+    else
+        fillRectsNormalImpl(row_ptr, row_len, stride, commands, command_count, format);
+}
+
 comptime {
     @export(&fillImpl, .{ .name = abi.fill_span_8_name });
     @export(&blendSpanImpl, .{ .name = abi.blend_span_8_name });
@@ -151,4 +216,5 @@ comptime {
     @export(&blendRowsImpl, .{ .name = abi.blend_rows_8_name });
     @export(&blendPixelsRowsImpl, .{ .name = abi.blend_pixels_rows_8_name });
     @export(&fillRectsImpl, .{ .name = abi.fill_rects_8_name });
+    @export(&blendSpriteBatchImpl, .{ .name = abi.blend_sprite_batch_8_name });
 }

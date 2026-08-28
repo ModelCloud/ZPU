@@ -1692,7 +1692,7 @@ fn drawPreparedBatchFast(comptime color_only: bool, target: []u8, depth: []u8, w
         if (!triangle.valid or !triangle.batch_raster.ready) continue;
         if (comptime color_only) if (!triangle.has_prelit_texture_16x16 or triangle.batch_raster.v_over_w_dx != 0) return null;
         const raster = triangle.batch_raster;
-        pixels_written += rasterFlatSpanTriangle(!color_only, color_words, depth_words, width, height, parallel_band_count, lane_index, raster.p0, raster.p1, raster.p2, raster.inverse_area, raster.min_x, raster.min_y, raster.max_x, raster.max_y, @max(raster.min_y, lane_min_y), @min(raster.max_y, lane_max_y), if (prepared.spans_valid) preparedSpan(prepared, triangle_index) else null, null, raster.flat_depth_bits, triangle.flat_color, if (triangle.has_prelit_texture) &triangle.prelit_texture else null, if (triangle.has_prelit_texture_16x16) if (triangle.prelit_texture_16x16_ptr) |colors| colors else &triangle.prelit_texture_16x16 else null, tile_min, tile_max, tile_columns, tile_count, raster.flat_reciprocal_w, raster.u_over_w[0], raster.u_over_w[1], raster.u_over_w[2], raster.v_over_w[0], raster.v_over_w[1], raster.v_over_w[2], raster.u_over_w_dx, raster.v_over_w_dx);
+        pixels_written += rasterFlatSpanTriangle(!color_only, color_words, depth_words, width, height, parallel_band_count, lane_index, raster.p0, raster.p1, raster.p2, raster.inverse_area, raster.min_x, raster.min_y, raster.max_x, raster.max_y, @max(raster.min_y, lane_min_y), @min(raster.max_y, lane_max_y), if (prepared.spans_valid) preparedSpan(prepared, triangle_index) else null, raster.flat_depth_bits, triangle.flat_color, if (triangle.has_prelit_texture) &triangle.prelit_texture else null, if (triangle.has_prelit_texture_16x16) if (triangle.prelit_texture_16x16_ptr) |colors| colors else &triangle.prelit_texture_16x16 else null, tile_min, tile_max, tile_columns, tile_count, raster.flat_reciprocal_w, raster.u_over_w[0], raster.u_over_w[1], raster.u_over_w[2], raster.v_over_w[0], raster.v_over_w[1], raster.v_over_w[2], raster.u_over_w_dx, raster.v_over_w_dx);
     }
     return pixels_written;
 }
@@ -2387,7 +2387,9 @@ fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, unif
     const full_screen_scissor = scissor.x == 0 and scissor.y == 0 and scissor.width == width and scissor.height == height;
     const clear_spans = clear_spans_requested and expected_target != null and prepared.spans_valid and width == 800 and height == 600 and full_screen_scissor;
     const tile_count = ((@as(usize, width) + dirty_tile_size - 1) / dirty_tile_size) * ((@as(usize, height) + dirty_tile_size - 1) / dirty_tile_size);
-    const use_tile_depth = clear_depth_pattern != null and tile_count <= max_batch_tiles;
+    // Batched application quads are small enough that direct vector depth
+    // tests beat the extra tile metadata loads and coordinate divisions.
+    const use_tile_depth = false;
     if (use_tile_depth) {
         @memset(batch_tile_min[0 .. tile_count * parallel_band_count], clear_depth_pattern.?);
         @memset(batch_tile_max[0 .. tile_count * parallel_band_count], clear_depth_pattern.?);

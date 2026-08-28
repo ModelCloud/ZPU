@@ -171,11 +171,20 @@ fn drawSprites(surface: *s.Surface, source: []const u8, iteration: usize, backen
     for (0..128) |i| destinations[i] = .{ .x = @as(i32, @intCast((i * 29 + iteration) % 248)) - 4, .y = @as(i32, @intCast((i * 43) % 248)) - 4, .width = 8, .height = 8 };
     if (backend) |b| raster.drawSpritesWith(surface, &destinations, source, 8, 8, b) else raster.drawSprites(surface, &destinations, source, 8, 8);
 }
+fn drawSpritesOpaque(surface: *s.Surface, destinations: []const s.Rect, source: []const u8, source_width: u32, source_height: u32, backend: ?dispatch.Backend) void {
+    if (backend) |b| raster.drawSpritesOpaqueWith(surface, destinations, source, source_width, source_height, b) else raster.drawSpritesOpaque(surface, destinations, source, source_width, source_height);
+}
 fn fillRects(surface: *s.Surface, draws: []const raster.ColoredRect, backend: ?dispatch.Backend) void {
     if (backend) |b| raster.fillRectsWith(surface, draws, b) else raster.fillRects(surface, draws);
 }
 fn blendRects(surface: *s.Surface, draws: []const raster.ColoredRect, backend: ?dispatch.Backend) void {
     if (backend) |b| raster.blendRectsWith(surface, draws, b) else raster.blendRects(surface, draws);
+}
+fn blendOpaqueRect(surface: *s.Surface, rect: s.Rect, color: s.Color, backend: ?dispatch.Backend) void {
+    if (backend) |b| raster.blendOpaqueRectWith(surface, rect, color, b) else raster.blendOpaqueRect(surface, rect, color);
+}
+fn blendOpaqueRects(surface: *s.Surface, draws: []const raster.ColoredRect, backend: ?dispatch.Backend) void {
+    if (backend) |b| raster.blendOpaqueRectsWith(surface, draws, b) else raster.blendOpaqueRects(surface, draws);
 }
 fn terminalAtlas(src: []const u8, atlas: *[64 * 16 * 4]u8) void {
     @memcpy(atlas, src[0 .. 64 * 16 * 4]);
@@ -204,7 +213,9 @@ fn desktopWindows(surface: *s.Surface, iteration: usize, backend: ?dispatch.Back
             panels[i * 6 + 2 + control] = .{ .rect = .{ .x = cx, .y = cy, .width = 12, .height = 12 }, .color = .rgba(@truncate(190 + control * 7), @truncate(195 + i * 5), 205, 255) };
         }
     }
-    blendRects(surface, &shadows, backend);
+    // The frame starts with an opaque clear; source-over therefore preserves
+    // opaque destination alpha for the entire compositor pass.
+    blendOpaqueRects(surface, &shadows, backend);
     fillRects(surface, &panels, backend);
 }
 
@@ -224,7 +235,7 @@ fn terminalCells(surface: *s.Surface, src: []const u8, iteration: usize, backend
         .{ .rect = .{ .x = @intCast((iteration * 5) % 232), .y = 8, .width = 2, .height = 8 }, .color = .rgba(220, 220, 220, 220) },
         .{ .rect = .{ .x = 16, .y = 16, .width = 24, .height = 8 }, .color = .rgba(68, 110, 180, 96) },
     };
-    blendRects(surface, &overlays, backend);
+    blendOpaqueRects(surface, &overlays, backend);
 }
 
 fn gameScene(surface: *s.Surface, src: []const u8, iteration: usize, backend: ?dispatch.Backend) void {
@@ -246,18 +257,18 @@ fn gameScene(surface: *s.Surface, src: []const u8, iteration: usize, backend: ?d
     for (0..4) |kind| if (counts[kind] != 0) {
         const source_offset = kind * 1024;
         const source = src[source_offset .. source_offset + 1024];
-        if (backend) |b| raster.drawSpritesWith(surface, destinations[kind][0..counts[kind]], source, 16, 16, b) else raster.drawSprites(surface, destinations[kind][0..counts[kind]], source, 16, 16);
+        drawSpritesOpaque(surface, destinations[kind][0..counts[kind]], source, 16, 16, backend);
     };
     var particles: [128]raster.ColoredRect = undefined;
     for (0..128) |i| particles[i] = .{ .rect = .{ .x = @intCast((i * 31 + iteration) % 239), .y = @intCast((i * 19 + iteration * 2) % 239), .width = 2, .height = 2 }, .color = .rgba(@truncate(120 + i), @truncate(70 + i * 3), 30, 170) };
-    blendRects(surface, &particles, backend);
+    blendOpaqueRects(surface, &particles, backend);
 }
 
 fn designCanvas(surface: *s.Surface, iteration: usize, backend: ?dispatch.Backend) void {
     fillRect(surface, .{ .x = 0, .y = 0, .width = width, .height = height }, .rgba(242, 244, 248, 255), backend);
     var layers: [32]raster.ColoredRect = undefined;
     for (0..32) |layer| layers[layer] = .{ .rect = .{ .x = @as(i32, @intCast((layer * 23 + iteration) % 208)) - 8, .y = @as(i32, @intCast((layer * 17 + iteration * 2) % 224)) - 8, .width = 48, .height = 32 }, .color = .rgba(@truncate(40 + layer * 5), @truncate(80 + layer * 3), @truncate(160 + layer * 2), 76) };
-    blendRects(surface, &layers, backend);
+    blendOpaqueRects(surface, &layers, backend);
     var handles: [256]raster.ColoredRect = undefined;
     for (0..256) |handle| handles[handle] = .{ .rect = .{ .x = @intCast((handle * 29 + iteration) % 239), .y = @intCast((handle * 43 + iteration * 3) % 239), .width = 2, .height = 2 }, .color = .rgba(@truncate(handle * 3), 80, 170, 255) };
     fillRects(surface, &handles, backend);
@@ -280,7 +291,7 @@ fn runOpWithCopy(op: Op, backend: ?dispatch.Backend, dst: []u8, src: []const u8,
         .sprite_draw => drawSprites(surface, src[0..256], iteration, backend),
         .frame => {
             fillRect(surface, .{ .x = 0, .y = 0, .width = width, .height = height }, .rgba(8, 12, 20, 255), backend);
-            for (0..64) |i| blendRect(surface, .{ .x = @intCast((i * 17) % 224), .y = @intCast((i * 41) % 224), .width = 16, .height = 16 }, .rgba(@truncate(i * 5), 140, 60, 180), backend);
+            for (0..64) |i| blendOpaqueRect(surface, .{ .x = @intCast((i * 17) % 224), .y = @intCast((i * 41) % 224), .width = 16, .height = 16 }, .rgba(@truncate(i * 5), 140, 60, 180), backend);
         },
         .desktop_windows => desktopWindows(surface, iteration, backend),
         .terminal_cells => terminalCells(surface, src, iteration, backend),

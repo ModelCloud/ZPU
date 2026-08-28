@@ -13,11 +13,11 @@
 #       Artifact contains zero VEX-encoded instructions inside any project
 #       function.
 #   check --kernelized FILE...
-#       All seven eight-lane kernel exports must be linked, genuinely
+#       All eight eight-lane kernel exports must be linked, genuinely
 #       vectorized (>0 VEX), and VEX-encoded instructions may appear only
 #       inside the kernel boundary (including its v3 tail helpers).
 #   check --kernels-linked FILE...
-#       All seven eight-lane kernel exports must be linked and genuinely
+#       All eight eight-lane kernel exports must be linked and genuinely
 #       vectorized (>0 VEX inside them). No constraints are placed on other
 #       functions: this mode applies when the user explicitly opted the whole
 #       artifact into a higher CPU tier via -Dcpu, where portable-tier code
@@ -51,8 +51,8 @@ esac
 # Exact exported kernel symbols. Single source of truth is
 # src/simd/kernel_abi.zig, whose test asserts these names appear verbatim in
 # this script.
-KERNEL_EXPORTS=(zpu_v3_fill_span_8 zpu_v3_blend_span_8 zpu_v3_blend_pixels_8 zpu_v3_fill_rows_8 zpu_v3_blend_rows_8 zpu_v3_blend_pixels_rows_8 zpu_v3_fill_rects_8)
-kernel_symbol_re='^(zpu_v3_fill_span_8|zpu_v3_blend_span_8|zpu_v3_blend_pixels_8|zpu_v3_fill_rows_8|zpu_v3_blend_rows_8|zpu_v3_blend_pixels_rows_8|zpu_v3_fill_rects_8)$'
+KERNEL_EXPORTS=(zpu_v3_fill_span_8 zpu_v3_blend_span_8 zpu_v3_blend_pixels_8 zpu_v3_fill_rows_8 zpu_v3_blend_rows_8 zpu_v3_blend_pixels_rows_8 zpu_v3_fill_rects_8 zpu_v3_blend_sprite_batch_8)
+kernel_symbol_re='^(zpu_v3_fill_span_8|zpu_v3_blend_span_8|zpu_v3_blend_pixels_8|zpu_v3_fill_rows_8|zpu_v3_blend_rows_8|zpu_v3_blend_pixels_rows_8|zpu_v3_fill_rects_8|zpu_v3_blend_sprite_batch_8)$'
 # The v3 object reuses scalar tail helpers for spans shorter than one vector.
 # They are compiled in the v3 tier and may therefore contain the same VEX
 # encoding; keep them in the vectorized boundary without treating similarly
