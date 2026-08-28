@@ -341,6 +341,12 @@ scalar tails directly. Against the freshly merged v9 tip, this reduced
 **54.0 µs** to **43.4 µs** (**1.24×**); cumulative improvement from the
 pre-v9 baseline is about **1.59×** for `game_scene`.
 
+The Vulkan host-memory copy helper now uses the compiler's bulk `memcpy`
+lowering for the API's validated non-overlapping buffer regions. On the same
+230,400-byte host transfer used by the benchmark, p50 latency fell from
+**54.3 µs** at the merged tip to **4.0 µs** (**13.7×**); arbitrary fill words,
+unaligned ranges, checksums, and the command validation rules are unchanged.
+
 ## 📐 3D throughput on two cores
 
 <p align="center">

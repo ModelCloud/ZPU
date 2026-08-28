@@ -2038,16 +2038,23 @@ fn clearPreparedSpansLane(context: *ParallelDraw, lane_index: usize) void {
     const depth_pattern = context.clear_depth_pattern orelse return;
     const color_words = std.mem.bytesAsSlice(u32, @as([]align(4) u8, @alignCast(context.target)));
     const depth_words = std.mem.bytesAsSlice(u32, @as([]align(4) u8, @alignCast(context.depth.?)));
+    // The validated dirty-clear path uses the fixed two-lane split. Walk only
+    // this lane's rows instead of scanning the entire attachment and calling
+    // stripeLane for every row/triangle pair.
     for (context.prepared.triangles[0..context.prepared.count], 0..) |triangle, triangle_index| {
         if (!triangle.valid) continue;
-        for (0..context.height) |y| {
-            if (stripeLane(@intCast(y), context.height, parallel_band_count, context.stripe_count) != lane_index) continue;
-            const span = context.prepared.spans[triangle_index][y];
-            if (span.last <= span.first) continue;
-            const start = y * @as(usize, context.width) + span.first;
-            const length = @as(usize, span.last - span.first);
-            @memset(color_words[start..][0..length], color_pattern);
-            @memset(depth_words[start..][0..length], depth_pattern);
+        var stripe_index = lane_index;
+        while (stripe_index < context.stripe_count) : (stripe_index += parallel_band_count) {
+            const first_stripe_y = @as(usize, context.height) * stripe_index / context.stripe_count;
+            const last_stripe_y = @as(usize, context.height) * (stripe_index + 1) / context.stripe_count;
+            for (first_stripe_y..last_stripe_y) |y| {
+                const span = context.prepared.spans[triangle_index][y];
+                if (span.last <= span.first) continue;
+                const start = y * @as(usize, context.width) + span.first;
+                const length = @as(usize, span.last - span.first);
+                @memset(color_words[start..][0..length], color_pattern);
+                @memset(depth_words[start..][0..length], depth_pattern);
+            }
         }
     }
 }
