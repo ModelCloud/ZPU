@@ -369,6 +369,23 @@ ordinary command without
 `--two-core` remains the frozen evidence workload used by
 [`tools/evidence.py`](tools/evidence.py).
 
+## 🧭 Usage-shaped 3D application workloads
+
+The separate `benchmark-3d-apps` suite models common draw patterns that the
+frozen vkcube scene does not: layered desktop windows, a terminal glyph grid,
+and a dynamic game-engine scene. It reports per-profile draw/s, triangles/s,
+frame-time tails, checksums, and raster counters. The profiles use the same
+800×600 two-core CPU renderer and compare serial versus parallel output in unit
+tests; they are usage-shaped renderer tests, not native Windows/terminal/game
+engine integrations or general SPIR-V claims.
+
+```sh
+ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d-apps -Doptimize=ReleaseFast -- --json
+```
+
+See [`docs/3d-app-benchmarks.md`](docs/3d-app-benchmarks.md) for the workload
+contracts, focused `--scenario` commands, and correctness methodology.
+
 ## 🎥 30-second 4K / 8K capture recipe
 
 When a real-present gate is green, capture a 30-second VP9 WebM with two driver
