@@ -238,6 +238,14 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
     run_tests.step.dependOn(&require_limited.step);
     const test_step = b.step("test", "Run deterministic unit tests");
+    const metal_abi_status = b.addSystemCommand(&.{ "python3", "tools/metal_abi_status.py" });
+    metal_abi_status.step.dependOn(&require_limited.step);
+    const metal_abi_tests = b.addSystemCommand(&.{ "test/metal_abi.sh" });
+    metal_abi_tests.step.dependOn(&require_limited.step);
+    const metal_abi_step = b.step("metal-abi", "Validate the native Metal ABI and report SDK coverage");
+    metal_abi_step.dependOn(&metal_abi_status.step);
+    metal_abi_step.dependOn(&metal_abi_tests.step);
+    test_step.dependOn(metal_abi_step);
     // Cross-compiling: prove the test graph builds for the target without
     // attempting to execute foreign binaries locally.
     const cross_compiling = target.result.cpu.arch != b.graph.host.result.cpu.arch or

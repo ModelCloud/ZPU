@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "target": {
+    "framework": "Metal",
+    "programming_models": ["Metal 3", "Metal 4"],
+    "platforms": ["macOS", "iOS"],
+    "sdk_validation": "Apple SDK required"
+  },
+  "sources": {
+    "documentation": "https://developer.apple.com/documentation/metal",
+    "feature_tables": "https://developer.apple.com/metal/capabilities/",
+    "metal_cpp": "https://github.com/apple/metal-cpp"
+  },
+  "coverage": {
+    "status": "wip",
+    "complete": false,
+    "reason": "The Linux build host has no Apple SDK, and this CPU layer does not implement the complete Metal framework or Metal Shading Language runtime."
+  },
+  "mapping_policy": {
+    "direct_vulkan": [
+      "color",
+      "viewport",
+      "scissor_rect",
+      "rgba8_unorm",
+      "bgra8_unorm",
+      "load_actions",
+      "store_actions",
+      "point_line_triangle_topologies"
+    ],
+    "native_metal": [
+      "device_and_queue_lifetimes",
+      "command_buffer_lifecycle",
+      "render_encoder_lifecycle",
+      "compute_encoder_lifecycle",
+      "blit_encoder_lifecycle",
+      "parallel_encoder_lifecycle",
+      "render_pass_descriptor_lifecycle",
+      "depth_attachment_lifecycle"
+    ]
+  },
+  "implemented_native_abi": [
+    "MTLDevice.systemDefault",
+    "MTLDevice.newCommandQueue",
+    "MTLCommandQueue.commandBuffer",
+    "MTLCommandBuffer.renderCommandEncoder",
+    "MTLCommandBuffer.commit",
+    "MTLRenderCommandEncoder.endEncoding",
+    "MTLRenderCommandEncoder.clearColor",
+    "MTLRenderCommandEncoder.fillRect",
+    "MTLRenderCommandEncoder.setViewport",
+    "MTLRenderCommandEncoder.setScissorRect",
+    "MTLRenderCommandEncoder.setCullMode",
+    "MTLRenderCommandEncoder.setFrontFacing",
+    "MTLRenderCommandEncoder.setTriangleFillMode",
+    "MTLRenderCommandEncoder.drawPrimitives",
+    "MTLRenderCommandEncoder.setDepthBuffer"
+  ],
+  "known_unimplemented_surface": [
+    "MTLComputeCommandEncoder",
+    "MTLBlitCommandEncoder",
+    "MTLParallelRenderCommandEncoder",
+    "MTLIndirectCommandBuffer",
+    "MTLHeap",
+    "MTLArgumentEncoder",
+    "MTL4CommandAllocator",
+    "MTL4ArgumentTable",
+    "MTL4CommandQueue",
+    "MTL4MachineLearningCommandEncoder",
+    "MTL4Tensor",
+    "MTLAccelerationStructure",
+    "MTLRayTracingPipelineState",
+    "MTLRenderPipelineState",
+    "MTLComputePipelineState",
+    "MTLLibrary",
+    "MTLTexture",
+    "MTLBuffer",
+    "MTLSamplerState",
+    "MTLSharedEvent",
+    "MTLTextureViewPool",
+    "MTLSparseTextureMapping"
+  ]
+}

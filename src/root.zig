@@ -19,5 +19,6 @@ test {
     _ = @import("render_pipeline.zig");
     _ = @import("vulkan/render_ir_exec.zig");
     _ = @import("metal/abi.zig");
+    _ = @import("metal/mapping.zig");
     _ = @import("metal/cpu.zig");
 }
