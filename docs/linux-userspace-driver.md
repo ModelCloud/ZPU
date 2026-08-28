@@ -224,8 +224,13 @@ Presentation cadence is process-local:
   retained when supplied, with monotonic per-swapchain IDs as the fallback.
   Count queries and queue-full backpressure do not allocate on the hot path.
 - Untimed presents continue on the process's configured cadence.
-- `VK_GOOGLE_display_timing` is unsupported and diagnosed with an error that
-  directs callers to the sanctioned controls above.
+- `VK_GOOGLE_display_timing` is accepted as a compatibility mapping: desired
+  present times, refresh duration, and history queries are translated onto the
+  same internal monotonic clock and `ZPU_REFRESH_HZ` cadence. The driver emits a
+  notice and recommends `VK_EXT_present_timing` for new code. Its
+  `refreshDuration` result is the integer nanosecond period derived from
+  `ZPU_REFRESH_HZ` (`floor(1e9 / hz)`), and its history records are drained from
+  the same bounded completion FIFO.
 
 ## Linux boundary: what the kernel does and does not do
 
