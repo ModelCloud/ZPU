@@ -261,6 +261,11 @@ kernel and reports the **4K-equivalent full-surface rate** by dividing measured
 MPix/s by 8.2944 MPix. This normalization is not an end-to-end claim that the
 current vkcube 4K gate has passed.
 
+The compact table below retains the controlled one- and two-core kernel
+baseline for operations that existed before v5. The four app-scene rows are
+consumed from the versioned JSON report because their command counts and
+`draws/s` rates are the new comparison surface.
+
 | Operation | 1 core | 2 cores | 4K-equivalent surfaces/s (1c / 2c) | p99 latency (1c / 2c) |
 | --- | ---: | ---: | ---: | ---: |
 | Clear / fill | 19,238.48 MPix/s | 19,367.85 MPix/s | 2,319.45 / 2,335.05 | 3,049 / 3,298 ns |
