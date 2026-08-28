@@ -551,6 +551,7 @@ fn prepareDraw(uniform: []const u8, vertex_count: u32, base_vertex: u32, viewpor
     output.batch_fast = false;
     const identity_transform = isIdentityTransform(uniform);
     for (output.triangles[0..output.count], 0..) |*triangle, index| {
+        triangle.* = .{};
         const first: u32 = @intCast(index * 3);
         const first_source = if (indexed != null) first else base_vertex +| first;
         const v0 = (if (identity_transform) transformedIdentityVertex(uniform, first_source, source_vertex_count, viewport, indexed) else transformedVertex(uniform, first_source, source_vertex_count, viewport, indexed)) orelse continue;
@@ -2369,7 +2370,7 @@ fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, unif
     if (dirty_bytes > max_dirty_tile_bytes) return 0;
     if (expected_target) |expected| if (expected.len != target.len) return 0;
     _ = cpu_locality.pinCurrent(.render);
-    var prepared: PreparedDraw = .{};
+    var prepared: PreparedDraw = undefined;
     const cache_status = prepareDrawCached(uniform, texture, texture_width, texture_height, vertex_count, viewport, &prepared);
     if (!cache_status.hit) buildPreparedFlatSpans(&prepared, width, height);
     const lighting_generation = exact_lighting_cache_generation.load(.acquire);
