@@ -11,10 +11,13 @@ pub const platform = @import("platform/presenter.zig");
 pub const benchmark = @import("benchmark.zig");
 pub const render_pipeline = @import("render_pipeline.zig");
 pub const render_ir_exec = @import("vulkan/render_ir_exec.zig");
+pub const metal = @import("metal.zig");
 
 test {
     _ = @import("tests.zig");
     _ = @import("vulkan/driver.zig");
     _ = @import("render_pipeline.zig");
     _ = @import("vulkan/render_ir_exec.zig");
+    _ = @import("metal/abi.zig");
+    _ = @import("metal/cpu.zig");
 }
