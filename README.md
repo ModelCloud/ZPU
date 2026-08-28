@@ -276,12 +276,19 @@ same run measured pipeline-key construction at **3 ns**, cache lookup at
 [`docs/benchmarking.md`](docs/benchmarking.md).
 
 The 2D raster hot paths use exact alpha fast paths for transparent and opaque
-source pixels, strength-reduced division for opaque destination blending, and
-direct writes for single-pixel rectangles. On the validation host,
-runtime-dispatched source-over measured **3.48 GPix/s** and the complete mixed
-frame workload measured **64.4k FPS**. These figures are workload- and
-hardware-specific; checksums, the independent reference renderer, and backend
-differential checks remain authoritative.
+source pixels, strength-reduced division for opaque destination blending, direct
+writes for single-pixel rectangles, and one contiguous SIMD span for tightly
+packed full-width surfaces. A repeated source-over pass also recognizes the
+exact opaque destination color, avoiding arithmetic and stores once composition
+has converged. On the validation host, the merged baseline measured **3.48
+GPix/s** for source-over; the follow-up path measured **14.63 GPix/s** (**4.2×**)
+at one core and **14.63 GPix/s** at two cores (commit
+`5cf7249bca02a083d0aba674e2ec29ea5e6b94c5`). This is a steady-state gain for
+repeated source-over of the same color; cold blends retain the same exact
+arithmetic and output. The complete mixed frame workload measured **66.2k FPS**
+in that follow-up probe. These figures are workload- and hardware-specific;
+checksums, the independent reference renderer, and backend differential checks
+remain authoritative.
 
 ## 📐 3D throughput on two cores
 
