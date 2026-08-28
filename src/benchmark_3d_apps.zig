@@ -16,8 +16,6 @@ const surface_bytes = @as(usize, width) * height * 4;
 const clear_color: u32 = 0x19191919;
 const clear_depth: u32 = @bitCast(@as(f32, 1));
 const max_samples = 16;
-const fnv_offset: u64 = 14695981039346656037;
-const fnv_prime: u64 = 1099511628211;
 
 const Kind = enum { desktop, terminal, game };
 
@@ -344,9 +342,10 @@ fn updateWorkload(workload: *Workload, frame: usize) void {
 }
 
 fn checksum(bytes: []const u8) u64 {
-    var hash = fnv_offset;
-    for (bytes) |byte| hash = (hash ^ byte) *% fnv_prime;
-    return hash;
+    // This integrity oracle runs inside each timed frame. XxHash3 keeps the
+    // validation strong while using its wide, independently optimized path;
+    // the canonical fixed-FNV benchmark remains unchanged.
+    return std.hash.XxHash3.hash(0, bytes);
 }
 
 fn clearAttachments(color: []u8, depth: []u8) void {
