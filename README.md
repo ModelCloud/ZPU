@@ -256,7 +256,7 @@ preferred API.
 ## 📊 2D throughput on a 4K surface
 
 The deterministic 2D benchmark is the versioned
-`zpu-2d-kernels-v4-240x240-seed-151521030` workload. It measures a 240×240
+`zpu-2d-app-scenes-v5-240x240-seed-151521030` workload. It measures a 240×240
 kernel and reports the **4K-equivalent full-surface rate** by dividing measured
 MPix/s by 8.2944 MPix. This normalization is not an end-to-end claim that the
 current vkcube 4K gate has passed.
@@ -296,6 +296,17 @@ draw order. On the same one-core probe, the batch path measured **15.16M sprite
 draws/s** versus **10.23M** at the post-merge tip (**1.48×**). This is a real
 API-call reduction; source pixels, origins, alpha values, and checksums are
 unchanged, and the remaining sprite cost is source-over arithmetic.
+
+The v5 workload adds four app-shaped draw patterns: desktop window
+compositing, a terminal glyph grid backed by an atlas, a tiled 2D game scene
+with particles, and a design canvas with translucent layers, handles, and
+guides. Each pattern uses varied positions and alpha coverage, an independent
+reference renderer, fixed checksums, and hand-computed traffic/draw-count
+models. `fillRectsWith`/`blendRectsWith` batch colored UI primitives while
+`drawSpriteRegionsWith` batches atlas-backed glyphs; these APIs select the
+backend once without changing clipping or draw order. Their rates are
+reported as `draws/s` alongside MPix/s so command-heavy workloads remain
+visible rather than being hidden behind a single synthetic frame number.
 
 ## 📐 3D throughput on two cores
 

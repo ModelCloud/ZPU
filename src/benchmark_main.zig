@@ -158,7 +158,7 @@ pub fn main(init: std.process.Init) !void {
     if (requested_cap == 0 or requested_cap > 8) return error.InvalidThreadCap;
     const cap = try verifyTrustedFingerprint(init.io, allocator, selected, cpu_model, topology);
     if (requested_cap != cap) return error.ThreadCapAffinityMismatch;
-    var metrics: [32]bench.Metric = undefined;
+    var metrics: [64]bench.Metric = undefined;
     const count = try bench.benchmark(init.io, &metrics, smoke);
     const pipeline_metric = try bench.benchmarkPipeline(init.io, smoke);
     if (!std.mem.eql(u8, init.environ_map.get("ZPU_LIMITED") orelse "", "physical-core-v1")) return error.MissingAffinityGate;

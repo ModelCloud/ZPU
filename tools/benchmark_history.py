@@ -12,14 +12,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-OPS = ["clear", "pixel_write", "clipped_rectangle", "vulkan_host_memory_fill", "vulkan_host_memory_copy", "source_over_blend", "sprite_draw", "frame"]
-RASTER = ["clear", "pixel_write", "clipped_rectangle", "source_over_blend", "sprite_draw", "frame"]
+OPS = ["clear", "pixel_write", "clipped_rectangle", "vulkan_host_memory_fill", "vulkan_host_memory_copy", "source_over_blend", "sprite_draw", "frame", "desktop_windows", "terminal_cells", "game_scene", "design_canvas"]
+RASTER = ["clear", "pixel_write", "clipped_rectangle", "source_over_blend", "sprite_draw", "frame", "desktop_windows", "terminal_cells", "game_scene", "design_canvas"]
 ORACLES = {
     "clear": "89fcf336d86c4f25", "pixel_write": "3d0737332ec9e1cc",
     "clipped_rectangle": "2cf726772c9ab549", "vulkan_host_memory_fill": "50dbc316a6090325",
     "vulkan_host_memory_copy": "4e61ac2d0cc0777b", "source_over_blend": "d5f99fe5b4e7eef8",
     "sprite_draw": "e73fc1dc4f99be0c", "frame": "2e480a89ab6181ef",
+    "desktop_windows": "1a7c05700c2ce93b", "terminal_cells": "5d6a5af80b89eba8",
+    "game_scene": "445b390c86d17660", "design_canvas": "3ed1f3dec68d962c",
 }
+DRAW_COUNTS = {"sprite_draw": 128, "desktop_windows": 43, "terminal_cells": 903, "game_scene": 825, "design_canvas": 353}
 LEGACY_ORACLES = ["89fcf336d86c4f25", "3d0737332ec9e1cc", "b5cb439ce748a598", "50dbc316a6090325", "4e61ac2d0cc0777b", "d5f99fe5b4e7eef8", "3717a00e187d9381", "2e480a89ab6181ef"]
 
 def fail(message):
@@ -72,7 +75,7 @@ def trusted_fingerprint(fp):
     if fp.get("topology") != ";".join(topo): fail("topology fingerprint is not trusted")
 
 def validate_report(report):
-    if report.get("schema_version") != 4 or report.get("workload_id") != "zpu-2d-kernels-v4-240x240-seed-151521030":
+    if report.get("schema_version") != 5 or report.get("workload_id") != "zpu-2d-app-scenes-v5-240x240-seed-151521030":
         fail("schema/workload mismatch")
     if report.get("rate_tolerance_fraction") != 0.20 or report.get("latency_tolerance_fraction") != 1.50:
         fail("tolerance policy mismatch")
@@ -108,8 +111,8 @@ def validate_report(report):
             if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                 fail(f"invalid {field}")
         if key[0] in ("sprite_draw", "frame") and m["mpix_s"] != 0: fail("inapplicable MPix metric is nonzero")
-        if key[0] == "sprite_draw" and m["draws_s"] <= 0: fail("sprite draws/s is zero")
-        if key[0] != "sprite_draw" and m["draws_s"] != 0: fail("inapplicable draws/s is nonzero")
+        if key[0] in DRAW_COUNTS and m["draws_s"] <= 0: fail("draws/s is zero")
+        if key[0] not in DRAW_COUNTS and m["draws_s"] != 0: fail("inapplicable draws/s is nonzero")
         if key[0] == "frame" and m["fps"] <= 0: fail("frame FPS is zero")
         if key[0] != "frame" and m["fps"] != 0: fail("inapplicable FPS is nonzero")
         frame = m.get("frame", {})
