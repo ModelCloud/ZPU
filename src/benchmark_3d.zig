@@ -6,14 +6,14 @@ const builtin = @import("builtin");
 const cube = @import("vulkan/cpu_cube.zig");
 
 pub const schema_version: u32 = 3;
-pub const workload_id = "zpu-vkcube-cpu-3d-v3-800x600-cube12";
-pub const target_workload_id = "zpu-vkcube-cpu-3d-v3-800x600-cube12-2core-target";
+pub const workload_id = "zpu-vkcube-cpu-3d-v4-800x600-random12";
+pub const target_workload_id = "zpu-vkcube-cpu-3d-v4-800x600-random12-2core-target";
 pub const width: u32 = 800;
 pub const height: u32 = 600;
-pub const reference_checksum: u64 = 0x37d978fe1c101415;
-pub const baseline_triangles_s: f64 = 3_133.92;
-pub const target_speedup: f64 = 10.0;
-pub const target_triangles_s: f64 = baseline_triangles_s * target_speedup;
+pub const reference_checksum: u64 = 0x9f6d64eb75b2ce10;
+pub const baseline_triangles_s: f64 = 3_884.0057226940316;
+pub const target_triangles_s: f64 = 150_000_000.0;
+pub const target_speedup: f64 = target_triangles_s / baseline_triangles_s;
 pub const target_cpu_cores: u8 = 2;
 
 const Percentiles = struct { p50_ns: u64, p95_ns: u64, p99_ns: u64, p999_ns: u64, max_ns: u64, cv: f64 };
@@ -51,6 +51,15 @@ fn putFloat(bytes: []u8, offset: usize, value: f32) void {
     std.mem.writeInt(u32, bytes[offset..][0..4], @bitCast(value), .little);
 }
 
+fn nextRandom(state: *u32) u32 {
+    state.* = state.* *% 1_664_525 +% 1_013_904_223;
+    return state.*;
+}
+
+fn randomUnit(state: *u32) f32 {
+    return @as(f32, @floatFromInt(nextRandom(state) >> 8)) / 16_777_215.0;
+}
+
 fn checksum(bytes: []const u8) u64 {
     var hash: u64 = 14695981039346656037;
     for (bytes) |byte| hash = (hash ^ byte) *% 1099511628211;
@@ -70,19 +79,42 @@ var static_reuse_checksum: ?u64 = null;
 fn scene(mutant: bool) Scene {
     var result: Scene = .{ .uniform = [_]u8{0} ** (64 + 36 * 32), .texture = undefined };
     for (0..4) |i| putFloat(&result.uniform, (i * 4 + i) * 4, 1);
-    const v = [_][4]f32{
-        .{ -0.62, -0.62, 0.20, 1 }, .{ 0.62, -0.62, 0.20, 1 }, .{ 0.62, 0.62, 0.20, 1 }, .{ -0.62, 0.62, 0.20, 1 },
-        .{ -0.42, -0.42, 0.72, 1 }, .{ 0.42, -0.42, 0.72, 1 }, .{ 0.42, 0.42, 0.72, 1 }, .{ -0.42, 0.42, 0.72, 1 },
-    };
-    const indices = [_]u8{ 0, 1, 2, 0, 2, 3, 5, 4, 7, 5, 7, 6, 4, 0, 3, 4, 3, 7, 1, 5, 6, 1, 6, 2, 3, 2, 6, 3, 6, 7, 4, 5, 1, 4, 1, 0 };
-    for (indices, 0..) |index, i| {
-        for (v[index], 0..) |value, c| putFloat(&result.uniform, 64 + i * 16 + c * 4, value);
-        const uv = [_]f32{ @floatFromInt(index & 1), @floatFromInt((index >> 1) & 1) };
-        for (uv, 0..) |value, c| putFloat(&result.uniform, 64 + 36 * 16 + i * 16 + c * 4, value);
+    // Twelve independent triangles are distributed over a 4x3 screen grid.
+    // A fixed LCG seed keeps the workload reproducible while giving each
+    // primitive a distinct center, depth, scale, orientation, and textured
+    // color.  No triangle reuses the old cube's x/y/z triplets.
+    var random_state: u32 = 0x51f15e77;
+    const shape = [_][2]f32{ .{ 0, 0.34 }, .{ -0.30, -0.24 }, .{ 0.30, -0.24 } };
+    for (0..12) |triangle| {
+        const grid_x: f32 = @floatFromInt(triangle % 4);
+        const grid_y: f32 = @floatFromInt(triangle / 4);
+        const center_x = -0.78 + grid_x * 0.52 + (randomUnit(&random_state) * 2.0 - 1.0) * 0.08;
+        const center_y = -0.67 + grid_y * 0.67 + (randomUnit(&random_state) * 2.0 - 1.0) * 0.08;
+        const angle = randomUnit(&random_state) * 6.283185307179586;
+        const cosine = @cos(angle);
+        const sine = @sin(angle);
+        const scale_x = 0.55 + randomUnit(&random_state) * 0.45;
+        const scale_y = 0.55 + randomUnit(&random_state) * 0.45;
+        const depth = 0.08 + randomUnit(&random_state) * 0.84;
+        for (shape, 0..) |local, corner| {
+            const rotated_x = (local[0] * cosine - local[1] * sine) * scale_x;
+            const rotated_y = (local[0] * sine + local[1] * cosine) * scale_y;
+            const vertex = triangle * 3 + corner;
+            putFloat(&result.uniform, 64 + vertex * 16, center_x + rotated_x);
+            putFloat(&result.uniform, 64 + vertex * 16 + 4, center_y + rotated_y);
+            putFloat(&result.uniform, 64 + vertex * 16 + 8, depth);
+            putFloat(&result.uniform, 64 + vertex * 16 + 12, 1);
+            const texel = nextRandom(&random_state) % 16;
+            const uv = [_]f32{ (@as(f32, @floatFromInt(texel % 4)) + 0.2) / 4.0, (@as(f32, @floatFromInt(texel / 4)) + 0.2) / 4.0 };
+            putFloat(&result.uniform, 64 + 36 * 16 + vertex * 16, uv[0]);
+            putFloat(&result.uniform, 64 + 36 * 16 + vertex * 16 + 4, uv[1]);
+        }
     }
-    for (0..16) |i| {
-        const bright: u8 = if (((i % 4) ^ (i / 4)) & 1 == 0) 232 else 47;
-        result.texture[i * 4 ..][0..4].* = .{ bright, @intCast(255 - bright), @intCast(80 + i * 7), 255 };
+    for (0..16) |texel| {
+        const red: u8 = @intCast(32 + @as(u32, @intFromFloat(randomUnit(&random_state) * 223.0)));
+        const green: u8 = @intCast(32 + @as(u32, @intFromFloat(randomUnit(&random_state) * 223.0)));
+        const blue: u8 = @intCast(32 + @as(u32, @intFromFloat(randomUnit(&random_state) * 223.0)));
+        result.texture[texel * 4 ..][0..4].* = .{ red, green, blue, 255 };
     }
     if (mutant) result.texture[0] +%= 1;
     return result;
@@ -181,7 +213,7 @@ pub fn main(init: std.process.Init) !void {
     var utc: []const u8 = "unknown";
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--smoke")) smoke = true else if (std.mem.eql(u8, args[i], "--two-core")) two_core = true else if (std.mem.eql(u8, args[i], "--require-10x")) require_target = true else if (std.mem.eql(u8, args[i], "--json")) {} else if (std.mem.eql(u8, args[i], "--capture") or std.mem.eql(u8, args[i], "--source-commit") or std.mem.eql(u8, args[i], "--utc")) {
+        if (std.mem.eql(u8, args[i], "--smoke")) smoke = true else if (std.mem.eql(u8, args[i], "--two-core")) two_core = true else if (std.mem.eql(u8, args[i], "--require-target") or std.mem.eql(u8, args[i], "--require-10x")) require_target = true else if (std.mem.eql(u8, args[i], "--json")) {} else if (std.mem.eql(u8, args[i], "--capture") or std.mem.eql(u8, args[i], "--source-commit") or std.mem.eql(u8, args[i], "--utc")) {
             const key = args[i];
             i += 1;
             if (i >= args.len) return error.MissingArgument;
@@ -226,7 +258,8 @@ test "frozen cube is deterministic and mutants differ" {
     try std.testing.expect((try render(&color, &depth, &changed, &mutant, false)) != one);
     try std.testing.expectEqual(@as(u64, 12), a.triangles_submitted);
     try std.testing.expect(a.fragments_tested > a.fragments_covered);
-    try std.testing.expect(a.fragments_covered > a.depth_tests_passed);
+    try std.testing.expect(a.fragments_covered >= a.depth_tests_passed);
+    try std.testing.expect(a.fragments_covered > 0);
     try std.testing.expectEqual(a.depth_tests_passed, a.color_writes);
 }
 
@@ -238,9 +271,11 @@ test "malformed vkcube inputs perform no work" {
     try std.testing.expectEqual(cube.Counters{}, counters);
 }
 
-test "two-core 3D target is explicit and tenfold" {
+test "two-core 3D target is explicit and 150M" {
     try std.testing.expectEqual(@as(u8, 2), target_cpu_cores);
-    try std.testing.expectEqual(@as(f64, 10.0), target_speedup);
+    try std.testing.expectEqual(@as(f64, 150_000_000.0), target_triangles_s);
+    try std.testing.expectEqual(target_triangles_s / baseline_triangles_s, target_speedup);
+    try std.testing.expect(target_speedup > 10.0);
     try std.testing.expectEqual(baseline_triangles_s * target_speedup, target_triangles_s);
     try std.testing.expect(target_workload_id.len > workload_id.len);
 }

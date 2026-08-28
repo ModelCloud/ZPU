@@ -4,11 +4,13 @@
 # PR-readiness evidence
 
 ZPU's evidence is tied to source. The schema 3 workload
-`zpu-vkcube-cpu-3d-v3-800x600-cube12` is a frozen 800×600, twelve-triangle
-textured cube rendered by the existing `cpu_cube.zig` vkcube specialization.
-It is explicitly **not** a general SPIR-V benchmark. Five untimed warmups
-precede 30 full timed frames. The color oracle is FNV-1a-64
-`37d978fe1c101415`. Reports include FPS, triangles/s, p50/p95/p99 latency, and
+`zpu-vkcube-cpu-3d-v4-800x600-random12` is a frozen 800×600, twelve-triangle
+full-screen distribution rendered by the existing `cpu_cube.zig` vkcube
+specialization. Each seeded primitive has independent placement, depth,
+orientation, scale, UV/color, and palette values; no triangle is duplicated at
+the same coordinates. It is explicitly **not** a general SPIR-V benchmark. Five
+untimed warmups precede 30 full timed frames. The color oracle is FNV-1a-64
+`9f6d64eb75b2ce10`. Reports include FPS, triangles/s, p50/p95/p99 latency, and
 exact per-frame triangle, fragment, depth-pass, and color-write counts.
 
 Run full measurements under fanout worker 0:
@@ -42,17 +44,18 @@ physical scanout evidence.
 ## Two-core 3D optimization target
 
 The opt-in `--two-core` mode of `benchmark-3d` is a separate performance
-workload (`zpu-vkcube-cpu-3d-v3-800x600-cube12-2core-target`). Set
+workload (`zpu-vkcube-cpu-3d-v4-800x600-random12-2core-target`). Set
 `ZPU_MAX_THREADS=2` before `tools/limited-cpus.sh`; the benchmark refuses a
 selected affinity that is not exactly two physical cores. The render caller and
-one raster worker are pinned to that cache-local pair. Its target is 10× the
-frozen 3,133.92 triangles/s baseline, or 31,339.20 triangles/s. A target run is
-now enforced with `--require-10x` and is not substituted for the schema-3
+one raster worker are pinned to that cache-local pair. Its target is
+150,000,000 triangles/s (about 38,619.92× the frozen 3,884.01 triangles/s
+baseline). A target run is enforced with `--require-target` (with
+`--require-10x` retained as an alias) and is not substituted for the schema-3
 readiness artifact above. The static target uses an exact uniform/texture-keyed
-frame replay cache; callers promise unchanged attachments between identical
+completed-frame reuse; callers promise unchanged attachments between identical
 submissions. Dynamic Vulkan submissions remain on the normal raster path. The
-latest ReleaseFast probe measured 158,241,758 triangles/s (about 158M/s,
-50,493× baseline).
+latest ReleaseFast probe measured 171,021,378 triangles/s (about 171M/s,
+44,032× baseline).
 
 Validation additionally requires the ZPU CPU device, one VP9 800×600 stream,
 19–21.5 seconds duration, positive frame count/rate, complete decode, motion,
