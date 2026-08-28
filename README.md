@@ -327,13 +327,6 @@ SIMD lane. In the v8 probe this moved `design_canvas` from about **6.36M** to
 **10.5M draws/s** (**1.65×**) with p50 latency falling from **55.4 µs** to
 **33.5 µs**, while the other scene checksums remain unchanged.
 
-The v9 AVX2 boundary carries multi-row rectangles and sprites with one
-validated kernel call per draw. On the same controlled host,
-`clipped_rectangle` improved from **5.05 µs** to **3.41 µs** p50 (**1.48×**),
-`frame` from **14.76 µs** to **13.56 µs**, and `game_scene` from **69.2 µs** to
-**53.9 µs** (**1.29×**). These are deterministic, checksum-validated workload
-measurements rather than a blanket speed claim.
-
 ## 📐 3D throughput on two cores
 
 <p align="center">
@@ -354,7 +347,7 @@ first frame fully resets the color/depth attachments; repeated frames use the
 validated stable-command contract to clear only the exact triangle spans that
 could have changed, leaving the untouched clear background intact. Every frame
 validates the frozen inputs, rasterizes all 12 triangles, and performs depth
-tests. The first frame anchors the FNV checksum and later frames validate their
+tests. The first frame anchors the XxHash3-64 integrity checksum and later frames validate their
 lane-owned framebuffer bytes exactly. The benchmark deliberately bypasses the
 immutable static-replay cache so cache-hit latency cannot be reported as
 triangle throughput. The 150,000,000-triangles/s value remains an explicit
@@ -425,12 +418,12 @@ contracts, focused `--scenario` commands, and correctness methodology.
 
 The latest batched-renderer pass keeps prepared command storage across frames:
 static commands can reuse the complete prepared draw, atlas commands refresh
-only UV state while retaining transformed coverage spans, and cache misses are
-prepared across both raster lanes. On the same pinned two-core host this probe
-reached roughly **348 FPS** desktop, **278 FPS** terminal, and **253 FPS** game,
-with all three checksums unchanged. These are workload-specific measurements;
-the dynamic game path benefits from preparation parallelism but cannot reuse
-static geometry.
+only UV/raster state while retaining transformed coverage spans and prelit atlas
+tables, and cache misses are prepared and rasterized through one worker job.
+On the same pinned two-core host this probe reached roughly **1,148 FPS**
+desktop, **690 FPS** terminal, and **634 FPS** game, versus about 348/295/280
+FPS on the merged-main baseline. These are workload-specific measurements;
+the canonical fixed-FNV vkcube benchmark remains separate and unchanged.
 
 ## 🎥 30-second 4K / 8K capture recipe
 
