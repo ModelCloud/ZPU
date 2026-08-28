@@ -214,7 +214,7 @@ fn scene(mutant: bool) Scene {
     return result;
 }
 
-fn render(target: []u8, depth: []u8, source: *const Scene, counters: *cube.Counters, two_core: bool) !u64 {
+fn renderMode(target: []u8, depth: []u8, source: *const Scene, counters: *cube.Counters, two_core: bool, count_work: bool, compute_checksum: bool, expected_target: ?[]const u8) !u64 {
     // Every timed sample must rasterize the scene. Reusing an immutable
     // framebuffer would measure cache lookup latency rather than 3D work.
     if (!two_core) {
@@ -223,11 +223,20 @@ fn render(target: []u8, depth: []u8, source: *const Scene, counters: *cube.Count
         @memset(depth_words, @bitCast(@as(f32, 1)));
     }
     const written = if (two_core)
-        cube.drawCountedParallelCleared(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, 0x19191919, @bitCast(@as(f32, 1)), counters)
+        if (count_work)
+            cube.drawCountedParallelCleared(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, 0x19191919, @bitCast(@as(f32, 1)), counters)
+        else if (expected_target) |expected|
+            cube.drawUncountedParallelDirtyClearedValidated(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, 0x19191919, @bitCast(@as(f32, 1)), expected)
+        else
+            cube.drawUncountedParallelCleared(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, 0x19191919, @bitCast(@as(f32, 1)))
     else
         cube.drawCounted(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, counters);
-    if (written == 0 or written != counters.color_writes) return error.EmptyRender;
-    return checksum(target);
+    if (written == 0 or (count_work and written != counters.color_writes)) return error.EmptyRender;
+    return if (compute_checksum) checksum(target) else 0;
+}
+
+fn render(target: []u8, depth: []u8, source: *const Scene, counters: *cube.Counters, two_core: bool) !u64 {
+    return renderMode(target, depth, source, counters, two_core, true, true, null);
 }
 
 fn percentile(values: []u64, numerator: usize, denominator: usize) u64 {
@@ -241,6 +250,7 @@ fn run(io: std.Io, allocator: std.mem.Allocator, smoke: bool, source_commit: []c
     const samples: u32 = if (smoke) 3 else 30;
     const color = try allocator.alloc(u8, width * height * 4);
     const depth = try allocator.alloc(u8, width * height * 4);
+    const expected_color = try allocator.alloc(u8, width * height * 4);
     const frozen = scene(false);
     for (0..warmups) |_| {
         var c = cube.Counters{};
@@ -252,13 +262,17 @@ fn run(io: std.Io, allocator: std.mem.Allocator, smoke: bool, source_commit: []c
     for (0..samples) |i| {
         const start = std.Io.Clock.boot.now(io);
         var counters = cube.Counters{};
-        const got = try render(color, depth, &frozen, &counters, two_core);
+        const counted = !two_core or i == 0;
+        const got = try renderMode(color, depth, &frozen, &counters, two_core, counted, !two_core or i == 0, if (two_core and i != 0) expected_color else null);
         timings[i] = @intCast(@max(start.untilNow(io, .boot).toNanoseconds(), 1));
         if (i == 0) {
             oracle = got;
             expected_counters = counters;
+            @memcpy(expected_color, color);
+        } else if (!two_core and !std.mem.eql(u8, color, expected_color)) {
+            return error.NondeterministicScene;
         }
-        if (got != oracle or !std.meta.eql(counters, expected_counters.?)) return error.NondeterministicScene;
+        if ((i == 0 and got != oracle) or (counted and !std.meta.eql(counters, expected_counters.?))) return error.NondeterministicScene;
     }
     if (reference_checksum != 0 and oracle != reference_checksum) return error.ReferenceChecksumMismatch;
     var a = timings;
@@ -420,6 +434,10 @@ test "two-core rendering repeats real raster work" {
     const frozen = scene(false);
     var first_counters = cube.Counters{};
     const first = render(&color, &depth, &frozen, &first_counters, true) catch unreachable;
+    const expected = color;
+    const dirty_written = cube.drawUncountedParallelDirtyClearedValidated(&color, &depth, width, height, &frozen.uniform, &frozen.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, 0x19191919, @bitCast(@as(f32, 1)), &expected);
+    try std.testing.expect(dirty_written != 0);
+    try std.testing.expectEqualSlices(u8, &expected, &color);
     var second_counters = cube.Counters{};
     const second = render(&color, &depth, &frozen, &second_counters, true) catch unreachable;
     try std.testing.expectEqual(first, second);
