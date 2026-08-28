@@ -51,6 +51,10 @@ fn putFloat(bytes: []u8, offset: usize, value: f32) void {
     std.mem.writeInt(u32, bytes[offset..][0..4], @bitCast(value), .little);
 }
 
+fn getFloat(bytes: []const u8, offset: usize) f32 {
+    return @bitCast(std.mem.readInt(u32, bytes[offset..][0..4], .little));
+}
+
 fn nextRandom(state: *u32) u32 {
     state.* = state.* *% 1_664_525 +% 1_013_904_223;
     return state.*;
@@ -278,6 +282,38 @@ test "two-core 3D target is explicit and 150M" {
     try std.testing.expect(target_speedup > 10.0);
     try std.testing.expectEqual(baseline_triangles_s * target_speedup, target_triangles_s);
     try std.testing.expect(target_workload_id.len > workload_id.len);
+}
+
+test "random scene spans the screen with unique geometry and palette" {
+    const frozen = scene(false);
+    var min_x: f32 = 2;
+    var max_x: f32 = -2;
+    var min_y: f32 = 2;
+    var max_y: f32 = -2;
+    var min_z: f32 = 2;
+    var max_z: f32 = -2;
+    for (0..36) |vertex| {
+        const base = 64 + vertex * 16;
+        const x = getFloat(&frozen.uniform, base);
+        const y = getFloat(&frozen.uniform, base + 4);
+        const z = getFloat(&frozen.uniform, base + 8);
+        min_x = @min(min_x, x);
+        max_x = @max(max_x, x);
+        min_y = @min(min_y, y);
+        max_y = @max(max_y, y);
+        min_z = @min(min_z, z);
+        max_z = @max(max_z, z);
+        if (vertex % 3 == 0) {
+            for (0..vertex / 3) |previous| {
+                const previous_base = 64 + previous * 3 * 16;
+                try std.testing.expect(x != getFloat(&frozen.uniform, previous_base) or y != getFloat(&frozen.uniform, previous_base + 4) or z != getFloat(&frozen.uniform, previous_base + 8));
+            }
+        }
+    }
+    try std.testing.expect(min_x < -0.8 and max_x > 0.8);
+    try std.testing.expect(min_y < -0.7 and max_y > 0.7);
+    try std.testing.expect(min_z < 0.25 and max_z > 0.75);
+    try std.testing.expect(!std.mem.eql(u8, frozen.texture[0..4], frozen.texture[4..8]));
 }
 
 test "two-core target preserves the cube oracle" {
