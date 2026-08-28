@@ -43,11 +43,13 @@ ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d-apps -Doptimize=R
 ```
 
 Full runs use three warmups and twelve measured frames per profile. A frame
-includes attachment clear, all profile draw calls, depth testing, and counted
-triangle/fragment work. The report includes FPS, draw/s and triangles/s,
-p50/p95/p99/max/CV frame time, first/final checksums, and counters from the
-first measured frame. The smoke mode is for CI and correctness checks, not
-performance claims.
+includes attachment clear, all profile draw calls, depth testing, the
+XxHash3-64 framebuffer integrity checksum, and counted triangle/fragment work.
+XxHash3-64 keeps the in-frame oracle inexpensive while remaining independent of
+the renderer; the canonical fixed-FNV vkcube benchmark is unchanged. The
+report includes FPS, draw/s and triangles/s, p50/p95/p99/max/CV frame time,
+first/final checksums, and counters from the first measured frame. The smoke
+mode is for CI and correctness checks, not performance claims.
 
 ## Correctness contract
 
