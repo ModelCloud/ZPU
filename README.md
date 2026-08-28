@@ -283,7 +283,7 @@ exact opaque destination color, avoiding arithmetic and stores once composition
 has converged. On the validation host, the merged baseline measured **3.48
 GPix/s** for source-over; the follow-up path measured **14.63 GPix/s** (**4.2×**)
 at one core and **14.63 GPix/s** at two cores (commit
-`5cf7249bca02a083d0aba674e2ec29ea5e6b94c5`). This is a steady-state gain for
+`31cefc4309f87fd522f9734b118e95a97fc617b2`). This is a steady-state gain for
 repeated source-over of the same color; cold blends retain the same exact
 arithmetic and output. The complete mixed frame workload measured **66.2k FPS**
 in that follow-up probe. These figures are workload- and hardware-specific;
