@@ -132,7 +132,7 @@ fn render(target: []u8, depth: []u8, source: *const Scene, counters: *cube.Count
         while (offset < depth.len) : (offset += 4) putFloat(depth, offset, 1);
     }
     const written = if (two_core)
-        cube.drawCountedParallelStaticReuse(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, counters)
+        cube.drawCountedParallelStaticReuseImmutable(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, counters)
     else
         cube.drawCounted(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, counters);
     if (written == 0 or written != counters.color_writes) return error.EmptyRender;
