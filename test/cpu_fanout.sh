@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+# SPDX-License-Identifier: Apache-2.0
+
 # Deterministic, fixture-driven proof of the four-worker CPU fanout partition.
 # Every case runs the planner or a --dry-run launch, so no workload escapes the
 # limited-cpus gate that invoked this script.

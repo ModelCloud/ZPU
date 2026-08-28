@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+# SPDX-License-Identifier: Apache-2.0
+
 # Topology-aware four-worker CPU fanout for ZPU experiment and optimization runs.
 #
 # Derives the effective allowed Linux cpuset at run time, reads online CPU

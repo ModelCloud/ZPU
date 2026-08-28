@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+# SPDX-License-Identifier: Apache-2.0
+
 # Capture a real high-resolution ZPU vkcube session. Outputs are ignored evidence.
 set -euo pipefail
 

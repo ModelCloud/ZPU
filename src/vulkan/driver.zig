@@ -1,3 +1,6 @@
+// Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+// SPDX-License-Identifier: Apache-2.0
+
 //! Original minimal ABI transcription from the public Vulkan 1.0 specification and
 //! Khronos loader/driver interface documentation. This is an experimental ICD.
 const std = @import("std");

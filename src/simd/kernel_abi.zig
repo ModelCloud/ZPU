@@ -1,3 +1,6 @@
+// Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+// SPDX-License-Identifier: Apache-2.0
+
 //! Single source of truth for the separately compiled eight-lane kernel ABI.
 //!
 //! Both sides derive their declarations from this file:

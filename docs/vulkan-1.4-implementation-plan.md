@@ -1,3 +1,6 @@
+<!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # Vulkan 1.4.360 driver implementation plan
 
 This plan is limited to the ZPU Vulkan ICD. Window managers, fonts, toolkit

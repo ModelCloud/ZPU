@@ -1,3 +1,6 @@
+<!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # SmolVM CLI contract fixture
 
 This strict argv/help/state fixture is a test double transcribed from the published upstream

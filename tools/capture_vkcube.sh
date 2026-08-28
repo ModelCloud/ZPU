@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+# SPDX-License-Identifier: Apache-2.0
+
 # Capture the real ZPU vkcube XCB presentation path. Outputs are ignored evidence.
 set -euo pipefail
 root=$(git rev-parse --show-toplevel)

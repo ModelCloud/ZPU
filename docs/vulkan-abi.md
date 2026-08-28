@@ -1,3 +1,6 @@
+<!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # Vulkan 1.4.360 ABI status
 
 Generated from the pinned Vulkan 1.4.360 registry, the command implementation contracts, and the live ICD dispatch table. Do not edit by hand; run `python3 tools/vulkan_abi_status.py --write`.

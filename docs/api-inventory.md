@@ -1,3 +1,6 @@
+<!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # Vulkan target inventory contract
 
 `api/vulkan-1.4.360.json` is the generated, reviewable inventory for ZPU's

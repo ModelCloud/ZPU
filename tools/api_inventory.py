@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+# SPDX-License-Identifier: Apache-2.0
+
 """Generate and validate ZPU's pinned, non-advertised Vulkan target inventory."""
 
 import argparse

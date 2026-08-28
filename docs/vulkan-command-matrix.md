@@ -1,3 +1,6 @@
+<!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # Vulkan 1.0–1.4 core command matrix
 
 Generated from the pinned Vulkan 1.4.360 inventory. Do not edit by hand; run `python3 tools/vulkan_command_matrix.py --write`.

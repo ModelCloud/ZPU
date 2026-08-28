@@ -1,3 +1,6 @@
+// Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+// SPDX-License-Identifier: Apache-2.0
+
 const s = @import("../surface.zig");
 
 pub fn fillSpan(row: []u8, start_pixel: usize, count: usize, format: s.Format, color: s.Color) void {

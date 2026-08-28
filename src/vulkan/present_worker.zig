@@ -1,3 +1,6 @@
+// Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 const cpu_locality = @import("cpu_locality.zig");
 const frame_pacing = @import("frame_pacing.zig");
