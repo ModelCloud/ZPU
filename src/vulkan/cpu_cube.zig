@@ -2273,6 +2273,25 @@ fn drawParallel(target: []u8, depth: ?[]u8, width: u32, height: u32, uniform: []
     if (!dispatchParallel(.{ .draw = &context })) return null;
     var pixels_written: usize = 0;
     for (context.bands) |band| pixels_written += band.pixels_written;
+    if (dirty_output) |output| for (commands, 0..) |command, index| {
+        markPreparedDirtyTiles(&context.prepared[index], width, height, command.scissor, 0, 0, output);
+    };
+    if (bounds) |output| {
+        output.* = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+        for (commands, 0..) |command, index| {
+            const draw_bounds = preparedBounds(&context.prepared[index], width, height, command.scissor);
+            if (draw_bounds.width == 0 or draw_bounds.height == 0) continue;
+            if (output.width == 0 or output.height == 0) {
+                output.* = draw_bounds;
+                continue;
+            }
+            const x0 = @min(output.x, draw_bounds.x);
+            const y0 = @min(output.y, draw_bounds.y);
+            const x1 = @max(output.x + @as(i32, @intCast(output.width)), draw_bounds.x + @as(i32, @intCast(draw_bounds.width)));
+            const y1 = @max(output.y + @as(i32, @intCast(output.height)), draw_bounds.y + @as(i32, @intCast(draw_bounds.height)));
+            output.* = .{ .x = x0, .y = y0, .width = @intCast(x1 - x0), .height = @intCast(y1 - y0) };
+        }
+    }
     return pixels_written;
 }
 
@@ -2330,9 +2349,10 @@ pub fn drawCountedParallel(target: []u8, depth: []u8, width: u32, height: u32, u
     return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, counters, null, null, null, false);
 }
 
-fn drawParallelBatchImpl(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, counters: ?*Counters, clear_color_pattern: ?u32, clear_depth_pattern: ?u32, comptime color_only: bool) usize {
+fn drawParallelBatchImpl(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, counters: ?*Counters, clear_color_pattern: ?u32, clear_depth_pattern: ?u32, bounds: ?*Rect, dirty_output: ?[]u8, comptime color_only: bool) usize {
     if (commands.len == 0 or commands.len > max_batch_commands or dirtyTileByteCount(width, height) > max_dirty_tile_bytes) return 0;
     if (target.len != @as(usize, width) * height * 4 or depth.len < @as(usize, width) * height * 4) return 0;
+    if (dirty_output) |output| if (output.len < dirtyTileByteCount(width, height)) return 0;
     _ = cpu_locality.pinCurrent(.render);
     const needs_preparation = batchNeedsPreparation(commands, width, height);
     var prepare_context: ParallelBatchPrepare = undefined;
@@ -2386,26 +2406,41 @@ fn drawParallelBatchImpl(target: []u8, depth: []u8, width: u32, height: u32, com
     return pixels_written;
 }
 
-fn drawParallelBatch(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, counters: ?*Counters, clear_color_pattern: ?u32, clear_depth_pattern: ?u32) usize {
-    return drawParallelBatchImpl(target, depth, width, height, commands, counters, clear_color_pattern, clear_depth_pattern, false);
+fn drawParallelBatch(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, counters: ?*Counters, clear_color_pattern: ?u32, clear_depth_pattern: ?u32, bounds: ?*Rect, dirty_output: ?[]u8) usize {
+    return drawParallelBatchImpl(target, depth, width, height, commands, counters, clear_color_pattern, clear_depth_pattern, bounds, dirty_output, false);
 }
 
-fn drawParallelBatchColorOnly(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand) usize {
-    return drawParallelBatchImpl(target, depth, width, height, commands, null, null, null, true);
+fn drawParallelBatchColorOnly(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, bounds: ?*Rect, dirty_output: ?[]u8) usize {
+    return drawParallelBatchImpl(target, depth, width, height, commands, null, null, null, bounds, dirty_output, true);
 }
 
 /// Counted two-core submission for an ordered batch of opaque draws. The batch
 /// pays one worker dispatch while retaining per-command transform, texture,
 /// scissor, and depth ordering semantics.
 pub fn drawCountedParallelBatch(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, counters: *Counters) usize {
-    return drawParallelBatch(target, depth, width, height, commands, counters, null, null);
+    return drawParallelBatch(target, depth, width, height, commands, counters, null, null, null, null);
 }
 
 /// Uncounted two-core submission for an ordered batch of opaque draws. Validate
 /// a representative frame with drawCountedParallelBatch, then use this path
 /// when counter instrumentation should not perturb frame timing.
 pub fn drawUncountedParallelBatch(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand) usize {
-    return drawParallelBatch(target, depth, width, height, commands, null, null, null);
+    return drawParallelBatch(target, depth, width, height, commands, null, null, null, null, null);
+}
+
+/// Uncounted batch submission that also returns the conservative transformed
+/// content bounds used by damage/present tracking. The bounds are computed
+/// from the same prepared geometry as the raster work, so callers do not need
+/// to replay every command through the single-draw tracking API.
+pub fn drawUncountedParallelBatchTracked(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, bounds: *Rect) usize {
+    return drawParallelBatch(target, depth, width, height, commands, null, null, null, bounds, null);
+}
+
+/// Tracked batch submission with the optional dirty-tile bitmap used by the
+/// Vulkan present path. It retains the same transformed bounds as the normal
+/// tracked entry point and marks every tile touched by the prepared geometry.
+pub fn drawUncountedParallelBatchTrackedTiles(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, bounds: *Rect, dirty_output: []u8) usize {
+    return drawParallelBatch(target, depth, width, height, commands, null, null, null, bounds, dirty_output);
 }
 
 /// Uncounted opaque overlay for a framebuffer that already contains the
@@ -2416,14 +2451,14 @@ pub fn drawUncountedParallelBatch(target: []u8, depth: []u8, width: u32, height:
 /// must be cleared or covered before this call. Only color is updated; the
 /// existing depth attachment is intentionally preserved.
 pub fn drawUncountedParallelBatchOpaqueOverlay(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand) usize {
-    return drawParallelBatchColorOnly(target, depth, width, height, commands);
+    return drawParallelBatchColorOnly(target, depth, width, height, commands, null, null);
 }
 
 /// Uncounted two-core batch that clears both attachments in the worker lanes.
 /// The known clear depth also enables a conservative per-tile hierarchical
 /// depth shortcut for flat opaque spans.
 pub fn drawUncountedParallelBatchCleared(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, color_pattern: u32, depth_pattern: u32) usize {
-    return drawParallelBatch(target, depth, width, height, commands, null, color_pattern, depth_pattern);
+    return drawParallelBatch(target, depth, width, height, commands, null, color_pattern, depth_pattern, null, null);
 }
 
 /// Uncounted replay for an immutable command buffer and framebuffer. The

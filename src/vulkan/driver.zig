@@ -9399,6 +9399,105 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     }
     if (depth) |depth_image| depth_image.content_bounds = unionRect(depth_image.content_bounds, bounds);
 }
+fn cpuCubeBatchCommand(op: anytype) ?cpu_cube.DrawCommand {
+    switch (op.pipeline.execution_abi) {
+        .cpu_cube_v1 => {},
+        else => return null,
+    }
+    if (op.rasterizer_discard_enable != 0 or op.primitive_topology != 3 or op.primitive_restart_enable != 0 or
+        op.depth_test_enable != 1 or op.depth_write_enable != 1 or op.depth_compare_op != 3 or
+        op.depth_bounds_test_enable != 0 or op.depth_bias_enable != 0 or op.pipeline.color_write_mask != 0xf or
+        op.pipeline.color_blend_enable != 0 or op.cull_mode != 0 or op.front_face != 0 or
+        op.base_vertex != 0 or op.instance_count != 1 or op.indexed != null or op.layer_count != 1) return null;
+    const uniform_buffer = op.descriptors.uniform orelse return null;
+    const texture = op.descriptors.texture orelse return null;
+    const memory = uniform_buffer.memory orelse return null;
+    if (op.descriptors.uniform_offset > uniform_buffer.size or op.descriptors.uniform_range == 0 or
+        op.descriptors.uniform_range > uniform_buffer.size - op.descriptors.uniform_offset) return null;
+    const uniform_base = std.math.add(u64, uniform_buffer.offset, op.descriptors.uniform_offset) catch return null;
+    const uniform_start = std.math.cast(usize, uniform_base) orelse return null;
+    const uniform_length = std.math.cast(usize, op.descriptors.uniform_range) orelse return null;
+    if (uniform_start > memory.bytes.len or uniform_length > memory.bytes.len - uniform_start) return null;
+    const color = op.color_image orelse if (op.framebuffer) |fb| fb.color_image else null;
+    const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
+    if (color == null or depth == null) return null;
+    return .{
+        .uniform = memory.bytes[uniform_start..][0..uniform_length],
+        .texture = imageBytes(texture),
+        .texture_width = texture.width,
+        .texture_height = texture.height,
+        .vertex_count = op.vertex_count,
+        .viewport = op.viewport,
+        .scissor = op.scissor,
+    };
+}
+
+/// Collapse adjacent legacy cpu_cube_v1 draw commands into one renderer
+/// submission. This is deliberately narrower than Vulkan's general command
+/// semantics: it only accepts the exact opaque, non-indexed, single-layer
+/// state that the batch API can represent. A state transition, unsupported
+/// execution ABI, blend, cull, indexed draw, instance, or layer falls back to
+/// executeValidatedCommand unchanged.
+fn executeValidatedCommandBatch(commands: []const Command, query_context: *QueryExecutionContext) ?usize {
+    if (commands.len < 2) return null;
+    const first = switch (commands[0]) {
+        .cube_draw => |op| op,
+        else => return null,
+    };
+    _ = cpuCubeBatchCommand(first) orelse return null;
+    const first_color = first.color_image orelse if (first.framebuffer) |fb| fb.color_image else null;
+    const first_depth = first.depth_image orelse if (first.framebuffer) |fb| fb.depth_image else null;
+    const color_image = first_color orelse return null;
+    const depth_image = first_depth orelse return null;
+    if (color_image.width != depth_image.width or color_image.height != depth_image.height) return null;
+
+    var batch: [256]cpu_cube.DrawCommand = undefined;
+    var batch_len: usize = 0;
+    var index: usize = 0;
+    while (index < commands.len and batch_len < batch.len) : (index += 1) {
+        const op = switch (commands[index]) {
+            .cube_draw => |value| value,
+            else => break,
+        };
+        const command = cpuCubeBatchCommand(op) orelse break;
+        const color = op.color_image orelse if (op.framebuffer) |fb| fb.color_image else null;
+        const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
+        if (color != color_image or depth != depth_image or op.color_base_layer != first.color_base_layer or
+            op.depth_base_layer != first.depth_base_layer) break;
+        batch[batch_len] = command;
+        batch_len += 1;
+    }
+    if (batch_len < 2) return null;
+
+    const color_bytes = imageLayerBytes(color_image, first.color_base_layer);
+    const depth_bytes = imageLayerBytes(depth_image, first.depth_base_layer);
+    const operation_start = frame_pacing.monotonicNs();
+    var bounds = emptyRect();
+    const dirty_tiles = if (first.layer_count == 1 and @as(u64, color_image.width) * color_image.height >= 3840 * 2160) ensureDirtyTiles(color_image) else null;
+    const pixels_written = if (dirty_tiles) |tiles|
+        cpu_cube.drawUncountedParallelBatchTrackedTiles(color_bytes, depth_bytes, color_image.width, color_image.height, batch[0..batch_len], &bounds, tiles)
+    else
+        cpu_cube.drawUncountedParallelBatchTracked(color_bytes, depth_bytes, color_image.width, color_image.height, batch[0..batch_len], &bounds);
+    if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(pixels_written, .monotonic);
+    color_image.content_bounds = unionRect(color_image.content_bounds, bounds);
+    depth_image.content_bounds = unionRect(depth_image.content_bounds, bounds);
+    color_image.complex_3d_content = true;
+    color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+    return batch_len;
+}
+
+fn executeValidatedCommands(commands: []const Command, query_context: *QueryExecutionContext) void {
+    var index: usize = 0;
+    while (index < commands.len) {
+        if (executeValidatedCommandBatch(commands[index..], query_context)) |consumed| {
+            index += consumed;
+        } else {
+            executeValidatedCommand(commands[index], query_context);
+            index += 1;
+        }
+    }
+}
+
 fn executeValidatedCommand(command: Command, query_context: *QueryExecutionContext) void {
     switch (command) {
         .fill => |op| {
@@ -15458,7 +15557,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
             }
         };
         if (submit.command_buffer_count != 0) for (submit.command_buffers.?[0..submit.command_buffer_count]) |cb| {
-            for (cb.impl.commands[0..cb.impl.count]) |command| executeValidatedCommand(command, &query_context);
+            executeValidatedCommands(cb.impl.commands[0..cb.impl.count], &query_context);
             for (cb.impl.secondaries[0..cb.impl.secondary_count]) |secondary| {
                 if (secondary.impl.begin_flags & 1 != 0) secondary.impl.state = 3;
             }
