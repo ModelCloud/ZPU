@@ -56,6 +56,19 @@ inline fn checkSpanBounds(row_len: usize, start: usize, count: usize) void {
     if (bytes > row_len) @trap();
 }
 
+/// Validate a row-oriented rectangle before entering the vector loop. The
+/// pointer passed by dispatch points at the first clipped row and row_len is
+/// the remaining backing allocation, not merely the visible row width; this
+/// lets padded surfaces and a short final row remain memory-safe.
+inline fn checkRowsBounds(row_len: usize, stride: usize, start: usize, count: usize, rows: usize) void {
+    checkSpanBounds(stride, start, count);
+    if (rows == 0) return;
+    const row_offset = std.math.mul(usize, rows - 1, stride) catch @trap();
+    const end_pixel = std.math.add(usize, start, count) catch @trap();
+    const end = std.math.add(usize, row_offset, std.math.mul(usize, end_pixel, 4) catch @trap()) catch @trap();
+    if (end > row_len) @trap();
+}
+
 fn fillImpl(row_ptr: [*]u8, row_len: usize, start: usize, count: usize, format_tag: u8, packed_color: u32) callconv(.c) void {
     checkSpanBounds(row_len, start, count);
     vector.fill(8, row_ptr[0..row_len], start, count, checkedFormat(format_tag), unpackColor(packed_color));
@@ -73,8 +86,42 @@ fn blendPixelsImpl(row_ptr: [*]u8, row_len: usize, start: usize, source_ptr: [*]
     vector.blendPixels(8, row_ptr[0..row_len], start, source_ptr[0..source_len], count, checkedFormat(format_tag));
 }
 
+fn fillRowsImpl(row_ptr: [*]u8, row_len: usize, stride: usize, start: usize, count: usize, rows: usize, format_tag: u8, packed_color: u32) callconv(.c) void {
+    checkRowsBounds(row_len, stride, start, count, rows);
+    const format = checkedFormat(format_tag);
+    const color = unpackColor(packed_color);
+    for (0..rows) |y| {
+        const offset = std.math.mul(usize, y, stride) catch @trap();
+        vector.fill(8, row_ptr[offset..row_len], start, count, format, color);
+    }
+}
+
+fn blendRowsImpl(row_ptr: [*]u8, row_len: usize, stride: usize, start: usize, count: usize, rows: usize, format_tag: u8, packed_color: u32) callconv(.c) void {
+    checkRowsBounds(row_len, stride, start, count, rows);
+    const format = checkedFormat(format_tag);
+    const color = unpackColor(packed_color);
+    for (0..rows) |y| {
+        const offset = std.math.mul(usize, y, stride) catch @trap();
+        vector.blend(8, row_ptr[offset..row_len], start, count, format, color);
+    }
+}
+
+fn blendPixelsRowsImpl(row_ptr: [*]u8, row_len: usize, stride: usize, source_ptr: [*]const u8, source_len: usize, source_stride: usize, start: usize, count: usize, rows: usize, format_tag: u8) callconv(.c) void {
+    checkRowsBounds(row_len, stride, start, count, rows);
+    checkRowsBounds(source_len, source_stride, 0, count, rows);
+    const format = checkedFormat(format_tag);
+    for (0..rows) |y| {
+        const destination_offset = std.math.mul(usize, y, stride) catch @trap();
+        const source_offset = std.math.mul(usize, y, source_stride) catch @trap();
+        vector.blendPixels(8, row_ptr[destination_offset..row_len], start, source_ptr[source_offset..source_len], count, format);
+    }
+}
+
 comptime {
     @export(&fillImpl, .{ .name = abi.fill_span_8_name });
     @export(&blendSpanImpl, .{ .name = abi.blend_span_8_name });
     @export(&blendPixelsImpl, .{ .name = abi.blend_pixels_8_name });
+    @export(&fillRowsImpl, .{ .name = abi.fill_rows_8_name });
+    @export(&blendRowsImpl, .{ .name = abi.blend_rows_8_name });
+    @export(&blendPixelsRowsImpl, .{ .name = abi.blend_pixels_rows_8_name });
 }

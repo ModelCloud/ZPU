@@ -75,6 +75,9 @@ const v3 = struct {
     const fill_span_8: abi.FillSpan8Fn = @extern(abi.FillSpan8Fn, .{ .name = abi.fill_span_8_name });
     const blend_span_8: abi.BlendSpan8Fn = @extern(abi.BlendSpan8Fn, .{ .name = abi.blend_span_8_name });
     const blend_pixels_8: abi.BlendPixels8Fn = @extern(abi.BlendPixels8Fn, .{ .name = abi.blend_pixels_8_name });
+    const fill_rows_8: abi.FillRows8Fn = @extern(abi.FillRows8Fn, .{ .name = abi.fill_rows_8_name });
+    const blend_rows_8: abi.BlendRows8Fn = @extern(abi.BlendRows8Fn, .{ .name = abi.blend_rows_8_name });
+    const blend_pixels_rows_8: abi.BlendPixelsRows8Fn = @extern(abi.BlendPixelsRows8Fn, .{ .name = abi.blend_pixels_rows_8_name });
 };
 
 /// Linkage consistency proof (build-time): an artifact whose comptime
@@ -86,10 +89,13 @@ const v3 = struct {
 /// kernel-free artifacts cannot carry them (asserted by the disassembly
 /// gate's `--no-kernel-symbols` mode).
 const linkage_proof = if (eight_lane_boundary)
-    [3]*const anyopaque{
+    [6]*const anyopaque{
         @ptrCast(v3.fill_span_8),
         @ptrCast(v3.blend_span_8),
         @ptrCast(v3.blend_pixels_8),
+        @ptrCast(v3.fill_rows_8),
+        @ptrCast(v3.blend_rows_8),
+        @ptrCast(v3.blend_pixels_rows_8),
     }
 else
     [0]*const anyopaque{};
@@ -141,8 +147,8 @@ pub fn fillRows(comptime backend: Backend, surface: *s.Surface, rectangle: s.Rec
             vector.fill(4, surface.row(@intCast(y)), @intCast(rectangle.x), rectangle.width, surface.format, color),
         .avx2 => if (comptime eight_lane_boundary) {
             requireEightLaneSupport();
-            for (@intCast(rectangle.y)..@as(usize, @intCast(rectangle.y)) + rectangle.height) |y|
-                v3.fill_span_8(surface.row(@intCast(y)).ptr, surface.row(@intCast(y)).len, @intCast(rectangle.x), rectangle.width, @intFromEnum(surface.format), packColor(color));
+            const row_offset = std.math.mul(usize, @as(usize, @intCast(rectangle.y)), surface.stride) catch unreachable;
+            v3.fill_rows_8(surface.pixels.ptr + row_offset, surface.pixels.len - row_offset, surface.stride, @intCast(rectangle.x), rectangle.width, rectangle.height, @intFromEnum(surface.format), packColor(color));
         } else @panic("eight-lane kernels require an x86_64 artifact target"),
     }
 }
@@ -158,9 +164,28 @@ pub fn blendRows(comptime backend: Backend, surface: *s.Surface, rectangle: s.Re
             vector.blend(4, surface.row(@intCast(y)), @intCast(rectangle.x), rectangle.width, surface.format, color),
         .avx2 => if (comptime eight_lane_boundary) {
             requireEightLaneSupport();
-            for (@intCast(rectangle.y)..@as(usize, @intCast(rectangle.y)) + rectangle.height) |y|
-                v3.blend_span_8(surface.row(@intCast(y)).ptr, surface.row(@intCast(y)).len, @intCast(rectangle.x), rectangle.width, @intFromEnum(surface.format), packColor(color));
+            const row_offset = std.math.mul(usize, @as(usize, @intCast(rectangle.y)), surface.stride) catch unreachable;
+            v3.blend_rows_8(surface.pixels.ptr + row_offset, surface.pixels.len - row_offset, surface.stride, @intCast(rectangle.x), rectangle.width, rectangle.height, @intFromEnum(surface.format), packColor(color));
         } else @panic("eight-lane kernels require an x86_64 artifact target"),
+    }
+}
+
+/// Runtime-backend wrapper for public clipped-rectangle APIs. Keeping the
+/// backend switch in one dispatch function avoids cloning the row loop at
+/// every raster call while still validating the AVX2 boundary exactly once.
+pub fn fillRowsRuntime(backend: Backend, surface: *s.Surface, rectangle: s.Rect, color: s.Color) void {
+    switch (backend) {
+        .scalar => fillRows(.scalar, surface, rectangle, color),
+        .portable_vector => fillRows(.portable_vector, surface, rectangle, color),
+        .avx2 => fillRows(.avx2, surface, rectangle, color),
+    }
+}
+
+pub fn blendRowsRuntime(backend: Backend, surface: *s.Surface, rectangle: s.Rect, color: s.Color) void {
+    switch (backend) {
+        .scalar => blendRows(.scalar, surface, rectangle, color),
+        .portable_vector => blendRows(.portable_vector, surface, rectangle, color),
+        .avx2 => blendRows(.avx2, surface, rectangle, color),
     }
 }
 
@@ -188,10 +213,12 @@ pub fn blendPixelsRows(backend: Backend, surface: *s.Surface, destination: s.Rec
             const source_offset = ((source_y + dy) * source_width + source_x) * 4;
             vector.blendPixels(4, surface.row(@intCast(@as(usize, @intCast(destination.y)) + dy)), @intCast(destination.x), source[source_offset..], destination.width, surface.format);
         },
-        .avx2 => for (0..destination.height) |dy| {
-            const source_offset = ((source_y + dy) * source_width + source_x) * 4;
-            blendPixels(.avx2, surface.row(@intCast(@as(usize, @intCast(destination.y)) + dy)), @intCast(destination.x), source[source_offset..], destination.width, surface.format);
-        },
+        .avx2 => if (comptime eight_lane_boundary) {
+            requireEightLaneSupport();
+            const destination_offset = std.math.mul(usize, @as(usize, @intCast(destination.y)), surface.stride) catch unreachable;
+            const source_offset = std.math.mul(usize, std.math.add(usize, std.math.mul(usize, source_y, source_width) catch unreachable, source_x) catch unreachable, 4) catch unreachable;
+            v3.blend_pixels_rows_8(surface.pixels.ptr + destination_offset, surface.pixels.len - destination_offset, surface.stride, source.ptr + source_offset, source.len - source_offset, @as(usize, source_width) * 4, @intCast(destination.x), destination.width, destination.height, @intFromEnum(surface.format));
+        } else @panic("eight-lane kernels require an x86_64 artifact target"),
     }
 }
 
@@ -220,16 +247,18 @@ pub fn blendPixelsRowsBatch(backend: Backend, surface: *s.Surface, destinations:
                 vector.blendPixels(4, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
             }
         },
-        .avx2 => for (destinations) |destination| {
-            if (destination.width != source_width or destination.height != source_height) continue;
-            const clipped = s.clip(destination, surface.width, surface.height) orelse continue;
-            const source_x: usize = @intCast(clipped.x - destination.x);
-            const source_y: usize = @intCast(clipped.y - destination.y);
-            for (0..clipped.height) |dy| {
-                const source_offset = ((source_y + dy) * source_width + source_x) * 4;
-                blendPixels(.avx2, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
+        .avx2 => if (comptime eight_lane_boundary) {
+            requireEightLaneSupport();
+            for (destinations) |destination| {
+                if (destination.width != source_width or destination.height != source_height) continue;
+                const clipped = s.clip(destination, surface.width, surface.height) orelse continue;
+                const source_x: usize = @intCast(clipped.x - destination.x);
+                const source_y: usize = @intCast(clipped.y - destination.y);
+                const destination_offset = std.math.mul(usize, @as(usize, @intCast(clipped.y)), surface.stride) catch unreachable;
+                const source_offset = std.math.mul(usize, std.math.add(usize, std.math.mul(usize, source_y, source_width) catch unreachable, source_x) catch unreachable, 4) catch unreachable;
+                v3.blend_pixels_rows_8(surface.pixels.ptr + destination_offset, surface.pixels.len - destination_offset, surface.stride, source.ptr + source_offset, source.len - source_offset, @as(usize, source_width) * 4, @intCast(clipped.x), clipped.width, clipped.height, @intFromEnum(surface.format));
             }
-        },
+        } else @panic("eight-lane kernels require an x86_64 artifact target"),
     }
 }
 
@@ -272,24 +301,31 @@ pub fn blendPixelsRowsRegionsBatch(backend: Backend, surface: *s.Surface, region
                 } else vector.blendPixels(4, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
             }
         },
-        .avx2 => for (regions) |region| {
-            const destination = region.destination;
-            const source_rect = region.source;
-            if (source_rect.x < 0 or source_rect.y < 0) continue;
-            const sx: u32 = @intCast(source_rect.x);
-            const sy: u32 = @intCast(source_rect.y);
-            if (sx > source_width or sy > source_height or source_rect.width > source_width - sx or source_rect.height > source_height - sy) continue;
-            if (destination.width != source_rect.width or destination.height != source_rect.height) continue;
-            const clipped = s.clip(destination, surface.width, surface.height) orelse continue;
-            const source_x: usize = @intCast(source_rect.x + (clipped.x - destination.x));
-            const source_y: usize = @intCast(source_rect.y + (clipped.y - destination.y));
-            for (0..clipped.height) |dy| {
-                const source_offset = ((source_y + dy) * source_width + source_x) * 4;
+        .avx2 => if (comptime eight_lane_boundary) {
+            requireEightLaneSupport();
+            for (regions) |region| {
+                const destination = region.destination;
+                const source_rect = region.source;
+                if (source_rect.x < 0 or source_rect.y < 0) continue;
+                const sx: u32 = @intCast(source_rect.x);
+                const sy: u32 = @intCast(source_rect.y);
+                if (sx > source_width or sy > source_height or source_rect.width > source_width - sx or source_rect.height > source_height - sy) continue;
+                if (destination.width != source_rect.width or destination.height != source_rect.height) continue;
+                const clipped = s.clip(destination, surface.width, surface.height) orelse continue;
+                const source_x: usize = @intCast(source_rect.x + (clipped.x - destination.x));
+                const source_y: usize = @intCast(source_rect.y + (clipped.y - destination.y));
                 if (binary_alpha) {
-                    if (surface.format == .rgba8_unorm) vector.blendPixelsBinaryRgba(8, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width) else vector.blendPixelsBinary(8, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
-                } else blendPixels(.avx2, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
+                    for (0..clipped.height) |dy| {
+                        const source_offset = ((source_y + dy) * source_width + source_x) * 4;
+                        if (surface.format == .rgba8_unorm) vector.blendPixelsBinaryRgba(8, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width) else vector.blendPixelsBinary(8, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
+                    }
+                } else {
+                    const destination_offset = std.math.mul(usize, @as(usize, @intCast(clipped.y)), surface.stride) catch unreachable;
+                    const source_offset = std.math.mul(usize, std.math.add(usize, std.math.mul(usize, source_y, source_width) catch unreachable, source_x) catch unreachable, 4) catch unreachable;
+                    v3.blend_pixels_rows_8(surface.pixels.ptr + destination_offset, surface.pixels.len - destination_offset, surface.stride, source.ptr + source_offset, source.len - source_offset, @as(usize, source_width) * 4, @intCast(clipped.x), clipped.width, clipped.height, @intFromEnum(surface.format));
+                }
             }
-        },
+        } else @panic("eight-lane kernels require an x86_64 artifact target"),
     }
 }
 

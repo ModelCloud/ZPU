@@ -70,6 +70,9 @@ awk -v phase=1 '
     exports["zpu_v3_fill_span_8"] = 1
     exports["zpu_v3_blend_span_8"] = 1
     exports["zpu_v3_blend_pixels_8"] = 1
+    exports["zpu_v3_fill_rows_8"] = 1
+    exports["zpu_v3_blend_rows_8"] = 1
+    exports["zpu_v3_blend_pixels_rows_8"] = 1
     bad = 0
     for (e in exports) {
       if (!(e in seen_export)) {

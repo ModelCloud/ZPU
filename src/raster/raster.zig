@@ -62,7 +62,7 @@ pub fn fillRect(surface: *s.Surface, rect: s.Rect, color: s.Color) void {
         kernel.fillSpan(span.bytes, 0, span.pixels, color) catch unreachable;
         return;
     }
-    for (@intCast(clipped.y)..@as(usize, @intCast(clipped.y)) + clipped.height) |y| kernel.fillSpan(surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, color) catch unreachable;
+    dispatch.fillRowsRuntime(kernel.backend, surface, clipped, color);
 }
 pub fn blendRect(surface: *s.Surface, rect: s.Rect, color: s.Color) void {
     const clipped = s.clip(rect, surface.width, surface.height) orelse return;
@@ -71,7 +71,7 @@ pub fn blendRect(surface: *s.Surface, rect: s.Rect, color: s.Color) void {
         kernel.blendSpan(span.bytes, 0, span.pixels, color) catch unreachable;
         return;
     }
-    for (@intCast(clipped.y)..@as(usize, @intCast(clipped.y)) + clipped.height) |y| kernel.blendSpan(surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, color) catch unreachable;
+    dispatch.blendRowsRuntime(kernel.backend, surface, clipped, color);
 }
 
 pub fn fillRectWith(surface: *s.Surface, rect: s.Rect, color: s.Color, backend: dispatch.Backend) void {
@@ -94,7 +94,7 @@ pub fn fillRectWith(surface: *s.Surface, rect: s.Rect, color: s.Color, backend: 
         dispatch.fillSpan(backend, span.bytes, 0, span.pixels, surface.format, color);
         return;
     }
-    for (@intCast(clipped.y)..@as(usize, @intCast(clipped.y)) + clipped.height) |y| dispatch.fillSpan(backend, surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, surface.format, color);
+    dispatch.fillRowsRuntime(backend, surface, clipped, color);
 }
 pub fn blendRectWith(surface: *s.Surface, rect: s.Rect, color: s.Color, backend: dispatch.Backend) void {
     const clipped = s.clip(rect, surface.width, surface.height) orelse return;
@@ -118,7 +118,7 @@ pub fn blendRectWith(surface: *s.Surface, rect: s.Rect, color: s.Color, backend:
         dispatch.blendSpan(backend, span.bytes, 0, span.pixels, surface.format, color);
         return;
     }
-    for (@intCast(clipped.y)..@as(usize, @intCast(clipped.y)) + clipped.height) |y| dispatch.blendSpan(backend, surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, surface.format, color);
+    dispatch.blendRowsRuntime(backend, surface, clipped, color);
 }
 
 /// A colored rectangle command used by retained-mode UI/compositor callers.

@@ -81,6 +81,24 @@ zpu_v3_blend_span_8:
 zpu_v3_blend_pixels_8:
 	ret
 .size zpu_v3_blend_pixels_8, .-zpu_v3_blend_pixels_8
+.globl zpu_v3_fill_rows_8
+.type zpu_v3_fill_rows_8,@function
+zpu_v3_fill_rows_8:
+	vpbroadcastd %xmm1, %ymm0
+	ret
+.size zpu_v3_fill_rows_8, .-zpu_v3_fill_rows_8
+.globl zpu_v3_blend_rows_8
+.type zpu_v3_blend_rows_8,@function
+zpu_v3_blend_rows_8:
+	vpblendd $0, %ymm1, %ymm0, %ymm0
+	ret
+.size zpu_v3_blend_rows_8, .-zpu_v3_blend_rows_8
+.globl zpu_v3_blend_pixels_rows_8
+.type zpu_v3_blend_pixels_rows_8,@function
+zpu_v3_blend_pixels_rows_8:
+	vpblendd $0, %ymm1, %ymm0, %ymm0
+	ret
+.size zpu_v3_blend_pixels_rows_8, .-zpu_v3_blend_pixels_rows_8
 EOF
 
 cat >"$work/plain.S" <<'EOF'

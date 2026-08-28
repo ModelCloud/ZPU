@@ -51,8 +51,8 @@ esac
 # Exact exported kernel symbols. Single source of truth is
 # src/simd/kernel_abi.zig, whose test asserts these names appear verbatim in
 # this script.
-KERNEL_EXPORTS=(zpu_v3_fill_span_8 zpu_v3_blend_span_8 zpu_v3_blend_pixels_8)
-kernel_symbol_re='^(zpu_v3_fill_span_8|zpu_v3_blend_span_8|zpu_v3_blend_pixels_8)$'
+KERNEL_EXPORTS=(zpu_v3_fill_span_8 zpu_v3_blend_span_8 zpu_v3_blend_pixels_8 zpu_v3_fill_rows_8 zpu_v3_blend_rows_8 zpu_v3_blend_pixels_rows_8)
+kernel_symbol_re='^(zpu_v3_fill_span_8|zpu_v3_blend_span_8|zpu_v3_blend_pixels_8|zpu_v3_fill_rows_8|zpu_v3_blend_rows_8|zpu_v3_blend_pixels_rows_8)$'
 
 # Fail closed: every required tool must exist before any analysis.
 missing_tools=()
