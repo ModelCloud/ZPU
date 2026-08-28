@@ -25,6 +25,8 @@ ZPU ICD, the ICD validates the call, and the CPU does the work. 🧠➡️🖼�
   <em>SmolVM → Linux Desktop → Chromium: ZPU as the Vulkan driver rendering google.com headlessly with ANGLE.</em>
 </p>
 
+Reproduce this screenshot with [`tools/smolvm-chrome.sh`](tools/smolvm-chrome.sh) and [`tools/smolvm-chrome.env`](tools/smolvm-chrome.env) once ZPU is staged in a SmolVM guest.
+
 ## ✨ At a glance
 
 | Area | State | Evidence / scope |
