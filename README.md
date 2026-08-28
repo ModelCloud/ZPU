@@ -369,7 +369,9 @@ The static replay APIs remain available for callers that explicitly want
 immutable attachment reuse: `drawCountedParallelStaticReuseImmutable` uses a
 thread-local pointer/generation fast path, while
 `drawCountedParallelStaticReuse` retains exact-key validation. Those APIs are
-not used for the throughput numbers above. The benchmark's
+not used for the canonical throughput numbers above. Batched callers with
+unchanged command buffers can use `drawUncountedParallelBatchStaticReplay` for
+the same explicit immutable-frame contract. The benchmark's
 `drawUncountedParallelDirtyClearedValidated` API is separate: it requires stable
 full-frame inputs and validates each replay while clearing only prior writable
 spans. Dynamic Vulkan submissions continue through the normal two-core
@@ -416,14 +418,14 @@ ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d-apps -Doptimize=R
 See [`docs/3d-app-benchmarks.md`](docs/3d-app-benchmarks.md) for the workload
 contracts, focused `--scenario` commands, and correctness methodology.
 
-The latest batched-renderer pass keeps prepared command storage across frames:
-static commands can reuse the complete prepared draw, atlas commands refresh
-only UV/raster state while retaining transformed coverage spans and prelit atlas
-tables, and cache misses are prepared and rasterized through one worker job.
-On the same pinned two-core host this probe reached roughly **1,148 FPS**
-desktop, **690 FPS** terminal, and **634 FPS** game, versus about 348/295/280
-FPS on the merged-main baseline. These are workload-specific measurements;
-the canonical fixed-FNV vkcube benchmark remains separate and unchanged.
+The latest batched-renderer pass keeps prepared command storage across frames,
+adds caller-supplied revision keys to avoid repeated dynamic-buffer scans,
+avoids copying the large prepared-draw slab during dynamic preparation, and
+uses direct vector depth tests for small application quads. Unchanged desktop
+command buffers can additionally use the explicit immutable batch replay API;
+the app suite measures that common compositor case separately from dynamic
+terminal and game frames. These are workload-specific measurements; the
+canonical fixed-FNV vkcube benchmark remains separate and unchanged.
 
 ## 🎥 30-second 4K / 8K capture recipe
 
