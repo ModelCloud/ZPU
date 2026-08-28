@@ -18,3 +18,10 @@ reference checksum, sampling schedule, exact work counters, capture procedure,
 and commit-bound evidence rules are documented in
 [pr-readiness.md](pr-readiness.md). This remains deliberately narrow and is not
 a general SPIR-V claim.
+
+The next optimization gate is an opt-in two-core profile. Run
+`ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d -- --two-core`;
+the process must expose exactly two selected physical cores. The target is
+31,339.20 triangles/s (10× the frozen 3,133.92 triangles/s baseline), with
+the measured speedup and affinity recorded in the target report. Until that
+number is measured, it is a goal rather than a performance claim.

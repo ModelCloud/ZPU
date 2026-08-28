@@ -168,12 +168,20 @@ This is the frozen, vkcube-specific CPU cube benchmark: twelve triangles at
 800×600, five warmups followed by thirty timed frames. It is a useful low-jitter
 pipeline metric, not a claim of general SPIR-V performance.
 
+The optimization target is explicit: keep the render caller and one raster
+worker on exactly two selected physical cores, then reach **10×** the frozen
+baseline (**31,339.20 triangles/s** versus 3,133.92 triangles/s). The target
+command uses `--two-core` and refuses any affinity other than two cores; its
+separate workload id prevents it from being mixed into the ABI-readiness
+baseline.
+
 | Metric | Result |
 | --- | ---: |
 | Median frame rate | **261.16 FPS** |
 | Frame time p50 / p95 / p99 | 3.826 / 3.840 / **3.873 ms** |
 | Triangles submitted / rasterized | 12 / 12 per frame |
 | Triangle throughput | **3,133.92 triangles/s** |
+| Two-core 10× target | **31,339.20 triangles/s** |
 | Fragments tested | **103.13M/s** |
 | Fragments covered | **96.37M/s** |
 | Depth tests passed / color writes | **48.19M/s** |
@@ -182,10 +190,18 @@ pipeline metric, not a claim of general SPIR-V performance.
 Run it yourself:
 
 ```sh
-tools/limited-cpus.sh zig build benchmark-3d -Doptimize=ReleaseFast -- \
+ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d -Doptimize=ReleaseFast -- \
+  --two-core \
   --json --source-commit "$(git rev-parse HEAD)" \
   --utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
+
+The current two-core probe reports the measured speedup in its JSON and stderr;
+the 10× gate is a target, not a passed claim. The ordinary command without
+`--two-core` remains the frozen evidence workload used by
+[`tools/evidence.py`](tools/evidence.py).
+Add `--require-10x` to turn the target into a failing acceptance gate once
+optimization work is ready to enforce it.
 
 ## 🎥 30-second 4K / 8K capture recipe
 
