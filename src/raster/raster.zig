@@ -81,7 +81,10 @@ pub fn fillRectWith(surface: *s.Surface, rect: s.Rect, color: s.Color, backend: 
         return;
     }
     const clipped = s.clip(rect, surface.width, surface.height) orelse return;
-    if (clipped.width <= 2 and clipped.height <= 2) {
+    // Narrow spans (cursor/guideline columns) never fill a SIMD lane. Writing
+    // them directly avoids one vector-kernel call per scanline while retaining
+    // the exact format-aware byte order.
+    if (clipped.width <= 2) {
         for (0..clipped.height) |dy| for (0..clipped.width) |dx| {
             s.Surface.write(surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), (@as(usize, @intCast(clipped.x)) + dx) * 4, surface.format, color);
         };
@@ -143,7 +146,10 @@ fn fillRectBackend(comptime backend: dispatch.Backend, surface: *s.Surface, rect
         return;
     }
     const clipped = s.clip(rect, surface.width, surface.height) orelse return;
-    if (clipped.width <= 2 and clipped.height <= 2) {
+    // Narrow spans (cursor/guideline columns) never fill a SIMD lane. Writing
+    // them directly avoids one vector-kernel call per scanline while retaining
+    // the exact format-aware byte order.
+    if (clipped.width <= 2) {
         for (0..clipped.height) |dy| for (0..clipped.width) |dx| {
             s.Surface.write(surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), (@as(usize, @intCast(clipped.x)) + dx) * 4, surface.format, color);
         };
@@ -156,10 +162,7 @@ fn fillRectBackend(comptime backend: dispatch.Backend, surface: *s.Surface, rect
         }
         return;
     }
-    for (@intCast(clipped.y)..@as(usize, @intCast(clipped.y)) + clipped.height) |y| switch (backend) {
-        .scalar => scalar.fillSpan(surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, surface.format, color),
-        .portable_vector, .avx2 => dispatch.fillSpan(backend, surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, surface.format, color),
-    };
+    dispatch.fillRows(backend, surface, clipped, color);
 }
 
 fn blendRectBackend(comptime backend: dispatch.Backend, surface: *s.Surface, rect: s.Rect, color: s.Color) void {
@@ -187,10 +190,7 @@ fn blendRectBackend(comptime backend: dispatch.Backend, surface: *s.Surface, rec
         }
         return;
     }
-    for (@intCast(clipped.y)..@as(usize, @intCast(clipped.y)) + clipped.height) |y| switch (backend) {
-        .scalar => scalar.blendSpan(surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, surface.format, color),
-        .portable_vector, .avx2 => dispatch.blendSpan(backend, surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, surface.format, color),
-    };
+    dispatch.blendRows(backend, surface, clipped, color);
 }
 
 /// Fill many independently clipped rectangles with one backend route. The

@@ -12,13 +12,21 @@ fn div255Fast(comptime T: type, value: T) T {
     return (shifted + (shifted >> @as(T, @splat(8)))) >> @as(T, @splat(8));
 }
 
-fn nativePacked(comptime lanes: usize, bytes: [lanes * 4]u8) @Vector(lanes, u32) {
-    const native: @Vector(lanes, u32) = @bitCast(bytes);
+// Pixel starts are always four-byte aligned relative to the surface/source
+// base, but the public API accepts byte slices with only alignment-1 metadata.
+// An explicitly unaligned word view lets optimized targets issue direct SIMD
+// loads/stores without temporary stack arrays while remaining valid for every
+// caller-provided slice.
+fn loadNativePacked(comptime lanes: usize, bytes: []const u8, offset: usize) @Vector(lanes, u32) {
+    const ptr: *align(1) const [lanes]u32 = @ptrCast(bytes.ptr + offset);
+    const native: @Vector(lanes, u32) = @bitCast(ptr.*);
     return if (comptime builtin.cpu.arch.endian() == .little) native else @byteSwap(native);
 }
 
-fn packedBytes(comptime lanes: usize, values: @Vector(lanes, u32)) [lanes * 4]u8 {
-    return @bitCast(if (comptime builtin.cpu.arch.endian() == .little) values else @byteSwap(values));
+fn storeNativePacked(comptime lanes: usize, bytes: []u8, offset: usize, values: @Vector(lanes, u32)) void {
+    const ptr: *align(1) [lanes]u32 = @ptrCast(bytes.ptr + offset);
+    const native = if (comptime builtin.cpu.arch.endian() == .little) values else @byteSwap(values);
+    ptr.* = @bitCast(native);
 }
 
 pub fn fill(comptime lanes: usize, row: []u8, start: usize, count: usize, format: s.Format, color: s.Color) void {
@@ -30,8 +38,7 @@ pub fn fill(comptime lanes: usize, row: []u8, start: usize, count: usize, format
     const values: V = @splat(pixel_bits);
     var i: usize = 0;
     while (i + lanes <= count) : (i += lanes) {
-        const bytes = packedBytes(lanes, values);
-        @memcpy(row[(start + i) * 4 ..][0 .. lanes * 4], &bytes);
+        storeNativePacked(lanes, row, (start + i) * 4, values);
     }
     scalar.fillSpan(row, start + i, count - i, format, color);
 }
@@ -56,9 +63,7 @@ pub fn blend(comptime lanes: usize, row: []u8, start: usize, count: usize, forma
     const stable: V = @splat(stable_bits);
     var i: usize = 0;
     while (i + lanes <= count) : (i += lanes) {
-        var destination_bytes: [lanes * 4]u8 = undefined;
-        @memcpy(&destination_bytes, row[(start + i) * 4 ..][0 .. lanes * 4]);
-        const destination_packed: V = nativePacked(lanes, destination_bytes);
+        const destination_packed: V = loadNativePacked(lanes, row, (start + i) * 4);
         if (@reduce(.And, destination_packed == stable)) continue;
         const low = destination_packed & channel_mask;
         const dg = (destination_packed >> @as(V, @splat(8))) & channel_mask;
@@ -79,8 +84,7 @@ pub fn blend(comptime lanes: usize, row: []u8, start: usize, count: usize, forma
         const rg = if (destination_is_opaque) div255Fast(V, @as(V, @splat(color.g)) * sa + dg * inverse) else blendChannel(dg, color.g, sa, dva, inverse, half, scale, divisor);
         const rb = if (destination_is_opaque) div255Fast(V, @as(V, @splat(color.b)) * sa + db * inverse) else blendChannel(db, color.b, sa, dva, inverse, half, scale, divisor);
         const packed_output = (if (format == .rgba8_unorm) rr | (rg << @as(V, @splat(8))) | (rb << @as(V, @splat(16))) else rb | (rg << @as(V, @splat(8))) | (rr << @as(V, @splat(16)))) | (out_a << @as(V, @splat(24)));
-        const output_bytes = packedBytes(lanes, packed_output);
-        @memcpy(row[(start + i) * 4 ..][0 .. lanes * 4], &output_bytes);
+        storeNativePacked(lanes, row, (start + i) * 4, packed_output);
     }
     scalar.blendSpan(row, start + i, count - i, format, color);
 }
@@ -92,9 +96,7 @@ pub fn blendPixels(comptime lanes: usize, row: []u8, start: usize, source: []con
     const scale: V = @splat(255);
     var i: usize = 0;
     while (i + lanes <= count) : (i += lanes) {
-        var source_bytes: [lanes * 4]u8 = undefined;
-        @memcpy(&source_bytes, source[i * 4 ..][0 .. lanes * 4]);
-        const packed_source: V = nativePacked(lanes, source_bytes);
+        const packed_source: V = loadNativePacked(lanes, source, i * 4);
         const sr = packed_source & channel_mask;
         const sg = (packed_source >> @as(V, @splat(8))) & channel_mask;
         const sb = (packed_source >> @as(V, @splat(16))) & channel_mask;
@@ -105,13 +107,10 @@ pub fn blendPixels(comptime lanes: usize, row: []u8, start: usize, source: []con
                 packed_source
             else
                 sb | (sg << @as(V, @splat(8))) | (sr << @as(V, @splat(16))) | (sva << @as(V, @splat(24)));
-            const output_bytes = packedBytes(lanes, packed_output);
-            @memcpy(row[(start + i) * 4 ..][0 .. lanes * 4], &output_bytes);
+            storeNativePacked(lanes, row, (start + i) * 4, packed_output);
             continue;
         }
-        var destination_bytes: [lanes * 4]u8 = undefined;
-        @memcpy(&destination_bytes, row[(start + i) * 4 ..][0 .. lanes * 4]);
-        const packed_destination: V = nativePacked(lanes, destination_bytes);
+        const packed_destination: V = loadNativePacked(lanes, row, (start + i) * 4);
         const destination_low = packed_destination & channel_mask;
         const dg = (packed_destination >> @as(V, @splat(8))) & channel_mask;
         const destination_high = (packed_destination >> @as(V, @splat(16))) & channel_mask;
@@ -132,8 +131,7 @@ pub fn blendPixels(comptime lanes: usize, row: []u8, start: usize, source: []con
         const rg = if (destination_is_opaque) div255Fast(V, sg * sva + dg * inverse) else blendChannel(sg, dg, sva, dva, inverse, half, scale, divisor);
         const rb = if (destination_is_opaque) div255Fast(V, sb * sva + db * inverse) else blendChannel(sb, db, sva, dva, inverse, half, scale, divisor);
         const packed_output = (if (format == .rgba8_unorm) rr | (rg << @as(V, @splat(8))) | (rb << @as(V, @splat(16))) else rb | (rg << @as(V, @splat(8))) | (rr << @as(V, @splat(16)))) | (out_a << @as(V, @splat(24)));
-        const output_bytes = packedBytes(lanes, packed_output);
-        @memcpy(row[(start + i) * 4 ..][0 .. lanes * 4], &output_bytes);
+        storeNativePacked(lanes, row, (start + i) * 4, packed_output);
     }
     scalar.blendPixels(row, start + i, source[i * 4 ..], count - i, format);
 }
@@ -146,9 +144,7 @@ pub fn blendPixelsBinary(comptime lanes: usize, row: []u8, start: usize, source:
     const channel_mask: V = @splat(0xff);
     var i: usize = 0;
     while (i + lanes <= count) : (i += lanes) {
-        var source_bytes: [lanes * 4]u8 = undefined;
-        @memcpy(&source_bytes, source[i * 4 ..][0 .. lanes * 4]);
-        const packed_source: V = nativePacked(lanes, source_bytes);
+        const packed_source: V = loadNativePacked(lanes, source, i * 4);
         const sr = packed_source & channel_mask;
         const sg = (packed_source >> @as(V, @splat(8))) & channel_mask;
         const sb = (packed_source >> @as(V, @splat(16))) & channel_mask;
@@ -156,16 +152,13 @@ pub fn blendPixelsBinary(comptime lanes: usize, row: []u8, start: usize, source:
         const transparent_mask = sa == @as(V, @splat(0));
         const opaque_mask = sa == @as(V, @splat(255));
         if (@reduce(.And, transparent_mask)) continue;
-        var destination_bytes: [lanes * 4]u8 = undefined;
-        @memcpy(&destination_bytes, row[(start + i) * 4 ..][0 .. lanes * 4]);
-        const packed_destination: V = nativePacked(lanes, destination_bytes);
+        const packed_destination: V = loadNativePacked(lanes, row, (start + i) * 4);
         const source_as_destination = if (format == .rgba8_unorm)
             packed_source
         else
             sb | (sg << @as(V, @splat(8))) | (sr << @as(V, @splat(16))) | (sa << @as(V, @splat(24)));
         const packed_output = @select(u32, opaque_mask, source_as_destination, packed_destination);
-        const output_bytes = packedBytes(lanes, packed_output);
-        @memcpy(row[(start + i) * 4 ..][0 .. lanes * 4], &output_bytes);
+        storeNativePacked(lanes, row, (start + i) * 4, packed_output);
     }
     scalar.blendPixelsBinary(row, start + i, source[i * 4 ..], count - i, format);
 }
@@ -177,19 +170,14 @@ pub fn blendPixelsBinaryRgba(comptime lanes: usize, row: []u8, start: usize, sou
     const V = @Vector(lanes, u32);
     var i: usize = 0;
     while (i + lanes <= count) : (i += lanes) {
-        var source_bytes: [lanes * 4]u8 = undefined;
-        @memcpy(&source_bytes, source[i * 4 ..][0 .. lanes * 4]);
-        const packed_source: V = nativePacked(lanes, source_bytes);
+        const packed_source: V = loadNativePacked(lanes, source, i * 4);
         const alpha = packed_source >> @as(V, @splat(24));
         const transparent = alpha == @as(V, @splat(0));
         const opaque_mask = alpha == @as(V, @splat(255));
         if (@reduce(.And, transparent)) continue;
-        var destination_bytes: [lanes * 4]u8 = undefined;
-        @memcpy(&destination_bytes, row[(start + i) * 4 ..][0 .. lanes * 4]);
-        const packed_destination: V = nativePacked(lanes, destination_bytes);
+        const packed_destination: V = loadNativePacked(lanes, row, (start + i) * 4);
         const packed_output = @select(u32, opaque_mask, packed_source, packed_destination);
-        const output_bytes = packedBytes(lanes, packed_output);
-        @memcpy(row[(start + i) * 4 ..][0 .. lanes * 4], &output_bytes);
+        storeNativePacked(lanes, row, (start + i) * 4, packed_output);
     }
     scalar.blendPixelsBinary(row, start + i, source[i * 4 ..], count - i, .rgba8_unorm);
 }
