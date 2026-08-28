@@ -1,0 +1,12 @@
+<!-- Copyright 2026 ModelCloud -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+<title id="title">Introducing ZPU</title><desc id="desc">Zig-native CPU-only Vulkan userspace driver for Linux.</desc>
+<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#1fe8ff"/><stop offset=".55" stop-color="#4080ff"/><stop offset="1" stop-color="#a44bff"/></linearGradient><filter id="glow"><feGaussianBlur stdDeviation="12" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+<rect width="1600" height="900" fill="#050811"/><g opacity=".26" stroke="#148bff"><path d="M0 130h420l100 100h230M1600 170h-420l-100 100H850M0 730h340l120-120h310M1600 760h-390l-120-120H900" fill="none" stroke-width="3"/></g>
+<text x="95" y="170" font-family="Inter,Arial" font-size="54" font-weight="900" fill="#fff">🚀 INTRODUCING</text><text x="95" y="345" font-family="Inter,Arial" font-size="180" font-style="italic" font-weight="900" fill="url(#g)" filter="url(#glow)">ZPU</text>
+<text x="100" y="430" font-family="Inter,Arial" font-size="46" font-weight="700" fill="#c9f6ff">A Zig-native, CPU-only Vulkan userspace driver for Linux</text>
+<g transform="translate(970 190)" filter="url(#glow)"><rect x="0" y="0" width="420" height="420" rx="70" fill="#0b1730" stroke="url(#g)" stroke-width="12"/><text x="210" y="220" text-anchor="middle" font-family="Inter,Arial" font-size="86" font-weight="900" fill="#fff">CPU</text><path d="M-45 70h45M-45 150h45M-45 230h45M-45 310h45M420 70h45M420 150h45M420 230h45M420 310h45M70-45v45M150-45v45M230-45v45M310-45v45M70 420v45M150 420v45M230 420v45M310 420v45" stroke="#9befff" stroke-width="18" stroke-linecap="round"/></g>
+<g font-family="Inter,Arial" font-size="34" font-weight="700"><text x="100" y="560" fill="#eafcff">🧠 CPU-only rendering</text><text x="100" y="620" fill="#eafcff">🐧 Linux userspace ICD</text><text x="100" y="680" fill="#eafcff">🚫 No GPU</text><text x="100" y="740" fill="#eafcff">🚫 No kernel DRM driver</text></g>
+<rect x="90" y="790" width="1420" height="70" rx="18" fill="#07162a" stroke="#31dcff" stroke-width="2"/><text x="800" y="837" text-anchor="middle" font-family="monospace" font-size="30" font-weight="700" fill="#7beaff">Vulkan calls in → CPU rasterizes pixels → pinned host memory</text>
+</svg>

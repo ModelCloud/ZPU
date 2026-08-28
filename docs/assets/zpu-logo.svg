@@ -1,0 +1,21 @@
+<!-- Copyright 2026 ModelCloud -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="300" viewBox="0 0 900 300" role="img" aria-labelledby="title desc">
+  <title id="title">ZPU logo</title>
+  <desc id="desc">Neon CPU chip with ZPU wordmark and Linux penguin motif.</desc>
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#25e9ff"/><stop offset=".55" stop-color="#3d7cff"/><stop offset="1" stop-color="#a64cff"/></linearGradient>
+    <filter id="glow"><feGaussianBlur stdDeviation="7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <rect width="900" height="300" rx="34" fill="#060912"/>
+  <g transform="translate(40 28)" filter="url(#glow)">
+    <rect x="12" y="12" width="230" height="230" rx="32" fill="#0b1730" stroke="url(#g)" stroke-width="7"/>
+    <path d="M0 58h20M0 105h20M0 152h20M0 199h20M234 58h20M234 105h20M234 152h20M234 199h20M58 0v20M105 0v20M152 0v20M199 0v20M58 234v20M105 234v20M152 234v20M199 234v20" stroke="#bce8ff" stroke-width="9" stroke-linecap="round"/>
+    <path d="M52 162L110 70l-8 63h65l-78 88 19-59z" fill="url(#g)"/>
+    <circle cx="184" cy="80" r="35" fill="none" stroke="#7defff" stroke-width="5"/>
+    <path d="M164 82l20-18 20 18-20 18zM184 47v69M151 82h66" stroke="#7defff" stroke-width="3" fill="none"/>
+  </g>
+  <text x="335" y="151" font-family="Inter,Arial,sans-serif" font-size="118" font-weight="900" font-style="italic" fill="url(#g)" letter-spacing="4">ZPU</text>
+  <text x="340" y="205" font-family="Inter,Arial,sans-serif" font-size="29" font-weight="700" fill="#e8f7ff">ZIG-NATIVE · CPU-ONLY · VULKAN</text>
+  <text x="340" y="244" font-family="Inter,Arial,sans-serif" font-size="22" fill="#70dfff">Linux userspace graphics, unapologetically experimental.</text>
+</svg>
