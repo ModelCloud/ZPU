@@ -411,6 +411,15 @@ ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d-apps -Doptimize=R
 See [`docs/3d-app-benchmarks.md`](docs/3d-app-benchmarks.md) for the workload
 contracts, focused `--scenario` commands, and correctness methodology.
 
+The latest batched-renderer pass keeps prepared command storage across frames:
+static commands can reuse the complete prepared draw, atlas commands refresh
+only UV state while retaining transformed coverage spans, and cache misses are
+prepared across both raster lanes. On the same pinned two-core host this probe
+reached roughly **348 FPS** desktop, **278 FPS** terminal, and **253 FPS** game,
+with all three checksums unchanged. These are workload-specific measurements;
+the dynamic game path benefits from preparation parallelism but cannot reuse
+static geometry.
+
 ## 🎥 30-second 4K / 8K capture recipe
 
 When a real-present gate is green, capture a 30-second VP9 WebM with two driver
