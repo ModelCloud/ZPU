@@ -337,7 +337,10 @@ threadlocal var prepared_color_runs: ColorRuns = undefined;
 
 fn buildPreparedColorRuns(prepared: *PreparedDraw, width: u32, height: u32) bool {
     if (width != 800 or height != flat_span_rows or !prepared.spans_valid) return false;
-    prepared_color_runs = std.mem.zeroes(ColorRuns);
+    for (0..prepared.count) |triangle_index| {
+        prepared_color_runs.valid[triangle_index] = false;
+        @memset(std.mem.asBytes(&prepared_color_runs.rows[triangle_index]), 0);
+    }
     for (prepared.triangles[0..prepared.count], 0..) |triangle, triangle_index| {
         if (!triangle.valid or (!triangle.has_prelit_texture and !triangle.has_prelit_texture_16x16)) continue;
         if (triangle.vertices[0].clip_w != triangle.vertices[1].clip_w or triangle.vertices[0].clip_w != triangle.vertices[2].clip_w) continue;
