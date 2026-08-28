@@ -263,17 +263,25 @@ current vkcube 4K gate has passed.
 
 | Operation | 1 core | 2 cores | 4K-equivalent surfaces/s (1c / 2c) | p99 latency (1c / 2c) |
 | --- | ---: | ---: | ---: | ---: |
-| Clear / fill | 19,426.64 MPix/s | 19,466.04 MPix/s | 2,342.14 / 2,346.89 | 2,997 / 3,003 ns |
-| Pixel pushes (512 writes) | 36.32 MPix/s | 36.26 MPix/s | 4.38 / 4.37 | 14,210 / 14,493 ns |
-| Clipped rectangles | 2,380.58 MPix/s | 2,377.76 MPix/s | 287.01 / 286.67 | 5,119 / 5,118 ns |
-| Source-over blend | 203.30 MPix/s | 203.38 MPix/s | 24.51 / 24.52 | 284,801 / 284,626 ns |
-| Sprite pushes (128 × 8×8) | 2.7126M draws/s | 2.7113M draws/s | 20.93 / 20.93 | 48,249 / 47,592 ns |
+| Clear / fill | 19,565.22 MPix/s | 19,400.47 MPix/s | 2,358.85 / 2,338.98 | 2,984 / 3,048 ns |
+| Pixel pushes (512 writes) | 171.01 MPix/s | 147.55 MPix/s | 20.62 / 17.79 | 3,045 / 3,571 ns |
+| Clipped rectangles | 2,351.34 MPix/s | 2,346.76 MPix/s | 283.48 / 282.93 | 5,175 / 5,732 ns |
+| Source-over blend | 3,461.54 MPix/s | 3,485.84 MPix/s | 417.33 / 420.26 | 37,757 / 37,852 ns |
+| Sprite pushes (128 × 8×8) | 10.3820M draws/s | 10.3577M draws/s | 80.11 / 79.92 | 33,221 / 33,226 ns |
 
 The nearly identical one- and two-core columns are intentional: the 2D path
 does not spread across the second core, preserving cache and NUMA locality. The
 same run measured pipeline-key construction at **3 ns**, cache lookup at
 **16 ns**, and a **99.999%** hit rate. Full methodology is in
 [`docs/benchmarking.md`](docs/benchmarking.md).
+
+The 2D raster hot paths use exact alpha fast paths for transparent and opaque
+source pixels, strength-reduced division for opaque destination blending, and
+direct writes for single-pixel rectangles. On the validation host,
+runtime-dispatched source-over measured **3.46 GPix/s** and the complete mixed
+frame workload measured **64.6k FPS**. These figures are workload- and
+hardware-specific; checksums, the independent reference renderer, and backend
+differential checks remain authoritative.
 
 ## 📐 3D throughput on two cores
 
@@ -288,50 +296,46 @@ orientation, scale, UV/color selection, and palette; it is not twelve copies of
 one triangle. It is a useful low-jitter pipeline metric, not a claim of general
 SPIR-V performance.
 
-The optimization target is explicit: keep the render caller and one raster
-worker on exactly two selected physical cores, then reach **150,000,000
-triangles/s** (about **38,619.92×** the frozen 3,884.01 triangles/s baseline).
-The target command uses `--two-core` and refuses any affinity other than two
-cores; its separate workload id prevents it from being mixed into the
-ABI-readiness baseline.
+The two-core run measures a complete render on every timed sample. It resets
+the color/depth attachments, transforms all 36 vertices, rasterizes all 12
+triangles, performs depth tests, and computes a checksum. The renderer has an
+optional immutable static-replay cache for real applications, but the
+benchmark deliberately bypasses it so cache-hit latency cannot be reported as
+triangle throughput. The 150,000,000-triangles/s value remains an explicit
+aspirational gate and is not represented as passed.
 
 | Metric | Result |
 | --- | ---: |
-| Median frame rate | **323.67 FPS** |
-| Frame time p50 / p95 / p99 | 3.087 / 3.094 / **3.139 ms** |
+| Median frame rate | **237.17 FPS** |
+| Frame time p50 / p95 / p99 | 4.212 / 4.249 / **4.256 ms** |
 | Triangles submitted / rasterized | 12 / 12 per frame |
-| Triangle throughput | **3,884.01 triangles/s** |
-| Two-core 150M target | **150,000,000 triangles/s** |
-| Fragments tested | **55.84M/s** |
-| Fragments covered | **47.79M/s** |
-| Depth tests passed / color writes | **47.77M/s** |
-| Frame-time coefficient of variation | **0.32%** |
+| Triangle throughput | **2,845.99 triangles/s** |
+| Two-core 150M target | **not met (150,000,000 triangles/s)** |
+| Fragments tested | **55.14M/s** |
+| Fragments covered | **35.01M/s** |
+| Depth tests passed / color writes | **35.00M/s** |
+| Frame-time coefficient of variation | **0.43%** |
 
-The opt-in two-core target now passes its 150M triangles/s gate. The static vkcube command
-buffer renders once, retains the completed color/depth attachments, and reuses
-them only when the full uniform/texture key and attachment ownership are unchanged.
-For callers that keep those inputs immutable, `drawCountedParallelStaticReuseImmutable`
-uses a thread-local pointer/generation fast path and avoids the replay mutex and full
-key scan. Callers that may mutate uniform or texture bytes in place should use
-`drawCountedParallelStaticReuse`, which retains exact-key validation. Dynamic Vulkan
-submissions continue through the normal two-core rasterizer.
-
-The latest ReleaseFast probe measured **313,043,478 triangles/s** (about
-**313M/s**, **80,598×** the frozen baseline), above the required
-150,000,000 triangles/s.
+The static replay APIs remain available for callers that explicitly want
+immutable attachment reuse: `drawCountedParallelStaticReuseImmutable` uses a
+thread-local pointer/generation fast path, while
+`drawCountedParallelStaticReuse` retains exact-key validation. Those APIs are
+not used for the throughput numbers above. Dynamic Vulkan submissions continue
+through the normal two-core rasterizer.
 
 Run it yourself:
 
 ```sh
 ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d -Doptimize=ReleaseFast -- \
-  --two-core --require-target \
+  --two-core \
   --json --source-commit "$(git rev-parse HEAD)" \
   --utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
-The two-core probe reports the measured speedup in its JSON and stderr; add
-`--require-target` to make the 150,000,000 triangles/s requirement fail closed
-(`--require-10x` remains an accepted alias). The
+The two-core probe reports the measured speedup in its JSON and stderr. Add
+`--require-target` to enforce the aspirational 150,000,000 triangles/s gate
+(`--require-10x` remains an accepted alias); it currently fails closed because
+the uncached render is below that target. The
 ordinary command without
 `--two-core` remains the frozen evidence workload used by
 [`tools/evidence.py`](tools/evidence.py).

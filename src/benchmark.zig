@@ -389,6 +389,35 @@ fn reportFor(metrics: []const Metric) Report {
     return .{ .schema_version = schema_version, .workload_id = workload_id, .source_commit = "unbound", .utc = "unbound", .fingerprint = fingerprint(), .warmup_iterations = 1, .sample_count = 3, .pipeline = .{ .iterations = 3, .key_construction_ns = 1, .cache_lookup_ns = 1, .cache_hits = 3, .cache_misses = 1, .cache_hit_rate = 0.75 }, .metrics = metrics };
 }
 
+fn markOrigin(seen: []bool, x: i32, y: i32) usize {
+    if (x < 0 or y < 0 or x >= width or y >= height) return 0;
+    const index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
+    if (seen[index]) return 0;
+    seen[index] = true;
+    return 1;
+}
+
+fn uniqueDrawOrigins(op: Op, iteration: usize) usize {
+    var seen = [_]bool{false} ** (width * height);
+    var unique: usize = 0;
+    switch (op) {
+        .pixel_write => for (0..512) |i| {
+            unique += markOrigin(&seen, @intCast((i * 37 + iteration) % width), @intCast((i * 73 + iteration) % height));
+        },
+        .clipped_rectangle => for (0..32) |i| {
+            unique += markOrigin(&seen, @as(i32, @intCast((i * 19) % 240)) - 10, @as(i32, @intCast((i * 31) % 240)) - 10);
+        },
+        .sprite_draw => for (0..128) |i| {
+            unique += markOrigin(&seen, @as(i32, @intCast((i * 29 + iteration) % 248)) - 4, @as(i32, @intCast((i * 43) % 248)) - 4);
+        },
+        .frame => for (0..64) |i| {
+            unique += markOrigin(&seen, @intCast((i * 17) % 224), @intCast((i * 41) % 224));
+        },
+        else => {},
+    }
+    return unique;
+}
+
 test "percentile index is overflow safe and nearest rank is exact" {
     try std.testing.expectEqual(@as(usize, 9), try percentileIndex(20, 50, 100));
     try std.testing.expectEqual(@as(usize, std.math.maxInt(usize) - 1), try percentileIndex(std.math.maxInt(usize), 100, 100));
@@ -418,6 +447,14 @@ test "independent reference renderer has fixed checksums" {
         referenceOp(op, &dst, &src, canonical_iteration);
         try std.testing.expectEqual(oracle(op), checksum(&dst));
     }
+}
+test "2D draw workloads cover varied origins" {
+    // Pixel writes intentionally wrap after one full 240x240-period cycle;
+    // they still visit 240 distinct positions rather than hammering one pixel.
+    try std.testing.expectEqual(@as(usize, 240), uniqueDrawOrigins(.pixel_write, canonical_iteration));
+    try std.testing.expectEqual(@as(usize, 28), uniqueDrawOrigins(.clipped_rectangle, canonical_iteration));
+    try std.testing.expectEqual(@as(usize, 121), uniqueDrawOrigins(.sprite_draw, canonical_iteration));
+    try std.testing.expectEqual(@as(usize, 64), uniqueDrawOrigins(.frame, canonical_iteration));
 }
 test "Vulkan host-memory copy is non-vacuous and no-op copy fails its oracle" {
     var src: [surface_bytes]u8 = undefined;
