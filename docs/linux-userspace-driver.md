@@ -1,3 +1,6 @@
+<!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # ZPU as a Linux userspace Vulkan driver
 
 ZPU is a Vulkan Installable Client Driver (ICD) implemented as a Linux shared
@@ -221,8 +224,13 @@ Presentation cadence is process-local:
   retained when supplied, with monotonic per-swapchain IDs as the fallback.
   Count queries and queue-full backpressure do not allocate on the hot path.
 - Untimed presents continue on the process's configured cadence.
-- `VK_GOOGLE_display_timing` is unsupported and diagnosed with an error that
-  directs callers to the sanctioned controls above.
+- `VK_GOOGLE_display_timing` is accepted as a compatibility mapping: desired
+  present times, refresh duration, and history queries are translated onto the
+  same internal monotonic clock and `ZPU_REFRESH_HZ` cadence. The driver emits a
+  notice and recommends `VK_EXT_present_timing` for new code. Its
+  `refreshDuration` result is the integer nanosecond period derived from
+  `ZPU_REFRESH_HZ` (`floor(1e9 / hz)`), and its history records are drained from
+  the same bounded completion FIFO.
 
 ## Linux boundary: what the kernel does and does not do
 
@@ -274,7 +282,8 @@ These gates exercise progressively larger portions of the map:
 | `zig build headless-present` | Independent C client → loader → `VK_EXT_headless_surface` → no-XCB swapchain acquire/present lifecycle. |
 | `zig build vkcube-ready` | Real vkcube acquire/submit/present lifecycle through loader and XCB. |
 | `zig build vkcube-visual` | Adds X-server readback proving a rendered pixel reached the window. |
-| `zig build target-4k-240` / `target-8k-60` | Adds controlled real-present p99 frame-time gates. |
+| `zig build target-4k-240` / `target-8k-60` / `target-8k-120` | Adds controlled real-present p99 frame-time gates for the high-resolution profiles. |
+| `tools/capture_vkcube_highres.sh` | Captures a provenance-tagged 30-second VP9 WebM at 4K/240 or 8K/120 under Xvfb when the corresponding gate is green. |
 
 Run repository gates through `tools/limited-cpus.sh` so the documented CPU and
 topology limits are enforced and fingerprinted.

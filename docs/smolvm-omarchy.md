@@ -1,3 +1,6 @@
+<!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # Native ZPU in an Omarchy SmolVM guest
 
 This workflow displays a guest `vkcube` XCB window on an Omarchy host while

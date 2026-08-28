@@ -1,3 +1,6 @@
+// Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+// SPDX-License-Identifier: Apache-2.0
+
 //! Small deterministic 2D render IR and AOT kernel selector.
 const std = @import("std");
 const builtin = @import("builtin");

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+# SPDX-License-Identifier: Apache-2.0
+
 # Repository-local ISA truth gate.
 #
 # Modes (all deterministic: binutils + fixed patterns, no network/timestamps):

@@ -1,3 +1,6 @@
+<!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # Progress benchmarks
 
 Benchmarked source commit: `a4ab71bcb0a723f940790b081b6a76c9edf96c39`

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+# SPDX-License-Identifier: Apache-2.0
+
 # Deterministic regression for the eight-lane kernel ABI guards (BL-3).
 #
 # The kernel library is built optimized without Debug safety plumbing, so its

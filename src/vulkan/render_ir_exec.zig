@@ -1,3 +1,6 @@
+// Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+// SPDX-License-Identifier: Apache-2.0
+
 //! Standalone scalar executor for `zpu_spirv_render_profile_v1` canonical IR.
 //!
 //! This module is synthetic and opt-in.  It is not wired to Vulkan draw or

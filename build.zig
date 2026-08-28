@@ -1,3 +1,6 @@
+// Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
@@ -65,11 +68,14 @@ pub fn build(b: *std.Build) void {
     validate_api_inventory.step.dependOn(&require_limited.step);
     const validate_command_matrix = b.addSystemCommand(&.{ "python3", "tools/vulkan_command_matrix.py" });
     validate_command_matrix.step.dependOn(&require_limited.step);
+    const validate_vulkan_abi_status = b.addSystemCommand(&.{ "python3", "tools/vulkan_abi_status.py" });
+    validate_vulkan_abi_status.step.dependOn(&require_limited.step);
     const test_api_inventory = b.addSystemCommand(&.{"test/api_inventory.sh"});
     test_api_inventory.step.dependOn(&require_limited.step);
     const api_inventory_step = b.step("api-inventory", "Validate the pinned Vulkan target inventory and failure fixtures");
     api_inventory_step.dependOn(&validate_api_inventory.step);
     api_inventory_step.dependOn(&validate_command_matrix.step);
+    api_inventory_step.dependOn(&validate_vulkan_abi_status.step);
     api_inventory_step.dependOn(&test_api_inventory.step);
     const zpu = b.addModule("zpu", .{
         .root_source_file = b.path("src/root.zig"),
@@ -219,6 +225,14 @@ pub fn build(b: *std.Build) void {
     run_target_8k_60.step.dependOn(b.getInstallStep());
     const target_8k_60_step = b.step("target-8k-60", "Require vkcube 7680x4320 presented-frame p99 at 60 FPS or better");
     target_8k_60_step.dependOn(&run_target_8k_60.step);
+
+    const run_target_8k_120 = b.addSystemCommand(&.{ "python3", "test/vkcube_benchmark.py" });
+    run_target_8k_120.addArg(b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_target_8k_120.addArgs(&.{ "7680", "4320", "120", "122" });
+    run_target_8k_120.step.dependOn(&require_limited.step);
+    run_target_8k_120.step.dependOn(b.getInstallStep());
+    const target_8k_120_step = b.step("target-8k-120", "Require vkcube 7680x4320 presented-frame p99 at 120 FPS or better");
+    target_8k_120_step.dependOn(&run_target_8k_120.step);
 
     const tests = b.addTest(.{ .root_module = zpu });
     const run_tests = b.addRunArtifact(tests);

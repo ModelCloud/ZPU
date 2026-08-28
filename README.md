@@ -1,264 +1,261 @@
-# ZPU
+<!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
 
-ZPU includes the frontend-only, non-conformant
-`zpu_spirv_render_profile_v1`. It validates and lowers a small bounded SPIR-V
-1.0 subset to owned canonical render IR for pipeline metadata. Public Vulkan
-profile drawing remains unsupported: profile pipelines fail closed at
-`vkCmdDraw`, while `cpu_cube_v1` remains the only drawable graphics ABI and its
-command representation and pixels are unchanged.
+<p align="center">
+  <img src="docs/assets/zpu-logo.svg" alt="ZPU logo" width="720">
+</p>
 
-The v1 frontend accepts only Shader + Logical GLSL450, a selected straight-line
-Vertex or Fragment entry, bounded scalar/vector/mat4 and read-only uniform data,
-and the small arithmetic/composite operation list documented in
-[`design/render-ir.md`](design/render-ir.md). Textures, sampling, ExtInst,
-control flow, calls, derivatives, discard, atomics, barriers, push constants,
-storage writes, dynamic indexing, undefined/non-finite values, and all later
-SPIR-V versions are rejected rather than interpreted.
-In particular, every profile-v1 access-chain index must be a scalar `u32`
-ordinary or specialized constant after specialization. A runtime scalar `u32`
-index is dynamic indexing and is rejected by both the frontend and canonical
-IR executor setup.
+# ZPU ⚡🧊
 
-Pipeline creation treats that rejection as pipeline failure and publishes no
-pipeline or cache result. The only exception is an exact `cpu_cube_v1`
-compatibility predicate for the immutable vertex/fragment module identities
-embedded by the readiness vkcube: both stages, `main`, exact word counts and
-full digests, and no specialization must match. This bridge does not create a
-frontend program and is not broader shader acceptance.
+> A Zig-native, CPU-only Vulkan userspace driver for Linux — small, explicit,
+> measurable, and unapologetically experimental. 🐧🦎
 
-Internally, the pipeline ABI is a typed choice among `cpu_cube_v1`,
-`profile_v1_metadata`, and `profile_v1_scalar_synthetic`. The last is a private,
-non-advertised, non-conformant test hook that owns one selected vertex or
-fragment scalar executor and accepts explicit interface-indexed byte bindings
-and outputs. It is never reached by Vulkan drawing and provides no Vulkan API,
-extension, feature, or profile-support claim.
+ZPU translates Vulkan calls inside the application process, lowers the supported
+draw path to a compact render IR, and rasterizes into pinned host memory. There
+is no kernel DRM driver and no hidden GPU service: the Vulkan loader discovers a
+ZPU ICD, the ICD validates the call, and the CPU does the work. 🧠➡️🖼️
 
-ZPU is a Zig-first experiment in a minimal-dependency, Vulkan-only userspace CPU graphics driver. This milestone adds an **experimental loader-compatible CPU transfer and vkcube rendering path**. It is not conformant Vulkan and is not yet sufficient for arbitrary Vulkan applications. The normative target for the API surface — the pinned core version, the profile ZPU builds toward, the loader–ICD interface requirement, and the gates that must pass before any advertised version changes — is [docs/api-policy.md](docs/api-policy.md). The driver, the ICD manifest, and CI advertise and assert Vulkan 1.0 today; the policy describes the target, not the present state.
+<p align="center">
+  <img src="docs/assets/zpu-intro.svg" alt="Introducing ZPU" width="100%">
+</p>
 
-## Build and run
+## ✨ At a glance
 
-ZPU targets Zig 0.16.0, the newest stable compiler at the time of this milestone.
+| Area | State | Evidence / scope |
+| --- | --- | --- |
+| Vulkan 1.4 core command ABI | ✅ **234/234** | Every cumulative 1.0–1.4 core command has a typed entry point, contract, unit/regression evidence, and verification path. See [`docs/vulkan-abi.md`](docs/vulkan-abi.md). |
+| Runtime Vulkan feature set | ⚠️ Bounded Vulkan 1.0 | The ICD advertises 1.0 today. Command-level ABI coverage is not a full feature, profile, or CTS-conformance claim. [`docs/api-policy.md`](docs/api-policy.md) is normative. |
+| Zig implementation | ✅ Zig 0.16.0 | `extern` ABI records, checked arithmetic, tagged unions, fixed arrays, `@Vector`, `@memcpy`, and explicit format helpers. |
+| 2D locality | ✅ One physical core maximum | 2D work stays serialized and pinned to one selected core. |
+| Complex 3D locality | ✅ Two physical cores maximum | The vkcube path uses at most two tile bands / physical cores. |
+| 4K240 / 8K60 / 8K120 | 🧪 Target profiles wired | These are p99 frame-time gates, not passed high-resolution benchmark claims. |
+| 30 s high-resolution capture | 🧪 Reproducible recipe | [`tools/capture_vkcube_highres.sh`](tools/capture_vkcube_highres.sh) captures VP9 WebM when the selected gate is green. |
+
+The central performance rule is simple: a target is a **p99 frame-time gate**,
+not an average-FPS slogan. For a target of `H` Hz, the frame budget is
+`1_000_000_000 / H` ns. ⏱️
+
+## 🧭 Linux userspace path
+
+<p align="center">
+  <img src="docs/assets/zpu-pipeline.svg" alt="ZPU Vulkan userspace pipeline" width="100%">
+</p>
+
+```text
+Vulkan app
+  → Vulkan loader
+  → ZPU ICD (libvulkan_zpu.so)
+  → ABI validation
+  → render IR / command stream
+  → CPU rasterizer
+  → pinned host-memory surface
+  → XCB / headless present
+```
+
+The detailed boundary, ownership, memory model, and loader diagrams live in
+[`docs/linux-userspace-driver.md`](docs/linux-userspace-driver.md). ZPU is an
+ICD in userspace; it is not a kernel DRM/KMS display driver and does not claim
+physical scan-out timing when a test uses Xvfb. 🪟
+
+## ✅ Vulkan 1.4 ABI coverage
+
+<p align="center">
+  <img src="docs/assets/zpu-abi.svg" alt="ZPU Vulkan ABI coverage" width="100%">
+</p>
+
+“100% Vulkan 1.4 compliant” is used here only in the precise
+**command/dispatch ABI** sense: names, calling conventions, LP64 layouts,
+pointer/count rules, pNext validation, ownership, lifetime, and failure-atomic
+behavior. It does **not** mean every optional Vulkan feature is enabled or that
+Vulkan CTS passes.
+
+| Core | Required command ABIs | Dispatched | Documented | Unit/regression | Verified |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1.0 | 137 | 137 | 137 | 137 | 137 |
+| 1.1 | 28 | 28 | 28 | 28 | 28 |
+| 1.2 | 13 | 13 | 13 | 13 | 13 |
+| 1.3 | 37 | 37 | 37 | 37 | 37 |
+| 1.4 | 19 | 19 | 19 | 19 | 19 |
+| **Total** | **234** | **234** | **234** | **234** | **234** |
+
+Commands for capabilities ZPU does not advertise still expose their ABI entry
+point and return a truthful default or unsupported result. The generated
+per-command matrix is the source of truth: [`docs/vulkan-abi.md`](docs/vulkan-abi.md).
+
+## ⚙️ Zig-native fast path
+
+<p align="center">
+  <img src="docs/assets/zpu-locality.svg" alt="ZPU locality-first CPU design" width="100%">
+</p>
+
+ZPU keeps the C-facing edge exact and the hot loops idiomatic Zig:
+
+| Zig primitive | Where it helps | Why it matters |
+| --- | --- | --- |
+| `extern struct`, `?*T`, `?[*]T` | Vulkan records and nullable arrays | Stable C ABI layout without handwritten packing. |
+| Checked integer arithmetic | Byte spans, pitches, offsets, copy regions | Overflow becomes a validation error before memory is touched. |
+| Tagged unions | Recorded commands and render operations | Dispatch is explicit and allocation-free. |
+| Fixed-capacity arrays | Handle slots, descriptors, tile work | Predictable storage and no hot-path allocator churn. |
+| `@Vector` | Four- and eight-pixel raster kernels | Portable SIMD source with scalar-equivalent bytes. |
+| `@memcpy` + explicit format helpers | Clears, transfers, RGBA/BGRA | Fast copies while keeping representation visible. |
+
+The scalar implementation is the reference. Selected vector backends are
+compared byte-for-byte, including tails, padded strides, clipping, and alpha
+edge cases. 🧪
+
+| CPU tier | Dispatch policy | Status |
+| --- | --- | --- |
+| Baseline/scalar | Safe on every supported x86-64 host | Always enabled |
+| Portable vector | Four-pixel `@Vector` kernels | Always enabled |
+| AVX / AVX2 | CPUID + OSXSAVE + XCR0 checks, then linked x86-64-v3 eight-lane kernels | Runtime-selected when available |
+| AVX-512 | Never dispatched | Reserved for measured future work |
+
+## 🎮 4K / 8K target profiles and frame pacing
+
+<p align="center">
+  <img src="docs/assets/zpu-targets.svg" alt="ZPU 4K and 8K p99 target profiles" width="100%">
+</p>
+
+These are real-present **target gates** wired into `build.zig`. A green result
+requires measured p99 frame time at or below the target budget. The current
+high-resolution vkcube probe is blocked during pipeline creation after its
+`VK_GOOGLE_display_timing` usage is diagnosed, so the rows below are **not**
+being represented as passed high-resolution measurements.
+
+| Profile | Surface | p99 budget | CPU cap | Gate |
+| --- | ---: | ---: | ---: | --- |
+| 4K30 | 3840×2160 | 33.333 ms | 2 cores | `target-4k-30` |
+| 4K60 | 3840×2160 | 16.667 ms | 2 cores | `target-4k-60` |
+| 4K120 | 3840×2160 | 8.333 ms | 2 cores | `target-4k-120` |
+| **4K240** | **3840×2160** | **4.167 ms** | **2 cores** | `target-4k-240` |
+| 8K60 | 7680×4320 | 16.667 ms | 2 cores | `target-8k-60` |
+| **8K120** | **7680×4320** | **8.333 ms** | **2 cores** | `target-8k-120` |
+
+Per-process presentation pacing is selected through `VK_EXT_present_timing` and
+`ZPU_REFRESH_HZ`. If a client uses `VK_GOOGLE_display_timing`, ZPU logs a
+mapping notice and translates its desired times, refresh duration, and history
+queries onto the same internal cadence. `VK_EXT_present_timing` remains the
+preferred API.
+
+## 📊 2D throughput on a 4K surface
+
+The deterministic 2D benchmark is the versioned
+`zpu-2d-kernels-v4-240x240-seed-151521030` workload. It measures a 240×240
+kernel and reports the **4K-equivalent full-surface rate** by dividing measured
+MPix/s by 8.2944 MPix. This normalization is not an end-to-end claim that the
+current vkcube 4K gate has passed.
+
+| Operation | 1 core | 2 cores | 4K-equivalent surfaces/s (1c / 2c) | p99 latency (1c / 2c) |
+| --- | ---: | ---: | ---: | ---: |
+| Clear / fill | 19,426.64 MPix/s | 19,466.04 MPix/s | 2,342.14 / 2,346.89 | 2,997 / 3,003 ns |
+| Pixel pushes (512 writes) | 36.32 MPix/s | 36.26 MPix/s | 4.38 / 4.37 | 14,210 / 14,493 ns |
+| Clipped rectangles | 2,380.58 MPix/s | 2,377.76 MPix/s | 287.01 / 286.67 | 5,119 / 5,118 ns |
+| Source-over blend | 203.30 MPix/s | 203.38 MPix/s | 24.51 / 24.52 | 284,801 / 284,626 ns |
+| Sprite pushes (128 × 8×8) | 2.7126M draws/s | 2.7113M draws/s | 20.93 / 20.93 | 48,249 / 47,592 ns |
+
+The nearly identical one- and two-core columns are intentional: the 2D path
+does not spread across the second core, preserving cache and NUMA locality. The
+same run measured pipeline-key construction at **3 ns**, cache lookup at
+**16 ns**, and a **99.999%** hit rate. Full methodology is in
+[`docs/benchmarking.md`](docs/benchmarking.md).
+
+## 📐 3D throughput on two cores
+
+<p align="center">
+  <img src="docs/assets/zpu-benchmark.svg" alt="ZPU two-core vkcube benchmark" width="100%">
+</p>
+
+This is the frozen, vkcube-specific CPU cube benchmark: twelve triangles at
+800×600, five warmups followed by thirty timed frames. It is a useful low-jitter
+pipeline metric, not a claim of general SPIR-V performance.
+
+| Metric | Result |
+| --- | ---: |
+| Median frame rate | **261.16 FPS** |
+| Frame time p50 / p95 / p99 | 3.826 / 3.840 / **3.873 ms** |
+| Triangles submitted / rasterized | 12 / 12 per frame |
+| Triangle throughput | **3,133.92 triangles/s** |
+| Fragments tested | **103.13M/s** |
+| Fragments covered | **96.37M/s** |
+| Depth tests passed / color writes | **48.19M/s** |
+| Frame-time coefficient of variation | **0.25%** |
+
+Run it yourself:
+
+```sh
+tools/limited-cpus.sh zig build benchmark-3d -Doptimize=ReleaseFast -- \
+  --json --source-commit "$(git rev-parse HEAD)" \
+  --utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+```
+
+## 🎥 30-second 4K / 8K capture recipe
+
+When a real-present gate is green, capture a 30-second VP9 WebM with two driver
+cores and a separate Xvfb/capture core:
+
+```sh
+# 4K @ 240 Hz (≈7,200 frames)
+ZPU_CAPTURE_PROFILE=4k240 ZPU_CAPTURE_SECONDS=30 \
+  tools/cpu-fanout.sh --worker 0 -- tools/capture_vkcube_highres.sh
+
+# 8K @ 120 Hz (≈3,600 frames)
+ZPU_CAPTURE_PROFILE=8k120 ZPU_CAPTURE_SECONDS=30 \
+  tools/cpu-fanout.sh --worker 0 -- tools/capture_vkcube_highres.sh
+```
+
+The script records profile, source commit, CPU affinity, dimensions, frame rate,
+and SHA-256 in adjacent JSON. Xvfb capture demonstrates userspace presentation
+cadence and rendered motion, **not physical display scan-out**.
+
+At the time of this README refresh, both high-resolution probes still terminate
+in `vkcube` pipeline creation. The Google timing path is now mapped, but the
+independent pipeline failure remains recorded as a blocker; no fabricated or
+scaled video is substituted.
+
+## 🧪 Build, test, and inspect
 
 ```sh
 zig build
-zig build api-inventory
-zig build test
-zig build isa-gate
-zig build isa-cross
-zig build coverage
-zig build smoke
-zig build transfer
-zig build headless-present
-zig build desktop-probe
-zig build vkcube-ready
-zig build xcb-present
-zig build vkcube-visual
-zig build desktop-session
-zig build demo
-zig build benchmark-3d
-zig build pr-readiness
-```
-
-All repository gates must be run through the Linux physical-core limiter, for example `tools/limited-cpus.sh zig build test`. Benchmark methodology, stable JSON, controlled baseline capture/comparison, tolerances, reproducibility guidance, and the opt-in hardware guard are documented in [docs/benchmarking.md](docs/benchmarking.md). The deterministic vkcube-specific 3D benchmark, real 20-second capture, progress table, and commit-bound gate are documented in [docs/pr-readiness.md](docs/pr-readiness.md); this narrow workload is not general SPIR-V.
-
-`tools/limited-cpus.sh zig build api-inventory` validates the pinned Vulkan
-1.4.360 registry and `VP_KHR_roadmap_2026` inputs, regenerates the complete
-cumulative core/profile target in memory, and rejects drift from the checked-in
-machine-readable inventory. It also runs negative fixtures for missing,
-duplicate, alias-only, wrongly scoped, wrongly pinned, stale, and unjustified
-entries. This is a future target inventory only: it does not change API
-advertising or imply Vulkan 1.4/profile support. See
-[the inventory contract](docs/api-inventory.md).
-
-To run four independent experiment or optimization commands at once, `tools/cpu-fanout.sh` partitions the effective cpuset into four pairwise-disjoint, equal-size groups of whole physical cores and launches each one through the same limiter; see the fanout section and its comparability rules in [docs/benchmarking.md](docs/benchmarking.md).
-
-The build installs `zig-out/lib/libvulkan_zpu.so` and `zig-out/share/vulkan/icd.d/zpu_icd.x86_64.json`. The manifest's relative path resolves back to that installed library. XCB presentation links the shared object to libc, libm, the ELF interpreter, and libxcb. The loader-independent smoke test uses `dlopen` to resolve the three private loader entry points, negotiate interface version 7, create an instance, and enumerate the CPU device.
-
-For the hardware-isolated Omarchy workflow, [the SmolVM guest guide](docs/smolvm-omarchy.md)
-builds and stages ZPU wholly inside a real `smol-machines/smolvm` guest, rejects
-host ICD injection, and displays the guest's native XCB Vulkan validation window
-through the host Xwayland socket without enabling SmolVM's Venus GPU path.
-The real graphical proof used a nested Xephyr display through headless
-Weston/Xwayland. No real Omarchy image or Hyprland session was available for
-that run, so native Omarchy/Hyprland confirmation remains an explicit gate.
-The `smolvm-dry-run` build gate uses a transcribed CLI fixture, private test
-socket, and `env -i`; it requires neither real SmolVM nor a live display.
-
-To ask a system Vulkan loader to discover only ZPU:
-
-```sh
-VK_DRIVER_FILES="$PWD/zig-out/share/vulkan/icd.d/zpu_icd.x86_64.json" vulkaninfo --summary
-```
-
-Loader discovery is an authoritative CI gate: CI installs Ubuntu's system `libvulkan1` and `vulkan-tools`, runs this command, and asserts the reported API, CPU type, IDs, and device name. The loader-independent C-ABI smoke remains useful but is not a substitute for real loader integration. These packages are test-host tools, not project dependencies.
-
-Vulkan-Loader and `vulkaninfo` 1.4.341 were also tested with that exact command (and `XDG_RUNTIME_DIR=/tmp` in the headless test environment). That 1.4.341 is the upstream release version of those two host tools, which tracks the Vulkan header revision they were built against; it is neither an API version ZPU advertises — ZPU reports 1.0.0, below — nor the Ubuntu `libvulkan1`/`vulkan-tools` package versions, which CI records separately with `dpkg-query`. The run exited 0 and reported:
-
-```text
-GPU0:
-    apiVersion    = 1.0.0
-    driverVersion = 1
-    vendorID      = 0x1cdc
-    deviceID      = 0x0001
-    deviceType    = PHYSICAL_DEVICE_TYPE_CPU
-    deviceName    = ZPU Experimental CPU
-```
-
-The demo composes a small desktop-like scene entirely on the CPU and writes deterministic `zpu-demo.ppm` output. It needs no Vulkan loader, window system, or physical GPU. `zig-out/bin/zpu-demo another.ppm` selects another output path.
-
-`zig build desktop-probe` reports whether the ICD has reached the minimum WSI,
-swapchain, color-target, synchronization, and draw-command boundary needed to
-start testing a Vulkan window under X11 or Wayland. It reports
-`READY_FOR_WINDOW_TEST` for the XCB backend; `zig build desktop-ready` is the
-corresponding strict gate. The staged path toward an Xfce-adjacent test is documented in
-[docs/desktop-readiness.md](docs/desktop-readiness.md).
-
-`zig build vkcube-probe` is the canonical first application compatibility test.
-It starts Xvfb, isolates Vulkan loader discovery to ZPU, and asks the system
-`vkcube` to render and present two XCB frames. The probe reports the first
-blocker without failing CI; `zig build vkcube-ready` is the strict process gate.
-`zig build vkcube-visual` additionally reads a presented pixel back from the X
-server and rejects the render-pass clear color. `zig build desktop-session`
-runs the same visual oracle while the small `twm` window manager is active.
-These gates currently pass. The CPU draw path is intentionally specialized to
-vkcube's current uniform, vertex, texture, and depth contract; it is not a
-general SPIR-V implementation.
-
-## Architecture
-
-The end-to-end Linux boundary is mapped in
-[`docs/linux-userspace-driver.md`](docs/linux-userspace-driver.md). It includes
-component, loader-discovery, frame-sequence, memory/presentation, and CPU-thread
-diagrams, plus an explicit account of which work stays in the application
-process, which work crosses into the X server, and why ZPU is not a kernel
-DRM/KMS driver.
-
-- `src/surface.zig` owns RGBA8/BGRA8 memory layout, validation, colors, and clipping.
-- `src/raster/` implements clear/fill and straight-alpha Porter-Duff source-over rectangles.
-- `src/simd/` owns backend selection and the scalar and portable four-pixel vector tiers; the eight-pixel tier is compiled separately in `src/x86_64_v3_kernels.zig` (see [design/isa-tiers.md](design/isa-tiers.md)).
-- `src/command/` decouples command recording semantics from raster execution.
-- `src/platform/` owns presentation; today that is a headless PPM sink.
-- `src/vulkan/` contains original minimal Vulkan 1.0 ABI declarations, private loader entry points, object lifetime handling, and the ICD manifest.
-
-ISA tiers are enforced by a build/code-generation boundary, not by naming conventions. Default builds pin every artifact to the x86-64 baseline CPU model, so no VEX-encoded (AVX2, AVX-512, FMA, BMI) instruction can exist inside any project function (foreign library code on an explicit allowlist and data tables are reported separately); `-Dcpu=` remains an explicit opt into a higher artifact tier. The eight-lane kernels are compiled as their own x86-64-v3 static library that baseline codegen reaches only through extern symbols after the runtime CPUID AVX/OSXSAVE, XCR0, and AVX2 checks pass; a tripwire panics if an unsupported host ever reached them, and the comptime boundary flag is tied to actual linkage so AVX2 availability can never be advertised without the kernel objects present. The width-oriented kernels use Zig `@Vector` rather than handwritten intrinsics, so pixel results are identical across tiers. AVX-512 remains excluded until controlled measurements show a tail-latency benefit, and automatic dispatch never advertises unsupported CPU/OS state. `zig build isa-gate` enforces all of this with deterministic raw-prefix disassembly analysis (ReleaseFast kernel-free twins must be fully clean; default artifacts may carry VEX only inside genuinely vectorized `zpu_v3_*` kernels), with fixture-based negative controls proving leaks fail closed.
-
-Tests compare every backend byte-for-byte with scalar for both formats, deliberately misaligned surface starts and padded strides, clipping and off-screen rectangles and sprites, odd widths and vector tails, alpha 0/1/128/254/255, and deterministic randomized content and operations.
-
-## Design position
-
-ZPU borrows only high-level lessons from studying mature projects such as Mesa and SwiftShader: keep API translation separate from execution, make formats explicit, centralize CPU capability policy, and test optimized paths against a reference. No source code was copied from those or other projects; this implementation is original.
-
-The ICD's XCB WSI path has a runtime dependency on libxcb (plus the normal C/math runtime). It is Vulkan-only by design: compatibility with OpenGL, legacy APIs, or historical driver ABIs is not a goal, and future interfaces may change incompatibly while the ICD takes shape. ZPU carries no legacy-specific paths, compatibility shims, or deprecated, vendor, or promoted aliases kept alive solely for old clients; [docs/api-policy.md](docs/api-policy.md) states that rule normatively, along with the narrow case where a present-day client still requires a promoted extension by name. ABI declarations are an original narrow transcription traceable to the [Vulkan 1.0 specification](https://registry.khronos.org/vulkan/specs/1.0/html/vkspec.html) and [Khronos loader/driver interface](https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderDriverInterface.md); no Mesa, SwiftShader, Vulkan-Loader, or Vulkan-Headers source is copied.
-
-The current ICD exposes one stable CPU physical device and one serial graphics+transfer queue. It advertises Vulkan 1.0, the instance extensions `VK_KHR_surface`, `VK_KHR_xcb_surface`, `VK_EXT_headless_surface`, `VK_KHR_external_memory_capabilities`, and `VK_KHR_external_semaphore_capabilities`, the single device extension `VK_KHR_swapchain`, no optional features, one conservative 256 MiB unified host-visible/coherent non-device-local memory heap/type, and the Vulkan 1.0 mandatory minimum physical-device limits. `VK_EXT_headless_surface` creates an offscreen surface and swapchain that never touches XCB; `zig build headless-present` verifies that lifecycle through the system Vulkan loader. The promoted external-capability names return an explicit zero-handle policy and do not imply external-memory import/export support. The heap backs device memory, buffers, and tightly packed linear 2D `VK_FORMAT_R8G8B8A8_UNORM`/`VK_FORMAT_B8G8R8A8_UNORM` images. Vulkan copy/fill commands preserve their API semantics, but on ZPU they operate on unified host memory and are not discrete-VRAM uploads. Custom allocation callbacks and unsupported direct application extension chains are rejected; documented loader-owned instance/device chains are parsed only while their structure type remains loader-owned, and opaque application tails are not traversed.
-
-Mutable ICD entry points are globally serialized. This intentionally simple experimental lifetime protocol keeps validation and use inside the same critical section. External loader callbacks temporarily release the lock, operate only on permanent slot storage, and are followed by locked lifetime revalidation before a handle is returned. Instance, device, memory, buffer, image, fence, command-pool, and command-buffer storage uses 64 slots per type with monotonic `never → live → tombstone` state: destroyed addresses are never reused, stale values are checked without dereferencing them, and recorded references are revalidated at submission. Exhaustion returns `VK_ERROR_OUT_OF_HOST_MEMORY`. This bound is a development limitation, not a production allocation strategy. Device-memory allocations are charged against the advertised 256 MiB heap and returned to its budget only after a valid unbound allocation is freed.
-
-The loader normally installs dispatch data for the top-level instance/device returned by core creation trampolines. ZPU extracts the documented instance/device loader-data callbacks and invokes them for driver-created child dispatchables (`VkPhysicalDevice`, `VkQueue`, and `VkCommandBuffer`); every dispatchable still starts with `ICD_LOADER_MAGIC` until loader initialization.
-
-The serial CPU queue supports `vkCmdFillBuffer`, `vkCmdCopyBuffer`, `vkCmdClearColorImage`, `vkCmdCopyBufferToImage`, `vkCmdCopyImageToBuffer`, and same-format `vkCmdCopyImage`; fences complete synchronously. Submission first validates every submit, command buffer, recorded resource, and layout transition against a shadow layout table, then executes only after the complete batch passes, so a rejected batch cannot partially mutate bytes, layouts, command state, or its fence. A narrow `vkCmdPipelineBarrier` path handles full-color-subresource transitions among undefined/preinitialized, general, transfer-source, and transfer-destination layouts. Its exact source tuples are top-of-pipe/no-access for undefined, host/host-write for preinitialized, and transfer with the layout's corresponding transfer access for the other layouts; its destination is transfer with the new layout's corresponding transfer access. Other stage or access combinations are rejected. `zig build transfer` runs a standalone C Vulkan client through the system loader, transitions its images, executes and independently checks all six commands over 240×240 pixels, and compares all 230,400 bytes after each operation. It queries and validates the returned subresource layout, performs channel-distinct BGRA buffer/image and image/image round trips, and also checks unsupported formats/usages, size overflow, binding alignment, out-of-bounds-copy rejection, invalid layouts/barriers, zero-submit rejection, and fence reset/timeout.
-
-This is deliberately non-conformant. It has narrow binary semaphores, XCB presentation, render-pass clears, descriptors, and a vkcube-specific CPU draw implementation, but no general shader execution, events, general memory/buffer barriers, cache operations, sparse images, non-coherent memory, secondary command buffers, parallel queue execution, or queries. The only barrier form accepted is the exact full-supported-image transition contract above; ownership transfers and partial subresources are rejected. Transfer regions must be wholly in bounds; Vulkan copy operations do not clip. API arrays are capped at 256 entries before access, and `vkQueueSubmit` rejects a zero submit count. Invalid recorded operations make `vkEndCommandBuffer` return an error, while stale recorded resources or layout mismatches make synchronous submission fail without executing any command in the batch; these are experimental diagnostics outside Vulkan's valid-usage contract. Applications must still preserve Vulkan resource lifetime order and external synchronization.
-
-## Coverage contract for this milestone
-
-`zig build coverage` is a deterministic 100% executed-line gate for the ICD, benchmark core, and benchmark CLI. Independent LLVM/kcov runs require every executable line in `src/vulkan/driver.zig`, `src/benchmark.zig`, and `src/benchmark_main.zig`; scopes cannot hide one file behind another's aggregate. The ICD scope includes all loader-facing functions, lookup tables, validation paths, object lifetime logic, loader callbacks, property/enumeration behavior, and colocated unit tests. Benchmark coverage includes workload/oracle execution, schema and exact-set validation, statistics, byte models, in-run guards, baseline comparison, trusted fingerprint collection, JSON, CLI parsing, filesystem failures, and capture/compare behavior. Coverage-only binaries use Zig 0.16.0's LLVM backend (`use_llvm = true`) to emit DWARF that `kcov` can instrument. `tools/coverage_gate.zig` validates each kcov output: aggregate totals must identify exactly the requested file and equal 100%, while `codecov.json` must contain the identical file key, exactly one valid positive executable-line record for every aggregate line, and no unexecuted record. This is runtime executable-line coverage; it does not count source patterns. A kcov record can contain multiple instrumented addresses on one source line, so the verifier requires the line to execute but does not misrepresent address counts as compiler branch coverage.
-
-On Debian/Ubuntu, install the coverage-only tool with `sudo apt-get install kcov`; CI pins the runner family to Ubuntu 24.04, installs from its signed apt repository, and prints the exact resolved package version in every run. Normal builds, the ICD, and the C smoke client do not require it.
-
-The gate is line coverage, because pinned Zig 0.16.0 exposes neither LLVM source-profile flags nor a deterministic built-in branch-coverage report; this project does not claim compiler branch coverage. `zig build behavior` is the complementary non-gameable behavioral contract: production branch sites set test-only requirement bits, and the final test fails if any enumerated requirement remains unexecuted. Its explicit matrix covers allocator rejection; structure types and loader-chain termination/depth/malformed callbacks; every queue field and priority boundary; null names/counts/outputs; callback success, decline, destruction, and post-callback validation; every stale child-handle class and recorded transfer direction; submitting-device ownership for every recorded resource; all monotonic pool exhaustion paths; heap exhaustion/recovery; checked buffer/image arithmetic; zero-effective-fill, zero/excessive-count, and zero-submit rejection; usage/alignment checks; submission failure atomicity; exact barrier stage/access tuples; image transitions and mismatches; and a barrier-controlled read/destroy overlap. Independent property and byte assertions encode expected behavior directly rather than deriving expectations from implementation constants. `kcov`, the Vulkan loader, and `vulkaninfo` are CI-only system tools; neither the ICD nor its tests gain a runtime project dependency.
-
-## Roadmap
-
-1. **CPU 2D foundation:** validated surfaces, clipped fills, source-over blending, runtime-selected kernels, command execution, and headless demo.
-2. **Minimal Vulkan ICD:** loader negotiation and instance/device discovery with no conformance claim.
-3. **CPU memory transfers (this milestone):** coherent memory, buffers, linear images, command submission, fences, and exact loader-level validation.
-4. **First visible 3D path (this milestone):** XCB swapchain transport plus vkcube-specific vertex processing, sampling, rasterization, and depth.
-5. **General 3D:** SPIR-V execution, broader pipeline state, tiling, increasingly capable shaders, performance work, and eventual conformance investigation against the version and profile pinned in [docs/api-policy.md](docs/api-policy.md). That target is Vulkan core 1.4.360 with `VP_KHR_roadmap_2026`; neither is claimed today, and the advertised version does not move until the gates in that document pass.
-
-## Development gates
-
-```sh
-tools/limited-cpus.sh zig fmt --check build.zig src tools
-tools/limited-cpus.sh zig build api-inventory
-tools/limited-cpus.sh zig build
 tools/limited-cpus.sh zig build test
-tools/limited-cpus.sh zig build behavior
-tools/limited-cpus.sh zig build coverage
-tools/limited-cpus.sh zig build smoke
-tools/limited-cpus.sh zig build transfer
-tools/limited-cpus.sh zig build desktop-probe
+tools/limited-cpus.sh zig build api-inventory
+tools/limited-cpus.sh zig build isa-gate
+tools/limited-cpus.sh zig build benchmark -Doptimize=ReleaseFast -- --json
+tools/limited-cpus.sh zig build benchmark-3d -Doptimize=ReleaseFast -- --json
 tools/limited-cpus.sh zig build vkcube-ready
-tools/limited-cpus.sh zig build xcb-present
-tools/limited-cpus.sh zig build vkcube-visual
-tools/limited-cpus.sh zig build desktop-session
-tools/limited-cpus.sh zig build benchmark -Doptimize=ReleaseFast -- --smoke --json
-tools/limited-cpus.sh zig build target-800x600 -Doptimize=ReleaseFast
-tools/limited-cpus.sh zig build target-4k-30 -Doptimize=ReleaseFast
-tools/limited-cpus.sh zig build target-4k-60 -Doptimize=ReleaseFast
-tools/limited-cpus.sh zig build target-4k-120 -Doptimize=ReleaseFast
 tools/limited-cpus.sh zig build target-4k-240 -Doptimize=ReleaseFast
-tools/limited-cpus.sh zig build target-8k-60 -Doptimize=ReleaseFast
-tools/limited-cpus.sh zig build demo
-tools/limited-cpus.sh zig build -Doptimize=ReleaseFast
-tools/limited-cpus.sh zig build smolvm-guest-test
-tools/limited-cpus.sh zig build smolvm-dry-run
+tools/limited-cpus.sh zig build target-8k-120 -Doptimize=ReleaseFast
 ```
 
-These are the repository's Linux gates; the CI configuration is the exact
-authoritative list run by CI. The SmolVM isolation fixture and dry-run commands
-above are local review gates and are not currently CI jobs. Generated PPM files
-and Zig build outputs are ignored.
+To isolate ZPU in the system Vulkan loader:
 
-`target-800x600` runs the real `vkcube` XCB path at 800x600, discards 120 warmup
-frames, then times 1,000 consecutive presented frames. It fails unless p99 frame
-time is at most 4,166,666 ns, equivalent to a 240 FPS 1% low. The measurement
-includes command submission, ZPU's CPU cube rasterizer, and XCB image upload.
-Presentation pacing defaults to 120 Hz and follows the validated
-`ZPU_REFRESH_HZ=1..1000` setting; this target explicitly selects 240 Hz.
-ZPU also exposes `VK_EXT_present_timing`: applications can attach
-`VkPresentTimingsInfoEXT` to each `vkQueuePresentKHR` call and select an absolute
-monotonic or relative target time per swapchain. Untimed presents retain the
-process-local `ZPU_REFRESH_HZ` cadence. When the swapchain timing queue is
-enabled with `vkSetSwapchainPresentTimingQueueSizeEXT`,
-`vkGetPastPresentationTimingEXT` returns bounded FIFO history with queue,
-dequeue, first-pixel-out, and first-pixel-visible timestamps for the requested
-present stages. The optional `VkPresentId2KHR` chain supplies application
-present IDs; otherwise ZPU assigns monotonic per-swapchain IDs. Count queries,
-`VK_INCOMPLETE`, and queue-full backpressure are failure-atomic and
-allocation-free on the warm path.
+```sh
+VK_DRIVER_FILES="$PWD/zig-out/share/vulkan/icd.d/zpu_icd.x86_64.json" \
+  vulkaninfo --summary
+```
 
-`target-4k-30`, `target-4k-60`, `target-4k-120`, and `target-4k-240` apply the same individual-frame ultra-low
-1% timing gate to real 3840x2160 `vkcube`: after 120 warmup frames, p99 across
-1,000 frames must not exceed 33,333,333 ns, 16,666,666 ns, 8,333,333 ns, and
-4,166,666 ns respectively. The strict floors use explicit 31 Hz, 63 Hz, 122 Hz,
-and 255 Hz pacing guard bands so ordinary wake jitter cannot turn an exact
-nominal cadence into a dishonest sub-target 1% low.
-`target-8k-60` extends the same real-present p99 gate to 7680x4320: 1,000
-post-warmup frames must remain at or below 16,666,666 ns with the standard
-63 Hz pacing guard. ZPU advertises and enforces an 8192x8192 maximum 2D image,
-framebuffer, viewport, and XCB surface extent to support this workload.
-With the canonical eight-core gate, the harness dedicates one inherited CPU to
-Xvfb and confines the client process to the other seven; ZPU itself selects at
-most two of those CPUs and never escapes the caller's original affinity budget.
-The vkcube-specific rasterizer uses 32x32 tiles at 4K and 8K to reduce
-classification overhead without removing per-pixel coverage or depth tests.
-It conservatively records every tile touched by transformed, non-culled
-triangles and clears only those dirty tiles before the next draw, preserving
-unchanged background tiles without weakening color or depth correctness. The
-4K and 8K paths add one swapchain image, within the advertised four-image
-limit, to absorb rare producer stalls without expanding the CPU set.
+See [`docs/pr-readiness.md`](docs/pr-readiness.md),
+[`docs/benchmarking.md`](docs/benchmarking.md), and
+[`docs/linux-userspace-driver.md`](docs/linux-userspace-driver.md) for the full
+evidence contract.
 
-ZPU ranks CPUs within the process's inherited affinity mask once and keeps all
-assignments on one NUMA node for the process lifetime. Every 2D path executes
-only on the pinned render CPU. A complex 3D pipeline may use one additional
-pinned raster CPU; presentation may migrate only between those same two
-cache-local CPUs, and ZPU never schedules work on a third CPU. Large color,
-depth, and XCB SHM caches are bound before first touch to the selected node and
-receive transparent huge-page advice; ZPU never expands the CPU mask supplied
-by the caller.
+## 🧱 Scope, boundaries, and roadmap
 
-`VK_GOOGLE_display_timing` is deliberately unsupported with no compatibility
-alias. Requests for that extension, its device procedures, or
-`VkPresentTimesInfoGOOGLE` emit an explicit driver error directing applications
-to `VK_EXT_present_timing` and `ZPU_REFRESH_HZ`.
+ZPU deliberately implements a bounded Vulkan surface: a CPU physical device,
+host-visible coherent memory, transfer commands, headless/XCB presentation, and
+the vkcube-specific draw path. Unsupported features fail closed. There is no
+claim of full Vulkan feature/profile conformance yet. The ABI is complete; the
+feature implementation is the work still ahead. 🚧
+
+The next milestones are broader SPIR-V execution, more pipeline state, measured
+tile/cache improvements, and independent conformance work governed by
+[`docs/api-policy.md`](docs/api-policy.md).
+
+## 📄 License
+
+ZPU is licensed under the [Apache License 2.0](LICENSE).
+
+First-party source, scripts, configuration, documentation, and project graphics
+use Apache-2.0 SPDX headers where the file format permits comments. Machine-
+readable formats that do not permit comments are covered by the repository
+license. Third-party or generated registry inputs retain their applicable
+upstream terms.

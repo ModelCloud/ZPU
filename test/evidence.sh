@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+# SPDX-License-Identifier: Apache-2.0
+
 set -euo pipefail
 bench2=${1:?2D benchmark}; bench3=${2:?3D benchmark}
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT

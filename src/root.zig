@@ -1,3 +1,6 @@
+// Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+// SPDX-License-Identifier: Apache-2.0
+
 //! ZPU CPU graphics foundation and experimental loader-compatible Vulkan ICD.
 pub const surface = @import("surface.zig");
 pub const raster = @import("raster/raster.zig");

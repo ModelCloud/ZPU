@@ -1,3 +1,6 @@
+<!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # PR-readiness evidence
 
 ZPU's evidence is tied to source. The schema 3 workload
@@ -24,10 +27,11 @@ support, plus the existing X11/Vulkan validation tools `Xvfb`, `vkcube`, and
 `sudo apt-get install ffmpeg`; no GitHub workflow permission or configuration is
 needed by this feature.
 
-The capture is a real 640×480 XCB vkcube session under Xvfb using only ZPU's
-ICD, pinned to exactly one verified physical core. It records 900 lossless
-FFV1 packets over 15 seconds for cadence analysis, 20 seconds of VP9 WebM for
-manual inspection, and three PNG observations in ignored `scratch_tmp/`.
+The baseline capture is a real 800×600 XCB vkcube session under Xvfb using only
+ZPU's ICD, pinned to exactly one verified physical core. It records 2,400
+lossless FFV1 packets over 20 seconds for cadence analysis, 20 seconds of VP9
+WebM for manual inspection, and three PNG observations in ignored
+`scratch_tmp/`.
 Cadence validation reports visible FPS, p50/p95/p99/worst intervals, interval
 CV, missed rational 60 Hz phase slots, consecutive frame duplicates, monotonic
 PTS, and capture drops. Metadata binds the exact logical CPU and physical
@@ -35,7 +39,7 @@ package/core identity, full source commit, commands, UTC, hashes, sizes, and
 image dimensions. This is explicitly synthetic Xvfb pacing evidence, not
 physical scanout evidence.
 
-Validation additionally requires the ZPU CPU device, one VP9 640×480 stream,
+Validation additionally requires the ZPU CPU device, one VP9 800×600 stream,
 19–21.5 seconds duration, positive frame count/rate, complete decode, motion,
 nonblack content, and matching provenance. FFmpeg and ffprobe are evidence
 tools, not runtime dependencies. The acceptance limits are not weakened when a
@@ -50,3 +54,11 @@ UTC, and the exact benchmarked commit. HEAD may equal that commit or be exactly 
 changed path is `progress_benchmarks.md`. Binary media and raw JSON must remain
 ignored and untracked. Heavy capture is an explicit local operation; validator
 failure fixtures remain in the normal `zig build test` gate.
+
+For the high-resolution target profiles, use
+[`tools/capture_vkcube_highres.sh`](../tools/capture_vkcube_highres.sh) with
+`ZPU_CAPTURE_PROFILE=4k240` or `ZPU_CAPTURE_PROFILE=8k120` and
+`ZPU_CAPTURE_SECONDS=30`. That helper emits a provenance-tagged VP9 WebM and
+JSON, uses two driver cores, and is intentionally separate from this fixed
+800×600 readiness schema. It must only be treated as evidence after the
+corresponding real-present p99 gate passes.

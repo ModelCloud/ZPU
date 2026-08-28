@@ -1,3 +1,6 @@
+// Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+// SPDX-License-Identifier: Apache-2.0
+
 //! Eight-lane kernel objects compiled for the x86-64-v3 feature level.
 //!
 //! This file is built by `build.zig` as its own static library with an

@@ -1,3 +1,6 @@
+<!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # Desktop readiness
 
 ZPU now reaches its first Vulkan-window compatibility milestone. The ICD exposes

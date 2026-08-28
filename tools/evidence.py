@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+# SPDX-License-Identifier: Apache-2.0
+
 """Generate and validate ZPU PR evidence. Generated media and JSON stay ignored."""
 import argparse
 import datetime as dt

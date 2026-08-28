@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+# SPDX-License-Identifier: Apache-2.0
+
 # Repository-local cross-target ISA tier evidence, appropriate to Zig 0.16.
 #
 # 1. Kernel-free baseline build (-Dv3-kernels=false, ReleaseFast): the ICD
