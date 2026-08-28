@@ -31,7 +31,12 @@ registry items, duplicates, alias-only core items, wrong extension scope,
 unknown extension names, missing consumer justification or deferral reason,
 and stale generated output. Negative fixtures exercise each failure class.
 
-This inventory is not an implementation or conformance list. In particular it
-does not feed runtime dispatch, instance validation, extension enumeration, the
-ICD manifest, or physical-device properties. ZPU continues to advertise and
-accept only its truthful Vulkan 1.0 surface as documented in `docs/api-policy.md`.
+The command subset of this inventory is paired with the generated
+[`docs/vulkan-abi.md`](vulkan-abi.md) page. That page proves that all 234
+cumulative core command names have dispatch, implementation-contract, and
+regression-evidence rows; it is the authoritative documentation for ZPU's
+100% command-level Vulkan 1.4 ABI result. The inventory remains broader than
+that command claim: its 603 types and 390 enums describe the future
+field-by-field conformance target and do not imply that every optional feature
+is enabled. ZPU continues to advertise and accept only its truthful Vulkan
+1.0 runtime surface as documented in `docs/api-policy.md`.

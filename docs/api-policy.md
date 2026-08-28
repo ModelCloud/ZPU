@@ -13,6 +13,15 @@ assert Vulkan **1.0.0** right now. See
 inventory, and treat every statement in sections 1–6 as a requirement on future
 work rather than a description of the shipped ICD.
 
+The command-level ABI inventory has since reached **234/234** cumulative core
+entry points through Vulkan 1.4.360. [The ABI status page](vulkan-abi.md) lists
+each command, its dispatch and contract status, and the unit/regression and
+verification gates. This is a complete command/dispatch ABI statement — exact
+calling convention, LP64 record handling, pNext/count validation, ownership,
+and failure atomicity — and does **not** by itself satisfy the complete-core
+advertisement gate below, which also requires every mandatory feature, limit,
+format, and independent conformance check.
+
 ---
 
 ## 1. Pinned core version
@@ -148,6 +157,7 @@ Everything in this column is the honest present state, not an aspiration.
 
 | Subject | Current | Target under this policy |
 | --- | --- | --- |
+| Cumulative core command ABI | `234/234` command entry points documented, dispatched, and regression-covered; bounded feature policies remain explicit | Complete mandatory core behavior and independent conformance |
 | Core version reported by the driver | `1.0.0` | `1.4.360` |
 | ICD manifest `api_version` | `1.0.0` | `1.4.360` |
 | CI loader-discovery assertion | asserts `apiVersion = 1.0.0` | asserts the pinned version |

@@ -1,11 +1,27 @@
 # ZPU
 
-ZPU includes the frontend-only, non-conformant
-`zpu_spirv_render_profile_v1`. It validates and lowers a small bounded SPIR-V
-1.0 subset to owned canonical render IR for pipeline metadata. Public Vulkan
-profile drawing remains unsupported: profile pipelines fail closed at
-`vkCmdDraw`, while `cpu_cube_v1` remains the only drawable graphics ABI and its
-command representation and pixels are unchanged.
+🎉 **Vulkan 1.4.360 command ABI coverage is now 100% (234/234).** Every
+required cumulative core command from Vulkan 1.0 through 1.4 has a C-callable
+ICD entry point, typed LP64/pointer-count handling, pNext and ownership
+validation, a documented contract, unit/regression evidence, and a reproducible
+verification path. The complete per-command status is generated in
+[`docs/vulkan-abi.md`](docs/vulkan-abi.md).
+
+The phrase *100% Vulkan 1.4 ABI compliant* is deliberately scoped to the
+command/dispatch ABI: calling conventions, record layouts, enumeration and
+count rules, pNext handling, lifetime/error behavior, and loader lookup. It is
+not a claim that every optional feature is enabled, that
+`VP_KHR_roadmap_2026` is met, or that the Vulkan CTS has passed. Commands for
+capabilities ZPU does not advertise still implement their ABI with an explicit
+default or unsupported result. Runtime version advertisement remains governed
+by [`docs/api-policy.md`](docs/api-policy.md).
+
+ZPU includes the bounded `zpu_spirv_render_profile_v1` frontend. It validates
+and lowers a small SPIR-V 1.0 subset to owned canonical render IR, while the
+public CPU-cube and scalar graphics/compute paths execute only the interfaces
+described by the implementation contract. Arbitrary SPIR-V, textures outside
+the supported formats, and unsupported execution features fail closed rather
+than being silently misinterpreted.
 
 The v1 frontend accepts only Shader + Logical GLSL450, a selected straight-line
 Vertex or Fragment entry, bounded scalar/vector/mat4 and read-only uniform data,
@@ -33,7 +49,7 @@ fragment scalar executor and accepts explicit interface-indexed byte bindings
 and outputs. It is never reached by Vulkan drawing and provides no Vulkan API,
 extension, feature, or profile-support claim.
 
-ZPU is a Zig-first experiment in a minimal-dependency, Vulkan-only userspace CPU graphics driver. This milestone adds an **experimental loader-compatible CPU transfer and vkcube rendering path**. It is not conformant Vulkan and is not yet sufficient for arbitrary Vulkan applications. The normative target for the API surface — the pinned core version, the profile ZPU builds toward, the loader–ICD interface requirement, and the gates that must pass before any advertised version changes — is [docs/api-policy.md](docs/api-policy.md). The driver, the ICD manifest, and CI advertise and assert Vulkan 1.0 today; the policy describes the target, not the present state.
+ZPU is a Zig-first experiment in a minimal-dependency, Vulkan-only userspace CPU graphics driver. The command ABI is complete for the pinned Vulkan 1.4.360 core, while feature support remains intentionally bounded and non-CTS-conformant. The normative target for the API surface — the pinned core version, the profile ZPU builds toward, the loader–ICD interface requirement, and the gates that must pass before any advertised version changes — is [docs/api-policy.md](docs/api-policy.md). The driver, the ICD manifest, and CI advertise and assert Vulkan 1.0 today; the policy describes the runtime-advertisement gates, not a missing command entry point.
 
 ## Build and run
 
@@ -138,9 +154,26 @@ DRM/KMS driver.
 - `src/simd/` owns backend selection and the scalar and portable four-pixel vector tiers; the eight-pixel tier is compiled separately in `src/x86_64_v3_kernels.zig` (see [design/isa-tiers.md](design/isa-tiers.md)).
 - `src/command/` decouples command recording semantics from raster execution.
 - `src/platform/` owns presentation; today that is a headless PPM sink.
-- `src/vulkan/` contains original minimal Vulkan 1.0 ABI declarations, private loader entry points, object lifetime handling, and the ICD manifest.
+- `src/vulkan/` contains original Vulkan 1.4.360 command ABI declarations, private loader entry points, object lifetime handling, and the ICD manifest.
 
-ISA tiers are enforced by a build/code-generation boundary, not by naming conventions. Default builds pin every artifact to the x86-64 baseline CPU model, so no VEX-encoded (AVX2, AVX-512, FMA, BMI) instruction can exist inside any project function (foreign library code on an explicit allowlist and data tables are reported separately); `-Dcpu=` remains an explicit opt into a higher artifact tier. The eight-lane kernels are compiled as their own x86-64-v3 static library that baseline codegen reaches only through extern symbols after the runtime CPUID AVX/OSXSAVE, XCR0, and AVX2 checks pass; a tripwire panics if an unsupported host ever reached them, and the comptime boundary flag is tied to actual linkage so AVX2 availability can never be advertised without the kernel objects present. The width-oriented kernels use Zig `@Vector` rather than handwritten intrinsics, so pixel results are identical across tiers. AVX-512 remains excluded until controlled measurements show a tail-latency benefit, and automatic dispatch never advertises unsupported CPU/OS state. `zig build isa-gate` enforces all of this with deterministic raw-prefix disassembly analysis (ReleaseFast kernel-free twins must be fully clean; default artifacts may carry VEX only inside genuinely vectorized `zpu_v3_*` kernels), with fixture-based negative controls proving leaks fail closed.
+ISA tiers are enforced by a build/code-generation boundary, not by naming conventions. Default builds pin every artifact to the x86-64 baseline CPU model, so no VEX-encoded (AVX, AVX2, AVX-512, FMA, BMI) instruction can exist inside any project function (foreign library code on an explicit allowlist and data tables are reported separately); `-Dcpu=` remains an explicit opt into a higher artifact tier. The eight-lane kernels are compiled as their own x86-64-v3 static library that baseline codegen reaches only through extern symbols after runtime CPUID AVX/OSXSAVE, XCR0, and AVX2 checks pass; a tripwire panics if an unsupported host ever reaches them, and the comptime boundary flag is tied to actual linkage so AVX2 availability can never be advertised without the kernel objects present. The width-oriented kernels use Zig `@Vector` rather than handwritten intrinsics, so pixel results are identical across tiers. AVX-512 is intentionally reserved (detected only as a disassembly hazard, never selected for rendering) until controlled frame-tail measurements justify a separate kernel tier. `zig build isa-gate` enforces all of this with deterministic raw-prefix disassembly analysis (ReleaseFast kernel-free twins must be fully clean; default artifacts may carry VEX only inside genuinely vectorized `zpu_v3_*` kernels), with fixture-based negative controls proving leaks fail closed.
+
+### Zig primitives and CPU tiers ⚙️
+
+The Vulkan command layer uses Zig `extern` records for stable C ABI layout,
+`?*T`/`?[*]T` pointers for nullable Vulkan arrays, checked integer arithmetic
+for byte spans, tagged unions for recorded commands, and fixed-capacity arrays
+for allocation-free hot paths. The raster layer uses comptime-sized
+`@Vector` lanes, `@memcpy`, and explicit endian/format helpers; scalar code is
+the reference implementation and every optimized result is compared byte for
+byte against it.
+
+| Tier | How ZPU uses it | Status |
+| --- | --- | --- |
+| Baseline/scalar | Zig scalar arithmetic and bounds-checked slices; safe on every supported x86-64 host. | Always enabled |
+| Portable vector | Four-pixel `@Vector` kernels compiled into the baseline artifact. | Always enabled |
+| AVX/AVX2 | AVX/OSXSAVE/XCR0 are prerequisites; the linked x86-64-v3 AVX2 library executes eight-pixel `@Vector` kernels only after CPUID gating. | Runtime-selected when available |
+| AVX-512 | No AVX-512 instructions are dispatched or advertised; disassembly gates reject accidental leakage. | Reserved for measured future work |
 
 Tests compare every backend byte-for-byte with scalar for both formats, deliberately misaligned surface starts and padded strides, clipping and off-screen rectangles and sprites, odd widths and vector tails, alpha 0/1/128/254/255, and deterministic randomized content and operations.
 
@@ -148,7 +181,7 @@ Tests compare every backend byte-for-byte with scalar for both formats, delibera
 
 ZPU borrows only high-level lessons from studying mature projects such as Mesa and SwiftShader: keep API translation separate from execution, make formats explicit, centralize CPU capability policy, and test optimized paths against a reference. No source code was copied from those or other projects; this implementation is original.
 
-The ICD's XCB WSI path has a runtime dependency on libxcb (plus the normal C/math runtime). It is Vulkan-only by design: compatibility with OpenGL, legacy APIs, or historical driver ABIs is not a goal, and future interfaces may change incompatibly while the ICD takes shape. ZPU carries no legacy-specific paths, compatibility shims, or deprecated, vendor, or promoted aliases kept alive solely for old clients; [docs/api-policy.md](docs/api-policy.md) states that rule normatively, along with the narrow case where a present-day client still requires a promoted extension by name. ABI declarations are an original narrow transcription traceable to the [Vulkan 1.0 specification](https://registry.khronos.org/vulkan/specs/1.0/html/vkspec.html) and [Khronos loader/driver interface](https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderDriverInterface.md); no Mesa, SwiftShader, Vulkan-Loader, or Vulkan-Headers source is copied.
+The ICD's XCB WSI path has a runtime dependency on libxcb (plus the normal C/math runtime). It is Vulkan-only by design: compatibility with OpenGL, legacy APIs, or historical driver ABIs is not a goal, and future interfaces may change incompatibly while the ICD takes shape. ZPU carries no legacy-specific paths, compatibility shims, or deprecated, vendor, or promoted aliases kept alive solely for old clients; [docs/api-policy.md](docs/api-policy.md) states that rule normatively, along with the narrow case where a present-day client still requires a promoted extension by name. ABI declarations are an original narrow transcription traceable to the [pinned Vulkan 1.4.360 specification](https://registry.khronos.org/vulkan/specs/1.4/html/vkspec.html) and [Khronos loader/driver interface](https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderDriverInterface.md); no Mesa, SwiftShader, Vulkan-Loader, or Vulkan-Headers source is copied.
 
 The current ICD exposes one stable CPU physical device and one serial graphics+transfer queue. It advertises Vulkan 1.0, the instance extensions `VK_KHR_surface`, `VK_KHR_xcb_surface`, `VK_EXT_headless_surface`, `VK_KHR_external_memory_capabilities`, and `VK_KHR_external_semaphore_capabilities`, the single device extension `VK_KHR_swapchain`, no optional features, one conservative 256 MiB unified host-visible/coherent non-device-local memory heap/type, and the Vulkan 1.0 mandatory minimum physical-device limits. `VK_EXT_headless_surface` creates an offscreen surface and swapchain that never touches XCB; `zig build headless-present` verifies that lifecycle through the system Vulkan loader. The promoted external-capability names return an explicit zero-handle policy and do not imply external-memory import/export support. The heap backs device memory, buffers, and tightly packed linear 2D `VK_FORMAT_R8G8B8A8_UNORM`/`VK_FORMAT_B8G8R8A8_UNORM` images. Vulkan copy/fill commands preserve their API semantics, but on ZPU they operate on unified host memory and are not discrete-VRAM uploads. Custom allocation callbacks and unsupported direct application extension chains are rejected; documented loader-owned instance/device chains are parsed only while their structure type remains loader-owned, and opaque application tails are not traversed.
 
@@ -174,7 +207,7 @@ The gate is line coverage, because pinned Zig 0.16.0 exposes neither LLVM source
 2. **Minimal Vulkan ICD:** loader negotiation and instance/device discovery with no conformance claim.
 3. **CPU memory transfers (this milestone):** coherent memory, buffers, linear images, command submission, fences, and exact loader-level validation.
 4. **First visible 3D path (this milestone):** XCB swapchain transport plus vkcube-specific vertex processing, sampling, rasterization, and depth.
-5. **General 3D:** SPIR-V execution, broader pipeline state, tiling, increasingly capable shaders, performance work, and eventual conformance investigation against the version and profile pinned in [docs/api-policy.md](docs/api-policy.md). That target is Vulkan core 1.4.360 with `VP_KHR_roadmap_2026`; neither is claimed today, and the advertised version does not move until the gates in that document pass.
+5. **General 3D:** broader SPIR-V execution, pipeline state, tiling, increasingly capable shaders, performance work, and eventual conformance investigation against the version and profile pinned in [docs/api-policy.md](docs/api-policy.md). The command ABI is already complete for Vulkan core 1.4.360; `VP_KHR_roadmap_2026` and unrestricted feature conformance remain future gates, and the advertised runtime version does not move until those gates pass.
 
 ## Development gates
 

@@ -2,7 +2,7 @@
 
 Generated from the pinned Vulkan 1.4.360 inventory. Do not edit by hand; run `python3 tools/vulkan_command_matrix.py --write`.
 
-`Dispatched` means a command name is exposed by a ZPU lookup table. `Implemented` means the command has an evidence-backed entry in the policy for ZPU's currently advertised narrow profile; it is not a claim of complete Vulkan 1.4 conformance. A narrow path, stub, opaque placeholder, or unaudited behavior should remain `No` until its advertised contract is explicit.
+`Dispatched` means a command name is exposed by a ZPU lookup table. `Implemented` means the command has an evidence-backed entry in the policy for ZPU's currently advertised narrow profile; it is not a claim of complete Vulkan 1.4 feature or CTS conformance. The command-level ABI result is tracked in [`docs/vulkan-abi.md`](vulkan-abi.md). A narrow path, stub, opaque placeholder, or unaudited behavior should remain `No` until its advertised contract is explicit.
 
 Current totals: **234 core commands**, **234 dispatched**, **234 narrow-profile evidence entries**.
 

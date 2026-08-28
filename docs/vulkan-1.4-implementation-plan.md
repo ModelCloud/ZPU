@@ -6,20 +6,37 @@ rendering, native APIs, and unrelated VM integration are outside its scope.
 The normative inputs are the pinned Khronos Vulkan-Headers `v1.4.360`
 `vk.xml`, the Vulkan 1.4.360 specification, and `VP_KHR_roadmap_2026`; see
 `api/registry/README.md`. Runtime version reporting stays at Vulkan 1.0 until
-all gates in `docs/api-policy.md` pass. Landing a command name is not enough:
-its object lifetime, valid execution behavior, synchronization, failure
-atomicity, feature/limit reporting, and required formats must all work before
-the command is marked complete.
+all gates in `docs/api-policy.md` pass. The command-level ABI milestone is
+complete: every cumulative core entry point is declared, dispatched, documented,
+unit/regression-tested, and verified. Landing a command name is not enough for
+feature conformance: its object lifetime, valid execution behavior,
+synchronization, failure atomicity, feature/limit reporting, and required
+formats must all work before the runtime version can be raised.
 
 ## Baseline gap
 
 The pinned cumulative core contains 234 commands, 603 types, and 390 enums.
 The current dispatch tables expose all 234 core command names, including the
-97 commands introduced by Vulkan 1.1 through 1.4. Some commands are still
-intentionally narrow, capability-gated, or opaque placeholders, so name
-coverage is only a lower-bound inventory, not a conformance percentage.
+97 commands introduced by Vulkan 1.1 through 1.4. The command ABI status is
+tracked in [`docs/vulkan-abi.md`](vulkan-abi.md); some command contracts remain
+intentionally narrow or capability-gated, so this 100% ABI result is not a
+Vulkan CTS or roadmap-profile conformance percentage.
 
 ## Current checkpoint
+
+### Command ABI milestone ✅
+
+The complete cumulative command ABI is now **234/234**: Vulkan 1.0 (137), 1.1
+(28), 1.2 (13), 1.3 (37), and 1.4 (19). Each row has a typed C-callable
+entrypoint, a machine-readable implementation contract, colocated unit and
+allocation/performance regression coverage, and a reproducible verification
+path. [`docs/vulkan-abi.md`](vulkan-abi.md) is generated from the pinned
+registry and fails closed if a required command disappears from the dispatch
+table or loses its contract entry.
+
+The remaining checklist below is capability and conformance work, not missing
+command names. Unsupported optional capabilities continue to return explicit
+Vulkan errors or zero-valued query results and are called out per command.
 
 The implementation now dispatches and tests all 234 cumulative core command
 entry points. The completed slices include timeline semaphores, compute
