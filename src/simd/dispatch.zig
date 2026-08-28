@@ -233,7 +233,9 @@ pub fn blendPixelsRowsRegionsBatch(backend: Backend, surface: *s.Surface, region
             const source_y: usize = @intCast(source_rect.y + (clipped.y - destination.y));
             for (0..clipped.height) |dy| {
                 const source_offset = ((source_y + dy) * source_width + source_x) * 4;
-                if (binary_alpha) vector.blendPixelsBinary(4, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format) else vector.blendPixels(4, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
+                if (binary_alpha) {
+                    if (surface.format == .rgba8_unorm) vector.blendPixelsBinaryRgba(4, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width) else vector.blendPixelsBinary(4, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
+                } else vector.blendPixels(4, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
             }
         },
         .avx2 => for (regions) |region| {
@@ -249,7 +251,9 @@ pub fn blendPixelsRowsRegionsBatch(backend: Backend, surface: *s.Surface, region
             const source_y: usize = @intCast(source_rect.y + (clipped.y - destination.y));
             for (0..clipped.height) |dy| {
                 const source_offset = ((source_y + dy) * source_width + source_x) * 4;
-                if (binary_alpha) vector.blendPixelsBinary(8, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format) else blendPixels(.avx2, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
+                if (binary_alpha) {
+                    if (surface.format == .rgba8_unorm) vector.blendPixelsBinaryRgba(8, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width) else vector.blendPixelsBinary(8, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
+                } else blendPixels(.avx2, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
             }
         },
     }

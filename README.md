@@ -318,7 +318,9 @@ pixels use direct format-aware writes, while arbitrary-alpha textures retain
 the general source-over kernel. On the validation host this moved
 `terminal_cells` from about **15.5M** to **23.5M draws/s** (the same
 ReleaseFast, 240×240, limited-core run); the checksum and clipping oracle stay
-unchanged.
+unchanged. The RGBA8 specialization then keeps packed source bytes packed for
+mixed SIMD groups, reaching about **34.3M draws/s** with a **26.4 µs** p50 on
+the same host; BGRA8 still uses the channel-swapping variant.
 
 ## 📐 3D throughput on two cores
 

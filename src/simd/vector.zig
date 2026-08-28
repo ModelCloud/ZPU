@@ -169,3 +169,27 @@ pub fn blendPixelsBinary(comptime lanes: usize, row: []u8, start: usize, source:
     }
     scalar.blendPixelsBinary(row, start + i, source[i * 4 ..], count - i, format);
 }
+
+/// RGBA8 specialization of the binary-alpha span. Packed source and
+/// destination pixels already share byte order, so no channel unpack/repack is
+/// needed for mixed transparent/opaque SIMD groups.
+pub fn blendPixelsBinaryRgba(comptime lanes: usize, row: []u8, start: usize, source: []const u8, count: usize) void {
+    const V = @Vector(lanes, u32);
+    var i: usize = 0;
+    while (i + lanes <= count) : (i += lanes) {
+        var source_bytes: [lanes * 4]u8 = undefined;
+        @memcpy(&source_bytes, source[i * 4 ..][0 .. lanes * 4]);
+        const packed_source: V = nativePacked(lanes, source_bytes);
+        const alpha = packed_source >> @as(V, @splat(24));
+        const transparent = alpha == @as(V, @splat(0));
+        const opaque_mask = alpha == @as(V, @splat(255));
+        if (@reduce(.And, transparent)) continue;
+        var destination_bytes: [lanes * 4]u8 = undefined;
+        @memcpy(&destination_bytes, row[(start + i) * 4 ..][0 .. lanes * 4]);
+        const packed_destination: V = nativePacked(lanes, destination_bytes);
+        const packed_output = @select(u32, opaque_mask, packed_source, packed_destination);
+        const output_bytes = packedBytes(lanes, packed_output);
+        @memcpy(row[(start + i) * 4 ..][0 .. lanes * 4], &output_bytes);
+    }
+    scalar.blendPixelsBinary(row, start + i, source[i * 4 ..], count - i, .rgba8_unorm);
+}
