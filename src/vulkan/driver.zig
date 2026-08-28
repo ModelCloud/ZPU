@@ -9759,7 +9759,10 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
                     const so = src_layer_offset + ((@as(usize, @intCast(op.region.src_offset.y)) + y) * op.src.width + @as(usize, @intCast(op.region.src_offset.x))) * 4;
                     const do = dst_layer_offset + ((@as(usize, @intCast(op.region.dst_offset.y)) + y) * op.dst.width + @as(usize, @intCast(op.region.dst_offset.x))) * 4;
                     const len = @as(usize, op.region.extent.width) * 4;
-                    std.mem.copyForwards(u8, dst[do..][0..len], src[so..][0..len]);
+                    // Command recording rejects overlapping image ranges, so
+                    // this validated transfer can use the non-overlap
+                    // primitive and let the compiler select a bulk copy.
+                    copyTransferRows(dst[do..], @as(usize, op.dst.width) * 4, src[so..], @as(usize, op.src.width) * 4, len, 1);
                 }
             }
             invalidateImageContents(op.dst);
@@ -9936,6 +9939,22 @@ test "dynamic rendering layered clears honor the recorded layer range" {
     test_allocations_before_failure = null;
 }
 
+/// Copy a set of tightly bounded rows whose source and destination are known
+/// not to overlap by Vulkan command validation. Keeping the row strides
+/// explicit preserves pitched buffer/image transfers while allowing LLVM to
+/// lower each row to the platform bulk-copy primitive.
+fn copyTransferRows(dst: []u8, dst_stride: usize, src: []const u8, src_stride: usize, row_bytes: usize, rows: usize) void {
+    for (0..rows) |row| {
+        @memcpy(dst[row * dst_stride ..][0..row_bytes], src[row * src_stride ..][0..row_bytes]);
+    }
+}
+
+pub fn benchmarkVulkanBufferImageCopy(dst: []u8, src: []const u8, width: u32, height: u32, row_length: u32) void {
+    const image_stride = @as(usize, width) * 4;
+    const buffer_stride = @as(usize, if (row_length == 0) width else row_length) * 4;
+    copyTransferRows(dst, image_stride, src, buffer_stride, image_stride, height);
+}
+
 fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy, to_image: bool) void {
     const b = bufferBytes(buffer);
     const pixels = imageBytes(image);
@@ -9949,7 +9968,12 @@ fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy
             const bo = @as(usize, @intCast(region.buffer_offset + layer_stride * layer + @as(u64, y) * row * 4));
             const io = image_layer_offset + ((@as(usize, @intCast(region.image_offset.y)) + y) * image.width + @as(usize, @intCast(region.image_offset.x))) * 4;
             const len = @as(usize, region.image_extent.width) * 4;
-            if (to_image) std.mem.copyForwards(u8, pixels[io..][0..len], b[bo..][0..len]) else std.mem.copyForwards(u8, b[bo..][0..len], pixels[io..][0..len]);
+            // buffer/image overlap is rejected by cmdCopyBufferToImage and
+            // cmdCopyImageToBuffer before this recorded command executes.
+            if (to_image)
+                copyTransferRows(pixels[io..], @as(usize, image.width) * 4, b[bo..], @as(usize, row) * 4, len, 1)
+            else
+                copyTransferRows(b[bo..], @as(usize, row) * 4, pixels[io..], @as(usize, image.width) * 4, len, 1);
         }
     }
 }

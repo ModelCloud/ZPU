@@ -461,6 +461,19 @@ See [`docs/vulkan-abi-benchmarks.md`](docs/vulkan-abi-benchmarks.md) for the
 open-source references, stream sizes, ABI eligibility contract, and oracle
 tests.
 
+Pitched Vulkan image transfers have a focused benchmark too. It models four
+1920×1080 RGBA layers uploaded from a 2048-texel row-pitch buffer and checks a
+full-destination checksum while comparing the validated bulk-copy path with
+the overlap-safe baseline:
+
+```sh
+ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-vulkan-transfer \
+  -Doptimize=ReleaseFast -- --json
+```
+
+See [`docs/vulkan-transfer-benchmarks.md`](docs/vulkan-transfer-benchmarks.md)
+for the workload, validation contract, and measured evidence.
+
 ## 🎥 30-second 4K / 8K capture recipe
 
 When a real-present gate is green, capture a 30-second VP9 WebM with two driver

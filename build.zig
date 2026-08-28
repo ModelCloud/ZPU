@@ -203,7 +203,18 @@ pub fn build(b: *std.Build) void {
     run_benchmark_vulkan_abi.step.dependOn(&require_limited.step);
     const benchmark_vulkan_abi_step = b.step("benchmark-vulkan-abi", "Measure Vulkan cpu_cube_v1 per-draw versus batched submission for terminal, app, and complex-demo streams");
     benchmark_vulkan_abi_step.dependOn(&run_benchmark_vulkan_abi.step);
-
+    const benchmark_vulkan_transfer = b.addExecutable(.{
+        .name = "zpu-benchmark-vulkan-transfer",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_vulkan_transfer.zig"), .target = target, .optimize = optimize }),
+    });
+    benchmark_vulkan_transfer.root_module.link_libc = true;
+    if (enable_xcb) benchmark_vulkan_transfer.root_module.linkSystemLibrary("xcb", .{});
+    b.installArtifact(benchmark_vulkan_transfer);
+    const run_benchmark_vulkan_transfer = b.addRunArtifact(benchmark_vulkan_transfer);
+    if (b.args) |args| run_benchmark_vulkan_transfer.addArgs(args);
+    run_benchmark_vulkan_transfer.step.dependOn(&require_limited.step);
+    const benchmark_vulkan_transfer_step = b.step("benchmark-vulkan-transfer", "Measure pitched Vulkan buffer/image transfers against the validated bulk-copy path");
+    benchmark_vulkan_transfer_step.dependOn(&run_benchmark_vulkan_transfer.step);
 
     const run_target_800x600 = b.addSystemCommand(&.{ "python3", "test/vkcube_benchmark.py" });
     run_target_800x600.addArg(b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
@@ -319,6 +330,14 @@ pub fn build(b: *std.Build) void {
     const run_benchmark_vulkan_abi_tests = b.addRunArtifact(benchmark_vulkan_abi_tests);
     run_benchmark_vulkan_abi_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&run_benchmark_vulkan_abi_tests.step);
+    const benchmark_vulkan_transfer_tests = b.addTest(.{
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_vulkan_transfer.zig"), .target = b.graph.host, .optimize = .Debug }),
+    });
+    benchmark_vulkan_transfer_tests.root_module.link_libc = true;
+    if (enable_xcb) benchmark_vulkan_transfer_tests.root_module.linkSystemLibrary("xcb", .{});
+    const run_benchmark_vulkan_transfer_tests = b.addRunArtifact(benchmark_vulkan_transfer_tests);
+    run_benchmark_vulkan_transfer_tests.step.dependOn(&require_limited.step);
+    test_step.dependOn(&run_benchmark_vulkan_transfer_tests.step);
     const benchmark_cli_tests = b.addSystemCommand(&.{"bash"});
     benchmark_cli_tests.addFileArg(b.path("test/benchmark_cli.sh"));
     benchmark_cli_tests.addArtifactArg(benchmark);
