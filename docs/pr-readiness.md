@@ -53,8 +53,9 @@ baseline). A target run is enforced with `--require-target` (with
 `--require-10x` retained as an alias) and is not substituted for the schema-3
 readiness artifact above. Every timed sample clears the attachments,
 transforms all 36 vertices, rasterizes all 12 triangles, and computes a
-checksum; the static replay cache is deliberately bypassed. The latest
-ReleaseFast probe measured 2,918.01 triangles/s (243.17 FPS, 4.158 ms p99), so
+checksum; the static replay cache is deliberately bypassed. The representative
+median-throughput snapshot measured 2,918.01 triangles/s (243.17 FPS, 4.158 ms
+p99), so
 the aspirational target is explicitly not reported as passed.
 
 Validation additionally requires the ZPU CPU device, one VP9 800×600 stream,
