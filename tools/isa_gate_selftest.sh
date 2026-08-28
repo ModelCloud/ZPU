@@ -8,7 +8,7 @@
 #   1. A VEX instruction inside a plain project-named function is REJECTED
 #      by --kernelized (fail-closed leak detection).
 #   2. A VEX instruction inside the exact `zpu_v3_fill_span_8` export is
-#      ACCEPTED by --kernelized with all seven exports linked.
+#      ACCEPTED by --kernelized with all eight exports linked.
 #   3. Any VEX instruction is REJECTED by --no-kernel-symbols/--clean modes.
 #   4. A non-VEX object passes --clean.
 # Fails closed if the assembler or any required tool is unavailable.
@@ -105,6 +105,12 @@ zpu_v3_fill_rects_8:
 	vpbroadcastd %xmm1, %ymm0
 	ret
 .size zpu_v3_fill_rects_8, .-zpu_v3_fill_rects_8
+.globl zpu_v3_blend_sprite_batch_8
+.type zpu_v3_blend_sprite_batch_8,@function
+zpu_v3_blend_sprite_batch_8:
+	vpbroadcastd %xmm1, %ymm0
+	ud2
+.size zpu_v3_blend_sprite_batch_8, .-zpu_v3_blend_sprite_batch_8
 EOF
 
 cat >"$work/plain.S" <<'EOF'

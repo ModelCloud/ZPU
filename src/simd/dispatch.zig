@@ -80,6 +80,7 @@ const v3 = struct {
     const blend_rows_8: abi.BlendRows8Fn = @extern(abi.BlendRows8Fn, .{ .name = abi.blend_rows_8_name });
     const blend_pixels_rows_8: abi.BlendPixelsRows8Fn = @extern(abi.BlendPixelsRows8Fn, .{ .name = abi.blend_pixels_rows_8_name });
     const fill_rects_8: abi.FillRects8Fn = @extern(abi.FillRects8Fn, .{ .name = abi.fill_rects_8_name });
+    const blend_sprite_batch_8: abi.BlendSpriteBatch8Fn = @extern(abi.BlendSpriteBatch8Fn, .{ .name = abi.blend_sprite_batch_8_name });
 };
 
 /// Linkage consistency proof (build-time): an artifact whose comptime
@@ -91,7 +92,7 @@ const v3 = struct {
 /// kernel-free artifacts cannot carry them (asserted by the disassembly
 /// gate's `--no-kernel-symbols` mode).
 const linkage_proof = if (eight_lane_boundary)
-    [7]*const anyopaque{
+    [8]*const anyopaque{
         @ptrCast(v3.fill_span_8),
         @ptrCast(v3.blend_span_8),
         @ptrCast(v3.blend_pixels_8),
@@ -99,6 +100,7 @@ const linkage_proof = if (eight_lane_boundary)
         @ptrCast(v3.blend_rows_8),
         @ptrCast(v3.blend_pixels_rows_8),
         @ptrCast(v3.fill_rects_8),
+        @ptrCast(v3.blend_sprite_batch_8),
     }
 else
     [0]*const anyopaque{};
@@ -135,6 +137,20 @@ pub fn blendSpan(backend: Backend, row: []u8, start: usize, count: usize, format
         .avx2 => if (comptime eight_lane_boundary) {
             requireEightLaneSupport();
             v3.blend_span_8(row.ptr, row.len, start, count, @intFromEnum(format), packColor(color));
+        } else @panic("eight-lane kernels require an x86_64 artifact target"),
+    }
+}
+
+/// Blend a span after the caller has verified that every destination pixel is
+/// opaque. The AVX2 entry keeps the existing ABI symbol and marks the private
+/// format-tag bit so the kernel can select its division-free arithmetic.
+pub fn blendOpaqueSpan(backend: Backend, row: []u8, start: usize, count: usize, format: s.Format, color: s.Color) void {
+    switch (backend) {
+        .scalar => scalar.blendSpan(row, start, count, format, color),
+        .portable_vector => vector.blendOpaque(4, row, start, count, format, color),
+        .avx2 => if (comptime eight_lane_boundary) {
+            requireEightLaneSupport();
+            v3.blend_span_8(row.ptr, row.len, start, count, @intFromEnum(format) | abi.opaque_format_bit, packColor(color));
         } else @panic("eight-lane kernels require an x86_64 artifact target"),
     }
 }
@@ -192,6 +208,20 @@ pub fn blendRowsRuntime(backend: Backend, surface: *s.Surface, rectangle: s.Rect
     }
 }
 
+pub fn blendOpaqueRows(comptime backend: Backend, surface: *s.Surface, rectangle: s.Rect, color: s.Color) void {
+    switch (backend) {
+        .scalar => for (@intCast(rectangle.y)..@as(usize, @intCast(rectangle.y)) + rectangle.height) |y|
+            scalar.blendSpan(surface.row(@intCast(y)), @intCast(rectangle.x), rectangle.width, surface.format, color),
+        .portable_vector => for (@intCast(rectangle.y)..@as(usize, @intCast(rectangle.y)) + rectangle.height) |y|
+            vector.blendOpaque(4, surface.row(@intCast(y)), @intCast(rectangle.x), rectangle.width, surface.format, color),
+        .avx2 => if (comptime eight_lane_boundary) {
+            requireEightLaneSupport();
+            const row_offset = std.math.mul(usize, @as(usize, @intCast(rectangle.y)), surface.stride) catch unreachable;
+            v3.blend_rows_8(surface.pixels.ptr + row_offset, surface.pixels.len - row_offset, surface.stride, @intCast(rectangle.x), rectangle.width, rectangle.height, @intFromEnum(surface.format) | abi.opaque_format_bit, packColor(color));
+        } else @panic("eight-lane kernels require an x86_64 artifact target"),
+    }
+}
+
 /// Submit a batch of fully in-bounds rectangle fills through one validated
 /// AVX2 ABI call. The command layout is shared with raster.ColoredRect, so
 /// draw order and per-command colors remain unchanged.
@@ -202,6 +232,24 @@ pub fn fillRects8(surface: *s.Surface, draws: []const RectColorCommand) void {
     } else @panic("eight-lane kernels require an x86_64 artifact target");
 }
 
+/// Reuse the validated rectangle ABI for an in-bounds opaque-destination
+/// source-over batch. The private format bit selects blending in the kernel;
+/// no new exported symbol or ISA gate is required.
+pub fn blendOpaqueRects8(surface: *s.Surface, draws: []const RectColorCommand) void {
+    if (comptime eight_lane_boundary) {
+        requireEightLaneSupport();
+        v3.fill_rects_8(surface.pixels.ptr, surface.pixels.len, surface.stride, draws.ptr, draws.len, @intFromEnum(surface.format) | abi.opaque_format_bit);
+    } else @panic("eight-lane kernels require an x86_64 artifact target");
+}
+
+pub fn blendSpriteBatch8(surface: *s.Surface, commands: []const abi.SpriteCommand, source: []const u8, source_stride: usize, opaque_destination: bool) void {
+    if (comptime eight_lane_boundary) {
+        requireEightLaneSupport();
+        const format_tag = @intFromEnum(surface.format) | if (opaque_destination) abi.opaque_format_bit else 0;
+        v3.blend_sprite_batch_8(surface.pixels.ptr, surface.pixels.len, surface.stride, commands.ptr, commands.len, source.ptr, source.len, source_stride, format_tag);
+    } else @panic("eight-lane kernels require an x86_64 artifact target");
+}
+
 pub fn blendPixels(backend: Backend, row: []u8, start: usize, source: []const u8, count: usize, format: s.Format) void {
     switch (backend) {
         .scalar => scalar.blendPixels(row, start, source, count, format),
@@ -209,6 +257,20 @@ pub fn blendPixels(backend: Backend, row: []u8, start: usize, source: []const u8
         .avx2 => if (comptime eight_lane_boundary) {
             requireEightLaneSupport();
             v3.blend_pixels_8(row.ptr, row.len, start, source.ptr, source.len, count, @intFromEnum(format));
+        } else @panic("eight-lane kernels require an x86_64 artifact target"),
+    }
+}
+
+/// Blend source pixels over a caller-proven opaque destination. The private
+/// ABI tag keeps this on the existing eight-lane symbol while selecting the
+/// division-free opaque-destination kernel.
+pub fn blendPixelsOpaque(backend: Backend, row: []u8, start: usize, source: []const u8, count: usize, format: s.Format) void {
+    switch (backend) {
+        .scalar => scalar.blendPixels(row, start, source, count, format),
+        .portable_vector => vector.blendPixelsOpaque(4, row, start, source, count, format),
+        .avx2 => if (comptime eight_lane_boundary) {
+            requireEightLaneSupport();
+            v3.blend_pixels_8(row.ptr, row.len, start, source.ptr, source.len, count, @intFromEnum(format) | abi.opaque_format_bit);
         } else @panic("eight-lane kernels require an x86_64 artifact target"),
     }
 }
@@ -262,6 +324,27 @@ pub fn blendPixelsRowsBatch(backend: Backend, surface: *s.Surface, destinations:
         },
         .avx2 => if (comptime eight_lane_boundary) {
             requireEightLaneSupport();
+            if (destinations.len >= 2 and destinations.len <= 256) {
+                var commands: [256]abi.SpriteCommand = undefined;
+                var command_count: usize = 0;
+                for (destinations) |destination| {
+                    if (destination.width != source_width or destination.height != source_height) continue;
+                    const clipped = s.clip(destination, surface.width, surface.height) orelse continue;
+                    commands[command_count] = .{
+                        .x = clipped.x,
+                        .y = clipped.y,
+                        .source_x = @intCast(clipped.x - destination.x),
+                        .source_y = @intCast(clipped.y - destination.y),
+                        .width = clipped.width,
+                        .height = clipped.height,
+                    };
+                    command_count += 1;
+                }
+                if (command_count >= 2) {
+                    blendSpriteBatch8(surface, commands[0..command_count], source, @as(usize, source_width) * 4, false);
+                    return;
+                }
+            }
             for (destinations) |destination| {
                 if (destination.width != source_width or destination.height != source_height) continue;
                 const clipped = s.clip(destination, surface.width, surface.height) orelse continue;
@@ -270,6 +353,57 @@ pub fn blendPixelsRowsBatch(backend: Backend, surface: *s.Surface, destinations:
                 const destination_offset = std.math.mul(usize, @as(usize, @intCast(clipped.y)), surface.stride) catch unreachable;
                 const source_offset = std.math.mul(usize, std.math.add(usize, std.math.mul(usize, source_y, source_width) catch unreachable, source_x) catch unreachable, 4) catch unreachable;
                 v3.blend_pixels_rows_8(surface.pixels.ptr + destination_offset, surface.pixels.len - destination_offset, surface.stride, source.ptr + source_offset, source.len - source_offset, @as(usize, source_width) * 4, @intCast(clipped.x), clipped.width, clipped.height, @intFromEnum(surface.format));
+            }
+        } else @panic("eight-lane kernels require an x86_64 artifact target"),
+    }
+}
+
+/// Batch same-sized sprites over a destination known to be opaque. Clipping
+/// and source-origin handling intentionally mirror blendPixelsRowsBatch.
+pub fn blendPixelsRowsOpaqueBatch(backend: Backend, surface: *s.Surface, destinations: []const s.Rect, source: []const u8, source_width: u32, source_height: u32) void {
+    switch (backend) {
+        .scalar => blendPixelsRowsBatch(.scalar, surface, destinations, source, source_width, source_height),
+        .portable_vector => for (destinations) |destination| {
+            if (destination.width != source_width or destination.height != source_height) continue;
+            const clipped = s.clip(destination, surface.width, surface.height) orelse continue;
+            const source_x: usize = @intCast(clipped.x - destination.x);
+            const source_y: usize = @intCast(clipped.y - destination.y);
+            for (0..clipped.height) |dy| {
+                const source_offset = ((source_y + dy) * source_width + source_x) * 4;
+                vector.blendPixelsOpaque(4, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
+            }
+        },
+        .avx2 => if (comptime eight_lane_boundary) {
+            requireEightLaneSupport();
+            if (destinations.len >= 2 and destinations.len <= 256) {
+                var commands: [256]abi.SpriteCommand = undefined;
+                var command_count: usize = 0;
+                for (destinations) |destination| {
+                    if (destination.width != source_width or destination.height != source_height) continue;
+                    const clipped = s.clip(destination, surface.width, surface.height) orelse continue;
+                    commands[command_count] = .{
+                        .x = clipped.x,
+                        .y = clipped.y,
+                        .source_x = @intCast(clipped.x - destination.x),
+                        .source_y = @intCast(clipped.y - destination.y),
+                        .width = clipped.width,
+                        .height = clipped.height,
+                    };
+                    command_count += 1;
+                }
+                if (command_count >= 2) {
+                    blendSpriteBatch8(surface, commands[0..command_count], source, @as(usize, source_width) * 4, true);
+                    return;
+                }
+            }
+            for (destinations) |destination| {
+                if (destination.width != source_width or destination.height != source_height) continue;
+                const clipped = s.clip(destination, surface.width, surface.height) orelse continue;
+                const source_x: usize = @intCast(clipped.x - destination.x);
+                const source_y: usize = @intCast(clipped.y - destination.y);
+                const destination_offset = std.math.mul(usize, @as(usize, @intCast(clipped.y)), surface.stride) catch unreachable;
+                const source_offset = std.math.mul(usize, std.math.add(usize, std.math.mul(usize, source_y, source_width) catch unreachable, source_x) catch unreachable, 4) catch unreachable;
+                v3.blend_pixels_rows_8(surface.pixels.ptr + destination_offset, surface.pixels.len - destination_offset, surface.stride, source.ptr + source_offset, source.len - source_offset, @as(usize, source_width) * 4, @intCast(clipped.x), clipped.width, clipped.height, @intFromEnum(surface.format) | abi.opaque_format_bit);
             }
         } else @panic("eight-lane kernels require an x86_64 artifact target"),
     }

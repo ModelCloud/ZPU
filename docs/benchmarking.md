@@ -15,6 +15,14 @@ Rectangle batches select their row kernel once per clipped draw instead of once 
 
 The v10 fill path packs the pixel word once per multi-row draw and writes scalar tails directly, avoiding repeated format packing and scalar dispatch on every scanline. Against the freshly merged v9 tip, the controlled probe reduced runtime `clipped_rectangle` p50 from 3.42 µs to 2.41 µs (1.42×), `frame` from 13.56 µs to 10.34 µs (1.31×), and `game_scene` from 54.0 µs to 43.4 µs (1.24×); cumulative improvement from the pre-v9 baseline is about 1.59× for `game_scene`. Checksums and the independent reference renderer remain authoritative.
 
+Opaque-destination composition is an explicit opt-in contract: after an opaque
+clear, callers may use `blendOpaqueRect(s)With` and
+`drawSpritesOpaqueWith`. Source-over then has a constant output alpha, so the
+AVX2 kernels omit destination-alpha division. Same-sized opaque sprite lists
+are clipped once into an ordered batch and submitted through one ABI call;
+general `blendRect(s)With` and `drawSpritesWith` retain the full straight-alpha
+path for translucent destinations.
+
 Each case starts from the same seeded bytes, executes an unmeasured warmup, resets, then takes 15 monotonic-clock samples with 100 operations per sample. Amortizing each sample limits scheduler-interruption distortion in tail percentiles; the reported rates use the median. A separate canonical iteration produces the checksum, so correctness identity never depends on sample count or timing. An independently implemented reference renderer and twelve fixed checksums define the oracle; scalar, every available SIMD backend, and dispatch must all match it. ReleaseFast is the meaningful performance configuration. `--smoke` reduces timing to three samples of two operations for CI schema/correctness checks, not performance claims.
 
 Optional `avx2` raster rows are emitted only when the runtime CPUID/XGETBV checks report that the linked x86-64-v3 eight-lane kernel tier is supported; hosts without AVX2 intentionally have no AVX2 execution to verify, and a result without those rows makes no AVX2 correctness or performance claim. AVX-512 rows are never emitted: that tier is excluded pending controlled frame-time-tail evidence. The ISA tiers themselves are enforced by a build/code-generation boundary described in [design/isa-tiers.md](../design/isa-tiers.md) and verified by `zig build isa-gate`.

@@ -16,6 +16,14 @@ const s = @import("../surface.zig");
 /// this same source tree. Keeping geometry/color adjacent preserves draw order
 /// while allowing the kernel to consume a batch without per-rectangle calls.
 pub const RectColorCommand = struct { rect: s.Rect, color: s.Color };
+pub const SpriteCommand = extern struct {
+    x: i32,
+    y: i32,
+    source_x: u32,
+    source_y: u32,
+    width: u32,
+    height: u32,
+};
 
 pub const fill_span_8_name = "zpu_v3_fill_span_8";
 pub const blend_span_8_name = "zpu_v3_blend_span_8";
@@ -24,6 +32,10 @@ pub const fill_rows_8_name = "zpu_v3_fill_rows_8";
 pub const blend_rows_8_name = "zpu_v3_blend_rows_8";
 pub const blend_pixels_rows_8_name = "zpu_v3_blend_pixels_rows_8";
 pub const fill_rects_8_name = "zpu_v3_fill_rects_8";
+pub const blend_sprite_batch_8_name = "zpu_v3_blend_sprite_batch_8";
+/// Internal format-tag bit used by the row/span kernels for the proven-opaque
+/// destination fast path. The low bit remains the public RGBA/BGRA format.
+pub const opaque_format_bit: u8 = 0x80;
 
 pub const FillSpan8Fn = *const fn ([*]u8, usize, usize, usize, u8, u32) callconv(.c) void;
 pub const BlendSpan8Fn = *const fn ([*]u8, usize, usize, usize, u8, u32) callconv(.c) void;
@@ -32,6 +44,7 @@ pub const FillRows8Fn = *const fn ([*]u8, usize, usize, usize, usize, usize, u8,
 pub const BlendRows8Fn = *const fn ([*]u8, usize, usize, usize, usize, usize, u8, u32) callconv(.c) void;
 pub const BlendPixelsRows8Fn = *const fn ([*]u8, usize, usize, [*]const u8, usize, usize, usize, usize, usize, u8) callconv(.c) void;
 pub const FillRects8Fn = *const fn ([*]u8, usize, usize, [*]const RectColorCommand, usize, u8) callconv(.c) void;
+pub const BlendSpriteBatch8Fn = *const fn ([*]u8, usize, usize, [*]const SpriteCommand, usize, [*]const u8, usize, usize, u8) callconv(.c) void;
 
 /// Exact exported symbol names. The disassembly gate treats these (matched on
 /// the final dot-separated component) as the only functions allowed to carry
@@ -44,6 +57,7 @@ pub const exported_symbols = [_][]const u8{
     blend_rows_8_name,
     blend_pixels_rows_8_name,
     fill_rects_8_name,
+    blend_sprite_batch_8_name,
 };
 
 test "gate script pins the same kernel symbol set" {

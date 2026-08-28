@@ -302,6 +302,15 @@ draws/s** versus **10.23M** at the post-merge tip (**1.48×**). This is a real
 API-call reduction; source pixels, origins, alpha values, and checksums are
 unchanged, and the remaining sprite cost is source-over arithmetic.
 
+Opaque compositor/HUD layers can opt into `blendOpaqueRectsWith` and
+`drawSpritesOpaqueWith` after establishing that the destination attachment is
+opaque (for example, immediately after a full-frame clear). The source-over
+contract keeps that alpha at 255, allowing the v3 path to skip destination-alpha
+division. Same-sized sprite lists are clipped into one ordered batch and sent
+through a dedicated eight-lane ABI call; arbitrary-alpha sprites remain fully
+supported, while callers that cannot prove opaque destinations continue using
+the general APIs.
+
 The v5 workload adds four app-shaped draw patterns: desktop window
 compositing, a terminal glyph grid backed by an atlas, a tiled 2D game scene
 with particles, and a design canvas with translucent layers, handles, and

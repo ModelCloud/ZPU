@@ -139,6 +139,9 @@ fn hasBinaryAlpha(source: []const u8, source_width: u32, source_height: u32) boo
     return true;
 }
 
+/// A destination with opaque alpha stays opaque under source-over blending.
+/// Scan only medium/large regions: tiny UI primitives are faster through the
+/// existing direct path than by paying a validation pass.
 fn fillRectBackend(comptime backend: dispatch.Backend, surface: *s.Surface, rect: s.Rect, color: s.Color) void {
     if (rect.width == 1 and rect.height == 1) {
         if (rect.x < 0 or rect.y < 0 or @as(u32, @intCast(rect.x)) >= surface.width or @as(u32, @intCast(rect.y)) >= surface.height) return;
@@ -193,6 +196,31 @@ fn blendRectBackend(comptime backend: dispatch.Backend, surface: *s.Surface, rec
     dispatch.blendRows(backend, surface, clipped, color);
 }
 
+/// Source-over blend for a caller-proven opaque destination. The destination
+/// alpha must be 255 for every pixel in each clipped rectangle; source-over
+/// then keeps it opaque and the SIMD route can omit output-alpha division.
+fn blendOpaqueRectBackend(comptime backend: dispatch.Backend, surface: *s.Surface, rect: s.Rect, color: s.Color) void {
+    const clipped = s.clip(rect, surface.width, surface.height) orelse return;
+    if (color.a == 0) return;
+    if (color.a == 255) {
+        fillRectBackend(backend, surface, clipped, color);
+        return;
+    }
+    if (backend == .scalar) {
+        blendRectBackend(.scalar, surface, clipped, color);
+        return;
+    }
+    if (clipped.width <= 2 and clipped.height <= 2) {
+        blendRectBackend(backend, surface, clipped, color);
+        return;
+    }
+    if (contiguousSpan(surface, clipped)) |span| {
+        dispatch.blendOpaqueSpan(backend, span.bytes, 0, span.pixels, surface.format, color);
+    } else {
+        dispatch.blendOpaqueRows(backend, surface, clipped, color);
+    }
+}
+
 fn canBatchFill(surface: *s.Surface, draws: []const ColoredRect) bool {
     if (draws.len < 2) return false;
     for (draws) |draw| {
@@ -236,6 +264,56 @@ pub fn fillRects(surface: *s.Surface, draws: []const ColoredRect) void {
 
 pub fn blendRects(surface: *s.Surface, draws: []const ColoredRect) void {
     blendRectsWith(surface, draws, cachedKernel(surface.format, .source_over).backend);
+}
+
+/// Batch source-over rectangles when the caller has established that the
+/// destination attachment is opaque. This is useful for compositors, design
+/// canvases, and HUD layers that begin from an opaque clear.
+pub fn blendOpaqueRectsWith(surface: *s.Surface, draws: []const ColoredRect, backend: dispatch.Backend) void {
+    switch (backend) {
+        .scalar => for (draws) |draw| blendOpaqueRectBackend(.scalar, surface, draw.rect, draw.color),
+        .portable_vector => for (draws) |draw| blendOpaqueRectBackend(.portable_vector, surface, draw.rect, draw.color),
+        .avx2 => {
+            // Clip into a bounded stack batch once. This keeps partially
+            // visible window/shadow layers on the single ABI call while
+            // retaining the public API's per-rectangle clipping semantics.
+            if (draws.len >= 2 and draws.len <= 256) {
+                var clipped_draws: [256]ColoredRect = undefined;
+                var clipped_count: usize = 0;
+                var batchable = true;
+                for (draws) |draw| {
+                    const clipped = s.clip(draw.rect, surface.width, surface.height) orelse continue;
+                    if (clipped.width <= 2) {
+                        batchable = false;
+                        break;
+                    }
+                    clipped_draws[clipped_count] = .{ .rect = clipped, .color = draw.color };
+                    clipped_count += 1;
+                }
+                if (batchable and clipped_count >= 2) {
+                    dispatch.blendOpaqueRects8(surface, clipped_draws[0..clipped_count]);
+                    return;
+                }
+            }
+            for (draws) |draw| blendOpaqueRectBackend(.avx2, surface, draw.rect, draw.color);
+        },
+    }
+}
+
+pub fn blendOpaqueRectWith(surface: *s.Surface, rect: s.Rect, color: s.Color, backend: dispatch.Backend) void {
+    switch (backend) {
+        .scalar => blendOpaqueRectBackend(.scalar, surface, rect, color),
+        .portable_vector => blendOpaqueRectBackend(.portable_vector, surface, rect, color),
+        .avx2 => blendOpaqueRectBackend(.avx2, surface, rect, color),
+    }
+}
+
+pub fn blendOpaqueRect(surface: *s.Surface, rect: s.Rect, color: s.Color) void {
+    blendOpaqueRectWith(surface, rect, color, cachedKernel(surface.format, .source_over).backend);
+}
+
+pub fn blendOpaqueRects(surface: *s.Surface, draws: []const ColoredRect) void {
+    blendOpaqueRectsWith(surface, draws, cachedKernel(surface.format, .source_over).backend);
 }
 
 /// Draw a tightly packed RGBA8 sprite with straight-alpha source-over blending.
@@ -288,6 +366,20 @@ pub fn drawSpritesWith(surface: *s.Surface, destinations: []const s.Rect, source
     const source_bytes = std.math.mul(usize, source_pixels, 4) catch return;
     if (source.len < source_bytes) return;
     dispatch.blendPixelsRowsBatch(backend, surface, destinations, source, source_width, source_height);
+}
+
+/// Draw same-sized sprites over a destination attachment known to be opaque.
+/// Source alpha remains arbitrary, but source-over preserves the proven
+/// destination alpha and can skip the general output-alpha compositing path.
+pub fn drawSpritesOpaqueWith(surface: *s.Surface, destinations: []const s.Rect, source: []const u8, source_width: u32, source_height: u32, backend: dispatch.Backend) void {
+    const source_pixels = std.math.mul(usize, source_width, source_height) catch return;
+    const source_bytes = std.math.mul(usize, source_pixels, 4) catch return;
+    if (source.len < source_bytes) return;
+    dispatch.blendPixelsRowsOpaqueBatch(backend, surface, destinations, source, source_width, source_height);
+}
+
+pub fn drawSpritesOpaque(surface: *s.Surface, destinations: []const s.Rect, source: []const u8, source_width: u32, source_height: u32) void {
+    drawSpritesOpaqueWith(surface, destinations, source, source_width, source_height, cachedKernel(surface.format, .sprite).backend);
 }
 
 /// Draw atlas-backed sprites in one batch. Source rectangles may differ per
@@ -377,7 +469,52 @@ test "colored rectangle batches preserve draw order and clipping" {
         fillRectsWith(&avx_surface, &fast_fills, .avx2);
         fillRectsWith(&scalar_fast_surface, &fast_fills, .scalar);
         try std.testing.expectEqualSlices(u8, &scalar_fast_pixels, &avx_pixels);
+
+        var opaque_avx_pixels = [_]u8{0x27} ** (8 * 6 * 4);
+        var opaque_scalar_pixels = opaque_avx_pixels;
+        for (0..8 * 6) |pixel| {
+            opaque_avx_pixels[pixel * 4 + 3] = 255;
+            opaque_scalar_pixels[pixel * 4 + 3] = 255;
+        }
+        var opaque_avx = try s.Surface.init(&opaque_avx_pixels, 8, 6, 32, .rgba8_unorm);
+        var opaque_scalar = try s.Surface.init(&opaque_scalar_pixels, 8, 6, 32, .rgba8_unorm);
+        const opaque_blends = [_]ColoredRect{
+            .{ .rect = .{ .x = -1, .y = 0, .width = 5, .height = 4 }, .color = .rgba(220, 40, 80, 96) },
+            .{ .rect = .{ .x = 2, .y = 2, .width = 6, .height = 3 }, .color = .rgba(30, 180, 210, 144) },
+            .{ .rect = .{ .x = 0, .y = 4, .width = 8, .height = 2 }, .color = .rgba(90, 60, 240, 72) },
+        };
+        blendOpaqueRectsWith(&opaque_avx, &opaque_blends, .avx2);
+        blendOpaqueRectsWith(&opaque_scalar, &opaque_blends, .scalar);
+        try std.testing.expectEqualSlices(u8, &opaque_scalar_pixels, &opaque_avx_pixels);
     }
+}
+
+test "opaque sprite batches preserve clipping and BGRA channel order" {
+    if (!dispatch.available(.avx2)) return;
+    var source: [4 * 4 * 4]u8 = undefined;
+    for (0..4) |y| for (0..4) |x| {
+        const offset = (y * 4 + x) * 4;
+        source[offset] = @truncate(20 + x * 31);
+        source[offset + 1] = @truncate(40 + y * 29);
+        source[offset + 2] = @truncate(60 + x * 7 + y * 11);
+        source[offset + 3] = if ((x + y) % 3 == 0) 0 else if ((x + y) % 3 == 1) 255 else 96;
+    };
+    var avx_pixels = [_]u8{0x19} ** (12 * 8 * 4);
+    var scalar_pixels = avx_pixels;
+    for (0..12 * 8) |pixel| {
+        avx_pixels[pixel * 4 + 3] = 255;
+        scalar_pixels[pixel * 4 + 3] = 255;
+    }
+    var avx = try s.Surface.init(&avx_pixels, 12, 8, 48, .bgra8_unorm);
+    var scalar_surface = try s.Surface.init(&scalar_pixels, 12, 8, 48, .bgra8_unorm);
+    const destinations = [_]s.Rect{
+        .{ .x = -1, .y = 1, .width = 4, .height = 4 },
+        .{ .x = 4, .y = 2, .width = 4, .height = 4 },
+        .{ .x = 8, .y = 3, .width = 4, .height = 4 },
+    };
+    drawSpritesOpaqueWith(&avx, &destinations, &source, 4, 4, .avx2);
+    drawSpritesOpaqueWith(&scalar_surface, &destinations, &source, 4, 4, .scalar);
+    try std.testing.expectEqualSlices(u8, &scalar_pixels, &avx_pixels);
 }
 
 test "atlas sprite batches preserve source rectangles and clipping" {

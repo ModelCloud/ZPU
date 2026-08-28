@@ -103,6 +103,34 @@ pub inline fn blend(comptime lanes: usize, row: []u8, start: usize, count: usize
     scalar.blendSpan(row, start + i, count - i, format, color);
 }
 
+/// Source-over blend for a span whose destination alpha has already been
+/// proven opaque. This is the common compositor case: the alpha channel stays
+/// 255 after the operation, so the general straight-alpha path's per-lane
+/// output-alpha/divisor work (including integer division) is unnecessary.
+pub inline fn blendOpaque(comptime lanes: usize, row: []u8, start: usize, count: usize, format: s.Format, color: s.Color) void {
+    if (color.a == 0) return;
+    if (color.a == 255) return fill(lanes, row, start, count, format, color);
+    const V = @Vector(lanes, u32);
+    const channel_mask: V = @splat(0xff);
+    const sa: V = @splat(color.a);
+    const inverse: V = @splat(255 - @as(u32, color.a));
+    var i: usize = 0;
+    while (i + lanes <= count) : (i += lanes) {
+        const destination_packed: V = loadNativePacked(lanes, row, (start + i) * 4);
+        const low = destination_packed & channel_mask;
+        const middle = (destination_packed >> @as(V, @splat(8))) & channel_mask;
+        const high = (destination_packed >> @as(V, @splat(16))) & channel_mask;
+        const dr = if (format == .rgba8_unorm) low else high;
+        const db = if (format == .rgba8_unorm) high else low;
+        const rr = div255Fast(V, @as(V, @splat(color.r)) * sa + dr * inverse);
+        const rg = div255Fast(V, @as(V, @splat(color.g)) * sa + middle * inverse);
+        const rb = div255Fast(V, @as(V, @splat(color.b)) * sa + db * inverse);
+        const packed_output = (if (format == .rgba8_unorm) rr | (rg << @as(V, @splat(8))) | (rb << @as(V, @splat(16))) else rb | (rg << @as(V, @splat(8))) | (rr << @as(V, @splat(16)))) | @as(V, @splat(0xff000000));
+        storeNativePacked(lanes, row, (start + i) * 4, packed_output);
+    }
+    scalar.blendSpan(row, start + i, count - i, format, color);
+}
+
 pub inline fn blendPixels(comptime lanes: usize, row: []u8, start: usize, source: []const u8, count: usize, format: s.Format) void {
     const V = @Vector(lanes, u32);
     const channel_mask: V = @splat(0xff);
@@ -145,6 +173,48 @@ pub inline fn blendPixels(comptime lanes: usize, row: []u8, start: usize, source
         const rg = if (destination_is_opaque) div255Fast(V, sg * sva + dg * inverse) else blendChannel(sg, dg, sva, dva, inverse, half, scale, divisor);
         const rb = if (destination_is_opaque) div255Fast(V, sb * sva + db * inverse) else blendChannel(sb, db, sva, dva, inverse, half, scale, divisor);
         const packed_output = (if (format == .rgba8_unorm) rr | (rg << @as(V, @splat(8))) | (rb << @as(V, @splat(16))) else rb | (rg << @as(V, @splat(8))) | (rr << @as(V, @splat(16)))) | (out_a << @as(V, @splat(24)));
+        storeNativePacked(lanes, row, (start + i) * 4, packed_output);
+    }
+    scalar.blendPixels(row, start + i, source[i * 4 ..], count - i, format);
+}
+
+/// Blend arbitrary-alpha source pixels over a destination that the caller has
+/// proven opaque. Source-over keeps the destination alpha at 255, so this
+/// avoids loading destination alpha and the general path's per-lane divides.
+pub inline fn blendPixelsOpaque(comptime lanes: usize, row: []u8, start: usize, source: []const u8, count: usize, format: s.Format) void {
+    const V = @Vector(lanes, u32);
+    const channel_mask: V = @splat(0xff);
+    const scale: V = @splat(255);
+    var i: usize = 0;
+    while (i + lanes <= count) : (i += lanes) {
+        const packed_source: V = loadNativePacked(lanes, source, i * 4);
+        const sr = packed_source & channel_mask;
+        const sg = (packed_source >> @as(V, @splat(8))) & channel_mask;
+        const sb = (packed_source >> @as(V, @splat(16))) & channel_mask;
+        const sa = packed_source >> @as(V, @splat(24));
+        if (@reduce(.And, sa == @as(V, @splat(0)))) continue;
+        const packed_destination: V = loadNativePacked(lanes, row, (start + i) * 4);
+        if (@reduce(.And, sa == @as(V, @splat(255)))) {
+            const packed_output = if (format == .rgba8_unorm)
+                packed_source
+            else
+                sb | (sg << @as(V, @splat(8))) | (sr << @as(V, @splat(16))) | (sa << @as(V, @splat(24)));
+            storeNativePacked(lanes, row, (start + i) * 4, packed_output);
+            continue;
+        }
+        const destination_low = packed_destination & channel_mask;
+        const destination_middle = (packed_destination >> @as(V, @splat(8))) & channel_mask;
+        const destination_high = (packed_destination >> @as(V, @splat(16))) & channel_mask;
+        const dr = if (format == .rgba8_unorm) destination_low else destination_high;
+        const db = if (format == .rgba8_unorm) destination_high else destination_low;
+        const inverse = scale - sa;
+        const rr = div255Fast(V, sr * sa + dr * inverse);
+        const rg = div255Fast(V, sg * sa + destination_middle * inverse);
+        const rb = div255Fast(V, sb * sa + db * inverse);
+        const packed_output = if (format == .rgba8_unorm)
+            rr | (rg << @as(V, @splat(8))) | (rb << @as(V, @splat(16))) | @as(V, @splat(0xff000000))
+        else
+            rb | (rg << @as(V, @splat(8))) | (rr << @as(V, @splat(16))) | @as(V, @splat(0xff000000));
         storeNativePacked(lanes, row, (start + i) * 4, packed_output);
     }
     scalar.blendPixels(row, start + i, source[i * 4 ..], count - i, format);
