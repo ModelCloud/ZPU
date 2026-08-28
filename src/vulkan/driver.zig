@@ -15664,10 +15664,7 @@ fn instanceLookup(n: []const u8) Fn {
     return deviceLookup(n);
 }
 fn deviceLookup(n: []const u8) Fn {
-    if (googleDisplayTimingProc(n)) {
-        logGoogleDisplayTimingRejected("device procedure lookup");
-        return null;
-    }
+    if (googleDisplayTimingProc(n)) return null;
     const semaphore_commands = .{ .{ "vkGetSemaphoreCounterValue", getSemaphoreCounterValue }, .{ "vkSignalSemaphore", signalSemaphore }, .{ "vkWaitSemaphores", waitSemaphores } };
     inline for (semaphore_commands) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
     const compute_commands = .{ .{ "vkCmdDispatch", cmdDispatch }, .{ "vkCmdDispatchIndirect", cmdDispatchIndirect }, .{ "vkCmdDispatchBase", cmdDispatchBase }, .{ "vkCmdSetDeviceMask", cmdSetDeviceMask } };

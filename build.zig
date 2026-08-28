@@ -295,6 +295,7 @@ pub fn build(b: *std.Build) void {
     const run_shader_module = b.addRunArtifact(shader_module_client);
     run_shader_module.step.dependOn(&require_limited.step);
     run_shader_module.setEnvironmentVariable("VK_DRIVER_FILES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_shader_module.setEnvironmentVariable("VK_ICD_FILENAMES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
     run_shader_module.step.dependOn(b.getInstallStep());
     if (cross_compiling) {
         // Foreign targets have no local Vulkan loader to link against (the
@@ -486,6 +487,7 @@ pub fn build(b: *std.Build) void {
     const run_transfer = b.addRunArtifact(transfer_client);
     run_transfer.step.dependOn(&require_limited.step);
     run_transfer.setEnvironmentVariable("VK_DRIVER_FILES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_transfer.setEnvironmentVariable("VK_ICD_FILENAMES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
     run_transfer.step.dependOn(b.getInstallStep());
     const transfer_step = b.step("transfer", "Run exact 240x240 transfers through the system Vulkan loader");
     transfer_step.dependOn(&run_transfer.step);
@@ -500,6 +502,7 @@ pub fn build(b: *std.Build) void {
     const run_headless_present = b.addRunArtifact(headless_present_client);
     run_headless_present.step.dependOn(&require_limited.step);
     run_headless_present.setEnvironmentVariable("VK_DRIVER_FILES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_headless_present.setEnvironmentVariable("VK_ICD_FILENAMES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
     run_headless_present.step.dependOn(b.getInstallStep());
     const headless_present_step = b.step("headless-present", "Run VK_EXT_headless_surface through the system Vulkan loader");
     headless_present_step.dependOn(&run_headless_present.step);
@@ -515,6 +518,7 @@ pub fn build(b: *std.Build) void {
     const run_xcb_present = b.addSystemCommand(&.{ "xvfb-run", "-a", "-s", "-screen 0 640x480x24 -nolisten tcp" });
     run_xcb_present.addArtifactArg(xcb_present_test);
     run_xcb_present.setEnvironmentVariable("VK_DRIVER_FILES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_xcb_present.setEnvironmentVariable("VK_ICD_FILENAMES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
     run_xcb_present.step.dependOn(&require_limited.step);
     run_xcb_present.step.dependOn(b.getInstallStep());
     const xcb_present_step = b.step("xcb-present", "Require swapchain pixels to reach an XCB window under Xvfb");
@@ -545,6 +549,7 @@ pub fn build(b: *std.Build) void {
     const run_desktop_probe = b.addRunArtifact(desktop_probe);
     run_desktop_probe.step.dependOn(&require_limited.step);
     run_desktop_probe.setEnvironmentVariable("VK_DRIVER_FILES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    run_desktop_probe.setEnvironmentVariable("VK_ICD_FILENAMES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
     run_desktop_probe.step.dependOn(b.getInstallStep());
     const desktop_probe_step = b.step("desktop-probe", "Report Vulkan window-system and rendering readiness without requiring success");
     desktop_probe_step.dependOn(&run_desktop_probe.step);
@@ -553,6 +558,7 @@ pub fn build(b: *std.Build) void {
     require_desktop_ready.addArg("--require-ready");
     require_desktop_ready.step.dependOn(&require_limited.step);
     require_desktop_ready.setEnvironmentVariable("VK_DRIVER_FILES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
+    require_desktop_ready.setEnvironmentVariable("VK_ICD_FILENAMES", b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
     require_desktop_ready.step.dependOn(b.getInstallStep());
     const desktop_ready_step = b.step("desktop-ready", "Require enough Vulkan WSI and rendering support to start a window test");
     desktop_ready_step.dependOn(&require_desktop_ready.step);

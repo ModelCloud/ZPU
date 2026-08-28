@@ -62,6 +62,7 @@ def main() -> int:
         metrics_path = pathlib.Path(temporary_directory) / "frame-metrics.bin"
         environment = os.environ.copy()
         environment["VK_DRIVER_FILES"] = str(manifest)
+        environment["VK_ICD_FILENAMES"] = str(manifest)
         environment["ZPU_FRAME_METRICS"] = "1"
         environment["ZPU_FRAME_METRICS_COUNT"] = str(WARMUP_FRAMES + SAMPLE_FRAMES)
         environment["ZPU_FRAME_METRICS_PATH"] = str(metrics_path)
