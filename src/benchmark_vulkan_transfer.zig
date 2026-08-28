@@ -4,7 +4,7 @@
 const std = @import("std");
 const driver = @import("vulkan/driver.zig");
 
-pub const schema_version: u32 = 1;
+pub const schema_version: u32 = 2;
 pub const width: u32 = 1920;
 pub const height: u32 = 1080;
 pub const row_length: u32 = 2048;
@@ -36,6 +36,9 @@ const Report = struct {
     copy_forwards: Timing,
     bulk_copy: Timing,
     p50_speedup: f64,
+    image_copy_forwards: Timing,
+    image_copy_bulk: Timing,
+    image_copy_p50_speedup: f64,
     checksum_hex: []const u8,
 };
 
@@ -58,6 +61,26 @@ fn copyForwards(dst: []u8, src: []const u8) void {
 fn copyBulk(dst: []u8, src: []const u8) void {
     for (0..layers) |layer| {
         driver.benchmarkVulkanBufferImageCopy(dst[layer * layer_destination_bytes ..][0..layer_destination_bytes], src[layer * layer_source_bytes ..][0..layer_source_bytes], width, height, row_length);
+    }
+}
+
+fn copyImageForwards(dst: []u8, src: []const u8) void {
+    const layer_bytes = layer_destination_bytes;
+    const row_bytes = @as(usize, width) * 4;
+    for (0..layers) |layer| {
+        const source = src[layer * layer_bytes ..][0..layer_bytes];
+        const destination = dst[layer * layer_bytes ..][0..layer_bytes];
+        for (0..height) |row| {
+            const offset = row * row_bytes;
+            std.mem.copyForwards(u8, destination[offset..][0..row_bytes], source[offset..][0..row_bytes]);
+        }
+    }
+}
+
+fn copyImageBulk(dst: []u8, src: []const u8) void {
+    for (0..layers) |layer| {
+        const offset = layer * layer_destination_bytes;
+        driver.benchmarkVulkanImageCopy(dst[offset..][0..layer_destination_bytes], src[offset..][0..layer_destination_bytes], width, height);
     }
 }
 
@@ -92,6 +115,25 @@ fn measure(source: []u8, destination: []u8, optimized: bool, smoke: bool, sink: 
     return .{ .sample_count = @intCast(sample_count), .p50_ns = percentile(timings[0..sample_count], 50, 100), .p95_ns = percentile(timings[0..sample_count], 95, 100), .p99_ns = percentile(timings[0..sample_count], 99, 100) };
 }
 
+fn measureImage(source: []u8, destination: []u8, optimized: bool, smoke: bool, sink: *u64) Timing {
+    const warmups: usize = if (smoke) 1 else 2;
+    const sample_count: usize = if (smoke) 3 else 6;
+    var timings: [max_samples]u64 = undefined;
+    for (0..warmups) |frame| {
+        source[frame % source.len] +%= @truncate(frame + 1);
+        if (optimized) copyImageBulk(destination, source) else copyImageForwards(destination, source);
+        sink.* ^= checksum(destination);
+    }
+    for (0..sample_count) |sample| {
+        source[(sample + warmups) % source.len] +%= @truncate(sample + 3);
+        const start = now();
+        if (optimized) copyImageBulk(destination, source) else copyImageForwards(destination, source);
+        timings[sample] = @max(now() - start, 1);
+        sink.* ^= checksum(destination);
+    }
+    return .{ .sample_count = @intCast(sample_count), .p50_ns = percentile(timings[0..sample_count], 50, 100), .p95_ns = percentile(timings[0..sample_count], 95, 100), .p99_ns = percentile(timings[0..sample_count], 99, 100) };
+}
+
 fn selectedCpuCount(text: []const u8) usize {
     var count: usize = 0;
     var tokens = std.mem.tokenizeScalar(u8, text, ',');
@@ -119,7 +161,10 @@ pub fn main(init: std.process.Init) !void {
     var sink: u64 = 0;
     const forwards = measure(source, destination, false, smoke, &sink);
     const bulk = measure(source, destination, true, smoke, &sink);
-    const report = Report{ .warmup_iterations = if (smoke) 1 else 2, .sample_count = if (smoke) 3 else 6, .copy_forwards = forwards, .bulk_copy = bulk, .p50_speedup = @as(f64, @floatFromInt(forwards.p50_ns)) / @as(f64, @floatFromInt(bulk.p50_ns)), .checksum_hex = try std.fmt.allocPrint(allocator, "{x:0>16}", .{checksum(destination) ^ sink}) };
+    const image_source = source[0..destination_bytes];
+    const image_forwards = measureImage(image_source, destination, false, smoke, &sink);
+    const image_bulk = measureImage(image_source, destination, true, smoke, &sink);
+    const report = Report{ .warmup_iterations = if (smoke) 1 else 2, .sample_count = if (smoke) 3 else 6, .copy_forwards = forwards, .bulk_copy = bulk, .p50_speedup = @as(f64, @floatFromInt(forwards.p50_ns)) / @as(f64, @floatFromInt(bulk.p50_ns)), .image_copy_forwards = image_forwards, .image_copy_bulk = image_bulk, .image_copy_p50_speedup = @as(f64, @floatFromInt(image_forwards.p50_ns)) / @as(f64, @floatFromInt(image_bulk.p50_ns)), .checksum_hex = try std.fmt.allocPrint(allocator, "{x:0>16}", .{checksum(destination) ^ sink}) };
     if (json) {
         var out: std.Io.Writer.Allocating = .init(allocator);
         var stringify: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
@@ -145,4 +190,12 @@ test "Vulkan transfer benchmark preserves pitched rows and layer boundaries" {
         const dst = destination[row * 6 * 4 ..][0 .. 6 * 4];
         try std.testing.expectEqualSlices(u8, src, dst);
     }
+}
+
+test "Vulkan image benchmark copies every tight row" {
+    var source: [3 * 2 * 4]u8 = undefined;
+    var destination: [3 * 2 * 4]u8 = .{0} ** (3 * 2 * 4);
+    for (&source, 0..) |*byte, index| byte.* = @truncate(index * 19 + 5);
+    driver.benchmarkVulkanImageCopy(&destination, &source, 3, 2);
+    try std.testing.expectEqualSlices(u8, &source, &destination);
 }

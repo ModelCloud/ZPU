@@ -2106,7 +2106,7 @@ fn rasterFlatSpanTriangle(comptime depth_test: bool, color_words: []align(4) u32
         var stepped_u_over_w = b0 * u_over_w0 + b1 * u_over_w1 + b2 * u_over_w2;
         var stepped_v_over_w = b0 * v_over_w0 + b1 * v_over_w1 + b2 * v_over_w2;
         var x = first;
-        while (x + 4 <= last) : (x += 4) {
+        while (x + 8 <= last) : (x += 8) {
             const pixel_index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
             var known_tile_pass = false;
             var tile_metadata_valid = false;
@@ -2115,27 +2115,27 @@ fn rasterFlatSpanTriangle(comptime depth_test: bool, color_words: []align(4) u32
                 const tile_x = @as(usize, @intCast(x)) / dirty_tile_size;
                 const tile_index = (@as(usize, @intCast(y)) / dirty_tile_size) * tile_columns + tile_x;
                 const tile_end = @min(@as(usize, @intCast(last)), (tile_x + 1) * dirty_tile_size);
-                if (tile_index < tile_count and @as(usize, @intCast(x)) + 4 <= tile_end) {
+                if (tile_index < tile_count and @as(usize, @intCast(x)) + 8 <= tile_end) {
                     tile_metadata_index = lane_index * tile_count + tile_index;
                     tile_metadata_valid = true;
                     known_tile_pass = flat_depth_bits <= mins[tile_metadata_index];
                 }
             }
-            const passes: @Vector(4, bool) = if (known_tile_pass)
-                @as(@Vector(4, bool), @splat(true))
+            const passes: @Vector(8, bool) = if (known_tile_pass)
+                @as(@Vector(8, bool), @splat(true))
             else
-                @as(@Vector(4, u32), @splat(flat_depth_bits)) <= depth_words[pixel_index..][0..4].*;
-            var colors: [4]u32 = undefined;
+                @as(@Vector(8, u32), @splat(flat_depth_bits)) <= depth_words[pixel_index..][0..8].*;
+            var colors: [8]u32 = undefined;
             if (flat_color) |color| {
-                colors = .{ color, color, color, color };
+                colors = .{ color, color, color, color, color, color, color, color };
             } else if (prelit_texture) |prelit| {
-                inline for (0..4) |lane| {
+                inline for (0..8) |lane| {
                     const lane_u = stepped_u_over_w + u_over_w_dx * @as(f32, @floatFromInt(lane));
                     const lane_v = stepped_v_over_w + v_over_w_dx * @as(f32, @floatFromInt(lane));
                     colors[lane] = shadeUnitTexture4x4(lane_u * flat_reciprocal_w, lane_v * flat_reciprocal_w, prelit);
                 }
             } else if (prelit_texture_16x16) |prelit| {
-                inline for (0..4) |lane| {
+                inline for (0..8) |lane| {
                     const lane_u = stepped_u_over_w + u_over_w_dx * @as(f32, @floatFromInt(lane));
                     const lane_v = stepped_v_over_w + v_over_w_dx * @as(f32, @floatFromInt(lane));
                     colors[lane] = shadeUnitTexture16x16(lane_u * flat_reciprocal_w, lane_v * flat_reciprocal_w, prelit);
@@ -2143,16 +2143,16 @@ fn rasterFlatSpanTriangle(comptime depth_test: bool, color_words: []align(4) u32
             }
             var vector_written: usize = 0;
             if (known_tile_pass) {
-                depth_words[pixel_index..][0..4].* = @as(@Vector(4, u32), @splat(flat_depth_bits));
-                color_words[pixel_index..][0..4].* = colors;
-                vector_written = 4;
+                depth_words[pixel_index..][0..8].* = @as(@Vector(8, u32), @splat(flat_depth_bits));
+                color_words[pixel_index..][0..8].* = colors;
+                vector_written = 8;
             } else if (@reduce(.And, passes)) {
-                depth_words[pixel_index..][0..4].* = @as(@Vector(4, u32), @splat(flat_depth_bits));
-                color_words[pixel_index..][0..4].* = colors;
-                vector_written = 4;
+                depth_words[pixel_index..][0..8].* = @as(@Vector(8, u32), @splat(flat_depth_bits));
+                color_words[pixel_index..][0..8].* = colors;
+                vector_written = 8;
             } else {
                 var written: usize = 0;
-                inline for (0..4) |lane| {
+                inline for (0..8) |lane| {
                     if (passes[lane]) {
                         depth_words[pixel_index + lane] = flat_depth_bits;
                         color_words[pixel_index + lane] = colors[lane];
@@ -2165,8 +2165,8 @@ fn rasterFlatSpanTriangle(comptime depth_test: bool, color_words: []align(4) u32
                 if (tile_min) |mins| mins[tile_metadata_index] = @min(mins[tile_metadata_index], flat_depth_bits);
             }
             pixels_written += vector_written;
-            stepped_u_over_w += u_over_w_dx * 4.0;
-            stepped_v_over_w += v_over_w_dx * 4.0;
+            stepped_u_over_w += u_over_w_dx * 8.0;
+            stepped_v_over_w += v_over_w_dx * 8.0;
         }
         while (x < last) : (x += 1) {
             const pixel_index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));

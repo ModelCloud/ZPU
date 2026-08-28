@@ -9748,16 +9748,14 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
             while (layer < op.region.src_subresource.layer_count) : (layer += 1) {
                 const src_layer_offset = imageLayerOffset(op.src, op.region.src_subresource.base_array_layer + layer).?;
                 const dst_layer_offset = imageLayerOffset(op.dst, op.region.dst_subresource.base_array_layer + layer).?;
-                var y: u32 = 0;
-                while (y < op.region.extent.height) : (y += 1) {
-                    const so = src_layer_offset + ((@as(usize, @intCast(op.region.src_offset.y)) + y) * op.src.width + @as(usize, @intCast(op.region.src_offset.x))) * 4;
-                    const do = dst_layer_offset + ((@as(usize, @intCast(op.region.dst_offset.y)) + y) * op.dst.width + @as(usize, @intCast(op.region.dst_offset.x))) * 4;
-                    const len = @as(usize, op.region.extent.width) * 4;
-                    // Command recording rejects overlapping image ranges, so
-                    // this validated transfer can use the non-overlap
-                    // primitive and let the compiler select a bulk copy.
-                    copyTransferRows(dst[do..], @as(usize, op.dst.width) * 4, src[so..], @as(usize, op.src.width) * 4, len, 1);
-                }
+                const so = src_layer_offset + (@as(usize, @intCast(op.region.src_offset.y)) * op.src.width + @as(usize, @intCast(op.region.src_offset.x))) * 4;
+                const do = dst_layer_offset + (@as(usize, @intCast(op.region.dst_offset.y)) * op.dst.width + @as(usize, @intCast(op.region.dst_offset.x))) * 4;
+                const len = @as(usize, op.region.extent.width) * 4;
+                // Command recording rejects overlapping image ranges, so the
+                // whole layer can use one non-overlap copy. Besides removing
+                // one helper call per row, this lets tight full-image copies
+                // collapse to one contiguous memcpy.
+                copyTransferRows(dst[do..], @as(usize, op.dst.width) * 4, src[so..], @as(usize, op.src.width) * 4, len, op.region.extent.height);
             }
             invalidateImageContents(op.dst);
         },
@@ -9938,6 +9936,11 @@ test "dynamic rendering layered clears honor the recorded layer range" {
 /// explicit preserves pitched buffer/image transfers while allowing LLVM to
 /// lower each row to the platform bulk-copy primitive.
 fn copyTransferRows(dst: []u8, dst_stride: usize, src: []const u8, src_stride: usize, row_bytes: usize, rows: usize) void {
+    if (rows == 0 or row_bytes == 0) return;
+    if (dst_stride == row_bytes and src_stride == row_bytes) {
+        @memcpy(dst[0 .. row_bytes * rows], src[0 .. row_bytes * rows]);
+        return;
+    }
     for (0..rows) |row| {
         @memcpy(dst[row * dst_stride ..][0..row_bytes], src[row * src_stride ..][0..row_bytes]);
     }
@@ -9963,6 +9966,14 @@ pub fn benchmarkVulkanBufferImageCopy(dst: []u8, src: []const u8, width: u32, he
     const image_stride = @as(usize, width) * 4;
     const buffer_stride = @as(usize, if (row_length == 0) width else row_length) * 4;
     copyTransferRows(dst, image_stride, src, buffer_stride, image_stride, height);
+}
+
+/// CPU implementation shared by vkCmdCopyImage execution and its benchmark.
+/// The caller supplies one tightly packed image layer; command validation has
+/// already rejected overlapping source and destination image regions.
+pub fn benchmarkVulkanImageCopy(dst: []u8, src: []const u8, width: u32, height: u32) void {
+    const stride = @as(usize, width) * 4;
+    copyTransferRows(dst, stride, src, stride, stride, height);
 }
 
 pub fn benchmarkVulkanHostImageCopy(dst: []u8, src: []const u8, width: u32, height: u32, row_length: u32) void {
@@ -9994,21 +10005,20 @@ fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy
     const pixels = imageBytes(image);
     const row = if (region.buffer_row_length == 0) region.image_extent.width else region.buffer_row_length;
     const layer_stride = bufferImageLayerStride(region).?;
+    const len = @as(usize, region.image_extent.width) * 4;
     var layer: u32 = 0;
     while (layer < region.image_subresource.layer_count) : (layer += 1) {
         const image_layer_offset = imageLayerOffset(image, region.image_subresource.base_array_layer + layer).?;
-        var y: u32 = 0;
-        while (y < region.image_extent.height) : (y += 1) {
-            const bo = @as(usize, @intCast(region.buffer_offset + layer_stride * layer + @as(u64, y) * row * 4));
-            const io = image_layer_offset + ((@as(usize, @intCast(region.image_offset.y)) + y) * image.width + @as(usize, @intCast(region.image_offset.x))) * 4;
-            const len = @as(usize, region.image_extent.width) * 4;
-            // buffer/image overlap is rejected by cmdCopyBufferToImage and
-            // cmdCopyImageToBuffer before this recorded command executes.
-            if (to_image)
-                copyTransferRows(pixels[io..], @as(usize, image.width) * 4, b[bo..], @as(usize, row) * 4, len, 1)
-            else
-                copyTransferRows(b[bo..], @as(usize, row) * 4, pixels[io..], @as(usize, image.width) * 4, len, 1);
-        }
+        const bo = @as(usize, @intCast(region.buffer_offset + layer_stride * layer));
+        const io = image_layer_offset + ((@as(usize, @intCast(region.image_offset.y)) * image.width + @as(usize, @intCast(region.image_offset.x)))) * 4;
+        // Buffer/image overlap is rejected by cmdCopyBufferToImage and
+        // cmdCopyImageToBuffer before this recorded command executes. Copying
+        // a complete layer in one call avoids per-row dispatch overhead while
+        // retaining explicit strides for pitched transfers.
+        if (to_image)
+            copyTransferRows(pixels[io..], @as(usize, image.width) * 4, b[bo..], @as(usize, row) * 4, len, region.image_extent.height)
+        else
+            copyTransferRows(b[bo..], @as(usize, row) * 4, pixels[io..], @as(usize, image.width) * 4, len, region.image_extent.height);
     }
 }
 
