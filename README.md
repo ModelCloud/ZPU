@@ -132,9 +132,10 @@ being represented as passed high-resolution measurements.
 | **8K120** | **7680×4320** | **8.333 ms** | **2 cores** | `target-8k-120` |
 
 Per-process presentation pacing is selected through `VK_EXT_present_timing` and
-`ZPU_REFRESH_HZ`. ZPU emits an actionable error when a client tries to use
-`VK_GOOGLE_display_timing`; no compatibility path silently accepts the old
-control.
+`ZPU_REFRESH_HZ`. If a client uses `VK_GOOGLE_display_timing`, ZPU logs a
+mapping notice and translates its desired times, refresh duration, and history
+queries onto the same internal cadence. `VK_EXT_present_timing` remains the
+preferred API.
 
 ## 📊 2D throughput on a 4K surface
 
@@ -205,6 +206,11 @@ ZPU_CAPTURE_PROFILE=8k120 ZPU_CAPTURE_SECONDS=30 \
 The script records profile, source commit, CPU affinity, dimensions, frame rate,
 and SHA-256 in adjacent JSON. Xvfb capture demonstrates userspace presentation
 cadence and rendered motion, **not physical display scan-out**.
+
+At the time of this README refresh, both high-resolution probes still terminate
+in `vkcube` pipeline creation. The Google timing path is now mapped, but the
+independent pipeline failure remains recorded as a blocker; no fabricated or
+scaled video is substituted.
 
 ## 🧪 Build, test, and inspect
 

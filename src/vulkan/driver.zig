@@ -1008,6 +1008,13 @@ pub const PresentInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, 
 pub const PresentId2KHR = extern struct { s_type: i32, p_next: ?*const anyopaque, swapchain_count: u32, present_ids: ?[*]const u64 };
 pub const PresentTimingsInfoEXT = extern struct { s_type: i32, p_next: ?*const anyopaque, swapchain_count: u32, timing_infos: ?[*]const PresentTimingInfoEXT };
 pub const PresentTimingInfoEXT = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, target_time: u64, time_domain_id: u64, present_stage_queries: u32, target_time_domain_present_stage: u32 };
+/// Compatibility-only VkPresentTimesInfoGOOGLE payload.  The driver maps this
+/// legacy struct to the same monotonic timing clock used by VK_EXT_present_timing;
+/// it is never advertised as a separate scheduling implementation.
+pub const PresentTimesInfoGOOGLE = extern struct { s_type: i32, p_next: ?*const anyopaque, swapchain_count: u32, times: ?[*]const PresentTimeGOOGLE };
+pub const PresentTimeGOOGLE = extern struct { present_id: u32, desired_present_time: u64 };
+pub const RefreshCycleDurationGOOGLE = extern struct { refresh_duration: u64 };
+pub const PastPresentationTimingGOOGLE = extern struct { present_id: u32, desired_present_time: u64, actual_present_time: u64, earliest_present_time: u64, present_margin: u64 };
 pub const SwapchainTimingPropertiesEXT = extern struct { s_type: i32, p_next: ?*anyopaque, refresh_duration: u64, refresh_interval: u64 };
 pub const SwapchainTimeDomainPropertiesEXT = extern struct { s_type: i32, p_next: ?*anyopaque, time_domain_count: u32, time_domains: ?[*]i32, time_domain_ids: ?[*]u64 };
 pub const PastPresentationTimingInfoEXT = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, swapchain: usize };
@@ -1501,6 +1508,7 @@ const SwapchainObj = struct {
 const PresentTimingRecord = struct {
     present_id: u64 = 0,
     target_time: u64 = 0,
+    counts_toward_queue: bool = true,
     requested_stages: u32 = 0,
     queue_operations_end_ns: u64 = 0,
     request_dequeued_ns: u64 = 0,
@@ -3044,8 +3052,8 @@ fn googleDisplayTimingProc(name: []const u8) bool {
     return std.mem.eql(u8, name, "vkGetRefreshCycleDurationGOOGLE") or std.mem.eql(u8, name, "vkGetPastPresentationTimingGOOGLE");
 }
 
-fn logGoogleDisplayTimingRejected(context: []const u8) void {
-    std.debug.print("ZPU error: unsupported VK_GOOGLE_display_timing usage detected ({s}); switch to VK_EXT_present_timing for runtime scheduling and ZPU_REFRESH_HZ for the process display cadence. No Google timing compatibility is provided.\n", .{context});
+fn logGoogleDisplayTimingMapped(context: []const u8) void {
+    std.debug.print("ZPU notice: VK_GOOGLE_display_timing usage detected ({s}); mapped to VK_EXT_present_timing and the process-scoped ZPU_REFRESH_HZ cadence.\n", .{context});
 }
 const LoaderInstanceInfo = extern struct {
     s_type: i32,
@@ -3801,7 +3809,7 @@ fn enumerateDeviceExtensions(physical: ?Physical, layer: ?[*:0]const u8, count: 
     if (!validPhysicalLocked(physical orelse return .error_initialization_failed)) return .error_initialization_failed;
     const n = count orelse return .error_initialization_failed;
     if (layer != null) return .error_extension_not_present;
-    const extensions = [_]struct { name: []const u8, version: u32 }{ .{ .name = "VK_KHR_swapchain", .version = 70 }, .{ .name = "VK_EXT_present_timing", .version = 3 } };
+    const extensions = [_]struct { name: []const u8, version: u32 }{ .{ .name = "VK_KHR_swapchain", .version = 70 }, .{ .name = "VK_EXT_present_timing", .version = 3 }, .{ .name = google_display_timing_extension, .version = 1 } };
     if (props) |items| {
         const written = @min(n.*, extensions.len);
         for (extensions[0..written], 0..) |extension, i| {
@@ -3835,10 +3843,8 @@ fn createDevice(physical: ?Physical, info: ?*const DeviceInfo, alloc: ?*const Al
         for (extensions[0..ci.extension_count]) |extension| {
             const name = std.mem.span(extension);
             if (std.mem.eql(u8, name, google_display_timing_extension)) {
-                logGoogleDisplayTimingRejected("device extension request");
-                return .error_extension_not_present;
-            }
-            if (!std.mem.eql(u8, name, "VK_KHR_swapchain") and !std.mem.eql(u8, name, "VK_EXT_present_timing")) return .error_extension_not_present;
+                logGoogleDisplayTimingMapped("device extension request");
+            } else if (!std.mem.eql(u8, name, "VK_KHR_swapchain") and !std.mem.eql(u8, name, "VK_EXT_present_timing")) return .error_extension_not_present;
         }
     }
     if (alloc != null) {
@@ -14804,13 +14810,15 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
             mutex.unlock();
             return .error_initialization_failed;
         }
-        if (target_request != null and swapchain.present_timing_queue_size != 0) {
-            _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
-            const full = swapchain.present_timing_outstanding >= swapchain.present_timing_queue_size;
-            _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
-            if (full) {
-                mutex.unlock();
-                return .error_present_timing_queue_full;
+        if (target_request) |request| {
+            if (request.source == .ext and swapchain.present_timing_queue_size != 0) {
+                _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
+                const full = swapchain.present_timing_outstanding >= swapchain.present_timing_queue_size;
+                _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+                if (full) {
+                    mutex.unlock();
+                    return .error_present_timing_queue_full;
+                }
             }
         }
         for (present.swapchains.?[0..i]) |prior| if (prior == handle) {
@@ -14887,19 +14895,20 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         swapchain.pending += 1;
         _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
         var timing_payload: ?present_worker.Timing = null;
-        if (timing_requests[i] != null and swapchain.present_timing_queue_size != 0) {
+        if (timing_requests[i] != null and (swapchain.present_timing_queue_size != 0 or timing_requests[i].?.source == .google)) {
             _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
             const present_id = timing_requests[i].?.present_id orelse swapchain.present_timing_next_id;
             if (timing_requests[i].?.present_id) |application_id| {
                 if (application_id >= swapchain.present_timing_next_id) swapchain.present_timing_next_id = application_id +% 1;
             } else swapchain.present_timing_next_id +%= 1;
-            swapchain.present_timing_outstanding += 1;
+            if (timing_requests[i].?.source == .ext) swapchain.present_timing_outstanding += 1;
             _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
             timing_payload = .{
                 .present_id = present_id,
-                .target_time = target_ns orelse 0,
+                .target_time = timing_requests[i].?.reported_target_ns,
                 .requested_stages = timing_requests[i].?.requested_stages,
                 .queue_operations_end_ns = frame_pacing.monotonicNs(),
+                .counts_toward_queue = timing_requests[i].?.source == .ext,
             };
         }
         const content = xcb_present.Region{ .x = @intCast(@max(image.content_bounds.x, 0)), .y = @intCast(@max(image.content_bounds.y, 0)), .width = image.content_bounds.width, .height = image.content_bounds.height };
@@ -15385,7 +15394,14 @@ fn queueWaitIdle(queue: ?Queue) callconv(.c) Result {
     }
     return .success;
 }
-const PresentTimingRequest = struct { target_ns: u64, requested_stages: u32, present_id: ?u64 = null };
+const PresentTimingSource = enum { ext, google };
+const PresentTimingRequest = struct {
+    target_ns: u64,
+    reported_target_ns: u64,
+    requested_stages: u32,
+    present_id: ?u64 = null,
+    source: PresentTimingSource = .ext,
+};
 
 fn presentTimingRequest(info: *const PresentInfo, index: usize, now_ns: u64) !?PresentTimingRequest {
     var next = info.p_next;
@@ -15398,8 +15414,22 @@ fn presentTimingRequest(info: *const PresentInfo, index: usize, now_ns: u64) !?P
         if (depth == 16) return error.InvalidPresentTiming;
         const header: *const ChainHeader = @ptrCast(@alignCast(raw));
         if (header.s_type == google_present_times_info_stype) {
-            logGoogleDisplayTimingRejected("VkPresentTimesInfoGOOGLE in vkQueuePresentKHR");
-            return error.GoogleDisplayTimingUnsupported;
+            if (seen_timings) return error.InvalidPresentTiming;
+            seen_timings = true;
+            const timings: *const PresentTimesInfoGOOGLE = @ptrCast(@alignCast(raw));
+            if (timings.swapchain_count != info.swapchain_count) return error.InvalidPresentTiming;
+            if (timings.times) |times| {
+                const timing = times[index];
+                logGoogleDisplayTimingMapped("VkPresentTimesInfoGOOGLE in vkQueuePresentKHR");
+                // A zero desiredPresentTime means the presentation engine may
+                // display the image at any time.  Use the current monotonic
+                // instant as the internal scheduling deadline, while retaining
+                // the application value for VkPastPresentationTimingGOOGLE.
+                const target = if (timing.desired_present_time == 0) now_ns else timing.desired_present_time;
+                request = .{ .target_ns = target, .reported_target_ns = timing.desired_present_time, .requested_stages = 0, .present_id = timing.present_id, .source = .google };
+            }
+            next = @ptrCast(header.p_next);
+            continue;
         }
         if (header.s_type == 1_000_479_001) {
             if (seen_present_ids) return error.InvalidPresentTiming;
@@ -15421,15 +15451,14 @@ fn presentTimingRequest(info: *const PresentInfo, index: usize, now_ns: u64) !?P
             if (timing.s_type != 1_000_208_004 or timing.p_next != null or timing.flags & ~@as(u32, 3) != 0 or timing.flags == 3 or timing.time_domain_id != 1 or timing.present_stage_queries & ~@as(u32, 0xf) != 0 or timing.target_time_domain_present_stage & ~@as(u32, 0xf) != 0) return error.InvalidPresentTiming;
             var target = if (timing.flags & 1 != 0) std.math.add(u64, now_ns, timing.target_time) catch return error.InvalidPresentTiming else timing.target_time;
             if (timing.flags & 2 != 0) {
-                const rate = frame_pacing.configuredRate();
-                const period = std.math.cast(u64, (@as(u128, frame_pacing.ns_per_second) * rate.denominator) / rate.numerator) orelse return error.InvalidPresentTiming;
+                const period = refreshDuration(frame_pacing.configuredRate()) orelse return error.InvalidPresentTiming;
                 if (period == 0) return error.InvalidPresentTiming;
                 const delta = target -| now_ns;
                 const cycles = std.math.add(u64, delta, period / 2) catch return error.InvalidPresentTiming;
                 const rounded = (cycles / period) * period;
                 target = std.math.add(u64, now_ns, rounded) catch return error.InvalidPresentTiming;
             }
-            request = .{ .target_ns = target, .requested_stages = timing.present_stage_queries, .present_id = present_id };
+            request = .{ .target_ns = target, .reported_target_ns = target, .requested_stages = timing.present_stage_queries, .present_id = present_id, .source = .ext };
             next = @ptrCast(header.p_next);
             continue;
         }
@@ -15447,17 +15476,18 @@ fn recordPresentTiming(context: *anyopaque, timing: present_worker.Timing) void 
     _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
     defer _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
     if (!timing.completed) {
-        if (swapchain.present_timing_outstanding != 0) swapchain.present_timing_outstanding -= 1;
+        if (timing.counts_toward_queue and swapchain.present_timing_outstanding != 0) swapchain.present_timing_outstanding -= 1;
         return;
     }
     if (swapchain.present_timing_history_count >= max_present_entries) {
-        if (swapchain.present_timing_outstanding != 0) swapchain.present_timing_outstanding -= 1;
+        if (timing.counts_toward_queue and swapchain.present_timing_outstanding != 0) swapchain.present_timing_outstanding -= 1;
         return;
     }
     const slot = swapchain.present_timing_history_count;
     swapchain.present_timing_history[slot] = .{
         .present_id = timing.present_id,
         .target_time = timing.target_time,
+        .counts_toward_queue = timing.counts_toward_queue,
         .requested_stages = timing.requested_stages,
         .queue_operations_end_ns = timing.queue_operations_end_ns,
         .request_dequeued_ns = timing.request_dequeued_ns,
@@ -15483,21 +15513,35 @@ test "EXT present timing selects absolute and relative deadlines" {
     var duplicate_info = info;
     duplicate_info.p_next = @ptrCast(&duplicate_timings);
     try std.testing.expectError(error.InvalidPresentTiming, presentTarget(&duplicate_info, 0, 1_000));
-    const google = ChainHeader{ .s_type = google_present_times_info_stype, .p_next = null };
+    var google_time = PresentTimeGOOGLE{ .present_id = 7, .desired_present_time = 5_000 };
+    var google = PresentTimesInfoGOOGLE{ .s_type = google_present_times_info_stype, .p_next = null, .swapchain_count = 1, .times = @ptrCast(&google_time) };
     var google_info = info;
     google_info.p_next = &google;
-    try std.testing.expectError(error.GoogleDisplayTimingUnsupported, presentTarget(&google_info, 0, 1_000));
+    const google_request = try presentTimingRequest(&google_info, 0, 1_000);
+    try std.testing.expectEqual(@as(?u64, 5_000), google_request.?.target_ns);
+    try std.testing.expectEqual(@as(u64, 5_000), google_request.?.reported_target_ns);
+    google_time.desired_present_time = 0;
+    const zero_google_request = try presentTimingRequest(&google_info, 0, 1_000);
+    try std.testing.expectEqual(@as(?u64, 1_000), zero_google_request.?.target_ns);
+    try std.testing.expectEqual(@as(u64, 0), zero_google_request.?.reported_target_ns);
+    google.times = null;
+    try std.testing.expectEqual(@as(?u64, null), try presentTarget(&google_info, 0, 1_000));
     const ignored = ChainHeader{ .s_type = 99, .p_next = null };
     var ignored_info = info;
     ignored_info.p_next = &ignored;
     try std.testing.expectError(error.InvalidPresentTiming, presentTarget(&ignored_info, 0, 1_000));
 }
 
-test "Google display timing procedure names are detected without aliases" {
+test "Google display timing procedure names map to the EXT timing backend" {
     try std.testing.expect(googleDisplayTimingProc("vkGetRefreshCycleDurationGOOGLE"));
     try std.testing.expect(googleDisplayTimingProc("vkGetPastPresentationTimingGOOGLE"));
     try std.testing.expect(!googleDisplayTimingProc("vkGetSwapchainTimingPropertiesEXT"));
-    try std.testing.expect(deviceLookup("vkGetRefreshCycleDurationGOOGLE") == null);
+    try std.testing.expect(deviceLookup("vkGetRefreshCycleDurationGOOGLE") != null);
+    try std.testing.expect(deviceLookup("vkGetPastPresentationTimingGOOGLE") != null);
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(PresentTimesInfoGOOGLE));
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(PresentTimeGOOGLE));
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(RefreshCycleDurationGOOGLE));
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(PastPresentationTimingGOOGLE));
 }
 
 test "EXT present timing returned-only ABI and nearest-cycle targets are exact" {
@@ -15520,6 +15564,19 @@ test "EXT present timing returned-only ABI and nearest-cycle targets are exact" 
     try std.testing.expectEqual(@as(u64, 8_334_333), nearest.?);
 }
 
+fn refreshDuration(rate: frame_pacing.Rate) ?u64 {
+    return std.math.cast(u64, (@as(u128, frame_pacing.ns_per_second) * rate.denominator) / rate.numerator);
+}
+
+fn configuredRefreshDuration() ?u64 {
+    return refreshDuration(frame_pacing.configuredRate());
+}
+
+test "Google refresh duration uses the configured process cadence" {
+    try std.testing.expectEqual(@as(?u64, 4_166_666), refreshDuration(frame_pacing.Rate.init(240, 1).?));
+    try std.testing.expectEqual(@as(?u64, 16_666_666), refreshDuration(frame_pacing.Rate.init(60, 1).?));
+}
+
 fn getSwapchainTimingProperties(device: ?Device, handle: usize, output: ?*SwapchainTimingPropertiesEXT, counter: ?*u64) callconv(.c) Result {
     lock();
     defer mutex.unlock();
@@ -15528,13 +15585,25 @@ fn getSwapchainTimingProperties(device: ?Device, handle: usize, output: ?*Swapch
     if (!validDeviceLocked(d) or swapchain.owner != d) return .error_initialization_failed;
     const properties = output orelse return .error_initialization_failed;
     if (properties.s_type != 1_000_208_001 or properties.p_next != null) return .error_initialization_failed;
-    const rate = frame_pacing.configuredRate();
-    const duration = std.math.cast(u64, (@as(u128, frame_pacing.ns_per_second) * rate.denominator) / rate.numerator) orelse return .error_initialization_failed;
+    const duration = configuredRefreshDuration() orelse return .error_initialization_failed;
     properties.refresh_duration = duration;
     // ZPU exposes a fixed-refresh-rate presentation engine.  Vulkan defines
     // FRR by making refreshInterval equal to refreshDuration.
     properties.refresh_interval = duration;
     if (counter) |value| value.* = 1;
+    return .success;
+}
+
+fn getRefreshCycleDurationGoogle(device: ?Device, handle: usize, output: ?*RefreshCycleDurationGOOGLE) callconv(.c) Result {
+    lock();
+    defer mutex.unlock();
+    const swapchain = validSwapchainLocked(handle) orelse return .error_initialization_failed;
+    const d = device orelse return .error_initialization_failed;
+    const properties = output orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or swapchain.owner != d) return .error_initialization_failed;
+    const duration = configuredRefreshDuration() orelse return .error_initialization_failed;
+    properties.refresh_duration = duration;
+    logGoogleDisplayTimingMapped("vkGetRefreshCycleDurationGOOGLE");
     return .success;
 }
 
@@ -15627,15 +15696,69 @@ fn getPastPresentationTiming(device: ?Device, info: ?*const PastPresentationTimi
         }
     }
     if (write_count != 0) {
+        var consumed_ext: u32 = 0;
+        for (swapchain.present_timing_history[0..write_count]) |timing_record| {
+            if (timing_record.counts_toward_queue) consumed_ext += 1;
+        }
         const remaining = available - write_count;
         if (remaining != 0) std.mem.copyForwards(PresentTimingRecord, swapchain.present_timing_history[0..remaining], swapchain.present_timing_history[write_count..available]);
         swapchain.present_timing_history_count = remaining;
-        swapchain.present_timing_outstanding -= @intCast(write_count);
+        swapchain.present_timing_outstanding -= @min(consumed_ext, swapchain.present_timing_outstanding);
     }
     properties.timing_properties_counter = 1;
     properties.time_domains_counter = 1;
     properties.presentation_timing_count = write_count;
     properties.presentation_timings = outputs;
+    return if (write_count < available) .incomplete else .success;
+}
+
+fn getPastPresentationTimingGoogle(device: ?Device, handle: usize, count: ?*u32, outputs: ?[*]PastPresentationTimingGOOGLE) callconv(.c) Result {
+    lock();
+    defer mutex.unlock();
+    const n = count orelse return .error_initialization_failed;
+    const swapchain = validSwapchainLocked(handle) orelse return .error_initialization_failed;
+    const d = device orelse return .error_initialization_failed;
+    if (!validDeviceLocked(d) or swapchain.owner != d) return .error_initialization_failed;
+    _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
+    defer _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
+    const available = swapchain.present_timing_history_count;
+    if (outputs == null) {
+        n.* = @intCast(available);
+        logGoogleDisplayTimingMapped("vkGetPastPresentationTimingGOOGLE count query");
+        return .success;
+    }
+    if (n.* == 0) {
+        logGoogleDisplayTimingMapped("vkGetPastPresentationTimingGOOGLE");
+        return if (available == 0) .success else .incomplete;
+    }
+    const write_count = @min(available, n.*);
+    for (0..write_count) |index| {
+        const timing_record_google = swapchain.present_timing_history[index];
+        const actual = if (timing_record_google.image_first_pixel_visible_ns != 0) timing_record_google.image_first_pixel_visible_ns else timing_record_google.request_dequeued_ns;
+        const earliest = if (timing_record_google.image_first_pixel_out_ns != 0) timing_record_google.image_first_pixel_out_ns else actual;
+        outputs.?[index] = .{
+            .present_id = @truncate(timing_record_google.present_id),
+            .desired_present_time = timing_record_google.target_time,
+            .actual_present_time = actual,
+            .earliest_present_time = earliest,
+            // The margin is the slack between queue processing completion and
+            // the earliest display opportunity, not lateness versus the
+            // application's desired timestamp.
+            .present_margin = earliest -| timing_record_google.queue_operations_end_ns,
+        };
+    }
+    if (write_count != 0) {
+        var consumed_ext: u32 = 0;
+        for (swapchain.present_timing_history[0..write_count]) |timing_record| {
+            if (timing_record.counts_toward_queue) consumed_ext += 1;
+        }
+        const remaining = available - write_count;
+        if (remaining != 0) std.mem.copyForwards(PresentTimingRecord, swapchain.present_timing_history[0..remaining], swapchain.present_timing_history[write_count..available]);
+        swapchain.present_timing_history_count = remaining;
+        swapchain.present_timing_outstanding -= @min(consumed_ext, swapchain.present_timing_outstanding);
+    }
+    n.* = @intCast(write_count);
+    logGoogleDisplayTimingMapped("vkGetPastPresentationTimingGOOGLE");
     return if (write_count < available) .incomplete else .success;
 }
 
@@ -15668,8 +15791,9 @@ fn instanceLookup(n: []const u8) Fn {
 }
 fn deviceLookup(n: []const u8) Fn {
     if (googleDisplayTimingProc(n)) {
-        logGoogleDisplayTimingRejected("device procedure lookup");
-        return null;
+        logGoogleDisplayTimingMapped("device procedure lookup");
+        if (std.mem.eql(u8, n, "vkGetRefreshCycleDurationGOOGLE")) return ptr(getRefreshCycleDurationGoogle);
+        return ptr(getPastPresentationTimingGoogle);
     }
     const semaphore_commands = .{ .{ "vkGetSemaphoreCounterValue", getSemaphoreCounterValue }, .{ "vkSignalSemaphore", signalSemaphore }, .{ "vkWaitSemaphores", waitSemaphores } };
     inline for (semaphore_commands) |e| if (std.mem.eql(u8, n, e[0])) return ptr(e[1]);
@@ -15873,7 +15997,7 @@ test "core instance physical and device enumeration is bounded and allocation fr
     var physical: [1]Physical = undefined;
     try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &physical_count, &physical));
     var instance_extensions: [5]ExtensionProperties = undefined;
-    var device_extensions: [2]ExtensionProperties = undefined;
+    var device_extensions: [3]ExtensionProperties = undefined;
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     for (0..4096) |_| {
@@ -15891,10 +16015,10 @@ test "core instance physical and device enumeration is bounded and allocation fr
         try std.testing.expectEqual(@as(u32, 1), count);
         count = 0;
         try std.testing.expectEqual(Result.success, enumerateDeviceExtensions(physical[0], null, &count, null));
-        try std.testing.expectEqual(@as(u32, 2), count);
+        try std.testing.expectEqual(@as(u32, 3), count);
         count = device_extensions.len;
         try std.testing.expectEqual(Result.success, enumerateDeviceExtensions(physical[0], null, &count, &device_extensions));
-        try std.testing.expectEqual(@as(u32, 2), count);
+        try std.testing.expectEqual(@as(u32, 3), count);
         var features = std.mem.zeroes(Features);
         @memset(std.mem.asBytes(&features), 1);
         getFeatures(physical[0], &features);
@@ -18329,6 +18453,9 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(timing_properties.refresh_duration > 0);
     try std.testing.expectEqual(timing_properties.refresh_duration, timing_properties.refresh_interval);
     try std.testing.expectEqual(@as(u64, 1), timing_counter);
+    var google_cycle = RefreshCycleDurationGOOGLE{ .refresh_duration = 0 };
+    try std.testing.expectEqual(Result.success, getRefreshCycleDurationGoogle(device, swapchain, &google_cycle));
+    try std.testing.expectEqual(timing_properties.refresh_duration, google_cycle.refresh_duration);
     var domains: [1]i32 = undefined;
     var domain_ids: [1]u64 = undefined;
     var domain_properties = SwapchainTimeDomainPropertiesEXT{ .s_type = 1_000_208_002, .p_next = null, .time_domain_count = 1, .time_domains = &domains, .time_domain_ids = &domain_ids };
@@ -18395,6 +18522,30 @@ test "vkcube presentation path records submits and presents two swapchain images
         try std.testing.expectEqual(Result.success, getPastPresentationTiming(device, &timing_past_info, &empty_past));
     }
     test_allocations_before_failure = null;
+    // Google timing uses the same completion history and process cadence as
+    // the EXT backend, while preserving its legacy present-ID and desired-time
+    // fields.  Exercise the path on a swapchain created with the EXT timing
+    // flag so both APIs can coexist without corrupting queue accounting.
+    var google_present_index: u32 = undefined;
+    try std.testing.expectEqual(Result.success, acquireNextImage(device, timing_swapchain, 0, 0, 0, &google_present_index));
+    var google_present_time = PresentTimeGOOGLE{ .present_id = 77, .desired_present_time = 0 };
+    var google_present_chain = PresentTimesInfoGOOGLE{ .s_type = google_present_times_info_stype, .p_next = null, .swapchain_count = 1, .times = @ptrCast(&google_present_time) };
+    var google_present = timing_present;
+    google_present.p_next = &google_present_chain;
+    google_present.image_indices = @ptrCast(&google_present_index);
+    try std.testing.expectEqual(Result.success, queuePresent(queue, &google_present));
+    try std.testing.expectEqual(Result.success, queueWaitIdle(queue));
+    var google_history_count: u32 = 0;
+    try std.testing.expectEqual(Result.success, getPastPresentationTimingGoogle(device, timing_swapchain, &google_history_count, null));
+    try std.testing.expectEqual(@as(u32, 1), google_history_count);
+    var google_history = PastPresentationTimingGOOGLE{ .present_id = 0, .desired_present_time = 123, .actual_present_time = 0, .earliest_present_time = 0, .present_margin = 0 };
+    google_history_count = 1;
+    try std.testing.expectEqual(Result.success, getPastPresentationTimingGoogle(device, timing_swapchain, &google_history_count, @ptrCast(&google_history)));
+    try std.testing.expectEqual(@as(u32, 77), google_history.present_id);
+    try std.testing.expectEqual(@as(u64, 0), google_history.desired_present_time);
+    try std.testing.expect(google_history.actual_present_time > 0);
+    try std.testing.expect(google_history.earliest_present_time > 0);
+    try std.testing.expect(google_history.present_margin <= google_history.earliest_present_time);
     try std.testing.expectEqual(Result.success, setSwapchainPresentTimingQueueSize(device, timing_swapchain, 1));
     var full_index: u32 = undefined;
     try std.testing.expectEqual(Result.success, acquireNextImage(device, timing_swapchain, 0, 0, 0, &full_index));
@@ -19049,16 +19200,20 @@ test "all physical queries cover success boundaries and invalid handles" {
     try std.testing.expectEqual(@as(u32, 0), sparse_count);
     var extension_count: u32 = 9;
     try std.testing.expectEqual(Result.success, enumerateDeviceExtensions(p, null, &extension_count, null));
-    try std.testing.expectEqual(@as(u32, 2), extension_count);
+    try std.testing.expectEqual(@as(u32, 3), extension_count);
     var device_extensions: [2]ExtensionProperties = undefined;
     extension_count = 0;
     try std.testing.expectEqual(Result.incomplete, enumerateDeviceExtensions(p, null, &extension_count, &device_extensions));
-    extension_count = 2;
-    try std.testing.expectEqual(Result.success, enumerateDeviceExtensions(p, null, &extension_count, &device_extensions));
-    try std.testing.expectEqualStrings("VK_KHR_swapchain", std.mem.sliceTo(&device_extensions[0].name, 0));
-    try std.testing.expectEqual(@as(u32, 70), device_extensions[0].spec_version);
-    try std.testing.expectEqualStrings("VK_EXT_present_timing", std.mem.sliceTo(&device_extensions[1].name, 0));
-    try std.testing.expectEqual(@as(u32, 3), device_extensions[1].spec_version);
+    var complete_device_extensions: [3]ExtensionProperties = undefined;
+    extension_count = complete_device_extensions.len;
+    try std.testing.expectEqual(Result.success, enumerateDeviceExtensions(p, null, &extension_count, &complete_device_extensions));
+    try std.testing.expectEqual(@as(u32, 3), extension_count);
+    try std.testing.expectEqualStrings("VK_KHR_swapchain", std.mem.sliceTo(&complete_device_extensions[0].name, 0));
+    try std.testing.expectEqual(@as(u32, 70), complete_device_extensions[0].spec_version);
+    try std.testing.expectEqualStrings("VK_EXT_present_timing", std.mem.sliceTo(&complete_device_extensions[1].name, 0));
+    try std.testing.expectEqual(@as(u32, 3), complete_device_extensions[1].spec_version);
+    try std.testing.expectEqualStrings(google_display_timing_extension, std.mem.sliceTo(&complete_device_extensions[2].name, 0));
+    try std.testing.expectEqual(@as(u32, 1), complete_device_extensions[2].spec_version);
     try std.testing.expectEqual(Result.error_extension_not_present, enumerateDeviceExtensions(p, "layer", &extension_count, null));
     try std.testing.expectEqual(Result.error_initialization_failed, enumerateDeviceExtensions(p, null, null, null));
     try std.testing.expect(vk_icdGetInstanceProcAddr(instance, "notAnEntryPoint") == null);
@@ -19129,7 +19284,8 @@ test "creation rejects every supported invalid-input class" {
     di.extension_count = 1;
     const google_extension = [_][*:0]const u8{google_display_timing_extension};
     di.extensions = &google_extension;
-    try std.testing.expectEqual(Result.error_extension_not_present, createDevice(physical[0], &di, null, &device));
+    try std.testing.expectEqual(Result.success, createDevice(physical[0], &di, null, &device));
+    destroyDevice(device, null);
     di.extensions = null;
     di.extension_count = 0;
     di.queue_info_count = 0;

@@ -21,14 +21,16 @@ pub const Trace = struct {
     frame_end_ns: u64,
 };
 
-/// Completion data for one VK_EXT_present_timing request.  The callback is
-/// invoked on the presentation worker, so the driver can publish timing
-/// history without allocating or taking the global object mutex.
+/// Completion data for one present-timing request (EXT or the GOOGLE
+/// compatibility mapping).  The callback is invoked on the presentation
+/// worker, so the driver can publish timing history without allocating or
+/// taking the global object mutex.
 pub const Timing = struct {
     present_id: u64,
     target_time: u64,
     requested_stages: u32,
     queue_operations_end_ns: u64,
+    counts_toward_queue: bool = true,
     request_dequeued_ns: u64 = 0,
     image_first_pixel_out_ns: u64 = 0,
     image_first_pixel_visible_ns: u64 = 0,
