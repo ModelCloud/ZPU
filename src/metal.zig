@@ -5,3 +5,4 @@
 //! does not pretend to be Apple's Objective-C runtime ABI.
 pub const abi = @import("metal/abi.zig");
 pub const cpu = @import("metal/cpu.zig");
+pub const raster3d = @import("metal/raster3d.zig");
