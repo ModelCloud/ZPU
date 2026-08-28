@@ -1,0 +1,38 @@
+# Copyright 2026 ModelCloud
+# SPDX-License-Identifier: Apache-2.0
+
+name: Apply Apache-2.0 headers
+
+on:
+  push:
+    branches:
+      - docs/zpu-branding-apache2
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: docs/zpu-branding-apache2
+          fetch-depth: 0
+
+      - name: Apply headers
+        run: python3 tools/apply-license-headers.py
+
+      - name: Commit header pass
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No header changes needed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "license: apply Apache-2.0 SPDX headers [skip ci]"
+          git push origin HEAD:docs/zpu-branding-apache2
