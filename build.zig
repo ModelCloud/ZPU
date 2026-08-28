@@ -65,11 +65,14 @@ pub fn build(b: *std.Build) void {
     validate_api_inventory.step.dependOn(&require_limited.step);
     const validate_command_matrix = b.addSystemCommand(&.{ "python3", "tools/vulkan_command_matrix.py" });
     validate_command_matrix.step.dependOn(&require_limited.step);
+    const validate_vulkan_abi_status = b.addSystemCommand(&.{ "python3", "tools/vulkan_abi_status.py" });
+    validate_vulkan_abi_status.step.dependOn(&require_limited.step);
     const test_api_inventory = b.addSystemCommand(&.{"test/api_inventory.sh"});
     test_api_inventory.step.dependOn(&require_limited.step);
     const api_inventory_step = b.step("api-inventory", "Validate the pinned Vulkan target inventory and failure fixtures");
     api_inventory_step.dependOn(&validate_api_inventory.step);
     api_inventory_step.dependOn(&validate_command_matrix.step);
+    api_inventory_step.dependOn(&validate_vulkan_abi_status.step);
     api_inventory_step.dependOn(&test_api_inventory.step);
     const zpu = b.addModule("zpu", .{
         .root_source_file = b.path("src/root.zig"),
