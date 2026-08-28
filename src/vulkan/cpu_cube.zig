@@ -251,8 +251,10 @@ fn markPreparedDirtyTiles(prepared: *const PreparedDraw, width: u32, height: u32
 }
 
 fn shade(texture: []const u8, texture_width: u32, texture_height: u32, u: f32, v: f32, table: *const [256]u8, unit_uv: bool) u32 {
-    const x: usize = if (unit_uv) @intFromFloat(u * (@as(f32, @floatFromInt(texture_width)) * 0.999999)) else @intFromFloat(std.math.clamp(u, 0, 0.999999) * @as(f32, @floatFromInt(texture_width)));
-    const y: usize = if (unit_uv) @intFromFloat(v * (@as(f32, @floatFromInt(texture_height)) * 0.999999)) else @intFromFloat(std.math.clamp(v, 0, 0.999999) * @as(f32, @floatFromInt(texture_height)));
+    const x_raw: usize = if (unit_uv) @intFromFloat(u * (@as(f32, @floatFromInt(texture_width)) * 0.999999)) else @intFromFloat(std.math.clamp(u, 0, 0.999999) * @as(f32, @floatFromInt(texture_width)));
+    const y_raw: usize = if (unit_uv) @intFromFloat(v * (@as(f32, @floatFromInt(texture_height)) * 0.999999)) else @intFromFloat(std.math.clamp(v, 0, 0.999999) * @as(f32, @floatFromInt(texture_height)));
+    const x = @min(x_raw, @as(usize, @max(1, texture_width)) - 1);
+    const y = @min(y_raw, @as(usize, @max(1, texture_height)) - 1);
     const offset = (y * texture_width + x) * 4;
     return @as(u32, table[texture[offset + 2]]) |
         @as(u32, table[texture[offset + 1]]) << 8 |

@@ -8,7 +8,7 @@ manifest=${1:?installed ZPU ICD manifest required}
 output=$(mktemp)
 trap 'rm -f "$output"' EXIT
 
-if ! VK_DRIVER_FILES="$manifest" ZPU_VERIFY_PRESENT=1 vkcube --wsi xcb --c 2 --suppress_popups >"$output" 2>&1; then
+if ! VK_DRIVER_FILES="$manifest" VK_ICD_FILENAMES="$manifest" ZPU_VERIFY_PRESENT=1 vkcube --c 2 --suppress_popups >"$output" 2>&1; then
     sed -n '1,120p' "$output"
     exit 1
 fi

@@ -11,7 +11,7 @@ permitted to advertise, and when an advertised version may change.
 This document is normative about the **target**. It is not a conformance claim
 and it does not describe what is implemented today. ZPU is not a conformant
 Vulkan implementation; the driver, the ICD manifest, and CI all advertise and
-assert Vulkan **1.0.0** right now. See
+assert Vulkan **1.1.0** right now. See
 [Current state versus target](#current-state-versus-target) for the honest
 inventory, and treat every statement in sections 1–6 as a requirement on future
 work rather than a description of the shipped ICD.
@@ -161,10 +161,10 @@ Everything in this column is the honest present state, not an aspiration.
 | Subject | Current | Target under this policy |
 | --- | --- | --- |
 | Cumulative core command ABI | `234/234` command entry points documented, dispatched, and regression-covered; bounded feature policies remain explicit | Complete mandatory core behavior and independent conformance |
-| Core version reported by the driver | `1.0.0` | `1.4.360` |
-| ICD manifest `api_version` | `1.0.0` | `1.4.360` |
-| CI loader-discovery assertion | asserts `apiVersion = 1.0.0` | asserts the pinned version |
-| Max `VkApplicationInfo::apiVersion` accepted | Vulkan 1.0 | the pinned version |
+| Core version reported by the driver | `1.1.0` | `1.4.360` |
+| ICD manifest `api_version` | `1.1.0` | `1.4.360` |
+| CI loader-discovery assertion | asserts `apiVersion = 1.1.0` | asserts the pinned version |
+| Max `VkApplicationInfo::apiVersion` accepted | Vulkan 1.1 | the pinned version |
 | Profile | none claimed | `VP_KHR_roadmap_2026` targeted, not claimed |
 | Loader–ICD interface | negotiates `min(requested, 7)`; **accepts lower interfaces** | 7 only |
 | Instance extensions | `VK_KHR_surface`, `VK_KHR_xcb_surface`, `VK_EXT_headless_surface`, `VK_KHR_external_memory_capabilities`, `VK_KHR_external_semaphore_capabilities` | minimum surface per sections 2–3 |

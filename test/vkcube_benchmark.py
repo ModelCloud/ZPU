@@ -58,13 +58,14 @@ def main() -> int:
         "timeout", "180s", "xvfb-run", "-a", "-s",
         f"-screen 0 {width}x{height}x24 -nolisten tcp -fakescreenfps 240",
         "taskset", "-c", ",".join(map(str, client_cpus)),
-        "vkcube", "--wsi", "xcb", "--c", str(presented_frames),
+        "vkcube", "--c", str(presented_frames),
         "--width", str(width), "--height", str(height), "--suppress_popups",
     ]
     with tempfile.TemporaryDirectory(prefix="zpu-vkcube-") as temporary_directory:
         metrics_path = pathlib.Path(temporary_directory) / "frame-metrics.bin"
         environment = os.environ.copy()
         environment["VK_DRIVER_FILES"] = str(manifest)
+        environment["VK_ICD_FILENAMES"] = str(manifest)
         environment["ZPU_FRAME_METRICS"] = "1"
         environment["ZPU_FRAME_METRICS_COUNT"] = str(WARMUP_FRAMES + SAMPLE_FRAMES)
         environment["ZPU_FRAME_METRICS_PATH"] = str(metrics_path)

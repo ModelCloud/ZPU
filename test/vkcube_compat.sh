@@ -26,8 +26,8 @@ trap 'rm -f "$output"' EXIT
 set +e
 XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp} timeout 20s xvfb-run -a \
     -s '-screen 0 640x480x24 -nolisten tcp' \
-    env VK_DRIVER_FILES="$manifest" \
-    vkcube --wsi xcb --c 2 --suppress_popups >"$output" 2>&1
+    env VK_DRIVER_FILES="$manifest" VK_ICD_FILENAMES="$manifest" \
+    vkcube --c 2 --suppress_popups >"$output" 2>&1
 status=$?
 set -e
 

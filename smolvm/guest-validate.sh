@@ -77,15 +77,16 @@ env -i \
     DISPLAY=:0 \
     XAUTHORITY="$auth" \
     VK_DRIVER_FILES="$manifest" \
+    VK_ICD_FILENAMES="$manifest" \
     vulkaninfo --summary > /tmp/zpu-vulkaninfo.txt
 "$(dirname "$0")/validate-vulkaninfo.sh" /tmp/zpu-vulkaninfo.txt
 
 if test "$auth_mode" = untrusted; then
     env -i HOME="${HOME:-/root}" PATH=/usr/bin:/bin XDG_RUNTIME_DIR="$runtime" DISPLAY=:0 XAUTHORITY="$auth" \
-        VK_DRIVER_FILES="$manifest" ZPU_UNTRUSTED_X11=1 ZPU_WINDOW_HOLD_SECONDS=2 "$prefix/bin/zpu-xcb-present"
+        VK_DRIVER_FILES="$manifest" VK_ICD_FILENAMES="$manifest" ZPU_UNTRUSTED_X11=1 ZPU_WINDOW_HOLD_SECONDS=2 "$prefix/bin/zpu-xcb-present"
 else
     env -i HOME="${HOME:-/root}" PATH=/usr/bin:/bin XDG_RUNTIME_DIR="$runtime" DISPLAY=:0 XAUTHORITY="$auth" \
-        VK_DRIVER_FILES="$manifest" ZPU_WINDOW_HOLD_SECONDS=2 "$prefix/bin/zpu-xcb-present"
+        VK_DRIVER_FILES="$manifest" VK_ICD_FILENAMES="$manifest" ZPU_WINDOW_HOLD_SECONDS=2 "$prefix/bin/zpu-xcb-present"
 fi
 
 env -i \
@@ -95,4 +96,5 @@ env -i \
     DISPLAY=:0 \
     XAUTHORITY="$auth" \
     VK_DRIVER_FILES="$manifest" \
+    VK_ICD_FILENAMES="$manifest" \
     vkcube --wsi xcb --c 120 --suppress_popups
