@@ -5,8 +5,9 @@
 # Unit test for the emulated zmouse and zkeyboard uinput drivers.
 #
 # This is a compile/build test that also verifies the binaries are statically
-# linked, that libzinput.so builds, and that the Python bindings import.  It
-# does not require /dev/uinput or a running desktop, so it is safe to run in CI.
+# linked, that libzinput.so builds, and that the `zpu` Python package imports.
+# It does not require /dev/uinput or a running desktop, so it is safe to run
+# in CI.
 
 set -euo pipefail
 
@@ -34,11 +35,13 @@ if [[ ! -f "$repo/tools/libzinput.so" ]]; then
 fi
 
 python3 -m py_compile "$repo/tools/zinput.py"
-python3 - <<PY
-import ctypes
-import os
-libpath = os.path.join("$repo/tools", "libzinput.so")
-lib = ctypes.CDLL(libpath)
+python3 -m py_compile "$repo/zpu/__init__.py"
+python3 -m py_compile "$repo/zpu/zinput.py"
+
+PYTHONPATH="$repo" python3 - <<PY
+import zpu
+from zpu.zinput import MouseClient, KeyboardClient, load_library
+lib = load_library()
 assert lib.zmouse_create(b"/nonexistent/uinput") < 0
 assert lib.zkeyboard_create(b"/nonexistent/uinput") < 0
 PY

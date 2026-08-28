@@ -39,7 +39,73 @@ ZPU ICD, the ICD validates the call, and the CPU does the work. 🧠➡️🖼�
 
 Reproduce the Chromium screenshot with [`tools/smolvm-chrome.sh`](tools/smolvm-chrome.sh) and [`tools/smolvm-chrome.env`](tools/smolvm-chrome.env), the fluid desktop capture with [`tools/smolvm-fluid-desktop.sh`](tools/smolvm-fluid-desktop.sh), or stage the emulated input drivers with [`tools/smolvm-zinput.sh`](tools/smolvm-zinput.sh) once ZPU is staged in a SmolVM guest.
 
-`tools/zmouse.c` and `tools/zkeyboard.c` are small `uinput`-based drivers that expose a virtual mouse and keyboard to Linux. They listen on Unix domain sockets for a line protocol (`m 50 0`, `k 30 1`, etc.) and ship with a Python binding in `tools/zinput.py` so agentic workflows can control the pointer and inject keystrokes on a ZPU-powered Linux desktop without physical input hardware. Run `zig build zinput` to build and verify them.
+## 🖱️ Controlling a ZPU-powered Linux desktop
+
+`zmouse` and `zkeyboard` are small `uinput`-based drivers that create a virtual mouse and keyboard on Linux. They listen on Unix domain sockets (`/run/zmouse.sock`, `/run/zkeyboard.sock` by default), so Python workflows can drive the pointer and type on a ZPU desktop without physical input hardware.
+
+Build and verify them with:
+
+```bash
+zig build zinput      # or: make -C tools zmouse zkeyboard libzinput.so
+```
+
+### Start the drivers
+
+On a normal Linux desktop (root or `input` group access to `/dev/uinput` is required):
+
+```bash
+sudo ./tools/zmouse  -d /dev/uinput -s /run/zmouse.sock
+sudo ./tools/zkeyboard -d /dev/uinput -s /run/zkeyboard.sock
+```
+
+Inside a SmolVM guest the same binaries are already started by [`tools/smolvm-zinput.sh`](tools/smolvm-zinput.sh); run `tools/smolvm-zinput.sh` after ZPU is staged in the guest.
+
+### Install the Python bindings
+
+Once published, the package is installed from PyPI:
+
+```bash
+pip install zpu
+```
+
+Until the first PyPI release, simulate the PyPI flow by installing from the repository root (this builds `zpu/libzinput.so` automatically):
+
+```bash
+pip install .
+```
+
+In the SmolVM guest `tools/smolvm-zinput.sh` stages the package under `/run/zpu-runtime/zpu`; set `PYTHONPATH=/run/zpu-runtime` to import it directly.
+
+### Control the desktop from Python
+
+Talk to the running daemons over their Unix sockets:
+
+```python
+from zpu import MouseClient, KeyboardClient
+
+with MouseClient('/run/zmouse.sock') as m:
+    m.move(100, 0)   # move pointer 100 px right
+    m.click(1)       # left click
+    m.wheel(-3)      # scroll down
+
+with KeyboardClient('/run/zkeyboard.sock') as k:
+    k.key_tap(30)    # press and release 'a'
+```
+
+Create devices directly through `/dev/uinput` instead of a daemon (useful for a single Python agent that owns the input device):
+
+```python
+from zpu import Mouse, Keyboard
+
+with Mouse() as m:
+    m.move(100, 0)
+    m.click(1)
+
+with Keyboard() as k:
+    k.key_tap(30)
+```
+
+`tools/zinput.py` remains a thin wrapper that imports `zpu.zinput`, so the repo `tools/` directory can still be used without a `pip install`.
 
 ## ✨ At a glance
 
@@ -51,7 +117,7 @@ Reproduce the Chromium screenshot with [`tools/smolvm-chrome.sh`](tools/smolvm-c
 | Chromium / ANGLE headless | ✅ `google.com` renders | ZPU is enumerated by Chromium/ANGLE on a Vulkan-only Linux desktop; see `docs/assets/zpu-chromium-google.png`. |
 | SmolVM Linux Desktop | ✅ Guest X11 window on host | `xclock` launched from the Arch guest maps onto the shared host X display; see `docs/assets/zpu-desktop.png`. |
 | SmolVM fluid desktop + simulated pointer | ✅ 60 Hz, p99 <= 17 ms | `tools/smolvm-fluid-desktop.sh` drives a guest `xtest_mouse` pointer while `vkcube` renders; see `docs/assets/zpu-fluid-desktop.png` and `test/smolvm_fluid_desktop.sh`. |
-| Emulated Linux input devices | ✅ zmouse / zkeyboard build + Python bindings | `tools/zmouse.c` and `tools/zkeyboard.c` create `uinput` mouse/keyboard devices and listen on Unix sockets; `tools/zinput.py` and `tools/libzinput.so` expose them to Python. See `tools/smolvm-zinput.sh` and `test/zinput.sh`. |
+| Emulated Linux input devices | ✅ zmouse / zkeyboard build + `zpu` PyPI package | `tools/zmouse.c` and `tools/zkeyboard.c` create `uinput` mouse/keyboard devices and listen on Unix sockets; the `zpu` package (and `tools/zinput.py`) exposes them to Python via `libzinput.so`. Install with `pip install zpu`; see `tools/smolvm-zinput.sh` and `test/zinput.sh`. |
 | Zig implementation | ✅ Zig 0.16.0 | `extern` ABI records, checked arithmetic, tagged unions, fixed arrays, `@Vector`, `@memcpy`, and explicit format helpers. |
 | 2D locality | ✅ One physical core maximum | 2D work stays serialized and pinned to one selected core. |
 | Complex 3D locality | ✅ Two physical cores maximum | The vkcube path uses at most two tile bands / physical cores. |

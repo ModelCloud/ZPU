@@ -12,6 +12,11 @@
 
 #include <string.h>
 #include <unistd.h>
+
+#ifdef __linux__
+#include <sys/file.h>
+#endif
+
 #include <linux/input-event-codes.h>
 
 #ifndef KEY_MAX
@@ -92,10 +97,31 @@ ZINPUT_API int zmouse_destroy(int fd) {
     return zinput_destroy(fd);
 }
 
+static void zinput_lock(int fd) {
+#ifdef __linux__
+    if (fd >= 0) flock(fd, LOCK_EX);
+#else
+    (void)fd;
+#endif
+}
+
+static void zinput_unlock(int fd) {
+#ifdef __linux__
+    if (fd >= 0) flock(fd, LOCK_UN);
+#else
+    (void)fd;
+#endif
+}
+
 ZINPUT_API int zmouse_move(int fd, int dx, int dy) {
-    if (zinput_emit(fd, EV_REL, REL_X, dx) < 0) return -1;
-    if (zinput_emit(fd, EV_REL, REL_Y, dy) < 0) return -1;
-    return zinput_sync(fd);
+    zinput_lock(fd);
+    int r = -1;
+    if (zinput_emit(fd, EV_REL, REL_X, dx) < 0) goto unlock;
+    if (zinput_emit(fd, EV_REL, REL_Y, dy) < 0) goto unlock;
+    r = zinput_sync(fd);
+unlock:
+    zinput_unlock(fd);
+    return r;
 }
 
 ZINPUT_API int zmouse_move_abs(int fd, int x, int y) {
@@ -103,26 +129,46 @@ ZINPUT_API int zmouse_move_abs(int fd, int x, int y) {
     if (x > ZMOUSE_AXIS_MAX) x = ZMOUSE_AXIS_MAX;
     if (y < 0) y = 0;
     if (y > ZMOUSE_AXIS_MAX) y = ZMOUSE_AXIS_MAX;
-    if (zinput_emit(fd, EV_ABS, ABS_X, x) < 0) return -1;
-    if (zinput_emit(fd, EV_ABS, ABS_Y, y) < 0) return -1;
-    return zinput_sync(fd);
+    zinput_lock(fd);
+    int r = -1;
+    if (zinput_emit(fd, EV_ABS, ABS_X, x) < 0) goto unlock;
+    if (zinput_emit(fd, EV_ABS, ABS_Y, y) < 0) goto unlock;
+    r = zinput_sync(fd);
+unlock:
+    zinput_unlock(fd);
+    return r;
 }
 
 ZINPUT_API int zmouse_button(int fd, int button, int down) {
     int code = code_for_button(button);
     if (code < 0) return -1;
-    if (zinput_emit(fd, EV_KEY, (unsigned short)code, down ? 1 : 0) < 0) return -1;
-    return zinput_sync(fd);
+    zinput_lock(fd);
+    int r = -1;
+    if (zinput_emit(fd, EV_KEY, (unsigned short)code, down ? 1 : 0) < 0) goto unlock;
+    r = zinput_sync(fd);
+unlock:
+    zinput_unlock(fd);
+    return r;
 }
 
 ZINPUT_API int zmouse_wheel(int fd, int value) {
-    if (zinput_emit(fd, EV_REL, REL_WHEEL, value) < 0) return -1;
-    return zinput_sync(fd);
+    zinput_lock(fd);
+    int r = -1;
+    if (zinput_emit(fd, EV_REL, REL_WHEEL, value) < 0) goto unlock;
+    r = zinput_sync(fd);
+unlock:
+    zinput_unlock(fd);
+    return r;
 }
 
 ZINPUT_API int zmouse_hwheel(int fd, int value) {
-    if (zinput_emit(fd, EV_REL, REL_HWHEEL, value) < 0) return -1;
-    return zinput_sync(fd);
+    zinput_lock(fd);
+    int r = -1;
+    if (zinput_emit(fd, EV_REL, REL_HWHEEL, value) < 0) goto unlock;
+    r = zinput_sync(fd);
+unlock:
+    zinput_unlock(fd);
+    return r;
 }
 
 ZINPUT_API int zkeyboard_create(const char *device) {
@@ -163,6 +209,11 @@ ZINPUT_API int zkeyboard_destroy(int fd) {
 ZINPUT_API int zkeyboard_key(int fd, int code, int value) {
     if (code < 0 || code > KEY_MAX) return -1;
     if (value < 0 || value > 2) return -1;
-    if (zinput_emit(fd, EV_KEY, (unsigned short)code, value) < 0) return -1;
-    return zinput_sync(fd);
+    zinput_lock(fd);
+    int r = -1;
+    if (zinput_emit(fd, EV_KEY, (unsigned short)code, value) < 0) goto unlock;
+    r = zinput_sync(fd);
+unlock:
+    zinput_unlock(fd);
+    return r;
 }
