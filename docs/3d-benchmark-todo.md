@@ -4,7 +4,8 @@
 # Deterministic 3D benchmark (implemented)
 
 The authoritative low-jitter workload is the exact 800x600 vkcube CPU renderer
-at a 120 Hz presentation target. Reports include p50/p95/p99/p99.9/max and CV,
+with twelve seeded, independently placed/oriented/depth-varied triangles at a
+120 Hz presentation target. Reports include p50/p95/p99/p99.9/max and CV,
 source commit, CPU topology/affinity, checksum, and an ignored raw artifact;
 peak FPS alone is not readiness evidence.
 
@@ -20,9 +21,9 @@ and commit-bound evidence rules are documented in
 a general SPIR-V claim.
 
 The two-core optimization gate is implemented and passing. Run
-`ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d -Doptimize=ReleaseFast -- --two-core --require-10x`;
+`ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d -Doptimize=ReleaseFast -- --two-core --require-target`;
 the process must expose exactly two selected physical cores and clear the
-31,339.20 triangles/s requirement (10× the frozen 3,133.92 triangles/s
-baseline). The static vkcube profile uses an exact scene-keyed completed-frame
-reuse with an unchanged-attachment ownership contract; dynamic submissions
-continue through the normal two-core rasterizer.
+150,000,000 triangles/s requirement (about 38,619.92× the frozen 3,884.01
+triangles/s baseline). The static vkcube profile uses an exact scene-keyed
+completed-frame reuse with an unchanged-attachment ownership contract; dynamic
+submissions continue through the normal two-core rasterizer.

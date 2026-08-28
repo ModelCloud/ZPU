@@ -14,11 +14,11 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ORACLE_3D = "37d978fe1c101415"
+ORACLE_3D = "9f6d64eb75b2ce10"
 COUNTERS = {
     "triangles_submitted": 12, "triangles_rasterized": 12,
-    "fragments_tested": 394880, "fragments_covered": 369024,
-    "depth_tests_passed": 184512, "color_writes": 184512,
+    "fragments_tested": 172525, "fragments_covered": 147639,
+    "depth_tests_passed": 147580, "color_writes": 147580,
 }
 
 def fail(message): raise SystemExit(f"evidence refusal: {message}")
@@ -35,7 +35,7 @@ def sha256(path):
 def run(*args): return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT)
 
 def validate_3d(report):
-    if report.get("schema_version") != 3 or report.get("workload_id") != "zpu-vkcube-cpu-3d-v3-800x600-cube12": fail("3D schema/workload mismatch")
+    if report.get("schema_version") != 3 or report.get("workload_id") != "zpu-vkcube-cpu-3d-v4-800x600-random12": fail("3D schema/workload mismatch")
     if report.get("renderer_scope") != "existing vkcube-specific cpu_cube renderer; not general SPIR-V": fail("3D scope mismatch")
     if report.get("resolution") != "800x600" or report.get("warmup_iterations") != 5 or report.get("sample_count") != 30: fail("3D resolution/sampling mismatch")
     m=report.get("metric",{})
