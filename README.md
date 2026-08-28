@@ -441,6 +441,20 @@ the app suite measures that common compositor case separately from dynamic
 terminal and game frames. These are workload-specific measurements; the
 canonical fixed-FNV vkcube benchmark remains separate and unchanged.
 
+The Vulkan-facing submission boundary has a focused benchmark as well. It
+models a Vulkan-backed WezTerm terminal stream, a Dear ImGui Vulkan desktop
+application, and a complex Khronos Vulkan sample scene, then compares
+per-command dispatch with conservative contiguous batching:
+
+```sh
+ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-vulkan-abi \
+  -Doptimize=ReleaseFast -- --json
+```
+
+See [`docs/vulkan-abi-benchmarks.md`](docs/vulkan-abi-benchmarks.md) for the
+open-source references, stream sizes, ABI eligibility contract, and oracle
+tests.
+
 ## 🎥 30-second 4K / 8K capture recipe
 
 When a real-present gate is green, capture a 30-second VP9 WebM with two driver

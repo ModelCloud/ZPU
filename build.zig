@@ -192,6 +192,18 @@ pub fn build(b: *std.Build) void {
     run_benchmark_3d_apps.step.dependOn(&require_limited.step);
     const benchmark_3d_apps_step = b.step("benchmark-3d-apps", "Run usage-shaped desktop, terminal, and game-engine CPU 3D benchmarks");
     benchmark_3d_apps_step.dependOn(&run_benchmark_3d_apps.step);
+    const benchmark_vulkan_abi = b.addExecutable(.{
+        .name = "zpu-benchmark-vulkan-abi",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_vulkan_abi.zig"), .target = target, .optimize = optimize }),
+    });
+    benchmark_vulkan_abi.root_module.link_libc = true;
+    b.installArtifact(benchmark_vulkan_abi);
+    const run_benchmark_vulkan_abi = b.addRunArtifact(benchmark_vulkan_abi);
+    if (b.args) |args| run_benchmark_vulkan_abi.addArgs(args);
+    run_benchmark_vulkan_abi.step.dependOn(&require_limited.step);
+    const benchmark_vulkan_abi_step = b.step("benchmark-vulkan-abi", "Measure Vulkan cpu_cube_v1 per-draw versus batched submission for terminal, app, and complex-demo streams");
+    benchmark_vulkan_abi_step.dependOn(&run_benchmark_vulkan_abi.step);
+
 
     const run_target_800x600 = b.addSystemCommand(&.{ "python3", "test/vkcube_benchmark.py" });
     run_target_800x600.addArg(b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
@@ -300,6 +312,13 @@ pub fn build(b: *std.Build) void {
     const run_benchmark_3d_apps_tests = b.addRunArtifact(benchmark_3d_apps_tests);
     run_benchmark_3d_apps_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&run_benchmark_3d_apps_tests.step);
+    const benchmark_vulkan_abi_tests = b.addTest(.{
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_vulkan_abi.zig"), .target = b.graph.host, .optimize = .Debug }),
+    });
+    benchmark_vulkan_abi_tests.root_module.link_libc = true;
+    const run_benchmark_vulkan_abi_tests = b.addRunArtifact(benchmark_vulkan_abi_tests);
+    run_benchmark_vulkan_abi_tests.step.dependOn(&require_limited.step);
+    test_step.dependOn(&run_benchmark_vulkan_abi_tests.step);
     const benchmark_cli_tests = b.addSystemCommand(&.{"bash"});
     benchmark_cli_tests.addFileArg(b.path("test/benchmark_cli.sh"));
     benchmark_cli_tests.addArtifactArg(benchmark);
