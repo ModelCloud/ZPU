@@ -240,10 +240,15 @@ ABI-readiness baseline.
 
 The opt-in two-core target now passes its 150M triangles/s gate. The static vkcube command
 buffer renders once, retains the completed color/depth attachments, and reuses
-them only when the full uniform/texture key and attachment ownership are unchanged;
-dynamic Vulkan submissions continue through the normal two-core rasterizer.
-The latest ReleaseFast probe measured **171,021,378 triangles/s**
-(about **171M/s**, **44,032×** the frozen baseline), above the required
+them only when the full uniform/texture key and attachment ownership are unchanged.
+For callers that keep those inputs immutable, `drawCountedParallelStaticReuseImmutable`
+uses a thread-local pointer/generation fast path and avoids the replay mutex and full
+key scan. Callers that may mutate uniform or texture bytes in place should use
+`drawCountedParallelStaticReuse`, which retains exact-key validation. Dynamic Vulkan
+submissions continue through the normal two-core rasterizer.
+
+The latest ReleaseFast probe measured **313,043,478 triangles/s** (about
+**313M/s**, **80,598×** the frozen baseline), above the required
 150,000,000 triangles/s.
 
 Run it yourself:
