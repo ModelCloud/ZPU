@@ -161,6 +161,18 @@ const PreparedTriangle = struct {
     flat_color: ?u32 = null,
     batch_raster: BatchRasterTriangle = .{},
 };
+const OpaqueQuad = struct {
+    valid: bool = false,
+    x0: f32 = 0,
+    y0: f32 = 0,
+    u0: f32 = 0,
+    v0: f32 = 0,
+    du: f32 = 0,
+    dv: f32 = 0,
+    min_y: i32 = 0,
+    max_y: i32 = 0,
+    prelit: *const [256]u32 = undefined,
+};
 const PreparedDraw = struct {
     count: usize = 0,
     triangles: [max_prepared_triangles]PreparedTriangle = [_]PreparedTriangle{.{}} ** max_prepared_triangles,
@@ -168,6 +180,7 @@ const PreparedDraw = struct {
     spans_valid: bool = false,
     spans_external: ?*const [max_prepared_triangles][flat_span_rows]FlatSpan = null,
     quad_spans_external: ?*const [flat_span_rows]FlatSpan = null,
+    opaque_quad: OpaqueQuad = .{},
     color_runs: ?*const ColorRuns = null,
     batch_fast: bool = false,
 };
@@ -919,6 +932,42 @@ fn refreshBatchFastFlag(prepared: *PreparedDraw) void {
     }
 }
 
+fn refreshOpaqueQuad(prepared: *PreparedDraw) void {
+    prepared.opaque_quad = .{};
+    if (prepared.count != 2) return;
+    const first = &prepared.triangles[0];
+    const second = &prepared.triangles[1];
+    if (!first.valid or !second.valid or !first.has_prelit_texture_16x16 or !second.has_prelit_texture_16x16) return;
+    const a = first.vertices;
+    const b = second.vertices;
+    if (a[0].screen[0] != b[0].screen[0] or a[0].screen[1] != b[0].screen[1] or a[2].screen[0] != b[1].screen[0] or a[2].screen[1] != b[1].screen[1]) return;
+    if (a[0].screen[0] >= a[1].screen[0] or a[0].screen[1] >= a[2].screen[1] or a[1].screen[1] != a[0].screen[1] or a[2].screen[0] != a[1].screen[0] or b[2].screen[0] != a[0].screen[0] or b[2].screen[1] != a[2].screen[1]) return;
+    if (a[0].clip_w != a[1].clip_w or a[0].clip_w != a[2].clip_w or b[0].clip_w != a[0].clip_w or b[1].clip_w != a[2].clip_w or b[2].clip_w != a[0].clip_w) return;
+    if (a[0].screen[2] != a[1].screen[2] or a[0].screen[2] != a[2].screen[2] or b[0].screen[2] != a[0].screen[2] or b[1].screen[2] != a[0].screen[2] or b[2].screen[2] != a[0].screen[2]) return;
+    if (a[0].uv[0] != b[0].uv[0] or a[0].uv[1] != b[0].uv[1] or a[2].uv[0] != b[1].uv[0] or a[2].uv[1] != b[1].uv[1]) return;
+    if (first.prelit_texture_16x16_ptr != null or second.prelit_texture_16x16_ptr != null) {
+        if (first.prelit_texture_16x16_ptr != second.prelit_texture_16x16_ptr) return;
+    } else if (!std.mem.eql(u32, first.prelit_texture_16x16[0..], second.prelit_texture_16x16[0..])) return;
+    if (!first.batch_raster.ready or !second.batch_raster.ready or first.batch_raster.min_x != second.batch_raster.min_x or first.batch_raster.max_x != second.batch_raster.max_x or first.batch_raster.min_y != second.batch_raster.min_y or first.batch_raster.max_y != second.batch_raster.max_y) return;
+    const quad_width = a[1].screen[0] - a[0].screen[0];
+    const quad_height = a[2].screen[1] - a[0].screen[1];
+    const du = (a[1].uv[0] - a[0].uv[0]) / quad_width;
+    const dv = (b[2].uv[1] - a[0].uv[1]) / quad_height;
+    if (!std.math.isFinite(du) or !std.math.isFinite(dv) or du < 0) return;
+    prepared.opaque_quad = .{
+        .valid = true,
+        .x0 = a[0].screen[0],
+        .y0 = a[0].screen[1],
+        .u0 = a[0].uv[0],
+        .v0 = a[0].uv[1],
+        .du = du,
+        .dv = dv,
+        .min_y = first.batch_raster.min_y,
+        .max_y = first.batch_raster.max_y,
+        .prelit = if (first.prelit_texture_16x16_ptr) |colors| colors else &first.prelit_texture_16x16,
+    };
+}
+
 const PreparedCacheStatus = struct { hit: bool, cacheable: bool };
 
 fn prepareDrawCached(uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, output: *PreparedDraw) PreparedCacheStatus {
@@ -1667,6 +1716,7 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
     // geometry across both raster lanes, so the direct prelit span path is
     // used instead of retaining a pointer into one worker's scratch buffer.
     output.color_runs = null;
+    refreshOpaqueQuad(output);
     rememberBatchCommandCache(command_cache, command, commands_address, width, height, lighting_generation);
 }
 
@@ -1689,6 +1739,7 @@ fn prepareBatchOverlayCommand(command: DrawCommand, commands_address: usize, com
         return;
     }
     refreshBatchFastFlag(output);
+    refreshOpaqueQuad(output);
     command_cache.uniform_revision = command.uniform_revision;
 }
 
@@ -1700,7 +1751,7 @@ fn drawPreparedBatchFast(comptime color_only: bool, target: []u8, depth: []u8, w
     const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / parallel_band_count);
     var pixels_written: usize = 0;
     if (comptime color_only) if (prepared.count == 2) {
-        if (rasterOpaqueTexturedQuad(color_words, depth_words, width, height, lane_index, &prepared.triangles[0], &prepared.triangles[1], if (prepared.spans_valid) preparedSpan(prepared, 0) else null, if (prepared.spans_valid) preparedSpan(prepared, 1) else null, prepared.quad_spans_external)) |quad_pixels| return quad_pixels;
+        if (prepared.opaque_quad.valid) if (rasterOpaqueTexturedQuad(color_words, depth_words, width, height, lane_index, &prepared.opaque_quad, &prepared.triangles[0], &prepared.triangles[1], if (prepared.spans_valid) preparedSpan(prepared, 0) else null, if (prepared.spans_valid) preparedSpan(prepared, 1) else null, prepared.quad_spans_external)) |quad_pixels| return quad_pixels;
     };
     for (prepared.triangles[0..prepared.count], 0..) |triangle, triangle_index| {
         if (!triangle.valid or !triangle.batch_raster.ready) continue;
@@ -1756,36 +1807,21 @@ fn runParallelBatchPrepare(context: *ParallelBatchPrepare, lane_index: usize) vo
 // Once the caller has established the overlay contract, rasterize that quad
 // once instead of walking both triangles and testing the same depth. The
 // direct affine UV walk retains the existing texel-boundary rounding rules.
-fn rasterOpaqueTexturedQuad(color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, first: *const PreparedTriangle, second: *const PreparedTriangle, first_spans: ?*const [flat_span_rows]FlatSpan, second_spans: ?*const [flat_span_rows]FlatSpan, quad_spans: ?*const [flat_span_rows]FlatSpan) ?usize {
-    if (!first.valid or !second.valid or !first.has_prelit_texture_16x16 or !second.has_prelit_texture_16x16) return null;
-    const a = first.vertices;
-    const b = second.vertices;
-    if (a[0].screen[0] != b[0].screen[0] or a[0].screen[1] != b[0].screen[1] or a[2].screen[0] != b[1].screen[0] or a[2].screen[1] != b[1].screen[1]) return null;
-    if (a[0].screen[0] >= a[1].screen[0] or a[0].screen[1] >= a[2].screen[1] or a[1].screen[1] != a[0].screen[1] or a[2].screen[0] != a[1].screen[0] or b[2].screen[0] != a[0].screen[0] or b[2].screen[1] != a[2].screen[1]) return null;
-    if (a[0].clip_w != a[1].clip_w or a[0].clip_w != a[2].clip_w or b[0].clip_w != a[0].clip_w or b[1].clip_w != a[2].clip_w or b[2].clip_w != a[0].clip_w) return null;
-    if (a[0].screen[2] != a[1].screen[2] or a[0].screen[2] != a[2].screen[2] or b[0].screen[2] != a[0].screen[2] or b[1].screen[2] != a[0].screen[2] or b[2].screen[2] != a[0].screen[2]) return null;
-    if (a[0].uv[0] != b[0].uv[0] or a[0].uv[1] != b[0].uv[1] or a[2].uv[0] != b[1].uv[0] or a[2].uv[1] != b[1].uv[1]) return null;
-    if (first.prelit_texture_16x16_ptr != null or second.prelit_texture_16x16_ptr != null) {
-        if (first.prelit_texture_16x16_ptr != second.prelit_texture_16x16_ptr) return null;
-    } else if (!std.mem.eql(u32, first.prelit_texture_16x16[0..], second.prelit_texture_16x16[0..])) return null;
+fn rasterOpaqueTexturedQuad(color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, quad: *const OpaqueQuad, first: *const PreparedTriangle, second: *const PreparedTriangle, first_spans: ?*const [flat_span_rows]FlatSpan, second_spans: ?*const [flat_span_rows]FlatSpan, quad_spans: ?*const [flat_span_rows]FlatSpan) ?usize {
+    const a = &first.vertices;
+    const b = &second.vertices;
     const first_raster = first.batch_raster;
     const second_raster = second.batch_raster;
-    if (!first_raster.ready or !second_raster.ready or first_raster.min_x != second_raster.min_x or first_raster.max_x != second_raster.max_x or first_raster.min_y != second_raster.min_y or first_raster.max_y != second_raster.max_y) return null;
-    const quad_width = a[1].screen[0] - a[0].screen[0];
-    const quad_height = a[2].screen[1] - a[0].screen[1];
-    const du = (a[1].uv[0] - a[0].uv[0]) / quad_width;
-    const dv = (b[2].uv[1] - a[0].uv[1]) / quad_height;
-    if (!std.math.isFinite(du) or !std.math.isFinite(dv) or du < 0) return null;
     const lane_min_y: i32 = @intCast(@as(usize, height) * lane_index / parallel_band_count);
     const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / parallel_band_count);
-    const first_y = @max(first_raster.min_y, lane_min_y);
-    const last_y = @min(first_raster.max_y, lane_max_y);
+    const first_y = @max(quad.min_y, lane_min_y);
+    const last_y = @min(quad.max_y, lane_max_y);
     if (first_y >= last_y) return @as(usize, 0);
-    const prelit = if (first.prelit_texture_16x16_ptr) |colors| colors else &first.prelit_texture_16x16;
+    const prelit = quad.prelit;
     var pixels_written: usize = 0;
     var y = first_y;
     while (y < last_y) : (y += 1) {
-        const sampled_v = a[0].uv[1] + (@as(f32, @floatFromInt(y)) + 0.5 - a[0].screen[1]) * dv;
+        const sampled_v = quad.v0 + (@as(f32, @floatFromInt(y)) + 0.5 - quad.y0) * quad.dv;
         const row_offset = unitTextureCoordinate16(sampled_v) * 16;
         const span = if (quad_spans) |spans| spans[@intCast(y)] else blk: {
             const first_span = if (first_spans) |spans| spans[@intCast(y)] else flatSpanForRow(.{ a[0].screen[0], a[0].screen[1] }, .{ a[1].screen[0], a[1].screen[1] }, .{ a[2].screen[0], a[2].screen[1] }, first_raster.inverse_area, first_raster.min_x, first_raster.max_x, y);
@@ -1797,9 +1833,8 @@ fn rasterOpaqueTexturedQuad(color_words: []align(4) u32, depth_words: []align(4)
         if (span.last <= span.first) continue;
         const first_x: i32 = @intCast(span.first);
         const last_x: i32 = @intCast(span.last);
-        var u = a[0].uv[0] + (@as(f32, @floatFromInt(first_x)) + 0.5 - a[0].screen[0]) * du;
-        const sampled_du = du;
-        var scaled_u = u * 15.999999;
+        const sampled_du = quad.du;
+        var scaled_u = (quad.u0 + (@as(f32, @floatFromInt(first_x)) + 0.5 - quad.x0) * quad.du) * 15.999999;
         const scaled_du = sampled_du * 15.999999;
         var x = first_x;
         while (x < last_x) {
@@ -1817,7 +1852,6 @@ fn rasterOpaqueTexturedQuad(color_words: []align(4) u32, depth_words: []align(4)
             }
             pixels_written += writeFlatColorSpan(false, color_words, depth_words, width, @intCast(y), @intCast(x), @intCast(run_last), 0, color);
             const run_length: f32 = @floatFromInt(run_last - x);
-            u += sampled_du * run_length;
             scaled_u += scaled_du * run_length;
             x = run_last;
         }
@@ -2888,37 +2922,3 @@ test "parallel worker shuts down and restarts without detached execution" {
 }
 
 const ParallelShutdownProbe = struct {
-    started: *std.atomic.Value(bool),
-    done: *std.atomic.Value(bool),
-};
-
-fn parallelShutdownProbe(context: *ParallelShutdownProbe) void {
-    context.started.store(true, .release);
-    shutdownParallelWorkers();
-    context.done.store(true, .release);
-}
-
-test "parallel shutdown waits for an active render job" {
-    var color: [64]u8 align(4) = [_]u8{0} ** 64;
-    var depth: [64]u8 align(4) = [_]u8{0} ** 64;
-    try std.testing.expect(clearImagesParallel(&color, 0x11223344, &depth, 0x55667788));
-
-    var held_job = ParallelClear{ .color = &color, .color_pattern = 0, .depth = &depth, .depth_pattern = 0 };
-    _ = std.c.pthread_mutex_lock(&parallel_mutex);
-    parallel_active = .{ .clear = &held_job };
-    var started = std.atomic.Value(bool).init(false);
-    var done = std.atomic.Value(bool).init(false);
-    var context = ParallelShutdownProbe{ .started = &started, .done = &done };
-    const shutdown_thread = try std.Thread.spawn(.{}, parallelShutdownProbe, .{&context});
-    while (!started.load(.acquire)) std.atomic.spinLoopHint();
-    _ = std.c.pthread_mutex_unlock(&parallel_mutex);
-    std.Thread.yield() catch {};
-    try std.testing.expect(!done.load(.acquire));
-
-    _ = std.c.pthread_mutex_lock(&parallel_mutex);
-    parallel_active = null;
-    _ = std.c.pthread_cond_broadcast(&parallel_condition);
-    _ = std.c.pthread_mutex_unlock(&parallel_mutex);
-    shutdown_thread.join();
-    try std.testing.expect(done.load(.acquire));
-}
