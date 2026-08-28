@@ -34,6 +34,7 @@ const Workload = struct {
     id: []const u8,
     category: []const u8,
     draws: []Draw,
+    commands: []cube.DrawCommand,
     texture: []u8,
     texture_width: u32,
     texture_height: u32,
@@ -45,6 +46,7 @@ const Workload = struct {
             if (draw.texture.len != 0) allocator.free(draw.texture);
         }
         if (self.draws.len != 0) allocator.free(self.draws);
+        if (self.commands.len != 0) allocator.free(self.commands);
         if (self.texture.len != 0) allocator.free(self.texture);
     }
 };
@@ -274,6 +276,7 @@ fn buildWorkload(allocator: std.mem.Allocator, kind: Kind) !Workload {
         .id = kindId(kind),
         .category = kindCategory(kind),
         .draws = @constCast(&[_]Draw{}),
+        .commands = @constCast(&[_]cube.DrawCommand{}),
         .texture = @constCast(&[_]u8{}),
         .texture_width = texture_width,
         .texture_height = texture_height,
@@ -314,6 +317,20 @@ fn buildWorkload(allocator: std.mem.Allocator, kind: Kind) !Workload {
             writeGameDraw(draw.uniform, object, 0);
             draw.vertex_count = 36;
         },
+    }
+    workload.commands = try allocator.alloc(cube.DrawCommand, draw_count);
+    const viewport = cube.Viewport{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 };
+    const scissor = cube.Rect{ .x = 0, .y = 0, .width = width, .height = height };
+    for (workload.draws, 0..) |draw, index| {
+        workload.commands[index] = .{
+            .uniform = draw.uniform,
+            .texture = if (draw.texture.len != 0) draw.texture else workload.texture,
+            .texture_width = if (draw.texture.len != 0) draw.texture_width else workload.texture_width,
+            .texture_height = if (draw.texture.len != 0) draw.texture_height else workload.texture_height,
+            .vertex_count = draw.vertex_count,
+            .viewport = viewport,
+            .scissor = scissor,
+        };
     }
     return workload;
 }
@@ -362,18 +379,13 @@ fn renderSerial(workload: *const Workload, color: []u8, depth: []u8) !FrameResul
     return .{ .checksum = checksum(color), .counters = counters };
 }
 
-fn renderParallel(workload: *const Workload, color: []u8, depth: []u8) !FrameResult {
-    clearAttachments(color, depth);
+fn renderParallel(workload: *const Workload, color: []u8, depth: []u8, counted: bool) !FrameResult {
     var counters = cube.Counters{};
-    for (workload.draws) |draw| {
-        var draw_counters = cube.Counters{};
-        const texture = if (draw.texture.len != 0) draw.texture else workload.texture;
-        const texture_width = if (draw.texture.len != 0) draw.texture_width else workload.texture_width;
-        const texture_height = if (draw.texture.len != 0) draw.texture_height else workload.texture_height;
-        const written = cube.drawCountedParallel(color, depth, width, height, draw.uniform, texture, texture_width, texture_height, draw.vertex_count, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, &draw_counters);
-        if (written == 0) return error.EmptyRender;
-        addCounters(&counters, draw_counters);
-    }
+    const written = if (counted) blk: {
+        clearAttachments(color, depth);
+        break :blk cube.drawCountedParallelBatch(color, depth, width, height, workload.commands, &counters);
+    } else cube.drawUncountedParallelBatchCleared(color, depth, width, height, workload.commands, clear_color, clear_depth);
+    if (written == 0) return error.EmptyRender;
     return .{ .checksum = checksum(color), .counters = counters };
 }
 
@@ -422,7 +434,7 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, workload: *Workload, smoke:
 
     for (0..warmups) |frame| {
         updateWorkload(workload, frame);
-        _ = try renderParallel(workload, color, depth);
+        _ = try renderParallel(workload, color, depth, true);
     }
 
     var first: ?FrameResult = null;
@@ -430,7 +442,9 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, workload: *Workload, smoke:
     for (0..sample_count) |sample| {
         updateWorkload(workload, warmups + sample);
         const start = std.Io.Clock.boot.now(io);
-        const result = try renderParallel(workload, color, depth);
+        // Keep one counted sample for telemetry, then measure the production
+        // path without per-fragment benchmark instrumentation.
+        const result = try renderParallel(workload, color, depth, sample == 0);
         timings[sample] = @intCast(@max(start.untilNow(io, .boot).toNanoseconds(), 1));
         if (first == null) first = result;
         final_checksum = result.checksum;
@@ -535,10 +549,13 @@ test "application workload profiles represent distinct draw usage" {
     defer game.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 36), desktop.draws.len);
+    try std.testing.expectEqual(desktop.draws.len, desktop.commands.len);
     try std.testing.expectEqual(@as(u32, 72), desktop.triangles_per_frame);
     try std.testing.expectEqual(@as(usize, 241), terminal.draws.len);
+    try std.testing.expectEqual(terminal.draws.len, terminal.commands.len);
     try std.testing.expectEqual(@as(u32, 482), terminal.triangles_per_frame);
     try std.testing.expectEqual(@as(usize, 32), game.draws.len);
+    try std.testing.expectEqual(game.draws.len, game.commands.len);
     try std.testing.expectEqual(@as(u32, 384), game.triangles_per_frame);
     try std.testing.expect(terminal.texture_width > 4);
     try std.testing.expect(game.draws[0].uniform.len > desktop.draws[0].uniform.len);
@@ -564,7 +581,7 @@ test "application workloads match the serial raster oracle" {
         defer allocator.free(parallel_depth);
 
         const serial = try renderSerial(&workload, serial_color, serial_depth);
-        const parallel = try renderParallel(&workload, parallel_color, parallel_depth);
+        const parallel = try renderParallel(&workload, parallel_color, parallel_depth, true);
         try std.testing.expectEqual(serial.checksum, parallel.checksum);
         try std.testing.expectEqualSlices(u8, serial_color, parallel_color);
         try std.testing.expectEqualSlices(u8, serial_depth, parallel_depth);
@@ -574,12 +591,21 @@ test "application workloads match the serial raster oracle" {
         try std.testing.expect(serial.counters.fragments_covered > 0);
         try std.testing.expect(serial.counters.fragments_tested >= serial.counters.fragments_covered);
 
+        const uncounted = try renderParallel(&workload, parallel_color, parallel_depth, false);
+        try std.testing.expectEqual(serial.checksum, uncounted.checksum);
+        try std.testing.expectEqualSlices(u8, serial_color, parallel_color);
+        try std.testing.expectEqualSlices(u8, serial_depth, parallel_depth);
+
         if (kind == .game) {
             updateWorkload(&workload, 9);
             const dynamic_serial = try renderSerial(&workload, serial_color, serial_depth);
-            const dynamic_parallel = try renderParallel(&workload, parallel_color, parallel_depth);
+            const dynamic_parallel = try renderParallel(&workload, parallel_color, parallel_depth, true);
             try std.testing.expect(dynamic_serial.checksum != serial.checksum);
             try std.testing.expectEqual(dynamic_serial.checksum, dynamic_parallel.checksum);
+            try std.testing.expectEqualSlices(u8, serial_color, parallel_color);
+            try std.testing.expectEqualSlices(u8, serial_depth, parallel_depth);
+            const dynamic_uncounted = try renderParallel(&workload, parallel_color, parallel_depth, false);
+            try std.testing.expectEqual(dynamic_serial.checksum, dynamic_uncounted.checksum);
             try std.testing.expectEqualSlices(u8, serial_color, parallel_color);
             try std.testing.expectEqualSlices(u8, serial_depth, parallel_depth);
         }
