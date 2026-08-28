@@ -474,6 +474,18 @@ ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-vulkan-transfer \
 See [`docs/vulkan-transfer-benchmarks.md`](docs/vulkan-transfer-benchmarks.md)
 for the workload, validation contract, and measured evidence.
 
+Host-pointer Vulkan image copies use the same row-pitched workload and select
+the bulk path only when the source and destination spans are disjoint. Run the
+host-copy benchmark with:
+
+```sh
+ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-vulkan-host-transfer \
+  -Doptimize=ReleaseFast -- --json
+```
+
+See [`docs/vulkan-host-transfer-benchmarks.md`](docs/vulkan-host-transfer-benchmarks.md)
+for the overlap-safety contract and measurements.
+
 ## 🎥 30-second 4K / 8K capture recipe
 
 When a real-present gate is green, capture a 30-second VP9 WebM with two driver
