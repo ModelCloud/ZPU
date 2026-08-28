@@ -181,6 +181,18 @@ pub fn build(b: *std.Build) void {
     const benchmark_3d_step = b.step("benchmark-3d", "Run the deterministic vkcube-specific CPU 3D benchmark");
     benchmark_3d_step.dependOn(&run_benchmark_3d.step);
 
+    const benchmark_3d_apps = b.addExecutable(.{
+        .name = "zpu-benchmark-3d-apps",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_3d_apps.zig"), .target = target, .optimize = optimize }),
+    });
+    benchmark_3d_apps.root_module.link_libc = true;
+    b.installArtifact(benchmark_3d_apps);
+    const run_benchmark_3d_apps = b.addRunArtifact(benchmark_3d_apps);
+    if (b.args) |args| run_benchmark_3d_apps.addArgs(args);
+    run_benchmark_3d_apps.step.dependOn(&require_limited.step);
+    const benchmark_3d_apps_step = b.step("benchmark-3d-apps", "Run usage-shaped desktop, terminal, and game-engine CPU 3D benchmarks");
+    benchmark_3d_apps_step.dependOn(&run_benchmark_3d_apps.step);
+
     const run_target_800x600 = b.addSystemCommand(&.{ "python3", "test/vkcube_benchmark.py" });
     run_target_800x600.addArg(b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
     run_target_800x600.addArgs(&.{ "800", "600", "240", "241" });
@@ -281,6 +293,13 @@ pub fn build(b: *std.Build) void {
     const run_benchmark_3d_tests = b.addRunArtifact(benchmark_3d_tests);
     run_benchmark_3d_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&run_benchmark_3d_tests.step);
+    const benchmark_3d_apps_tests = b.addTest(.{
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_3d_apps.zig"), .target = b.graph.host, .optimize = .Debug }),
+    });
+    benchmark_3d_apps_tests.root_module.link_libc = true;
+    const run_benchmark_3d_apps_tests = b.addRunArtifact(benchmark_3d_apps_tests);
+    run_benchmark_3d_apps_tests.step.dependOn(&require_limited.step);
+    test_step.dependOn(&run_benchmark_3d_apps_tests.step);
     const benchmark_cli_tests = b.addSystemCommand(&.{"bash"});
     benchmark_cli_tests.addFileArg(b.path("test/benchmark_cli.sh"));
     benchmark_cli_tests.addArtifactArg(benchmark);

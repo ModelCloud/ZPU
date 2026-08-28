@@ -312,38 +312,45 @@ sample so the checksum is comparable; scene-coverage tests verify distinct
 origins and nontrivial x/y/z ranges. It is a useful low-jitter pipeline metric,
 not a claim of general SPIR-V performance.
 
-The two-core run measures a complete render on every timed sample. It resets
-the color/depth attachments, validates the frozen inputs, rasterizes all 12
-triangles, performs depth tests, and computes a checksum. Repeated frames reuse
-validated transformed-triangle state, but the benchmark deliberately bypasses
-the immutable static-replay cache so cache-hit latency cannot be reported as
+The two-core run measures a complete raster render on every timed sample. The
+first frame fully resets the color/depth attachments; repeated frames use the
+validated stable-command contract to clear only the exact triangle spans that
+could have changed, leaving the untouched clear background intact. Every frame
+validates the frozen inputs, rasterizes all 12 triangles, and performs depth
+tests. The first frame anchors the FNV checksum and later frames validate their
+lane-owned framebuffer bytes exactly. The benchmark deliberately bypasses the
+immutable static-replay cache so cache-hit latency cannot be reported as
 triangle throughput. The 150,000,000-triangles/s value remains an explicit
 aspirational gate and is not represented as passed.
 
 | Metric | Result |
 | --- | ---: |
-| Measured frame rate (30-sample mean) | **577.53 FPS** |
-| Frame time p50 / p95 / p99 | 1.730 / 1.747 / **1.775 ms** |
+| Measured frame rate (30-sample mean) | **4,989.01 FPS** |
+| Frame time p50 / p95 / p99 | 0.138 / 0.320 / **1.762 ms** |
 | Triangles submitted / rasterized | 12 / 12 per frame |
-| Triangle throughput | **6,930.37 triangles/s** |
+| Triangle throughput | **59,868.15 triangles/s** |
 | Two-core 150M target | **not met (150,000,000 triangles/s)** |
-| Fragments tested | **134.28M/s** |
-| Fragments covered | **85.27M/s** |
-| Depth tests passed / color writes | **85.23M/s** |
-| Frame-time coefficient of variation | **0.53%** |
+| Fragments tested | **1,157.62M/s** |
+| Fragments covered | **736.57M/s** |
+| Depth tests passed / color writes | **736.28M/s** |
+| Frame-time coefficient of variation | **145.62%** |
 
 The static replay APIs remain available for callers that explicitly want
 immutable attachment reuse: `drawCountedParallelStaticReuseImmutable` uses a
 thread-local pointer/generation fast path, while
 `drawCountedParallelStaticReuse` retains exact-key validation. Those APIs are
-not used for the throughput numbers above. Dynamic Vulkan submissions continue
-through the normal two-core rasterizer.
+not used for the throughput numbers above. The benchmark's
+`drawUncountedParallelDirtyClearedValidated` API is separate: it requires stable
+full-frame inputs and validates each replay while clearing only prior writable
+spans. Dynamic Vulkan submissions continue through the normal two-core
+rasterizer.
 
-The displayed 3D snapshot is the median-throughput result of five full probes
-on the validation host; CPU frequency/scheduling can move individual probes
-between roughly 6.9k and 6.95k triangles/s. This is about 1.8× the recorded
-3,884 triangles/s baseline; the next 4× gate is not yet met. Every probe still
-reports the same checksum and nonzero work counters.
+The displayed 3D snapshot is the median-throughput result of three fresh full
+probes on the validation host; CPU scheduling can move individual probes
+between roughly 57.57k and 60.08k triangles/s. This is about 15.4× the recorded
+3,884 triangles/s baseline and 8.64× the merged-main snapshot. The p99 includes
+an occasional scheduler outlier, while every probe reports the same checksum
+and nonzero work counters.
 
 Run it yourself:
 
@@ -361,6 +368,23 @@ the uncached render is below that target. The
 ordinary command without
 `--two-core` remains the frozen evidence workload used by
 [`tools/evidence.py`](tools/evidence.py).
+
+## 🧭 Usage-shaped 3D application workloads
+
+The separate `benchmark-3d-apps` suite models common draw patterns that the
+frozen vkcube scene does not: layered desktop windows, a terminal glyph grid,
+and a dynamic game-engine scene. It reports per-profile draw/s, triangles/s,
+frame-time tails, checksums, and raster counters. The profiles use the same
+800×600 two-core CPU renderer and compare serial versus parallel output in unit
+tests; they are usage-shaped renderer tests, not native Windows/terminal/game
+engine integrations or general SPIR-V claims.
+
+```sh
+ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d-apps -Doptimize=ReleaseFast -- --json
+```
+
+See [`docs/3d-app-benchmarks.md`](docs/3d-app-benchmarks.md) for the workload
+contracts, focused `--scenario` commands, and correctness methodology.
 
 ## 🎥 30-second 4K / 8K capture recipe
 

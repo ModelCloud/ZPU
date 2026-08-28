@@ -30,6 +30,14 @@ const Vertex = struct { screen: [3]f32, clip_w: f32, uv: [2]f32 };
 const QuadFloat = @Vector(4, f32);
 const QuadClassification = struct { reject: bool, fully_covered: bool };
 const max_prepared_triangles = 12;
+const flat_span_rows = 600;
+const max_color_runs = 8;
+const FlatSpan = struct { first: u16 = 0, last: u16 = 0 };
+const ColorRun = struct { first: u16 = 0, last: u16 = 0, color: u32 = 0 };
+const ColorRuns = struct {
+    valid: [max_prepared_triangles]bool = [_]bool{false} ** max_prepared_triangles,
+    rows: [max_prepared_triangles][flat_span_rows][max_color_runs]ColorRun = [_][flat_span_rows][max_color_runs]ColorRun{[_][max_color_runs]ColorRun{[_]ColorRun{.{}} ** max_color_runs} ** flat_span_rows} ** max_prepared_triangles,
+};
 const PreparedTriangle = struct {
     valid: bool = false,
     vertices: [3]Vertex = undefined,
@@ -42,6 +50,9 @@ const PreparedTriangle = struct {
 const PreparedDraw = struct {
     count: usize = 0,
     triangles: [max_prepared_triangles]PreparedTriangle = [_]PreparedTriangle{.{}} ** max_prepared_triangles,
+    spans: [max_prepared_triangles][flat_span_rows]FlatSpan = [_][flat_span_rows]FlatSpan{[_]FlatSpan{.{}} ** flat_span_rows} ** max_prepared_triangles,
+    spans_valid: bool = false,
+    color_runs: ?*const ColorRuns = null,
 };
 
 const prepared_cache_capacity = 8192;
@@ -55,6 +66,7 @@ const PreparedCache = struct {
     viewport: Viewport = undefined,
     lighting_generation: u64 = 0,
     uniform: [prepared_cache_capacity]u8 = undefined,
+    texture: [prepared_cache_capacity]u8 = undefined,
     prepared: PreparedDraw = .{},
 };
 
@@ -110,6 +122,168 @@ fn classifyQuad(p0: [2]f32, p1: [2]f32, p2: [2]f32, inverse_area: f32, x: QuadFl
         result.fully_covered = result.fully_covered and !@reduce(.Or, outside);
     }
     return result;
+}
+
+fn flatSpanForRow(p0: [2]f32, p1: [2]f32, p2: [2]f32, inverse_area: f32, min_x: i32, max_x: i32, y: i32) FlatSpan {
+    const edge_dx = [3]f32{
+        (p2[1] - p1[1]) * inverse_area,
+        (p0[1] - p2[1]) * inverse_area,
+        (p1[1] - p0[1]) * inverse_area,
+    };
+    const sample = [2]f32{ @as(f32, @floatFromInt(min_x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5 };
+    const row_edges = [3]f32{
+        edge(p1, p2, sample) * inverse_area,
+        edge(p2, p0, sample) * inverse_area,
+        edge(p0, p1, sample) * inverse_area,
+    };
+    var first = min_x;
+    var last = max_x;
+    inline for (0..3) |edge_index| {
+        const value = row_edges[edge_index];
+        const slope = edge_dx[edge_index];
+        if (slope > 0) {
+            const boundary = -value / slope;
+            const conservative = @as(i32, @intFromFloat(@floor(boundary))) - 1;
+            first = @max(first, min_x +| conservative);
+        } else if (slope < 0) {
+            const boundary = -value / slope;
+            const conservative = @as(i32, @intFromFloat(@ceil(boundary))) + 2;
+            last = @min(last, min_x +| conservative);
+        } else if (value < 0) {
+            first = last;
+        }
+    }
+    first = @max(first, min_x);
+    last = @min(last, max_x);
+    while (first < last) : (first += 1) {
+        const offset = @as(f32, @floatFromInt(first - min_x));
+        if (row_edges[0] + edge_dx[0] * offset >= 0 and row_edges[1] + edge_dx[1] * offset >= 0 and row_edges[2] + edge_dx[2] * offset >= 0) break;
+    }
+    while (last > first) {
+        const offset = @as(f32, @floatFromInt(last - 1 - min_x));
+        if (row_edges[0] + edge_dx[0] * offset >= 0 and row_edges[1] + edge_dx[1] * offset >= 0 and row_edges[2] + edge_dx[2] * offset >= 0) break;
+        last -= 1;
+    }
+    if (first >= last) return .{};
+    return .{ .first = @intCast(first), .last = @intCast(last) };
+}
+
+fn buildPreparedFlatSpans(prepared: *PreparedDraw, width: u32, height: u32) void {
+    if (width == 0 or height == 0 or height > flat_span_rows) return;
+    for (prepared.triangles[0..prepared.count], 0..) |triangle, index| {
+        if (!triangle.valid) continue;
+        const p0 = [2]f32{ triangle.vertices[0].screen[0], triangle.vertices[0].screen[1] };
+        const p1 = [2]f32{ triangle.vertices[1].screen[0], triangle.vertices[1].screen[1] };
+        const p2 = [2]f32{ triangle.vertices[2].screen[0], triangle.vertices[2].screen[1] };
+        const area = edge(p0, p1, p2);
+        if (!std.math.isFinite(area) or @abs(area) < 0.00001) continue;
+        const min_x = @max(@as(i32, @intFromFloat(@floor(@min(p0[0], @min(p1[0], p2[0]))))), 0);
+        const min_y = @max(@as(i32, @intFromFloat(@floor(@min(p0[1], @min(p1[1], p2[1]))))), 0);
+        const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(p0[0], @max(p1[0], p2[0]))))), @as(i32, @intCast(width)));
+        const max_y = @min(@as(i32, @intFromFloat(@ceil(@max(p0[1], @max(p1[1], p2[1]))))), @as(i32, @intCast(height)));
+        if (max_x <= min_x or max_y <= min_y) continue;
+        for (@as(usize, @intCast(min_y))..@as(usize, @intCast(max_y))) |y| prepared.spans[index][y] = flatSpanForRow(p0, p1, p2, 1.0 / area, min_x, max_x, @intCast(y));
+    }
+    prepared.spans_valid = true;
+}
+
+threadlocal var prepared_color_runs: ColorRuns = undefined;
+
+fn buildPreparedColorRuns(prepared: *PreparedDraw, width: u32, height: u32) bool {
+    if (width != 800 or height != flat_span_rows or !prepared.spans_valid) return false;
+    prepared_color_runs = std.mem.zeroes(ColorRuns);
+    for (prepared.triangles[0..prepared.count], 0..) |triangle, triangle_index| {
+        if (!triangle.valid or !triangle.has_prelit_texture) continue;
+        if (triangle.vertices[0].clip_w != triangle.vertices[1].clip_w or triangle.vertices[0].clip_w != triangle.vertices[2].clip_w) continue;
+        const p0 = [2]f32{ triangle.vertices[0].screen[0], triangle.vertices[0].screen[1] };
+        const p1 = [2]f32{ triangle.vertices[1].screen[0], triangle.vertices[1].screen[1] };
+        const p2 = [2]f32{ triangle.vertices[2].screen[0], triangle.vertices[2].screen[1] };
+        const area = edge(p0, p1, p2);
+        if (!std.math.isFinite(area) or @abs(area) < 0.00001) continue;
+        const inverse_area = 1.0 / area;
+        const inverse_w = 1.0 / triangle.vertices[0].clip_w;
+        const u_over_w0 = triangle.vertices[0].uv[0] * inverse_w;
+        const u_over_w1 = triangle.vertices[1].uv[0] * inverse_w;
+        const u_over_w2 = triangle.vertices[2].uv[0] * inverse_w;
+        const v_over_w0 = triangle.vertices[0].uv[1] * inverse_w;
+        const v_over_w1 = triangle.vertices[1].uv[1] * inverse_w;
+        const v_over_w2 = triangle.vertices[2].uv[1] * inverse_w;
+        const b0_dx = (p2[1] - p1[1]) * inverse_area;
+        const b1_dx = (p0[1] - p2[1]) * inverse_area;
+        const b2_dx = (p1[1] - p0[1]) * inverse_area;
+        const u_over_w_dx = b0_dx * u_over_w0 + b1_dx * u_over_w1 + b2_dx * u_over_w2;
+        const v_over_w_dx = b0_dx * v_over_w0 + b1_dx * v_over_w1 + b2_dx * v_over_w2;
+        prepared_color_runs.valid[triangle_index] = true;
+        for (0..height) |y| {
+            const span = prepared.spans[triangle_index][y];
+            if (span.last <= span.first) continue;
+            const first = @as(i32, @intCast(span.first));
+            const last = @as(i32, @intCast(span.last));
+            const sample = [2]f32{ @as(f32, @floatFromInt(first)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5 };
+            const b0 = edge(p1, p2, sample) * inverse_area;
+            const b1 = edge(p2, p0, sample) * inverse_area;
+            const b2 = edge(p0, p1, sample) * inverse_area;
+            var u = b0 * u_over_w0 + b1 * u_over_w1 + b2 * u_over_w2;
+            var v = b0 * v_over_w0 + b1 * v_over_w1 + b2 * v_over_w2;
+            var run_index: usize = 0;
+            var run_first = first;
+            var run_color = if (triangle.flat_color) |color| color else shadeUnitTexture4x4(u * inverse_w, v * inverse_w, &triangle.prelit_texture);
+            var x = first + 1;
+            while (x < last) : (x += 1) {
+                u += u_over_w_dx;
+                v += v_over_w_dx;
+                const color = if (triangle.flat_color) |flat_color| flat_color else shadeUnitTexture4x4(u * inverse_w, v * inverse_w, &triangle.prelit_texture);
+                if (color == run_color) continue;
+                if (run_index == max_color_runs) {
+                    prepared_color_runs.valid[triangle_index] = false;
+                    break;
+                }
+                prepared_color_runs.rows[triangle_index][y][run_index] = .{ .first = @intCast(run_first), .last = @intCast(x), .color = run_color };
+                run_index += 1;
+                run_first = x;
+                run_color = color;
+            }
+            if (!prepared_color_runs.valid[triangle_index]) break;
+            if (run_index == max_color_runs) {
+                prepared_color_runs.valid[triangle_index] = false;
+                break;
+            }
+            prepared_color_runs.rows[triangle_index][y][run_index] = .{ .first = @intCast(run_first), .last = @intCast(last), .color = run_color };
+        }
+    }
+    return true;
+}
+
+fn writeFlatColorSpan(color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, y: usize, first: usize, last: usize, depth_pattern: u32, color: u32) usize {
+    var pixels_written: usize = 0;
+    var x = first;
+    while (x + 4 <= last) : (x += 4) {
+        const pixel_index = y * width + x;
+        const depth_values: @Vector(4, u32) = depth_words[pixel_index..][0..4].*;
+        const passes: @Vector(4, bool) = @as(@Vector(4, u32), @splat(depth_pattern)) <= depth_values;
+        if (@reduce(.And, passes)) {
+            depth_words[pixel_index..][0..4].* = @as(@Vector(4, u32), @splat(depth_pattern));
+            color_words[pixel_index..][0..4].* = @as(@Vector(4, u32), @splat(color));
+            pixels_written += 4;
+        } else {
+            inline for (0..4) |lane| {
+                if (passes[lane]) {
+                    depth_words[pixel_index + lane] = depth_pattern;
+                    color_words[pixel_index + lane] = color;
+                    pixels_written += 1;
+                }
+            }
+        }
+    }
+    while (x < last) : (x += 1) {
+        const pixel_index = y * width + x;
+        if (depth_pattern <= depth_words[pixel_index]) {
+            depth_words[pixel_index] = depth_pattern;
+            color_words[pixel_index] = color;
+            pixels_written += 1;
+        }
+    }
+    return pixels_written;
 }
 
 fn srgbToLinear(value: f32) f32 {
@@ -310,7 +484,7 @@ fn shade(texture: []const u8, texture_width: u32, texture_height: u32, u: f32, v
 }
 
 fn unitTextureCoordinate(value: f32) usize {
-    return @min(@as(usize, @intFromFloat(value * 3.999999)), 3);
+    return @intFromFloat(value * 3.999999);
 }
 
 fn shadeUnitTexture4x4(u: f32, v: f32, colors: *const [16]u32) u32 {
@@ -357,7 +531,8 @@ fn prepareDrawCached(uniform: []const u8, texture: []const u8, texture_width: u3
         prepared_cache.uniform_len == uniform.len and prepared_cache.texture_len == texture.len and
         prepared_cache.texture_width == texture_width and prepared_cache.texture_height == texture_height and
         std.meta.eql(prepared_cache.viewport, viewport) and
-        std.mem.eql(u8, prepared_cache.uniform[0..uniform.len], uniform);
+        std.mem.eql(u8, prepared_cache.uniform[0..uniform.len], uniform) and
+        std.mem.eql(u8, prepared_cache.texture[0..texture.len], texture);
     if (hit) {
         output.* = prepared_cache.prepared;
         return .{ .hit = true, .cacheable = true };
@@ -366,6 +541,7 @@ fn prepareDrawCached(uniform: []const u8, texture: []const u8, texture_width: u3
     output.* = prepareDraw(uniform, vertex_count, 0, viewport, null);
     if (cacheable) {
         @memcpy(prepared_cache.uniform[0..uniform.len], uniform);
+        @memcpy(prepared_cache.texture[0..texture.len], texture);
         prepared_cache.vertex_count = vertex_count;
         prepared_cache.uniform_len = uniform.len;
         prepared_cache.texture_len = texture.len;
@@ -379,7 +555,7 @@ fn prepareDrawCached(uniform: []const u8, texture: []const u8, texture_width: u3
     return .{ .hit = false, .cacheable = cacheable };
 }
 
-fn writeFragment(target: ?[]u8, depth: ?[]u8, pixel_index: usize, z: f32, flat_depth_bits: ?u32, inverse_w: f32, flat_reciprocal_w: ?f32, u_over_w: f32, v_over_w: f32, texture: []const u8, texture_width: u32, texture_height: u32, lighting: *const [256]u8, unit_uv: bool, prelit_texture: ?*const [16]u32, counters: *Counters, comptime count_work: bool) bool {
+fn writeFragment(target: ?[]u8, depth: ?[]u8, pixel_index: usize, z: f32, flat_depth_bits: ?u32, inverse_w: f32, flat_reciprocal_w: ?f32, u_over_w: f32, v_over_w: f32, texture: []const u8, texture_width: u32, texture_height: u32, lighting: *const [256]u8, unit_uv: bool, prelit_texture: ?*const [16]u32, flat_color: ?u32, counters: *Counters, comptime count_work: bool) bool {
     const depth_pass = if (depth) |depth_bytes| blk: {
         const depth_offset = pixel_index * 4;
         if (flat_depth_bits) |bits| {
@@ -391,10 +567,12 @@ fn writeFragment(target: ?[]u8, depth: ?[]u8, pixel_index: usize, z: f32, flat_d
     } else true;
     if (!depth_pass) return false;
     if (target) |color_bytes| {
-        const reciprocal_w = flat_reciprocal_w orelse 1.0 / inverse_w;
-        const u = u_over_w * reciprocal_w;
-        const v = v_over_w * reciprocal_w;
-        const color = if (prelit_texture) |prelit| shadeUnitTexture4x4(u, v, prelit) else shade(texture, texture_width, texture_height, u, v, lighting, unit_uv);
+        const color = if (flat_color) |constant| constant else blk: {
+            const reciprocal_w = flat_reciprocal_w orelse 1.0 / inverse_w;
+            const u = u_over_w * reciprocal_w;
+            const v = v_over_w * reciprocal_w;
+            break :blk if (prelit_texture) |prelit| shadeUnitTexture4x4(u, v, prelit) else shade(texture, texture_width, texture_height, u, v, lighting, unit_uv);
+        };
         std.mem.writeInt(u32, color_bytes[pixel_index * 4 ..][0..4], color, .little);
         if (count_work) counters.color_writes += 1;
     }
@@ -434,12 +612,13 @@ fn drawInternal(target: ?[]u8, depth: ?[]u8, width: u32, height: u32, uniform: [
     var lighting_count: usize = 0;
     var triangle: u32 = 0;
     while (triangle < vertex_count) : (triangle += 3) {
-        const prepared_triangle: ?*const PreparedTriangle = if (prepared) |state| blk: {
+        const prepared_index: ?usize = if (prepared) |state| blk: {
             const index = triangle / 3;
             if (index >= state.count) break :blk null;
             if (!state.triangles[index].valid) continue;
-            break :blk &state.triangles[index];
+            break :blk index;
         } else null;
+        const prepared_triangle: ?*const PreparedTriangle = if (prepared) |state| if (prepared_index) |index| &state.triangles[index] else null else null;
         const first_source = if (indexed != null) triangle else base_vertex +| triangle;
         const v0 = if (prepared_triangle) |state| state.vertices[0] else transformedVertex(uniform, first_source, source_vertex_count, viewport, indexed) orelse continue;
         const v1 = if (prepared_triangle) |state| state.vertices[1] else transformedVertex(uniform, first_source +| 1, source_vertex_count, viewport, indexed) orelse continue;
@@ -469,6 +648,8 @@ fn drawInternal(target: ?[]u8, depth: ?[]u8, width: u32, height: u32, uniform: [
         const unit_uv = if (prepared_triangle) |state| state.unit_uv else false;
         const prelit_texture: ?*const [16]u32 = if (prepared_triangle) |state| if (state.has_prelit_texture) &state.prelit_texture else null else null;
         const flat_color = if (prepared_triangle) |state| state.flat_color else null;
+        const cached_spans: ?*const [flat_span_rows]FlatSpan = if (prepared) |state| if (prepared_index) |index| if (state.spans_valid) &state.spans[index] else null else null else null;
+        const cached_colors: ?*const [flat_span_rows][max_color_runs]ColorRun = if (prepared) |state| if (prepared_index) |index| if (state.color_runs) |runs| if (runs.valid[index]) &runs.rows[index] else null else null else null else null;
         const flat_w = v0.clip_w == v1.clip_w and v0.clip_w == v2.clip_w;
         const flat_z = v0.screen[2] == v1.screen[2] and v0.screen[2] == v2.screen[2];
         const flat_inverse_w = if (flat_w) 1.0 / v0.clip_w else 0;
@@ -507,146 +688,182 @@ fn drawInternal(target: ?[]u8, depth: ?[]u8, width: u32, height: u32, uniform: [
         const lane_max_y: i32 = if (fixed_two_lane) @intCast(@as(usize, height) * (lane_index + 1) / 2) else max_y;
         const raster_min_y = @max(min_y, lane_min_y);
         const raster_max_y = @min(max_y, lane_max_y);
-        var tile_y: i32 = raster_min_y;
-        while (tile_y < raster_max_y) : (tile_y += tile_size) {
-            const tile_max_y = @min(tile_y + tile_size, raster_max_y);
-            if (lane_count != 1 and !fixed_two_lane) {
-                var lane_has_rows = false;
-                var candidate_y = tile_y;
-                while (candidate_y < tile_max_y) : (candidate_y += 1) {
-                    if (row_lanes[@intCast(candidate_y)] == lane_index) lane_has_rows = true;
+        if (!count_work and optimized and (flat_color != null or prelit_texture != null) and flat_depth_bits != null and flat_reciprocal_w != null and typed_target != null and typed_depth != null) {
+            pixels_written += rasterFlatSpanTriangle(typed_target.?, typed_depth.?, width, height, stripe_count, lane_index, p0, p1, p2, inverse_area, min_x, min_y, max_x, max_y, raster_min_y, raster_max_y, cached_spans, cached_colors, flat_depth_bits.?, flat_color, prelit_texture, flat_reciprocal_w.?, u_over_w0, u_over_w1, u_over_w2, v_over_w0, v_over_w1, v_over_w2, u_over_w_dx, v_over_w_dx);
+            continue;
+        }
+        const stripe_partitioned = lane_count != 1 and !fixed_two_lane and stripe_count > lane_count;
+        var stripe_index: usize = if (stripe_partitioned) lane_index else 0;
+        const stripe_limit: usize = if (stripe_partitioned) stripe_count else 1;
+        const stripe_step: usize = if (stripe_partitioned) lane_count else stripe_count;
+        while (stripe_index < stripe_limit) : (stripe_index += stripe_step) {
+            const stripe_min_y: i32 = if (stripe_partitioned) @intCast(@as(usize, height) * stripe_index / stripe_count) else raster_min_y;
+            const stripe_max_y: i32 = if (stripe_partitioned) @intCast(@as(usize, height) * (stripe_index + 1) / stripe_count) else raster_max_y;
+            var tile_y: i32 = @max(raster_min_y, stripe_min_y);
+            while (tile_y < @min(raster_max_y, stripe_max_y)) : (tile_y += tile_size) {
+                const tile_max_y = @min(tile_y + tile_size, raster_max_y, stripe_max_y);
+                if (lane_count != 1 and !fixed_two_lane and !stripe_partitioned) {
+                    var lane_has_rows = false;
+                    var candidate_y = tile_y;
+                    while (candidate_y < tile_max_y) : (candidate_y += 1) {
+                        if (row_lanes[@intCast(candidate_y)] == lane_index) lane_has_rows = true;
+                    }
+                    if (!lane_has_rows) continue;
                 }
-                if (!lane_has_rows) continue;
-            }
-            var tile_x: i32 = min_x;
-            while (tile_x < max_x) : (tile_x += tile_size) {
-                const tile_max_x = @min(tile_x + tile_size, max_x);
-                // Reject a tile when every one of its sample-space corners is
-                // outside the same edge. This is conservative and retains the
-                // original per-fragment coverage/depth/draw ordering.
-                const x0 = @as(f32, @floatFromInt(tile_x)) + 0.5;
-                const y0 = @as(f32, @floatFromInt(tile_y)) + 0.5;
-                const x1 = @as(f32, @floatFromInt(tile_max_x - 1)) + 0.5;
-                const y1 = @as(f32, @floatFromInt(tile_max_y - 1)) + 0.5;
-                const classification = classifyQuad(p0, p1, p2, inverse_area, .{ x0, x1, x0, x1 }, .{ y0, y0, y1, y1 });
-                if (optimized and classification.reject) continue;
-                const fully_covered = classification.fully_covered;
-                const tile_fast_flat = optimized and fully_covered and flat_w and flat_z and flat_depth_bits != null and flat_reciprocal_w != null;
-                var y = tile_y;
-                while (y < tile_max_y) : (y += 1) {
-                    if (lane_count != 1 and !fixed_two_lane and row_lanes[@intCast(y)] != lane_index) continue;
-                    var x = tile_x;
-                    const first_sample = [2]f32{ @as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5 };
-                    var b0 = edge(p1, p2, first_sample) * inverse_area;
-                    var b1 = edge(p2, p0, first_sample) * inverse_area;
-                    var b2 = edge(p0, p1, first_sample) * inverse_area;
-                    var stepped_inverse_w = b0 * inv_w0 + b1 * inv_w1 + b2 * inv_w2;
-                    var stepped_z = b0 * v0.screen[2] + b1 * v1.screen[2] + b2 * v2.screen[2];
-                    var stepped_u_over_w = b0 * u_over_w0 + b1 * u_over_w1 + b2 * u_over_w2;
-                    var stepped_v_over_w = b0 * v_over_w0 + b1 * v_over_w1 + b2 * v_over_w2;
-                    const fast_flat = tile_fast_flat;
-                    if (fast_flat) {
-                        const fast_z_bits = flat_depth_bits.?;
-                        const fast_reciprocal_w = flat_reciprocal_w.?;
-                        if (typed_target) |color_words| if (typed_depth) |depth_words| {
-                            while (x + 4 <= tile_max_x) : (x += 4) {
-                                if (count_work) {
-                                    stats.fragments_tested += 4;
-                                    stats.fragments_covered += 4;
-                                }
-                                const pixel_index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
-                                const depth_values: @Vector(4, u32) = depth_words[pixel_index..][0..4].*;
-                                const passes: @Vector(4, bool) = @as(@Vector(4, u32), @splat(fast_z_bits)) <= depth_values;
-                                var colors: [4]u32 = undefined;
-                                if (flat_color) |color| {
-                                    colors = .{ color, color, color, color };
-                                } else {
-                                    inline for (0..4) |lane| {
-                                        const lane_u = stepped_u_over_w + u_over_w_dx * @as(f32, @floatFromInt(lane));
-                                        const lane_v = stepped_v_over_w + v_over_w_dx * @as(f32, @floatFromInt(lane));
-                                        colors[lane] = if (prelit_texture) |prelit| shadeUnitTexture4x4(lane_u * fast_reciprocal_w, lane_v * fast_reciprocal_w, prelit) else shade(texture, texture_width, texture_height, lane_u * fast_reciprocal_w, lane_v * fast_reciprocal_w, lighting, unit_uv);
-                                    }
-                                }
-                                if (@reduce(.And, passes)) {
-                                    depth_words[pixel_index..][0..4].* = @as(@Vector(4, u32), @splat(fast_z_bits));
-                                    color_words[pixel_index..][0..4].* = colors;
+                var tile_x: i32 = min_x;
+                while (tile_x < max_x) : (tile_x += tile_size) {
+                    const tile_max_x = @min(tile_x + tile_size, max_x);
+                    // Reject a tile when every one of its sample-space corners is
+                    // outside the same edge. This is conservative and retains the
+                    // original per-fragment coverage/depth/draw ordering.
+                    const x0 = @as(f32, @floatFromInt(tile_x)) + 0.5;
+                    const y0 = @as(f32, @floatFromInt(tile_y)) + 0.5;
+                    const x1 = @as(f32, @floatFromInt(tile_max_x - 1)) + 0.5;
+                    const y1 = @as(f32, @floatFromInt(tile_max_y - 1)) + 0.5;
+                    const classification = classifyQuad(p0, p1, p2, inverse_area, .{ x0, x1, x0, x1 }, .{ y0, y0, y1, y1 });
+                    if (optimized and classification.reject) continue;
+                    const fully_covered = classification.fully_covered;
+                    const tile_fast_flat = optimized and fully_covered and flat_w and flat_z and flat_depth_bits != null and flat_reciprocal_w != null;
+                    var y = tile_y;
+                    while (y < tile_max_y) : (y += 1) {
+                        if (lane_count != 1 and !fixed_two_lane and !stripe_partitioned and row_lanes[@intCast(y)] != lane_index) continue;
+                        var x = tile_x;
+                        const first_sample = [2]f32{ @as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5 };
+                        var b0 = edge(p1, p2, first_sample) * inverse_area;
+                        var b1 = edge(p2, p0, first_sample) * inverse_area;
+                        var b2 = edge(p0, p1, first_sample) * inverse_area;
+                        var stepped_inverse_w = b0 * inv_w0 + b1 * inv_w1 + b2 * inv_w2;
+                        var stepped_z = b0 * v0.screen[2] + b1 * v1.screen[2] + b2 * v2.screen[2];
+                        var stepped_u_over_w = b0 * u_over_w0 + b1 * u_over_w1 + b2 * u_over_w2;
+                        var stepped_v_over_w = b0 * v_over_w0 + b1 * v_over_w1 + b2 * v_over_w2;
+                        const fast_flat = tile_fast_flat;
+                        if (fast_flat) {
+                            const fast_z_bits = flat_depth_bits.?;
+                            const fast_reciprocal_w = flat_reciprocal_w.?;
+                            if (typed_target) |color_words| if (typed_depth) |depth_words| {
+                                while (x + 4 <= tile_max_x) : (x += 4) {
                                     if (count_work) {
-                                        stats.depth_tests_passed += 4;
-                                        stats.color_writes += 4;
+                                        stats.fragments_tested += 4;
+                                        stats.fragments_covered += 4;
                                     }
-                                    pixels_written += 4;
-                                } else {
-                                    inline for (0..4) |lane| {
-                                        if (passes[lane]) {
-                                            depth_words[pixel_index + lane] = fast_z_bits;
-                                            color_words[pixel_index + lane] = colors[lane];
-                                            if (count_work) {
-                                                stats.depth_tests_passed += 1;
-                                                stats.color_writes += 1;
+                                    const pixel_index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
+                                    const depth_values: @Vector(4, u32) = depth_words[pixel_index..][0..4].*;
+                                    const passes: @Vector(4, bool) = @as(@Vector(4, u32), @splat(fast_z_bits)) <= depth_values;
+                                    var colors: [4]u32 = undefined;
+                                    if (flat_color) |color| {
+                                        colors = .{ color, color, color, color };
+                                    } else {
+                                        inline for (0..4) |lane| {
+                                            const lane_u = stepped_u_over_w + u_over_w_dx * @as(f32, @floatFromInt(lane));
+                                            const lane_v = stepped_v_over_w + v_over_w_dx * @as(f32, @floatFromInt(lane));
+                                            colors[lane] = if (prelit_texture) |prelit| shadeUnitTexture4x4(lane_u * fast_reciprocal_w, lane_v * fast_reciprocal_w, prelit) else shade(texture, texture_width, texture_height, lane_u * fast_reciprocal_w, lane_v * fast_reciprocal_w, lighting, unit_uv);
+                                        }
+                                    }
+                                    if (@reduce(.And, passes)) {
+                                        depth_words[pixel_index..][0..4].* = @as(@Vector(4, u32), @splat(fast_z_bits));
+                                        color_words[pixel_index..][0..4].* = colors;
+                                        if (count_work) {
+                                            stats.depth_tests_passed += 4;
+                                            stats.color_writes += 4;
+                                        }
+                                        pixels_written += 4;
+                                    } else {
+                                        inline for (0..4) |lane| {
+                                            if (passes[lane]) {
+                                                depth_words[pixel_index + lane] = fast_z_bits;
+                                                color_words[pixel_index + lane] = colors[lane];
+                                                if (count_work) {
+                                                    stats.depth_tests_passed += 1;
+                                                    stats.color_writes += 1;
+                                                }
+                                                pixels_written += 1;
+                                            }
+                                        }
+                                    }
+                                    stepped_u_over_w += u_over_w_dx * 4.0;
+                                    stepped_v_over_w += v_over_w_dx * 4.0;
+                                }
+                                while (x < tile_max_x) : (x += 1) {
+                                    if (count_work) {
+                                        stats.fragments_tested += 1;
+                                        stats.fragments_covered += 1;
+                                    }
+                                    const pixel_index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
+                                    if (fast_z_bits <= depth_words[pixel_index]) {
+                                        depth_words[pixel_index] = fast_z_bits;
+                                        if (count_work) stats.depth_tests_passed += 1;
+                                        color_words[pixel_index] = if (flat_color) |color| color else if (prelit_texture) |prelit| shadeUnitTexture4x4(stepped_u_over_w * fast_reciprocal_w, stepped_v_over_w * fast_reciprocal_w, prelit) else shade(texture, texture_width, texture_height, stepped_u_over_w * fast_reciprocal_w, stepped_v_over_w * fast_reciprocal_w, lighting, unit_uv);
+                                        if (count_work) stats.color_writes += 1;
+                                        pixels_written += 1;
+                                    }
+                                    stepped_u_over_w += u_over_w_dx;
+                                    stepped_v_over_w += v_over_w_dx;
+                                }
+                            } else {
+                                while (x < tile_max_x) : (x += 1) {
+                                    if (count_work) {
+                                        stats.fragments_tested += 1;
+                                        stats.fragments_covered += 1;
+                                    }
+                                    const pixel_index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
+                                    const depth_offset = pixel_index * 4;
+                                    if (depth) |depth_bytes| {
+                                        if (fast_z_bits <= std.mem.readInt(u32, depth_bytes[depth_offset..][0..4], .little)) {
+                                            std.mem.writeInt(u32, depth_bytes[depth_offset..][0..4], fast_z_bits, .little);
+                                            if (count_work) stats.depth_tests_passed += 1;
+                                            if (target) |color_bytes| {
+                                                std.mem.writeInt(u32, color_bytes[depth_offset..][0..4], if (prelit_texture) |prelit| shadeUnitTexture4x4(stepped_u_over_w * fast_reciprocal_w, stepped_v_over_w * fast_reciprocal_w, prelit) else shade(texture, texture_width, texture_height, stepped_u_over_w * fast_reciprocal_w, stepped_v_over_w * fast_reciprocal_w, lighting, unit_uv), .little);
+                                                if (count_work) stats.color_writes += 1;
                                             }
                                             pixels_written += 1;
                                         }
-                                    }
-                                }
-                                stepped_u_over_w += u_over_w_dx * 4.0;
-                                stepped_v_over_w += v_over_w_dx * 4.0;
-                            }
-                            while (x < tile_max_x) : (x += 1) {
-                                if (count_work) {
-                                    stats.fragments_tested += 1;
-                                    stats.fragments_covered += 1;
-                                }
-                                const pixel_index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
-                                if (fast_z_bits <= depth_words[pixel_index]) {
-                                    depth_words[pixel_index] = fast_z_bits;
-                                    if (count_work) stats.depth_tests_passed += 1;
-                                    color_words[pixel_index] = if (flat_color) |color| color else if (prelit_texture) |prelit| shadeUnitTexture4x4(stepped_u_over_w * fast_reciprocal_w, stepped_v_over_w * fast_reciprocal_w, prelit) else shade(texture, texture_width, texture_height, stepped_u_over_w * fast_reciprocal_w, stepped_v_over_w * fast_reciprocal_w, lighting, unit_uv);
-                                    if (count_work) stats.color_writes += 1;
-                                    pixels_written += 1;
-                                }
-                                stepped_u_over_w += u_over_w_dx;
-                                stepped_v_over_w += v_over_w_dx;
-                            }
-                        } else {
-                            while (x < tile_max_x) : (x += 1) {
-                                if (count_work) {
-                                    stats.fragments_tested += 1;
-                                    stats.fragments_covered += 1;
-                                }
-                                const pixel_index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
-                                const depth_offset = pixel_index * 4;
-                                if (depth) |depth_bytes| {
-                                    if (fast_z_bits <= std.mem.readInt(u32, depth_bytes[depth_offset..][0..4], .little)) {
-                                        std.mem.writeInt(u32, depth_bytes[depth_offset..][0..4], fast_z_bits, .little);
-                                        if (count_work) stats.depth_tests_passed += 1;
+                                    } else {
                                         if (target) |color_bytes| {
                                             std.mem.writeInt(u32, color_bytes[depth_offset..][0..4], if (prelit_texture) |prelit| shadeUnitTexture4x4(stepped_u_over_w * fast_reciprocal_w, stepped_v_over_w * fast_reciprocal_w, prelit) else shade(texture, texture_width, texture_height, stepped_u_over_w * fast_reciprocal_w, stepped_v_over_w * fast_reciprocal_w, lighting, unit_uv), .little);
                                             if (count_work) stats.color_writes += 1;
                                         }
                                         pixels_written += 1;
                                     }
-                                } else {
-                                    if (target) |color_bytes| {
-                                        std.mem.writeInt(u32, color_bytes[depth_offset..][0..4], if (prelit_texture) |prelit| shadeUnitTexture4x4(stepped_u_over_w * fast_reciprocal_w, stepped_v_over_w * fast_reciprocal_w, prelit) else shade(texture, texture_width, texture_height, stepped_u_over_w * fast_reciprocal_w, stepped_v_over_w * fast_reciprocal_w, lighting, unit_uv), .little);
-                                        if (count_work) stats.color_writes += 1;
-                                    }
-                                    pixels_written += 1;
+                                    stepped_u_over_w += u_over_w_dx;
+                                    stepped_v_over_w += v_over_w_dx;
                                 }
+                            };
+                        } else if (optimized and fully_covered) {
+                            while (x < tile_max_x) : (x += 1) {
+                                if (count_work) {
+                                    stats.fragments_tested += 1;
+                                    stats.fragments_covered += 1;
+                                }
+                                const inverse_w = if (optimized and flat_w) flat_inverse_w else if (optimized) stepped_inverse_w else unreachable;
+                                if (@abs(inverse_w) >= 0.000001) {
+                                    const z = if (optimized and flat_z) v0.screen[2] else if (optimized) stepped_z else unreachable;
+                                    const pixel_index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
+                                    if (writeFragment(target, depth, pixel_index, z, flat_depth_bits, inverse_w, if (optimized and flat_w) flat_reciprocal_w else null, stepped_u_over_w, stepped_v_over_w, texture, texture_width, texture_height, lighting, unit_uv, prelit_texture, flat_color, stats, count_work)) pixels_written += 1;
+                                }
+                                b0 += b0_dx;
+                                b1 += b1_dx;
+                                b2 += b2_dx;
+                                if (!flat_w) stepped_inverse_w += inverse_w_dx;
+                                if (!flat_z) stepped_z += z_dx;
                                 stepped_u_over_w += u_over_w_dx;
                                 stepped_v_over_w += v_over_w_dx;
                             }
-                        };
-                    } else if (optimized and fully_covered) {
-                        while (x < tile_max_x) : (x += 1) {
-                            if (count_work) {
-                                stats.fragments_tested += 1;
-                                stats.fragments_covered += 1;
-                            }
-                            const inverse_w = if (optimized and flat_w) flat_inverse_w else if (optimized) stepped_inverse_w else unreachable;
-                            if (@abs(inverse_w) >= 0.000001) {
-                                const z = if (optimized and flat_z) v0.screen[2] else if (optimized) stepped_z else unreachable;
-                                const pixel_index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
-                                if (writeFragment(target, depth, pixel_index, z, flat_depth_bits, inverse_w, if (optimized and flat_w) flat_reciprocal_w else null, stepped_u_over_w, stepped_v_over_w, texture, texture_width, texture_height, lighting, unit_uv, prelit_texture, stats, count_work)) pixels_written += 1;
+                        } else while (x < tile_max_x) : (x += 1) {
+                            const sample = [2]f32{ @as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5 };
+                            const fragment_b0 = if (optimized) b0 else edge(p1, p2, sample) * inverse_area;
+                            const fragment_b1 = if (optimized) b1 else edge(p2, p0, sample) * inverse_area;
+                            const fragment_b2 = if (optimized) b2 else edge(p0, p1, sample) * inverse_area;
+                            if (count_work) stats.fragments_tested += 1;
+                            if (fragment_b0 >= 0 and fragment_b1 >= 0 and fragment_b2 >= 0) {
+                                if (count_work) stats.fragments_covered += 1;
+                                const inverse_w = if (optimized and flat_w) flat_inverse_w else if (optimized) stepped_inverse_w else fragment_b0 * inv_w0 + fragment_b1 * inv_w1 + fragment_b2 * inv_w2;
+                                if (@abs(inverse_w) >= 0.000001) {
+                                    const z = if (optimized and flat_z) v0.screen[2] else if (optimized) stepped_z else fragment_b0 * v0.screen[2] + fragment_b1 * v1.screen[2] + fragment_b2 * v2.screen[2];
+                                    const pixel_index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
+                                    const u_over_w = if (optimized) stepped_u_over_w else fragment_b0 * u_over_w0 + fragment_b1 * u_over_w1 + fragment_b2 * u_over_w2;
+                                    const v_over_w = if (optimized) stepped_v_over_w else fragment_b0 * v_over_w0 + fragment_b1 * v_over_w1 + fragment_b2 * v_over_w2;
+                                    if (writeFragment(target, depth, pixel_index, z, flat_depth_bits, inverse_w, if (optimized and flat_w) flat_reciprocal_w else null, u_over_w, v_over_w, texture, texture_width, texture_height, lighting, unit_uv, prelit_texture, flat_color, stats, count_work)) pixels_written += 1;
+                                }
                             }
                             b0 += b0_dx;
                             b1 += b1_dx;
@@ -656,30 +873,6 @@ fn drawInternal(target: ?[]u8, depth: ?[]u8, width: u32, height: u32, uniform: [
                             stepped_u_over_w += u_over_w_dx;
                             stepped_v_over_w += v_over_w_dx;
                         }
-                    } else while (x < tile_max_x) : (x += 1) {
-                        const sample = [2]f32{ @as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5 };
-                        const fragment_b0 = if (optimized) b0 else edge(p1, p2, sample) * inverse_area;
-                        const fragment_b1 = if (optimized) b1 else edge(p2, p0, sample) * inverse_area;
-                        const fragment_b2 = if (optimized) b2 else edge(p0, p1, sample) * inverse_area;
-                        if (count_work) stats.fragments_tested += 1;
-                        if (fragment_b0 >= 0 and fragment_b1 >= 0 and fragment_b2 >= 0) {
-                            if (count_work) stats.fragments_covered += 1;
-                            const inverse_w = if (optimized and flat_w) flat_inverse_w else if (optimized) stepped_inverse_w else fragment_b0 * inv_w0 + fragment_b1 * inv_w1 + fragment_b2 * inv_w2;
-                            if (@abs(inverse_w) >= 0.000001) {
-                                const z = if (optimized and flat_z) v0.screen[2] else if (optimized) stepped_z else fragment_b0 * v0.screen[2] + fragment_b1 * v1.screen[2] + fragment_b2 * v2.screen[2];
-                                const pixel_index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
-                                const u_over_w = if (optimized) stepped_u_over_w else fragment_b0 * u_over_w0 + fragment_b1 * u_over_w1 + fragment_b2 * u_over_w2;
-                                const v_over_w = if (optimized) stepped_v_over_w else fragment_b0 * v_over_w0 + fragment_b1 * v_over_w1 + fragment_b2 * v_over_w2;
-                                if (writeFragment(target, depth, pixel_index, z, flat_depth_bits, inverse_w, if (optimized and flat_w) flat_reciprocal_w else null, u_over_w, v_over_w, texture, texture_width, texture_height, lighting, unit_uv, prelit_texture, stats, count_work)) pixels_written += 1;
-                            }
-                        }
-                        b0 += b0_dx;
-                        b1 += b1_dx;
-                        b2 += b2_dx;
-                        if (!flat_w) stepped_inverse_w += inverse_w_dx;
-                        if (!flat_z) stepped_z += z_dx;
-                        stepped_u_over_w += u_over_w_dx;
-                        stepped_v_over_w += v_over_w_dx;
                     }
                 }
             }
@@ -699,7 +892,7 @@ pub fn drawReferenceCounted(target: []u8, depth: ?[]u8, width: u32, height: u32,
 }
 
 const parallel_band_count = 2;
-const parallel_slice_count = 10;
+const parallel_slice_count = 4;
 const parallel_8k_slice_count = 40;
 const ParallelBand = struct { counters: Counters = .{}, pixels_written: usize = 0 };
 const ParallelDraw = struct {
@@ -719,9 +912,13 @@ const ParallelDraw = struct {
     front_face: i32,
     indexed: ?IndexStream,
     prepared: *const PreparedDraw,
+    stripe_count: usize = parallel_band_count,
     count_work: bool = false,
     clear_color_pattern: ?u32 = null,
     clear_depth_pattern: ?u32 = null,
+    expected_target: ?[]const u8 = null,
+    validation_failed: ?*std.atomic.Value(bool) = null,
+    clear_spans: bool = false,
     bands: [parallel_band_count]ParallelBand = [_]ParallelBand{.{}} ** parallel_band_count,
 };
 const ParallelClear = struct { color: []u8, color_pattern: u32, depth: []u8, depth_pattern: u32, width: u32 = 0, rect: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 } };
@@ -781,8 +978,81 @@ fn waitForParallelGeneration(observed_generation: u64, spin_budget_ns: *u64) u64
 
 fn runParallelBand(context: *ParallelDraw, band_index: usize, comptime count_work: bool) void {
     const band = &context.bands[band_index];
-    const stripe_count: usize = parallel_band_count;
+    const stripe_count = context.stripe_count;
     band.pixels_written = drawInternal(context.target, context.depth, context.width, context.height, context.uniform, context.texture, context.texture_width, context.texture_height, context.vertex_count, context.base_vertex, context.viewport, context.scissor, &band.counters, true, context.cull_mode, context.front_face, band_index, parallel_band_count, stripe_count, context.prepared, context.indexed, count_work);
+}
+
+fn rasterFlatSpanTriangle(color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, stripe_count: usize, lane_index: usize, p0: [2]f32, p1: [2]f32, p2: [2]f32, inverse_area: f32, min_x: i32, min_y: i32, max_x: i32, max_y: i32, lane_min_y: i32, lane_max_y: i32, cached_spans: ?*const [flat_span_rows]FlatSpan, cached_colors: ?*const [flat_span_rows][max_color_runs]ColorRun, flat_depth_bits: u32, flat_color: ?u32, prelit_texture: ?*const [16]u32, flat_reciprocal_w: f32, u_over_w0: f32, u_over_w1: f32, u_over_w2: f32, v_over_w0: f32, v_over_w1: f32, v_over_w2: f32, u_over_w_dx: f32, v_over_w_dx: f32) usize {
+    var pixels_written: usize = 0;
+    const first_lane_y = @max(min_y, lane_min_y);
+    const last_lane_y = @min(max_y, lane_max_y);
+    var y = first_lane_y;
+    while (y < last_lane_y) : (y += 1) {
+        if (stripe_count > parallel_band_count and (@as(usize, @intCast(y)) * stripe_count / height) % parallel_band_count != lane_index) continue;
+        const y_offset = @as(f32, @floatFromInt(y)) + 0.5;
+        const span = if (cached_spans) |spans| spans[@intCast(y)] else flatSpanForRow(p0, p1, p2, inverse_area, min_x, max_x, y);
+        if (span.last <= span.first) continue;
+        const first = @max(min_x, @as(i32, @intCast(span.first)));
+        const last = @min(max_x, @as(i32, @intCast(span.last)));
+        if (first >= last) continue;
+        if (cached_colors) |colors| {
+            for (colors[@intCast(y)]) |run| {
+                if (run.last <= run.first) break;
+                const run_first = @max(first, @as(i32, @intCast(run.first)));
+                const run_last = @min(last, @as(i32, @intCast(run.last)));
+                if (run_first < run_last) pixels_written += writeFlatColorSpan(color_words, depth_words, width, @intCast(y), @intCast(run_first), @intCast(run_last), flat_depth_bits, run.color);
+            }
+            continue;
+        }
+        const first_sample = [2]f32{ @as(f32, @floatFromInt(first)) + 0.5, y_offset };
+        const b0 = edge(p1, p2, first_sample) * inverse_area;
+        const b1 = edge(p2, p0, first_sample) * inverse_area;
+        const b2 = edge(p0, p1, first_sample) * inverse_area;
+        var stepped_u_over_w = b0 * u_over_w0 + b1 * u_over_w1 + b2 * u_over_w2;
+        var stepped_v_over_w = b0 * v_over_w0 + b1 * v_over_w1 + b2 * v_over_w2;
+        var x = first;
+        while (x + 4 <= last) : (x += 4) {
+            const pixel_index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
+            const depth_values: @Vector(4, u32) = depth_words[pixel_index..][0..4].*;
+            const passes: @Vector(4, bool) = @as(@Vector(4, u32), @splat(flat_depth_bits)) <= depth_values;
+            var colors: [4]u32 = undefined;
+            if (flat_color) |color| {
+                colors = .{ color, color, color, color };
+            } else if (prelit_texture) |prelit| {
+                inline for (0..4) |lane| {
+                    const lane_u = stepped_u_over_w + u_over_w_dx * @as(f32, @floatFromInt(lane));
+                    const lane_v = stepped_v_over_w + v_over_w_dx * @as(f32, @floatFromInt(lane));
+                    colors[lane] = shadeUnitTexture4x4(lane_u * flat_reciprocal_w, lane_v * flat_reciprocal_w, prelit);
+                }
+            }
+            if (@reduce(.And, passes)) {
+                depth_words[pixel_index..][0..4].* = @as(@Vector(4, u32), @splat(flat_depth_bits));
+                color_words[pixel_index..][0..4].* = colors;
+                pixels_written += 4;
+            } else {
+                inline for (0..4) |lane| {
+                    if (passes[lane]) {
+                        depth_words[pixel_index + lane] = flat_depth_bits;
+                        color_words[pixel_index + lane] = colors[lane];
+                        pixels_written += 1;
+                    }
+                }
+            }
+            stepped_u_over_w += u_over_w_dx * 4.0;
+            stepped_v_over_w += v_over_w_dx * 4.0;
+        }
+        while (x < last) : (x += 1) {
+            const pixel_index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
+            if (flat_depth_bits <= depth_words[pixel_index]) {
+                depth_words[pixel_index] = flat_depth_bits;
+                color_words[pixel_index] = if (flat_color) |color| color else shadeUnitTexture4x4(stepped_u_over_w * flat_reciprocal_w, stepped_v_over_w * flat_reciprocal_w, prelit_texture.?);
+                pixels_written += 1;
+            }
+            stepped_u_over_w += u_over_w_dx;
+            stepped_v_over_w += v_over_w_dx;
+        }
+    }
+    return pixels_written;
 }
 
 fn fillPatternLane(bytes: []u8, pattern: u32, lane_index: usize) void {
@@ -817,12 +1087,50 @@ fn fillPatternRectAll(bytes: []u8, width: u32, rect: Rect, pattern: u32) void {
     }
 }
 
+fn clearPreparedSpansLane(context: *ParallelDraw, lane_index: usize) void {
+    if (!context.prepared.spans_valid) return;
+    const color_pattern = context.clear_color_pattern orelse return;
+    const depth_pattern = context.clear_depth_pattern orelse return;
+    const color_words = std.mem.bytesAsSlice(u32, @as([]align(4) u8, @alignCast(context.target)));
+    const depth_words = std.mem.bytesAsSlice(u32, @as([]align(4) u8, @alignCast(context.depth.?)));
+    for (context.prepared.triangles[0..context.prepared.count], 0..) |triangle, triangle_index| {
+        if (!triangle.valid) continue;
+        for (0..context.height) |y| {
+            if (stripeLane(@intCast(y), context.height, parallel_band_count, context.stripe_count) != lane_index) continue;
+            const span = context.prepared.spans[triangle_index][y];
+            if (span.last <= span.first) continue;
+            const start = y * @as(usize, context.width) + span.first;
+            const length = @as(usize, span.last - span.first);
+            @memset(color_words[start..][0..length], color_pattern);
+            @memset(depth_words[start..][0..length], depth_pattern);
+        }
+    }
+}
+
 fn runParallelJob(job: ParallelJob, lane_index: usize) void {
     switch (job) {
         .draw => |context| {
-            if (context.clear_color_pattern) |pattern| fillPatternLane(context.target, pattern, lane_index);
-            if (context.clear_depth_pattern) |pattern| if (context.depth) |depth| fillPatternLane(depth, pattern, lane_index);
+            if (context.clear_spans) {
+                clearPreparedSpansLane(context, lane_index);
+            } else {
+                if (context.clear_color_pattern) |pattern| fillPatternLane(context.target, pattern, lane_index);
+                if (context.clear_depth_pattern) |pattern| if (context.depth) |depth| fillPatternLane(depth, pattern, lane_index);
+            }
             if (context.count_work) runParallelBand(context, lane_index, true) else runParallelBand(context, lane_index, false);
+            if (context.expected_target) |expected| {
+                const row_bytes = @as(usize, context.width) * 4;
+                var stripe_index = lane_index;
+                while (stripe_index < context.stripe_count) : (stripe_index += parallel_band_count) {
+                    const first_row = @as(usize, context.height) * stripe_index / context.stripe_count;
+                    const last_row = @as(usize, context.height) * (stripe_index + 1) / context.stripe_count;
+                    const start = first_row * row_bytes;
+                    const end = last_row * row_bytes;
+                    if (!std.mem.eql(u8, context.target[start..end], expected[start..end])) {
+                        if (context.validation_failed) |failed| failed.store(true, .release);
+                        break;
+                    }
+                }
+            }
         },
         .clear => |context| {
             if (context.width == 0) {
@@ -999,19 +1307,21 @@ fn drawParallel(target: []u8, depth: ?[]u8, width: u32, height: u32, uniform: []
     prepareLitTextures(&prepared, texture, texture_width, texture_height);
     if (bounds) |output| output.* = preparedBounds(&prepared, width, height, scissor);
     if (dirty_output) |output| markPreparedDirtyTiles(&prepared, width, height, scissor, cull_mode, front_face, output);
-    var context = ParallelDraw{ .target = target, .depth = depth, .width = width, .height = height, .uniform = uniform, .texture = texture, .texture_width = texture_width, .texture_height = texture_height, .vertex_count = vertex_count, .base_vertex = base_vertex, .viewport = viewport, .scissor = scissor, .cull_mode = cull_mode, .front_face = front_face, .indexed = indexed, .prepared = &prepared };
+    var context = ParallelDraw{ .target = target, .depth = depth, .width = width, .height = height, .uniform = uniform, .texture = texture, .texture_width = texture_width, .texture_height = texture_height, .vertex_count = vertex_count, .base_vertex = base_vertex, .viewport = viewport, .scissor = scissor, .cull_mode = cull_mode, .front_face = front_face, .indexed = indexed, .prepared = &prepared, .stripe_count = parallel_slice_count };
     if (!dispatchParallel(.{ .draw = &context })) return null;
     var pixels_written: usize = 0;
     for (context.bands) |band| pixels_written += band.pixels_written;
     return pixels_written;
 }
 
-fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, counters: ?*Counters, clear_color_pattern: ?u32, clear_depth_pattern: ?u32) usize {
+fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, counters: ?*Counters, clear_color_pattern: ?u32, clear_depth_pattern: ?u32, expected_target: ?[]const u8, clear_spans_requested: bool) usize {
     const dirty_bytes = dirtyTileByteCount(width, height);
     if (dirty_bytes > max_dirty_tile_bytes) return 0;
+    if (expected_target) |expected| if (expected.len != target.len) return 0;
     _ = cpu_locality.pinCurrent(.render);
     var prepared: PreparedDraw = .{};
     const cache_status = prepareDrawCached(uniform, texture, texture_width, texture_height, vertex_count, viewport, &prepared);
+    if (!cache_status.hit) buildPreparedFlatSpans(&prepared, width, height);
     const lighting_generation = exact_lighting_cache_generation.load(.acquire);
     if (!cache_status.hit or prepared_cache.lighting_generation != lighting_generation) {
         for (prepared.triangles[0..prepared.count]) |*triangle| {
@@ -1020,10 +1330,15 @@ fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, unif
         prepared_cache.lighting_generation = exact_lighting_cache_generation.load(.acquire);
     }
     prepareLitTextures(&prepared, texture, texture_width, texture_height);
+    if (!cache_status.hit and buildPreparedColorRuns(&prepared, width, height)) prepared.color_runs = &prepared_color_runs;
     if (cache_status.cacheable) prepared_cache.prepared = prepared;
     const prepared_ptr: *const PreparedDraw = if (cache_status.cacheable) &prepared_cache.prepared else &prepared;
-    var context = ParallelDraw{ .target = target, .depth = depth, .width = width, .height = height, .uniform = uniform, .texture = texture, .texture_width = texture_width, .texture_height = texture_height, .vertex_count = vertex_count, .base_vertex = 0, .viewport = viewport, .scissor = scissor, .cull_mode = 0, .front_face = 0, .indexed = null, .prepared = prepared_ptr, .count_work = counters != null, .clear_color_pattern = clear_color_pattern, .clear_depth_pattern = clear_depth_pattern };
+    var validation_failed = std.atomic.Value(bool).init(false);
+    const full_screen_scissor = scissor.x == 0 and scissor.y == 0 and scissor.width == width and scissor.height == height;
+    const clear_spans = clear_spans_requested and expected_target != null and prepared.spans_valid and width == 800 and height == 600 and full_screen_scissor;
+    var context = ParallelDraw{ .target = target, .depth = depth, .width = width, .height = height, .uniform = uniform, .texture = texture, .texture_width = texture_width, .texture_height = texture_height, .vertex_count = vertex_count, .base_vertex = 0, .viewport = viewport, .scissor = scissor, .cull_mode = 0, .front_face = 0, .indexed = null, .prepared = prepared_ptr, .stripe_count = parallel_slice_count, .count_work = counters != null, .clear_color_pattern = clear_color_pattern, .clear_depth_pattern = clear_depth_pattern, .expected_target = expected_target, .validation_failed = if (expected_target != null) &validation_failed else null, .clear_spans = clear_spans };
     if (!dispatchParallel(.{ .draw = &context })) return 0;
+    if (validation_failed.load(.acquire)) return 0;
     var pixels_written: usize = 0;
     for (context.bands) |band| {
         pixels_written += band.pixels_written;
@@ -1044,14 +1359,14 @@ fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, unif
 /// render caller is pinned to the selected render CPU and the worker is pinned
 /// to the selected raster CPU; no additional cores participate in this path.
 pub fn drawCountedParallel(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, counters: *Counters) usize {
-    return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, counters, null, null);
+    return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, counters, null, null, null, false);
 }
 
 /// Two-core counted draw that clears each lane immediately before that lane's
 /// raster work. This preserves the clear-before-draw ordering while removing a
 /// separate full-frame parallel dispatch for callers that need both operations.
 pub fn drawCountedParallelCleared(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, color_pattern: u32, depth_pattern: u32, counters: *Counters) usize {
-    return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, counters, color_pattern, depth_pattern);
+    return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, counters, color_pattern, depth_pattern, null, false);
 }
 
 // Shared implementation for the exact-key and immutable-input replay APIs.
@@ -1060,7 +1375,7 @@ pub fn drawCountedParallelCleared(target: []u8, depth: []u8, width: u32, height:
 // already present and the expensive raster dispatch is safely skipped.
 fn drawCountedParallelStaticReuseImpl(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, counters: *Counters, comptime immutable_inputs: bool) usize {
     if (!staticCacheEligible(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor)) {
-        return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, counters, null, null);
+        return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, counters, null, null, null, false);
     }
     if (comptime immutable_inputs) {
         const generation = static_cache_generation.load(.acquire);
@@ -1081,7 +1396,7 @@ fn drawCountedParallelStaticReuseImpl(target: []u8, depth: []u8, width: u32, hei
             return static_cache_counters.color_writes;
         }
     }
-    const written = drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, counters, null, null);
+    const written = drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, counters, null, null, null, false);
     if (written == 0) return 0;
     @memcpy(static_cache_uniform[0..], uniform);
     @memcpy(static_cache_texture[0..], texture);
@@ -1116,7 +1431,30 @@ pub fn drawCountedParallelStaticReuseImmutable(target: []u8, depth: []u8, width:
 /// Two-core benchmark path without per-fragment instrumentation. The caller
 /// can validate one counted frame separately and time this lower-overhead path.
 pub fn drawUncountedParallel(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect) usize {
-    return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, null, null);
+    return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, null, null, null, null, false);
+}
+
+/// Two-core uncounted draw with the same lane-local clear ordering as the
+/// counted cleared entry point. Use it when counters have been validated on a
+/// separate sample and instrumentation should not perturb frame timing.
+pub fn drawUncountedParallelCleared(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, color_pattern: u32, depth_pattern: u32) usize {
+    return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, null, color_pattern, depth_pattern, null, false);
+}
+
+/// Two-core uncounted cleared draw that validates each lane against a known
+/// reference buffer before that lane reports completion. This overlaps exact
+/// output validation with the other lane's raster work and retains a full
+/// attachment clear.
+pub fn drawUncountedParallelClearedValidated(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, color_pattern: u32, depth_pattern: u32, expected_target: []const u8) usize {
+    return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, null, color_pattern, depth_pattern, expected_target, false);
+}
+
+/// Two-core uncounted draw for a stable full-frame command. The caller must
+/// keep the target, depth, uniform, texture, and full-screen scissor unchanged
+/// between calls. It clears only spans that the validated previous frame could
+/// have modified, then validates those same lane-owned spans after raster work.
+pub fn drawUncountedParallelDirtyClearedValidated(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, color_pattern: u32, depth_pattern: u32, expected_target: []const u8) usize {
+    return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, null, color_pattern, depth_pattern, expected_target, true);
 }
 
 pub fn clearImagesParallel(color: []u8, color_pattern: u32, depth: []u8, depth_pattern: u32) bool {
