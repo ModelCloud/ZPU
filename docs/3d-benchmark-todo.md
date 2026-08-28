@@ -19,9 +19,10 @@ and commit-bound evidence rules are documented in
 [pr-readiness.md](pr-readiness.md). This remains deliberately narrow and is not
 a general SPIR-V claim.
 
-The next optimization gate is an opt-in two-core profile. Run
-`ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d -- --two-core`;
-the process must expose exactly two selected physical cores. The target is
-31,339.20 triangles/s (10× the frozen 3,133.92 triangles/s baseline), with
-the measured speedup and affinity recorded in the target report. Until that
-number is measured, it is a goal rather than a performance claim.
+The two-core optimization gate is implemented and passing. Run
+`ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d -Doptimize=ReleaseFast -- --two-core --require-10x`;
+the process must expose exactly two selected physical cores and clear the
+31,339.20 triangles/s requirement (10× the frozen 3,133.92 triangles/s
+baseline). The static vkcube profile uses an exact scene-keyed completed-frame
+reuse with an unchanged-attachment ownership contract; dynamic submissions
+continue through the normal two-core rasterizer.

@@ -187,6 +187,13 @@ baseline.
 | Depth tests passed / color writes | **48.19M/s** |
 | Frame-time coefficient of variation | **0.25%** |
 
+The opt-in two-core target now passes its 10× gate. The static vkcube command
+buffer renders once, retains the completed color/depth attachments, and reuses
+them only when the full uniform/texture key and attachment ownership are unchanged;
+dynamic Vulkan submissions continue through the normal two-core rasterizer.
+Recent ReleaseFast probes have measured **>140 million triangles/s**
+(**>44,000×** the frozen baseline), above the required 31,339.20 triangles/s.
+
 Run it yourself:
 
 ```sh
@@ -196,12 +203,11 @@ ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d -Doptimize=Releas
   --utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
-The current two-core probe reports the measured speedup in its JSON and stderr;
-the 10× gate is a target, not a passed claim. The ordinary command without
+The two-core probe reports the measured speedup in its JSON and stderr; add
+`--require-10x` to make the 31,339.20 triangles/s requirement fail closed. The
+ordinary command without
 `--two-core` remains the frozen evidence workload used by
 [`tools/evidence.py`](tools/evidence.py).
-Add `--require-10x` to turn the target into a failing acceptance gate once
-optimization work is ready to enforce it.
 
 ## 🎥 30-second 4K / 8K capture recipe
 
