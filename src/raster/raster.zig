@@ -5,6 +5,7 @@ const std = @import("std");
 const s = @import("../surface.zig");
 const dispatch = @import("../simd/dispatch.zig");
 const pipeline = @import("../render_pipeline.zig");
+const scalar = @import("scalar.zig");
 
 threadlocal var kernel_cache = pipeline.Cache{};
 threadlocal var selected_backend: ?dispatch.Backend = null;
@@ -31,6 +32,10 @@ pub fn clear(surface: *s.Surface, color: s.Color) void {
 }
 pub fn fillRect(surface: *s.Surface, rect: s.Rect, color: s.Color) void {
     const clipped = s.clip(rect, surface.width, surface.height) orelse return;
+    if (clipped.width == 1 and clipped.height == 1) {
+        s.Surface.write(surface.row(@intCast(clipped.y)), @as(usize, @intCast(clipped.x)) * 4, surface.format, color);
+        return;
+    }
     const kernel = cachedKernel(surface.format, .fill);
     for (@intCast(clipped.y)..@as(usize, @intCast(clipped.y)) + clipped.height) |y| kernel.fillSpan(surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, color) catch unreachable;
 }
@@ -42,10 +47,20 @@ pub fn blendRect(surface: *s.Surface, rect: s.Rect, color: s.Color) void {
 
 pub fn fillRectWith(surface: *s.Surface, rect: s.Rect, color: s.Color, backend: dispatch.Backend) void {
     const clipped = s.clip(rect, surface.width, surface.height) orelse return;
+    if (clipped.width == 1 and clipped.height == 1) {
+        s.Surface.write(surface.row(@intCast(clipped.y)), @as(usize, @intCast(clipped.x)) * 4, surface.format, color);
+        return;
+    }
     for (@intCast(clipped.y)..@as(usize, @intCast(clipped.y)) + clipped.height) |y| dispatch.fillSpan(backend, surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, surface.format, color);
 }
 pub fn blendRectWith(surface: *s.Surface, rect: s.Rect, color: s.Color, backend: dispatch.Backend) void {
     const clipped = s.clip(rect, surface.width, surface.height) orelse return;
+    if (clipped.width == 1 and clipped.height == 1) {
+        const row = surface.row(@intCast(clipped.y));
+        const offset = @as(usize, @intCast(clipped.x)) * 4;
+        s.Surface.write(row, offset, surface.format, scalar.blendPixel(s.Surface.read(row, offset, surface.format), color));
+        return;
+    }
     for (@intCast(clipped.y)..@as(usize, @intCast(clipped.y)) + clipped.height) |y| dispatch.blendSpan(backend, surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, surface.format, color);
 }
 

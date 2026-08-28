@@ -11,10 +11,23 @@ fn div255(v: u32) u32 {
     return (v + 127) / 255;
 }
 
+fn div255Fast(v: u32) u32 {
+    const shifted = v + 128;
+    return (shifted + (shifted >> 8)) >> 8;
+}
+
 pub fn blendPixel(dst: s.Color, src: s.Color) s.Color {
+    if (src.a == 0) return dst;
+    if (src.a == 255) return src;
     const sa: u32 = src.a;
     const da: u32 = dst.a;
     const inv = 255 - sa;
+    if (da == 255) return .rgba(
+        @intCast(div255Fast(@as(u32, src.r) * sa + @as(u32, dst.r) * inv)),
+        @intCast(div255Fast(@as(u32, src.g) * sa + @as(u32, dst.g) * inv)),
+        @intCast(div255Fast(@as(u32, src.b) * sa + @as(u32, dst.b) * inv)),
+        255,
+    );
     const out_a = sa + div255(da * inv);
     if (out_a == 0) return s.Color.rgba(0, 0, 0, 0);
     const blend = struct {
