@@ -3566,6 +3566,14 @@ fn imageFormatUsage(format: i32) u32 {
         else => 0,
     };
 }
+fn sparseImageFormatQueryValid(format: i32, image_type: i32, samples: u32, usage: u32, tiling: i32) bool {
+    // Sparse residency is not advertised, but the query ABI still has to
+    // distinguish a valid unsupported combination from malformed input. The
+    // profile accepts the core image-type/sample/tiling domains and any
+    // nonzero image-usage mask, then returns an empty property set.
+    const valid_samples = samples == 1 or samples == 2 or samples == 4 or samples == 8 or samples == 16 or samples == 32 or samples == 64;
+    return format != 0 and image_type >= 0 and image_type <= 2 and valid_samples and usage != 0 and (tiling == 0 or tiling == 1);
+}
 fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatProperties) bool {
     if (!validPhysicalLocked(physical)) return false;
     const out = output orelse return false;
@@ -3594,16 +3602,12 @@ fn getImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, t
     return .success;
 }
 fn getSparseImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, samples: u32, usage: u32, tiling: i32, count: ?*u32, output: ?[*]SparseImageFormatProperties) callconv(.c) void {
-    _ = format;
-    _ = image_type;
-    _ = samples;
-    _ = usage;
-    _ = tiling;
     _ = output;
+    const n = count orelse return;
+    if (!sparseImageFormatQueryValid(format, image_type, samples, usage, tiling)) return;
     lock();
     defer mutex.unlock();
     if (!validPhysicalLocked(physical orelse return)) return;
-    const n = count orelse return;
     n.* = 0;
 }
 fn getPhysicalDeviceFeatures2(physical: ?Physical, output: ?*PhysicalDeviceFeatures2) callconv(.c) void {
@@ -3711,7 +3715,7 @@ fn getPhysicalDeviceMemoryProperties2(physical: ?Physical, output: ?*PhysicalDev
 fn getPhysicalDeviceSparseImageFormatProperties2(physical: ?Physical, info: ?*const PhysicalDeviceSparseImageFormatInfo2, count: ?*u32, output: ?[*]SparseImageFormatProperties2) callconv(.c) void {
     const n = count orelse return;
     const i = info orelse return;
-    if (i.s_type != 1000059008 or i.p_next != null or !sparseImageFormatProperties2OutputValid(output, n.*)) return;
+    if (i.s_type != 1000059008 or i.p_next != null or !sparseImageFormatQueryValid(i.format, i.image_type, i.samples, i.usage, i.tiling) or !sparseImageFormatProperties2OutputValid(output, n.*)) return;
     lock();
     defer mutex.unlock();
     if (!validPhysicalLocked(physical orelse return)) return;
@@ -15883,6 +15887,9 @@ test "core instance physical and device enumeration is bounded and allocation fr
         var sparse_count: u32 = 1;
         getSparseImageFormatProperties(physical[0], 37, 1, 1, 4, 0, &sparse_count, @ptrFromInt(8));
         try std.testing.expectEqual(@as(u32, 0), sparse_count);
+        sparse_count = 1;
+        getSparseImageFormatProperties(physical[0], 37, 3, 1, 4, 0, &sparse_count, null);
+        try std.testing.expectEqual(@as(u32, 1), sparse_count);
         var queue_count: u32 = 1;
         var queue_properties: [1]QueueProperties = undefined;
         getQueueProperties(physical[0], &queue_count, &queue_properties);
@@ -19010,8 +19017,11 @@ test "all physical queries cover success boundaries and invalid handles" {
     try std.testing.expectEqual(Result.error_initialization_failed, getImageFormatProperties(p, 37, 1, 0, 1, 0, null));
     try std.testing.expectEqual(Result.error_format_not_supported, getImageFormatProperties(p, 0, 0, 0, 0, 0, null));
     var sparse_count: u32 = 9;
-    getSparseImageFormatProperties(p, 0, 0, 1, 0, 0, &sparse_count, null);
+    getSparseImageFormatProperties(p, 37, 1, 1, 1, 0, &sparse_count, null);
     try std.testing.expectEqual(@as(u32, 0), sparse_count);
+    sparse_count = 9;
+    getSparseImageFormatProperties(p, 0, 0, 1, 0, 0, &sparse_count, null);
+    try std.testing.expectEqual(@as(u32, 9), sparse_count);
     var extension_count: u32 = 9;
     try std.testing.expectEqual(Result.success, enumerateDeviceExtensions(p, null, &extension_count, null));
     try std.testing.expectEqual(@as(u32, 2), extension_count);
@@ -19999,6 +20009,11 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     getPhysicalDeviceSparseImageFormatProperties2(ctx.physical, &sparse_info, &sparse_count, null);
     try std.testing.expectEqual(@as(u32, 8), sparse_count);
     sparse_info.p_next = null;
+    sparse_info.image_type = 3;
+    sparse_count = 8;
+    getPhysicalDeviceSparseImageFormatProperties2(ctx.physical, &sparse_info, &sparse_count, null);
+    try std.testing.expectEqual(@as(u32, 8), sparse_count);
+    sparse_info.image_type = 1;
     var external_buffer_info = PhysicalDeviceExternalBufferInfo{ .s_type = 1000071002, .p_next = null, .flags = 0, .usage = 0, .handle_type = 0 };
     var external_buffer = ExternalBufferProperties{ .s_type = 1000071003, .p_next = null, .external_memory_properties = .{ .external_memory_features = 0xffff_ffff, .export_from_imported_handle_types = 0xffff_ffff, .compatible_handle_types = 0xffff_ffff } };
     getPhysicalDeviceExternalBufferProperties(ctx.physical, &external_buffer_info, &external_buffer);

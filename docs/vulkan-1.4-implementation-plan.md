@@ -303,6 +303,10 @@ formats), so ordinary color formats fail as malformed input before capability
 classification; valid unsupported formats retain the explicit
 `VK_ERROR_FORMAT_NOT_SUPPORTED` policy and both paths have allocation-free
 warm coverage.
+The legacy `vkGetPhysicalDeviceSparseImageFormatProperties` query now validates
+its format, image-type, sample-count, usage, and tiling domains before
+reporting the truthful zero-sparse result; malformed and stale calls preserve
+the caller's count, and the valid and rejection paths remain allocation-free.
 `vkCreateSampler` now accepts the promoted `VkSamplerReductionModeCreateInfo`
 chain in its default weighted-average form, rejects MIN/MAX with
 `VK_ERROR_FEATURE_NOT_PRESENT` because `samplerFilterMinmax` is not advertised,
