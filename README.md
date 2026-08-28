@@ -39,22 +39,73 @@ ZPU ICD, the ICD validates the call, and the CPU does the work. 🧠➡️🖼�
 
 Reproduce the Chromium screenshot with [`tools/smolvm-chrome.sh`](tools/smolvm-chrome.sh) and [`tools/smolvm-chrome.env`](tools/smolvm-chrome.env), the fluid desktop capture with [`tools/smolvm-fluid-desktop.sh`](tools/smolvm-fluid-desktop.sh), or stage the emulated input drivers with [`tools/smolvm-zinput.sh`](tools/smolvm-zinput.sh) once ZPU is staged in a SmolVM guest.
 
-`tools/zmouse.c` and `tools/zkeyboard.c` are small `uinput`-based drivers that expose a virtual mouse and keyboard to Linux. They listen on Unix domain sockets for a line protocol (`m 50 0`, `k 30 1`, etc.) and ship with Python bindings in the `zpu` package (`pip install zpu`) and in `tools/zinput.py` so agentic workflows can control the pointer and inject keystrokes on a ZPU-powered Linux desktop without physical input hardware. Run `zig build zinput` to build and verify them.
+## 🖱️ Controlling a ZPU-powered Linux desktop
+
+`zmouse` and `zkeyboard` are small `uinput`-based drivers that create a virtual mouse and keyboard on Linux. They listen on Unix domain sockets (`/run/zmouse.sock`, `/run/zkeyboard.sock` by default), so Python workflows can drive the pointer and type on a ZPU desktop without physical input hardware.
+
+Build and verify them with:
+
+```bash
+zig build zinput      # or: make -C tools zmouse zkeyboard libzinput.so
+```
+
+### Start the drivers
+
+On a normal Linux desktop (root or `input` group access to `/dev/uinput` is required):
+
+```bash
+sudo ./tools/zmouse  -d /dev/uinput -s /run/zmouse.sock
+sudo ./tools/zkeyboard -d /dev/uinput -s /run/zkeyboard.sock
+```
+
+Inside a SmolVM guest the same binaries are already started by [`tools/smolvm-zinput.sh`](tools/smolvm-zinput.sh); run `tools/smolvm-zinput.sh` after ZPU is staged in the guest.
+
+### Install the Python bindings
+
+Once published, the package is installed from PyPI:
 
 ```bash
 pip install zpu
 ```
 
+Until the first PyPI release, simulate the PyPI flow by installing from the repository root (this builds `zpu/libzinput.so` automatically):
+
+```bash
+pip install .
+```
+
+In the SmolVM guest `tools/smolvm-zinput.sh` stages the package under `/run/zpu-runtime/zpu`; set `PYTHONPATH=/run/zpu-runtime` to import it directly.
+
+### Control the desktop from Python
+
+Talk to the running daemons over their Unix sockets:
+
 ```python
 from zpu import MouseClient, KeyboardClient
 
 with MouseClient('/run/zmouse.sock') as m:
+    m.move(100, 0)   # move pointer 100 px right
+    m.click(1)       # left click
+    m.wheel(-3)      # scroll down
+
+with KeyboardClient('/run/zkeyboard.sock') as k:
+    k.key_tap(30)    # press and release 'a'
+```
+
+Create devices directly through `/dev/uinput` instead of a daemon (useful for a single Python agent that owns the input device):
+
+```python
+from zpu import Mouse, Keyboard
+
+with Mouse() as m:
     m.move(100, 0)
     m.click(1)
 
-with KeyboardClient('/run/zkeyboard.sock') as k:
-    k.key_tap(30)  # 'a'
+with Keyboard() as k:
+    k.key_tap(30)
 ```
+
+`tools/zinput.py` remains a thin wrapper that imports `zpu.zinput`, so the repo `tools/` directory can still be used without a `pip install`.
 
 ## ✨ At a glance
 
