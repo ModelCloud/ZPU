@@ -596,7 +596,15 @@ test "application workloads match the serial raster oracle" {
         try std.testing.expectEqualSlices(u8, serial_color, parallel_color);
         try std.testing.expectEqualSlices(u8, serial_depth, parallel_depth);
 
-        if (kind == .game) {
+        if (kind == .terminal) {
+            updateWorkload(&workload, 1);
+            const dynamic_serial = try renderSerial(&workload, serial_color, serial_depth);
+            const dynamic_uncounted = try renderParallel(&workload, parallel_color, parallel_depth, false);
+            try std.testing.expect(dynamic_serial.checksum != serial.checksum);
+            try std.testing.expectEqual(dynamic_serial.checksum, dynamic_uncounted.checksum);
+            try std.testing.expectEqualSlices(u8, serial_color, parallel_color);
+            try std.testing.expectEqualSlices(u8, serial_depth, parallel_depth);
+        } else if (kind == .game) {
             updateWorkload(&workload, 9);
             const dynamic_serial = try renderSerial(&workload, serial_color, serial_depth);
             const dynamic_parallel = try renderParallel(&workload, parallel_color, parallel_depth, true);

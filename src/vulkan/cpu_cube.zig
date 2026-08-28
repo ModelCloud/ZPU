@@ -85,6 +85,7 @@ const PreparedDraw = struct {
     triangles: [max_prepared_triangles]PreparedTriangle = [_]PreparedTriangle{.{}} ** max_prepared_triangles,
     spans: [max_prepared_triangles][flat_span_rows]FlatSpan = [_][flat_span_rows]FlatSpan{[_]FlatSpan{.{}} ** flat_span_rows} ** max_prepared_triangles,
     spans_valid: bool = false,
+    spans_external: ?*const [max_prepared_triangles][flat_span_rows]FlatSpan = null,
     color_runs: ?*const ColorRuns = null,
     batch_fast: bool = false,
 };
@@ -219,6 +220,11 @@ fn buildPreparedFlatSpans(prepared: *PreparedDraw, width: u32, height: u32) void
         for (@as(usize, @intCast(min_y))..@as(usize, @intCast(max_y))) |y| prepared.spans[index][y] = flatSpanForRow(p0, p1, p2, 1.0 / area, min_x, max_x, @intCast(y));
     }
     prepared.spans_valid = true;
+    prepared.spans_external = null;
+}
+
+fn preparedSpan(prepared: *const PreparedDraw, triangle_index: usize) *const [flat_span_rows]FlatSpan {
+    return if (prepared.spans_external) |external| &external[triangle_index] else &prepared.spans[triangle_index];
 }
 
 threadlocal var prepared_color_runs: ColorRuns = undefined;
@@ -475,8 +481,21 @@ fn triangleLight(v0: Vertex, v1: Vertex, v2: Vertex) f32 {
 fn prepareDraw(uniform: []const u8, vertex_count: u32, base_vertex: u32, viewport: Viewport, indexed: ?IndexStream) PreparedDraw {
     const source_vertex_count = if (indexed != null) packedVertexCount(uniform) orelse 0 else base_vertex +| vertex_count;
     const max_uniform_vertices = (std.math.maxInt(usize) - 64) / 32;
-    if (source_vertex_count > max_uniform_vertices or uniform.len < 64 + @as(usize, source_vertex_count) * 32) return .{};
-    var prepared = PreparedDraw{ .count = @min(vertex_count / 3, max_prepared_triangles) };
+    if (source_vertex_count > max_uniform_vertices or uniform.len < 64 + @as(usize, source_vertex_count) * 32) {
+        var empty: PreparedDraw = undefined;
+        empty.count = 0;
+        empty.spans_valid = false;
+        empty.spans_external = null;
+        empty.color_runs = null;
+        empty.batch_fast = false;
+        return empty;
+    }
+    var prepared: PreparedDraw = undefined;
+    prepared.count = @min(vertex_count / 3, max_prepared_triangles);
+    prepared.spans_valid = false;
+    prepared.spans_external = null;
+    prepared.color_runs = null;
+    prepared.batch_fast = false;
     for (prepared.triangles[0..prepared.count], 0..) |*triangle, index| {
         const first: u32 = @intCast(index * 3);
         const first_source = if (indexed != null) first else base_vertex +| first;
@@ -486,7 +505,14 @@ fn prepareDraw(uniform: []const u8, vertex_count: u32, base_vertex: u32, viewpor
         const unit_uv = for ([3]Vertex{ v0, v1, v2 }) |vertex| {
             if (vertex.uv[0] < 0 or vertex.uv[0] > 1 or vertex.uv[1] < 0 or vertex.uv[1] > 1) break false;
         } else (v0.clip_w > 0 and v1.clip_w > 0 and v2.clip_w > 0) or (v0.clip_w < 0 and v1.clip_w < 0 and v2.clip_w < 0);
-        triangle.* = .{ .valid = true, .vertices = .{ v0, v1, v2 }, .lighting = cachedLightingTable(triangleLight(v0, v1, v2)), .unit_uv = unit_uv };
+        triangle.valid = true;
+        triangle.vertices = .{ v0, v1, v2 };
+        triangle.lighting = cachedLightingTable(triangleLight(v0, v1, v2));
+        triangle.unit_uv = unit_uv;
+        triangle.has_prelit_texture = false;
+        triangle.has_prelit_texture_16x16 = false;
+        triangle.flat_color = null;
+        triangle.batch_raster = .{};
     }
     return prepared;
 }
@@ -830,7 +856,7 @@ fn drawInternal(target: ?[]u8, depth: ?[]u8, width: u32, height: u32, uniform: [
         const prelit_texture: ?*const [16]u32 = if (prepared_triangle) |state| if (state.has_prelit_texture) &state.prelit_texture else null else null;
         const prelit_texture_16x16: ?*const [256]u32 = if (prepared_triangle) |state| if (state.has_prelit_texture_16x16) &state.prelit_texture_16x16 else null else null;
         const flat_color = if (prepared_triangle) |state| state.flat_color else null;
-        const cached_spans: ?*const [flat_span_rows]FlatSpan = if (prepared) |state| if (prepared_index) |index| if (state.spans_valid) &state.spans[index] else null else null else null;
+        const cached_spans: ?*const [flat_span_rows]FlatSpan = if (prepared) |state| if (prepared_index) |index| if (state.spans_valid) preparedSpan(state, index) else null else null else null;
         const cached_colors: ?*const [flat_span_rows][max_color_runs]ColorRun = if (prepared) |state| if (prepared_index) |index| if (state.color_runs) |runs| if (runs.valid[index]) &runs.rows[index] else null else null else null else null;
         const flat_w = v0.clip_w == v1.clip_w and v0.clip_w == v2.clip_w;
         const flat_z = v0.screen[2] == v1.screen[2] and v0.screen[2] == v2.screen[2];
@@ -1078,6 +1104,34 @@ const parallel_slice_count = 4;
 const parallel_8k_slice_count = 40;
 const max_batch_commands = 256;
 const max_batch_tiles = max_dirty_tile_bytes * 8;
+const max_batch_geometry_bytes = 64 + max_prepared_triangles * 3 * 16;
+const BatchCommandCache = struct {
+    valid: bool = false,
+    geometry_valid: bool = false,
+    width: u32 = 0,
+    height: u32 = 0,
+    uniform_len: usize = 0,
+    texture_len: usize = 0,
+    geometry_len: usize = 0,
+    texture_width: u32 = 0,
+    texture_height: u32 = 0,
+    vertex_count: u32 = 0,
+    viewport: Viewport = undefined,
+    scissor: Rect = undefined,
+    lighting_generation: u64 = 0,
+    uniform: [prepared_cache_capacity]u8 = undefined,
+    texture: [prepared_cache_capacity]u8 = undefined,
+    geometry: [max_batch_geometry_bytes]u8 = undefined,
+};
+const BatchSpanCache = struct {
+    valid: bool = false,
+    width: u32 = 0,
+    height: u32 = 0,
+    count: usize = 0,
+    triangle_valid: [max_prepared_triangles]bool = [_]bool{false} ** max_prepared_triangles,
+    screen: [max_prepared_triangles][3][3]f32 = undefined,
+    spans: [max_prepared_triangles][flat_span_rows]FlatSpan = [_][flat_span_rows]FlatSpan{[_]FlatSpan{.{}} ** flat_span_rows} ** max_prepared_triangles,
+};
 const ParallelBand = struct { counters: Counters = .{}, pixels_written: usize = 0 };
 const ParallelDraw = struct {
     target: []u8,
@@ -1121,9 +1175,15 @@ const ParallelBatchDraw = struct {
     tile_count: usize = 0,
     bands: [parallel_band_count]ParallelBand = [_]ParallelBand{.{}} ** parallel_band_count,
 };
+const ParallelBatchPrepare = struct {
+    commands: []const DrawCommand,
+    prepared: []PreparedDraw,
+    width: u32,
+    height: u32,
+};
 const ParallelClear = struct { color: []u8, color_pattern: u32, depth: []u8, depth_pattern: u32, width: u32 = 0, rect: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 } };
 const ParallelTileClear = struct { color: []u8, color_pattern: u32, depth: []u8, depth_pattern: u32, width: u32, height: u32, tiles: []const u8 };
-const ParallelJob = union(enum) { draw: *ParallelDraw, batch: *ParallelBatchDraw, clear: *ParallelClear, tile_clear: *ParallelTileClear };
+const ParallelJob = union(enum) { draw: *ParallelDraw, batch: *ParallelBatchDraw, batch_prepare: *ParallelBatchPrepare, clear: *ParallelClear, tile_clear: *ParallelTileClear };
 
 var parallel_mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER;
 var parallel_condition: std.c.pthread_cond_t = std.c.PTHREAD_COND_INITIALIZER;
@@ -1136,6 +1196,8 @@ var parallel_generation = std.atomic.Value(u64).init(0);
 var parallel_completed = std.atomic.Value(usize).init(0);
 var parallel_active: ?ParallelJob = null;
 var batch_prepared_storage: [max_batch_commands]PreparedDraw = undefined;
+var batch_command_cache: [max_batch_commands]BatchCommandCache = undefined;
+var batch_span_cache: [max_batch_commands]BatchSpanCache = undefined;
 var batch_tile_min: [max_batch_tiles * parallel_band_count]u32 = undefined;
 var batch_tile_max: [max_batch_tiles * parallel_band_count]u32 = undefined;
 
@@ -1202,11 +1264,135 @@ fn addCounters(total: *Counters, value: Counters) void {
     total.color_writes += value.color_writes;
 }
 
-fn prepareBatchCommand(command: DrawCommand, width: u32, height: u32, output: *PreparedDraw) void {
-    output.* = prepareDraw(command.uniform, command.vertex_count, 0, command.viewport, null);
-    buildPreparedFlatSpans(output, width, height);
+fn batchSpanCacheMatches(cache: *const BatchSpanCache, prepared: *const PreparedDraw, width: u32, height: u32) bool {
+    if (!cache.valid or cache.width != width or cache.height != height or cache.count != prepared.count) return false;
+    for (prepared.triangles[0..prepared.count], 0..) |triangle, index| {
+        if (cache.triangle_valid[index] != triangle.valid) return false;
+        if (!triangle.valid) continue;
+        for (0..3) |vertex| for (0..3) |component| {
+            if (@as(u32, @bitCast(cache.screen[index][vertex][component])) != @as(u32, @bitCast(triangle.vertices[vertex].screen[component]))) return false;
+        };
+    }
+    return true;
+}
+
+fn rememberBatchSpanCache(cache: *BatchSpanCache, prepared: *const PreparedDraw, width: u32, height: u32) void {
+    cache.* = .{ .valid = true, .width = width, .height = height, .count = prepared.count };
+    for (prepared.triangles[0..prepared.count], 0..) |triangle, index| {
+        cache.triangle_valid[index] = triangle.valid;
+        if (!triangle.valid) continue;
+        for (0..3) |vertex| {
+            for (0..3) |component| cache.screen[index][vertex][component] = triangle.vertices[vertex].screen[component];
+        }
+        @memcpy(&cache.spans[index], &prepared.spans[index]);
+    }
+}
+
+fn batchGeometryLen(vertex_count: u32) usize {
+    return 64 + @as(usize, @min(vertex_count, max_prepared_triangles * 3)) * 16;
+}
+
+fn batchCommandCacheMatches(cache: *const BatchCommandCache, command: DrawCommand, width: u32, height: u32, lighting_generation: u64) bool {
+    return cache.valid and cache.width == width and cache.height == height and cache.uniform_len == command.uniform.len and cache.texture_len == command.texture.len and
+        cache.texture_width == command.texture_width and cache.texture_height == command.texture_height and cache.vertex_count == command.vertex_count and
+        cache.lighting_generation == lighting_generation and std.meta.eql(cache.viewport, command.viewport) and std.meta.eql(cache.scissor, command.scissor) and
+        std.mem.eql(u8, cache.uniform[0..command.uniform.len], command.uniform) and std.mem.eql(u8, cache.texture[0..command.texture.len], command.texture);
+}
+
+fn batchNeedsPreparation(commands: []const DrawCommand, width: u32, height: u32) bool {
+    const lighting_generation = exact_lighting_cache_generation.load(.acquire);
+    for (commands, 0..) |command, index| {
+        if (!batchCommandCacheMatches(&batch_command_cache[index], command, width, height, lighting_generation)) return true;
+    }
+    return false;
+}
+
+fn batchGeometryCacheMatches(cache: *const BatchCommandCache, command: DrawCommand) bool {
+    const geometry_len = batchGeometryLen(command.vertex_count);
+    return cache.geometry_valid and cache.geometry_len == geometry_len and cache.vertex_count == command.vertex_count and
+        std.meta.eql(cache.viewport, command.viewport) and command.uniform.len >= geometry_len and
+        std.mem.eql(u8, cache.geometry[0..geometry_len], command.uniform[0..geometry_len]);
+}
+
+fn rememberBatchCommandCache(cache: *BatchCommandCache, command: DrawCommand, width: u32, height: u32, lighting_generation: u64) void {
+    if (command.uniform.len > prepared_cache_capacity or command.texture.len > prepared_cache_capacity) {
+        cache.valid = false;
+        cache.geometry_valid = false;
+        return;
+    }
+    cache.width = width;
+    cache.height = height;
+    cache.uniform_len = command.uniform.len;
+    cache.texture_len = command.texture.len;
+    cache.geometry_len = batchGeometryLen(command.vertex_count);
+    cache.texture_width = command.texture_width;
+    cache.texture_height = command.texture_height;
+    cache.vertex_count = command.vertex_count;
+    cache.viewport = command.viewport;
+    cache.scissor = command.scissor;
+    cache.lighting_generation = lighting_generation;
+    @memcpy(cache.uniform[0..command.uniform.len], command.uniform);
+    @memcpy(cache.texture[0..command.texture.len], command.texture);
+    if (command.uniform.len >= cache.geometry_len) {
+        @memcpy(cache.geometry[0..cache.geometry_len], command.uniform[0..cache.geometry_len]);
+        cache.geometry_valid = true;
+    } else {
+        cache.geometry_valid = false;
+    }
+    cache.valid = true;
+}
+
+fn refreshBatchPreparedUvs(prepared: *PreparedDraw, uniform: []const u8, vertex_count: u32) bool {
+    const uv_base = std.math.mul(usize, @as(usize, vertex_count), 16) catch return false;
+    const uv_start = 64 + uv_base;
+    if (uv_start > uniform.len) return false;
+    for (prepared.triangles[0..prepared.count], 0..) |*triangle, triangle_index| {
+        if (!triangle.valid) continue;
+        var unit_uv = true;
+        for (&triangle.vertices, 0..) |*vertex, vertex_index| {
+            const offset = uv_start + (triangle_index * 3 + vertex_index) * 16;
+            if (offset > uniform.len or uniform.len - offset < 8) return false;
+            vertex.uv = .{ readFloat(uniform, offset), readFloat(uniform, offset + 4) };
+            unit_uv = unit_uv and vertex.uv[0] >= 0 and vertex.uv[0] <= 1 and vertex.uv[1] >= 0 and vertex.uv[1] <= 1;
+        }
+        triangle.unit_uv = unit_uv and ((triangle.vertices[0].clip_w > 0 and triangle.vertices[1].clip_w > 0 and triangle.vertices[2].clip_w > 0) or
+            (triangle.vertices[0].clip_w < 0 and triangle.vertices[1].clip_w < 0 and triangle.vertices[2].clip_w < 0));
+        triangle.has_prelit_texture = false;
+        triangle.has_prelit_texture_16x16 = false;
+        triangle.flat_color = null;
+    }
+    return true;
+}
+
+fn prepareBatchCommand(command: DrawCommand, command_index: usize, width: u32, height: u32, output: *PreparedDraw) void {
+    const lighting_generation = exact_lighting_cache_generation.load(.acquire);
+    const command_cache = &batch_command_cache[command_index];
+    if (batchCommandCacheMatches(command_cache, command, width, height, lighting_generation)) return;
+
+    var geometry_cache_hit = batchGeometryCacheMatches(command_cache, command);
+    if (geometry_cache_hit) {
+        if (!refreshBatchPreparedUvs(output, command.uniform, command.vertex_count)) {
+            geometry_cache_hit = false;
+            output.* = prepareDraw(command.uniform, command.vertex_count, 0, command.viewport, null);
+        }
+    } else {
+        output.* = prepareDraw(command.uniform, command.vertex_count, 0, command.viewport, null);
+    }
+
+    const span_cache = &batch_span_cache[command_index];
+    if (geometry_cache_hit and span_cache.valid) {
+        output.spans_valid = true;
+        output.spans_external = &span_cache.spans;
+    } else if (batchSpanCacheMatches(span_cache, output, width, height)) {
+        output.spans_valid = true;
+        output.spans_external = &span_cache.spans;
+    } else {
+        buildPreparedFlatSpans(output, width, height);
+        rememberBatchSpanCache(span_cache, output, width, height);
+    }
+    const lighting_refresh = !geometry_cache_hit or command_cache.lighting_generation != lighting_generation;
     for (output.triangles[0..output.count]) |*triangle| {
-        if (triangle.valid) triangle.lighting = exactCachedLightingTable(triangleLight(triangle.vertices[0], triangle.vertices[1], triangle.vertices[2]));
+        if (triangle.valid and lighting_refresh) triangle.lighting = exactCachedLightingTable(triangleLight(triangle.vertices[0], triangle.vertices[1], triangle.vertices[2]));
     }
     prepareLitTextures(output, command.texture, command.texture_width, command.texture_height);
     prepareBatchRaster(output, width, height, command.scissor);
@@ -1214,6 +1400,7 @@ fn prepareBatchCommand(command: DrawCommand, width: u32, height: u32, output: *P
     // geometry across both raster lanes, so the direct prelit span path is
     // used instead of retaining a pointer into one worker's scratch buffer.
     output.color_runs = null;
+    rememberBatchCommandCache(command_cache, command, width, height, lighting_generation);
 }
 
 fn drawPreparedBatchFast(target: []u8, depth: []u8, width: u32, height: u32, prepared: *const PreparedDraw, lane_index: usize, tile_min: ?[]u32, tile_max: ?[]u32, tile_columns: usize, tile_count: usize) ?usize {
@@ -1226,7 +1413,7 @@ fn drawPreparedBatchFast(target: []u8, depth: []u8, width: u32, height: u32, pre
     for (prepared.triangles[0..prepared.count], 0..) |triangle, triangle_index| {
         if (!triangle.valid or !triangle.batch_raster.ready) continue;
         const raster = triangle.batch_raster;
-        pixels_written += rasterFlatSpanTriangle(color_words, depth_words, width, height, parallel_band_count, lane_index, raster.p0, raster.p1, raster.p2, raster.inverse_area, raster.min_x, raster.min_y, raster.max_x, raster.max_y, @max(raster.min_y, lane_min_y), @min(raster.max_y, lane_max_y), if (prepared.spans_valid) &prepared.spans[triangle_index] else null, null, raster.flat_depth_bits, triangle.flat_color, if (triangle.has_prelit_texture) &triangle.prelit_texture else null, if (triangle.has_prelit_texture_16x16) &triangle.prelit_texture_16x16 else null, tile_min, tile_max, tile_columns, tile_count, raster.flat_reciprocal_w, raster.u_over_w[0], raster.u_over_w[1], raster.u_over_w[2], raster.v_over_w[0], raster.v_over_w[1], raster.v_over_w[2], raster.u_over_w_dx, raster.v_over_w_dx);
+        pixels_written += rasterFlatSpanTriangle(color_words, depth_words, width, height, parallel_band_count, lane_index, raster.p0, raster.p1, raster.p2, raster.inverse_area, raster.min_x, raster.min_y, raster.max_x, raster.max_y, @max(raster.min_y, lane_min_y), @min(raster.max_y, lane_max_y), if (prepared.spans_valid) preparedSpan(prepared, triangle_index) else null, null, raster.flat_depth_bits, triangle.flat_color, if (triangle.has_prelit_texture) &triangle.prelit_texture else null, if (triangle.has_prelit_texture_16x16) &triangle.prelit_texture_16x16 else null, tile_min, tile_max, tile_columns, tile_count, raster.flat_reciprocal_w, raster.u_over_w[0], raster.u_over_w[1], raster.u_over_w[2], raster.v_over_w[0], raster.v_over_w[1], raster.v_over_w[2], raster.u_over_w_dx, raster.v_over_w_dx);
     }
     return pixels_written;
 }
@@ -1246,6 +1433,13 @@ fn runParallelBatchBand(context: *ParallelBatchDraw, band_index: usize, comptime
         }
         band.pixels_written += drawInternal(context.target, context.depth, context.width, context.height, command.uniform, command.texture, command.texture_width, command.texture_height, command.vertex_count, 0, command.viewport, command.scissor, &draw_counters, true, 0, 0, band_index, parallel_band_count, parallel_band_count, prepared_ptr, null, count_work);
         if (comptime count_work) addCounters(&band.counters, draw_counters);
+    }
+}
+
+fn runParallelBatchPrepare(context: *ParallelBatchPrepare, lane_index: usize) void {
+    var command_index = lane_index;
+    while (command_index < context.commands.len) : (command_index += parallel_band_count) {
+        prepareBatchCommand(context.commands[command_index], command_index, context.width, context.height, &context.prepared[command_index]);
     }
 }
 
@@ -1450,6 +1644,7 @@ fn runParallelJob(job: ParallelJob, lane_index: usize) void {
             if (context.clear_depth_pattern) |pattern| fillPatternLane(context.depth, pattern, lane_index);
             if (context.count_work) runParallelBatchBand(context, lane_index, true) else runParallelBatchBand(context, lane_index, false);
         },
+        .batch_prepare => |context| runParallelBatchPrepare(context, lane_index),
         .clear => |context| {
             if (context.width == 0) {
                 fillPatternLane(context.color, context.color_pattern, lane_index);
@@ -1684,7 +1879,15 @@ fn drawParallelBatch(target: []u8, depth: []u8, width: u32, height: u32, command
     if (commands.len == 0 or commands.len > max_batch_commands or dirtyTileByteCount(width, height) > max_dirty_tile_bytes) return 0;
     if (target.len != @as(usize, width) * height * 4 or depth.len < @as(usize, width) * height * 4) return 0;
     _ = cpu_locality.pinCurrent(.render);
-    for (commands, 0..) |command, index| prepareBatchCommand(command, width, height, &batch_prepared_storage[index]);
+    if (batchNeedsPreparation(commands, width, height)) {
+        var prepare_context = ParallelBatchPrepare{
+            .commands = commands,
+            .prepared = batch_prepared_storage[0..commands.len],
+            .width = width,
+            .height = height,
+        };
+        if (!dispatchParallel(.{ .batch_prepare = &prepare_context })) return 0;
+    }
     const tile_count = ((@as(usize, width) + dirty_tile_size - 1) / dirty_tile_size) * ((@as(usize, height) + dirty_tile_size - 1) / dirty_tile_size);
     const use_tile_depth = clear_depth_pattern != null and tile_count <= max_batch_tiles;
     if (use_tile_depth) {
