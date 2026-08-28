@@ -274,7 +274,8 @@ These gates exercise progressively larger portions of the map:
 | `zig build headless-present` | Independent C client → loader → `VK_EXT_headless_surface` → no-XCB swapchain acquire/present lifecycle. |
 | `zig build vkcube-ready` | Real vkcube acquire/submit/present lifecycle through loader and XCB. |
 | `zig build vkcube-visual` | Adds X-server readback proving a rendered pixel reached the window. |
-| `zig build target-4k-240` / `target-8k-60` | Adds controlled real-present p99 frame-time gates. |
+| `zig build target-4k-240` / `target-8k-60` / `target-8k-120` | Adds controlled real-present p99 frame-time gates for the high-resolution profiles. |
+| `tools/capture_vkcube_highres.sh` | Captures a provenance-tagged 30-second VP9 WebM at 4K/240 or 8K/120 under Xvfb when the corresponding gate is green. |
 
 Run repository gates through `tools/limited-cpus.sh` so the documented CPU and
 topology limits are enforced and fingerprinted.
