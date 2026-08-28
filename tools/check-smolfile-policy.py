@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 import pathlib
 import sys
-import tomllib
+
+try:
+    import tomllib
+    decode = tomllib.loads
+    DecodeError = tomllib.TOMLDecodeError
+except ImportError:
+    import toml
+    decode = toml.loads
+    DecodeError = toml.decoder.TomlDecodeError
 
 if len(sys.argv) != 2:
     raise SystemExit("usage: check-smolfile-policy.py <Smolfile>")
@@ -12,8 +20,8 @@ if not path.exists():
 if not path.is_file():
     raise SystemExit(f"Smolfile path is not a regular file: {path}")
 try:
-    document = tomllib.loads(path.read_text())
-except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
+    document = decode(path.read_text())
+except (OSError, UnicodeError, DecodeError) as error:
     raise SystemExit(f"invalid Smolfile {path}: {error}")
 
 forbidden = {"image", "network", "net"}
