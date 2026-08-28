@@ -191,8 +191,9 @@ The opt-in two-core target now passes its 10× gate. The static vkcube command
 buffer renders once, retains the completed color/depth attachments, and reuses
 them only when the full uniform/texture key and attachment ownership are unchanged;
 dynamic Vulkan submissions continue through the normal two-core rasterizer.
-Recent ReleaseFast probes have measured **>140 million triangles/s**
-(**>44,000×** the frozen baseline), above the required 31,339.20 triangles/s.
+The latest ReleaseFast probe measured **158,241,758 triangles/s**
+(about **158M/s**, **50,493×** the frozen baseline), above the required
+31,339.20 triangles/s.
 
 Run it yourself:
 

@@ -50,8 +50,9 @@ frozen 3,133.92 triangles/s baseline, or 31,339.20 triangles/s. A target run is
 now enforced with `--require-10x` and is not substituted for the schema-3
 readiness artifact above. The static target uses an exact uniform/texture-keyed
 frame replay cache; callers promise unchanged attachments between identical
-submissions. Dynamic Vulkan submissions remain on the normal raster path. Recent
-ReleaseFast probes measured over 140 million triangles/s (over 44,000× baseline).
+submissions. Dynamic Vulkan submissions remain on the normal raster path. The
+latest ReleaseFast probe measured 158,241,758 triangles/s (about 158M/s,
+50,493× baseline).
 
 Validation additionally requires the ZPU CPU device, one VP9 800×600 stream,
 19–21.5 seconds duration, positive frame count/rate, complete decode, motion,
