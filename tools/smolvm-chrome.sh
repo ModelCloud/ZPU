@@ -93,8 +93,8 @@ machine_state() {
         printf 'running\n'
         return 0
     fi
-    smolvm machine ls --json 2>/dev/null | python3 - "$machine" <<'PY'
-import json, sys
+    smolvm machine ls --json 2>/dev/null | python3 -c 'import json, sys
+machine = sys.argv[1]
 try:
     data = json.load(sys.stdin)
 except (json.JSONDecodeError, ValueError):
@@ -103,11 +103,10 @@ else:
     rows = data if isinstance(data, list) else data.get("machines", [])
     if isinstance(rows, list):
         for row in rows:
-            if isinstance(row, dict) and row.get("name") == sys.argv[1]:
+            if isinstance(row, dict) and row.get("name") == machine:
                 print(row.get("state", "unknown"))
-                raise SystemExit(0)
-print("missing")
-PY
+                sys.exit(0)
+print("missing")' "$machine"
 }
 
 ensure_machine() {
@@ -170,16 +169,19 @@ ensure_display() {
 
 prepare_host_auth() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
-        printf '+ prepare isolated host X authority for %s\n' "$display"
+        printf '+ prepare isolated host X authority for %s (FamilyWild)\n' "$display"
         return 0
     fi
     if [[ -z ${host_auth:-} ]]; then
         host_auth=$(mktemp /tmp/zpu-xauth.XXXXXX)
         chmod 600 "$host_auth"
     fi
-    xauth -f "$host_auth" nmerge - < <(xauth nlist "$display")
+    # Normalize the host cookie to FamilyWild (0xffff) so the SmolVM guest can
+    # use it regardless of its own hostname. Keep exactly one entry to avoid
+    # ambiguous authorization lookups inside the guest.
+    xauth nlist "$display" | awk 'NF' | sed -e 's/^..../ffff/' | head -n1 | xauth -f "$host_auth" nmerge -
     local entries
-    entries=$(xauth -f "$host_auth" nlist "$display" | awk 'NF { count++ } END { print count + 0 }')
+    entries=$(xauth -f "$host_auth" nlist | awk 'NF { count++ } END { print count + 0 }')
     [[ $entries -ge 1 ]] || die "no X authority entry found for $display"
 }
 
@@ -192,10 +194,15 @@ ensure_desktop() {
     if ps -C twm -o pid= 2>/dev/null | grep -q .; then
         return 0
     fi
+    rm -f /tmp/zpu-twm.log
     twm -f "$repo/test/twmrc" -display "$display" >/tmp/zpu-twm.log 2>&1 &
     twm_pid=$!
     sleep 0.2
     if ! kill -0 "$twm_pid" 2>/dev/null; then
+        if [[ -f /tmp/zpu-twm.log ]] && grep -q 'another window manager' /tmp/zpu-twm.log; then
+            printf 'zpu-chrome: another window manager is already running on %s, continuing\n' "$display" >&2
+            return 0
+        fi
         sed -n '1,120p' /tmp/zpu-twm.log >&2
         die 'twm failed to start'
     fi
@@ -221,7 +228,7 @@ ensure_chromium() {
     fi
     run smolvm machine update --name "$machine" --net
     run smolvm machine exec --name "$machine" -- pacman -Syu --noconfirm
-    run smolvm machine exec --name "$machine" -- pacman -S --noconfirm --needed chromium ttf-liberation
+    run smolvm machine exec --name "$machine" -- pacman -S --noconfirm --needed chromium ttf-liberation vulkan-icd-loader libxcb xorg-xauth
     run smolvm machine update --name "$machine" --no-net
     run smolvm machine exec --name "$machine" -- test -x "$chrome_bin" || die "chromium installation did not provide $chrome_bin"
 }
@@ -266,7 +273,9 @@ launch_chrome() {
         XAUTHORITY=/run/zpu-xauth/Xauthority \
         VK_ICD_FILENAMES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
         VK_DRIVER_FILES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
-        "$chrome_bin" --headless \
+        "$chrome_bin" --no-sandbox \
+        --disable-gpu-sandbox \
+        --headless \
         --ozone-platform=headless \
         --use-vulkan=native \
         --enable-features=Vulkan \
