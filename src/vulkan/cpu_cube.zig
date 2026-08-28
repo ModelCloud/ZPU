@@ -2273,25 +2273,6 @@ fn drawParallel(target: []u8, depth: ?[]u8, width: u32, height: u32, uniform: []
     if (!dispatchParallel(.{ .draw = &context })) return null;
     var pixels_written: usize = 0;
     for (context.bands) |band| pixels_written += band.pixels_written;
-    if (dirty_output) |output| for (commands, 0..) |command, index| {
-        markPreparedDirtyTiles(&context.prepared[index], width, height, command.scissor, 0, 0, output);
-    };
-    if (bounds) |output| {
-        output.* = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
-        for (commands, 0..) |command, index| {
-            const draw_bounds = preparedBounds(&context.prepared[index], width, height, command.scissor);
-            if (draw_bounds.width == 0 or draw_bounds.height == 0) continue;
-            if (output.width == 0 or output.height == 0) {
-                output.* = draw_bounds;
-                continue;
-            }
-            const x0 = @min(output.x, draw_bounds.x);
-            const y0 = @min(output.y, draw_bounds.y);
-            const x1 = @max(output.x + @as(i32, @intCast(output.width)), draw_bounds.x + @as(i32, @intCast(draw_bounds.width)));
-            const y1 = @max(output.y + @as(i32, @intCast(output.height)), draw_bounds.y + @as(i32, @intCast(draw_bounds.height)));
-            output.* = .{ .x = x0, .y = y0, .width = @intCast(x1 - x0), .height = @intCast(y1 - y0) };
-        }
-    }
     return pixels_written;
 }
 
@@ -2393,6 +2374,25 @@ fn drawParallelBatchImpl(target: []u8, depth: []u8, width: u32, height: u32, com
     if (!dispatchParallel(.{ .batch = &context })) return 0;
     var pixels_written: usize = 0;
     for (context.bands) |band| pixels_written += band.pixels_written;
+    if (dirty_output) |output| for (commands, 0..) |command, index| {
+        markPreparedDirtyTiles(&context.prepared[index], width, height, command.scissor, 0, 0, output);
+    };
+    if (bounds) |output| {
+        output.* = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+        for (commands, 0..) |command, index| {
+            const draw_bounds = preparedBounds(&context.prepared[index], width, height, command.scissor);
+            if (draw_bounds.width == 0 or draw_bounds.height == 0) continue;
+            if (output.width == 0 or output.height == 0) {
+                output.* = draw_bounds;
+                continue;
+            }
+            const x0 = @min(output.x, draw_bounds.x);
+            const y0 = @min(output.y, draw_bounds.y);
+            const x1 = @max(output.x + @as(i32, @intCast(output.width)), draw_bounds.x + @as(i32, @intCast(draw_bounds.width)));
+            const y1 = @max(output.y + @as(i32, @intCast(output.height)), draw_bounds.y + @as(i32, @intCast(draw_bounds.height)));
+            output.* = .{ .x = x0, .y = y0, .width = @intCast(x1 - x0), .height = @intCast(y1 - y0) };
+        }
+    }
     if (counters) |output| {
         var total = context.bands[0].counters;
         for (context.bands[1..]) |band| {
@@ -2969,3 +2969,24 @@ fn parallelShutdownProbe(context: *ParallelShutdownProbe) void {
 test "parallel shutdown waits for an active render job" {
     var color: [64]u8 align(4) = [_]u8{0} ** 64;
     var depth: [64]u8 align(4) = [_]u8{0} ** 64;
+    try std.testing.expect(clearImagesParallel(&color, 0x11223344, &depth, 0x55667788));
+
+    var held_job = ParallelClear{ .color = &color, .color_pattern = 0, .depth = &depth, .depth_pattern = 0 };
+    _ = std.c.pthread_mutex_lock(&parallel_mutex);
+    parallel_active = .{ .clear = &held_job };
+    var started = std.atomic.Value(bool).init(false);
+    var done = std.atomic.Value(bool).init(false);
+    var context = ParallelShutdownProbe{ .started = &started, .done = &done };
+    const shutdown_thread = try std.Thread.spawn(.{}, parallelShutdownProbe, .{&context});
+    while (!started.load(.acquire)) std.atomic.spinLoopHint();
+    _ = std.c.pthread_mutex_unlock(&parallel_mutex);
+    std.Thread.yield() catch {};
+    try std.testing.expect(!done.load(.acquire));
+
+    _ = std.c.pthread_mutex_lock(&parallel_mutex);
+    parallel_active = null;
+    _ = std.c.pthread_cond_broadcast(&parallel_condition);
+    _ = std.c.pthread_mutex_unlock(&parallel_mutex);
+    shutdown_thread.join();
+    try std.testing.expect(done.load(.acquire));
+}
