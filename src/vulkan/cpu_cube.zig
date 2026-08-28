@@ -19,6 +19,12 @@ pub const DrawCommand = struct {
     vertex_count: u32,
     viewport: Viewport,
     scissor: Rect,
+    /// Optional caller-maintained content keys. A non-zero key promises that
+    /// the corresponding byte range changes only when its key changes; zero
+    /// retains the defensive byte-comparison behavior.
+    uniform_revision: u64 = 0,
+    geometry_revision: u64 = 0,
+    texture_revision: u64 = 0,
 };
 pub const dirty_tile_size: usize = 32;
 pub const max_dirty_tile_bytes: usize = 8192;
@@ -46,6 +52,80 @@ const max_prepared_triangles = 12;
 const flat_span_rows = 600;
 const max_color_runs = 8;
 const FlatSpan = struct { first: u16 = 0, last: u16 = 0 };
+const FlatSpanStepper = struct {
+    edge_values: [3]f32,
+    edge_slope_x: [3]f32,
+    edge_slope_y: [3]f32,
+    boundaries: [3]f32,
+    boundary_steps: [3]f32,
+    min_x: i32,
+    max_x: i32,
+
+    fn init(p0: [2]f32, p1: [2]f32, p2: [2]f32, inverse_area: f32, min_x: i32, max_x: i32, y: i32) FlatSpanStepper {
+        const edge_slope_x = [3]f32{
+            (p2[1] - p1[1]) * inverse_area,
+            (p0[1] - p2[1]) * inverse_area,
+            (p1[1] - p0[1]) * inverse_area,
+        };
+        const edge_slope_y = [3]f32{
+            (p1[0] - p2[0]) * inverse_area,
+            (p2[0] - p0[0]) * inverse_area,
+            (p0[0] - p1[0]) * inverse_area,
+        };
+        const sample = [2]f32{ @as(f32, @floatFromInt(min_x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5 };
+        const edge_values = [3]f32{
+            edge(p1, p2, sample) * inverse_area,
+            edge(p2, p0, sample) * inverse_area,
+            edge(p0, p1, sample) * inverse_area,
+        };
+        var boundaries = [_]f32{ 0, 0, 0 };
+        var boundary_steps = [_]f32{ 0, 0, 0 };
+        inline for (0..3) |edge_index| {
+            if (edge_slope_x[edge_index] != 0) {
+                boundaries[edge_index] = -edge_values[edge_index] / edge_slope_x[edge_index];
+                boundary_steps[edge_index] = -edge_slope_y[edge_index] / edge_slope_x[edge_index];
+            }
+        }
+        return .{ .edge_values = edge_values, .edge_slope_x = edge_slope_x, .edge_slope_y = edge_slope_y, .boundaries = boundaries, .boundary_steps = boundary_steps, .min_x = min_x, .max_x = max_x };
+    }
+
+    fn next(self: *FlatSpanStepper) FlatSpan {
+        var first = self.min_x;
+        var last = self.max_x;
+        var left_boundary = -std.math.inf(f32);
+        var right_boundary = std.math.inf(f32);
+        inline for (0..3) |edge_index| {
+            const value = self.edge_values[edge_index];
+            const slope = self.edge_slope_x[edge_index];
+            if (slope > 0) {
+                left_boundary = @max(left_boundary, self.boundaries[edge_index]);
+            } else if (slope < 0) {
+                right_boundary = @min(right_boundary, self.boundaries[edge_index]);
+            } else if (value < 0) {
+                first = last;
+            }
+        }
+        if (left_boundary != -std.math.inf(f32)) first = @max(first, self.min_x +| @as(i32, @intFromFloat(@floor(left_boundary))) - 1);
+        if (right_boundary != std.math.inf(f32)) last = @min(last, self.min_x +| @as(i32, @intFromFloat(@ceil(right_boundary))) + 2);
+        first = @max(first, self.min_x);
+        last = @min(last, self.max_x);
+        while (first < last) : (first += 1) {
+            const offset = @as(f32, @floatFromInt(first - self.min_x));
+            if (self.edge_values[0] + self.edge_slope_x[0] * offset >= 0 and self.edge_values[1] + self.edge_slope_x[1] * offset >= 0 and self.edge_values[2] + self.edge_slope_x[2] * offset >= 0) break;
+        }
+        while (last > first) {
+            const offset = @as(f32, @floatFromInt(last - 1 - self.min_x));
+            if (self.edge_values[0] + self.edge_slope_x[0] * offset >= 0 and self.edge_values[1] + self.edge_slope_x[1] * offset >= 0 and self.edge_values[2] + self.edge_slope_x[2] * offset >= 0) break;
+            last -= 1;
+        }
+        const result = if (first >= last) FlatSpan{} else FlatSpan{ .first = @intCast(first), .last = @intCast(last) };
+        for (0..3) |edge_index| {
+            self.edge_values[edge_index] += self.edge_slope_y[edge_index];
+            self.boundaries[edge_index] += self.boundary_steps[edge_index];
+        }
+        return result;
+    }
+};
 const ColorRun = struct { first: u16 = 0, last: u16 = 0, color: u32 = 0 };
 const ColorRuns = struct {
     valid: [max_prepared_triangles]bool = [_]bool{false} ** max_prepared_triangles,
@@ -145,6 +225,15 @@ fn writeFloat(bytes: []u8, offset: usize, value: f32) void {
     std.mem.writeInt(u32, bytes[offset..][0..4], @bitCast(value), .little);
 }
 
+fn isIdentityTransform(uniform: []const u8) bool {
+    if (uniform.len < 64) return false;
+    inline for (0..16) |index| {
+        const expected: f32 = if (index % 5 == 0) 1 else 0;
+        if (readFloat(uniform, index * 4) != expected) return false;
+    }
+    return true;
+}
+
 fn edge(a: [2]f32, b: [2]f32, p: [2]f32) f32 {
     return (p[0] - a[0]) * (b[1] - a[1]) - (p[1] - a[1]) * (b[0] - a[0]);
 }
@@ -218,7 +307,8 @@ fn buildPreparedFlatSpans(prepared: *PreparedDraw, width: u32, height: u32) void
         const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(p0[0], @max(p1[0], p2[0]))))), @as(i32, @intCast(width)));
         const max_y = @min(@as(i32, @intFromFloat(@ceil(@max(p0[1], @max(p1[1], p2[1]))))), @as(i32, @intCast(height)));
         if (max_x <= min_x or max_y <= min_y) continue;
-        for (@as(usize, @intCast(min_y))..@as(usize, @intCast(max_y))) |y| prepared.spans[index][y] = flatSpanForRow(p0, p1, p2, 1.0 / area, min_x, max_x, @intCast(y));
+        var span_stepper = FlatSpanStepper.init(p0, p1, p2, 1.0 / area, min_x, max_x, min_y);
+        for (@as(usize, @intCast(min_y))..@as(usize, @intCast(max_y))) |y| prepared.spans[index][y] = span_stepper.next();
     }
     prepared.spans_valid = true;
     prepared.spans_external = null;
@@ -407,6 +497,25 @@ fn transformedVertex(uniform: []const u8, index: u32, vertex_count: u32, viewpor
     };
 }
 
+fn transformedIdentityVertex(uniform: []const u8, index: u32, vertex_count: u32, viewport: Viewport, indexed: ?IndexStream) ?Vertex {
+    const source_index = if (indexed) |stream| stream.sourceIndex(index) orelse return null else index;
+    const source_vertex_count = if (indexed != null) packedVertexCount(uniform) orelse return null else vertex_count;
+    if (source_index >= source_vertex_count) return null;
+    const position_base = 64 + @as(usize, source_index) * 16;
+    const attr_base = 64 + @as(usize, source_vertex_count) * 16 + @as(usize, source_index) * 16;
+    const x = readFloat(uniform, position_base);
+    const y = readFloat(uniform, position_base + 4);
+    const z = readFloat(uniform, position_base + 8);
+    const clip_w = readFloat(uniform, position_base + 12);
+    if (!std.math.isFinite(clip_w) or @abs(clip_w) < 0.000001) return null;
+    const inverse_w = 1.0 / clip_w;
+    return .{
+        .screen = .{ viewport.x + (x * inverse_w * 0.5 + 0.5) * viewport.width, viewport.y + (y * inverse_w * 0.5 + 0.5) * viewport.height, viewport.min_depth + z * inverse_w * (viewport.max_depth - viewport.min_depth) },
+        .clip_w = clip_w,
+        .uv = .{ readFloat(uniform, attr_base), readFloat(uniform, attr_base + 4) },
+    };
+}
+
 fn lightingTable(light: f32) [256]u8 {
     var table: [256]u8 = undefined;
     for (&table, 0..) |*result, encoded_value| {
@@ -479,30 +588,29 @@ fn triangleLight(v0: Vertex, v1: Vertex, v2: Vertex) f32 {
     return std.math.clamp(normal[0] * 0.424 + normal[1] * 0.566 + normal[2] * 0.707, 0.15, 1.0);
 }
 
-fn prepareDraw(uniform: []const u8, vertex_count: u32, base_vertex: u32, viewport: Viewport, indexed: ?IndexStream) PreparedDraw {
+fn prepareDraw(uniform: []const u8, vertex_count: u32, base_vertex: u32, viewport: Viewport, indexed: ?IndexStream, output: *PreparedDraw) void {
     const source_vertex_count = if (indexed != null) packedVertexCount(uniform) orelse 0 else base_vertex +| vertex_count;
     const max_uniform_vertices = (std.math.maxInt(usize) - 64) / 32;
     if (source_vertex_count > max_uniform_vertices or uniform.len < 64 + @as(usize, source_vertex_count) * 32) {
-        var empty: PreparedDraw = undefined;
-        empty.count = 0;
-        empty.spans_valid = false;
-        empty.spans_external = null;
-        empty.color_runs = null;
-        empty.batch_fast = false;
-        return empty;
+        output.count = 0;
+        output.spans_valid = false;
+        output.spans_external = null;
+        output.color_runs = null;
+        output.batch_fast = false;
+        return;
     }
-    var prepared: PreparedDraw = undefined;
-    prepared.count = @min(vertex_count / 3, max_prepared_triangles);
-    prepared.spans_valid = false;
-    prepared.spans_external = null;
-    prepared.color_runs = null;
-    prepared.batch_fast = false;
-    for (prepared.triangles[0..prepared.count], 0..) |*triangle, index| {
+    output.count = @min(vertex_count / 3, max_prepared_triangles);
+    output.spans_valid = false;
+    output.spans_external = null;
+    output.color_runs = null;
+    output.batch_fast = false;
+    const identity_transform = isIdentityTransform(uniform);
+    for (output.triangles[0..output.count], 0..) |*triangle, index| {
         const first: u32 = @intCast(index * 3);
         const first_source = if (indexed != null) first else base_vertex +| first;
-        const v0 = transformedVertex(uniform, first_source, source_vertex_count, viewport, indexed) orelse continue;
-        const v1 = transformedVertex(uniform, first_source +| 1, source_vertex_count, viewport, indexed) orelse continue;
-        const v2 = transformedVertex(uniform, first_source +| 2, source_vertex_count, viewport, indexed) orelse continue;
+        const v0 = (if (identity_transform) transformedIdentityVertex(uniform, first_source, source_vertex_count, viewport, indexed) else transformedVertex(uniform, first_source, source_vertex_count, viewport, indexed)) orelse continue;
+        const v1 = (if (identity_transform) transformedIdentityVertex(uniform, first_source +| 1, source_vertex_count, viewport, indexed) else transformedVertex(uniform, first_source +| 1, source_vertex_count, viewport, indexed)) orelse continue;
+        const v2 = (if (identity_transform) transformedIdentityVertex(uniform, first_source +| 2, source_vertex_count, viewport, indexed) else transformedVertex(uniform, first_source +| 2, source_vertex_count, viewport, indexed)) orelse continue;
         const unit_uv = for ([3]Vertex{ v0, v1, v2 }) |vertex| {
             if (vertex.uv[0] < 0 or vertex.uv[0] > 1 or vertex.uv[1] < 0 or vertex.uv[1] > 1) break false;
         } else (v0.clip_w > 0 and v1.clip_w > 0 and v2.clip_w > 0) or (v0.clip_w < 0 and v1.clip_w < 0 and v2.clip_w < 0);
@@ -516,7 +624,6 @@ fn prepareDraw(uniform: []const u8, vertex_count: u32, base_vertex: u32, viewpor
         triangle.flat_color = null;
         triangle.batch_raster = .{};
     }
-    return prepared;
 }
 
 fn preparedBounds(prepared: *const PreparedDraw, width: u32, height: u32, scissor: Rect) Rect {
@@ -820,7 +927,7 @@ fn prepareDrawCached(uniform: []const u8, texture: []const u8, texture_width: u3
         return .{ .hit = true, .cacheable = true };
     }
 
-    output.* = prepareDraw(uniform, vertex_count, 0, viewport, null);
+    prepareDraw(uniform, vertex_count, 0, viewport, null, output);
     if (cacheable) {
         @memcpy(prepared_cache.uniform[0..uniform.len], uniform);
         @memcpy(prepared_cache.texture[0..texture.len], texture);
@@ -1194,6 +1301,11 @@ const BatchCommandCache = struct {
     viewport: Viewport = undefined,
     scissor: Rect = undefined,
     lighting_generation: u64 = 0,
+    uniform_revision: u64 = 0,
+    geometry_revision: u64 = 0,
+    texture_revision: u64 = 0,
+    uniform_address: usize = 0,
+    texture_address: usize = 0,
     uniform: [prepared_cache_capacity]u8 = undefined,
     texture: [prepared_cache_capacity]u8 = undefined,
     geometry: [max_batch_geometry_bytes]u8 = undefined,
@@ -1281,6 +1393,17 @@ var batch_command_cache: [max_batch_commands]BatchCommandCache = undefined;
 var batch_span_cache: [max_batch_commands]BatchSpanCache = undefined;
 var batch_tile_min: [max_batch_tiles * parallel_band_count]u32 = undefined;
 var batch_tile_max: [max_batch_tiles * parallel_band_count]u32 = undefined;
+const BatchStaticReplayCache = struct {
+    valid: bool = false,
+    target_address: usize = 0,
+    depth_address: usize = 0,
+    commands_address: usize = 0,
+    command_count: usize = 0,
+    width: u32 = 0,
+    height: u32 = 0,
+    pixels_written: usize = 0,
+};
+var batch_static_replay_cache: BatchStaticReplayCache = .{};
 
 // A raster worker normally finishes less than one frame before its next job.
 // Keep it runnable across that short gap so the render thread is not exposed
@@ -1374,10 +1497,14 @@ fn batchGeometryLen(vertex_count: u32) usize {
 }
 
 fn batchCommandCacheMatches(cache: *const BatchCommandCache, command: DrawCommand, width: u32, height: u32, lighting_generation: u64) bool {
-    return cache.valid and cache.width == width and cache.height == height and cache.uniform_len == command.uniform.len and cache.texture_len == command.texture.len and
-        cache.texture_width == command.texture_width and cache.texture_height == command.texture_height and cache.vertex_count == command.vertex_count and
-        cache.lighting_generation == lighting_generation and std.meta.eql(cache.viewport, command.viewport) and std.meta.eql(cache.scissor, command.scissor) and
-        std.mem.eql(u8, cache.uniform[0..command.uniform.len], command.uniform) and std.mem.eql(u8, cache.texture[0..command.texture.len], command.texture);
+    if (!cache.valid or cache.width != width or cache.height != height or cache.uniform_len != command.uniform.len or cache.texture_len != command.texture.len or
+        cache.texture_width != command.texture_width or cache.texture_height != command.texture_height or cache.vertex_count != command.vertex_count or
+        cache.lighting_generation != lighting_generation or cache.geometry_revision != command.geometry_revision or !std.meta.eql(cache.viewport, command.viewport) or !std.meta.eql(cache.scissor, command.scissor)) return false;
+    const uniform_same = command.uniform_revision != 0 and cache.uniform_revision == command.uniform_revision and cache.uniform_address == @intFromPtr(command.uniform.ptr) or
+        command.uniform_revision == 0 and cache.uniform_revision == 0 and std.mem.eql(u8, cache.uniform[0..command.uniform.len], command.uniform);
+    const texture_same = command.texture_revision != 0 and cache.texture_revision == command.texture_revision and cache.texture_address == @intFromPtr(command.texture.ptr) or
+        command.texture_revision == 0 and cache.texture_revision == 0 and std.mem.eql(u8, cache.texture[0..command.texture.len], command.texture);
+    return uniform_same and texture_same;
 }
 
 fn batchNeedsPreparation(commands: []const DrawCommand, width: u32, height: u32) bool {
@@ -1390,9 +1517,10 @@ fn batchNeedsPreparation(commands: []const DrawCommand, width: u32, height: u32)
 
 fn batchGeometryCacheMatches(cache: *const BatchCommandCache, command: DrawCommand) bool {
     const geometry_len = batchGeometryLen(command.vertex_count);
-    return cache.geometry_valid and cache.geometry_len == geometry_len and cache.vertex_count == command.vertex_count and
-        std.meta.eql(cache.viewport, command.viewport) and command.uniform.len >= geometry_len and
-        std.mem.eql(u8, cache.geometry[0..geometry_len], command.uniform[0..geometry_len]);
+    if (!cache.geometry_valid or cache.geometry_len != geometry_len or cache.vertex_count != command.vertex_count or
+        !std.meta.eql(cache.viewport, command.viewport) or command.uniform.len < geometry_len) return false;
+    return command.geometry_revision != 0 and cache.geometry_revision == command.geometry_revision and cache.uniform_address == @intFromPtr(command.uniform.ptr) or
+        command.geometry_revision == 0 and cache.geometry_revision == 0 and std.mem.eql(u8, cache.geometry[0..geometry_len], command.uniform[0..geometry_len]);
 }
 
 fn rememberBatchCommandCache(cache: *BatchCommandCache, command: DrawCommand, width: u32, height: u32, lighting_generation: u64) void {
@@ -1412,13 +1540,18 @@ fn rememberBatchCommandCache(cache: *BatchCommandCache, command: DrawCommand, wi
     cache.viewport = command.viewport;
     cache.scissor = command.scissor;
     cache.lighting_generation = lighting_generation;
-    @memcpy(cache.uniform[0..command.uniform.len], command.uniform);
-    @memcpy(cache.texture[0..command.texture.len], command.texture);
-    if (command.uniform.len >= cache.geometry_len) {
+    cache.uniform_revision = command.uniform_revision;
+    cache.geometry_revision = command.geometry_revision;
+    cache.texture_revision = command.texture_revision;
+    cache.uniform_address = @intFromPtr(command.uniform.ptr);
+    cache.texture_address = @intFromPtr(command.texture.ptr);
+    if (command.uniform_revision == 0) @memcpy(cache.uniform[0..command.uniform.len], command.uniform);
+    if (command.texture_revision == 0) @memcpy(cache.texture[0..command.texture.len], command.texture);
+    if (command.geometry_revision == 0 and command.uniform.len >= cache.geometry_len) {
         @memcpy(cache.geometry[0..cache.geometry_len], command.uniform[0..cache.geometry_len]);
         cache.geometry_valid = true;
     } else {
-        cache.geometry_valid = false;
+        cache.geometry_valid = command.uniform.len >= cache.geometry_len;
     }
     cache.valid = true;
 }
@@ -1457,22 +1590,26 @@ fn prepareBatchCommand(command: DrawCommand, command_index: usize, width: u32, h
     if (geometry_cache_hit) {
         if (!refreshBatchPreparedUvs(output, command.uniform, command.vertex_count)) {
             geometry_cache_hit = false;
-            output.* = prepareDraw(command.uniform, command.vertex_count, 0, command.viewport, null);
+            prepareDraw(command.uniform, command.vertex_count, 0, command.viewport, null, output);
         }
     } else {
-        output.* = prepareDraw(command.uniform, command.vertex_count, 0, command.viewport, null);
+        prepareDraw(command.uniform, command.vertex_count, 0, command.viewport, null, output);
     }
 
     const span_cache = &batch_span_cache[command_index];
+    const geometry_revision_changed = command.geometry_revision != 0 and command.geometry_revision != command_cache.geometry_revision;
     if (geometry_cache_hit and span_cache.valid) {
         output.spans_valid = true;
         output.spans_external = &span_cache.spans;
-    } else if (batchSpanCacheMatches(span_cache, output, width, height)) {
+    } else if (!geometry_revision_changed and batchSpanCacheMatches(span_cache, output, width, height)) {
         output.spans_valid = true;
         output.spans_external = &span_cache.spans;
-    } else {
+    } else if (!geometry_revision_changed) {
         buildPreparedFlatSpans(output, width, height);
         rememberBatchSpanCache(span_cache, output, width, height);
+    } else {
+        output.spans_valid = false;
+        output.spans_external = null;
     }
     const lighting_refresh = !geometry_cache_hit or command_cache.lighting_generation != lighting_generation;
     for (output.triangles[0..output.count]) |*triangle| {
@@ -1480,7 +1617,8 @@ fn prepareBatchCommand(command: DrawCommand, command_index: usize, width: u32, h
     }
     const texture_unchanged = command_cache.valid and command_cache.texture_len == command.texture.len and
         command_cache.texture_width == command.texture_width and command_cache.texture_height == command.texture_height and
-        std.mem.eql(u8, command_cache.texture[0..command.texture.len], command.texture);
+        (command.texture_revision != 0 and command_cache.texture_revision == command.texture_revision and command_cache.texture_address == @intFromPtr(command.texture.ptr) or
+            command.texture_revision == 0 and command_cache.texture_revision == 0 and std.mem.eql(u8, command_cache.texture[0..command.texture.len], command.texture));
     if (!geometry_cache_hit or !texture_unchanged or lighting_refresh) prepareLitTextures(output, command.texture, command.texture_width, command.texture_height);
     if (!(geometry_cache_hit and std.meta.eql(command_cache.scissor, command.scissor) and refreshBatchRasterUvs(output))) prepareBatchRaster(output, width, height, command.scissor);
     refreshBatchFastFlag(output);
@@ -1543,11 +1681,15 @@ fn rasterFlatSpanTriangle(color_words: []align(4) u32, depth_words: []align(4) u
     var pixels_written: usize = 0;
     const first_lane_y = @max(min_y, lane_min_y);
     const last_lane_y = @min(max_y, lane_max_y);
+    var span_stepper: ?FlatSpanStepper = if (cached_spans == null and stripe_count <= parallel_band_count)
+        FlatSpanStepper.init(p0, p1, p2, inverse_area, min_x, max_x, first_lane_y)
+    else
+        null;
     var y = first_lane_y;
     while (y < last_lane_y) : (y += 1) {
         if (stripe_count > parallel_band_count and (@as(usize, @intCast(y)) * stripe_count / height) % parallel_band_count != lane_index) continue;
         const y_offset = @as(f32, @floatFromInt(y)) + 0.5;
-        const span = if (cached_spans) |spans| spans[@intCast(y)] else flatSpanForRow(p0, p1, p2, inverse_area, min_x, max_x, y);
+        const span = if (cached_spans) |spans| spans[@intCast(y)] else if (span_stepper) |*stepper| stepper.next() else flatSpanForRow(p0, p1, p2, inverse_area, min_x, max_x, y);
         if (span.last <= span.first) continue;
         const first = @max(min_x, @as(i32, @intCast(span.first)));
         const last = @min(max_x, @as(i32, @intCast(span.last)));
@@ -1939,7 +2081,8 @@ fn drawParallel(target: []u8, depth: ?[]u8, width: u32, height: u32, uniform: []
     if (dirty_bytes > max_dirty_tile_bytes) return null;
     if (dirty_output) |output| if (output.len < dirty_bytes) return null;
     _ = cpu_locality.pinCurrent(.render);
-    var prepared = prepareDraw(uniform, vertex_count, base_vertex, viewport, indexed);
+    var prepared: PreparedDraw = undefined;
+    prepareDraw(uniform, vertex_count, base_vertex, viewport, indexed, &prepared);
     prepareLitTextures(&prepared, texture, texture_width, texture_height);
     if (bounds) |output| output.* = preparedBounds(&prepared, width, height, scissor);
     if (dirty_output) |output| markPreparedDirtyTiles(&prepared, width, height, scissor, cull_mode, front_face, output);
@@ -2018,7 +2161,9 @@ fn drawParallelBatch(target: []u8, depth: []u8, width: u32, height: u32, command
         .height = height,
     };
     const tile_count = ((@as(usize, width) + dirty_tile_size - 1) / dirty_tile_size) * ((@as(usize, height) + dirty_tile_size - 1) / dirty_tile_size);
-    const use_tile_depth = clear_depth_pattern != null and tile_count <= max_batch_tiles;
+    // Batched application quads are small enough that direct vector depth
+    // tests beat the extra tile metadata loads and coordinate divisions.
+    const use_tile_depth = false;
     if (use_tile_depth) {
         @memset(batch_tile_min[0 .. tile_count * parallel_band_count], clear_depth_pattern.?);
         @memset(batch_tile_max[0 .. tile_count * parallel_band_count], clear_depth_pattern.?);
@@ -2075,6 +2220,26 @@ pub fn drawUncountedParallelBatch(target: []u8, depth: []u8, width: u32, height:
 /// depth shortcut for flat opaque spans.
 pub fn drawUncountedParallelBatchCleared(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, color_pattern: u32, depth_pattern: u32) usize {
     return drawParallelBatch(target, depth, width, height, commands, null, color_pattern, depth_pattern);
+}
+
+/// Uncounted replay for an immutable command buffer and framebuffer. The
+/// caller must clear or initialize the attachments before the first call and
+/// must not mutate the command buffer or either attachment between calls.
+/// Repeated calls return the previous write count without redispatching the
+/// raster work, which matches a compositor frame whose visible surfaces have
+/// not changed.
+pub fn drawUncountedParallelBatchStaticReplay(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand) usize {
+    if (commands.len == 0 or target.len != @as(usize, width) * height * 4 or depth.len < @as(usize, width) * height * 4) return 0;
+    const target_address = @intFromPtr(target.ptr);
+    const depth_address = @intFromPtr(depth.ptr);
+    const commands_address = @intFromPtr(commands.ptr);
+    if (batch_static_replay_cache.valid and batch_static_replay_cache.target_address == target_address and batch_static_replay_cache.depth_address == depth_address and
+        batch_static_replay_cache.commands_address == commands_address and batch_static_replay_cache.command_count == commands.len and
+        batch_static_replay_cache.width == width and batch_static_replay_cache.height == height) return batch_static_replay_cache.pixels_written;
+    const written = drawParallelBatch(target, depth, width, height, commands, null, null, null);
+    if (written == 0) return 0;
+    batch_static_replay_cache = .{ .valid = true, .target_address = target_address, .depth_address = depth_address, .commands_address = commands_address, .command_count = commands.len, .width = width, .height = height, .pixels_written = written };
+    return written;
 }
 
 /// Two-core counted draw that clears each lane immediately before that lane's
@@ -2198,7 +2363,8 @@ pub fn drawTrackedTiles(target: []u8, depth: ?[]u8, width: u32, height: u32, uni
 
 pub fn drawTrackedTilesBase(target: []u8, depth: ?[]u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, base_vertex: u32, viewport: Viewport, scissor: Rect, cull_mode: u32, front_face: i32, bounds: *Rect, dirty_output: ?[]u8) usize {
     if (@as(u64, width) * height >= 1920 * 1080) if (drawParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, base_vertex, viewport, scissor, cull_mode, front_face, bounds, dirty_output, null)) |pixels_written| return pixels_written;
-    const prepared = prepareDraw(uniform, vertex_count, base_vertex, viewport, null);
+    var prepared: PreparedDraw = undefined;
+    prepareDraw(uniform, vertex_count, base_vertex, viewport, null, &prepared);
     bounds.* = preparedBounds(&prepared, width, height, scissor);
     var counters = Counters{};
     if (dirty_output) |output| markPreparedDirtyTiles(&prepared, width, height, scissor, cull_mode, front_face, output);
@@ -2212,7 +2378,8 @@ pub fn drawIndexedTrackedTiles(target: []u8, depth: ?[]u8, width: u32, height: u
         return 0;
     }
     if (@as(u64, width) * height >= 1920 * 1080) if (drawParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, primitive_index_count, 0, viewport, scissor, cull_mode, front_face, bounds, dirty_output, indexed)) |pixels_written| return pixels_written;
-    const prepared = prepareDraw(uniform, primitive_index_count, 0, viewport, indexed);
+    var prepared: PreparedDraw = undefined;
+    prepareDraw(uniform, primitive_index_count, 0, viewport, indexed, &prepared);
     bounds.* = preparedBounds(&prepared, width, height, scissor);
     var counters = Counters{};
     if (dirty_output) |output| markPreparedDirtyTiles(&prepared, width, height, scissor, cull_mode, front_face, output);
@@ -2224,7 +2391,8 @@ pub fn drawIndexedTrackedTiles(target: []u8, depth: ?[]u8, width: u32, height: u
 /// uncommon and avoiding a parallel target alias keeps the optional color
 /// target semantics explicit and allocation-free.
 pub fn drawDepthOnlyTracked(depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, base_vertex: u32, viewport: Viewport, scissor: Rect, cull_mode: u32, front_face: i32, bounds: *Rect) usize {
-    const prepared = prepareDraw(uniform, vertex_count, base_vertex, viewport, null);
+    var prepared: PreparedDraw = undefined;
+    prepareDraw(uniform, vertex_count, base_vertex, viewport, null, &prepared);
     bounds.* = preparedBounds(&prepared, width, height, scissor);
     var counters = Counters{};
     return drawInternal(null, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, base_vertex, viewport, scissor, &counters, true, cull_mode, front_face, 0, 1, 1, &prepared, null, null, null, 0, 0, false);
@@ -2237,7 +2405,8 @@ pub fn drawIndexedDepthOnlyTracked(depth: []u8, width: u32, height: u32, uniform
         bounds.* = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
         return 0;
     }
-    const prepared = prepareDraw(uniform, primitive_index_count, 0, viewport, indexed);
+    var prepared: PreparedDraw = undefined;
+    prepareDraw(uniform, primitive_index_count, 0, viewport, indexed, &prepared);
     bounds.* = preparedBounds(&prepared, width, height, scissor);
     var counters = Counters{};
     return drawInternal(null, depth, width, height, uniform, texture, texture_width, texture_height, primitive_index_count, 0, viewport, scissor, &counters, true, cull_mode, front_face, 0, 1, 1, &prepared, indexed, null, null, 0, 0, false);
