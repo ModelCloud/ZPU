@@ -5,6 +5,13 @@ const builtin = @import("builtin");
 const s = @import("../surface.zig");
 const scalar = @import("../raster/scalar.zig");
 
+fn div255Fast(comptime T: type, value: T) T {
+    // All callers pass values <= 255*255. This is an exact strength
+    // reduction of (value + 127) / 255 for that range.
+    const shifted = value + @as(T, @splat(128));
+    return (shifted + (shifted >> @as(T, @splat(8)))) >> @as(T, @splat(8));
+}
+
 fn nativePacked(comptime lanes: usize, bytes: [lanes * 4]u8) @Vector(lanes, u32) {
     const native: @Vector(lanes, u32) = @bitCast(bytes);
     return if (comptime builtin.cpu.arch.endian() == .little) native else @byteSwap(native);
@@ -30,6 +37,8 @@ pub fn fill(comptime lanes: usize, row: []u8, start: usize, count: usize, format
 }
 
 pub fn blend(comptime lanes: usize, row: []u8, start: usize, count: usize, format: s.Format, color: s.Color) void {
+    if (color.a == 0) return;
+    if (color.a == 255) return fill(lanes, row, start, count, format, color);
     const V = @Vector(lanes, u32);
     const channel_mask: V = @splat(0xff);
     const sa: V = @splat(color.a);
@@ -47,7 +56,8 @@ pub fn blend(comptime lanes: usize, row: []u8, start: usize, count: usize, forma
         const dva = destination_packed >> @as(V, @splat(24));
         const dr = if (format == .rgba8_unorm) low else high;
         const db = if (format == .rgba8_unorm) high else low;
-        const out_a = sa + (dva * inverse + half) / scale;
+        const destination_is_opaque = @reduce(.And, dva == @as(V, @splat(255)));
+        const out_a = if (destination_is_opaque) @as(V, @splat(255)) else sa + div255Fast(V, dva * inverse);
         const divisor = @select(u32, out_a == @as(V, @splat(0)), @as(V, @splat(1)), out_a);
         const blendChannel = struct {
             fn run(dst: V, source: u8, src_a: V, dst_a: V, inv: V, rounding: V, divisor_scale: V, oa: V) V {
@@ -55,9 +65,9 @@ pub fn blend(comptime lanes: usize, row: []u8, start: usize, count: usize, forma
                 return (premul + oa / @as(V, @splat(2))) / oa;
             }
         }.run;
-        const rr = blendChannel(dr, color.r, sa, dva, inverse, half, scale, divisor);
-        const rg = blendChannel(dg, color.g, sa, dva, inverse, half, scale, divisor);
-        const rb = blendChannel(db, color.b, sa, dva, inverse, half, scale, divisor);
+        const rr = if (destination_is_opaque) div255Fast(V, @as(V, @splat(color.r)) * sa + dr * inverse) else blendChannel(dr, color.r, sa, dva, inverse, half, scale, divisor);
+        const rg = if (destination_is_opaque) div255Fast(V, @as(V, @splat(color.g)) * sa + dg * inverse) else blendChannel(dg, color.g, sa, dva, inverse, half, scale, divisor);
+        const rb = if (destination_is_opaque) div255Fast(V, @as(V, @splat(color.b)) * sa + db * inverse) else blendChannel(db, color.b, sa, dva, inverse, half, scale, divisor);
         const packed_output = (if (format == .rgba8_unorm) rr | (rg << @as(V, @splat(8))) | (rb << @as(V, @splat(16))) else rb | (rg << @as(V, @splat(8))) | (rr << @as(V, @splat(16)))) | (out_a << @as(V, @splat(24)));
         const output_bytes = packedBytes(lanes, packed_output);
         @memcpy(row[(start + i) * 4 ..][0 .. lanes * 4], &output_bytes);
@@ -73,15 +83,25 @@ pub fn blendPixels(comptime lanes: usize, row: []u8, start: usize, source: []con
     var i: usize = 0;
     while (i + lanes <= count) : (i += lanes) {
         var source_bytes: [lanes * 4]u8 = undefined;
-        var destination_bytes: [lanes * 4]u8 = undefined;
         @memcpy(&source_bytes, source[i * 4 ..][0 .. lanes * 4]);
-        @memcpy(&destination_bytes, row[(start + i) * 4 ..][0 .. lanes * 4]);
         const packed_source: V = nativePacked(lanes, source_bytes);
-        const packed_destination: V = nativePacked(lanes, destination_bytes);
         const sr = packed_source & channel_mask;
         const sg = (packed_source >> @as(V, @splat(8))) & channel_mask;
         const sb = (packed_source >> @as(V, @splat(16))) & channel_mask;
         const sva = packed_source >> @as(V, @splat(24));
+        if (@reduce(.And, sva == @as(V, @splat(0)))) continue;
+        if (@reduce(.And, sva == @as(V, @splat(255)))) {
+            const packed_output = if (format == .rgba8_unorm)
+                packed_source
+            else
+                sb | (sg << @as(V, @splat(8))) | (sr << @as(V, @splat(16))) | (sva << @as(V, @splat(24)));
+            const output_bytes = packedBytes(lanes, packed_output);
+            @memcpy(row[(start + i) * 4 ..][0 .. lanes * 4], &output_bytes);
+            continue;
+        }
+        var destination_bytes: [lanes * 4]u8 = undefined;
+        @memcpy(&destination_bytes, row[(start + i) * 4 ..][0 .. lanes * 4]);
+        const packed_destination: V = nativePacked(lanes, destination_bytes);
         const destination_low = packed_destination & channel_mask;
         const dg = (packed_destination >> @as(V, @splat(8))) & channel_mask;
         const destination_high = (packed_destination >> @as(V, @splat(16))) & channel_mask;
@@ -89,7 +109,8 @@ pub fn blendPixels(comptime lanes: usize, row: []u8, start: usize, source: []con
         const dr = if (format == .rgba8_unorm) destination_low else destination_high;
         const db = if (format == .rgba8_unorm) destination_high else destination_low;
         const inverse = scale - sva;
-        const out_a = sva + (dva * inverse + half) / scale;
+        const destination_is_opaque = @reduce(.And, dva == @as(V, @splat(255)));
+        const out_a = if (destination_is_opaque) @as(V, @splat(255)) else sva + div255Fast(V, dva * inverse);
         const divisor = @select(u32, out_a == @as(V, @splat(0)), @as(V, @splat(1)), out_a);
         const blendChannel = struct {
             fn run(src: V, dst: V, src_a: V, dst_a: V, inv: V, rounding: V, divisor_scale: V, oa: V) V {
@@ -97,9 +118,9 @@ pub fn blendPixels(comptime lanes: usize, row: []u8, start: usize, source: []con
                 return (premul + oa / @as(V, @splat(2))) / oa;
             }
         }.run;
-        const rr = blendChannel(sr, dr, sva, dva, inverse, half, scale, divisor);
-        const rg = blendChannel(sg, dg, sva, dva, inverse, half, scale, divisor);
-        const rb = blendChannel(sb, db, sva, dva, inverse, half, scale, divisor);
+        const rr = if (destination_is_opaque) div255Fast(V, sr * sva + dr * inverse) else blendChannel(sr, dr, sva, dva, inverse, half, scale, divisor);
+        const rg = if (destination_is_opaque) div255Fast(V, sg * sva + dg * inverse) else blendChannel(sg, dg, sva, dva, inverse, half, scale, divisor);
+        const rb = if (destination_is_opaque) div255Fast(V, sb * sva + db * inverse) else blendChannel(sb, db, sva, dva, inverse, half, scale, divisor);
         const packed_output = (if (format == .rgba8_unorm) rr | (rg << @as(V, @splat(8))) | (rb << @as(V, @splat(16))) else rb | (rg << @as(V, @splat(8))) | (rr << @as(V, @splat(16)))) | (out_a << @as(V, @splat(24)));
         const output_bytes = packedBytes(lanes, packed_output);
         @memcpy(row[(start + i) * 4 ..][0 .. lanes * 4], &output_bytes);

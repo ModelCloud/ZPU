@@ -263,17 +263,25 @@ current vkcube 4K gate has passed.
 
 | Operation | 1 core | 2 cores | 4K-equivalent surfaces/s (1c / 2c) | p99 latency (1c / 2c) |
 | --- | ---: | ---: | ---: | ---: |
-| Clear / fill | 19,426.64 MPix/s | 19,466.04 MPix/s | 2,342.14 / 2,346.89 | 2,997 / 3,003 ns |
-| Pixel pushes (512 writes) | 36.32 MPix/s | 36.26 MPix/s | 4.38 / 4.37 | 14,210 / 14,493 ns |
-| Clipped rectangles | 2,380.58 MPix/s | 2,377.76 MPix/s | 287.01 / 286.67 | 5,119 / 5,118 ns |
-| Source-over blend | 203.30 MPix/s | 203.38 MPix/s | 24.51 / 24.52 | 284,801 / 284,626 ns |
-| Sprite pushes (128 × 8×8) | 2.7126M draws/s | 2.7113M draws/s | 20.93 / 20.93 | 48,249 / 47,592 ns |
+| Clear / fill | 19,238.48 MPix/s | 19,367.85 MPix/s | 2,319.45 / 2,335.05 | 3,049 / 3,298 ns |
+| Pixel pushes (512 writes) | 172.22 MPix/s | 168.81 MPix/s | 20.76 / 20.35 | 3,022 / 3,399 ns |
+| Clipped rectangles | 2,347.22 MPix/s | 2,330.89 MPix/s | 282.99 / 281.02 | 5,295 / 5,263 ns |
+| Source-over blend | 3,481.62 MPix/s | 3,439.83 MPix/s | 419.76 / 414.72 | 37,831 / 39,637 ns |
+| Sprite pushes (128 × 8×8) | 10.3803M draws/s | 10.3627M draws/s | 80.09 / 79.95 | 33,260 / 33,349 ns |
 
 The nearly identical one- and two-core columns are intentional: the 2D path
 does not spread across the second core, preserving cache and NUMA locality. The
 same run measured pipeline-key construction at **3 ns**, cache lookup at
 **16 ns**, and a **99.999%** hit rate. Full methodology is in
 [`docs/benchmarking.md`](docs/benchmarking.md).
+
+The 2D raster hot paths use exact alpha fast paths for transparent and opaque
+source pixels, strength-reduced division for opaque destination blending, and
+direct writes for single-pixel rectangles. On the validation host,
+runtime-dispatched source-over measured **3.48 GPix/s** and the complete mixed
+frame workload measured **64.4k FPS**. These figures are workload- and
+hardware-specific; checksums, the independent reference renderer, and backend
+differential checks remain authoritative.
 
 ## 📐 3D throughput on two cores
 
@@ -285,53 +293,56 @@ This is the frozen, vkcube-specific CPU 3D benchmark: twelve independently
 generated triangles at 800×600, five warmups followed by thirty timed frames.
 Each seeded primitive has a distinct full-screen-grid placement, depth,
 orientation, scale, UV/color selection, and palette; it is not twelve copies of
-one triangle. It is a useful low-jitter pipeline metric, not a claim of general
-SPIR-V performance.
+one triangle. The same seeded coordinates are intentionally rendered for each
+sample so the checksum is comparable; scene-coverage tests verify distinct
+origins and nontrivial x/y/z ranges. It is a useful low-jitter pipeline metric,
+not a claim of general SPIR-V performance.
 
-The optimization target is explicit: keep the render caller and one raster
-worker on exactly two selected physical cores, then reach **150,000,000
-triangles/s** (about **38,619.92×** the frozen 3,884.01 triangles/s baseline).
-The target command uses `--two-core` and refuses any affinity other than two
-cores; its separate workload id prevents it from being mixed into the
-ABI-readiness baseline.
+The two-core run measures a complete render on every timed sample. It resets
+the color/depth attachments, transforms all 36 vertices, rasterizes all 12
+triangles, performs depth tests, and computes a checksum. The renderer has an
+optional immutable static-replay cache for real applications, but the
+benchmark deliberately bypasses it so cache-hit latency cannot be reported as
+triangle throughput. The 150,000,000-triangles/s value remains an explicit
+aspirational gate and is not represented as passed.
 
 | Metric | Result |
 | --- | ---: |
-| Median frame rate | **323.67 FPS** |
-| Frame time p50 / p95 / p99 | 3.087 / 3.094 / **3.139 ms** |
+| Measured frame rate (30-sample mean) | **243.17 FPS** |
+| Frame time p50 / p95 / p99 | 4.108 / 4.122 / **4.158 ms** |
 | Triangles submitted / rasterized | 12 / 12 per frame |
-| Triangle throughput | **3,884.01 triangles/s** |
-| Two-core 150M target | **150,000,000 triangles/s** |
-| Fragments tested | **55.84M/s** |
-| Fragments covered | **47.79M/s** |
-| Depth tests passed / color writes | **47.77M/s** |
-| Frame-time coefficient of variation | **0.32%** |
+| Triangle throughput | **2,918.01 triangles/s** |
+| Two-core 150M target | **not met (150,000,000 triangles/s)** |
+| Fragments tested | **56.54M/s** |
+| Fragments covered | **35.90M/s** |
+| Depth tests passed / color writes | **35.89M/s** |
+| Frame-time coefficient of variation | **0.25%** |
 
-The opt-in two-core target now passes its 150M triangles/s gate. The static vkcube command
-buffer renders once, retains the completed color/depth attachments, and reuses
-them only when the full uniform/texture key and attachment ownership are unchanged.
-For callers that keep those inputs immutable, `drawCountedParallelStaticReuseImmutable`
-uses a thread-local pointer/generation fast path and avoids the replay mutex and full
-key scan. Callers that may mutate uniform or texture bytes in place should use
-`drawCountedParallelStaticReuse`, which retains exact-key validation. Dynamic Vulkan
-submissions continue through the normal two-core rasterizer.
+The static replay APIs remain available for callers that explicitly want
+immutable attachment reuse: `drawCountedParallelStaticReuseImmutable` uses a
+thread-local pointer/generation fast path, while
+`drawCountedParallelStaticReuse` retains exact-key validation. Those APIs are
+not used for the throughput numbers above. Dynamic Vulkan submissions continue
+through the normal two-core rasterizer.
 
-The latest ReleaseFast probe measured **313,043,478 triangles/s** (about
-**313M/s**, **80,598×** the frozen baseline), above the required
-150,000,000 triangles/s.
+The displayed 3D snapshot is the median-throughput result of five full probes
+on the validation host; CPU frequency/scheduling can move individual probes
+between roughly 2.9k and 3.7k triangles/s. Every probe still reports the same
+checksum and nonzero work counters.
 
 Run it yourself:
 
 ```sh
 ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d -Doptimize=ReleaseFast -- \
-  --two-core --require-target \
+  --two-core \
   --json --source-commit "$(git rev-parse HEAD)" \
   --utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
-The two-core probe reports the measured speedup in its JSON and stderr; add
-`--require-target` to make the 150,000,000 triangles/s requirement fail closed
-(`--require-10x` remains an accepted alias). The
+The two-core probe reports the measured speedup in its JSON and stderr. Add
+`--require-target` to enforce the aspirational 150,000,000 triangles/s gate
+(`--require-10x` remains an accepted alias); it currently fails closed because
+the uncached render is below that target. The
 ordinary command without
 `--two-core` remains the frozen evidence workload used by
 [`tools/evidence.py`](tools/evidence.py).

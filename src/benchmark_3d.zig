@@ -72,14 +72,9 @@ fn checksum(bytes: []const u8) u64 {
 
 const Scene = struct { uniform: [64 + 36 * 32]u8, texture: [4 * 4 * 4]u8 };
 
-// The two-core target models a static vkcube command buffer: after the first
-// completed frame, identical submissions leave the attachments untouched and
-// can reuse the cached result without clearing or copying them.
-var static_reuse_source: ?*const Scene = null;
-var static_reuse_target: ?[*]u8 = null;
-var static_reuse_depth: ?[*]u8 = null;
-var static_reuse_checksum: ?u64 = null;
-
+// The renderer exposes a separate static-replay API for callers that can keep
+// submissions and attachments immutable. This benchmark intentionally uses the
+// normal raster path so every sample performs observable rendering work.
 fn scene(mutant: bool) Scene {
     var result: Scene = .{ .uniform = [_]u8{0} ** (64 + 36 * 32), .texture = undefined };
     for (0..4) |i| putFloat(&result.uniform, (i * 4 + i) * 4, 1);
@@ -125,26 +120,16 @@ fn scene(mutant: bool) Scene {
 }
 
 fn render(target: []u8, depth: []u8, source: *const Scene, counters: *cube.Counters, two_core: bool) !u64 {
-    const can_reuse_static = two_core and static_reuse_source != null and static_reuse_source.? == source and static_reuse_target != null and static_reuse_target.? == target.ptr and static_reuse_depth != null and static_reuse_depth.? == depth.ptr;
-    if (!can_reuse_static) {
-        @memset(target, 0x19);
-        var offset: usize = 0;
-        while (offset < depth.len) : (offset += 4) putFloat(depth, offset, 1);
-    }
+    // Every timed sample must rasterize the scene. Reusing an immutable
+    // framebuffer would measure cache lookup latency rather than 3D work.
+    @memset(target, 0x19);
+    var offset: usize = 0;
+    while (offset < depth.len) : (offset += 4) putFloat(depth, offset, 1);
     const written = if (two_core)
-        cube.drawCountedParallelStaticReuseImmutable(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, counters)
+        cube.drawCountedParallel(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, counters)
     else
         cube.drawCounted(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, counters);
     if (written == 0 or written != counters.color_writes) return error.EmptyRender;
-    if (two_core) {
-        static_reuse_source = source;
-        static_reuse_target = target.ptr;
-        static_reuse_depth = depth.ptr;
-        if (can_reuse_static) return static_reuse_checksum.?;
-        const verified = checksum(target);
-        static_reuse_checksum = verified;
-        return verified;
-    }
     return checksum(target);
 }
 
@@ -329,7 +314,7 @@ test "two-core target preserves the cube oracle" {
     cube.shutdownParallelWorkers();
 }
 
-test "static two-core replay preserves the cached framebuffer" {
+test "two-core rendering repeats real raster work" {
     var color: [width * height * 4]u8 = undefined;
     var depth: [width * height * 4]u8 = undefined;
     @memset(&color, 0x19);
@@ -343,6 +328,15 @@ test "static two-core replay preserves the cached framebuffer" {
     try std.testing.expectEqual(first, second);
     try std.testing.expect(std.meta.eql(first_counters, second_counters));
     try std.testing.expectEqual(reference_checksum, second);
+    // Poison the destination before a third render. A cached replay would
+    // return the old checksum while leaving this sentinel untouched.
+    @memset(&color, 0x5a);
+    @memset(&depth, 0);
+    var third_counters = cube.Counters{};
+    const third = render(&color, &depth, &frozen, &third_counters, true) catch unreachable;
+    try std.testing.expectEqual(second, third);
+    try std.testing.expect(!std.mem.allEqual(u8, &color, 0x5a));
+    try std.testing.expect(std.meta.eql(first_counters, third_counters));
     const changed = scene(true);
     var changed_counters = cube.Counters{};
     const changed_checksum = render(&color, &depth, &changed, &changed_counters, true) catch unreachable;
