@@ -148,6 +148,11 @@ fn blendRect(surface: *s.Surface, rect: s.Rect, color: s.Color, backend: ?dispat
 fn drawSprite(surface: *s.Surface, rect: s.Rect, source: []const u8, source_width: u32, source_height: u32, backend: ?dispatch.Backend) void {
     if (backend) |b| raster.drawSpriteWith(surface, rect, source, source_width, source_height, b) else raster.drawSprite(surface, rect, source, source_width, source_height);
 }
+fn drawSprites(surface: *s.Surface, source: []const u8, iteration: usize, backend: ?dispatch.Backend) void {
+    var destinations: [128]s.Rect = undefined;
+    for (0..128) |i| destinations[i] = .{ .x = @as(i32, @intCast((i * 29 + iteration) % 248)) - 4, .y = @as(i32, @intCast((i * 43) % 248)) - 4, .width = 8, .height = 8 };
+    if (backend) |b| raster.drawSpritesWith(surface, &destinations, source, 8, 8, b) else raster.drawSprites(surface, &destinations, source, 8, 8);
+}
 
 fn runOpWithCopy(op: Op, backend: ?dispatch.Backend, dst: []u8, src: []const u8, surface: *s.Surface, iteration: usize, copy: TransferCopyFn) void {
     switch (op) {
@@ -160,7 +165,7 @@ fn runOpWithCopy(op: Op, backend: ?dispatch.Backend, dst: []u8, src: []const u8,
         },
         .vulkan_host_memory_copy => copy(dst, src),
         .source_over_blend => blendRect(surface, .{ .x = 0, .y = 0, .width = width, .height = height }, .rgba(220, 31, 77, 128), backend),
-        .sprite_draw => for (0..128) |i| drawSprite(surface, .{ .x = @as(i32, @intCast((i * 29 + iteration) % 248)) - 4, .y = @as(i32, @intCast((i * 43) % 248)) - 4, .width = 8, .height = 8 }, src[0..256], 8, 8, backend),
+        .sprite_draw => drawSprites(surface, src[0..256], iteration, backend),
         .frame => {
             fillRect(surface, .{ .x = 0, .y = 0, .width = width, .height = height }, .rgba(8, 12, 20, 255), backend);
             for (0..64) |i| blendRect(surface, .{ .x = @intCast((i * 17) % 224), .y = @intCast((i * 41) % 224), .width = 16, .height = 16 }, .rgba(@truncate(i * 5), 140, 60, 180), backend);

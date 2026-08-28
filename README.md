@@ -290,6 +290,13 @@ in that follow-up probe. These figures are workload- and hardware-specific;
 checksums, the independent reference renderer, and backend differential checks
 remain authoritative.
 
+The sprite workload also has a batched `drawSpritesWith` entry point: it
+validates one immutable 8×8 source once while retaining per-sprite clipping and
+draw order. On the same one-core probe, the batch path measured **15.16M sprite
+draws/s** versus **10.23M** at the post-merge tip (**1.48×**). This is a real
+API-call reduction; source pixels, origins, alpha values, and checksums are
+unchanged, and the remaining sprite cost is source-over arithmetic.
+
 ## 📐 3D throughput on two cores
 
 <p align="center">
