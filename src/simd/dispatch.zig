@@ -130,6 +130,40 @@ pub fn blendSpan(backend: Backend, row: []u8, start: usize, count: usize, format
     }
 }
 
+/// Fill every row in a clipped rectangle after selecting the backend once.
+/// This keeps tiny/partial rectangles from paying an ISA probe and dispatch
+/// switch for each scanline (notably the many narrow guides in design tools).
+pub fn fillRows(comptime backend: Backend, surface: *s.Surface, rectangle: s.Rect, color: s.Color) void {
+    switch (backend) {
+        .scalar => for (@intCast(rectangle.y)..@as(usize, @intCast(rectangle.y)) + rectangle.height) |y|
+            scalar.fillSpan(surface.row(@intCast(y)), @intCast(rectangle.x), rectangle.width, surface.format, color),
+        .portable_vector => for (@intCast(rectangle.y)..@as(usize, @intCast(rectangle.y)) + rectangle.height) |y|
+            vector.fill(4, surface.row(@intCast(y)), @intCast(rectangle.x), rectangle.width, surface.format, color),
+        .avx2 => if (comptime eight_lane_boundary) {
+            requireEightLaneSupport();
+            for (@intCast(rectangle.y)..@as(usize, @intCast(rectangle.y)) + rectangle.height) |y|
+                v3.fill_span_8(surface.row(@intCast(y)).ptr, surface.row(@intCast(y)).len, @intCast(rectangle.x), rectangle.width, @intFromEnum(surface.format), packColor(color));
+        } else @panic("eight-lane kernels require an x86_64 artifact target"),
+    }
+}
+
+/// Blend every row in a clipped rectangle after selecting the backend once.
+/// The ABI kernels remain row-oriented, but the safety probe and backend
+/// selection now happen once per rectangle rather than once per row.
+pub fn blendRows(comptime backend: Backend, surface: *s.Surface, rectangle: s.Rect, color: s.Color) void {
+    switch (backend) {
+        .scalar => for (@intCast(rectangle.y)..@as(usize, @intCast(rectangle.y)) + rectangle.height) |y|
+            scalar.blendSpan(surface.row(@intCast(y)), @intCast(rectangle.x), rectangle.width, surface.format, color),
+        .portable_vector => for (@intCast(rectangle.y)..@as(usize, @intCast(rectangle.y)) + rectangle.height) |y|
+            vector.blend(4, surface.row(@intCast(y)), @intCast(rectangle.x), rectangle.width, surface.format, color),
+        .avx2 => if (comptime eight_lane_boundary) {
+            requireEightLaneSupport();
+            for (@intCast(rectangle.y)..@as(usize, @intCast(rectangle.y)) + rectangle.height) |y|
+                v3.blend_span_8(surface.row(@intCast(y)).ptr, surface.row(@intCast(y)).len, @intCast(rectangle.x), rectangle.width, @intFromEnum(surface.format), packColor(color));
+        } else @panic("eight-lane kernels require an x86_64 artifact target"),
+    }
+}
+
 pub fn blendPixels(backend: Backend, row: []u8, start: usize, source: []const u8, count: usize, format: s.Format) void {
     switch (backend) {
         .scalar => scalar.blendPixels(row, start, source, count, format),

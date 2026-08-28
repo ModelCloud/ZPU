@@ -320,7 +320,12 @@ the general source-over kernel. On the validation host this moved
 ReleaseFast, 240×240, limited-core run); the checksum and clipping oracle stay
 unchanged. The RGBA8 specialization then keeps packed source bytes packed for
 mixed SIMD groups, reaching about **34.3M draws/s** with a **26.4 µs** p50 on
-the same host; BGRA8 still uses the channel-swapping variant.
+the same host; BGRA8 still uses the channel-swapping variant. The next raster
+pass batches rectangle row dispatch and uses direct packed SIMD loads/stores;
+narrow guideline spans stay on a scalar write path because they cannot fill a
+SIMD lane. In the v8 probe this moved `design_canvas` from about **6.36M** to
+**10.5M draws/s** (**1.65×**) with p50 latency falling from **55.4 µs** to
+**33.5 µs**, while the other scene checksums remain unchanged.
 
 ## 📐 3D throughput on two cores
 
