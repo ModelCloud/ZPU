@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+# SPDX-License-Identifier: Apache-2.0
+
 # Prove where tools/limited-cpus.sh sources its ZPU_TOPOLOGY fingerprint:
 # a live run must report each selected CPU's kernel physical_package_id and
 # core_id from sysfs (what src/benchmark_main.zig reads back), while a run

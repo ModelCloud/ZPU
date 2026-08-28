@@ -1,3 +1,6 @@
+<!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 ---
 name: zpu-pr-readiness
 description: Gate ModelCloud/ZPU pull requests on fresh visual captures, a validated 20-second vkcube video, complete 2D/3D benchmark evidence, and ignored-artifact hygiene.

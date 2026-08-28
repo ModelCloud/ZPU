@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2026 ModelCloud
+# Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
 # SPDX-License-Identifier: Apache-2.0
 
 """Apply Apache-2.0 SPDX headers to first-party repository text files.
@@ -15,7 +15,7 @@ import pathlib
 import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-COPYRIGHT = "Copyright 2026 ModelCloud"
+COPYRIGHT = "Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team"
 SPDX = "SPDX-License-Identifier: Apache-2.0"
 
 LINE_HASH = {".sh", ".py", ".yml", ".yaml", ".toml", ".gitignore", ".gitattributes"}

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+# SPDX-License-Identifier: Apache-2.0
+
 """Append validated benchmark JSON to the repository's append-only history."""
 import argparse
 import json

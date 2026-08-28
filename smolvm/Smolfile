@@ -1,3 +1,6 @@
+# Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+# SPDX-License-Identifier: Apache-2.0
+
 # Image, network, CPU, and memory are launcher-owned and deliberately absent.
 # This prevents Smolfile/CLI precedence from weakening explicit launch policy.
 

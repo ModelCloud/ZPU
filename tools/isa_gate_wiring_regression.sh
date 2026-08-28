@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+# SPDX-License-Identifier: Apache-2.0
+
 # Deterministic regression for ISA-gate graph wiring (BL-1).
 #
 # Proves, via nested builds, that:

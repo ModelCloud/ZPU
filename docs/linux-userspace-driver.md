@@ -1,3 +1,6 @@
+<!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # ZPU as a Linux userspace Vulkan driver
 
 ZPU is a Vulkan Installable Client Driver (ICD) implemented as a Linux shared

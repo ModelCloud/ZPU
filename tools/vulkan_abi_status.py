@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+# SPDX-License-Identifier: Apache-2.0
+
 """Generate the complete Vulkan 1.0–1.4 command ABI status page."""
 
 import argparse

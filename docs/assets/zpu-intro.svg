@@ -1,4 +1,4 @@
-<!-- Copyright 2026 ModelCloud -->
+<!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
 <title id="title">Introducing ZPU</title><desc id="desc">Zig-native CPU-only Vulkan userspace driver for Linux.</desc>

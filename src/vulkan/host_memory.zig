@@ -1,3 +1,6 @@
+// Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 
 pub fn fill(bytes: []u8, data: u32) void {

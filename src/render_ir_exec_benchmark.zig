@@ -1,3 +1,6 @@
+// Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 const exec = @import("vulkan/render_ir_exec.zig");
 const ir = @import("vulkan/render_ir.zig");

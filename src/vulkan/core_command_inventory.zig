@@ -1,3 +1,6 @@
+// Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+// SPDX-License-Identifier: Apache-2.0
+
 pub const names = [_][]const u8{
     "vkAllocateCommandBuffers",
     "vkAllocateDescriptorSets",

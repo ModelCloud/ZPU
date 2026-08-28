@@ -1,3 +1,6 @@
+<!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # 2D performance methodology
 
 `tools/limited-cpus.sh zig build benchmark -Doptimize=ReleaseFast -- --json` runs the versioned `zpu-2d-kernels-v4-240x240-seed-151521030` workload. It measures clear, pixel writes, deliberately clipped rectangles, straight-alpha source-over blends, clipped RGBA sprite draws, complete deterministic 240×240 frames, and Vulkan host-memory fill/copy operations. Constant-color spans and per-pixel RGBA sprite spans use the selected scalar or vector backend. Raster operations run with scalar, every CPU/OS-available vector backend, and normal runtime dispatch; Vulkan host-memory operations have no raster dispatch choice and run once. Results include pixels/s (serialized as `mpix_s`), bytes/s and modeled GiB/s, draws/s, frames/s (`fps`), per-operation p50/p95/p99 latency, iteration counts, and a fixed-output FNV-1a checksum.

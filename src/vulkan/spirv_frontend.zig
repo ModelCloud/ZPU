@@ -1,3 +1,6 @@
+// Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+// SPDX-License-Identifier: Apache-2.0
+
 const std = @import("std");
 pub const decode = @import("spirv_decode.zig");
 pub const ir = @import("render_ir.zig");

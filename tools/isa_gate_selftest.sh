@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+# SPDX-License-Identifier: Apache-2.0
+
 # Deterministic negative/positive-control fixtures for tools/isa_disasm_gate.sh.
 #
 # Assembles tiny ELF objects with GNU as and proves the gate's behavior:

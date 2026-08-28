@@ -1,3 +1,6 @@
+<!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # Chromium Compatibility Requirements
 
 Tracking document for what ZPU must implement before Chromium's GPU process will
