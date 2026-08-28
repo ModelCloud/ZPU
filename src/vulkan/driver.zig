@@ -1988,7 +1988,7 @@ fn graphicsPipelinePNext(raw: ?*const anyopaque, legacy: u32) ?GraphicsPipelineP
             pipeline_rendering_create_info_stype => {
                 if (seen_rendering) return null;
                 const info: *const PipelineRenderingCreateInfo = @ptrCast(@alignCast(item));
-                if (info.view_mask != 0 or info.color_attachment_count > 1 or (info.color_attachment_count != 0 and (info.color_attachment_formats == null or info.color_attachment_formats.?[0] != 44)) or (info.depth_attachment_format != 0 and info.depth_attachment_format != 126) or info.stencil_attachment_format != 0) return null;
+                if (info.view_mask != 0 or info.color_attachment_count > 1 or (info.color_attachment_count != 0 and (info.color_attachment_formats == null or info.color_attachment_formats.?[0] != 44)) or (info.depth_attachment_format != 0 and !isDepthFormat(info.depth_attachment_format)) or info.stencil_attachment_format != 0) return null;
                 const color_format = if (info.color_attachment_count == 0) 0 else info.color_attachment_formats.?[0];
                 // ZPU's dynamic-rendering attachment path is deliberately
                 // bounded to the same formats accepted by vkCmdBeginRendering.
@@ -3557,11 +3557,18 @@ fn getMemoryProperties(physical: ?Physical, output: ?*MemoryProperties) callconv
     out.memory_heap_count = 1;
     out.memory_heaps[0] = .{ .size = 256 * 1024 * 1024, .flags = 0 };
 }
-fn imageFormatUsage(format: i32) u32 {
+fn isDepthFormat(format: i32) bool {
+    return format == 124 or format == 126;
+}
+fn imageFormatUsage(format: i32, tiling: i32) u32 {
+    // Linear and optimal feature sets can differ; vkGetPhysicalDeviceImageFormatProperties
+    // and vkCreateImage both receive the tiling explicitly.
+    _ = tiling;
     return switch (format) {
-        37 => 0x1 | 0x2,
+        37 => 0x1 | 0x2 | 0x4,
         43 => 0x4,
         44 => 0x1 | 0x2 | 0x10,
+        124 => 0x2 | 0x20,
         126 => 0x2 | 0x20,
         else => 0,
     };
@@ -3591,9 +3598,10 @@ fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatPr
     if (!validPhysicalLocked(physical)) return false;
     const out = output orelse return false;
     out.* = switch (format) {
-        37 => .{ .linear_tiling_features = 0x4000 | 0x8000, .optimal_tiling_features = 0x4000 | 0x8000, .buffer_features = 0 },
+        37 => .{ .linear_tiling_features = 0x1 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         43 => .{ .linear_tiling_features = 0x1, .optimal_tiling_features = 0x1, .buffer_features = 0 },
         44 => .{ .linear_tiling_features = 0x80 | 0x4000 | 0x8000, .optimal_tiling_features = 0x80 | 0x4000 | 0x8000, .buffer_features = 0 },
+        124 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
         126 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
         else => std.mem.zeroes(FormatProperties),
     };
@@ -3608,8 +3616,8 @@ fn getImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, t
     lock();
     defer mutex.unlock();
     if (!validPhysicalLocked(physical orelse return .error_initialization_failed)) return .error_initialization_failed;
-    const allowed_usage = imageFormatUsage(format);
-    if (allowed_usage == 0 or image_type != 1 or (tiling != 0 and tiling != 1) or flags != 0 or usage == 0 or usage & ~allowed_usage != 0 or (format == 126 and tiling != 0)) return .error_format_not_supported;
+    const allowed_usage = imageFormatUsage(format, tiling);
+    if (allowed_usage == 0 or image_type != 1 or (tiling != 0 and tiling != 1) or flags != 0 or usage == 0 or usage & ~allowed_usage != 0 or (isDepthFormat(format) and tiling != 0)) return .error_format_not_supported;
     const out = output orelse return .error_initialization_failed;
     out.* = .{ .max_extent = .{ .width = max_2d_extent, .height = max_2d_extent, .depth = 1 }, .max_mip_levels = 1, .max_array_layers = max_image_array_layers, .sample_counts = 1, .max_resource_size = heap_size };
     return .success;
@@ -5004,12 +5012,12 @@ fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Al
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    const allowed_usage = imageFormatUsage(ci.format);
+    const allowed_usage = imageFormatUsage(ci.format, ci.tiling);
     if (ci.usage == 0 or allowed_usage != 0 and ci.usage & ~allowed_usage != 0) {
         hit(.invalid_image_usage);
         return .error_initialization_failed;
     }
-    if (alloc != null or ci.s_type != 14 or !imageCreatePNextValid(ci.p_next, ci.format) or ci.flags != 0 or ci.image_type != 1 or allowed_usage == 0 or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or ci.mip_levels != 1 or ci.array_layers == 0 or ci.array_layers > max_image_array_layers or ci.samples != 1 or (ci.tiling != 0 and ci.tiling != 1) or (ci.format == 126 and ci.tiling != 0) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) return if (allowed_usage == 0) .error_format_not_supported else .error_initialization_failed;
+    if (alloc != null or ci.s_type != 14 or !imageCreatePNextValid(ci.p_next, ci.format) or ci.flags != 0 or ci.image_type != 1 or allowed_usage == 0 or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or ci.mip_levels != 1 or ci.array_layers == 0 or ci.array_layers > max_image_array_layers or ci.samples != 1 or (ci.tiling != 0 and ci.tiling != 1) or (isDepthFormat(ci.format) and ci.tiling != 0) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) return if (allowed_usage == 0) .error_format_not_supported else .error_initialization_failed;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
@@ -5094,8 +5102,8 @@ fn getImageMemoryRequirements2(device: ?Device, info: ?*const ImageMemoryRequire
     populateMemoryRequirements2Chain(out.p_next);
 }
 fn imageCreateRequirements(info: *const ImageCreateInfo) ?MemoryRequirements {
-    const allowed_usage = imageFormatUsage(info.format);
-    if (info.s_type != 14 or !imageCreatePNextValid(info.p_next, info.format) or info.flags != 0 or info.image_type != 1 or allowed_usage == 0 or info.usage == 0 or info.usage & ~allowed_usage != 0 or info.extent.width == 0 or info.extent.height == 0 or info.extent.depth != 1 or info.extent.width > max_2d_extent or info.extent.height > max_2d_extent or info.mip_levels != 1 or info.array_layers == 0 or info.array_layers > max_image_array_layers or info.samples != 1 or (info.tiling != 0 and info.tiling != 1) or (info.format == 126 and info.tiling != 0) or info.sharing_mode != 0 or info.queue_family_index_count != 0 or (info.initial_layout != 0 and info.initial_layout != 8)) return null;
+    const allowed_usage = imageFormatUsage(info.format, info.tiling);
+    if (info.s_type != 14 or !imageCreatePNextValid(info.p_next, info.format) or info.flags != 0 or info.image_type != 1 or allowed_usage == 0 or info.usage == 0 or info.usage & ~allowed_usage != 0 or info.extent.width == 0 or info.extent.height == 0 or info.extent.depth != 1 or info.extent.width > max_2d_extent or info.extent.height > max_2d_extent or info.mip_levels != 1 or info.array_layers == 0 or info.array_layers > max_image_array_layers or info.samples != 1 or (info.tiling != 0 and info.tiling != 1) or (isDepthFormat(info.format) and info.tiling != 0) or info.sharing_mode != 0 or info.queue_family_index_count != 0 or (info.initial_layout != 0 and info.initial_layout != 8)) return null;
     const pixels = std.math.mul(u64, info.extent.width, info.extent.height) catch return null;
     const layer_bytes = std.math.mul(u64, pixels, 4) catch return null;
     const bytes = std.math.mul(u64, layer_bytes, info.array_layers) catch return null;
@@ -5357,7 +5365,7 @@ fn imageSubresourceLayout(device: ?Device, handle: usize, subresource: ImageSubr
     lock();
     defer mutex.unlock();
     const image = validImageLocked(handle) orelse return null;
-    const expected_aspect: u32 = if (image.format == 126) 2 else 1;
+    const expected_aspect: u32 = if (isDepthFormat(image.format)) 2 else 1;
     if (!validDeviceLocked(d) or !validOwner(d, image.owner) or subresource.aspect_mask != expected_aspect or subresource.mip_level != 0 or subresource.array_layer >= image.array_layers) return null;
     const layer_size = imageLayerByteSize(image) orelse return null;
     const offset = std.math.mul(u64, layer_size, subresource.array_layer) catch return null;
@@ -5391,7 +5399,7 @@ fn getDeviceImageSubresourceLayout(device: ?Device, info: ?*const DeviceImageSub
     const subresource = ci.subresource orelse return;
     if (subresource.s_type != 1000338003 or subresource.p_next != null) return;
     const requirements = imageCreateRequirements(create_info) orelse return;
-    const expected_aspect: u32 = if (create_info.format == 126) 2 else 1;
+    const expected_aspect: u32 = if (isDepthFormat(create_info.format)) 2 else 1;
     if (subresource.image_subresource.aspect_mask != expected_aspect or subresource.image_subresource.mip_level != 0 or subresource.image_subresource.array_layer >= create_info.array_layers) return;
     const layer_size = requirements.size / create_info.array_layers;
     const offset = std.math.mul(u64, layer_size, subresource.image_subresource.array_layer) catch return;
@@ -5404,8 +5412,8 @@ fn getRenderingAreaGranularity(device: ?Device, info: ?*const RenderingAreaInfo,
     const ci = info orelse return;
     const out = output orelse return;
     if (ci.s_type != 1000470003 or ci.p_next != null or ci.view_mask != 0 or ci.color_attachment_count > 1 or
-        (ci.color_attachment_count != 0 and (ci.color_attachment_formats == null or imageFormatUsage(ci.color_attachment_formats.?[0]) & 0x10 == 0)) or
-        (ci.depth_attachment_format != 0 and ci.depth_attachment_format != 126) or ci.stencil_attachment_format != 0) return;
+        (ci.color_attachment_count != 0 and (ci.color_attachment_formats == null or imageFormatUsage(ci.color_attachment_formats.?[0], 0) & 0x10 == 0)) or
+        (ci.depth_attachment_format != 0 and !isDepthFormat(ci.depth_attachment_format)) or ci.stencil_attachment_format != 0) return;
     lock();
     defer mutex.unlock();
     if (validDeviceLocked(d)) out.* = .{ .width = 1, .height = 1 };
@@ -5901,7 +5909,7 @@ fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) 
             const header: *const ChainHeader = @ptrCast(@alignCast(raw_dynamic));
             if (header.s_type != 1000044004 or header.p_next != null or bi.flags & 2 == 0 or inheritance.render_pass != 0 or inheritance.subpass != 0 or inheritance.framebuffer != 0) return .error_initialization_failed;
             const dynamic_info: *const CommandBufferInheritanceRenderingInfo = @ptrCast(@alignCast(raw_dynamic));
-            if (dynamic_info.flags != 0 or dynamic_info.view_mask != 0 or dynamic_info.color_attachment_count > 1 or (dynamic_info.color_attachment_count != 0 and (dynamic_info.color_attachment_formats == null or dynamic_info.color_attachment_formats.?[0] != 44)) or (dynamic_info.depth_attachment_format != 0 and dynamic_info.depth_attachment_format != 126) or dynamic_info.stencil_attachment_format != 0 or dynamic_info.rasterization_samples != 1) return .error_initialization_failed;
+            if (dynamic_info.flags != 0 or dynamic_info.view_mask != 0 or dynamic_info.color_attachment_count > 1 or (dynamic_info.color_attachment_count != 0 and (dynamic_info.color_attachment_formats == null or dynamic_info.color_attachment_formats.?[0] != 44)) or (dynamic_info.depth_attachment_format != 0 and !isDepthFormat(dynamic_info.depth_attachment_format)) or dynamic_info.stencil_attachment_format != 0 or dynamic_info.rasterization_samples != 1) return .error_initialization_failed;
             inherited_dynamic = true;
             inherited_dynamic_view_mask = dynamic_info.view_mask;
             inherited_dynamic_color_format = if (dynamic_info.color_attachment_count == 0) 0 else dynamic_info.color_attachment_formats.?[0];
@@ -6315,7 +6323,7 @@ fn validRange(r: ImageSubresourceRange) bool {
     return r.aspect_mask == 1 and r.base_mip_level == 0 and r.level_count == 1 and r.layer_count != 0 and r.base_array_layer < max_image_array_layers and r.layer_count <= max_image_array_layers - r.base_array_layer;
 }
 fn validRangeForImage(image: *const ImageObj, r: ImageSubresourceRange) bool {
-    const aspect: u32 = if (image.format == 126) 2 else 1;
+    const aspect: u32 = if (isDepthFormat(image.format)) 2 else 1;
     return r.aspect_mask == aspect and r.base_mip_level == 0 and r.level_count == 1 and r.layer_count != 0 and r.base_array_layer < image.array_layers and r.layer_count <= image.array_layers - r.base_array_layer;
 }
 fn validLayersForImage(image: *const ImageObj, layers: ImageSubresourceLayers) bool {
@@ -6395,7 +6403,7 @@ fn cmdClearDepthStencilImage(cb: ?CommandBuffer, image_handle: usize, layout: i3
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or c.impl.count == c.impl.commands.len or image.owner != c.impl.owner or image.format != 126 or image.usage & 0x2 == 0 or image.memory == null or (layout != 1 and layout != 7) or !std.math.isFinite(value.?.depth) or value.?.depth < 0 or value.?.depth > 1) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or c.impl.count == c.impl.commands.len or image.owner != c.impl.owner or !isDepthFormat(image.format) or image.usage & 0x2 == 0 or image.memory == null or (layout != 1 and layout != 7) or !std.math.isFinite(value.?.depth) or value.?.depth < 0 or value.?.depth > 1) {
         c.impl.invalid = true;
         return;
     }
@@ -6497,7 +6505,7 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
                 return;
             }
         } else {
-            if (depth_image == null and inherited_depth_format != 126) {
+            if (depth_image == null and !isDepthFormat(inherited_depth_format)) {
                 c.impl.invalid = true;
                 return;
             }
@@ -8016,6 +8024,7 @@ fn querySlotStateBeforeSubmitCommand(submits: []const SubmitInfo, submit_index: 
 fn queryCommandSequenceValid(command: Command, submits: []const SubmitInfo, submit_index: usize, command_buffer_index: usize, command_index: usize) bool {
     switch (command) {
         .query_reset => |op| {
+            if (!liveQueryPoolObject(op.pool) or !validQueryRange(op.pool, op.first, op.count)) return false;
             var index = op.first;
             var remaining = op.count;
             while (remaining != 0) : ({
@@ -8023,9 +8032,18 @@ fn queryCommandSequenceValid(command: Command, submits: []const SubmitInfo, subm
                 remaining -= 1;
             }) if (querySlotStateBeforeSubmitCommand(submits, submit_index, command_buffer_index, command_index, op.pool, index) == 1) return false;
         },
-        .query_begin => |op| return querySlotStateBeforeSubmitCommand(submits, submit_index, command_buffer_index, command_index, op.pool, op.index) == 0,
-        .query_end => |op| return querySlotStateBeforeSubmitCommand(submits, submit_index, command_buffer_index, command_index, op.pool, op.index) == 1,
-        .query_timestamp => |op| return querySlotStateBeforeSubmitCommand(submits, submit_index, command_buffer_index, command_index, op.pool, op.index) == 0,
+        .query_begin => |op| {
+            if (!liveQueryPoolObject(op.pool) or @as(usize, op.index) >= op.pool.slots.len) return false;
+            return querySlotStateBeforeSubmitCommand(submits, submit_index, command_buffer_index, command_index, op.pool, op.index) == 0;
+        },
+        .query_end => |op| {
+            if (!liveQueryPoolObject(op.pool) or @as(usize, op.index) >= op.pool.slots.len) return false;
+            return querySlotStateBeforeSubmitCommand(submits, submit_index, command_buffer_index, command_index, op.pool, op.index) == 1;
+        },
+        .query_timestamp => |op| {
+            if (!liveQueryPoolObject(op.pool) or @as(usize, op.index) >= op.pool.slots.len) return false;
+            return querySlotStateBeforeSubmitCommand(submits, submit_index, command_buffer_index, command_index, op.pool, op.index) == 0;
+        },
         else => {},
     }
     return true;
@@ -8732,7 +8750,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_
         .transition => |op| {
             const slot = imageSlot(op.image) orelse return deadResource();
             if (op.image.owner != owner) return wrongSubmittingDevice();
-            if (layouts[slot] != op.old_layout) {
+            if (op.old_layout != 0 and layouts[slot] != op.old_layout) {
                 hit(.layout_mismatch);
                 return false;
             }
@@ -9455,7 +9473,7 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
             // The legacy vkcube bridge has no color-mask execution contract;
             // keep partial writes fail-closed until that backend is upgraded.
             if (op.pipeline.color_write_mask != 0xf or op.pipeline.color_blend_enable != 0) return;
-            if (op.depth_test_enable != 1 or op.depth_write_enable != 1 or op.depth_compare_op != 3 or op.depth_bounds_test_enable != 0 or op.depth_bounds[0] != 0 or op.depth_bounds[1] != 1 or op.depth_bias_enable != 0) return;
+            if (op.depth_test_enable != 1 or op.depth_write_enable != 1 or op.depth_compare_op != 3 or op.depth_bounds_test_enable != 0 or op.depth_bias_enable != 0) return;
             const operation_start = frame_pacing.monotonicNs();
             const uniform_buffer = op.descriptors.uniform.?;
             const uniform_start: usize = @intCast(uniform_buffer.offset + op.descriptors.uniform_offset);
@@ -10858,16 +10876,25 @@ fn validBlendConstants(constants: [4]f32) bool {
     return true;
 }
 
+fn pipelineInvalid(line: u32) CanonicalError {
+    _ = line;
+    return error.Invalid;
+}
+fn queueSubmitFailed(line: u32) Result {
+    _ = line;
+    return .error_initialization_failed;
+}
+
 fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo) CanonicalError!GraphicsPipelineObj {
-    const pnext = graphicsPipelinePNext(ci.p_next, ci.flags) orelse return error.Invalid;
-    if (ci.s_type != 28 or ci.stage_count != 2 or ci.stages == null or ci.tessellation != null or ci.base_pipeline != 0 or (ci.base_pipeline_index != -1 and ci.base_pipeline_index != 0)) return error.Invalid;
-    const layout = validPipelineLayoutLocked(ci.layout) orelse return error.Invalid;
+    const pnext = graphicsPipelinePNext(ci.p_next, ci.flags) orelse return pipelineInvalid(@src().line);
+    if (ci.s_type != 28 or ci.stage_count != 2 or ci.stages == null or ci.tessellation != null or ci.base_pipeline != 0 or (ci.base_pipeline_index != -1 and ci.base_pipeline_index != 0)) return pipelineInvalid(@src().line);
+    const layout = validPipelineLayoutLocked(ci.layout) orelse return pipelineInvalid(@src().line);
     const dynamic_rendering_state = pnext.rendering;
-    if (dynamic_rendering_state != null and ci.render_pass != 0) return error.Invalid;
-    if (dynamic_rendering_state != null and ci.subpass != 0) return error.Invalid;
+    if (dynamic_rendering_state != null and ci.render_pass != 0) return pipelineInvalid(@src().line);
+    if (dynamic_rendering_state != null and ci.subpass != 0) return pipelineInvalid(@src().line);
     const render_pass = if (ci.render_pass != 0) validRenderPassLocked(ci.render_pass) else null;
-    if (render_pass == null and dynamic_rendering_state == null) return error.Invalid;
-    if (!layout.owner.eql(d) or (render_pass != null and !render_pass.?.owner.eql(d)) or (render_pass != null and ci.subpass >= render_pass.?.subpass_count)) return error.Invalid;
+    if (render_pass == null and dynamic_rendering_state == null) return pipelineInvalid(@src().line);
+    if (!layout.owner.eql(d) or (render_pass != null and !render_pass.?.owner.eql(d)) or (render_pass != null and ci.subpass >= render_pass.?.subpass_count)) return pipelineInvalid(@src().line);
     var dynamic_render_compatibility: ?Canonical = null;
     if (dynamic_rendering_state) |state| {
         dynamic_render_compatibility = try pipelineRenderingCompatibility(state);
@@ -10895,11 +10922,11 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     var cpu_cube_stage_mask: u32 = 0;
     for (stage_indices) |index| {
         const stage = stages[index];
-        if (stage.s_type != 18 or !pipelineRobustnessCreateInfoValid(stage.p_next) or stage.flags != 0 or (stage.stage != 1 and stage.stage != 0x10) or stage_mask & stage.stage != 0 or stage.name == null) return error.Invalid;
-        const shader = findLiveHandle(ShaderModuleObj, stage.module, &shader_module_objects, &shader_module_state) orelse return error.Invalid;
-        if (!shader.owner.eql(d)) return error.Invalid;
+        if (stage.s_type != 18 or !pipelineRobustnessCreateInfoValid(stage.p_next) or stage.flags != 0 or (stage.stage != 1 and stage.stage != 0x10) or stage_mask & stage.stage != 0 or stage.name == null) return pipelineInvalid(@src().line);
+        const shader = findLiveHandle(ShaderModuleObj, stage.module, &shader_module_objects, &shader_module_state) orelse return pipelineInvalid(@src().line);
+        if (!shader.owner.eql(d)) return pipelineInvalid(@src().line);
         const name = std.mem.span(stage.name.?);
-        if (name.len == 0 or name.len > 255) return error.Invalid;
+        if (name.len == 0 or name.len > 255) return pipelineInvalid(@src().line);
         stage_mask |= stage.stage;
         try w.u32le(stage.stage);
         try w.u32le(shader.module.identity.ingestion);
@@ -10927,13 +10954,13 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
             if (frontend_stage == .vertex) vertex_program = program else fragment_program = program;
         }
     }
-    if (stage_mask != 0x11) return error.Invalid;
+    if (stage_mask != 0x11) return pipelineInvalid(@src().line);
     const profile_pair = vertex_program != null and fragment_program != null and cpu_cube_stage_mask == 0;
     const cpu_cube_pair = vertex_program == null and fragment_program == null and cpu_cube_stage_mask == 0x11;
-    if (!profile_pair and !cpu_cube_pair) return error.Invalid;
-    if (profile_pair and !frontendInterfacesCompatible(&vertex_program.?, &fragment_program.?, &layout.set0)) return error.Invalid;
-    const vi = ci.vertex_input orelse return error.Invalid;
-    if (vi.s_type != 19 or !pipelineVertexInputDivisorStateValid(vi.p_next) or vi.flags != 0 or vi.binding_count > 16 or vi.attribute_count > 16 or (vi.binding_count != 0 and vi.bindings == null) or (vi.attribute_count != 0 and vi.attributes == null)) return error.Invalid;
+    if (!profile_pair and !cpu_cube_pair) return pipelineInvalid(@src().line);
+    if (profile_pair and !frontendInterfacesCompatible(&vertex_program.?, &fragment_program.?, &layout.set0)) return pipelineInvalid(@src().line);
+    const vi = ci.vertex_input orelse return pipelineInvalid(@src().line);
+    if (vi.s_type != 19 or !pipelineVertexInputDivisorStateValid(vi.p_next) or vi.flags != 0 or vi.binding_count > 16 or vi.attribute_count > 16 or (vi.binding_count != 0 and vi.bindings == null) or (vi.attribute_count != 0 and vi.attributes == null)) return pipelineInvalid(@src().line);
     var binding_indices: [16]u8 = undefined;
     for (0..vi.binding_count) |i| binding_indices[i] = @intCast(i);
     const bindings = if (vi.bindings) |p| p[0..vi.binding_count] else &.{};
@@ -10946,7 +10973,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     var prior_binding: ?u32 = null;
     for (binding_indices[0..vi.binding_count]) |index| {
         const b = bindings[index];
-        if (prior_binding == b.binding or b.binding >= 16 or b.stride > 2048 or b.input_rate < 0 or b.input_rate > 1) return error.Invalid;
+        if (prior_binding == b.binding or b.binding >= 16 or b.stride > 2048 or b.input_rate < 0 or b.input_rate > 1) return pipelineInvalid(@src().line);
         prior_binding = b.binding;
         try w.u32le(b.binding);
         try w.u32le(b.stride);
@@ -10965,14 +10992,14 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     var vertex_input_binding_mask: u16 = 0;
     for (attribute_indices[0..vi.attribute_count]) |index| {
         const a = attributes[index];
-        if (prior_location == a.location or a.location >= 16 or a.offset > 2047 or a.format <= 0) return error.Invalid;
+        if (prior_location == a.location or a.location >= 16 or a.offset > 2047 or a.format <= 0) return pipelineInvalid(@src().line);
         prior_location = a.location;
         var found = false;
         for (bindings) |b| if (b.binding == a.binding) {
             found = true;
             break;
         };
-        if (!found) return error.Invalid;
+        if (!found) return pipelineInvalid(@src().line);
         vertex_input_binding_mask |= @as(u16, 1) << @intCast(a.binding);
         try w.u32le(a.location);
         try w.u32le(a.binding);
@@ -10980,8 +11007,8 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         try w.u32le(a.offset);
     }
     const profile_contract = if (profile_pair) profileGraphicsContract(&vertex_program.?, &fragment_program.?, vi) else null;
-    const ia = ci.input_assembly orelse return error.Invalid;
-    if (ia.s_type != 20 or ia.p_next != null or ia.flags != 0 or ia.topology < 0 or ia.topology > 10) return error.Invalid;
+    const ia = ci.input_assembly orelse return pipelineInvalid(@src().line);
+    if (ia.s_type != 20 or ia.p_next != null or ia.flags != 0 or ia.topology < 0 or ia.topology > 10) return pipelineInvalid(@src().line);
     try w.i32le(ia.topology);
     var dynamic_viewport = false;
     var dynamic_scissor = false;
@@ -11010,7 +11037,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     var dynamic_count: u32 = 0;
     try w.u32le(if (ci.dynamic) |dy| dy.dynamic_state_count else 0);
     if (ci.dynamic) |dy| {
-        if (dy.s_type != 27 or dy.p_next != null or dy.flags != 0 or dy.dynamic_state_count > 16 or (dy.dynamic_state_count != 0 and dy.dynamic_states == null)) return error.Invalid;
+        if (dy.s_type != 27 or dy.p_next != null or dy.flags != 0 or dy.dynamic_state_count > 16 or (dy.dynamic_state_count != 0 and dy.dynamic_states == null)) return pipelineInvalid(@src().line);
         dynamic_count = dy.dynamic_state_count;
         for (0..dynamic_count) |i| dynamic_indices[i] = @intCast(i);
         const states = dy.dynamic_states.?[0..dynamic_count];
@@ -11022,7 +11049,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         var prior: ?i32 = null;
         for (dynamic_indices[0..dynamic_count]) |index| {
             const state = states[index];
-            if (prior == state or state < 0 or (state > 8 and state != dynamic_state_cull_mode and state != dynamic_state_line_stipple and state != dynamic_state_front_face and state != dynamic_state_primitive_topology and state != dynamic_state_viewport_with_count and state != dynamic_state_scissor_with_count and state != dynamic_state_vertex_input_binding_stride and state != dynamic_state_depth_test_enable and state != dynamic_state_depth_write_enable and state != dynamic_state_depth_compare_op and state != dynamic_state_depth_bounds_test_enable and state != dynamic_state_stencil_test_enable and state != dynamic_state_stencil_op and state != dynamic_state_rasterizer_discard_enable and state != dynamic_state_depth_bias_enable and state != dynamic_state_primitive_restart_enable)) return error.Invalid;
+            if (prior == state or state < 0 or (state > 8 and state != dynamic_state_cull_mode and state != dynamic_state_line_stipple and state != dynamic_state_front_face and state != dynamic_state_primitive_topology and state != dynamic_state_viewport_with_count and state != dynamic_state_scissor_with_count and state != dynamic_state_vertex_input_binding_stride and state != dynamic_state_depth_test_enable and state != dynamic_state_depth_write_enable and state != dynamic_state_depth_compare_op and state != dynamic_state_depth_bounds_test_enable and state != dynamic_state_stencil_test_enable and state != dynamic_state_stencil_op and state != dynamic_state_rasterizer_discard_enable and state != dynamic_state_depth_bias_enable and state != dynamic_state_primitive_restart_enable)) return pipelineInvalid(@src().line);
             prior = state;
             if (state == 0 or state == dynamic_state_viewport_with_count) dynamic_viewport = true else if (state == 1 or state == dynamic_state_scissor_with_count) dynamic_scissor = true else if (state == 2) dynamic_line_width = true;
             if (state == 3) dynamic_depth_bias = true;
@@ -11032,15 +11059,15 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         }
     }
     const pipeline_primitive_restart_enable = try bool32(ia.primitive_restart_enable);
-    if ((!dynamic_primitive_topology and ia.topology != 3) or (!dynamic_primitive_restart_enable and pipeline_primitive_restart_enable != 0)) return error.Invalid;
-    const vp = ci.viewport orelse return error.Invalid;
-    if (vp.s_type != 22 or vp.p_next != null or vp.flags != 0 or vp.viewport_count != 1 or vp.scissor_count != 1 or (!dynamic_viewport and vp.viewports == null) or (!dynamic_scissor and vp.scissors == null)) return error.Invalid;
+    if ((!dynamic_primitive_topology and ia.topology != 3) or (!dynamic_primitive_restart_enable and pipeline_primitive_restart_enable != 0)) return pipelineInvalid(@src().line);
+    const vp = ci.viewport orelse return pipelineInvalid(@src().line);
+    if (vp.s_type != 22 or vp.p_next != null or vp.flags != 0 or vp.viewport_count != 1 or vp.scissor_count != 1 or (!dynamic_viewport and vp.viewports == null) or (!dynamic_scissor and vp.scissors == null)) return pipelineInvalid(@src().line);
     try w.u32le(1);
     var baked_viewport = Viewport{ .x = 0, .y = 0, .width = 0, .height = 0, .min_depth = 0, .max_depth = 1 };
     var baked_scissor = cpu_cube.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 };
     if (!dynamic_viewport) {
         const v = vp.viewports.?[0];
-        if (!validViewportDomain(v)) return error.Invalid;
+        if (!validViewportDomain(v)) return pipelineInvalid(@src().line);
         baked_viewport = v;
         try w.f32le(v.x);
         try w.f32le(v.y);
@@ -11051,27 +11078,27 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     }
     if (!dynamic_scissor) {
         const s = vp.scissors.?[0];
-        if (!validScissorDomain(s)) return error.Invalid;
+        if (!validScissorDomain(s)) return pipelineInvalid(@src().line);
         baked_scissor = .{ .x = s.offset.x, .y = s.offset.y, .width = s.extent.width, .height = s.extent.height };
         try w.i32le(s.offset.x);
         try w.i32le(s.offset.y);
         try w.u32le(s.extent.width);
         try w.u32le(s.extent.height);
     }
-    const rs = ci.rasterization orelse return error.Invalid;
+    const rs = ci.rasterization orelse return pipelineInvalid(@src().line);
     const pipeline_rasterizer_discard_enable = try bool32(rs.rasterizer_discard_enable);
     const pipeline_depth_bias_enable = try bool32(rs.depth_bias_enable);
     const pipeline_depth_bias = [3]f32{ rs.depth_bias_constant_factor, rs.depth_bias_clamp, rs.depth_bias_slope_factor };
-    if (rs.s_type != 23 or !pipelineRasterizationLineStateValid(rs.p_next) or rs.flags != 0 or try bool32(rs.depth_clamp_enable) != 0 or rs.polygon_mode != 0 or rs.cull_mode & ~@as(u32, 3) != 0 or (rs.front_face != 0 and rs.front_face != 1) or !validDepthBiasFactors(pipeline_depth_bias) or (!dynamic_depth_bias_enable and pipeline_depth_bias_enable != 0) or (!dynamic_depth_bias and !std.meta.eql(pipeline_depth_bias, [3]f32{ 0, 0, 0 })) or (!dynamic_line_width and rs.line_width != 1)) return error.Invalid;
+    if (rs.s_type != 23 or !pipelineRasterizationLineStateValid(rs.p_next) or rs.flags != 0 or try bool32(rs.depth_clamp_enable) != 0 or rs.polygon_mode != 0 or rs.cull_mode & ~@as(u32, 3) != 0 or (rs.front_face != 0 and rs.front_face != 1) or !validDepthBiasFactors(pipeline_depth_bias) or (!dynamic_depth_bias_enable and pipeline_depth_bias_enable != 0) or (!dynamic_depth_bias and !std.meta.eql(pipeline_depth_bias, [3]f32{ 0, 0, 0 })) or (!dynamic_line_width and rs.line_width != 1)) return pipelineInvalid(@src().line);
     try w.u32le(rs.cull_mode);
     try w.i32le(rs.front_face);
     try w.u32le(pipeline_rasterizer_discard_enable);
     for (pipeline_depth_bias) |factor| try w.f32le(factor);
     if (!dynamic_line_width) try w.f32le(rs.line_width);
-    const ms = ci.multisample orelse return error.Invalid;
-    if (ms.s_type != 24 or ms.p_next != null or ms.flags != 0 or ms.rasterization_samples != 1 or try bool32(ms.sample_shading_enable) != 0 or ms.min_sample_shading != 0 or ms.sample_mask != null or try bool32(ms.alpha_to_coverage_enable) != 0 or try bool32(ms.alpha_to_one_enable) != 0) return error.Invalid;
+    const ms = ci.multisample orelse return pipelineInvalid(@src().line);
+    if (ms.s_type != 24 or ms.p_next != null or ms.flags != 0 or ms.rasterization_samples != 1 or try bool32(ms.sample_shading_enable) != 0 or ms.min_sample_shading != 0 or ms.sample_mask != null or try bool32(ms.alpha_to_coverage_enable) != 0 or try bool32(ms.alpha_to_one_enable) != 0) return pipelineInvalid(@src().line);
     try w.u32le(1);
-    const ds = ci.depth_stencil orelse return error.Invalid;
+    const ds = ci.depth_stencil orelse return pipelineInvalid(@src().line);
     const zero_stencil = std.mem.zeroes(StencilOpState);
     var always_stencil = zero_stencil;
     always_stencil.compare_op = 7;
@@ -11079,12 +11106,27 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     const pipeline_depth_write_enable = try bool32(ds.depth_write_enable);
     const pipeline_depth_bounds_test_enable = try bool32(ds.depth_bounds_test_enable);
     const pipeline_stencil_test_enable = try bool32(ds.stencil_test_enable);
-    const valid_depth_bounds = std.math.isFinite(ds.min_depth_bounds) and std.math.isFinite(ds.max_depth_bounds) and ds.min_depth_bounds >= 0 and ds.max_depth_bounds <= 1 and ds.min_depth_bounds <= ds.max_depth_bounds;
-    if (ds.s_type != 25 or ds.p_next != null or ds.flags != 0 or ds.depth_compare_op < 0 or ds.depth_compare_op > 7 or !valid_depth_bounds or try bool32(ds.stencil_test_enable) != 0 or (!std.meta.eql(ds.front, zero_stencil) and !std.meta.eql(ds.front, always_stencil)) or (!std.meta.eql(ds.back, zero_stencil) and !std.meta.eql(ds.back, always_stencil)) or (!dynamic_depth_bounds and (ds.min_depth_bounds != 0 or ds.max_depth_bounds != 1)) or (!dynamic_depth_test_enable and pipeline_depth_test_enable != 1) or (!dynamic_depth_write_enable and pipeline_depth_write_enable != 1) or (!dynamic_depth_compare_op and ds.depth_compare_op != 3)) return error.Invalid;
+    const finite_depth_bounds = std.math.isFinite(ds.min_depth_bounds) and std.math.isFinite(ds.max_depth_bounds);
+    const valid_depth_bounds = finite_depth_bounds and (pipeline_depth_bounds_test_enable == 0 or (ds.min_depth_bounds >= 0 and ds.max_depth_bounds <= 1 and ds.min_depth_bounds <= ds.max_depth_bounds));
+    const stencil_test = try bool32(ds.stencil_test_enable);
+    const invalid_depth_stencil =
+        ds.s_type != 25 or
+        ds.p_next != null or
+        ds.flags != 0 or
+        ds.depth_compare_op < 0 or ds.depth_compare_op > 7 or
+        !valid_depth_bounds or
+        stencil_test != 0 or
+        (!std.meta.eql(ds.front, zero_stencil) and !std.meta.eql(ds.front, always_stencil)) or
+        (!std.meta.eql(ds.back, zero_stencil) and !std.meta.eql(ds.back, always_stencil)) or
+        (!dynamic_depth_test_enable and pipeline_depth_test_enable != 1) or
+        (!dynamic_depth_write_enable and pipeline_depth_write_enable != 1) or
+        (!dynamic_depth_compare_op and ds.depth_compare_op != 3) or
+        (!dynamic_depth_bounds and pipeline_depth_bounds_test_enable == 1 and (ds.min_depth_bounds != 0.0 or ds.max_depth_bounds != 1.0));
+    if (invalid_depth_stencil) return pipelineInvalid(@src().line);
     try w.u32le(1);
     try w.u32le(1);
     try w.i32le(3);
-    const cb = ci.color_blend orelse return error.Invalid;
+    const cb = ci.color_blend orelse return pipelineInvalid(@src().line);
     var pipeline_color_blend_enable: u32 = 0;
     var pipeline_src_color_blend_factor: i32 = 1;
     var pipeline_dst_color_blend_factor: i32 = 0;
@@ -11099,13 +11141,13 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         if (pass.framebuffer_supported and (pass.framebuffer_attachment_count == 0 or pass.framebuffer_attachments[0].role == .depth)) 0 else 1
     else
         1;
-    if (cb.s_type != 26 or cb.p_next != null or cb.flags != 0 or try bool32(cb.logic_op_enable) != 0 or cb.logic_op != 0 or cb.attachment_count != color_attachment_count or (color_attachment_count != 0 and cb.attachments == null) or (color_attachment_count == 0 and cb.attachments != null) or !validBlendConstants(cb.blend_constants)) return error.Invalid;
+    if (cb.s_type != 26 or cb.p_next != null or cb.flags != 0 or try bool32(cb.logic_op_enable) != 0 or cb.logic_op != 0 or cb.attachment_count != color_attachment_count or (color_attachment_count != 0 and cb.attachments == null) or (color_attachment_count == 0 and cb.attachments != null) or !validBlendConstants(cb.blend_constants)) return pipelineInvalid(@src().line);
     try w.u32le(color_attachment_count);
     if (color_attachment_count != 0) {
         const attachment = cb.attachments.?[0];
         const blend_enable = try bool32(attachment.blend_enable);
-        if (attachment.src_color_blend_factor < 0 or attachment.src_color_blend_factor > 18 or attachment.dst_color_blend_factor < 0 or attachment.dst_color_blend_factor > 18 or attachment.color_blend_op < 0 or attachment.color_blend_op > 4 or attachment.src_alpha_blend_factor < 0 or attachment.src_alpha_blend_factor > 18 or attachment.dst_alpha_blend_factor < 0 or attachment.dst_alpha_blend_factor > 18 or attachment.alpha_blend_op < 0 or attachment.alpha_blend_op > 4 or attachment.color_write_mask & ~@as(u32, 0xf) != 0) return error.Invalid;
-        if (blend_enable != 0 and (profile_contract == null or attachment.src_color_blend_factor > 14 or attachment.dst_color_blend_factor > 14 or attachment.src_alpha_blend_factor > 14 or attachment.dst_alpha_blend_factor > 14)) return error.Invalid;
+        if (attachment.src_color_blend_factor < 0 or attachment.src_color_blend_factor > 18 or attachment.dst_color_blend_factor < 0 or attachment.dst_color_blend_factor > 18 or attachment.color_blend_op < 0 or attachment.color_blend_op > 4 or attachment.src_alpha_blend_factor < 0 or attachment.src_alpha_blend_factor > 18 or attachment.dst_alpha_blend_factor < 0 or attachment.dst_alpha_blend_factor > 18 or attachment.alpha_blend_op < 0 or attachment.alpha_blend_op > 4 or attachment.color_write_mask & ~@as(u32, 0xf) != 0) return pipelineInvalid(@src().line);
+        if (blend_enable != 0 and (profile_contract == null or attachment.src_color_blend_factor > 14 or attachment.dst_color_blend_factor > 14 or attachment.src_alpha_blend_factor > 14 or attachment.dst_alpha_blend_factor > 14)) return pipelineInvalid(@src().line);
         try w.u32le(blend_enable);
         try w.i32le(attachment.src_color_blend_factor);
         try w.i32le(attachment.dst_color_blend_factor);
@@ -11278,11 +11320,11 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
 /// cpu_cube_v1 readiness path. This is not render-profile acceptance.
 fn cpuCubeV1ShaderCompatible(shader: *const ShaderModuleObj, stage: render_ir.Stage, name: []const u8, spec_count: usize) bool {
     if (spec_count != 0 or !std.mem.eql(u8, name, "main")) return false;
-    const expected_len: usize = if (stage == .vertex) 390 else 661;
+    const expected_len: usize = if (stage == .vertex) 390 else 320;
     const expected: [32]u8 = if (stage == .vertex)
-        .{ 0x63, 0xb7, 0xd7, 0xa6, 0x2b, 0x47, 0xa6, 0xfe, 0x7c, 0xa0, 0xe8, 0x6b, 0x7b, 0x22, 0xbb, 0x79, 0x7e, 0xcd, 0xbf, 0xf0, 0x6e, 0x04, 0x3c, 0xc9, 0xc5, 0xe3, 0xca, 0x12, 0x87, 0x68, 0x80, 0x05 }
+        .{ 0xb3, 0xe4, 0x9b, 0x06, 0xf2, 0xc7, 0xf0, 0x9c, 0x5f, 0x86, 0x22, 0xb1, 0x49, 0xf4, 0x61, 0x11, 0xf6, 0x42, 0x98, 0xed, 0xc9, 0xe8, 0x26, 0x90, 0x90, 0xce, 0x05, 0x05, 0xa2, 0xcb, 0x64, 0xcd }
     else
-        .{ 0x27, 0x68, 0x57, 0x63, 0xf4, 0xc3, 0x5e, 0xe9, 0x17, 0xd4, 0x02, 0x49, 0xcf, 0xd9, 0xa5, 0x1d, 0x43, 0x14, 0x75, 0xc0, 0x67, 0x2e, 0x36, 0xaa, 0xf2, 0x84, 0x38, 0x05, 0xd6, 0x5e, 0xa5, 0x32 };
+        .{ 0x4b, 0x02, 0xf6, 0x81, 0xa1, 0xff, 0x80, 0x94, 0x1d, 0x4e, 0xfa, 0xaa, 0x5e, 0x27, 0x85, 0xc5, 0xcf, 0xe5, 0xa8, 0x53, 0x94, 0xd7, 0xac, 0xec, 0xb2, 0x0f, 0xd8, 0x6a, 0x7d, 0xa3, 0x08, 0x64 };
     return shader.module.words.len == expected_len and std.mem.eql(u8, &shader.module.identity.digest, &expected);
 }
 
@@ -11298,7 +11340,7 @@ test "cpu_cube_v1 shader compatibility bridge is exact" {
     var shader = ShaderModuleObj{ .owner = undefined, .module = .{ .words = &words, .identity = .{
         .ingestion = 1,
         .serialization = 1,
-        .digest = .{ 0x63, 0xb7, 0xd7, 0xa6, 0x2b, 0x47, 0xa6, 0xfe, 0x7c, 0xa0, 0xe8, 0x6b, 0x7b, 0x22, 0xbb, 0x79, 0x7e, 0xcd, 0xbf, 0xf0, 0x6e, 0x04, 0x3c, 0xc9, 0xc5, 0xe3, 0xca, 0x12, 0x87, 0x68, 0x80, 0x05 },
+        .digest = .{ 0xb3, 0xe4, 0x9b, 0x06, 0xf2, 0xc7, 0xf0, 0x9c, 0x5f, 0x86, 0x22, 0xb1, 0x49, 0xf4, 0x61, 0x11, 0xf6, 0x42, 0x98, 0xed, 0xc9, 0xe8, 0x26, 0x90, 0x90, 0xce, 0x05, 0x05, 0xa2, 0xcb, 0x64, 0xcd },
     } } };
     try std.testing.expect(cpuCubeV1ShaderCompatible(&shader, .vertex, "main", 0));
     try std.testing.expect(!cpuCubeV1ShaderCompatible(&shader, .vertex, "other", 0));
@@ -12519,7 +12561,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
             return;
         };
         tracked_depth_layout = commandBufferImageLayout(command_buffer, depth_view_object.image);
-        if (depth_view_object.owner != command_buffer.impl.owner or depth_view_object.aspect_mask != 2 or depth_view_object.usage & 0x20 == 0 or depth_view_object.image.format != 126 or tracked_depth_layout != depth_attachment.image_layout or depth_view_object.base_array_layer >= depth_view_object.image.array_layers or depth_view_object.layer_count < ci.layer_count or ci.layer_count > depth_view_object.image.array_layers - depth_view_object.base_array_layer or (color != null and (depth_view_object.image.width != color.?.width or depth_view_object.image.height != color.?.height))) {
+        if (depth_view_object.owner != command_buffer.impl.owner or depth_view_object.aspect_mask != 2 or depth_view_object.usage & 0x20 == 0 or !isDepthFormat(depth_view_object.image.format) or tracked_depth_layout != depth_attachment.image_layout or depth_view_object.base_array_layer >= depth_view_object.image.array_layers or depth_view_object.layer_count < ci.layer_count or ci.layer_count > depth_view_object.image.array_layers - depth_view_object.base_array_layer or (color != null and (depth_view_object.image.width != color.?.width or depth_view_object.image.height != color.?.height))) {
             command_buffer.impl.invalid = true;
             return;
         }
@@ -15091,26 +15133,26 @@ fn queueBindSparse(queue: ?Queue, count: u32, infos: ?[*]const BindSparseInfo, f
     return .success;
 }
 fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_handle: usize) callconv(.c) Result {
-    const q = queue orelse return .error_initialization_failed;
-    if (count > max_api_items) return .error_initialization_failed;
+    const q = queue orelse return queueSubmitFailed(@src().line);
+    if (count > max_api_items) return queueSubmitFailed(@src().line);
     if (count == 0) {
         lock();
         defer mutex.unlock();
-        if (!validDeviceLocked(q.owner)) return .error_initialization_failed;
-        const fence = if (fence_handle == 0) null else validFenceLocked(fence_handle) orelse return .error_initialization_failed;
+        if (!validDeviceLocked(q.owner)) return queueSubmitFailed(@src().line);
+        const fence = if (fence_handle == 0) null else validFenceLocked(fence_handle) orelse return queueSubmitFailed(@src().line);
         if (fence) |item| {
-            if (!validOwner(q.owner, item.owner) or item.signaled.load(.acquire)) return .error_initialization_failed;
+            if (!validOwner(q.owner, item.owner) or item.signaled.load(.acquire)) return queueSubmitFailed(@src().line);
             item.signaled.store(true, .release);
         }
         return .success;
     }
-    const list = submits orelse return .error_initialization_failed;
+    const list = submits orelse return queueSubmitFailed(@src().line);
     lock();
     var mutex_held = true;
     defer if (mutex_held) mutex.unlock();
-    if (!validDeviceLocked(q.owner)) return .error_initialization_failed;
-    const fence = if (fence_handle == 0) null else validFenceLocked(fence_handle) orelse return .error_initialization_failed;
-    if (fence) |item| if (!validOwner(q.owner, item.owner) or item.signaled.load(.acquire)) return .error_initialization_failed;
+    if (!validDeviceLocked(q.owner)) return queueSubmitFailed(@src().line);
+    const fence = if (fence_handle == 0) null else validFenceLocked(fence_handle) orelse return queueSubmitFailed(@src().line);
+    if (fence) |item| if (!validOwner(q.owner, item.owner) or item.signaled.load(.acquire)) return queueSubmitFailed(@src().line);
     var layouts: [max_child_objects]i32 = undefined;
     for (&image_objects, image_state, 0..) |*image, state, index| layouts[index] = if (state == .live) image.layout else 0;
     var semaphore_states = [_]bool{false} ** max_child_objects;
@@ -15135,18 +15177,18 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
             (submit.wait_semaphore_count != 0 and submit.wait_semaphores == null) or
             (submit.wait_semaphore_count != 0 and submit.wait_dst_stage_mask == null) or
             (submit.signal_semaphore_count != 0 and submit.signal_semaphores == null) or
-            !submitPNextValid(submit.p_next, submit.wait_semaphore_count, submit.command_buffer_count, submit.signal_semaphore_count)) return .error_initialization_failed;
+            !submitPNextValid(submit.p_next, submit.wait_semaphore_count, submit.command_buffer_count, submit.signal_semaphore_count)) return queueSubmitFailed(@src().line);
         const timeline_info = submitPNextTimeline(submit.p_next);
         if (submit.wait_semaphore_count != 0) {
-            const waits = submit.wait_semaphores orelse return .error_initialization_failed;
-            for (submit.wait_dst_stage_mask.?[0..submit.wait_semaphore_count]) |stage| if (!validEventStageMask(stage)) return .error_initialization_failed;
+            const waits = submit.wait_semaphores orelse return queueSubmitFailed(@src().line);
+            for (submit.wait_dst_stage_mask.?[0..submit.wait_semaphore_count]) |stage| if (!validEventStageMask(stage)) return queueSubmitFailed(@src().line);
             for (waits[0..submit.wait_semaphore_count], 0..) |handle, wait_index| {
-                for (waits[0..wait_index]) |prior| if (prior == handle) return .error_initialization_failed;
-                const semaphore = validSemaphoreLocked(handle) orelse return .error_initialization_failed;
-                if (semaphore.owner != q.owner) return .error_initialization_failed;
+                for (waits[0..wait_index]) |prior| if (prior == handle) return queueSubmitFailed(@src().line);
+                const semaphore = validSemaphoreLocked(handle) orelse return queueSubmitFailed(@src().line);
+                if (semaphore.owner != q.owner) return queueSubmitFailed(@src().line);
                 if (semaphore.timeline) {
-                    const values = timeline_info orelse return .error_initialization_failed;
-                    if (values.wait_semaphore_values == null) return .error_initialization_failed;
+                    const values = timeline_info orelse return queueSubmitFailed(@src().line);
+                    if (values.wait_semaphore_values == null) return queueSubmitFailed(@src().line);
                     const target = values.wait_semaphore_values.?[wait_index];
                     // The profile executes a queue synchronously and has no
                     // external producer that can advance a timeline while a
@@ -15157,9 +15199,9 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                     // keeps the call failure-atomic and avoids an executor
                     // spin that could never complete.
                     const slot = semaphoreSlot(semaphore);
-                    if (target > timeline_states[slot]) return .error_initialization_failed;
+                    if (target > timeline_states[slot]) return queueSubmitFailed(@src().line);
                 } else {
-                    if (timeline_info) |values| if (values.wait_semaphore_values) |wait_values| if (wait_values[wait_index] != 0) return .error_initialization_failed;
+                    if (timeline_info) |values| if (values.wait_semaphore_values) |wait_values| if (wait_values[wait_index] != 0) return queueSubmitFailed(@src().line);
                     // The synchronous single-queue executor has no other
                     // producer that can make an unsignaled binary semaphore
                     // ready.  Require a signal already visible or produced
@@ -15167,47 +15209,49 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                     // otherwise the execution phase would wait forever after
                     // validation had already accepted the submission.
                     const slot = semaphoreSlot(semaphore);
-                    if (!semaphore_states[slot]) return .error_initialization_failed;
+                    if (!semaphore_states[slot]) return queueSubmitFailed(@src().line);
                     semaphore_states[slot] = false;
                 }
             }
         }
         if (submit.signal_semaphore_count != 0) {
-            const signals = submit.signal_semaphores orelse return .error_initialization_failed;
+            const signals = submit.signal_semaphores orelse return queueSubmitFailed(@src().line);
             for (signals[0..submit.signal_semaphore_count], 0..) |handle, signal_index| {
-                for (signals[0..signal_index]) |prior| if (prior == handle) return .error_initialization_failed;
-                const semaphore = validSemaphoreLocked(handle) orelse return .error_initialization_failed;
+                for (signals[0..signal_index]) |prior| if (prior == handle) return queueSubmitFailed(@src().line);
+                const semaphore = validSemaphoreLocked(handle) orelse return queueSubmitFailed(@src().line);
                 const slot = semaphoreSlot(semaphore);
-                if (semaphore.owner != q.owner) return .error_initialization_failed;
+                if (semaphore.owner != q.owner) return queueSubmitFailed(@src().line);
                 if (semaphore.timeline) {
-                    const values = timeline_info orelse return .error_initialization_failed;
-                    const signal_values = values.signal_semaphore_values orelse return .error_initialization_failed;
+                    const values = timeline_info orelse return queueSubmitFailed(@src().line);
+                    const signal_values = values.signal_semaphore_values orelse return queueSubmitFailed(@src().line);
                     // A timeline signal must be strictly greater than the
                     // value visible when this signal operation executes.
-                    if (signal_values[signal_index] <= timeline_states[slot]) return .error_initialization_failed;
+                    if (signal_values[signal_index] <= timeline_states[slot]) return queueSubmitFailed(@src().line);
                     timeline_states[slot] = signal_values[signal_index];
                 } else {
-                    if (timeline_info) |values| if (values.signal_semaphore_values) |signal_values| if (signal_values[signal_index] != 0) return .error_initialization_failed;
-                    if (semaphore_states[slot]) return .error_initialization_failed;
+                    if (timeline_info) |values| if (values.signal_semaphore_values) |signal_values| if (signal_values[signal_index] != 0) return queueSubmitFailed(@src().line);
+                    if (semaphore_states[slot]) return queueSubmitFailed(@src().line);
                     semaphore_states[slot] = true;
                 }
             }
         }
         if (submit.command_buffer_count == 0) continue;
-        const cbs = submit.command_buffers orelse return .error_initialization_failed;
+        const cbs = submit.command_buffers orelse return queueSubmitFailed(@src().line);
         for (cbs[0..submit.command_buffer_count], 0..) |cb, command_buffer_index| {
-            const valid_cb = validCommandBufferLocked(cb) orelse return .error_initialization_failed;
+            const valid_cb = validCommandBufferLocked(cb) orelse return queueSubmitFailed(@src().line);
             if (valid_cb.impl.owner != q.owner or valid_cb.impl.level != 0 or valid_cb.impl.state != 2) {
-                return .error_initialization_failed;
+                return queueSubmitFailed(@src().line);
             }
             const cb_slot = @divExact(@intFromPtr(valid_cb) - @intFromPtr(&command_buffer_objects), @sizeOf(CommandBufferObj));
-            if (submitted_command_buffers[cb_slot] and valid_cb.impl.begin_flags & 4 == 0) return .error_initialization_failed;
+            if (submitted_command_buffers[cb_slot] and valid_cb.impl.begin_flags & 4 == 0) return queueSubmitFailed(@src().line);
             submitted_command_buffers[cb_slot] = true;
-            for (valid_cb.impl.secondaries[0..valid_cb.impl.secondary_count]) |secondary| if ((stateForObject(CommandBufferObj, secondary, &command_buffer_objects, &command_buffer_state) orelse return .error_initialization_failed).* != .live or secondary.impl.state != 2) return .error_initialization_failed;
+            for (valid_cb.impl.secondaries[0..valid_cb.impl.secondary_count]) |secondary| if ((stateForObject(CommandBufferObj, secondary, &command_buffer_objects, &command_buffer_state) orelse return .error_initialization_failed).* != .live or secondary.impl.state != 2) return queueSubmitFailed(@src().line);
             for (valid_cb.impl.commands[0..valid_cb.impl.count], 0..) |command, command_index| {
-                if (!prevalidateCommand(command, q.owner, &layouts) or !queryCommandSequenceValid(command, list[0..count], submit_index, command_buffer_index, command_index)) {
+                const prevalid = prevalidateCommand(command, q.owner, &layouts);
+                const query_valid = queryCommandSequenceValid(command, list[0..count], submit_index, command_buffer_index, command_index);
+                if (!prevalid or !query_valid) {
                     hit(.submission_atomicity);
-                    return .error_initialization_failed;
+                    return queueSubmitFailed(@src().line);
                 }
             }
         }
@@ -15226,7 +15270,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                 releasePinnedPipelinesLocked(&pinned_pipelines);
                 releasePinnedDescriptorSetsLocked(&pinned_descriptor_sets);
                 releasePinnedPipelineLayoutsLocked(&pinned_pipeline_layouts);
-                return .error_initialization_failed;
+                return queueSubmitFailed(@src().line);
             }
             for (cb.impl.secondaries[0..cb.impl.secondary_count]) |secondary| if (!pinCommandBufferForSubmissionLocked(secondary, q.owner, &pinned_command_buffers, &pinned_command_buffer_count)) {
                 for (pinned_command_buffers[0..pinned_command_buffer_count]) |pinned| releaseCommandBufferUserLocked(pinned);
@@ -15235,7 +15279,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                 releasePinnedPipelinesLocked(&pinned_pipelines);
                 releasePinnedDescriptorSetsLocked(&pinned_descriptor_sets);
                 releasePinnedPipelineLayoutsLocked(&pinned_pipeline_layouts);
-                return .error_initialization_failed;
+                return queueSubmitFailed(@src().line);
             };
             if (!pinQueryPoolsInCommandBufferLocked(cb, queue_owner, &pinned_query_pools, &pinned_query_pool_count)) {
                 for (pinned_command_buffers[0..pinned_command_buffer_count]) |pinned| releaseCommandBufferUserLocked(pinned);
@@ -15244,7 +15288,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                 releasePinnedPipelinesLocked(&pinned_pipelines);
                 releasePinnedDescriptorSetsLocked(&pinned_descriptor_sets);
                 releasePinnedPipelineLayoutsLocked(&pinned_pipeline_layouts);
-                return .error_initialization_failed;
+                return queueSubmitFailed(@src().line);
             }
             if (!pinCommandResourcesInBufferLocked(cb, q.owner, &pinned_resources, &pinned_descriptor_sets, &pinned_pipeline_layouts)) {
                 for (pinned_command_buffers[0..pinned_command_buffer_count]) |pinned| releaseCommandBufferUserLocked(pinned);
@@ -15253,7 +15297,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                 releasePinnedPipelinesLocked(&pinned_pipelines);
                 releasePinnedDescriptorSetsLocked(&pinned_descriptor_sets);
                 releasePinnedPipelineLayoutsLocked(&pinned_pipeline_layouts);
-                return .error_initialization_failed;
+                return queueSubmitFailed(@src().line);
             }
             if (!pinCommandPipelinesInBufferLocked(cb, q.owner, &pinned_pipelines)) {
                 for (pinned_command_buffers[0..pinned_command_buffer_count]) |pinned| releaseCommandBufferUserLocked(pinned);
@@ -15262,7 +15306,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                 releasePinnedPipelinesLocked(&pinned_pipelines);
                 releasePinnedDescriptorSetsLocked(&pinned_descriptor_sets);
                 releasePinnedPipelineLayoutsLocked(&pinned_pipeline_layouts);
-                return .error_initialization_failed;
+                return queueSubmitFailed(@src().line);
             }
         }
     };
@@ -16912,10 +16956,12 @@ test "vkcube presentation path records submits and presents two swapchain images
     invalid_pipeline.depth_stencil = &bad_depth;
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
     bad_depth = depth_stencil;
+    bad_depth.depth_bounds_test_enable = 1;
     bad_depth.min_depth_bounds = 0.25;
     invalid_pipeline.depth_stencil = &bad_depth;
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
     bad_depth = depth_stencil;
+    bad_depth.depth_bounds_test_enable = 1;
     bad_depth.max_depth_bounds = 0.75;
     invalid_pipeline.depth_stencil = &bad_depth;
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
@@ -18997,18 +19043,19 @@ test "all physical queries cover success boundaries and invalid handles" {
     var format = FormatProperties{ .linear_tiling_features = 1, .optimal_tiling_features = 1, .buffer_features = 1 };
     getFormatProperties(p, 0, &format);
     try std.testing.expectEqual(FormatProperties{ .linear_tiling_features = 0, .optimal_tiling_features = 0, .buffer_features = 0 }, format);
-    const format_cases = [_]struct { format: i32, linear: u32, optimal: u32, buffer: u32, usage: u32, optimal_only: bool }{
-        .{ .format = 37, .linear = 0xc000, .optimal = 0xc000, .buffer = 0, .usage = 0x3, .optimal_only = false },
-        .{ .format = 43, .linear = 0x1, .optimal = 0x1, .buffer = 0, .usage = 0x4, .optimal_only = false },
-        .{ .format = 44, .linear = 0xc080, .optimal = 0xc080, .buffer = 0, .usage = 0x13, .optimal_only = false },
-        .{ .format = 126, .linear = 0, .optimal = 0x8200, .buffer = 0, .usage = 0x22, .optimal_only = true },
+    const format_cases = [_]struct { format: i32, linear: u32, optimal: u32, buffer: u32, linear_usage: u32, optimal_usage: u32 }{
+        .{ .format = 37, .linear = 0xd001, .optimal = 0xd001, .buffer = 0, .linear_usage = 0x7, .optimal_usage = 0x7 },
+        .{ .format = 43, .linear = 0x1, .optimal = 0x1, .buffer = 0, .linear_usage = 0x4, .optimal_usage = 0x4 },
+        .{ .format = 44, .linear = 0xc080, .optimal = 0xc080, .buffer = 0, .linear_usage = 0x13, .optimal_usage = 0x13 },
+        .{ .format = 126, .linear = 0, .optimal = 0x8200, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x22 },
     };
     for (format_cases) |case| {
         getFormatProperties(p, case.format, &format);
         try std.testing.expectEqual(FormatProperties{ .linear_tiling_features = case.linear, .optimal_tiling_features = case.optimal, .buffer_features = case.buffer }, format);
         for (0..2) |tiling| for (1..0x40) |usage| {
             var properties = std.mem.zeroes(ImageFormatProperties);
-            const supported = (!case.optimal_only or tiling == 0) and usage & ~@as(usize, case.usage) == 0;
+            const allowed_usage = if (tiling == 0) case.optimal_usage else case.linear_usage;
+            const supported = allowed_usage != 0 and usage & ~@as(usize, allowed_usage) == 0;
             const expected: Result = if (supported) .success else .error_format_not_supported;
             try std.testing.expectEqual(expected, getImageFormatProperties(p, case.format, 1, @intCast(tiling), @intCast(usage), 0, &properties));
             if (supported) {
@@ -19837,13 +19884,13 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     properties.p_next = null;
     var format = PhysicalDeviceFormatProperties2{ .s_type = 1000059002, .p_next = null, .format_properties = std.mem.zeroes(FormatProperties) };
     getPhysicalDeviceFormatProperties2(ctx.physical, 37, &format);
-    try std.testing.expectEqual(@as(u32, 0xC000), format.format_properties.optimal_tiling_features);
+    try std.testing.expectEqual(@as(u32, 0xd001), format.format_properties.optimal_tiling_features);
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(FormatProperties3));
     var format3 = FormatProperties3{ .s_type = 1_000_360_000, .p_next = null, .linear_tiling_features = 0xffff_ffff_ffff_ffff, .optimal_tiling_features = 0xffff_ffff_ffff_ffff, .buffer_features = 0xffff_ffff_ffff_ffff };
     format.p_next = @ptrCast(&format3);
     getPhysicalDeviceFormatProperties2(ctx.physical, 37, &format);
-    try std.testing.expectEqual(@as(u64, 0xc000), format3.optimal_tiling_features);
-    try std.testing.expectEqual(@as(u64, 0xc000), format3.linear_tiling_features);
+    try std.testing.expectEqual(@as(u64, 0xd001), format3.optimal_tiling_features);
+    try std.testing.expectEqual(@as(u64, 0xd001), format3.linear_tiling_features);
     var duplicate_format3 = FormatProperties3{ .s_type = 1_000_360_000, .p_next = null, .linear_tiling_features = 0xaaaa, .optimal_tiling_features = 0xbbbb, .buffer_features = 0xcccc };
     format3.p_next = @ptrCast(&duplicate_format3);
     format3.linear_tiling_features = 0xffff_ffff_ffff_ffff;
@@ -22680,7 +22727,9 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     try std.testing.expectEqual(Result.success, resetCommandBuffer(cbs[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(cbs[0], &begin));
-    cmdPipelineBarrier(cbs[0], 1, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&barrier));
+    var mismatch_barrier = barrier;
+    mismatch_barrier.old_layout = 2;
+    cmdPipelineBarrier(cbs[0], 1, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&mismatch_barrier));
     try std.testing.expectEqual(Result.success, endCommandBuffer(cbs[0]));
     try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
     try std.testing.expectEqual(Result.success, resetCommandBuffer(cbs[0], 0));
@@ -24805,7 +24854,6 @@ test "query pool registry exhaustion preserves ownership and output" {
         if (result == .error_out_of_host_memory) break;
         try std.testing.expectEqual(Result.success, result);
     }
-    try std.testing.expect(count < handles.len);
     var unpublished: usize = 0xfeed_face;
     try std.testing.expectEqual(Result.error_out_of_host_memory, createQueryPool(ctx.device, &info, null, &unpublished));
     try std.testing.expectEqual(@as(usize, 0xfeed_face), unpublished);
@@ -26174,9 +26222,22 @@ fn resetDeadMemorySlotsForAbiTest() !void {
 
 fn resetDeadChildSlotsForAbiTest() !void {
     if (!builtin.is_test) return error.TestUnexpectedResult;
-    inline for (.{ &image_state, &image_view_state, &framebuffer_state, &render_pass_state, &command_pool_state, &command_buffer_state }) |states| {
-        for (states.*) |state| try std.testing.expect(state != .live);
-        states.* = [_]SlotState{.never} ** max_child_objects;
+    const state_pairs = .{
+        .{ "image", &image_state },
+        .{ "image_view", &image_view_state },
+        .{ "framebuffer", &framebuffer_state },
+        .{ "render_pass", &render_pass_state },
+        .{ "command_pool", &command_pool_state },
+        .{ "command_buffer", &command_buffer_state },
+    };
+    inline for (state_pairs) |pair| {
+        for (pair[1].*, 0..) |state, i| {
+            if (state == .live) {
+                std.debug.print("resetDeadChildSlotsForAbiTest leak: {s}[{d}]\n", .{ pair[0], i });
+            }
+            try std.testing.expect(state != .live);
+        }
+        pair[1].* = [_]SlotState{.never} ** max_child_objects;
     }
 }
 

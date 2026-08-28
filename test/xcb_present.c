@@ -64,9 +64,9 @@ static int load_vkcube_shaders(uint32_t **vertex, size_t *vertex_size, uint32_t 
     const uint8_t magic[4] = { 3, 2, 35, 7 };
     size_t offsets[2] = { 0, 0 }, found = 0;
     for (size_t i = 0; i + 4 <= (size_t)length && found < 2; ++i) if (memcmp(bytes + i, magic, 4) == 0) offsets[found++] = i;
-    CHECK_TRUE(found == 2 && offsets[0] + 390 * 4 <= (size_t)length && offsets[1] + 661 * 4 <= (size_t)length);
+    CHECK_TRUE(found == 2 && offsets[0] + 390 * 4 <= (size_t)length && offsets[1] + 320 * 4 <= (size_t)length);
     *vertex_size = 390 * 4;
-    *fragment_size = 661 * 4;
+    *fragment_size = 320 * 4;
     *vertex = malloc(*vertex_size);
     *fragment = malloc(*fragment_size);
     CHECK_TRUE(*vertex != NULL && *fragment != NULL);

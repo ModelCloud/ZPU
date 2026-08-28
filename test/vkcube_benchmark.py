@@ -55,7 +55,7 @@ def main() -> int:
         "timeout", "180s", "xvfb-run", "-a", "-s",
         f"-screen 0 {width}x{height}x24 -nolisten tcp -fakescreenfps 240",
         "taskset", "-c", ",".join(map(str, client_cpus)),
-        "vkcube", "--wsi", "xcb", "--c", str(presented_frames),
+        "vkcube", "--c", str(presented_frames),
         "--width", str(width), "--height", str(height), "--suppress_popups",
     ]
     with tempfile.TemporaryDirectory(prefix="zpu-vkcube-") as temporary_directory:
