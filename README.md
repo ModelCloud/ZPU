@@ -19,12 +19,19 @@ ZPU ICD, the ICD validates the call, and the CPU does the work. 🧠➡️🖼�
   <img src="docs/assets/zpu-intro.svg" alt="Introducing ZPU" width="100%">
 </p>
 
+<p align="center">
+  <img src="docs/assets/zpu-chromium-google.png" alt="ZPU rendering google.com in headless Chromium" width="720">
+  <br>
+  <em>SmolVM → Linux Desktop → Chromium: ZPU as the Vulkan driver rendering google.com headlessly with ANGLE.</em>
+</p>
+
 ## ✨ At a glance
 
 | Area | State | Evidence / scope |
 | --- | --- | --- |
 | Vulkan 1.4 core command ABI | ✅ **234/234** | Every cumulative 1.0–1.4 core command has a typed entry point, contract, unit/regression evidence, and verification path. See [`docs/vulkan-abi.md`](docs/vulkan-abi.md). |
-| Runtime Vulkan feature set | ⚠️ Bounded Vulkan 1.0 | The ICD advertises 1.0 today. Command-level ABI coverage is not a full feature, profile, or CTS-conformance claim. [`docs/api-policy.md`](docs/api-policy.md) is normative. |
+| Runtime Vulkan feature set | ⚠️ Bounded Vulkan 1.1 | The ICD advertises 1.1 today. Command-level ABI coverage is not a full feature, profile, or CTS-conformance claim. [`docs/api-policy.md`](docs/api-policy.md) is normative. |
+| Chromium / ANGLE headless | ✅ `google.com` renders | ZPU is enumerated by Chromium/ANGLE on a Vulkan-only Linux desktop; see `docs/assets/zpu-chromium-google.png`. |
 | Zig implementation | ✅ Zig 0.16.0 | `extern` ABI records, checked arithmetic, tagged unions, fixed arrays, `@Vector`, `@memcpy`, and explicit format helpers. |
 | 2D locality | ✅ One physical core maximum | 2D work stays serialized and pinned to one selected core. |
 | Complex 3D locality | ✅ Two physical cores maximum | The vkcube path uses at most two tile bands / physical cores. |
