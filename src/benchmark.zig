@@ -182,9 +182,9 @@ fn terminalAtlas(src: []const u8, atlas: *[64 * 16 * 4]u8) void {
     // Terminal glyph caches are masks: channels carry the cached color while
     // coverage is normally binary. A deterministic bitmap pattern gives the
     // SIMD path realistic transparent/opaque runs without an empty workload.
-    for (0..8) |glyph| for (0..8) |y| for (0..8) |x| {
-        const alpha: u8 = if ((glyph * 7 + y * 3 + x * 5) % 11 < 5) 255 else 0;
-        atlas[((y * 64 + glyph * 8 + x) * 4) + 3] = alpha;
+    for (0..16) |y| for (0..64) |x| {
+        const alpha: u8 = if (y < 8 and ((x / 8) * 7 + y * 3 + (x % 8) * 5) % 11 < 5) 255 else 0;
+        atlas[((y * 64 + x) * 4) + 3] = alpha;
     };
 }
 

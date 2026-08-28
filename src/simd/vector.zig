@@ -137,3 +137,35 @@ pub fn blendPixels(comptime lanes: usize, row: []u8, start: usize, source: []con
     }
     scalar.blendPixels(row, start + i, source[i * 4 ..], count - i, format);
 }
+
+/// Blend a source span with binary alpha coverage. The vector path selects
+/// between the unchanged destination and an opaque source pixel, avoiding the
+/// source-over divides used by arbitrary-alpha textures.
+pub fn blendPixelsBinary(comptime lanes: usize, row: []u8, start: usize, source: []const u8, count: usize, format: s.Format) void {
+    const V = @Vector(lanes, u32);
+    const channel_mask: V = @splat(0xff);
+    var i: usize = 0;
+    while (i + lanes <= count) : (i += lanes) {
+        var source_bytes: [lanes * 4]u8 = undefined;
+        @memcpy(&source_bytes, source[i * 4 ..][0 .. lanes * 4]);
+        const packed_source: V = nativePacked(lanes, source_bytes);
+        const sr = packed_source & channel_mask;
+        const sg = (packed_source >> @as(V, @splat(8))) & channel_mask;
+        const sb = (packed_source >> @as(V, @splat(16))) & channel_mask;
+        const sa = packed_source >> @as(V, @splat(24));
+        const transparent_mask = sa == @as(V, @splat(0));
+        const opaque_mask = sa == @as(V, @splat(255));
+        if (@reduce(.And, transparent_mask)) continue;
+        var destination_bytes: [lanes * 4]u8 = undefined;
+        @memcpy(&destination_bytes, row[(start + i) * 4 ..][0 .. lanes * 4]);
+        const packed_destination: V = nativePacked(lanes, destination_bytes);
+        const source_as_destination = if (format == .rgba8_unorm)
+            packed_source
+        else
+            sb | (sg << @as(V, @splat(8))) | (sr << @as(V, @splat(16))) | (sa << @as(V, @splat(24)));
+        const packed_output = @select(u32, opaque_mask, source_as_destination, packed_destination);
+        const output_bytes = packedBytes(lanes, packed_output);
+        @memcpy(row[(start + i) * 4 ..][0 .. lanes * 4], &output_bytes);
+    }
+    scalar.blendPixelsBinary(row, start + i, source[i * 4 ..], count - i, format);
+}

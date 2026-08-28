@@ -124,6 +124,18 @@ pub fn blendRectWith(surface: *s.Surface, rect: s.Rect, color: s.Color, backend:
 pub const ColoredRect = struct { rect: s.Rect, color: s.Color };
 pub const SpriteRegion = dispatch.SpriteRegion;
 
+fn hasBinaryAlpha(source: []const u8, source_width: u32, source_height: u32) bool {
+    const pixels = std.math.mul(usize, source_width, source_height) catch return false;
+    const bytes = std.math.mul(usize, pixels, 4) catch return false;
+    if (source.len < bytes) return false;
+    var offset: usize = 3;
+    while (offset < bytes) : (offset += 4) {
+        const alpha = source[offset];
+        if (alpha != 0 and alpha != 255) return false;
+    }
+    return true;
+}
+
 fn fillRectBackend(comptime backend: dispatch.Backend, surface: *s.Surface, rect: s.Rect, color: s.Color) void {
     if (rect.width == 1 and rect.height == 1) {
         if (rect.x < 0 or rect.y < 0 or @as(u32, @intCast(rect.x)) >= surface.width or @as(u32, @intCast(rect.y)) >= surface.height) return;
@@ -273,7 +285,7 @@ pub fn drawSpriteRegionsWith(surface: *s.Surface, regions: []const SpriteRegion,
         if (sx > source_width or sy > source_height or source_rect.width > source_width - sx or source_rect.height > source_height - sy) continue;
         if (region.destination.width != source_rect.width or region.destination.height != source_rect.height) continue;
     }
-    dispatch.blendPixelsRowsRegionsBatch(backend, surface, regions, source, source_width, source_height);
+    dispatch.blendPixelsRowsRegionsBatch(backend, surface, regions, source, source_width, source_height, hasBinaryAlpha(source, source_width, source_height));
 }
 
 pub fn drawSpriteRegions(surface: *s.Surface, regions: []const SpriteRegion, source: []const u8, source_width: u32, source_height: u32) void {
@@ -355,4 +367,31 @@ test "atlas sprite batches preserve source rectangles and clipping" {
     const invalid = [_]SpriteRegion{.{ .destination = .{ .x = 0, .y = 0, .width = 2, .height = 2 }, .source = .{ .x = 5, .y = 3, .width = 2, .height = 2 } }};
     drawSpriteRegionsWith(&batched, &invalid, &atlas, 6, 4, .scalar);
     try std.testing.expectEqualSlices(u8, &before, &batched_pixels);
+}
+
+test "binary alpha atlas batches match scalar BGRA composition" {
+    var atlas: [8 * 4 * 4]u8 = undefined;
+    for (0..4) |y| for (0..8) |x| {
+        const index = (y * 8 + x) * 4;
+        atlas[index] = @truncate(x * 31 + y * 7);
+        atlas[index + 1] = @truncate(x * 13 + y * 29);
+        atlas[index + 2] = @truncate(x * 19 + y * 11);
+        atlas[index + 3] = if ((x + y) % 3 == 0) 255 else 0;
+    };
+    var batched_pixels = [_]u8{0x23} ** (8 * 6 * 4);
+    var individual_pixels = batched_pixels;
+    var batched = try s.Surface.init(&batched_pixels, 8, 6, 32, .bgra8_unorm);
+    var individual = try s.Surface.init(&individual_pixels, 8, 6, 32, .bgra8_unorm);
+    const regions = [_]SpriteRegion{
+        .{ .destination = .{ .x = -1, .y = 1, .width = 4, .height = 3 }, .source = .{ .x = 1, .y = 0, .width = 4, .height = 3 } },
+        .{ .destination = .{ .x = 3, .y = 3, .width = 3, .height = 1 }, .source = .{ .x = 0, .y = 2, .width = 3, .height = 1 } },
+    };
+    drawSpriteRegionsWith(&batched, &regions, &atlas, 8, 4, .portable_vector);
+    var first_source: [4 * 3 * 4]u8 = undefined;
+    for (0..3) |y| for (0..4) |x| @memcpy(first_source[(y * 4 + x) * 4 ..][0..4], atlas[(y * 8 + (1 + x)) * 4 ..][0..4]);
+    drawSpriteWith(&individual, regions[0].destination, &first_source, 4, 3, .scalar);
+    var second_source: [3 * 1 * 4]u8 = undefined;
+    for (0..3) |x| @memcpy(second_source[x * 4 ..][0..4], atlas[(2 * 8 + x) * 4 ..][0..4]);
+    drawSpriteWith(&individual, regions[1].destination, &second_source, 3, 1, .scalar);
+    try std.testing.expectEqualSlices(u8, &individual_pixels, &batched_pixels);
 }

@@ -312,6 +312,13 @@ models. `fillRectsWith`/`blendRectsWith` batch colored UI primitives while
 backend once without changing clipping or draw order. Their rates are
 reported as `draws/s` alongside MPix/s so command-heavy workloads remain
 visible rather than being hidden behind a single synthetic frame number.
+Atlas batches classify a source with binary alpha coverage once per call;
+terminal-style transparent glyph pixels then skip destination reads and opaque
+pixels use direct format-aware writes, while arbitrary-alpha textures retain
+the general source-over kernel. On the validation host this moved
+`terminal_cells` from about **15.5M** to **23.5M draws/s** (the same
+ReleaseFast, 240×240, limited-core run); the checksum and clipping oracle stay
+unchanged.
 
 ## 📐 3D throughput on two cores
 
