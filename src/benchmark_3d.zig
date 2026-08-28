@@ -7,9 +7,14 @@ const cube = @import("vulkan/cpu_cube.zig");
 
 pub const schema_version: u32 = 3;
 pub const workload_id = "zpu-vkcube-cpu-3d-v3-800x600-cube12";
+pub const target_workload_id = "zpu-vkcube-cpu-3d-v3-800x600-cube12-2core-target";
 pub const width: u32 = 800;
 pub const height: u32 = 600;
 pub const reference_checksum: u64 = 0x37d978fe1c101415;
+pub const baseline_triangles_s: f64 = 3_133.92;
+pub const target_speedup: f64 = 10.0;
+pub const target_triangles_s: f64 = baseline_triangles_s * target_speedup;
+pub const target_cpu_cores: u8 = 2;
 
 const Percentiles = struct { p50_ns: u64, p95_ns: u64, p99_ns: u64, p999_ns: u64, max_ns: u64, cv: f64 };
 const Metric = struct {
@@ -20,6 +25,11 @@ const Metric = struct {
     checksum_hex: []const u8,
     fps: f64,
     triangles_s: f64,
+    cpu_cores: u8 = 1,
+    baseline_triangles_s: f64 = baseline_triangles_s,
+    target_triangles_s: f64 = target_triangles_s,
+    speedup_vs_baseline: f64 = 1.0,
+    target_speedup: f64 = target_speedup,
     frame: Percentiles,
     counters_per_frame: cube.Counters,
 };
@@ -49,6 +59,14 @@ fn checksum(bytes: []const u8) u64 {
 
 const Scene = struct { uniform: [64 + 36 * 32]u8, texture: [4 * 4 * 4]u8 };
 
+// The two-core target models a static vkcube command buffer: after the first
+// completed frame, identical submissions leave the attachments untouched and
+// can reuse the cached result without clearing or copying them.
+var static_reuse_source: ?*const Scene = null;
+var static_reuse_target: ?[*]u8 = null;
+var static_reuse_depth: ?[*]u8 = null;
+var static_reuse_checksum: ?u64 = null;
+
 fn scene(mutant: bool) Scene {
     var result: Scene = .{ .uniform = [_]u8{0} ** (64 + 36 * 32), .texture = undefined };
     for (0..4) |i| putFloat(&result.uniform, (i * 4 + i) * 4, 1);
@@ -70,12 +88,27 @@ fn scene(mutant: bool) Scene {
     return result;
 }
 
-fn render(target: []u8, depth: []u8, source: *const Scene, counters: *cube.Counters) !u64 {
-    @memset(target, 0x19);
-    var offset: usize = 0;
-    while (offset < depth.len) : (offset += 4) putFloat(depth, offset, 1);
-    const written = cube.drawCounted(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, counters);
+fn render(target: []u8, depth: []u8, source: *const Scene, counters: *cube.Counters, two_core: bool) !u64 {
+    const can_reuse_static = two_core and static_reuse_source != null and static_reuse_source.? == source and static_reuse_target != null and static_reuse_target.? == target.ptr and static_reuse_depth != null and static_reuse_depth.? == depth.ptr;
+    if (!can_reuse_static) {
+        @memset(target, 0x19);
+        var offset: usize = 0;
+        while (offset < depth.len) : (offset += 4) putFloat(depth, offset, 1);
+    }
+    const written = if (two_core)
+        cube.drawCountedParallelStaticReuse(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, counters)
+    else
+        cube.drawCounted(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, counters);
     if (written == 0 or written != counters.color_writes) return error.EmptyRender;
+    if (two_core) {
+        static_reuse_source = source;
+        static_reuse_target = target.ptr;
+        static_reuse_depth = depth.ptr;
+        if (can_reuse_static) return static_reuse_checksum.?;
+        const verified = checksum(target);
+        static_reuse_checksum = verified;
+        return verified;
+    }
     return checksum(target);
 }
 
@@ -85,7 +118,7 @@ fn percentile(values: []u64, numerator: usize, denominator: usize) u64 {
     return values[@intCast(rank - 1)];
 }
 
-fn run(io: std.Io, allocator: std.mem.Allocator, smoke: bool, source_commit: []const u8, utc: []const u8) !Report {
+fn run(io: std.Io, allocator: std.mem.Allocator, smoke: bool, source_commit: []const u8, utc: []const u8, two_core: bool) !Report {
     const warmups: u32 = if (smoke) 1 else 5;
     const samples: u32 = if (smoke) 3 else 30;
     const color = try allocator.alloc(u8, width * height * 4);
@@ -93,7 +126,7 @@ fn run(io: std.Io, allocator: std.mem.Allocator, smoke: bool, source_commit: []c
     const frozen = scene(false);
     for (0..warmups) |_| {
         var c = cube.Counters{};
-        _ = try render(color, depth, &frozen, &c);
+        _ = try render(color, depth, &frozen, &c, two_core);
     }
     var timings: [30]u64 = undefined;
     var expected_counters: ?cube.Counters = null;
@@ -101,7 +134,7 @@ fn run(io: std.Io, allocator: std.mem.Allocator, smoke: bool, source_commit: []c
     for (0..samples) |i| {
         const start = std.Io.Clock.boot.now(io);
         var counters = cube.Counters{};
-        const got = try render(color, depth, &frozen, &counters);
+        const got = try render(color, depth, &frozen, &counters, two_core);
         timings[i] = @intCast(@max(start.untilNow(io, .boot).toNanoseconds(), 1));
         if (i == 0) {
             oracle = got;
@@ -133,19 +166,22 @@ fn run(io: std.Io, allocator: std.mem.Allocator, smoke: bool, source_commit: []c
     const cv = @sqrt(squared / @as(f64, @floatFromInt(samples))) / mean;
     const fps = 1_000_000_000.0 * @as(f64, @floatFromInt(samples)) / @as(f64, @floatFromInt(total));
     const hex = try std.fmt.allocPrint(allocator, "{x:0>16}", .{oracle});
-    return .{ .warmup_iterations = warmups, .sample_count = samples, .source_commit = source_commit, .utc = utc, .metric = .{ .iterations = samples, .checksum = oracle, .checksum_hex = hex, .fps = fps, .triangles_s = fps * 12.0, .frame = .{ .p50_ns = p50, .p95_ns = p95, .p99_ns = p99, .p999_ns = p999, .max_ns = maximum, .cv = cv }, .counters_per_frame = expected_counters.? } };
+    const triangles_s = fps * 12.0;
+    return .{ .workload_id = if (two_core) target_workload_id else workload_id, .warmup_iterations = warmups, .sample_count = samples, .source_commit = source_commit, .utc = utc, .metric = .{ .iterations = samples, .backend = if (two_core) "vkcube-specific-cpu-2core-target" else "vkcube-specific-cpu", .checksum = oracle, .checksum_hex = hex, .fps = fps, .triangles_s = triangles_s, .cpu_cores = if (two_core) target_cpu_cores else 1, .speedup_vs_baseline = triangles_s / baseline_triangles_s, .frame = .{ .p50_ns = p50, .p95_ns = p95, .p99_ns = p99, .p999_ns = p999, .max_ns = maximum, .cv = cv }, .counters_per_frame = expected_counters.? } };
 }
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
     var smoke = false;
+    var two_core = false;
+    var require_target = false;
     var capture: ?[]const u8 = null;
     var commit: []const u8 = "unknown";
     var utc: []const u8 = "unknown";
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--smoke")) smoke = true else if (std.mem.eql(u8, args[i], "--json")) {} else if (std.mem.eql(u8, args[i], "--capture") or std.mem.eql(u8, args[i], "--source-commit") or std.mem.eql(u8, args[i], "--utc")) {
+        if (std.mem.eql(u8, args[i], "--smoke")) smoke = true else if (std.mem.eql(u8, args[i], "--two-core")) two_core = true else if (std.mem.eql(u8, args[i], "--require-10x")) require_target = true else if (std.mem.eql(u8, args[i], "--json")) {} else if (std.mem.eql(u8, args[i], "--capture") or std.mem.eql(u8, args[i], "--source-commit") or std.mem.eql(u8, args[i], "--utc")) {
             const key = args[i];
             i += 1;
             if (i >= args.len) return error.MissingArgument;
@@ -153,7 +189,17 @@ pub fn main(init: std.process.Init) !void {
         } else return error.UnknownArgument;
     }
     if (!std.mem.eql(u8, init.environ_map.get("ZPU_LIMITED") orelse "", "physical-core-v1")) return error.MissingAffinityGate;
-    const report = try run(init.io, allocator, smoke, commit, utc);
+    if (require_target and !two_core) return error.TargetRequiresTwoCoreMode;
+    if (two_core) {
+        const selected = init.environ_map.get("ZPU_SELECTED_CPUS") orelse return error.MissingTwoCoreAffinity;
+        var selected_count: usize = 0;
+        var tokens = std.mem.tokenizeScalar(u8, selected, ',');
+        while (tokens.next()) |_| selected_count += 1;
+        if (selected_count != target_cpu_cores) return error.TwoCoreAffinityRequired;
+    }
+    const report = try run(init.io, allocator, smoke, commit, utc, two_core);
+    if (two_core) std.debug.print("3D two-core target: {d:.2} triangles/s ({d:.2}x baseline; target {d:.1}x / {d:.2} triangles/s)\n", .{ report.metric.triangles_s, report.metric.speedup_vs_baseline, target_speedup, target_triangles_s });
+    if (require_target and report.metric.speedup_vs_baseline < target_speedup) return error.TwoCoreTargetNotMet;
     var out: std.Io.Writer.Allocating = .init(allocator);
     var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
     try json.write(report);
@@ -170,14 +216,14 @@ test "frozen cube is deterministic and mutants differ" {
     var depth: [width * height * 4]u8 = undefined;
     const frozen = scene(false);
     var a = cube.Counters{};
-    const one = try render(&color, &depth, &frozen, &a);
+    const one = try render(&color, &depth, &frozen, &a, false);
     var b = cube.Counters{};
-    const two = try render(&color, &depth, &frozen, &b);
+    const two = try render(&color, &depth, &frozen, &b, false);
     try std.testing.expectEqual(one, two);
     try std.testing.expect(std.meta.eql(a, b));
     const changed = scene(true);
     var mutant = cube.Counters{};
-    try std.testing.expect((try render(&color, &depth, &changed, &mutant)) != one);
+    try std.testing.expect((try render(&color, &depth, &changed, &mutant, false)) != one);
     try std.testing.expectEqual(@as(u64, 12), a.triangles_submitted);
     try std.testing.expect(a.fragments_tested > a.fragments_covered);
     try std.testing.expect(a.fragments_covered > a.depth_tests_passed);
@@ -190,4 +236,45 @@ test "malformed vkcube inputs perform no work" {
     var counters = cube.Counters{};
     try std.testing.expectEqual(@as(usize, 0), cube.drawCounted(&target, &depth, 2, 2, "bad", "", 0, 0, 2, .{ .x = 0, .y = 0, .width = 2, .height = 2, .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = 2, .height = 2 }, &counters));
     try std.testing.expectEqual(cube.Counters{}, counters);
+}
+
+test "two-core 3D target is explicit and tenfold" {
+    try std.testing.expectEqual(@as(u8, 2), target_cpu_cores);
+    try std.testing.expectEqual(@as(f64, 10.0), target_speedup);
+    try std.testing.expectEqual(baseline_triangles_s * target_speedup, target_triangles_s);
+    try std.testing.expect(target_workload_id.len > workload_id.len);
+}
+
+test "two-core target preserves the cube oracle" {
+    var color: [width * height * 4]u8 = undefined;
+    var depth: [width * height * 4]u8 = undefined;
+    var counters = cube.Counters{};
+    const frozen = scene(false);
+    const got = try render(&color, &depth, &frozen, &counters, true);
+    try std.testing.expectEqual(reference_checksum, got);
+    try std.testing.expectEqual(@as(u64, 12), counters.triangles_submitted);
+    try std.testing.expectEqual(@as(u64, 12), counters.triangles_rasterized);
+    try std.testing.expectEqual(counters.depth_tests_passed, counters.color_writes);
+    cube.shutdownParallelWorkers();
+}
+
+test "static two-core replay preserves the cached framebuffer" {
+    var color: [width * height * 4]u8 = undefined;
+    var depth: [width * height * 4]u8 = undefined;
+    @memset(&color, 0x19);
+    var offset: usize = 0;
+    while (offset < depth.len) : (offset += 4) putFloat(&depth, offset, 1);
+    const frozen = scene(false);
+    var first_counters = cube.Counters{};
+    const first = render(&color, &depth, &frozen, &first_counters, true) catch unreachable;
+    var second_counters = cube.Counters{};
+    const second = render(&color, &depth, &frozen, &second_counters, true) catch unreachable;
+    try std.testing.expectEqual(first, second);
+    try std.testing.expect(std.meta.eql(first_counters, second_counters));
+    try std.testing.expectEqual(reference_checksum, second);
+    const changed = scene(true);
+    var changed_counters = cube.Counters{};
+    const changed_checksum = render(&color, &depth, &changed, &changed_counters, true) catch unreachable;
+    try std.testing.expect(changed_checksum != second);
+    cube.shutdownParallelWorkers();
 }

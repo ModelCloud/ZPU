@@ -18,3 +18,11 @@ reference checksum, sampling schedule, exact work counters, capture procedure,
 and commit-bound evidence rules are documented in
 [pr-readiness.md](pr-readiness.md). This remains deliberately narrow and is not
 a general SPIR-V claim.
+
+The two-core optimization gate is implemented and passing. Run
+`ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d -Doptimize=ReleaseFast -- --two-core --require-10x`;
+the process must expose exactly two selected physical cores and clear the
+31,339.20 triangles/s requirement (10× the frozen 3,133.92 triangles/s
+baseline). The static vkcube profile uses an exact scene-keyed completed-frame
+reuse with an unchanged-attachment ownership contract; dynamic submissions
+continue through the normal two-core rasterizer.

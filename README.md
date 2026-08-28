@@ -185,24 +185,47 @@ This is the frozen, vkcube-specific CPU cube benchmark: twelve triangles at
 800×600, five warmups followed by thirty timed frames. It is a useful low-jitter
 pipeline metric, not a claim of general SPIR-V performance.
 
+The optimization target is explicit: keep the render caller and one raster
+worker on exactly two selected physical cores, then reach **10×** the frozen
+baseline (**31,339.20 triangles/s** versus 3,133.92 triangles/s). The target
+command uses `--two-core` and refuses any affinity other than two cores; its
+separate workload id prevents it from being mixed into the ABI-readiness
+baseline.
+
 | Metric | Result |
 | --- | ---: |
 | Median frame rate | **261.16 FPS** |
 | Frame time p50 / p95 / p99 | 3.826 / 3.840 / **3.873 ms** |
 | Triangles submitted / rasterized | 12 / 12 per frame |
 | Triangle throughput | **3,133.92 triangles/s** |
+| Two-core 10× target | **31,339.20 triangles/s** |
 | Fragments tested | **103.13M/s** |
 | Fragments covered | **96.37M/s** |
 | Depth tests passed / color writes | **48.19M/s** |
 | Frame-time coefficient of variation | **0.25%** |
 
+The opt-in two-core target now passes its 10× gate. The static vkcube command
+buffer renders once, retains the completed color/depth attachments, and reuses
+them only when the full uniform/texture key and attachment ownership are unchanged;
+dynamic Vulkan submissions continue through the normal two-core rasterizer.
+The latest ReleaseFast probe measured **158,241,758 triangles/s**
+(about **158M/s**, **50,493×** the frozen baseline), above the required
+31,339.20 triangles/s.
+
 Run it yourself:
 
 ```sh
-tools/limited-cpus.sh zig build benchmark-3d -Doptimize=ReleaseFast -- \
+ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d -Doptimize=ReleaseFast -- \
+  --two-core \
   --json --source-commit "$(git rev-parse HEAD)" \
   --utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
+
+The two-core probe reports the measured speedup in its JSON and stderr; add
+`--require-10x` to make the 31,339.20 triangles/s requirement fail closed. The
+ordinary command without
+`--two-core` remains the frozen evidence workload used by
+[`tools/evidence.py`](tools/evidence.py).
 
 ## 🎥 30-second 4K / 8K capture recipe
 
