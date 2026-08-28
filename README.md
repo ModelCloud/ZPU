@@ -327,6 +327,20 @@ SIMD lane. In the v8 probe this moved `design_canvas` from about **6.36M** to
 **10.5M draws/s** (**1.65×**) with p50 latency falling from **55.4 µs** to
 **33.5 µs**, while the other scene checksums remain unchanged.
 
+The v9 AVX2 boundary carries multi-row rectangles and sprites with one
+validated kernel call per draw. On the same controlled host,
+`clipped_rectangle` improved from **5.05 µs** to **3.41 µs** p50 (**1.48×**),
+`frame` from **14.76 µs** to **13.56 µs**, and `game_scene` from **69.2 µs** to
+**53.9 µs** (**1.29×**). These are deterministic, checksum-validated workload
+measurements rather than a blanket speed claim.
+
+The v10 fill path packs the pixel word once per multi-row draw and writes
+scalar tails directly. Against the freshly merged v9 tip, this reduced
+`clipped_rectangle` from **3.42 µs** to **2.41 µs** p50 (**1.42×**),
+`frame` from **13.56 µs** to **10.34 µs** (**1.31×**), and `game_scene` from
+**54.0 µs** to **43.4 µs** (**1.24×**); cumulative improvement from the
+pre-v9 baseline is about **1.59×** for `game_scene`.
+
 ## 📐 3D throughput on two cores
 
 <p align="center">
