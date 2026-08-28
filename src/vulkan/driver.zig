@@ -20006,6 +20006,15 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     getPhysicalDeviceSparseImageFormatProperties2(ctx.physical, &sparse_info, &sparse_count, @ptrCast(&sparse_property));
     try std.testing.expectEqual(@as(u32, 0), sparse_count);
     try std.testing.expectEqual(@as(u32, 0xcafe_f00d), sparse_property.properties.aspect_mask);
+    sparse_info.format = 999;
+    sparse_count = 7;
+    getPhysicalDeviceSparseImageFormatProperties2(ctx.physical, &sparse_info, &sparse_count, null);
+    try std.testing.expectEqual(@as(u32, 7), sparse_count);
+    sparse_info.format = 1000066000;
+    sparse_count = 1;
+    getPhysicalDeviceSparseImageFormatProperties2(ctx.physical, &sparse_info, &sparse_count, null);
+    try std.testing.expectEqual(@as(u32, 0), sparse_count);
+    sparse_info.format = 37;
     var malformed_sparse_property = sparse_property;
     malformed_sparse_property.s_type = 999;
     sparse_count = 7;
