@@ -17,7 +17,20 @@ pub fn fill(bytes: []u8, data: u32) void {
 }
 
 pub fn copy(dst: []u8, src: []const u8) void {
-    std.mem.copyForwards(u8, dst, src);
+    // Vulkan host-visible transfers are non-overlapping by API contract.
+    // Use the compiler's bulk memcpy lowering (which selects the CPU's tuned
+    // copy routine) instead of the overlap-safe byte loop. Keep a defensive
+    // overlap fallback for direct helper users; validated Vulkan commands
+    // never take this branch.
+    const dst_start = @intFromPtr(dst.ptr);
+    const src_start = @intFromPtr(src.ptr);
+    const dst_end = dst_start +| dst.len;
+    const src_end = src_start +| src.len;
+    if (dst_start < src_end and src_start < dst_end) {
+        @memmove(dst, src);
+        return;
+    }
+    @memcpy(dst, src);
 }
 
 test "native vector fill preserves little-endian Vulkan words for unaligned chunks and tails" {
@@ -29,4 +42,20 @@ test "native vector fill preserves little-endian Vulkan words for unaligned chun
     while (offset < 69) : (offset += 4) {
         try std.testing.expectEqualSlices(u8, &.{ 0x11, 0x22, 0x33, 0x44 }, storage[offset..][0..4]);
     }
+}
+
+test "bulk host copy preserves a non-overlapping unaligned transfer" {
+    var source = [_]u8{0} ** 37;
+    for (&source, 0..) |*value, index| value.* = @truncate(index * 13 + 5);
+    var destination = [_]u8{0xaa} ** 43;
+    copy(destination[3..40], source[0..37]);
+    try std.testing.expectEqualSlices(u8, source[0..], destination[3..40]);
+    try std.testing.expectEqual(@as(u8, 0xaa), destination[0]);
+    try std.testing.expectEqual(@as(u8, 0xaa), destination[40]);
+}
+
+test "overlapping helper copies retain memmove semantics" {
+    var bytes = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7 };
+    copy(bytes[1..], bytes[0..7]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 1, 2, 3, 4, 5, 6 }, &bytes);
 }
