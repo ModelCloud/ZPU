@@ -1751,7 +1751,9 @@ fn drawPreparedBatchFast(comptime color_only: bool, target: []u8, depth: []u8, w
     const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / parallel_band_count);
     var pixels_written: usize = 0;
     if (comptime color_only) if (prepared.count == 2) {
-        if (prepared.opaque_quad.valid) if (rasterOpaqueTexturedQuad(color_words, depth_words, width, height, lane_index, &prepared.opaque_quad, &prepared.triangles[0], &prepared.triangles[1], if (prepared.spans_valid) preparedSpan(prepared, 0) else null, if (prepared.spans_valid) preparedSpan(prepared, 1) else null, prepared.quad_spans_external)) |quad_pixels| return quad_pixels;
+        if (prepared.opaque_quad.valid) if (prepared.quad_spans_external) |spans| {
+            if (rasterOpaqueTexturedQuad(color_words, depth_words, width, height, lane_index, &prepared.opaque_quad, spans)) |quad_pixels| return quad_pixels;
+        } else {};
     };
     for (prepared.triangles[0..prepared.count], 0..) |triangle, triangle_index| {
         if (!triangle.valid or !triangle.batch_raster.ready) continue;
@@ -1807,11 +1809,7 @@ fn runParallelBatchPrepare(context: *ParallelBatchPrepare, lane_index: usize) vo
 // Once the caller has established the overlay contract, rasterize that quad
 // once instead of walking both triangles and testing the same depth. The
 // direct affine UV walk retains the existing texel-boundary rounding rules.
-fn rasterOpaqueTexturedQuad(color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, quad: *const OpaqueQuad, first: *const PreparedTriangle, second: *const PreparedTriangle, first_spans: ?*const [flat_span_rows]FlatSpan, second_spans: ?*const [flat_span_rows]FlatSpan, quad_spans: ?*const [flat_span_rows]FlatSpan) ?usize {
-    const a = &first.vertices;
-    const b = &second.vertices;
-    const first_raster = first.batch_raster;
-    const second_raster = second.batch_raster;
+fn rasterOpaqueTexturedQuad(color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, quad: *const OpaqueQuad, quad_spans: *const [flat_span_rows]FlatSpan) ?usize {
     const lane_min_y: i32 = @intCast(@as(usize, height) * lane_index / parallel_band_count);
     const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / parallel_band_count);
     const first_y = @max(quad.min_y, lane_min_y);
@@ -1823,13 +1821,7 @@ fn rasterOpaqueTexturedQuad(color_words: []align(4) u32, depth_words: []align(4)
     while (y < last_y) : (y += 1) {
         const sampled_v = quad.v0 + (@as(f32, @floatFromInt(y)) + 0.5 - quad.y0) * quad.dv;
         const row_offset = unitTextureCoordinate16(sampled_v) * 16;
-        const span = if (quad_spans) |spans| spans[@intCast(y)] else blk: {
-            const first_span = if (first_spans) |spans| spans[@intCast(y)] else flatSpanForRow(.{ a[0].screen[0], a[0].screen[1] }, .{ a[1].screen[0], a[1].screen[1] }, .{ a[2].screen[0], a[2].screen[1] }, first_raster.inverse_area, first_raster.min_x, first_raster.max_x, y);
-            const second_span = if (second_spans) |spans| spans[@intCast(y)] else flatSpanForRow(.{ b[0].screen[0], b[0].screen[1] }, .{ b[1].screen[0], b[1].screen[1] }, .{ b[2].screen[0], b[2].screen[1] }, second_raster.inverse_area, second_raster.min_x, second_raster.max_x, y);
-            if (first_span.last <= first_span.first) break :blk second_span;
-            if (second_span.last <= second_span.first) break :blk first_span;
-            break :blk FlatSpan{ .first = @min(first_span.first, second_span.first), .last = @max(first_span.last, second_span.last) };
-        };
+        const span = quad_spans[@intCast(y)];
         if (span.last <= span.first) continue;
         const first_x: i32 = @intCast(span.first);
         const last_x: i32 = @intCast(span.last);
@@ -2922,3 +2914,16 @@ test "parallel worker shuts down and restarts without detached execution" {
 }
 
 const ParallelShutdownProbe = struct {
+    started: *std.atomic.Value(bool),
+    done: *std.atomic.Value(bool),
+};
+
+fn parallelShutdownProbe(context: *ParallelShutdownProbe) void {
+    context.started.store(true, .release);
+    shutdownParallelWorkers();
+    context.done.store(true, .release);
+}
+
+test "parallel shutdown waits for an active render job" {
+    var color: [64]u8 align(4) = [_]u8{0} ** 64;
+    var depth: [64]u8 align(4) = [_]u8{0} ** 64;
