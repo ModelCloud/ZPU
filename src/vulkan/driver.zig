@@ -22,6 +22,7 @@ pub const Fn = ?*const fn () callconv(.c) void;
 pub const Alloc = opaque {};
 pub const MAGIC: usize = 0x01CDC0DE;
 pub const API_1_0: u32 = 1 << 22;
+pub const API_1_1: u32 = (1 << 22) | (1 << 12);
 pub const AppInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, app_name: ?[*:0]const u8, app_version: u32, engine_name: ?[*:0]const u8, engine_version: u32, api_version: u32 };
 pub const InstanceInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, app_info: ?*const AppInfo, layer_count: u32, layers: ?[*]const [*:0]const u8, extension_count: u32, extensions: ?[*]const [*:0]const u8 };
 pub const QueueInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, family: u32, count: u32, priorities: ?[*]const f32 };
@@ -278,8 +279,8 @@ pub const PhysicalDeviceFeatures2 = extern struct { s_type: i32, p_next: ?*anyop
 // Promoted core feature chains use only VkBool32 payloads.  Keeping these
 // declarations explicit gives the *2 queries a real ABI-sized destination
 // instead of treating every non-null pNext as an opaque rejection.  ZPU's
-// advertised profile has no optional features, so each payload is filled with
-// VK_FALSE while preserving the caller-owned chain links.
+// advertised Vulkan 1.1 profile enables samplerYcbcrConversion; every other
+// optional feature remains VK_FALSE while preserving the caller-owned chain links.
 pub const PhysicalDeviceVulkan11Features = extern struct {
     s_type: i32,
     p_next: ?*anyopaque,
@@ -2403,6 +2404,16 @@ fn populateCoreFeatureChain(raw: ?*anyopaque) bool {
         const words = coreFeaturePayloadWords(header.s_type) orelse return false;
         const bytes: [*]u8 = @ptrCast(item);
         @memset(bytes[16 .. 16 + words * @sizeOf(u32)], 0);
+        const payload = bytes[16 .. 16 + words * @sizeOf(u32)];
+        switch (header.s_type) {
+            49 => { // VkPhysicalDeviceVulkan11Features
+                propertyWriteU32(payload, 40, 1); // samplerYcbcrConversion
+            },
+            1000156004 => { // VkPhysicalDeviceSamplerYcbcrConversionFeatures
+                propertyWriteU32(payload, 0, 1);
+            },
+            else => {},
+        }
         next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
     }
     return true;
@@ -2414,7 +2425,22 @@ fn coreFeatureChainHasEnabledValue(raw: ?*const anyopaque) bool {
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
         const words = coreFeaturePayloadWords(header.s_type) orelse return true;
         const bytes: [*]const u8 = @ptrCast(item);
-        for (bytes[16 .. 16 + words * @sizeOf(u32)]) |value| if (value != 0) return true;
+        switch (header.s_type) {
+            49 => { // VkPhysicalDeviceVulkan11Features
+                var i: usize = 0;
+                while (i < words) : (i += 1) {
+                    const value = std.mem.readInt(u32, @ptrCast(&bytes[16 + i * 4]), .little);
+                    if (value != 0 and i != 10) return true;
+                }
+            },
+            1000156004 => { // VkPhysicalDeviceSamplerYcbcrConversionFeatures
+                const value = std.mem.readInt(u32, @ptrCast(&bytes[16]), .little);
+                if (value != 0 and value != 1) return true;
+            },
+            else => {
+                for (bytes[16 .. 16 + words * @sizeOf(u32)]) |value| if (value != 0) return true;
+            },
+        }
         next = header.p_next;
     }
     return false;
@@ -3223,7 +3249,7 @@ fn createInstance(info: ?*const InstanceInfo, alloc: ?*const Alloc, output: ?*In
     if (ci.app_info) |app| if (app.s_type != 0) {
         hit(.app_stype);
         return .error_initialization_failed;
-    } else if (app.p_next != null or app.api_version > API_1_0) return .error_initialization_failed;
+    } else if (app.p_next != null or app.api_version > API_1_1) return .error_initialization_failed;
     lock();
     defer mutex.unlock();
     const set_loader_data = findInstanceLoaderCallback(ci.p_next);
@@ -3384,7 +3410,7 @@ fn enumeratePhysicalDevices(instance: ?Instance, count: ?*u32, output: ?[*]Physi
 }
 fn enumerateInstanceVersion(count: ?*u32) callconv(.c) Result {
     const out = count orelse return .error_initialization_failed;
-    out.* = API_1_0;
+    out.* = API_1_1;
     return .success;
 }
 fn enumeratePhysicalDeviceGroups(instance: ?Instance, count: ?*u32, output: ?[*]PhysicalDeviceGroupProperties) callconv(.c) Result {
@@ -3521,7 +3547,7 @@ fn conservativeLimits() Limits {
 fn getPropertiesLocked(h: Physical, out: *Properties) bool {
     if (!validPhysicalLocked(h)) return false;
     out.* = std.mem.zeroes(Properties);
-    out.api_version = API_1_0;
+    out.api_version = API_1_1;
     out.driver_version = 1;
     out.vendor_id = 0x1cdc;
     out.device_id = 1;
@@ -19042,7 +19068,7 @@ test "physical properties start with coherent conservative limits" {
     try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &count, &physical));
     var properties: Properties = undefined;
     getProperties(physical[0], &properties);
-    try std.testing.expectEqual(API_1_0, properties.api_version);
+    try std.testing.expectEqual(API_1_1, properties.api_version);
     try std.testing.expectEqual(@as(u32, 0x1cdc), properties.vendor_id);
     try std.testing.expectEqual(@as(u32, 1), properties.device_id);
     try std.testing.expectEqual(@as(u32, 4), properties.device_type);
@@ -19296,10 +19322,10 @@ test "creation rejects every supported invalid-input class" {
     ci.flags = 1;
     try std.testing.expectEqual(Result.error_initialization_failed, createInstance(&ci, null, &instance));
     ci.flags = 0;
-    var app = AppInfo{ .s_type = 0, .p_next = null, .app_name = null, .app_version = 0, .engine_name = null, .engine_version = 0, .api_version = API_1_0 + 1 };
+    var app = AppInfo{ .s_type = 0, .p_next = null, .app_name = null, .app_version = 0, .engine_name = null, .engine_version = 0, .api_version = API_1_1 + 1 };
     ci.app_info = &app;
     try std.testing.expectEqual(Result.error_initialization_failed, createInstance(&ci, null, &instance));
-    app.api_version = API_1_0;
+    app.api_version = API_1_1;
     app.s_type = 99;
     try std.testing.expectEqual(Result.error_initialization_failed, createInstance(&ci, null, &instance));
     ci.app_info = null;
@@ -19566,7 +19592,7 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 0xfeed), ycbcr_handle);
     var version: u32 = 0;
     try std.testing.expectEqual(Result.success, enumerateInstanceVersion(&version));
-    try std.testing.expectEqual(API_1_0, version);
+    try std.testing.expectEqual(API_1_1, version);
     var groups = [_]PhysicalDeviceGroupProperties{std.mem.zeroes(PhysicalDeviceGroupProperties)};
     groups[0].s_type = 1000070000;
     var group_count: u32 = 1;
@@ -19682,7 +19708,18 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     getPhysicalDeviceFeatures2(ctx.physical, &features);
     try std.testing.expectEqual(@as(u32, 1), features.features.multi_draw_indirect);
     for (featureWords(&features.features), 0..) |value, index| if (index != 9) try std.testing.expectEqual(@as(u32, 0), value);
-    try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&vulkan11_features)[16..64], 0));
+    {
+        const v11_bytes = std.mem.asBytes(&vulkan11_features)[16..64];
+        var i: usize = 0;
+        while (i < 12) : (i += 1) {
+            const value = std.mem.readInt(u32, @ptrCast(&v11_bytes[i * 4]), .little);
+            if (i == 10) {
+                try std.testing.expectEqual(@as(u32, 1), value);
+            } else {
+                try std.testing.expectEqual(@as(u32, 0), value);
+            }
+        }
+    }
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&vulkan12_features)[16..204], 0));
     try std.testing.expectEqual(@as(u32, 0), vulkan12_features.timeline_semaphore);
     try std.testing.expectEqual(@as(u32, 0), vulkan12_features.buffer_device_address);
@@ -19820,7 +19857,7 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     @memset(std.mem.asBytes(&vulkan14_properties)[16..], 0xff);
     var properties = PhysicalDeviceProperties2{ .s_type = 1000059001, .p_next = @ptrCast(&vulkan14_properties), .properties = std.mem.zeroes(Properties) };
     getPhysicalDeviceProperties2(ctx.physical, &properties);
-    try std.testing.expectEqual(API_1_0, properties.properties.api_version);
+    try std.testing.expectEqual(API_1_1, properties.properties.api_version);
     try std.testing.expectEqualSlices(u8, &device_uuid, &vulkan11_properties.device_uuid);
     try std.testing.expectEqualSlices(u8, &driver_uuid, &vulkan11_properties.driver_uuid);
     try std.testing.expectEqual(@as(u32, 1), vulkan11_properties.device_node_mask);
@@ -26372,7 +26409,7 @@ test "installed manifest contract" {
     const icd = root.get("ICD").?.object;
     try std.testing.expectEqualStrings("../../../lib/libvulkan_zpu.so", icd.get("library_path").?.string);
     try std.testing.expectEqualStrings("64", icd.get("library_arch").?.string);
-    try std.testing.expectEqualStrings("1.0.0", icd.get("api_version").?.string);
+    try std.testing.expectEqualStrings("1.1.0", icd.get("api_version").?.string);
     try std.testing.expect(!icd.get("is_portability_driver").?.bool);
 }
 

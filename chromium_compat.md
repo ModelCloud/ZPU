@@ -26,18 +26,17 @@ citation next to it.
 
 ---
 
-## 0. Blocking gate — Chromium will not enumerate ZPU today
+## 0. Chromium enumeration version requirement
 
-- [ ] **Report Vulkan 1.1.** `kVulkanRequiredApiVersion = VK_API_VERSION_1_1`
+- [x] **Report Vulkan 1.1.** `kVulkanRequiredApiVersion = VK_API_VERSION_1_1`
       (`gpu/vulkan/vulkan_function_pointers.h:121`), enforced by
       `static_assert(kVulkanRequiredApiVersion >= VK_API_VERSION_1_1, "")`
       (`gpu/vulkan/vulkan_instance.cc:450`). Any physical device reporting a lower
       `apiVersion` is skipped in `vulkan_device_queue.cc`
       (`if (device_properties.apiVersion < info.used_api_version) continue;`).
 
-      ZPU currently reports `1.0.0` — in the driver, in the ICD manifest, and in
-      the CI loader-discovery assertion. **Until this changes, nothing else on
-      this list can be tested against real Chromium.**
+      ZPU now reports `1.1.0` — in the driver, in the ICD manifest, and in
+      the CI loader-discovery assertion.
 
 `VK_API_VERSION_1_1` is Chromium's floor, not ZPU's destination. The pinned
 target is Vulkan **1.4.360**, whose mandatory core is cumulative and already
@@ -76,15 +75,16 @@ folds in the following as core, all of which must actually work:
 
 ## 1. Required physical-device features
 
-- [ ] **`samplerYcbcrConversion = VK_TRUE`.** Hard-checked on Linux with a fatal
+- [x] **`samplerYcbcrConversion = VK_TRUE`.** Hard-checked on Linux with a fatal
       log in `gpu/vulkan/vulkan_device_queue.cc`:
       `if (!physical_device_info.feature_sampler_ycbcr_conversion) { LOG(ERROR) << "samplerYcbcrConversion is not supported."; … }`
       Guarded by `IS_ANDROID || IS_FUCHSIA || IS_LINUX || IS_CHROMEOS`.
 
-      Note: the *feature bit* is required unconditionally. The actual conversion
-      machinery is only exercised for multi-planar formats, so ZPU can satisfy
-      this cheaply at first by advertising the feature and no multi-planar
-      formats — but confirm Chromium does not then request one.
+      ZPU now advertises `samplerYcbcrConversion` through
+      `VkPhysicalDeviceVulkan11Features` and
+      `VkPhysicalDeviceSamplerYcbcrConversionFeatures`. The actual conversion
+      machinery is only exercised for multi-planar formats, which ZPU does not
+      support; Chromium's headless path must be verified not to request one.
 
 - [ ] `protectedMemory` — only when Chromium requests protected content. Report
       `VK_FALSE`; verify Chromium's headless path never asks.
