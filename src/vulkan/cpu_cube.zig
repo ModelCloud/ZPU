@@ -182,6 +182,7 @@ const PreparedDraw = struct {
 const prepared_cache_capacity = 8192;
 const PreparedCache = struct {
     valid: bool = false,
+    prepared_ready: bool = false,
     vertex_count: u32 = 0,
     uniform_len: usize = 0,
     texture_len: usize = 0,
@@ -898,19 +899,20 @@ fn refreshOpaqueQuad(prepared: *PreparedDraw) void {
     };
 }
 
-const PreparedCacheStatus = struct { hit: bool, cacheable: bool };
+const PreparedCacheStatus = struct { hit: bool, cacheable: bool, promote: bool };
 
 fn prepareDrawCached(uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, output: *PreparedDraw) PreparedCacheStatus {
     const cacheable = uniform.len <= prepared_cache_capacity and texture.len <= prepared_cache_capacity;
-    const hit = cacheable and prepared_cache.valid and prepared_cache.vertex_count == vertex_count and
+    const key_matches = cacheable and prepared_cache.valid and prepared_cache.vertex_count == vertex_count and
         prepared_cache.uniform_len == uniform.len and prepared_cache.texture_len == texture.len and
         prepared_cache.texture_width == texture_width and prepared_cache.texture_height == texture_height and
         std.meta.eql(prepared_cache.viewport, viewport) and
         std.mem.eql(u8, prepared_cache.uniform[0..uniform.len], uniform) and
         std.mem.eql(u8, prepared_cache.texture[0..texture.len], texture);
+    const hit = key_matches and prepared_cache.prepared_ready;
     if (hit) {
         output.* = prepared_cache.prepared;
-        return .{ .hit = true, .cacheable = true };
+        return .{ .hit = true, .cacheable = true, .promote = false };
     }
 
     prepareDraw(uniform, vertex_count, 0, viewport, null, output);
@@ -923,11 +925,13 @@ fn prepareDrawCached(uniform: []const u8, texture: []const u8, texture_width: u3
         prepared_cache.texture_width = texture_width;
         prepared_cache.texture_height = texture_height;
         prepared_cache.viewport = viewport;
+        prepared_cache.prepared_ready = false;
         prepared_cache.valid = true;
     } else {
         prepared_cache.valid = false;
+        prepared_cache.prepared_ready = false;
     }
-    return .{ .hit = false, .cacheable = cacheable };
+    return .{ .hit = false, .cacheable = cacheable, .promote = cacheable and key_matches };
 }
 
 fn writeFragment(target: ?[]u8, depth: ?[]u8, pixel_index: usize, z: f32, flat_depth_bits: ?u32, inverse_w: f32, flat_reciprocal_w: ?f32, u_over_w: f32, v_over_w: f32, texture: []const u8, texture_width: u32, texture_height: u32, lighting: *const [256]u8, unit_uv: bool, prelit_texture: ?*const [16]u32, flat_color: ?u32, counters: *Counters, comptime count_work: bool) bool {
@@ -978,7 +982,7 @@ fn drawInternal(target: ?[]u8, depth: ?[]u8, width: u32, height: u32, uniform: [
     const stats: *Counters = if (count_work) &local_counters else counters;
     if (count_work) stats.triangles_submitted += vertex_count / 3;
     var row_lanes: [8192]u8 = undefined;
-    if (lane_count != 1) {
+    if (lane_count != 1 and stripe_count <= lane_count) {
         for (row_lanes[0..height], 0..) |*lane, y| lane.* = @intCast(stripeLane(@intCast(y), height, lane_count, stripe_count));
     }
     var pixels_written: usize = 0;
@@ -1692,7 +1696,7 @@ fn drawPreparedBatchFast(comptime color_only: bool, target: []u8, depth: []u8, w
         if (!triangle.valid or !triangle.batch_raster.ready) continue;
         if (comptime color_only) if (!triangle.has_prelit_texture_16x16 or triangle.batch_raster.v_over_w_dx != 0) return null;
         const raster = triangle.batch_raster;
-        pixels_written += rasterFlatSpanTriangle(!color_only, color_words, depth_words, width, height, parallel_band_count, lane_index, raster.p0, raster.p1, raster.p2, raster.inverse_area, raster.min_x, raster.min_y, raster.max_x, raster.max_y, @max(raster.min_y, lane_min_y), @min(raster.max_y, lane_max_y), if (prepared.spans_valid) preparedSpan(prepared, triangle_index) else null, null, raster.flat_depth_bits, triangle.flat_color, if (triangle.has_prelit_texture) &triangle.prelit_texture else null, if (triangle.has_prelit_texture_16x16) if (triangle.prelit_texture_16x16_ptr) |colors| colors else &triangle.prelit_texture_16x16 else null, tile_min, tile_max, tile_columns, tile_count, raster.flat_reciprocal_w, raster.u_over_w[0], raster.u_over_w[1], raster.u_over_w[2], raster.v_over_w[0], raster.v_over_w[1], raster.v_over_w[2], raster.u_over_w_dx, raster.v_over_w_dx);
+        pixels_written += rasterFlatSpanTriangle(!color_only, color_words, depth_words, width, height, parallel_band_count, lane_index, raster.p0, raster.p1, raster.p2, raster.inverse_area, raster.min_x, raster.min_y, raster.max_x, raster.max_y, @max(raster.min_y, lane_min_y), @min(raster.max_y, lane_max_y), if (prepared.spans_valid) preparedSpan(prepared, triangle_index) else null, raster.flat_depth_bits, triangle.flat_color, if (triangle.has_prelit_texture) &triangle.prelit_texture else null, if (triangle.has_prelit_texture_16x16) if (triangle.prelit_texture_16x16_ptr) |colors| colors else &triangle.prelit_texture_16x16 else null, tile_min, tile_max, tile_columns, tile_count, raster.flat_reciprocal_w, raster.u_over_w[0], raster.u_over_w[1], raster.u_over_w[2], raster.v_over_w[0], raster.v_over_w[1], raster.v_over_w[2], raster.u_over_w_dx, raster.v_over_w_dx);
     }
     return pixels_written;
 }
@@ -2372,6 +2376,7 @@ fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, unif
     _ = cpu_locality.pinCurrent(.render);
     var prepared: PreparedDraw = undefined;
     const cache_status = prepareDrawCached(uniform, texture, texture_width, texture_height, vertex_count, viewport, &prepared);
+    const inline_fast = counters == null and clear_color_pattern == null and clear_depth_pattern == null and expected_target == null and !clear_spans_requested;
     if (!cache_status.hit) buildPreparedFlatSpans(&prepared, width, height);
     const lighting_generation = exact_lighting_cache_generation.load(.acquire);
     if (!cache_status.hit or prepared_cache.lighting_generation != lighting_generation) {
@@ -2381,8 +2386,26 @@ fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, unif
         prepared_cache.lighting_generation = exact_lighting_cache_generation.load(.acquire);
     }
     prepareLitTextures(&prepared, texture, texture_width, texture_height);
-    if (cache_status.cacheable) prepared_cache.prepared = prepared;
-    const prepared_ptr: *const PreparedDraw = if (cache_status.cacheable) &prepared_cache.prepared else &prepared;
+    if (inline_fast and !cache_status.hit) {
+        prepareBatchRaster(&prepared, width, height, scissor);
+        refreshBatchFastFlag(&prepared);
+    }
+    if (cache_status.cacheable and cache_status.promote) {
+        prepared_cache.prepared = prepared;
+        prepared_cache.prepared_ready = true;
+    }
+    const prepared_ptr: *const PreparedDraw = if (cache_status.hit or cache_status.promote) &prepared_cache.prepared else &prepared;
+    if (inline_fast) {
+        var inline_context = ParallelDraw{ .target = target, .depth = depth, .width = width, .height = height, .uniform = uniform, .texture = texture, .texture_width = texture_width, .texture_height = texture_height, .vertex_count = vertex_count, .base_vertex = 0, .viewport = viewport, .scissor = scissor, .cull_mode = 0, .front_face = 0, .indexed = null, .prepared = prepared_ptr, .stripe_count = parallel_slice_count };
+        if (prepared_ptr.batch_fast) {
+            if (drawPreparedBatchFast(false, target, depth, width, height, prepared_ptr, 0, null, null, 0, 0)) |pixels| inline_context.bands[0].pixels_written = pixels else runParallelJob(.{ .draw = &inline_context }, 0);
+            if (drawPreparedBatchFast(false, target, depth, width, height, prepared_ptr, 1, null, null, 0, 0)) |pixels| inline_context.bands[1].pixels_written = pixels else runParallelJob(.{ .draw = &inline_context }, 1);
+        } else {
+            runParallelJob(.{ .draw = &inline_context }, 0);
+            runParallelJob(.{ .draw = &inline_context }, 1);
+        }
+        return inline_context.bands[0].pixels_written + inline_context.bands[1].pixels_written;
+    }
     var validation_failed = std.atomic.Value(bool).init(false);
     const full_screen_scissor = scissor.x == 0 and scissor.y == 0 and scissor.width == width and scissor.height == height;
     const clear_spans = clear_spans_requested and expected_target != null and prepared.spans_valid and width == 800 and height == 600 and full_screen_scissor;
