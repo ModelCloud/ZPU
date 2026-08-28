@@ -69,6 +69,10 @@ pub fn build(b: *std.Build) void {
     smolvm_dry_run_step.dependOn(&smolvm_dry_run.step);
     const smolvm_fluid_desktop_step = b.step("smolvm-fluid-desktop", "Dry-run the SmolVM + fluid desktop + simulated pointer test");
     smolvm_fluid_desktop_step.dependOn(&smolvm_fluid_desktop.step);
+    const zinput_test = b.addSystemCommand(&.{"test/zinput.sh"});
+    zinput_test.step.dependOn(&require_limited.step);
+    const zinput_step = b.step("zinput", "Build and verify zmouse/zkeyboard uinput drivers");
+    zinput_step.dependOn(&zinput_test.step);
     const validate_api_inventory = b.addSystemCommand(&.{ "python3", "tools/api_inventory.py" });
     validate_api_inventory.step.dependOn(&require_limited.step);
     const validate_command_matrix = b.addSystemCommand(&.{ "python3", "tools/vulkan_command_matrix.py" });
@@ -303,6 +307,7 @@ pub fn build(b: *std.Build) void {
     limited_cpus_topology_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&limited_cpus_topology_tests.step);
     test_step.dependOn(&smolvm_fluid_desktop.step);
+    test_step.dependOn(&zinput_test.step);
     test_step.dependOn(&test_api_inventory.step);
 
     const shader_module_client = b.addExecutable(.{

@@ -37,7 +37,9 @@ ZPU ICD, the ICD validates the call, and the CPU does the work. 🧠➡️🖼�
   <em>SmolVM → Linux Desktop → vkcube + simulated pointer: a guest X11 pointer driven by <code>tools/xtest_mouse.c</code> moves right-to-left and around the screen while vkcube renders at 60 Hz. Captured p99 frame time is 16.974 ms.</em>
 </p>
 
-Reproduce the Chromium screenshot with [`tools/smolvm-chrome.sh`](tools/smolvm-chrome.sh) and [`tools/smolvm-chrome.env`](tools/smolvm-chrome.env), or the fluid desktop capture with [`tools/smolvm-fluid-desktop.sh`](tools/smolvm-fluid-desktop.sh), once ZPU is staged in a SmolVM guest.
+Reproduce the Chromium screenshot with [`tools/smolvm-chrome.sh`](tools/smolvm-chrome.sh) and [`tools/smolvm-chrome.env`](tools/smolvm-chrome.env), the fluid desktop capture with [`tools/smolvm-fluid-desktop.sh`](tools/smolvm-fluid-desktop.sh), or stage the emulated input drivers with [`tools/smolvm-zinput.sh`](tools/smolvm-zinput.sh) once ZPU is staged in a SmolVM guest.
+
+`tools/zmouse.c` and `tools/zkeyboard.c` are small `uinput`-based drivers that expose a virtual mouse and keyboard to Linux. They listen on Unix domain sockets for a line protocol (`m 50 0`, `k 30 1`, etc.) so agentic workflows can control the pointer and inject keystrokes on a ZPU-powered Linux desktop without physical input hardware. Run `zig build zinput` to build and verify them.
 
 ## ✨ At a glance
 
@@ -49,6 +51,7 @@ Reproduce the Chromium screenshot with [`tools/smolvm-chrome.sh`](tools/smolvm-c
 | Chromium / ANGLE headless | ✅ `google.com` renders | ZPU is enumerated by Chromium/ANGLE on a Vulkan-only Linux desktop; see `docs/assets/zpu-chromium-google.png`. |
 | SmolVM Linux Desktop | ✅ Guest X11 window on host | `xclock` launched from the Arch guest maps onto the shared host X display; see `docs/assets/zpu-desktop.png`. |
 | SmolVM fluid desktop + simulated pointer | ✅ 60 Hz, p99 <= 17 ms | `tools/smolvm-fluid-desktop.sh` drives a guest `xtest_mouse` pointer while `vkcube` renders; see `docs/assets/zpu-fluid-desktop.png` and `test/smolvm_fluid_desktop.sh`. |
+| Emulated Linux input devices | ✅ zmouse / zkeyboard build | `tools/zmouse.c` and `tools/zkeyboard.c` create `uinput` mouse/keyboard devices and listen on Unix sockets; see `tools/smolvm-zinput.sh` and `test/zinput.sh`. |
 | Zig implementation | ✅ Zig 0.16.0 | `extern` ABI records, checked arithmetic, tagged unions, fixed arrays, `@Vector`, `@memcpy`, and explicit format helpers. |
 | 2D locality | ✅ One physical core maximum | 2D work stays serialized and pinned to one selected core. |
 | Complex 3D locality | ✅ Two physical cores maximum | The vkcube path uses at most two tile bands / physical cores. |
