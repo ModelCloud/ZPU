@@ -16,6 +16,7 @@
  */
 
 #include "zinput.h"
+#include "zinput_server.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -105,34 +106,6 @@ static int process_command(const char *line, int fd) {
     return 1;
 }
 
-static int handle_client(int cfd, int uinput_fd) {
-    char buf[4096];
-    size_t len = 0;
-    while (running) {
-        ssize_t n = recv(cfd, buf + len, sizeof(buf) - len - 1, 0);
-        if (n <= 0) break;
-        len += (size_t)n;
-        buf[len] = '\0';
-
-        char *line_start = buf;
-        char *nl;
-        while ((nl = strchr(line_start, '\n')) != NULL) {
-            *nl = '\0';
-            if (process_command(line_start, uinput_fd) == 0) {
-                running = 0;
-                return 0;
-            }
-            line_start = nl + 1;
-        }
-
-        len = strlen(line_start);
-        if (len > 0 && line_start != buf) {
-            memmove(buf, line_start, len);
-        }
-    }
-    return 1;
-}
-
 int main(int argc, char **argv) {
     const char *device = getenv("ZKEYBOARD_DEVICE");
     if (!device) device = ZKEYBOARD_DEFAULT_DEVICE;
@@ -188,22 +161,14 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (listen(sock, 4) < 0) {
+    if (listen(sock, 16) < 0) {
         fprintf(stderr, "zkeyboard: cannot listen: %s\n", strerror(errno));
         close(sock);
         zinput_destroy(fd);
         return 1;
     }
 
-    while (running) {
-        int c = accept(sock, NULL, NULL);
-        if (c < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        handle_client(c, fd);
-        close(c);
-    }
+    zinput_server_run(sock, fd, process_command, &running);
 
     close(sock);
     zinput_destroy(fd);

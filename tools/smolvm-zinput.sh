@@ -81,7 +81,7 @@ ensure_machine() {
 
 build_drivers() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
-        printf '+ make -C %q zmouse zkeyboard (static) libzinput.so zinput.py\n' "$host_tools"
+        printf '+ make -C %q zmouse zkeyboard (static) libzinput.so\n' "$host_tools"
         return 0
     fi
     run make -C "$host_tools" clean >/dev/null
@@ -91,14 +91,15 @@ build_drivers() {
 
 stage_drivers() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
-        printf '+ stage zmouse/zkeyboard/libzinput.so/zinput.py into %s on %s\n' "$guest_runtime" "$machine"
+        printf '+ stage zmouse/zkeyboard and the zpu python package into %s on %s\n' "$guest_runtime" "$machine"
         return 0
     fi
-    run smolvm machine exec --name "$machine" -- sh -c "install -d -m 755 $guest_runtime"
+    run smolvm machine exec --name "$machine" -- sh -c "install -d -m 755 $guest_runtime/zpu"
     run smolvm machine cp "$host_tools/zmouse" "$machine:$guest_runtime/zmouse"
     run smolvm machine cp "$host_tools/zkeyboard" "$machine:$guest_runtime/zkeyboard"
-    run smolvm machine cp "$host_tools/libzinput.so" "$machine:$guest_runtime/libzinput.so"
-    run smolvm machine cp "$host_tools/zinput.py" "$machine:$guest_runtime/zinput.py"
+    run smolvm machine cp "$host_tools/libzinput.so" "$machine:$guest_runtime/zpu/libzinput.so"
+    run smolvm machine cp "$repo/zpu/__init__.py" "$machine:$guest_runtime/zpu/__init__.py"
+    run smolvm machine cp "$repo/zpu/zinput.py" "$machine:$guest_runtime/zpu/zinput.py"
     run smolvm machine exec --name "$machine" -- sh -c "chmod +x $guest_runtime/zmouse $guest_runtime/zkeyboard"
 }
 
@@ -130,7 +131,7 @@ echo_dry_run_note() {
 #   printf 'k 30 1\nk 30 0\n' | nc -U /run/zkeyboard.sock  # press/release 'a'
 #
 # Python (from inside the guest, with PYTHONPATH set to /run/zpu-runtime):
-#   from zinput import MouseClient, KeyboardClient
+#   from zpu.zinput import MouseClient, KeyboardClient
 #   with MouseClient('/run/zmouse.sock') as m:
 #       m.move(50, 0)
 #       m.click(1)

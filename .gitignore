@@ -12,3 +12,11 @@ smolvm-stage/
 tools/zmouse
 tools/zkeyboard
 tools/libzinput.so
+zpu/libzinput.so
+dist/
+build/
+*.egg-info/
+.eggs/
+.tox/
+.pytest_cache/
+*.pyc
