@@ -263,11 +263,11 @@ current vkcube 4K gate has passed.
 
 | Operation | 1 core | 2 cores | 4K-equivalent surfaces/s (1c / 2c) | p99 latency (1c / 2c) |
 | --- | ---: | ---: | ---: | ---: |
-| Clear / fill | 19,565.22 MPix/s | 19,400.47 MPix/s | 2,358.85 / 2,338.98 | 2,984 / 3,048 ns |
-| Pixel pushes (512 writes) | 171.01 MPix/s | 147.55 MPix/s | 20.62 / 17.79 | 3,045 / 3,571 ns |
-| Clipped rectangles | 2,351.34 MPix/s | 2,346.76 MPix/s | 283.48 / 282.93 | 5,175 / 5,732 ns |
-| Source-over blend | 3,461.54 MPix/s | 3,485.84 MPix/s | 417.33 / 420.26 | 37,757 / 37,852 ns |
-| Sprite pushes (128 × 8×8) | 10.3820M draws/s | 10.3577M draws/s | 80.11 / 79.92 | 33,221 / 33,226 ns |
+| Clear / fill | 19,238.48 MPix/s | 19,367.85 MPix/s | 2,319.45 / 2,335.05 | 3,049 / 3,298 ns |
+| Pixel pushes (512 writes) | 172.22 MPix/s | 168.81 MPix/s | 20.76 / 20.35 | 3,022 / 3,399 ns |
+| Clipped rectangles | 2,347.22 MPix/s | 2,330.89 MPix/s | 282.99 / 281.02 | 5,295 / 5,263 ns |
+| Source-over blend | 3,481.62 MPix/s | 3,439.83 MPix/s | 419.76 / 414.72 | 37,831 / 39,637 ns |
+| Sprite pushes (128 × 8×8) | 10.3803M draws/s | 10.3627M draws/s | 80.09 / 79.95 | 33,260 / 33,349 ns |
 
 The nearly identical one- and two-core columns are intentional: the 2D path
 does not spread across the second core, preserving cache and NUMA locality. The
@@ -278,8 +278,8 @@ same run measured pipeline-key construction at **3 ns**, cache lookup at
 The 2D raster hot paths use exact alpha fast paths for transparent and opaque
 source pixels, strength-reduced division for opaque destination blending, and
 direct writes for single-pixel rectangles. On the validation host,
-runtime-dispatched source-over measured **3.46 GPix/s** and the complete mixed
-frame workload measured **64.6k FPS**. These figures are workload- and
+runtime-dispatched source-over measured **3.48 GPix/s** and the complete mixed
+frame workload measured **64.4k FPS**. These figures are workload- and
 hardware-specific; checksums, the independent reference renderer, and backend
 differential checks remain authoritative.
 
@@ -293,8 +293,10 @@ This is the frozen, vkcube-specific CPU 3D benchmark: twelve independently
 generated triangles at 800×600, five warmups followed by thirty timed frames.
 Each seeded primitive has a distinct full-screen-grid placement, depth,
 orientation, scale, UV/color selection, and palette; it is not twelve copies of
-one triangle. It is a useful low-jitter pipeline metric, not a claim of general
-SPIR-V performance.
+one triangle. The same seeded coordinates are intentionally rendered for each
+sample so the checksum is comparable; scene-coverage tests verify distinct
+origins and nontrivial x/y/z ranges. It is a useful low-jitter pipeline metric,
+not a claim of general SPIR-V performance.
 
 The two-core run measures a complete render on every timed sample. It resets
 the color/depth attachments, transforms all 36 vertices, rasterizes all 12
@@ -306,15 +308,15 @@ aspirational gate and is not represented as passed.
 
 | Metric | Result |
 | --- | ---: |
-| Median frame rate | **237.17 FPS** |
-| Frame time p50 / p95 / p99 | 4.212 / 4.249 / **4.256 ms** |
+| Measured frame rate (30-sample mean) | **307.16 FPS** |
+| Frame time p50 / p95 / p99 | 3.255 / 3.268 / **3.268 ms** |
 | Triangles submitted / rasterized | 12 / 12 per frame |
-| Triangle throughput | **2,845.99 triangles/s** |
+| Triangle throughput | **3,685.88 triangles/s** |
 | Two-core 150M target | **not met (150,000,000 triangles/s)** |
-| Fragments tested | **55.14M/s** |
-| Fragments covered | **35.01M/s** |
-| Depth tests passed / color writes | **35.00M/s** |
-| Frame-time coefficient of variation | **0.43%** |
+| Fragments tested | **71.42M/s** |
+| Fragments covered | **45.35M/s** |
+| Depth tests passed / color writes | **45.33M/s** |
+| Frame-time coefficient of variation | **0.28%** |
 
 The static replay APIs remain available for callers that explicitly want
 immutable attachment reuse: `drawCountedParallelStaticReuseImmutable` uses a

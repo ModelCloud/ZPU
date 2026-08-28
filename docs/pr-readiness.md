@@ -54,7 +54,7 @@ baseline). A target run is enforced with `--require-target` (with
 readiness artifact above. Every timed sample clears the attachments,
 transforms all 36 vertices, rasterizes all 12 triangles, and computes a
 checksum; the static replay cache is deliberately bypassed. The latest
-ReleaseFast probe measured 2,845.99 triangles/s (237.17 FPS, 4.256 ms p99), so
+ReleaseFast probe measured 3,685.88 triangles/s (307.16 FPS, 3.268 ms p99), so
 the aspirational target is explicitly not reported as passed.
 
 Validation additionally requires the ZPU CPU device, one VP9 800×600 stream,
