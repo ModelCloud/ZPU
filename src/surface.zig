@@ -63,6 +63,14 @@ pub const Surface = struct {
 };
 
 pub fn clip(rect: Rect, width: u32, height: u32) ?Rect {
+    // Most draw calls are already in bounds. Use subtraction-based checks so
+    // the fast path avoids widening coordinates and cannot overflow on large
+    // rectangles; zero-sized inputs still retain the null result below.
+    if (rect.width != 0 and rect.height != 0 and rect.x >= 0 and rect.y >= 0) {
+        const x: u32 = @intCast(rect.x);
+        const y: u32 = @intCast(rect.y);
+        if (x <= width and rect.width <= width - x and y <= height and rect.height <= height - y) return rect;
+    }
     const x0 = @max(@as(i64, rect.x), 0);
     const y0 = @max(@as(i64, rect.y), 0);
     const x1 = @min(@as(i64, rect.x) + rect.width, width);

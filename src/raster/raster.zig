@@ -121,19 +121,37 @@ pub fn drawSprite(surface: *s.Surface, destination: s.Rect, source: []const u8, 
     }
 }
 
-pub fn drawSpriteWith(surface: *s.Surface, destination: s.Rect, source: []const u8, source_width: u32, source_height: u32, backend: dispatch.Backend) void {
-    if (destination.width != source_width or destination.height != source_height) return;
+fn drawSpriteChecked(surface: *s.Surface, destination: s.Rect, source: []const u8, source_width: u32, backend: dispatch.Backend) void {
     const clipped = s.clip(destination, surface.width, surface.height) orelse return;
     const source_x: usize = @intCast(clipped.x - destination.x);
     const source_y: usize = @intCast(clipped.y - destination.y);
+    dispatch.blendPixelsRows(backend, surface, clipped, source, source_width, source_x, source_y);
+}
+
+pub fn drawSprites(surface: *s.Surface, destinations: []const s.Rect, source: []const u8, source_width: u32, source_height: u32) void {
     const source_pixels = std.math.mul(usize, source_width, source_height) catch return;
     const source_bytes = std.math.mul(usize, source_pixels, 4) catch return;
     if (source.len < source_bytes) return;
-    for (0..clipped.height) |dy| {
-        const row = surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy));
-        const source_offset = ((source_y + dy) * source_width + source_x) * 4;
-        dispatch.blendPixels(backend, row, @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
-    }
+    const kernel = cachedKernel(surface.format, .sprite);
+    dispatch.blendPixelsRowsBatch(kernel.backend, surface, destinations, source, source_width, source_height);
+}
+
+pub fn drawSpriteWith(surface: *s.Surface, destination: s.Rect, source: []const u8, source_width: u32, source_height: u32, backend: dispatch.Backend) void {
+    if (destination.width != source_width or destination.height != source_height) return;
+    const source_pixels = std.math.mul(usize, source_width, source_height) catch return;
+    const source_bytes = std.math.mul(usize, source_pixels, 4) catch return;
+    if (source.len < source_bytes) return;
+    drawSpriteChecked(surface, destination, source, source_width, backend);
+}
+
+/// Draw multiple same-sized sprites while validating the immutable source once.
+/// This keeps the per-sprite clipping and source-origin semantics, but avoids
+/// repeating the source-size checks for batched UI/particle workloads.
+pub fn drawSpritesWith(surface: *s.Surface, destinations: []const s.Rect, source: []const u8, source_width: u32, source_height: u32, backend: dispatch.Backend) void {
+    const source_pixels = std.math.mul(usize, source_width, source_height) catch return;
+    const source_bytes = std.math.mul(usize, source_pixels, 4) catch return;
+    if (source.len < source_bytes) return;
+    dispatch.blendPixelsRowsBatch(backend, surface, destinations, source, source_width, source_height);
 }
 
 test "sprite draw validates source and clips while preserving source origin" {
@@ -152,4 +170,16 @@ test "sprite draw validates source and clips while preserving source origin" {
     drawSpriteWith(&surface, .{ .x = 0, .y = 0, .width = std.math.maxInt(u32), .height = std.math.maxInt(u32) }, &.{}, std.math.maxInt(u32), std.math.maxInt(u32), .scalar);
     drawSpriteWith(&surface, .{ .x = 5, .y = 5, .width = 2, .height = 2 }, &sprite, 2, 2, .scalar);
     try std.testing.expectEqualSlices(u8, &before, &pixels);
+
+    var batched_pixels = [_]u8{0} ** (3 * 2 * 4);
+    var individual_pixels = [_]u8{0} ** (3 * 2 * 4);
+    var batched_surface = try s.Surface.init(&batched_pixels, 3, 2, 12, .rgba8_unorm);
+    var individual_surface = try s.Surface.init(&individual_pixels, 3, 2, 12, .rgba8_unorm);
+    const destinations = [_]s.Rect{
+        .{ .x = -1, .y = 0, .width = 2, .height = 2 },
+        .{ .x = 1, .y = 0, .width = 2, .height = 2 },
+    };
+    drawSpritesWith(&batched_surface, &destinations, &sprite, 2, 2, .scalar);
+    for (destinations) |destination| drawSpriteWith(&individual_surface, destination, &sprite, 2, 2, .scalar);
+    try std.testing.expectEqualSlices(u8, &individual_pixels, &batched_pixels);
 }

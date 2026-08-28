@@ -128,6 +128,7 @@ pub fn blendSpan(backend: Backend, row: []u8, start: usize, count: usize, format
         } else @panic("eight-lane kernels require an x86_64 artifact target"),
     }
 }
+
 pub fn blendPixels(backend: Backend, row: []u8, start: usize, source: []const u8, count: usize, format: s.Format) void {
     switch (backend) {
         .scalar => scalar.blendPixels(row, start, source, count, format),
@@ -136,6 +137,64 @@ pub fn blendPixels(backend: Backend, row: []u8, start: usize, source: []const u8
             requireEightLaneSupport();
             v3.blend_pixels_8(row.ptr, row.len, start, source.ptr, source.len, count, @intFromEnum(format));
         } else @panic("eight-lane kernels require an x86_64 artifact target"),
+    }
+}
+
+/// Blend a clipped multi-row sprite while selecting the backend once. The
+/// kernel ABI is row-oriented, so this keeps the per-row calls but removes the
+/// repeated backend switch from the raster hot path.
+pub fn blendPixelsRows(backend: Backend, surface: *s.Surface, destination: s.Rect, source: []const u8, source_width: u32, source_x: usize, source_y: usize) void {
+    switch (backend) {
+        .scalar => for (0..destination.height) |dy| {
+            const source_offset = ((source_y + dy) * source_width + source_x) * 4;
+            scalar.blendPixels(surface.row(@intCast(@as(usize, @intCast(destination.y)) + dy)), @intCast(destination.x), source[source_offset..], destination.width, surface.format);
+        },
+        .portable_vector => for (0..destination.height) |dy| {
+            const source_offset = ((source_y + dy) * source_width + source_x) * 4;
+            vector.blendPixels(4, surface.row(@intCast(@as(usize, @intCast(destination.y)) + dy)), @intCast(destination.x), source[source_offset..], destination.width, surface.format);
+        },
+        .avx2 => for (0..destination.height) |dy| {
+            const source_offset = ((source_y + dy) * source_width + source_x) * 4;
+            blendPixels(.avx2, surface.row(@intCast(@as(usize, @intCast(destination.y)) + dy)), @intCast(destination.x), source[source_offset..], destination.width, surface.format);
+        },
+    }
+}
+
+/// Batch sprite rows with one backend selection. Clipping remains per sprite,
+/// but all sprites in the batch use the same already-validated source and
+/// backend route.
+pub fn blendPixelsRowsBatch(backend: Backend, surface: *s.Surface, destinations: []const s.Rect, source: []const u8, source_width: u32, source_height: u32) void {
+    switch (backend) {
+        .scalar => for (destinations) |destination| {
+            if (destination.width != source_width or destination.height != source_height) continue;
+            const clipped = s.clip(destination, surface.width, surface.height) orelse continue;
+            const source_x: usize = @intCast(clipped.x - destination.x);
+            const source_y: usize = @intCast(clipped.y - destination.y);
+            for (0..clipped.height) |dy| {
+                const source_offset = ((source_y + dy) * source_width + source_x) * 4;
+                scalar.blendPixels(surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
+            }
+        },
+        .portable_vector => for (destinations) |destination| {
+            if (destination.width != source_width or destination.height != source_height) continue;
+            const clipped = s.clip(destination, surface.width, surface.height) orelse continue;
+            const source_x: usize = @intCast(clipped.x - destination.x);
+            const source_y: usize = @intCast(clipped.y - destination.y);
+            for (0..clipped.height) |dy| {
+                const source_offset = ((source_y + dy) * source_width + source_x) * 4;
+                vector.blendPixels(4, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
+            }
+        },
+        .avx2 => for (destinations) |destination| {
+            if (destination.width != source_width or destination.height != source_height) continue;
+            const clipped = s.clip(destination, surface.width, surface.height) orelse continue;
+            const source_x: usize = @intCast(clipped.x - destination.x);
+            const source_y: usize = @intCast(clipped.y - destination.y);
+            for (0..clipped.height) |dy| {
+                const source_offset = ((source_y + dy) * source_width + source_x) * 4;
+                blendPixels(.avx2, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
+            }
+        },
     }
 }
 
