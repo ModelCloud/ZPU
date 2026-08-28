@@ -202,7 +202,7 @@ pub fn blendPixelsRowsBatch(backend: Backend, surface: *s.Surface, destinations:
 /// Batch atlas sprites with one backend route. Each source rectangle must be
 /// in the immutable atlas and match its destination dimensions; destination
 /// clipping advances the source origin exactly like drawSprite.
-pub fn blendPixelsRowsRegionsBatch(backend: Backend, surface: *s.Surface, regions: []const SpriteRegion, source: []const u8, source_width: u32, source_height: u32) void {
+pub fn blendPixelsRowsRegionsBatch(backend: Backend, surface: *s.Surface, regions: []const SpriteRegion, source: []const u8, source_width: u32, source_height: u32, binary_alpha: bool) void {
     switch (backend) {
         .scalar => for (regions) |region| {
             const destination = region.destination;
@@ -217,7 +217,7 @@ pub fn blendPixelsRowsRegionsBatch(backend: Backend, surface: *s.Surface, region
             const source_y: usize = @intCast(source_rect.y + (clipped.y - destination.y));
             for (0..clipped.height) |dy| {
                 const source_offset = ((source_y + dy) * source_width + source_x) * 4;
-                scalar.blendPixels(surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
+                if (binary_alpha) scalar.blendPixelsBinary(surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format) else scalar.blendPixels(surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
             }
         },
         .portable_vector => for (regions) |region| {
@@ -233,7 +233,7 @@ pub fn blendPixelsRowsRegionsBatch(backend: Backend, surface: *s.Surface, region
             const source_y: usize = @intCast(source_rect.y + (clipped.y - destination.y));
             for (0..clipped.height) |dy| {
                 const source_offset = ((source_y + dy) * source_width + source_x) * 4;
-                vector.blendPixels(4, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
+                if (binary_alpha) vector.blendPixelsBinary(4, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format) else vector.blendPixels(4, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
             }
         },
         .avx2 => for (regions) |region| {
@@ -249,7 +249,7 @@ pub fn blendPixelsRowsRegionsBatch(backend: Backend, surface: *s.Surface, region
             const source_y: usize = @intCast(source_rect.y + (clipped.y - destination.y));
             for (0..clipped.height) |dy| {
                 const source_offset = ((source_y + dy) * source_width + source_x) * 4;
-                blendPixels(.avx2, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
+                if (binary_alpha) vector.blendPixelsBinary(8, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format) else blendPixels(.avx2, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
             }
         },
     }
