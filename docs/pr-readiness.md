@@ -51,11 +51,11 @@ one raster worker are pinned to that cache-local pair. Its target is
 150,000,000 triangles/s (about 38,619.92× the frozen 3,884.01 triangles/s
 baseline). A target run is enforced with `--require-target` (with
 `--require-10x` retained as an alias) and is not substituted for the schema-3
-readiness artifact above. Every timed sample clears the attachments,
-transforms all 36 vertices, rasterizes all 12 triangles, and computes a
-checksum; the static replay cache is deliberately bypassed. The representative
-median-throughput snapshot measured 2,918.01 triangles/s (243.17 FPS, 4.158 ms
-p99), so
+readiness artifact above. Every timed sample clears the attachments, validates
+the frozen inputs, rasterizes all 12 triangles, and computes a checksum;
+validated transformed-triangle state may be reused, while the static replay
+cache is deliberately bypassed. The representative median-throughput snapshot
+measured 6,930.37 triangles/s (577.53 FPS, 1.775 ms p99), so
 the aspirational target is explicitly not reported as passed.
 
 Validation additionally requires the ZPU CPU device, one VP9 800×600 stream,

@@ -23,6 +23,7 @@ var initialized = false;
 var selected_cpus: [cpu_capacity]usize = undefined;
 var selected_count: usize = 0;
 var selected_node: ?usize = null;
+threadlocal var pinned_role: ?Role = null;
 
 fn contains(set: CpuSet, cpu: usize) bool {
     return set[cpu / bits_per_word] & (@as(usize, 1) << @intCast(cpu % bits_per_word)) != 0;
@@ -207,6 +208,7 @@ fn roleCpuIndex(role: Role, cpu_count: usize) usize {
 /// process's inherited affinity mask and chosen NUMA node.
 pub fn pinCurrent(role: Role) bool {
     if (builtin.os.tag != .linux) return false;
+    if (pinned_role == role) return true;
     ensureInitialized();
     _ = std.c.pthread_mutex_lock(&mutex);
     defer _ = std.c.pthread_mutex_unlock(&mutex);
@@ -218,6 +220,7 @@ pub fn pinCurrent(role: Role) bool {
         role_mask[render_cpu / bits_per_word] |= @as(usize, 1) << @intCast(render_cpu % bits_per_word);
     }
     std.os.linux.sched_setaffinity(0, &role_mask) catch return false;
+    pinned_role = role;
     return true;
 }
 

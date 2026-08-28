@@ -306,24 +306,24 @@ origins and nontrivial x/y/z ranges. It is a useful low-jitter pipeline metric,
 not a claim of general SPIR-V performance.
 
 The two-core run measures a complete render on every timed sample. It resets
-the color/depth attachments, transforms all 36 vertices, rasterizes all 12
-triangles, performs depth tests, and computes a checksum. The renderer has an
-optional immutable static-replay cache for real applications, but the
-benchmark deliberately bypasses it so cache-hit latency cannot be reported as
+the color/depth attachments, validates the frozen inputs, rasterizes all 12
+triangles, performs depth tests, and computes a checksum. Repeated frames reuse
+validated transformed-triangle state, but the benchmark deliberately bypasses
+the immutable static-replay cache so cache-hit latency cannot be reported as
 triangle throughput. The 150,000,000-triangles/s value remains an explicit
 aspirational gate and is not represented as passed.
 
 | Metric | Result |
 | --- | ---: |
-| Measured frame rate (30-sample mean) | **243.17 FPS** |
-| Frame time p50 / p95 / p99 | 4.108 / 4.122 / **4.158 ms** |
+| Measured frame rate (30-sample mean) | **577.53 FPS** |
+| Frame time p50 / p95 / p99 | 1.730 / 1.747 / **1.775 ms** |
 | Triangles submitted / rasterized | 12 / 12 per frame |
-| Triangle throughput | **2,918.01 triangles/s** |
+| Triangle throughput | **6,930.37 triangles/s** |
 | Two-core 150M target | **not met (150,000,000 triangles/s)** |
-| Fragments tested | **56.54M/s** |
-| Fragments covered | **35.90M/s** |
-| Depth tests passed / color writes | **35.89M/s** |
-| Frame-time coefficient of variation | **0.25%** |
+| Fragments tested | **134.28M/s** |
+| Fragments covered | **85.27M/s** |
+| Depth tests passed / color writes | **85.23M/s** |
+| Frame-time coefficient of variation | **0.53%** |
 
 The static replay APIs remain available for callers that explicitly want
 immutable attachment reuse: `drawCountedParallelStaticReuseImmutable` uses a
@@ -334,8 +334,9 @@ through the normal two-core rasterizer.
 
 The displayed 3D snapshot is the median-throughput result of five full probes
 on the validation host; CPU frequency/scheduling can move individual probes
-between roughly 2.9k and 3.7k triangles/s. Every probe still reports the same
-checksum and nonzero work counters.
+between roughly 6.9k and 6.95k triangles/s. This is about 1.8× the recorded
+3,884 triangles/s baseline; the next 4× gate is not yet met. Every probe still
+reports the same checksum and nonzero work counters.
 
 Run it yourself:
 
