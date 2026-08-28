@@ -46,6 +46,8 @@ pub fn build(b: *std.Build) void {
     smolvm_guest_step.dependOn(&smolvm_guest_test.step);
     const smolvm_dry_run = b.addSystemCommand(&.{"test/smolvm_dry_run.sh"});
     smolvm_dry_run.step.dependOn(&require_limited.step);
+    const smolvm_fluid_desktop = b.addSystemCommand(&.{"test/smolvm_fluid_desktop.sh"});
+    smolvm_fluid_desktop.step.dependOn(&require_limited.step);
     const smolvm_untrusted_environment = [_][]const u8{
         "VK_DRIVER_FILES",              "VK_ICD_FILENAMES",                  "VK_ADD_DRIVER_FILES",             "VK_LAYER_PATH",               "VK_ADD_LAYER_PATH",
         "VK_IMPLICIT_LAYER_PATH",       "VK_ADD_IMPLICIT_LAYER_PATH",        "VK_INSTANCE_LAYERS",              "VK_LOADER_LAYERS_ENABLE",     "VK_LOADER_LAYERS_DISABLE",
@@ -61,9 +63,12 @@ pub fn build(b: *std.Build) void {
     for (smolvm_untrusted_environment) |name| {
         smolvm_guest_test.removeEnvironmentVariable(name);
         smolvm_dry_run.removeEnvironmentVariable(name);
+        smolvm_fluid_desktop.removeEnvironmentVariable(name);
     }
     const smolvm_dry_run_step = b.step("smolvm-dry-run", "Print the complete guest lifecycle without changing host or VM state");
     smolvm_dry_run_step.dependOn(&smolvm_dry_run.step);
+    const smolvm_fluid_desktop_step = b.step("smolvm-fluid-desktop", "Dry-run the SmolVM + fluid desktop + simulated pointer test");
+    smolvm_fluid_desktop_step.dependOn(&smolvm_fluid_desktop.step);
     const validate_api_inventory = b.addSystemCommand(&.{ "python3", "tools/api_inventory.py" });
     validate_api_inventory.step.dependOn(&require_limited.step);
     const validate_command_matrix = b.addSystemCommand(&.{ "python3", "tools/vulkan_command_matrix.py" });
@@ -297,6 +302,7 @@ pub fn build(b: *std.Build) void {
     const limited_cpus_topology_tests = b.addSystemCommand(&.{"test/limited_cpus_topology.sh"});
     limited_cpus_topology_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&limited_cpus_topology_tests.step);
+    test_step.dependOn(&smolvm_fluid_desktop.step);
     test_step.dependOn(&test_api_inventory.step);
 
     const shader_module_client = b.addExecutable(.{
