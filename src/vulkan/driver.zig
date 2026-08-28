@@ -3566,13 +3566,26 @@ fn imageFormatUsage(format: i32) u32 {
         else => 0,
     };
 }
+fn validVkFormatEnum(format: i32) bool {
+    // The core VkFormat enum is contiguous through VK_FORMAT_ASTC_12x12,
+    // while the promoted sampler-YCbCr and later format extensions occupy
+    // explicit extension ranges.  Sparse queries must distinguish those
+    // valid-but-unsupported formats from an actually malformed enum value.
+    return (format >= 0 and format <= 184) or
+        (format >= 1000066000 and format <= 1000066013) or // VK_EXT_texture_compression_astc_hdr
+        (format >= 1000156000 and format <= 1000156033) or // VK_KHR_sampler_ycbcr_conversion
+        (format >= 1000288000 and format <= 1000288029) or // VK_EXT_texture_compression_astc_3d
+        (format >= 1000330000 and format <= 1000330003) or // VK_EXT_ycbcr_2plane_444
+        (format >= 1000340000 and format <= 1000340001) or // VK_EXT_4444_formats
+        (format >= 1000470000 and format <= 1000470001); // VK_KHR_maintenance5
+}
 fn sparseImageFormatQueryValid(format: i32, image_type: i32, samples: u32, usage: u32, tiling: i32) bool {
     // Sparse residency is not advertised, but the query ABI still has to
     // distinguish a valid unsupported combination from malformed input. The
     // profile accepts the core image-type/sample/tiling domains and any
     // nonzero image-usage mask, then returns an empty property set.
     const valid_samples = samples == 1 or samples == 2 or samples == 4 or samples == 8 or samples == 16 or samples == 32 or samples == 64;
-    return format != 0 and image_type >= 0 and image_type <= 2 and valid_samples and usage != 0 and (tiling == 0 or tiling == 1);
+    return format != 0 and validVkFormatEnum(format) and image_type >= 0 and image_type <= 2 and valid_samples and usage != 0 and (tiling == 0 or tiling == 1);
 }
 fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatProperties) bool {
     if (!validPhysicalLocked(physical)) return false;
@@ -19022,6 +19035,15 @@ test "all physical queries cover success boundaries and invalid handles" {
     sparse_count = 9;
     getSparseImageFormatProperties(p, 0, 0, 1, 0, 0, &sparse_count, null);
     try std.testing.expectEqual(@as(u32, 9), sparse_count);
+    // Unknown VkFormat values are malformed rather than valid unsupported
+    // sparse combinations.  Extension-defined formats remain valid query
+    // inputs and still report the truthful zero-sparse result.
+    sparse_count = 9;
+    getSparseImageFormatProperties(p, 999, 1, 1, 1, 0, &sparse_count, null);
+    try std.testing.expectEqual(@as(u32, 9), sparse_count);
+    sparse_count = 9;
+    getSparseImageFormatProperties(p, 1000066000, 1, 1, 1, 0, &sparse_count, null);
+    try std.testing.expectEqual(@as(u32, 0), sparse_count);
     var extension_count: u32 = 9;
     try std.testing.expectEqual(Result.success, enumerateDeviceExtensions(p, null, &extension_count, null));
     try std.testing.expectEqual(@as(u32, 2), extension_count);
