@@ -55,6 +55,15 @@ p50/p95/p99/max/CV frame time, first/final checksums, and counters from the
 first measured frame. The smoke mode is for CI and correctness checks, not
 performance claims.
 
+The terminal profile also exercises the opt-in
+`drawUncountedParallelBatchOpaqueOverlay` Vulkan-facing API. It renders the
+background and stable glyph geometry once, then updates only the opaque glyph
+colors from the 16×16 atlas while preserving depth and avoiding a full-frame
+clear. The API contract is deliberately narrow: callers must guarantee opaque,
+depth-passing overlays and must clear or cover obsolete coverage themselves.
+This models steady-state terminal/compositor text updates; it is not a
+general-purpose alpha or blending path.
+
 Batch callers that can track their own data lifetimes may set the optional
 `DrawCommand` `uniform_revision`, `geometry_revision`, and `texture_revision`
 keys. Non-zero keys avoid defensive byte scans while retaining pointer checks;
@@ -71,6 +80,8 @@ whenever the corresponding bytes change.
   two-core paths, requiring identical color/depth attachments and checksums,
   matching submitted/rasterized triangle counts, nonzero coverage, and a
   changed but still matching game frame after animation.
+- the terminal overlay test compares an incremental overlay update against a
+  fully cleared redraw and requires byte-identical color and depth attachments.
 
 Run them with:
 
