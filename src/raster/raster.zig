@@ -81,6 +81,12 @@ pub fn fillRectWith(surface: *s.Surface, rect: s.Rect, color: s.Color, backend: 
         return;
     }
     const clipped = s.clip(rect, surface.width, surface.height) orelse return;
+    if (clipped.width <= 2 and clipped.height <= 2) {
+        for (0..clipped.height) |dy| for (0..clipped.width) |dx| {
+            s.Surface.write(surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), (@as(usize, @intCast(clipped.x)) + dx) * 4, surface.format, color);
+        };
+        return;
+    }
     if (contiguousSpan(surface, clipped)) |span| {
         dispatch.fillSpan(backend, span.bytes, 0, span.pixels, surface.format, color);
         return;
@@ -95,11 +101,110 @@ pub fn blendRectWith(surface: *s.Surface, rect: s.Rect, color: s.Color, backend:
         s.Surface.write(row, offset, surface.format, scalar.blendPixel(s.Surface.read(row, offset, surface.format), color));
         return;
     }
+    if (clipped.width <= 2 and clipped.height <= 2) {
+        for (0..clipped.height) |dy| {
+            const row = surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy));
+            for (0..clipped.width) |dx| {
+                const offset = (@as(usize, @intCast(clipped.x)) + dx) * 4;
+                s.Surface.write(row, offset, surface.format, scalar.blendPixel(s.Surface.read(row, offset, surface.format), color));
+            }
+        }
+        return;
+    }
     if (contiguousSpan(surface, clipped)) |span| {
         dispatch.blendSpan(backend, span.bytes, 0, span.pixels, surface.format, color);
         return;
     }
     for (@intCast(clipped.y)..@as(usize, @intCast(clipped.y)) + clipped.height) |y| dispatch.blendSpan(backend, surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, surface.format, color);
+}
+
+/// A colored rectangle command used by retained-mode UI/compositor callers.
+/// Keeping the color next to the geometry lets one batch contain window
+/// shadows, panels, controls, and guides without allocating per draw.
+pub const ColoredRect = struct { rect: s.Rect, color: s.Color };
+pub const SpriteRegion = dispatch.SpriteRegion;
+
+fn fillRectBackend(comptime backend: dispatch.Backend, surface: *s.Surface, rect: s.Rect, color: s.Color) void {
+    if (rect.width == 1 and rect.height == 1) {
+        if (rect.x < 0 or rect.y < 0 or @as(u32, @intCast(rect.x)) >= surface.width or @as(u32, @intCast(rect.y)) >= surface.height) return;
+        s.Surface.write(surface.row(@intCast(rect.y)), @as(usize, @intCast(rect.x)) * 4, surface.format, color);
+        return;
+    }
+    const clipped = s.clip(rect, surface.width, surface.height) orelse return;
+    if (clipped.width <= 2 and clipped.height <= 2) {
+        for (0..clipped.height) |dy| for (0..clipped.width) |dx| {
+            s.Surface.write(surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), (@as(usize, @intCast(clipped.x)) + dx) * 4, surface.format, color);
+        };
+        return;
+    }
+    if (contiguousSpan(surface, clipped)) |span| {
+        switch (backend) {
+            .scalar => scalar.fillSpan(span.bytes, 0, span.pixels, surface.format, color),
+            .portable_vector, .avx2 => dispatch.fillSpan(backend, span.bytes, 0, span.pixels, surface.format, color),
+        }
+        return;
+    }
+    for (@intCast(clipped.y)..@as(usize, @intCast(clipped.y)) + clipped.height) |y| switch (backend) {
+        .scalar => scalar.fillSpan(surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, surface.format, color),
+        .portable_vector, .avx2 => dispatch.fillSpan(backend, surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, surface.format, color),
+    };
+}
+
+fn blendRectBackend(comptime backend: dispatch.Backend, surface: *s.Surface, rect: s.Rect, color: s.Color) void {
+    const clipped = s.clip(rect, surface.width, surface.height) orelse return;
+    if (clipped.width == 1 and clipped.height == 1) {
+        const row = surface.row(@intCast(clipped.y));
+        const offset = @as(usize, @intCast(clipped.x)) * 4;
+        s.Surface.write(row, offset, surface.format, scalar.blendPixel(s.Surface.read(row, offset, surface.format), color));
+        return;
+    }
+    if (clipped.width <= 2 and clipped.height <= 2) {
+        for (0..clipped.height) |dy| {
+            const row = surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy));
+            for (0..clipped.width) |dx| {
+                const offset = (@as(usize, @intCast(clipped.x)) + dx) * 4;
+                s.Surface.write(row, offset, surface.format, scalar.blendPixel(s.Surface.read(row, offset, surface.format), color));
+            }
+        }
+        return;
+    }
+    if (contiguousSpan(surface, clipped)) |span| {
+        switch (backend) {
+            .scalar => scalar.blendSpan(span.bytes, 0, span.pixels, surface.format, color),
+            .portable_vector, .avx2 => dispatch.blendSpan(backend, span.bytes, 0, span.pixels, surface.format, color),
+        }
+        return;
+    }
+    for (@intCast(clipped.y)..@as(usize, @intCast(clipped.y)) + clipped.height) |y| switch (backend) {
+        .scalar => scalar.blendSpan(surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, surface.format, color),
+        .portable_vector, .avx2 => dispatch.blendSpan(backend, surface.row(@intCast(y)), @intCast(clipped.x), clipped.width, surface.format, color),
+    };
+}
+
+/// Fill many independently clipped rectangles with one backend route. The
+/// individual geometry and color values remain observable in draw order.
+pub fn fillRectsWith(surface: *s.Surface, draws: []const ColoredRect, backend: dispatch.Backend) void {
+    switch (backend) {
+        .scalar => for (draws) |draw| fillRectBackend(.scalar, surface, draw.rect, draw.color),
+        .portable_vector => for (draws) |draw| fillRectBackend(.portable_vector, surface, draw.rect, draw.color),
+        .avx2 => for (draws) |draw| fillRectBackend(.avx2, surface, draw.rect, draw.color),
+    }
+}
+
+pub fn blendRectsWith(surface: *s.Surface, draws: []const ColoredRect, backend: dispatch.Backend) void {
+    switch (backend) {
+        .scalar => for (draws) |draw| blendRectBackend(.scalar, surface, draw.rect, draw.color),
+        .portable_vector => for (draws) |draw| blendRectBackend(.portable_vector, surface, draw.rect, draw.color),
+        .avx2 => for (draws) |draw| blendRectBackend(.avx2, surface, draw.rect, draw.color),
+    }
+}
+
+pub fn fillRects(surface: *s.Surface, draws: []const ColoredRect) void {
+    fillRectsWith(surface, draws, cachedKernel(surface.format, .fill).backend);
+}
+
+pub fn blendRects(surface: *s.Surface, draws: []const ColoredRect) void {
+    blendRectsWith(surface, draws, cachedKernel(surface.format, .source_over).backend);
 }
 
 /// Draw a tightly packed RGBA8 sprite with straight-alpha source-over blending.
@@ -154,6 +259,27 @@ pub fn drawSpritesWith(surface: *s.Surface, destinations: []const s.Rect, source
     dispatch.blendPixelsRowsBatch(backend, surface, destinations, source, source_width, source_height);
 }
 
+/// Draw atlas-backed sprites in one batch. Source rectangles may differ per
+/// draw, which models terminal glyph atlases and 2D engine texture sheets.
+pub fn drawSpriteRegionsWith(surface: *s.Surface, regions: []const SpriteRegion, source: []const u8, source_width: u32, source_height: u32, backend: dispatch.Backend) void {
+    const source_pixels = std.math.mul(usize, source_width, source_height) catch return;
+    const source_bytes = std.math.mul(usize, source_pixels, 4) catch return;
+    if (source.len < source_bytes) return;
+    for (regions) |region| {
+        const source_rect = region.source;
+        if (source_rect.x < 0 or source_rect.y < 0) continue;
+        const sx: u32 = @intCast(source_rect.x);
+        const sy: u32 = @intCast(source_rect.y);
+        if (sx > source_width or sy > source_height or source_rect.width > source_width - sx or source_rect.height > source_height - sy) continue;
+        if (region.destination.width != source_rect.width or region.destination.height != source_rect.height) continue;
+    }
+    dispatch.blendPixelsRowsRegionsBatch(backend, surface, regions, source, source_width, source_height);
+}
+
+pub fn drawSpriteRegions(surface: *s.Surface, regions: []const SpriteRegion, source: []const u8, source_width: u32, source_height: u32) void {
+    drawSpriteRegionsWith(surface, regions, source, source_width, source_height, cachedKernel(surface.format, .sprite).backend);
+}
+
 test "sprite draw validates source and clips while preserving source origin" {
     var pixels = [_]u8{0} ** (3 * 2 * 4);
     var surface = try s.Surface.init(&pixels, 3, 2, 12, .rgba8_unorm);
@@ -182,4 +308,51 @@ test "sprite draw validates source and clips while preserving source origin" {
     drawSpritesWith(&batched_surface, &destinations, &sprite, 2, 2, .scalar);
     for (destinations) |destination| drawSpriteWith(&individual_surface, destination, &sprite, 2, 2, .scalar);
     try std.testing.expectEqualSlices(u8, &individual_pixels, &batched_pixels);
+}
+
+test "colored rectangle batches preserve draw order and clipping" {
+    var batched_pixels = [_]u8{0} ** (8 * 6 * 4);
+    var individual_pixels = [_]u8{0} ** (8 * 6 * 4);
+    var batched = try s.Surface.init(&batched_pixels, 8, 6, 32, .rgba8_unorm);
+    var individual = try s.Surface.init(&individual_pixels, 8, 6, 32, .rgba8_unorm);
+    const fills = [_]ColoredRect{
+        .{ .rect = .{ .x = -2, .y = 1, .width = 5, .height = 4 }, .color = .rgba(210, 30, 40, 255) },
+        .{ .rect = .{ .x = 3, .y = -1, .width = 6, .height = 3 }, .color = .rgba(30, 180, 70, 255) },
+        .{ .rect = .{ .x = 7, .y = 4, .width = 1, .height = 1 }, .color = .rgba(20, 40, 220, 255) },
+    };
+    fillRectsWith(&batched, &fills, .scalar);
+    for (fills) |draw| fillRectWith(&individual, draw.rect, draw.color, .scalar);
+    try std.testing.expectEqualSlices(u8, &individual_pixels, &batched_pixels);
+    const blends = [_]ColoredRect{
+        .{ .rect = .{ .x = 1, .y = 1, .width = 4, .height = 3 }, .color = .rgba(240, 40, 90, 96) },
+        .{ .rect = .{ .x = -1, .y = 3, .width = 6, .height = 4 }, .color = .rgba(20, 180, 220, 144) },
+    };
+    blendRectsWith(&batched, &blends, .scalar);
+    for (blends) |draw| blendRectWith(&individual, draw.rect, draw.color, .scalar);
+    try std.testing.expectEqualSlices(u8, &individual_pixels, &batched_pixels);
+}
+
+test "atlas sprite batches preserve source rectangles and clipping" {
+    var atlas: [6 * 4 * 4]u8 = undefined;
+    for (&atlas, 0..) |*byte, index| byte.* = @truncate(index * 17 + 3);
+    var batched_pixels = [_]u8{0} ** (8 * 6 * 4);
+    var individual_pixels = [_]u8{0} ** (8 * 6 * 4);
+    var batched = try s.Surface.init(&batched_pixels, 8, 6, 32, .rgba8_unorm);
+    var individual = try s.Surface.init(&individual_pixels, 8, 6, 32, .rgba8_unorm);
+    const regions = [_]SpriteRegion{
+        .{ .destination = .{ .x = -1, .y = 1, .width = 3, .height = 2 }, .source = .{ .x = 1, .y = 1, .width = 3, .height = 2 } },
+        .{ .destination = .{ .x = 4, .y = 3, .width = 2, .height = 2 }, .source = .{ .x = 3, .y = 0, .width = 2, .height = 2 } },
+    };
+    drawSpriteRegionsWith(&batched, &regions, &atlas, 6, 4, .scalar);
+    var first_source: [3 * 2 * 4]u8 = undefined;
+    for (0..2) |y| for (0..3) |x| @memcpy(first_source[(y * 3 + x) * 4 ..][0..4], atlas[((1 + y) * 6 + (1 + x)) * 4 ..][0..4]);
+    drawSpriteWith(&individual, regions[0].destination, &first_source, 3, 2, .scalar);
+    var second_source: [2 * 2 * 4]u8 = undefined;
+    for (0..2) |y| for (0..2) |x| @memcpy(second_source[(y * 2 + x) * 4 ..][0..4], atlas[(y * 6 + (3 + x)) * 4 ..][0..4]);
+    drawSpriteWith(&individual, regions[1].destination, &second_source, 2, 2, .scalar);
+    try std.testing.expectEqualSlices(u8, &individual_pixels, &batched_pixels);
+    const before = batched_pixels;
+    const invalid = [_]SpriteRegion{.{ .destination = .{ .x = 0, .y = 0, .width = 2, .height = 2 }, .source = .{ .x = 5, .y = 3, .width = 2, .height = 2 } }};
+    drawSpriteRegionsWith(&batched, &invalid, &atlas, 6, 4, .scalar);
+    try std.testing.expectEqualSlices(u8, &before, &batched_pixels);
 }

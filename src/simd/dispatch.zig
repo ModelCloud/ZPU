@@ -21,6 +21,7 @@ const vector = @import("vector.zig");
 ///   CPU/OS support checks in `available`.
 /// AVX-512 remains excluded pending controlled frame-time-tail evidence.
 pub const Backend = enum { scalar, portable_vector, avx2 };
+pub const SpriteRegion = struct { destination: s.Rect, source: s.Rect };
 
 /// Comptime-known availability of the separately compiled eight-lane kernel
 /// objects for this artifact. True exactly when `build.zig` linked the
@@ -190,6 +191,62 @@ pub fn blendPixelsRowsBatch(backend: Backend, surface: *s.Surface, destinations:
             const clipped = s.clip(destination, surface.width, surface.height) orelse continue;
             const source_x: usize = @intCast(clipped.x - destination.x);
             const source_y: usize = @intCast(clipped.y - destination.y);
+            for (0..clipped.height) |dy| {
+                const source_offset = ((source_y + dy) * source_width + source_x) * 4;
+                blendPixels(.avx2, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
+            }
+        },
+    }
+}
+
+/// Batch atlas sprites with one backend route. Each source rectangle must be
+/// in the immutable atlas and match its destination dimensions; destination
+/// clipping advances the source origin exactly like drawSprite.
+pub fn blendPixelsRowsRegionsBatch(backend: Backend, surface: *s.Surface, regions: []const SpriteRegion, source: []const u8, source_width: u32, source_height: u32) void {
+    switch (backend) {
+        .scalar => for (regions) |region| {
+            const destination = region.destination;
+            const source_rect = region.source;
+            if (source_rect.x < 0 or source_rect.y < 0) continue;
+            const sx: u32 = @intCast(source_rect.x);
+            const sy: u32 = @intCast(source_rect.y);
+            if (sx > source_width or sy > source_height or source_rect.width > source_width - sx or source_rect.height > source_height - sy) continue;
+            if (destination.width != source_rect.width or destination.height != source_rect.height) continue;
+            const clipped = s.clip(destination, surface.width, surface.height) orelse continue;
+            const source_x: usize = @intCast(source_rect.x + (clipped.x - destination.x));
+            const source_y: usize = @intCast(source_rect.y + (clipped.y - destination.y));
+            for (0..clipped.height) |dy| {
+                const source_offset = ((source_y + dy) * source_width + source_x) * 4;
+                scalar.blendPixels(surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
+            }
+        },
+        .portable_vector => for (regions) |region| {
+            const destination = region.destination;
+            const source_rect = region.source;
+            if (source_rect.x < 0 or source_rect.y < 0) continue;
+            const sx: u32 = @intCast(source_rect.x);
+            const sy: u32 = @intCast(source_rect.y);
+            if (sx > source_width or sy > source_height or source_rect.width > source_width - sx or source_rect.height > source_height - sy) continue;
+            if (destination.width != source_rect.width or destination.height != source_rect.height) continue;
+            const clipped = s.clip(destination, surface.width, surface.height) orelse continue;
+            const source_x: usize = @intCast(source_rect.x + (clipped.x - destination.x));
+            const source_y: usize = @intCast(source_rect.y + (clipped.y - destination.y));
+            for (0..clipped.height) |dy| {
+                const source_offset = ((source_y + dy) * source_width + source_x) * 4;
+                vector.blendPixels(4, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
+            }
+        },
+        .avx2 => for (regions) |region| {
+            const destination = region.destination;
+            const source_rect = region.source;
+            if (source_rect.x < 0 or source_rect.y < 0) continue;
+            const sx: u32 = @intCast(source_rect.x);
+            const sy: u32 = @intCast(source_rect.y);
+            if (sx > source_width or sy > source_height or source_rect.width > source_width - sx or source_rect.height > source_height - sy) continue;
+            if (destination.width != source_rect.width or destination.height != source_rect.height) continue;
+            const clipped = s.clip(destination, surface.width, surface.height) orelse continue;
+            const source_x: usize = @intCast(source_rect.x + (clipped.x - destination.x));
+            const source_y: usize = @intCast(source_rect.y + (clipped.y - destination.y));
             for (0..clipped.height) |dy| {
                 const source_offset = ((source_y + dy) * source_width + source_x) * 4;
                 blendPixels(.avx2, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
