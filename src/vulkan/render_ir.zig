@@ -5,7 +5,7 @@ pub const serialization_version: u32 = 2;
 pub const max_values: usize = 4096;
 pub const max_instructions: usize = 4096;
 
-pub const Stage = enum(u8) { vertex = 0, fragment = 1 };
+pub const Stage = enum(u8) { vertex = 0, fragment = 1, compute = 2 };
 pub const Scalar = enum(u8) { bool = 0, i32 = 1, u32 = 2, f32 = 3 };
 pub const Type = packed struct { scalar: Scalar, columns: u3 = 1, rows: u3 = 1, _pad: u6 = 0 };
 pub const Op = enum(u8) {
@@ -28,6 +28,324 @@ pub const Op = enum(u8) {
     matrix_times_vector,
     convert,
     output,
+    select,
+    storage,
+    /// Component-wise two's-complement integer multiplication. Appended to
+    /// preserve the serialized numeric values of existing operations.
+    imul,
+    /// Component-wise two's-complement signed integer negation. Appended to
+    /// preserve the serialized numeric values of existing operations.
+    ineg,
+    /// Component-wise integer bitwise OR. Appended to preserve existing
+    /// serialized operation values.
+    bit_or,
+    /// Component-wise integer bitwise XOR. Appended to preserve existing
+    /// serialized operation values.
+    bit_xor,
+    /// Component-wise integer bitwise AND. Appended to preserve existing
+    /// serialized operation values.
+    bit_and,
+    /// Component-wise integer bitwise NOT. Appended to preserve existing
+    /// serialized operation values.
+    bit_not,
+    /// Component-wise unsigned integer division.
+    udiv,
+    /// Component-wise signed integer division.
+    sdiv,
+    /// Component-wise unsigned integer remainder.
+    umod,
+    /// Component-wise signed integer remainder with dividend sign.
+    srem,
+    /// Component-wise signed modulo with divisor sign.
+    smod,
+    /// Component-wise logical left shift.
+    shl_logical,
+    /// Component-wise logical right shift.
+    shr_logical,
+    /// Component-wise arithmetic right shift.
+    shr_arithmetic,
+    /// Scalar integer equality comparison producing a boolean.
+    ieq,
+    /// Scalar integer inequality comparison producing a boolean.
+    ine,
+    /// Scalar unsigned greater-than comparison producing a boolean.
+    ugt,
+    /// Scalar unsigned greater-than-or-equal comparison producing a boolean.
+    uge,
+    /// Scalar unsigned less-than comparison producing a boolean.
+    ult,
+    /// Scalar unsigned less-than-or-equal comparison producing a boolean.
+    ule,
+    /// Scalar signed greater-than comparison producing a boolean.
+    sgt,
+    /// Scalar signed greater-than-or-equal comparison producing a boolean.
+    sge,
+    /// Scalar signed less-than comparison producing a boolean.
+    slt,
+    /// Scalar signed less-than-or-equal comparison producing a boolean.
+    sle,
+    /// Ordered floating-point equality comparison producing a boolean.
+    ford_eq,
+    /// Unordered floating-point equality comparison producing a boolean.
+    funord_eq,
+    /// Ordered floating-point inequality comparison producing a boolean.
+    ford_ne,
+    /// Unordered floating-point inequality comparison producing a boolean.
+    funord_ne,
+    /// Ordered floating-point less-than comparison producing a boolean.
+    ford_lt,
+    /// Unordered floating-point less-than comparison producing a boolean.
+    funord_lt,
+    /// Ordered floating-point greater-than comparison producing a boolean.
+    ford_gt,
+    /// Unordered floating-point greater-than comparison producing a boolean.
+    funord_gt,
+    /// Ordered floating-point less-than-or-equal comparison producing a boolean.
+    ford_le,
+    /// Unordered floating-point less-than-or-equal comparison producing a boolean.
+    funord_le,
+    /// Ordered floating-point greater-than-or-equal comparison producing a boolean.
+    ford_ge,
+    /// Unordered floating-point greater-than-or-equal comparison producing a boolean.
+    funord_ge,
+    /// Scalar boolean equality operation.
+    logical_eq,
+    /// Scalar boolean inequality operation.
+    logical_ne,
+    /// Scalar boolean OR operation.
+    logical_or,
+    /// Scalar boolean AND operation.
+    logical_and,
+    /// Scalar boolean NOT operation.
+    logical_not,
+    /// Component-wise floating-point remainder with truncating quotient.
+    frem,
+    /// Column-major 4x4 matrix multiplied by a scalar.
+    matrix_times_scalar,
+    /// Row-vector f32x4 multiplied by a column-major 4x4 matrix.
+    vector_times_matrix,
+    /// Column-major 4x4 matrix multiplied by a column-major 4x4 matrix.
+    matrix_times_matrix,
+    /// Transpose of a column-major 4x4 matrix.
+    transpose,
+    /// Outer product of two f32x4 vectors, producing a column-major 4x4 matrix.
+    outer_product,
+    /// Dot product of equal-length f32 vectors, producing a scalar.
+    dot,
+    /// Reduction of a bool vector to whether any lane is true.
+    any,
+    /// Reduction of a bool vector to whether all lanes are true.
+    all,
+    /// Per-lane floating-point NaN classification.
+    is_nan,
+    /// Per-lane floating-point infinity classification.
+    is_inf,
+    /// Per-lane floating-point finite classification.
+    is_finite,
+    /// Per-lane floating-point normal-number classification.
+    is_normal,
+    /// Per-lane floating-point sign-bit classification.
+    sign_bit_set,
+    /// Per-lane ordered less-than-or-greater-than comparison.
+    less_or_greater,
+    /// Per-lane ordered classification for two floating-point values.
+    ordered,
+    /// Per-lane unordered classification for two floating-point values.
+    unordered,
+    /// Component-wise floating-point modulo with floor quotient.
+    fmod,
+    /// Component-wise integer bit reversal.
+    bit_reverse,
+    /// Component-wise integer population count.
+    bit_count,
+    /// Component-wise integer bit-field insertion.
+    bit_field_insert,
+    /// Component-wise signed integer bit-field extraction.
+    bit_field_s_extract,
+    /// Component-wise unsigned integer bit-field extraction.
+    bit_field_u_extract,
+    /// Dynamic extraction of one component from a vector.
+    vector_extract_dynamic,
+    /// Dynamic replacement of one component in a vector.
+    vector_insert_dynamic,
+    /// Static replacement of one component in a vector composite.
+    composite_insert,
+    /// Bit-preserving reinterpretation between numeric scalar types.
+    /// Appended to preserve the serialized numeric values of existing operations.
+    bitcast,
+    /// Type-preserving value copy corresponding to SPIR-V OpCopyObject.
+    /// Appended to preserve the serialized numeric values of existing operations.
+    copy_object,
+    /// Round an f32 value to f16 precision while retaining an f32 result.
+    quantize_f16,
+    /// Unsigned scalar addition returning low bits and carry as a two-lane
+    /// value (bounded representation of SPIR-V OpIAddCarry).
+    iadd_carry,
+    /// Unsigned scalar subtraction returning low bits and borrow as a
+    /// two-lane value (bounded representation of SPIR-V OpISubBorrow).
+    isub_borrow,
+    /// Unsigned scalar multiplication returning low and high words as a
+    /// two-lane value (bounded representation of SPIR-V OpUMulExtended).
+    umul_extended,
+    /// Signed scalar multiplication returning low and high words as a
+    /// two-lane value (bounded representation of SPIR-V OpSMulExtended).
+    smul_extended,
+    /// Component-wise floating-point absolute value from GLSL.std.450.
+    f_abs,
+    /// Component-wise signed integer absolute value from GLSL.std.450.
+    i_abs,
+    /// Component-wise floating-point minimum from GLSL.std.450.
+    f_min,
+    /// Component-wise floating-point maximum from GLSL.std.450.
+    f_max,
+    /// Component-wise floating-point sign from GLSL.std.450.
+    f_sign,
+    /// Component-wise signed integer sign from GLSL.std.450.
+    i_sign,
+    /// Component-wise unsigned integer minimum from GLSL.std.450.
+    u_min,
+    /// Component-wise signed integer minimum from GLSL.std.450.
+    i_min,
+    /// Component-wise unsigned integer maximum from GLSL.std.450.
+    u_max,
+    /// Component-wise signed integer maximum from GLSL.std.450.
+    i_max,
+    /// Component-wise floating-point clamp from GLSL.std.450.
+    f_clamp,
+    /// Component-wise unsigned integer clamp from GLSL.std.450.
+    u_clamp,
+    /// Component-wise signed integer clamp from GLSL.std.450.
+    i_clamp,
+    /// Component-wise floating-point linear interpolation from GLSL.std.450.
+    f_mix,
+    /// Component-wise floating-point fused multiply-add from GLSL.std.450.
+    fma,
+    /// Component-wise floating-point step function from GLSL.std.450.
+    f_step,
+    /// Component-wise floating-point smooth step from GLSL.std.450.
+    f_smooth_step,
+    /// Component-wise floating-point round-to-nearest from GLSL.std.450.
+    f_round,
+    /// Component-wise floating-point round-to-nearest-even from GLSL.std.450.
+    f_round_even,
+    /// Component-wise floating-point truncation from GLSL.std.450.
+    f_trunc,
+    /// Component-wise floating-point floor from GLSL.std.450.
+    f_floor,
+    /// Component-wise floating-point ceiling from GLSL.std.450.
+    f_ceil,
+    /// Component-wise floating-point fractional part from GLSL.std.450.
+    f_fract,
+    /// Component-wise degrees-to-radians conversion from GLSL.std.450.
+    f_radians,
+    /// Component-wise radians-to-degrees conversion from GLSL.std.450.
+    f_degrees,
+    /// Component-wise sine from GLSL.std.450.
+    f_sin,
+    /// Component-wise cosine from GLSL.std.450.
+    f_cos,
+    /// Component-wise tangent from GLSL.std.450.
+    f_tan,
+    /// Component-wise inverse sine from GLSL.std.450.
+    f_asin,
+    /// Component-wise inverse cosine from GLSL.std.450.
+    f_acos,
+    /// Component-wise inverse tangent from GLSL.std.450.
+    f_atan,
+    /// Component-wise hyperbolic sine from GLSL.std.450.
+    f_sinh,
+    /// Component-wise hyperbolic cosine from GLSL.std.450.
+    f_cosh,
+    /// Component-wise hyperbolic tangent from GLSL.std.450.
+    f_tanh,
+    /// Component-wise inverse hyperbolic sine from GLSL.std.450.
+    f_asinh,
+    /// Component-wise inverse hyperbolic cosine from GLSL.std.450.
+    f_acosh,
+    /// Component-wise inverse hyperbolic tangent from GLSL.std.450.
+    f_atanh,
+    /// Component-wise base-e exponentiation from GLSL.std.450.
+    f_exp,
+    /// Component-wise natural logarithm from GLSL.std.450.
+    f_log,
+    /// Component-wise base-two exponentiation from GLSL.std.450.
+    f_exp2,
+    /// Component-wise base-two logarithm from GLSL.std.450.
+    f_log2,
+    /// Component-wise square root from GLSL.std.450.
+    f_sqrt,
+    /// Component-wise reciprocal square root from GLSL.std.450.
+    f_inverse_sqrt,
+    /// Component-wise two-argument arc tangent from GLSL.std.450.
+    f_atan2,
+    /// Component-wise floating-point power from GLSL.std.450.
+    f_pow,
+    /// Determinant of a column-major 4x4 f32 matrix from GLSL.std.450.
+    f_determinant,
+    /// Inverse of a column-major 4x4 f32 matrix from GLSL.std.450.
+    f_matrix_inverse,
+    /// Length of an f32 vector from GLSL.std.450.
+    f_length,
+    /// Euclidean distance between f32 vectors from GLSL.std.450.
+    f_distance,
+    /// Cross product of f32 3-vectors from GLSL.std.450.
+    f_cross,
+    /// Normalized f32 vector from GLSL.std.450.
+    f_normalize,
+    /// Face-forward orientation of an f32 vector from GLSL.std.450.
+    f_face_forward,
+    /// Reflection of an f32 incident vector from GLSL.std.450.
+    f_reflect,
+    /// Refraction of an f32 incident vector from GLSL.std.450.
+    f_refract,
+    /// Index of the least-significant set bit from GLSL.std.450.
+    i_find_lsb,
+    /// Index of the most-significant bit differing from the sign from GLSL.std.450.
+    i_find_s_msb,
+    /// Index of the most-significant set bit from GLSL.std.450.
+    i_find_u_msb,
+    /// Builds an f32 value from a value and a signed power-of-two exponent
+    /// from GLSL.std.450 Ldexp.
+    f_ldexp,
+    /// Component-wise floating-point minimum that prefers non-NaN operands.
+    f_n_min,
+    /// Component-wise floating-point maximum that prefers non-NaN operands.
+    f_n_max,
+    /// Component-wise non-NaN-preferred floating-point clamp.
+    f_n_clamp,
+    /// Pack four normalized signed f32 lanes into one 32-bit word.
+    i_pack_snorm4x8,
+    /// Pack four normalized unsigned f32 lanes into one 32-bit word.
+    i_pack_unorm4x8,
+    /// Pack two normalized signed f32 lanes into one 32-bit word.
+    i_pack_snorm2x16,
+    /// Pack two normalized unsigned f32 lanes into one 32-bit word.
+    i_pack_unorm2x16,
+    /// Unpack two normalized signed 16-bit lanes into f32 values.
+    f_unpack_snorm2x16,
+    /// Unpack two normalized unsigned 16-bit lanes into f32 values.
+    f_unpack_unorm2x16,
+    /// Unpack four normalized signed 8-bit lanes into f32 values.
+    f_unpack_snorm4x8,
+    /// Unpack four normalized unsigned 8-bit lanes into f32 values.
+    f_unpack_unorm4x8,
+    /// Pack two f32 lanes into one 32-bit word containing IEEE-754 binary16 values.
+    i_pack_half2x16,
+    /// Unpack two IEEE-754 binary16 values from one 32-bit word into f32 lanes.
+    f_unpack_half2x16,
+    /// GLSL.std.450 Modf: return fractional part and write integral part to
+    /// the output interface operand. Appended to preserve serialized values.
+    f_modf,
+    /// GLSL.std.450 Frexp: return significand and write exponent to the
+    /// output interface operand. Appended to preserve serialized values.
+    f_frexp,
+    /// Scalar GLSL.std.450 ModfStruct pair (fraction, integral). Appended to
+    /// preserve serialized values.
+    f_modf_struct,
+    /// Scalar GLSL.std.450 FrexpStruct pair (significand, exponent bits).
+    /// The second lane stores the signed i32 exponent as raw bits. Appended
+    /// to preserve serialized values.
+    f_frexp_struct,
 };
 
 pub const Instruction = struct {
@@ -174,14 +492,36 @@ pub fn identify(bytes: []const u8) Identity {
 
 fn valueOperand(op: Op, operand_index: usize) bool {
     return switch (op) {
-        .constant, .input, .uniform => false,
+        .constant, .input, .uniform, .storage => false,
         .constant_composite => true,
         .access => operand_index != 0,
         .composite => true,
         .extract => operand_index == 0,
         .shuffle => operand_index < 2,
-        .fneg, .convert => operand_index == 0,
-        .iadd, .isub, .fadd, .fsub, .fmul, .fdiv, .vector_times_scalar, .matrix_times_vector => operand_index < 2,
+        .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .bit_not, .convert, .bitcast, .copy_object, .quantize_f16 => operand_index == 0,
+        .select => operand_index < 3,
+        .u_min, .i_min, .u_max, .i_max => operand_index < 2,
+        .f_clamp, .u_clamp, .i_clamp, .f_n_clamp => operand_index < 3,
+        .f_mix, .fma => operand_index < 3,
+        .f_step => operand_index < 2,
+        .f_smooth_step => operand_index < 3,
+        .f_round, .f_round_even, .f_trunc => operand_index == 0,
+        .f_floor, .f_ceil, .f_fract => operand_index == 0,
+        .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .f_determinant, .f_matrix_inverse, .f_length, .f_normalize => operand_index == 0,
+        .f_atan2, .f_pow, .f_ldexp, .f_n_min, .f_n_max => operand_index < 2,
+        .f_distance, .f_cross, .f_reflect => operand_index < 2,
+        .f_face_forward, .f_refract => operand_index < 3,
+        .i_find_lsb, .i_find_s_msb, .i_find_u_msb => operand_index == 0,
+        .i_pack_snorm4x8, .i_pack_unorm4x8, .i_pack_snorm2x16, .i_pack_unorm2x16, .f_unpack_snorm2x16, .f_unpack_unorm2x16, .f_unpack_snorm4x8, .f_unpack_unorm4x8, .i_pack_half2x16, .f_unpack_half2x16 => operand_index == 0,
+        .f_modf, .f_frexp, .f_modf_struct, .f_frexp_struct => operand_index == 0,
+        .iadd, .isub, .imul, .iadd_carry, .isub_borrow, .umul_extended, .smul_extended, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge, .logical_eq, .logical_ne, .logical_or, .logical_and, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .vector_times_scalar, .matrix_times_vector, .matrix_times_scalar, .vector_times_matrix, .matrix_times_matrix, .outer_product, .dot, .less_or_greater, .ordered, .unordered => operand_index < 2,
+        .transpose, .any, .all, .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set, .bit_reverse, .bit_count => operand_index == 0,
+        .bit_field_insert => operand_index < 4,
+        .bit_field_s_extract, .bit_field_u_extract => operand_index < 3,
+        .vector_extract_dynamic => operand_index < 2,
+        .vector_insert_dynamic => operand_index < 3,
+        .composite_insert => operand_index < 2,
+        .logical_not => operand_index == 0,
         .output => operand_index == 1,
     };
 }

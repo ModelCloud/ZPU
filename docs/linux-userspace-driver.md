@@ -215,6 +215,11 @@ Presentation cadence is process-local:
 - `VK_EXT_present_timing` lets the application choose absolute monotonic or
   relative targets per `vkQueuePresentKHR` call and can change timing throughout
   the process lifetime.
+- Its opt-in timing queue also exposes bounded FIFO history through
+  `vkGetPastPresentationTimingEXT`, including the queue/dequeue and pixel
+  visibility stages requested by the application. `VkPresentId2KHR` IDs are
+  retained when supplied, with monotonic per-swapchain IDs as the fallback.
+  Count queries and queue-full backpressure do not allocate on the hot path.
 - Untimed presents continue on the process's configured cadence.
 - `VK_GOOGLE_display_timing` is unsupported and diagnosed with an error that
   directs callers to the sanctioned controls above.
@@ -266,6 +271,7 @@ These gates exercise progressively larger portions of the map:
 | `zig build smoke` | Direct ICD loading and loader-interface entry points without the system Vulkan loader. |
 | `vulkaninfo --summary` with `VK_DRIVER_FILES` | System-loader discovery and physical-device reporting. |
 | `zig build transfer` | C Vulkan client → loader → ZPU command submission → host-memory byte oracle. |
+| `zig build headless-present` | Independent C client → loader → `VK_EXT_headless_surface` → no-XCB swapchain acquire/present lifecycle. |
 | `zig build vkcube-ready` | Real vkcube acquire/submit/present lifecycle through loader and XCB. |
 | `zig build vkcube-visual` | Adds X-server readback proving a rendered pixel reached the window. |
 | `zig build target-4k-240` / `target-8k-60` | Adds controlled real-present p99 frame-time gates. |

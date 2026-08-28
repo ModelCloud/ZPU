@@ -5,3 +5,4 @@ __pycache__/
 *.ppm
 *.smolmachine
 smolvm-stage/
+.monitor_pr33*

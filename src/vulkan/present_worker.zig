@@ -18,6 +18,20 @@ pub const Trace = struct {
     frame_end_ns: u64,
 };
 
+/// Completion data for one VK_EXT_present_timing request.  The callback is
+/// invoked on the presentation worker, so the driver can publish timing
+/// history without allocating or taking the global object mutex.
+pub const Timing = struct {
+    present_id: u64,
+    target_time: u64,
+    requested_stages: u32,
+    queue_operations_end_ns: u64,
+    request_dequeued_ns: u64 = 0,
+    image_first_pixel_out_ns: u64 = 0,
+    image_first_pixel_visible_ns: u64 = 0,
+    completed: bool = true,
+};
+
 pub const Work = struct {
     transport: *xcb_present.Transport,
     cadence: *?frame_pacing.Clock,
@@ -32,6 +46,9 @@ pub const Work = struct {
     render_draw_ns: u64 = 0,
     target_ns: ?u64 = null,
     enqueued_ns: u64 = 0,
+    timing: ?Timing = null,
+    timing_context: ?*anyopaque = null,
+    timing_record: ?*const fn (*anyopaque, Timing) void = null,
 };
 
 const capacity = 24;
@@ -63,6 +80,11 @@ fn run() void {
         if (work.cadence.* == null) work.cadence.* = frame_pacing.Clock.init(before, frame_pacing.configuredRate());
         const deadline = work.target_ns orelse work.cadence.*.?.deadline();
         if (!xcb_present.upload(work.transport, work.pixels, work.content, work.force_full)) {
+            if (work.timing) |timing| if (work.timing_record) |record| {
+                var failed = timing;
+                failed.completed = false;
+                record(work.timing_context.?, failed);
+            };
             work.release(work.context, work.image_index);
             continue;
         }
@@ -70,7 +92,15 @@ fn run() void {
         if (commit_deadline > before) frame_pacing.sleepUntilPrecise(commit_deadline, frame_pacing.present_spin_ns);
         const woke = frame_pacing.monotonicNs();
         work.transport.last.wake_error_ns = if (woke >= deadline) @intCast(woke - deadline) else -@as(i64, @intCast(deadline - woke));
-        _ = xcb_present.commit(work.transport, work.pixels);
+        if (!xcb_present.commit(work.transport, work.pixels)) {
+            if (work.timing) |timing| if (work.timing_record) |record| {
+                var failed = timing;
+                failed.completed = false;
+                record(work.timing_context.?, failed);
+            };
+            work.release(work.context, work.image_index);
+            continue;
+        }
         const finished = frame_pacing.monotonicNs();
         work.transport.last.frame_total_ns = finished - work.enqueued_ns;
         work.cadence.*.?.advance(finished);
@@ -88,6 +118,13 @@ fn run() void {
             .render_draw_ns = work.render_draw_ns,
             .frame_end_ns = finished,
         });
+        if (work.timing) |timing| if (work.timing_record) |record| {
+            var completed = timing;
+            completed.request_dequeued_ns = before;
+            completed.image_first_pixel_out_ns = finished;
+            completed.image_first_pixel_visible_ns = finished;
+            record(work.timing_context.?, completed);
+        };
         work.release(work.context, work.image_index);
     }
 }
