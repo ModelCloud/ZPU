@@ -25,7 +25,7 @@ unmet. Run
 `ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d -Doptimize=ReleaseFast -- --two-core`;
 the process must expose exactly two selected physical cores and perform a
 complete render for every timed sample. The latest real-render probe measured
-3,685.88 triangles/s (307.16 FPS, 3.268 ms p99), versus the aspirational
+2,918.01 triangles/s (243.17 FPS, 4.158 ms p99), versus the aspirational
 150,000,000 triangles/s requirement (about 38,619.92× the frozen 3,884.01
 triangles/s baseline). `--require-target` is retained as a fail-closed gate
 and correctly exits non-zero until the target is actually reached. The

@@ -308,15 +308,15 @@ aspirational gate and is not represented as passed.
 
 | Metric | Result |
 | --- | ---: |
-| Measured frame rate (30-sample mean) | **307.16 FPS** |
-| Frame time p50 / p95 / p99 | 3.255 / 3.268 / **3.268 ms** |
+| Measured frame rate (30-sample mean) | **243.17 FPS** |
+| Frame time p50 / p95 / p99 | 4.108 / 4.122 / **4.158 ms** |
 | Triangles submitted / rasterized | 12 / 12 per frame |
-| Triangle throughput | **3,685.88 triangles/s** |
+| Triangle throughput | **2,918.01 triangles/s** |
 | Two-core 150M target | **not met (150,000,000 triangles/s)** |
-| Fragments tested | **71.42M/s** |
-| Fragments covered | **45.35M/s** |
-| Depth tests passed / color writes | **45.33M/s** |
-| Frame-time coefficient of variation | **0.28%** |
+| Fragments tested | **56.54M/s** |
+| Fragments covered | **35.90M/s** |
+| Depth tests passed / color writes | **35.89M/s** |
+| Frame-time coefficient of variation | **0.25%** |
 
 The static replay APIs remain available for callers that explicitly want
 immutable attachment reuse: `drawCountedParallelStaticReuseImmutable` uses a
@@ -324,6 +324,11 @@ thread-local pointer/generation fast path, while
 `drawCountedParallelStaticReuse` retains exact-key validation. Those APIs are
 not used for the throughput numbers above. Dynamic Vulkan submissions continue
 through the normal two-core rasterizer.
+
+The displayed 3D snapshot is the median-throughput result of five full probes
+on the validation host; CPU frequency/scheduling can move individual probes
+between roughly 2.9k and 3.7k triangles/s. Every probe still reports the same
+checksum and nonzero work counters.
 
 Run it yourself:
 
