@@ -11578,9 +11578,30 @@ int main(void) {
             memcmp(legacy_move_destination_after, sparse_texture_input_data.bytes,
                    sizeof(legacy_move_destination_after)) == 0;
 
+        MTLTextureDescriptor *legacy_mismatch_descriptor = [adapter_sparse_texture_descriptor copy];
+        legacy_mismatch_descriptor.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        id<MTLTexture> legacy_mismatch_destination =
+            [adapter_device newTextureWithDescriptor:legacy_mismatch_descriptor];
+        id<MTLCommandBuffer> legacy_mismatch_command = [adapter_sparse_texture_legacy_queue commandBuffer];
+        id<MTLResourceStateCommandEncoder> legacy_mismatch_state =
+            [legacy_mismatch_command resourceStateCommandEncoder];
+        [legacy_mismatch_state moveTextureMappingsFromTexture:legacy_move_source
+                                                   sourceSlice:0 sourceLevel:0
+                                                  sourceOrigin:MTLOriginMake(0, 0, 0)
+                                                    sourceSize:MTLSizeMake(1, 1, 1)
+                                                       toTexture:legacy_mismatch_destination
+                                                destinationSlice:0 destinationLevel:0
+                                               destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [legacy_mismatch_state endEncoding];
+        [legacy_mismatch_command commit];
+        [legacy_mismatch_command waitUntilCompleted];
+        BOOL legacy_deferred_move_compatibility =
+            legacy_mismatch_destination != nil && legacy_mismatch_state != nil &&
+            legacy_mismatch_command.status == MTLCommandBufferStatusError;
+
         if (!legacy_deferred_direct_exact || !legacy_deferred_indirect_exact ||
             !legacy_deferred_batch_exact || !legacy_deferred_indirect_atomic ||
-            !legacy_deferred_move_exact) {
+            !legacy_deferred_move_exact || !legacy_deferred_move_compatibility) {
             fprintf(stderr, "metal-pixel: deferred CPU resource-state mapping exactness failed\n");
             return 180;
         }

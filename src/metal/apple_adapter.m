@@ -3382,10 +3382,24 @@ static BOOL zpu_sparse_update_texture_mapping_indirect(ZPUTexture *texture,
     return YES;
 }
 
+static BOOL zpu_sparse_texture_mapping_copy_compatible(ZPUTexture *source, ZPUTexture *destination) {
+    return source != nil && destination != nil && source->_sparsePageBytes != 0 &&
+        destination->_sparsePageBytes == source->_sparsePageBytes &&
+        source->_sparseTileSize.width == destination->_sparseTileSize.width &&
+        source->_sparseTileSize.height == destination->_sparseTileSize.height &&
+        source->_sparseTileSize.depth == destination->_sparseTileSize.depth &&
+        source->_textureType == destination->_textureType &&
+        source->_pixelFormat == destination->_pixelFormat &&
+        [source sampleCount] == [destination sampleCount] &&
+        [source usage] == [destination usage] &&
+        [source resourceOptions] == [destination resourceOptions];
+}
+
 static BOOL zpu_sparse_texture_tail_copy_compatible(ZPUTexture *source, ZPUTexture *destination,
                                                     MTLRegion sourceRegion, NSUInteger sourceLevel,
                                                     NSUInteger sourceSlice, MTLOrigin destinationOrigin,
                                                     NSUInteger destinationLevel, NSUInteger destinationSlice) {
+    if (!zpu_sparse_texture_mapping_copy_compatible(source, destination)) return NO;
     if (source == nil || destination == nil || source->_sparsePageBytes == 0 ||
         destination->_sparsePageBytes != source->_sparsePageBytes ||
         source->_sparseTileSize.width != destination->_sparseTileSize.width ||
@@ -3508,11 +3522,7 @@ static BOOL zpu_sparse_copy_texture_mapping(ZPUTexture *source, ZPUTexture *dest
                                                      sourceSlice, destinationOrigin, destinationLevel,
                                                      destinationSlice);
     }
-    if (source == nil || destination == nil || source->_sparsePageBytes == 0 ||
-        destination->_sparsePageBytes != source->_sparsePageBytes ||
-        source->_sparseTileSize.width != destination->_sparseTileSize.width ||
-        source->_sparseTileSize.height != destination->_sparseTileSize.height ||
-        source->_sparseTileSize.depth != destination->_sparseTileSize.depth ||
+    if (!zpu_sparse_texture_mapping_copy_compatible(source, destination) ||
         !zpu_sparse_texture_region_valid(source, sourceLevel, sourceSlice, sourceRegion) ||
         destinationOrigin.x > NSUIntegerMax - sourceRegion.size.width ||
         destinationOrigin.y > NSUIntegerMax - sourceRegion.size.height ||
@@ -3582,6 +3592,7 @@ static BOOL zpu_sparse_move_texture_tail_mapping(ZPUTexture *source, ZPUTexture 
                                                  MTLRegion sourceRegion, NSUInteger sourceLevel,
                                                  NSUInteger sourceSlice, MTLOrigin destinationOrigin,
                                                  NSUInteger destinationLevel, NSUInteger destinationSlice) {
+    if ([source heap] != [destination heap]) return NO;
     if (!zpu_sparse_texture_tail_copy_compatible(source, destination, sourceRegion, sourceLevel,
                                                   sourceSlice, destinationOrigin, destinationLevel,
                                                   destinationSlice)) return NO;
@@ -3651,11 +3662,8 @@ static BOOL zpu_sparse_move_texture_mapping(ZPUTexture *source, ZPUTexture *dest
                                                      sourceSlice, destinationOrigin, destinationLevel,
                                                      destinationSlice);
     }
-    if (source == nil || destination == nil || source->_sparsePageBytes == 0 ||
-        destination->_sparsePageBytes != source->_sparsePageBytes ||
-        source->_sparseTileSize.width != destination->_sparseTileSize.width ||
-        source->_sparseTileSize.height != destination->_sparseTileSize.height ||
-        source->_sparseTileSize.depth != destination->_sparseTileSize.depth ||
+    if (!zpu_sparse_texture_mapping_copy_compatible(source, destination) ||
+        [source heap] != [destination heap] ||
         !zpu_sparse_texture_region_valid(source, sourceLevel, sourceSlice, sourceRegion) ||
         destinationOrigin.x > NSUIntegerMax - sourceRegion.size.width ||
         destinationOrigin.y > NSUIntegerMax - sourceRegion.size.height ||
