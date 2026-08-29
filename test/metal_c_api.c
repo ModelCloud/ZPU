@@ -1061,7 +1061,7 @@ int main(void) {
         uint32_t count;
         zpu_metal_sparse_texture_mapping_arguments mappings[2];
     } sparse_texture_indirect_data = {
-        .count = 2,
+        .count = 0,
         .mappings = {
             {{{0, 0, 0}, {1, 1, 1}}, 0, 0},
             {{{1, 0, 0}, {1, 1, 1}}, 0, 0},
@@ -1079,6 +1079,8 @@ int main(void) {
         zpu_metal_resource_state_encoder_update_texture_mapping_indirect(
             sparse_texture_upload_state, sparse_texture_destination,
             ZPU_METAL_SPARSE_MAPPING_MAP, sparse_texture_indirect_buffer, 0) != 0 ||
+        zpu_metal_buffer_write(sparse_texture_indirect_buffer, 0,
+                               (const uint32_t[]){2}, sizeof(uint32_t)) != 0 ||
         zpu_metal_resource_state_encoder_update_texture_mappings(
             sparse_texture_upload_state, sparse_texture, ZPU_METAL_SPARSE_MAPPING_MAP,
             sparse_texture_mapping_regions, 2, sparse_texture_invalid_levels,
