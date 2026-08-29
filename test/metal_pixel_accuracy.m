@@ -8091,6 +8091,186 @@ int main(void) {
             return 101;
         }
 
+        /* Tile dispatch is a CPU/ZPU-owned Metal 4 profile. The registered
+         * tile function is metadata for the adapter; no native tile shader
+         * is compiled or submitted. Use a non-square target and 2x2 tiles so
+         * both the upper-left (0,0) origin and clipped edge tiles are tested
+         * at every pixel. */
+        BOOL adapter_mtl4_tile_exact = YES;
+        NSError *adapter_mtl4_tile_error = nil;
+        id<MTLRenderPipelineState> adapter_mtl4_tile_pipeline = nil;
+        id<MTLTexture> adapter_mtl4_tile_texture = nil;
+        id<MTL4CommandBuffer> adapter_mtl4_tile_command_buffer = nil;
+        id<MTL4RenderCommandEncoder> adapter_mtl4_tile_encoder = nil;
+        uint8_t adapter_mtl4_tile_pixels[5 * 3 * 4] = {0};
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTL4CommandAllocatorDescriptor *adapter_mtl4_tile_allocator_descriptor =
+                [MTL4CommandAllocatorDescriptor new];
+            id<MTL4CommandAllocator> adapter_mtl4_tile_allocator =
+                [adapter_device newCommandAllocatorWithDescriptor:adapter_mtl4_tile_allocator_descriptor
+                                                              error:&adapter_mtl4_tile_error];
+            MTL4CommandQueueDescriptor *adapter_mtl4_tile_queue_descriptor =
+                [MTL4CommandQueueDescriptor new];
+            id<MTL4CommandQueue> adapter_mtl4_tile_queue =
+                [adapter_device newMTL4CommandQueueWithDescriptor:adapter_mtl4_tile_queue_descriptor
+                                                              error:&adapter_mtl4_tile_error];
+            MTL4LibraryFunctionDescriptor *adapter_mtl4_tile_function_descriptor =
+                [MTL4LibraryFunctionDescriptor new];
+            adapter_mtl4_tile_function_descriptor.name = @"zpu_cpu_tile_gradient_rgba8";
+            adapter_mtl4_tile_function_descriptor.library = adapter_default_library;
+            MTL4TileRenderPipelineDescriptor *adapter_mtl4_tile_descriptor =
+                [MTL4TileRenderPipelineDescriptor new];
+            adapter_mtl4_tile_descriptor.tileFunctionDescriptor = adapter_mtl4_tile_function_descriptor;
+            adapter_mtl4_tile_descriptor.rasterSampleCount = 1;
+            adapter_mtl4_tile_descriptor.maxTotalThreadsPerThreadgroup = 4;
+            adapter_mtl4_tile_descriptor.threadgroupSizeMatchesTileSize = YES;
+            adapter_mtl4_tile_descriptor.requiredThreadsPerThreadgroup = MTLSizeMake(2, 2, 1);
+            adapter_mtl4_tile_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+            adapter_mtl4_tile_pipeline =
+                [adapter_mtl4_compiler newRenderPipelineStateWithDescriptor:adapter_mtl4_tile_descriptor
+                                                            compilerTaskOptions:nil
+                                                                          error:&adapter_mtl4_tile_error];
+            MTLTextureDescriptor *adapter_mtl4_tile_texture_descriptor =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                    width:5 height:3 mipmapped:NO];
+            adapter_mtl4_tile_texture_descriptor.storageMode = MTLStorageModeShared;
+            adapter_mtl4_tile_texture_descriptor.usage = MTLTextureUsageRenderTarget;
+            adapter_mtl4_tile_texture =
+                [adapter_device newTextureWithDescriptor:adapter_mtl4_tile_texture_descriptor];
+            MTL4RenderPassDescriptor *adapter_mtl4_tile_pass = [MTL4RenderPassDescriptor new];
+            adapter_mtl4_tile_pass.colorAttachments[0].texture = adapter_mtl4_tile_texture;
+            adapter_mtl4_tile_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            adapter_mtl4_tile_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            adapter_mtl4_tile_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+            adapter_mtl4_tile_pass.tileWidth = 2;
+            adapter_mtl4_tile_pass.tileHeight = 2;
+            adapter_mtl4_tile_command_buffer = [adapter_device newCommandBuffer];
+            [adapter_mtl4_tile_command_buffer beginCommandBufferWithAllocator:adapter_mtl4_tile_allocator];
+            adapter_mtl4_tile_encoder =
+                [adapter_mtl4_tile_command_buffer renderCommandEncoderWithDescriptor:adapter_mtl4_tile_pass];
+            [adapter_mtl4_tile_encoder setRenderPipelineState:adapter_mtl4_tile_pipeline];
+            [adapter_mtl4_tile_encoder dispatchThreadsPerTile:MTLSizeMake(2, 2, 1)];
+            [adapter_mtl4_tile_encoder endEncoding];
+            [adapter_mtl4_tile_command_buffer endCommandBuffer];
+            id<MTL4CommandBuffer> adapter_mtl4_tile_command_buffers[] = {
+                adapter_mtl4_tile_command_buffer};
+            [adapter_mtl4_tile_queue commit:adapter_mtl4_tile_command_buffers count:1];
+            if (adapter_mtl4_tile_texture != nil) {
+                [adapter_mtl4_tile_texture getBytes:adapter_mtl4_tile_pixels
+                                         bytesPerRow:5 * 4
+                                          fromRegion:MTLRegionMake2D(0, 0, 5, 3)
+                                         mipmapLevel:0];
+            }
+            uint8_t expected_tile_pixels[5 * 3 * 4];
+            for (NSUInteger y = 0; y < 3; ++y) {
+                for (NSUInteger x = 0; x < 5; ++x) {
+                    const NSUInteger pixel = (y * 5 + x) * 4;
+                    expected_tile_pixels[pixel + 0] = (uint8_t)(((x + 1) * 255 + 4) / 8);
+                    expected_tile_pixels[pixel + 1] = (uint8_t)(((y + 1) * 255 + 4) / 8);
+                    expected_tile_pixels[pixel + 2] = 64;
+                    expected_tile_pixels[pixel + 3] = 255;
+                }
+            }
+            adapter_mtl4_tile_exact = adapter_mtl4_tile_pipeline != nil &&
+                adapter_mtl4_tile_allocator != nil && adapter_mtl4_tile_queue != nil &&
+                adapter_mtl4_tile_texture != nil && adapter_mtl4_tile_command_buffer != nil &&
+                adapter_mtl4_tile_encoder != nil &&
+                adapter_mtl4_tile_pipeline.maxTotalThreadsPerThreadgroup == 4 &&
+                adapter_mtl4_tile_pipeline.threadgroupSizeMatchesTileSize &&
+                adapter_mtl4_tile_pipeline.requiredThreadsPerTileThreadgroup.width == 2 &&
+                adapter_mtl4_tile_pipeline.requiredThreadsPerTileThreadgroup.height == 2 &&
+                adapter_mtl4_tile_pipeline.requiredThreadsPerTileThreadgroup.depth == 1 &&
+                memcmp(adapter_mtl4_tile_pixels, expected_tile_pixels,
+                       sizeof(expected_tile_pixels)) == 0;
+        }
+        if (!adapter_mtl4_tile_exact) {
+            fail_with_error("Metal 4 CPU tile dispatch pixel exactness failed", adapter_mtl4_tile_error);
+            return 108;
+        }
+
+        /* Exercise the legacy tile descriptor and encoder too. BGRA bytes
+         * are intentionally checked in storage order here; the logical tile
+         * kernel still sees the same upper-left RGBA coordinates. */
+        BOOL adapter_legacy_tile_exact = YES;
+        NSError *adapter_legacy_tile_error = nil;
+        if (@available(macOS 11.0, iOS 11.0, *)) {
+            id<MTLFunction> adapter_legacy_tile_function =
+                [adapter_default_library newFunctionWithName:@"zpu_cpu_tile_gradient_rgba8"];
+            MTLTileRenderPipelineDescriptor *adapter_legacy_tile_descriptor =
+                [MTLTileRenderPipelineDescriptor new];
+            adapter_legacy_tile_descriptor.tileFunction = adapter_legacy_tile_function;
+            adapter_legacy_tile_descriptor.rasterSampleCount = 1;
+            adapter_legacy_tile_descriptor.maxTotalThreadsPerThreadgroup = 4;
+            adapter_legacy_tile_descriptor.threadgroupSizeMatchesTileSize = YES;
+            if (@available(macOS 26.0, iOS 26.0, *)) {
+                adapter_legacy_tile_descriptor.requiredThreadsPerThreadgroup = MTLSizeMake(2, 2, 1);
+            }
+            adapter_legacy_tile_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+            id<MTLRenderPipelineState> adapter_legacy_tile_pipeline =
+                [adapter_device newRenderPipelineStateWithTileDescriptor:adapter_legacy_tile_descriptor
+                                                                     options:0 reflection:nil
+                                                                        error:&adapter_legacy_tile_error];
+            MTLTextureDescriptor *adapter_legacy_tile_texture_descriptor =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                    width:5 height:3 mipmapped:NO];
+            adapter_legacy_tile_texture_descriptor.storageMode = MTLStorageModeShared;
+            adapter_legacy_tile_texture_descriptor.usage = MTLTextureUsageRenderTarget;
+            id<MTLTexture> adapter_legacy_tile_texture =
+                [adapter_device newTextureWithDescriptor:adapter_legacy_tile_texture_descriptor];
+            MTLRenderPassDescriptor *adapter_legacy_tile_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            adapter_legacy_tile_pass.colorAttachments[0].texture = adapter_legacy_tile_texture;
+            adapter_legacy_tile_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            adapter_legacy_tile_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            adapter_legacy_tile_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+            adapter_legacy_tile_pass.tileWidth = 2;
+            adapter_legacy_tile_pass.tileHeight = 2;
+            id<MTLCommandBuffer> adapter_legacy_tile_command_buffer = [adapter_queue commandBuffer];
+            id<MTLRenderCommandEncoder> adapter_legacy_tile_encoder =
+                [adapter_legacy_tile_command_buffer renderCommandEncoderWithDescriptor:adapter_legacy_tile_pass];
+            [adapter_legacy_tile_encoder setRenderPipelineState:adapter_legacy_tile_pipeline];
+            [adapter_legacy_tile_encoder dispatchThreadsPerTile:MTLSizeMake(2, 2, 1)];
+            [adapter_legacy_tile_encoder endEncoding];
+            [adapter_legacy_tile_command_buffer commit];
+            [adapter_legacy_tile_command_buffer waitUntilCompleted];
+            uint8_t adapter_legacy_tile_pixels[5 * 3 * 4] = {0};
+            if (adapter_legacy_tile_texture != nil) {
+                [adapter_legacy_tile_texture getBytes:adapter_legacy_tile_pixels
+                                           bytesPerRow:5 * 4
+                                         fromRegion:MTLRegionMake2D(0, 0, 5, 3)
+                                        mipmapLevel:0];
+            }
+            uint8_t expected_legacy_tile_pixels[5 * 3 * 4];
+            for (NSUInteger y = 0; y < 3; ++y) {
+                for (NSUInteger x = 0; x < 5; ++x) {
+                    const NSUInteger pixel = (y * 5 + x) * 4;
+                    expected_legacy_tile_pixels[pixel + 0] = 64;
+                    expected_legacy_tile_pixels[pixel + 1] = (uint8_t)(((y + 1) * 255 + 4) / 8);
+                    expected_legacy_tile_pixels[pixel + 2] = (uint8_t)(((x + 1) * 255 + 4) / 8);
+                    expected_legacy_tile_pixels[pixel + 3] = 255;
+                }
+            }
+            BOOL adapter_legacy_tile_required_ok = YES;
+            if (@available(macOS 26.0, iOS 26.0, *)) {
+                adapter_legacy_tile_required_ok =
+                    adapter_legacy_tile_pipeline.requiredThreadsPerTileThreadgroup.width == 2 &&
+                    adapter_legacy_tile_pipeline.requiredThreadsPerTileThreadgroup.height == 2 &&
+                    adapter_legacy_tile_pipeline.requiredThreadsPerTileThreadgroup.depth == 1;
+            }
+            adapter_legacy_tile_exact = adapter_legacy_tile_function != nil &&
+                adapter_legacy_tile_pipeline != nil && adapter_legacy_tile_texture != nil &&
+                adapter_legacy_tile_command_buffer != nil && adapter_legacy_tile_encoder != nil &&
+                adapter_legacy_tile_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                adapter_legacy_tile_pipeline.maxTotalThreadsPerThreadgroup == 4 &&
+                adapter_legacy_tile_pipeline.threadgroupSizeMatchesTileSize &&
+                adapter_legacy_tile_required_ok &&
+                memcmp(adapter_legacy_tile_pixels, expected_legacy_tile_pixels,
+                       sizeof(expected_legacy_tile_pixels)) == 0;
+        }
+        if (!adapter_legacy_tile_exact) {
+            fail_with_error("legacy CPU tile dispatch pixel exactness failed", adapter_legacy_tile_error);
+            return 109;
+        }
+
         /* Function tables retain CPU-side handles/resources only. The native
          * table and handle below are an API/oracle probe; no native object is
          * passed into the adapter and no native table participates in ZPU

@@ -42,6 +42,7 @@ static const MTLIndirectCommandType zpu_indirect_command_type_draw_indexed_patch
 /* This is a deliberately small, portable ML profile. It is a registered
  * ZPU operation, not an arbitrary MSL or framework graph compiler entry. */
 static NSString *const zpu_cpu_ml_identity_function_name = @"zpu_cpu_ml_identity";
+static NSString *const zpu_cpu_tile_gradient_function_name = @"zpu_cpu_tile_gradient_rgba8";
 static const MTLBindingType zpu_mtl_binding_type_tensor = (MTLBindingType)37;
 
 @class ZPUDevice;
@@ -614,8 +615,18 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLRenderPipelineReflection *_legacyReflection;
     NSArray *_vertexBinaryFunctionNames;
     NSArray *_fragmentBinaryFunctionNames;
+    BOOL _isTilePipeline;
+    NSString *_tileFunctionName;
+    NSUInteger _tileMaxTotalThreadsPerThreadgroup;
+    BOOL _tileThreadgroupSizeMatchesTileSize;
+    MTLSize _tileRequiredThreadsPerThreadgroup;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLRenderPipelineDescriptor *)descriptor;
+- (instancetype)initWithOwner:(ZPUDevice *)owner tileFunctionName:(NSString *)tileFunctionName
+                         label:(NSString *)label colorFormat:(MTLPixelFormat)colorFormat
+           maxTotalThreadsPerThreadgroup:(NSUInteger)maxTotalThreadsPerThreadgroup
+             threadgroupSizeMatchesTileSize:(BOOL)threadgroupSizeMatchesTileSize
+             requiredThreadsPerThreadgroup:(MTLSize)requiredThreadsPerThreadgroup;
 - (instancetype)initWithPipeline:(ZPURenderPipelineState *)pipeline
              vertexFunctionNames:(NSArray<NSString *> *)vertexFunctionNames
            fragmentFunctionNames:(NSArray<NSString *> *)fragmentFunctionNames
@@ -1279,6 +1290,8 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     ZPUTexture *_fragmentTexture;
     ZPURenderPipelineState *_pipelineState;
     ZPUDepthStencilState *_depthStencilState;
+    NSUInteger _tileWidth;
+    NSUInteger _tileHeight;
 }
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner encoder:(zpu_metal_render_encoder *)encoder;
 - (BOOL)applyVertexAttributeStride:(NSUInteger)stride allowStaticToken:(BOOL)allowStaticToken;
@@ -5496,6 +5509,10 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
             initWithBindings:@[] userAnnotation:nil];
     }
+    if ([name isEqualToString:zpu_cpu_tile_gradient_function_name]) {
+        return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+            initWithBindings:@[] userAnnotation:nil];
+    }
     if ([name hasPrefix:@"zpu_cpu_"]) {
         zpu_metal_compute_kernel kernel = 0;
         if ([name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"]) kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8;
@@ -5581,6 +5598,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         @"zpu_cpu_fill_gradient_rgba8_3d",
         @"zpu_cpu_fill_gradient_r32_float",
         @"zpu_cpu_fill_gradient_rgba16_float",
+        zpu_cpu_tile_gradient_function_name,
         zpu_cpu_ml_identity_function_name,
     ] containsObject:name];
 }
@@ -5647,6 +5665,31 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
     }
     return self;
 }
+- (instancetype)initWithOwner:(ZPUDevice *)owner tileFunctionName:(NSString *)tileFunctionName
+                         label:(NSString *)label colorFormat:(MTLPixelFormat)colorFormat
+           maxTotalThreadsPerThreadgroup:(NSUInteger)maxTotalThreadsPerThreadgroup
+             threadgroupSizeMatchesTileSize:(BOOL)threadgroupSizeMatchesTileSize
+             requiredThreadsPerThreadgroup:(MTLSize)requiredThreadsPerThreadgroup {
+    if ((self = [super init])) {
+        _owner = owner;
+        _resourceID = zpu_register_resource(self);
+        _label = [label copy];
+        _isTilePipeline = YES;
+        _tileFunctionName = [tileFunctionName copy];
+        _tileMaxTotalThreadsPerThreadgroup = maxTotalThreadsPerThreadgroup;
+        _tileThreadgroupSizeMatchesTileSize = threadgroupSizeMatchesTileSize;
+        _tileRequiredThreadsPerThreadgroup = requiredThreadsPerThreadgroup;
+        _colorPixelFormat = colorFormat;
+        _colorPixelFormats[0] = colorFormat;
+        _colorAttachmentCount = 1;
+        _rasterizationEnabled = NO;
+        _supportsIndirectCommandBuffers = NO;
+        _fragmentFunctionName = nil;
+        _reflection = (MTLRenderPipelineReflection *)[[ZPURenderPipelineReflection alloc]
+            initWithVertexArguments:@[] fragmentArguments:@[] vertexBindings:@[] fragmentBindings:@[]];
+    }
+    return self;
+}
 - (instancetype)initWithPipeline:(ZPURenderPipelineState *)pipeline
              vertexFunctionNames:(NSArray<NSString *> *)vertexFunctionNames
            fragmentFunctionNames:(NSArray<NSString *> *)fragmentFunctionNames
@@ -5695,13 +5738,13 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
 - (NSUInteger)allocatedSize API_AVAILABLE(macos(15.0), ios(18.0)) { return 0; }
 - (NSString *)label { return _label; }
 - (void)setLabel:(NSString *)label { _label = [label copy]; }
-- (NSUInteger)maxTotalThreadsPerThreadgroup { return 1; }
+- (NSUInteger)maxTotalThreadsPerThreadgroup { return _isTilePipeline ? _tileMaxTotalThreadsPerThreadgroup : 1; }
 - (NSUInteger)maxTotalThreadsPerObjectThreadgroup { return 1; }
 - (NSUInteger)maxTotalThreadsPerMeshThreadgroup API_AVAILABLE(macos(13.0), ios(16.0)) { return 0; }
 - (NSUInteger)objectThreadExecutionWidth API_AVAILABLE(macos(13.0), ios(16.0)) { return 0; }
 - (NSUInteger)meshThreadExecutionWidth API_AVAILABLE(macos(13.0), ios(16.0)) { return 0; }
 - (NSUInteger)maxTotalThreadgroupsPerMeshGrid API_AVAILABLE(macos(13.0), ios(16.0)) { return 0; }
-- (BOOL)threadgroupSizeMatchesTileSize { return NO; }
+- (BOOL)threadgroupSizeMatchesTileSize { return _isTilePipeline && _tileThreadgroupSizeMatchesTileSize; }
 - (NSUInteger)imageblockSampleLength API_AVAILABLE(macos(11.0), ios(11.0), macCatalyst(14.0), tvos(14.5)) { return 0; }
 - (NSUInteger)imageblockMemoryLengthForDimensions:(MTLSize)imageblockDimensions API_AVAILABLE(macos(11.0), ios(11.0), macCatalyst(14.0), tvos(14.5)) {
     (void)imageblockDimensions;
@@ -5710,16 +5753,20 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
 - (BOOL)supportIndirectCommandBuffers API_AVAILABLE(macos(10.14), ios(12.0)) { return _supportsIndirectCommandBuffers; }
 - (MTLResourceID)gpuResourceID API_AVAILABLE(macos(13.0), ios(16.0)) { return (MTLResourceID){_resourceID}; }
 - (MTLShaderValidation)shaderValidation API_AVAILABLE(macos(15.0), ios(18.0)) { return (MTLShaderValidation)0; }
-- (MTLSize)requiredThreadsPerTileThreadgroup API_AVAILABLE(macos(26.0), ios(26.0)) { return MTLSizeMake(0, 0, 0); }
+- (MTLSize)requiredThreadsPerTileThreadgroup API_AVAILABLE(macos(26.0), ios(26.0)) {
+    return _isTilePipeline ? _tileRequiredThreadsPerThreadgroup : MTLSizeMake(0, 0, 0);
+}
 - (MTLSize)requiredThreadsPerObjectThreadgroup API_AVAILABLE(macos(26.0), ios(26.0)) { return MTLSizeMake(0, 0, 0); }
 - (MTLSize)requiredThreadsPerMeshThreadgroup API_AVAILABLE(macos(26.0), ios(26.0)) { return MTLSizeMake(0, 0, 0); }
 - (id<MTLFunctionHandle>)functionHandleWithFunction:(id<MTLFunction>)function stage:(MTLRenderStages)stage API_AVAILABLE(macos(12.0), ios(15.0), tvos(16.0)) {
     ZPUCPUFunction *cpuFunction = (ZPUCPUFunction *)function;
     if (![cpuFunction isKindOfClass:[ZPUCPUFunction class]] || cpuFunction->_owner != _owner) return nil;
-    NSString *expectedName = stage == MTLRenderStageVertex ? _vertexFunctionName :
-        (stage == MTLRenderStageFragment ? _fragmentFunctionName : nil);
-    MTLFunctionType expectedType = stage == MTLRenderStageVertex ? MTLFunctionTypeVertex :
-        (stage == MTLRenderStageFragment ? MTLFunctionTypeFragment : MTLFunctionTypeKernel);
+    NSString *expectedName = _isTilePipeline && stage == MTLRenderStageTile ? _tileFunctionName :
+        (stage == MTLRenderStageVertex ? _vertexFunctionName :
+        (stage == MTLRenderStageFragment ? _fragmentFunctionName : nil));
+    MTLFunctionType expectedType = _isTilePipeline && stage == MTLRenderStageTile ? MTLFunctionTypeKernel :
+        (stage == MTLRenderStageVertex ? MTLFunctionTypeVertex :
+        (stage == MTLRenderStageFragment ? MTLFunctionTypeFragment : MTLFunctionTypeKernel));
     NSArray<NSString *> *linkedNames = stage == MTLRenderStageVertex ? _vertexLinkedFunctionNames :
         (stage == MTLRenderStageFragment ? _fragmentLinkedFunctionNames : @[]);
     NSArray<NSString *> *binaryNames = stage == MTLRenderStageVertex ? _vertexBinaryFunctionNames :
@@ -5749,10 +5796,12 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
 }
 - (MTLRenderPipelineReflection *)reflection API_AVAILABLE(macos(26.0), ios(26.0)) { return _reflection; }
 - (id<MTLFunctionHandle>)functionHandleWithName:(NSString *)name stage:(MTLRenderStages)stage API_AVAILABLE(macos(26.0), ios(26.0)) {
-    NSString *expectedName = stage == MTLRenderStageVertex ? _vertexFunctionName :
-        (stage == MTLRenderStageFragment ? _fragmentFunctionName : nil);
-    MTLFunctionType expectedType = stage == MTLRenderStageVertex ? MTLFunctionTypeVertex :
-        (stage == MTLRenderStageFragment ? MTLFunctionTypeFragment : MTLFunctionTypeKernel);
+    NSString *expectedName = _isTilePipeline && stage == MTLRenderStageTile ? _tileFunctionName :
+        (stage == MTLRenderStageVertex ? _vertexFunctionName :
+        (stage == MTLRenderStageFragment ? _fragmentFunctionName : nil));
+    MTLFunctionType expectedType = _isTilePipeline && stage == MTLRenderStageTile ? MTLFunctionTypeKernel :
+        (stage == MTLRenderStageVertex ? MTLFunctionTypeVertex :
+        (stage == MTLRenderStageFragment ? MTLFunctionTypeFragment : MTLFunctionTypeKernel));
     NSArray<NSString *> *linkedNames = stage == MTLRenderStageVertex ? _vertexLinkedFunctionNames :
         (stage == MTLRenderStageFragment ? _fragmentLinkedFunctionNames : @[]);
     if (expectedName == nil || (![expectedName isEqualToString:name] && ![linkedNames containsObject:name])) return nil;
@@ -5781,6 +5830,10 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
                                                                  functionType:expectedType];
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithBinaryFunctions:(MTL4RenderPipelineBinaryFunctionsDescriptor *)binaryFunctionsDescriptor error:(NSError **)error API_AVAILABLE(macos(26.0), ios(26.0)) {
+    if (_isTilePipeline) {
+        zpu_set_error(error, @"ZPU CPU Metal tile pipelines do not support binary linking");
+        return nil;
+    }
     if (binaryFunctionsDescriptor == nil) {
         zpu_set_error(error, @"ZPU CPU Metal render pipeline binary functions must be non-nil");
         return nil;
@@ -5820,6 +5873,10 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         fragmentBinaryNames:fragmentNames];
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithAdditionalBinaryFunctions:(MTLRenderPipelineFunctionsDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(12.0), ios(15.0), tvos(16.0)) {
+    if (_isTilePipeline) {
+        zpu_set_error(error, @"ZPU CPU Metal tile pipelines do not support binary linking");
+        return nil;
+    }
     if (descriptor == nil) {
         zpu_set_error(error, @"ZPU CPU Metal render pipeline binary functions must be non-nil");
         return nil;
@@ -7000,7 +7057,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (id<MTLLibrary>)newDefaultLibrary {
     return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
-                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_ml_identity"];
+                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_tile_gradient_rgba8 zpu_cpu_ml_identity"];
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
@@ -7079,19 +7136,58 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     completionHandler(nil, error);
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithTileDescriptor:(MTLTileRenderPipelineDescriptor *)descriptor options:(MTLPipelineOption)options reflection:(MTLAutoreleasedRenderPipelineReflection *)reflection error:(NSError **)error API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
-    (void)descriptor;
     (void)options;
     if (reflection != NULL) *reflection = nil;
-    zpu_set_error(error, @"ZPU CPU Metal has no tile-shader implementation");
-    return nil;
+    if (descriptor == nil || descriptor.tileFunction == nil || descriptor.rasterSampleCount != 1) {
+        zpu_set_error(error, @"ZPU CPU Metal tile pipelines require one sample and a tile function");
+        return nil;
+    }
+    NSUInteger max_threads = descriptor.maxTotalThreadsPerThreadgroup;
+    if (max_threads == 0) max_threads = 1024;
+    MTLSize required_threads = MTLSizeMake(0, 0, 0);
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        required_threads = descriptor.requiredThreadsPerThreadgroup;
+    }
+    ZPUCPUFunction *tileFunction = (ZPUCPUFunction *)descriptor.tileFunction;
+    MTLTileRenderPipelineColorAttachmentDescriptor *attachment = descriptor.colorAttachments[0];
+    if (![tileFunction isKindOfClass:[ZPUCPUFunction class]] || tileFunction->_owner != self ||
+        tileFunction.functionType != MTLFunctionTypeKernel ||
+        ![tileFunction.name isEqualToString:zpu_cpu_tile_gradient_function_name] ||
+        attachment == nil || (attachment.pixelFormat != MTLPixelFormatRGBA8Unorm &&
+                               attachment.pixelFormat != MTLPixelFormatBGRA8Unorm) ||
+        max_threads > 1024) {
+        zpu_set_error(error, @"ZPU CPU Metal supports only the registered RGBA8 CPU tile profile");
+        return nil;
+    }
+    const BOOL required_any = required_threads.width != 0 || required_threads.height != 0 ||
+        required_threads.depth != 0;
+    const BOOL required_complete = required_threads.width != 0 && required_threads.height != 0 &&
+        required_threads.depth != 0;
+    if (required_any && (!required_complete ||
+                         !zpu_metal_size_fits_cpu_threadgroup(required_threads, max_threads))) {
+        zpu_set_error(error, @"ZPU CPU Metal tile required threadgroup size is invalid");
+        return nil;
+    }
+    for (NSUInteger index = 1; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
+        if (descriptor.colorAttachments[index].pixelFormat != MTLPixelFormatInvalid) {
+            zpu_set_error(error, @"ZPU CPU Metal supports only one tile color attachment");
+            return nil;
+        }
+    }
+    if (error != NULL) *error = nil;
+    return (id<MTLRenderPipelineState>)[[ZPURenderPipelineState alloc]
+        initWithOwner:self tileFunctionName:tileFunction.name label:descriptor.label
+        colorFormat:attachment.pixelFormat
+        maxTotalThreadsPerThreadgroup:max_threads
+        threadgroupSizeMatchesTileSize:descriptor.threadgroupSizeMatchesTileSize
+        requiredThreadsPerThreadgroup:required_threads];
 }
 - (void)newRenderPipelineStateWithTileDescriptor:(MTLTileRenderPipelineDescriptor *)descriptor options:(MTLPipelineOption)options completionHandler:(MTLNewRenderPipelineStateWithReflectionCompletionHandler)completionHandler API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
-    (void)descriptor;
-    (void)options;
     if (completionHandler == nil) return;
     NSError *error = nil;
-    zpu_set_error(&error, @"ZPU CPU Metal has no tile-shader implementation");
-    completionHandler(nil, nil, error);
+    MTLRenderPipelineReflection *reflection = nil;
+    id<MTLRenderPipelineState> state = [self newRenderPipelineStateWithTileDescriptor:descriptor options:options reflection:&reflection error:&error];
+    completionHandler(state, reflection, error);
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithMeshDescriptor:(MTLMeshRenderPipelineDescriptor *)descriptor options:(MTLPipelineOption)options reflection:(MTLAutoreleasedRenderPipelineReflection *)reflection error:(NSError **)error API_AVAILABLE(macos(13.0), ios(16.0)) {
     (void)descriptor;
@@ -7458,6 +7554,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
             @"zpu_cpu_fill_gradient_rgba8_3d",
             @"zpu_cpu_fill_gradient_r32_float",
             @"zpu_cpu_fill_gradient_rgba16_float",
+            zpu_cpu_tile_gradient_function_name,
             zpu_cpu_ml_identity_function_name,
         ]) {
             if ([source rangeOfString:name].location != NSNotFound) [names addObject:name];
@@ -8001,6 +8098,58 @@ static id<MTLRenderPipelineState> zpu_mtl4_render_pipeline_for_descriptor(
     return pipeline;
 }
 
+static id<MTLRenderPipelineState> zpu_mtl4_tile_pipeline_for_descriptor(
+    ZPUDevice *owner, MTL4TileRenderPipelineDescriptor *descriptor, NSError **error) {
+    if (descriptor == nil || descriptor.tileFunctionDescriptor == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 requires a registered tile function");
+        return nil;
+    }
+    if (descriptor.rasterSampleCount != 0 && descriptor.rasterSampleCount != 1) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 supports only one-sample CPU tile targets");
+        return nil;
+    }
+    MTL4StaticLinkingDescriptor *linking = descriptor.staticLinkingDescriptor;
+    if (descriptor.supportBinaryLinking || linking.functionDescriptors.count != 0 ||
+        linking.privateFunctionDescriptors.count != 0 || linking.groups.count != 0) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 tile pipelines do not support function linking");
+        return nil;
+    }
+    id<MTLFunction> tile = zpu_mtl4_resolve_library_function(owner, descriptor.tileFunctionDescriptor, error);
+    MTLTileRenderPipelineColorAttachmentDescriptor *attachment = descriptor.colorAttachments[0];
+    if (tile == nil || tile.functionType != MTLFunctionTypeKernel ||
+        ![tile.name isEqualToString:zpu_cpu_tile_gradient_function_name] || attachment == nil ||
+        (attachment.pixelFormat != MTLPixelFormatRGBA8Unorm &&
+         attachment.pixelFormat != MTLPixelFormatBGRA8Unorm)) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 supports only the registered RGBA8 CPU tile profile");
+        return nil;
+    }
+    for (NSUInteger index = 1; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
+        if (descriptor.colorAttachments[index].pixelFormat != MTLPixelFormatInvalid) {
+            zpu_set_error(error, @"ZPU CPU Metal 4 supports only one tile color attachment");
+            return nil;
+        }
+    }
+    NSUInteger max_threads = descriptor.maxTotalThreadsPerThreadgroup;
+    if (max_threads == 0) max_threads = 1024;
+    if (max_threads > 1024) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 tile threadgroups are limited to 1024 threads");
+        return nil;
+    }
+    const MTLSize required = descriptor.requiredThreadsPerThreadgroup;
+    const BOOL required_any = required.width != 0 || required.height != 0 || required.depth != 0;
+    const BOOL required_complete = required.width != 0 && required.height != 0 && required.depth != 0;
+    if (required_any && (!required_complete || !zpu_metal_size_fits_cpu_threadgroup(required, max_threads))) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 tile required threadgroup size is invalid");
+        return nil;
+    }
+    if (error != NULL) *error = nil;
+    return (id<MTLRenderPipelineState>)[[ZPURenderPipelineState alloc]
+        initWithOwner:owner tileFunctionName:tile.name label:descriptor.label
+        colorFormat:attachment.pixelFormat maxTotalThreadsPerThreadgroup:max_threads
+        threadgroupSizeMatchesTileSize:descriptor.threadgroupSizeMatchesTileSize
+        requiredThreadsPerThreadgroup:required];
+}
+
 static BOOL zpu_mtl4_apply_compute_descriptor(
     ZPUComputePipelineState *pipeline, MTL4ComputePipelineDescriptor *descriptor, NSError **error) {
     if (pipeline == nil || descriptor == nil ||
@@ -8130,6 +8279,10 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
                                                    compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
                                                                  error:(NSError **)error {
     (void)compilerTaskOptions;
+    if ([descriptor isKindOfClass:[MTL4TileRenderPipelineDescriptor class]]) {
+        return zpu_mtl4_tile_pipeline_for_descriptor(
+            _owner, (MTL4TileRenderPipelineDescriptor *)descriptor, error);
+    }
     if (![descriptor isKindOfClass:[MTL4RenderPipelineDescriptor class]]) {
         zpu_set_error(error, @"ZPU CPU Metal 4 compiler supports only ordinary render descriptors");
         return nil;
@@ -8150,6 +8303,29 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
                                                  compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
                                                                error:(NSError **)error {
     (void)compilerTaskOptions;
+    if ([descriptor isKindOfClass:[MTL4TileRenderPipelineDescriptor class]]) {
+        id<MTLRenderPipelineState> pipeline = [self newRenderPipelineStateWithDescriptor:descriptor
+                                                                       compilerTaskOptions:nil
+                                                                                     error:error];
+        if (pipeline == nil || dynamicLinkingDescriptor == nil) return pipeline;
+        if (!zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.vertexLinkingDescriptor, error) ||
+            !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.fragmentLinkingDescriptor, error) ||
+            !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.tileLinkingDescriptor, error) ||
+            !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.objectLinkingDescriptor, error) ||
+            !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.meshLinkingDescriptor, error)) {
+            return nil;
+        }
+        if (dynamicLinkingDescriptor.vertexLinkingDescriptor.binaryLinkedFunctions.count != 0 ||
+            dynamicLinkingDescriptor.fragmentLinkingDescriptor.binaryLinkedFunctions.count != 0 ||
+            dynamicLinkingDescriptor.tileLinkingDescriptor.binaryLinkedFunctions.count != 0 ||
+            dynamicLinkingDescriptor.objectLinkingDescriptor.binaryLinkedFunctions.count != 0 ||
+            dynamicLinkingDescriptor.meshLinkingDescriptor.binaryLinkedFunctions.count != 0) {
+            zpu_set_error(error, @"ZPU CPU Metal 4 tile pipelines do not support binary linking");
+            return nil;
+        }
+        if (error != NULL) *error = nil;
+        return pipeline;
+    }
     id<MTLRenderPipelineState> pipeline = [self newRenderPipelineStateWithDescriptor:descriptor
                                                                       compilerTaskOptions:nil
                                                                                     error:error];
@@ -8757,7 +8933,10 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
         zpu_metal_render_encoder_destroy(encoder);
         return nil;
     }
-    return (id<MTLRenderCommandEncoder>)[[ZPURenderEncoder alloc] initWithOwner:self encoder:encoder];
+    ZPURenderEncoder *result = [[ZPURenderEncoder alloc] initWithOwner:self encoder:encoder];
+    result->_tileWidth = descriptor.tileWidth;
+    result->_tileHeight = descriptor.tileHeight;
+    return (id<MTLRenderCommandEncoder>)result;
 }
 - (id<MTLParallelRenderCommandEncoder>)parallelRenderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)descriptor {
     if (descriptor == nil) return nil;
@@ -9526,6 +9705,8 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
         _legacy = legacy;
         _tileWidth = tileWidth;
         _tileHeight = tileHeight;
+        _legacy->_tileWidth = tileWidth;
+        _legacy->_tileHeight = tileHeight;
     }
     return self;
 }
@@ -9706,14 +9887,10 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
     [_owner markError];
 }
 - (void)dispatchThreadsPerTile:(MTLSize)threadsPerTile {
-    (void)threadsPerTile;
-    [_owner markError];
+    [(id)_legacy dispatchThreadsPerTile:threadsPerTile];
 }
 - (void)setThreadgroupMemoryLength:(NSUInteger)length offset:(NSUInteger)offset atIndex:(NSUInteger)index {
-    (void)length;
-    (void)offset;
-    (void)index;
-    [_owner markError];
+    [(id)_legacy setThreadgroupMemoryLength:length offset:offset atIndex:index];
 }
 - (void)setArgumentTable:(id<MTL4ArgumentTable>)argumentTable atStages:(MTLRenderStages)stages {
     if (argumentTable != nil &&
@@ -9724,7 +9901,7 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
     }
     _argumentTable = (ZPUMTL4ArgumentTable *)argumentTable;
     if (_argumentTable == nil) return;
-    if (_argumentTable->_invalid || (stages & ~(MTLRenderStageVertex | MTLRenderStageFragment)) != 0) {
+    if (_argumentTable->_invalid || (stages & ~(MTLRenderStageVertex | MTLRenderStageFragment | MTLRenderStageTile)) != 0) {
         [_owner markError];
         return;
     }
@@ -12467,6 +12644,10 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     return zpu_metal_render_encoder_set_vertex_buffer_stride(_zpuEncoder, _vertexStride) == ZPU_METAL_OK;
 }
 - (BOOL)validateVertexStrideForDraw {
+    if (_pipelineState != nil && _pipelineState->_isTilePipeline) {
+        [_owner markError];
+        return NO;
+    }
     if (_pipelineState != nil && _pipelineState->_vertexStrideDynamic && !_vertexStrideExplicit) {
         [_owner markError];
         return NO;
@@ -12940,6 +13121,21 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         [_owner markError];
         return;
     }
+    if (state->_isTilePipeline) {
+        _pipelineState = state;
+        [_owner retainResource:state];
+        uint16_t colorFormats[ZPU_METAL_MAX_COLOR_ATTACHMENTS];
+        for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
+            colorFormats[index] = (uint16_t)state->_colorPixelFormats[index];
+        }
+        if (zpu_metal_render_encoder_set_pipeline_color_formats(
+                _zpuEncoder, colorFormats, state->_colorAttachmentCount,
+                (uint16_t)state->_depthPixelFormat, (uint16_t)state->_stencilPixelFormat) != ZPU_METAL_OK ||
+            zpu_metal_render_encoder_set_rasterization_enabled(_zpuEncoder, false) != ZPU_METAL_OK) {
+            [_owner markError];
+        }
+        return;
+    }
     if (_vertexStrideExplicit &&
         ((_vertexStrideStaticToken && state->_vertexStrideDynamic) ||
          (!_vertexStrideStaticToken && !state->_vertexStrideDynamic))) {
@@ -12992,8 +13188,8 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     if (zpu_metal_render_encoder_set_visibility_result_mode(_zpuEncoder, (uint8_t)mode, offset) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)textureBarrier API_DEPRECATED_WITH_REPLACEMENT("Use memoryBarrierWithScope:MTLBarrierScopeRenderTargets", macos(10.11, 10.14)) API_UNAVAILABLE(ios) {}
-- (NSUInteger)tileWidth API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { return 0; }
-- (NSUInteger)tileHeight API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { return 0; }
+- (NSUInteger)tileWidth API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { return _tileWidth; }
+- (NSUInteger)tileHeight API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { return _tileHeight; }
 - (void)drawPrimitives:(MTLPrimitiveType)primitiveType vertexStart:(NSUInteger)vertexStart vertexCount:(NSUInteger)vertexCount {
     [self drawPrimitives:primitiveType vertexStart:vertexStart vertexCount:vertexCount instanceCount:1];
 }
@@ -13119,14 +13315,39 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     [_owner markError];
 }
 - (void)dispatchThreadsPerTile:(MTLSize)threadsPerTile API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
-    (void)threadsPerTile;
-    [_owner markError];
+    if (_pipelineState == nil || !_pipelineState->_isTilePipeline ||
+        ![_pipelineState->_tileFunctionName isEqualToString:zpu_cpu_tile_gradient_function_name] ||
+        _tileWidth == 0 || _tileHeight == 0 || threadsPerTile.width == 0 ||
+        threadsPerTile.height == 0 || threadsPerTile.depth != 1 ||
+        threadsPerTile.width > _tileWidth || threadsPerTile.height > _tileHeight ||
+        (_pipelineState->_tileThreadgroupSizeMatchesTileSize &&
+         (threadsPerTile.width != _tileWidth || threadsPerTile.height != _tileHeight)) ||
+        (_pipelineState->_tileRequiredThreadsPerThreadgroup.width != 0 &&
+         (threadsPerTile.width != _pipelineState->_tileRequiredThreadsPerThreadgroup.width ||
+          threadsPerTile.height != _pipelineState->_tileRequiredThreadsPerThreadgroup.height ||
+          threadsPerTile.depth != _pipelineState->_tileRequiredThreadsPerThreadgroup.depth))) {
+        [_owner markError];
+        return;
+    }
+    uint32_t tile_width = 0;
+    uint32_t tile_height = 0;
+    uint32_t thread_width = 0;
+    uint32_t thread_height = 0;
+    uint32_t thread_depth = 0;
+    if (!zpu_u32(_tileWidth, &tile_width) || !zpu_u32(_tileHeight, &tile_height) ||
+        !zpu_u32(threadsPerTile.width, &thread_width) || !zpu_u32(threadsPerTile.height, &thread_height) ||
+        !zpu_u32(threadsPerTile.depth, &thread_depth) ||
+        zpu_metal_render_encoder_dispatch_threads_per_tile(
+            _zpuEncoder, ZPU_METAL_TILE_FILL_GRADIENT_RGBA8,
+            (zpu_metal_size){tile_width, tile_height, 1},
+            (zpu_metal_size){thread_width, thread_height, thread_depth}) != ZPU_METAL_OK) {
+        [_owner markError];
+    }
 }
 - (void)setThreadgroupMemoryLength:(NSUInteger)length offset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
-    (void)length;
-    (void)offset;
-    (void)index;
-    [_owner markError];
+    if (_pipelineState == nil || !_pipelineState->_isTilePipeline || length != 0 || offset != 0 || index != 0) {
+        [_owner markError];
+    }
 }
 - (void)executeCommandsInBuffer:(id<MTLIndirectCommandBuffer>)indirectCommandBuffer withRange:(NSRange)executionRange {
     ZPUIndirectCommandBuffer *buffer = (ZPUIndirectCommandBuffer *)indirectCommandBuffer;
