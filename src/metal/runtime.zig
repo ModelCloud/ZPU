@@ -49,6 +49,25 @@ pub const TextureFormat = enum {
     }
 };
 
+fn textureFormatFromRaw(format_raw: u16) ?TextureFormat {
+    return switch (format_raw) {
+        @intFromEnum(abi.PixelFormat.rgba8_unorm) => .rgba8_unorm,
+        @intFromEnum(abi.PixelFormat.bgra8_unorm) => .bgra8_unorm,
+        @intFromEnum(abi.PixelFormat.r32_float) => .r32_float,
+        @intFromEnum(abi.PixelFormat.rgba16_float) => .rgba16_float,
+        @intFromEnum(abi.PixelFormat.depth32_float) => .depth32_float,
+        @intFromEnum(abi.PixelFormat.stencil8) => .stencil8,
+        else => null,
+    };
+}
+
+fn textureFormatsViewCompatible(source: TextureFormat, view: TextureFormat) bool {
+    if (source == view) return true;
+    const source_packed_32 = source == .rgba8_unorm or source == .bgra8_unorm or source == .r32_float;
+    const view_packed_32 = view == .rgba8_unorm or view == .bgra8_unorm or view == .r32_float;
+    return source_packed_32 and view_packed_32;
+}
+
 pub const Error = error{
     InvalidArgument,
     InvalidResource,
@@ -1950,15 +1969,7 @@ pub fn destroyBuffer(buffer: *Buffer) void {
 
 pub fn createTexture(device: *Device, width: u32, height: u32, format_raw: u16) Error!*Texture {
     if (!validDevice(device)) return error.InvalidResource;
-    const format: TextureFormat = switch (format_raw) {
-        @intFromEnum(abi.PixelFormat.rgba8_unorm) => .rgba8_unorm,
-        @intFromEnum(abi.PixelFormat.bgra8_unorm) => .bgra8_unorm,
-        @intFromEnum(abi.PixelFormat.r32_float) => .r32_float,
-        @intFromEnum(abi.PixelFormat.rgba16_float) => .rgba16_float,
-        @intFromEnum(abi.PixelFormat.depth32_float) => .depth32_float,
-        @intFromEnum(abi.PixelFormat.stencil8) => .stencil8,
-        else => return error.UnsupportedFormat,
-    };
+    const format = textureFormatFromRaw(format_raw) orelse return error.UnsupportedFormat;
     const stride = std.math.mul(usize, width, format.bytesPerPixel()) catch return error.InvalidArgument;
     const length = std.math.mul(usize, stride, height) catch return error.InvalidArgument;
     const bytes = allocator.alignedAlloc(u8, std.mem.Alignment.of(f32), length) catch return error.OutOfMemory;
@@ -2025,6 +2036,23 @@ pub fn destroyTexture(texture: *Texture) void {
     if (!validTexture(texture)) return;
     texture.deinit();
     allocator.destroy(texture);
+}
+
+pub fn createTextureView(texture: *const Texture, format_raw: u16) Error!*Texture {
+    if (texture.magic != texture_magic or !validDevice(texture.device)) return error.InvalidResource;
+    const format = textureFormatFromRaw(format_raw) orelse return error.UnsupportedFormat;
+    if (!textureFormatsViewCompatible(texture.format, format)) return error.UnsupportedFormat;
+    const result = allocator.create(Texture) catch return error.OutOfMemory;
+    result.* = .{
+        .device = texture.device,
+        .width = texture.width,
+        .height = texture.height,
+        .stride = texture.stride,
+        .format = format,
+        .bytes = texture.bytes,
+        .owns_bytes = false,
+    };
+    return result;
 }
 
 pub fn createFence(device: *Device) Error!*Fence {
@@ -3021,6 +3049,30 @@ test "raw texture formats preserve their native texel widths" {
     try std.testing.expectEqualSlices(u8, &rgba16_values, rgba16.bytes);
 }
 
+test "compatible texture views reinterpret shared storage" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const source = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(source);
+    const initial = [_]u8{
+        0x00, 0x00, 0x80, 0x3f, 0x11, 0x22, 0x33, 0x44,
+        0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
+    };
+    try textureReplaceRegion(source, .{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = 2, .height = 2, .depth = 1 } }, &initial, initial.len, 8);
+    const view = try createTextureView(source, @intFromEnum(abi.PixelFormat.r32_float));
+    defer destroyTexture(view);
+    try std.testing.expectEqual(TextureFormat.r32_float, view.format);
+    try std.testing.expectEqual(@intFromPtr(source.bytes.ptr), @intFromPtr(view.bytes.ptr));
+    var copied: [16]u8 = undefined;
+    try textureGetBytes(view, &copied, copied.len, 8, .{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = 2, .height = 2, .depth = 1 } });
+    try std.testing.expectEqualSlices(u8, &initial, &copied);
+
+    const replacement = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+    try textureReplaceRegion(view, .{ .origin = .{ .x = 1, .y = 0, .z = 0 }, .size = .{ .width = 1, .height = 1, .depth = 1 } }, &replacement, replacement.len, 4);
+    try std.testing.expectEqualSlices(u8, &replacement, source.bytes[4..8]);
+    try std.testing.expectError(error.UnsupportedFormat, createTextureView(source, @intFromEnum(abi.PixelFormat.rgba16_float)));
+}
+
 test "indexed render encoding produces the same pixels as direct vertices" {
     const device = try createDevice();
     defer destroyDevice(device);
@@ -3653,6 +3705,10 @@ pub export fn zpu_metal_heap_new_texture_at_offset(heap: ?*Heap, descriptor: ?*c
 
 pub export fn zpu_metal_texture_destroy(texture: ?*Texture) callconv(.c) void {
     if (texture) |value| destroyTexture(value);
+}
+
+pub export fn zpu_metal_texture_view(texture: ?*const Texture, format_raw: u16) callconv(.c) ?*Texture {
+    return createTextureView(texture orelse return null, format_raw) catch null;
 }
 
 pub export fn zpu_metal_texture_width(texture: ?*const Texture) callconv(.c) u32 {

@@ -2362,6 +2362,87 @@ int main(void) {
             return 101;
         }
 
+        /* A compatible pixel-format view must reinterpret the shared texels
+         * while preserving their raw bytes. This exercises the CPU view
+         * handles rather than merely copying the parent's metadata. */
+        id<MTLTexture> native_bgra_view =
+            [native_sample_source newTextureViewWithPixelFormat:MTLPixelFormatBGRA8Unorm];
+        id<MTLTexture> adapter_bgra_view =
+            [adapter_sample_source newTextureViewWithPixelFormat:MTLPixelFormatBGRA8Unorm];
+        enum { format_view_width = 2, format_view_height = 2,
+               format_view_byte_count = format_view_width * format_view_height * 4 };
+        uint8_t native_bgra_view_raw_bytes[format_view_byte_count];
+        uint8_t adapter_bgra_view_raw_bytes[format_view_byte_count];
+        if (native_bgra_view == nil || adapter_bgra_view == nil ||
+            native_bgra_view.pixelFormat != MTLPixelFormatBGRA8Unorm ||
+            adapter_bgra_view.pixelFormat != MTLPixelFormatBGRA8Unorm ||
+            adapter_bgra_view.parentTexture != adapter_sample_source) {
+            fprintf(stderr, "metal-pixel: compatible pixel-format view creation failed\n");
+            return 106;
+        }
+        [native_bgra_view getBytes:native_bgra_view_raw_bytes bytesPerRow:format_view_width * 4
+                        fromRegion:MTLRegionMake2D(0, 0, format_view_width, format_view_height) mipmapLevel:0];
+        [adapter_bgra_view getBytes:adapter_bgra_view_raw_bytes bytesPerRow:format_view_width * 4
+                          fromRegion:MTLRegionMake2D(0, 0, format_view_width, format_view_height) mipmapLevel:0];
+        if (memcmp(native_bgra_view_raw_bytes, adapter_bgra_view_raw_bytes, format_view_byte_count) != 0) {
+            fprintf(stderr, "metal-pixel: compatible pixel-format view bytes changed\n");
+            return 107;
+        }
+        id<MTLTexture> native_format_view_output = [device newTextureWithDescriptor:sample_output_descriptor];
+        id<MTLTexture> adapter_format_view_output = [adapter_device newTextureWithDescriptor:sample_output_descriptor];
+        if (native_format_view_output == nil || adapter_format_view_output == nil) {
+            fprintf(stderr, "metal-pixel: compatible pixel-format view output allocation failed\n");
+            return 108;
+        }
+        MTLRenderPassDescriptor *native_format_view_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_format_view_pass.colorAttachments[0].texture = native_format_view_output;
+        native_format_view_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_format_view_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_format_view_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> native_format_view_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_format_view_encoder =
+            [native_format_view_command_buffer renderCommandEncoderWithDescriptor:native_format_view_pass];
+        [native_format_view_encoder setRenderPipelineState:native_sample_pipeline];
+        [native_format_view_encoder setVertexBuffer:native_sample_vertex_buffer offset:0 atIndex:0];
+        [native_format_view_encoder setFragmentTexture:native_bgra_view atIndex:0];
+        [native_format_view_encoder setFragmentSamplerState:native_sample_sampler atIndex:0];
+        [native_format_view_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_format_view_encoder endEncoding];
+        [native_format_view_command_buffer commit];
+        [native_format_view_command_buffer waitUntilCompleted];
+        MTLRenderPassDescriptor *adapter_format_view_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_format_view_pass.colorAttachments[0].texture = adapter_format_view_output;
+        adapter_format_view_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_format_view_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_format_view_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> adapter_format_view_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_format_view_encoder =
+            [adapter_format_view_command_buffer renderCommandEncoderWithDescriptor:adapter_format_view_pass];
+        [adapter_format_view_encoder setRenderPipelineState:adapter_sample_pipeline];
+        [adapter_format_view_encoder setVertexBuffer:adapter_sample_vertex_buffer offset:0 atIndex:0];
+        [adapter_format_view_encoder setFragmentTexture:adapter_bgra_view atIndex:0];
+        [adapter_format_view_encoder setFragmentSamplerState:adapter_sample_sampler atIndex:0];
+        [adapter_format_view_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_format_view_encoder endEncoding];
+        [adapter_format_view_command_buffer commit];
+        [adapter_format_view_command_buffer waitUntilCompleted];
+        uint8_t native_format_view_bytes[byte_count];
+        uint8_t adapter_format_view_bytes[byte_count];
+        [native_format_view_output getBytes:native_format_view_bytes bytesPerRow:(NSUInteger)width * 4
+                                 fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_format_view_output getBytes:adapter_format_view_bytes bytesPerRow:(NSUInteger)width * 4
+                                   fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (native_format_view_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_format_view_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_format_view_bytes, adapter_format_view_bytes, byte_count) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < byte_count && native_format_view_bytes[mismatch] == adapter_format_view_bytes[mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: compatible pixel-format view sample mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                    mismatch, mismatch < byte_count ? native_format_view_bytes[mismatch] : 0,
+                    mismatch < byte_count ? adapter_format_view_bytes[mismatch] : 0);
+            return 109;
+        }
+
         const zpu_metal_vertex address_sample_vertices[] = {
             {{x0, y0, 0.5f, 1.0f}, {-0.25f, -0.25f, 0.0f, 1.0f}},
             {{x1, y0, 0.5f, 1.0f}, { 1.25f, -0.25f, 0.0f, 1.0f}},

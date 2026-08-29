@@ -96,6 +96,11 @@ triangle path:
   rejected
 - buffer-backed texture views that alias storage with checked row strides and
   preserve the backing resource lifetime
+- compatible pixel-format views for the supported 32-bit color group
+  (RGBA8Unorm, BGRA8Unorm, and R32Float) create view-owned ZPU handles over
+  the same bytes, so CPU sampling, rendering, and transfers observe the view
+  interpretation while the parent remains the storage owner; RGBA16Float,
+  depth32-float, and Stencil8 views remain same-format only
 - CPU-owned `MTLTextureViewPool` slots that create/copy ZPU texture views or
   buffer-backed views and return synthetic resource IDs usable by MTL4
   argument tables

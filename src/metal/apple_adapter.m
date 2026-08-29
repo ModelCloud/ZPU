@@ -196,6 +196,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     BOOL _shareable;
     NSString *_label;
     BOOL _aliasable;
+    BOOL _ownsZpuTextures;
 }
 - (instancetype)initWithOwner:(id)owner texture:(zpu_metal_texture *)texture type:(MTLTextureType)type pixelFormat:(MTLPixelFormat)pixelFormat;
 - (instancetype)initWithOwner:(id)owner texture:(zpu_metal_texture *)texture type:(MTLTextureType)type pixelFormat:(MTLPixelFormat)pixelFormat backing:(ZPUTexture *)backing;
@@ -3773,6 +3774,64 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
 
 #pragma clang diagnostic pop
 
+static BOOL zpu_texture_view_formats_compatible(MTLPixelFormat source, MTLPixelFormat view) {
+    if (source == view) return YES;
+    const BOOL source_packed_32 = source == MTLPixelFormatRGBA8Unorm ||
+        source == MTLPixelFormatBGRA8Unorm || source == MTLPixelFormatR32Float;
+    const BOOL view_packed_32 = view == MTLPixelFormatRGBA8Unorm ||
+        view == MTLPixelFormatBGRA8Unorm || view == MTLPixelFormatR32Float;
+    return source_packed_32 && view_packed_32;
+}
+
+static void zpu_destroy_texture_arrays(NSArray *sliceMipmapTextures) {
+    for (NSArray *slice in sliceMipmapTextures) {
+        for (id value in slice) {
+            if ([value isKindOfClass:[NSValue class]]) {
+                zpu_metal_texture *texture = (zpu_metal_texture *)[value pointerValue];
+                if (texture != NULL) zpu_metal_texture_destroy(texture);
+            }
+        }
+    }
+}
+
+static NSArray *zpu_make_texture_view_slice(NSArray *sourceMipmapTextures, MTLPixelFormat pixelFormat, BOOL *success) {
+    NSMutableArray *viewMipmapTextures = [NSMutableArray arrayWithCapacity:sourceMipmapTextures.count];
+    for (id value in sourceMipmapTextures) {
+        if ([value isKindOfClass:[NSNull class]]) {
+            [viewMipmapTextures addObject:value];
+            continue;
+        }
+        if (![value isKindOfClass:[NSValue class]]) {
+            *success = NO;
+            zpu_destroy_texture_arrays(@[viewMipmapTextures]);
+            return nil;
+        }
+        zpu_metal_texture *source = (zpu_metal_texture *)[value pointerValue];
+        zpu_metal_texture *view = source == NULL ? NULL :
+            zpu_metal_texture_view(source, zpu_pixel_format(pixelFormat));
+        if (view == NULL) {
+            *success = NO;
+            zpu_destroy_texture_arrays(@[viewMipmapTextures]);
+            return nil;
+        }
+        [viewMipmapTextures addObject:[NSValue valueWithPointer:view]];
+    }
+    return [viewMipmapTextures copy];
+}
+
+static NSArray *zpu_make_texture_view_slices(NSArray *sourceSliceMipmapTextures, MTLPixelFormat pixelFormat, BOOL *success) {
+    NSMutableArray *viewSliceMipmapTextures = [NSMutableArray arrayWithCapacity:sourceSliceMipmapTextures.count];
+    for (NSArray *sourceMipmapTextures in sourceSliceMipmapTextures) {
+        NSArray *viewMipmapTextures = zpu_make_texture_view_slice(sourceMipmapTextures, pixelFormat, success);
+        if (!*success) {
+            zpu_destroy_texture_arrays(viewSliceMipmapTextures);
+            return nil;
+        }
+        [viewSliceMipmapTextures addObject:viewMipmapTextures];
+    }
+    return [viewSliceMipmapTextures copy];
+}
+
 @implementation ZPUTexture
 - (instancetype)initWithOwner:(id)owner texture:(zpu_metal_texture *)texture type:(MTLTextureType)type pixelFormat:(MTLPixelFormat)pixelFormat {
     return [self initWithOwner:owner texture:texture type:type pixelFormat:pixelFormat backing:nil];
@@ -3814,6 +3873,7 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
         _depth = 1;
         _baseMipmapLevel = 0;
         _baseSlice = 0;
+        _ownsZpuTextures = NO;
         _resourceID = zpu_register_resource(self);
     }
     return self;
@@ -3844,16 +3904,7 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
 }
 - (void)dealloc {
     if (_backing == nil && _sparseMappings != nil) zpu_sparse_flush_texture_mappings(self);
-    if (_backing == nil) {
-        for (NSArray *slice in _sliceMipmapTextures) {
-            for (id value in slice) {
-                if ([value isKindOfClass:[NSValue class]]) {
-                    zpu_metal_texture *texture = (zpu_metal_texture *)[value pointerValue];
-                    if (texture != NULL) zpu_metal_texture_destroy(texture);
-                }
-            }
-        }
-    }
+    if (_ownsZpuTextures || _backing == nil) zpu_destroy_texture_arrays(_sliceMipmapTextures);
     if (_iosurface != NULL) CFRelease(_iosurface);
 }
 - (NSString *)label { return _label; }
@@ -3956,7 +4007,7 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
     }
     return total;
 }
-- (id<MTLHeap>)heap { return (id<MTLHeap>)_heap; }
+- (id<MTLHeap>)heap { return _backing != nil ? [_backing heap] : (id<MTLHeap>)_heap; }
 - (NSUInteger)heapOffset { return _backing != nil ? [_backing heapOffset] : _heapOffset; }
 - (NSUInteger)parentRelativeLevel { return _baseMipmapLevel; }
 - (NSUInteger)parentRelativeSlice { return _baseSlice; }
@@ -4169,11 +4220,22 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
     (void)zpu_metal_texture_replace_region(texture, zpu_region(region), source, NSUIntegerMax, bytesPerRow);
 }
 - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)pixelFormat {
-    if (pixelFormat != _pixelFormat) return nil;
+    if (!zpu_texture_view_formats_compatible(_pixelFormat, pixelFormat) ||
+        (_sparseMappings != nil && pixelFormat != _pixelFormat)) return nil;
     ZPUTexture *view = [[ZPUTexture alloc] initWithOwner:_owner texture:_zpuTexture
                                                     type:_textureType pixelFormat:pixelFormat backing:self];
-    view->_mipmapTextures = [_mipmapTextures copy];
-    view->_sliceMipmapTextures = [_sliceMipmapTextures copy];
+    if (pixelFormat == _pixelFormat) {
+        view->_mipmapTextures = [_mipmapTextures copy];
+        view->_sliceMipmapTextures = [_sliceMipmapTextures copy];
+    } else {
+        BOOL success = YES;
+        NSArray *viewSlices = zpu_make_texture_view_slices(_sliceMipmapTextures, pixelFormat, &success);
+        if (!success || viewSlices.count == 0 || [viewSlices.firstObject count] == 0) return nil;
+        view->_sliceMipmapTextures = viewSlices;
+        view->_mipmapTextures = [viewSlices.firstObject copy];
+        view->_zpuTexture = [view zpuTextureAtLevel:0 slice:0];
+        view->_ownsZpuTextures = YES;
+    }
     view->_arrayLength = _arrayLength;
     view->_depth = _depth;
     view->_baseMipmapLevel = _baseMipmapLevel;
@@ -4187,7 +4249,8 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
         sliceRange.length > _sliceMipmapTextures.count - sliceRange.location ||
         levelRange.location > _mipmapTextures.count || levelRange.length == 0 ||
         levelRange.length > _mipmapTextures.count - levelRange.location) return nil;
-    if (pixelFormat != _pixelFormat) return nil;
+    if (!zpu_texture_view_formats_compatible(_pixelFormat, pixelFormat) ||
+        (_sparseMappings != nil && pixelFormat != _pixelFormat)) return nil;
     if (zpu_texture_type_is_3d(_textureType) && (sliceRange.location != 0 || sliceRange.length != 1)) return nil;
     if (_textureType == MTLTextureTypeCube && (sliceRange.location != 0 || sliceRange.length != 6)) return nil;
     if (zpu_texture_type_is_cube_array(_textureType) &&
@@ -4198,12 +4261,22 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
     for (NSArray *slice in [_sliceMipmapTextures subarrayWithRange:sourceSliceRange]) {
         [sliceMipmapTextures addObject:[slice subarrayWithRange:levelRange]];
     }
+    if (pixelFormat != _pixelFormat) {
+        BOOL success = YES;
+        NSArray *viewSlices = zpu_make_texture_view_slices(sliceMipmapTextures, pixelFormat, &success);
+        if (!success) return nil;
+        sliceMipmapTextures = [viewSlices mutableCopy];
+    }
     NSArray *mipmaps = sliceMipmapTextures.firstObject;
     zpu_metal_texture *texture = (zpu_metal_texture *)[mipmaps[0] pointerValue];
     ZPUTexture *view = [[ZPUTexture alloc] initWithOwner:_owner texture:texture
                                                     type:_textureType pixelFormat:pixelFormat backing:self];
     view->_mipmapTextures = [mipmaps copy];
     view->_sliceMipmapTextures = [sliceMipmapTextures copy];
+    if (pixelFormat != _pixelFormat) {
+        view->_zpuTexture = [view zpuTextureAtLevel:0 slice:0];
+        view->_ownsZpuTextures = YES;
+    }
     view->_arrayLength = zpu_texture_type_is_cube(_textureType) ?
         sliceRange.length / 6 : (zpu_texture_type_is_3d(_textureType) ? 1 : sliceRange.length);
     view->_depth = zpu_texture_type_is_3d(_textureType) ?

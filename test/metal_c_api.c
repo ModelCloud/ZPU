@@ -127,6 +127,16 @@ int main(void) {
     }
     if (!has_colored_pixel) return 11;
 
+    zpu_metal_texture *r32_view = zpu_metal_texture_view(texture, ZPU_METAL_R32_FLOAT);
+    uint8_t view_bytes[sizeof(rendered)];
+    memset(view_bytes, 0, sizeof(view_bytes));
+    if (r32_view == NULL || zpu_metal_texture_width(r32_view) != 4 ||
+        zpu_metal_texture_height(r32_view) != 4 ||
+        zpu_metal_texture_get_bytes(r32_view, view_bytes, sizeof(view_bytes), 4 * 4,
+                                    (zpu_metal_region){{0, 0, 0}, {4, 4, 1}}) != 0 ||
+        memcmp(rendered, view_bytes, sizeof(rendered)) != 0) return 12;
+    zpu_metal_texture_destroy(r32_view);
+
     zpu_metal_texture_descriptor compute_descriptor = {
         .width = 4,
         .height = 4,

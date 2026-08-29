@@ -9,7 +9,7 @@
 /* Native ZPU CPU Metal-layer ABI. This is intentionally separate from the
  * Apple Objective-C framework ABI; it is the portable FFI surface used by
  * clients that select ZPU's CPU renderer. */
-#define ZPU_METAL_ABI_VERSION 8u
+#define ZPU_METAL_ABI_VERSION 9u
 
 typedef uint8_t zpu_metal_workload;
 enum {
@@ -364,6 +364,10 @@ zpu_metal_buffer *zpu_metal_heap_new_buffer_at_offset(zpu_metal_heap *heap, size
 zpu_metal_texture *zpu_metal_heap_new_texture(zpu_metal_heap *heap, const zpu_metal_texture_descriptor *descriptor);
 zpu_metal_texture *zpu_metal_heap_new_texture_at_offset(zpu_metal_heap *heap, const zpu_metal_texture_descriptor *descriptor, size_t offset);
 void zpu_metal_texture_destroy(zpu_metal_texture *texture);
+/* Creates a shared-storage view with a Metal-compatible pixel format. The
+ * source remains the owner of its bytes; destroy the returned view handle
+ * before releasing the source texture. */
+zpu_metal_texture *zpu_metal_texture_view(const zpu_metal_texture *texture, zpu_metal_pixel_format format);
 uint32_t zpu_metal_texture_width(const zpu_metal_texture *texture);
 uint32_t zpu_metal_texture_height(const zpu_metal_texture *texture);
 size_t zpu_metal_texture_heap_offset(const zpu_metal_texture *texture);
