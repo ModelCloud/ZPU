@@ -657,6 +657,34 @@ static BOOL zpu_depth_format_supported(MTLPixelFormat format) {
     return format == MTLPixelFormatInvalid || format == MTLPixelFormatDepth32Float;
 }
 
+static BOOL zpu_texture_descriptor_size(MTLTextureDescriptor *descriptor, NSUInteger *size) {
+    if (descriptor == nil || size == NULL ||
+        (descriptor.textureType != MTLTextureType2D && descriptor.textureType != MTLTextureType2DArray) ||
+        descriptor.depth != 1 || descriptor.arrayLength == 0 ||
+        (descriptor.textureType == MTLTextureType2D && descriptor.arrayLength != 1) ||
+        descriptor.mipmapLevelCount == 0 || descriptor.sampleCount != 1 ||
+        descriptor.width > UINT32_MAX || descriptor.height > UINT32_MAX ||
+        (descriptor.pixelFormat != MTLPixelFormatRGBA8Unorm && descriptor.pixelFormat != MTLPixelFormatBGRA8Unorm &&
+         descriptor.pixelFormat != MTLPixelFormatDepth32Float)) return NO;
+    NSUInteger total = 0;
+    for (NSUInteger slice = 0; slice < descriptor.arrayLength; ++slice) {
+        (void)slice;
+        NSUInteger width = descriptor.width;
+        NSUInteger height = descriptor.height;
+        for (NSUInteger level = 0; level < descriptor.mipmapLevelCount; ++level) {
+            if (height != 0 && width > SIZE_MAX / (height * 4)) return NO;
+            const NSUInteger levelSize = width * height * 4;
+            if (levelSize > SIZE_MAX - total) return NO;
+            total += levelSize;
+            width = width > 1 ? width / 2 : 1;
+            height = height > 1 ? height / 2 : 1;
+        }
+        if (total == SIZE_MAX) return NO;
+    }
+    *size = total;
+    return YES;
+}
+
 static MTLResourceOptions zpu_pack_resource_options(MTLStorageMode storageMode,
                                                      MTLCPUCacheMode cpuCacheMode,
                                                      MTLHazardTrackingMode hazardTrackingMode) {
@@ -1209,22 +1237,42 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
     return (id<MTLBuffer>)result;
 }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor {
-    if (descriptor == nil || descriptor.textureType != MTLTextureType2D || descriptor.depth != 1 ||
-        descriptor.arrayLength != 1 || descriptor.mipmapLevelCount != 1 || descriptor.sampleCount != 1 ||
-        descriptor.width > UINT32_MAX || descriptor.height > UINT32_MAX ||
-        (descriptor.pixelFormat != MTLPixelFormatRGBA8Unorm && descriptor.pixelFormat != MTLPixelFormatBGRA8Unorm &&
-         descriptor.pixelFormat != MTLPixelFormatDepth32Float)) return nil;
+    NSUInteger descriptorSize = 0;
+    if (!zpu_texture_descriptor_size(descriptor, &descriptorSize)) return nil;
     if ((descriptor.storageMode != _storageMode && descriptor.storageMode != MTLStorageModeMemoryless) ||
         descriptor.cpuCacheMode != _cpuCacheMode ||
         (descriptor.hazardTrackingMode == MTLHazardTrackingModeTracked && [self hazardTrackingMode] != MTLHazardTrackingModeTracked)) return nil;
-    zpu_metal_texture_descriptor zpu_descriptor = {
-        (uint32_t)descriptor.width, (uint32_t)descriptor.height, zpu_pixel_format(descriptor.pixelFormat),
-    };
-    zpu_metal_texture *texture = zpu_metal_heap_new_texture(_zpuHeap, &zpu_descriptor);
-    if (texture == NULL) return nil;
+    (void)descriptorSize;
+    NSMutableArray *sliceMipmapTextures = [NSMutableArray arrayWithCapacity:descriptor.arrayLength];
+    for (NSUInteger slice = 0; slice < descriptor.arrayLength; ++slice) {
+        NSMutableArray *mipmaps = [NSMutableArray arrayWithCapacity:descriptor.mipmapLevelCount];
+        NSUInteger levelWidth = descriptor.width;
+        NSUInteger levelHeight = descriptor.height;
+        for (NSUInteger level = 0; level < descriptor.mipmapLevelCount; ++level) {
+            zpu_metal_texture_descriptor zpu_descriptor = {
+                (uint32_t)levelWidth, (uint32_t)levelHeight, zpu_pixel_format(descriptor.pixelFormat),
+            };
+            zpu_metal_texture *texture = zpu_metal_heap_new_texture(_zpuHeap, &zpu_descriptor);
+            if (texture == NULL) {
+                for (NSArray *createdSlice in sliceMipmapTextures) {
+                    for (NSValue *value in createdSlice) zpu_metal_texture_destroy((zpu_metal_texture *)value.pointerValue);
+                }
+                for (NSValue *value in mipmaps) zpu_metal_texture_destroy((zpu_metal_texture *)value.pointerValue);
+                return nil;
+            }
+            [mipmaps addObject:[NSValue valueWithPointer:texture]];
+            levelWidth = levelWidth > 1 ? levelWidth / 2 : 1;
+            levelHeight = levelHeight > 1 ? levelHeight / 2 : 1;
+        }
+        [sliceMipmapTextures addObject:mipmaps];
+    }
+    NSArray *firstSlice = sliceMipmapTextures.firstObject;
+    zpu_metal_texture *texture = (zpu_metal_texture *)[firstSlice[0] pointerValue];
     ZPUTexture *result = [[ZPUTexture alloc] initWithOwner:_owner texture:texture
                                                       type:descriptor.textureType
                                                pixelFormat:descriptor.pixelFormat heap:self];
+    result->_sliceMipmapTextures = [sliceMipmapTextures copy];
+    result->_mipmapTextures = [firstSlice copy];
     [result applyDescriptor:descriptor];
     return (id<MTLTexture>)result;
 }
@@ -1734,13 +1782,8 @@ static uint64_t zpu_cpu_timestamp(void) {
     return descriptor == nil ? nil : [self newCommandQueue];
 }
 - (MTLSizeAndAlign)heapTextureSizeAndAlignWithDescriptor:(MTLTextureDescriptor *)descriptor API_AVAILABLE(macos(10.13), ios(10.0)) {
-    if (descriptor == nil || descriptor.width > SIZE_MAX / 4 || descriptor.height > SIZE_MAX / (descriptor.width == 0 ? 1 : descriptor.width * 4)) return (MTLSizeAndAlign){0, 0};
-    if (descriptor.textureType != MTLTextureType2D || descriptor.depth != 1 || descriptor.arrayLength != 1 ||
-        descriptor.mipmapLevelCount != 1 || descriptor.sampleCount != 1 ||
-        (descriptor.pixelFormat != MTLPixelFormatRGBA8Unorm && descriptor.pixelFormat != MTLPixelFormatBGRA8Unorm &&
-         descriptor.pixelFormat != MTLPixelFormatDepth32Float)) return (MTLSizeAndAlign){0, 0};
-    const NSUInteger rowBytes = descriptor.width * 4;
-    return (MTLSizeAndAlign){rowBytes * descriptor.height, 4};
+    NSUInteger size = 0;
+    return zpu_texture_descriptor_size(descriptor, &size) ? (MTLSizeAndAlign){size, 4} : (MTLSizeAndAlign){0, 0};
 }
 - (MTLSizeAndAlign)heapBufferSizeAndAlignWithLength:(NSUInteger)length options:(MTLResourceOptions)options API_AVAILABLE(macos(10.13), ios(10.0)) {
     (void)options;

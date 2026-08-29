@@ -2375,6 +2375,47 @@ int main(void) {
             return 38;
         }
 
+        MTLHeapDescriptor *adapter_mip_heap_descriptor = [MTLHeapDescriptor new];
+        adapter_mip_heap_descriptor.size = 256;
+        adapter_mip_heap_descriptor.storageMode = MTLStorageModeShared;
+        id<MTLHeap> adapter_mip_heap = [adapter_device newHeapWithDescriptor:adapter_mip_heap_descriptor];
+        MTLTextureDescriptor *adapter_heap_mip_descriptor = [MTLTextureDescriptor new];
+        adapter_heap_mip_descriptor.textureType = MTLTextureType2DArray;
+        adapter_heap_mip_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        adapter_heap_mip_descriptor.width = 4;
+        adapter_heap_mip_descriptor.height = 4;
+        adapter_heap_mip_descriptor.arrayLength = 2;
+        adapter_heap_mip_descriptor.mipmapLevelCount = 3;
+        adapter_heap_mip_descriptor.sampleCount = 1;
+        adapter_heap_mip_descriptor.storageMode = MTLStorageModeShared;
+        adapter_heap_mip_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        MTLSizeAndAlign adapter_heap_mip_size_align =
+            [adapter_device heapTextureSizeAndAlignWithDescriptor:adapter_heap_mip_descriptor];
+        id<MTLTexture> adapter_heap_mip_texture =
+            [adapter_mip_heap newTextureWithDescriptor:adapter_heap_mip_descriptor];
+        uint8_t adapter_heap_mip_bytes[sizeof(array_level_one)] = {0};
+        [adapter_heap_mip_texture replaceRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                    mipmapLevel:1
+                                          slice:1
+                                      withBytes:array_level_one
+                                    bytesPerRow:2 * 4
+                                  bytesPerImage:2 * 2 * 4];
+        [adapter_heap_mip_texture getBytes:adapter_heap_mip_bytes
+                               bytesPerRow:2 * 4
+                             bytesPerImage:2 * 2 * 4
+                              fromRegion:MTLRegionMake3D(0, 0, 0, 2, 2, 1)
+                             mipmapLevel:1
+                                    slice:1];
+        const NSUInteger expected_heap_mip_size = 2 * (4 * 4 + 2 * 2 + 1) * 4;
+        if (adapter_mip_heap == nil || adapter_heap_mip_texture == nil ||
+            adapter_heap_mip_size_align.size != expected_heap_mip_size || adapter_heap_mip_size_align.align != 4 ||
+            adapter_mip_heap.usedSize != expected_heap_mip_size || adapter_heap_mip_texture.arrayLength != 2 ||
+            adapter_heap_mip_texture.mipmapLevelCount != 3 || adapter_heap_mip_texture.allocatedSize != expected_heap_mip_size ||
+            memcmp(adapter_heap_mip_bytes, native_array_level_one, sizeof(adapter_heap_mip_bytes)) != 0) {
+            fprintf(stderr, "metal-pixel: heap array/mipmap texture exactness failed\n");
+            return 39;
+        }
+
         const uint32_t adapter_indirect_arguments[] = {6, 1, 0, 0};
         id<MTLBuffer> adapter_indirect_buffer =
             [adapter_device newBufferWithBytes:adapter_indirect_arguments
