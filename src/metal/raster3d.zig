@@ -47,6 +47,7 @@ pub const DrawOptions = struct {
     sample_mip_filter: abi.SamplerMipFilter = .not_mipmapped,
     sample_lod_min_clamp: f32 = 0,
     sample_lod_max_clamp: f32 = std.math.floatMax(f32),
+    sample_normalized_coordinates: bool = true,
     sample_address_s: abi.SamplerAddressMode = .clamp_to_edge,
     sample_address_t: abi.SamplerAddressMode = .clamp_to_edge,
     sample_border_color: abi.SamplerBorderColor = .transparent_black,
@@ -288,10 +289,12 @@ pub const Target = struct {
         };
     }
 
-    fn sample(self: *const Target, u: f32, v: f32, filter: abi.SamplerFilter, address_s: abi.SamplerAddressMode, address_t: abi.SamplerAddressMode, border_color: abi.SamplerBorderColor, swizzle: abi.TextureSwizzleChannels) [4]f32 {
+    fn sample(self: *const Target, u: f32, v: f32, filter: abi.SamplerFilter, address_s: abi.SamplerAddressMode, address_t: abi.SamplerAddressMode, border_color: abi.SamplerBorderColor, swizzle: abi.TextureSwizzleChannels, normalized_coordinates: bool) [4]f32 {
+        const sample_u = if (normalized_coordinates) u else u / @as(f32, @floatFromInt(self.width));
+        const sample_v = if (normalized_coordinates) v else v / @as(f32, @floatFromInt(self.height));
         const color = switch (filter) {
-            .nearest => self.sampleNearest(u, v, address_s, address_t, border_color),
-            .linear => self.sampleLinear(u, v, address_s, address_t, border_color),
+            .nearest => self.sampleNearest(sample_u, sample_v, address_s, address_t, border_color),
+            .linear => self.sampleLinear(sample_u, sample_v, address_s, address_t, border_color),
         };
         return applySwizzle(color, swizzle);
     }
@@ -519,11 +522,12 @@ fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [
     const fragment_color = if (job.sample_texture) |texture| blk: {
         const level0 = if (job.sample_mipmaps.len != 0) &job.sample_mipmaps[selection.level0] else texture;
         const color0 = level0.sample(color[0], color[1], selection.filter, job.options.sample_address_s,
-            job.options.sample_address_t, job.options.sample_border_color, job.options.sample_swizzle);
+            job.options.sample_address_t, job.options.sample_border_color, job.options.sample_swizzle,
+            job.options.sample_normalized_coordinates);
         if (selection.level1 == selection.level0 or job.sample_mipmaps.len == 0) break :blk color0;
         const color1 = job.sample_mipmaps[selection.level1].sample(color[0], color[1], selection.filter,
             job.options.sample_address_s, job.options.sample_address_t, job.options.sample_border_color,
-            job.options.sample_swizzle);
+            job.options.sample_swizzle, job.options.sample_normalized_coordinates);
         var result: [4]f32 = undefined;
         for (0..4) |channel| result[channel] = color0[channel] + (color1[channel] - color0[channel]) * selection.level_weight;
         break :blk result;
@@ -593,8 +597,10 @@ fn lineSampleSelection(job: *const Job, a: ProjectedVertex, b: ProjectedVertex) 
     const steps = @max(@abs(b.x - a.x), @abs(b.y - a.y));
     if (!std.math.isFinite(steps) or steps <= 0) return .{ .filter = job.options.sample_mag_filter };
     const texture = job.sample_texture.?;
-    const footprint_u = @abs(b.color[0] - a.color[0]) * @as(f32, @floatFromInt(texture.width)) / steps;
-    const footprint_v = @abs(b.color[1] - a.color[1]) * @as(f32, @floatFromInt(texture.height)) / steps;
+    const coordinate_scale_u = if (job.options.sample_normalized_coordinates) @as(f32, @floatFromInt(texture.width)) else 1;
+    const coordinate_scale_v = if (job.options.sample_normalized_coordinates) @as(f32, @floatFromInt(texture.height)) else 1;
+    const footprint_u = @abs(b.color[0] - a.color[0]) * coordinate_scale_u / steps;
+    const footprint_v = @abs(b.color[1] - a.color[1]) * coordinate_scale_v / steps;
     const rho = @max(footprint_u, footprint_v);
     return sampleSelection(job, if (rho > 1) job.options.sample_min_filter else job.options.sample_mag_filter, rho);
 }
@@ -663,8 +669,8 @@ fn triangleSampleSelection(job: *const Job, vertices: [3]ProjectedVertex, w0: f3
     if (!std.math.isFinite(du_dx) or !std.math.isFinite(du_dy) or
         !std.math.isFinite(dv_dx) or !std.math.isFinite(dv_dy)) return .{ .filter = job.options.sample_mag_filter };
     const texture = job.sample_texture.?;
-    const width = @as(f32, @floatFromInt(texture.width));
-    const height = @as(f32, @floatFromInt(texture.height));
+    const width = if (job.options.sample_normalized_coordinates) @as(f32, @floatFromInt(texture.width)) else 1;
+    const height = if (job.options.sample_normalized_coordinates) @as(f32, @floatFromInt(texture.height)) else 1;
     const rho_x = @sqrt((du_dx * width) * (du_dx * width) + (dv_dx * height) * (dv_dx * height));
     const rho_y = @sqrt((du_dy * width) * (du_dy * width) + (dv_dy * height) * (dv_dy * height));
     const rho = @max(rho_x, rho_y);
@@ -1033,7 +1039,7 @@ test "CPU texture sampling applies texture-view channel swizzles" {
         .green = .red,
         .blue = .one,
         .alpha = .zero,
-    });
+    }, true);
     try std.testing.expectEqual([4]f32{ 0, 1, 1, 0 }, swizzled);
 }
 

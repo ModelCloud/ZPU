@@ -12042,10 +12042,13 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         (zpu_metal_sampler_mip_filter)zpuSampler->_mipFilter;
     const float lodMinClamp = sampler == nil ? 0.0f : zpuSampler->_lodMinClamp;
     const float lodMaxClamp = sampler == nil ? FLT_MAX : zpuSampler->_lodMaxClamp;
+    const BOOL normalizedCoordinates = sampler == nil ? YES : zpuSampler->_normalizedCoordinates;
     if (zpu_metal_render_encoder_set_fragment_sampler_with_filters_and_mip_filter(
             _zpuEncoder, minFilter, magFilter, address_s, address_t, borderColor, mipFilter) != ZPU_METAL_OK ||
         zpu_metal_render_encoder_set_fragment_sampler_lod_clamps(
-            _zpuEncoder, lodMinClamp, lodMaxClamp) != ZPU_METAL_OK) {
+            _zpuEncoder, lodMinClamp, lodMaxClamp) != ZPU_METAL_OK ||
+        zpu_metal_render_encoder_set_fragment_sampler_normalized_coordinates(
+            _zpuEncoder, normalizedCoordinates) != ZPU_METAL_OK) {
         [_owner markError];
         return;
     }

@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include "zpu/metal.h"
 
-_Static_assert(ZPU_METAL_ABI_VERSION == 5u, "Metal ABI version drift");
+_Static_assert(ZPU_METAL_ABI_VERSION == 6u, "Metal ABI version drift");
 _Static_assert(sizeof(zpu_metal_color) == 16, "color layout drift");
 _Static_assert(sizeof(zpu_metal_vertex) == 32, "vertex layout drift");
 _Static_assert(sizeof(zpu_metal_viewport) == 24, "viewport layout drift");

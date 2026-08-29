@@ -678,6 +678,7 @@ pub const RenderEncoder = struct {
     sample_mip_filter: abi.SamplerMipFilter = .not_mipmapped,
     sample_lod_min_clamp: f32 = 0,
     sample_lod_max_clamp: f32 = std.math.floatMax(f32),
+    sample_normalized_coordinates: bool = true,
     sample_address_s: abi.SamplerAddressMode = .clamp_to_edge,
     sample_address_t: abi.SamplerAddressMode = .clamp_to_edge,
     sample_border_color: abi.SamplerBorderColor = .transparent_black,
@@ -739,6 +740,7 @@ pub const RenderEncoder = struct {
             .sample_mip_filter = self.sample_mip_filter,
             .sample_lod_min_clamp = self.sample_lod_min_clamp,
             .sample_lod_max_clamp = self.sample_lod_max_clamp,
+            .sample_normalized_coordinates = self.sample_normalized_coordinates,
             .sample_address_s = self.sample_address_s,
             .sample_address_t = self.sample_address_t,
             .sample_border_color = self.sample_border_color,
@@ -875,6 +877,11 @@ pub const RenderEncoder = struct {
             lod_min_clamp < 0 or lod_max_clamp < lod_min_clamp) return error.InvalidArgument;
         self.sample_lod_min_clamp = lod_min_clamp;
         self.sample_lod_max_clamp = lod_max_clamp;
+    }
+
+    pub fn setFragmentSamplerNormalizedCoordinates(self: *RenderEncoder, normalized_coordinates: bool) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        self.sample_normalized_coordinates = normalized_coordinates;
     }
 
     pub fn setFragmentTextureSwizzle(self: *RenderEncoder, red: u8, green: u8, blue: u8, alpha: u8) Error!void {
@@ -3887,6 +3894,13 @@ pub export fn zpu_metal_render_encoder_set_fragment_sampler_lod_clamps(
     encoder: ?*RenderEncoder, lod_min_clamp: f32, lod_max_clamp: f32,
 ) callconv(.c) c_int {
     (encoder orelse return -1).setFragmentSamplerLodClamps(lod_min_clamp, lod_max_clamp) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_fragment_sampler_normalized_coordinates(
+    encoder: ?*RenderEncoder, normalized_coordinates: bool,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setFragmentSamplerNormalizedCoordinates(normalized_coordinates) catch |err| return errorCode(err);
     return 0;
 }
 

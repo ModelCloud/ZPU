@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <float.h>
 
 #include "zpu/metal.h"
 #include "zpu/metal_apple.h"
@@ -214,16 +215,17 @@ static int test_mip_sampler_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
     id<MTLFunction> adapter_vertex_function, id<MTLFunction> adapter_fragment_function,
-    MTLSamplerMipFilter mip_filter, float lod_min_clamp, float lod_max_clamp) {
+    MTLSamplerMipFilter mip_filter, float lod_min_clamp, float lod_max_clamp,
+    BOOL normalized_coordinates) {
     enum { output_width = 4, output_height = 4, mip_width = 16, mip_height = 16,
            mip_levels = 5, byte_count = output_width * output_height * 4 };
     const zpu_metal_vertex vertices[] = {
         {{-1.0f, -1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
-        {{ 1.0f, -1.0f, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
-        {{ 1.0f,  1.0f, 0.5f, 1.0f}, {1.0f, 1.0f, 0.0f, 1.0f}},
+        {{ 1.0f, -1.0f, 0.5f, 1.0f}, {normalized_coordinates ? 1.0f : 16.0f, 0.0f, 0.0f, 1.0f}},
+        {{ 1.0f,  1.0f, 0.5f, 1.0f}, {normalized_coordinates ? 1.0f : 16.0f, normalized_coordinates ? 1.0f : 16.0f, 0.0f, 1.0f}},
         {{-1.0f, -1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
-        {{ 1.0f,  1.0f, 0.5f, 1.0f}, {1.0f, 1.0f, 0.0f, 1.0f}},
-        {{-1.0f,  1.0f, 0.5f, 1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}},
+        {{ 1.0f,  1.0f, 0.5f, 1.0f}, {normalized_coordinates ? 1.0f : 16.0f, normalized_coordinates ? 1.0f : 16.0f, 0.0f, 1.0f}},
+        {{-1.0f,  1.0f, 0.5f, 1.0f}, {0.0f, normalized_coordinates ? 1.0f : 16.0f, 0.0f, 1.0f}},
     };
     const uint8_t level_colors[mip_levels][4] = {
         {255, 0, 0, 255}, {0, 255, 0, 255}, {0, 0, 255, 255},
@@ -241,7 +243,11 @@ static int test_mip_sampler_against_native(
         const NSUInteger level_width = MAX((NSUInteger)1, (NSUInteger)mip_width >> level);
         const NSUInteger level_height = MAX((NSUInteger)1, (NSUInteger)mip_height >> level);
         for (NSUInteger pixel = 0; pixel < level_width * level_height; ++pixel) {
-            memcpy(level_bytes + pixel * 4, level_colors[level], 4);
+            if (level == 0) {
+                const BOOL checker = (((pixel % level_width) ^ (pixel / level_width)) & 1) != 0;
+                memcpy(level_bytes + pixel * 4, checker ? (const uint8_t[]){255, 0, 0, 255} :
+                    (const uint8_t[]){0, 0, 255, 255}, 4);
+            } else memcpy(level_bytes + pixel * 4, level_colors[level], 4);
         }
         [native_source replaceRegion:MTLRegionMake2D(0, 0, level_width, level_height)
                           mipmapLevel:level withBytes:level_bytes bytesPerRow:level_width * 4];
@@ -278,6 +284,7 @@ static int test_mip_sampler_against_native(
     sampler_descriptor.minFilter = MTLSamplerMinMagFilterNearest;
     sampler_descriptor.magFilter = MTLSamplerMinMagFilterNearest;
     sampler_descriptor.mipFilter = mip_filter;
+    sampler_descriptor.normalizedCoordinates = normalized_coordinates;
     sampler_descriptor.lodMinClamp = lod_min_clamp;
     sampler_descriptor.lodMaxClamp = lod_max_clamp;
     id<MTLSamplerState> native_sampler = [native_device newSamplerStateWithDescriptor:sampler_descriptor];
@@ -1339,13 +1346,18 @@ int main(void) {
         const int mip_nearest_result = test_mip_sampler_against_native(
             device, adapter_device, vertex_function, sample_fragment_function,
             adapter_vertex_function, adapter_sample_fragment_function,
-            MTLSamplerMipFilterNearest, 0.0f, FLT_MAX);
+            MTLSamplerMipFilterNearest, 0.0f, FLT_MAX, YES);
         if (mip_nearest_result != 0) return mip_nearest_result;
         const int mip_linear_result = test_mip_sampler_against_native(
             device, adapter_device, vertex_function, sample_fragment_function,
             adapter_vertex_function, adapter_sample_fragment_function,
-            MTLSamplerMipFilterLinear, 1.5f, 1.5f);
+            MTLSamplerMipFilterLinear, 1.5f, 1.5f, YES);
         if (mip_linear_result != 0) return mip_linear_result;
+        const int unnormalized_sampler_result = test_mip_sampler_against_native(
+            device, adapter_device, vertex_function, sample_fragment_function,
+            adapter_vertex_function, adapter_sample_fragment_function,
+            MTLSamplerMipFilterNotMipmapped, 0.0f, 0.0f, NO);
+        if (unnormalized_sampler_result != 0) return unnormalized_sampler_result;
 
         if (adapter_stage_in_vertex_function == nil ||
             ZPUMetalCreateCPUFunction(adapter_device, @"arbitrary_unregistered_vertex") != nil) {
