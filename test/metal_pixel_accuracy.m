@@ -3402,6 +3402,26 @@ int main(void) {
             return 132;
         }
 
+        /* The fixed ZPU vertex ABI has no vertex texture or sampler inputs.
+         * These bindings must poison the command rather than being retained
+         * and silently ignored by the CPU rasterizer. */
+        id<MTLCommandBuffer> unsupported_vertex_resource_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> unsupported_vertex_resource_encoder =
+            [unsupported_vertex_resource_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+        [unsupported_vertex_resource_encoder setRenderPipelineState:adapter_pipeline];
+        [unsupported_vertex_resource_encoder setVertexTexture:adapter_sample_source atIndex:0];
+        [unsupported_vertex_resource_encoder setVertexSamplerState:adapter_sample_sampler atIndex:0];
+        [unsupported_vertex_resource_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [unsupported_vertex_resource_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [unsupported_vertex_resource_encoder endEncoding];
+        [unsupported_vertex_resource_command_buffer commit];
+        [unsupported_vertex_resource_command_buffer waitUntilCompleted];
+        if (unsupported_vertex_resource_encoder == nil ||
+            unsupported_vertex_resource_command_buffer.status != MTLCommandBufferStatusError) {
+            fprintf(stderr, "metal-pixel: unsupported CPU vertex resources did not fail closed\n");
+            return 133;
+        }
+
         /* Metal 4 compiler-created compute pipelines are still CPU-owned.
          * The compiler accepts only registered ZPU library functions; the
          * native Metal compiler above remains the pixel oracle. */

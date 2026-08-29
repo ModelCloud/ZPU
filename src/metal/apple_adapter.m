@@ -7726,8 +7726,8 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (void)setVertexTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
     ZPUTexture *zpuTexture = (ZPUTexture *)texture;
     if (texture != nil && !zpu_texture_belongs_to_device([_owner device], zpuTexture)) { [_owner markError]; return; }
+    if (texture != nil) { [_owner markError]; return; }
     (void)index;
-    if (zpuTexture != nil) [_owner retainResource:zpuTexture];
 }
 - (void)setVertexTextures:(const id<MTLTexture> __nullable [__nonnull])textures withRange:(NSRange)range {
     if (textures == NULL) { [_owner markError]; return; }
@@ -7736,8 +7736,8 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (void)setVertexSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
     ZPUSamplerState *zpuSampler = (ZPUSamplerState *)sampler;
     if (sampler != nil && (![zpuSampler isKindOfClass:[ZPUSamplerState class]] || zpuSampler->_owner != [_owner device])) { [_owner markError]; return; }
+    if (sampler != nil) { [_owner markError]; return; }
     (void)index;
-    if (sampler != nil) [_owner retainResource:sampler];
 }
 - (void)setVertexSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers withRange:(NSRange)range {
     if (samplers == NULL) { [_owner markError]; return; }
