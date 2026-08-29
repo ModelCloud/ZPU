@@ -391,6 +391,8 @@ int zpu_metal_render_encoder_set_fragment_sampler(zpu_metal_render_encoder *enco
 int zpu_metal_render_encoder_set_fragment_texture_swizzle(zpu_metal_render_encoder *encoder, zpu_metal_texture_swizzle red, zpu_metal_texture_swizzle green, zpu_metal_texture_swizzle blue, zpu_metal_texture_swizzle alpha);
 int zpu_metal_render_encoder_set_fragment_uniform_enabled(zpu_metal_render_encoder *encoder, int enabled);
 int zpu_metal_render_encoder_set_fragment_bytes(zpu_metal_render_encoder *encoder, const void *bytes, size_t length, uint32_t index);
+int zpu_metal_render_encoder_set_fragment_buffer(zpu_metal_render_encoder *encoder, zpu_metal_buffer *buffer, size_t offset, uint32_t index);
+int zpu_metal_render_encoder_set_fragment_buffer_offset(zpu_metal_render_encoder *encoder, size_t offset, uint32_t index);
 int zpu_metal_render_encoder_set_rasterization_enabled(zpu_metal_render_encoder *encoder, int enabled);
 int zpu_metal_render_encoder_set_depth_compare_function(zpu_metal_render_encoder *encoder, zpu_metal_compare_function compare_function, int depth_write_enabled);
 int zpu_metal_render_encoder_set_blend_state(zpu_metal_render_encoder *encoder, int blending_enabled,

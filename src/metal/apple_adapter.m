@@ -5703,10 +5703,16 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 - (void)setFragmentBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
     if (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] || offset > zpuBuffer.length)) { [_owner markError]; return; }
-    (void)index;
+    if (index > UINT32_MAX || zpu_metal_render_encoder_set_fragment_buffer(
+            _zpuEncoder, zpuBuffer == nil ? NULL : zpuBuffer->_zpuBuffer, offset, (uint32_t)index) != ZPU_METAL_OK) {
+        [_owner markError];
+        return;
+    }
     if (zpuBuffer != nil) [_owner retainResource:zpuBuffer];
 }
-- (void)setFragmentBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index { (void)offset; (void)index; }
+- (void)setFragmentBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index {
+    if (index > UINT32_MAX || zpu_metal_render_encoder_set_fragment_buffer_offset(_zpuEncoder, offset, (uint32_t)index) != ZPU_METAL_OK) [_owner markError];
+}
 - (void)setFragmentBuffers:(const id<MTLBuffer> __nullable [__nonnull])buffers offsets:(const NSUInteger [__nonnull])offsets withRange:(NSRange)range {
     if (buffers == NULL || offsets == NULL) { [_owner markError]; return; }
     for (NSUInteger index = 0; index < range.length; ++index) [self setFragmentBuffer:buffers[index] offset:offsets[index] atIndex:range.location + index];

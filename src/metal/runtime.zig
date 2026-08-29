@@ -154,6 +154,9 @@ const DrawCommand = struct {
     vertex_count: usize,
     primitive: abi.PrimitiveType,
     options: raster3d.DrawOptions,
+    fragment_uniform_enabled: bool = false,
+    fragment_uniform_buffer: ?*Buffer = null,
+    fragment_uniform_buffer_offset: usize = 0,
     sample_texture: ?*Texture = null,
     visibility_buffer: ?*Buffer = null,
     visibility_mode: abi.VisibilityResultMode = .disabled,
@@ -360,6 +363,23 @@ pub const CommandBuffer = struct {
                 const target_handle = active_target orelse return self.fail(error.InvalidCommand);
                 if (!validTexture(target_handle)) return self.fail(error.InvalidResource);
                 if (draw.vertex_start > self.vertices.items.len or draw.vertex_count > self.vertices.items.len - draw.vertex_start) return self.fail(error.InvalidCommand);
+                var draw_options = draw.options;
+                if (draw.fragment_uniform_enabled) {
+                    if (draw.fragment_uniform_buffer) |buffer| {
+                        if (!validBuffer(buffer) or buffer.device != self.queue.device or
+                            !rangeValid(buffer.bytes.len, draw.fragment_uniform_buffer_offset, @sizeOf(abi.Color)))
+                            return self.fail(error.InvalidArgument);
+                        const raw = buffer.bytes[draw.fragment_uniform_buffer_offset .. draw.fragment_uniform_buffer_offset + @sizeOf(abi.Color)];
+                        var color: [4]f32 = undefined;
+                        for (0..4) |channel| {
+                            color[channel] = @bitCast(std.mem.readInt(u32, raw[channel * @sizeOf(f32) ..][0..@sizeOf(f32)], .little));
+                            if (!std.math.isFinite(color[channel])) return self.fail(error.InvalidArgument);
+                        }
+                        draw_options.fragment_color = color;
+                    } else if (draw_options.fragment_color == null) {
+                        return self.fail(error.InvalidResource);
+                    }
+                }
                 var target = target_handle.asTarget();
                 var extra_targets_storage: [7]raster3d.Target = undefined;
                 var extra_targets: [7]*raster3d.Target = undefined;
@@ -386,7 +406,7 @@ pub const CommandBuffer = struct {
                     active_stencil,
                     self.vertices.items[draw.vertex_start .. draw.vertex_start + draw.vertex_count],
                     draw.primitive,
-                    draw.options,
+                    draw_options,
                 );
                 if (draw.visibility_mode != .disabled) {
                     const visibility_buffer = draw.visibility_buffer orelse return self.fail(error.InvalidResource);
@@ -580,6 +600,8 @@ pub const RenderEncoder = struct {
     stencil_back: raster3d.StencilFace = .{},
     fragment_color: ?[4]f32 = null,
     fragment_uniform_enabled: bool = false,
+    fragment_uniform_buffer: ?*Buffer = null,
+    fragment_uniform_buffer_offset: usize = 0,
     visibility_buffer: ?*Buffer = null,
     visibility_mode: abi.VisibilityResultMode = .disabled,
     visibility_offset: usize = 0,
@@ -699,7 +721,29 @@ pub const RenderEncoder = struct {
             color[channel] = @bitCast(std.mem.readInt(u32, raw[channel * @sizeOf(f32) ..][0..@sizeOf(f32)], .little));
             if (!std.math.isFinite(color[channel])) return error.InvalidArgument;
         }
+        self.fragment_uniform_buffer = null;
+        self.fragment_uniform_buffer_offset = 0;
         self.fragment_color = color;
+    }
+
+    pub fn setFragmentBuffer(self: *RenderEncoder, buffer: ?*Buffer, offset: usize, index: u32) Error!void {
+        if (!self.open() or (buffer != null and (!validBuffer(buffer.?) or
+            buffer.?.device != self.command_buffer.queue.device or offset > buffer.?.bytes.len))) return error.InvalidArgument;
+        if (!self.fragment_uniform_enabled) return;
+        if (index != 0) return error.UnsupportedOperation;
+        self.fragment_uniform_buffer = buffer;
+        self.fragment_uniform_buffer_offset = offset;
+        self.fragment_color = null;
+    }
+
+    pub fn setFragmentBufferOffset(self: *RenderEncoder, offset: usize, index: u32) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        if (!self.fragment_uniform_enabled) return;
+        if (index != 0) return error.UnsupportedOperation;
+        const buffer = self.fragment_uniform_buffer orelse return error.InvalidCommand;
+        if (offset > buffer.bytes.len) return error.InvalidArgument;
+        self.fragment_uniform_buffer_offset = offset;
+        self.fragment_color = null;
     }
 
     pub fn setRasterizationEnabled(self: *RenderEncoder, enabled: bool) Error!void {
@@ -998,6 +1042,9 @@ pub const RenderEncoder = struct {
                 .vertex_count = selected.len,
                 .primitive = primitive,
                 .options = self.options(),
+                .fragment_uniform_enabled = self.fragment_uniform_enabled,
+                .fragment_uniform_buffer = self.fragment_uniform_buffer,
+                .fragment_uniform_buffer_offset = self.fragment_uniform_buffer_offset,
                 .sample_texture = if (self.sample_texture) self.fragment_texture else null,
                 .visibility_buffer = self.visibility_buffer,
                 .visibility_mode = self.visibility_mode,
@@ -1051,6 +1098,9 @@ pub const RenderEncoder = struct {
                 .vertex_count = index_count,
                 .primitive = primitive,
                 .options = self.options(),
+                .fragment_uniform_enabled = self.fragment_uniform_enabled,
+                .fragment_uniform_buffer = self.fragment_uniform_buffer,
+                .fragment_uniform_buffer_offset = self.fragment_uniform_buffer_offset,
                 .sample_texture = if (self.sample_texture) self.fragment_texture else null,
                 .visibility_buffer = self.visibility_buffer,
                 .visibility_mode = self.visibility_mode,
@@ -2721,6 +2771,41 @@ test "CPU uniform fragment bytes override interpolated color" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 51, 153, 230, 102 }, texture.bytes[0..4]);
 }
 
+test "CPU uniform fragment buffer reads at commit with offset" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const texture = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(texture);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.5, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .{ .position = .{ -1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 1, .blue = 1, .alpha = 1 } },
+    };
+    const initial = abi.Color{ .red = 0.9, .green = 0.1, .blue = 0.2, .alpha = 1 };
+    const updated = abi.Color{ .red = 0.2, .green = 0.6, .blue = 0.88, .alpha = 0.4 };
+    const uniform_buffer = try createBuffer(device, 24, null);
+    defer destroyBuffer(uniform_buffer);
+    try bufferWrite(uniform_buffer, 8, @ptrCast(&initial), @sizeOf(abi.Color));
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, texture, .{ .color = .{ .load_action = .clear, .store_action = .store } });
+    try encoder.setFragmentUniformEnabled(true);
+    try encoder.setFragmentBuffer(uniform_buffer, 0, 0);
+    try encoder.setFragmentBufferOffset(8, 0);
+    try encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
+    try encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try bufferWrite(uniform_buffer, 8, @ptrCast(&updated), @sizeOf(abi.Color));
+    try command_buffer.commit();
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 51, 153, 224, 102 }, texture.bytes[0..4]);
+}
+
 test "depth texture attachment rejects farther fragments" {
     const device = try createDevice();
     defer destroyDevice(device);
@@ -3305,6 +3390,16 @@ pub export fn zpu_metal_render_encoder_set_fragment_uniform_enabled(encoder: ?*R
 
 pub export fn zpu_metal_render_encoder_set_fragment_bytes(encoder: ?*RenderEncoder, bytes: ?[*]const u8, length: usize, index: u32) callconv(.c) c_int {
     (encoder orelse return -1).setFragmentBytes(bytes, length, index) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_fragment_buffer(encoder: ?*RenderEncoder, buffer: ?*Buffer, offset: usize, index: u32) callconv(.c) c_int {
+    (encoder orelse return -1).setFragmentBuffer(buffer, offset, index) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_fragment_buffer_offset(encoder: ?*RenderEncoder, offset: usize, index: u32) callconv(.c) c_int {
+    (encoder orelse return -1).setFragmentBufferOffset(offset, index) catch |err| return errorCode(err);
     return 0;
 }
 

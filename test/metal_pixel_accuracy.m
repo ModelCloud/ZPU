@@ -846,6 +846,76 @@ int main(void) {
             return 97;
         }
 
+        uint8_t initial_uniform_storage[8 + sizeof(uniform_color)] = {0};
+        const float initial_uniform_color[4] = {0.9f, 0.1f, 0.2f, 1.0f};
+        memcpy(initial_uniform_storage + 8, initial_uniform_color, sizeof(initial_uniform_color));
+        id<MTLBuffer> native_uniform_buffer =
+            [device newBufferWithBytes:initial_uniform_storage length:sizeof(initial_uniform_storage)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_uniform_buffer =
+            [adapter_device newBufferWithBytes:initial_uniform_storage length:sizeof(initial_uniform_storage)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLTexture> native_uniform_buffer_output = [device newTextureWithDescriptor:texture_descriptor];
+        id<MTLTexture> adapter_uniform_buffer_output = [adapter_device newTextureWithDescriptor:texture_descriptor];
+        if (native_uniform_buffer == nil || adapter_uniform_buffer == nil ||
+            native_uniform_buffer_output == nil || adapter_uniform_buffer_output == nil) {
+            fprintf(stderr, "metal-pixel: uniform fragment buffer resource allocation failed\n");
+            return 98;
+        }
+        MTLRenderPassDescriptor *native_uniform_buffer_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_uniform_buffer_pass.colorAttachments[0].texture = native_uniform_buffer_output;
+        native_uniform_buffer_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_uniform_buffer_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_uniform_buffer_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> native_uniform_buffer_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_uniform_buffer_encoder =
+            [native_uniform_buffer_command_buffer renderCommandEncoderWithDescriptor:native_uniform_buffer_pass];
+        [native_uniform_buffer_encoder setRenderPipelineState:native_uniform_pipeline];
+        [native_uniform_buffer_encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
+        [native_uniform_buffer_encoder setFragmentBuffer:native_uniform_buffer offset:0 atIndex:0];
+        [native_uniform_buffer_encoder setFragmentBufferOffset:8 atIndex:0];
+        [native_uniform_buffer_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_uniform_buffer_encoder endEncoding];
+        memcpy((uint8_t *)native_uniform_buffer.contents + 8, uniform_color, sizeof(uniform_color));
+        [native_uniform_buffer_command_buffer commit];
+        [native_uniform_buffer_command_buffer waitUntilCompleted];
+        MTLRenderPassDescriptor *adapter_uniform_buffer_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_uniform_buffer_pass.colorAttachments[0].texture = adapter_uniform_buffer_output;
+        adapter_uniform_buffer_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_uniform_buffer_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_uniform_buffer_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> adapter_uniform_buffer_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_uniform_buffer_encoder =
+            [adapter_uniform_buffer_command_buffer renderCommandEncoderWithDescriptor:adapter_uniform_buffer_pass];
+        [adapter_uniform_buffer_encoder setRenderPipelineState:adapter_uniform_pipeline];
+        [adapter_uniform_buffer_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_uniform_buffer_encoder setFragmentBuffer:adapter_uniform_buffer offset:0 atIndex:0];
+        [adapter_uniform_buffer_encoder setFragmentBufferOffset:8 atIndex:0];
+        [adapter_uniform_buffer_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_uniform_buffer_encoder endEncoding];
+        memcpy((uint8_t *)adapter_uniform_buffer.contents + 8, uniform_color, sizeof(uniform_color));
+        [adapter_uniform_buffer_command_buffer commit];
+        [adapter_uniform_buffer_command_buffer waitUntilCompleted];
+        uint8_t native_uniform_buffer_bytes[byte_count];
+        uint8_t adapter_uniform_buffer_bytes[byte_count];
+        [native_uniform_buffer_output getBytes:native_uniform_buffer_bytes bytesPerRow:(NSUInteger)width * 4
+                                      fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_uniform_buffer_output getBytes:adapter_uniform_buffer_bytes bytesPerRow:(NSUInteger)width * 4
+                                        fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (native_uniform_buffer_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_uniform_buffer_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_uniform_buffer_bytes, adapter_uniform_buffer_bytes, byte_count) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < byte_count && native_uniform_buffer_bytes[mismatch] == adapter_uniform_buffer_bytes[mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: uniform fragment buffer mismatch (native=%lu adapter=%lu mismatch=%zu nativeByte=%u adapterByte=%u)\n",
+                    (unsigned long)native_uniform_buffer_command_buffer.status,
+                    (unsigned long)adapter_uniform_buffer_command_buffer.status,
+                    mismatch,
+                    mismatch < byte_count ? native_uniform_buffer_bytes[mismatch] : 0,
+                    mismatch < byte_count ? adapter_uniform_buffer_bytes[mismatch] : 0);
+            return 99;
+        }
+
         const zpu_metal_vertex linear_sample_vertices[] = {
             {{x0, y0, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
             {{x1, y0, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
@@ -4202,6 +4272,62 @@ int main(void) {
             return 67;
         }
 
+        /* Metal 4 splits argument-table bindings by stage. Bind the vertex
+         * buffer through one table and the uniform fragment buffer through a
+         * second table, then compare the CPU/ZPU result with the native
+         * buffer-binding oracle above. The uniform buffer is already the
+         * post-encode value, proving the CPU path reads it at commit. */
+        id<MTLTexture> adapter_metal4_uniform_texture =
+            [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        id<MTLBuffer> adapter_metal4_uniform_buffer =
+            [adapter_device newBufferWithBytes:uniform_color length:sizeof(uniform_color)
+                                        options:MTLResourceStorageModeShared];
+        MTL4RenderPassDescriptor *adapter_metal4_uniform_pass = [MTL4RenderPassDescriptor new];
+        adapter_metal4_uniform_pass.colorAttachments[0].texture = adapter_metal4_uniform_texture;
+        adapter_metal4_uniform_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_metal4_uniform_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_metal4_uniform_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        MTL4ArgumentTableDescriptor *adapter_metal4_uniform_vertex_descriptor = [MTL4ArgumentTableDescriptor new];
+        adapter_metal4_uniform_vertex_descriptor.maxBufferBindCount = 1;
+        id<MTL4ArgumentTable> adapter_metal4_uniform_vertex_table =
+            [adapter_device newArgumentTableWithDescriptor:adapter_metal4_uniform_vertex_descriptor error:&metal4_error];
+        [adapter_metal4_uniform_vertex_table setAddress:adapter_vertex_buffer.gpuAddress atIndex:0];
+        MTL4ArgumentTableDescriptor *adapter_metal4_uniform_fragment_descriptor = [MTL4ArgumentTableDescriptor new];
+        adapter_metal4_uniform_fragment_descriptor.maxBufferBindCount = 1;
+        id<MTL4ArgumentTable> adapter_metal4_uniform_fragment_table =
+            [adapter_device newArgumentTableWithDescriptor:adapter_metal4_uniform_fragment_descriptor error:&metal4_error];
+        [adapter_metal4_uniform_fragment_table setAddress:adapter_metal4_uniform_buffer.gpuAddress atIndex:0];
+        id<MTL4CommandBuffer> adapter_metal4_uniform_command_buffer = [adapter_device newCommandBuffer];
+        [adapter_metal4_uniform_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4RenderCommandEncoder> adapter_metal4_uniform_encoder =
+            [adapter_metal4_uniform_command_buffer renderCommandEncoderWithDescriptor:adapter_metal4_uniform_pass];
+        [adapter_metal4_uniform_encoder setRenderPipelineState:adapter_uniform_pipeline];
+        [adapter_metal4_uniform_encoder setArgumentTable:adapter_metal4_uniform_vertex_table atStages:MTLRenderStageVertex];
+        [adapter_metal4_uniform_encoder setArgumentTable:adapter_metal4_uniform_fragment_table atStages:MTLRenderStageFragment];
+        [adapter_metal4_uniform_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_metal4_uniform_encoder endEncoding];
+        [adapter_metal4_uniform_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> adapter_metal4_uniform_command_buffers[] = {adapter_metal4_uniform_command_buffer};
+        [metal4_queue commit:adapter_metal4_uniform_command_buffers count:1];
+        uint8_t adapter_metal4_uniform_pixels[byte_count];
+        [adapter_metal4_uniform_texture getBytes:adapter_metal4_uniform_pixels
+                                      bytesPerRow:(NSUInteger)width * 4
+                                       fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                      mipmapLevel:0];
+        if (adapter_metal4_uniform_texture == nil || adapter_metal4_uniform_buffer == nil ||
+            adapter_metal4_uniform_vertex_table == nil ||
+            adapter_metal4_uniform_fragment_table == nil || adapter_metal4_uniform_command_buffer == nil ||
+            adapter_metal4_uniform_encoder == nil ||
+            memcmp(native_uniform_buffer_bytes, adapter_metal4_uniform_pixels, byte_count) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < byte_count && native_uniform_buffer_bytes[mismatch] == adapter_metal4_uniform_pixels[mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: Metal 4 uniform fragment buffer mismatch (mismatch=%zu nativeByte=%u adapterByte=%u)\n",
+                    mismatch,
+                    mismatch < byte_count ? native_uniform_buffer_bytes[mismatch] : 0,
+                    mismatch < byte_count ? adapter_metal4_uniform_pixels[mismatch] : 0);
+            return 100;
+        }
+
         /* MTL4 carries the same visibility mode but sources its result buffer
          * from the render-pass descriptor. Verify that descriptor path also
          * stays CPU-owned and agrees with the native legacy oracle. */
@@ -5469,7 +5595,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, uniform fragment bytes, visibility results, legacy/Metal 4 counters, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, uniform fragment bytes/buffers, visibility results, legacy/Metal 4 counters, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }

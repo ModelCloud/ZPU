@@ -69,7 +69,9 @@ triangle path:
   native Metal is used only as the byte-accuracy oracle
 - the bounded `zpu_cpu_uniform_color_fragment` profile consumes a 16-byte
   `float4` from `setFragmentBytes:length:atIndex:0` and applies it through
-  the CPU raster path; other fragment byte layouts remain unsupported
+  the CPU raster path; it also consumes a ZPU-owned 16-byte `float4` buffer
+  binding at fragment index 0 with commit-time reads, so writes made before
+  commit are visible; other fragment byte layouts remain unsupported
 - fixed-function render pipeline, depth-stencil, and sampler state objects;
   pipeline attachment format validation, blending factors/operations, color
   write masks, depth bounds, and Metal top-left triangle edge inclusion
