@@ -6781,7 +6781,7 @@ int main(void) {
             return 79;
         }
         [adapter_depth_only_encoder setRenderPipelineState:adapter_depth_only_pipeline];
-        [adapter_depth_only_encoder setDepthStencilState:depth_state];
+        [adapter_depth_only_encoder setDepthStencilState:adapter_depth_state];
         [adapter_depth_only_encoder setVertexBuffer:adapter_depth_vertex_buffer offset:0 atIndex:0];
         [adapter_depth_only_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
         [adapter_depth_only_encoder endEncoding];

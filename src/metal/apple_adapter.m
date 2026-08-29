@@ -6269,6 +6269,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (void)setComputePipelineState:(id<MTLComputePipelineState>)state {
     ZPUComputePipelineState *pipeline = (ZPUComputePipelineState *)state;
     if (![pipeline isKindOfClass:[ZPUComputePipelineState class]] ||
+        pipeline->_owner != [_owner device] ||
         zpu_metal_compute_encoder_set_kernel(_zpuEncoder, pipeline->_kernel) != ZPU_METAL_OK) {
         [_owner markError];
         return;
@@ -7775,7 +7776,10 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)setDepthStencilState:(id<MTLDepthStencilState>)depthStencilState {
     ZPUDepthStencilState *state = (ZPUDepthStencilState *)depthStencilState;
-    if (![state isKindOfClass:[ZPUDepthStencilState class]]) return;
+    if (![state isKindOfClass:[ZPUDepthStencilState class]] || state->_owner != [_owner device]) {
+        [_owner markError];
+        return;
+    }
     _depthStencilState = state;
     [_owner retainResource:state];
     if (zpu_metal_render_encoder_set_depth_compare_function(
@@ -7810,7 +7814,10 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)pipelineState {
     ZPURenderPipelineState *state = (ZPURenderPipelineState *)pipelineState;
-    if (![state isKindOfClass:[ZPURenderPipelineState class]]) return;
+    if (![state isKindOfClass:[ZPURenderPipelineState class]] || state->_owner != [_owner device]) {
+        [_owner markError];
+        return;
+    }
     _pipelineState = state;
     [_owner retainResource:state];
     uint16_t colorFormats[ZPU_METAL_MAX_COLOR_ATTACHMENTS];
