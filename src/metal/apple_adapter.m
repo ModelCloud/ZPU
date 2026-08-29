@@ -346,6 +346,12 @@ API_AVAILABLE(macos(15.0), ios(18.0))
     BOOL _hasDispatchThreadgroups;
     MTLSize _threadgroupsPerGrid;
     MTLSize _threadgroupsPerThreadgroup;
+    NSUInteger _imageblockWidth;
+    NSUInteger _imageblockHeight;
+    BOOL _hasImageblock;
+    MTLRegion _stageInRegion;
+    BOOL _hasStageInRegion;
+    NSMutableDictionary *_threadgroupMemoryLengths;
     BOOL _unsupportedCommand;
 }
 - (instancetype)initWithOwner:(ZPUIndirectCommandBuffer *)owner;
@@ -374,9 +380,13 @@ API_AVAILABLE(macos(15.0), ios(18.0))
     NSUInteger _maxVertexBufferBindCount;
     NSUInteger _maxFragmentBufferBindCount;
     NSUInteger _maxKernelBufferBindCount;
+    NSUInteger _maxKernelThreadgroupMemoryBindCount;
     NSUInteger _maxObjectBufferBindCount;
     NSUInteger _maxMeshBufferBindCount;
     NSUInteger _maxObjectThreadgroupMemoryBindCount;
+    BOOL _supportRayTracing;
+    BOOL _supportDynamicAttributeStride;
+    BOOL _supportColorAttachmentMapping;
     NSMutableArray *_commands;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLIndirectCommandBufferDescriptor *)descriptor maxCommandCount:(NSUInteger)maxCount options:(MTLResourceOptions)options;
@@ -12209,13 +12219,23 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         _maxVertexBufferBindCount = descriptor.maxVertexBufferBindCount;
         _maxFragmentBufferBindCount = descriptor.maxFragmentBufferBindCount;
         _maxKernelBufferBindCount = descriptor.maxKernelBufferBindCount;
+        _maxKernelThreadgroupMemoryBindCount = 31;
         _maxObjectBufferBindCount = 0;
         _maxMeshBufferBindCount = 0;
         _maxObjectThreadgroupMemoryBindCount = 0;
+        _supportRayTracing = NO;
+        _supportDynamicAttributeStride = NO;
+        _supportColorAttachmentMapping = NO;
         if (@available(macOS 14.0, iOS 17.0, *)) {
+            _maxKernelThreadgroupMemoryBindCount = descriptor.maxKernelThreadgroupMemoryBindCount;
             _maxObjectBufferBindCount = descriptor.maxObjectBufferBindCount;
             _maxMeshBufferBindCount = descriptor.maxMeshBufferBindCount;
             _maxObjectThreadgroupMemoryBindCount = descriptor.maxObjectThreadgroupMemoryBindCount;
+            _supportRayTracing = descriptor.supportRayTracing;
+            _supportDynamicAttributeStride = descriptor.supportDynamicAttributeStride;
+        }
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            _supportColorAttachmentMapping = descriptor.supportColorAttachmentMapping;
         }
         _commands = [NSMutableArray arrayWithCapacity:maxCount];
         for (NSUInteger index = 0; index < maxCount; ++index) [_commands addObject:[NSNull null]];
@@ -12348,8 +12368,17 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
             copy->_hasDispatchThreadgroups = computeCommand->_hasDispatchThreadgroups;
             copy->_threadgroupsPerGrid = computeCommand->_threadgroupsPerGrid;
             copy->_threadgroupsPerThreadgroup = computeCommand->_threadgroupsPerThreadgroup;
+            copy->_imageblockWidth = computeCommand->_imageblockWidth;
+            copy->_imageblockHeight = computeCommand->_imageblockHeight;
+            copy->_hasImageblock = computeCommand->_hasImageblock;
+            copy->_stageInRegion = computeCommand->_stageInRegion;
+            copy->_hasStageInRegion = computeCommand->_hasStageInRegion;
             copy->_unsupportedCommand = computeCommand->_unsupportedCommand;
             if (computeCommand->_kernelBuffer != nil && _maxKernelBufferBindCount == 0) return NO;
+            for (NSNumber *memoryIndex in computeCommand->_threadgroupMemoryLengths) {
+                if (memoryIndex.unsignedIntegerValue >= _maxKernelThreadgroupMemoryBindCount) return NO;
+            }
+            copy->_threadgroupMemoryLengths = [computeCommand->_threadgroupMemoryLengths mutableCopy];
             _commands[destinationIndex + index] = copy;
         } else {
             return NO;
@@ -12712,7 +12741,10 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 
 @implementation ZPUIndirectComputeCommand
 - (instancetype)initWithOwner:(ZPUIndirectCommandBuffer *)owner {
-    if ((self = [super init])) _owner = owner;
+    if ((self = [super init])) {
+        _owner = owner;
+        _threadgroupMemoryLengths = [NSMutableDictionary dictionary];
+    }
     return self;
 }
 - (void)reset {
@@ -12725,6 +12757,12 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     _hasDispatchThreadgroups = NO;
     _threadgroupsPerGrid = MTLSizeMake(0, 0, 0);
     _threadgroupsPerThreadgroup = MTLSizeMake(0, 0, 0);
+    _imageblockWidth = 0;
+    _imageblockHeight = 0;
+    _hasImageblock = NO;
+    _stageInRegion = (MTLRegion){MTLOriginMake(0, 0, 0), MTLSizeMake(0, 0, 0)};
+    _hasStageInRegion = NO;
+    [_threadgroupMemoryLengths removeAllObjects];
     _unsupportedCommand = NO;
 }
 - (void)setComputePipelineState:(id<MTLComputePipelineState>)pipelineState API_AVAILABLE(macos(11.0), ios(13.0)) {
@@ -12785,15 +12823,21 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 - (void)setBarrier {}
 - (void)clearBarrier {}
 - (void)setImageblockWidth:(NSUInteger)width height:(NSUInteger)height API_AVAILABLE(ios(14.0), macos(11.0)) {
-    (void)width;
-    (void)height;
+    _imageblockWidth = width;
+    _imageblockHeight = height;
+    _hasImageblock = YES;
 }
 - (void)setThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index {
-    (void)length;
-    (void)index;
+    if (index >= _owner->_maxKernelThreadgroupMemoryBindCount) {
+        _unsupportedCommand = YES;
+        return;
+    }
+    if (_threadgroupMemoryLengths == nil) _threadgroupMemoryLengths = [NSMutableDictionary dictionary];
+    _threadgroupMemoryLengths[@(index)] = @(length);
 }
 - (void)setStageInRegion:(MTLRegion)region {
-    (void)region;
+    _stageInRegion = region;
+    _hasStageInRegion = YES;
 }
 - (void)executeWithEncoder:(ZPUComputeEncoder *)encoder {
     if (_unsupportedCommand) {

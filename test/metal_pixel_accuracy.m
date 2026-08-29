@@ -7481,6 +7481,9 @@ int main(void) {
             [adapter_compute_icb indirectComputeCommandAtIndex:0];
         [adapter_compute_icb_command setComputePipelineState:adapter_icb_compute_pipeline];
         [adapter_compute_icb_command setKernelBuffer:adapter_copy_buffer offset:0 atIndex:0];
+        [adapter_compute_icb_command setImageblockWidth:2 height:2];
+        [adapter_compute_icb_command setThreadgroupMemoryLength:16 atIndex:0];
+        [adapter_compute_icb_command setStageInRegion:MTLRegionMake2D(1, 1, 2, 2)];
         [adapter_compute_icb_command concurrentDispatchThreads:MTLSizeMake(width, height, 1)
                                            threadsPerThreadgroup:MTLSizeMake(2, 2, 1)];
         id<MTLTexture> adapter_compute_icb_texture = [adapter_device newTextureWithDescriptor:compute_texture_descriptor];
@@ -7544,6 +7547,30 @@ int main(void) {
             memcmp(native_copy_pixels, adapter_copied_compute_icb_pixels, byte_count) != 0) {
             fprintf(stderr, "metal-pixel: copied indirect compute command buffer mismatch\n");
             return 59;
+        }
+
+        if (@available(macOS 14.0, *)) {
+            MTLIndirectCommandBufferDescriptor *invalid_memory_icb_descriptor = [compute_icb_descriptor copy];
+            invalid_memory_icb_descriptor.maxKernelThreadgroupMemoryBindCount = 0;
+            id<MTLIndirectCommandBuffer> invalid_memory_icb =
+                [adapter_device newIndirectCommandBufferWithDescriptor:invalid_memory_icb_descriptor
+                                                         maxCommandCount:1 options:MTLResourceStorageModeShared];
+            id<MTLIndirectComputeCommand> invalid_memory_command =
+                [invalid_memory_icb indirectComputeCommandAtIndex:0];
+            [invalid_memory_command setThreadgroupMemoryLength:16 atIndex:0];
+            id<MTLCommandBuffer> invalid_memory_command_buffer = [adapter_queue commandBuffer];
+            id<MTLComputeCommandEncoder> invalid_memory_encoder =
+                [invalid_memory_command_buffer computeCommandEncoder];
+            [invalid_memory_encoder setTexture:adapter_compute_icb_texture atIndex:1];
+            [invalid_memory_encoder executeCommandsInBuffer:invalid_memory_icb withRange:NSMakeRange(0, 1)];
+            [invalid_memory_encoder endEncoding];
+            [invalid_memory_command_buffer commit];
+            [invalid_memory_command_buffer waitUntilCompleted];
+            if (invalid_memory_icb == nil || invalid_memory_command == nil ||
+                invalid_memory_command_buffer.status != MTLCommandBufferStatusError) {
+                fprintf(stderr, "metal-pixel: indirect compute threadgroup-memory limit did not fail closed\n");
+                return 60;
+            }
         }
 
         MTLArgumentDescriptor *adapter_argument_descriptor = [MTLArgumentDescriptor argumentDescriptor];

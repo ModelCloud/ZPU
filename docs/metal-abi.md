@@ -259,8 +259,12 @@ triangle path:
 - CPU indirect compute commands for those registered kernels; the command
   buffer inherits the ZPU encoder's texture bindings and records pipeline,
   buffer, and dispatch state for deferred execution, with device ownership,
-  command-type, buffer-offset, dimension, and CPU threadgroup-limit checks;
-  reset slots remain legal no-ops
+  command-type, buffer-offset, dimension, and CPU threadgroup-limit checks.
+  Indirect imageblock dimensions, stage-in regions, and kernel threadgroup
+  memory bindings are retained through copy/reset and checked against the
+  descriptor's bind limit; they are metadata-only for the registered ZPU
+  kernels, whose CPU execution has no hidden threadgroup storage. Reset slots
+  remain legal no-ops
 - CPU indirect mesh command recording, copy, and reset state; mesh command
   descriptors and thread dimensions are retained in the CPU-owned ICB and
   unsupported mesh shader execution fails closed at replay
