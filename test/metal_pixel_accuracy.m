@@ -956,6 +956,25 @@ int main(void) {
             return 19;
         }
 
+        /* CPU-owned resources cannot be discarded to satisfy a purge request.
+         * Match Metal's observable previous-state result instead of claiming
+         * that live ZPU storage became volatile or empty. */
+        const MTLPurgeableState native_buffer_purge_state =
+            [vertex_buffer setPurgeableState:MTLPurgeableStateVolatile];
+        const MTLPurgeableState adapter_buffer_purge_state =
+            [adapter_vertex_buffer setPurgeableState:MTLPurgeableStateVolatile];
+        const MTLPurgeableState native_texture_purge_state =
+            [texture setPurgeableState:MTLPurgeableStateEmpty];
+        const MTLPurgeableState adapter_texture_purge_state =
+            [adapter_texture setPurgeableState:MTLPurgeableStateEmpty];
+        if (native_buffer_purge_state != adapter_buffer_purge_state ||
+            native_texture_purge_state != adapter_texture_purge_state ||
+            adapter_buffer_purge_state != MTLPurgeableStateNonVolatile ||
+            adapter_texture_purge_state != MTLPurgeableStateNonVolatile) {
+            fprintf(stderr, "metal-pixel: purgeability state mismatch\n");
+            return 20;
+        }
+
         /* Non-renderable resource formats still have a byte-exact contract.
          * The adapter must preserve the native Metal texel width for both
          * scalar R32Float and packed RGBA16Float transfers. */

@@ -42,7 +42,9 @@ triangle path:
   cache mode, hazard mode, texture usage, optimization flag, compression mode,
   and swizzle metadata; indirect command buffers preserve their resource
   options, and texture views inherit those properties from their ZPU-owned
-  backing resource
+  backing resource; CPU resources remain non-volatile, so
+  `setPurgeableState:` returns the prior `MTLPurgeableStateNonVolatile` state
+  without discarding ZPU storage
 - `newBufferWithBytesNoCopy` aliases caller-owned CPU memory through the ZPU
   buffer while deferring the supplied deallocator until the adapter resource
   is released

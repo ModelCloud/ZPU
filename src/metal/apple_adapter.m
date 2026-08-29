@@ -1548,6 +1548,15 @@ static MTLHazardTrackingMode zpu_effective_hazard_tracking_mode(MTLHazardTrackin
     return mode == MTLHazardTrackingModeDefault ? fallback : mode;
 }
 
+/* ZPU resources are backed by live CPU storage and are never discarded by a
+ * purge request. Metal reports the previous state from setPurgeableState:;
+ * keep the CPU resource non-volatile and return that state for every query or
+ * transition request. */
+static MTLPurgeableState zpu_cpu_purgeable_state(MTLPurgeableState requested) {
+    (void)requested;
+    return MTLPurgeableStateNonVolatile;
+}
+
 static BOOL zpu_heap_buffer_options_match(MTLStorageMode heapStorageMode,
                                            MTLCPUCacheMode heapCPUCacheMode,
                                            MTLHazardTrackingMode heapHazardTrackingMode,
@@ -3363,7 +3372,7 @@ static ZPUTensor *zpu_create_tensor(ZPUDevice *owner, ZPUBuffer *storageBuffer,
 - (NSUInteger)heapOffset { return _heapOffset; }
 - (BOOL)isAliasable { return _aliasable; }
 - (void)makeAliasable { _aliasable = YES; }
-- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return state; }
+- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return zpu_cpu_purgeable_state(state); }
 - (void)didModifyRange:(NSRange)range { (void)range; }
 - (void)addDebugMarker:(NSString *)marker range:(NSRange)range API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)marker;
@@ -3602,7 +3611,7 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
     return zpu_effective_hazard_tracking_mode(_hazardTrackingMode, MTLHazardTrackingModeTracked);
 }
 - (MTLResourceOptions)resourceOptions { return _resourceOptions; }
-- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return state; }
+- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return zpu_cpu_purgeable_state(state); }
 - (id<MTLHeap>)heap { return nil; }
 - (NSUInteger)heapOffset { return 0; }
 - (NSUInteger)allocatedSize { return _allocatedSize; }
@@ -3833,7 +3842,7 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
 }
 - (BOOL)isAliasable { return _aliasable; }
 - (void)makeAliasable { _aliasable = YES; }
-- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return state; }
+- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return zpu_cpu_purgeable_state(state); }
 - (void)getBytes:(void *)destination bytesPerRow:(NSUInteger)bytesPerRow fromRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level {
     if (_sparseMappings != nil) {
         if (zpu_texture_type_is_3d(_textureType)) {
@@ -4320,7 +4329,7 @@ static NSUInteger zpu_acceleration_structure_size_for_descriptor(
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor {
     return [self zpuNewTextureWithDescriptor:descriptor firstOffset:0 explicitOffset:NO];
 }
-- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return state; }
+- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return zpu_cpu_purgeable_state(state); }
 - (MTLHeapType)type { return _type; }
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)options offset:(NSUInteger)offset API_AVAILABLE(macos(10.15), ios(13.0)) {
     if (!zpu_heap_buffer_options_match(_storageMode, _cpuCacheMode, [self hazardTrackingMode], options)) return nil;
@@ -4380,7 +4389,7 @@ static NSUInteger zpu_acceleration_structure_size_for_descriptor(
 - (MTLStorageMode)storageMode { return _storageMode; }
 - (MTLHazardTrackingMode)hazardTrackingMode { return _hazardTrackingMode; }
 - (MTLResourceOptions)resourceOptions { return _resourceOptions; }
-- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return state; }
+- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return zpu_cpu_purgeable_state(state); }
 - (id<MTLHeap>)heap { return (id<MTLHeap>)_heap; }
 - (NSUInteger)heapOffset { return _heapOffset; }
 - (NSUInteger)allocatedSize { return _size; }
@@ -9870,7 +9879,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (MTLStorageMode)storageMode { return MTLStorageModeShared; }
 - (MTLHazardTrackingMode)hazardTrackingMode { return MTLHazardTrackingModeTracked; }
 - (MTLResourceOptions)resourceOptions { return MTLResourceStorageModeShared; }
-- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return state; }
+- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return zpu_cpu_purgeable_state(state); }
 - (id<MTLHeap>)heap { return nil; }
 - (NSUInteger)heapOffset { return 0; }
 - (NSUInteger)allocatedSize {
@@ -9930,7 +9939,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (MTLStorageMode)storageMode { return MTLStorageModeShared; }
 - (MTLHazardTrackingMode)hazardTrackingMode { return MTLHazardTrackingModeTracked; }
 - (MTLResourceOptions)resourceOptions { return MTLResourceStorageModeShared; }
-- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return state; }
+- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return zpu_cpu_purgeable_state(state); }
 - (id<MTLHeap>)heap { return nil; }
 - (NSUInteger)heapOffset { return 0; }
 - (NSUInteger)allocatedSize {
@@ -12279,7 +12288,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 - (NSUInteger)heapOffset { return 0; }
 - (BOOL)isAliasable { return NO; }
 - (void)makeAliasable {}
-- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return state; }
+- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return zpu_cpu_purgeable_state(state); }
 - (id<MTLResource>)rootResource { return (id<MTLResource>)self; }
 - (kern_return_t)setOwnerWithIdentity:(task_id_token_t)task_id_token API_AVAILABLE(ios(17.4), watchos(10.4), tvos(17.4), macos(14.4)) {
     (void)task_id_token;
