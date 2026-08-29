@@ -359,7 +359,7 @@ pub const CommandBuffer = struct {
                             .height = readU32Little(indirect_buffer.bytes, compute.indirect_buffer_offset + 16),
                             .depth = readU32Little(indirect_buffer.bytes, compute.indirect_buffer_offset + 20),
                         };
-                        if ((compute.kernel != 3 and resolved.threads_per_grid.depth != 1) or
+                        if ((compute.kernel != 3 and compute.kernel != 4 and resolved.threads_per_grid.depth != 1) or
                             resolved.threads_per_threadgroup.width == 0 or
                             resolved.threads_per_threadgroup.height == 0 or
                             resolved.threads_per_threadgroup.depth == 0) return self.fail(error.InvalidArgument);
@@ -369,7 +369,7 @@ pub const CommandBuffer = struct {
                             .height = readU32Little(indirect_buffer.bytes, compute.indirect_buffer_offset + 4),
                             .depth = readU32Little(indirect_buffer.bytes, compute.indirect_buffer_offset + 8),
                         };
-                        if ((compute.kernel != 3 and groups.depth != 1) or compute.threads_per_threadgroup.depth == 0 or
+                        if ((compute.kernel != 3 and compute.kernel != 4 and groups.depth != 1) or compute.threads_per_threadgroup.depth == 0 or
                             compute.threads_per_threadgroup.width == 0 or compute.threads_per_threadgroup.height == 0)
                         {
                             return self.fail(error.InvalidArgument);
@@ -380,12 +380,12 @@ pub const CommandBuffer = struct {
                         resolved.threads_per_grid = .{
                             .width = @intCast(grid_width),
                             .height = @intCast(grid_height),
-                            .depth = if (compute.kernel == 3) groups.depth else 1,
+                            .depth = if (compute.kernel == 3 or compute.kernel == 4) groups.depth else 1,
                         };
                     }
                 }
                 if (resolved.array_slice) |slice| {
-                    if (resolved.threads_per_grid.depth <= slice) continue;
+                    if ((resolved.kernel == 3 or resolved.kernel == 4) and resolved.threads_per_grid.depth <= slice) continue;
                 }
                 executeCompute(resolved) catch |err| return self.fail(err);
             },
@@ -855,7 +855,7 @@ pub const ComputeEncoder = struct {
 
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (kernel != 1 and kernel != 2 and kernel != 3) return error.UnsupportedOperation;
+        if (kernel != 1 and kernel != 2 and kernel != 3 and kernel != 4) return error.UnsupportedOperation;
         self.kernel = kernel;
     }
 
@@ -939,11 +939,12 @@ pub const ComputeEncoder = struct {
 
     pub fn dispatchThreads(self: *ComputeEncoder, threads_per_grid: abi.Size, threads_per_threadgroup: abi.Size) Error!void {
         if (!self.open() or self.kernel == 0 or self.texture == null) return error.InvalidCommand;
-        if (((self.kernel == 1 or self.kernel == 3) and self.texture_index != 0) or (self.kernel == 2 and
+        if (((self.kernel == 1 or self.kernel == 3 or self.kernel == 4) and self.texture_index != 0) or (self.kernel == 2 and
             (self.texture_index != 1 or self.buffer == null))) return error.InvalidCommand;
-        if (threads_per_grid.depth != 1 or threads_per_threadgroup.width == 0 or
+        if ((self.kernel != 3 and self.kernel != 4 and threads_per_grid.depth != 1) or
+            threads_per_threadgroup.width == 0 or
             threads_per_threadgroup.height == 0 or threads_per_threadgroup.depth == 0) return error.InvalidArgument;
-        if (threads_per_threadgroup.depth != 1) return error.UnsupportedOperation;
+        if (self.kernel != 4 and threads_per_threadgroup.depth != 1) return error.UnsupportedOperation;
         _ = try self.command_buffer.append(.{ .compute = .{
             .kernel = self.kernel,
             .texture = self.texture.?,
@@ -951,12 +952,14 @@ pub const ComputeEncoder = struct {
             .buffer = self.buffer,
             .buffer_offset = self.buffer_offset,
             .threads_per_grid = threads_per_grid,
+            .array_slice = self.array_slice,
         } });
     }
 
     pub fn dispatchThreadgroups(self: *ComputeEncoder, threadgroups_per_grid: abi.Size, threads_per_threadgroup: abi.Size) Error!void {
         if (!self.open() or self.kernel == 0 or self.texture == null) return error.InvalidCommand;
-        if (threadgroups_per_grid.depth != 1 or threads_per_threadgroup.depth != 1 or
+        if ((self.kernel != 3 and self.kernel != 4 and threadgroups_per_grid.depth != 1) or
+            (self.kernel != 4 and threads_per_threadgroup.depth != 1) or
             threads_per_threadgroup.width == 0 or threads_per_threadgroup.height == 0) return error.InvalidArgument;
         const grid_width = @as(u64, threadgroups_per_grid.width) * @as(u64, threads_per_threadgroup.width);
         const grid_height = @as(u64, threadgroups_per_grid.height) * @as(u64, threads_per_threadgroup.height);
@@ -964,19 +967,19 @@ pub const ComputeEncoder = struct {
         return self.dispatchThreads(.{
             .width = @intCast(grid_width),
             .height = @intCast(grid_height),
-            .depth = 1,
+            .depth = if (self.kernel == 3 or self.kernel == 4) threadgroups_per_grid.depth else 1,
         }, threads_per_threadgroup);
     }
 
     pub fn dispatchThreadgroupsIndirect(self: *ComputeEncoder, indirect_buffer: *Buffer, indirect_buffer_offset: usize, threads_per_threadgroup: abi.Size) Error!void {
         if (!self.open() or self.kernel == 0 or self.texture == null) return error.InvalidCommand;
-        if (((self.kernel == 1 or self.kernel == 3) and self.texture_index != 0) or (self.kernel == 2 and
+        if (((self.kernel == 1 or self.kernel == 3 or self.kernel == 4) and self.texture_index != 0) or (self.kernel == 2 and
             (self.texture_index != 1 or self.buffer == null))) return error.InvalidCommand;
         if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
             indirect_buffer_offset % @alignOf(u32) != 0 or
             !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, @sizeOf(abi.Size))) return error.InvalidArgument;
         if (threads_per_threadgroup.depth == 0 or threads_per_threadgroup.width == 0 or threads_per_threadgroup.height == 0) return error.InvalidArgument;
-        if (threads_per_threadgroup.depth != 1) return error.UnsupportedOperation;
+        if (self.kernel != 4 and threads_per_threadgroup.depth != 1) return error.UnsupportedOperation;
         _ = try self.command_buffer.append(.{ .compute = .{
             .kernel = self.kernel,
             .texture = self.texture.?,
@@ -993,7 +996,7 @@ pub const ComputeEncoder = struct {
 
     pub fn dispatchThreadsIndirect(self: *ComputeEncoder, indirect_buffer: *Buffer) Error!void {
         if (!self.open() or self.kernel == 0 or self.texture == null) return error.InvalidCommand;
-        if (((self.kernel == 1 or self.kernel == 3) and self.texture_index != 0) or (self.kernel == 2 and
+        if (((self.kernel == 1 or self.kernel == 3 or self.kernel == 4) and self.texture_index != 0) or (self.kernel == 2 and
             (self.texture_index != 1 or self.buffer == null))) return error.InvalidCommand;
         if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
             indirect_buffer.bytes.len < 2 * @sizeOf(abi.Size)) return error.InvalidArgument;
@@ -1032,23 +1035,27 @@ fn unorm8Fraction(numerator: u32, denominator: u32) u8 {
 
 fn executeCompute(command: ComputeCommand) Error!void {
     if (!validTexture(command.texture) or !command.texture.format.isColor()) return error.InvalidResource;
-    if (command.kernel != 3 and command.threads_per_grid.depth != 1) return error.InvalidArgument;
+    if (command.kernel != 3 and command.kernel != 4 and command.threads_per_grid.depth != 1) return error.InvalidArgument;
     const width = @min(command.threads_per_grid.width, command.texture.width);
     const height = @min(command.threads_per_grid.height, command.texture.height);
     switch (command.kernel) {
-        1, 3 => for (0..height) |y| {
+        1, 3, 4 => for (0..height) |y| {
             for (0..width) |x| {
                 const red = unorm8Fraction(@as(u32, @intCast(x)) + 1, 8);
                 const green = unorm8Fraction(@as(u32, @intCast(y)) + 1, 8);
+                const blue = if (command.kernel == 4)
+                    unorm8Fraction(@as(u32, command.array_slice orelse 0) + 1, 8)
+                else
+                    64;
                 const offset = y * command.texture.stride + x * 4;
                 if (command.texture.format == .rgba8_unorm) {
                     command.texture.bytes[offset + 0] = red;
                     command.texture.bytes[offset + 1] = green;
-                    command.texture.bytes[offset + 2] = 64;
+                    command.texture.bytes[offset + 2] = blue;
                 } else {
                     // Metal's BGRA texture memory is [B, G, R, A], while the
                     // kernel's logical result is RGBA.
-                    command.texture.bytes[offset + 0] = 64;
+                    command.texture.bytes[offset + 0] = blue;
                     command.texture.bytes[offset + 1] = green;
                     command.texture.bytes[offset + 2] = red;
                 }

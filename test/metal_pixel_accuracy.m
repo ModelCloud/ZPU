@@ -25,6 +25,11 @@ static const char *const kShaderSource =
     "uint3 gid [[thread_position_in_grid]]) { "
     "if (gid.x >= output.get_width() || gid.y >= output.get_height() || gid.z >= output.get_array_size()) return; "
     "output.write(float4((float(gid.x) + 1.0) / 8.0, (float(gid.y) + 1.0) / 8.0, 0.25, 1.0), gid.xy, gid.z); }\n"
+    "kernel void zpu_cpu_fill_gradient_rgba8_3d(texture3d<float, access::write> output [[texture(0)]], "
+    "uint3 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height() || gid.z >= output.get_depth()) return; "
+    "output.write(float4((float(gid.x) + 1.0) / 8.0, (float(gid.y) + 1.0) / 8.0, "
+    "(float(gid.z) + 1.0) / 8.0, 1.0), gid); }\n"
     "kernel void zpu_cpu_copy_rgba8_buffer_to_texture(device const uchar4 *source [[buffer(0)]], "
     "texture2d<float, access::write> output [[texture(1)]], uint2 gid [[thread_position_in_grid]]) { "
     "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
@@ -1455,7 +1460,8 @@ int main(void) {
         NSString *adapter_cpu_source =
             @"kernel void zpu_cpu_fill_gradient_rgba8() {}\n"
              "kernel void zpu_cpu_copy_rgba8_buffer_to_texture() {}\n"
-             "kernel void zpu_cpu_fill_gradient_rgba8_array() {}";
+             "kernel void zpu_cpu_fill_gradient_rgba8_array() {}\n"
+             "kernel void zpu_cpu_fill_gradient_rgba8_3d() {}";
         id<MTLLibrary> adapter_library =
             [adapter_device newLibraryWithSource:adapter_cpu_source options:nil error:&adapter_library_error];
         id<MTLFunction> adapter_library_function =
@@ -1474,8 +1480,9 @@ int main(void) {
             adapter_constant_function == nil ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 3 ||
+            adapter_library.functionNames.count != 4 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_3d"] == nil ||
             !adapter_library_completion_called ||
             unsupported_adapter_library != nil || adapter_library_error == nil) {
             fail_with_error("CPU library/function metadata failed", adapter_library_error);
@@ -1697,6 +1704,67 @@ int main(void) {
         if (!array_compute_exact) {
             fprintf(stderr, "metal-pixel: 2D-array compute exactness failed\n");
             return 44;
+        }
+
+        id<MTLFunction> native_three_d_compute_function =
+            [library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_3d"];
+        id<MTLComputePipelineState> native_three_d_compute_pipeline =
+            [device newComputePipelineStateWithFunction:native_three_d_compute_function error:&error];
+        id<MTLTexture> native_three_d_compute_texture = [device newTextureWithDescriptor:three_d_descriptor];
+        id<MTLCommandBuffer> native_three_d_compute_command_buffer = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> native_three_d_compute_encoder =
+            [native_three_d_compute_command_buffer computeCommandEncoder];
+        [native_three_d_compute_encoder setComputePipelineState:native_three_d_compute_pipeline];
+        [native_three_d_compute_encoder setTexture:native_three_d_compute_texture atIndex:0];
+        [native_three_d_compute_encoder dispatchThreads:MTLSizeMake(three_d_width, three_d_height, three_d_depth + 1)
+                                  threadsPerThreadgroup:MTLSizeMake(2, 2, 1)];
+        [native_three_d_compute_encoder endEncoding];
+        [native_three_d_compute_command_buffer commit];
+        [native_three_d_compute_command_buffer waitUntilCompleted];
+        id<MTLFunction> adapter_three_d_compute_function =
+            ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_fill_gradient_rgba8_3d");
+        id<MTLComputePipelineState> adapter_three_d_compute_pipeline =
+            [adapter_device newComputePipelineStateWithFunction:adapter_three_d_compute_function
+                                                           error:&adapter_compute_error];
+        id<MTLTexture> adapter_three_d_compute_texture = [adapter_device newTextureWithDescriptor:three_d_descriptor];
+        id<MTLCommandBuffer> adapter_three_d_compute_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> adapter_three_d_compute_encoder =
+            [adapter_three_d_compute_command_buffer computeCommandEncoder];
+        [adapter_three_d_compute_encoder setComputePipelineState:adapter_three_d_compute_pipeline];
+        [adapter_three_d_compute_encoder setTexture:adapter_three_d_compute_texture atIndex:0];
+        [adapter_three_d_compute_encoder dispatchThreads:MTLSizeMake(three_d_width, three_d_height, three_d_depth + 1)
+                                   threadsPerThreadgroup:MTLSizeMake(2, 2, 1)];
+        [adapter_three_d_compute_encoder endEncoding];
+        uint8_t native_three_d_compute_bytes[three_d_bytes];
+        uint8_t adapter_three_d_compute_deferred[three_d_bytes];
+        memset(adapter_three_d_compute_deferred, 0, sizeof(adapter_three_d_compute_deferred));
+        [adapter_three_d_compute_texture getBytes:adapter_three_d_compute_deferred
+                                       bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes
+                                        fromRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                       mipmapLevel:0 slice:0];
+        [adapter_three_d_compute_command_buffer commit];
+        [adapter_three_d_compute_command_buffer waitUntilCompleted];
+        memset(native_three_d_compute_bytes, 0, sizeof(native_three_d_compute_bytes));
+        [native_three_d_compute_texture getBytes:native_three_d_compute_bytes
+                                      bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes
+                                       fromRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                      mipmapLevel:0 slice:0];
+        uint8_t adapter_three_d_compute_bytes[three_d_bytes];
+        memset(adapter_three_d_compute_bytes, 0, sizeof(adapter_three_d_compute_bytes));
+        [adapter_three_d_compute_texture getBytes:adapter_three_d_compute_bytes
+                                       bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes
+                                        fromRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                       mipmapLevel:0 slice:0];
+        if (native_three_d_compute_function == nil || native_three_d_compute_pipeline == nil ||
+            native_three_d_compute_texture == nil || native_three_d_compute_encoder == nil ||
+            native_three_d_compute_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_three_d_compute_function == nil || adapter_three_d_compute_pipeline == nil ||
+            adapter_three_d_compute_texture == nil || adapter_three_d_compute_encoder == nil ||
+            adapter_three_d_compute_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(adapter_three_d_compute_deferred, (const uint8_t[three_d_bytes]){0}, three_d_bytes) != 0 ||
+            memcmp(native_three_d_compute_bytes, adapter_three_d_compute_bytes, three_d_bytes) != 0) {
+            fail_with_error("3D CPU compute adapter execution failed", adapter_compute_error);
+            return 83;
         }
 
         /* Indirect array dispatch must preserve Metal's deferred grid
@@ -1972,6 +2040,67 @@ int main(void) {
                    three_d_copy_buffer_length) != 0) {
             fail_with_error("Metal 4 CPU 3D texture copy failed", metal4_error);
             return 82;
+        }
+
+        MTL4ArgumentTableDescriptor *metal4_three_d_compute_table_descriptor = [MTL4ArgumentTableDescriptor new];
+        metal4_three_d_compute_table_descriptor.maxTextureBindCount = 1;
+        id<MTL4ArgumentTable> metal4_three_d_compute_table =
+            [adapter_device newArgumentTableWithDescriptor:metal4_three_d_compute_table_descriptor error:&metal4_error];
+        id<MTLTexture> metal4_three_d_compute_texture = [adapter_device newTextureWithDescriptor:three_d_descriptor];
+        [metal4_three_d_compute_table setTexture:metal4_three_d_compute_texture.gpuResourceID atIndex:0];
+        id<MTL4CommandBuffer> metal4_three_d_compute_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_three_d_compute_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> metal4_three_d_compute_encoder =
+            [metal4_three_d_compute_command_buffer computeCommandEncoder];
+        [metal4_three_d_compute_encoder setComputePipelineState:adapter_three_d_compute_pipeline];
+        [metal4_three_d_compute_encoder setArgumentTable:metal4_three_d_compute_table];
+        [metal4_three_d_compute_encoder dispatchThreads:MTLSizeMake(three_d_width, three_d_height, three_d_depth + 1)
+                                   threadsPerThreadgroup:MTLSizeMake(2, 2, 1)];
+        [metal4_three_d_compute_encoder endEncoding];
+        [metal4_three_d_compute_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_three_d_compute_command_buffers[] = {metal4_three_d_compute_command_buffer};
+        [metal4_queue commit:metal4_three_d_compute_command_buffers count:1];
+        uint8_t metal4_three_d_compute_bytes[three_d_bytes];
+        memset(metal4_three_d_compute_bytes, 0, sizeof(metal4_three_d_compute_bytes));
+        [metal4_three_d_compute_texture getBytes:metal4_three_d_compute_bytes
+                                      bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes
+                                       fromRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                      mipmapLevel:0 slice:0];
+
+        const uint32_t metal4_three_d_indirect_threads[] = {
+            three_d_width, three_d_height, three_d_depth + 1, 2, 2, 1,
+        };
+        id<MTLBuffer> metal4_three_d_indirect_buffer =
+            [adapter_device newBufferWithBytes:metal4_three_d_indirect_threads
+                                         length:sizeof(metal4_three_d_indirect_threads)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLTexture> metal4_three_d_indirect_texture = [adapter_device newTextureWithDescriptor:three_d_descriptor];
+        [metal4_three_d_compute_table setTexture:metal4_three_d_indirect_texture.gpuResourceID atIndex:0];
+        id<MTL4CommandBuffer> metal4_three_d_indirect_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_three_d_indirect_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> metal4_three_d_indirect_encoder =
+            [metal4_three_d_indirect_command_buffer computeCommandEncoder];
+        [metal4_three_d_indirect_encoder setComputePipelineState:adapter_three_d_compute_pipeline];
+        [metal4_three_d_indirect_encoder setArgumentTable:metal4_three_d_compute_table];
+        [metal4_three_d_indirect_encoder dispatchThreadsWithIndirectBuffer:metal4_three_d_indirect_buffer.gpuAddress];
+        [metal4_three_d_indirect_encoder endEncoding];
+        [metal4_three_d_indirect_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_three_d_indirect_command_buffers[] = {metal4_three_d_indirect_command_buffer};
+        [metal4_queue commit:metal4_three_d_indirect_command_buffers count:1];
+        uint8_t metal4_three_d_indirect_bytes[three_d_bytes];
+        memset(metal4_three_d_indirect_bytes, 0, sizeof(metal4_three_d_indirect_bytes));
+        [metal4_three_d_indirect_texture getBytes:metal4_three_d_indirect_bytes
+                                       bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes
+                                        fromRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                       mipmapLevel:0 slice:0];
+        if (metal4_three_d_compute_table == nil || metal4_three_d_compute_texture == nil ||
+            metal4_three_d_compute_command_buffer == nil || metal4_three_d_compute_encoder == nil ||
+            metal4_three_d_indirect_buffer == nil || metal4_three_d_indirect_texture == nil ||
+            metal4_three_d_indirect_command_buffer == nil || metal4_three_d_indirect_encoder == nil ||
+            memcmp(metal4_three_d_compute_bytes, native_three_d_compute_bytes, sizeof(metal4_three_d_compute_bytes)) != 0 ||
+            memcmp(metal4_three_d_indirect_bytes, native_three_d_compute_bytes, sizeof(metal4_three_d_indirect_bytes)) != 0) {
+            fail_with_error("Metal 4 CPU 3D compute dispatch failed", metal4_error);
+            return 84;
         }
 
         id<MTLTexture> metal4_generate_mip_texture = [adapter_device newTextureWithDescriptor:generate_mip_descriptor];

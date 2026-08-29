@@ -2188,7 +2188,7 @@ static uint64_t zpu_cpu_timestamp(void) {
 }
 - (id<MTLLibrary>)newDefaultLibrary {
     return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
-                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array"];
+                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d"];
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
@@ -2560,6 +2560,7 @@ static uint64_t zpu_cpu_timestamp(void) {
             @"zpu_cpu_fill_gradient_rgba8",
             @"zpu_cpu_copy_rgba8_buffer_to_texture",
             @"zpu_cpu_fill_gradient_rgba8_array",
+            @"zpu_cpu_fill_gradient_rgba8_3d",
         ]) {
             if ([source rangeOfString:name].location != NSNotFound) [names addObject:name];
         }
@@ -3609,7 +3610,26 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
                 return;
             }
         }
-    } else if (_legacy->_boundTexture != nil && _legacy->_boundTexture->_textureType == MTLTextureType2DArray) {
+    } else if (_legacy->_kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_3D) {
+        if (_legacy->_boundTexture == nil || _legacy->_boundTexture->_textureType != MTLTextureType3D) {
+            [_owner markError];
+            return;
+        }
+        for (NSUInteger slice = 0; slice < _legacy->_boundTexture.depth; ++slice) {
+            zpu_metal_texture *sliceTexture = [_legacy->_boundTexture zpuTextureAtLevel:0 slice:slice];
+            if (sliceTexture == NULL ||
+                zpu_metal_compute_encoder_set_texture(_legacy->_zpuEncoder, sliceTexture,
+                    (uint32_t)_legacy->_boundTextureIndex) != ZPU_METAL_OK ||
+                zpu_metal_compute_encoder_set_array_slice(_legacy->_zpuEncoder, (uint32_t)slice,
+                    (uint32_t)_legacy->_boundTextureIndex) != ZPU_METAL_OK ||
+                zpu_metal_compute_encoder_dispatch_threads_indirect(_legacy->_zpuEncoder,
+                    buffer->_zpuBuffer) != ZPU_METAL_OK) {
+                [_owner markError];
+                return;
+            }
+        }
+    } else if (_legacy->_boundTexture != nil && (_legacy->_boundTexture->_textureType == MTLTextureType2DArray ||
+                                                 _legacy->_boundTexture->_textureType == MTLTextureType3D)) {
         [_owner markError];
         return;
     } else if (zpu_metal_compute_encoder_dispatch_threads_indirect(
@@ -3997,6 +4017,8 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
             _kernel = ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE;
         } else if (is_kernel && [name isEqualToString:@"zpu_cpu_fill_gradient_rgba8_array"]) {
             _kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY;
+        } else if (is_kernel && [name isEqualToString:@"zpu_cpu_fill_gradient_rgba8_3d"]) {
+            _kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_3D;
         } else {
             zpu_set_error(error, @"ZPU CPU Metal has no registered CPU implementation for this compute function");
             return nil;
@@ -4266,6 +4288,7 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
         return;
     }
     const BOOL arrayKernel = _kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY;
+    const BOOL volumeKernel = _kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_3D;
     if (arrayKernel) {
         if (_boundTexture == nil || _boundTexture->_textureType != MTLTextureType2DArray) {
             [_owner markError];
@@ -4285,7 +4308,29 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
         }
         return;
     }
-    if (_boundTexture != nil && _boundTexture->_textureType == MTLTextureType2DArray) {
+    if (volumeKernel) {
+        if (_boundTexture == nil || _boundTexture->_textureType != MTLTextureType3D) {
+            [_owner markError];
+            return;
+        }
+        for (NSUInteger slice = 0; slice < threadsPerGrid.depth && slice < _boundTexture.depth; ++slice) {
+            zpu_metal_texture *sliceTexture = [_boundTexture zpuTextureAtLevel:0 slice:slice];
+            if (sliceTexture == NULL ||
+                zpu_metal_compute_encoder_set_texture(_zpuEncoder, sliceTexture, (uint32_t)_boundTextureIndex) != ZPU_METAL_OK ||
+                zpu_metal_compute_encoder_set_array_slice(_zpuEncoder, (uint32_t)slice,
+                    (uint32_t)_boundTextureIndex) != ZPU_METAL_OK ||
+                zpu_metal_compute_encoder_dispatch_threads(_zpuEncoder,
+                    (zpu_metal_size){(uint32_t)threadsPerGrid.width, (uint32_t)threadsPerGrid.height, (uint32_t)threadsPerGrid.depth},
+                    (zpu_metal_size){(uint32_t)threadsPerThreadgroup.width, (uint32_t)threadsPerThreadgroup.height,
+                                     (uint32_t)threadsPerThreadgroup.depth}) != ZPU_METAL_OK) {
+                [_owner markError];
+                return;
+            }
+        }
+        return;
+    }
+    if (_boundTexture != nil && (_boundTexture->_textureType == MTLTextureType2DArray ||
+                                 _boundTexture->_textureType == MTLTextureType3D)) {
         [_owner markError];
         return;
     }
@@ -4314,8 +4359,21 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
              threadsPerThreadgroup:threadsPerThreadgroup];
         return;
     }
-    if (_kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY ||
-        (_boundTexture != nil && _boundTexture->_textureType == MTLTextureType2DArray)) {
+    if (_kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_3D &&
+        _boundTexture != nil && _boundTexture->_textureType == MTLTextureType3D) {
+        const uint64_t gridWidth = (uint64_t)threadgroupsPerGrid.width * threadsPerThreadgroup.width;
+        const uint64_t gridHeight = (uint64_t)threadgroupsPerGrid.height * threadsPerThreadgroup.height;
+        if (gridWidth > UINT32_MAX || gridHeight > UINT32_MAX) {
+            [_owner markError];
+            return;
+        }
+        [self dispatchThreads:MTLSizeMake((NSUInteger)gridWidth, (NSUInteger)gridHeight, threadgroupsPerGrid.depth)
+             threadsPerThreadgroup:threadsPerThreadgroup];
+        return;
+    }
+    if (_kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY || _kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_3D ||
+        (_boundTexture != nil && (_boundTexture->_textureType == MTLTextureType2DArray ||
+                                  _boundTexture->_textureType == MTLTextureType3D))) {
         [_owner markError];
         return;
     }
@@ -4336,6 +4394,7 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
         return;
     }
     const BOOL arrayKernel = _kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY;
+    const BOOL volumeKernel = _kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_3D;
     if (arrayKernel) {
         if (_boundTexture == nil || _boundTexture->_textureType != MTLTextureType2DArray) {
             [_owner markError];
@@ -4350,6 +4409,26 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
                     (uint32_t)_boundTextureIndex) != ZPU_METAL_OK ||
                 zpu_metal_compute_encoder_dispatch_threadgroups_indirect(_zpuEncoder,
                     zpuBuffer->_zpuBuffer, indirectBufferOffset,
+                    (zpu_metal_size){(uint32_t)threadsPerThreadgroup.width,
+                    (uint32_t)threadsPerThreadgroup.height, (uint32_t)threadsPerThreadgroup.depth}) != ZPU_METAL_OK) {
+                [_owner markError];
+                return;
+            }
+        }
+    } else if (volumeKernel) {
+        if (_boundTexture == nil || _boundTexture->_textureType != MTLTextureType3D) {
+            [_owner markError];
+            return;
+        }
+        for (NSUInteger slice = 0; slice < _boundTexture.depth; ++slice) {
+            zpu_metal_texture *sliceTexture = [_boundTexture zpuTextureAtLevel:0 slice:slice];
+            if (sliceTexture == NULL ||
+                zpu_metal_compute_encoder_set_texture(_zpuEncoder, sliceTexture,
+                    (uint32_t)_boundTextureIndex) != ZPU_METAL_OK ||
+                zpu_metal_compute_encoder_set_array_slice(_zpuEncoder, (uint32_t)slice,
+                    (uint32_t)_boundTextureIndex) != ZPU_METAL_OK ||
+                zpu_metal_compute_encoder_dispatch_threadgroups_indirect(_zpuEncoder, zpuBuffer->_zpuBuffer,
+                    indirectBufferOffset,
                     (zpu_metal_size){(uint32_t)threadsPerThreadgroup.width,
                     (uint32_t)threadsPerThreadgroup.height, (uint32_t)threadsPerThreadgroup.depth}) != ZPU_METAL_OK) {
                 [_owner markError];
