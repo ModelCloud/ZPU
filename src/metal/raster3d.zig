@@ -87,7 +87,7 @@ pub const StencilFace = struct {
     reference: u8 = 0,
 };
 
-pub const TargetFormat = enum { r8_unorm, r16_float, rg8_unorm, rg16_float, rgba8_unorm, bgra8_unorm, r32_float, rgba16_float };
+pub const TargetFormat = enum { r8_unorm, r16_float, rg8_unorm, rg16_float, rgba8_unorm, bgra8_unorm, r32_float, rgba16_unorm, rgba16_float, rgba32_float };
 
 pub const Target = struct {
     pixels: []u8,
@@ -103,7 +103,8 @@ pub const Target = struct {
             .rg8_unorm => 2,
             .rg16_float => 4,
             .rgba8_unorm, .bgra8_unorm, .r32_float => 4,
-            .rgba16_float => 8,
+            .rgba16_unorm, .rgba16_float => 8,
+            .rgba32_float => 16,
         };
     }
 
@@ -132,9 +133,18 @@ pub const Target = struct {
         return @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, row_bytes[offset..][0..2], .little))));
     }
 
+    fn readU16(row_bytes: []const u8, offset: usize) f32 {
+        return @as(f32, @floatFromInt(std.mem.readInt(u16, row_bytes[offset..][0..2], .little))) / 65535.0;
+    }
+
     fn writeF16(row_bytes: []u8, offset: usize, value: f32) void {
         const half: f16 = @floatCast(value);
         std.mem.writeInt(u16, row_bytes[offset..][0..2], @bitCast(half), .little);
+    }
+
+    fn writeU16(row_bytes: []u8, offset: usize, value: f32) void {
+        const quantized: u16 = @intFromFloat(std.math.clamp(value, 0, 1) * 65535.0 + 0.5);
+        std.mem.writeInt(u16, row_bytes[offset..][0..2], quantized, .little);
     }
 
     fn readColor(self: *const Target, x: usize, y: usize) [4]f32 {
@@ -161,9 +171,14 @@ pub const Target = struct {
                 };
             },
             .r32_float => .{ readF32(row_bytes, offset), 0, 0, 1 },
+            .rgba16_unorm => .{ readU16(row_bytes, offset), readU16(row_bytes, offset + 2), readU16(row_bytes, offset + 4), readU16(row_bytes, offset + 6) },
             .rgba16_float => .{
                 readF16(row_bytes, offset),     readF16(row_bytes, offset + 2),
                 readF16(row_bytes, offset + 4), readF16(row_bytes, offset + 6),
+            },
+            .rgba32_float => .{
+                readF32(row_bytes, offset),     readF32(row_bytes, offset + 4),
+                readF32(row_bytes, offset + 8), readF32(row_bytes, offset + 12),
             },
         };
     }
@@ -196,11 +211,23 @@ pub const Target = struct {
                 surface.Surface.write(row_bytes, offset, format, output);
             },
             .r32_float => if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeF32(row_bytes, offset, color[0]),
+            .rgba16_unorm => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeU16(row_bytes, offset, color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeU16(row_bytes, offset + 2, color[1]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) writeU16(row_bytes, offset + 4, color[2]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) writeU16(row_bytes, offset + 6, color[3]);
+            },
             .rgba16_float => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeF16(row_bytes, offset, color[0]);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeF16(row_bytes, offset + 2, color[1]);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) writeF16(row_bytes, offset + 4, color[2]);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) writeF16(row_bytes, offset + 6, color[3]);
+            },
+            .rgba32_float => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeF32(row_bytes, offset, color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeF32(row_bytes, offset + 4, color[1]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) writeF32(row_bytes, offset + 8, color[2]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) writeF32(row_bytes, offset + 12, color[3]);
             },
         }
     }

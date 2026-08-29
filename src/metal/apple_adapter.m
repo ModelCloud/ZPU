@@ -1345,11 +1345,13 @@ static BOOL zpu_color_texture_format_supported(MTLPixelFormat format) {
     return format == MTLPixelFormatR8Unorm || format == MTLPixelFormatR16Float ||
         format == MTLPixelFormatRG8Unorm || format == MTLPixelFormatRG16Float ||
         format == MTLPixelFormatRGBA8Unorm || format == MTLPixelFormatBGRA8Unorm ||
-        format == MTLPixelFormatR32Float || format == MTLPixelFormatRGBA16Float;
+        format == MTLPixelFormatR32Float || format == MTLPixelFormatRGBA16Unorm ||
+        format == MTLPixelFormatRGBA16Float || format == MTLPixelFormatRGBA32Float;
 }
 
 static BOOL zpu_texture_format_supported(MTLPixelFormat format) {
-    return zpu_color_texture_format_supported(format) || format == MTLPixelFormatDepth32Float ||
+    return zpu_color_texture_format_supported(format) || format == MTLPixelFormatR32Uint ||
+        format == MTLPixelFormatDepth32Float ||
         format == MTLPixelFormatStencil8;
 }
 
@@ -1362,9 +1364,12 @@ static zpu_metal_pixel_format zpu_pixel_format(MTLPixelFormat format) {
     if (format == MTLPixelFormatR16Float) return ZPU_METAL_R16_FLOAT;
     if (format == MTLPixelFormatRG8Unorm) return ZPU_METAL_RG8_UNORM;
     if (format == MTLPixelFormatRG16Float) return ZPU_METAL_RG16_FLOAT;
+    if (format == MTLPixelFormatR32Uint) return ZPU_METAL_R32_UINT;
     if (format == MTLPixelFormatBGRA8Unorm) return ZPU_METAL_BGRA8_UNORM;
     if (format == MTLPixelFormatR32Float) return ZPU_METAL_R32_FLOAT;
+    if (format == MTLPixelFormatRGBA16Unorm) return ZPU_METAL_RGBA16_UNORM;
     if (format == MTLPixelFormatRGBA16Float) return ZPU_METAL_RGBA16_FLOAT;
+    if (format == MTLPixelFormatRGBA32Float) return ZPU_METAL_RGBA32_FLOAT;
     if (format == MTLPixelFormatDepth32Float) return ZPU_METAL_DEPTH32_FLOAT;
     if (format == MTLPixelFormatStencil8) return ZPU_METAL_STENCIL8;
     return ZPU_METAL_RGBA8_UNORM;
@@ -1375,8 +1380,10 @@ static NSUInteger zpu_texture_bytes_per_pixel(MTLPixelFormat format) {
     if (format == MTLPixelFormatR16Float) return 2;
     if (format == MTLPixelFormatRG8Unorm) return 2;
     if (format == MTLPixelFormatRG16Float) return 4;
+    if (format == MTLPixelFormatR32Uint) return 4;
     if (format == MTLPixelFormatStencil8) return 1;
-    if (format == MTLPixelFormatRGBA16Float) return 8;
+    if (format == MTLPixelFormatRGBA16Unorm || format == MTLPixelFormatRGBA16Float) return 8;
+    if (format == MTLPixelFormatRGBA32Float) return 16;
     return 4;
 }
 
@@ -6473,7 +6480,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         !zpu_stencil_format_supported(descriptor.stencilAttachmentPixelFormat) ||
         (descriptor != nil && !zpu_vertex_layout_supported(descriptor.vertexDescriptor,
                                                              &vertexStride, &vertexStrideDynamic))) {
-        zpu_set_error(error, @"ZPU Metal supports only the fixed Vertex ABI with RGBA8/BGRA8, depth32-float, and stencil8 attachments");
+        zpu_set_error(error, @"ZPU Metal supports only the fixed Vertex ABI with supported CPU color, depth32-float, and stencil8 attachments");
         return nil;
     }
     ZPUCPUFunction *vertexFunction = (ZPUCPUFunction *)descriptor.vertexFunction;
@@ -6487,7 +6494,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     }
     for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
         if (!zpu_render_pipeline_format_supported(descriptor.colorAttachments[index].pixelFormat)) {
-            zpu_set_error(error, @"ZPU Metal supports only R8/R16Float/RG8/RG16Float/RGBA8/BGRA8/R32Float/RGBA16Float color attachments");
+            zpu_set_error(error, @"ZPU Metal supports only R8/R16Float/RG8/RG16Float/RGBA8/BGRA8/R32Float/RGBA16Unorm/RGBA16Float/RGBA32Float color attachments");
             return nil;
         }
     }
