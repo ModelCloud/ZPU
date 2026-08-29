@@ -152,6 +152,7 @@ pub const Texture = struct {
 const DrawCommand = struct {
     vertex_start: usize,
     vertex_count: usize,
+    vertex_stride: usize = @sizeOf(abi.Vertex),
     primitive: abi.PrimitiveType,
     options: raster3d.DrawOptions,
     vertex_buffer: ?*Buffer = null,
@@ -321,9 +322,10 @@ pub const CommandBuffer = struct {
         return start;
     }
 
-    fn resolveDrawVertices(self: *CommandBuffer, draw: DrawCommand, owned: *?[]abi.Vertex) Error![]const abi.Vertex {
+    fn resolveDrawVertices(self: *CommandBuffer, draw: DrawCommand,
+        owned_source: *?[]abi.Vertex, owned_indexed: *?[]abi.Vertex) Error![]const abi.Vertex {
         const source = if (draw.vertex_buffer) |buffer|
-            try bufferVertices(buffer, draw.vertex_buffer_offset)
+            try bufferVertices(buffer, draw.vertex_buffer_offset, draw.vertex_stride, owned_source)
         else if (draw.vertex_source_count != 0 or draw.index_buffer != null) blk: {
             if (draw.vertex_start > self.vertices.items.len or
                 draw.vertex_source_count > self.vertices.items.len - draw.vertex_start)
@@ -336,7 +338,7 @@ pub const CommandBuffer = struct {
             const index_bytes = std.math.mul(usize, draw.vertex_count, index_size) catch return error.InvalidArgument;
             if (!rangeValid(index_buffer.bytes.len, draw.index_buffer_offset, index_bytes)) return error.InvalidArgument;
             const result = allocator.alloc(abi.Vertex, draw.vertex_count) catch return error.OutOfMemory;
-            owned.* = result;
+            owned_indexed.* = result;
             for (0..draw.vertex_count) |index| {
                 const offset = draw.index_buffer_offset + index * index_size;
                 const value: usize = if (draw.index_type == .uint16)
@@ -429,9 +431,15 @@ pub const CommandBuffer = struct {
                 var resolved_draw = draw;
                 const instance_count = self.resolveIndirectDraw(&resolved_draw) catch |err| return self.fail(err);
                 if (instance_count == 0 or resolved_draw.vertex_count == 0) continue;
-                var owned_vertices: ?[]abi.Vertex = null;
-                const draw_vertices = self.resolveDrawVertices(resolved_draw, &owned_vertices) catch |err| return self.fail(err);
-                defer if (owned_vertices) |vertices| allocator.free(vertices);
+                var owned_source_vertices: ?[]abi.Vertex = null;
+                var owned_indexed_vertices: ?[]abi.Vertex = null;
+                const draw_vertices = self.resolveDrawVertices(
+                    resolved_draw, &owned_source_vertices, &owned_indexed_vertices,
+                ) catch |err| return self.fail(err);
+                defer {
+                    if (owned_source_vertices) |vertices| allocator.free(vertices);
+                    if (owned_indexed_vertices) |vertices| allocator.free(vertices);
+                }
                 var draw_options = resolved_draw.options;
                 if (resolved_draw.fragment_uniform_enabled) {
                     if (resolved_draw.fragment_uniform_buffer) |buffer| {
@@ -632,6 +640,7 @@ pub const RenderEncoder = struct {
     begin_index: usize,
     vertex_buffer: ?*Buffer = null,
     vertex_offset: usize = 0,
+    vertex_stride: usize = @sizeOf(abi.Vertex),
     inline_vertices: std.ArrayList(abi.Vertex) = .empty,
     viewport: abi.Viewport,
     scissor: abi.ScissorRect,
@@ -1058,15 +1067,19 @@ pub const RenderEncoder = struct {
         self.vertex_offset = offset;
     }
 
+    pub fn setVertexBufferStride(self: *RenderEncoder, stride: usize) Error!void {
+        if (!self.open() or stride < @sizeOf(abi.Vertex)) return error.InvalidArgument;
+        self.vertex_stride = stride;
+    }
+
     pub fn setVertexBytes(self: *RenderEncoder, bytes: ?[*]const u8, length: usize, index: u32) Error!void {
         if (!self.open()) return error.InvalidCommand;
         if (index != 0) return error.UnsupportedOperation;
         if (length != 0 and bytes == null) return error.InvalidArgument;
-        if (length % @sizeOf(abi.Vertex) != 0) return error.InvalidArgument;
         self.inline_vertices.clearRetainingCapacity();
         if (length != 0) {
             const raw = bytes.?[0..length];
-            try appendVertexBytes(&self.inline_vertices, raw);
+            try appendVertexBytes(&self.inline_vertices, raw, self.vertex_stride);
         }
         self.vertex_buffer = null;
         self.vertex_offset = 0;
@@ -1120,17 +1133,19 @@ pub const RenderEncoder = struct {
         self.depth_test_max_bound = max_bound;
     }
 
-    fn sourceVertices(self: *const RenderEncoder) Error![]const abi.Vertex {
+    fn sourceVertices(self: *const RenderEncoder, owned: *?[]abi.Vertex) Error![]const abi.Vertex {
         if (self.vertex_buffer == null and self.inline_vertices.items.len != 0) return self.inline_vertices.items;
         const buffer = self.vertex_buffer orelse return error.InvalidArgument;
-        return bufferVertices(buffer, self.vertex_offset);
+        return bufferVertices(buffer, self.vertex_offset, self.vertex_stride, owned);
     }
 
     pub fn drawPrimitives(self: *RenderEncoder, primitive: abi.PrimitiveType, vertex_start: usize, vertex_count: usize, instance_count: usize) Error!void {
         if (!self.open() or !validPrimitive(primitive)) return error.InvalidCommand;
         if (self.sample_texture and self.fragment_texture == null) return error.InvalidResource;
         if (instance_count == 0 or vertex_count == 0) return;
-        const source = try self.sourceVertices();
+        var owned_source: ?[]abi.Vertex = null;
+        const source = try self.sourceVertices(&owned_source);
+        defer if (owned_source) |vertices| allocator.free(vertices);
         if (vertex_start > source.len or vertex_count > source.len - vertex_start) return error.InvalidArgument;
         const selected = source[vertex_start .. vertex_start + vertex_count];
         var instance: usize = 0;
@@ -1140,6 +1155,7 @@ pub const RenderEncoder = struct {
             _ = try self.command_buffer.append(.{ .draw = .{
                 .vertex_start = start,
                 .vertex_count = selected.len,
+                .vertex_stride = self.vertex_stride,
                 .primitive = primitive,
                 .options = self.options(),
                 .vertex_buffer = bound_buffer,
@@ -1159,12 +1175,15 @@ pub const RenderEncoder = struct {
     pub fn drawPrimitivesIndirect(self: *RenderEncoder, primitive: abi.PrimitiveType, indirect_buffer: *Buffer, indirect_buffer_offset: usize) Error!void {
         if (!self.open() or !validPrimitive(primitive) or !validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device) return error.InvalidArgument;
         if (indirect_buffer_offset % @alignOf(u32) != 0 or !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, 16)) return error.InvalidArgument;
-        const source = try self.sourceVertices();
+        var owned_source: ?[]abi.Vertex = null;
+        const source = try self.sourceVertices(&owned_source);
+        defer if (owned_source) |vertices| allocator.free(vertices);
         const bound_buffer = self.vertex_buffer;
         const vertex_start = if (bound_buffer == null) try self.command_buffer.appendVertices(source) else 0;
         _ = try self.command_buffer.append(.{ .draw = .{
             .vertex_start = vertex_start,
             .vertex_count = 0,
+            .vertex_stride = self.vertex_stride,
             .primitive = primitive,
             .options = self.options(),
             .vertex_buffer = bound_buffer,
@@ -1192,7 +1211,9 @@ pub const RenderEncoder = struct {
         if (self.sample_texture and self.fragment_texture == null) return error.InvalidResource;
         if (!validBuffer(index_buffer) or index_buffer.device != self.command_buffer.queue.device) return error.InvalidArgument;
         if (instance_count == 0 or index_count == 0) return;
-        const source = try self.sourceVertices();
+        var owned_source: ?[]abi.Vertex = null;
+        const source = try self.sourceVertices(&owned_source);
+        defer if (owned_source) |vertices| allocator.free(vertices);
         const index_size: usize = if (index_type == .uint16) 2 else 4;
         const index_bytes = std.math.mul(usize, index_count, index_size) catch return error.InvalidArgument;
         if (!rangeValid(index_buffer.bytes.len, index_buffer_offset, index_bytes)) return error.InvalidArgument;
@@ -1203,6 +1224,7 @@ pub const RenderEncoder = struct {
             _ = try self.command_buffer.append(.{ .draw = .{
                 .vertex_start = vertex_start,
                 .vertex_count = index_count,
+                .vertex_stride = self.vertex_stride,
                 .primitive = primitive,
                 .options = self.options(),
                 .vertex_buffer = bound_buffer,
@@ -1228,12 +1250,15 @@ pub const RenderEncoder = struct {
         if (!self.open() or !validPrimitive(primitive) or !validIndexType(index_type) or !validBuffer(index_buffer) or !validBuffer(indirect_buffer)) return error.InvalidArgument;
         if (index_buffer.device != self.command_buffer.queue.device or indirect_buffer.device != self.command_buffer.queue.device) return error.InvalidArgument;
         if (indirect_buffer_offset % @alignOf(u32) != 0 or !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, 20)) return error.InvalidArgument;
-        const source = try self.sourceVertices();
+        var owned_source: ?[]abi.Vertex = null;
+        const source = try self.sourceVertices(&owned_source);
+        defer if (owned_source) |vertices| allocator.free(vertices);
         const bound_buffer = self.vertex_buffer;
         const vertex_start = if (bound_buffer == null) try self.command_buffer.appendVertices(source) else 0;
         _ = try self.command_buffer.append(.{ .draw = .{
             .vertex_start = vertex_start,
             .vertex_count = 0,
+            .vertex_stride = self.vertex_stride,
             .primitive = primitive,
             .options = self.options(),
             .vertex_buffer = bound_buffer,
@@ -2066,22 +2091,41 @@ pub fn textureReplaceRegion(texture: *Texture, region: abi.Region, source: ?[*]c
     }
 }
 
-fn appendVertexBytes(list: *std.ArrayList(abi.Vertex), raw: []const u8) Error!void {
-    if (raw.len % @sizeOf(abi.Vertex) != 0) return error.InvalidArgument;
-    for (0..raw.len / @sizeOf(abi.Vertex)) |index| {
+fn vertexCount(raw_len: usize, stride: usize) ?usize {
+    if (stride < @sizeOf(abi.Vertex) or raw_len < @sizeOf(abi.Vertex)) return null;
+    return 1 + (raw_len - @sizeOf(abi.Vertex)) / stride;
+}
+
+fn appendVertexBytes(list: *std.ArrayList(abi.Vertex), raw: []const u8, stride: usize) Error!void {
+    const count = vertexCount(raw.len, stride) orelse {
+        if (raw.len == 0) return;
+        return error.InvalidArgument;
+    };
+    for (0..count) |index| {
         var value: abi.Vertex = undefined;
         const destination = std.mem.asBytes(&value);
-        @memcpy(destination, raw[index * @sizeOf(abi.Vertex) ..][0..@sizeOf(abi.Vertex)]);
+        @memcpy(destination, raw[index * stride ..][0..@sizeOf(abi.Vertex)]);
         list.append(allocator, value) catch return error.OutOfMemory;
     }
 }
 
-fn bufferVertices(buffer: *Buffer, offset: usize) Error![]const abi.Vertex {
+fn bufferVertices(buffer: *Buffer, offset: usize, stride: usize, owned: *?[]abi.Vertex) Error![]const abi.Vertex {
     if (!validBuffer(buffer) or offset > buffer.bytes.len) return error.InvalidResource;
     const raw = buffer.bytes[offset..];
-    if (raw.len % @sizeOf(abi.Vertex) != 0 or @intFromPtr(raw.ptr) % @alignOf(abi.Vertex) != 0) return error.InvalidArgument;
-    const pointer: [*]const abi.Vertex = @ptrCast(@alignCast(raw.ptr));
-    return pointer[0 .. raw.len / @sizeOf(abi.Vertex)];
+    const count = vertexCount(raw.len, stride) orelse {
+        if (raw.len == 0) return &.{};
+        return error.InvalidArgument;
+    };
+    if (stride == @sizeOf(abi.Vertex) and @intFromPtr(raw.ptr) % @alignOf(abi.Vertex) == 0) {
+        const pointer: [*]const abi.Vertex = @ptrCast(@alignCast(raw.ptr));
+        return pointer[0..count];
+    }
+    const result = allocator.alloc(abi.Vertex, count) catch return error.OutOfMemory;
+    for (0..count) |index| {
+        @memcpy(std.mem.asBytes(&result[index]), raw[index * stride ..][0..@sizeOf(abi.Vertex)]);
+    }
+    owned.* = result;
+    return result;
 }
 
 fn addRasterStats(a: raster3d.Stats, b: raster3d.Stats) raster3d.Stats {
@@ -3582,6 +3626,11 @@ pub export fn zpu_metal_render_encoder_destroy(encoder: ?*RenderEncoder) callcon
 
 pub export fn zpu_metal_render_encoder_set_vertex_buffer(encoder: ?*RenderEncoder, buffer: ?*Buffer, offset: usize, index: u32) callconv(.c) c_int {
     (encoder orelse return -1).setVertexBuffer(buffer, offset, index) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_vertex_buffer_stride(encoder: ?*RenderEncoder, stride: usize) callconv(.c) c_int {
+    (encoder orelse return -1).setVertexBufferStride(stride) catch |err| return errorCode(err);
     return 0;
 }
 

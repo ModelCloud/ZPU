@@ -371,6 +371,7 @@ zpu_metal_render_encoder *zpu_metal_command_buffer_render_encoder(
     zpu_metal_texture *color_texture,
     const zpu_metal_render_pass_descriptor *pass);
 int zpu_metal_render_encoder_set_vertex_buffer(zpu_metal_render_encoder *encoder, zpu_metal_buffer *buffer, size_t offset, uint32_t index);
+int zpu_metal_render_encoder_set_vertex_buffer_stride(zpu_metal_render_encoder *encoder, size_t stride);
 int zpu_metal_render_encoder_set_vertex_bytes(zpu_metal_render_encoder *encoder, const void *bytes, size_t length, uint32_t index);
 int zpu_metal_render_encoder_set_viewport(zpu_metal_render_encoder *encoder, zpu_metal_viewport viewport);
 int zpu_metal_render_encoder_set_scissor_rect(zpu_metal_render_encoder *encoder, zpu_metal_scissor_rect scissor);

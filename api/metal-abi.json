@@ -66,6 +66,7 @@
       "zpu_metal_command_buffer_render_encoder",
       "zpu_metal_render_encoder_destroy",
       "zpu_metal_render_encoder_set_vertex_buffer",
+      "zpu_metal_render_encoder_set_vertex_buffer_stride",
       "zpu_metal_render_encoder_set_vertex_bytes",
       "zpu_metal_render_encoder_set_viewport",
       "zpu_metal_render_encoder_set_scissor_rect",

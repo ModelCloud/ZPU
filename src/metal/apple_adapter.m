@@ -566,6 +566,8 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLPixelFormat _depthPixelFormat;
     MTLPixelFormat _stencilPixelFormat;
     BOOL _sampleTexture;
+    NSUInteger _vertexStride;
+    BOOL _vertexStrideDynamic;
     NSArray *_vertexLinkedFunctionNames;
     NSArray *_fragmentLinkedFunctionNames;
     BOOL _supportsAddingVertexBinaryFunctions;
@@ -1190,11 +1192,16 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     ZPUCommandBuffer *_owner;
     NSString *_label;
     ZPUBuffer *_vertexBuffer;
+    NSUInteger _vertexStride;
+    BOOL _vertexStrideExplicit;
+    BOOL _vertexStrideStaticToken;
     ZPUTexture *_fragmentTexture;
     ZPURenderPipelineState *_pipelineState;
     ZPUDepthStencilState *_depthStencilState;
 }
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner encoder:(zpu_metal_render_encoder *)encoder;
+- (BOOL)applyVertexAttributeStride:(NSUInteger)stride allowStaticToken:(BOOL)allowStaticToken;
+- (BOOL)validateVertexStrideForDraw;
 @end
 
 #pragma clang diagnostic push
@@ -1351,6 +1358,33 @@ static BOOL zpu_render_pipeline_format_supported(MTLPixelFormat format) {
     return format == MTLPixelFormatInvalid || format == MTLPixelFormatRGBA8Unorm ||
         format == MTLPixelFormatBGRA8Unorm || format == MTLPixelFormatR32Float ||
         format == MTLPixelFormatRGBA16Float;
+}
+
+static BOOL zpu_vertex_layout_supported(MTLVertexDescriptor *descriptor, NSUInteger *stride, BOOL *dynamic) {
+    *stride = sizeof(zpu_metal_vertex);
+    *dynamic = NO;
+    if (descriptor == nil) return YES;
+
+    MTLVertexAttributeDescriptor *position = descriptor.attributes[0];
+    MTLVertexAttributeDescriptor *color = descriptor.attributes[1];
+    MTLVertexBufferLayoutDescriptor *layout = descriptor.layouts[0];
+    const BOOL empty = position.format == MTLVertexFormatInvalid &&
+        color.format == MTLVertexFormatInvalid && layout.stride == 0 &&
+        (layout.stepFunction == MTLVertexStepFunctionConstant ||
+         layout.stepFunction == MTLVertexStepFunctionPerVertex);
+    if (empty) return YES;
+
+    if (position.format != MTLVertexFormatFloat4 || position.offset != 0 ||
+        position.bufferIndex != 0 || color.format != MTLVertexFormatFloat4 ||
+        color.offset != sizeof(float) * 4 || color.bufferIndex != 0 ||
+        layout.stepFunction != MTLVertexStepFunctionPerVertex || layout.stepRate != 1) return NO;
+    if (layout.stride == NSUIntegerMax) {
+        *dynamic = YES;
+        return YES;
+    }
+    if (layout.stride < sizeof(zpu_metal_vertex)) return NO;
+    *stride = layout.stride;
+    return YES;
 }
 
 static BOOL zpu_depth_format_supported(MTLPixelFormat format) {
@@ -5060,6 +5094,7 @@ static BOOL zpu_append_visible_binary_function_names(
         }
         _multiTargetOutput = [descriptor.fragmentFunction.name rangeOfString:@"mrt" options:NSCaseInsensitiveSearch].location != NSNotFound;
         _sampleTexture = [descriptor.fragmentFunction.name rangeOfString:@"sample" options:NSCaseInsensitiveSearch].location != NSNotFound;
+        (void)zpu_vertex_layout_supported(descriptor.vertexDescriptor, &_vertexStride, &_vertexStrideDynamic);
         _fragmentUniform = [descriptor.fragmentFunction.name isEqualToString:@"zpu_cpu_uniform_color_fragment"];
         _rasterizationEnabled = descriptor.rasterizationEnabled;
         _supportsIndirectCommandBuffers = descriptor.supportIndirectCommandBuffers;
@@ -5113,6 +5148,8 @@ static BOOL zpu_append_visible_binary_function_names(
         _colorAttachmentCount = pipeline->_colorAttachmentCount;
         _multiTargetOutput = pipeline->_multiTargetOutput;
         _rasterizationEnabled = pipeline->_rasterizationEnabled;
+        _vertexStride = pipeline->_vertexStride;
+        _vertexStrideDynamic = pipeline->_vertexStrideDynamic;
         _supportsIndirectCommandBuffers = pipeline->_supportsIndirectCommandBuffers;
         _fragmentUniform = pipeline->_fragmentUniform;
         _depthPixelFormat = pipeline->_depthPixelFormat;
@@ -6167,10 +6204,14 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     return heap == NULL ? nil : (id<MTLHeap>)[[ZPUHeap alloc] initWithOwner:self heap:heap descriptor:descriptor];
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)descriptor error:(NSError **)error {
+    NSUInteger vertexStride = 0;
+    BOOL vertexStrideDynamic = NO;
     if (descriptor == nil || descriptor.vertexFunction == nil || descriptor.fragmentFunction == nil ||
         descriptor.rasterSampleCount != 1 ||
         !zpu_depth_format_supported(descriptor.depthAttachmentPixelFormat) ||
-        !zpu_stencil_format_supported(descriptor.stencilAttachmentPixelFormat)) {
+        !zpu_stencil_format_supported(descriptor.stencilAttachmentPixelFormat) ||
+        (descriptor != nil && !zpu_vertex_layout_supported(descriptor.vertexDescriptor,
+                                                             &vertexStride, &vertexStrideDynamic))) {
         zpu_set_error(error, @"ZPU Metal supports only the fixed Vertex ABI with RGBA8/BGRA8, depth32-float, and stencil8 attachments");
         return nil;
     }
@@ -6191,6 +6232,8 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     }
     if (error != NULL) *error = nil;
     ZPURenderPipelineState *pipeline = [[ZPURenderPipelineState alloc] initWithOwner:self descriptor:descriptor];
+    pipeline->_vertexStride = vertexStride;
+    pipeline->_vertexStrideDynamic = vertexStrideDynamic;
     if (pipeline->_invalidLinking) {
         zpu_set_error(error, @"ZPU CPU Metal render pipeline has unsupported linked functions");
         return nil;
@@ -7255,7 +7298,7 @@ static id<MTLRenderPipelineState> zpu_mtl4_render_pipeline_for_descriptor(
         position_attribute.format == MTLVertexFormatFloat4 && position_attribute.offset == 0 &&
         position_attribute.bufferIndex == 0 && color_attribute.format == MTLVertexFormatFloat4 &&
         color_attribute.offset == sizeof(float) * 4 && color_attribute.bufferIndex == 0 &&
-        vertex_layout.stride == sizeof(zpu_metal_vertex) &&
+        (vertex_layout.stride == NSUIntegerMax || vertex_layout.stride >= sizeof(zpu_metal_vertex)) &&
         vertex_layout.stepFunction == MTLVertexStepFunctionPerVertex && vertex_layout.stepRate == 1;
     if (descriptor.alphaToCoverageState != MTL4AlphaToCoverageStateDisabled ||
         descriptor.alphaToOneState != MTL4AlphaToOneStateDisabled ||
@@ -7282,6 +7325,7 @@ static id<MTLRenderPipelineState> zpu_mtl4_render_pipeline_for_descriptor(
     legacy.alphaToCoverageEnabled = NO;
     legacy.alphaToOneEnabled = NO;
     legacy.rasterizationEnabled = descriptor.rasterizationEnabled;
+    legacy.vertexDescriptor = vertex_descriptor;
     legacy.maxVertexAmplificationCount = descriptor.maxVertexAmplificationCount == 0 ? 1 : descriptor.maxVertexAmplificationCount;
     legacy.inputPrimitiveTopology = descriptor.inputPrimitiveTopology;
     legacy.supportAddingVertexBinaryFunctions = descriptor.supportVertexBinaryLinking;
@@ -8963,7 +9007,12 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
             return;
         }
         if ((stages & MTLRenderStageVertex) != 0) {
-            [(id)_legacy setVertexBuffer:(id<MTLBuffer>)buffer offset:0 attributeStride:(NSUInteger)bufferStrides[index] atIndex:index];
+            if (bufferStrides[index] == 0 || bufferStrides[index] == NSUIntegerMax) {
+                [(id)_legacy setVertexBuffer:(id<MTLBuffer>)buffer offset:0 atIndex:index];
+            } else {
+                [(id)_legacy setVertexBuffer:(id<MTLBuffer>)buffer offset:0
+                              attributeStride:(NSUInteger)bufferStrides[index] atIndex:index];
+            }
         }
         if ((stages & MTLRenderStageFragment) != 0) {
             [(id)_legacy setFragmentBuffer:(id<MTLBuffer>)buffer offset:0 atIndex:index];
@@ -9146,7 +9195,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
         if (resource == nil) continue;
         const uint64_t *strides = (const uint64_t *)_argumentTable->_bufferStrides.bytes;
         [_legacy setBuffer:(id<MTLBuffer>)resource offset:0 atIndex:index];
-        if (strides[index] != 0) {
+        if (strides[index] != 0 && strides[index] != NSUIntegerMax) {
             [_legacy setBuffer:(id<MTLBuffer>)resource offset:0 attributeStride:(NSUInteger)strides[index] atIndex:index];
         }
     }
@@ -10096,7 +10145,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     }
 }
 - (void)setBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0)) {
-    (void)stride;
+    if (stride != NSUIntegerMax) { [_owner markError]; return; }
     [self setBuffer:buffer offset:offset atIndex:index];
 }
 - (void)setBuffers:(const id<MTLBuffer> __nullable [__nonnull])buffers offsets:(const NSUInteger [__nonnull])offsets attributeStrides:(const NSUInteger [__nonnull])strides withRange:(NSRange)range API_AVAILABLE(macos(14.0), ios(17.0)) {
@@ -10106,11 +10155,11 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     }
 }
 - (void)setBufferOffset:(NSUInteger)offset attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0)) {
-    (void)stride;
+    if (stride != NSUIntegerMax) { [_owner markError]; return; }
     [self setBufferOffset:offset atIndex:index];
 }
 - (void)setBytes:(const void *)bytes length:(NSUInteger)length attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0)) {
-    (void)stride;
+    if (stride != NSUIntegerMax) { [_owner markError]; return; }
     [self setBytes:bytes length:length atIndex:index];
 }
 - (void)setBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(10.11), ios(8.3)) {
@@ -11543,6 +11592,26 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     if ((self = [super init])) { _owner = owner; _zpuEncoder = encoder; }
     return self;
 }
+- (BOOL)applyVertexAttributeStride:(NSUInteger)stride allowStaticToken:(BOOL)allowStaticToken {
+    const BOOL staticToken = stride == NSUIntegerMax;
+    if (staticToken && !allowStaticToken) return NO;
+    if (_pipelineState != nil) {
+        if (staticToken && _pipelineState->_vertexStrideDynamic) return NO;
+        if (!staticToken && !_pipelineState->_vertexStrideDynamic) return NO;
+    }
+    if (!staticToken && stride < sizeof(zpu_metal_vertex)) return NO;
+    _vertexStrideStaticToken = staticToken;
+    _vertexStride = staticToken ? (_pipelineState == nil ? sizeof(zpu_metal_vertex) : _pipelineState->_vertexStride) : stride;
+    _vertexStrideExplicit = YES;
+    return zpu_metal_render_encoder_set_vertex_buffer_stride(_zpuEncoder, _vertexStride) == ZPU_METAL_OK;
+}
+- (BOOL)validateVertexStrideForDraw {
+    if (_pipelineState != nil && _pipelineState->_vertexStrideDynamic && !_vertexStrideExplicit) {
+        [_owner markError];
+        return NO;
+    }
+    return YES;
+}
 - (id<MTLDevice>)device { return [_owner device]; }
 - (void)dealloc {
     if (_zpuEncoder != NULL) {
@@ -11577,22 +11646,29 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
             _zpuEncoder, bytes, length, (uint32_t)index) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0)) {
-    (void)stride;
+    if (![self applyVertexAttributeStride:stride allowStaticToken:NO]) { [_owner markError]; return; }
     [self setVertexBuffer:buffer offset:offset atIndex:index];
 }
 - (void)setVertexBuffers:(id<MTLBuffer> const __nullable [__nonnull])buffers
                   offsets:(NSUInteger const [__nonnull])offsets
          attributeStrides:(NSUInteger const [__nonnull])strides
                 withRange:(NSRange)range API_AVAILABLE(macos(14.0), ios(17.0)) {
-    (void)strides;
-    [self setVertexBuffers:buffers offsets:offsets withRange:range];
+    if (buffers == NULL || offsets == NULL || strides == NULL) { [_owner markError]; return; }
+    if (range.location > UINT32_MAX || range.length > UINT32_MAX - range.location) { [_owner markError]; return; }
+    for (NSUInteger index = 0; index < range.length; ++index) {
+        if (![self applyVertexAttributeStride:strides[index] allowStaticToken:YES]) {
+            [_owner markError];
+            continue;
+        }
+        [self setVertexBuffer:buffers[index] offset:offsets[index] atIndex:range.location + index];
+    }
 }
 - (void)setVertexBufferOffset:(NSUInteger)offset attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0)) {
-    (void)stride;
+    if (![self applyVertexAttributeStride:stride allowStaticToken:NO]) { [_owner markError]; return; }
     [self setVertexBufferOffset:offset atIndex:index];
 }
 - (void)setVertexBytes:(const void *)bytes length:(NSUInteger)length attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0)) {
-    (void)stride;
+    if (![self applyVertexAttributeStride:stride allowStaticToken:NO]) { [_owner markError]; return; }
     [self setVertexBytes:bytes length:length atIndex:index];
 }
 - (void)setVertexTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
@@ -11965,7 +12041,18 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         [_owner markError];
         return;
     }
+    if (_vertexStrideExplicit &&
+        ((_vertexStrideStaticToken && state->_vertexStrideDynamic) ||
+         (!_vertexStrideStaticToken && !state->_vertexStrideDynamic))) {
+        [_owner markError];
+        return;
+    }
     _pipelineState = state;
+    if (!_vertexStrideExplicit || _vertexStrideStaticToken) _vertexStride = state->_vertexStride;
+    if (zpu_metal_render_encoder_set_vertex_buffer_stride(_zpuEncoder, _vertexStride) != ZPU_METAL_OK) {
+        [_owner markError];
+        return;
+    }
     [_owner retainResource:state];
     uint16_t colorFormats[ZPU_METAL_MAX_COLOR_ATTACHMENTS];
     for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
@@ -12012,6 +12099,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     [self drawPrimitives:primitiveType vertexStart:vertexStart vertexCount:vertexCount instanceCount:1];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)primitiveType vertexStart:(NSUInteger)vertexStart vertexCount:(NSUInteger)vertexCount instanceCount:(NSUInteger)instanceCount {
+    if (![self validateVertexStrideForDraw]) return;
     if (zpu_metal_render_encoder_draw_primitives(_zpuEncoder, (zpu_metal_primitive_type)primitiveType, vertexStart, vertexCount, instanceCount) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)primitiveType vertexStart:(NSUInteger)vertexStart vertexCount:(NSUInteger)vertexCount instanceCount:(NSUInteger)instanceCount baseInstance:(NSUInteger)baseInstance {
@@ -12019,18 +12107,21 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     [self drawPrimitives:primitiveType vertexStart:vertexStart vertexCount:vertexCount instanceCount:instanceCount];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)primitiveType indirectBuffer:(id<MTLBuffer>)indirectBuffer indirectBufferOffset:(NSUInteger)indirectBufferOffset {
+    if (![self validateVertexStrideForDraw]) return;
     ZPUBuffer *zpuIndirectBuffer = (ZPUBuffer *)indirectBuffer;
     if (![zpuIndirectBuffer isKindOfClass:[ZPUBuffer class]]) { [_owner markError]; return; }
     [_owner retainResource:zpuIndirectBuffer];
     if (zpu_metal_render_encoder_draw_primitives_indirect(_zpuEncoder, (zpu_metal_primitive_type)primitiveType, zpuIndirectBuffer->_zpuBuffer, indirectBufferOffset) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)primitiveType indexCount:(NSUInteger)indexCount indexType:(MTLIndexType)indexType indexBuffer:(id<MTLBuffer>)indexBuffer indexBufferOffset:(NSUInteger)indexBufferOffset {
+    if (![self validateVertexStrideForDraw]) return;
     ZPUBuffer *zpuIndexBuffer = (ZPUBuffer *)indexBuffer;
     if (![zpuIndexBuffer isKindOfClass:[ZPUBuffer class]]) { [_owner markError]; return; }
     [_owner retainResource:zpuIndexBuffer];
     if (zpu_metal_render_encoder_draw_indexed_primitives(_zpuEncoder, (zpu_metal_primitive_type)primitiveType, indexCount, (zpu_metal_index_type)(indexType == MTLIndexTypeUInt16 ? ZPU_METAL_INDEX_UINT16 : ZPU_METAL_INDEX_UINT32), zpuIndexBuffer->_zpuBuffer, indexBufferOffset, 1) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)primitiveType indexCount:(NSUInteger)indexCount indexType:(MTLIndexType)indexType indexBuffer:(id<MTLBuffer>)indexBuffer indexBufferOffset:(NSUInteger)indexBufferOffset instanceCount:(NSUInteger)instanceCount {
+    if (![self validateVertexStrideForDraw]) return;
     ZPUBuffer *zpuIndexBuffer = (ZPUBuffer *)indexBuffer;
     if (![zpuIndexBuffer isKindOfClass:[ZPUBuffer class]]) { [_owner markError]; return; }
     [_owner retainResource:zpuIndexBuffer];
@@ -12040,6 +12131,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         zpuIndexBuffer->_zpuBuffer, indexBufferOffset, instanceCount) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)primitiveType indexCount:(NSUInteger)indexCount indexType:(MTLIndexType)indexType indexBuffer:(id<MTLBuffer>)indexBuffer indexBufferOffset:(NSUInteger)indexBufferOffset instanceCount:(NSUInteger)instanceCount baseVertex:(NSInteger)baseVertex baseInstance:(NSUInteger)baseInstance {
+    if (![self validateVertexStrideForDraw]) return;
     (void)baseInstance;
     ZPUBuffer *zpuIndexBuffer = (ZPUBuffer *)indexBuffer;
     if (![zpuIndexBuffer isKindOfClass:[ZPUBuffer class]]) { [_owner markError]; return; }
@@ -12050,6 +12142,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         zpuIndexBuffer->_zpuBuffer, indexBufferOffset, instanceCount, (int64_t)baseVertex) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)primitiveType indexType:(MTLIndexType)indexType indexBuffer:(id<MTLBuffer>)indexBuffer indexBufferOffset:(NSUInteger)indexBufferOffset indirectBuffer:(id<MTLBuffer>)indirectBuffer indirectBufferOffset:(NSUInteger)indirectBufferOffset {
+    if (![self validateVertexStrideForDraw]) return;
     ZPUBuffer *zpuIndexBuffer = (ZPUBuffer *)indexBuffer;
     ZPUBuffer *zpuIndirectBuffer = (ZPUBuffer *)indirectBuffer;
     if (![zpuIndexBuffer isKindOfClass:[ZPUBuffer class]] || ![zpuIndirectBuffer isKindOfClass:[ZPUBuffer class]]) { [_owner markError]; return; }
