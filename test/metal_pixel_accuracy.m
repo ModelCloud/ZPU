@@ -1268,12 +1268,23 @@ int main(void) {
             return 20;
         }
 
-        /* Non-renderable resource formats still have a byte-exact contract.
-         * The adapter must preserve the native Metal texel width for both
-         * scalar R32Float and packed RGBA16Float transfers. */
+        /* Scalar and packed floating-point resource formats have a byte-exact
+         * contract. The adapter must preserve the native Metal texel width
+         * for R16Float, RG16Float, R32Float, and RGBA16Float transfers. */
         enum { raw_format_width = 3, raw_format_height = 2,
+               raw_r16_bytes = raw_format_width * raw_format_height * 2,
+               raw_rg16_bytes = raw_format_width * raw_format_height * 4,
                raw_r32_bytes = raw_format_width * raw_format_height * 4,
                raw_rgba16_bytes = raw_format_width * raw_format_height * 8 };
+        const uint8_t raw_r16_source[raw_r16_bytes] = {
+            0x00, 0x3c, 0x00, 0x40, 0x00, 0x42,
+            0x00, 0xc8, 0x00, 0x00, 0x00, 0x7b,
+        };
+        const uint8_t raw_rg16_source[raw_rg16_bytes] = {
+            0x00, 0x3c, 0x00, 0x40, 0x00, 0x42, 0x00, 0x44,
+            0x00, 0xc8, 0x00, 0xc9, 0x00, 0x00, 0x00, 0x3a,
+            0x00, 0x7b, 0x00, 0x7a, 0x00, 0x38, 0x00, 0x39,
+        };
         const uint32_t raw_r32_source[raw_format_width * raw_format_height] = {
             0x3f800000, 0x40000000, 0x40400000, 0xc0800000, 0x00000000, 0x7f800000,
         };
@@ -1292,6 +1303,10 @@ int main(void) {
                                                             mipmapped:NO];
         native_r32_descriptor.storageMode = MTLStorageModeShared;
         native_r32_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        MTLTextureDescriptor *native_r16_descriptor = [native_r32_descriptor copy];
+        native_r16_descriptor.pixelFormat = MTLPixelFormatR16Float;
+        MTLTextureDescriptor *native_rg16_descriptor = [native_r32_descriptor copy];
+        native_rg16_descriptor.pixelFormat = MTLPixelFormatRG16Float;
         MTLTextureDescriptor *native_rgba16_descriptor =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
                                                                 width:raw_format_width
@@ -1300,30 +1315,60 @@ int main(void) {
         native_rgba16_descriptor.storageMode = MTLStorageModeShared;
         native_rgba16_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
         id<MTLTexture> native_r32_texture = [device newTextureWithDescriptor:native_r32_descriptor];
+        id<MTLTexture> native_r16_texture = [device newTextureWithDescriptor:native_r16_descriptor];
+        id<MTLTexture> native_rg16_texture = [device newTextureWithDescriptor:native_rg16_descriptor];
         id<MTLTexture> native_rgba16_texture = [device newTextureWithDescriptor:native_rgba16_descriptor];
+        MTLTextureDescriptor *adapter_r16_descriptor = [native_r16_descriptor copy];
+        MTLTextureDescriptor *adapter_rg16_descriptor = [native_rg16_descriptor copy];
         MTLTextureDescriptor *adapter_r32_descriptor = [native_r32_descriptor copy];
         MTLTextureDescriptor *adapter_rgba16_descriptor = [native_rgba16_descriptor copy];
+        id<MTLTexture> adapter_r16_texture = [adapter_device newTextureWithDescriptor:adapter_r16_descriptor];
+        id<MTLTexture> adapter_rg16_texture = [adapter_device newTextureWithDescriptor:adapter_rg16_descriptor];
         id<MTLTexture> adapter_r32_texture = [adapter_device newTextureWithDescriptor:adapter_r32_descriptor];
         id<MTLTexture> adapter_rgba16_texture = [adapter_device newTextureWithDescriptor:adapter_rgba16_descriptor];
-        if (native_r32_texture == nil || native_rgba16_texture == nil ||
+        if (native_r16_texture == nil || native_rg16_texture == nil ||
+            native_r32_texture == nil || native_rgba16_texture == nil ||
+            adapter_r16_texture == nil || adapter_rg16_texture == nil ||
             adapter_r32_texture == nil || adapter_rgba16_texture == nil ||
+            adapter_r16_texture.allocatedSize != raw_r16_bytes ||
+            adapter_rg16_texture.allocatedSize != raw_rg16_bytes ||
             adapter_r32_texture.allocatedSize != raw_r32_bytes ||
             adapter_rgba16_texture.allocatedSize != raw_rgba16_bytes) {
             fprintf(stderr, "metal-pixel: scalar/half-float texture allocation failed\n");
             return 75;
         }
+        [native_r16_texture replaceRegion:MTLRegionMake2D(0, 0, raw_format_width, raw_format_height)
+                              mipmapLevel:0 withBytes:raw_r16_source bytesPerRow:raw_format_width * 2];
+        [native_rg16_texture replaceRegion:MTLRegionMake2D(0, 0, raw_format_width, raw_format_height)
+                               mipmapLevel:0 withBytes:raw_rg16_source bytesPerRow:raw_format_width * 4];
         [native_r32_texture replaceRegion:MTLRegionMake2D(0, 0, raw_format_width, raw_format_height)
                               mipmapLevel:0 withBytes:raw_r32_source bytesPerRow:raw_format_width * 4];
         [native_rgba16_texture replaceRegion:MTLRegionMake2D(0, 0, raw_format_width, raw_format_height)
                                 mipmapLevel:0 withBytes:raw_rgba16_source bytesPerRow:raw_format_width * 8];
+        [adapter_r16_texture replaceRegion:MTLRegionMake2D(0, 0, raw_format_width, raw_format_height)
+                               mipmapLevel:0 withBytes:raw_r16_source bytesPerRow:raw_format_width * 2];
+        [adapter_rg16_texture replaceRegion:MTLRegionMake2D(0, 0, raw_format_width, raw_format_height)
+                                mipmapLevel:0 withBytes:raw_rg16_source bytesPerRow:raw_format_width * 4];
         [adapter_r32_texture replaceRegion:MTLRegionMake2D(0, 0, raw_format_width, raw_format_height)
                               mipmapLevel:0 withBytes:raw_r32_source bytesPerRow:raw_format_width * 4];
         [adapter_rgba16_texture replaceRegion:MTLRegionMake2D(0, 0, raw_format_width, raw_format_height)
                                 mipmapLevel:0 withBytes:raw_rgba16_source bytesPerRow:raw_format_width * 8];
+        uint8_t native_r16_bytes[raw_r16_bytes];
+        uint8_t adapter_r16_bytes[raw_r16_bytes];
+        uint8_t native_rg16_bytes[raw_rg16_bytes];
+        uint8_t adapter_rg16_bytes[raw_rg16_bytes];
         uint8_t native_r32_bytes[raw_r32_bytes];
         uint8_t adapter_r32_bytes[raw_r32_bytes];
         uint8_t native_rgba16_bytes[raw_rgba16_bytes];
         uint8_t adapter_rgba16_bytes[raw_rgba16_bytes];
+        [native_r16_texture getBytes:native_r16_bytes bytesPerRow:raw_format_width * 2
+                          fromRegion:MTLRegionMake2D(0, 0, raw_format_width, raw_format_height) mipmapLevel:0];
+        [adapter_r16_texture getBytes:adapter_r16_bytes bytesPerRow:raw_format_width * 2
+                            fromRegion:MTLRegionMake2D(0, 0, raw_format_width, raw_format_height) mipmapLevel:0];
+        [native_rg16_texture getBytes:native_rg16_bytes bytesPerRow:raw_format_width * 4
+                           fromRegion:MTLRegionMake2D(0, 0, raw_format_width, raw_format_height) mipmapLevel:0];
+        [adapter_rg16_texture getBytes:adapter_rg16_bytes bytesPerRow:raw_format_width * 4
+                             fromRegion:MTLRegionMake2D(0, 0, raw_format_width, raw_format_height) mipmapLevel:0];
         [native_r32_texture getBytes:native_r32_bytes bytesPerRow:raw_format_width * 4
                           fromRegion:MTLRegionMake2D(0, 0, raw_format_width, raw_format_height) mipmapLevel:0];
         [adapter_r32_texture getBytes:adapter_r32_bytes bytesPerRow:raw_format_width * 4
@@ -1332,8 +1377,14 @@ int main(void) {
                               fromRegion:MTLRegionMake2D(0, 0, raw_format_width, raw_format_height) mipmapLevel:0];
         [adapter_rgba16_texture getBytes:adapter_rgba16_bytes bytesPerRow:raw_format_width * 8
                                 fromRegion:MTLRegionMake2D(0, 0, raw_format_width, raw_format_height) mipmapLevel:0];
-        if (memcmp(native_r32_bytes, adapter_r32_bytes, raw_r32_bytes) != 0 ||
-            memcmp(native_rgba16_bytes, adapter_rgba16_bytes, raw_rgba16_bytes) != 0) {
+        if (memcmp(native_r16_bytes, adapter_r16_bytes, raw_r16_bytes) != 0 ||
+            memcmp(native_rg16_bytes, adapter_rg16_bytes, raw_rg16_bytes) != 0 ||
+            memcmp(native_r32_bytes, adapter_r32_bytes, raw_r32_bytes) != 0 ||
+            memcmp(native_rgba16_bytes, adapter_rgba16_bytes, raw_rgba16_bytes) != 0 ||
+            memcmp(adapter_r16_bytes, raw_r16_source, raw_r16_bytes) != 0 ||
+            memcmp(adapter_rg16_bytes, raw_rg16_source, raw_rg16_bytes) != 0 ||
+            memcmp(adapter_r32_bytes, raw_r32_source, raw_r32_bytes) != 0 ||
+            memcmp(adapter_rgba16_bytes, raw_rgba16_source, raw_rgba16_bytes) != 0) {
             fprintf(stderr, "metal-pixel: non-renderable texture format byte mismatch\n");
             return 76;
         }
@@ -1763,12 +1814,15 @@ int main(void) {
         const MTLPixelFormat color_formats[] = {
             MTLPixelFormatR32Float, MTLPixelFormatRGBA16Float,
             MTLPixelFormatR8Unorm, MTLPixelFormatRG8Unorm,
+            MTLPixelFormatR16Float, MTLPixelFormatRG16Float,
         };
         for (NSUInteger format_index = 0; format_index < sizeof(color_formats) / sizeof(color_formats[0]); ++format_index) {
             const MTLPixelFormat format = color_formats[format_index];
             const NSUInteger bytes_per_pixel = format == MTLPixelFormatR32Float ? 4 :
                 format == MTLPixelFormatRGBA16Float ? 8 :
-                format == MTLPixelFormatR8Unorm ? 1 : 2;
+                format == MTLPixelFormatR8Unorm ? 1 :
+                format == MTLPixelFormatR16Float ? 2 :
+                format == MTLPixelFormatRG8Unorm ? 2 : 4;
             const NSUInteger float_byte_count = (NSUInteger)width * height * bytes_per_pixel;
             MTLRenderPipelineDescriptor *native_float_pipeline_descriptor = [pipeline_descriptor copy];
             native_float_pipeline_descriptor.colorAttachments[0].pixelFormat = format;
@@ -11676,7 +11730,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for R8/RG8/RGBA8/BGRA8 core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables and border colors, mip/coordinate/reduction/anisotropic sampler modes, visibility results, acceleration-structure resources, cube/cube-array textures, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for R8/R16Float/RG8/RG16Float/RGBA8/BGRA8 core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables and border colors, mip/coordinate/reduction/anisotropic sampler modes, visibility results, acceleration-structure resources, cube/cube-array textures, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }

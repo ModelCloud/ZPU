@@ -15,7 +15,9 @@ pub const Api = enum {
     viewport,
     scissor_rect,
     r8_unorm,
+    r16_float,
     rg8_unorm,
+    rg16_float,
     rgba8_unorm,
     bgra8_unorm,
     r32_float,
@@ -52,7 +54,9 @@ pub fn entry(api: Api) Entry {
     return switch (api) {
         .color, .viewport, .scissor_rect => .{ .kind = .direct_vulkan },
         .r8_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 9 }, // VK_FORMAT_R8_UNORM
+        .r16_float => .{ .kind = .direct_vulkan, .vulkan_value = 76 }, // VK_FORMAT_R16_SFLOAT
         .rg8_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 16 }, // VK_FORMAT_R8G8_UNORM
+        .rg16_float => .{ .kind = .direct_vulkan, .vulkan_value = 83 }, // VK_FORMAT_R16G16_SFLOAT
         .rgba8_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 37 }, // VK_FORMAT_R8G8B8A8_UNORM
         .bgra8_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 44 }, // VK_FORMAT_B8G8R8A8_UNORM
         .r32_float => .{ .kind = .direct_vulkan, .vulkan_value = 100 }, // VK_FORMAT_R32_SFLOAT
@@ -73,7 +77,9 @@ pub fn entry(api: Api) Entry {
 
 test "mapping policy keeps direct values separate from native lifetimes" {
     try @import("std").testing.expectEqual(@as(?u32, 9), entry(.r8_unorm).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 76), entry(.r16_float).vulkan_value);
     try @import("std").testing.expectEqual(@as(?u32, 16), entry(.rg8_unorm).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 83), entry(.rg16_float).vulkan_value);
     try @import("std").testing.expectEqual(Kind.direct_vulkan, entry(.bgra8_unorm).kind);
     try @import("std").testing.expectEqual(@as(?u32, 44), entry(.bgra8_unorm).vulkan_value);
     try @import("std").testing.expectEqual(@as(?u32, 100), entry(.r32_float).vulkan_value);

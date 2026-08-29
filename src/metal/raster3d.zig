@@ -87,7 +87,7 @@ pub const StencilFace = struct {
     reference: u8 = 0,
 };
 
-pub const TargetFormat = enum { r8_unorm, rg8_unorm, rgba8_unorm, bgra8_unorm, r32_float, rgba16_float };
+pub const TargetFormat = enum { r8_unorm, r16_float, rg8_unorm, rg16_float, rgba8_unorm, bgra8_unorm, r32_float, rgba16_float };
 
 pub const Target = struct {
     pixels: []u8,
@@ -99,7 +99,9 @@ pub const Target = struct {
     fn bytesPerPixel(format: TargetFormat) usize {
         return switch (format) {
             .r8_unorm => 1,
+            .r16_float => 2,
             .rg8_unorm => 2,
+            .rg16_float => 4,
             .rgba8_unorm, .bgra8_unorm, .r32_float => 4,
             .rgba16_float => 8,
         };
@@ -140,12 +142,14 @@ pub const Target = struct {
         const offset = x * bytesPerPixel(self.format);
         return switch (self.format) {
             .r8_unorm => .{ @as(f32, @floatFromInt(row_bytes[offset])) / 255.0, 0, 0, 1 },
+            .r16_float => .{ readF16(row_bytes, offset), 0, 0, 1 },
             .rg8_unorm => .{
                 @as(f32, @floatFromInt(row_bytes[offset])) / 255.0,
                 @as(f32, @floatFromInt(row_bytes[offset + 1])) / 255.0,
                 0,
                 1,
             },
+            .rg16_float => .{ readF16(row_bytes, offset), readF16(row_bytes, offset + 2), 0, 1 },
             .rgba8_unorm, .bgra8_unorm => blk: {
                 const format: surface.Format = if (self.format == .rgba8_unorm) .rgba8_unorm else .bgra8_unorm;
                 const color = surface.Surface.read(row_bytes, offset, format);
@@ -171,9 +175,16 @@ pub const Target = struct {
             .r8_unorm => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) row_bytes[offset] = colorByte(color[0]);
             },
+            .r16_float => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeF16(row_bytes, offset, color[0]);
+            },
             .rg8_unorm => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) row_bytes[offset] = colorByte(color[0]);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) row_bytes[offset + 1] = colorByte(color[1]);
+            },
+            .rg16_float => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeF16(row_bytes, offset, color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeF16(row_bytes, offset + 2, color[1]);
             },
             .rgba8_unorm, .bgra8_unorm => {
                 const format: surface.Format = if (self.format == .rgba8_unorm) .rgba8_unorm else .bgra8_unorm;
