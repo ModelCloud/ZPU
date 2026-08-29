@@ -496,8 +496,7 @@ fn effectiveSampleReductionMode(options: DrawOptions) abi.SamplerReductionMode {
     return options.sample_reduction_mode;
 }
 
-fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [4]f32,
-    selection: SampleSelection, stats: *Stats, front_facing: bool) void {
+fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [4]f32, selection: SampleSelection, stats: *Stats, front_facing: bool) void {
     const width: usize = @intCast(job.target.width);
     if (x >= width or y >= job.target.height) return;
     const adjusted_depth = adjustedDepth(job, z, depth_adjust) orelse return;
@@ -542,13 +541,9 @@ fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [
     const reduction_mode = effectiveSampleReductionMode(job.options);
     const fragment_color = if (job.sample_texture) |texture| blk: {
         const level0 = if (job.sample_mipmaps.len != 0) &job.sample_mipmaps[selection.level0] else texture;
-        const color0 = level0.sample(color[0], color[1], selection.filter, job.options.sample_address_s,
-            job.options.sample_address_t, job.options.sample_border_color, job.options.sample_swizzle,
-            job.options.sample_normalized_coordinates, reduction_mode);
+        const color0 = level0.sample(color[0], color[1], selection.filter, job.options.sample_address_s, job.options.sample_address_t, job.options.sample_border_color, job.options.sample_swizzle, job.options.sample_normalized_coordinates, reduction_mode);
         if (selection.level1 == selection.level0 or job.sample_mipmaps.len == 0) break :blk color0;
-        const color1 = job.sample_mipmaps[selection.level1].sample(color[0], color[1], selection.filter,
-            job.options.sample_address_s, job.options.sample_address_t, job.options.sample_border_color,
-            job.options.sample_swizzle, job.options.sample_normalized_coordinates, reduction_mode);
+        const color1 = job.sample_mipmaps[selection.level1].sample(color[0], color[1], selection.filter, job.options.sample_address_s, job.options.sample_address_t, job.options.sample_border_color, job.options.sample_swizzle, job.options.sample_normalized_coordinates, reduction_mode);
         var result: [4]f32 = undefined;
         for (0..4) |channel| result[channel] = color0[channel] + (color1[channel] - color0[channel]) * selection.level_weight;
         break :blk result;
@@ -609,8 +604,7 @@ fn drawPoint(job: *Job, vertex: ProjectedVertex, y0: usize, y1: usize, stats: *S
     const x = pixelCoordinate(vertex.x, bounds.x1) orelse return;
     const y = pixelCoordinate(vertex.y, bounds.y1) orelse return;
     if (x < bounds.x0 or y < @max(bounds.y0, y0) or y >= @min(bounds.y1, y1)) return;
-    writePixel(job, x, y, vertex.z, depthBias(job, 0), vertex.color,
-        sampleSelection(job, job.options.sample_mag_filter, 0), stats, true);
+    writePixel(job, x, y, vertex.z, depthBias(job, 0), vertex.color, sampleSelection(job, job.options.sample_mag_filter, 0), stats, true);
 }
 
 fn lineSampleSelection(job: *const Job, a: ProjectedVertex, b: ProjectedVertex) SampleSelection {
@@ -648,8 +642,7 @@ fn drawLine(job: *Job, a: ProjectedVertex, b: ProjectedVertex, y0: usize, y1: us
         const x = pixelCoordinate(x_value, bounds.x1) orelse continue;
         const y = pixelCoordinate(y_value, bounds.y1) orelse continue;
         if (x < bounds.x0 or y < @max(bounds.y0, y0) or y >= @min(bounds.y1, y1)) continue;
-        writePixel(job, x, y, a.z + (b.z - a.z) * t, depth_adjust, interpolateLineColor(a, b, t),
-            lineSampleSelection(job, a, b), stats, true);
+        writePixel(job, x, y, a.z + (b.z - a.z) * t, depth_adjust, interpolateLineColor(a, b, t), lineSampleSelection(job, a, b), stats, true);
     }
 }
 
@@ -747,8 +740,7 @@ fn drawTriangle(job: *Job, input: [3]ProjectedVertex, y0: usize, y1: usize, stat
             const w0 = edge0 * edge_sign * inverse_area;
             const w1 = edge1 * edge_sign * inverse_area;
             const w2 = edge2 * edge_sign * inverse_area;
-            writePixel(job, x, y, vertices[0].z * w0 + vertices[1].z * w1 + vertices[2].z * w2,
-                depth_adjust, interpolateTriangleColor(vertices, w0, w1, w2), triangleSampleSelection(job, vertices, w0, w1, w2), stats, front_facing);
+            writePixel(job, x, y, vertices[0].z * w0 + vertices[1].z * w1 + vertices[2].z * w2, depth_adjust, interpolateTriangleColor(vertices, w0, w1, w2), triangleSampleSelection(job, vertices, w0, w1, w2), stats, front_facing);
         }
     }
     stats.primitives_rasterized += 1;
@@ -1187,8 +1179,8 @@ test "CPU sampler mip filter selects clamped levels" {
 
 test "CPU sampler reduction modes reduce bilinear texels per channel" {
     var pixels = [_]u8{
-        255, 0, 64, 255,   0, 128, 32, 255,
-        64, 64, 255, 255, 128, 32, 16, 255,
+        255, 0,  64,  255, 0,   128, 32, 255,
+        64,  64, 255, 255, 128, 32,  16, 255,
     };
     const target = try Target.init(&pixels, 2, 2, 2 * 4, .rgba8_unorm);
     const minimum = target.sampleLinear(0.5, 0.5, .clamp_to_edge, .clamp_to_edge, .transparent_black, .minimum);

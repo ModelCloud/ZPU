@@ -326,8 +326,7 @@ pub const CommandBuffer = struct {
         return start;
     }
 
-    fn resolveDrawVertices(self: *CommandBuffer, draw: DrawCommand,
-        owned_source: *?[]abi.Vertex, owned_indexed: *?[]abi.Vertex) Error![]const abi.Vertex {
+    fn resolveDrawVertices(self: *CommandBuffer, draw: DrawCommand, owned_source: *?[]abi.Vertex, owned_indexed: *?[]abi.Vertex) Error![]const abi.Vertex {
         const source = if (draw.vertex_buffer) |buffer|
             try bufferVertices(buffer, draw.vertex_buffer_offset, draw.vertex_stride, owned_source)
         else if (draw.vertex_source_count != 0 or draw.index_buffer != null) blk: {
@@ -438,7 +437,9 @@ pub const CommandBuffer = struct {
                 var owned_source_vertices: ?[]abi.Vertex = null;
                 var owned_indexed_vertices: ?[]abi.Vertex = null;
                 const draw_vertices = self.resolveDrawVertices(
-                    resolved_draw, &owned_source_vertices, &owned_indexed_vertices,
+                    resolved_draw,
+                    &owned_source_vertices,
+                    &owned_indexed_vertices,
                 ) catch |err| return self.fail(err);
                 defer {
                     if (owned_source_vertices) |vertices| allocator.free(vertices);
@@ -3877,65 +3878,84 @@ pub export fn zpu_metal_render_encoder_set_fragment_texture(encoder: ?*RenderEnc
 }
 
 pub export fn zpu_metal_render_encoder_set_fragment_texture_levels(
-    encoder: ?*RenderEncoder, textures: ?[*]const ?*Texture, count: usize, index: u32,
+    encoder: ?*RenderEncoder,
+    textures: ?[*]const ?*Texture,
+    count: usize,
+    index: u32,
 ) callconv(.c) c_int {
     (encoder orelse return -1).setFragmentTextureLevels(textures, count, index) catch |err| return errorCode(err);
     return 0;
 }
 
 pub export fn zpu_metal_render_encoder_set_fragment_sampler(encoder: ?*RenderEncoder, filter: u8, address_s: u8, address_t: u8) callconv(.c) c_int {
-    (encoder orelse return -1).setFragmentSampler(filter, filter, address_s, address_t,
-        @intFromEnum(abi.SamplerBorderColor.transparent_black),
-        @intFromEnum(abi.SamplerMipFilter.not_mipmapped)) catch |err| return errorCode(err);
+    (encoder orelse return -1).setFragmentSampler(filter, filter, address_s, address_t, @intFromEnum(abi.SamplerBorderColor.transparent_black), @intFromEnum(abi.SamplerMipFilter.not_mipmapped)) catch |err| return errorCode(err);
     return 0;
 }
 
 pub export fn zpu_metal_render_encoder_set_fragment_sampler_with_border(
-    encoder: ?*RenderEncoder, filter: u8, address_s: u8, address_t: u8, border_color: u8,
+    encoder: ?*RenderEncoder,
+    filter: u8,
+    address_s: u8,
+    address_t: u8,
+    border_color: u8,
 ) callconv(.c) c_int {
-    (encoder orelse return -1).setFragmentSampler(filter, filter, address_s, address_t, border_color,
-        @intFromEnum(abi.SamplerMipFilter.not_mipmapped)) catch |err| return errorCode(err);
+    (encoder orelse return -1).setFragmentSampler(filter, filter, address_s, address_t, border_color, @intFromEnum(abi.SamplerMipFilter.not_mipmapped)) catch |err| return errorCode(err);
     return 0;
 }
 
 pub export fn zpu_metal_render_encoder_set_fragment_sampler_with_filters(
-    encoder: ?*RenderEncoder, min_filter: u8, mag_filter: u8, address_s: u8, address_t: u8, border_color: u8,
+    encoder: ?*RenderEncoder,
+    min_filter: u8,
+    mag_filter: u8,
+    address_s: u8,
+    address_t: u8,
+    border_color: u8,
 ) callconv(.c) c_int {
-    (encoder orelse return -1).setFragmentSampler(min_filter, mag_filter, address_s, address_t, border_color,
-        @intFromEnum(abi.SamplerMipFilter.not_mipmapped)) catch |err| return errorCode(err);
+    (encoder orelse return -1).setFragmentSampler(min_filter, mag_filter, address_s, address_t, border_color, @intFromEnum(abi.SamplerMipFilter.not_mipmapped)) catch |err| return errorCode(err);
     return 0;
 }
 
 pub export fn zpu_metal_render_encoder_set_fragment_sampler_with_filters_and_mip_filter(
-    encoder: ?*RenderEncoder, min_filter: u8, mag_filter: u8, address_s: u8, address_t: u8, border_color: u8, mip_filter: u8,
+    encoder: ?*RenderEncoder,
+    min_filter: u8,
+    mag_filter: u8,
+    address_s: u8,
+    address_t: u8,
+    border_color: u8,
+    mip_filter: u8,
 ) callconv(.c) c_int {
     (encoder orelse return -1).setFragmentSampler(min_filter, mag_filter, address_s, address_t, border_color, mip_filter) catch |err| return errorCode(err);
     return 0;
 }
 
 pub export fn zpu_metal_render_encoder_set_fragment_sampler_lod_clamps(
-    encoder: ?*RenderEncoder, lod_min_clamp: f32, lod_max_clamp: f32,
+    encoder: ?*RenderEncoder,
+    lod_min_clamp: f32,
+    lod_max_clamp: f32,
 ) callconv(.c) c_int {
     (encoder orelse return -1).setFragmentSamplerLodClamps(lod_min_clamp, lod_max_clamp) catch |err| return errorCode(err);
     return 0;
 }
 
 pub export fn zpu_metal_render_encoder_set_fragment_sampler_lod_bias(
-    encoder: ?*RenderEncoder, lod_bias: f32,
+    encoder: ?*RenderEncoder,
+    lod_bias: f32,
 ) callconv(.c) c_int {
     (encoder orelse return -1).setFragmentSamplerLodBias(lod_bias) catch |err| return errorCode(err);
     return 0;
 }
 
 pub export fn zpu_metal_render_encoder_set_fragment_sampler_normalized_coordinates(
-    encoder: ?*RenderEncoder, normalized_coordinates: bool,
+    encoder: ?*RenderEncoder,
+    normalized_coordinates: bool,
 ) callconv(.c) c_int {
     (encoder orelse return -1).setFragmentSamplerNormalizedCoordinates(normalized_coordinates) catch |err| return errorCode(err);
     return 0;
 }
 
 pub export fn zpu_metal_render_encoder_set_fragment_sampler_reduction_mode(
-    encoder: ?*RenderEncoder, reduction_mode: u8,
+    encoder: ?*RenderEncoder,
+    reduction_mode: u8,
 ) callconv(.c) c_int {
     (encoder orelse return -1).setFragmentSamplerReductionMode(reduction_mode) catch |err| return errorCode(err);
     return 0;
