@@ -96,6 +96,10 @@ int main(void) {
         zpu_metal_command_buffer_render_encoder(render_buffer, texture, &render_pass);
     if (render_encoder == NULL) return 9;
     if (zpu_metal_render_encoder_set_vertex_buffer(render_encoder, vertex_buffer, 0, 0) != 0 ||
+        zpu_metal_render_encoder_set_fragment_sampler_with_filters(
+            render_encoder, ZPU_METAL_SAMPLER_LINEAR, ZPU_METAL_SAMPLER_NEAREST,
+            ZPU_METAL_SAMPLER_CLAMP_TO_EDGE, ZPU_METAL_SAMPLER_CLAMP_TO_BORDER_COLOR,
+            ZPU_METAL_SAMPLER_BORDER_OPAQUE_WHITE) != 0 ||
         zpu_metal_render_encoder_draw_primitives(render_encoder, ZPU_METAL_TRIANGLE, 0, 3, 1) != 0 ||
         zpu_metal_render_encoder_end_encoding(render_encoder) != 0 ||
         zpu_metal_command_buffer_get_status(render_buffer) != ZPU_METAL_COMMAND_BUFFER_CREATED ||

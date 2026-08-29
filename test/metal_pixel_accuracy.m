@@ -1984,6 +1984,96 @@ int main(void) {
             return 98;
         }
 
+        /* Metal chooses minification and magnification filters from the
+         * fragment footprint when mipmapping is disabled. A 16x16 source
+         * projected over the four-pixel square forces minification, so this
+         * catches adapters that silently preserve only magFilter. */
+        uint8_t minmag_source_bytes[16 * 16 * 4];
+        for (NSUInteger y = 0; y < 16; ++y) {
+            for (NSUInteger x = 0; x < 16; ++x) {
+                const BOOL checker = ((x ^ y) & 1) != 0;
+                const NSUInteger offset = (y * 16 + x) * 4;
+                minmag_source_bytes[offset + 0] = checker ? 255 : 0;
+                minmag_source_bytes[offset + 1] = 0;
+                minmag_source_bytes[offset + 2] = checker ? 0 : 255;
+                minmag_source_bytes[offset + 3] = 255;
+            }
+        }
+        MTLTextureDescriptor *minmag_source_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                width:16 height:16 mipmapped:NO];
+        minmag_source_descriptor.storageMode = MTLStorageModeShared;
+        minmag_source_descriptor.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> native_minmag_source = [device newTextureWithDescriptor:minmag_source_descriptor];
+        id<MTLTexture> adapter_minmag_source = [adapter_device newTextureWithDescriptor:minmag_source_descriptor];
+        [native_minmag_source replaceRegion:MTLRegionMake2D(0, 0, 16, 16) mipmapLevel:0
+                                  withBytes:minmag_source_bytes bytesPerRow:16 * 4];
+        [adapter_minmag_source replaceRegion:MTLRegionMake2D(0, 0, 16, 16) mipmapLevel:0
+                                    withBytes:minmag_source_bytes bytesPerRow:16 * 4];
+        MTLSamplerDescriptor *minmag_sampler_descriptor = [sample_sampler_descriptor copy];
+        minmag_sampler_descriptor.minFilter = MTLSamplerMinMagFilterLinear;
+        minmag_sampler_descriptor.magFilter = MTLSamplerMinMagFilterNearest;
+        id<MTLSamplerState> native_minmag_sampler =
+            [device newSamplerStateWithDescriptor:minmag_sampler_descriptor];
+        id<MTLSamplerState> adapter_minmag_sampler =
+            [adapter_device newSamplerStateWithDescriptor:minmag_sampler_descriptor];
+        id<MTLTexture> native_minmag_output = [device newTextureWithDescriptor:sample_output_descriptor];
+        id<MTLTexture> adapter_minmag_output = [adapter_device newTextureWithDescriptor:sample_output_descriptor];
+        if (native_minmag_source == nil || adapter_minmag_source == nil ||
+            native_minmag_sampler == nil || adapter_minmag_sampler == nil ||
+            native_minmag_output == nil || adapter_minmag_output == nil) {
+            fprintf(stderr, "metal-pixel: min/mag sampler resource allocation failed\n");
+            return 104;
+        }
+        MTLRenderPassDescriptor *native_minmag_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_minmag_pass.colorAttachments[0].texture = native_minmag_output;
+        native_minmag_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_minmag_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_minmag_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> native_minmag_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_minmag_encoder =
+            [native_minmag_command_buffer renderCommandEncoderWithDescriptor:native_minmag_pass];
+        [native_minmag_encoder setRenderPipelineState:native_sample_pipeline];
+        [native_minmag_encoder setVertexBuffer:native_linear_vertex_buffer offset:0 atIndex:0];
+        [native_minmag_encoder setFragmentTexture:native_minmag_source atIndex:0];
+        [native_minmag_encoder setFragmentSamplerState:native_minmag_sampler atIndex:0];
+        [native_minmag_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_minmag_encoder endEncoding];
+        [native_minmag_command_buffer commit];
+        [native_minmag_command_buffer waitUntilCompleted];
+        MTLRenderPassDescriptor *adapter_minmag_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_minmag_pass.colorAttachments[0].texture = adapter_minmag_output;
+        adapter_minmag_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_minmag_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_minmag_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> adapter_minmag_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_minmag_encoder =
+            [adapter_minmag_command_buffer renderCommandEncoderWithDescriptor:adapter_minmag_pass];
+        [adapter_minmag_encoder setRenderPipelineState:adapter_sample_pipeline];
+        [adapter_minmag_encoder setVertexBuffer:adapter_linear_vertex_buffer offset:0 atIndex:0];
+        [adapter_minmag_encoder setFragmentTexture:adapter_minmag_source atIndex:0];
+        [adapter_minmag_encoder setFragmentSamplerState:adapter_minmag_sampler atIndex:0];
+        [adapter_minmag_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_minmag_encoder endEncoding];
+        [adapter_minmag_command_buffer commit];
+        [adapter_minmag_command_buffer waitUntilCompleted];
+        uint8_t native_minmag_bytes[byte_count];
+        uint8_t adapter_minmag_bytes[byte_count];
+        [native_minmag_output getBytes:native_minmag_bytes bytesPerRow:(NSUInteger)width * 4
+                              fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_minmag_output getBytes:adapter_minmag_bytes bytesPerRow:(NSUInteger)width * 4
+                                fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (native_minmag_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_minmag_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_minmag_bytes, adapter_minmag_bytes, byte_count) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < byte_count && native_minmag_bytes[mismatch] == adapter_minmag_bytes[mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: min/mag sampler mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                    mismatch, mismatch < byte_count ? native_minmag_bytes[mismatch] : 0,
+                    mismatch < byte_count ? adapter_minmag_bytes[mismatch] : 0);
+            return 105;
+        }
+
         const MTLTextureSwizzleChannels sample_swizzle = MTLTextureSwizzleChannelsMake(
             MTLTextureSwizzleBlue, MTLTextureSwizzleRed, MTLTextureSwizzleGreen, MTLTextureSwizzleOne);
         id<MTLTexture> native_sample_swizzled_source =

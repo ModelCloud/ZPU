@@ -12006,7 +12006,9 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         [_owner markError];
         return;
     }
-    const zpu_metal_sampler_filter filter = sampler == nil ? ZPU_METAL_SAMPLER_NEAREST :
+    const zpu_metal_sampler_filter minFilter = sampler == nil ? ZPU_METAL_SAMPLER_NEAREST :
+        (zpu_metal_sampler_filter)zpuSampler->_minFilter;
+    const zpu_metal_sampler_filter magFilter = sampler == nil ? ZPU_METAL_SAMPLER_NEAREST :
         (zpu_metal_sampler_filter)zpuSampler->_magFilter;
     const zpu_metal_sampler_address_mode address_s = sampler == nil ? ZPU_METAL_SAMPLER_CLAMP_TO_EDGE :
         (zpu_metal_sampler_address_mode)zpuSampler->_sAddressMode;
@@ -12014,8 +12016,8 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         (zpu_metal_sampler_address_mode)zpuSampler->_tAddressMode;
     const uint8_t borderColor = sampler == nil ? (uint8_t)MTLSamplerBorderColorTransparentBlack :
         (uint8_t)zpuSampler->_borderColor;
-    if (zpu_metal_render_encoder_set_fragment_sampler_with_border(
-            _zpuEncoder, filter, address_s, address_t, borderColor) != ZPU_METAL_OK) {
+    if (zpu_metal_render_encoder_set_fragment_sampler_with_filters(
+            _zpuEncoder, minFilter, magFilter, address_s, address_t, borderColor) != ZPU_METAL_OK) {
         [_owner markError];
         return;
     }

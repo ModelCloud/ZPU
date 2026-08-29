@@ -9,7 +9,7 @@
 /* Native ZPU CPU Metal-layer ABI. This is intentionally separate from the
  * Apple Objective-C framework ABI; it is the portable FFI surface used by
  * clients that select ZPU's CPU renderer. */
-#define ZPU_METAL_ABI_VERSION 3u
+#define ZPU_METAL_ABI_VERSION 4u
 
 typedef uint8_t zpu_metal_workload;
 enum {
@@ -400,6 +400,7 @@ int zpu_metal_render_encoder_set_sample_texture(zpu_metal_render_encoder *encode
 int zpu_metal_render_encoder_set_fragment_texture(zpu_metal_render_encoder *encoder, zpu_metal_texture *texture, uint32_t index);
 int zpu_metal_render_encoder_set_fragment_sampler(zpu_metal_render_encoder *encoder, zpu_metal_sampler_filter filter, zpu_metal_sampler_address_mode address_s, zpu_metal_sampler_address_mode address_t);
 int zpu_metal_render_encoder_set_fragment_sampler_with_border(zpu_metal_render_encoder *encoder, zpu_metal_sampler_filter filter, zpu_metal_sampler_address_mode address_s, zpu_metal_sampler_address_mode address_t, zpu_metal_sampler_border_color border_color);
+int zpu_metal_render_encoder_set_fragment_sampler_with_filters(zpu_metal_render_encoder *encoder, zpu_metal_sampler_filter min_filter, zpu_metal_sampler_filter mag_filter, zpu_metal_sampler_address_mode address_s, zpu_metal_sampler_address_mode address_t, zpu_metal_sampler_border_color border_color);
 int zpu_metal_render_encoder_set_fragment_texture_swizzle(zpu_metal_render_encoder *encoder, zpu_metal_texture_swizzle red, zpu_metal_texture_swizzle green, zpu_metal_texture_swizzle blue, zpu_metal_texture_swizzle alpha);
 int zpu_metal_render_encoder_set_fragment_uniform_enabled(zpu_metal_render_encoder *encoder, int enabled);
 int zpu_metal_render_encoder_set_fragment_bytes(zpu_metal_render_encoder *encoder, const void *bytes, size_t length, uint32_t index);
