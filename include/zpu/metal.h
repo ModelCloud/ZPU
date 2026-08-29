@@ -9,7 +9,7 @@
 /* Native ZPU CPU Metal-layer ABI. This is intentionally separate from the
  * Apple Objective-C framework ABI; it is the portable FFI surface used by
  * clients that select ZPU's CPU renderer. */
-#define ZPU_METAL_ABI_VERSION 25u
+#define ZPU_METAL_ABI_VERSION 26u
 
 typedef uint8_t zpu_metal_workload;
 enum {
@@ -360,6 +360,15 @@ enum {
     ZPU_METAL_SPARSE_MAPPING_UNMAP = 1,
 };
 
+/* Layout-compatible with Apple's MTLMapIndirectArguments after the six
+ * 32-bit region coordinates. The count word precedes an array of these
+ * records in the indirect buffer. */
+typedef struct zpu_metal_sparse_texture_mapping_arguments {
+    zpu_metal_region region;
+    uint32_t mip_level;
+    uint32_t slice;
+} zpu_metal_sparse_texture_mapping_arguments;
+
 /* CPU compute kernels are explicit ZPU operations.  They are not MSL and
  * do not invoke Apple's Metal compiler or command encoder. */
 typedef uint8_t zpu_metal_compute_kernel;
@@ -602,6 +611,8 @@ int zpu_metal_resource_state_encoder_update_texture_mapping(zpu_metal_resource_s
  * mip-level and slice entry corresponds to one region entry; only level 0 and
  * slice 0 are currently representable by the portable 2D texture object. */
 int zpu_metal_resource_state_encoder_update_texture_mappings(zpu_metal_resource_state_encoder *encoder, zpu_metal_texture *texture, zpu_metal_sparse_mapping_mode mode, const zpu_metal_region *regions, size_t region_count, const size_t *mip_levels, const size_t *slices);
+int zpu_metal_resource_state_encoder_update_texture_mapping_indirect(zpu_metal_resource_state_encoder *encoder, zpu_metal_texture *texture, zpu_metal_sparse_mapping_mode mode, zpu_metal_buffer *indirect_buffer, size_t indirect_buffer_offset);
+int zpu_metal_resource_state_encoder_move_texture_mappings(zpu_metal_resource_state_encoder *encoder, zpu_metal_texture *source, zpu_metal_texture *destination, zpu_metal_region source_region, zpu_metal_origin destination_origin);
 int zpu_metal_resource_state_encoder_copy_texture_mappings(zpu_metal_resource_state_encoder *encoder, zpu_metal_texture *source, zpu_metal_texture *destination, zpu_metal_region source_region, zpu_metal_origin destination_origin);
 int zpu_metal_resource_state_encoder_end_encoding(zpu_metal_resource_state_encoder *encoder);
 void zpu_metal_resource_state_encoder_destroy(zpu_metal_resource_state_encoder *encoder);

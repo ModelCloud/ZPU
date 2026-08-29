@@ -602,6 +602,20 @@ const SparseTextureCopyMappingCommand = struct {
     destination_origin: abi.Origin,
 };
 
+const SparseTextureMappingIndirectCommand = struct {
+    texture: *Texture,
+    mode: u8,
+    buffer: *Buffer,
+    buffer_offset: usize,
+};
+
+const SparseTextureMoveMappingCommand = struct {
+    source: *Texture,
+    destination: *Texture,
+    source_region: abi.Region,
+    destination_origin: abi.Origin,
+};
+
 const SharedEventCommand = struct {
     event: *SharedEvent,
     value: u64,
@@ -640,6 +654,8 @@ const Command = union(enum) {
     sparse_buffer_mapping: SparseBufferMappingCommand,
     sparse_buffer_copy_mapping: SparseBufferCopyMappingCommand,
     sparse_texture_mapping: SparseTextureMappingCommand,
+    sparse_texture_mapping_indirect: SparseTextureMappingIndirectCommand,
+    sparse_texture_move_mapping: SparseTextureMoveMappingCommand,
     sparse_texture_copy_mapping: SparseTextureCopyMappingCommand,
     update_fence: *Fence,
     wait_fence: *Fence,
@@ -1425,6 +1441,18 @@ pub const CommandBuffer = struct {
             .sparse_texture_mapping => |mapping| {
                 if (!validTexture(mapping.texture) or mapping.texture.device != self.queue.device) return self.fail(error.InvalidResource);
                 sparseUpdateTextureMapping(mapping.texture, mapping.mode, mapping.region) catch |err| return self.fail(err);
+            },
+            .sparse_texture_mapping_indirect => |mapping| {
+                if (!validTexture(mapping.texture) or !validBuffer(mapping.buffer) or
+                    mapping.texture.device != self.queue.device or mapping.buffer.device != self.queue.device)
+                    return self.fail(error.InvalidResource);
+                sparseUpdateTextureMappingIndirect(mapping.texture, mapping.mode, mapping.buffer, mapping.buffer_offset) catch |err| return self.fail(err);
+            },
+            .sparse_texture_move_mapping => |mapping| {
+                if (!validTexture(mapping.source) or !validTexture(mapping.destination) or
+                    mapping.source.device != self.queue.device or mapping.destination.device != self.queue.device)
+                    return self.fail(error.InvalidResource);
+                sparseMoveTextureMappings(mapping.source, mapping.destination, mapping.source_region, mapping.destination_origin) catch |err| return self.fail(err);
             },
             .sparse_texture_copy_mapping => |mapping| {
                 if (!validTexture(mapping.source) or !validTexture(mapping.destination) or
@@ -2729,6 +2757,43 @@ pub const ResourceStateEncoder = struct {
                 .region = region,
             } });
         }
+    }
+
+    /// Record the indirect MTLMapIndirectArguments form. The count and
+    /// records are read at commit time, matching Metal's deferred command
+    /// buffer behavior; the portable profile still requires level 0 and
+    /// slice 0 for every record.
+    pub fn updateTextureMappingIndirect(self: *ResourceStateEncoder, texture: *Texture, mode: u8, buffer: *Buffer, buffer_offset: usize) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        if (!validTexture(texture) or !validBuffer(buffer) or texture.device != self.command_buffer.queue.device or
+            buffer.device != self.command_buffer.queue.device or buffer.sparse_page_bytes != 0 or
+            texture.sparse_page_bytes == 0 or (mode != 0 and mode != 1) or
+            !rangeValid(buffer.bytes.len, buffer_offset, @sizeOf(u32))) return error.InvalidArgument;
+        _ = try self.command_buffer.append(.{ .sparse_texture_mapping_indirect = .{
+            .texture = texture,
+            .mode = mode,
+            .buffer = buffer,
+            .buffer_offset = buffer_offset,
+        } });
+    }
+
+    /// Move mapped pages, leaving the source unmapped. A destination tile that
+    /// is already mapped is preserved, as required by Metal's move operation.
+    pub fn moveTextureMappings(self: *ResourceStateEncoder, source: *Texture, destination: *Texture, source_region: abi.Region, destination_origin: abi.Origin) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        const destination_region = abi.Region{ .origin = destination_origin, .size = source_region.size };
+        if (!validTexture(source) or !validTexture(destination) or source.device != self.command_buffer.queue.device or
+            destination.device != self.command_buffer.queue.device or source.sparse_page_bytes == 0 or
+            source.sparse_page_bytes != destination.sparse_page_bytes or source.format != destination.format or
+            source.sparse_tile_width != destination.sparse_tile_width or source.sparse_tile_height != destination.sparse_tile_height or
+            !sparseTextureRangeValid(source, source_region) or !sparseTextureRangeValid(destination, destination_region))
+            return error.InvalidArgument;
+        _ = try self.command_buffer.append(.{ .sparse_texture_move_mapping = .{
+            .source = source,
+            .destination = destination,
+            .source_region = source_region,
+            .destination_origin = destination_origin,
+        } });
     }
 
     /// Map or unmap page-aligned ranges of a sparse buffer. Mapping commands
@@ -5449,6 +5514,7 @@ fn sparseUpdateTextureMapping(texture: *Texture, mode: u8, region: abi.Region) E
 fn sparseCopyTextureMappings(source: *Texture, destination: *Texture, source_region: abi.Region, destination_origin: abi.Origin) Error!void {
     const destination_region = abi.Region{ .origin = destination_origin, .size = source_region.size };
     if (!validTexture(source) or !validTexture(destination) or source.device != destination.device or
+        source.format != destination.format or
         source.sparse_page_bytes == 0 or source.sparse_page_bytes != destination.sparse_page_bytes or
         source.sparse_tile_width != destination.sparse_tile_width or source.sparse_tile_height != destination.sparse_tile_height or
         !sparseTextureRangeValid(source, source_region) or !sparseTextureRangeValid(destination, destination_region)) return error.InvalidArgument;
@@ -5493,6 +5559,128 @@ fn sparseCopyTextureMappings(source: *Texture, destination: *Texture, source_reg
             page_index += 1;
         }
     }
+    sparseSyncTexture(destination);
+}
+
+fn sparseUpdateTextureMappingIndirect(texture: *Texture, mode: u8, buffer: *Buffer, buffer_offset: usize) Error!void {
+    if (!validTexture(texture) or !validBuffer(buffer) or texture.device != buffer.device or
+        buffer.sparse_page_bytes != 0 or texture.sparse_page_bytes == 0 or
+        (mode != 0 and mode != 1) or !rangeValid(buffer.bytes.len, buffer_offset, @sizeOf(u32)))
+        return error.InvalidArgument;
+    sparseSyncBuffer(buffer);
+    const mapping_count = readU32Little(buffer.bytes, buffer_offset);
+    const arguments_offset = std.math.add(usize, buffer_offset, @sizeOf(u32)) catch return error.InvalidArgument;
+    const arguments_bytes = std.math.mul(usize, @as(usize, mapping_count), @sizeOf(abi.SparseTextureMappingArguments)) catch
+        return error.InvalidArgument;
+    if (!rangeValid(buffer.bytes.len, arguments_offset, arguments_bytes)) return error.InvalidArgument;
+    for (0..mapping_count) |index| {
+        const offset = arguments_offset + index * @sizeOf(abi.SparseTextureMappingArguments);
+        const region = abi.Region{
+            .origin = .{
+                .x = readU32Little(buffer.bytes, offset),
+                .y = readU32Little(buffer.bytes, offset + 4),
+                .z = readU32Little(buffer.bytes, offset + 8),
+            },
+            .size = .{
+                .width = readU32Little(buffer.bytes, offset + 12),
+                .height = readU32Little(buffer.bytes, offset + 16),
+                .depth = readU32Little(buffer.bytes, offset + 20),
+            },
+        };
+        if (readU32Little(buffer.bytes, offset + 24) != 0 or
+            readU32Little(buffer.bytes, offset + 28) != 0 or
+            !sparseTextureRangeValid(texture, region)) return error.InvalidArgument;
+    }
+    for (0..mapping_count) |index| {
+        const offset = arguments_offset + index * @sizeOf(abi.SparseTextureMappingArguments);
+        const region = abi.Region{
+            .origin = .{
+                .x = readU32Little(buffer.bytes, offset),
+                .y = readU32Little(buffer.bytes, offset + 4),
+                .z = readU32Little(buffer.bytes, offset + 8),
+            },
+            .size = .{
+                .width = readU32Little(buffer.bytes, offset + 12),
+                .height = readU32Little(buffer.bytes, offset + 16),
+                .depth = readU32Little(buffer.bytes, offset + 20),
+            },
+        };
+        try sparseUpdateTextureMapping(texture, mode, region);
+    }
+}
+
+fn sparseMoveTextureMappings(source: *Texture, destination: *Texture, source_region: abi.Region, destination_origin: abi.Origin) Error!void {
+    const destination_region = abi.Region{ .origin = destination_origin, .size = source_region.size };
+    if (!validTexture(source) or !validTexture(destination) or source.device != destination.device or
+        source.format != destination.format or source.sparse_page_bytes == 0 or
+        source.sparse_page_bytes != destination.sparse_page_bytes or
+        source.sparse_tile_width != destination.sparse_tile_width or
+        source.sparse_tile_height != destination.sparse_tile_height or
+        !sparseTextureRangeValid(source, source_region) or
+        !sparseTextureRangeValid(destination, destination_region)) return error.InvalidArgument;
+    sparseFlushTexture(source);
+    sparseFlushTexture(destination);
+    const page_count = std.math.mul(usize, @as(usize, source_region.size.width), source_region.size.height) catch return error.InvalidArgument;
+    const pages = allocator.alloc(?*SparsePage, page_count) catch return error.OutOfMemory;
+    defer {
+        for (pages) |page| if (page) |value| value.release();
+        allocator.free(pages);
+    }
+    const destination_mapped = allocator.alloc(bool, page_count) catch {
+        allocator.free(pages);
+        return error.OutOfMemory;
+    };
+    defer allocator.free(destination_mapped);
+    var page_index: usize = 0;
+    var move_count: usize = 0;
+    for (0..source_region.size.height) |row| {
+        for (0..source_region.size.width) |column| {
+            const source_x = @as(usize, source_region.origin.x) + column;
+            const source_y = @as(usize, source_region.origin.y) + row;
+            const destination_x = @as(usize, destination_origin.x) + column;
+            const destination_y = @as(usize, destination_origin.y) + row;
+            pages[page_index] = if (sparseTextureMappingIndex(source, source_x, source_y)) |mapping_index| blk: {
+                const page = source.sparse_mappings.items[mapping_index].page;
+                page.retain();
+                break :blk page;
+            } else null;
+            destination_mapped[page_index] = sparseTextureMappingIndex(destination, destination_x, destination_y) != null;
+            if (pages[page_index] != null and !destination_mapped[page_index]) move_count += 1;
+            page_index += 1;
+        }
+    }
+    destination.sparse_mappings.ensureUnusedCapacity(allocator, move_count) catch return error.OutOfMemory;
+    page_index = 0;
+    for (0..source_region.size.height) |row| {
+        for (0..source_region.size.width) |column| {
+            if (pages[page_index] != null and !destination_mapped[page_index]) {
+                const source_x = @as(usize, source_region.origin.x) + column;
+                const source_y = @as(usize, source_region.origin.y) + row;
+                if (sparseTextureMappingIndex(source, source_x, source_y)) |mapping_index| {
+                    const removed = source.sparse_mappings.orderedRemove(mapping_index);
+                    removed.page.release();
+                }
+            }
+            page_index += 1;
+        }
+    }
+    page_index = 0;
+    for (0..destination_region.size.height) |row| {
+        for (0..destination_region.size.width) |column| {
+            if (pages[page_index]) |page| {
+                if (!destination_mapped[page_index]) {
+                    destination.sparse_mappings.appendAssumeCapacity(.{
+                        .tile_x = @as(usize, destination_region.origin.x) + column,
+                        .tile_y = @as(usize, destination_region.origin.y) + row,
+                        .page = page,
+                    });
+                    pages[page_index] = null;
+                }
+            }
+            page_index += 1;
+        }
+    }
+    sparseSyncTexture(source);
     sparseSyncTexture(destination);
 }
 
@@ -8067,6 +8255,38 @@ pub export fn zpu_metal_resource_state_encoder_update_texture_mappings(
         region_values,
         mip_values,
         slice_values,
+    ) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_resource_state_encoder_update_texture_mapping_indirect(
+    encoder: ?*ResourceStateEncoder,
+    texture: ?*Texture,
+    mode: u8,
+    indirect_buffer: ?*Buffer,
+    indirect_buffer_offset: usize,
+) callconv(.c) c_int {
+    (encoder orelse return -1).updateTextureMappingIndirect(
+        texture orelse return -1,
+        mode,
+        indirect_buffer orelse return -1,
+        indirect_buffer_offset,
+    ) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_resource_state_encoder_move_texture_mappings(
+    encoder: ?*ResourceStateEncoder,
+    source: ?*Texture,
+    destination: ?*Texture,
+    source_region: abi.Region,
+    destination_origin: abi.Origin,
+) callconv(.c) c_int {
+    (encoder orelse return -1).moveTextureMappings(
+        source orelse return -1,
+        destination orelse return -1,
+        source_region,
+        destination_origin,
     ) catch |err| return errorCode(err);
     return 0;
 }

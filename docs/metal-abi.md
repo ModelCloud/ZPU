@@ -465,13 +465,14 @@ are recorded on the resource-state encoder, and mapping copies preserve page
 aliases. Ordinary ZPU blit/fill commands are the deterministic access path,
 with unmapped reads returning zero. The bounded ABI covers sparse buffers and
 single-level 2D sparse textures for the Apple page-size/tile geometries exposed
-by the portable constructors. Both the single-region and legacy batch texture
-mapping entry points use sparse-tile coordinates and preserve the caller's
-deferred order; only mip level 0 and slice 0 are representable in this
-portable profile. Arbitrary sparse texture mip/tail/3D layouts are still
-outside this ABI; the Apple adapter's Objective-C resource-state
-implementation additionally covers its documented CPU page model for those
-layouts.
+by the portable constructors. The single-region, legacy batch, and indirect
+texture mapping entry points use sparse-tile coordinates and preserve the
+caller's deferred order; move operations transfer pages only into unmapped
+destination tiles, matching Metal's resource-state rule. Only mip level 0 and
+slice 0 are representable in this portable profile. Arbitrary sparse texture
+mip/tail/3D layouts are still outside this ABI; the Apple adapter's
+Objective-C resource-state implementation additionally covers its documented
+CPU page model for those layouts.
 
 On macOS, `zig build metal-pixel` compiles a tiny runtime MSL shader, renders a
 known triangle pair using Apple's Metal framework, renders the same vertices
