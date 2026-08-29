@@ -7337,7 +7337,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         return nil;
     }
     if (error != NULL) *error = nil;
-    return (id<MTLRenderPipelineState>)[[ZPURenderPipelineState alloc]
+    ZPURenderPipelineState *pipeline = [[ZPURenderPipelineState alloc]
         initWithOwner:self meshFunctionName:meshFunction.name objectFunctionName:nil
         fragmentFunctionName:fragmentFunction.name label:descriptor.label colorFormat:attachment.pixelFormat
         maxTotalThreadsPerObjectThreadgroup:object_max maxTotalThreadsPerMeshThreadgroup:mesh_max
@@ -7345,6 +7345,10 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         objectThreadgroupSizeMatchesExecutionWidth:NO threadgroupSizeMatchesExecutionWidth:NO
         requiredThreadsPerObjectThreadgroup:MTLSizeMake(0, 0, 0)
         requiredThreadsPerMeshThreadgroup:MTLSizeMake(0, 0, 0)];
+    if (@available(macOS 14.0, iOS 17.0, *)) {
+        pipeline->_supportsIndirectCommandBuffers = descriptor.supportIndirectCommandBuffers;
+    }
+    return (id<MTLRenderPipelineState>)pipeline;
 }
 - (void)newRenderPipelineStateWithMeshDescriptor:(MTLMeshRenderPipelineDescriptor *)descriptor options:(MTLPipelineOption)options completionHandler:(MTLNewRenderPipelineStateWithReflectionCompletionHandler)completionHandler API_AVAILABLE(macos(13.0), ios(16.0)) {
     (void)descriptor;
@@ -14407,6 +14411,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 }
 - (void)drawMeshThreadgroups:(MTLSize)threadgroupsPerGrid threadsPerObjectThreadgroup:(MTLSize)threadsPerObjectThreadgroup threadsPerMeshThreadgroup:(MTLSize)threadsPerMeshThreadgroup API_AVAILABLE(macos(14.0), ios(17.0), tvos(18.1), visionos(2.1)) {
     if ((_owner->_commandTypes & zpu_indirect_command_type_draw_mesh_threadgroups) == 0 ||
+        threadgroupsPerGrid.width > UINT32_MAX || threadgroupsPerGrid.height > UINT32_MAX || threadgroupsPerGrid.depth > UINT32_MAX ||
         !zpu_metal_size_fits_cpu_threadgroup(threadsPerObjectThreadgroup, 1024) ||
         !zpu_metal_size_fits_cpu_threadgroup(threadsPerMeshThreadgroup, 1024)) {
         _unsupportedCommand = YES;
@@ -14417,9 +14422,14 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     _meshThreadsPerMeshThreadgroup = threadsPerMeshThreadgroup;
     _hasMeshThreadgroups = YES;
     _hasMeshThreads = NO;
+    _hasDraw = NO;
+    _hasIndexedDraw = NO;
+    _hasPatches = NO;
+    _hasIndexedPatches = NO;
 }
 - (void)drawMeshThreads:(MTLSize)threadsPerGrid threadsPerObjectThreadgroup:(MTLSize)threadsPerObjectThreadgroup threadsPerMeshThreadgroup:(MTLSize)threadsPerMeshThreadgroup API_AVAILABLE(macos(14.0), ios(17.0), tvos(18.1), visionos(2.1)) {
     if ((_owner->_commandTypes & zpu_indirect_command_type_draw_mesh_threads) == 0 ||
+        threadsPerGrid.width > UINT32_MAX || threadsPerGrid.height > UINT32_MAX || threadsPerGrid.depth > UINT32_MAX ||
         !zpu_metal_size_fits_cpu_threadgroup(threadsPerObjectThreadgroup, 1024) ||
         !zpu_metal_size_fits_cpu_threadgroup(threadsPerMeshThreadgroup, 1024)) {
         _unsupportedCommand = YES;
@@ -14430,6 +14440,10 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     _meshThreadsPerMeshThreadgroup = threadsPerMeshThreadgroup;
     _hasMeshThreads = YES;
     _hasMeshThreadgroups = NO;
+    _hasDraw = NO;
+    _hasIndexedDraw = NO;
+    _hasPatches = NO;
+    _hasIndexedPatches = NO;
 }
 - (void)setDepthStencilState:(id<MTLDepthStencilState>)depthStencilState API_AVAILABLE(macos(26.0), ios(26.0)) {
     ZPUDepthStencilState *state = (ZPUDepthStencilState *)depthStencilState;
@@ -14487,11 +14501,40 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     }
     /* A reset or never-recorded ICB slot is a legal no-op, even when the
      * descriptor does not inherit pipeline state. */
-    if (_hasPatches || _hasIndexedPatches || _hasMeshThreadgroups || _hasMeshThreads) {
-        /* The CPU adapter records patch/mesh geometry commands so ICB
-         * ownership, reset, and copy semantics remain observable. It cannot
-         * execute tessellation or arbitrary object/mesh shaders without a CPU
-         * shader interpreter. */
+    if (_hasMeshThreadgroups || _hasMeshThreads) {
+        ZPURenderPipelineState *state = (ZPURenderPipelineState *)_pipelineState;
+        ZPURenderPipelineState *effectiveState = state != nil ? state : encoder->_pipelineState;
+        if ((state != nil && (![state isKindOfClass:[ZPURenderPipelineState class]] ||
+                              state->_owner != [encoder->_owner device])) ||
+             _objectBuffers.count != 0 || _meshBuffers.count != 0 || _objectThreadgroupMemoryLengths.count != 0 ||
+             ![effectiveState isKindOfClass:[ZPURenderPipelineState class]] ||
+             effectiveState->_owner != [encoder->_owner device] || !effectiveState->_isMeshPipeline ||
+             !effectiveState->_supportsIndirectCommandBuffers ||
+             ![effectiveState->_meshFunctionName isEqualToString:zpu_cpu_mesh_gradient_function_name] ||
+             ![effectiveState->_meshFragmentFunctionName isEqualToString:zpu_cpu_mesh_gradient_fragment_name] ||
+            (!_owner->_inheritPipelineState && state == nil)) {
+            [encoder->_owner markError];
+            return;
+        }
+        if (@available(macOS 13.0, iOS 16.0, *)) {
+            if (state != nil) [encoder setRenderPipelineState:(id<MTLRenderPipelineState>)state];
+            if (_hasMeshThreadgroups) {
+                [encoder drawMeshThreadgroups:_meshThreadgroupsPerGrid
+                     threadsPerObjectThreadgroup:_meshThreadsPerObjectThreadgroup
+                       threadsPerMeshThreadgroup:_meshThreadsPerMeshThreadgroup];
+            } else {
+                [encoder drawMeshThreads:_meshThreadsPerGrid
+                   threadsPerObjectThreadgroup:_meshThreadsPerObjectThreadgroup
+                     threadsPerMeshThreadgroup:_meshThreadsPerMeshThreadgroup];
+            }
+        } else {
+            [encoder->_owner markError];
+        }
+        return;
+    }
+    if (_hasPatches || _hasIndexedPatches) {
+        /* Patch command recording remains CPU-owned, but tessellation has no
+         * fixed ZPU executor and therefore fails closed at replay. */
         [encoder->_owner markError];
         return;
     }

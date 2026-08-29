@@ -831,7 +831,7 @@
     "MTLResourceStateCommandEncoder.endEncoding"
   ],
   "known_unimplemented_surface": [
-    "MTLIndirectCommandBuffer mesh and tessellation shader execution",
+    "MTLIndirectCommandBuffer arbitrary mesh and tessellation shader execution",
     "MTL4RenderCommandEncoder arbitrary tile/mesh execution",
     "MTL4MachineLearningCommandEncoder arbitrary ML graph execution",
     "MTLAccelerationStructure ray-tracing execution",

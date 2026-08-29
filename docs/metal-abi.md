@@ -354,9 +354,9 @@ triangle path:
   descriptor's bind limit; they are metadata-only for the registered ZPU
   kernels, whose CPU execution has no hidden threadgroup storage. Reset slots
   remain legal no-ops
-- CPU indirect mesh command recording, copy, and reset state; mesh command
-  descriptors and thread dimensions are retained in the CPU-owned ICB and
-  unsupported mesh shader execution fails closed at replay
+- CPU indirect mesh command recording, copy, reset, and replay for the
+  registered mesh-gradient profile; its thread dimensions remain in the
+  CPU-owned ICB and arbitrary mesh shader execution fails closed at replay
 - CPU indirect patch and indexed-patch command recording, copy, and reset
   state; patch buffers, tessellation-factor buffers, offsets, strides, and
   draw ranges are retained in the CPU-owned ICB, while CPU tessellation
