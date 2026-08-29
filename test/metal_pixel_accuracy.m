@@ -1689,7 +1689,13 @@ int main(void) {
         }];
         adapter_event.signaledValue = 7;
         dispatch_sync(adapter_event_listener.dispatchQueue, ^{});
+        MTLSharedEventHandle *adapter_event_handle = [adapter_event newSharedEventHandle];
+        id<MTLSharedEvent> adapter_event_from_handle =
+            [adapter_device newSharedEventWithHandle:adapter_event_handle];
+        adapter_event_from_handle.signaledValue = 11;
         if (adapter_event == nil || !adapter_event_notified ||
+            adapter_event_handle == nil || adapter_event_from_handle != adapter_event ||
+            adapter_event.signaledValue != 11 ||
             ![adapter_event waitUntilSignaledValue:7 timeoutMS:0]) {
             fprintf(stderr, "metal-pixel: shared event adapter failed\n");
             return 19;

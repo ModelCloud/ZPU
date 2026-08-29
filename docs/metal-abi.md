@@ -110,6 +110,9 @@ triangle path:
   CPU memory, while sparse texture mapping requests fail closed
 - CPU residency sets track ZPU allocations, committed byte totals, and
   request/end-residency state without introducing a GPU residency domain
+- process-local shared-event handles round-trip the same ZPU event and
+  preserve monotonic signaling; decoded or foreign handles fail closed because
+  the CPU adapter does not invent a cross-process GPU primitive
 - CPU indirect compute commands for those registered kernels; the command
   buffer inherits the ZPU encoder's texture bindings and records pipeline,
   buffer, and dispatch state for deferred execution

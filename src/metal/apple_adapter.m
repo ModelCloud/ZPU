@@ -25,6 +25,7 @@
 @class ZPUCommandBuffer;
 @class ZPUHeap;
 @class ZPUResidencySet;
+@class ZPUSharedEvent;
 @class ZPUTextureViewPool;
 @class ZPUIndirectCommandBuffer;
 @class ZPUIndirectComputeCommand;
@@ -220,8 +221,17 @@ API_AVAILABLE(macos(15.0), ios(18.0))
     zpu_metal_shared_event *_zpuEvent;
     ZPUDevice *_owner;
     NSMutableArray *_notifications;
+    NSString *_label;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner event:(zpu_metal_shared_event *)event;
+@end
+
+@interface ZPUSharedEventHandle : MTLSharedEventHandle {
+@public
+    ZPUSharedEvent *_event;
+    NSString *_label;
+}
+- (instancetype)initWithEvent:(ZPUSharedEvent *)event;
 @end
 
 #pragma clang diagnostic push
@@ -1282,6 +1292,23 @@ static BOOL zpu_residency_allocation_belongs_to_device(ZPUDevice *owner, id<MTLA
 }
 @end
 
+@implementation ZPUSharedEventHandle
+- (instancetype)initWithEvent:(ZPUSharedEvent *)event {
+    if ((self = [super init])) {
+        _event = event;
+        _label = [event.label copy];
+    }
+    return self;
+}
+- (NSString *)label { return _label; }
++ (BOOL)supportsSecureCoding { return YES; }
+- (instancetype)initWithCoder:(NSCoder *)coder {
+    if ((self = [super init])) _label = [[coder decodeObjectOfClass:[NSString class] forKey:@"label"] copy];
+    return self;
+}
+- (void)encodeWithCoder:(NSCoder *)coder { [coder encodeObject:_label forKey:@"label"]; }
+@end
+
 @implementation ZPUSharedEvent
 - (instancetype)initWithOwner:(ZPUDevice *)owner event:(zpu_metal_shared_event *)event {
     if ((self = [super init])) {
@@ -1295,8 +1322,8 @@ static BOOL zpu_residency_allocation_belongs_to_device(ZPUDevice *owner, id<MTLA
     if (_zpuEvent != NULL) zpu_metal_shared_event_destroy(_zpuEvent);
 }
 - (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
-- (NSString *)label { return nil; }
-- (void)setLabel:(NSString *)label { (void)label; }
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (uint64_t)signaledValue { return zpu_metal_shared_event_signaled_value(_zpuEvent); }
 - (void)setSignaledValue:(uint64_t)value {
     if (zpu_metal_shared_event_set_signaled_value(_zpuEvent, value) != ZPU_METAL_OK) return;
@@ -1326,7 +1353,7 @@ static BOOL zpu_residency_allocation_belongs_to_device(ZPUDevice *owner, id<MTLA
 - (BOOL)waitUntilSignaledValue:(uint64_t)value timeoutMS:(uint64_t)milliseconds {
     return zpu_metal_shared_event_wait_until_signaled_value(_zpuEvent, value, milliseconds) == ZPU_METAL_OK;
 }
-- (MTLSharedEventHandle *)newSharedEventHandle { return nil; }
+- (MTLSharedEventHandle *)newSharedEventHandle { return [[ZPUSharedEventHandle alloc] initWithEvent:self]; }
 @end
 
 static uint64_t zpu_cpu_timestamp(void) {
@@ -1778,8 +1805,10 @@ static uint64_t zpu_cpu_timestamp(void) {
     return (id<MTLEvent>)[self newSharedEvent];
 }
 - (id<MTLSharedEvent>)newSharedEventWithHandle:(MTLSharedEventHandle *)sharedEventHandle API_AVAILABLE(macos(10.14), ios(12.0)) {
-    (void)sharedEventHandle;
-    return nil;
+    ZPUSharedEventHandle *handle = (ZPUSharedEventHandle *)sharedEventHandle;
+    if (![handle isKindOfClass:[ZPUSharedEventHandle class]] || handle->_event == nil ||
+        handle->_event->_owner != self) return nil;
+    return (id<MTLSharedEvent>)handle->_event;
 }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor iosurface:(IOSurfaceRef)iosurface plane:(NSUInteger)plane API_AVAILABLE(macos(10.11), ios(11.0)) {
     (void)descriptor;
