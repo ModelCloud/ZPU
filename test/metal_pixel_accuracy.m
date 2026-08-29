@@ -8260,6 +8260,31 @@ int main(void) {
             return 49;
         }
 
+        /* A bound constantDataAtIndex: pointer aliases the selected argument
+         * buffer. Rebinding must preserve those bytes and must not accept an
+         * unaligned or truncated destination. */
+        const uint32_t rebound_argument_constant = 0xcafebabe;
+        memcpy(bound_constant_data, &rebound_argument_constant, sizeof(rebound_argument_constant));
+        [adapter_argument_encoder setArgumentBuffer:adapter_argument_buffer offset:32];
+        void *rebound_constant_data = [adapter_argument_encoder constantDataAtIndex:5];
+        uint32_t rebound_argument_readback = 0;
+        if (rebound_constant_data != NULL) {
+            memcpy(&rebound_argument_readback, rebound_constant_data, sizeof(rebound_argument_readback));
+        }
+        [adapter_argument_encoder setArgumentBuffer:adapter_argument_buffer offset:8];
+        void *unaligned_constant_data = [adapter_argument_encoder constantDataAtIndex:5];
+        [adapter_argument_encoder setArgumentBuffer:adapter_argument_buffer offset:0];
+        void *restored_constant_data = [adapter_argument_encoder constantDataAtIndex:5];
+        uint32_t restored_argument_readback = 0;
+        if (restored_constant_data != NULL) {
+            memcpy(&restored_argument_readback, restored_constant_data, sizeof(restored_argument_readback));
+        }
+        if (rebound_constant_data == NULL || rebound_argument_readback != rebound_argument_constant ||
+            unaligned_constant_data != rebound_constant_data || restored_argument_readback != rebound_argument_constant) {
+            fprintf(stderr, "metal-pixel: CPU argument encoder rebind/range semantics failed\n");
+            return 50;
+        }
+
         __block BOOL no_copy_freed = NO;
         uint8_t *no_copy_memory = (uint8_t *)malloc(16);
         if (no_copy_memory == NULL) {
@@ -10439,6 +10464,27 @@ int main(void) {
             fail_with_error("depth adapter pipeline allocation failed", adapter_depth_pipeline_error);
             fprintf(stderr, "metal-pixel: depth adapter allocation failed\n");
             return 28;
+        }
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTLArgumentDescriptor *depth_argument_descriptor = [MTLArgumentDescriptor argumentDescriptor];
+            depth_argument_descriptor.dataType = MTLDataTypePointer;
+            depth_argument_descriptor.index = 0;
+            id<MTLArgumentEncoder> depth_argument_encoder =
+                [adapter_device newArgumentEncoderWithArguments:@[depth_argument_descriptor]];
+            id<MTLBuffer> depth_argument_buffer =
+                [adapter_device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+            [depth_argument_encoder setArgumentBuffer:depth_argument_buffer offset:0];
+            [depth_argument_encoder setDepthStencilState:adapter_depth_state atIndex:0];
+            uint64_t encoded_depth_resource = 0;
+            if (depth_argument_buffer != nil) {
+                memcpy(&encoded_depth_resource, depth_argument_buffer.contents, sizeof(encoded_depth_resource));
+            }
+            if (depth_argument_encoder == nil || depth_argument_buffer == nil ||
+                adapter_depth_state.gpuResourceID._impl == 0 ||
+                encoded_depth_resource != adapter_depth_state.gpuResourceID._impl) {
+                fprintf(stderr, "metal-pixel: depth state argument encoding failed\n");
+                return 51;
+            }
         }
         [adapter_depth_encoder setRenderPipelineState:adapter_depth_pipeline];
         [adapter_depth_encoder setDepthStencilState:adapter_depth_state];

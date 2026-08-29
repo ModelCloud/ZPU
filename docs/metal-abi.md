@@ -186,9 +186,10 @@ triangle path:
   the current ZPU command buffer executes serially, and registered kernels do
   not sample or consume stage-in/threadgroup metadata
 - argument encoders retain ZPU resources, provide aligned CPU constant storage,
-  and serialize supported buffer/texture/sampler bindings into deterministic
-  CPU-side 16-byte slots containing synthetic resource IDs and buffer offsets;
-  arbitrary shader-specific Metal layouts are still not synthesized
+  and serialize supported buffer/texture/sampler/depth-stencil bindings into
+  deterministic CPU-side 16-byte slots containing synthetic resource IDs and
+  buffer offsets; rebinding captures direct constant writes, while arbitrary
+  shader-specific Metal layouts are still not synthesized
 - CPU-owned Metal 4 timestamp counter heaps; timestamps are monotonic values
   from the adapter's CPU clock domain, resolve into ZPU buffers, and support
   immediate CPU-range invalidation. `queryTimestampFrequency` reports

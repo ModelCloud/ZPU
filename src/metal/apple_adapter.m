@@ -604,6 +604,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @public
     ZPUDevice *_owner;
     NSString *_label;
+    uint64_t _resourceID;
     MTLCompareFunction _depthCompareFunction;
     BOOL _depthWriteEnabled;
     MTLCompareFunction _frontStencilCompareFunction;
@@ -5443,6 +5444,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
     if ((self = [super init])) {
         _owner = owner;
         _label = [descriptor.label copy];
+        _resourceID = zpu_register_resource(self);
         _depthCompareFunction = descriptor.depthCompareFunction;
         _depthWriteEnabled = descriptor.depthWriteEnabled;
         MTLStencilDescriptor *front = descriptor.frontFaceStencil;
@@ -5465,7 +5467,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
 - (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
 - (NSString *)label { return _label; }
 - (void)setLabel:(NSString *)label { _label = [label copy]; }
-- (MTLResourceID)gpuResourceID API_AVAILABLE(macos(26.0), ios(26.0)) { return (MTLResourceID){0}; }
+- (MTLResourceID)gpuResourceID API_AVAILABLE(macos(26.0), ios(26.0)) { return (MTLResourceID){_resourceID}; }
 @end
 
 @implementation ZPUSamplerState
@@ -10722,10 +10724,29 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (NSUInteger)encodedLength { return _encodedLength; }
 - (NSUInteger)alignment { return _alignment; }
+- (BOOL)argumentBufferOffsetIsValid:(ZPUBuffer *)buffer offset:(NSUInteger)offset {
+    if (buffer == nil) return YES;
+    if (_alignment != 0 && offset % _alignment != 0) return NO;
+    if (_encodedLength > buffer.length - offset) return NO;
+    return _encodedLength == 0 || buffer.contents != nil;
+}
+- (void)captureConstantsFromArgumentBuffer {
+    if (_argumentBuffer == nil || _argumentBuffer.contents == nil) return;
+    for (NSNumber *key in _constants) {
+        const NSUInteger index = key.unsignedIntegerValue;
+        if (index > (NSUIntegerMax - _argumentOffset) / 16) continue;
+        const NSUInteger sourceOffset = _argumentOffset + index * 16;
+        NSMutableData *data = _constants[key];
+        if (sourceOffset <= _argumentBuffer.length && _argumentBuffer.length - sourceOffset >= data.length) {
+            memcpy(data.mutableBytes, (uint8_t *)_argumentBuffer.contents + sourceOffset, data.length);
+        }
+    }
+}
 - (void)setArgumentBuffer:(id<MTLBuffer>)argumentBuffer offset:(NSUInteger)offset {
     ZPUBuffer *buffer = (ZPUBuffer *)argumentBuffer;
     if (argumentBuffer != nil && !zpu_buffer_belongs_to_device(_owner, buffer)) return;
-    if (buffer != nil && offset > buffer.length) return;
+    if (buffer != nil && (offset > buffer.length || ![self argumentBufferOffsetIsValid:buffer offset:offset])) return;
+    [self captureConstantsFromArgumentBuffer];
     _argumentBuffer = buffer;
     _argumentOffset = offset;
     if (buffer != nil) [_retainedResources addObject:buffer];
@@ -10749,7 +10770,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     [self setArgumentBuffer:argumentBuffer offset:startOffset + elementOffset];
 }
 - (void)writeBindingsToArgumentBuffer {
-    if (_argumentBuffer == nil) return;
+    if (_argumentBuffer == nil || _argumentBuffer.contents == nil) return;
     for (NSNumber *key in _bindings) {
         const NSUInteger index = key.unsignedIntegerValue;
         if (index > (NSUIntegerMax - _argumentOffset) / 16) continue;
@@ -10774,6 +10795,8 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
             resourceID = ((ZPUIntersectionFunctionTable *)object)->_resourceID;
         } else if ([object isKindOfClass:[ZPUIndirectCommandBuffer class]]) {
             resourceID = ((ZPUIndirectCommandBuffer *)object)->_resourceID;
+        } else if ([object isKindOfClass:[ZPUDepthStencilState class]]) {
+            resourceID = ((ZPUDepthStencilState *)object)->_resourceID;
         }
         memcpy((uint8_t *)_argumentBuffer.contents + destinationOffset, &resourceID, sizeof(resourceID));
         memcpy((uint8_t *)_argumentBuffer.contents + destinationOffset + sizeof(resourceID), &auxiliary, sizeof(auxiliary));
@@ -10883,12 +10906,16 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     }
 }
 - (void)setDepthStencilState:(id<MTLDepthStencilState>)depthStencilState atIndex:(NSUInteger)index API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)depthStencilState;
-    (void)index;
+    ZPUDepthStencilState *state = (ZPUDepthStencilState *)depthStencilState;
+    if (depthStencilState != nil && (![state isKindOfClass:[ZPUDepthStencilState class]] || state->_owner != _owner)) return;
+    [self remember:depthStencilState atIndex:index];
 }
 - (void)setDepthStencilStates:(const id<MTLDepthStencilState> __nullable [__nonnull])depthStencilStates withRange:(NSRange)range API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)depthStencilStates;
-    (void)range;
+    if (depthStencilStates == NULL) return;
+    for (NSUInteger index = 0; index < range.length; ++index) {
+        if (range.location > NSUIntegerMax - index) return;
+        [self setDepthStencilState:depthStencilStates[index] atIndex:range.location + index];
+    }
 }
 - (id<MTLArgumentEncoder>)newArgumentEncoderForBufferAtIndex:(NSUInteger)index API_AVAILABLE(macos(10.13), ios(11.0)) {
     (void)index;
