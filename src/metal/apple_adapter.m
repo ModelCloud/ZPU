@@ -7351,12 +7351,13 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     return (id<MTLRenderPipelineState>)pipeline;
 }
 - (void)newRenderPipelineStateWithMeshDescriptor:(MTLMeshRenderPipelineDescriptor *)descriptor options:(MTLPipelineOption)options completionHandler:(MTLNewRenderPipelineStateWithReflectionCompletionHandler)completionHandler API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)descriptor;
-    (void)options;
     if (completionHandler == nil) return;
     NSError *error = nil;
-    zpu_set_error(&error, @"ZPU CPU Metal has no mesh-shader implementation");
-    completionHandler(nil, nil, error);
+    MTLRenderPipelineReflection *reflection = nil;
+    id<MTLRenderPipelineState> state =
+        [self newRenderPipelineStateWithMeshDescriptor:descriptor options:options
+                                             reflection:&reflection error:&error];
+    completionHandler(state, reflection, error);
 }
 - (id<MTLRasterizationRateMap>)newRasterizationRateMapWithDescriptor:(MTLRasterizationRateMapDescriptor *)descriptor API_AVAILABLE(macos(10.15), ios(13.0), macCatalyst(13.4), tvos(16.0)) {
     return (id<MTLRasterizationRateMap>)[[ZPURasterizationRateMap alloc] initWithOwner:self descriptor:descriptor];
@@ -8369,13 +8370,14 @@ static id<MTLRenderPipelineState> zpu_mtl4_mesh_pipeline_for_descriptor(
     MTL4StaticLinkingDescriptor *fragment_linking = descriptor.fragmentStaticLinkingDescriptor;
     if (descriptor.supportObjectBinaryLinking || descriptor.supportMeshBinaryLinking ||
         descriptor.supportFragmentBinaryLinking ||
-        descriptor.supportIndirectCommandBuffers != MTL4IndirectCommandBufferSupportStateDisabled ||
+        (descriptor.supportIndirectCommandBuffers != MTL4IndirectCommandBufferSupportStateDisabled &&
+         descriptor.supportIndirectCommandBuffers != MTL4IndirectCommandBufferSupportStateEnabled) ||
         object_linking.functionDescriptors.count != 0 || object_linking.privateFunctionDescriptors.count != 0 ||
         object_linking.groups.count != 0 || mesh_linking.functionDescriptors.count != 0 ||
         mesh_linking.privateFunctionDescriptors.count != 0 || mesh_linking.groups.count != 0 ||
         fragment_linking.functionDescriptors.count != 0 || fragment_linking.privateFunctionDescriptors.count != 0 ||
         fragment_linking.groups.count != 0) {
-        zpu_set_error(error, @"ZPU CPU Metal 4 mesh gradients do not support function linking or ICB execution");
+        zpu_set_error(error, @"ZPU CPU Metal 4 mesh gradients do not support function linking");
         return nil;
     }
     id<MTLFunction> mesh = zpu_mtl4_resolve_library_function(owner, descriptor.meshFunctionDescriptor, error);
@@ -8416,7 +8418,7 @@ static id<MTLRenderPipelineState> zpu_mtl4_mesh_pipeline_for_descriptor(
         return nil;
     }
     if (error != NULL) *error = nil;
-    return (id<MTLRenderPipelineState>)[[ZPURenderPipelineState alloc]
+    ZPURenderPipelineState *pipeline = [[ZPURenderPipelineState alloc]
         initWithOwner:owner meshFunctionName:mesh.name objectFunctionName:nil
         fragmentFunctionName:fragment.name label:descriptor.label colorFormat:attachment.pixelFormat
         maxTotalThreadsPerObjectThreadgroup:object_max maxTotalThreadsPerMeshThreadgroup:mesh_max
@@ -8424,6 +8426,9 @@ static id<MTLRenderPipelineState> zpu_mtl4_mesh_pipeline_for_descriptor(
         objectThreadgroupSizeMatchesExecutionWidth:descriptor.objectThreadgroupSizeIsMultipleOfThreadExecutionWidth
         threadgroupSizeMatchesExecutionWidth:descriptor.meshThreadgroupSizeIsMultipleOfThreadExecutionWidth
         requiredThreadsPerObjectThreadgroup:required_object requiredThreadsPerMeshThreadgroup:required_mesh];
+    pipeline->_supportsIndirectCommandBuffers =
+        descriptor.supportIndirectCommandBuffers == MTL4IndirectCommandBufferSupportStateEnabled;
+    return (id<MTLRenderPipelineState>)pipeline;
 }
 
 static BOOL zpu_mtl4_apply_compute_descriptor(

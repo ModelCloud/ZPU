@@ -8379,6 +8379,17 @@ int main(void) {
                 [adapter_device newRenderPipelineStateWithMeshDescriptor:adapter_legacy_mesh_descriptor
                                                                     options:0 reflection:nil
                                                                        error:&adapter_legacy_mesh_error];
+            __block id<MTLRenderPipelineState> adapter_legacy_mesh_async_pipeline = nil;
+            __block NSError *adapter_legacy_mesh_async_error = nil;
+            [adapter_device newRenderPipelineStateWithMeshDescriptor:adapter_legacy_mesh_descriptor
+                                                                options:0
+                                                     completionHandler:^(id<MTLRenderPipelineState> state,
+                                                                         MTLRenderPipelineReflection *reflection,
+                                                                         NSError *async_error) {
+                (void)reflection;
+                adapter_legacy_mesh_async_pipeline = state;
+                adapter_legacy_mesh_async_error = async_error;
+            }];
             MTLTextureDescriptor *adapter_legacy_mesh_texture_descriptor =
                 [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                                                     width:5 height:3 mipmapped:NO];
@@ -8420,6 +8431,7 @@ int main(void) {
             }
             adapter_legacy_mesh_exact = adapter_legacy_mesh_function != nil &&
                 adapter_legacy_mesh_fragment != nil && adapter_legacy_mesh_pipeline != nil &&
+                adapter_legacy_mesh_async_pipeline != nil && adapter_legacy_mesh_async_error == nil &&
                 adapter_legacy_mesh_texture != nil && adapter_legacy_mesh_command_buffer != nil &&
                 adapter_legacy_mesh_encoder != nil &&
                 adapter_legacy_mesh_command_buffer.status == MTLCommandBufferStatusCompleted &&
@@ -8543,6 +8555,8 @@ int main(void) {
             adapter_mtl4_mesh_descriptor.fragmentFunctionDescriptor = adapter_mtl4_mesh_fragment_descriptor;
             adapter_mtl4_mesh_descriptor.rasterSampleCount = 1;
             adapter_mtl4_mesh_descriptor.maxTotalThreadsPerMeshThreadgroup = 4;
+            adapter_mtl4_mesh_descriptor.supportIndirectCommandBuffers =
+                MTL4IndirectCommandBufferSupportStateEnabled;
             adapter_mtl4_mesh_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
             id<MTLRenderPipelineState> adapter_mtl4_mesh_pipeline =
                 [adapter_mtl4_compiler newRenderPipelineStateWithDescriptor:adapter_mtl4_mesh_descriptor
@@ -8620,6 +8634,63 @@ int main(void) {
                     expected_mtl4_mesh_pixels[pixel + 3] = 255;
                 }
             }
+            BOOL adapter_mtl4_mesh_icb_exact = YES;
+            MTLIndirectCommandBufferDescriptor *adapter_mtl4_mesh_icb_descriptor =
+                [MTLIndirectCommandBufferDescriptor new];
+            adapter_mtl4_mesh_icb_descriptor.commandTypes = MTLIndirectCommandTypeDrawMeshThreadgroups;
+            adapter_mtl4_mesh_icb_descriptor.inheritPipelineState = YES;
+            adapter_mtl4_mesh_icb_descriptor.inheritBuffers = YES;
+            id<MTLIndirectCommandBuffer> adapter_mtl4_mesh_icb =
+                [adapter_device newIndirectCommandBufferWithDescriptor:adapter_mtl4_mesh_icb_descriptor
+                                                            maxCommandCount:1
+                                                                    options:MTLResourceStorageModeShared];
+            id<MTLIndirectRenderCommand> adapter_mtl4_mesh_icb_command =
+                [adapter_mtl4_mesh_icb indirectRenderCommandAtIndex:0];
+            [adapter_mtl4_mesh_icb_command drawMeshThreadgroups:MTLSizeMake(5, 3, 1)
+                                      threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
+                                        threadsPerMeshThreadgroup:MTLSizeMake(1, 1, 1)];
+            MTLTextureDescriptor *adapter_mtl4_mesh_icb_texture_descriptor =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                    width:5 height:3 mipmapped:NO];
+            adapter_mtl4_mesh_icb_texture_descriptor.storageMode = MTLStorageModeShared;
+            adapter_mtl4_mesh_icb_texture_descriptor.usage = MTLTextureUsageRenderTarget;
+            id<MTLTexture> adapter_mtl4_mesh_icb_texture =
+                [adapter_device newTextureWithDescriptor:adapter_mtl4_mesh_icb_texture_descriptor];
+            MTL4RenderPassDescriptor *adapter_mtl4_mesh_icb_pass = [MTL4RenderPassDescriptor new];
+            adapter_mtl4_mesh_icb_pass.colorAttachments[0].texture = adapter_mtl4_mesh_icb_texture;
+            adapter_mtl4_mesh_icb_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            adapter_mtl4_mesh_icb_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            adapter_mtl4_mesh_icb_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+            id<MTL4CommandBuffer> adapter_mtl4_mesh_icb_command_buffer = [adapter_device newCommandBuffer];
+            [adapter_mtl4_mesh_icb_command_buffer beginCommandBufferWithAllocator:adapter_mtl4_mesh_allocator];
+            id<MTL4RenderCommandEncoder> adapter_mtl4_mesh_icb_encoder =
+                [adapter_mtl4_mesh_icb_command_buffer renderCommandEncoderWithDescriptor:adapter_mtl4_mesh_icb_pass];
+            [adapter_mtl4_mesh_icb_encoder setRenderPipelineState:adapter_mtl4_archived_mesh_pipeline];
+            [adapter_mtl4_mesh_icb_encoder executeCommandsInBuffer:adapter_mtl4_mesh_icb withRange:NSMakeRange(0, 1)];
+            [adapter_mtl4_mesh_icb_encoder endEncoding];
+            [adapter_mtl4_mesh_icb_command_buffer endCommandBuffer];
+            id<MTL4CommandBuffer> adapter_mtl4_mesh_icb_command_buffers[] = {
+                adapter_mtl4_mesh_icb_command_buffer,
+            };
+            [adapter_mtl4_mesh_queue commit:adapter_mtl4_mesh_icb_command_buffers count:1];
+            uint8_t adapter_mtl4_mesh_icb_pixels[5 * 3 * 4] = {0};
+            if (adapter_mtl4_mesh_icb_texture != nil) {
+                [adapter_mtl4_mesh_icb_texture getBytes:adapter_mtl4_mesh_icb_pixels
+                                              bytesPerRow:5 * 4
+                                            fromRegion:MTLRegionMake2D(0, 0, 5, 3)
+                                           mipmapLevel:0];
+            }
+            adapter_mtl4_mesh_icb_exact = adapter_mtl4_mesh_pipeline != nil &&
+                adapter_mtl4_mesh_pipeline.supportIndirectCommandBuffers &&
+                adapter_mtl4_archived_mesh_pipeline != nil &&
+                adapter_mtl4_archived_mesh_pipeline.supportIndirectCommandBuffers &&
+                adapter_mtl4_mesh_icb != nil && adapter_mtl4_mesh_icb_command != nil &&
+                adapter_mtl4_mesh_icb_texture != nil && adapter_mtl4_mesh_icb_command_buffer != nil &&
+                adapter_mtl4_mesh_icb_encoder != nil &&
+                memcmp(adapter_mtl4_mesh_icb_pixels, expected_mtl4_mesh_pixels,
+                       sizeof(expected_mtl4_mesh_pixels)) == 0;
+            [adapter_mtl4_mesh_icb resetWithRange:NSMakeRange(0, 1)];
+
             adapter_mtl4_mesh_exact = adapter_mtl4_mesh_allocator != nil && adapter_mtl4_mesh_queue != nil &&
                 adapter_mtl4_mesh_pipeline != nil && adapter_mtl4_mesh_archive_flushed &&
                 adapter_mtl4_mesh_archive != nil && adapter_mtl4_archived_mesh_pipeline != nil &&
@@ -8634,13 +8705,14 @@ int main(void) {
                     rangeOfString:@"mesh zpu_cpu_mesh_gradient_rgba8"].location != NSNotFound &&
                 adapter_mtl4_mesh_texture != nil && adapter_mtl4_mesh_command_buffer != nil &&
                 adapter_mtl4_mesh_encoder != nil &&
+                adapter_mtl4_mesh_icb_exact &&
                 memcmp(adapter_mtl4_mesh_pixels, expected_mtl4_mesh_pixels,
                        sizeof(expected_mtl4_mesh_pixels)) == 0;
             [[NSFileManager defaultManager] removeItemAtURL:adapter_mtl4_mesh_archive_url error:nil];
         }
         if (!adapter_mtl4_mesh_exact) {
             fail_with_error("Metal 4 CPU mesh dispatch pixel exactness failed", adapter_mtl4_mesh_error);
-            return 111;
+            return 112;
         }
 
         /* Function tables retain CPU-side handles/resources only. The native

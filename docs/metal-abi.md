@@ -482,7 +482,7 @@ Metal ABI. The remaining framework surface includes additional compute and
 Metal 4 encoders, resource and pipeline descriptors beyond the fixed-function state
 implemented here, arbitrary Metal 4 tile/mesh render and remaining copy/optimization families. The registered RGBA8 tile and mesh profiles are CPU/ZPU-owned
 through legacy and Metal 4 pipeline creation, binary archives, and the Metal 4
-pipeline-data serializer; arbitrary tile/mesh functions remain unsupported. ICB mesh/tessellation-shader execution, other
+pipeline-data serializer; arbitrary tile/mesh functions remain unsupported. ICB arbitrary mesh/tessellation-shader execution, other
 synchronization families, ray-tracing execution, opaque native 3D sparse-texture tail
 backing layout, arbitrary machine-learning/tensor execution, and arbitrary shader compilation. Function-table storage is
 implemented, but it does not imply ray-tracing or arbitrary function-pointer
