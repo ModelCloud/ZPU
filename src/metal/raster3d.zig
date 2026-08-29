@@ -48,6 +48,7 @@ pub const DrawOptions = struct {
     sample_lod_min_clamp: f32 = 0,
     sample_lod_max_clamp: f32 = std.math.floatMax(f32),
     sample_lod_bias: f32 = 0,
+    sample_max_anisotropy: u32 = 1,
     sample_normalized_coordinates: bool = true,
     sample_reduction_mode: abi.SamplerReductionMode = .weighted_average,
     sample_address_s: abi.SamplerAddressMode = .clamp_to_edge,
@@ -460,6 +461,9 @@ const SampleSelection = struct {
     level0: usize = 0,
     level1: usize = 0,
     level_weight: f32 = 0,
+    anisotropic_major_u: f32 = 0,
+    anisotropic_major_v: f32 = 0,
+    anisotropic_taps: usize = 1,
 };
 
 fn sampleSelection(job: *const Job, filter: abi.SamplerFilter, rho: f32) SampleSelection {
@@ -487,6 +491,23 @@ fn sampleSelection(job: *const Job, filter: abi.SamplerFilter, rho: f32) SampleS
     };
 }
 
+fn sampleSelectionWithFootprint(job: *const Job, rho_x: f32, rho_y: f32, major_u: f32, major_v: f32) SampleSelection {
+    const major_rho = @max(rho_x, rho_y);
+    const minor_rho = @min(rho_x, rho_y);
+    const anisotropic = job.options.sample_max_anisotropy > 1 and
+        job.options.sample_min_filter == .linear and job.options.sample_mag_filter == .linear and
+        job.options.sample_normalized_coordinates and std.math.isFinite(major_rho) and
+        std.math.isFinite(minor_rho) and minor_rho > 0 and major_rho > minor_rho;
+    const filter = if (major_rho > 1) job.options.sample_min_filter else job.options.sample_mag_filter;
+    var selection = sampleSelection(job, filter, if (anisotropic) minor_rho else major_rho);
+    if (anisotropic) {
+        selection.anisotropic_major_u = major_u;
+        selection.anisotropic_major_v = major_v;
+        selection.anisotropic_taps = @intCast(@min(job.options.sample_max_anisotropy, 16));
+    }
+    return selection;
+}
+
 fn effectiveSampleReductionMode(options: DrawOptions) abi.SamplerReductionMode {
     // Metal ignores reductionMode unless all three filtering stages can
     // contribute a linear footprint. Keep this decision at sampler-state
@@ -494,6 +515,29 @@ fn effectiveSampleReductionMode(options: DrawOptions) abi.SamplerReductionMode {
     if (options.sample_min_filter != .linear or options.sample_mag_filter != .linear or
         options.sample_mip_filter != .linear) return .weighted_average;
     return options.sample_reduction_mode;
+}
+
+fn sampleTextureWithSelection(job: *const Job, u: f32, v: f32, selection: SampleSelection) [4]f32 {
+    const texture = job.sample_texture.?;
+    const reduction_mode = effectiveSampleReductionMode(job.options);
+    const tap_count = @max(selection.anisotropic_taps, 1);
+    var result = [4]f32{ 0, 0, 0, 0 };
+    for (0..tap_count) |tap| {
+        const tap_position = if (tap_count == 1) @as(f32, 0) else (@as(f32, @floatFromInt(tap)) + 0.5) / @as(f32, @floatFromInt(tap_count)) - 0.5;
+        const tap_u = u + selection.anisotropic_major_u * tap_position;
+        const tap_v = v + selection.anisotropic_major_v * tap_position;
+        const level0 = if (job.sample_mipmaps.len != 0) &job.sample_mipmaps[selection.level0] else texture;
+        const color0 = level0.sample(tap_u, tap_v, selection.filter, job.options.sample_address_s, job.options.sample_address_t, job.options.sample_border_color, job.options.sample_swizzle, job.options.sample_normalized_coordinates, reduction_mode);
+        var color = color0;
+        if (selection.level1 != selection.level0 and job.sample_mipmaps.len != 0) {
+            const color1 = job.sample_mipmaps[selection.level1].sample(tap_u, tap_v, selection.filter, job.options.sample_address_s, job.options.sample_address_t, job.options.sample_border_color, job.options.sample_swizzle, job.options.sample_normalized_coordinates, reduction_mode);
+            for (0..4) |channel| color[channel] = color0[channel] +
+                (color1[channel] - color0[channel]) * selection.level_weight;
+        }
+        for (0..4) |channel| result[channel] += color[channel];
+    }
+    for (0..4) |channel| result[channel] /= @as(f32, @floatFromInt(tap_count));
+    return result;
 }
 
 fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [4]f32, selection: SampleSelection, stats: *Stats, front_facing: bool) void {
@@ -538,16 +582,10 @@ fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [
         stats.depth_tests_passed += 1;
     }
     if (stencil_index) |index| applyStencil(job.stencil.?, index, stencil_state, stencil_state.depth_pass);
-    const reduction_mode = effectiveSampleReductionMode(job.options);
-    const fragment_color = if (job.sample_texture) |texture| blk: {
-        const level0 = if (job.sample_mipmaps.len != 0) &job.sample_mipmaps[selection.level0] else texture;
-        const color0 = level0.sample(color[0], color[1], selection.filter, job.options.sample_address_s, job.options.sample_address_t, job.options.sample_border_color, job.options.sample_swizzle, job.options.sample_normalized_coordinates, reduction_mode);
-        if (selection.level1 == selection.level0 or job.sample_mipmaps.len == 0) break :blk color0;
-        const color1 = job.sample_mipmaps[selection.level1].sample(color[0], color[1], selection.filter, job.options.sample_address_s, job.options.sample_address_t, job.options.sample_border_color, job.options.sample_swizzle, job.options.sample_normalized_coordinates, reduction_mode);
-        var result: [4]f32 = undefined;
-        for (0..4) |channel| result[channel] = color0[channel] + (color1[channel] - color0[channel]) * selection.level_weight;
-        break :blk result;
-    } else job.options.fragment_color orelse color;
+    const fragment_color = if (job.sample_texture != null)
+        sampleTextureWithSelection(job, color[0], color[1], selection)
+    else
+        job.options.fragment_color orelse color;
     writeColor(job.target, x, y, fragment_color, job.options);
     if (job.options.write_extra_targets) for (job.extra_targets) |target| writeColor(target, x, y, fragment_color, job.options);
     stats.fragments_covered += 1;
@@ -616,8 +654,7 @@ fn lineSampleSelection(job: *const Job, a: ProjectedVertex, b: ProjectedVertex) 
     const coordinate_scale_v = if (job.options.sample_normalized_coordinates) @as(f32, @floatFromInt(texture.height)) else 1;
     const footprint_u = @abs(b.color[0] - a.color[0]) * coordinate_scale_u / steps;
     const footprint_v = @abs(b.color[1] - a.color[1]) * coordinate_scale_v / steps;
-    const rho = @max(footprint_u, footprint_v);
-    return sampleSelection(job, if (rho > 1) job.options.sample_min_filter else job.options.sample_mag_filter, rho);
+    return sampleSelectionWithFootprint(job, footprint_u, footprint_v, (b.color[0] - a.color[0]) / steps, (b.color[1] - a.color[1]) / steps);
 }
 
 fn lineSampleFilter(job: *const Job, a: ProjectedVertex, b: ProjectedVertex) abi.SamplerFilter {
@@ -687,8 +724,9 @@ fn triangleSampleSelection(job: *const Job, vertices: [3]ProjectedVertex, w0: f3
     const height = if (job.options.sample_normalized_coordinates) @as(f32, @floatFromInt(texture.height)) else 1;
     const rho_x = @sqrt((du_dx * width) * (du_dx * width) + (dv_dx * height) * (dv_dx * height));
     const rho_y = @sqrt((du_dy * width) * (du_dy * width) + (dv_dy * height) * (dv_dy * height));
-    const rho = @max(rho_x, rho_y);
-    return sampleSelection(job, if (rho > 1) job.options.sample_min_filter else job.options.sample_mag_filter, rho);
+    const major_u = if (rho_x >= rho_y) du_dx else du_dy;
+    const major_v = if (rho_x >= rho_y) dv_dx else dv_dy;
+    return sampleSelectionWithFootprint(job, rho_x, rho_y, major_u, major_v);
 }
 
 fn triangleSampleFilter(job: *const Job, vertices: [3]ProjectedVertex, w0: f32, w1: f32, w2: f32) abi.SamplerFilter {
@@ -1213,4 +1251,43 @@ test "CPU sampler ignores reduction when Metal filtering disables it" {
     try std.testing.expectEqual(abi.SamplerReductionMode.minimum, effectiveSampleReductionMode(options));
     options.sample_mag_filter = .nearest;
     try std.testing.expectEqual(abi.SamplerReductionMode.weighted_average, effectiveSampleReductionMode(options));
+}
+
+test "CPU sampler uses bounded anisotropic major-axis taps" {
+    var source_pixels = [_]u8{
+        0, 0, 0, 255, 85, 0, 0, 255, 170, 0, 0, 255, 255, 0, 0, 255,
+    };
+    var source = try Target.init(&source_pixels, 4, 1, 4 * 4, .rgba8_unorm);
+    const options = DrawOptions{
+        .viewport = .{ .origin_x = 0, .origin_y = 0, .width = 1, .height = 1, .znear = 0, .zfar = 1 },
+        .scissor = .{ .x = 0, .y = 0, .width = 1, .height = 1 },
+        .sample_min_filter = .linear,
+        .sample_mag_filter = .linear,
+        .sample_max_anisotropy = 2,
+    };
+    const selection = sampleSelectionWithFootprint(&Job{
+        .target = &source,
+        .extra_targets = &.{},
+        .sample_texture = &source,
+        .sample_mipmaps = &.{},
+        .depth = null,
+        .stencil = null,
+        .vertices = &.{},
+        .primitive = .point,
+        .options = options,
+    }, 4, 1, 0.75, 0);
+    var job = Job{
+        .target = &source,
+        .extra_targets = &.{},
+        .sample_texture = &source,
+        .sample_mipmaps = &.{},
+        .depth = null,
+        .stencil = null,
+        .vertices = &.{},
+        .primitive = .point,
+        .options = options,
+    };
+    try std.testing.expectEqual(@as(usize, 2), selection.anisotropic_taps);
+    const sampled = sampleTextureWithSelection(&job, 0.5, 0.5, selection);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), sampled[0], 0.001);
 }

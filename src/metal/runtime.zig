@@ -699,6 +699,7 @@ pub const RenderEncoder = struct {
     sample_lod_min_clamp: f32 = 0,
     sample_lod_max_clamp: f32 = std.math.floatMax(f32),
     sample_lod_bias: f32 = 0,
+    sample_max_anisotropy: u32 = 1,
     sample_normalized_coordinates: bool = true,
     sample_reduction_mode: abi.SamplerReductionMode = .weighted_average,
     sample_address_s: abi.SamplerAddressMode = .clamp_to_edge,
@@ -763,6 +764,7 @@ pub const RenderEncoder = struct {
             .sample_lod_min_clamp = self.sample_lod_min_clamp,
             .sample_lod_max_clamp = self.sample_lod_max_clamp,
             .sample_lod_bias = self.sample_lod_bias,
+            .sample_max_anisotropy = self.sample_max_anisotropy,
             .sample_normalized_coordinates = self.sample_normalized_coordinates,
             .sample_reduction_mode = self.sample_reduction_mode,
             .sample_address_s = self.sample_address_s,
@@ -906,6 +908,11 @@ pub const RenderEncoder = struct {
     pub fn setFragmentSamplerLodBias(self: *RenderEncoder, lod_bias: f32) Error!void {
         if (!self.open() or !std.math.isFinite(lod_bias) or lod_bias < -16 or lod_bias >= 16) return error.InvalidArgument;
         self.sample_lod_bias = lod_bias;
+    }
+
+    pub fn setFragmentSamplerMaxAnisotropy(self: *RenderEncoder, max_anisotropy: u32) Error!void {
+        if (!self.open() or max_anisotropy == 0) return error.InvalidArgument;
+        self.sample_max_anisotropy = max_anisotropy;
     }
 
     pub fn setFragmentSamplerNormalizedCoordinates(self: *RenderEncoder, normalized_coordinates: bool) Error!void {
@@ -3998,6 +4005,14 @@ pub export fn zpu_metal_render_encoder_set_fragment_sampler_lod_bias(
     lod_bias: f32,
 ) callconv(.c) c_int {
     (encoder orelse return -1).setFragmentSamplerLodBias(lod_bias) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_fragment_sampler_max_anisotropy(
+    encoder: ?*RenderEncoder,
+    max_anisotropy: u32,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setFragmentSamplerMaxAnisotropy(max_anisotropy) catch |err| return errorCode(err);
     return 0;
 }
 

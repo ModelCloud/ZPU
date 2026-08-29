@@ -104,9 +104,11 @@ int main(void) {
             ZPU_METAL_SAMPLER_BORDER_OPAQUE_WHITE) != 0 ||
         zpu_metal_render_encoder_set_fragment_sampler_normalized_coordinates(render_encoder, 1) != 0 ||
         zpu_metal_render_encoder_set_fragment_sampler_lod_bias(render_encoder, 0.0f) != 0 ||
+        zpu_metal_render_encoder_set_fragment_sampler_max_anisotropy(render_encoder, 1) != 0 ||
         zpu_metal_render_encoder_set_fragment_sampler_reduction_mode(
             render_encoder, ZPU_METAL_SAMPLER_REDUCTION_WEIGHTED_AVERAGE) != 0 ||
         zpu_metal_render_encoder_set_fragment_sampler_lod_bias(render_encoder, 16.0f) == 0 ||
+        zpu_metal_render_encoder_set_fragment_sampler_max_anisotropy(render_encoder, 0) == 0 ||
         zpu_metal_render_encoder_draw_primitives(render_encoder, ZPU_METAL_TRIANGLE, 0, 3, 1) != 0 ||
         zpu_metal_render_encoder_end_encoding(render_encoder) != 0 ||
         zpu_metal_command_buffer_get_status(render_buffer) != ZPU_METAL_COMMAND_BUFFER_CREATED ||

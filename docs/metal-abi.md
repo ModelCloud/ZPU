@@ -80,6 +80,9 @@ triangle path:
   the CPU raster path; it also consumes a ZPU-owned 16-byte `float4` buffer
   binding at fragment index 0 with commit-time reads, so writes made before
   commit are visible; other fragment byte layouts remain unsupported
+- bounded CPU anisotropic sampler footprints for normalized coordinates and
+  linear min/mag filters, with the configured tap count capped for predictable
+  CPU work; native Metal remains only the byte-accuracy oracle
 - fixed-function render pipeline, depth-stencil, and sampler state objects;
   pipeline attachment format validation, blending factors/operations, color
   write masks, depth bounds, and Metal top-left triangle edge inclusion
@@ -407,7 +410,7 @@ reference: <https://developer.apple.com/documentation/metal>.
 The current checked-in implementation is intentionally not 100% of the Apple
 Metal ABI. The remaining framework surface includes additional compute and
 Metal 4 encoders, resource and pipeline descriptors beyond the fixed-function state
-implemented here, anisotropic sampler footprints, Metal 4 tile/mesh render and remaining copy/optimization families, ICB mesh/tessellation-shader execution, other
+implemented here, Metal 4 tile/mesh render and remaining copy/optimization families, ICB mesh/tessellation-shader execution, other
 synchronization families, ray-tracing execution, unsupported 3D sparse-texture tail
 packing, machine learning/tensor execution, and arbitrary shader compilation. Function-table storage is
 implemented, but it does not imply ray-tracing or arbitrary function-pointer

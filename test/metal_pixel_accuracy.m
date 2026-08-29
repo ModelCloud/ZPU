@@ -218,16 +218,16 @@ static int test_mip_sampler_against_native(
     MTLSamplerMinMagFilter min_filter, MTLSamplerMinMagFilter mag_filter,
     MTLSamplerMipFilter mip_filter, MTLSamplerReductionMode reduction_mode,
     float lod_bias, float lod_min_clamp, float lod_max_clamp,
-    BOOL normalized_coordinates) {
+    BOOL normalized_coordinates, NSUInteger max_anisotropy, float v_scale) {
     enum { output_width = 4, output_height = 4, mip_width = 16, mip_height = 16,
            mip_levels = 5, byte_count = output_width * output_height * 4 };
     const zpu_metal_vertex vertices[] = {
         {{-1.0f, -1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
         {{ 1.0f, -1.0f, 0.5f, 1.0f}, {normalized_coordinates ? 1.0f : 16.0f, 0.0f, 0.0f, 1.0f}},
-        {{ 1.0f,  1.0f, 0.5f, 1.0f}, {normalized_coordinates ? 1.0f : 16.0f, normalized_coordinates ? 1.0f : 16.0f, 0.0f, 1.0f}},
+        {{ 1.0f,  1.0f, 0.5f, 1.0f}, {normalized_coordinates ? 1.0f : 16.0f, (normalized_coordinates ? 1.0f : 16.0f) * v_scale, 0.0f, 1.0f}},
         {{-1.0f, -1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
-        {{ 1.0f,  1.0f, 0.5f, 1.0f}, {normalized_coordinates ? 1.0f : 16.0f, normalized_coordinates ? 1.0f : 16.0f, 0.0f, 1.0f}},
-        {{-1.0f,  1.0f, 0.5f, 1.0f}, {0.0f, normalized_coordinates ? 1.0f : 16.0f, 0.0f, 1.0f}},
+        {{ 1.0f,  1.0f, 0.5f, 1.0f}, {normalized_coordinates ? 1.0f : 16.0f, (normalized_coordinates ? 1.0f : 16.0f) * v_scale, 0.0f, 1.0f}},
+        {{-1.0f,  1.0f, 0.5f, 1.0f}, {0.0f, (normalized_coordinates ? 1.0f : 16.0f) * v_scale, 0.0f, 1.0f}},
     };
     const uint8_t level_colors[mip_levels][4] = {
         {255, 0, 0, 255}, {0, 255, 0, 255}, {0, 0, 255, 255},
@@ -289,6 +289,7 @@ static int test_mip_sampler_against_native(
     sampler_descriptor.normalizedCoordinates = normalized_coordinates;
     sampler_descriptor.lodMinClamp = lod_min_clamp;
     sampler_descriptor.lodMaxClamp = lod_max_clamp;
+    sampler_descriptor.maxAnisotropy = max_anisotropy;
     if (@available(macOS 26.0, iOS 26.0, *)) {
         sampler_descriptor.lodBias = lod_bias;
         sampler_descriptor.reductionMode = reduction_mode;
@@ -1354,21 +1355,21 @@ int main(void) {
             adapter_vertex_function, adapter_sample_fragment_function,
             MTLSamplerMinMagFilterNearest, MTLSamplerMinMagFilterNearest,
             MTLSamplerMipFilterNearest, MTLSamplerReductionModeWeightedAverage,
-            0.0f, 0.0f, FLT_MAX, YES);
+            0.0f, 0.0f, FLT_MAX, YES, 1, 1.0f);
         if (mip_nearest_result != 0) return mip_nearest_result;
         const int mip_linear_result = test_mip_sampler_against_native(
             device, adapter_device, vertex_function, sample_fragment_function,
             adapter_vertex_function, adapter_sample_fragment_function,
             MTLSamplerMinMagFilterNearest, MTLSamplerMinMagFilterNearest,
             MTLSamplerMipFilterLinear, MTLSamplerReductionModeWeightedAverage,
-            0.0f, 1.5f, 1.5f, YES);
+            0.0f, 1.5f, 1.5f, YES, 1, 1.0f);
         if (mip_linear_result != 0) return mip_linear_result;
         const int unnormalized_sampler_result = test_mip_sampler_against_native(
             device, adapter_device, vertex_function, sample_fragment_function,
             adapter_vertex_function, adapter_sample_fragment_function,
             MTLSamplerMinMagFilterNearest, MTLSamplerMinMagFilterNearest,
             MTLSamplerMipFilterNotMipmapped, MTLSamplerReductionModeWeightedAverage,
-            0.0f, 0.0f, 0.0f, NO);
+            0.0f, 0.0f, 0.0f, NO, 1, 1.0f);
         if (unnormalized_sampler_result != 0) return unnormalized_sampler_result;
         if (@available(macOS 26.0, iOS 26.0, *)) {
             const int lod_bias_result = test_mip_sampler_against_native(
@@ -1376,7 +1377,7 @@ int main(void) {
                 adapter_vertex_function, adapter_sample_fragment_function,
                 MTLSamplerMinMagFilterNearest, MTLSamplerMinMagFilterNearest,
                 MTLSamplerMipFilterNearest, MTLSamplerReductionModeWeightedAverage,
-                1.0f, 0.0f, FLT_MAX, YES);
+                1.0f, 0.0f, FLT_MAX, YES, 1, 1.0f);
             if (lod_bias_result != 0) return lod_bias_result;
         }
         if (@available(macOS 26.0, iOS 26.0, *)) {
@@ -1392,23 +1393,34 @@ int main(void) {
                     adapter_vertex_function, adapter_sample_fragment_function,
                     MTLSamplerMinMagFilterLinear, MTLSamplerMinMagFilterLinear,
                     MTLSamplerMipFilterLinear, MTLSamplerReductionModeMinimum,
-                    0.0f, 0.0f, 0.0f, YES);
+                    0.0f, 0.0f, 0.0f, YES, 1, 1.0f);
                 if (reduction_min_result != 0) return reduction_min_result;
                 const int reduction_max_result = test_mip_sampler_against_native(
                     device, adapter_device, vertex_function, sample_fragment_function,
                     adapter_vertex_function, adapter_sample_fragment_function,
                     MTLSamplerMinMagFilterLinear, MTLSamplerMinMagFilterLinear,
                     MTLSamplerMipFilterLinear, MTLSamplerReductionModeMaximum,
-                    0.0f, 0.0f, 0.0f, YES);
+                    0.0f, 0.0f, 0.0f, YES, 1, 1.0f);
                 if (reduction_max_result != 0) return reduction_max_result;
             }
         }
-        MTLSamplerDescriptor *unsupported_anisotropy_descriptor = [MTLSamplerDescriptor new];
-        unsupported_anisotropy_descriptor.maxAnisotropy = 2;
+        const int anisotropy_result = test_mip_sampler_against_native(
+            device, adapter_device, vertex_function, sample_fragment_function,
+            adapter_vertex_function, adapter_sample_fragment_function,
+            MTLSamplerMinMagFilterLinear, MTLSamplerMinMagFilterLinear,
+            MTLSamplerMipFilterNotMipmapped, MTLSamplerReductionModeWeightedAverage,
+            0.0f, 0.0f, 0.0f, YES, 2, 0.0625f);
+        if (anisotropy_result != 0) return anisotropy_result;
+        MTLSamplerDescriptor *anisotropy_descriptor = [MTLSamplerDescriptor new];
+        anisotropy_descriptor.maxAnisotropy = 2;
         id<MTLSamplerState> adapter_anisotropic_sampler =
-            [adapter_device newSamplerStateWithDescriptor:unsupported_anisotropy_descriptor];
-        if (adapter_anisotropic_sampler != nil) {
-            fprintf(stderr, "metal-pixel: CPU adapter silently accepted unsupported anisotropic sampling\n");
+            [adapter_device newSamplerStateWithDescriptor:anisotropy_descriptor];
+        MTLSamplerDescriptor *invalid_anisotropy_descriptor = [anisotropy_descriptor copy];
+        invalid_anisotropy_descriptor.normalizedCoordinates = NO;
+        id<MTLSamplerState> adapter_invalid_anisotropic_sampler =
+            [adapter_device newSamplerStateWithDescriptor:invalid_anisotropy_descriptor];
+        if (adapter_anisotropic_sampler == nil || adapter_invalid_anisotropic_sampler != nil) {
+            fprintf(stderr, "metal-pixel: CPU sampler anisotropy validation mismatch\n");
             return 152;
         }
 
