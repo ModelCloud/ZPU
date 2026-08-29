@@ -12290,10 +12290,23 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     }
 }
 - (void)synchronizeResource:(id<MTLResource>)resource {
-    ZPUBuffer *buffer = (ZPUBuffer *)resource;
-    if (!zpu_buffer_belongs_to_device([_owner device], buffer)) { [_owner markError]; return; }
-    [_owner retainResource:buffer];
-    if (zpu_metal_blit_encoder_synchronize_resource(_zpuEncoder, buffer->_zpuBuffer) != ZPU_METAL_OK) [_owner markError];
+    if ([resource isKindOfClass:[ZPUBuffer class]]) {
+        ZPUBuffer *buffer = (ZPUBuffer *)resource;
+        if (!zpu_buffer_belongs_to_device([_owner device], buffer)) { [_owner markError]; return; }
+        [_owner retainResource:buffer];
+        if (zpu_metal_blit_encoder_synchronize_resource(_zpuEncoder, buffer->_zpuBuffer) != ZPU_METAL_OK) [_owner markError];
+        return;
+    }
+    /* CPU-owned textures have no GPU cache to flush. Keep the resource alive
+     * through completion, matching the texture-specific selector and Metal's
+     * generic MTLResource contract without routing execution to native Metal. */
+    if ([resource isKindOfClass:[ZPUTexture class]]) {
+        ZPUTexture *texture = (ZPUTexture *)resource;
+        if (!zpu_texture_belongs_to_device([_owner device], texture)) { [_owner markError]; return; }
+        [_owner retainResource:texture];
+        return;
+    }
+    [_owner markError];
 }
 - (void)synchronizeTexture:(id<MTLTexture>)texture slice:(NSUInteger)slice level:(NSUInteger)level API_AVAILABLE(macos(10.11), macCatalyst(13.0)) API_UNAVAILABLE(ios) {
     ZPUTexture *zpuTexture = (ZPUTexture *)texture;

@@ -5408,6 +5408,13 @@ int main(void) {
             [adapter_device newBufferWithLength:sizeof(mip_level_one) options:MTLResourceStorageModeShared];
         id<MTLCommandBuffer> adapter_mip_command_buffer = [adapter_queue commandBuffer];
         id<MTLBlitCommandEncoder> adapter_mip_blit = [adapter_mip_command_buffer blitCommandEncoder];
+        id<MTLCommandBuffer> native_mip_sync_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> native_mip_sync_blit = [native_mip_sync_command_buffer blitCommandEncoder];
+        [native_mip_sync_blit synchronizeResource:native_mip_texture];
+        [native_mip_sync_blit endEncoding];
+        [native_mip_sync_command_buffer commit];
+        [native_mip_sync_command_buffer waitUntilCompleted];
+        [adapter_mip_blit synchronizeResource:adapter_mip_texture];
         [adapter_mip_blit copyFromTexture:adapter_mip_texture
                               sourceSlice:0
                               sourceLevel:1
@@ -5450,6 +5457,7 @@ int main(void) {
             adapter_mip_view == nil || adapter_mip_view.width != 2 || adapter_mip_view.height != 2 ||
             adapter_mip_view.mipmapLevelCount != 1 || adapter_mip_view.parentRelativeLevel != 1 ||
             adapter_mip_buffer == nil || adapter_mip_copy == nil ||
+            native_mip_sync_command_buffer.status != MTLCommandBufferStatusCompleted ||
             adapter_mip_command_buffer.status != MTLCommandBufferStatusCompleted ||
             memcmp(native_mip_level_one, mip_level_one, sizeof(mip_level_one)) != 0 ||
             memcmp(adapter_mip_level_one, native_mip_level_one, sizeof(mip_level_one)) != 0 ||
