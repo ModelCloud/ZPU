@@ -15,6 +15,14 @@ id<MTLDevice> ZPUMetalCreateSystemDefaultDevice(void);
  * the ZPU runtime. This is metadata only: it does not compile MSL. */
 id<MTLFunction> ZPUMetalCreateCPUFunction(id<MTLDevice> device, NSString *name);
 
+/* Create a CPU-owned drawable around an existing ZPU texture. Presentation
+ * is a logical CPU operation: it never imports CAMetalLayer, IOSurface, or an
+ * Apple drawable. The texture remains owned by the device returned from
+ * ZPUMetalCreateSystemDefaultDevice and can be rendered into before the
+ * drawable is presented. */
+API_AVAILABLE(macos(10.11), ios(8.0))
+id<MTLDrawable> ZPUMetalCreateCPUDrawable(id<MTLTexture> texture);
+
 /* Allocate CPU-owned Metal 4 commit options. The returned object can be
  * passed to MTL4CommandQueue commit:count:options: and accepts native
  * MTL4CommitFeedbackHandler blocks without invoking Apple's GPU runtime. */

@@ -18,6 +18,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <mach/mach_time.h>
 #include <compression.h>
 
 #include "zpu/metal.h"
@@ -199,6 +200,30 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 - (zpu_metal_texture *)zpuTextureAtLevel:(NSUInteger)level;
 - (zpu_metal_texture *)zpuTextureAtLevel:(NSUInteger)level slice:(NSUInteger)slice;
 - (void)applyDescriptor:(MTLTextureDescriptor *)descriptor;
+@end
+
+/* A drawable is deliberately an explicit CPU object rather than a
+ * CAMetalLayer interposition. It wraps a ZPU texture supplied by the caller;
+ * presentation only records the logical host-time event and invokes the
+ * Metal presented handlers. */
+API_AVAILABLE(macos(10.11), ios(8.0))
+@interface ZPUCPUDrawable : NSObject <MTLDrawable> {
+@public
+    ZPUTexture *_texture;
+    ZPUDevice *_owner;
+    NSUInteger _drawableID;
+    CFTimeInterval _presentedTime;
+    NSMutableArray *_presentedHandlers;
+    BOOL _presented;
+    BOOL _presentationQueued;
+    BOOL _queueSignaled;
+    CFTimeInterval _queuedPresentationTime;
+    CFTimeInterval _queuedMinimumDuration;
+}
+- (instancetype)initWithTexture:(ZPUTexture *)texture;
+- (BOOL)queuePresentationAtTime:(CFTimeInterval)presentationTime minimumDuration:(CFTimeInterval)duration;
+- (void)finishPresentation;
+- (void)signalForPresentation;
 @end
 
 #pragma clang diagnostic push
@@ -805,6 +830,80 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 - (instancetype)initWithOwner:(ZPUMTL4CommandBuffer *)owner;
 @end
 
+static CFTimeInterval zpu_drawable_host_time(void) {
+    mach_timebase_info_data_t timebase = {0, 0};
+    if (mach_timebase_info(&timebase) != KERN_SUCCESS || timebase.denom == 0) {
+        return CFAbsoluteTimeGetCurrent();
+    }
+    return ((CFTimeInterval)mach_absolute_time() * (CFTimeInterval)timebase.numer /
+            (CFTimeInterval)timebase.denom) * 1.0e-9;
+}
+
+static uint64_t zpu_next_cpu_drawable_id;
+
+@implementation ZPUCPUDrawable
+- (instancetype)initWithTexture:(ZPUTexture *)texture {
+    if (texture == nil || ![texture isKindOfClass:[ZPUTexture class]] || texture->_owner == nil) return nil;
+    if ((self = [super init])) {
+        _texture = texture;
+        _owner = (ZPUDevice *)texture->_owner;
+        _drawableID = (NSUInteger)__sync_fetch_and_add(&zpu_next_cpu_drawable_id, 1);
+        _presentedTime = 0;
+        _presentedHandlers = [NSMutableArray array];
+        _presented = NO;
+        _presentationQueued = NO;
+        _queueSignaled = NO;
+        _queuedPresentationTime = 0;
+        _queuedMinimumDuration = 0;
+    }
+    return self;
+}
+- (BOOL)queuePresentationAtTime:(CFTimeInterval)presentationTime minimumDuration:(CFTimeInterval)duration {
+    if (_presented || _presentationQueued || !isfinite(presentationTime) || presentationTime < 0.0 ||
+        !isfinite(duration) || duration < 0.0) return NO;
+    _presentationQueued = YES;
+    _queuedPresentationTime = presentationTime;
+    _queuedMinimumDuration = duration;
+    return YES;
+}
+- (void)finishPresentation {
+    if (!_presentationQueued || _presented) return;
+    const CFTimeInterval now = zpu_drawable_host_time();
+    CFTimeInterval presentationTime = _queuedPresentationTime;
+    if (_queuedMinimumDuration > 0.0) {
+        const CFTimeInterval minimumTime = now + _queuedMinimumDuration;
+        if (presentationTime < minimumTime) presentationTime = minimumTime;
+    }
+    if (presentationTime < now) presentationTime = now;
+    _presentedTime = presentationTime == 0.0 ? now : presentationTime;
+    _presentationQueued = NO;
+    _presented = YES;
+    NSArray *handlers = [_presentedHandlers copy];
+    [_presentedHandlers removeAllObjects];
+    for (MTLDrawablePresentedHandler block in handlers) block((id<MTLDrawable>)self);
+}
+- (void)present {
+    if ([self queuePresentationAtTime:0.0 minimumDuration:0.0]) [self finishPresentation];
+}
+- (void)presentAtTime:(CFTimeInterval)presentationTime {
+    if ([self queuePresentationAtTime:presentationTime minimumDuration:0.0]) [self finishPresentation];
+}
+- (void)presentAfterMinimumDuration:(CFTimeInterval)duration API_AVAILABLE(macos(10.15.4), ios(10.3), macCatalyst(13.4)) {
+    if ([self queuePresentationAtTime:0.0 minimumDuration:duration]) [self finishPresentation];
+}
+- (void)addPresentedHandler:(MTLDrawablePresentedHandler)block API_AVAILABLE(macos(10.15.4), ios(10.3), macCatalyst(13.4)) {
+    if (block == nil) return;
+    if (_presented) {
+        block((id<MTLDrawable>)self);
+    } else {
+        [_presentedHandlers addObject:[block copy]];
+    }
+}
+- (CFTimeInterval)presentedTime API_AVAILABLE(macos(10.15.4), ios(10.3), macCatalyst(13.4)) { return _presentedTime; }
+- (NSUInteger)drawableID API_AVAILABLE(macos(10.15.4), ios(10.3), macCatalyst(13.4)) { return _drawableID; }
+- (void)signalForPresentation { _queueSignaled = YES; }
+@end
+
 #pragma clang diagnostic pop
 
 @interface ZPUCPUFunction : NSObject <MTLFunction> {
@@ -976,6 +1075,9 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSError *_error;
     NSString *_label;
     BOOL _scheduled;
+    ZPUCPUDrawable *_pendingDrawable;
+    CFTimeInterval _pendingPresentationTime;
+    CFTimeInterval _pendingMinimumDuration;
 }
 - (instancetype)initWithOwner:(ZPUCommandQueue *)owner commandBuffer:(zpu_metal_command_buffer *)commandBuffer;
 - (void)retainResource:(id)resource;
@@ -7751,9 +7853,16 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
      * recorded operations. Unbacked virtual tiles are explicitly zeroed so
      * ordinary render, compute, and blit commands cannot observe stale bytes. */
     zpu_sparse_synchronize_resources();
-    if (zpu_metal_command_buffer_commit(_zpuCommandBuffer) != ZPU_METAL_OK) {
+    const BOOL succeeded = zpu_metal_command_buffer_commit(_zpuCommandBuffer) == ZPU_METAL_OK;
+    if (!succeeded) {
         _error = [NSError errorWithDomain:@"ZPUMetal" code:ZPU_METAL_INVALID_COMMAND
                                 userInfo:@{NSLocalizedDescriptionKey: @"ZPU Metal command buffer execution failed"}];
+    } else if (_pendingDrawable != nil) {
+        /* Native Metal schedules a drawable present with command-buffer
+         * execution. The ZPU runtime is synchronous, so the logical present
+         * becomes observable at the same point the CPU command buffer has
+         * completed. */
+        [_pendingDrawable finishPresentation];
     }
     /* The ZPU runtime executes synchronously. Reconcile CPU writes from
      * mapped sparse resources with their shared physical-page objects and
@@ -7769,9 +7878,41 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     (void)zpu_metal_command_buffer_wait_until_completed(_zpuCommandBuffer);
 }
 - (void)waitUntilScheduled {}
-- (void)presentDrawable:(id<MTLDrawable>)drawable { (void)drawable; [self markError]; }
-- (void)presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)presentationTime { (void)drawable; (void)presentationTime; [self markError]; }
-- (void)presentDrawable:(id<MTLDrawable>)drawable afterMinimumDuration:(CFTimeInterval)duration API_AVAILABLE(macos(10.15.4), ios(10.3), macCatalyst(13.4)) { (void)drawable; (void)duration; [self markError]; }
+- (void)presentDrawable:(id<MTLDrawable>)drawable {
+    ZPUCPUDrawable *cpuDrawable = (ZPUCPUDrawable *)drawable;
+    if (_scheduled || ![cpuDrawable isKindOfClass:[ZPUCPUDrawable class]] ||
+        cpuDrawable->_owner != _owner->_owner || _pendingDrawable != nil ||
+        ![cpuDrawable queuePresentationAtTime:0.0 minimumDuration:0.0]) {
+        [self markError];
+        return;
+    }
+    _pendingDrawable = cpuDrawable;
+    [self retainResource:cpuDrawable];
+}
+- (void)presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)presentationTime {
+    ZPUCPUDrawable *cpuDrawable = (ZPUCPUDrawable *)drawable;
+    if (_scheduled || ![cpuDrawable isKindOfClass:[ZPUCPUDrawable class]] ||
+        cpuDrawable->_owner != _owner->_owner || _pendingDrawable != nil ||
+        ![cpuDrawable queuePresentationAtTime:presentationTime minimumDuration:0.0]) {
+        [self markError];
+        return;
+    }
+    _pendingDrawable = cpuDrawable;
+    _pendingPresentationTime = presentationTime;
+    [self retainResource:cpuDrawable];
+}
+- (void)presentDrawable:(id<MTLDrawable>)drawable afterMinimumDuration:(CFTimeInterval)duration API_AVAILABLE(macos(10.15.4), ios(10.3), macCatalyst(13.4)) {
+    ZPUCPUDrawable *cpuDrawable = (ZPUCPUDrawable *)drawable;
+    if (_scheduled || ![cpuDrawable isKindOfClass:[ZPUCPUDrawable class]] ||
+        cpuDrawable->_owner != _owner->_owner || _pendingDrawable != nil ||
+        ![cpuDrawable queuePresentationAtTime:0.0 minimumDuration:duration]) {
+        [self markError];
+        return;
+    }
+    _pendingDrawable = cpuDrawable;
+    _pendingMinimumDuration = duration;
+    [self retainResource:cpuDrawable];
+}
 - (void)addScheduledHandler:(MTLCommandBufferHandler)block {
     if (block == nil) return;
     if ([self status] != MTLCommandBufferStatusNotEnqueued) {
@@ -8451,8 +8592,24 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     }
     [buffer commit];
 }
-- (void)signalDrawable:(id<MTLDrawable>)drawable { (void)drawable; _failed = YES; }
-- (void)waitForDrawable:(id<MTLDrawable>)drawable { (void)drawable; _failed = YES; }
+- (void)signalDrawable:(id<MTLDrawable>)drawable {
+    ZPUCPUDrawable *cpuDrawable = (ZPUCPUDrawable *)drawable;
+    if (![cpuDrawable isKindOfClass:[ZPUCPUDrawable class]] || cpuDrawable->_owner != _owner) {
+        _failed = YES;
+        return;
+    }
+    [cpuDrawable signalForPresentation];
+}
+- (void)waitForDrawable:(id<MTLDrawable>)drawable {
+    ZPUCPUDrawable *cpuDrawable = (ZPUCPUDrawable *)drawable;
+    if (![cpuDrawable isKindOfClass:[ZPUCPUDrawable class]] || cpuDrawable->_owner != _owner) {
+        _failed = YES;
+        return;
+    }
+    /* CPU command buffers complete synchronously, so there is no display
+     * queue to drain. Validation is still important: foreign drawables must
+     * not silently become synchronization points in this queue. */
+}
 - (void)addResidencySet:(id<MTLResidencySet>)residencySet {
     ZPUResidencySet *zpuSet = (ZPUResidencySet *)residencySet;
     if (![zpuSet isKindOfClass:[ZPUResidencySet class]] || zpuSet->_owner != _owner) {
@@ -12674,6 +12831,11 @@ id<MTLDevice> ZPUMetalCreateSystemDefaultDevice(void) {
 id<MTLFunction> ZPUMetalCreateCPUFunction(id<MTLDevice> device, NSString *name) {
     if (![device isKindOfClass:[ZPUDevice class]] || name == nil) return nil;
     return (id<MTLFunction>)[[ZPUCPUFunction alloc] initWithOwner:(ZPUDevice *)device name:name];
+}
+
+id<MTLDrawable> ZPUMetalCreateCPUDrawable(id<MTLTexture> texture) {
+    if (![texture isKindOfClass:[ZPUTexture class]]) return nil;
+    return (id<MTLDrawable>)[[ZPUCPUDrawable alloc] initWithTexture:(ZPUTexture *)texture];
 }
 
 MTL4CommitOptions *ZPUMetalCreateCPUCommitOptions(void) API_AVAILABLE(macos(26.0), ios(26.0)) {

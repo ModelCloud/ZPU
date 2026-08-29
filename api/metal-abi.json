@@ -744,7 +744,6 @@
   "known_unimplemented_surface": [
     "MTLIndirectCommandBuffer.patch commands and mesh shader execution",
     "MTL4RenderCommandEncoder tile/mesh execution",
-    "MTL4CommandQueue drawable semantics",
     "MTL4MachineLearningCommandEncoder",
     "MTLAccelerationStructure ray-tracing execution",
     "MTLRayTracingPipelineState",

@@ -296,6 +296,90 @@ static int test_cpu_io_against_native(id<MTLDevice> native_device, id<MTLDevice>
     return 0;
 }
 
+static int test_cpu_drawable_lifecycle(id<MTLDevice> native_device, id<MTLDevice> adapter_device) {
+    MTLTextureDescriptor *descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:4 height:4 mipmapped:NO];
+    descriptor.storageMode = MTLStorageModeShared;
+    descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:descriptor];
+    id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:descriptor];
+    if (native_texture == nil || adapter_texture == nil ||
+        ZPUMetalCreateCPUDrawable(native_texture) != nil) {
+        fprintf(stderr, "metal-pixel: CPU drawable ownership validation failed\n");
+        return 131;
+    }
+
+    id<MTLDrawable> drawable = ZPUMetalCreateCPUDrawable(adapter_texture);
+    id<MTLCommandQueue> queue = [adapter_device newCommandQueue];
+    id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    if (drawable == nil || queue == nil || command_buffer == nil) {
+        fprintf(stderr, "metal-pixel: CPU drawable or command queue creation failed\n");
+        return 132;
+    }
+    __block NSUInteger presented_count = 0;
+    __block BOOL presented_object_matches = NO;
+    if (@available(macOS 10.15.4, *)) {
+        if (drawable.drawableID != 0 || drawable.presentedTime != 0.0) {
+            fprintf(stderr, "metal-pixel: CPU drawable initial ID/time mismatch\n");
+            return 133;
+        }
+        [drawable addPresentedHandler:^(id<MTLDrawable> presented) {
+            presented_count += 1;
+            presented_object_matches = presented == drawable;
+        }];
+    }
+    [command_buffer presentDrawable:drawable];
+    if (@available(macOS 10.15.4, *)) {
+        if (presented_count != 0 || drawable.presentedTime != 0.0) {
+            fprintf(stderr, "metal-pixel: CPU drawable presented before command commit\n");
+            return 134;
+        }
+    }
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+    BOOL drawable_presentation_ok = YES;
+    if (@available(macOS 10.15.4, *)) {
+        drawable_presentation_ok = presented_count == 1 && presented_object_matches && drawable.presentedTime > 0.0;
+    }
+    if (command_buffer.status != MTLCommandBufferStatusCompleted || !drawable_presentation_ok) {
+        fprintf(stderr, "metal-pixel: CPU drawable command-buffer presentation failed\n");
+        return 135;
+    }
+
+    id<MTLDrawable> direct_drawable = ZPUMetalCreateCPUDrawable(adapter_texture);
+    if (direct_drawable == nil) {
+        fprintf(stderr, "metal-pixel: second CPU drawable allocation failed\n");
+        return 136;
+    }
+    __block NSUInteger direct_presented_count = 0;
+    if (@available(macOS 10.15.4, *)) {
+        [direct_drawable addPresentedHandler:^(id<MTLDrawable> presented) {
+            if (presented == direct_drawable) direct_presented_count += 1;
+        }];
+        [direct_drawable presentAfterMinimumDuration:0.001];
+        if (direct_presented_count != 1 || direct_drawable.presentedTime <= 0.0) {
+            fprintf(stderr, "metal-pixel: CPU drawable direct presentation failed\n");
+            return 137;
+        }
+    } else {
+        [direct_drawable present];
+    }
+
+    /* Metal 4 drawable synchronization is also CPU-only. A valid drawable
+     * is accepted by signal/wait; no native command queue is touched. */
+    if (@available(macOS 26.0, *)) {
+        id<MTL4CommandQueue> queue4 = [adapter_device newMTL4CommandQueue];
+        if (queue4 == nil) {
+            fprintf(stderr, "metal-pixel: CPU Metal 4 drawable queue creation failed\n");
+            return 138;
+        }
+        [queue4 signalDrawable:direct_drawable];
+        [queue4 waitForDrawable:direct_drawable];
+    }
+    return 0;
+}
+
 int main(void) {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -669,6 +753,8 @@ int main(void) {
 
         const int io_result = test_cpu_io_against_native(device, adapter_rate_map_device);
         if (io_result != 0) return io_result;
+        const int drawable_result = test_cpu_drawable_lifecycle(device, adapter_rate_map_device);
+        if (drawable_result != 0) return drawable_result;
 
         /* Repeat the reference comparison for BGRA8. This catches a channel
          * order bug even when geometry and interpolation are otherwise exact. */

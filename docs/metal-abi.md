@@ -268,8 +268,13 @@ triangle path:
   and CPU/GPU access optimization commands append or apply CPU-owned ZPU work;
   CPU-owned tensors also provide contiguous and strided byte-addressable slice
   transfers. Acceleration-structure build/refit/copy/compaction commands use
-  the same CPU-owned storage path. Tensor shader binding, ray-intersection execution,
-  unsupported 3D sparse-tail packing, drawable, machine-learning, and tile/mesh render-pass
+  the same CPU-owned storage path. An explicit `ZPUMetalCreateCPUDrawable`
+  factory wraps a ZPU texture in a CPU-owned `MTLDrawable`; ordinary command
+  buffers defer presentation until synchronous CPU completion, deliver
+  presented handlers, and expose host-time/monotonic-ID metadata. Metal 4
+  drawable signal/wait validates the same ownership graph and remains a CPU
+  no-op. Tensor shader binding, ray-intersection execution, unsupported 3D
+  sparse-tail packing, machine-learning, and tile/mesh render-pass
   features remain explicit fail-closed boundaries. Suspending/resuming render
   passes are represented as sequential ordinary CPU passes because the CPU
   implementation has no tile-memory stitching requirement. The
@@ -278,7 +283,7 @@ triangle path:
   command-buffer selectors that have no portable CPU meaning are represented
   explicitly: metadata-only operations are deterministic no-ops, while
   arbitrary shader compilation, unregistered or arbitrary binary linking, unsupported
-  sparse-texture tail layouts, drawable access, ray tracing, tensor shader/ML execution, and unsupported
+  sparse-texture tail layouts, CAMetalLayer drawable acquisition, ray tracing, tensor shader/ML execution, and unsupported
   Metal 4 advanced families return nil or a stable error. They never fall through to Apple's
   native Metal runtime
 
