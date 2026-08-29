@@ -256,6 +256,11 @@ triangle path:
   clip-space +Y direction as the legacy adapter, including clipped edge tiles,
   and rejects GPU addresses and argument-table resources that are not owned by
   the ZPU device recording the command
+- matching registered legacy tile, object, and mesh stage resource setters
+  validate and retain ZPU-owned buffers, textures, samplers, offsets, threadgroup
+  metadata, and inline byte snapshots; these bindings are metadata for the
+  fixed CPU profiles and do not route execution to native Metal. Ordinary
+  pipelines and arbitrary stage profiles remain fail-closed
 - indirect threadgroup dispatch arguments are read from ZPU buffers at commit
   time, preserving Metal's deferred argument-buffer semantics
 - direct and indexed render draws read ZPU vertex and index buffer bindings at

@@ -1329,6 +1329,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSUInteger _vertexStride;
     BOOL _vertexStrideExplicit;
     BOOL _vertexStrideStaticToken;
+    NSMutableDictionary *_stageBindings;
     ZPUTexture *_fragmentTexture;
     ZPURenderPipelineState *_pipelineState;
     ZPUDepthStencilState *_depthStencilState;
@@ -13255,11 +13256,103 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 }
 @end
 
+static BOOL zpu_render_stage_is_supported(ZPURenderEncoder *encoder, MTLRenderStages stage) {
+    if (encoder == nil || encoder->_pipelineState == nil) return NO;
+    if (stage == MTLRenderStageTile) return encoder->_pipelineState->_isTilePipeline;
+    if (stage == zpu_mtl_render_stage_object || stage == zpu_mtl_render_stage_mesh) {
+        return encoder->_pipelineState->_isMeshPipeline;
+    }
+    return NO;
+}
+
+static NSString *zpu_render_stage_binding_key(MTLRenderStages stage, NSUInteger index, NSString *kind) {
+    return [NSString stringWithFormat:@"%lu:%lu:%@", (unsigned long)stage, (unsigned long)index, kind];
+}
+
+static BOOL zpu_render_stage_begin(ZPURenderEncoder *encoder, MTLRenderStages stage, NSUInteger index) {
+    if (!zpu_render_stage_is_supported(encoder, stage) || index > UINT32_MAX) {
+        [encoder->_owner markError];
+        return NO;
+    }
+    return YES;
+}
+
+static BOOL zpu_render_stage_record_bytes(ZPURenderEncoder *encoder, MTLRenderStages stage,
+                                           const void *bytes, NSUInteger length, NSUInteger index) {
+    if (!zpu_render_stage_begin(encoder, stage, index) || (bytes == NULL && length != 0)) {
+        [encoder->_owner markError];
+        return NO;
+    }
+    NSString *key = zpu_render_stage_binding_key(stage, index, @"bytes");
+    encoder->_stageBindings[key] = [NSData dataWithBytes:bytes length:length];
+    return YES;
+}
+
+static BOOL zpu_render_stage_record_buffer(ZPURenderEncoder *encoder, MTLRenderStages stage,
+                                             id<MTLBuffer> buffer, NSUInteger offset, NSUInteger index) {
+    ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
+    if (!zpu_render_stage_begin(encoder, stage, index) ||
+        (buffer != nil && (!zpu_buffer_belongs_to_device([encoder->_owner device], zpuBuffer) || offset > buffer.length))) {
+        [encoder->_owner markError];
+        return NO;
+    }
+    NSString *key = zpu_render_stage_binding_key(stage, index, @"buffer");
+    encoder->_stageBindings[key] = buffer == nil ? (id)[NSNull null] : (id)buffer;
+    encoder->_stageBindings[zpu_render_stage_binding_key(stage, index, @"bufferOffset")] = @(offset);
+    if (buffer != nil) [encoder->_owner retainResource:buffer];
+    return YES;
+}
+
+static BOOL zpu_render_stage_record_buffer_offset(ZPURenderEncoder *encoder, MTLRenderStages stage,
+                                                   NSUInteger offset, NSUInteger index) {
+    if (!zpu_render_stage_begin(encoder, stage, index)) return NO;
+    encoder->_stageBindings[zpu_render_stage_binding_key(stage, index, @"bufferOffset")] = @(offset);
+    return YES;
+}
+
+static BOOL zpu_render_stage_record_texture(ZPURenderEncoder *encoder, MTLRenderStages stage,
+                                             id<MTLTexture> texture, NSUInteger index) {
+    ZPUTexture *zpuTexture = (ZPUTexture *)texture;
+    if (!zpu_render_stage_begin(encoder, stage, index) ||
+        (texture != nil && !zpu_texture_belongs_to_device([encoder->_owner device], zpuTexture))) {
+        [encoder->_owner markError];
+        return NO;
+    }
+    encoder->_stageBindings[zpu_render_stage_binding_key(stage, index, @"texture")] =
+        texture == nil ? (id)[NSNull null] : (id)texture;
+    if (texture != nil) [encoder->_owner retainResource:texture];
+    return YES;
+}
+
+static BOOL zpu_render_stage_record_sampler(ZPURenderEncoder *encoder, MTLRenderStages stage,
+                                             id<MTLSamplerState> sampler, NSUInteger index) {
+    ZPUSamplerState *zpuSampler = (ZPUSamplerState *)sampler;
+    if (!zpu_render_stage_begin(encoder, stage, index) ||
+        (sampler != nil && (![zpuSampler isKindOfClass:[ZPUSamplerState class]] ||
+                            zpuSampler->_owner != [encoder->_owner device]))) {
+        [encoder->_owner markError];
+        return NO;
+    }
+    encoder->_stageBindings[zpu_render_stage_binding_key(stage, index, @"sampler")] =
+        sampler == nil ? (id)[NSNull null] : (id)sampler;
+    if (sampler != nil) [encoder->_owner retainResource:sampler];
+    return YES;
+}
+
+static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderStages stage,
+                                           NSString *kind, id value, NSUInteger index) {
+    if (!zpu_render_stage_begin(encoder, stage, index)) return NO;
+    encoder->_stageBindings[zpu_render_stage_binding_key(stage, index, kind)] = value ?: (id)[NSNull null];
+    return YES;
+}
+
 @implementation ZPURenderEncoder
+
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner encoder:(zpu_metal_render_encoder *)encoder {
     if ((self = [super init])) {
         _owner = owner;
         _zpuEncoder = encoder;
+        _stageBindings = [NSMutableDictionary dictionary];
         _passDescriptor = nil;
         _ended = NO;
     }
@@ -13515,95 +13608,178 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     }
 }
 - (void)setObjectBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)bytes;
-    (void)length;
-    (void)index;
-    [_owner markError];
+    (void)zpu_render_stage_record_bytes(self, zpu_mtl_render_stage_object, bytes, length, index);
 }
 - (void)setObjectBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)buffer;
-    (void)offset;
-    (void)index;
-    [_owner markError];
+    (void)zpu_render_stage_record_buffer(self, zpu_mtl_render_stage_object, buffer, offset, index);
 }
-- (void)setObjectBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { (void)offset; (void)index; [_owner markError]; }
+- (void)setObjectBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
+    (void)zpu_render_stage_record_buffer_offset(self, zpu_mtl_render_stage_object, offset, index);
+}
 - (void)setObjectBuffers:(const id<MTLBuffer> __nullable [__nonnull])buffers offsets:(const NSUInteger [__nonnull])offsets withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)buffers;
-    (void)offsets;
-    (void)range;
-    [_owner markError];
+    if (range.length != 0 && (buffers == NULL || offsets == NULL)) { [_owner markError]; return; }
+    if (!zpu_u32_range_indices_fit(range)) { [_owner markError]; return; }
+    for (NSUInteger index = 0; index < range.length; ++index) {
+        [self setObjectBuffer:buffers[index] offset:offsets[index] atIndex:range.location + index];
+    }
 }
-- (void)setObjectTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { (void)texture; (void)index; [_owner markError]; }
-- (void)setObjectTextures:(const id<MTLTexture> __nullable [__nonnull])textures withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) { (void)textures; (void)range; [_owner markError]; }
-- (void)setObjectSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { (void)sampler; (void)index; [_owner markError]; }
-- (void)setObjectSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) { (void)samplers; (void)range; [_owner markError]; }
+- (void)setObjectTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
+    (void)zpu_render_stage_record_texture(self, zpu_mtl_render_stage_object, texture, index);
+}
+- (void)setObjectTextures:(const id<MTLTexture> __nullable [__nonnull])textures withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) {
+    if (range.length != 0 && textures == NULL) { [_owner markError]; return; }
+    if (!zpu_u32_range_indices_fit(range)) { [_owner markError]; return; }
+    for (NSUInteger index = 0; index < range.length; ++index) {
+        [self setObjectTexture:textures[index] atIndex:range.location + index];
+    }
+}
+- (void)setObjectSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
+    (void)zpu_render_stage_record_sampler(self, zpu_mtl_render_stage_object, sampler, index);
+}
+- (void)setObjectSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) {
+    if (range.length != 0 && samplers == NULL) { [_owner markError]; return; }
+    if (!zpu_u32_range_indices_fit(range)) { [_owner markError]; return; }
+    for (NSUInteger index = 0; index < range.length; ++index) {
+        [self setObjectSamplerState:samplers[index] atIndex:range.location + index];
+    }
+}
 - (void)setObjectSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMinClamp lodMaxClamp:(float)lodMaxClamp atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)sampler;
-    (void)lodMinClamp;
-    (void)lodMaxClamp;
-    (void)index;
-    [_owner markError];
+    if (!zpu_render_stage_record_sampler(self, zpu_mtl_render_stage_object, sampler, index)) return;
+    (void)zpu_render_stage_record_value(self, zpu_mtl_render_stage_object, @"samplerLodClamps",
+                                        @[ @(lodMinClamp), @(lodMaxClamp) ], index);
 }
 - (void)setObjectSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers
                 lodMinClamps:(const float [__nonnull])lodMinClamps
                     lodMaxClamps:(const float [__nonnull])lodMaxClamps
                     withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)samplers;
-    (void)lodMinClamps;
-    (void)lodMaxClamps;
-    (void)range;
-    [_owner markError];
+    if (range.length != 0 && (samplers == NULL || lodMinClamps == NULL || lodMaxClamps == NULL)) {
+        [_owner markError];
+        return;
+    }
+    if (!zpu_u32_range_indices_fit(range)) { [_owner markError]; return; }
+    for (NSUInteger index = 0; index < range.length; ++index) {
+        [self setObjectSamplerState:samplers[index]
+                       lodMinClamp:lodMinClamps[index]
+                       lodMaxClamp:lodMaxClamps[index]
+                            atIndex:range.location + index];
+    }
 }
-- (void)setObjectThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { (void)length; (void)index; [_owner markError]; }
-- (void)setMeshBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { (void)bytes; (void)length; (void)index; [_owner markError]; }
-- (void)setMeshBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { (void)buffer; (void)offset; (void)index; [_owner markError]; }
-- (void)setMeshBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { (void)offset; (void)index; [_owner markError]; }
-- (void)setMeshBuffers:(const id<MTLBuffer> __nullable [__nonnull])buffers offsets:(const NSUInteger [__nonnull])offsets withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) { (void)buffers; (void)offsets; (void)range; [_owner markError]; }
-- (void)setMeshTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { (void)texture; (void)index; [_owner markError]; }
-- (void)setMeshTextures:(const id<MTLTexture> __nullable [__nonnull])textures withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) { (void)textures; (void)range; [_owner markError]; }
-- (void)setMeshSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { (void)sampler; (void)index; [_owner markError]; }
-- (void)setMeshSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) { (void)samplers; (void)range; [_owner markError]; }
+- (void)setObjectThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
+    (void)zpu_render_stage_record_value(self, zpu_mtl_render_stage_object, @"threadgroupMemory", @(length), index);
+}
+- (void)setMeshBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
+    (void)zpu_render_stage_record_bytes(self, zpu_mtl_render_stage_mesh, bytes, length, index);
+}
+- (void)setMeshBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
+    (void)zpu_render_stage_record_buffer(self, zpu_mtl_render_stage_mesh, buffer, offset, index);
+}
+- (void)setMeshBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
+    (void)zpu_render_stage_record_buffer_offset(self, zpu_mtl_render_stage_mesh, offset, index);
+}
+- (void)setMeshBuffers:(const id<MTLBuffer> __nullable [__nonnull])buffers offsets:(const NSUInteger [__nonnull])offsets withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) {
+    if (range.length != 0 && (buffers == NULL || offsets == NULL)) { [_owner markError]; return; }
+    if (!zpu_u32_range_indices_fit(range)) { [_owner markError]; return; }
+    for (NSUInteger index = 0; index < range.length; ++index) {
+        [self setMeshBuffer:buffers[index] offset:offsets[index] atIndex:range.location + index];
+    }
+}
+- (void)setMeshTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
+    (void)zpu_render_stage_record_texture(self, zpu_mtl_render_stage_mesh, texture, index);
+}
+- (void)setMeshTextures:(const id<MTLTexture> __nullable [__nonnull])textures withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) {
+    if (range.length != 0 && textures == NULL) { [_owner markError]; return; }
+    if (!zpu_u32_range_indices_fit(range)) { [_owner markError]; return; }
+    for (NSUInteger index = 0; index < range.length; ++index) {
+        [self setMeshTexture:textures[index] atIndex:range.location + index];
+    }
+}
+- (void)setMeshSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
+    (void)zpu_render_stage_record_sampler(self, zpu_mtl_render_stage_mesh, sampler, index);
+}
+- (void)setMeshSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) {
+    if (range.length != 0 && samplers == NULL) { [_owner markError]; return; }
+    if (!zpu_u32_range_indices_fit(range)) { [_owner markError]; return; }
+    for (NSUInteger index = 0; index < range.length; ++index) {
+        [self setMeshSamplerState:samplers[index] atIndex:range.location + index];
+    }
+}
 - (void)setMeshSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMinClamp lodMaxClamp:(float)lodMaxClamp atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)sampler;
-    (void)lodMinClamp;
-    (void)lodMaxClamp;
-    (void)index;
-    [_owner markError];
+    if (!zpu_render_stage_record_sampler(self, zpu_mtl_render_stage_mesh, sampler, index)) return;
+    (void)zpu_render_stage_record_value(self, zpu_mtl_render_stage_mesh, @"samplerLodClamps",
+                                        @[ @(lodMinClamp), @(lodMaxClamp) ], index);
 }
 - (void)setMeshSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers
                 lodMinClamps:(const float [__nonnull])lodMinClamps
                     lodMaxClamps:(const float [__nonnull])lodMaxClamps
                     withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)samplers;
-    (void)lodMinClamps;
-    (void)lodMaxClamps;
-    (void)range;
-    [_owner markError];
+    if (range.length != 0 && (samplers == NULL || lodMinClamps == NULL || lodMaxClamps == NULL)) {
+        [_owner markError];
+        return;
+    }
+    if (!zpu_u32_range_indices_fit(range)) { [_owner markError]; return; }
+    for (NSUInteger index = 0; index < range.length; ++index) {
+        [self setMeshSamplerState:samplers[index]
+                     lodMinClamp:lodMinClamps[index]
+                     lodMaxClamp:lodMaxClamps[index]
+                          atIndex:range.location + index];
+    }
 }
-- (void)setTileBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { (void)bytes; (void)length; (void)index; [_owner markError]; }
-- (void)setTileBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { (void)buffer; (void)offset; (void)index; [_owner markError]; }
-- (void)setTileBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { (void)offset; (void)index; [_owner markError]; }
-- (void)setTileBuffers:(const id<MTLBuffer> __nullable [__nonnull])buffers offsets:(const NSUInteger [__nonnull])offsets withRange:(NSRange)range API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { (void)buffers; (void)offsets; (void)range; [_owner markError]; }
-- (void)setTileTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { (void)texture; (void)index; [_owner markError]; }
-- (void)setTileTextures:(const id<MTLTexture> __nullable [__nonnull])textures withRange:(NSRange)range API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { (void)textures; (void)range; [_owner markError]; }
-- (void)setTileSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { (void)sampler; (void)index; [_owner markError]; }
-- (void)setTileSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers withRange:(NSRange)range API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { (void)samplers; (void)range; [_owner markError]; }
+- (void)setTileBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
+    (void)zpu_render_stage_record_bytes(self, MTLRenderStageTile, bytes, length, index);
+}
+- (void)setTileBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
+    (void)zpu_render_stage_record_buffer(self, MTLRenderStageTile, buffer, offset, index);
+}
+- (void)setTileBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
+    (void)zpu_render_stage_record_buffer_offset(self, MTLRenderStageTile, offset, index);
+}
+- (void)setTileBuffers:(const id<MTLBuffer> __nullable [__nonnull])buffers offsets:(const NSUInteger [__nonnull])offsets withRange:(NSRange)range API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
+    if (range.length != 0 && (buffers == NULL || offsets == NULL)) { [_owner markError]; return; }
+    if (!zpu_u32_range_indices_fit(range)) { [_owner markError]; return; }
+    for (NSUInteger index = 0; index < range.length; ++index) {
+        [self setTileBuffer:buffers[index] offset:offsets[index] atIndex:range.location + index];
+    }
+}
+- (void)setTileTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
+    (void)zpu_render_stage_record_texture(self, MTLRenderStageTile, texture, index);
+}
+- (void)setTileTextures:(const id<MTLTexture> __nullable [__nonnull])textures withRange:(NSRange)range API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
+    if (range.length != 0 && textures == NULL) { [_owner markError]; return; }
+    if (!zpu_u32_range_indices_fit(range)) { [_owner markError]; return; }
+    for (NSUInteger index = 0; index < range.length; ++index) {
+        [self setTileTexture:textures[index] atIndex:range.location + index];
+    }
+}
+- (void)setTileSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
+    (void)zpu_render_stage_record_sampler(self, MTLRenderStageTile, sampler, index);
+}
+- (void)setTileSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers withRange:(NSRange)range API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
+    if (range.length != 0 && samplers == NULL) { [_owner markError]; return; }
+    if (!zpu_u32_range_indices_fit(range)) { [_owner markError]; return; }
+    for (NSUInteger index = 0; index < range.length; ++index) {
+        [self setTileSamplerState:samplers[index] atIndex:range.location + index];
+    }
+}
 - (void)setTileSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMinClamp lodMaxClamp:(float)lodMaxClamp atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
-    (void)sampler;
-    (void)lodMinClamp;
-    (void)lodMaxClamp;
-    (void)index;
-    [_owner markError];
+    if (!zpu_render_stage_record_sampler(self, MTLRenderStageTile, sampler, index)) return;
+    (void)zpu_render_stage_record_value(self, MTLRenderStageTile, @"samplerLodClamps",
+                                        @[ @(lodMinClamp), @(lodMaxClamp) ], index);
 }
 - (void)setTileSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers
                 lodMinClamps:(const float [__nonnull])lodMinClamps
-                    lodMaxClamps:(const float [__nonnull])lodMaxClamps
+                lodMaxClamps:(const float [__nonnull])lodMaxClamps
                     withRange:(NSRange)range API_AVAILABLE(ios(11.0), tvos(14.5), macos(11.0), macCatalyst(14.0)) {
-    (void)samplers;
-    (void)lodMinClamps;
-    (void)lodMaxClamps;
-    (void)range;
-    [_owner markError];
+    if (range.length != 0 && (samplers == NULL || lodMinClamps == NULL || lodMaxClamps == NULL)) {
+        [_owner markError];
+        return;
+    }
+    if (!zpu_u32_range_indices_fit(range)) { [_owner markError]; return; }
+    for (NSUInteger index = 0; index < range.length; ++index) {
+        [self setTileSamplerState:samplers[index]
+                     lodMinClamp:lodMinClamps[index]
+                     lodMaxClamp:lodMaxClamps[index]
+                          atIndex:range.location + index];
+    }
 }
 - (void)setVertexVisibleFunctionTable:(id<MTLVisibleFunctionTable>)functionTable atBufferIndex:(NSUInteger)bufferIndex API_AVAILABLE(macos(12.0), ios(15.0), tvos(16.0)) { (void)bufferIndex; if (functionTable != nil) [_owner markError]; }
 - (void)setVertexVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __nullable [__nonnull])functionTables withBufferRange:(NSRange)range API_AVAILABLE(macos(12.0), ios(15.0), tvos(16.0)) { (void)functionTables; if (range.length != 0) [_owner markError]; }

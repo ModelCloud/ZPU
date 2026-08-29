@@ -8407,6 +8407,12 @@ int main(void) {
             id<MTLRenderCommandEncoder> adapter_legacy_tile_encoder =
                 [adapter_legacy_tile_command_buffer renderCommandEncoderWithDescriptor:adapter_legacy_tile_pass];
             [adapter_legacy_tile_encoder setRenderPipelineState:adapter_legacy_tile_pipeline];
+            uint32_t adapter_legacy_tile_stage_bytes = 0x54494c45u;
+            [adapter_legacy_tile_encoder setTileBytes:&adapter_legacy_tile_stage_bytes
+                                               length:sizeof(adapter_legacy_tile_stage_bytes) atIndex:0];
+            [adapter_legacy_tile_encoder setTileBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+            [adapter_legacy_tile_encoder setTileTexture:adapter_legacy_tile_texture atIndex:0];
+            [adapter_legacy_tile_encoder setTileSamplerState:adapter_sampler atIndex:0];
             [adapter_legacy_tile_encoder dispatchThreadsPerTile:MTLSizeMake(2, 2, 1)];
             [adapter_legacy_tile_encoder endEncoding];
             [adapter_legacy_tile_command_buffer commit];
@@ -8504,6 +8510,16 @@ int main(void) {
             id<MTLRenderCommandEncoder> adapter_legacy_mesh_encoder =
                 [adapter_legacy_mesh_command_buffer renderCommandEncoderWithDescriptor:adapter_legacy_mesh_pass];
             [adapter_legacy_mesh_encoder setRenderPipelineState:adapter_legacy_mesh_pipeline];
+            uint32_t adapter_legacy_mesh_object_bytes = 0x4f424a45u;
+            uint32_t adapter_legacy_mesh_mesh_bytes = 0x4d455348u;
+            [adapter_legacy_mesh_encoder setObjectBytes:&adapter_legacy_mesh_object_bytes
+                                                 length:sizeof(adapter_legacy_mesh_object_bytes) atIndex:0];
+            [adapter_legacy_mesh_encoder setObjectBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+            [adapter_legacy_mesh_encoder setMeshBytes:&adapter_legacy_mesh_mesh_bytes
+                                               length:sizeof(adapter_legacy_mesh_mesh_bytes) atIndex:0];
+            [adapter_legacy_mesh_encoder setMeshBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+            [adapter_legacy_mesh_encoder setMeshTexture:adapter_legacy_mesh_texture atIndex:0];
+            [adapter_legacy_mesh_encoder setMeshSamplerState:adapter_sampler atIndex:0];
             [adapter_legacy_mesh_encoder drawMeshThreadgroups:MTLSizeMake(3, 2, 1)
                                    threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
                                      threadsPerMeshThreadgroup:MTLSizeMake(2, 2, 1)];
