@@ -446,11 +446,26 @@ int main(void) {
         const BOOL adapter_selector_scissors = [adapter_encoder respondsToSelector:@selector(setScissorRects:count:)];
         const BOOL adapter_selectors_ok = adapter_selector_resource_state && adapter_selector_acceleration &&
             adapter_selector_event && adapter_selector_viewports && adapter_selector_scissors;
+        id<MTLCommandBuffer> adapter_resource_state_command_buffer = [adapter_queue commandBuffer];
+        id<MTLResourceStateCommandEncoder> adapter_resource_state_encoder =
+            [adapter_resource_state_command_buffer resourceStateCommandEncoderWithDescriptor:
+                [MTLResourceStatePassDescriptor resourceStatePassDescriptor]];
+        id<MTLFence> adapter_resource_state_fence = [adapter_device newFence];
+        [adapter_resource_state_encoder updateFence:adapter_resource_state_fence];
+        [adapter_resource_state_encoder endEncoding];
+        id<MTLBlitCommandEncoder> adapter_resource_state_followup =
+            [adapter_resource_state_command_buffer blitCommandEncoder];
+        [adapter_resource_state_followup waitForFence:adapter_resource_state_fence];
+        [adapter_resource_state_followup endEncoding];
+        [adapter_resource_state_command_buffer commit];
+        [adapter_resource_state_command_buffer waitUntilCompleted];
         id<MTLLibrary> adapter_conformance_default_library = [adapter_device newDefaultLibrary];
         const BOOL adapter_fail_closed_ok =
             adapter_conformance_default_library != nil &&
             [adapter_conformance_default_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8"] != nil &&
-            [adapter_command_buffer resourceStateCommandEncoder] == nil &&
+            adapter_resource_state_encoder != nil &&
+            [adapter_resource_state_encoder conformsToProtocol:@protocol(MTLResourceStateCommandEncoder)] &&
+            adapter_resource_state_command_buffer.status == MTLCommandBufferStatusCompleted &&
             [adapter_command_buffer accelerationStructureCommandEncoder] == nil;
         if (!adapter_protocols_ok || !adapter_selectors_ok || !adapter_fail_closed_ok) {
             fprintf(stderr, "metal-pixel: protocol flags=%d selectors=%d fail-closed=%d (%d,%d,%d,%d,%d)\n",

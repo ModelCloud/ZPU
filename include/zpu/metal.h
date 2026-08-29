@@ -192,6 +192,7 @@ typedef struct zpu_metal_command_queue zpu_metal_command_queue;
 typedef struct zpu_metal_command_buffer zpu_metal_command_buffer;
 typedef struct zpu_metal_render_encoder zpu_metal_render_encoder;
 typedef struct zpu_metal_blit_encoder zpu_metal_blit_encoder;
+typedef struct zpu_metal_resource_state_encoder zpu_metal_resource_state_encoder;
 typedef struct zpu_metal_compute_encoder zpu_metal_compute_encoder;
 typedef struct zpu_metal_buffer zpu_metal_buffer;
 typedef struct zpu_metal_texture zpu_metal_texture;
@@ -336,6 +337,12 @@ int zpu_metal_blit_encoder_update_fence(zpu_metal_blit_encoder *encoder, zpu_met
 int zpu_metal_blit_encoder_wait_for_fence(zpu_metal_blit_encoder *encoder, zpu_metal_fence *fence);
 int zpu_metal_blit_encoder_end_encoding(zpu_metal_blit_encoder *encoder);
 void zpu_metal_blit_encoder_destroy(zpu_metal_blit_encoder *encoder);
+
+zpu_metal_resource_state_encoder *zpu_metal_command_buffer_resource_state_encoder(zpu_metal_command_buffer *command_buffer);
+int zpu_metal_resource_state_encoder_update_fence(zpu_metal_resource_state_encoder *encoder, zpu_metal_fence *fence);
+int zpu_metal_resource_state_encoder_wait_for_fence(zpu_metal_resource_state_encoder *encoder, zpu_metal_fence *fence);
+int zpu_metal_resource_state_encoder_end_encoding(zpu_metal_resource_state_encoder *encoder);
+void zpu_metal_resource_state_encoder_destroy(zpu_metal_resource_state_encoder *encoder);
 
 zpu_metal_compute_encoder *zpu_metal_command_buffer_compute_encoder(zpu_metal_command_buffer *command_buffer);
 int zpu_metal_compute_encoder_set_kernel(zpu_metal_compute_encoder *encoder, zpu_metal_compute_kernel kernel);

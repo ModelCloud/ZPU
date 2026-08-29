@@ -23,6 +23,7 @@ const command_buffer_magic: u64 = 0x5a50555f434d4442; // ZPU_CMDB
 const render_encoder_magic: u64 = 0x5a50555f52454e43; // ZPU_RENC
 const blit_encoder_magic: u64 = 0x5a50555f424c4954; // ZPU_BLIT
 const compute_encoder_magic: u64 = 0x5a50555f434f4d50; // ZPU_COMP
+const resource_state_encoder_magic: u64 = 0x5a50555f52535445; // ZPU_RSTE
 const buffer_magic: u64 = 0x5a50555f42554646; // ZPU_BUFF
 const texture_magic: u64 = 0x5a50555f54455854; // ZPU_TEXT
 const heap_magic: u64 = 0x5a50555f48454150; // ZPU_HEAP
@@ -60,7 +61,7 @@ pub const CommandStatus = enum(u8) {
     failed,
 };
 
-const EncoderKind = enum { none, render, blit, compute };
+const EncoderKind = enum { none, render, blit, compute, resource_state };
 
 pub const Device = struct {
     magic: u64 = device_magic,
@@ -768,6 +769,49 @@ pub const BlitEncoder = struct {
     }
 };
 
+pub const ResourceStateEncoder = struct {
+    magic: u64 = resource_state_encoder_magic,
+    command_buffer: *CommandBuffer,
+
+    pub fn deinit(self: *ResourceStateEncoder) void {
+        self.magic = 0;
+    }
+
+    fn open(self: *const ResourceStateEncoder) bool {
+        return self.magic == resource_state_encoder_magic and self.command_buffer.active_encoder == .resource_state;
+    }
+
+    /// ZPU owns unified CPU memory, so resource state transitions do not need
+    /// cache operations. They remain an encoder boundary so command ordering,
+    /// fence visibility, and Metal's deferred commit behavior are preserved.
+    pub fn updateFence(self: *ResourceStateEncoder, fence: *Fence) Error!void {
+        if (!self.open() or !validFence(fence) or fence.device != self.command_buffer.queue.device) return error.InvalidArgument;
+        _ = try self.command_buffer.append(.{ .update_fence = fence });
+    }
+
+    pub fn waitForFence(self: *ResourceStateEncoder, fence: *Fence) Error!void {
+        if (!self.open() or !validFence(fence) or fence.device != self.command_buffer.queue.device) return error.InvalidArgument;
+        _ = try self.command_buffer.append(.{ .wait_fence = fence });
+    }
+
+    /// Sparse mappings have no CPU/ZPU representation yet. Fail at record
+    /// time, matching the adapter's explicit unsupported-feature boundary.
+    pub fn updateTextureMappings(self: *ResourceStateEncoder, texture: *Texture, mode: u32, regions: []const abi.Region, mip_levels: []const usize, slices: []const usize) Error!void {
+        _ = texture;
+        _ = mode;
+        _ = regions;
+        _ = mip_levels;
+        _ = slices;
+        if (!self.open()) return error.InvalidCommand;
+        return error.UnsupportedOperation;
+    }
+
+    pub fn endEncoding(self: *ResourceStateEncoder) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        try self.command_buffer.end(.resource_state);
+    }
+};
+
 pub const ComputeEncoder = struct {
     magic: u64 = compute_encoder_magic,
     command_buffer: *CommandBuffer,
@@ -1253,6 +1297,24 @@ pub fn beginBlit(command_buffer: *CommandBuffer) Error!*BlitEncoder {
 pub fn destroyBlitEncoder(encoder: *BlitEncoder) void {
     if (encoder.magic != blit_encoder_magic) return;
     if (encoder.command_buffer.active_encoder == .blit) encoder.command_buffer.active_encoder = .none;
+    encoder.deinit();
+    allocator.destroy(encoder);
+}
+
+pub fn beginResourceState(command_buffer: *CommandBuffer) Error!*ResourceStateEncoder {
+    if (!validCommandBuffer(command_buffer)) return error.InvalidResource;
+    try command_buffer.begin(.resource_state);
+    const result = allocator.create(ResourceStateEncoder) catch {
+        command_buffer.active_encoder = .none;
+        return error.OutOfMemory;
+    };
+    result.* = .{ .command_buffer = command_buffer };
+    return result;
+}
+
+pub fn destroyResourceStateEncoder(encoder: *ResourceStateEncoder) void {
+    if (encoder.magic != resource_state_encoder_magic) return;
+    if (encoder.command_buffer.active_encoder == .resource_state) encoder.command_buffer.active_encoder = .none;
     encoder.deinit();
     allocator.destroy(encoder);
 }
@@ -2048,6 +2110,29 @@ pub export fn zpu_metal_render_encoder_end_encoding(encoder: ?*RenderEncoder) ca
 
 pub export fn zpu_metal_command_buffer_blit_encoder(command_buffer: ?*CommandBuffer) callconv(.c) ?*BlitEncoder {
     return beginBlit(command_buffer orelse return null) catch null;
+}
+
+pub export fn zpu_metal_command_buffer_resource_state_encoder(command_buffer: ?*CommandBuffer) callconv(.c) ?*ResourceStateEncoder {
+    return beginResourceState(command_buffer orelse return null) catch null;
+}
+
+pub export fn zpu_metal_resource_state_encoder_destroy(encoder: ?*ResourceStateEncoder) callconv(.c) void {
+    if (encoder) |value| destroyResourceStateEncoder(value);
+}
+
+pub export fn zpu_metal_resource_state_encoder_update_fence(encoder: ?*ResourceStateEncoder, fence: ?*Fence) callconv(.c) c_int {
+    (encoder orelse return -1).updateFence(fence orelse return -1) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_resource_state_encoder_wait_for_fence(encoder: ?*ResourceStateEncoder, fence: ?*Fence) callconv(.c) c_int {
+    (encoder orelse return -1).waitForFence(fence orelse return -1) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_resource_state_encoder_end_encoding(encoder: ?*ResourceStateEncoder) callconv(.c) c_int {
+    (encoder orelse return -1).endEncoding() catch |err| return errorCode(err);
+    return 0;
 }
 
 pub export fn zpu_metal_blit_encoder_destroy(encoder: ?*BlitEncoder) callconv(.c) void {

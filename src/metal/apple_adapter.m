@@ -34,6 +34,7 @@
 @class ZPUCounterSet;
 @class ZPUCounterSampleBuffer;
 @class ZPURenderEncoder;
+@class ZPUResourceStateEncoder;
 @class ZPULibrary;
 @class ZPUMTL4CommandAllocator;
 @class ZPUMTL4CommandQueue;
@@ -523,6 +524,16 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     ZPUCommandBuffer *_owner;
 }
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner encoder:(zpu_metal_blit_encoder *)encoder;
+@end
+
+@interface ZPUResourceStateEncoder : NSObject <MTLResourceStateCommandEncoder> {
+@public
+    zpu_metal_resource_state_encoder *_zpuEncoder;
+    ZPUCommandBuffer *_owner;
+    NSString *_label;
+    BOOL _ended;
+}
+- (instancetype)initWithOwner:(ZPUCommandBuffer *)owner encoder:(zpu_metal_resource_state_encoder *)encoder;
 @end
 
 @interface ZPUParallelRenderEncoder : NSObject <MTLParallelRenderCommandEncoder> {
@@ -2264,11 +2275,14 @@ static uint64_t zpu_cpu_timestamp(void) {
     return (id<MTLComputeCommandEncoder>)encoder;
 }
 - (id<MTLResourceStateCommandEncoder>)resourceStateCommandEncoder API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(13.0), tvos(16.0)) {
-    return nil;
+    zpu_metal_resource_state_encoder *encoder =
+        zpu_metal_command_buffer_resource_state_encoder(_zpuCommandBuffer);
+    return encoder == NULL ? nil : (id<MTLResourceStateCommandEncoder>)[[ZPUResourceStateEncoder alloc]
+        initWithOwner:self encoder:encoder];
 }
 - (id<MTLResourceStateCommandEncoder>)resourceStateCommandEncoderWithDescriptor:(MTLResourceStatePassDescriptor *)descriptor API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)descriptor;
-    return nil;
+    if (descriptor == nil) return nil;
+    return [self resourceStateCommandEncoder];
 }
 - (id<MTLAccelerationStructureCommandEncoder>)accelerationStructureCommandEncoder API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
     return nil;
@@ -3881,6 +3895,114 @@ static uint64_t zpu_cpu_timestamp(void) {
 - (void)popDebugGroup {}
 - (void)endEncoding {
     if (_zpuEncoder != NULL) (void)zpu_metal_blit_encoder_end_encoding(_zpuEncoder);
+}
+@end
+
+@implementation ZPUResourceStateEncoder
+- (instancetype)initWithOwner:(ZPUCommandBuffer *)owner encoder:(zpu_metal_resource_state_encoder *)encoder {
+    if ((self = [super init])) {
+        _owner = owner;
+        _zpuEncoder = encoder;
+    }
+    return self;
+}
+- (id<MTLDevice>)device { return [_owner device]; }
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
+- (void)dealloc {
+    if (_zpuEncoder != NULL) {
+        (void)zpu_metal_resource_state_encoder_end_encoding(_zpuEncoder);
+        zpu_metal_resource_state_encoder_destroy(_zpuEncoder);
+    }
+}
+- (void)updateTextureMappings:(id<MTLTexture>)texture
+                         mode:(const MTLSparseTextureMappingMode)mode
+                      regions:(const MTLRegion[])regions
+                    mipLevels:(const NSUInteger[])mipLevels
+                       slices:(const NSUInteger[])slices
+                   numRegions:(NSUInteger)numRegions {
+    (void)texture;
+    (void)mode;
+    (void)regions;
+    (void)mipLevels;
+    (void)slices;
+    (void)numRegions;
+    /* Sparse storage is intentionally unsupported; never fabricate a
+     * mapping while keeping the failure visible on the command buffer. */
+    [_owner markError];
+}
+- (void)updateTextureMapping:(id<MTLTexture>)texture
+                        mode:(const MTLSparseTextureMappingMode)mode
+                       region:(const MTLRegion)region
+                     mipLevel:(const NSUInteger)mipLevel
+                        slice:(const NSUInteger)slice {
+    (void)texture;
+    (void)mode;
+    (void)region;
+    (void)mipLevel;
+    (void)slice;
+    [_owner markError];
+}
+- (void)updateTextureMapping:(id<MTLTexture>)texture
+                        mode:(const MTLSparseTextureMappingMode)mode
+              indirectBuffer:(id<MTLBuffer>)indirectBuffer
+        indirectBufferOffset:(NSUInteger)indirectBufferOffset {
+    (void)texture;
+    (void)mode;
+    (void)indirectBuffer;
+    (void)indirectBufferOffset;
+    [_owner markError];
+}
+- (void)moveTextureMappingsFromTexture:(id<MTLTexture>)sourceTexture
+                          sourceSlice:(NSUInteger)sourceSlice
+                          sourceLevel:(NSUInteger)sourceLevel
+                         sourceOrigin:(MTLOrigin)sourceOrigin
+                           sourceSize:(MTLSize)sourceSize
+                            toTexture:(id<MTLTexture>)destinationTexture
+                     destinationSlice:(NSUInteger)destinationSlice
+                     destinationLevel:(NSUInteger)destinationLevel
+                  destinationOrigin:(MTLOrigin)destinationOrigin {
+    (void)sourceTexture;
+    (void)sourceSlice;
+    (void)sourceLevel;
+    (void)sourceOrigin;
+    (void)sourceSize;
+    (void)destinationTexture;
+    (void)destinationSlice;
+    (void)destinationLevel;
+    (void)destinationOrigin;
+    [_owner markError];
+}
+- (void)updateFence:(id<MTLFence>)fence {
+    ZPUFence *zpuFence = (ZPUFence *)fence;
+    if (![zpuFence isKindOfClass:[ZPUFence class]] || zpuFence->_owner != [_owner device] ||
+        zpu_metal_resource_state_encoder_update_fence(_zpuEncoder, zpuFence->_zpuFence) != ZPU_METAL_OK) {
+        [_owner markError];
+        return;
+    }
+    [_owner retainResource:zpuFence];
+}
+- (void)waitForFence:(id<MTLFence>)fence {
+    ZPUFence *zpuFence = (ZPUFence *)fence;
+    if (![zpuFence isKindOfClass:[ZPUFence class]] || zpuFence->_owner != [_owner device] ||
+        zpu_metal_resource_state_encoder_wait_for_fence(_zpuEncoder, zpuFence->_zpuFence) != ZPU_METAL_OK) {
+        [_owner markError];
+        return;
+    }
+    [_owner retainResource:zpuFence];
+}
+- (void)barrierAfterQueueStages:(MTLStages)afterQueueStages beforeStages:(MTLStages)beforeStages API_AVAILABLE(macos(26.0), ios(26.0)) {
+    (void)afterQueueStages;
+    (void)beforeStages;
+}
+- (void)insertDebugSignpost:(NSString *)string { (void)string; }
+- (void)pushDebugGroup:(NSString *)string { (void)string; }
+- (void)popDebugGroup {}
+- (void)endEncoding {
+    if (_zpuEncoder != NULL && !_ended) {
+        (void)zpu_metal_resource_state_encoder_end_encoding(_zpuEncoder);
+        _ended = YES;
+    }
 }
 @end
 

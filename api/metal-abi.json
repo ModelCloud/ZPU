@@ -92,6 +92,11 @@
       "zpu_metal_blit_encoder_update_fence",
       "zpu_metal_blit_encoder_wait_for_fence",
       "zpu_metal_blit_encoder_end_encoding",
+      "zpu_metal_command_buffer_resource_state_encoder",
+      "zpu_metal_resource_state_encoder_update_fence",
+      "zpu_metal_resource_state_encoder_wait_for_fence",
+      "zpu_metal_resource_state_encoder_end_encoding",
+      "zpu_metal_resource_state_encoder_destroy",
       "zpu_metal_command_buffer_compute_encoder",
       "zpu_metal_compute_encoder_set_kernel",
       "zpu_metal_compute_encoder_set_buffer",
@@ -202,6 +207,8 @@
     "MTLDevice.newComputePipelineStateWithDescriptorCompletionHandler",
     "MTLCommandBuffer.computeCommandEncoder",
     "MTLCommandBuffer.computeCommandEncoderWithDispatchType",
+    "MTLCommandBuffer.resourceStateCommandEncoder",
+    "MTLCommandBuffer.resourceStateCommandEncoderWithDescriptor",
     "MTLComputeCommandEncoder.dispatchType",
     "MTLComputePipelineState.maxTotalThreadsPerThreadgroup",
     "MTLComputePipelineState.threadExecutionWidth",
@@ -457,7 +464,10 @@
     "MTLBlitCommandEncoder.copyFromTextureToTexture",
     "MTLBlitCommandEncoder.copyIndirectCommandBuffer",
     "MTLBlitCommandEncoder.fillBuffer",
-    "MTLBlitCommandEncoder.synchronizeResource"
+    "MTLBlitCommandEncoder.synchronizeResource",
+    "MTLResourceStateCommandEncoder.updateFence",
+    "MTLResourceStateCommandEncoder.waitForFence",
+    "MTLResourceStateCommandEncoder.endEncoding"
   ],
   "known_unimplemented_surface": [
     "MTLIndirectCommandBuffer.patch/mesh command families",
