@@ -209,9 +209,8 @@ GROUP_SIZE=0
 validate_groups() {
   (($# == WORKER_COUNT)) ||
     fail 70 "grouping produced $# worker groups; exactly $WORKER_COUNT are required"
-  local -A owner=()
-  local expected="" group cpu idx=0
-  local -a members
+  local expected="" group cpu idx=0 existing_idx
+  local -a members owner_cpus owner_groups
   for group in "$@"; do
     [[ -n "$group" ]] || fail 70 "worker $idx has an empty CPU group"
     validate_cpu_list "$group" "worker $idx CPU group"
@@ -223,9 +222,13 @@ validate_groups() {
     fi
     for cpu in "${members[@]}"; do
       cpu=$((cpu))
-      [[ -z "${owner[$cpu]:-}" ]] ||
-        fail 70 "CPU $cpu appears in worker ${owner[$cpu]} and worker $idx; worker groups must be pairwise disjoint"
-      owner[$cpu]=$idx
+      for existing_idx in "${!owner_cpus[@]}"; do
+        if [[ "${owner_cpus[$existing_idx]}" == "$cpu" ]]; then
+          fail 70 "CPU $cpu appears in worker ${owner_groups[$existing_idx]} and worker $idx; worker groups must be pairwise disjoint"
+        fi
+      done
+      owner_cpus+=("$cpu")
+      owner_groups+=("$idx")
     done
     idx=$((idx + 1))
   done
@@ -273,8 +276,8 @@ build_partition() {
   ((per >= 1)) ||
     fail 69 "four-worker fanout needs at least $WORKER_COUNT usable physical cores; the effective cpuset $ALLOWED_CSV yields $PHYSICAL_CORES (SMT siblings of one core count once)"
 
-  local -A assigned=()
-  local w k row cpu socket core group cores
+  local -a assigned
+  local w k row cpu socket core group cores assigned_cpu found
   WORKER_GROUPS=()
   GROUP_CORES=()
   for ((w = 0; w < WORKER_COUNT; w++)); do
@@ -285,7 +288,7 @@ build_partition() {
       read -r socket core cpu <<<"$row"
       group+="${group:+,}$cpu"
       cores+="${cores:+,}$socket:$core"
-      assigned[$cpu]=1
+      assigned+=("$cpu")
     done
     WORKER_GROUPS+=("$group")
     GROUP_CORES+=("$cores")
@@ -295,7 +298,14 @@ build_partition() {
 
   local -a unused=()
   for cpu in $allowed; do
-    [[ -n "${assigned[$cpu]:-}" ]] || unused+=("$cpu")
+    found=0
+    for assigned_cpu in "${assigned[@]}"; do
+      if [[ "$assigned_cpu" == "$cpu" ]]; then
+        found=1
+        break
+      fi
+    done
+    ((found == 0)) && unused+=("$cpu")
   done
   UNUSED_CSV=$(join_csv "${unused[@]+"${unused[@]}"}")
 }

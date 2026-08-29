@@ -13,6 +13,7 @@ unset ZPU_FANOUT_CGROUP_FILE ZPU_FANOUT_CGROUP_ROOT
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 fanout="$root/tools/cpu-fanout.sh"
+platform=$(uname -s)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 failures=0
@@ -112,9 +113,9 @@ for w in 0 1 2 3; do
   all_cpus+="${all_cpus:+,}$group"
   all_cores+="${all_cores:+,}$cores"
 done
-uniq_cpus=$(tr ',' '\n' <<<"$all_cpus" | sort -u | wc -l)
+uniq_cpus=$(tr ',' '\n' <<<"$all_cpus" | sort -u | wc -l | tr -d '[:space:]')
 check 'worker CPU groups are pairwise disjoint' "$uniq_cpus" 12
-uniq_cores=$(tr ',' '\n' <<<"$all_cores" | sort -u | wc -l)
+uniq_cores=$(tr ',' '\n' <<<"$all_cores" | sort -u | wc -l | tr -d '[:space:]')
 check 'no physical core is split across workers (SMT siblings stay together)' "$uniq_cores" 12
 union=$(tr ',' '\n' <<<"$all_cpus,$(field "$a" unused)" | sort -n -u | paste -sd, -)
 check 'assigned plus unused CPUs reconstruct the effective cpuset' \
@@ -179,7 +180,13 @@ check 'dry-run shell-quotes arguments so the printed command is exact' \
 # The workload is tools/require-limited.sh, which refuses unless the canonical
 # marker, the selected CPU list, and the process affinity all agree.
 live_plan_error="$tmp/live-plan-error"
-if live_plan=$("$fanout" --plan 2>"$live_plan_error"); then
+if [[ "$platform" == "Darwin" ]]; then
+  # Darwin has no taskset equivalent. The deterministic planner, dry-run
+  # launch contract, and all failure fixtures above still execute; only the
+  # proof that four child processes receive disjoint Linux affinities is
+  # unavailable on this host.
+  printf 'cpu-fanout: live four-worker limiter proof skipped: Darwin has no taskset affinity launcher\n'
+elif live_plan=$("$fanout" --plan 2>"$live_plan_error"); then
   live_cap=$(field "$live_plan" thread_cap)
   probe="$root/tools/require-limited.sh >/dev/null 2>&1 && printf '%s|%s|%s|%s|%s\\n' \
     \"\$ZPU_FANOUT_WORKER\" \"\$ZPU_LIMITED\" \"\$ZPU_MAX_THREADS\" \
@@ -350,10 +357,14 @@ mkdir -p "$tmp/cgroup/a/b"
 printf '0::/a/b\n' >"$tmp/proc-self-cgroup"
 printf '3,5,9,11\n' >"$tmp/cgroup/a/cpuset.cpus.effective"
 ln -s /proc/1/mem "$tmp/cgroup/a/b/cpuset.cpus.effective"
-ancestor=$(env ZPU_FANOUT_ALLOWED_CPUS=0-400 ZPU_FANOUT_CGROUP_FILE="$tmp/proc-self-cgroup" \
-  ZPU_FANOUT_CGROUP_ROOT="$tmp/cgroup" ZPU_FANOUT_LSCPU_FILE="$tmp/topology" "$fanout" --plan)
-check 'an unreadable nearer cgroup cpuset falls back to a readable ancestor' \
-  "$(field "$ancestor" allowed_cpus)" '3,5,9,11'
+if [[ "$platform" == "Darwin" ]]; then
+  printf 'cpu-fanout: cgroup ancestor fallback proof skipped: Darwin has no Linux cgroup hierarchy\n'
+else
+  ancestor=$(env ZPU_FANOUT_ALLOWED_CPUS=0-400 ZPU_FANOUT_CGROUP_FILE="$tmp/proc-self-cgroup" \
+    ZPU_FANOUT_CGROUP_ROOT="$tmp/cgroup" ZPU_FANOUT_LSCPU_FILE="$tmp/topology" "$fanout" --plan)
+  check 'an unreadable nearer cgroup cpuset falls back to a readable ancestor' \
+    "$(field "$ancestor" allowed_cpus)" '3,5,9,11'
+fi
 
 refuses 'a failing live lscpu becomes a fanout refusal' 66 \
   "'lscpu -p=CPU,CORE,SOCKET,ONLINE' failed" -- \
