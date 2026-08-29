@@ -2198,9 +2198,12 @@ static BOOL zpu_sparse_update_texture_tail_mapping(ZPUTexture *texture, ZPUHeap 
     for (NSArray *key in bindings) {
         const NSUInteger tailLevel = [key[0] unsignedIntegerValue] - texture->_baseMipmapLevel;
         const NSUInteger tailSlice = [key[1] unsignedIntegerValue] - texture->_baseSlice;
+        const NSUInteger tileX = [key[2] unsignedIntegerValue];
+        const NSUInteger tileY = [key[3] unsignedIntegerValue];
+        const NSUInteger tileZ = [key[4] unsignedIntegerValue];
         ZPUSparsePage *page = bindings[key];
         texture->_sparseMappings[key] = page;
-        if (!zpu_sparse_texture_copy_page_to_tile(texture, tailLevel, tailSlice, 0, 0, 0, page)) return NO;
+        if (!zpu_sparse_texture_copy_page_to_tile(texture, tailLevel, tailSlice, tileX, tileY, tileZ, page)) return NO;
     }
     return YES;
 }
