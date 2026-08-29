@@ -734,7 +734,6 @@
     "MTLComputePipelineState unregistered reflection",
     "MTL4Compiler machine-learning and arbitrary MSL families",
     "MTLLibrary stitched loading and arbitrary MSL compilation",
-    "MTLIO compressed file-handle decoding",
     "MTLSparseTextureMapping"
   ]
 }

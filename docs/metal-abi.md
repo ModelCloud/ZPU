@@ -205,6 +205,10 @@ triangle path:
 - CPU binary archives persist and reload deterministic metadata for registered
   ZPU compute/render functions; the Metal 4 archive view can reopen registered
   compute metadata; neither archive API serializes Apple GPU binaries
+- CPU Metal I/O handles decode Apple `MTLIOCompressionContext` pack files for
+  zlib, LZFSE, LZ4, LZMA, and LZBitmap through the system CPU compression API;
+  load-bytes, buffer, and texture operations consume the decoded ZPU-owned
+  bytes, with native Metal used only as the test oracle
 - CPU resource-state encoders preserve Metal encoder boundaries and fence
   ordering. Resource/cache transitions are ordered no-ops over ZPU's unified
   CPU memory, while sparse texture mapping requests fail closed

@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0 */
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <Metal/MTLIOCompressor.h>
 #import <IOSurface/IOSurfaceRef.h>
 
 #include <stdio.h>
@@ -208,10 +209,75 @@ static int test_cpu_io_against_native(id<MTLDevice> native_device, id<MTLDevice>
         [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
         return 67;
     }
+    uint8_t compressed_source[128];
+    memset(compressed_source, 0x5a, sizeof(compressed_source));
+    uint8_t patterned_source[128];
+    memcpy(patterned_source, compressed_source, sizeof(compressed_source));
+    for (size_t index = 64; index < sizeof(patterned_source); ++index) {
+        patterned_source[index] = (uint8_t)((index * 37 + 11) & 0xff);
+    }
+    const MTLIOCompressionMethod compression_methods[] = {
+        MTLIOCompressionMethodZlib,
+        MTLIOCompressionMethodLZFSE,
+        MTLIOCompressionMethodLZ4,
+        MTLIOCompressionMethodLZMA,
+        MTLIOCompressionMethodLZBitmap,
+    };
+    for (NSUInteger method_index = 0;
+         method_index < sizeof(compression_methods) / sizeof(compression_methods[0]); ++method_index) {
+        NSURL *compressed_url = [NSURL fileURLWithPath:[NSTemporaryDirectory()
+            stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]]];
+        MTLIOCompressionContext compression_context = MTLIOCreateCompressionContext(
+            compressed_url.path.fileSystemRepresentation, compression_methods[method_index], 64);
+        if (compression_context == NULL) {
+            fprintf(stderr, "metal-pixel: native compressed Metal I/O context creation failed for method %lu\n",
+                    (unsigned long)method_index);
+            [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+            return 68;
+        }
+        MTLIOCompressionContextAppendData(compression_context, patterned_source, sizeof(patterned_source));
+        if (MTLIOFlushAndDestroyCompressionContext(compression_context) != MTLIOCompressionStatusComplete) {
+            fprintf(stderr, "metal-pixel: native compressed Metal I/O pack creation failed for method %lu\n",
+                    (unsigned long)method_index);
+            [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+            return 69;
+        }
+        NSError *compressed_error = nil;
+        id<MTLIOFileHandle> native_compressed_handle = [native_device
+            newIOFileHandleWithURL:compressed_url compressionMethod:compression_methods[method_index]
+            error:&compressed_error];
+        id<MTLIOFileHandle> adapter_compressed_handle = [adapter_device
+            newIOFileHandleWithURL:compressed_url compressionMethod:compression_methods[method_index]
+            error:&compressed_error];
+        uint8_t native_compressed_bytes[sizeof(patterned_source)] = {0};
+        uint8_t adapter_compressed_bytes[sizeof(patterned_source)] = {0};
+        id<MTLIOCommandBuffer> native_compressed_command_buffer = [native_queue commandBuffer];
+        id<MTLIOCommandBuffer> adapter_compressed_command_buffer = [adapter_queue commandBuffer];
+        [native_compressed_command_buffer loadBytes:native_compressed_bytes size:sizeof(native_compressed_bytes)
+                                       sourceHandle:native_compressed_handle sourceHandleOffset:0];
+        [adapter_compressed_command_buffer loadBytes:adapter_compressed_bytes size:sizeof(adapter_compressed_bytes)
+                                        sourceHandle:adapter_compressed_handle sourceHandleOffset:0];
+        [native_compressed_command_buffer commit];
+        [native_compressed_command_buffer waitUntilCompleted];
+        [adapter_compressed_command_buffer commit];
+        [adapter_compressed_command_buffer waitUntilCompleted];
+        if (native_compressed_handle == nil || adapter_compressed_handle == nil ||
+            native_compressed_command_buffer.status != MTLIOStatusComplete ||
+            adapter_compressed_command_buffer.status != MTLIOStatusComplete ||
+            memcmp(native_compressed_bytes, patterned_source, sizeof(patterned_source)) != 0 ||
+            memcmp(adapter_compressed_bytes, patterned_source, sizeof(patterned_source)) != 0 ||
+            memcmp(native_compressed_bytes, adapter_compressed_bytes, sizeof(patterned_source)) != 0) {
+            fail_with_error("native/CPU compressed Metal I/O bytes mismatch", compressed_error);
+            [[NSFileManager defaultManager] removeItemAtURL:compressed_url error:nil];
+            [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+            return 70;
+        }
+        [[NSFileManager defaultManager] removeItemAtURL:compressed_url error:nil];
+    }
     if ([adapter_device newIOFileHandleWithURL:url compressionMethod:MTLIOCompressionMethodZlib error:&error] != nil) {
-        fprintf(stderr, "metal-pixel: compressed CPU Metal I/O handle was not rejected\n");
+        fprintf(stderr, "metal-pixel: raw file was accepted as a compressed Metal I/O pack\n");
         [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
-        return 68;
+        return 71;
     }
     id<MTLDevice> foreign_device = ZPUMetalCreateSystemDefaultDevice();
     id<MTLBuffer> foreign_buffer = [foreign_device newBufferWithLength:sizeof(source_bytes)
@@ -224,7 +290,7 @@ static int test_cpu_io_against_native(id<MTLDevice> native_device, id<MTLDevice>
         invalid_command_buffer.status != MTLIOStatusError || invalid_command_buffer.error == nil) {
         fprintf(stderr, "metal-pixel: CPU Metal I/O foreign-resource validation failed\n");
         [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
-        return 69;
+        return 72;
     }
     [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
     return 0;

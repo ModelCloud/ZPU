@@ -18,6 +18,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <compression.h>
 
 #include "zpu/metal.h"
 #include "zpu/metal_apple.h"
@@ -549,6 +550,8 @@ API_AVAILABLE(macos(13.0), ios(16.0))
     NSString *_label;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner url:(NSURL *)url error:(NSError **)error;
+- (instancetype)initWithOwner:(ZPUDevice *)owner url:(NSURL *)url
+              compressionMethod:(MTLIOCompressionMethod)compressionMethod error:(NSError **)error;
 @end
 
 typedef BOOL (^ZPUIOOperationBlock)(NSError **error);
@@ -3637,6 +3640,145 @@ static BOOL zpu_io_data_range(NSData *data, NSUInteger offset, NSUInteger length
     return data != nil && offset <= data.length && length <= data.length - offset;
 }
 
+static BOOL zpu_io_read_u64(NSData *data, NSUInteger offset, uint64_t *value) {
+    if (value == NULL || !zpu_io_data_range(data, offset, sizeof(uint64_t))) return NO;
+    memcpy(value, (const uint8_t *)data.bytes + offset, sizeof(*value));
+    return YES;
+}
+
+static compression_algorithm zpu_io_compression_algorithm(MTLIOCompressionMethod method) {
+    switch (method) {
+        case MTLIOCompressionMethodZlib: return COMPRESSION_ZLIB;
+        case MTLIOCompressionMethodLZFSE: return COMPRESSION_LZFSE;
+        case MTLIOCompressionMethodLZ4: return COMPRESSION_LZ4;
+        case MTLIOCompressionMethodLZMA: return COMPRESSION_LZMA;
+        case MTLIOCompressionMethodLZBitmap: return COMPRESSION_LZBITMAP;
+        default: return 0;
+    }
+}
+
+/* MTLIOCompressionContext writes a small, stable chunk table followed by
+ * independently compressed blocks. The first compression bit is in the
+ * header; each table entry carries the bit for the following block. This
+ * lets Metal seek to a block without decoding the preceding file. Decode the
+ * public pack format here with Apple's CPU Compression framework only. No
+ * Metal resource or native command is involved in this path. */
+static NSData *zpu_io_decode_compressed_pack(NSData *packed, MTLIOCompressionMethod method,
+                                             NSError **error) {
+    const uint32_t magic = 0xbadc0fee;
+    uint32_t fileMagic = 0;
+    if (packed == nil || packed.length < 0x20 ||
+        !zpu_io_data_range(packed, 0, sizeof(fileMagic))) {
+        zpu_set_error(error, @"ZPU CPU Metal compressed I/O pack is truncated");
+        return nil;
+    }
+    memcpy(&fileMagic, packed.bytes, sizeof(fileMagic));
+    if (fileMagic != magic) {
+        zpu_set_error(error, @"ZPU CPU Metal compressed I/O pack has an invalid header");
+        return nil;
+    }
+    uint64_t chunkSize64 = 0;
+    uint64_t chunkCount64 = 0;
+    uint64_t compressed = 0;
+    if (!zpu_io_read_u64(packed, 0x08, &chunkSize64) ||
+        !zpu_io_read_u64(packed, 0x10, &chunkCount64) ||
+        !zpu_io_read_u64(packed, 0x18, &compressed) ||
+        chunkSize64 == 0 || chunkSize64 > (uint64_t)NSUIntegerMax || compressed > 1 ||
+        chunkCount64 > (uint64_t)((packed.length - 0x20) / 16 + 1)) {
+        zpu_set_error(error, @"ZPU CPU Metal compressed I/O pack has invalid chunk metadata");
+        return nil;
+    }
+    const compression_algorithm algorithm = zpu_io_compression_algorithm(method);
+    if (algorithm == 0) {
+        zpu_set_error(error, @"ZPU CPU Metal compressed I/O codec is unsupported");
+        return nil;
+    }
+    const NSUInteger chunkSize = (NSUInteger)chunkSize64;
+    const NSUInteger chunkCount = (NSUInteger)chunkCount64;
+    NSMutableData *decoded = [NSMutableData data];
+    NSUInteger cursor = 0x20;
+    NSUInteger firstDataOffset = NSUIntegerMax;
+    NSUInteger previousDataEnd = 0;
+    BOOL currentCompressed = compressed != 0;
+    for (NSUInteger index = 0; index < chunkCount; ++index) {
+        uint64_t dataOffset64 = 0;
+        uint64_t dataSize64 = 0;
+        if (!zpu_io_read_u64(packed, cursor, &dataOffset64) ||
+            !zpu_io_read_u64(packed, cursor + sizeof(uint64_t), &dataSize64) ||
+            dataOffset64 > (uint64_t)NSUIntegerMax || dataSize64 > (uint64_t)NSUIntegerMax) {
+            zpu_set_error(error, @"ZPU CPU Metal compressed I/O pack has an invalid chunk table");
+            return nil;
+        }
+        cursor += sizeof(uint64_t) * 2;
+        const NSUInteger dataOffset = (NSUInteger)dataOffset64;
+        const NSUInteger dataSize = (NSUInteger)dataSize64;
+        if (index == 0) firstDataOffset = dataOffset;
+        if (dataOffset < cursor || dataOffset < previousDataEnd ||
+            !zpu_io_data_range(packed, dataOffset, dataSize)) {
+            zpu_set_error(error, @"ZPU CPU Metal compressed I/O pack chunk is outside the file");
+            return nil;
+        }
+        if (index + 1 < chunkCount) {
+            uint64_t nextCompressed = 0;
+            if (!zpu_io_read_u64(packed, cursor, &nextCompressed) || nextCompressed > 1) {
+                zpu_set_error(error, @"ZPU CPU Metal compressed I/O pack has invalid chunk flags");
+                return nil;
+            }
+            cursor += sizeof(uint64_t);
+            previousDataEnd = dataOffset + dataSize;
+            if (dataOffset + dataSize < dataOffset) {
+                zpu_set_error(error, @"ZPU CPU Metal compressed I/O pack chunk range overflows");
+                return nil;
+            }
+
+            if (currentCompressed) {
+                NSMutableData *block = [NSMutableData dataWithLength:chunkSize];
+                const size_t outputSize = compression_decode_buffer(block.mutableBytes, chunkSize,
+                    (const uint8_t *)packed.bytes + dataOffset, dataSize, NULL, algorithm);
+                if (outputSize != chunkSize) {
+                    zpu_set_error(error, @"ZPU CPU Metal compressed I/O block did not decode to its chunk size");
+                    return nil;
+                }
+                [decoded appendData:block];
+            } else {
+                if (dataSize != chunkSize) {
+                    zpu_set_error(error, @"ZPU CPU Metal uncompressed I/O block has an invalid size");
+                    return nil;
+                }
+                [decoded appendBytes:(const uint8_t *)packed.bytes + dataOffset length:dataSize];
+            }
+            currentCompressed = nextCompressed != 0;
+        } else {
+            if (dataOffset + dataSize < dataOffset) {
+                zpu_set_error(error, @"ZPU CPU Metal compressed I/O pack chunk range overflows");
+                return nil;
+            }
+            previousDataEnd = dataOffset + dataSize;
+            if (currentCompressed) {
+                NSMutableData *block = [NSMutableData dataWithLength:chunkSize];
+                const size_t outputSize = compression_decode_buffer(block.mutableBytes, chunkSize,
+                    (const uint8_t *)packed.bytes + dataOffset, dataSize, NULL, algorithm);
+                if (outputSize == 0 || outputSize > chunkSize) {
+                    zpu_set_error(error, @"ZPU CPU Metal compressed I/O final block did not decode");
+                    return nil;
+                }
+                [decoded appendBytes:block.bytes length:outputSize];
+            } else {
+                if (dataSize == 0 || dataSize > chunkSize) {
+                    zpu_set_error(error, @"ZPU CPU Metal final uncompressed I/O block has an invalid size");
+                    return nil;
+                }
+                [decoded appendBytes:(const uint8_t *)packed.bytes + dataOffset length:dataSize];
+            }
+        }
+    }
+    if (chunkCount != 0 && (firstDataOffset == NSUIntegerMax || firstDataOffset < cursor)) {
+        zpu_set_error(error, @"ZPU CPU Metal compressed I/O pack overlaps its chunk table");
+        return nil;
+    }
+    return decoded;
+}
+
 static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUInteger level,
                                 MTLSize size, NSUInteger sourceBytesPerRow,
                                 NSUInteger sourceBytesPerImage, MTLOrigin destinationOrigin,
@@ -3736,6 +3878,36 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
     if (error != NULL) *error = nil;
     return self;
 }
+- (instancetype)initWithOwner:(ZPUDevice *)owner url:(NSURL *)url
+              compressionMethod:(MTLIOCompressionMethod)compressionMethod error:(NSError **)error {
+    if (owner == nil || url == nil || !url.isFileURL) {
+        zpu_set_error(error, @"ZPU CPU Metal compressed I/O handle requires a file URL");
+        return nil;
+    }
+    if (zpu_io_compression_algorithm(compressionMethod) == 0) {
+        zpu_set_error(error, @"ZPU CPU Metal compressed I/O codec is unsupported");
+        return nil;
+    }
+    NSError *readError = nil;
+    NSData *packed = [NSData dataWithContentsOfURL:url options:0 error:&readError];
+    if (packed == nil) {
+        if (error != NULL) *error = readError != nil ? readError : [NSError errorWithDomain:@"ZPUMetal"
+            code:ZPU_METAL_INVALID_ARGUMENT userInfo:@{NSLocalizedDescriptionKey: @"ZPU CPU Metal compressed I/O file could not be read"}];
+        return nil;
+    }
+    NSError *decodeError = nil;
+    NSData *data = zpu_io_decode_compressed_pack(packed, compressionMethod, &decodeError);
+    if (data == nil) {
+        if (error != NULL) *error = decodeError;
+        return nil;
+    }
+    if ((self = [super init])) {
+        _owner = owner;
+        _data = data;
+    }
+    if (error != NULL) *error = nil;
+    return self;
+}
 - (NSString *)label { return _label; }
 - (void)setLabel:(NSString *)label { _label = [label copy]; }
 @end
@@ -3777,7 +3949,7 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
     ZPUIOFileHandle *handle = (ZPUIOFileHandle *)sourceHandle;
     if (![handle isKindOfClass:[ZPUIOFileHandle class]] || handle->_owner != _owner->_owner ||
         (pointer == NULL && size != 0)) {
-        [self addFailure:@"ZPU CPU Metal I/O loadBytes requires a same-device raw file handle and destination pointer"];
+        [self addFailure:@"ZPU CPU Metal I/O loadBytes requires a same-device file handle and destination pointer"];
         return;
     }
     NSData *data = handle->_data;
@@ -3796,7 +3968,7 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
     if (![handle isKindOfClass:[ZPUIOFileHandle class]] || handle->_owner != _owner->_owner ||
         !zpu_buffer_belongs_to_device(_owner->_owner, destination) || offset > destination.length ||
         size > destination.length - offset) {
-        [self addFailure:@"ZPU CPU Metal I/O loadBuffer requires same-device file and buffer ranges"];
+        [self addFailure:@"ZPU CPU Metal I/O loadBuffer requires same-device file handle and buffer ranges"];
         return;
     }
     NSData *data = handle->_data;
@@ -3815,7 +3987,7 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
     ZPUTexture *destination = (ZPUTexture *)texture;
     if (![handle isKindOfClass:[ZPUIOFileHandle class]] || handle->_owner != _owner->_owner ||
         !zpu_texture_belongs_to_device(_owner->_owner, destination)) {
-        [self addFailure:@"ZPU CPU Metal I/O loadTexture requires same-device file and texture resources"];
+        [self addFailure:@"ZPU CPU Metal I/O loadTexture requires same-device file handle and texture resources"];
         return;
     }
     NSData *data = handle->_data;
@@ -4622,10 +4794,8 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     return (id<MTLIOFileHandle>)[[ZPUIOFileHandle alloc] initWithOwner:self url:url error:error];
 }
 - (id<MTLIOFileHandle>)newIOHandleWithURL:(NSURL *)url compressionMethod:(MTLIOCompressionMethod)compressionMethod error:(NSError **)error API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)url;
-    (void)compressionMethod;
-    zpu_set_error(error, @"ZPU CPU Metal I/O supports raw file handles only; compressed handles are unsupported");
-    return nil;
+    return (id<MTLIOFileHandle>)[[ZPUIOFileHandle alloc] initWithOwner:self url:url
+        compressionMethod:compressionMethod error:error];
 }
 - (id<MTLIOCommandQueue>)newIOCommandQueueWithDescriptor:(MTLIOCommandQueueDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(13.0), ios(16.0)) {
     if (descriptor == nil || descriptor.priority < MTLIOPriorityHigh || descriptor.priority > MTLIOPriorityLow ||
@@ -4640,10 +4810,8 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     return (id<MTLIOFileHandle>)[[ZPUIOFileHandle alloc] initWithOwner:self url:url error:error];
 }
 - (id<MTLIOFileHandle>)newIOFileHandleWithURL:(NSURL *)url compressionMethod:(MTLIOCompressionMethod)compressionMethod error:(NSError **)error API_AVAILABLE(macos(14.0), ios(17.0)) {
-    (void)url;
-    (void)compressionMethod;
-    zpu_set_error(error, @"ZPU CPU Metal I/O supports raw file handles only; compressed handles are unsupported");
-    return nil;
+    return (id<MTLIOFileHandle>)[[ZPUIOFileHandle alloc] initWithOwner:self url:url
+        compressionMethod:compressionMethod error:error];
 }
 - (id<MTLLogState>)newLogStateWithDescriptor:(MTLLogStateDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(15.0), ios(18.0)) {
     return (id<MTLLogState>)[[ZPULogState alloc] initWithDescriptor:descriptor error:error];

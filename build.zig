@@ -254,10 +254,12 @@ pub fn build(b: *std.Build) void {
         metal_layer.root_module.addCSourceFile(.{ .file = b.path("src/metal/apple_adapter.m"), .flags = &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" } });
         if (std.zig.system.darwin.getSdk(b.graph.arena, b.graph.io, &target.result)) |sdk_path| {
             metal_layer.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk_path, "usr/include" }) });
+            metal_layer.root_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk_path, "usr/lib" }) });
             metal_layer.root_module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk_path, "System/Library/Frameworks" }) });
         }
         metal_layer.root_module.linkFramework("Foundation", .{});
         metal_layer.root_module.linkFramework("Metal", .{});
+        metal_layer.root_module.linkSystemLibrary("compression", .{});
         metal_layer.root_module.linkFramework("IOSurface", .{});
     }
     const install_metal_layer = b.addInstallArtifact(metal_layer, .{});
@@ -324,6 +326,7 @@ pub fn build(b: *std.Build) void {
         metal_pixel_tests.root_module.link_libc = true;
         metal_pixel_tests.root_module.linkFramework("Foundation", .{});
         metal_pixel_tests.root_module.linkFramework("Metal", .{});
+        metal_pixel_tests.root_module.linkSystemLibrary("compression", .{});
         metal_pixel_tests.root_module.linkFramework("IOSurface", .{});
         metal_pixel_tests.root_module.linkLibrary(metal_layer);
         const run_metal_pixel_tests = b.addRunArtifact(metal_pixel_tests);
