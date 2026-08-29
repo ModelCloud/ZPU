@@ -186,6 +186,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     uint64_t _resourceID;
     NSArray *_mipmapTextures;
     NSArray *_sliceMipmapTextures;
+    NSUInteger _arrayLength;
     NSUInteger _depth;
     NSUInteger _baseMipmapLevel;
     NSUInteger _baseSlice;
@@ -1518,17 +1519,44 @@ static BOOL zpu_texture_type_is_3d(MTLTextureType type) {
     return type == MTLTextureType3D;
 }
 
+static BOOL zpu_texture_type_is_cube(MTLTextureType type) {
+    return type == MTLTextureTypeCube || type == MTLTextureTypeCubeArray;
+}
+
+static BOOL zpu_texture_type_is_cube_array(MTLTextureType type) {
+    return type == MTLTextureTypeCubeArray;
+}
+
 static BOOL zpu_texture_type_is_array(MTLTextureType type) {
-    return type == MTLTextureType1DArray || type == MTLTextureType2DArray;
+    return type == MTLTextureType1DArray || type == MTLTextureType2DArray ||
+        type == MTLTextureTypeCubeArray;
 }
 
 static BOOL zpu_texture_type_is_supported(MTLTextureType type) {
     return type == MTLTextureType1D || type == MTLTextureType1DArray ||
-        type == MTLTextureType2D || type == MTLTextureType2DArray || type == MTLTextureType3D;
+        type == MTLTextureType2D || type == MTLTextureType2DArray || type == MTLTextureType3D ||
+        type == MTLTextureTypeCube || type == MTLTextureTypeCubeArray;
 }
 
 static BOOL zpu_render_texture_type_supported(MTLTextureType type) {
     return type == MTLTextureType2D || type == MTLTextureType2DArray;
+}
+
+/* ZPU stores every non-3D Metal slice as an independent 2D texture. Metal
+ * exposes a cube as six slices, while arrayLength remains the number of
+ * cubes, so keep those two counts separate. */
+static NSUInteger zpu_texture_storage_slice_count(MTLTextureType type, NSUInteger arrayLength) {
+    if (type == MTLTextureTypeCube) return arrayLength == 1 ? 6 : 0;
+    if (type == MTLTextureTypeCubeArray) {
+        if (arrayLength > SIZE_MAX / 6) return 0;
+        return arrayLength * 6;
+    }
+    return arrayLength;
+}
+
+static NSUInteger zpu_texture_transfer_slice_count(ZPUTexture *texture) {
+    if (texture == nil) return 0;
+    return zpu_texture_type_is_3d(texture->_textureType) ? 1 : texture->_sliceMipmapTextures.count;
 }
 
 static NSUInteger zpu_texture_depth_at_level(ZPUTexture *texture, NSUInteger level) {
@@ -1545,13 +1573,16 @@ static BOOL zpu_texture_descriptor_size(MTLTextureDescriptor *descriptor, NSUInt
         (zpu_texture_type_is_3d(descriptor.textureType) ? descriptor.depth == 0 : descriptor.depth != 1) ||
         (!zpu_texture_type_is_array(descriptor.textureType) && descriptor.arrayLength != 1) ||
         (zpu_texture_type_is_1d(descriptor.textureType) && descriptor.height != 1) ||
+        (zpu_texture_type_is_cube(descriptor.textureType) && descriptor.width != descriptor.height) ||
         descriptor.mipmapLevelCount == 0 || descriptor.sampleCount != 1 ||
         descriptor.width > UINT32_MAX || descriptor.height > UINT32_MAX ||
         (descriptor.pixelFormat != MTLPixelFormatRGBA8Unorm && descriptor.pixelFormat != MTLPixelFormatBGRA8Unorm &&
          descriptor.pixelFormat != MTLPixelFormatR32Float && descriptor.pixelFormat != MTLPixelFormatRGBA16Float &&
          descriptor.pixelFormat != MTLPixelFormatDepth32Float && descriptor.pixelFormat != MTLPixelFormatStencil8)) return NO;
     NSUInteger total = 0;
-    const NSUInteger sliceCount = zpu_texture_type_is_3d(descriptor.textureType) ? 1 : descriptor.arrayLength;
+    const NSUInteger sliceCount = zpu_texture_type_is_3d(descriptor.textureType) ? 1 :
+        zpu_texture_storage_slice_count(descriptor.textureType, descriptor.arrayLength);
+    if (sliceCount == 0) return NO;
     for (NSUInteger slice = 0; slice < sliceCount; ++slice) {
         (void)slice;
         NSUInteger width = descriptor.width;
@@ -2493,8 +2524,7 @@ static void zpu_sparse_refresh_texture_mappings(ZPUTexture *texture) {
 
 static void zpu_sparse_zero_unmapped_texture_tiles(ZPUTexture *texture) {
     if (texture == nil || texture->_sparseMappings == nil) return;
-    const NSUInteger sliceCount = zpu_texture_type_is_3d(texture->_textureType) ? 1 :
-        texture->_sliceMipmapTextures.count;
+    const NSUInteger sliceCount = zpu_texture_transfer_slice_count(texture);
     for (NSUInteger level = 0; level < texture->_mipmapTextures.count; ++level) {
         NSUInteger tileCountX = 0;
         NSUInteger tileCountY = 0;
@@ -3746,6 +3776,7 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
         _swizzle = MTLTextureSwizzleChannelsDefault;
         _mipmapTextures = @[[NSValue valueWithPointer:texture]];
         _sliceMipmapTextures = @[_mipmapTextures];
+        _arrayLength = 1;
         _depth = 1;
         _baseMipmapLevel = 0;
         _baseSlice = 0;
@@ -3801,7 +3832,7 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
 - (NSUInteger)depth { return _depth; }
 - (NSUInteger)mipmapLevelCount { return _mipmapTextures.count; }
 - (NSUInteger)sampleCount { return 1; }
-- (NSUInteger)arrayLength { return zpu_texture_type_is_3d(_textureType) ? 1 : _sliceMipmapTextures.count; }
+- (NSUInteger)arrayLength { return _arrayLength; }
 - (void)applyDescriptor:(MTLTextureDescriptor *)descriptor {
     if (descriptor == nil) return;
     _usage = descriptor.usage;
@@ -4109,6 +4140,7 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
                                                     type:_textureType pixelFormat:pixelFormat backing:self];
     view->_mipmapTextures = [_mipmapTextures copy];
     view->_sliceMipmapTextures = [_sliceMipmapTextures copy];
+    view->_arrayLength = _arrayLength;
     view->_depth = _depth;
     view->_baseMipmapLevel = _baseMipmapLevel;
     view->_baseSlice = _baseSlice;
@@ -4123,6 +4155,9 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
         levelRange.length > _mipmapTextures.count - levelRange.location) return nil;
     if (pixelFormat != _pixelFormat) return nil;
     if (zpu_texture_type_is_3d(_textureType) && (sliceRange.location != 0 || sliceRange.length != 1)) return nil;
+    if (_textureType == MTLTextureTypeCube && (sliceRange.location != 0 || sliceRange.length != 6)) return nil;
+    if (zpu_texture_type_is_cube_array(_textureType) &&
+        (sliceRange.location % 6 != 0 || sliceRange.length % 6 != 0)) return nil;
     NSMutableArray *sliceMipmapTextures = [NSMutableArray arrayWithCapacity:sliceRange.length];
     const NSRange sourceSliceRange = zpu_texture_type_is_3d(_textureType) ?
         NSMakeRange(0, _sliceMipmapTextures.count) : sliceRange;
@@ -4135,6 +4170,8 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
                                                     type:_textureType pixelFormat:pixelFormat backing:self];
     view->_mipmapTextures = [mipmaps copy];
     view->_sliceMipmapTextures = [sliceMipmapTextures copy];
+    view->_arrayLength = zpu_texture_type_is_cube(_textureType) ?
+        sliceRange.length / 6 : (zpu_texture_type_is_3d(_textureType) ? 1 : sliceRange.length);
     view->_depth = zpu_texture_type_is_3d(_textureType) ?
         zpu_texture_depth_at_level(self, levelRange.location) : 1;
     view->_baseMipmapLevel = _baseMipmapLevel + levelRange.location;
@@ -4343,7 +4380,9 @@ static NSUInteger zpu_acceleration_structure_size_for_descriptor(
     if ((descriptor.storageMode != _storageMode && descriptor.storageMode != MTLStorageModeMemoryless) ||
         descriptor.cpuCacheMode != _cpuCacheMode ||
         (descriptor.hazardTrackingMode == MTLHazardTrackingModeTracked && [self hazardTrackingMode] != MTLHazardTrackingModeTracked)) return nil;
-    const NSUInteger sliceCount = zpu_texture_type_is_3d(descriptor.textureType) ? descriptor.depth : descriptor.arrayLength;
+    const NSUInteger sliceCount = zpu_texture_type_is_3d(descriptor.textureType) ? descriptor.depth :
+        zpu_texture_storage_slice_count(descriptor.textureType, descriptor.arrayLength);
+    if (sliceCount == 0) return nil;
     NSMutableArray *sliceMipmapTextures = [NSMutableArray arrayWithCapacity:sliceCount];
     for (NSUInteger slice = 0; slice < sliceCount; ++slice) {
         NSMutableArray *mipmaps = [NSMutableArray arrayWithCapacity:descriptor.mipmapLevelCount];
@@ -4388,6 +4427,7 @@ static NSUInteger zpu_acceleration_structure_size_for_descriptor(
                                                pixelFormat:descriptor.pixelFormat heap:self];
     result->_sliceMipmapTextures = [sliceMipmapTextures copy];
     result->_mipmapTextures = [firstSlice copy];
+    result->_arrayLength = descriptor.arrayLength;
     result->_depth = zpu_texture_type_is_3d(descriptor.textureType) ? descriptor.depth : 1;
     [result applyDescriptor:descriptor];
     return (id<MTLTexture>)result;
@@ -6223,7 +6263,9 @@ static BOOL zpu_apply_legacy_compute_descriptor(
                 tileSize.height == 0 || tileSize.depth == 0) return nil;
         }
     }
-    const NSUInteger sliceCount = zpu_texture_type_is_3d(descriptor.textureType) ? descriptor.depth : descriptor.arrayLength;
+    const NSUInteger sliceCount = zpu_texture_type_is_3d(descriptor.textureType) ? descriptor.depth :
+        zpu_texture_storage_slice_count(descriptor.textureType, descriptor.arrayLength);
+    if (sliceCount == 0) return nil;
     NSMutableArray *sliceMipmapTextures = [NSMutableArray arrayWithCapacity:sliceCount];
     for (NSUInteger slice = 0; slice < sliceCount; ++slice) {
         NSMutableArray *mipmaps = [NSMutableArray arrayWithCapacity:descriptor.mipmapLevelCount];
@@ -6264,6 +6306,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
                                                pixelFormat:descriptor.pixelFormat
                                              mipmapSlices:sliceMipmapTextures];
     result->_depth = zpu_texture_type_is_3d(descriptor.textureType) ? descriptor.depth : 1;
+    result->_arrayLength = descriptor.arrayLength;
     [result applyDescriptor:descriptor];
     return (id<MTLTexture>)result;
 }
@@ -9350,8 +9393,10 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     ZPUTexture *destination = (ZPUTexture *)destinationTexture;
     if (!zpu_texture_belongs_to_device([_owner device], source) || !zpu_texture_belongs_to_device([_owner device], destination) ||
         sliceCount == 0 || levelCount == 0 ||
-        sourceSlice > source.arrayLength || sliceCount > source.arrayLength - sourceSlice ||
-        destinationSlice > destination.arrayLength || sliceCount > destination.arrayLength - destinationSlice ||
+        sourceSlice > zpu_texture_transfer_slice_count(source) ||
+        sliceCount > zpu_texture_transfer_slice_count(source) - sourceSlice ||
+        destinationSlice > zpu_texture_transfer_slice_count(destination) ||
+        sliceCount > zpu_texture_transfer_slice_count(destination) - destinationSlice ||
         sourceLevel > source.mipmapLevelCount || levelCount > source.mipmapLevelCount - sourceLevel ||
         destinationLevel > destination.mipmapLevelCount || levelCount > destination.mipmapLevelCount - destinationLevel) {
         [_owner markError];
@@ -9662,7 +9707,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
         _stages |= MTLStageBlit;
         return;
     }
-    for (NSUInteger slice = 0; slice < zpuTexture.arrayLength; ++slice) {
+    for (NSUInteger slice = 0; slice < zpu_texture_transfer_slice_count(zpuTexture); ++slice) {
         for (NSUInteger level = 0; level + 1 < zpuTexture.mipmapLevelCount; ++level) {
             if (zpu_metal_compute_encoder_generate_mipmap(
                     _legacy->_zpuEncoder, [zpuTexture zpuTextureAtLevel:level slice:slice],
@@ -11098,8 +11143,10 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     ZPUTexture *destination = (ZPUTexture *)destinationTexture;
     if (![source isKindOfClass:[ZPUTexture class]] || ![destination isKindOfClass:[ZPUTexture class]] ||
         sliceCount == 0 || levelCount == 0 ||
-        sourceSlice > source.arrayLength || sliceCount > source.arrayLength - sourceSlice ||
-        destinationSlice > destination.arrayLength || sliceCount > destination.arrayLength - destinationSlice ||
+        sourceSlice > zpu_texture_transfer_slice_count(source) ||
+        sliceCount > zpu_texture_transfer_slice_count(source) - sourceSlice ||
+        destinationSlice > zpu_texture_transfer_slice_count(destination) ||
+        sliceCount > zpu_texture_transfer_slice_count(destination) - destinationSlice ||
         sourceLevel > source.mipmapLevelCount || levelCount > source.mipmapLevelCount - sourceLevel ||
         destinationLevel > destination.mipmapLevelCount || levelCount > destination.mipmapLevelCount - destinationLevel) {
         [_owner markError];
@@ -11213,7 +11260,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         [_owner retainResource:zpuTexture];
         return;
     }
-    for (NSUInteger slice = 0; slice < zpuTexture.arrayLength; ++slice) {
+    for (NSUInteger slice = 0; slice < zpu_texture_transfer_slice_count(zpuTexture); ++slice) {
         for (NSUInteger level = 0; level + 1 < zpuTexture.mipmapLevelCount; ++level) {
             if (zpu_metal_blit_encoder_generate_mipmap(
                     _zpuEncoder, [zpuTexture zpuTextureAtLevel:level slice:slice],
@@ -13034,8 +13081,13 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     if (_pipelineState != nil) [encoder setRenderPipelineState:(id<MTLRenderPipelineState>)_pipelineState];
     if (_hasVertexBuffer) {
         if (_hasVertexStride) {
-            [encoder setVertexBuffer:(id<MTLBuffer>)_vertexBuffer offset:_vertexOffset
-                      attributeStride:_vertexStride atIndex:0];
+            if (@available(macOS 14.0, iOS 17.0, *)) {
+                [encoder setVertexBuffer:(id<MTLBuffer>)_vertexBuffer offset:_vertexOffset
+                          attributeStride:_vertexStride atIndex:0];
+            } else {
+                [encoder->_owner markError];
+                return;
+            }
         } else {
             [encoder setVertexBuffer:(id<MTLBuffer>)_vertexBuffer offset:_vertexOffset atIndex:0];
         }

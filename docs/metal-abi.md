@@ -26,8 +26,9 @@ triangle path:
   render/compute paths accept R32Float and RGBA16Float as CPU color targets;
   formats without a corresponding CPU shader profile remain rejected
   profile
-- ordinary device-created 1D, 1D-array, 2D, and 2D-array textures with independently
-  allocated CPU/ZPU slice×mip levels, exact level/slice read/write,
+- ordinary device-created 1D, 1D-array, 2D, 2D-array, cube, and cube-array
+  textures with independently allocated CPU/ZPU slice×mip levels (six faces
+  per cube), exact level/slice read/write,
   level/slice-range views, and level/slice-aware blit copies; CPU mipmap
   generation uses Metal's destination-center linear filter and matches the
   native RGBA8/R32Float/RGBA16Float oracles; buffer-backed and
@@ -327,7 +328,8 @@ draws, render and compute indirect command buffers, the CPU compute path
   ordinary render paths, compiler-created Metal 4 compute/render and archive
   metadata paths, deferred indirect-thread dispatch, and deferred
   indirect array z filtering, explicit 3D texture plane/stride copies, and
-  legacy/Metal 4 3D mipmap generation, 2D float mipmap raw-byte exactness, and
+  legacy/Metal 4 3D mipmap generation, cube/cube-array face and view transfers,
+  2D float mipmap raw-byte exactness, and
   legacy/Metal 4 visibility result byte exactness, and CPU depth-bounds output
   against an equivalent native Metal fragment-discard oracle,
 and the explicit adapter; it is not a claim that every Metal feature is

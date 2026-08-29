@@ -3351,6 +3351,238 @@ int main(void) {
             return 75;
         }
 
+        /* Cube storage is six ordinary CPU/ZPU-owned 2D faces. The native
+         * texture is used only as the Metal slice, mipmap, copy, and view
+         * oracle; no adapter operation below submits a native Metal command. */
+        enum {
+            cube_size = 4,
+            cube_face_bytes = cube_size * cube_size * 4,
+            cube_mip_bytes = (cube_size * cube_size + 2 * 2 + 1) * 4,
+            cube_face_count = 6,
+            cube_array_count = 2,
+            cube_array_slice_count = cube_face_count * cube_array_count,
+        };
+        MTLTextureDescriptor *cube_descriptor = [MTLTextureDescriptor new];
+        cube_descriptor.textureType = MTLTextureTypeCube;
+        cube_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        cube_descriptor.width = cube_size;
+        cube_descriptor.height = cube_size;
+        cube_descriptor.depth = 1;
+        cube_descriptor.arrayLength = 1;
+        cube_descriptor.mipmapLevelCount = 3;
+        cube_descriptor.sampleCount = 1;
+        cube_descriptor.storageMode = MTLStorageModeShared;
+        cube_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        MTLTextureDescriptor *cube_array_descriptor = [cube_descriptor copy];
+        cube_array_descriptor.textureType = MTLTextureTypeCubeArray;
+        cube_array_descriptor.arrayLength = cube_array_count;
+        id<MTLTexture> native_cube_texture = [device newTextureWithDescriptor:cube_descriptor];
+        id<MTLTexture> adapter_cube_texture = [adapter_device newTextureWithDescriptor:cube_descriptor];
+        id<MTLTexture> native_cube_array_texture = [device newTextureWithDescriptor:cube_array_descriptor];
+        id<MTLTexture> adapter_cube_array_texture = [adapter_device newTextureWithDescriptor:cube_array_descriptor];
+        uint8_t cube_face_source[cube_face_count][cube_face_bytes];
+        uint8_t cube_array_source[cube_array_slice_count][cube_face_bytes];
+        for (NSUInteger slice = 0; slice < cube_face_count; ++slice) {
+            for (NSUInteger index = 0; index < cube_face_bytes; ++index) {
+                cube_face_source[slice][index] = (uint8_t)((slice * 37u + index * 19u + 11u) & 0xffu);
+            }
+        }
+        for (NSUInteger slice = 0; slice < cube_array_slice_count; ++slice) {
+            for (NSUInteger index = 0; index < cube_face_bytes; ++index) {
+                cube_array_source[slice][index] = (uint8_t)((slice * 53u + index * 23u + 17u) & 0xffu);
+            }
+        }
+        for (NSUInteger slice = 0; slice < cube_face_count; ++slice) {
+            [native_cube_texture replaceRegion:MTLRegionMake2D(0, 0, cube_size, cube_size)
+                                    mipmapLevel:0
+                                          slice:slice
+                                      withBytes:cube_face_source[slice]
+                                    bytesPerRow:cube_size * 4
+                                  bytesPerImage:cube_face_bytes];
+            [adapter_cube_texture replaceRegion:MTLRegionMake2D(0, 0, cube_size, cube_size)
+                                     mipmapLevel:0
+                                           slice:slice
+                                       withBytes:cube_face_source[slice]
+                                     bytesPerRow:cube_size * 4
+                                   bytesPerImage:cube_face_bytes];
+        }
+        for (NSUInteger slice = 0; slice < cube_array_slice_count; ++slice) {
+            [native_cube_array_texture replaceRegion:MTLRegionMake2D(0, 0, cube_size, cube_size)
+                                         mipmapLevel:0
+                                               slice:slice
+                                           withBytes:cube_array_source[slice]
+                                         bytesPerRow:cube_size * 4
+                                       bytesPerImage:cube_face_bytes];
+            [adapter_cube_array_texture replaceRegion:MTLRegionMake2D(0, 0, cube_size, cube_size)
+                                          mipmapLevel:0
+                                                slice:slice
+                                            withBytes:cube_array_source[slice]
+                                          bytesPerRow:cube_size * 4
+                                        bytesPerImage:cube_face_bytes];
+        }
+        uint8_t native_cube_bytes[cube_face_bytes];
+        uint8_t adapter_cube_bytes[cube_face_bytes];
+        uint8_t native_cube_array_bytes[cube_face_bytes];
+        uint8_t adapter_cube_array_bytes[cube_face_bytes];
+        BOOL cube_bytes_match = YES;
+        for (NSUInteger slice = 0; slice < cube_face_count; ++slice) {
+            [native_cube_texture getBytes:native_cube_bytes
+                              bytesPerRow:cube_size * 4
+                            bytesPerImage:cube_face_bytes
+                             fromRegion:MTLRegionMake2D(0, 0, cube_size, cube_size)
+                            mipmapLevel:0
+                                   slice:slice];
+            [adapter_cube_texture getBytes:adapter_cube_bytes
+                               bytesPerRow:cube_size * 4
+                             bytesPerImage:cube_face_bytes
+                              fromRegion:MTLRegionMake2D(0, 0, cube_size, cube_size)
+                             mipmapLevel:0
+                                    slice:slice];
+            cube_bytes_match = cube_bytes_match &&
+                memcmp(native_cube_bytes, cube_face_source[slice], cube_face_bytes) == 0 &&
+                memcmp(adapter_cube_bytes, native_cube_bytes, cube_face_bytes) == 0;
+        }
+        BOOL cube_array_bytes_match = YES;
+        for (NSUInteger slice = 0; slice < cube_array_slice_count; ++slice) {
+            [native_cube_array_texture getBytes:native_cube_array_bytes
+                                      bytesPerRow:cube_size * 4
+                                    bytesPerImage:cube_face_bytes
+                                     fromRegion:MTLRegionMake2D(0, 0, cube_size, cube_size)
+                                    mipmapLevel:0
+                                           slice:slice];
+            [adapter_cube_array_texture getBytes:adapter_cube_array_bytes
+                                         bytesPerRow:cube_size * 4
+                                       bytesPerImage:cube_face_bytes
+                                        fromRegion:MTLRegionMake2D(0, 0, cube_size, cube_size)
+                                       mipmapLevel:0
+                                              slice:slice];
+            cube_array_bytes_match = cube_array_bytes_match &&
+                memcmp(native_cube_array_bytes, cube_array_source[slice], cube_face_bytes) == 0 &&
+                memcmp(adapter_cube_array_bytes, native_cube_array_bytes, cube_face_bytes) == 0;
+        }
+        id<MTLCommandBuffer> native_cube_mip_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> native_cube_mip_blit = [native_cube_mip_command_buffer blitCommandEncoder];
+        [native_cube_mip_blit generateMipmapsForTexture:native_cube_texture];
+        [native_cube_mip_blit endEncoding];
+        [native_cube_mip_command_buffer commit];
+        [native_cube_mip_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> adapter_cube_mip_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_cube_mip_blit = [adapter_cube_mip_command_buffer blitCommandEncoder];
+        [adapter_cube_mip_blit generateMipmapsForTexture:adapter_cube_texture];
+        [adapter_cube_mip_blit endEncoding];
+        [adapter_cube_mip_command_buffer commit];
+        [adapter_cube_mip_command_buffer waitUntilCompleted];
+        BOOL cube_mips_match = native_cube_mip_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_cube_mip_command_buffer.status == MTLCommandBufferStatusCompleted;
+        for (NSUInteger level = 1; level < cube_descriptor.mipmapLevelCount; ++level) {
+            const NSUInteger levelSize = cube_size >> level;
+            const NSUInteger levelBytes = levelSize * levelSize * 4;
+            for (NSUInteger slice = 0; slice < cube_face_count; ++slice) {
+                [native_cube_texture getBytes:native_cube_bytes
+                                  bytesPerRow:levelSize * 4
+                                bytesPerImage:levelBytes
+                                 fromRegion:MTLRegionMake2D(0, 0, levelSize, levelSize)
+                                mipmapLevel:level slice:slice];
+                [adapter_cube_texture getBytes:adapter_cube_bytes
+                                   bytesPerRow:levelSize * 4
+                                 bytesPerImage:levelBytes
+                                    fromRegion:MTLRegionMake2D(0, 0, levelSize, levelSize)
+                                   mipmapLevel:level slice:slice];
+                cube_mips_match = cube_mips_match &&
+                    memcmp(native_cube_bytes, adapter_cube_bytes, levelBytes) == 0;
+            }
+        }
+        id<MTLTexture> native_cube_array_copy = [device newTextureWithDescriptor:cube_array_descriptor];
+        id<MTLTexture> adapter_cube_array_copy = [adapter_device newTextureWithDescriptor:cube_array_descriptor];
+        id<MTLCommandBuffer> native_cube_copy_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> native_cube_copy_blit = [native_cube_copy_command_buffer blitCommandEncoder];
+        [native_cube_copy_blit copyFromTexture:native_cube_array_texture
+                                   sourceSlice:0 sourceLevel:0
+                                      toTexture:native_cube_array_copy
+                              destinationSlice:0 destinationLevel:0
+                                  sliceCount:cube_array_slice_count levelCount:1];
+        [native_cube_copy_blit endEncoding];
+        [native_cube_copy_command_buffer commit];
+        [native_cube_copy_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> adapter_cube_copy_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_cube_copy_blit = [adapter_cube_copy_command_buffer blitCommandEncoder];
+        [adapter_cube_copy_blit copyFromTexture:adapter_cube_array_texture
+                                    sourceSlice:0 sourceLevel:0
+                                       toTexture:adapter_cube_array_copy
+                               destinationSlice:0 destinationLevel:0
+                                   sliceCount:cube_array_slice_count levelCount:1];
+        [adapter_cube_copy_blit endEncoding];
+        [adapter_cube_copy_command_buffer commit];
+        [adapter_cube_copy_command_buffer waitUntilCompleted];
+        BOOL cube_copy_match = native_cube_copy_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_cube_copy_command_buffer.status == MTLCommandBufferStatusCompleted;
+        for (NSUInteger slice = 0; slice < cube_array_slice_count; ++slice) {
+            [native_cube_array_copy getBytes:native_cube_array_bytes
+                                   bytesPerRow:cube_size * 4
+                                 bytesPerImage:cube_face_bytes
+                                    fromRegion:MTLRegionMake2D(0, 0, cube_size, cube_size)
+                                   mipmapLevel:0 slice:slice];
+            [adapter_cube_array_copy getBytes:adapter_cube_array_bytes
+                                      bytesPerRow:cube_size * 4
+                                    bytesPerImage:cube_face_bytes
+                                       fromRegion:MTLRegionMake2D(0, 0, cube_size, cube_size)
+                                      mipmapLevel:0 slice:slice];
+            cube_copy_match = cube_copy_match &&
+                memcmp(native_cube_array_bytes, adapter_cube_array_bytes, cube_face_bytes) == 0 &&
+                memcmp(adapter_cube_array_bytes, cube_array_source[slice], cube_face_bytes) == 0;
+        }
+        id<MTLTexture> native_cube_array_view =
+            [native_cube_array_texture newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                           textureType:MTLTextureTypeCubeArray
+                                                                levels:NSMakeRange(0, 1)
+                                                                slices:NSMakeRange(cube_face_count, cube_face_count)];
+        id<MTLTexture> adapter_cube_array_view =
+            [adapter_cube_array_texture newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            textureType:MTLTextureTypeCubeArray
+                                                                 levels:NSMakeRange(0, 1)
+                                                                 slices:NSMakeRange(cube_face_count, cube_face_count)];
+        uint8_t native_cube_view_bytes[cube_face_bytes];
+        uint8_t adapter_cube_view_bytes[cube_face_bytes];
+        if (native_cube_array_view != nil) {
+            [native_cube_array_view getBytes:native_cube_view_bytes
+                                  bytesPerRow:cube_size * 4
+                                bytesPerImage:cube_face_bytes
+                                   fromRegion:MTLRegionMake2D(0, 0, cube_size, cube_size)
+                                  mipmapLevel:0 slice:0];
+        }
+        if (adapter_cube_array_view != nil) {
+            [adapter_cube_array_view getBytes:adapter_cube_view_bytes
+                                     bytesPerRow:cube_size * 4
+                                   bytesPerImage:cube_face_bytes
+                                      fromRegion:MTLRegionMake2D(0, 0, cube_size, cube_size)
+                                     mipmapLevel:0 slice:0];
+        }
+        const NSUInteger expected_cube_allocated_size = cube_face_count * cube_mip_bytes;
+        const NSUInteger expected_cube_array_allocated_size = cube_array_count * expected_cube_allocated_size;
+        if (native_cube_texture == nil || adapter_cube_texture == nil ||
+            native_cube_array_texture == nil || adapter_cube_array_texture == nil ||
+            native_cube_texture.textureType != MTLTextureTypeCube ||
+            adapter_cube_texture.textureType != MTLTextureTypeCube ||
+            native_cube_array_texture.textureType != MTLTextureTypeCubeArray ||
+            adapter_cube_array_texture.textureType != MTLTextureTypeCubeArray ||
+            native_cube_texture.arrayLength != 1 || adapter_cube_texture.arrayLength != 1 ||
+            native_cube_array_texture.arrayLength != cube_array_count ||
+            adapter_cube_array_texture.arrayLength != cube_array_count ||
+            native_cube_texture.width != cube_size || adapter_cube_texture.width != cube_size ||
+            native_cube_texture.height != cube_size || adapter_cube_texture.height != cube_size ||
+            native_cube_texture.mipmapLevelCount != 3 || adapter_cube_texture.mipmapLevelCount != 3 ||
+            adapter_cube_texture.allocatedSize != expected_cube_allocated_size ||
+            adapter_cube_array_texture.allocatedSize != expected_cube_array_allocated_size ||
+            !cube_bytes_match || !cube_array_bytes_match || !cube_mips_match || !cube_copy_match ||
+            native_cube_array_view == nil || adapter_cube_array_view == nil ||
+            native_cube_array_view.arrayLength != 1 || adapter_cube_array_view.arrayLength != 1 ||
+            adapter_cube_array_view.parentRelativeSlice != cube_face_count ||
+            memcmp(native_cube_view_bytes, adapter_cube_view_bytes, cube_face_bytes) != 0 ||
+            memcmp(adapter_cube_view_bytes, cube_array_source[cube_face_count], cube_face_bytes) != 0) {
+            fprintf(stderr, "metal-pixel: cube/cube-array slice, mipmap, copy, or view exactness failed\n");
+            return 78;
+        }
+
         MTLTextureDescriptor *one_d_descriptor = [MTLTextureDescriptor new];
         one_d_descriptor.textureType = MTLTextureType1D;
         one_d_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
@@ -10654,7 +10886,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables, visibility results, acceleration-structure resources, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables, visibility results, acceleration-structure resources, cube/cube-array textures, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }
