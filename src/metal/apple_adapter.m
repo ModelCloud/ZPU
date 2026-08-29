@@ -1416,9 +1416,12 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     uint8_t _stencilClearValue;
     zpu_metal_render_pass_descriptor _pass;
     MTLRenderPassDescriptor *_descriptor;
+    id _passDescriptor;
     NSUInteger _childCount;
+    BOOL _ended;
 }
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner texture:(ZPUTexture *)texture renderTexture:(zpu_metal_texture *)renderTexture depthTexture:(zpu_metal_texture *)depthTexture stencilTexture:(zpu_metal_texture *)stencilTexture stencilLoadAction:(zpu_metal_load_action)stencilLoadAction stencilStoreAction:(zpu_metal_store_action)stencilStoreAction stencilClearValue:(uint8_t)stencilClearValue pass:(zpu_metal_render_pass_descriptor)pass descriptor:(MTLRenderPassDescriptor *)descriptor;
+- (BOOL)configurePassDescriptor:(id)descriptor;
 @end
 
 static BOOL zpu_u32(NSUInteger value, uint32_t *result) {
@@ -9505,11 +9508,16 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     [self retainResource:texture];
     if (descriptor.depthAttachment.texture != nil) [self retainResource:descriptor.depthAttachment.texture];
     if (descriptor.stencilAttachment.texture != nil) [self retainResource:descriptor.stencilAttachment.texture];
-    return (id<MTLParallelRenderCommandEncoder>)[[ZPUParallelRenderEncoder alloc]
+    ZPUParallelRenderEncoder *result = [[ZPUParallelRenderEncoder alloc]
         initWithOwner:self texture:texture renderTexture:colorTexture depthTexture:depthTexture stencilTexture:stencilTexture
         stencilLoadAction:descriptor.stencilAttachment.texture != nil ? zpu_load_action(descriptor.stencilAttachment.loadAction) : ZPU_METAL_LOAD_DONT_CARE
         stencilStoreAction:descriptor.stencilAttachment.texture != nil ? zpu_store_action(descriptor.stencilAttachment.storeAction) : ZPU_METAL_STORE_DONT_CARE
         stencilClearValue:(uint8_t)descriptor.stencilAttachment.clearStencil pass:pass descriptor:descriptor];
+    if (result == nil) return nil;
+    if (@available(macOS 11.0, iOS 14.0, *)) {
+        if (![result configurePassDescriptor:descriptor]) return nil;
+    }
+    return (id<MTLParallelRenderCommandEncoder>)result;
 }
 - (id<MTLBlitCommandEncoder>)blitCommandEncoder {
     zpu_metal_blit_encoder *encoder = zpu_metal_command_buffer_blit_encoder(_zpuCommandBuffer);
@@ -12286,8 +12294,15 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         _stencilClearValue = stencilClearValue;
         _pass = pass;
         _descriptor = [descriptor copy];
+        _passDescriptor = nil;
+        _ended = NO;
     }
     return self;
+}
+- (BOOL)configurePassDescriptor:(id)descriptor {
+    if (descriptor == nil || !zpu_sample_render_pass_attachments(_owner, [descriptor sampleBufferAttachments], YES)) return NO;
+    _passDescriptor = [descriptor copy];
+    return YES;
 }
 - (id<MTLDevice>)device { return [_owner device]; }
 - (id<MTLRenderCommandEncoder>)renderCommandEncoder {
@@ -12358,7 +12373,13 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (void)insertDebugSignpost:(NSString *)string { (void)string; }
 - (void)pushDebugGroup:(NSString *)string { (void)string; }
 - (void)popDebugGroup {}
-- (void)endEncoding { }
+- (void)endEncoding {
+    if (_ended) return;
+    _ended = YES;
+    if (_passDescriptor != nil && !zpu_sample_render_pass_attachments(_owner, [_passDescriptor sampleBufferAttachments], NO)) {
+        [_owner markError];
+    }
+}
 @end
 
 @implementation ZPUBlitEncoder

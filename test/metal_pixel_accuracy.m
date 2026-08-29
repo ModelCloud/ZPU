@@ -11687,6 +11687,25 @@ int main(void) {
         [adapter_descriptor_render_encoder endEncoding];
         [adapter_counter_render_command_buffer commit];
         [adapter_counter_render_command_buffer waitUntilCompleted];
+
+        MTLRenderPassDescriptor *adapter_counter_parallel_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_counter_parallel_pass.colorAttachments[0].texture = adapter_mip_texture;
+        adapter_counter_parallel_pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        adapter_counter_parallel_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_counter_parallel_pass.sampleBufferAttachments[0].sampleBuffer = adapter_pass_counter_sample_buffer;
+        adapter_counter_parallel_pass.sampleBufferAttachments[0].startOfVertexSampleIndex = 0;
+        adapter_counter_parallel_pass.sampleBufferAttachments[0].endOfVertexSampleIndex = 1;
+        adapter_counter_parallel_pass.sampleBufferAttachments[0].startOfFragmentSampleIndex = 2;
+        adapter_counter_parallel_pass.sampleBufferAttachments[0].endOfFragmentSampleIndex = 3;
+        id<MTLCommandBuffer> adapter_counter_parallel_command_buffer = [adapter_queue commandBuffer];
+        id<MTLParallelRenderCommandEncoder> adapter_counter_parallel_encoder =
+            [adapter_counter_parallel_command_buffer parallelRenderCommandEncoderWithDescriptor:adapter_counter_parallel_pass];
+        id<MTLRenderCommandEncoder> adapter_counter_parallel_child =
+            [adapter_counter_parallel_encoder renderCommandEncoder];
+        [adapter_counter_parallel_child endEncoding];
+        [adapter_counter_parallel_encoder endEncoding];
+        [adapter_counter_parallel_command_buffer commit];
+        [adapter_counter_parallel_command_buffer waitUntilCompleted];
         NSData *adapter_pass_counter_resolved =
             [adapter_pass_counter_sample_buffer resolveCounterRange:NSMakeRange(0, 4)];
         const MTLCounterResultTimestamp *adapter_pass_counter_entries =
@@ -11696,10 +11715,12 @@ int main(void) {
             adapter_descriptor_compute_encoder != nil && adapter_descriptor_blit_encoder != nil &&
             adapter_descriptor_resource_encoder != nil &&
             adapter_descriptor_render_encoder != nil &&
+            adapter_counter_parallel_encoder != nil && adapter_counter_parallel_child != nil &&
             adapter_counter_compute_command_buffer.status == MTLCommandBufferStatusCompleted &&
             adapter_counter_blit_command_buffer.status == MTLCommandBufferStatusCompleted &&
             adapter_counter_resource_command_buffer.status == MTLCommandBufferStatusCompleted &&
             adapter_counter_render_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_counter_parallel_command_buffer.status == MTLCommandBufferStatusCompleted &&
             adapter_pass_counter_resolved.length == 4 * sizeof(MTLCounterResultTimestamp) &&
             adapter_pass_counter_entries[0].timestamp != MTLCounterErrorValue &&
             adapter_pass_counter_entries[1].timestamp != MTLCounterErrorValue &&
