@@ -9013,6 +9013,69 @@ int main(void) {
                 adapter_indexed_patch_command_buffer.status == MTLCommandBufferStatusCompleted &&
                 memcmp(adapter_indexed_patch_pixels, adapter_patch_reference_pixels,
                        sizeof(adapter_indexed_patch_pixels)) == 0;
+
+            /* UInt32 control-point indices use the same top-left raster path,
+             * but exercise their wider element size, a nonzero control-point
+             * offset, and Metal's base-instance factor addressing. */
+            MTLRenderPipelineDescriptor *adapter_uint32_patch_descriptor = [adapter_patch_descriptor copy];
+            adapter_uint32_patch_descriptor.tessellationControlPointIndexType =
+                MTLTessellationControlPointIndexTypeUInt32;
+            id<MTLRenderPipelineState> adapter_uint32_patch_pipeline =
+                [adapter_device newRenderPipelineStateWithDescriptor:adapter_uint32_patch_descriptor
+                                                                  error:&adapter_patch_error];
+            const uint32_t adapter_uint32_patch_indices[] = {UINT32_MAX, 0, 1, 2};
+            id<MTLBuffer> adapter_uint32_patch_control_point_index_buffer =
+                [adapter_device newBufferWithBytes:adapter_uint32_patch_indices
+                                             length:sizeof(adapter_uint32_patch_indices)
+                                            options:MTLResourceStorageModeShared];
+            const uint16_t adapter_uint32_patch_factors[16] = {
+                0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0x3c00, 0x3c00, 0x3c00, 0x3c00,
+            };
+            id<MTLBuffer> adapter_uint32_patch_factor_buffer =
+                [adapter_device newBufferWithBytes:adapter_uint32_patch_factors
+                                             length:sizeof(adapter_uint32_patch_factors)
+                                            options:MTLResourceStorageModeShared];
+            MTLTextureDescriptor *adapter_uint32_patch_texture_descriptor = [adapter_patch_texture_descriptor copy];
+            id<MTLTexture> adapter_uint32_patch_texture =
+                [adapter_device newTextureWithDescriptor:adapter_uint32_patch_texture_descriptor];
+            MTLRenderPassDescriptor *adapter_uint32_patch_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            adapter_uint32_patch_pass.colorAttachments[0].texture = adapter_uint32_patch_texture;
+            adapter_uint32_patch_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            adapter_uint32_patch_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            adapter_uint32_patch_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+            id<MTLCommandBuffer> adapter_uint32_patch_command_buffer = [adapter_queue commandBuffer];
+            id<MTLRenderCommandEncoder> adapter_uint32_patch_encoder =
+                [adapter_uint32_patch_command_buffer renderCommandEncoderWithDescriptor:adapter_uint32_patch_pass];
+            [adapter_uint32_patch_encoder setRenderPipelineState:adapter_uint32_patch_pipeline];
+            [adapter_uint32_patch_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+            [adapter_uint32_patch_encoder setTessellationFactorBuffer:adapter_uint32_patch_factor_buffer
+                                                                  offset:sizeof(uint64_t)
+                                                          instanceStride:sizeof(adapter_uint32_patch_factors) / 2];
+            [adapter_uint32_patch_encoder drawIndexedPatches:3
+                                                   patchStart:0
+                                                   patchCount:1
+                                             patchIndexBuffer:nil
+                                       patchIndexBufferOffset:0
+                                      controlPointIndexBuffer:adapter_uint32_patch_control_point_index_buffer
+                                controlPointIndexBufferOffset:sizeof(uint32_t)
+                                              instanceCount:1
+                                               baseInstance:1];
+            [adapter_uint32_patch_encoder endEncoding];
+            [adapter_uint32_patch_command_buffer commit];
+            [adapter_uint32_patch_command_buffer waitUntilCompleted];
+            uint8_t adapter_uint32_patch_pixels[5 * 3 * 4] = {0};
+            if (adapter_uint32_patch_texture != nil) {
+                [adapter_uint32_patch_texture getBytes:adapter_uint32_patch_pixels bytesPerRow:5 * 4
+                                              fromRegion:MTLRegionMake2D(0, 0, 5, 3) mipmapLevel:0];
+            }
+            adapter_patch_exact = adapter_patch_exact && adapter_uint32_patch_pipeline != nil &&
+                adapter_uint32_patch_control_point_index_buffer != nil &&
+                adapter_uint32_patch_factor_buffer != nil && adapter_uint32_patch_texture != nil &&
+                adapter_uint32_patch_command_buffer != nil && adapter_uint32_patch_encoder != nil &&
+                adapter_uint32_patch_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                memcmp(adapter_uint32_patch_pixels, adapter_patch_reference_pixels,
+                       sizeof(adapter_uint32_patch_pixels)) == 0;
         }
         if (!adapter_patch_exact) {
             fail_with_error("CPU triangle patch pixel exactness failed", adapter_patch_error);

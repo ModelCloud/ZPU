@@ -530,6 +530,7 @@ int zpu_metal_render_encoder_set_stencil_reference(zpu_metal_render_encoder *enc
 int zpu_metal_render_encoder_set_visibility_result_buffer(zpu_metal_render_encoder *encoder, zpu_metal_buffer *buffer);
 int zpu_metal_render_encoder_set_visibility_result_mode(zpu_metal_render_encoder *encoder, zpu_metal_visibility_result_mode mode, size_t offset);
 int zpu_metal_render_encoder_set_visibility_result_type(zpu_metal_render_encoder *encoder, zpu_metal_visibility_result_type result_type);
+/* Passing NULL unbinds the factor buffer, matching Metal's nullable selector. */
 int zpu_metal_render_encoder_set_tessellation_factor_buffer(zpu_metal_render_encoder *encoder, zpu_metal_buffer *buffer, size_t offset, size_t instance_stride);
 int zpu_metal_render_encoder_set_tessellation_factor_scale(zpu_metal_render_encoder *encoder, float scale);
 int zpu_metal_render_encoder_update_fence(zpu_metal_render_encoder *encoder, zpu_metal_fence *fence);
