@@ -4968,6 +4968,49 @@ test "CPU tile dispatch preserves Metal's upper-left pixel origin" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 159, 96, 64, 255 }, texture.bytes[2 * texture.stride + 4 * 4 ..][0..4]);
 }
 
+test "CPU mesh indirect grid is deferred and uses Metal threadgroup dimensions" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const texture = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.bgra8_unorm));
+    defer destroyTexture(texture);
+    const initial_arguments = [_]u32{ 1, 1, 1 };
+    const indirect = try createBuffer(device, @sizeOf(@TypeOf(initial_arguments)), @ptrCast(&initial_arguments));
+    defer destroyBuffer(indirect);
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, texture, .{ .color = .{ .load_action = .clear, .store_action = .store } });
+    try encoder.drawMeshThreadgroupsIndirect(
+        1,
+        indirect,
+        0,
+        .{ .width = 1, .height = 1, .depth = 1 },
+        .{ .width = 2, .height = 2, .depth = 1 },
+    );
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+
+    const updated_arguments = [_]u32{ 3, 2, 1 };
+    try bufferWrite(indirect, 0, @ptrCast(&updated_arguments), @sizeOf(@TypeOf(updated_arguments)));
+    try std.testing.expectEqual(@as(u8, 0), texture.bytes[0]);
+    try command_buffer.commit();
+
+    var expected = [_]u8{0} ** (5 * 3 * 4);
+    for (0..3) |y| {
+        for (0..5) |x| {
+            const pixel = (y * 5 + x) * 4;
+            expected[pixel + 0] = 64;
+            expected[pixel + 1] = @intCast(((y + 1) * 255 + 4) / 8);
+            expected[pixel + 2] = @intCast(((x + 1) * 255 + 4) / 8);
+            expected[pixel + 3] = 255;
+        }
+    }
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+    try std.testing.expectEqualSlices(u8, &expected, texture.bytes);
+}
+
 test "CPU compute writes narrow unorm targets at their native stride" {
     const device = try createDevice();
     defer destroyDevice(device);
