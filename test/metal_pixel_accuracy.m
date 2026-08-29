@@ -3368,6 +3368,28 @@ int main(void) {
             return 131;
         }
 
+        /* The bounded ZPU compute ABI has no threadgroup-memory or imageblock
+         * storage. Reject non-zero requests instead of running a kernel with
+         * different memory semantics. */
+        id<MTLTexture> unsupported_compute_texture = [adapter_device newTextureWithDescriptor:compute_texture_descriptor];
+        id<MTLCommandBuffer> unsupported_compute_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> unsupported_compute_encoder =
+            [unsupported_compute_command_buffer computeCommandEncoder];
+        [unsupported_compute_encoder setComputePipelineState:adapter_compute_pipeline];
+        [unsupported_compute_encoder setTexture:unsupported_compute_texture atIndex:0];
+        [unsupported_compute_encoder setThreadgroupMemoryLength:16 atIndex:0];
+        [unsupported_compute_encoder setImageblockWidth:1 height:1];
+        [unsupported_compute_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                  threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+        [unsupported_compute_encoder endEncoding];
+        [unsupported_compute_command_buffer commit];
+        [unsupported_compute_command_buffer waitUntilCompleted];
+        if (unsupported_compute_texture == nil || unsupported_compute_encoder == nil ||
+            unsupported_compute_command_buffer.status != MTLCommandBufferStatusError) {
+            fprintf(stderr, "metal-pixel: unsupported CPU compute memory did not fail closed\n");
+            return 132;
+        }
+
         /* Metal 4 compiler-created compute pipelines are still CPU-owned.
          * The compiler accepts only registered ZPU library functions; the
          * native Metal compiler above remains the pixel oracle. */

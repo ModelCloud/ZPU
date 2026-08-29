@@ -6574,32 +6574,31 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     }
 }
 - (void)setVisibleFunctionTable:(id<MTLVisibleFunctionTable>)visibleFunctionTable atBufferIndex:(NSUInteger)bufferIndex API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)visibleFunctionTable;
     (void)bufferIndex;
+    if (visibleFunctionTable != nil) [_owner markError];
 }
 - (void)setVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __nullable [__nonnull])visibleFunctionTables withBufferRange:(NSRange)range API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
     (void)visibleFunctionTables;
-    (void)range;
+    if (range.length != 0) [_owner markError];
 }
 - (void)setIntersectionFunctionTable:(id<MTLIntersectionFunctionTable>)intersectionFunctionTable atBufferIndex:(NSUInteger)bufferIndex API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)intersectionFunctionTable;
     (void)bufferIndex;
+    if (intersectionFunctionTable != nil) [_owner markError];
 }
 - (void)setIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> __nullable [__nonnull])intersectionFunctionTables withBufferRange:(NSRange)range API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
     (void)intersectionFunctionTables;
-    (void)range;
+    if (range.length != 0) [_owner markError];
 }
 - (void)setAccelerationStructure:(id<MTLAccelerationStructure>)accelerationStructure atBufferIndex:(NSUInteger)bufferIndex API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)accelerationStructure;
     (void)bufferIndex;
+    if (accelerationStructure != nil) [_owner markError];
 }
 - (void)setThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index {
-    (void)length;
     (void)index;
+    if (length != 0) [_owner markError];
 }
 - (void)setImageblockWidth:(NSUInteger)width height:(NSUInteger)height API_AVAILABLE(ios(11.0), macos(11.0), macCatalyst(14.0), tvos(14.5)) {
-    (void)width;
-    (void)height;
+    if (width != 0 || height != 0) [_owner markError];
 }
 - (void)setStageInRegion:(MTLRegion)region API_AVAILABLE(macos(10.12), ios(10.0)) {
     if (!zpu_region_fits(region)) [_owner markError];
