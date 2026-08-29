@@ -45,11 +45,24 @@ pub const DrawOptions = struct {
     alpha_operation: abi.BlendOperation = .add,
     color_write_mask: u8 = @intFromEnum(abi.ColorWriteMask.all),
     blend_color: [4]f32 = .{ 0, 0, 0, 0 },
+    stencil_front: StencilFace = .{},
+    stencil_back: StencilFace = .{},
+};
+
+pub const StencilFace = struct {
+    compare: abi.CompareFunction = .always,
+    stencil_failure: abi.StencilOperation = .keep,
+    depth_failure: abi.StencilOperation = .keep,
+    depth_pass: abi.StencilOperation = .keep,
+    read_mask: u8 = 0xff,
+    write_mask: u8 = 0xff,
+    reference: u8 = 0,
 };
 
 const Job = struct {
     target: *surface.Surface,
     depth: ?[]f32,
+    stencil: ?[]u8,
     vertices: []const abi.Vertex,
     primitive: abi.PrimitiveType,
     options: DrawOptions,
@@ -93,10 +106,55 @@ fn colorByte(value: f32) u8 {
     return @intFromFloat(std.math.clamp(value, 0, 1) * 255.0 + 0.5);
 }
 
-fn writePixel(job: *Job, x: usize, y: usize, z: f32, color: [4]f32, stats: *Stats) void {
+fn compareStencil(compare: abi.CompareFunction, reference: u8, current: u8, mask: u8) bool {
+    const lhs = reference & mask;
+    const rhs = current & mask;
+    return switch (compare) {
+        .never => false,
+        .less => lhs < rhs,
+        .equal => lhs == rhs,
+        .less_equal => lhs <= rhs,
+        .greater => lhs > rhs,
+        .not_equal => lhs != rhs,
+        .greater_equal => lhs >= rhs,
+        .always => true,
+    };
+}
+
+fn stencilOperation(operation: abi.StencilOperation, current: u8, reference: u8) u8 {
+    return switch (operation) {
+        .keep => current,
+        .zero => 0,
+        .replace => reference,
+        .increment_clamp => if (current == 0xff) 0xff else current + 1,
+        .decrement_clamp => if (current == 0) 0 else current - 1,
+        .invert => ~current,
+        .increment_wrap => current +% 1,
+        .decrement_wrap => current -% 1,
+    };
+}
+
+fn applyStencil(stencil: []u8, index: usize, state: StencilFace, operation: abi.StencilOperation) void {
+    const current = stencil[index];
+    const result = stencilOperation(operation, current, state.reference);
+    stencil[index] = (current & ~state.write_mask) | (result & state.write_mask);
+}
+
+fn writePixel(job: *Job, x: usize, y: usize, z: f32, color: [4]f32, stats: *Stats, front_facing: bool) void {
     const width: usize = @intCast(job.target.width);
     if (x >= width or y >= job.target.height) return;
     stats.fragments_tested += 1;
+    const stencil_state = if (front_facing) job.options.stencil_front else job.options.stencil_back;
+    var stencil_index: ?usize = null;
+    if (job.stencil) |stencil| {
+        const index = y * width + x;
+        if (index >= stencil.len) return;
+        stencil_index = index;
+        if (!compareStencil(stencil_state.compare, stencil_state.reference, stencil[index], stencil_state.read_mask)) {
+            applyStencil(stencil, index, stencil_state, stencil_state.stencil_failure);
+            return;
+        }
+    }
     if (job.depth) |depth| {
         const index = y * width + x;
         if (index >= depth.len) return;
@@ -111,10 +169,14 @@ fn writePixel(job: *Job, x: usize, y: usize, z: f32, color: [4]f32, stats: *Stat
             .greater_equal => z >= current,
             .always => true,
         };
-        if (!passes) return;
+        if (!passes) {
+            if (stencil_index) |stencil_pixel_index| applyStencil(job.stencil.?, stencil_pixel_index, stencil_state, stencil_state.depth_failure);
+            return;
+        }
         if (job.options.depth_write_enabled) depth[index] = z;
         stats.depth_tests_passed += 1;
     }
+    if (stencil_index) |index| applyStencil(job.stencil.?, index, stencil_state, stencil_state.depth_pass);
     const destination = surface.Surface.read(job.target.row(@intCast(y)), x * 4, job.target.format);
     const destination_color = .{
         @as(f32, @floatFromInt(destination.r)) / 255.0,
@@ -188,7 +250,7 @@ fn drawPoint(job: *Job, vertex: ProjectedVertex, y0: usize, y1: usize, stats: *S
     const x = pixelCoordinate(vertex.x, bounds.x1) orelse return;
     const y = pixelCoordinate(vertex.y, bounds.y1) orelse return;
     if (x < bounds.x0 or y < @max(bounds.y0, y0) or y >= @min(bounds.y1, y1)) return;
-    writePixel(job, x, y, vertex.z, vertex.color, stats);
+    writePixel(job, x, y, vertex.z, vertex.color, stats, true);
 }
 
 fn drawLine(job: *Job, a: ProjectedVertex, b: ProjectedVertex, y0: usize, y1: usize, stats: *Stats) void {
@@ -212,7 +274,7 @@ fn drawLine(job: *Job, a: ProjectedVertex, b: ProjectedVertex, y0: usize, y1: us
             a.color[1] + (b.color[1] - a.color[1]) * t,
             a.color[2] + (b.color[2] - a.color[2]) * t,
             a.color[3] + (b.color[3] - a.color[3]) * t,
-        }, stats);
+        }, stats, true);
     }
 }
 
@@ -261,7 +323,7 @@ fn drawTriangle(job: *Job, input: [3]ProjectedVertex, y0: usize, y1: usize, stat
                 vertices[0].color[1] * w0 + vertices[1].color[1] * w1 + vertices[2].color[1] * w2,
                 vertices[0].color[2] * w0 + vertices[1].color[2] * w1 + vertices[2].color[2] * w2,
                 vertices[0].color[3] * w0 + vertices[1].color[3] * w1 + vertices[2].color[3] * w2,
-            }, stats);
+            }, stats, front_facing);
         }
     }
     stats.primitives_rasterized += 1;
@@ -336,8 +398,8 @@ fn addStats(a: Stats, b: Stats) Stats {
     };
 }
 
-pub fn draw(target: *surface.Surface, depth: ?[]f32, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
-    var job = Job{ .target = target, .depth = depth, .vertices = vertices, .primitive = primitive, .options = options };
+pub fn draw(target: *surface.Surface, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
+    var job = Job{ .target = target, .depth = depth, .stencil = stencil, .vertices = vertices, .primitive = primitive, .options = options };
     const worker = std.Thread.spawn(.{}, renderWorker, .{&job}) catch {
         job.bands[0] = drawBand(&job, 0);
         job.bands[1] = drawBand(&job, 1);
@@ -402,7 +464,7 @@ test "Metal viewport and scissor origins use the top-left pixel grid" {
         .{ .position = .{ 0.75, -0.90, 0.5, 1 }, .color = blue },
         .{ .position = .{ -0.75, -0.90, 0.5, 1 }, .color = blue },
     };
-    _ = draw(&target, null, &vertices, .triangle, options);
+    _ = draw(&target, null, null, &vertices, .triangle, options);
 
     const red_pixel = surface.Surface.read(target.row(2), 3 * 4, .rgba8_unorm);
     const red_pixel_lower = surface.Surface.read(target.row(3), 3 * 4, .rgba8_unorm);

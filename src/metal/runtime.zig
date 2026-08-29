@@ -34,10 +34,10 @@ pub const TextureFormat = enum {
     rgba8_unorm,
     bgra8_unorm,
     depth32_float,
+    stencil8,
 
     fn bytesPerPixel(self: TextureFormat) usize {
-        _ = self;
-        return 4;
+        return if (self == .stencil8) 1 else 4;
     }
 
     fn isColor(self: TextureFormat) bool {
@@ -136,6 +136,7 @@ pub const Texture = struct {
                 .rgba8_unorm => .rgba8_unorm,
                 .bgra8_unorm => .bgra8_unorm,
                 .depth32_float => unreachable,
+                .stencil8 => unreachable,
             },
         };
     }
@@ -152,6 +153,10 @@ const BeginRenderCommand = struct {
     target: *Texture,
     pass: abi.RenderPassDescriptor,
     depth: ?[]f32 = null,
+    stencil: ?[]u8 = null,
+    stencil_load_action: abi.LoadAction = .dont_care,
+    stencil_store_action: abi.StoreAction = .dont_care,
+    stencil_clear: u8 = 0,
 };
 
 const CopyBufferCommand = struct {
@@ -286,12 +291,14 @@ pub const CommandBuffer = struct {
         self.status = .committed;
         var active_target: ?*Texture = null;
         var active_depth: ?[]f32 = null;
+        var active_stencil: ?[]u8 = null;
 
         for (self.commands.items) |command| switch (command) {
             .begin_render => |begin_render| {
                 if (!validTexture(begin_render.target)) return self.fail(error.InvalidResource);
                 active_target = begin_render.target;
                 active_depth = begin_render.depth;
+                active_stencil = begin_render.stencil;
                 var target = begin_render.target.asSurface();
                 if (begin_render.pass.color.load_action == .clear) {
                     raster.clear(&target, toSurfaceColor(begin_render.pass.color.clear_color));
@@ -304,6 +311,14 @@ pub const CommandBuffer = struct {
                         @memset(depth[0..pixel_count], begin_render.pass.depth.clear_depth);
                     }
                 }
+                if (begin_render.stencil_load_action != .dont_care) {
+                    const stencil = active_stencil orelse return self.fail(error.InvalidResource);
+                    const pixel_count = std.math.mul(usize, target.width, target.height) catch return self.fail(error.InvalidArgument);
+                    if (stencil.len < pixel_count) return self.fail(error.InvalidResource);
+                    if (begin_render.stencil_load_action == .clear) {
+                        @memset(stencil[0..pixel_count], begin_render.stencil_clear);
+                    }
+                }
             },
             .draw => |draw| {
                 const target_handle = active_target orelse return self.fail(error.InvalidCommand);
@@ -313,6 +328,7 @@ pub const CommandBuffer = struct {
                 _ = raster3d.draw(
                     &target,
                     active_depth,
+                    active_stencil,
                     self.vertices.items[draw.vertex_start .. draw.vertex_start + draw.vertex_count],
                     draw.primitive,
                     draw.options,
@@ -465,6 +481,8 @@ pub const RenderEncoder = struct {
     alpha_operation: abi.BlendOperation = .add,
     color_write_mask: u8 = @intFromEnum(abi.ColorWriteMask.all),
     blend_color: [4]f32 = .{ 0, 0, 0, 0 },
+    stencil_front: raster3d.StencilFace = .{},
+    stencil_back: raster3d.StencilFace = .{},
 
     pub fn deinit(self: *RenderEncoder) void {
         self.inline_vertices.deinit(allocator);
@@ -493,10 +511,16 @@ pub const RenderEncoder = struct {
             .alpha_operation = self.alpha_operation,
             .color_write_mask = self.color_write_mask,
             .blend_color = self.blend_color,
+            .stencil_front = self.stencil_front,
+            .stencil_back = self.stencil_back,
         };
     }
 
     pub fn setPipelineFormats(self: *RenderEncoder, color_format: u16, depth_format: u16) Error!void {
+        return self.setPipelineFormatsWithStencil(color_format, depth_format, 0);
+    }
+
+    pub fn setPipelineFormatsWithStencil(self: *RenderEncoder, color_format: u16, depth_format: u16, stencil_format: u16) Error!void {
         if (!self.open()) return error.InvalidCommand;
         const expected_color = switch (color_format) {
             0 => null,
@@ -509,11 +533,17 @@ pub const RenderEncoder = struct {
             @intFromEnum(abi.PixelFormat.depth32_float) => abi.PixelFormat.depth32_float,
             else => return error.UnsupportedFormat,
         };
+        const expected_stencil = switch (stencil_format) {
+            0 => null,
+            @intFromEnum(abi.PixelFormat.stencil8) => abi.PixelFormat.stencil8,
+            else => return error.UnsupportedFormat,
+        };
         switch (self.command_buffer.commands.items[self.begin_index]) {
             .begin_render => |begin_render| {
                 const actual_color = texturePixelFormat(begin_render.target) orelse return error.InvalidResource;
                 if (expected_color) |format| if (format != actual_color) return error.InvalidArgument;
                 if (expected_depth != null and begin_render.depth == null) return error.InvalidArgument;
+                if (expected_stencil != null and begin_render.stencil == null) return error.InvalidArgument;
             },
             else => return error.InvalidCommand,
         }
@@ -571,6 +601,45 @@ pub const RenderEncoder = struct {
             .begin_render => |*begin_render| begin_render.depth = depth,
             else => return error.InvalidCommand,
         }
+    }
+
+    pub fn setStencilTexture(self: *RenderEncoder, texture: *Texture, load_action: u8, store_action: u8, clear_value: u8) Error!void {
+        if (!self.open() or !validTexture(texture) or texture.device != self.command_buffer.queue.device or texture.format != .stencil8) return error.InvalidArgument;
+        if (load_action > @intFromEnum(abi.LoadAction.clear) or store_action > @intFromEnum(abi.StoreAction.store) or
+            texture.width != self.colorWidth() or texture.height != self.colorHeight()) return error.InvalidArgument;
+        const stencil: []u8 = texture.bytes[0 .. @as(usize, texture.width) * texture.height];
+        switch (self.command_buffer.commands.items[self.begin_index]) {
+            .begin_render => |*begin_render| {
+                begin_render.stencil = stencil;
+                begin_render.stencil_load_action = @enumFromInt(load_action);
+                begin_render.stencil_store_action = @enumFromInt(store_action);
+                begin_render.stencil_clear = clear_value;
+            },
+            else => return error.InvalidCommand,
+        }
+    }
+
+    pub fn setStencilState(self: *RenderEncoder, front_face: bool, compare: u8, stencil_failure: u8, depth_failure: u8, depth_pass: u8, read_mask: u8, write_mask: u8) Error!void {
+        if (!self.open() or compare > @intFromEnum(abi.CompareFunction.always) or
+            stencil_failure > @intFromEnum(abi.StencilOperation.decrement_wrap) or
+            depth_failure > @intFromEnum(abi.StencilOperation.decrement_wrap) or
+            depth_pass > @intFromEnum(abi.StencilOperation.decrement_wrap)) return error.InvalidArgument;
+        const state = raster3d.StencilFace{
+            .compare = @enumFromInt(compare),
+            .stencil_failure = @enumFromInt(stencil_failure),
+            .depth_failure = @enumFromInt(depth_failure),
+            .depth_pass = @enumFromInt(depth_pass),
+            .read_mask = read_mask,
+            .write_mask = write_mask,
+            .reference = if (front_face) self.stencil_front.reference else self.stencil_back.reference,
+        };
+        if (front_face) self.stencil_front = state else self.stencil_back = state;
+    }
+
+    pub fn setStencilReference(self: *RenderEncoder, front_reference: u8, back_reference: u8) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        self.stencil_front.reference = front_reference;
+        self.stencil_back.reference = back_reference;
     }
 
     pub fn updateFence(self: *RenderEncoder, fence: *Fence) Error!void {
@@ -1270,6 +1339,7 @@ pub fn createTexture(device: *Device, width: u32, height: u32, format_raw: u16) 
         @intFromEnum(abi.PixelFormat.rgba8_unorm) => .rgba8_unorm,
         @intFromEnum(abi.PixelFormat.bgra8_unorm) => .bgra8_unorm,
         @intFromEnum(abi.PixelFormat.depth32_float) => .depth32_float,
+        @intFromEnum(abi.PixelFormat.stencil8) => .stencil8,
         else => return error.UnsupportedFormat,
     };
     const stride = std.math.mul(usize, width, format.bytesPerPixel()) catch return error.InvalidArgument;
@@ -1311,6 +1381,7 @@ pub fn createTextureFromBuffer(buffer: *Buffer, width: u32, height: u32, format_
     const format: TextureFormat = switch (format_raw) {
         @intFromEnum(abi.PixelFormat.rgba8_unorm) => .rgba8_unorm,
         @intFromEnum(abi.PixelFormat.bgra8_unorm) => .bgra8_unorm,
+        @intFromEnum(abi.PixelFormat.stencil8) => .stencil8,
         else => return error.UnsupportedFormat,
     };
     if (offset % @alignOf(u32) != 0) return error.InvalidArgument;
@@ -1485,7 +1556,7 @@ pub fn textureGetBytes(texture: *Texture, destination: ?[*]u8, destination_lengt
     if (!validTexture(texture) or (region.origin.z != 0) or (region.size.depth != 1)) return error.InvalidArgument;
     const row_bytes = std.math.mul(usize, region.size.width, texture.format.bytesPerPixel()) catch return error.InvalidArgument;
     const stride = if (bytes_per_row == 0) row_bytes else bytes_per_row;
-    try validateRegion(texture.width, texture.height, region, stride, destination_length);
+    try validateRegion(texture.width, texture.height, region, stride, destination_length, texture.format.bytesPerPixel());
     if (row_bytes != 0 and destination == null) return error.InvalidArgument;
     if (row_bytes == 0) return;
     for (0..region.size.height) |row| {
@@ -1499,7 +1570,7 @@ pub fn textureReplaceRegion(texture: *Texture, region: abi.Region, source: ?[*]c
     if (!validTexture(texture) or (region.origin.z != 0) or (region.size.depth != 1)) return error.InvalidArgument;
     const row_bytes = std.math.mul(usize, region.size.width, texture.format.bytesPerPixel()) catch return error.InvalidArgument;
     const stride = if (bytes_per_row == 0) row_bytes else bytes_per_row;
-    try validateRegion(texture.width, texture.height, region, stride, source_length);
+    try validateRegion(texture.width, texture.height, region, stride, source_length, texture.format.bytesPerPixel());
     if (row_bytes != 0 and source == null) return error.InvalidArgument;
     if (row_bytes == 0) return;
     for (0..region.size.height) |row| {
@@ -1522,7 +1593,7 @@ fn appendVertexBytes(list: *std.ArrayList(abi.Vertex), raw: []const u8) Error!vo
 fn copyBufferToTexture(command: BufferTextureCommand) Error!void {
     const row_bytes = std.math.mul(usize, command.region.size.width, command.texture.format.bytesPerPixel()) catch return error.InvalidArgument;
     const stride = if (command.bytes_per_row == 0) row_bytes else command.bytes_per_row;
-    try validateRegion(command.texture.width, command.texture.height, command.region, stride, command.buffer.bytes.len -| command.buffer_offset);
+    try validateRegion(command.texture.width, command.texture.height, command.region, stride, command.buffer.bytes.len -| command.buffer_offset, command.texture.format.bytesPerPixel());
     if (command.buffer_offset > command.buffer.bytes.len) return error.InvalidArgument;
     for (0..command.region.size.height) |row| {
         const source_offset = command.buffer_offset + row * stride;
@@ -1534,7 +1605,7 @@ fn copyBufferToTexture(command: BufferTextureCommand) Error!void {
 fn copyTextureToBuffer(command: TextureBufferCommand) Error!void {
     const row_bytes = std.math.mul(usize, command.region.size.width, command.texture.format.bytesPerPixel()) catch return error.InvalidArgument;
     const stride = if (command.bytes_per_row == 0) row_bytes else command.bytes_per_row;
-    try validateRegion(command.texture.width, command.texture.height, command.region, stride, command.buffer.bytes.len -| command.buffer_offset);
+    try validateRegion(command.texture.width, command.texture.height, command.region, stride, command.buffer.bytes.len -| command.buffer_offset, command.texture.format.bytesPerPixel());
     if (command.buffer_offset > command.buffer.bytes.len) return error.InvalidArgument;
     for (0..command.region.size.height) |row| {
         const source_offset = (@as(usize, command.region.origin.y) + row) * command.texture.stride + @as(usize, command.region.origin.x) * command.texture.format.bytesPerPixel();
@@ -1548,8 +1619,8 @@ fn copyTextureToTexture(command: TextureTextureCommand) Error!void {
         command.source_region.size.height != command.destination_region.size.height or
         command.source_region.size.depth != 1 or command.destination_region.size.depth != 1) return error.InvalidArgument;
     const row_bytes = std.math.mul(usize, command.source_region.size.width, command.source.format.bytesPerPixel()) catch return error.InvalidArgument;
-    try validateRegion(command.source.width, command.source.height, command.source_region, row_bytes, std.math.maxInt(usize));
-    try validateRegion(command.destination.width, command.destination.height, command.destination_region, row_bytes, std.math.maxInt(usize));
+    try validateRegion(command.source.width, command.source.height, command.source_region, row_bytes, std.math.maxInt(usize), command.source.format.bytesPerPixel());
+    try validateRegion(command.destination.width, command.destination.height, command.destination_region, row_bytes, std.math.maxInt(usize), command.destination.format.bytesPerPixel());
     for (0..command.source_region.size.height) |row| {
         const source_offset = (@as(usize, command.source_region.origin.y) + row) * command.source.stride + @as(usize, command.source_region.origin.x) * command.source.format.bytesPerPixel();
         const destination_offset = (@as(usize, command.destination_region.origin.y) + row) * command.destination.stride + @as(usize, command.destination_region.origin.x) * command.destination.format.bytesPerPixel();
@@ -1680,10 +1751,10 @@ fn generateMipmap3D(command: Mipmap3DCommand) Error!void {
     }
 }
 
-fn validateRegion(width: u32, height: u32, region: abi.Region, stride: usize, storage_length: usize) Error!void {
+fn validateRegion(width: u32, height: u32, region: abi.Region, stride: usize, storage_length: usize, bytes_per_pixel: usize) Error!void {
     if (region.origin.z != 0 or region.size.depth != 1) return error.InvalidArgument;
     if (region.origin.x > width or region.origin.y > height or region.size.width > width - region.origin.x or region.size.height > height - region.origin.y) return error.InvalidArgument;
-    const row_bytes = std.math.mul(usize, region.size.width, 4) catch return error.InvalidArgument;
+    const row_bytes = std.math.mul(usize, region.size.width, bytes_per_pixel) catch return error.InvalidArgument;
     if (stride < row_bytes) return error.InvalidArgument;
     const needed = if (region.size.height == 0) 0 else std.math.add(usize, std.math.mul(usize, region.size.height - 1, stride) catch return error.InvalidArgument, row_bytes) catch return error.InvalidArgument;
     if (storage_length < needed) return error.InvalidArgument;
@@ -1701,6 +1772,7 @@ fn texturePixelFormat(texture: *const Texture) ?abi.PixelFormat {
         .rgba8_unorm => .rgba8_unorm,
         .bgra8_unorm => .bgra8_unorm,
         .depth32_float => .depth32_float,
+        .stencil8 => .stencil8,
     };
 }
 
@@ -2053,6 +2125,48 @@ test "depth texture attachment rejects farther fragments" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 255, 0, 255 }, color.bytes[0..4]);
 }
 
+test "stencil attachment applies compare and pass/failure operations" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const color = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(color);
+    const stencil = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.stencil8));
+    defer destroyTexture(stencil);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+    };
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, color, .{
+        .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } },
+    });
+    try encoder.setStencilTexture(stencil, @intFromEnum(abi.LoadAction.clear), @intFromEnum(abi.StoreAction.store), 3);
+    for ([_]bool{ true, false }) |front_face| {
+        try encoder.setStencilState(front_face,
+            @intFromEnum(abi.CompareFunction.equal),
+            @intFromEnum(abi.StencilOperation.zero),
+            @intFromEnum(abi.StencilOperation.keep),
+            @intFromEnum(abi.StencilOperation.increment_clamp), 0xff, 0xff);
+    }
+    try encoder.setStencilReference(3, 3);
+    try encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
+    try encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
+    try encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try command_buffer.commit();
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+    for (stencil.bytes) |value| try std.testing.expectEqual(@as(u8, 0), value);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, color.bytes[0..4]);
+}
+
 test "fence update and wait preserve command ordering" {
     const device = try createDevice();
     defer destroyDevice(device);
@@ -2359,6 +2473,11 @@ pub export fn zpu_metal_render_encoder_set_pipeline_formats(encoder: ?*RenderEnc
     return 0;
 }
 
+pub export fn zpu_metal_render_encoder_set_pipeline_formats_with_stencil(encoder: ?*RenderEncoder, color_format: u16, depth_format: u16, stencil_format: u16) callconv(.c) c_int {
+    (encoder orelse return -1).setPipelineFormatsWithStencil(color_format, depth_format, stencil_format) catch |err| return errorCode(err);
+    return 0;
+}
+
 pub export fn zpu_metal_render_encoder_set_depth_compare_function(encoder: ?*RenderEncoder, compare_function: u8, depth_write_enabled: bool) callconv(.c) c_int {
     (encoder orelse return -1).setDepthCompareFunction(compare_function, depth_write_enabled) catch |err| return errorCode(err);
     return 0;
@@ -2381,6 +2500,21 @@ pub export fn zpu_metal_render_encoder_set_depth_texture(encoder: ?*RenderEncode
 
 pub export fn zpu_metal_render_encoder_set_depth_buffer(encoder: ?*RenderEncoder, depth: ?[*]f32, depth_count: usize) callconv(.c) c_int {
     (encoder orelse return -1).setDepthBuffer(depth, depth_count) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_stencil_texture(encoder: ?*RenderEncoder, texture: ?*Texture, load_action: u8, store_action: u8, clear_value: u8) callconv(.c) c_int {
+    (encoder orelse return -1).setStencilTexture(texture orelse return -1, load_action, store_action, clear_value) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_stencil_state(encoder: ?*RenderEncoder, front_face: c_int, compare: u8, stencil_failure: u8, depth_failure: u8, depth_pass: u8, read_mask: u8, write_mask: u8) callconv(.c) c_int {
+    (encoder orelse return -1).setStencilState(front_face != 0, compare, stencil_failure, depth_failure, depth_pass, read_mask, write_mask) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_stencil_reference(encoder: ?*RenderEncoder, front_reference: u8, back_reference: u8) callconv(.c) c_int {
+    (encoder orelse return -1).setStencilReference(front_reference, back_reference) catch |err| return errorCode(err);
     return 0;
 }
 

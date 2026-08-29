@@ -23,6 +23,7 @@ pub const PixelFormat = enum(u16) {
     bgra8_unorm = 80,
     rgba8_unorm = 70,
     depth32_float = 252,
+    stencil8 = 253,
 };
 
 pub const LoadAction = enum(u8) { dont_care, load, clear };
@@ -41,6 +42,16 @@ pub const CompareFunction = enum(u8) {
     not_equal = 5,
     greater_equal = 6,
     always = 7,
+};
+pub const StencilOperation = enum(u8) {
+    keep = 0,
+    zero = 1,
+    replace = 2,
+    increment_clamp = 3,
+    decrement_clamp = 4,
+    invert = 5,
+    increment_wrap = 6,
+    decrement_wrap = 7,
 };
 pub const BlendFactor = enum(u8) {
     zero = 0,

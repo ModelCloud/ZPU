@@ -3825,13 +3825,168 @@ int main(void) {
                 return 29;
             }
         }
+
+        /* Stencil is also a CPU-owned attachment. Use native Metal only as
+         * the oracle: a passing draw increments the clear value, then a
+         * reference mismatch takes the stencil-failure operation and leaves
+         * the first color result intact. Both the color and Stencil8 bytes
+         * must match exactly. */
+        enum { stencil_byte_count = width * height };
+        MTLRenderPipelineDescriptor *stencil_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
+        stencil_pipeline_descriptor.vertexFunction = vertex_function;
+        stencil_pipeline_descriptor.fragmentFunction = fragment_function;
+        stencil_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        stencil_pipeline_descriptor.stencilAttachmentPixelFormat = MTLPixelFormatStencil8;
+        id<MTLRenderPipelineState> metal_stencil_pipeline =
+            [device newRenderPipelineStateWithDescriptor:stencil_pipeline_descriptor error:&error];
+        MTLDepthStencilDescriptor *stencil_state_descriptor = [MTLDepthStencilDescriptor new];
+        stencil_state_descriptor.depthCompareFunction = MTLCompareFunctionAlways;
+        stencil_state_descriptor.depthWriteEnabled = NO;
+        MTLStencilDescriptor *stencil_face = [MTLStencilDescriptor new];
+        stencil_face.stencilCompareFunction = MTLCompareFunctionEqual;
+        stencil_face.stencilFailureOperation = MTLStencilOperationZero;
+        stencil_face.depthFailureOperation = MTLStencilOperationDecrementClamp;
+        stencil_face.depthStencilPassOperation = MTLStencilOperationIncrementClamp;
+        stencil_face.readMask = 0xff;
+        stencil_face.writeMask = 0xff;
+        stencil_state_descriptor.frontFaceStencil = stencil_face;
+        stencil_state_descriptor.backFaceStencil = stencil_face;
+        id<MTLDepthStencilState> metal_stencil_state =
+            [device newDepthStencilStateWithDescriptor:stencil_state_descriptor];
+        MTLTextureDescriptor *metal_stencil_texture_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatStencil8
+                                                                width:width
+                                                               height:height
+                                                            mipmapped:NO];
+        metal_stencil_texture_descriptor.storageMode = MTLStorageModeShared;
+        metal_stencil_texture_descriptor.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> metal_stencil_color = [device newTextureWithDescriptor:texture_descriptor];
+        id<MTLTexture> metal_stencil_texture =
+            [device newTextureWithDescriptor:metal_stencil_texture_descriptor];
+        if (metal_stencil_pipeline == nil || metal_stencil_state == nil ||
+            metal_stencil_color == nil || metal_stencil_texture == nil) {
+            fail_with_error("stencil reference allocation failed", error);
+            return 30;
+        }
+        MTLRenderPassDescriptor *metal_stencil_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        metal_stencil_pass.colorAttachments[0].texture = metal_stencil_color;
+        metal_stencil_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        metal_stencil_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        metal_stencil_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        metal_stencil_pass.stencilAttachment.texture = metal_stencil_texture;
+        metal_stencil_pass.stencilAttachment.loadAction = MTLLoadActionClear;
+        metal_stencil_pass.stencilAttachment.storeAction = MTLStoreActionStore;
+        metal_stencil_pass.stencilAttachment.clearStencil = 3;
+        id<MTLCommandBuffer> metal_stencil_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> metal_stencil_encoder =
+            [metal_stencil_command_buffer renderCommandEncoderWithDescriptor:metal_stencil_pass];
+        [metal_stencil_encoder setRenderPipelineState:metal_stencil_pipeline];
+        [metal_stencil_encoder setDepthStencilState:metal_stencil_state];
+        [metal_stencil_encoder setStencilReferenceValue:3];
+        [metal_stencil_encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
+        [metal_stencil_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [metal_stencil_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [metal_stencil_encoder endEncoding];
+        [metal_stencil_command_buffer commit];
+        [metal_stencil_command_buffer waitUntilCompleted];
+        if (metal_stencil_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: stencil reference command did not complete\n");
+            return 31;
+        }
+        uint8_t metal_stencil_pixels[byte_count];
+        uint8_t metal_stencil_values[stencil_byte_count];
+        [metal_stencil_color getBytes:metal_stencil_pixels
+                           bytesPerRow:(NSUInteger)width * 4
+                            fromRegion:MTLRegionMake2D(0, 0, width, height)
+                           mipmapLevel:0];
+        [metal_stencil_texture getBytes:metal_stencil_values
+                            bytesPerRow:(NSUInteger)width
+                             fromRegion:MTLRegionMake2D(0, 0, width, height)
+                            mipmapLevel:0];
+
+        MTLTextureDescriptor *adapter_stencil_color_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                width:width
+                                                               height:height
+                                                            mipmapped:NO];
+        adapter_stencil_color_descriptor.storageMode = MTLStorageModeShared;
+        adapter_stencil_color_descriptor.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> adapter_stencil_color =
+            [adapter_device newTextureWithDescriptor:adapter_stencil_color_descriptor];
+        MTLTextureDescriptor *adapter_stencil_texture_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatStencil8
+                                                                width:width
+                                                               height:height
+                                                            mipmapped:NO];
+        adapter_stencil_texture_descriptor.storageMode = MTLStorageModeShared;
+        adapter_stencil_texture_descriptor.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> adapter_stencil_texture =
+            [adapter_device newTextureWithDescriptor:adapter_stencil_texture_descriptor];
+        id<MTLRenderPipelineState> adapter_stencil_pipeline =
+            [adapter_device newRenderPipelineStateWithDescriptor:stencil_pipeline_descriptor error:&error];
+        id<MTLDepthStencilState> adapter_stencil_state =
+            [adapter_device newDepthStencilStateWithDescriptor:stencil_state_descriptor];
+        if (adapter_stencil_color == nil || adapter_stencil_texture == nil ||
+            adapter_stencil_pipeline == nil || adapter_stencil_state == nil) {
+            fail_with_error("stencil adapter allocation failed", error);
+            return 32;
+        }
+        MTLRenderPassDescriptor *adapter_stencil_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_stencil_pass.colorAttachments[0].texture = adapter_stencil_color;
+        adapter_stencil_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_stencil_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_stencil_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        adapter_stencil_pass.stencilAttachment.texture = adapter_stencil_texture;
+        adapter_stencil_pass.stencilAttachment.loadAction = MTLLoadActionClear;
+        adapter_stencil_pass.stencilAttachment.storeAction = MTLStoreActionStore;
+        adapter_stencil_pass.stencilAttachment.clearStencil = 3;
+        id<MTLCommandBuffer> adapter_stencil_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_stencil_encoder =
+            [adapter_stencil_command_buffer renderCommandEncoderWithDescriptor:adapter_stencil_pass];
+        [adapter_stencil_encoder setRenderPipelineState:adapter_stencil_pipeline];
+        [adapter_stencil_encoder setDepthStencilState:adapter_stencil_state];
+        [adapter_stencil_encoder setStencilReferenceValue:3];
+        [adapter_stencil_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_stencil_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_stencil_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_stencil_encoder endEncoding];
+        [adapter_stencil_command_buffer commit];
+        [adapter_stencil_command_buffer waitUntilCompleted];
+        if (adapter_stencil_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: stencil adapter command did not complete\n");
+            return 33;
+        }
+        uint8_t adapter_stencil_pixels[byte_count];
+        uint8_t adapter_stencil_values[stencil_byte_count];
+        [adapter_stencil_color getBytes:adapter_stencil_pixels
+                            bytesPerRow:(NSUInteger)width * 4
+                             fromRegion:MTLRegionMake2D(0, 0, width, height)
+                            mipmapLevel:0];
+        [adapter_stencil_texture getBytes:adapter_stencil_values
+                              bytesPerRow:(NSUInteger)width
+                               fromRegion:MTLRegionMake2D(0, 0, width, height)
+                              mipmapLevel:0];
+        for (size_t index = 0; index < byte_count; index++) {
+            if (metal_stencil_pixels[index] != adapter_stencil_pixels[index]) {
+                fprintf(stderr, "metal-pixel: stencil color mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                        index, metal_stencil_pixels[index], adapter_stencil_pixels[index]);
+                return 34;
+            }
+        }
+        for (size_t index = 0; index < stencil_byte_count; index++) {
+            if (metal_stencil_values[index] != adapter_stencil_values[index]) {
+                fprintf(stderr, "metal-pixel: stencil value mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                        index, metal_stencil_values[index], adapter_stencil_values[index]);
+                return 35;
+            }
+        }
         zpu_metal_render_encoder_destroy(zpu_encoder);
         zpu_metal_command_buffer_destroy(zpu_command_buffer);
         zpu_metal_buffer_destroy(zpu_vertex_buffer);
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, legacy/Metal 4 counters, render/dispatch/copy, view pools, argument encoders, depth, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, legacy/Metal 4 counters, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }

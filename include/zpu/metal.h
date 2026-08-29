@@ -22,6 +22,7 @@ enum {
     ZPU_METAL_RGBA8_UNORM = 70,
     ZPU_METAL_BGRA8_UNORM = 80,
     ZPU_METAL_DEPTH32_FLOAT = 252,
+    ZPU_METAL_STENCIL8 = 253,
 };
 
 typedef uint8_t zpu_metal_load_action;
@@ -81,6 +82,18 @@ enum {
     ZPU_METAL_COMPARE_NOT_EQUAL = 5,
     ZPU_METAL_COMPARE_GREATER_EQUAL = 6,
     ZPU_METAL_COMPARE_ALWAYS = 7,
+};
+
+typedef uint8_t zpu_metal_stencil_operation;
+enum {
+    ZPU_METAL_STENCIL_KEEP = 0,
+    ZPU_METAL_STENCIL_ZERO = 1,
+    ZPU_METAL_STENCIL_REPLACE = 2,
+    ZPU_METAL_STENCIL_INCREMENT_CLAMP = 3,
+    ZPU_METAL_STENCIL_DECREMENT_CLAMP = 4,
+    ZPU_METAL_STENCIL_INVERT = 5,
+    ZPU_METAL_STENCIL_INCREMENT_WRAP = 6,
+    ZPU_METAL_STENCIL_DECREMENT_WRAP = 7,
 };
 
 typedef uint8_t zpu_metal_blend_factor;
@@ -313,6 +326,7 @@ int zpu_metal_render_encoder_set_cull_mode(zpu_metal_render_encoder *encoder, zp
 int zpu_metal_render_encoder_set_front_facing(zpu_metal_render_encoder *encoder, zpu_metal_winding winding);
 int zpu_metal_render_encoder_set_triangle_fill_mode(zpu_metal_render_encoder *encoder, zpu_metal_triangle_fill_mode fill_mode);
 int zpu_metal_render_encoder_set_pipeline_formats(zpu_metal_render_encoder *encoder, uint16_t color_format, uint16_t depth_format);
+int zpu_metal_render_encoder_set_pipeline_formats_with_stencil(zpu_metal_render_encoder *encoder, uint16_t color_format, uint16_t depth_format, uint16_t stencil_format);
 int zpu_metal_render_encoder_set_depth_compare_function(zpu_metal_render_encoder *encoder, zpu_metal_compare_function compare_function, int depth_write_enabled);
 int zpu_metal_render_encoder_set_blend_state(zpu_metal_render_encoder *encoder, int blending_enabled,
     zpu_metal_blend_factor source_rgb_factor, zpu_metal_blend_factor destination_rgb_factor,
@@ -322,6 +336,9 @@ int zpu_metal_render_encoder_set_blend_state(zpu_metal_render_encoder *encoder, 
 int zpu_metal_render_encoder_set_blend_color(zpu_metal_render_encoder *encoder, zpu_metal_color color);
 int zpu_metal_render_encoder_set_depth_texture(zpu_metal_render_encoder *encoder, zpu_metal_texture *texture);
 int zpu_metal_render_encoder_set_depth_buffer(zpu_metal_render_encoder *encoder, float *depth, size_t depth_count);
+int zpu_metal_render_encoder_set_stencil_texture(zpu_metal_render_encoder *encoder, zpu_metal_texture *texture, zpu_metal_load_action load_action, zpu_metal_store_action store_action, uint8_t clear_value);
+int zpu_metal_render_encoder_set_stencil_state(zpu_metal_render_encoder *encoder, int front_face, zpu_metal_compare_function compare, zpu_metal_stencil_operation stencil_failure, zpu_metal_stencil_operation depth_failure, zpu_metal_stencil_operation depth_pass, uint8_t read_mask, uint8_t write_mask);
+int zpu_metal_render_encoder_set_stencil_reference(zpu_metal_render_encoder *encoder, uint8_t front_reference, uint8_t back_reference);
 int zpu_metal_render_encoder_update_fence(zpu_metal_render_encoder *encoder, zpu_metal_fence *fence);
 int zpu_metal_render_encoder_wait_for_fence(zpu_metal_render_encoder *encoder, zpu_metal_fence *fence);
 int zpu_metal_render_encoder_draw_primitives(zpu_metal_render_encoder *encoder, zpu_metal_primitive_type primitive, size_t vertex_start, size_t vertex_count, size_t instance_count);

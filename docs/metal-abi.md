@@ -44,6 +44,9 @@ triangle path:
   heap rules
 - owned depth32-float textures bound as render-pass depth attachments, with
   configurable Metal compare functions, write masks, and depth clears
+- owned Stencil8 textures bound as render-pass stencil attachments, with
+  front/back compare functions, fail/depth-fail/pass operations, read/write
+  masks, references, and clear/load/store behavior
 - fixed-function render pipeline, depth-stencil, and sampler state objects;
   pipeline attachment format validation, blending factors/operations, color
   write masks, and Metal top-left triangle edge inclusion
@@ -153,7 +156,7 @@ triangle path:
 
 The C header exposes both `zpu_metal_render`, an opt-in single-pass entry
 point, and a resource/command-buffer API for C, C++, and Objective-C clients.
-The latter owns RGBA8/BGRA8/depth32-float buffers and textures, records
+The latter owns RGBA8/BGRA8/depth32-float/Stencil8 buffers and textures, records
 render/blit work, and executes it at command-buffer commit. Its render state
 uses a fixed `zpu_metal_vertex` ABI; it does not parse MSL or execute arbitrary
 shader functions. The optional Apple adapter supplies the supported
