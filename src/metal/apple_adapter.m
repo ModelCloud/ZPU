@@ -5894,7 +5894,8 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     ZPUTexture *destination = (ZPUTexture *)destinationTexture;
     zpu_metal_region sourceRegion;
     zpu_metal_region destinationRegion;
-    if (![source isKindOfClass:[ZPUTexture class]] || ![destination isKindOfClass:[ZPUTexture class]] ||
+    if (!zpu_texture_belongs_to_device([_owner device], source) ||
+        !zpu_texture_belongs_to_device([_owner device], destination) ||
         !zpu_metal4_region(sourceOrigin, sourceSize, &sourceRegion) ||
         !zpu_metal4_region(destinationOrigin, sourceSize, &destinationRegion)) {
         [_owner markError];
@@ -5947,7 +5948,8 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     ZPUTexture *source = (ZPUTexture *)sourceTexture;
     ZPUBuffer *destination = (ZPUBuffer *)destinationBuffer;
     zpu_metal_region sourceRegion;
-    if (![source isKindOfClass:[ZPUTexture class]] || ![destination isKindOfClass:[ZPUBuffer class]] ||
+    if (!zpu_texture_belongs_to_device([_owner device], source) ||
+        !zpu_buffer_belongs_to_device([_owner device], destination) ||
         !zpu_metal4_region(sourceOrigin, sourceSize, &sourceRegion)) {
         [_owner markError];
         return;
@@ -6001,7 +6003,8 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 - (void)copyFromBuffer:(id<MTLBuffer>)sourceBuffer sourceOffset:(NSUInteger)sourceOffset toBuffer:(id<MTLBuffer>)destinationBuffer destinationOffset:(NSUInteger)destinationOffset size:(NSUInteger)size {
     ZPUBuffer *source = (ZPUBuffer *)sourceBuffer;
     ZPUBuffer *destination = (ZPUBuffer *)destinationBuffer;
-    if (![source isKindOfClass:[ZPUBuffer class]] || ![destination isKindOfClass:[ZPUBuffer class]] ||
+    if (!zpu_buffer_belongs_to_device([_owner device], source) ||
+        !zpu_buffer_belongs_to_device([_owner device], destination) ||
         zpu_metal_compute_encoder_copy_buffer(_legacy->_zpuEncoder, source->_zpuBuffer, sourceOffset,
             destination->_zpuBuffer, destinationOffset, size) != ZPU_METAL_OK) { [_owner markError]; return; }
     [_owner->_legacyBuffer retainResource:source];
@@ -6012,7 +6015,8 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     ZPUBuffer *source = (ZPUBuffer *)sourceBuffer;
     ZPUTexture *destination = (ZPUTexture *)destinationTexture;
     zpu_metal_region destinationRegion;
-    if (![source isKindOfClass:[ZPUBuffer class]] || ![destination isKindOfClass:[ZPUTexture class]] ||
+    if (!zpu_buffer_belongs_to_device([_owner device], source) ||
+        !zpu_texture_belongs_to_device([_owner device], destination) ||
         !zpu_metal4_region(destinationOrigin, sourceSize, &destinationRegion)) {
         [_owner markError];
         return;
@@ -6080,7 +6084,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 }
 - (void)generateMipmapsForTexture:(id<MTLTexture>)texture {
     ZPUTexture *zpuTexture = (ZPUTexture *)texture;
-    if (![zpuTexture isKindOfClass:[ZPUTexture class]] ||
+    if (!zpu_texture_belongs_to_device([_owner device], zpuTexture) ||
         (zpuTexture->_pixelFormat != MTLPixelFormatRGBA8Unorm && zpuTexture->_pixelFormat != MTLPixelFormatBGRA8Unorm) ||
         zpuTexture.mipmapLevelCount < 2) {
         [_owner markError];
@@ -6131,7 +6135,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 }
 - (void)fillBuffer:(id<MTLBuffer>)buffer range:(NSRange)range value:(uint8_t)value {
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
-    if (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
+    if (!zpu_buffer_belongs_to_device([_owner device], zpuBuffer) ||
         zpu_metal_compute_encoder_fill_buffer(_legacy->_zpuEncoder, zpuBuffer->_zpuBuffer, range.location, range.length, value) != ZPU_METAL_OK) { [_owner markError]; return; }
     [_owner->_legacyBuffer retainResource:zpuBuffer];
     _stages |= MTLStageBlit;

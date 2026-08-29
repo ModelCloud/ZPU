@@ -4181,6 +4181,33 @@ int main(void) {
             return 63;
         }
 
+        /* MTL4 copy commands must apply the same device ownership rule as
+         * argument tables and GPU-address dispatch. */
+        id<MTL4CommandBuffer> foreign_metal4_copy_command_buffer = [adapter_device newCommandBuffer];
+        [foreign_metal4_copy_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> foreign_metal4_copy_encoder =
+            [foreign_metal4_copy_command_buffer computeCommandEncoder];
+        [foreign_metal4_copy_encoder copyFromBuffer:foreign_adapter_buffer sourceOffset:0
+                                           toBuffer:adapter_copy_buffer destinationOffset:0 size:sizeof(uint32_t)];
+        [foreign_metal4_copy_encoder endEncoding];
+        [foreign_metal4_copy_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> foreign_metal4_copy_command_buffers[] = {
+            foreign_metal4_copy_command_buffer,
+        };
+        MTL4CommitOptions *foreign_metal4_copy_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *foreign_metal4_copy_error = nil;
+        [foreign_metal4_copy_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            foreign_metal4_copy_error = feedback.error;
+        }];
+        [metal4_queue commit:foreign_metal4_copy_command_buffers
+                        count:1
+                       options:foreign_metal4_copy_options];
+        if (foreign_metal4_copy_command_buffer == nil || foreign_metal4_copy_encoder == nil ||
+            foreign_metal4_copy_error == nil) {
+            fail_with_error("Metal 4 CPU adapter accepted a foreign copy resource", metal4_error);
+            return 64;
+        }
+
         /* The ML encoder must be a CPU-owned object even though arbitrary ML
          * graph execution is not implemented. Its dispatch path must report
          * an error through Metal 4 feedback instead of returning nil or
