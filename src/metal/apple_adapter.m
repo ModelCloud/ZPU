@@ -11680,7 +11680,8 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 }
 - (void)setFragmentSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
     ZPUSamplerState *zpuSampler = (ZPUSamplerState *)sampler;
-    if (index > UINT32_MAX || (sampler != nil && (![zpuSampler isKindOfClass:[ZPUSamplerState class]] || zpuSampler->_owner != [_owner device]))) {
+    if (index > UINT32_MAX || (sampler != nil && index != 0) ||
+        (sampler != nil && (![zpuSampler isKindOfClass:[ZPUSamplerState class]] || zpuSampler->_owner != [_owner device]))) {
         [_owner markError];
         return;
     }

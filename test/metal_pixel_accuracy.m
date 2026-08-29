@@ -1493,6 +1493,23 @@ int main(void) {
             return 95;
         }
 
+        id<MTLCommandBuffer> invalid_fragment_sampler_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> invalid_fragment_sampler_encoder =
+            [invalid_fragment_sampler_command_buffer renderCommandEncoderWithDescriptor:adapter_sample_pass];
+        [invalid_fragment_sampler_encoder setRenderPipelineState:adapter_sample_pipeline];
+        [invalid_fragment_sampler_encoder setVertexBuffer:adapter_sample_vertex_buffer offset:0 atIndex:0];
+        [invalid_fragment_sampler_encoder setFragmentTexture:adapter_sample_source atIndex:0];
+        [invalid_fragment_sampler_encoder setFragmentSamplerState:adapter_sample_sampler atIndex:1];
+        [invalid_fragment_sampler_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [invalid_fragment_sampler_encoder endEncoding];
+        [invalid_fragment_sampler_command_buffer commit];
+        [invalid_fragment_sampler_command_buffer waitUntilCompleted];
+        if (invalid_fragment_sampler_encoder == nil ||
+            invalid_fragment_sampler_command_buffer.status != MTLCommandBufferStatusError) {
+            fprintf(stderr, "metal-pixel: unrepresentable fragment sampler index did not fail closed\n");
+            return 134;
+        }
+
         const float uniform_color[4] = {0.2f, 0.6f, 0.88f, 0.4f};
         MTLRenderPipelineDescriptor *native_uniform_pipeline_descriptor = [pipeline_descriptor copy];
         native_uniform_pipeline_descriptor.fragmentFunction = [library newFunctionWithName:@"zpu_test_uniform_fragment"];
