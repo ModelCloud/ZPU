@@ -5815,10 +5815,12 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
 - (id<MTLFunctionHandle>)functionHandleWithBinaryFunction:(id<MTL4BinaryFunction>)function stage:(MTLRenderStages)stage API_AVAILABLE(macos(26.0), ios(26.0)) {
     ZPUMTL4BinaryFunction *binary = (ZPUMTL4BinaryFunction *)function;
     if (![binary isKindOfClass:[ZPUMTL4BinaryFunction class]] || binary->_owner != _owner) return nil;
-    NSString *expectedName = stage == MTLRenderStageVertex ? _vertexFunctionName :
-        (stage == MTLRenderStageFragment ? _fragmentFunctionName : nil);
-    MTLFunctionType expectedType = stage == MTLRenderStageVertex ? MTLFunctionTypeVertex :
-        (stage == MTLRenderStageFragment ? MTLFunctionTypeFragment : MTLFunctionTypeKernel);
+    NSString *expectedName = _isTilePipeline && stage == MTLRenderStageTile ? _tileFunctionName :
+        (stage == MTLRenderStageVertex ? _vertexFunctionName :
+        (stage == MTLRenderStageFragment ? _fragmentFunctionName : nil));
+    MTLFunctionType expectedType = _isTilePipeline && stage == MTLRenderStageTile ? MTLFunctionTypeKernel :
+        (stage == MTLRenderStageVertex ? MTLFunctionTypeVertex :
+        (stage == MTLRenderStageFragment ? MTLFunctionTypeFragment : MTLFunctionTypeKernel));
     NSArray<NSString *> *binaryNames = stage == MTLRenderStageVertex ? _vertexBinaryFunctionNames :
         (stage == MTLRenderStageFragment ? _fragmentBinaryFunctionNames : @[]);
     const BOOL isBaseFunction = expectedName != nil && [expectedName isEqualToString:binary->_name] &&

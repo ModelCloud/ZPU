@@ -8129,6 +8129,9 @@ int main(void) {
         NSURL *adapter_mtl4_tile_archive_url = nil;
         id<MTL4Archive> adapter_mtl4_tile_archive = nil;
         BOOL adapter_mtl4_tile_archive_flushed = YES;
+        id<MTL4BinaryFunction> adapter_mtl4_tile_binary_function = nil;
+        id<MTLFunctionHandle> adapter_mtl4_tile_binary_handle = nil;
+        id<MTLFunctionHandle> adapter_mtl4_tile_function_handle = nil;
         uint8_t adapter_mtl4_tile_pixels[5 * 3 * 4] = {0};
         if (@available(macOS 26.0, iOS 26.0, *)) {
             MTL4CommandAllocatorDescriptor *adapter_mtl4_tile_allocator_descriptor =
@@ -8170,6 +8173,21 @@ int main(void) {
             adapter_mtl4_archived_tile_pipeline =
                 [adapter_mtl4_tile_archive newRenderPipelineStateWithDescriptor:adapter_mtl4_tile_descriptor
                                                                             error:&adapter_mtl4_tile_error];
+            MTL4BinaryFunctionDescriptor *adapter_mtl4_tile_binary_descriptor =
+                [MTL4BinaryFunctionDescriptor new];
+            adapter_mtl4_tile_binary_descriptor.name = @"zpu_cpu_tile_gradient_rgba8";
+            adapter_mtl4_tile_binary_descriptor.functionDescriptor = adapter_mtl4_tile_function_descriptor;
+            adapter_mtl4_tile_binary_descriptor.options = MTL4BinaryFunctionOptionPipelineIndependent;
+            adapter_mtl4_tile_binary_function =
+                [adapter_mtl4_compiler newBinaryFunctionWithDescriptor:adapter_mtl4_tile_binary_descriptor
+                                                      compilerTaskOptions:nil
+                                                                    error:&adapter_mtl4_tile_error];
+            adapter_mtl4_tile_binary_handle =
+                [adapter_mtl4_archived_tile_pipeline functionHandleWithBinaryFunction:
+                    adapter_mtl4_tile_binary_function stage:MTLRenderStageTile];
+            adapter_mtl4_tile_function_handle =
+                [adapter_mtl4_archived_tile_pipeline functionHandleWithFunction:adapter_tile_function
+                                                                             stage:MTLRenderStageTile];
             MTLTextureDescriptor *adapter_mtl4_tile_texture_descriptor =
                 [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                     width:5 height:3 mipmapped:NO];
@@ -8221,6 +8239,9 @@ int main(void) {
                                        encoding:NSUTF8StringEncoding]
                     rangeOfString:@"tile zpu_cpu_tile_gradient_rgba8"].location != NSNotFound &&
                 adapter_mtl4_tile_archive_flushed && adapter_mtl4_tile_archive != nil &&
+                adapter_mtl4_tile_binary_function != nil &&
+                adapter_mtl4_tile_binary_handle != nil &&
+                adapter_mtl4_tile_function_handle != nil &&
                 adapter_mtl4_tile_pipeline.maxTotalThreadsPerThreadgroup == 4 &&
                 adapter_mtl4_tile_pipeline.threadgroupSizeMatchesTileSize &&
                 adapter_mtl4_tile_pipeline.requiredThreadsPerTileThreadgroup.width == 2 &&
