@@ -1279,8 +1279,11 @@ pub const RenderEncoder = struct {
         .alpha = .alpha,
     },
     rasterization_enabled: bool = true,
-    depth_compare: abi.CompareFunction = .less_equal,
-    depth_write_enabled: bool = true,
+    // Metal starts a render encoder with no depth/stencil state bound. Model
+    // that state explicitly through an always-pass, no-write depth test until
+    // setDepthCompareFunction installs a real depth state.
+    depth_compare: abi.CompareFunction = .always,
+    depth_write_enabled: bool = false,
     blending_enabled: bool = false,
     source_rgb_factor: abi.BlendFactor = .one,
     destination_rgb_factor: abi.BlendFactor = .zero,
@@ -6055,6 +6058,7 @@ test "depth texture attachment rejects farther fragments" {
         .depth = .{ .load_action = .clear, .store_action = .store, .clear_depth = 1 },
     });
     try encoder.setDepthTexture(depth);
+    try encoder.setDepthCompareFunction(@intFromEnum(abi.CompareFunction.less_equal), true);
     try encoder.setVertexBytes(@ptrCast(&far), @sizeOf(@TypeOf(far)), 0);
     try encoder.drawPrimitives(.triangle, 0, far.len, 1);
     try encoder.setVertexBytes(@ptrCast(&near), @sizeOf(@TypeOf(near)), 0);
@@ -6063,6 +6067,48 @@ test "depth texture attachment rejects farther fragments" {
     destroyRenderEncoder(encoder);
     try command_buffer.commit();
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 255, 0, 255 }, color.bytes[0..4]);
+}
+
+test "CPU render encoder leaves depth disabled until a state is bound" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const color = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(color);
+    const depth = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.depth32_float));
+    defer destroyTexture(depth);
+    const near = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.25, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.25, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.25, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, -1, 0.25, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.25, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, 1, 0.25, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+    };
+    const far = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.75, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.75, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.75, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, -1, 0.75, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.75, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, 1, 0.75, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+    };
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, color, .{
+        .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } },
+        .depth = .{ .load_action = .clear, .store_action = .store, .clear_depth = 1 },
+    });
+    try encoder.setDepthTexture(depth);
+    try encoder.setVertexBytes(@ptrCast(&near), @sizeOf(@TypeOf(near)), 0);
+    try encoder.drawPrimitives(.triangle, 0, near.len, 1);
+    try encoder.setVertexBytes(@ptrCast(&far), @sizeOf(@TypeOf(far)), 0);
+    try encoder.drawPrimitives(.triangle, 0, far.len, 1);
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try command_buffer.commit();
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, color.bytes[0..4]);
 }
 
 test "depth16 texture attachment stores normalized CPU depth" {
@@ -6089,6 +6135,7 @@ test "depth16 texture attachment stores normalized CPU depth" {
         .depth = .{ .load_action = .clear, .store_action = .store, .clear_depth = 1 },
     });
     try encoder.setDepthTexture(depth);
+    try encoder.setDepthCompareFunction(@intFromEnum(abi.CompareFunction.less_equal), true);
     try encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
     try encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
     try encoder.endEncoding();
@@ -6132,6 +6179,7 @@ test "combined depth stencil textures pack CPU attachment results" {
         try encoder.setDepthTexture(depth_stencil);
         try encoder.setStencilTexture(depth_stencil, @intFromEnum(abi.LoadAction.clear), @intFromEnum(abi.StoreAction.store), 3);
         try encoder.setPipelineFormatsWithStencil(@intFromEnum(abi.PixelFormat.rgba8_unorm), format.raw, format.raw);
+        try encoder.setDepthCompareFunction(@intFromEnum(abi.CompareFunction.less_equal), true);
         try encoder.setStencilState(true, @intFromEnum(abi.CompareFunction.equal), @intFromEnum(abi.StencilOperation.keep), @intFromEnum(abi.StencilOperation.keep), @intFromEnum(abi.StencilOperation.increment_clamp), 0xff, 0xff);
         try encoder.setStencilState(false, @intFromEnum(abi.CompareFunction.equal), @intFromEnum(abi.StencilOperation.keep), @intFromEnum(abi.StencilOperation.keep), @intFromEnum(abi.StencilOperation.increment_clamp), 0xff, 0xff);
         try encoder.setStencilReference(3, 3);
@@ -6229,6 +6277,7 @@ test "depth bounds discard fragments outside the CPU depth range" {
         .depth = .{ .load_action = .clear, .store_action = .store, .clear_depth = 1 },
     });
     try encoder.setDepthTexture(depth);
+    try encoder.setDepthCompareFunction(@intFromEnum(abi.CompareFunction.less_equal), true);
     try encoder.setDepthTestBounds(0.5, 1.0);
     try encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
     try encoder.drawPrimitives(.triangle, 0, vertices.len, 1);

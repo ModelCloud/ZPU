@@ -14452,6 +14452,78 @@ int main(void) {
             }
         }
 
+        /* A nil depth/stencil state disables a previously bound depth test.
+         * Draw the nearer green triangle with the state bound, then unbind it
+         * before the farther red triangle; both implementations must leave
+         * the red draw visible. */
+        MTLTextureDescriptor *metal_no_depth_state_texture_descriptor = [metal_depth_texture_descriptor copy];
+        metal_no_depth_state_texture_descriptor.storageMode = MTLStorageModeShared;
+        id<MTLTexture> metal_no_depth_state_texture =
+            [device newTextureWithDescriptor:metal_no_depth_state_texture_descriptor];
+        id<MTLTexture> metal_no_depth_state_color = [device newTextureWithDescriptor:texture_descriptor];
+        MTLRenderPassDescriptor *metal_no_depth_state_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        metal_no_depth_state_pass.colorAttachments[0].texture = metal_no_depth_state_color;
+        metal_no_depth_state_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        metal_no_depth_state_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        metal_no_depth_state_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        metal_no_depth_state_pass.depthAttachment.texture = metal_no_depth_state_texture;
+        metal_no_depth_state_pass.depthAttachment.loadAction = MTLLoadActionClear;
+        metal_no_depth_state_pass.depthAttachment.storeAction = MTLStoreActionStore;
+        metal_no_depth_state_pass.depthAttachment.clearDepth = 1.0;
+        id<MTLCommandBuffer> metal_no_depth_state_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> metal_no_depth_state_encoder =
+            [metal_no_depth_state_command_buffer renderCommandEncoderWithDescriptor:metal_no_depth_state_pass];
+        [metal_no_depth_state_encoder setRenderPipelineState:depth_pipeline];
+        [metal_no_depth_state_encoder setVertexBuffer:metal_depth_vertex_buffer offset:0 atIndex:0];
+        [metal_no_depth_state_encoder setDepthStencilState:depth_state];
+        [metal_no_depth_state_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:6 vertexCount:6];
+        [metal_no_depth_state_encoder setDepthStencilState:nil];
+        [metal_no_depth_state_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [metal_no_depth_state_encoder endEncoding];
+        [metal_no_depth_state_command_buffer commit];
+        [metal_no_depth_state_command_buffer waitUntilCompleted];
+        uint8_t metal_no_depth_state_pixels[byte_count];
+        [metal_no_depth_state_color getBytes:metal_no_depth_state_pixels bytesPerRow:(NSUInteger)width * 4
+                                  fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+
+        id<MTLTexture> adapter_no_depth_state_texture =
+            [adapter_device newTextureWithDescriptor:metal_no_depth_state_texture_descriptor];
+        id<MTLTexture> adapter_no_depth_state_color = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTLRenderPassDescriptor *adapter_no_depth_state_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_no_depth_state_pass.colorAttachments[0].texture = adapter_no_depth_state_color;
+        adapter_no_depth_state_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_no_depth_state_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_no_depth_state_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        adapter_no_depth_state_pass.depthAttachment.texture = adapter_no_depth_state_texture;
+        adapter_no_depth_state_pass.depthAttachment.loadAction = MTLLoadActionClear;
+        adapter_no_depth_state_pass.depthAttachment.storeAction = MTLStoreActionStore;
+        adapter_no_depth_state_pass.depthAttachment.clearDepth = 1.0;
+        id<MTLCommandBuffer> adapter_no_depth_state_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_no_depth_state_encoder =
+            [adapter_no_depth_state_command_buffer renderCommandEncoderWithDescriptor:adapter_no_depth_state_pass];
+        [adapter_no_depth_state_encoder setRenderPipelineState:adapter_depth_pipeline];
+        [adapter_no_depth_state_encoder setVertexBuffer:adapter_depth_vertex_buffer offset:0 atIndex:0];
+        [adapter_no_depth_state_encoder setDepthStencilState:adapter_depth_state];
+        [adapter_no_depth_state_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:6 vertexCount:6];
+        [adapter_no_depth_state_encoder setDepthStencilState:nil];
+        [adapter_no_depth_state_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_no_depth_state_encoder endEncoding];
+        [adapter_no_depth_state_command_buffer commit];
+        [adapter_no_depth_state_command_buffer waitUntilCompleted];
+        uint8_t adapter_no_depth_state_pixels[byte_count];
+        [adapter_no_depth_state_color getBytes:adapter_no_depth_state_pixels bytesPerRow:(NSUInteger)width * 4
+                                   fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (metal_no_depth_state_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_no_depth_state_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            metal_no_depth_state_color == nil || adapter_no_depth_state_color == nil ||
+            memcmp(metal_no_depth_state_pixels, adapter_no_depth_state_pixels, byte_count) != 0 ||
+            memcmp(adapter_no_depth_state_pixels, metal_depth_pixels, byte_count) == 0) {
+            fprintf(stderr, "metal-pixel: nil depth-stencil state mismatch\n");
+            fail_with_error("native nil depth-stencil state error", metal_no_depth_state_command_buffer.error);
+            fail_with_error("adapter nil depth-stencil state error", adapter_no_depth_state_command_buffer.error);
+            return 30;
+        }
+
         /* Depth16Unorm uses the same CPU depth-test path, with an explicit
          * decode/store boundary around the ZPU-owned normalized texels. */
         enum { depth16_byte_count = width * height * 2 };

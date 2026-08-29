@@ -13541,6 +13541,24 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 }
 - (void)setDepthStencilState:(id<MTLDepthStencilState>)depthStencilState {
     ZPUDepthStencilState *state = (ZPUDepthStencilState *)depthStencilState;
+    if (depthStencilState == nil) {
+        /* A nil MTLDepthStencilState disables both depth testing/writes and
+         * stencil effects. The portable runtime represents that state as an
+         * always-pass, no-write depth test plus keep/always stencil faces. */
+        if (zpu_metal_render_encoder_set_depth_compare_function(
+                _zpuEncoder, ZPU_METAL_COMPARE_ALWAYS, false) != ZPU_METAL_OK ||
+            zpu_metal_render_encoder_set_stencil_state(
+                _zpuEncoder, 1, ZPU_METAL_COMPARE_ALWAYS, ZPU_METAL_STENCIL_KEEP,
+                ZPU_METAL_STENCIL_KEEP, ZPU_METAL_STENCIL_KEEP, UINT8_MAX, UINT8_MAX) != ZPU_METAL_OK ||
+            zpu_metal_render_encoder_set_stencil_state(
+                _zpuEncoder, 0, ZPU_METAL_COMPARE_ALWAYS, ZPU_METAL_STENCIL_KEEP,
+                ZPU_METAL_STENCIL_KEEP, ZPU_METAL_STENCIL_KEEP, UINT8_MAX, UINT8_MAX) != ZPU_METAL_OK) {
+            [_owner markError];
+            return;
+        }
+        _depthStencilState = nil;
+        return;
+    }
     if (![state isKindOfClass:[ZPUDepthStencilState class]] || state->_owner != [_owner device]) {
         [_owner markError];
         return;

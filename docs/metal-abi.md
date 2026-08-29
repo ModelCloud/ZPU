@@ -132,7 +132,8 @@ triangle path:
   CPU work; native Metal remains only the byte-accuracy oracle
 - fixed-function render pipeline, depth-stencil, and sampler state objects;
   pipeline attachment format validation, blending factors/operations, color
-  write masks, depth bounds, and Metal top-left triangle edge inclusion
+  write masks, depth bounds, nil depth-stencil disabling, and Metal top-left
+  triangle edge inclusion
 - Metal pixel-grid coordinates: texture row/column zero is the upper-left
   texel, `MTLViewport` and `MTLScissorRect` origins are applied in that same
   top-left space, and clip-space `+Y` maps toward decreasing row indices
