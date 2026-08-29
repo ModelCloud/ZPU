@@ -5707,6 +5707,33 @@ int main(void) {
         for (NSUInteger index = 0; index < sparse_page_bytes; ++index) {
             ((uint8_t *)sparse_input_data.mutableBytes)[index] = (uint8_t)((index * 29u + 11u) & 0xffu);
         }
+        const MTLTextureType sparse_texture_types[] = {
+            MTLTextureType1D, MTLTextureType1DArray, MTLTextureType2D,
+            MTLTextureType2DArray, MTLTextureType3D,
+        };
+        const MTLPixelFormat sparse_pixel_formats[] = {
+            MTLPixelFormatRGBA8Unorm, MTLPixelFormatR32Float,
+            MTLPixelFormatRGBA16Float, MTLPixelFormatStencil8,
+            MTLPixelFormatDepth32Float,
+        };
+        const MTLSparsePageSize sparse_page_sizes[] = {
+            MTLSparsePageSize16, MTLSparsePageSize64, MTLSparsePageSize256,
+        };
+        BOOL sparse_tile_exact = YES;
+        for (NSUInteger texture_type_index = 0; texture_type_index < sizeof(sparse_texture_types) / sizeof(sparse_texture_types[0]); ++texture_type_index) {
+            for (NSUInteger format_index = 0; format_index < sizeof(sparse_pixel_formats) / sizeof(sparse_pixel_formats[0]); ++format_index) {
+                for (NSUInteger page_index = 0; page_index < sizeof(sparse_page_sizes) / sizeof(sparse_page_sizes[0]); ++page_index) {
+                    MTLSize native_tile = [device sparseTileSizeWithTextureType:sparse_texture_types[texture_type_index]
+                                                                       pixelFormat:sparse_pixel_formats[format_index]
+                                                                       sampleCount:1 sparsePageSize:sparse_page_sizes[page_index]];
+                    MTLSize adapter_tile = [adapter_device sparseTileSizeWithTextureType:sparse_texture_types[texture_type_index]
+                                                                                  pixelFormat:sparse_pixel_formats[format_index]
+                                                                                  sampleCount:1 sparsePageSize:sparse_page_sizes[page_index]];
+                    sparse_tile_exact = sparse_tile_exact && native_tile.width == adapter_tile.width &&
+                        native_tile.height == adapter_tile.height && native_tile.depth == adapter_tile.depth;
+                }
+            }
+        }
         id<MTLHeap> sparse_heap = nil;
         id<MTLBuffer> sparse_source = nil;
         id<MTLBuffer> sparse_destination = nil;
@@ -5718,7 +5745,8 @@ int main(void) {
             sparse_page_bytes_256 != 256u * 1024u ||
             [device sparseTileSizeInBytesForSparsePageSize:MTLSparsePageSize16] != sparse_page_bytes_16 ||
             [device sparseTileSizeInBytesForSparsePageSize:MTLSparsePageSize64] != sparse_page_bytes ||
-            [device sparseTileSizeInBytesForSparsePageSize:MTLSparsePageSize256] != sparse_page_bytes_256) {
+            [device sparseTileSizeInBytesForSparsePageSize:MTLSparsePageSize256] != sparse_page_bytes_256 ||
+            !sparse_tile_exact) {
             fprintf(stderr, "metal-pixel: CPU sparse page sizes are incorrect\n");
             return 85;
         }

@@ -192,11 +192,13 @@ triangle path:
   blit sample points resolve to `MTLCounterResultTimestamp` records in shared
   ZPU buffers. Unsupported hardware-only counters remain unavailable rather
   than being reported as fabricated statistics
-- CPU integer geometry for `convertSparsePixelRegions:...` and
-  `convertSparseTileRegions:...`; outward and inward alignment are overflow
-  checked; placement sparse buffers additionally provide CPU-owned page
-  mapping, copied-page aliasing, unmap-to-zero behavior, and exact byte
-  transfers, while sparse texture allocation remains unsupported
+- CPU integer geometry for `sparseTileSizeWithTextureType:...`,
+  `convertSparsePixelRegions:...`, and `convertSparseTileRegions:...`; supported
+  color/depth formats and 1D/2D/3D texture types match the native tile oracle,
+  while outward and inward alignment are overflow checked; placement sparse
+  buffers additionally provide CPU-owned page mapping, copied-page aliasing,
+  unmap-to-zero behavior, and exact byte transfers, while sparse texture
+  allocation remains unsupported
 - CPU library metadata can discover the six registered kernel names and fixed
   CPU render profiles from source text, UTF-8 file/URL/data inputs, and the
   default bundle query; unsupported arbitrary MSL and stitched libraries fail

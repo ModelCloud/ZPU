@@ -1590,6 +1590,42 @@ static NSUInteger zpu_sparse_page_bytes(NSInteger pageSize) {
     }
 }
 
+static MTLSize zpu_sparse_tile_size(MTLTextureType textureType, MTLPixelFormat pixelFormat,
+                                    NSUInteger sampleCount, NSInteger pageSize) {
+    if (sampleCount != 1 || zpu_sparse_page_bytes(pageSize) == 0 ||
+        (textureType != MTLTextureType1D && textureType != MTLTextureType1DArray &&
+         textureType != MTLTextureType2D && textureType != MTLTextureType2DArray &&
+         textureType != MTLTextureType3D)) return MTLSizeMake(0, 0, 0);
+    switch (pixelFormat) {
+        case MTLPixelFormatStencil8:
+            switch (pageSize) {
+                case MTLSparsePageSize16: return MTLSizeMake(128, 128, 1);
+                case MTLSparsePageSize64: return MTLSizeMake(256, 256, 1);
+                case MTLSparsePageSize256: return MTLSizeMake(512, 512, 1);
+                default: return MTLSizeMake(0, 0, 0);
+            }
+        case MTLPixelFormatRGBA16Float:
+            switch (pageSize) {
+                case MTLSparsePageSize16: return MTLSizeMake(64, 32, 1);
+                case MTLSparsePageSize64: return MTLSizeMake(128, 64, 1);
+                case MTLSparsePageSize256: return MTLSizeMake(256, 128, 1);
+                default: return MTLSizeMake(0, 0, 0);
+            }
+        case MTLPixelFormatRGBA8Unorm:
+        case MTLPixelFormatBGRA8Unorm:
+        case MTLPixelFormatR32Float:
+        case MTLPixelFormatDepth32Float:
+            switch (pageSize) {
+                case MTLSparsePageSize16: return MTLSizeMake(64, 64, 1);
+                case MTLSparsePageSize64: return MTLSizeMake(128, 128, 1);
+                case MTLSparsePageSize256: return MTLSizeMake(256, 256, 1);
+                default: return MTLSizeMake(0, 0, 0);
+            }
+        default:
+            return MTLSizeMake(0, 0, 0);
+    }
+}
+
 static NSUInteger zpu_sparse_tile_count(NSUInteger length, NSUInteger pageBytes) {
     if (pageBytes == 0 || length > NSUIntegerMax - (pageBytes - 1)) return 0;
     return (length + pageBytes - 1) / pageBytes;
@@ -5013,11 +5049,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     return MTLSizeMake(0, 0, 0);
 }
 - (MTLSize)sparseTileSizeWithTextureType:(MTLTextureType)textureType pixelFormat:(MTLPixelFormat)pixelFormat sampleCount:(NSUInteger)sampleCount sparsePageSize:(MTLSparsePageSize)sparsePageSize API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)textureType;
-    (void)pixelFormat;
-    (void)sampleCount;
-    (void)sparsePageSize;
-    return MTLSizeMake(0, 0, 0);
+    return zpu_sparse_tile_size(textureType, pixelFormat, sampleCount, (NSInteger)sparsePageSize);
 }
 - (void)convertSparsePixelRegions:(const MTLRegion[_Nonnull])pixelRegions toTileRegions:(MTLRegion[_Nonnull])tileRegions withTileSize:(MTLSize)tileSize alignmentMode:(MTLSparseTextureRegionAlignmentMode)mode numRegions:(NSUInteger)numRegions API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(13.0), tvos(16.0)) {
     if (pixelRegions == NULL || tileRegions == NULL) return;
