@@ -69,11 +69,18 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{ .root_source_file = b.path("src/render/scalar_packet.zig"), .target = b.graph.host, .optimize = .Debug }),
         });
         const run_scalar_packet_test = b.addRunArtifact(scalar_packet_test);
+        const scalar_packet_cpu_cube_test = b.addTest(.{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/render/scalar_packet_cpu_cube_test.zig"), .target = b.graph.host, .optimize = .Debug }),
+        });
+        scalar_packet_cpu_cube_test.root_module.addImport("cpu_cube", b.createModule(.{ .root_source_file = b.path("src/vulkan/cpu_cube.zig"), .target = b.graph.host, .optimize = .Debug }));
+        scalar_packet_cpu_cube_test.root_module.link_libc = true;
+        const run_scalar_packet_cpu_cube_test = b.addRunArtifact(scalar_packet_cpu_cube_test);
         const test_step = b.step("test", "Run dependency-free render foundation tests");
         test_step.dependOn(&run_render_test.step);
         test_step.dependOn(&run_locality_test.step);
         test_step.dependOn(&run_prepared_test.step);
         test_step.dependOn(&run_scalar_packet_test.step);
+        test_step.dependOn(&run_scalar_packet_cpu_cube_test.step);
         b.getInstallStep().dependOn(test_step);
         return;
     }
@@ -402,6 +409,14 @@ pub fn build(b: *std.Build) void {
     const run_benchmark_vulkan_host_transfer_tests = b.addRunArtifact(benchmark_vulkan_host_transfer_tests);
     run_benchmark_vulkan_host_transfer_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&run_benchmark_vulkan_host_transfer_tests.step);
+    const scalar_packet_cpu_cube_tests = b.addTest(.{
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/render/scalar_packet_cpu_cube_test.zig"), .target = b.graph.host, .optimize = .Debug }),
+    });
+    scalar_packet_cpu_cube_tests.root_module.addImport("cpu_cube", b.createModule(.{ .root_source_file = b.path("src/vulkan/cpu_cube.zig"), .target = b.graph.host, .optimize = .Debug }));
+    scalar_packet_cpu_cube_tests.root_module.link_libc = true;
+    const run_scalar_packet_cpu_cube_tests = b.addRunArtifact(scalar_packet_cpu_cube_tests);
+    run_scalar_packet_cpu_cube_tests.step.dependOn(&require_limited.step);
+    test_step.dependOn(&run_scalar_packet_cpu_cube_tests.step);
     const benchmark_cli_tests = b.addSystemCommand(&.{"bash"});
     benchmark_cli_tests.addFileArg(b.path("test/benchmark_cli.sh"));
     benchmark_cli_tests.addArtifactArg(benchmark);
