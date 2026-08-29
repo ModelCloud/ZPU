@@ -1705,7 +1705,8 @@ static BOOL zpu_sparse_buffer_range(ZPUBuffer *buffer, NSRange range) {
 static BOOL zpu_sparse_heap_range(ZPUHeap *heap, NSInteger pageSize,
                                   NSUInteger heapOffset, NSUInteger tileCount) {
     const NSUInteger pageBytes = zpu_sparse_page_bytes(pageSize);
-    if (heap == nil || heap->_type != MTLHeapTypePlacement || pageBytes == 0 ||
+    if (heap == nil || heap->_type != MTLHeapTypePlacement || heap->_storageMode != MTLStorageModePrivate ||
+        pageBytes == 0 ||
         heap->_maxCompatiblePlacementSparsePageSize < pageSize ||
         heapOffset > NSUIntegerMax - tileCount ||
         heapOffset + tileCount > NSUIntegerMax / pageBytes) return NO;
@@ -1719,14 +1720,22 @@ static BOOL zpu_sparse_update_buffer_mapping(ZPUBuffer *buffer, ZPUHeap *heap,
         (mode != MTLSparseTextureMappingModeMap && mode != MTLSparseTextureMappingModeUnmap)) return NO;
     if (mode == MTLSparseTextureMappingModeMap &&
         !zpu_sparse_heap_range(heap, buffer->_sparsePageSize, heapOffset, range.length)) return NO;
+    NSMutableArray *mappedPages = nil;
+    if (mode == MTLSparseTextureMappingModeMap) {
+        mappedPages = [NSMutableArray arrayWithCapacity:range.length];
+        for (NSUInteger index = 0; index < range.length; ++index) {
+            ZPUSparsePage *page = zpu_heap_sparse_page(heap, buffer->_sparsePageSize, heapOffset + index, YES);
+            if (page == nil) return NO;
+            [mappedPages addObject:page];
+        }
+    }
     for (NSUInteger index = 0; index < range.length; ++index) {
         const NSUInteger bufferPage = range.location + index;
         NSNumber *bufferKey = @(bufferPage);
         ZPUSparsePage *oldPage = buffer->_sparseMappings[bufferKey];
         if (oldPage != nil) zpu_sparse_copy_buffer_to_page(buffer, bufferPage, oldPage);
         if (mode == MTLSparseTextureMappingModeMap) {
-            ZPUSparsePage *page = zpu_heap_sparse_page(heap, buffer->_sparsePageSize, heapOffset + index, YES);
-            if (page == nil) return NO;
+            ZPUSparsePage *page = mappedPages[index];
             buffer->_sparseMappings[bufferKey] = page;
             zpu_sparse_copy_page_to_buffer(buffer, bufferPage, page);
         } else {
@@ -1754,7 +1763,16 @@ static BOOL zpu_sparse_copy_buffer_mapping(ZPUBuffer *source, ZPUBuffer *destina
         const NSUInteger destinationPage = destinationOffset + index;
         NSNumber *destinationKey = @(destinationPage);
         ZPUSparsePage *oldPage = destination->_sparseMappings[destinationKey];
-        if (oldPage != nil) zpu_sparse_copy_buffer_to_page(destination, destinationPage, oldPage);
+        BOOL oldPageIsSourcePage = NO;
+        if (oldPage != nil) {
+            for (id value in pages) {
+                if (![value isKindOfClass:[NSNull class]] && value == oldPage) {
+                    oldPageIsSourcePage = YES;
+                    break;
+                }
+            }
+        }
+        if (oldPage != nil && !oldPageIsSourcePage) zpu_sparse_copy_buffer_to_page(destination, destinationPage, oldPage);
         id value = pages[index];
         if ([value isKindOfClass:[NSNull class]]) {
             [destination->_sparseMappings removeObjectForKey:destinationKey];

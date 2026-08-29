@@ -5803,6 +5803,10 @@ int main(void) {
             .destinationOffset = 0,
         };
         [metal4_sparse_queue copyBufferMappingsFromBuffer:sparse_source
+                                                  toBuffer:sparse_source
+                                                operations:&metal4_sparse_copy_operation
+                                                     count:1];
+        [metal4_sparse_queue copyBufferMappingsFromBuffer:sparse_source
                                                   toBuffer:sparse_destination
                                                 operations:&metal4_sparse_copy_operation
                                                      count:1];
