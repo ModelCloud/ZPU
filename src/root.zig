@@ -11,10 +11,14 @@ pub const platform = @import("platform/presenter.zig");
 pub const benchmark = @import("benchmark.zig");
 pub const render_pipeline = @import("render_pipeline.zig");
 pub const render_ir_exec = @import("vulkan/render_ir_exec.zig");
+pub const pass_dag = @import("render/pass_dag.zig");
+pub const cluster_pipeline = @import("render/cluster_pipeline.zig");
 
 test {
     _ = @import("tests.zig");
     _ = @import("vulkan/driver.zig");
     _ = @import("render_pipeline.zig");
     _ = @import("vulkan/render_ir_exec.zig");
+    _ = @import("render/pass_dag.zig");
+    _ = @import("render/cluster_pipeline.zig");
 }
