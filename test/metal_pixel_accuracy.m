@@ -8652,6 +8652,9 @@ int main(void) {
                 MTLIndirectCommandTypeDrawMeshThreadgroups;
             adapter_mesh_icb_descriptor.inheritPipelineState = YES;
             adapter_mesh_icb_descriptor.inheritBuffers = YES;
+            adapter_mesh_icb_descriptor.maxObjectBufferBindCount = 1;
+            adapter_mesh_icb_descriptor.maxMeshBufferBindCount = 1;
+            adapter_mesh_icb_descriptor.maxObjectThreadgroupMemoryBindCount = 1;
             id<MTLIndirectCommandBuffer> adapter_mesh_icb =
                 [adapter_device newIndirectCommandBufferWithDescriptor:adapter_mesh_icb_descriptor
                                                             maxCommandCount:2
@@ -8663,6 +8666,9 @@ int main(void) {
             [adapter_mesh_icb_command drawMeshThreads:MTLSizeMake(5, 3, 1)
                            threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
                              threadsPerMeshThreadgroup:MTLSizeMake(1, 1, 1)];
+            [adapter_mesh_icb_command setObjectBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+            [adapter_mesh_icb_command setMeshBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+            [adapter_mesh_icb_command setObjectThreadgroupMemoryLength:16 atIndex:0];
             [adapter_mesh_icb_threadgroups_command drawMeshThreadgroups:MTLSizeMake(5, 3, 1)
                                       threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
                                         threadsPerMeshThreadgroup:MTLSizeMake(1, 1, 1)];
@@ -8896,6 +8902,9 @@ int main(void) {
             adapter_mtl4_mesh_icb_descriptor.commandTypes = MTLIndirectCommandTypeDrawMeshThreadgroups;
             adapter_mtl4_mesh_icb_descriptor.inheritPipelineState = YES;
             adapter_mtl4_mesh_icb_descriptor.inheritBuffers = YES;
+            adapter_mtl4_mesh_icb_descriptor.maxObjectBufferBindCount = 1;
+            adapter_mtl4_mesh_icb_descriptor.maxMeshBufferBindCount = 1;
+            adapter_mtl4_mesh_icb_descriptor.maxObjectThreadgroupMemoryBindCount = 1;
             id<MTLIndirectCommandBuffer> adapter_mtl4_mesh_icb =
                 [adapter_device newIndirectCommandBufferWithDescriptor:adapter_mtl4_mesh_icb_descriptor
                                                             maxCommandCount:1
@@ -8905,6 +8914,9 @@ int main(void) {
             [adapter_mtl4_mesh_icb_command drawMeshThreadgroups:MTLSizeMake(5, 3, 1)
                                       threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
                                         threadsPerMeshThreadgroup:MTLSizeMake(1, 1, 1)];
+            [adapter_mtl4_mesh_icb_command setObjectBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+            [adapter_mtl4_mesh_icb_command setMeshBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+            [adapter_mtl4_mesh_icb_command setObjectThreadgroupMemoryLength:16 atIndex:0];
             MTLTextureDescriptor *adapter_mtl4_mesh_icb_texture_descriptor =
                 [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                     width:5 height:3 mipmapped:NO];

@@ -15059,7 +15059,6 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
         ZPURenderPipelineState *effectiveState = state != nil ? state : encoder->_pipelineState;
         if ((state != nil && (![state isKindOfClass:[ZPURenderPipelineState class]] ||
                               state->_owner != [encoder->_owner device])) ||
-             _objectBuffers.count != 0 || _meshBuffers.count != 0 || _objectThreadgroupMemoryLengths.count != 0 ||
              ![effectiveState isKindOfClass:[ZPURenderPipelineState class]] ||
              effectiveState->_owner != [encoder->_owner device] || !effectiveState->_isMeshPipeline ||
              !effectiveState->_supportsIndirectCommandBuffers ||
@@ -15071,6 +15070,23 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
         }
         if (@available(macOS 13.0, iOS 16.0, *)) {
             if (state != nil) [encoder setRenderPipelineState:(id<MTLRenderPipelineState>)state];
+            for (NSNumber *bindingIndex in _objectBuffers) {
+                id buffer = _objectBuffers[bindingIndex];
+                NSUInteger offset = [_objectBufferOffsets[bindingIndex] unsignedIntegerValue];
+                [encoder setObjectBuffer:buffer == [NSNull null] ? nil : buffer
+                                  offset:offset atIndex:bindingIndex.unsignedIntegerValue];
+            }
+            for (NSNumber *bindingIndex in _meshBuffers) {
+                id buffer = _meshBuffers[bindingIndex];
+                NSUInteger offset = [_meshBufferOffsets[bindingIndex] unsignedIntegerValue];
+                [encoder setMeshBuffer:buffer == [NSNull null] ? nil : buffer
+                                offset:offset atIndex:bindingIndex.unsignedIntegerValue];
+            }
+            for (NSNumber *bindingIndex in _objectThreadgroupMemoryLengths) {
+                [encoder setObjectThreadgroupMemoryLength:
+                    [_objectThreadgroupMemoryLengths[bindingIndex] unsignedIntegerValue]
+                    atIndex:bindingIndex.unsignedIntegerValue];
+            }
             if (_hasMeshThreadgroups) {
                 [encoder drawMeshThreadgroups:_meshThreadgroupsPerGrid
                      threadsPerObjectThreadgroup:_meshThreadsPerObjectThreadgroup
