@@ -46,6 +46,7 @@
 @class ZPURenderEncoder;
 @class ZPUResourceStateEncoder;
 @class ZPULibrary;
+@class ZPUDynamicLibrary;
 @class ZPUBinaryArchive;
 @class ZPUMTL4BinaryFunction;
 @class ZPUMTL4PipelineDataSetSerializer;
@@ -790,8 +791,27 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     ZPUDevice *_owner;
     NSArray *_functionNames;
     NSString *_label;
+    MTLLibraryType _type;
+    NSString *_installName;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner source:(NSString *)source;
+- (instancetype)initWithOwner:(ZPUDevice *)owner source:(NSString *)source
+                          type:(MTLLibraryType)type installName:(NSString *)installName;
+@end
+
+/* Dynamic libraries are CPU-side symbol packages. They retain only the
+ * registered ZPU function names and a deterministic install name; no native
+ * Metal library or compiled shader binary is loaded or serialized. */
+API_AVAILABLE(macos(11.0), ios(14.0))
+@interface ZPUDynamicLibrary : NSObject <MTLDynamicLibrary> {
+@public
+    ZPUDevice *_owner;
+    NSArray *_functionNames;
+    NSString *_installName;
+    NSString *_label;
+}
+- (instancetype)initWithLibrary:(ZPULibrary *)library error:(NSError **)error;
+- (instancetype)initWithOwner:(ZPUDevice *)owner serializedData:(NSData *)data error:(NSError **)error;
 @end
 
 /* A binary archive is a deterministic CPU metadata cache. It stores names of
@@ -3966,12 +3986,23 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
     return descriptor == nil ? nil : (id<MTLSamplerState>)[[ZPUSamplerState alloc] initWithOwner:self descriptor:descriptor];
 }
 - (id<MTLLibrary>)newLibraryWithSource:(NSString *)source options:(MTLCompileOptions *)options error:(NSError **)error {
-    (void)options;
     if (source == nil) {
         zpu_set_error(error, @"ZPU CPU Metal requires source text");
         return nil;
     }
-    ZPULibrary *library = [[ZPULibrary alloc] initWithOwner:self source:source];
+    MTLLibraryType type = MTLLibraryTypeExecutable;
+    NSString *installName = nil;
+    if (options != nil) {
+        if (@available(macOS 11.0, iOS 14.0, *)) {
+            type = options.libraryType;
+            installName = options.installName;
+        }
+    }
+    if (type == MTLLibraryTypeDynamic && installName.length == 0) {
+        zpu_set_error(error, @"ZPU CPU Metal dynamic libraries require a non-empty install name");
+        return nil;
+    }
+    ZPULibrary *library = [[ZPULibrary alloc] initWithOwner:self source:source type:type installName:installName];
     if (library->_functionNames.count == 0) {
         zpu_set_error(error, @"ZPU CPU Metal source contains no registered CPU kernel");
         return nil;
@@ -4217,14 +4248,16 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
 - (uint32_t)peerIndex API_AVAILABLE(macos(10.15)) { return 0; }
 - (uint32_t)peerCount API_AVAILABLE(macos(10.15)) { return 1; }
 - (id<MTLDynamicLibrary>)newDynamicLibrary:(id<MTLLibrary>)library error:(NSError **)error API_AVAILABLE(macos(11.0), ios(14.0)) {
-    (void)library;
-    zpu_set_error(error, @"ZPU CPU Metal has no dynamic shader libraries");
-    return nil;
+    return (id<MTLDynamicLibrary>)[[ZPUDynamicLibrary alloc] initWithLibrary:(ZPULibrary *)library error:error];
 }
 - (id<MTLDynamicLibrary>)newDynamicLibraryWithURL:(NSURL *)url error:(NSError **)error API_AVAILABLE(macos(11.0), ios(14.0)) {
-    (void)url;
-    zpu_set_error(error, @"ZPU CPU Metal has no dynamic shader libraries");
-    return nil;
+    if (url == nil || !url.isFileURL) {
+        zpu_set_error(error, @"ZPU CPU Metal dynamic library URL must be a file URL");
+        return nil;
+    }
+    NSData *data = [NSData dataWithContentsOfURL:url options:0 error:error];
+    return data == nil ? nil : (id<MTLDynamicLibrary>)[[ZPUDynamicLibrary alloc]
+        initWithOwner:self serializedData:data error:error];
 }
 - (id<MTLBinaryArchive>)newBinaryArchiveWithDescriptor:(MTLBinaryArchiveDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(11.0), ios(14.0)) {
     return (id<MTLBinaryArchive>)[[ZPUBinaryArchive alloc] initWithOwner:self descriptor:descriptor error:error];
@@ -4529,8 +4562,14 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
 
 @implementation ZPULibrary
 - (instancetype)initWithOwner:(ZPUDevice *)owner source:(NSString *)source {
+    return [self initWithOwner:owner source:source type:MTLLibraryTypeExecutable installName:nil];
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner source:(NSString *)source
+                          type:(MTLLibraryType)type installName:(NSString *)installName {
     if ((self = [super init])) {
         _owner = owner;
+        _type = type;
+        _installName = [installName copy];
         NSMutableArray *names = [NSMutableArray array];
         for (NSString *name in @[
             @"zpu_test_vertex",
@@ -4558,6 +4597,7 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
 - (NSString *)label { return _label; }
 - (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (id<MTLFunction>)newFunctionWithName:(NSString *)functionName {
+    if (_type != MTLLibraryTypeExecutable) return nil;
     if (![_functionNames containsObject:functionName]) return nil;
     return (id<MTLFunction>)[[ZPUCPUFunction alloc] initWithOwner:_owner name:functionName];
 }
@@ -4575,11 +4615,11 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
     id<MTLFunction> function = [self newFunctionWithName:name constantValues:constantValues error:&error];
     completionHandler(function, error);
 }
-- (NSArray<NSString *> *)functionNames { return _functionNames; }
-- (MTLLibraryType)type API_AVAILABLE(macos(11.0), ios(14.0)) { return MTLLibraryTypeExecutable; }
-- (NSString *)installName API_AVAILABLE(macos(11.0), ios(14.0)) { return nil; }
+- (NSArray<NSString *> *)functionNames { return _type == MTLLibraryTypeExecutable ? _functionNames : @[]; }
+- (MTLLibraryType)type API_AVAILABLE(macos(11.0), ios(14.0)) { return _type; }
+- (NSString *)installName API_AVAILABLE(macos(11.0), ios(14.0)) { return _installName; }
 - (MTLFunctionReflection *)reflectionForFunctionWithName:(NSString *)functionName API_AVAILABLE(macos(26.0), ios(26.0)) {
-    if (![_functionNames containsObject:functionName]) return nil;
+    if (_type != MTLLibraryTypeExecutable || ![_functionNames containsObject:functionName]) return nil;
     return zpu_function_reflection(functionName);
 }
 - (id<MTLFunction>)newFunctionWithDescriptor:(MTLFunctionDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(11.0), ios(14.0)) {
@@ -4605,6 +4645,75 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
     NSError *error = nil;
     zpu_set_error(&error, @"ZPU CPU Metal has no intersection-function implementation");
     completionHandler(nil, error);
+}
+@end
+
+@implementation ZPUDynamicLibrary
+- (instancetype)initWithLibrary:(ZPULibrary *)library error:(NSError **)error {
+    if (![library isKindOfClass:[ZPULibrary class]] || library->_owner == nil ||
+        library->_type != MTLLibraryTypeDynamic || library->_installName.length == 0) {
+        zpu_set_error(error, @"ZPU CPU Metal dynamic libraries require a dynamic ZPU library with an install name");
+        return nil;
+    }
+    if ((self = [super init])) {
+        _owner = library->_owner;
+        _functionNames = [library->_functionNames copy];
+        _installName = [library->_installName copy];
+    }
+    if (error != NULL) *error = nil;
+    return self;
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner serializedData:(NSData *)data error:(NSError **)error {
+    if (owner == nil || data == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal dynamic library requires an owner and serialized data");
+        return nil;
+    }
+    NSString *serialized = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    NSArray<NSString *> *lines = [serialized componentsSeparatedByString:@"\n"];
+    if (serialized == nil || lines.count < 3 ||
+        ![lines[0] isEqualToString:@"ZPU CPU Metal Dynamic Library v1"] || lines[1].length == 0) {
+        zpu_set_error(error, @"ZPU CPU Metal dynamic library data is invalid");
+        return nil;
+    }
+    NSMutableString *source = [NSMutableString string];
+    for (NSUInteger index = 2; index < lines.count; ++index) {
+        if (lines[index].length != 0) [source appendFormat:@"%@ ", lines[index]];
+    }
+    ZPULibrary *library = [[ZPULibrary alloc] initWithOwner:owner source:source];
+    if (library->_functionNames.count == 0) {
+        zpu_set_error(error, @"ZPU CPU Metal dynamic library data contains no registered CPU symbols");
+        return nil;
+    }
+    if ((self = [super init])) {
+        _owner = owner;
+        _functionNames = [library->_functionNames copy];
+        _installName = [lines[1] copy];
+    }
+    if (error != NULL) *error = nil;
+    return self;
+}
+- (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
+- (NSString *)installName { return _installName; }
+- (BOOL)serializeToURL:(NSURL *)url error:(NSError **)error {
+    if (url == nil || !url.isFileURL) {
+        zpu_set_error(error, @"ZPU CPU Metal dynamic library serialization requires a file URL");
+        return NO;
+    }
+    NSMutableString *serialized = [NSMutableString stringWithFormat:@"ZPU CPU Metal Dynamic Library v1\n%@\n", _installName];
+    NSArray<NSString *> *sortedNames = [_functionNames sortedArrayUsingSelector:@selector(compare:)];
+    for (NSString *name in sortedNames) [serialized appendFormat:@"%@\n", name];
+    NSError *writeError = nil;
+    BOOL result = [[serialized dataUsingEncoding:NSUTF8StringEncoding] writeToURL:url
+                                                                            options:NSDataWritingAtomic
+                                                                              error:&writeError];
+    if (!result) {
+        if (error != NULL) *error = writeError;
+        return NO;
+    }
+    if (error != NULL) *error = nil;
+    return YES;
 }
 @end
 
@@ -4974,7 +5083,19 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
         zpu_set_error(error, @"ZPU CPU Metal 4 library creation requires source text");
         return nil;
     }
-    ZPULibrary *library = [[ZPULibrary alloc] initWithOwner:_owner source:descriptor.source];
+    MTLLibraryType type = MTLLibraryTypeExecutable;
+    NSString *installName = nil;
+    MTLCompileOptions *options = descriptor.options;
+    if (options != nil) {
+        type = options.libraryType;
+        installName = options.installName;
+    }
+    if (type == MTLLibraryTypeDynamic && installName.length == 0) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 dynamic libraries require a non-empty install name");
+        return nil;
+    }
+    ZPULibrary *library = [[ZPULibrary alloc] initWithOwner:_owner source:descriptor.source
+                                                       type:type installName:installName];
     if (library->_functionNames.count == 0) {
         zpu_set_error(error, @"ZPU CPU Metal 4 source contains no registered CPU kernel");
         return nil;
@@ -4984,14 +5105,16 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     return (id<MTLLibrary>)library;
 }
 - (id<MTLDynamicLibrary>)newDynamicLibrary:(id<MTLLibrary>)library error:(NSError **)error {
-    (void)library;
-    zpu_set_error(error, @"ZPU CPU Metal 4 has no dynamic library implementation");
-    return nil;
+    return (id<MTLDynamicLibrary>)[[ZPUDynamicLibrary alloc] initWithLibrary:(ZPULibrary *)library error:error];
 }
 - (id<MTLDynamicLibrary>)newDynamicLibraryWithURL:(NSURL *)url error:(NSError **)error {
-    (void)url;
-    zpu_set_error(error, @"ZPU CPU Metal 4 has no dynamic library implementation");
-    return nil;
+    if (url == nil || !url.isFileURL) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 dynamic library URL must be a file URL");
+        return nil;
+    }
+    NSData *data = [NSData dataWithContentsOfURL:url options:0 error:error];
+    return data == nil ? nil : (id<MTLDynamicLibrary>)[[ZPUDynamicLibrary alloc]
+        initWithOwner:_owner serializedData:data error:error];
 }
 - (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTL4ComputePipelineDescriptor *)descriptor
                                                   compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions

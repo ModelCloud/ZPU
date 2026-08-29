@@ -3817,6 +3817,46 @@ int main(void) {
             return 50;
         }
 
+        /* Dynamic libraries are CPU symbol packages. The adapter accepts the
+         * same registered ZPU names, preserves the install name, and round
+         * trips its own deterministic file format; no native Metal library
+         * is created for this path. */
+        BOOL adapter_dynamic_library_ok = YES;
+        if (@available(macOS 11.0, iOS 14.0, *)) {
+            MTLCompileOptions *adapter_dynamic_options = [MTLCompileOptions new];
+            adapter_dynamic_options.libraryType = MTLLibraryTypeDynamic;
+            adapter_dynamic_options.installName = @"@loader_path/zpu_cpu_dynamic.metallib";
+            NSError *adapter_dynamic_error = nil;
+            id<MTLLibrary> adapter_dynamic_source_library =
+                [adapter_device newLibraryWithSource:adapter_cpu_source
+                                             options:adapter_dynamic_options
+                                               error:&adapter_dynamic_error];
+            id<MTLDynamicLibrary> adapter_dynamic_library =
+                [adapter_device newDynamicLibrary:adapter_dynamic_source_library error:&adapter_dynamic_error];
+            NSURL *adapter_dynamic_url = [NSURL fileURLWithPath:
+                [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]]];
+            BOOL adapter_dynamic_serialized =
+                [adapter_dynamic_library serializeToURL:adapter_dynamic_url error:&adapter_dynamic_error];
+            id<MTLDynamicLibrary> adapter_dynamic_reloaded =
+                [adapter_device newDynamicLibraryWithURL:adapter_dynamic_url error:&adapter_dynamic_error];
+            adapter_dynamic_library_ok =
+                adapter_dynamic_source_library != nil &&
+                adapter_dynamic_source_library.type == MTLLibraryTypeDynamic &&
+                [adapter_dynamic_source_library.installName isEqualToString:adapter_dynamic_options.installName] &&
+                adapter_dynamic_library != nil &&
+                [adapter_dynamic_library conformsToProtocol:@protocol(MTLDynamicLibrary)] &&
+                adapter_dynamic_library.device == adapter_device &&
+                [adapter_dynamic_library.installName isEqualToString:adapter_dynamic_options.installName] &&
+                adapter_dynamic_serialized && adapter_dynamic_reloaded != nil &&
+                adapter_dynamic_reloaded.device == adapter_device &&
+                [adapter_dynamic_reloaded.installName isEqualToString:adapter_dynamic_options.installName];
+            [[NSFileManager defaultManager] removeItemAtURL:adapter_dynamic_url error:nil];
+        }
+        if (!adapter_dynamic_library_ok) {
+            fail_with_error("CPU dynamic library metadata failed", adapter_library_error);
+            return 136;
+        }
+
         NSURL *adapter_source_url = [NSURL fileURLWithPath:
             [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]]];
         NSError *adapter_source_error = nil;
@@ -4186,6 +4226,39 @@ int main(void) {
         id<MTLLibrary> adapter_mtl4_library =
             [adapter_mtl4_compiler newLibraryWithDescriptor:adapter_mtl4_library_descriptor
                                                        error:&adapter_mtl4_compiler_error];
+        BOOL adapter_mtl4_dynamic_library_ok = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTLCompileOptions *adapter_mtl4_dynamic_options = [MTLCompileOptions new];
+            adapter_mtl4_dynamic_options.libraryType = MTLLibraryTypeDynamic;
+            adapter_mtl4_dynamic_options.installName = @"@loader_path/zpu_cpu_mtl4_dynamic.metallib";
+            MTL4LibraryDescriptor *adapter_mtl4_dynamic_descriptor = [MTL4LibraryDescriptor new];
+            adapter_mtl4_dynamic_descriptor.source = adapter_mtl4_library_descriptor.source;
+            adapter_mtl4_dynamic_descriptor.options = adapter_mtl4_dynamic_options;
+            id<MTLLibrary> adapter_mtl4_dynamic_source_library =
+                [adapter_mtl4_compiler newLibraryWithDescriptor:adapter_mtl4_dynamic_descriptor
+                                                           error:&adapter_mtl4_compiler_error];
+            id<MTLDynamicLibrary> adapter_mtl4_dynamic_library =
+                [adapter_mtl4_compiler newDynamicLibrary:adapter_mtl4_dynamic_source_library
+                                                    error:&adapter_mtl4_compiler_error];
+            NSURL *adapter_mtl4_dynamic_url = [NSURL fileURLWithPath:
+                [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]]];
+            BOOL adapter_mtl4_dynamic_serialized =
+                [adapter_mtl4_dynamic_library serializeToURL:adapter_mtl4_dynamic_url
+                                                        error:&adapter_mtl4_compiler_error];
+            id<MTLDynamicLibrary> adapter_mtl4_dynamic_reloaded =
+                [adapter_mtl4_compiler newDynamicLibraryWithURL:adapter_mtl4_dynamic_url
+                                                           error:&adapter_mtl4_compiler_error];
+            adapter_mtl4_dynamic_library_ok =
+                adapter_mtl4_dynamic_source_library != nil &&
+                adapter_mtl4_dynamic_source_library.type == MTLLibraryTypeDynamic &&
+                adapter_mtl4_dynamic_library != nil &&
+                adapter_mtl4_dynamic_library.device == adapter_device &&
+                [adapter_mtl4_dynamic_library.installName isEqualToString:adapter_mtl4_dynamic_options.installName] &&
+                adapter_mtl4_dynamic_serialized && adapter_mtl4_dynamic_reloaded != nil &&
+                adapter_mtl4_dynamic_reloaded.device == adapter_device &&
+                [adapter_mtl4_dynamic_reloaded.installName isEqualToString:adapter_mtl4_dynamic_options.installName];
+            [[NSFileManager defaultManager] removeItemAtURL:adapter_mtl4_dynamic_url error:nil];
+        }
         MTLFunctionReflection *adapter_mtl4_function_reflection = nil;
         MTLFunctionReflection *adapter_mtl4_no_raster_reflection = nil;
         MTLFunctionReflection *native_function_reflection = nil;
@@ -4349,6 +4422,7 @@ int main(void) {
             adapter_mtl4_pipeline_script.length == 0 || !adapter_mtl4_archive_flushed ||
             adapter_mtl4_serializer_archive == nil || adapter_mtl4_serializer_binary == nil ||
             adapter_mtl4_compiler == nil || adapter_mtl4_library == nil ||
+            !adapter_mtl4_dynamic_library_ok ||
             adapter_mtl4_function_reflection == nil ||
             adapter_mtl4_function_reflection.bindings.count != 1 ||
             ![adapter_mtl4_function_reflection.bindings[0].name isEqualToString:@"output"] ||

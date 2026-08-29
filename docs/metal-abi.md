@@ -126,8 +126,9 @@ triangle path:
   compiler-created compute pipeline descriptors instantiate the existing ZPU
   CPU kernels, binary functions expose deterministic name/type metadata, and
   asynchronous compiler tasks complete synchronously after CPU construction;
-  render/tile/mesh, dynamic-library, machine-learning, and arbitrary-MSL
-  compiler requests remain fail-closed
+  dynamic libraries preserve registered symbol names and install names through
+  a deterministic CPU serialization format; render/tile/mesh,
+  machine-learning, and arbitrary-MSL compiler requests remain fail-closed
 - CPU-owned Metal 4 pipeline-data serializers record those registered compute
   names and emit deterministic ZPU metadata scripts or the existing ZPU
   binary-archive format; these outputs are not Apple metal-tt scripts or
