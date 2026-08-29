@@ -1649,6 +1649,10 @@ var parallel_active: ?ParallelJob = null;
 var batch_prepared_storage: [max_batch_commands]PreparedDraw = undefined;
 var batch_command_cache: [max_batch_commands]BatchCommandCache = undefined;
 var batch_command_snapshots: [max_batch_commands]BatchCommandSnapshot = undefined;
+// Populated by the single cache-validation pass before a batch dispatch.
+// Preparation workers consume this mask so they do not repeat the same
+// command-cache comparison for every entry in a dynamic stream.
+var batch_command_needs_prepare: [max_batch_commands]bool = undefined;
 var batch_span_cache: [max_batch_span_cache_commands]BatchSpanCache = undefined;
 var batch_quad_span_cache: [max_batch_commands]BatchQuadSpanCache = undefined;
 var batch_command_lanes: [max_batch_commands]u8 = undefined;
@@ -1798,10 +1802,13 @@ fn batchCommandCacheMatches(cache: *const BatchCommandCache, snapshot: *const Ba
 fn batchNeedsPreparation(commands: []const DrawCommand, width: u32, height: u32) bool {
     const lighting_generation = exact_lighting_cache_generation.load(.acquire);
     const commands_address = @intFromPtr(commands.ptr);
+    var needs_preparation = false;
     for (commands, 0..) |command, index| {
-        if (!batchCommandCacheMatches(&batch_command_cache[index], &batch_command_snapshots[index], command, commands_address, width, height, lighting_generation)) return true;
+        const needs_command = !batchCommandCacheMatches(&batch_command_cache[index], &batch_command_snapshots[index], command, commands_address, width, height, lighting_generation);
+        batch_command_needs_prepare[index] = needs_command;
+        needs_preparation = needs_preparation or needs_command;
     }
-    return false;
+    return needs_preparation;
 }
 
 fn batchGeometryCacheMatches(cache: *const BatchCommandCache, snapshot: *const BatchCommandSnapshot, command: DrawCommand) bool {
@@ -1895,6 +1902,7 @@ fn refreshBatchPreparedUvs(prepared: *PreparedDraw, uniform: []const u8, vertex_
 }
 
 fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_index: usize, width: u32, height: u32, output: *PreparedDraw, build_opaque_quad: bool) void {
+    if (!batch_command_needs_prepare[command_index]) return;
     const lighting_generation = exact_lighting_cache_generation.load(.acquire);
     const command_cache = &batch_command_cache[command_index];
     const command_snapshot = &batch_command_snapshots[command_index];
@@ -2168,6 +2176,18 @@ inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: [
             const sampled_v = stepped_v_over_w * raster.flat_reciprocal_w;
             const texture_y = unitTextureCoordinate16(sampled_v);
             var x = first_x;
+            // Terminal glyphs are only a handful of pixels wide. The
+            // transition estimator below is useful for large spans, but its
+            // per-run division and look-ahead samples cost more than they
+            // save on these short atlas spans.
+            if (last_x - first_x <= 8) {
+                while (x < last_x) : (x += 1) {
+                    const color = shadeUnitTexture16x16Row(stepped_u_over_w * raster.flat_reciprocal_w, texture_y, prelit);
+                    pixels_written += writeFlatColorSpanAtRow(depth_test, color_words, depth_words, row_offset, @intCast(x), @intCast(x + 1), raster.flat_depth_bits, color);
+                    stepped_u_over_w += raster.u_over_w_dx;
+                }
+                continue;
+            }
             while (x < last_x) {
                 const sampled_u = stepped_u_over_w * raster.flat_reciprocal_w;
                 const color = shadeUnitTexture16x16Row(sampled_u, texture_y, prelit);
