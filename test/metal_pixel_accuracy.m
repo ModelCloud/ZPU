@@ -7609,6 +7609,37 @@ int main(void) {
             return 59;
         }
 
+        /* As with render ICBs, the fixed CPU compute ABI has one representable
+         * kernel-buffer slot. Do not accept a larger descriptor and later
+         * replay its index-one binding as index zero. */
+        MTLIndirectCommandBufferDescriptor *invalid_compute_binding_descriptor = [compute_icb_descriptor copy];
+        invalid_compute_binding_descriptor.maxKernelBufferBindCount = 2;
+        id<MTLIndirectCommandBuffer> invalid_compute_binding_icb =
+            [adapter_device newIndirectCommandBufferWithDescriptor:invalid_compute_binding_descriptor
+                                                    maxCommandCount:1 options:MTLResourceStorageModeShared];
+        id<MTLIndirectComputeCommand> invalid_compute_binding_command =
+            [invalid_compute_binding_icb indirectComputeCommandAtIndex:0];
+        [invalid_compute_binding_command setComputePipelineState:adapter_icb_compute_pipeline];
+        [invalid_compute_binding_command setKernelBuffer:adapter_copy_buffer offset:0 atIndex:1];
+        [invalid_compute_binding_command concurrentDispatchThreads:MTLSizeMake(width, height, 1)
+                                               threadsPerThreadgroup:MTLSizeMake(2, 2, 1)];
+        id<MTLTexture> invalid_compute_binding_texture =
+            [adapter_device newTextureWithDescriptor:compute_texture_descriptor];
+        id<MTLCommandBuffer> invalid_compute_binding_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> invalid_compute_binding_encoder =
+            [invalid_compute_binding_command_buffer computeCommandEncoder];
+        [invalid_compute_binding_encoder setTexture:invalid_compute_binding_texture atIndex:1];
+        [invalid_compute_binding_encoder executeCommandsInBuffer:invalid_compute_binding_icb withRange:NSMakeRange(0, 1)];
+        [invalid_compute_binding_encoder endEncoding];
+        [invalid_compute_binding_command_buffer commit];
+        [invalid_compute_binding_command_buffer waitUntilCompleted];
+        if (invalid_compute_binding_icb == nil || invalid_compute_binding_command == nil ||
+            invalid_compute_binding_texture == nil || invalid_compute_binding_encoder == nil ||
+            invalid_compute_binding_command_buffer.status != MTLCommandBufferStatusError) {
+            fprintf(stderr, "metal-pixel: indirect kernel binding index did not fail closed\n");
+            return 130;
+        }
+
         if (@available(macOS 14.0, *)) {
             MTLIndirectCommandBufferDescriptor *invalid_memory_icb_descriptor = [compute_icb_descriptor copy];
             invalid_memory_icb_descriptor.maxKernelThreadgroupMemoryBindCount = 0;
@@ -8886,6 +8917,41 @@ int main(void) {
                         index, metal_icb_pixels[index], adapter_icb_pixels[index]);
                 return 40;
             }
+        }
+
+        /* The CPU renderer currently has one representable vertex binding.
+         * An ICB descriptor may advertise more slots, but accepting an index
+         * other than zero would replay that resource at the wrong slot. The
+         * adapter must poison the command instead of silently rebinding it. */
+        MTLIndirectCommandBufferDescriptor *invalid_render_binding_descriptor = [icb_descriptor copy];
+        invalid_render_binding_descriptor.maxVertexBufferBindCount = 2;
+        id<MTLIndirectCommandBuffer> invalid_render_binding_icb =
+            [adapter_device newIndirectCommandBufferWithDescriptor:invalid_render_binding_descriptor
+                                                    maxCommandCount:1 options:MTLResourceStorageModeShared];
+        id<MTLIndirectRenderCommand> invalid_render_binding_command =
+            [invalid_render_binding_icb indirectRenderCommandAtIndex:0];
+        [invalid_render_binding_command setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:1];
+        [invalid_render_binding_command drawPrimitives:MTLPrimitiveTypeTriangle
+                                          vertexStart:0 vertexCount:6 instanceCount:1 baseInstance:0];
+        id<MTLTexture> invalid_render_binding_texture =
+            [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTLRenderPassDescriptor *invalid_render_binding_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        invalid_render_binding_pass.colorAttachments[0].texture = invalid_render_binding_texture;
+        invalid_render_binding_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        invalid_render_binding_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLCommandBuffer> invalid_render_binding_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> invalid_render_binding_encoder =
+            [invalid_render_binding_command_buffer renderCommandEncoderWithDescriptor:invalid_render_binding_pass];
+        [invalid_render_binding_encoder setRenderPipelineState:adapter_pipeline];
+        [invalid_render_binding_encoder executeCommandsInBuffer:invalid_render_binding_icb withRange:NSMakeRange(0, 1)];
+        [invalid_render_binding_encoder endEncoding];
+        [invalid_render_binding_command_buffer commit];
+        [invalid_render_binding_command_buffer waitUntilCompleted];
+        if (invalid_render_binding_icb == nil || invalid_render_binding_command == nil ||
+            invalid_render_binding_texture == nil || invalid_render_binding_encoder == nil ||
+            invalid_render_binding_command_buffer.status != MTLCommandBufferStatusError) {
+            fprintf(stderr, "metal-pixel: indirect vertex binding index did not fail closed\n");
+            return 129;
         }
 
         /* Indexed ICB commands carry their index resource inside the CPU

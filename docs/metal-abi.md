@@ -260,6 +260,9 @@ triangle path:
   buffer inherits the ZPU encoder's texture bindings and records pipeline,
   buffer, and dispatch state for deferred execution, with device ownership,
   command-type, buffer-offset, dimension, and CPU threadgroup-limit checks.
+  The fixed CPU kernel ABI has one representable kernel-buffer binding, so an
+  ICB binding at any other index fails closed rather than being replayed at
+  index zero.
   Indirect imageblock dimensions, stage-in regions, and kernel threadgroup
   memory bindings are retained through copy/reset and checked against the
   descriptor's bind limit; they are metadata-only for the registered ZPU
@@ -272,6 +275,10 @@ triangle path:
   state; patch buffers, tessellation-factor buffers, offsets, strides, and
   draw ranges are retained in the CPU-owned ICB, while CPU tessellation
   execution fails closed at replay
+- CPU indirect render commands preserve the same one-slot constraint as the
+  CPU raster ABI for vertex and fragment buffers; descriptor capacity beyond
+  slot zero is accepted as metadata, but recording a non-zero binding fails
+  closed instead of silently rebinding it at slot zero
 - Metal 4 buffer/texture/tensor copies, buffer-fill, indirect-command reset/copy,
   and CPU/GPU access optimization commands append or apply CPU-owned ZPU work;
   CPU-owned tensors also provide contiguous and strided byte-addressable slice

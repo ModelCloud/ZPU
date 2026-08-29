@@ -12531,7 +12531,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
-    if (index >= _owner->_maxVertexBufferBindCount ||
+    if (index != 0 || index >= _owner->_maxVertexBufferBindCount ||
         (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
                             zpuBuffer->_owner != _owner->_owner || offset > zpuBuffer.length))) {
         _unsupportedCommand = YES;
@@ -12543,7 +12543,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 }
 - (void)setFragmentBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
-    if (index >= _owner->_maxFragmentBufferBindCount || (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
+    if (index != 0 || index >= _owner->_maxFragmentBufferBindCount || (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
                                          zpuBuffer->_owner != _owner->_owner || offset > zpuBuffer.length))) {
         _unsupportedCommand = YES;
         return;
@@ -12867,7 +12867,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 }
 - (void)setKernelBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
-    if (index >= _owner->_maxKernelBufferBindCount || (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
+    if (index != 0 || index >= _owner->_maxKernelBufferBindCount || (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
                                          zpuBuffer->_owner != _owner->_owner || offset > zpuBuffer.length))) {
         _unsupportedCommand = YES;
         return;
