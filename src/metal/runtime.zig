@@ -6498,7 +6498,10 @@ pub export fn zpu_metal_render_encoder_draw_mesh_threadgroups(
     threads_per_mesh_threadgroup: abi.Size,
 ) callconv(.c) c_int {
     (encoder orelse return -1).drawMeshThreadgroups(
-        kernel, threadgroups_per_grid, threads_per_object_threadgroup, threads_per_mesh_threadgroup,
+        kernel,
+        threadgroups_per_grid,
+        threads_per_object_threadgroup,
+        threads_per_mesh_threadgroup,
     ) catch |err| return errorCode(err);
     return 0;
 }
@@ -6511,7 +6514,10 @@ pub export fn zpu_metal_render_encoder_draw_mesh_threads(
     threads_per_mesh_threadgroup: abi.Size,
 ) callconv(.c) c_int {
     (encoder orelse return -1).drawMeshThreads(
-        kernel, threads_per_grid, threads_per_object_threadgroup, threads_per_mesh_threadgroup,
+        kernel,
+        threads_per_grid,
+        threads_per_object_threadgroup,
+        threads_per_mesh_threadgroup,
     ) catch |err| return errorCode(err);
     return 0;
 }
@@ -6525,8 +6531,11 @@ pub export fn zpu_metal_render_encoder_draw_mesh_threadgroups_indirect(
     threads_per_mesh_threadgroup: abi.Size,
 ) callconv(.c) c_int {
     (encoder orelse return -1).drawMeshThreadgroupsIndirect(
-        kernel, indirect_buffer orelse return -1, indirect_buffer_offset,
-        threads_per_object_threadgroup, threads_per_mesh_threadgroup,
+        kernel,
+        indirect_buffer orelse return -1,
+        indirect_buffer_offset,
+        threads_per_object_threadgroup,
+        threads_per_mesh_threadgroup,
     ) catch |err| return errorCode(err);
     return 0;
 }
