@@ -48,8 +48,9 @@ triangle path:
   attachment stores and 2D/3D mip generation use integer-domain normalized
   filtering with native-oracle quantization; all Uint/Sint formats remain
   transfer-only; packed normalized B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/BGR10A2
-  formats use CPU decode/encode profiles for render targets and 2D/3D mip
-  generation, while packed RG11B10Float/RGB9E5Float remain transfer-only;
+  formats use CPU decode/encode profiles for sampling, render targets, and
+  2D/3D mip generation, while packed RG11B10Float/RGB9E5Float remain
+  transfer-only;
   fixed CPU compute profiles remain explicitly format-specific;
 - formats without a corresponding CPU shader profile remain rejected
 - CPU-owned `MTLDevice` identity and capability metadata, including a stable,

@@ -1734,7 +1734,7 @@ static int test_packed_3d_mipmaps_against_native(id<MTLDevice> native_device, id
     return 0;
 }
 
-static int test_srgb_sampling_against_native(
+static int test_color_sampling_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_vertex_function, id<MTLFunction> native_sample_function,
     id<MTLFunction> adapter_vertex_function, id<MTLFunction> adapter_sample_function) {
@@ -1748,6 +1748,12 @@ static int test_srgb_sampling_against_native(
         {MTLPixelFormatRG8Unorm_sRGB, 2, "RG8Unorm_sRGB"},
         {MTLPixelFormatRGBA8Unorm_sRGB, 4, "RGBA8Unorm_sRGB"},
         {MTLPixelFormatBGRA8Unorm_sRGB, 4, "BGRA8Unorm_sRGB"},
+        {MTLPixelFormatB5G6R5Unorm, 2, "B5G6R5Unorm"},
+        {MTLPixelFormatA1BGR5Unorm, 2, "A1BGR5Unorm"},
+        {MTLPixelFormatABGR4Unorm, 2, "ABGR4Unorm"},
+        {MTLPixelFormatBGR5A1Unorm, 2, "BGR5A1Unorm"},
+        {MTLPixelFormatRGB10A2Unorm, 4, "RGB10A2Unorm"},
+        {MTLPixelFormatBGR10A2Unorm, 4, "BGR10A2Unorm"},
     };
     const zpu_metal_vertex vertices[] = {
         {{-1.0f, -1.0f, 0.5f, 1.0f}, {0.0625f, 0.0625f, 0.0f, 1.0f}},
@@ -3036,10 +3042,10 @@ int main(void) {
         const int srgb_3d_mipmap_result = test_srgb_3d_mipmaps_against_native(
             device, adapter_device);
         if (srgb_3d_mipmap_result != 0) return srgb_3d_mipmap_result;
-        const int srgb_sample_result = test_srgb_sampling_against_native(
+        const int color_sample_result = test_color_sampling_against_native(
             device, adapter_device, vertex_function, sample_fragment_function,
             adapter_vertex_function, adapter_sample_fragment_function);
-        if (srgb_sample_result != 0) return srgb_sample_result;
+        if (color_sample_result != 0) return color_sample_result;
 
         const int mip_nearest_result = test_mip_sampler_against_native(
             device, adapter_device, vertex_function, sample_fragment_function,
