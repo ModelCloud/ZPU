@@ -35,8 +35,9 @@ triangle path:
   backing resource
 - heap-backed buffers and textures with bounded allocation accounting; heap
   storage/cache mismatches are rejected, heap offsets are retained for
-  resources, and default heap hazard tracking is resolved as untracked,
-  matching Metal's heap rules
+  resources, explicit aligned append placement is supported for heap buffers,
+  and default heap hazard tracking is resolved as untracked, matching Metal's
+  heap rules
 - owned depth32-float textures bound as render-pass depth attachments, with
   configurable Metal compare functions, write masks, and depth clears
 - fixed-function render pipeline, depth-stencil, and sampler state objects;

@@ -2375,6 +2375,15 @@ int main(void) {
             fprintf(stderr, "metal-pixel: heap texture byte identity failed\n");
             return 38;
         }
+        id<MTLBuffer> adapter_heap_offset_buffer =
+            [adapter_heap newBufferWithLength:16 options:MTLResourceStorageModeShared offset:32];
+        id<MTLBuffer> adapter_heap_bad_offset_buffer =
+            [adapter_heap newBufferWithLength:4 options:MTLResourceStorageModeShared offset:49];
+        if (adapter_heap_offset_buffer == nil || adapter_heap_bad_offset_buffer != nil ||
+            adapter_heap_offset_buffer.heapOffset != 32 || adapter_heap.usedSize != 48) {
+            fprintf(stderr, "metal-pixel: explicit heap buffer offset handling failed\n");
+            return 40;
+        }
 
         MTLHeapDescriptor *adapter_mip_heap_descriptor = [MTLHeapDescriptor new];
         adapter_mip_heap_descriptor.size = 256;

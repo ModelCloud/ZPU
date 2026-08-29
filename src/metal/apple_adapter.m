@@ -1283,10 +1283,12 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return state; }
 - (MTLHeapType)type { return _type; }
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)options offset:(NSUInteger)offset API_AVAILABLE(macos(10.15), ios(13.0)) {
-    (void)length;
-    (void)options;
-    (void)offset;
-    return nil;
+    if (!zpu_heap_buffer_options_match(_storageMode, _cpuCacheMode, [self hazardTrackingMode], options)) return nil;
+    zpu_metal_buffer *buffer = zpu_metal_heap_new_buffer_at_offset(_zpuHeap, length, NULL, offset);
+    if (buffer == NULL) return nil;
+    ZPUBuffer *result = [[ZPUBuffer alloc] initWithOwner:_owner buffer:buffer heap:self];
+    [result applyResourceOptions:options];
+    return (id<MTLBuffer>)result;
 }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor offset:(NSUInteger)offset API_AVAILABLE(macos(10.15), ios(13.0)) {
     (void)descriptor;

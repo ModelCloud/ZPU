@@ -1118,10 +1118,16 @@ fn reserveHeapAllocation(heap: *Heap, size: usize, alignment: usize) Error!usize
     const mask = alignment - 1;
     const previous = heap.used;
     const start = (std.math.add(usize, previous, mask) catch return error.InvalidArgument) & ~mask;
-    const end = std.math.add(usize, start, size) catch return error.InvalidArgument;
+    return reserveHeapAllocationAtOffset(heap, size, alignment, start);
+}
+
+fn reserveHeapAllocationAtOffset(heap: *Heap, size: usize, alignment: usize, offset: usize) Error!usize {
+    if (!validHeap(heap) or alignment == 0 or (alignment & (alignment - 1)) != 0 or
+        (offset & (alignment - 1)) != 0 or offset != heap.used) return error.InvalidArgument;
+    const end = std.math.add(usize, offset, size) catch return error.InvalidArgument;
     if (end > heap.size) return error.OutOfMemory;
     heap.used = end;
-    return start;
+    return offset;
 }
 
 fn releaseHeapAllocation(heap: ?*Heap, allocation_size: usize) void {
@@ -1143,6 +1149,18 @@ pub fn createBufferInHeap(heap: *Heap, length: usize, initial_bytes: ?[*]const u
     errdefer destroyBuffer(result);
     const previous = heap.used;
     const allocation_offset = try reserveHeapAllocation(heap, length, @alignOf(u32));
+    result.heap = heap;
+    result.heap_allocation_offset = allocation_offset;
+    result.heap_allocation_size = heap.used - previous;
+    return result;
+}
+
+pub fn createBufferInHeapAtOffset(heap: *Heap, length: usize, initial_bytes: ?[*]const u8, offset: usize) Error!*Buffer {
+    if (!validHeap(heap)) return error.InvalidResource;
+    const result = try createBuffer(heap.device, length, initial_bytes);
+    errdefer destroyBuffer(result);
+    const previous = heap.used;
+    const allocation_offset = try reserveHeapAllocationAtOffset(heap, length, @alignOf(u32), offset);
     result.heap = heap;
     result.heap_allocation_offset = allocation_offset;
     result.heap_allocation_size = heap.used - previous;
@@ -1943,6 +1961,10 @@ pub export fn zpu_metal_heap_max_available_size(heap: ?*const Heap, alignment: u
 
 pub export fn zpu_metal_heap_new_buffer(heap: ?*Heap, length: usize, initial_bytes: ?[*]const u8) callconv(.c) ?*Buffer {
     return createBufferInHeap(heap orelse return null, length, initial_bytes) catch null;
+}
+
+pub export fn zpu_metal_heap_new_buffer_at_offset(heap: ?*Heap, length: usize, initial_bytes: ?[*]const u8, offset: usize) callconv(.c) ?*Buffer {
+    return createBufferInHeapAtOffset(heap orelse return null, length, initial_bytes, offset) catch null;
 }
 
 pub export fn zpu_metal_buffer_new_texture(buffer: ?*Buffer, descriptor: ?*const abi.TextureDescriptor, offset: usize, bytes_per_row: usize) callconv(.c) ?*Texture {
