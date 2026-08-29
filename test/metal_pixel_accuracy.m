@@ -6051,6 +6051,13 @@ int main(void) {
             [device newTextureWithDescriptor:native_sparse_texture_3d_descriptor];
         id<MTLTexture> adapter_sparse_texture_3d =
             [adapter_sparse_texture_heap newTextureWithDescriptor:native_sparse_texture_3d_descriptor];
+        MTLTextureDescriptor *native_sparse_texture_3d_tail_descriptor = [native_sparse_texture_3d_descriptor copy];
+        native_sparse_texture_3d_tail_descriptor.depth = 4;
+        native_sparse_texture_3d_tail_descriptor.mipmapLevelCount = 4;
+        id<MTLTexture> native_sparse_texture_3d_tail =
+            [device newTextureWithDescriptor:native_sparse_texture_3d_tail_descriptor];
+        id<MTLTexture> adapter_sparse_texture_3d_tail =
+            [adapter_device newTextureWithDescriptor:native_sparse_texture_3d_tail_descriptor];
         MTLTextureDescriptor *native_sparse_texture_array_tail_descriptor =
             [native_sparse_texture_tail_descriptor copy];
         native_sparse_texture_array_tail_descriptor.textureType = MTLTextureType2DArray;
@@ -6183,6 +6190,9 @@ int main(void) {
         BOOL sparse_texture_3d_exact = native_sparse_texture_3d != nil && adapter_sparse_texture_3d != nil &&
             native_sparse_texture_3d.isSparse && adapter_sparse_texture_3d.isSparse &&
             native_sparse_texture_3d.sparseTextureTier == adapter_sparse_texture_3d.sparseTextureTier &&
+            native_sparse_texture_3d_tail != nil && adapter_sparse_texture_3d_tail != nil &&
+            native_sparse_texture_3d_tail.firstMipmapInTail == adapter_sparse_texture_3d_tail.firstMipmapInTail &&
+            native_sparse_texture_3d_tail.tailSizeInBytes == adapter_sparse_texture_3d_tail.tailSizeInBytes &&
             memcmp(sparse_texture_3d_output.bytes, sparse_texture_3d_input.bytes,
                    sparse_texture_3d_input.length) == 0;
         if (sparse_texture_3d_exact) {
@@ -6197,6 +6207,56 @@ int main(void) {
         adapter_sparse_texture_3d_unmap.mode = MTLSparseTextureMappingModeUnmap;
         [metal4_sparse_queue updateTextureMappings:adapter_sparse_texture_3d heap:nil
                                          operations:&adapter_sparse_texture_3d_unmap count:1];
+        BOOL sparse_texture_3d_tail_mapping_exact = native_sparse_texture_3d_tail != nil &&
+            adapter_sparse_texture_3d_tail != nil &&
+            adapter_sparse_texture_3d_tail.firstMipmapInTail == 1 &&
+            adapter_sparse_texture_3d_tail.tailSizeInBytes == sparse_page_bytes * 3;
+        MTL4UpdateSparseTextureMappingOperation adapter_sparse_texture_3d_tail_map = {
+            .mode = MTLSparseTextureMappingModeMap,
+            .textureRegion = MTLRegionMake3D(0, 0, 0, 1, 1, 1),
+            .heapOffset = 0,
+            .textureLevel = 1,
+            .textureSlice = 0,
+        };
+        if (sparse_texture_3d_tail_mapping_exact) {
+            [metal4_sparse_queue updateTextureMappings:adapter_sparse_texture_3d_tail
+                                                  heap:adapter_sparse_texture_wide_heap
+                                             operations:&adapter_sparse_texture_3d_tail_map count:1];
+            NSUInteger levelWidth = 64;
+            NSUInteger levelHeight = 64;
+            NSUInteger levelDepth = 2;
+            for (NSUInteger level = 1; level < 4 && sparse_texture_3d_tail_mapping_exact; ++level) {
+                const NSUInteger levelBytes = levelWidth * levelHeight * levelDepth * 4;
+                NSMutableData *input = [NSMutableData dataWithLength:levelBytes];
+                for (NSUInteger index = 0; index < input.length; ++index) {
+                    ((uint8_t *)input.mutableBytes)[index] = (uint8_t)((index * 53u + level * 19u) & 0xffu);
+                }
+                [adapter_sparse_texture_3d_tail replaceRegion:MTLRegionMake3D(0, 0, 0,
+                                                                                 levelWidth, levelHeight, levelDepth)
+                                                   mipmapLevel:level slice:0 withBytes:input.bytes
+                                                  bytesPerRow:levelWidth * 4
+                                                bytesPerImage:levelWidth * levelHeight * 4];
+                NSMutableData *output = [NSMutableData dataWithLength:levelBytes];
+                [adapter_sparse_texture_3d_tail getBytes:output.mutableBytes
+                                             bytesPerRow:levelWidth * 4
+                                            bytesPerImage:levelWidth * levelHeight * 4
+                                              fromRegion:MTLRegionMake3D(0, 0, 0,
+                                                                           levelWidth, levelHeight, levelDepth)
+                                             mipmapLevel:level slice:0];
+                if (memcmp(input.bytes, output.bytes, levelBytes) != 0) {
+                    sparse_texture_3d_tail_mapping_exact = NO;
+                }
+                levelWidth = levelWidth > 1 ? levelWidth / 2 : 1;
+                levelHeight = levelHeight > 1 ? levelHeight / 2 : 1;
+                levelDepth = levelDepth > 1 ? levelDepth / 2 : 1;
+            }
+            MTL4UpdateSparseTextureMappingOperation adapter_sparse_texture_3d_tail_unmap =
+                adapter_sparse_texture_3d_tail_map;
+            adapter_sparse_texture_3d_tail_unmap.mode = MTLSparseTextureMappingModeUnmap;
+            [metal4_sparse_queue updateTextureMappings:adapter_sparse_texture_3d_tail heap:nil
+                                             operations:&adapter_sparse_texture_3d_tail_unmap count:1];
+        }
+        sparse_texture_3d_exact = sparse_texture_3d_exact && sparse_texture_3d_tail_mapping_exact;
         const NSUInteger sparse_texture_array_tail_level = adapter_sparse_texture_array_tail == nil ? 0 :
             adapter_sparse_texture_array_tail.firstMipmapInTail;
         MTL4UpdateSparseTextureMappingOperation adapter_sparse_texture_array_tail_map = {
