@@ -400,6 +400,11 @@ const Mipmap3DCommand = struct {
     source1_weight_denominator: u32,
 };
 
+const Mipmap3DArrayCommand = struct {
+    source_planes: []const *Texture,
+    destination: *Texture,
+};
+
 const FillBufferCommand = struct {
     buffer: *Buffer,
     offset: usize,
@@ -435,6 +440,7 @@ const Command = union(enum) {
     copy_texture_to_texture: TextureTextureCommand,
     generate_mipmap: MipmapCommand,
     generate_mipmap_3d: Mipmap3DCommand,
+    generate_mipmap_3d_array: Mipmap3DArrayCommand,
     fill_buffer: FillBufferCommand,
     compute: ComputeCommand,
     synchronize_buffer: *Buffer,
@@ -452,12 +458,15 @@ pub const CommandBuffer = struct {
     commands: std.ArrayList(Command) = .empty,
     vertices: std.ArrayList(abi.Vertex) = .empty,
     sample_mipmaps: std.ArrayList(*Texture) = .empty,
+    owned_mipmap_source_lists: std.ArrayList([]*Texture) = .empty,
     owned_compute_buffers: std.ArrayList(*Buffer) = .empty,
 
     pub fn deinit(self: *CommandBuffer) void {
         self.commands.deinit(allocator);
         self.vertices.deinit(allocator);
         self.sample_mipmaps.deinit(allocator);
+        for (self.owned_mipmap_source_lists.items) |sources| allocator.free(sources);
+        self.owned_mipmap_source_lists.deinit(allocator);
         for (self.owned_compute_buffers.items) |buffer| destroyBuffer(buffer);
         self.owned_compute_buffers.deinit(allocator);
         self.magic = 0;
@@ -477,6 +486,24 @@ pub const CommandBuffer = struct {
         if (self.magic != command_buffer_magic or self.status != .created) return error.InvalidCommand;
         self.commands.append(allocator, command) catch return error.OutOfMemory;
         return self.commands.items.len - 1;
+    }
+
+    fn appendMipmap3DArray(self: *CommandBuffer, sources: []const *Texture, destination: *Texture) Error!void {
+        if (sources.len == 0) return error.InvalidArgument;
+        const owned = allocator.alloc(*Texture, sources.len) catch return error.OutOfMemory;
+        @memcpy(owned, sources);
+        self.owned_mipmap_source_lists.append(allocator, owned) catch {
+            allocator.free(owned);
+            return error.OutOfMemory;
+        };
+        _ = self.append(.{ .generate_mipmap_3d_array = .{
+            .source_planes = owned,
+            .destination = destination,
+        } }) catch |err| {
+            self.owned_mipmap_source_lists.items.len -= 1;
+            allocator.free(owned);
+            return err;
+        };
     }
 
     fn appendVertices(self: *CommandBuffer, values: []const abi.Vertex) Error!usize {
@@ -719,6 +746,14 @@ pub const CommandBuffer = struct {
                 if (mipmap.source0.device != mipmap.destination.device or
                     (mipmap.source1 != null and mipmap.source1.?.device != mipmap.destination.device)) return self.fail(error.InvalidResource);
                 generateMipmap3D(mipmap) catch |err| return self.fail(err);
+            },
+            .generate_mipmap_3d_array => |mipmap| {
+                if (!validTexture(mipmap.destination) or mipmap.source_planes.len == 0) return self.fail(error.InvalidResource);
+                for (mipmap.source_planes) |source| {
+                    if (!validTexture(source) or source.device != self.queue.device) return self.fail(error.InvalidResource);
+                }
+                if (mipmap.destination.device != self.queue.device) return self.fail(error.InvalidResource);
+                generateSrgb8Mipmap3DArray(mipmap) catch |err| return self.fail(err);
             },
             .fill_buffer => |fill| {
                 if (!validBuffer(fill.buffer)) return self.fail(error.InvalidResource);
@@ -1635,6 +1670,14 @@ pub const BlitEncoder = struct {
         } });
     }
 
+    pub fn generateMipmap3DArray(self: *BlitEncoder, sources: []const *Texture, destination: *Texture) Error!void {
+        if (!self.open() or !validTexture(destination) or sources.len == 0) return error.InvalidArgument;
+        for (sources) |source| {
+            if (!validTexture(source) or source.device != destination.device or source.format != destination.format) return error.InvalidArgument;
+        }
+        try self.command_buffer.appendMipmap3DArray(sources, destination);
+    }
+
     pub fn fillBuffer(self: *BlitEncoder, buffer: *Buffer, offset: usize, length: usize, value: u8) Error!void {
         if (!self.open() or !validBuffer(buffer)) return error.InvalidArgument;
         if (!rangeValid(buffer.bytes.len, offset, length)) return error.InvalidArgument;
@@ -1824,6 +1867,14 @@ pub const ComputeEncoder = struct {
         } });
     }
 
+    pub fn generateMipmap3DArray(self: *ComputeEncoder, sources: []const *Texture, destination: *Texture) Error!void {
+        if (!self.open() or !validTexture(destination) or sources.len == 0) return error.InvalidArgument;
+        for (sources) |source| {
+            if (!validTexture(source) or source.device != destination.device or source.format != destination.format) return error.InvalidArgument;
+        }
+        try self.command_buffer.appendMipmap3DArray(sources, destination);
+    }
+
     pub fn fillBuffer(self: *ComputeEncoder, buffer: *Buffer, offset: usize, length: usize, value: u8) Error!void {
         if (!self.open() or !validBuffer(buffer) or !rangeValid(buffer.bytes.len, offset, length)) return error.InvalidArgument;
         _ = try self.command_buffer.append(.{ .fill_buffer = .{ .buffer = buffer, .offset = offset, .length = length, .value = value } });
@@ -1958,6 +2009,10 @@ fn srgb8ToLinear(value: u8) f64 {
     return @round(decoded * 4095.0) / 4095.0;
 }
 
+fn srgb8AlphaToF32(value: u8) f32 {
+    return @as(f32, @floatFromInt(value)) / 255.0;
+}
+
 fn linearToSrgb8(value: f64) u8 {
     // Apple texture filtering keeps the linear intermediate at 12-bit
     // precision before converting it back to an 8-bit sRGB texel. Narrow to
@@ -1973,7 +2028,12 @@ fn linearToSrgb8(value: f64) u8 {
 }
 
 fn unorm8Value(value: f64) u8 {
-    return @intFromFloat(std.math.clamp(value, 0, 1) * 255.0 + 0.5);
+    const scaled = std.math.clamp(value, 0, 1) * 255.0;
+    const lower = @floor(scaled);
+    const fraction = scaled - lower;
+    const lower_integer: u64 = @intFromFloat(lower);
+    const rounded = if (fraction > 0.5 or (fraction == 0.5 and lower_integer % 2 == 1)) lower + 1 else lower;
+    return @intFromFloat(rounded);
 }
 
 fn readSrgb8MipmapColor(texture: *const Texture, x: usize, y: usize) [4]f64 {
@@ -1983,11 +2043,11 @@ fn readSrgb8MipmapColor(texture: *const Texture, x: usize, y: usize) [4]f64 {
         .rg8_unorm_srgb => .{ srgb8ToLinear(texture.bytes[offset]), srgb8ToLinear(texture.bytes[offset + 1]), 0, 1 },
         .rgba8_unorm_srgb => .{
             srgb8ToLinear(texture.bytes[offset]),     srgb8ToLinear(texture.bytes[offset + 1]),
-            srgb8ToLinear(texture.bytes[offset + 2]), @as(f64, @floatFromInt(texture.bytes[offset + 3])) / 255.0,
+            srgb8ToLinear(texture.bytes[offset + 2]), @floatCast(srgb8AlphaToF32(texture.bytes[offset + 3])),
         },
         .bgra8_unorm_srgb => .{
             srgb8ToLinear(texture.bytes[offset + 2]), srgb8ToLinear(texture.bytes[offset + 1]),
-            srgb8ToLinear(texture.bytes[offset]),     @as(f64, @floatFromInt(texture.bytes[offset + 3])) / 255.0,
+            srgb8ToLinear(texture.bytes[offset]),     @floatCast(srgb8AlphaToF32(texture.bytes[offset + 3])),
         },
         else => unreachable,
     };
@@ -2825,17 +2885,20 @@ fn generateSrgb8Mipmap(command: MipmapCommand) Error!void {
         const source_y = mipmapRange(command.source.height, command.destination.height, y);
         for (0..command.destination.width) |x| {
             const source_x = mipmapRange(command.source.width, command.destination.width, x);
-            const denominator = @as(f64, @floatFromInt((source_x.high - source_x.low) * (source_y.high - source_y.low)));
+            const footprint = (source_x.high - source_x.low) * (source_y.high - source_y.low);
+            const denominator = @as(f64, @floatFromInt(footprint));
             var sums = [_]f64{ 0, 0, 0, 0 };
+            var alpha_sum: f32 = 0;
             for (source_y.low..source_y.high) |source_y_index| {
                 for (source_x.low..source_x.high) |source_x_index| {
                     const color = readSrgb8MipmapColor(command.source, source_x_index, source_y_index);
                     for (0..channels) |component| sums[component] += color[component];
+                    if (channels == 4) alpha_sum += @floatCast(color[3]);
                 }
             }
             writeSrgb8MipmapColor(command.destination, x, y, .{
                 sums[0] / denominator, sums[1] / denominator,
-                sums[2] / denominator, sums[3] / denominator,
+                sums[2] / denominator, if (channels == 4) @as(f64, @floatCast(alpha_sum / @as(f32, @floatFromInt(footprint)))) else 1,
             });
         }
     }
@@ -3064,6 +3127,43 @@ fn generateSrgb8Mipmap3D(command: Mipmap3DCommand) Error!void {
             writeSrgb8MipmapColor(command.destination, x, y, .{
                 sums[0] / denominator, sums[1] / denominator,
                 sums[2] / denominator, sums[3] / denominator,
+            });
+        }
+    }
+}
+
+fn generateSrgb8Mipmap3DArray(command: Mipmap3DArrayCommand) Error!void {
+    if (command.source_planes.len == 0 or command.destination.width == 0 or command.destination.height == 0 or
+        command.destination.format != command.source_planes[0].format) return error.InvalidArgument;
+    const source = command.source_planes[0];
+    if (command.destination.width > source.width or command.destination.height > source.height or
+        (source.width > 1 and command.destination.width == source.width) or
+        (source.height > 1 and command.destination.height == source.height)) return error.InvalidArgument;
+    for (command.source_planes) |source_plane| {
+        if (source_plane.format != source.format or source_plane.width != source.width or
+            source_plane.height != source.height) return error.InvalidArgument;
+    }
+    const channels = srgb8ChannelCount(source.format);
+    for (0..command.destination.height) |y| {
+        const source_y = mipmapRange(source.height, command.destination.height, y);
+        for (0..command.destination.width) |x| {
+            const source_x = mipmapRange(source.width, command.destination.width, x);
+            const footprint = command.source_planes.len * (source_x.high - source_x.low) * (source_y.high - source_y.low);
+            const denominator = @as(f64, @floatFromInt(footprint));
+            var sums = [_]f64{ 0, 0, 0, 0 };
+            var alpha_sum: f32 = 0;
+            for (command.source_planes) |source_plane| {
+                for (source_x.low..source_x.high) |source_x_index| {
+                    for (source_y.low..source_y.high) |source_y_index| {
+                        const color = readSrgb8MipmapColor(source_plane, source_x_index, source_y_index);
+                        for (0..channels) |component| sums[component] += color[component];
+                        if (channels == 4) alpha_sum += @floatCast(color[3]);
+                    }
+                }
+            }
+            writeSrgb8MipmapColor(command.destination, x, y, .{
+                sums[0] / denominator, sums[1] / denominator,
+                sums[2] / denominator, if (channels == 4) @as(f64, @floatCast(alpha_sum / @as(f32, @floatFromInt(footprint)))) else 1,
             });
         }
     }
@@ -3499,6 +3599,31 @@ test "CPU sRGB mipmaps average in linear color space" {
     destroyBlitEncoder(encoder);
     try command_buffer.commit();
     try std.testing.expectEqualSlices(u8, &[_]u8{ 188, 188, 225, 112 }, destination.bytes);
+}
+
+test "CPU sRGB 3D mipmap arrays average the complete footprint" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const source0 = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.rgba8_unorm_srgb));
+    defer destroyTexture(source0);
+    const source1 = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.rgba8_unorm_srgb));
+    defer destroyTexture(source1);
+    const destination = try createTexture(device, 1, 1, @intFromEnum(abi.PixelFormat.rgba8_unorm_srgb));
+    defer destroyTexture(destination);
+    @memset(source0.bytes, 0);
+    @memset(source1.bytes, 255);
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginBlit(command_buffer);
+    const sources = [_]*Texture{ source0, source1 };
+    try encoder.generateMipmap3DArray(sources[0..], destination);
+    try encoder.endEncoding();
+    destroyBlitEncoder(encoder);
+    try command_buffer.commit();
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 188, 188, 188, 128 }, destination.bytes);
 }
 
 test "CPU float mipmap generation preserves format precision" {
@@ -5133,6 +5258,14 @@ pub export fn zpu_metal_blit_encoder_generate_mipmap_3d_weighted(encoder: ?*Blit
     return 0;
 }
 
+pub export fn zpu_metal_blit_encoder_generate_mipmap_3d_array(encoder: ?*BlitEncoder, source_planes: ?[*]const ?*Texture, source_count: usize, destination: ?*Texture) callconv(.c) c_int {
+    const sources = source_planes orelse return -1;
+    if (source_count == 0) return -1;
+    const source_slice: []const *Texture = @ptrCast(sources[0..source_count]);
+    (encoder orelse return -1).generateMipmap3DArray(source_slice, destination orelse return -1) catch |err| return errorCode(err);
+    return 0;
+}
+
 pub export fn zpu_metal_blit_encoder_fill_buffer(encoder: ?*BlitEncoder, buffer: ?*Buffer, offset: usize, length: usize, value: u8) callconv(.c) c_int {
     (encoder orelse return -1).fillBuffer(buffer orelse return -1, offset, length, value) catch |err| return errorCode(err);
     return 0;
@@ -5224,6 +5357,14 @@ pub export fn zpu_metal_compute_encoder_generate_mipmap_3d(encoder: ?*ComputeEnc
 
 pub export fn zpu_metal_compute_encoder_generate_mipmap_3d_weighted(encoder: ?*ComputeEncoder, source0: ?*Texture, source1: ?*Texture, destination: ?*Texture, source1_weight_numerator: u32, source1_weight_denominator: u32) callconv(.c) c_int {
     (encoder orelse return -1).generateMipmap3DWeighted(source0 orelse return -1, source1, destination orelse return -1, source1_weight_numerator, source1_weight_denominator) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_compute_encoder_generate_mipmap_3d_array(encoder: ?*ComputeEncoder, source_planes: ?[*]const ?*Texture, source_count: usize, destination: ?*Texture) callconv(.c) c_int {
+    const sources = source_planes orelse return -1;
+    if (source_count == 0) return -1;
+    const source_slice: []const *Texture = @ptrCast(sources[0..source_count]);
+    (encoder orelse return -1).generateMipmap3DArray(source_slice, destination orelse return -1) catch |err| return errorCode(err);
     return 0;
 }
 

@@ -510,6 +510,7 @@ int zpu_metal_blit_encoder_copy_texture_to_texture(zpu_metal_blit_encoder *encod
 int zpu_metal_blit_encoder_generate_mipmap(zpu_metal_blit_encoder *encoder, zpu_metal_texture *source, zpu_metal_texture *destination);
 int zpu_metal_blit_encoder_generate_mipmap_3d(zpu_metal_blit_encoder *encoder, zpu_metal_texture *source0, zpu_metal_texture *source1, zpu_metal_texture *destination);
 int zpu_metal_blit_encoder_generate_mipmap_3d_weighted(zpu_metal_blit_encoder *encoder, zpu_metal_texture *source0, zpu_metal_texture *source1, zpu_metal_texture *destination, uint32_t source1_weight_numerator, uint32_t source1_weight_denominator);
+int zpu_metal_blit_encoder_generate_mipmap_3d_array(zpu_metal_blit_encoder *encoder, zpu_metal_texture *const *source_planes, size_t source_count, zpu_metal_texture *destination);
 int zpu_metal_blit_encoder_fill_buffer(zpu_metal_blit_encoder *encoder, zpu_metal_buffer *buffer, size_t offset, size_t length, uint8_t value);
 int zpu_metal_blit_encoder_synchronize_resource(zpu_metal_blit_encoder *encoder, zpu_metal_buffer *buffer);
 int zpu_metal_blit_encoder_update_fence(zpu_metal_blit_encoder *encoder, zpu_metal_fence *fence);
@@ -537,6 +538,7 @@ int zpu_metal_compute_encoder_copy_texture_to_texture(zpu_metal_compute_encoder 
 int zpu_metal_compute_encoder_generate_mipmap(zpu_metal_compute_encoder *encoder, zpu_metal_texture *source, zpu_metal_texture *destination);
 int zpu_metal_compute_encoder_generate_mipmap_3d(zpu_metal_compute_encoder *encoder, zpu_metal_texture *source0, zpu_metal_texture *source1, zpu_metal_texture *destination);
 int zpu_metal_compute_encoder_generate_mipmap_3d_weighted(zpu_metal_compute_encoder *encoder, zpu_metal_texture *source0, zpu_metal_texture *source1, zpu_metal_texture *destination, uint32_t source1_weight_numerator, uint32_t source1_weight_denominator);
+int zpu_metal_compute_encoder_generate_mipmap_3d_array(zpu_metal_compute_encoder *encoder, zpu_metal_texture *const *source_planes, size_t source_count, zpu_metal_texture *destination);
 int zpu_metal_compute_encoder_fill_buffer(zpu_metal_compute_encoder *encoder, zpu_metal_buffer *buffer, size_t offset, size_t length, uint8_t value);
 int zpu_metal_compute_encoder_dispatch_threads(zpu_metal_compute_encoder *encoder, zpu_metal_size threads_per_grid, zpu_metal_size threads_per_threadgroup);
 int zpu_metal_compute_encoder_dispatch_threadgroups(zpu_metal_compute_encoder *encoder, zpu_metal_size threadgroups_per_grid, zpu_metal_size threads_per_threadgroup);
