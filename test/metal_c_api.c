@@ -1078,6 +1078,9 @@ int main(void) {
             sparse_texture_mapping_slices) != 0 ||
         zpu_metal_resource_state_encoder_update_texture_mapping_indirect(
             sparse_texture_upload_state, sparse_texture_destination,
+            ZPU_METAL_SPARSE_MAPPING_MAP, sparse_texture_indirect_buffer, 1) == 0 ||
+        zpu_metal_resource_state_encoder_update_texture_mapping_indirect(
+            sparse_texture_upload_state, sparse_texture_destination,
             ZPU_METAL_SPARSE_MAPPING_MAP, sparse_texture_indirect_buffer, 0) != 0 ||
         zpu_metal_buffer_write(sparse_texture_indirect_buffer, 0,
                                (const uint32_t[]){2}, sizeof(uint32_t)) != 0 ||

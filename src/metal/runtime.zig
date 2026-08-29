@@ -2768,6 +2768,7 @@ pub const ResourceStateEncoder = struct {
         if (!validTexture(texture) or !validBuffer(buffer) or texture.device != self.command_buffer.queue.device or
             buffer.device != self.command_buffer.queue.device or buffer.sparse_page_bytes != 0 or
             texture.sparse_page_bytes == 0 or (mode != 0 and mode != 1) or
+            buffer_offset % @alignOf(u32) != 0 or
             !rangeValid(buffer.bytes.len, buffer_offset, @sizeOf(u32))) return error.InvalidArgument;
         _ = try self.command_buffer.append(.{ .sparse_texture_mapping_indirect = .{
             .texture = texture,
@@ -5565,7 +5566,8 @@ fn sparseCopyTextureMappings(source: *Texture, destination: *Texture, source_reg
 fn sparseUpdateTextureMappingIndirect(texture: *Texture, mode: u8, buffer: *Buffer, buffer_offset: usize) Error!void {
     if (!validTexture(texture) or !validBuffer(buffer) or texture.device != buffer.device or
         buffer.sparse_page_bytes != 0 or texture.sparse_page_bytes == 0 or
-        (mode != 0 and mode != 1) or !rangeValid(buffer.bytes.len, buffer_offset, @sizeOf(u32)))
+        (mode != 0 and mode != 1) or buffer_offset % @alignOf(u32) != 0 or
+        !rangeValid(buffer.bytes.len, buffer_offset, @sizeOf(u32)))
         return error.InvalidArgument;
     sparseSyncBuffer(buffer);
     const mapping_count = readU32Little(buffer.bytes, buffer_offset);

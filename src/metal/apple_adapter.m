@@ -13069,7 +13069,8 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)indirectBuffer;
     if (!zpu_texture_belongs_to_device([_owner device], zpuTexture) || zpuTexture->_sparseMappings == nil ||
         !zpu_buffer_belongs_to_device([_owner device], zpuBuffer) || zpuBuffer.contents == nil ||
-        indirectBufferOffset > zpuBuffer.length || zpuBuffer.length - indirectBufferOffset < sizeof(uint32_t)) {
+        indirectBufferOffset % sizeof(uint32_t) != 0 || indirectBufferOffset > zpuBuffer.length ||
+        zpuBuffer.length - indirectBufferOffset < sizeof(uint32_t)) {
         [_owner markError];
         return;
     }
