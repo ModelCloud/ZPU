@@ -1390,6 +1390,8 @@ static int test_packed_render_against_native(
         {MTLPixelFormatBGR5A1Unorm, 2, "BGR5A1Unorm"},
         {MTLPixelFormatRGB10A2Unorm, 4, "RGB10A2Unorm"},
         {MTLPixelFormatBGR10A2Unorm, 4, "BGR10A2Unorm"},
+        {MTLPixelFormatRG11B10Float, 4, "RG11B10Float"},
+        {MTLPixelFormatRGB9E5Float, 4, "RGB9E5Float"},
     };
     const zpu_metal_vertex vertices[] = {
         {{-1.0f, -1.0f, 0.5f, 1.0f}, {0.125f, 0.375f, 0.625f, 0.875f}},
@@ -1489,6 +1491,8 @@ static int test_packed_mipmaps_against_native(id<MTLDevice> native_device, id<MT
         {MTLPixelFormatBGR5A1Unorm, 2, "BGR5A1Unorm mipmaps"},
         {MTLPixelFormatRGB10A2Unorm, 4, "RGB10A2Unorm mipmaps"},
         {MTLPixelFormatBGR10A2Unorm, 4, "BGR10A2Unorm mipmaps"},
+        {MTLPixelFormatRG11B10Float, 4, "RG11B10Float mipmaps"},
+        {MTLPixelFormatRGB9E5Float, 4, "RGB9E5Float mipmaps"},
     };
     for (NSUInteger index = 0; index < sizeof(formats) / sizeof(formats[0]); ++index) {
         const NSUInteger source_byte_count = width * height * formats[index].bytes_per_pixel;
@@ -1527,6 +1531,16 @@ static int test_packed_mipmaps_against_native(id<MTLDevice> native_device, id<MT
                     break;
                 case MTLPixelFormatBGR10A2Unorm:
                     bits = blue | (green << 10) | (red << 20) | (alpha << 30);
+                    break;
+                case MTLPixelFormatRG11B10Float:
+                    bits = ((12u << 6) | ((x + y) & 0x3fu)) |
+                        (((13u << 6) | ((x * 2u + y) & 0x3fu)) << 11) |
+                        (((14u << 5) | ((x + y * 2u) & 0x1fu)) << 22);
+                    break;
+                case MTLPixelFormatRGB9E5Float:
+                    bits = (32u + x * 2u + y) |
+                        ((192u + x + y * 2u) << 9) |
+                        ((320u + x * 2u + y * 3u) << 18) | (15u << 27);
                     break;
                 default:
                     bits = 0;
@@ -1608,6 +1622,8 @@ static int test_packed_3d_mipmaps_against_native(id<MTLDevice> native_device, id
         {MTLPixelFormatBGR5A1Unorm, 2, "BGR5A1Unorm 3D mipmaps"},
         {MTLPixelFormatRGB10A2Unorm, 4, "RGB10A2Unorm 3D mipmaps"},
         {MTLPixelFormatBGR10A2Unorm, 4, "BGR10A2Unorm 3D mipmaps"},
+        {MTLPixelFormatRG11B10Float, 4, "RG11B10Float 3D mipmaps"},
+        {MTLPixelFormatRGB9E5Float, 4, "RGB9E5Float 3D mipmaps"},
     };
     for (NSUInteger index = 0; index < sizeof(formats) / sizeof(formats[0]); ++index) {
         const NSUInteger source_byte_count = width * height * depth * formats[index].bytes_per_pixel;
@@ -1646,6 +1662,16 @@ static int test_packed_3d_mipmaps_against_native(id<MTLDevice> native_device, id
                             break;
                         case MTLPixelFormatBGR10A2Unorm:
                             bits = blue | (green << 10) | (red << 20) | (2u << 30);
+                            break;
+                        case MTLPixelFormatRG11B10Float:
+                            bits = ((12u << 6) | ((x + y + z * 2u + 1u) & 0x3fu)) |
+                                (((13u << 6) | ((x * 2u + y + z * 2u + 2u) & 0x3fu)) << 11) |
+                                (((14u << 5) | ((x + y * 2u + z + 3u) & 0x1fu)) << 22);
+                            break;
+                        case MTLPixelFormatRGB9E5Float:
+                            bits = (32u + x * 2u + y + z * 3u) |
+                                ((192u + x + y * 2u + z * 3u) << 9) |
+                                ((320u + x * 2u + y * 3u + z * 4u) << 18) | (15u << 27);
                             break;
                         default:
                             bits = pixel;
@@ -1754,6 +1780,8 @@ static int test_color_sampling_against_native(
         {MTLPixelFormatBGR5A1Unorm, 2, "BGR5A1Unorm"},
         {MTLPixelFormatRGB10A2Unorm, 4, "RGB10A2Unorm"},
         {MTLPixelFormatBGR10A2Unorm, 4, "BGR10A2Unorm"},
+        {MTLPixelFormatRG11B10Float, 4, "RG11B10Float"},
+        {MTLPixelFormatRGB9E5Float, 4, "RGB9E5Float"},
     };
     const zpu_metal_vertex vertices[] = {
         {{-1.0f, -1.0f, 0.5f, 1.0f}, {0.0625f, 0.0625f, 0.0f, 1.0f}},

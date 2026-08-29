@@ -111,7 +111,7 @@ pub const TextureFormat = enum {
             self == .rg8_unorm or self == .rg8_unorm_srgb or self == .rg8_snorm or self == .rg16_unorm or self == .rg16_snorm or self == .rg16_float or
             self == .rgba8_unorm or self == .rgba8_unorm_srgb or self == .rgba8_snorm or self == .bgra8_unorm or self == .bgra8_unorm_srgb or
             self == .b5g6r5_unorm or self == .a1bgr5_unorm or self == .abgr4_unorm or self == .bgr5a1_unorm or
-            self == .rgb10a2_unorm or self == .bgr10a2_unorm or
+            self == .rgb10a2_unorm or self == .bgr10a2_unorm or self == .rg11b10_float or self == .rgb9e5_float or
             self == .r32_float or self == .rgba16_unorm or self == .rgba16_snorm or self == .rgba16_float or self == .rg32_float or self == .rgba32_float;
     }
 };
@@ -298,7 +298,9 @@ pub const Texture = struct {
                 .abgr4_unorm => .abgr4_unorm,
                 .bgr5a1_unorm => .bgr5a1_unorm,
                 .rgb10a2_unorm => .rgb10a2_unorm,
-                .rgb10a2_uint, .rg11b10_float, .rgb9e5_float => unreachable,
+                .rgb10a2_uint => unreachable,
+                .rg11b10_float => .rg11b10_float,
+                .rgb9e5_float => .rgb9e5_float,
                 .bgr10a2_unorm => .bgr10a2_unorm,
                 .r32_float => .r32_float,
                 .rgba16_unorm => .rgba16_unorm,
@@ -1206,6 +1208,8 @@ pub const RenderEncoder = struct {
                         @intFromEnum(abi.PixelFormat.abgr4_unorm) => abi.PixelFormat.abgr4_unorm,
                         @intFromEnum(abi.PixelFormat.bgr5a1_unorm) => abi.PixelFormat.bgr5a1_unorm,
                         @intFromEnum(abi.PixelFormat.rgb10a2_unorm) => abi.PixelFormat.rgb10a2_unorm,
+                        @intFromEnum(abi.PixelFormat.rg11b10_float) => abi.PixelFormat.rg11b10_float,
+                        @intFromEnum(abi.PixelFormat.rgb9e5_float) => abi.PixelFormat.rgb9e5_float,
                         @intFromEnum(abi.PixelFormat.bgr10a2_unorm) => abi.PixelFormat.bgr10a2_unorm,
                         @intFromEnum(abi.PixelFormat.r32_float) => abi.PixelFormat.r32_float,
                         @intFromEnum(abi.PixelFormat.rgba16_float) => abi.PixelFormat.rgba16_float,
@@ -2975,6 +2979,73 @@ fn packedMipmapValue(value: f64, maximum: u32) u32 {
     return @intFromFloat(std.math.clamp(value, 0, 1) * @as(f64, @floatFromInt(maximum)) + 0.5);
 }
 
+// Apple's blit mipmap path truncates packed-float mantissas when it stores the
+// filtered value.  Render-target conversion uses the separate raster3d
+// encoder, which keeps its native rounding behavior.
+fn truncatePackedFloat(value: f64) u32 {
+    if (!(value > 0)) return 0;
+    return @intFromFloat(@floor(value));
+}
+
+fn readUnsignedPackedFloat(bits: u32, mantissa_bits: u32) f64 {
+    const mantissa_mask = (@as(u32, 1) << @intCast(mantissa_bits)) - 1;
+    const mantissa = bits & mantissa_mask;
+    const exponent = (bits >> @intCast(mantissa_bits)) & 0x1f;
+    if (exponent == 0) return @as(f64, @floatFromInt(mantissa)) *
+        std.math.pow(f64, 2.0, -14.0 - @as(f64, @floatFromInt(mantissa_bits)));
+    if (exponent == 0x1f) return if (mantissa == 0) std.math.inf(f64) else std.math.nan(f64);
+    return (1.0 + @as(f64, @floatFromInt(mantissa)) /
+        std.math.pow(f64, 2.0, @as(f64, @floatFromInt(mantissa_bits)))) *
+        std.math.pow(f64, 2.0, @as(f64, @floatFromInt(exponent)) - 15.0);
+}
+
+fn writeUnsignedPackedFloat(value: f64, mantissa_bits: u32) u32 {
+    if (!(value > 0)) return 0;
+    if (!std.math.isFinite(value)) return @as(u32, 0x1f) << @intCast(mantissa_bits);
+    const mantissa_scale = std.math.pow(f64, 2.0, @as(f64, @floatFromInt(mantissa_bits)));
+    const minimum_normal = std.math.pow(f64, 2.0, -14.0);
+    if (value < minimum_normal) return truncatePackedFloat(value *
+        std.math.pow(f64, 2.0, 14.0 + @as(f64, @floatFromInt(mantissa_bits))));
+    const exponent: i32 = @intFromFloat(@floor(std.math.log2(value)));
+    const mantissa = truncatePackedFloat((value / std.math.pow(f64, 2.0, @floatFromInt(exponent)) - 1.0) * mantissa_scale);
+    if (exponent > 15) return @as(u32, 0x1f) << @intCast(mantissa_bits);
+    return (@as(u32, @intCast(exponent + 15)) << @intCast(mantissa_bits)) | mantissa;
+}
+
+fn readRgb9e5Mipmap(bits: u32) [4]f64 {
+    const exponent = (bits >> 27) & 0x1f;
+    const scale = std.math.pow(f64, 2.0, @as(f64, @floatFromInt(exponent)) - 24.0);
+    return .{
+        @as(f64, @floatFromInt(bits & 0x1ff)) * scale,
+        @as(f64, @floatFromInt((bits >> 9) & 0x1ff)) * scale,
+        @as(f64, @floatFromInt((bits >> 18) & 0x1ff)) * scale,
+        1,
+    };
+}
+
+fn writeRgb9e5Mipmap(color: [4]f64) u32 {
+    var maximum: f64 = 0;
+    for (color[0..3]) |component| maximum = @max(maximum, std.math.clamp(component, 0, std.math.inf(f64)));
+    if (!(maximum > 0)) return 0;
+    var exponent: i32 = @as(i32, @intFromFloat(@floor(std.math.log2(maximum)))) + 16;
+    exponent = std.math.clamp(exponent, 0, 31);
+    var scale = std.math.pow(f64, 2.0, @as(f64, @floatFromInt(exponent)) - 24.0);
+    var red = truncatePackedFloat(std.math.clamp(color[0], 0, std.math.inf(f64)) / scale);
+    var green = truncatePackedFloat(std.math.clamp(color[1], 0, std.math.inf(f64)) / scale);
+    var blue = truncatePackedFloat(std.math.clamp(color[2], 0, std.math.inf(f64)) / scale);
+    if (@max(@max(red, green), blue) > 0x1ff and exponent < 31) {
+        exponent += 1;
+        scale = std.math.pow(f64, 2.0, @as(f64, @floatFromInt(exponent)) - 24.0);
+        red = truncatePackedFloat(std.math.clamp(color[0], 0, std.math.inf(f64)) / scale);
+        green = truncatePackedFloat(std.math.clamp(color[1], 0, std.math.inf(f64)) / scale);
+        blue = truncatePackedFloat(std.math.clamp(color[2], 0, std.math.inf(f64)) / scale);
+    }
+    return @as(u32, @intCast(@min(red, 0x1ff))) |
+        (@as(u32, @intCast(@min(green, 0x1ff))) << 9) |
+        (@as(u32, @intCast(@min(blue, 0x1ff))) << 18) |
+        (@as(u32, @intCast(exponent)) << 27);
+}
+
 fn readPackedMipmapColor(texture: *const Texture, x: usize, y: usize) [4]f64 {
     const offset = y * texture.stride + x * texture.format.bytesPerPixel();
     return switch (texture.format) {
@@ -3025,6 +3096,16 @@ fn readPackedMipmapColor(texture: *const Texture, x: usize, y: usize) [4]f64 {
                 @as(f64, @floatFromInt((bits >> 30) & 3)) / 3.0,
             };
         },
+        .rg11b10_float => blk: {
+            const bits = std.mem.readInt(u32, texture.bytes[offset..][0..4], .little);
+            break :blk .{
+                readUnsignedPackedFloat(bits & 0x7ff, 6),
+                readUnsignedPackedFloat((bits >> 11) & 0x7ff, 6),
+                readUnsignedPackedFloat((bits >> 22) & 0x3ff, 5),
+                1,
+            };
+        },
+        .rgb9e5_float => readRgb9e5Mipmap(std.mem.readInt(u32, texture.bytes[offset..][0..4], .little)),
         else => unreachable,
     };
 }
@@ -3062,6 +3143,13 @@ fn writePackedMipmapColor(texture: *Texture, x: usize, y: usize, color: [4]f64) 
                 (packedMipmapValue(color[3], 3) << 30);
             std.mem.writeInt(u32, texture.bytes[offset..][0..4], bits, .little);
         },
+        .rg11b10_float => {
+            const bits = writeUnsignedPackedFloat(color[0], 6) |
+                (writeUnsignedPackedFloat(color[1], 6) << 11) |
+                (writeUnsignedPackedFloat(color[2], 5) << 22);
+            std.mem.writeInt(u32, texture.bytes[offset..][0..4], bits, .little);
+        },
+        .rgb9e5_float => std.mem.writeInt(u32, texture.bytes[offset..][0..4], writeRgb9e5Mipmap(color), .little),
         else => unreachable,
     }
 }
@@ -3402,7 +3490,8 @@ fn generateMipmap(command: MipmapCommand) Error!void {
         command.source.format == .r16_snorm or command.source.format == .rg16_snorm or command.source.format == .rgba16_snorm) return generateSnormMipmap(command);
     if (command.source.format == .b5g6r5_unorm or command.source.format == .a1bgr5_unorm or
         command.source.format == .abgr4_unorm or command.source.format == .bgr5a1_unorm or
-        command.source.format == .rgb10a2_unorm or command.source.format == .bgr10a2_unorm) return generatePackedUnormMipmap(command);
+        command.source.format == .rgb10a2_unorm or command.source.format == .bgr10a2_unorm or
+        command.source.format == .rg11b10_float or command.source.format == .rgb9e5_float) return generatePackedUnormMipmap(command);
     if (command.source.format == .r16_unorm or command.source.format == .rg16_unorm or command.source.format == .rgba16_unorm) return generateUnorm16Mipmap(command);
     if (command.source.format == .r16_float or command.source.format == .rg16_float or command.source.format == .r32_float or command.source.format == .rgba16_float or command.source.format == .rgba32_float) {
         return generateFloatMipmap(command);
@@ -3852,7 +3941,8 @@ fn generateMipmap3D(command: Mipmap3DCommand) Error!void {
         command.source0.format == .r16_snorm or command.source0.format == .rg16_snorm or command.source0.format == .rgba16_snorm) return generateSnormMipmap3D(command);
     if (command.source0.format == .b5g6r5_unorm or command.source0.format == .a1bgr5_unorm or
         command.source0.format == .abgr4_unorm or command.source0.format == .bgr5a1_unorm or
-        command.source0.format == .rgb10a2_unorm or command.source0.format == .bgr10a2_unorm) return generatePackedUnormMipmap3D(command);
+        command.source0.format == .rgb10a2_unorm or command.source0.format == .bgr10a2_unorm or
+        command.source0.format == .rg11b10_float or command.source0.format == .rgb9e5_float) return generatePackedUnormMipmap3D(command);
     if (command.source0.format == .r16_unorm or command.source0.format == .rg16_unorm or command.source0.format == .rgba16_unorm) return generateUnorm16Mipmap3D(command);
     if (command.source0.format == .r16_float or command.source0.format == .rg16_float or command.source0.format == .r32_float or command.source0.format == .rgba16_float or command.source0.format == .rgba32_float) {
         return generateFloatMipmap3D(command);

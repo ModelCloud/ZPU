@@ -118,6 +118,8 @@ pub const TargetFormat = enum {
     bgr5a1_unorm,
     rgb10a2_unorm,
     bgr10a2_unorm,
+    rg11b10_float,
+    rgb9e5_float,
 };
 
 pub const Target = struct {
@@ -141,7 +143,7 @@ pub const Target = struct {
             .rg32_float => 8,
             .rgba32_float => 16,
             .b5g6r5_unorm, .a1bgr5_unorm, .abgr4_unorm, .bgr5a1_unorm => 2,
-            .rgb10a2_unorm, .bgr10a2_unorm => 4,
+            .rgb10a2_unorm, .bgr10a2_unorm, .rg11b10_float, .rgb9e5_float => 4,
         };
     }
 
@@ -200,6 +202,80 @@ pub const Target = struct {
 
     fn packedUnormValue(bits: u32, maximum: u32) f32 {
         return @as(f32, @floatFromInt(bits)) / @as(f32, @floatFromInt(maximum));
+    }
+
+    fn roundToEven(value: f64) u32 {
+        if (!(value > 0)) return 0;
+        const lower_float = @floor(value);
+        const lower: u64 = @intFromFloat(lower_float);
+        const fraction = value - lower_float;
+        const rounded = if (fraction > 0.5 or (fraction == 0.5 and lower % 2 == 1)) lower + 1 else lower;
+        return @intCast(rounded);
+    }
+
+    fn readUnsignedFloat(bits: u32, mantissa_bits: u32) f32 {
+        const mantissa_mask = (@as(u32, 1) << @intCast(mantissa_bits)) - 1;
+        const mantissa = bits & mantissa_mask;
+        const exponent = (bits >> @intCast(mantissa_bits)) & 0x1f;
+        if (exponent == 0) {
+            return @floatCast(@as(f64, @floatFromInt(mantissa)) * std.math.pow(f64, 2.0, -14.0 - @as(f64, @floatFromInt(mantissa_bits))));
+        }
+        if (exponent == 0x1f) return if (mantissa == 0) std.math.inf(f32) else std.math.nan(f32);
+        const scale = std.math.pow(f64, 2.0, @as(f64, @floatFromInt(exponent)) - 15.0);
+        return @floatCast((1.0 + @as(f64, @floatFromInt(mantissa)) /
+            std.math.pow(f64, 2.0, @as(f64, @floatFromInt(mantissa_bits)))) * scale);
+    }
+
+    fn writeUnsignedFloat(value: f32, mantissa_bits: u32) u32 {
+        if (!(value > 0)) return 0;
+        if (!std.math.isFinite(value)) return (@as(u32, 0x1f) << @intCast(mantissa_bits));
+        const x: f64 = @floatCast(value);
+        const mantissa_scale = std.math.pow(f64, 2.0, @as(f64, @floatFromInt(mantissa_bits)));
+        const minimum_normal = std.math.pow(f64, 2.0, -14.0);
+        if (x < minimum_normal) return roundToEven(x * std.math.pow(f64, 2.0, 14.0 + @as(f64, @floatFromInt(mantissa_bits))));
+        var exponent: i32 = @intFromFloat(@floor(std.math.log2(x)));
+        var mantissa = roundToEven((x / std.math.pow(f64, 2.0, @floatFromInt(exponent)) - 1.0) * mantissa_scale);
+        const mantissa_limit = @as(u32, 1) << @intCast(mantissa_bits);
+        if (mantissa >= mantissa_limit) {
+            exponent += 1;
+            mantissa = 0;
+        }
+        if (exponent > 15) return (@as(u32, 0x1f) << @intCast(mantissa_bits));
+        return (@as(u32, @intCast(exponent + 15)) << @intCast(mantissa_bits)) | mantissa;
+    }
+
+    fn readRgb9e5(bits: u32) [4]f32 {
+        const exponent = (bits >> 27) & 0x1f;
+        const scale = std.math.pow(f64, 2.0, @as(f64, @floatFromInt(exponent)) - 24.0);
+        return .{
+            @floatCast(@as(f64, @floatFromInt(bits & 0x1ff)) * scale),
+            @floatCast(@as(f64, @floatFromInt((bits >> 9) & 0x1ff)) * scale),
+            @floatCast(@as(f64, @floatFromInt((bits >> 18) & 0x1ff)) * scale),
+            1,
+        };
+    }
+
+    fn writeRgb9e5(color: [4]f32) u32 {
+        var maximum: f64 = 0;
+        for (color[0..3]) |component| maximum = @max(maximum, @as(f64, @floatCast(std.math.clamp(component, 0, std.math.inf(f32)))));
+        if (!(maximum > 0)) return 0;
+        var exponent: i32 = @as(i32, @intFromFloat(@floor(std.math.log2(maximum)))) + 16;
+        exponent = std.math.clamp(exponent, 0, 31);
+        var scale = std.math.pow(f64, 2.0, @as(f64, @floatFromInt(exponent)) - 24.0);
+        var red = roundToEven(@as(f64, @floatCast(std.math.clamp(color[0], 0, std.math.inf(f32)))) / scale);
+        var green = roundToEven(@as(f64, @floatCast(std.math.clamp(color[1], 0, std.math.inf(f32)))) / scale);
+        var blue = roundToEven(@as(f64, @floatCast(std.math.clamp(color[2], 0, std.math.inf(f32)))) / scale);
+        if (@max(@max(red, green), blue) > 0x1ff and exponent < 31) {
+            exponent += 1;
+            scale = std.math.pow(f64, 2.0, @as(f64, @floatFromInt(exponent)) - 24.0);
+            red = roundToEven(@as(f64, @floatCast(std.math.clamp(color[0], 0, std.math.inf(f32)))) / scale);
+            green = roundToEven(@as(f64, @floatCast(std.math.clamp(color[1], 0, std.math.inf(f32)))) / scale);
+            blue = roundToEven(@as(f64, @floatCast(std.math.clamp(color[2], 0, std.math.inf(f32)))) / scale);
+        }
+        return @as(u32, @intCast(@min(red, 0x1ff))) |
+            (@as(u32, @intCast(@min(green, 0x1ff))) << 9) |
+            (@as(u32, @intCast(@min(blue, 0x1ff))) << 18) |
+            (@as(u32, @intCast(exponent)) << 27);
     }
 
     fn readPacked16(row_bytes: []const u8, offset: usize) u16 {
@@ -355,6 +431,16 @@ pub const Target = struct {
                     packedUnormValue(blue_bits, 1023), packedUnormValue((bits >> 30) & 3, 3),
                 };
             },
+            .rg11b10_float => blk: {
+                const bits = readPacked32(row_bytes, offset);
+                break :blk .{
+                    readUnsignedFloat(bits & 0x7ff, 6),
+                    readUnsignedFloat((bits >> 11) & 0x7ff, 6),
+                    readUnsignedFloat((bits >> 22) & 0x3ff, 5),
+                    1,
+                };
+            },
+            .rgb9e5_float => readRgb9e5(readPacked32(row_bytes, offset)),
         };
     }
 
@@ -490,6 +576,20 @@ pub const Target = struct {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) bits = (bits & ~blue_mask) | blue_bits;
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) bits = (bits & ~@as(u32, 0xc0000000)) | (packedUnorm(color[3], 3) << 30);
                 writePacked32(row_bytes, offset, bits);
+            },
+            .rg11b10_float => {
+                var bits = readPacked32(row_bytes, offset);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) bits = (bits & ~@as(u32, 0x000007ff)) | writeUnsignedFloat(color[0], 6);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) bits = (bits & ~@as(u32, 0x003ff800)) | (writeUnsignedFloat(color[1], 6) << 11);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) bits = (bits & ~@as(u32, 0xffc00000)) | (writeUnsignedFloat(color[2], 5) << 22);
+                writePacked32(row_bytes, offset, bits);
+            },
+            .rgb9e5_float => {
+                var old = readRgb9e5(readPacked32(row_bytes, offset));
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) old[0] = color[0];
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) old[1] = color[1];
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) old[2] = color[2];
+                writePacked32(row_bytes, offset, writeRgb9e5(old));
             },
         }
     }
@@ -1449,6 +1549,31 @@ test "packed normalized color targets preserve component bits and masks" {
         };
         try std.testing.expectEqual(preserved & ~red_mask, masked & ~red_mask);
     }
+}
+
+test "packed float color targets preserve native encodings" {
+    const color = [4]f32{ 0.25, 0.5, 0.75, 1 };
+
+    var rg11_bytes = [_]u8{0} ** 4;
+    var rg11 = try Target.init(&rg11_bytes, 1, 1, 4, .rg11b10_float);
+    rg11.storeColor(0, 0, color);
+    try std.testing.expectEqual(@as(u32, 0x741c0340), std.mem.readInt(u32, rg11_bytes[0..4], .little));
+    const rg11_color = rg11.readColor(0, 0);
+    try std.testing.expectEqual(@as(f32, 0.25), rg11_color[0]);
+    try std.testing.expectEqual(@as(f32, 0.5), rg11_color[1]);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.75), rg11_color[2], 0.001);
+    rg11.writeColor(0, 0, .{ 0, 0, 0, 1 }, @intFromEnum(abi.ColorWriteMask.red));
+    try std.testing.expectEqual(@as(u32, 0x741c0000), std.mem.readInt(u32, rg11_bytes[0..4], .little));
+
+    var rgb9e5_bytes = [_]u8{0} ** 4;
+    var rgb9e5 = try Target.init(&rgb9e5_bytes, 1, 1, 4, .rgb9e5_float);
+    rgb9e5.storeColor(0, 0, color);
+    try std.testing.expectEqual(@as(u32, 0x7e020080), std.mem.readInt(u32, rgb9e5_bytes[0..4], .little));
+    const rgb9e5_color = rgb9e5.readColor(0, 0);
+    try std.testing.expectEqual(@as(f32, 0.25), rgb9e5_color[0]);
+    try std.testing.expectEqual(@as(f32, 0.5), rgb9e5_color[1]);
+    try std.testing.expectEqual(@as(f32, 0.75), rgb9e5_color[2]);
+    try std.testing.expectEqual(@as(f32, 1), rgb9e5_color[3]);
 }
 
 test "CPU texture sampling uses normalized top-left texel coordinates" {

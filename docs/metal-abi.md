@@ -39,7 +39,8 @@ triangle path:
   R16Unorm/R16Snorm, RG8Unorm/RG8Unorm_sRGB/RG8Snorm,
   RG16Unorm/RG16Snorm, R16Float, RG16Float, RGBA8Unorm/RGBA8Unorm_sRGB,
   RGBA8Snorm, BGRA8Unorm/BGRA8Unorm_sRGB, RGBA16Unorm/RGBA16Snorm,
-  RGBA16Float, R32Float, RG32Float, and RGBA32Float as CPU color targets;
+  RGBA16Float, RG11B10Float, RGB9E5Float, R32Float, RG32Float, and RGBA32Float
+  as CPU color targets;
   sRGB RGB channels
   use Apple's 12-bit linear fixed-point transfer profile for CPU sampling,
   attachment stores, clears, and mip generation; 2D mip levels are filtered
@@ -48,9 +49,9 @@ triangle path:
   attachment stores and 2D/3D mip generation use integer-domain normalized
   filtering with native-oracle quantization; all Uint/Sint formats remain
   transfer-only; packed normalized B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/BGR10A2
-  formats use CPU decode/encode profiles for sampling, render targets, and
-  2D/3D mip generation, while packed RG11B10Float/RGB9E5Float remain
-  transfer-only;
+  and packed RG11B10Float/RGB9E5Float formats use CPU decode/encode profiles
+  for sampling, render targets, and 2D/3D mip generation, including the
+  native packed-float mipmap truncation rule;
   fixed CPU compute profiles remain explicitly format-specific;
 - formats without a corresponding CPU shader profile remain rejected
 - CPU-owned `MTLDevice` identity and capability metadata, including a stable,
@@ -95,7 +96,7 @@ triangle path:
   adapters; a private discarded CPU color surface preserves the portable
   raster ABI while public depth bytes remain exact
 - up to eight R8/R16Unorm/R16Float/RG8/RG16Unorm/RG16Float/RGBA8/BGRA8/
-  B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/BGR10A2Unorm/
+  B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10Float/RGB9E5Float/BGR10A2Unorm/
   R32Float/RGBA16Unorm/RGBA16Float/RG32Float/RGBA32Float color attachments can be
   described and cleared by a CPU render pass; the explicit
   `zpu_test_mrt_fragment` profile mirrors one logical fragment color to every
