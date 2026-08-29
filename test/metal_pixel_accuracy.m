@@ -3991,6 +3991,37 @@ int main(void) {
             return 60;
         }
 
+        /* GPU addresses are only meaningful for resources owned by the
+         * device that records the command. A native buffer is used here only
+         * to supply a foreign address; it is never submitted to native Metal
+         * and must be rejected by the CPU adapter. */
+        id<MTLBuffer> native_foreign_address_buffer =
+            [device newBufferWithLength:sizeof(uint32_t) options:MTLResourceStorageModeShared];
+        id<MTL4CommandBuffer> metal4_foreign_address_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_foreign_address_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> metal4_foreign_address_encoder =
+            [metal4_foreign_address_command_buffer computeCommandEncoder];
+        [metal4_foreign_address_encoder dispatchThreadgroupsWithIndirectBuffer:native_foreign_address_buffer.gpuAddress
+                                                        threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [metal4_foreign_address_encoder endEncoding];
+        [metal4_foreign_address_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_foreign_address_command_buffers[] = {
+            metal4_foreign_address_command_buffer,
+        };
+        MTL4CommitOptions *metal4_foreign_address_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *metal4_foreign_address_error = nil;
+        [metal4_foreign_address_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            metal4_foreign_address_error = feedback.error;
+        }];
+        [metal4_queue commit:metal4_foreign_address_command_buffers
+                        count:1
+                       options:metal4_foreign_address_options];
+        if (native_foreign_address_buffer == nil || metal4_foreign_address_command_buffer == nil ||
+            metal4_foreign_address_encoder == nil || metal4_foreign_address_error == nil) {
+            fail_with_error("Metal 4 CPU adapter accepted a foreign GPU address", metal4_error);
+            return 61;
+        }
+
         id<MTLTexture> metal4_mip_copy = [adapter_device newTextureWithDescriptor:mip_descriptor];
         id<MTL4CommandBuffer> metal4_mip_command_buffer = [adapter_device newCommandBuffer];
         [metal4_mip_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
