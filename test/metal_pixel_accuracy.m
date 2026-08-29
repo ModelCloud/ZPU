@@ -1458,6 +1458,46 @@ int main(void) {
             return 76;
         }
 
+        id<MTLTexture> metal4_array_compute_texture =
+            [adapter_device newTextureWithDescriptor:compute_array_descriptor];
+        MTL4ArgumentTableDescriptor *metal4_array_compute_table_descriptor = [MTL4ArgumentTableDescriptor new];
+        metal4_array_compute_table_descriptor.maxTextureBindCount = 1;
+        id<MTL4ArgumentTable> metal4_array_compute_table =
+            [adapter_device newArgumentTableWithDescriptor:metal4_array_compute_table_descriptor error:&metal4_error];
+        [metal4_array_compute_table setTexture:metal4_array_compute_texture.gpuResourceID atIndex:0];
+        id<MTL4CommandBuffer> metal4_array_compute_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_array_compute_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> metal4_array_compute_encoder =
+            [metal4_array_compute_command_buffer computeCommandEncoder];
+        [metal4_array_compute_encoder setComputePipelineState:adapter_array_compute_pipeline];
+        [metal4_array_compute_encoder setArgumentTable:metal4_array_compute_table];
+        [metal4_array_compute_encoder dispatchThreads:MTLSizeMake(width, height, 2)
+                                  threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+        [metal4_array_compute_encoder endEncoding];
+        [metal4_array_compute_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_array_compute_command_buffers[] = {metal4_array_compute_command_buffer};
+        [metal4_queue commit:metal4_array_compute_command_buffers count:1];
+        uint8_t metal4_array_compute_pixels[2][byte_count];
+        for (NSUInteger slice = 0; slice < 2; ++slice) {
+            [metal4_array_compute_texture getBytes:metal4_array_compute_pixels[slice]
+                                      bytesPerRow:(NSUInteger)width * 4
+                                    bytesPerImage:byte_count
+                                     fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                                    mipmapLevel:0
+                                           slice:slice];
+        }
+        BOOL metal4_array_compute_exact = metal4_array_compute_texture != nil &&
+            metal4_array_compute_table != nil && metal4_array_compute_command_buffer != nil &&
+            metal4_array_compute_encoder != nil;
+        for (NSUInteger slice = 0; slice < 2; ++slice) {
+            metal4_array_compute_exact = metal4_array_compute_exact &&
+                memcmp(native_array_compute_pixels[slice], metal4_array_compute_pixels[slice], byte_count) == 0;
+        }
+        if (!metal4_array_compute_exact) {
+            fail_with_error("Metal 4 CPU array compute failed", metal4_error);
+            return 79;
+        }
+
         const uint32_t metal4_indirect_threads[] = {width, height, 1, 8, 8, 1};
         id<MTLBuffer> metal4_indirect_threads_buffer =
             [adapter_device newBufferWithBytes:metal4_indirect_threads
