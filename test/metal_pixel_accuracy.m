@@ -8901,6 +8901,19 @@ int main(void) {
             fprintf(stderr, "metal-pixel: Objective-C adapter command did not complete\n");
             return 20;
         }
+        MTLCommandBufferDescriptor *adapter_unretained_descriptor = [MTLCommandBufferDescriptor new];
+        adapter_unretained_descriptor.retainedReferences = NO;
+        adapter_unretained_descriptor.errorOptions = MTLCommandBufferErrorOptionEncoderExecutionStatus;
+        id<MTLCommandBuffer> adapter_unretained_command_buffer =
+            [adapter_queue commandBufferWithUnretainedReferences];
+        id<MTLCommandBuffer> adapter_descriptor_command_buffer =
+            [adapter_queue commandBufferWithDescriptor:adapter_unretained_descriptor];
+        if (adapter_unretained_command_buffer == nil || adapter_unretained_command_buffer.retainedReferences ||
+            adapter_descriptor_command_buffer == nil || adapter_descriptor_command_buffer.retainedReferences ||
+            adapter_descriptor_command_buffer.errorOptions != MTLCommandBufferErrorOptionEncoderExecutionStatus) {
+            fprintf(stderr, "metal-pixel: CPU command-buffer retention/options metadata failed\n");
+            return 22;
+        }
         uint8_t adapter_pixels[byte_count];
         memset(adapter_pixels, 0xa5, sizeof(adapter_pixels));
         [adapter_texture getBytes:adapter_pixels

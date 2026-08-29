@@ -1120,6 +1120,8 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     CFTimeInterval _gpuStartTime;
     CFTimeInterval _gpuEndTime;
     BOOL _hasComputeWork;
+    BOOL _retainedReferences;
+    MTLCommandBufferErrorOption _errorOptions;
 }
 - (instancetype)initWithOwner:(ZPUCommandQueue *)owner commandBuffer:(zpu_metal_command_buffer *)commandBuffer;
 - (void)retainResource:(id)resource;
@@ -8033,8 +8035,18 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     if (commandBuffer == NULL) return nil;
     return (id<MTLCommandBuffer>)[[ZPUCommandBuffer alloc] initWithOwner:self commandBuffer:commandBuffer];
 }
-- (id<MTLCommandBuffer>)commandBufferWithUnretainedReferences { return [self commandBuffer]; }
-- (id<MTLCommandBuffer>)commandBufferWithDescriptor:(MTLCommandBufferDescriptor *)descriptor { (void)descriptor; return [self commandBuffer]; }
+- (id<MTLCommandBuffer>)commandBufferWithUnretainedReferences {
+    ZPUCommandBuffer *buffer = (ZPUCommandBuffer *)[self commandBuffer];
+    buffer->_retainedReferences = NO;
+    return (id<MTLCommandBuffer>)buffer;
+}
+- (id<MTLCommandBuffer>)commandBufferWithDescriptor:(MTLCommandBufferDescriptor *)descriptor {
+    ZPUCommandBuffer *buffer = (ZPUCommandBuffer *)[self commandBuffer];
+    if (buffer == nil || descriptor == nil) return (id<MTLCommandBuffer>)buffer;
+    buffer->_retainedReferences = descriptor.retainedReferences;
+    buffer->_errorOptions = descriptor.errorOptions;
+    return (id<MTLCommandBuffer>)buffer;
+}
 @end
 
 @implementation ZPUCommandBuffer
@@ -8045,18 +8057,22 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
         _retainedResources = [NSMutableArray array];
         _scheduledHandlers = [NSMutableArray array];
         _completedHandlers = [NSMutableArray array];
+        _retainedReferences = YES;
+        _errorOptions = MTLCommandBufferErrorOptionNone;
     }
     return self;
 }
 - (void)dealloc {
     if (_zpuCommandBuffer != NULL) zpu_metal_command_buffer_destroy(_zpuCommandBuffer);
 }
-- (void)retainResource:(id)resource { if (resource != nil) [_retainedResources addObject:resource]; }
+- (void)retainResource:(id)resource {
+    if (_retainedReferences && resource != nil) [_retainedResources addObject:resource];
+}
 - (void)markError { zpu_metal_command_buffer_mark_error(_zpuCommandBuffer); }
 - (id<MTLDevice>)device { return [_owner device]; }
 - (id<MTLCommandQueue>)commandQueue { return (id<MTLCommandQueue>)_owner; }
-- (BOOL)retainedReferences { return YES; }
-- (MTLCommandBufferErrorOption)errorOptions { return MTLCommandBufferErrorOptionNone; }
+- (BOOL)retainedReferences { return _retainedReferences; }
+- (MTLCommandBufferErrorOption)errorOptions { return _errorOptions; }
 - (NSString *)label { return _label; }
 - (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (CFTimeInterval)kernelStartTime { return _hasComputeWork ? _kernelStartTime : 0.0; }
