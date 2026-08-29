@@ -1122,7 +1122,7 @@ pub const ComputeEncoder = struct {
 
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (kernel != 1 and kernel != 2 and kernel != 3 and kernel != 4) return error.UnsupportedOperation;
+        if (kernel != 1 and kernel != 2 and kernel != 3 and kernel != 4 and kernel != 5 and kernel != 6) return error.UnsupportedOperation;
         self.kernel = kernel;
     }
 
@@ -1379,6 +1379,23 @@ fn executeCompute(command: ComputeCommand) Error!void {
                     command.texture.bytes[destination_offset + 3] = source.bytes[source_offset + 3];
                 }
             }
+        },
+        5 => {
+            if (command.texture.format != .r32_float) return error.UnsupportedFormat;
+            var target = command.texture.asTarget();
+            for (0..height) |y| for (0..width) |x| target.storeColor(x, y, .{
+                (@as(f32, @floatFromInt(x)) + 1.0) / 8.0, 0, 0, 1,
+            });
+        },
+        6 => {
+            if (command.texture.format != .rgba16_float) return error.UnsupportedFormat;
+            var target = command.texture.asTarget();
+            for (0..height) |y| for (0..width) |x| target.storeColor(x, y, .{
+                (@as(f32, @floatFromInt(x)) + 1.0) / 8.0,
+                (@as(f32, @floatFromInt(y)) + 1.0) / 8.0,
+                0.25,
+                1,
+            });
         },
         else => return error.UnsupportedOperation,
     }

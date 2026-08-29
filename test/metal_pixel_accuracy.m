@@ -40,7 +40,15 @@ static const char *const kShaderSource =
     "kernel void zpu_cpu_copy_rgba8_buffer_to_texture(device const uchar4 *source [[buffer(0)]], "
     "texture2d<float, access::write> output [[texture(1)]], uint2 gid [[thread_position_in_grid]]) { "
     "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
-    "output.write(float4(source[gid.y * output.get_width() + gid.x]) / 255.0, gid); }\n";
+    "output.write(float4(source[gid.y * output.get_width() + gid.x]) / 255.0, gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_r32_float(texture2d<float, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write((float(gid.x) + 1.0) / 8.0, gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_rgba16_float(texture2d<float, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(float4((float(gid.x) + 1.0) / 8.0, (float(gid.y) + 1.0) / 8.0, 0.25, 1.0), gid); }\n";
 
 static void fail_with_error(const char *message, NSError *error) {
     if (error != nil) {
@@ -2478,6 +2486,66 @@ int main(void) {
                 fprintf(stderr, "metal-pixel: compute mismatch at byte %zu: Metal=%u ZPU=%u\n",
                         index, native_compute_pixels[index], adapter_compute_pixels[index]);
                 return 43;
+            }
+        }
+
+        const MTLPixelFormat compute_float_formats[] = {
+            MTLPixelFormatR32Float, MTLPixelFormatRGBA16Float,
+        };
+        NSString *compute_float_names[] = {
+            @"zpu_cpu_fill_gradient_r32_float", @"zpu_cpu_fill_gradient_rgba16_float",
+        };
+        for (NSUInteger format_index = 0; format_index < sizeof(compute_float_formats) / sizeof(compute_float_formats[0]); ++format_index) {
+            const MTLPixelFormat format = compute_float_formats[format_index];
+            const NSUInteger bytes_per_pixel = format == MTLPixelFormatR32Float ? 4 : 8;
+            const NSUInteger compute_float_byte_count = (NSUInteger)width * height * bytes_per_pixel;
+            MTLTextureDescriptor *native_compute_float_descriptor = [compute_texture_descriptor copy];
+            native_compute_float_descriptor.pixelFormat = format;
+            MTLTextureDescriptor *adapter_compute_float_descriptor = [native_compute_float_descriptor copy];
+            id<MTLTexture> native_compute_float_texture = [device newTextureWithDescriptor:native_compute_float_descriptor];
+            id<MTLTexture> adapter_compute_float_texture = [adapter_device newTextureWithDescriptor:adapter_compute_float_descriptor];
+            id<MTLFunction> native_compute_float_function = [library newFunctionWithName:compute_float_names[format_index]];
+            id<MTLComputePipelineState> native_compute_float_pipeline =
+                [device newComputePipelineStateWithFunction:native_compute_float_function error:&error];
+            id<MTLFunction> adapter_compute_float_function =
+                ZPUMetalCreateCPUFunction(adapter_device, compute_float_names[format_index]);
+            id<MTLComputePipelineState> adapter_compute_float_pipeline =
+                [adapter_device newComputePipelineStateWithFunction:adapter_compute_float_function error:&adapter_compute_error];
+            id<MTLCommandBuffer> native_compute_float_command_buffer = [queue commandBuffer];
+            id<MTLComputeCommandEncoder> native_compute_float_encoder =
+                [native_compute_float_command_buffer computeCommandEncoder];
+            [native_compute_float_encoder setComputePipelineState:native_compute_float_pipeline];
+            [native_compute_float_encoder setTexture:native_compute_float_texture atIndex:0];
+            [native_compute_float_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                      threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            [native_compute_float_encoder endEncoding];
+            [native_compute_float_command_buffer commit];
+            [native_compute_float_command_buffer waitUntilCompleted];
+            id<MTLCommandBuffer> adapter_compute_float_command_buffer = [adapter_queue commandBuffer];
+            id<MTLComputeCommandEncoder> adapter_compute_float_encoder =
+                [adapter_compute_float_command_buffer computeCommandEncoder];
+            [adapter_compute_float_encoder setComputePipelineState:adapter_compute_float_pipeline];
+            [adapter_compute_float_encoder setTexture:adapter_compute_float_texture atIndex:0];
+            [adapter_compute_float_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                       threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            [adapter_compute_float_encoder endEncoding];
+            [adapter_compute_float_command_buffer commit];
+            [adapter_compute_float_command_buffer waitUntilCompleted];
+            uint8_t native_compute_float_bytes[compute_float_byte_count];
+            uint8_t adapter_compute_float_bytes[compute_float_byte_count];
+            [native_compute_float_texture getBytes:native_compute_float_bytes bytesPerRow:(NSUInteger)width * bytes_per_pixel
+                                        fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            [adapter_compute_float_texture getBytes:adapter_compute_float_bytes bytesPerRow:(NSUInteger)width * bytes_per_pixel
+                                          fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            if (native_compute_float_function == nil || native_compute_float_pipeline == nil ||
+                native_compute_float_texture == nil ||
+                native_compute_float_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                adapter_compute_float_function == nil || adapter_compute_float_pipeline == nil ||
+                adapter_compute_float_texture == nil ||
+                adapter_compute_float_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                memcmp(native_compute_float_bytes, adapter_compute_float_bytes, compute_float_byte_count) != 0) {
+                fail_with_error("float compute adapter execution failed", adapter_compute_error);
+                return 45 + (int)format_index;
             }
         }
 

@@ -2374,7 +2374,7 @@ static uint64_t zpu_cpu_timestamp(void) {
 }
 - (id<MTLLibrary>)newDefaultLibrary {
     return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
-                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d"];
+                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float"];
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
@@ -2747,6 +2747,8 @@ static uint64_t zpu_cpu_timestamp(void) {
             @"zpu_cpu_copy_rgba8_buffer_to_texture",
             @"zpu_cpu_fill_gradient_rgba8_array",
             @"zpu_cpu_fill_gradient_rgba8_3d",
+            @"zpu_cpu_fill_gradient_r32_float",
+            @"zpu_cpu_fill_gradient_rgba16_float",
         ]) {
             if ([source rangeOfString:name].location != NSNotFound) [names addObject:name];
         }
@@ -4313,6 +4315,10 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
             _kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY;
         } else if (is_kernel && [name isEqualToString:@"zpu_cpu_fill_gradient_rgba8_3d"]) {
             _kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_3D;
+        } else if (is_kernel && [name isEqualToString:@"zpu_cpu_fill_gradient_r32_float"]) {
+            _kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_R32_FLOAT;
+        } else if (is_kernel && [name isEqualToString:@"zpu_cpu_fill_gradient_rgba16_float"]) {
+            _kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA16_FLOAT;
         } else {
             zpu_set_error(error, @"ZPU CPU Metal has no registered CPU implementation for this compute function");
             return nil;

@@ -95,7 +95,9 @@ triangle path:
   `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8`,
   `ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE`, and
   `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY` and
-  `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_3D` kernels; they operate directly
+  `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_3D`,
+  `ZPU_METAL_COMPUTE_FILL_GRADIENT_R32_FLOAT`, and
+  `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA16_FLOAT` kernels; they operate directly
   on ZPU-owned buffers/textures and never invoke Apple's Metal runtime. Array
   dispatches expand the logical z grid into ordered per-slice ZPU commands;
   3D dispatches expand z into plane commands while preserving the z coordinate

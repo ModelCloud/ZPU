@@ -166,6 +166,11 @@ pub const Target = struct {
         }
     }
 
+    pub fn storeColor(self: *Target, x: usize, y: usize, color: [4]f32) void {
+        if (x >= self.width or y >= self.height) return;
+        self.writeColor(x, y, color, @intFromEnum(abi.ColorWriteMask.all));
+    }
+
     fn addressCoordinate(value: f32, mode: abi.SamplerAddressMode) ?f32 {
         if (!std.math.isFinite(value)) return null;
         return switch (mode) {
