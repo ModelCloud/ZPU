@@ -635,6 +635,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLSamplerAddressMode _sAddressMode;
     MTLSamplerAddressMode _tAddressMode;
     MTLSamplerBorderColor _borderColor;
+    MTLSamplerReductionMode _reductionMode;
     BOOL _normalizedCoordinates;
     float _lodMinClamp;
     float _lodMaxClamp;
@@ -5510,6 +5511,8 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _sAddressMode = descriptor.sAddressMode;
         _tAddressMode = descriptor.tAddressMode;
         _borderColor = descriptor.borderColor;
+        _reductionMode = MTLSamplerReductionModeWeightedAverage;
+        if (@available(macOS 26.0, iOS 26.0, *)) _reductionMode = descriptor.reductionMode;
         _normalizedCoordinates = descriptor.normalizedCoordinates;
         _lodMinClamp = descriptor.lodMinClamp;
         _lodMaxClamp = descriptor.lodMaxClamp;
@@ -6426,7 +6429,10 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     return descriptor == nil ? nil : (id<MTLDepthStencilState>)[[ZPUDepthStencilState alloc] initWithOwner:self descriptor:descriptor];
 }
 - (id<MTLSamplerState>)newSamplerStateWithDescriptor:(MTLSamplerDescriptor *)descriptor {
-    if (descriptor == nil || descriptor.borderColor > MTLSamplerBorderColorOpaqueWhite) return nil;
+    /* The CPU rasterizer has no anisotropic footprint evaluator yet. Do not
+     * silently accept a sampler whose maxAnisotropy would change its result. */
+    if (descriptor == nil || descriptor.borderColor > MTLSamplerBorderColorOpaqueWhite ||
+        descriptor.maxAnisotropy > 1) return nil;
     return (id<MTLSamplerState>)[[ZPUSamplerState alloc] initWithOwner:self descriptor:descriptor];
 }
 - (id<MTLLibrary>)newLibraryWithSource:(NSString *)source options:(MTLCompileOptions *)options error:(NSError **)error {
@@ -12048,7 +12054,10 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         zpu_metal_render_encoder_set_fragment_sampler_lod_clamps(
             _zpuEncoder, lodMinClamp, lodMaxClamp) != ZPU_METAL_OK ||
         zpu_metal_render_encoder_set_fragment_sampler_normalized_coordinates(
-            _zpuEncoder, normalizedCoordinates) != ZPU_METAL_OK) {
+            _zpuEncoder, normalizedCoordinates) != ZPU_METAL_OK ||
+        zpu_metal_render_encoder_set_fragment_sampler_reduction_mode(
+            _zpuEncoder, sampler == nil ? (uint8_t)MTLSamplerReductionModeWeightedAverage :
+                (uint8_t)zpuSampler->_reductionMode) != ZPU_METAL_OK) {
         [_owner markError];
         return;
     }

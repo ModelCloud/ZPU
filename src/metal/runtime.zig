@@ -679,6 +679,7 @@ pub const RenderEncoder = struct {
     sample_lod_min_clamp: f32 = 0,
     sample_lod_max_clamp: f32 = std.math.floatMax(f32),
     sample_normalized_coordinates: bool = true,
+    sample_reduction_mode: abi.SamplerReductionMode = .weighted_average,
     sample_address_s: abi.SamplerAddressMode = .clamp_to_edge,
     sample_address_t: abi.SamplerAddressMode = .clamp_to_edge,
     sample_border_color: abi.SamplerBorderColor = .transparent_black,
@@ -741,6 +742,7 @@ pub const RenderEncoder = struct {
             .sample_lod_min_clamp = self.sample_lod_min_clamp,
             .sample_lod_max_clamp = self.sample_lod_max_clamp,
             .sample_normalized_coordinates = self.sample_normalized_coordinates,
+            .sample_reduction_mode = self.sample_reduction_mode,
             .sample_address_s = self.sample_address_s,
             .sample_address_t = self.sample_address_t,
             .sample_border_color = self.sample_border_color,
@@ -882,6 +884,11 @@ pub const RenderEncoder = struct {
     pub fn setFragmentSamplerNormalizedCoordinates(self: *RenderEncoder, normalized_coordinates: bool) Error!void {
         if (!self.open()) return error.InvalidCommand;
         self.sample_normalized_coordinates = normalized_coordinates;
+    }
+
+    pub fn setFragmentSamplerReductionMode(self: *RenderEncoder, reduction_mode: u8) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        self.sample_reduction_mode = samplerReductionModeFromInt(reduction_mode) orelse return error.InvalidArgument;
     }
 
     pub fn setFragmentTextureSwizzle(self: *RenderEncoder, red: u8, green: u8, blue: u8, alpha: u8) Error!void {
@@ -2718,6 +2725,15 @@ fn samplerMipFilterFromInt(value: u8) ?abi.SamplerMipFilter {
     };
 }
 
+fn samplerReductionModeFromInt(value: u8) ?abi.SamplerReductionMode {
+    return switch (value) {
+        @intFromEnum(abi.SamplerReductionMode.weighted_average) => .weighted_average,
+        @intFromEnum(abi.SamplerReductionMode.minimum) => .minimum,
+        @intFromEnum(abi.SamplerReductionMode.maximum) => .maximum,
+        else => null,
+    };
+}
+
 fn samplerAddressModeFromInt(value: u8) ?abi.SamplerAddressMode {
     return switch (value) {
         @intFromEnum(abi.SamplerAddressMode.clamp_to_edge) => .clamp_to_edge,
@@ -3901,6 +3917,13 @@ pub export fn zpu_metal_render_encoder_set_fragment_sampler_normalized_coordinat
     encoder: ?*RenderEncoder, normalized_coordinates: bool,
 ) callconv(.c) c_int {
     (encoder orelse return -1).setFragmentSamplerNormalizedCoordinates(normalized_coordinates) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_fragment_sampler_reduction_mode(
+    encoder: ?*RenderEncoder, reduction_mode: u8,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setFragmentSamplerReductionMode(reduction_mode) catch |err| return errorCode(err);
     return 0;
 }
 

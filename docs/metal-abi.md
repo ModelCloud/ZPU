@@ -68,11 +68,13 @@ triangle path:
   extra target, while ordinary single-output profiles leave extra targets at
   their load/clear value
 - the bounded `zpu_test_sample_fragment` profile samples a ZPU-owned color
-  texture with interpolated normalized coordinates; nearest/linear
-  minification and magnification filters selected from CPU-computed texture
-  footprints, sampler address modes, linear filtering, and the three Metal
-  border-color modes are carried through the CPU raster path; native Metal is
-  used only as the byte-accuracy oracle
+  texture with interpolated normalized or texel-space coordinates; nearest/
+  linear minification and magnification filters selected from CPU-computed
+  texture footprints, nearest/linear mip selection, LOD clamps, sampler
+  address modes, linear filtering, the three Metal border-color modes, and
+  weighted/minimum/maximum reduction are carried through the CPU raster path;
+  native Metal is used only as the byte-accuracy oracle where the native GPU
+  exposes the requested feature
 - the bounded `zpu_cpu_uniform_color_fragment` profile consumes a 16-byte
   `float4` from `setFragmentBytes:length:atIndex:0` and applies it through
   the CPU raster path; it also consumes a ZPU-owned 16-byte `float4` buffer
@@ -400,7 +402,7 @@ reference: <https://developer.apple.com/documentation/metal>.
 The current checked-in implementation is intentionally not 100% of the Apple
 Metal ABI. The remaining framework surface includes additional compute and
 Metal 4 encoders, resource and pipeline descriptors beyond the fixed-function state
-implemented here, Metal 4 tile/mesh render and remaining copy/optimization families, ICB mesh/tessellation-shader execution, other
+implemented here, anisotropic sampler footprints, Metal 4 tile/mesh render and remaining copy/optimization families, ICB mesh/tessellation-shader execution, other
 synchronization families, ray-tracing execution, unsupported 3D sparse-texture tail
 packing, machine learning/tensor execution, and arbitrary shader compilation. Function-table storage is
 implemented, but it does not imply ray-tracing or arbitrary function-pointer
