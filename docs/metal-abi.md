@@ -196,9 +196,13 @@ triangle path:
   `convertSparsePixelRegions:...`, and `convertSparseTileRegions:...`; supported
   color/depth formats and 1D/2D/3D texture types match the native tile oracle,
   while outward and inward alignment are overflow checked; placement sparse
-  buffers additionally provide CPU-owned page mapping, copied-page aliasing,
-  unmap-to-zero behavior, and exact byte transfers, while sparse texture
-  allocation remains unsupported
+  buffers and Tier 1 placement sparse textures provide CPU-owned page mapping,
+  copied-page aliasing, legacy and Metal 4 map/unmap/copy operations,
+  resource-state move operations, unmap-to-zero behavior, and exact mapped
+  tile transfers. Sparse resources never allocate native Metal storage;
+  unbacked texture reads return zero and unbacked writes are discarded. The
+  adapter accepts one-level sparse textures only (`firstMipmapInTail` equals
+  `mipmapLevelCount`, `tailSizeInBytes == 0`) and does not emulate tail packing
 - CPU library metadata can discover the six registered kernel names and fixed
   CPU render profiles from source text, UTF-8 file/URL/data inputs, and the
   default bundle query; unsupported arbitrary MSL and stitched libraries fail
@@ -215,7 +219,8 @@ triangle path:
   bytes, with native Metal used only as the test oracle
 - CPU resource-state encoders preserve Metal encoder boundaries and fence
   ordering. Resource/cache transitions are ordered no-ops over ZPU's unified
-  CPU memory, while sparse texture mapping requests fail closed
+  CPU memory; legacy sparse buffer and texture mapping operations update the
+  same CPU-owned physical-page store as the Metal 4 queue operations
 - CPU residency sets track ZPU allocations, committed byte totals, and
   request/end-residency state without introducing a GPU residency domain
 - process-local shared-event handles round-trip the same ZPU event and
@@ -258,7 +263,7 @@ triangle path:
   CPU-owned tensors also provide contiguous and strided byte-addressable slice
   transfers. Acceleration-structure build/refit/copy/compaction commands use
   the same CPU-owned storage path. Tensor shader binding, ray-intersection execution,
-  sparse texture, drawable, machine-learning, and tile/mesh render-pass
+  sparse-texture tail packing, drawable, machine-learning, and tile/mesh render-pass
   features remain explicit fail-closed boundaries. Suspending/resuming render
   passes are represented as sequential ordinary CPU passes because the CPU
   implementation has no tile-memory stitching requirement. The
@@ -266,8 +271,8 @@ triangle path:
 - classic Metal resource, pipeline, blit, event, indirect-command, and
   command-buffer selectors that have no portable CPU meaning are represented
   explicitly: metadata-only operations are deterministic no-ops, while
-  arbitrary shader compilation, unregistered or arbitrary binary linking, sparse texture
-  resources, drawable access, ray tracing, tensor shader/ML execution, and unsupported
+  arbitrary shader compilation, unregistered or arbitrary binary linking, sparse-texture
+  tail resources, drawable access, ray tracing, tensor shader/ML execution, and unsupported
   Metal 4 advanced families return nil or a stable error. They never fall through to Apple's
   native Metal runtime
 
@@ -353,7 +358,7 @@ The current checked-in implementation is intentionally not 100% of the Apple
 Metal ABI. The remaining framework surface includes additional compute and
 Metal 4 encoders, resource and pipeline descriptors beyond the fixed-function state
 implemented here, Metal 4 tile/mesh render and remaining copy/optimization families, ICB patch/mesh commands, other
-synchronization families, ray-tracing execution, sparse resources, machine
+synchronization families, ray-tracing execution, sparse-texture tail packing, machine
 learning/tensor execution, and arbitrary shader compilation. Function-table storage is
 implemented, but it does not imply ray-tracing or arbitrary function-pointer
 execution. A strict completeness claim belongs only after the Apple SDK

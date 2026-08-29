@@ -5879,33 +5879,170 @@ int main(void) {
                                         operations:&metal4_sparse_unmap_operation
                                              count:1];
 
-        /* Sparse texture mapping remains deliberately fail-closed until the
-         * CPU texture pager has the same page/format contract. */
-        MTL4UpdateSparseTextureMappingOperation metal4_sparse_texture_operation = {
+        /* Placement-sparse textures use the same CPU-owned physical-page
+         * store as sparse buffers. Native Metal is queried only for the
+         * resource-property oracle; the adapter never routes this work to
+         * Apple's command encoder. */
+        const NSUInteger sparse_texture_width = sparse_page_bytes == 0 ? 0 : 256;
+        const NSUInteger sparse_texture_height = 128;
+        const NSUInteger sparse_texture_row_bytes = sparse_texture_width * 4;
+        const NSUInteger sparse_texture_bytes = sparse_texture_row_bytes * sparse_texture_height;
+        const NSUInteger sparse_texture_tile_bytes = 128 * 128 * 4;
+        NSMutableData *sparse_texture_input_data = [NSMutableData dataWithLength:sparse_texture_tile_bytes];
+        for (NSUInteger index = 0; index < sparse_texture_tile_bytes; ++index) {
+            ((uint8_t *)sparse_texture_input_data.mutableBytes)[index] = (uint8_t)((index * 17u + 3u) & 0xffu);
+        }
+        MTLTextureDescriptor *native_sparse_texture_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                width:sparse_texture_width
+                                                               height:sparse_texture_height
+                                                            mipmapped:NO];
+        native_sparse_texture_descriptor.storageMode = MTLStorageModePrivate;
+        native_sparse_texture_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        native_sparse_texture_descriptor.placementSparsePageSize = MTLSparsePageSize64;
+        MTLTextureDescriptor *adapter_sparse_texture_descriptor = [native_sparse_texture_descriptor copy];
+        id<MTLTexture> native_sparse_texture = [device newTextureWithDescriptor:native_sparse_texture_descriptor];
+        MTLHeapDescriptor *adapter_sparse_texture_heap_descriptor = [MTLHeapDescriptor new];
+        adapter_sparse_texture_heap_descriptor.type = MTLHeapTypePlacement;
+        adapter_sparse_texture_heap_descriptor.size = sparse_page_bytes * 2;
+        adapter_sparse_texture_heap_descriptor.storageMode = MTLStorageModePrivate;
+        adapter_sparse_texture_heap_descriptor.maxCompatiblePlacementSparsePageSize = MTLSparsePageSize64;
+        id<MTLHeap> adapter_sparse_texture_heap = [adapter_device newHeapWithDescriptor:adapter_sparse_texture_heap_descriptor];
+        id<MTLTexture> adapter_sparse_texture = [adapter_sparse_texture_heap newTextureWithDescriptor:adapter_sparse_texture_descriptor];
+        id<MTLTexture> adapter_sparse_texture_copy = [adapter_sparse_texture_heap newTextureWithDescriptor:adapter_sparse_texture_descriptor];
+        MTLTextureDescriptor *adapter_sparse_texture_tail_descriptor = [adapter_sparse_texture_descriptor copy];
+        adapter_sparse_texture_tail_descriptor.mipmapLevelCount = 2;
+        const BOOL sparse_texture_tail_rejected =
+            [adapter_device newTextureWithDescriptor:adapter_sparse_texture_tail_descriptor] == nil &&
+            [adapter_sparse_texture_heap newTextureWithDescriptor:adapter_sparse_texture_tail_descriptor] == nil;
+        id<MTLBuffer> adapter_sparse_texture_input =
+            [adapter_device newBufferWithBytes:sparse_texture_input_data.bytes
+                                         length:sparse_texture_input_data.length
+                                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_sparse_texture_output =
+            [adapter_device newBufferWithLength:sparse_texture_bytes options:MTLResourceStorageModeShared];
+        MTL4UpdateSparseTextureMappingOperation adapter_sparse_texture_map = {
             .mode = MTLSparseTextureMappingModeMap,
             .textureRegion = MTLRegionMake2D(0, 0, 1, 1),
             .heapOffset = 0,
             .textureLevel = 0,
             .textureSlice = 0,
         };
-        [metal4_sparse_queue updateTextureMappings:adapter_compute_texture
-                                              heap:adapter_three_d_heap
-                                         operations:&metal4_sparse_texture_operation
-                                              count:1];
-        id<MTL4CommandBuffer> metal4_sparse_command_buffer = [adapter_device newCommandBuffer];
-        [metal4_sparse_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
-        [metal4_sparse_command_buffer endCommandBuffer];
-        id<MTL4CommandBuffer> metal4_sparse_command_buffers[] = {metal4_sparse_command_buffer};
-        MTL4CommitOptions *metal4_sparse_options = ZPUMetalCreateCPUCommitOptions();
-        __block NSError *metal4_sparse_error = nil;
-        [metal4_sparse_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
-            metal4_sparse_error = feedback.error;
-        }];
-        [metal4_sparse_queue commit:metal4_sparse_command_buffers count:1 options:metal4_sparse_options];
-        if (metal4_sparse_queue == nil || metal4_sparse_command_buffer == nil ||
-            metal4_sparse_error == nil) {
-            fail_with_error("Metal 4 CPU sparse texture mapping did not fail closed", metal4_error);
+        [metal4_sparse_queue updateTextureMappings:adapter_sparse_texture
+                                              heap:adapter_sparse_texture_heap
+                                         operations:&adapter_sparse_texture_map count:1];
+        id<MTLCommandQueue> adapter_sparse_texture_legacy_queue = [adapter_device newCommandQueue];
+        id<MTLCommandBuffer> adapter_sparse_texture_upload_command = [adapter_sparse_texture_legacy_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_sparse_texture_upload_encoder =
+            [adapter_sparse_texture_upload_command blitCommandEncoder];
+        [adapter_sparse_texture_upload_encoder copyFromBuffer:adapter_sparse_texture_input sourceOffset:0
+                                               sourceBytesPerRow:128 * 4 sourceBytesPerImage:128 * 128 * 4
+                                                     sourceSize:MTLSizeMake(128, 128, 1)
+                                                    toTexture:adapter_sparse_texture destinationSlice:0 destinationLevel:0
+                                             destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [adapter_sparse_texture_upload_encoder endEncoding];
+        [adapter_sparse_texture_upload_command commit];
+        [adapter_sparse_texture_upload_command waitUntilCompleted];
+        id<MTLCommandBuffer> adapter_sparse_texture_download_command = [adapter_sparse_texture_legacy_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_sparse_texture_download_encoder =
+            [adapter_sparse_texture_download_command blitCommandEncoder];
+        [adapter_sparse_texture_download_encoder copyFromTexture:adapter_sparse_texture sourceSlice:0 sourceLevel:0
+                                                     sourceOrigin:MTLOriginMake(0, 0, 0)
+                                                       sourceSize:MTLSizeMake(sparse_texture_width, sparse_texture_height, 1)
+                                                          toBuffer:adapter_sparse_texture_output destinationOffset:0
+                                              destinationBytesPerRow:sparse_texture_row_bytes
+                                            destinationBytesPerImage:sparse_texture_bytes];
+        [adapter_sparse_texture_download_encoder endEncoding];
+        [adapter_sparse_texture_download_command commit];
+        [adapter_sparse_texture_download_command waitUntilCompleted];
+        BOOL sparse_texture_exact =
+            native_sparse_texture != nil && native_sparse_texture.isSparse &&
+            native_sparse_texture.sparseTextureTier == MTLTextureSparseTier1 &&
+            native_sparse_texture.firstMipmapInTail == adapter_sparse_texture.firstMipmapInTail &&
+            adapter_sparse_texture_heap != nil &&
+            adapter_sparse_texture != nil && adapter_sparse_texture_input != nil &&
+            adapter_sparse_texture_output != nil && adapter_sparse_texture_legacy_queue != nil &&
+            sparse_texture_tail_rejected &&
+            adapter_sparse_texture_upload_command.status == MTLCommandBufferStatusCompleted &&
+            adapter_sparse_texture_download_command.status == MTLCommandBufferStatusCompleted;
+        if (sparse_texture_exact) {
+            const uint8_t *adapter_bytes = adapter_sparse_texture_output.contents;
+            const uint8_t *input_bytes = sparse_texture_input_data.bytes;
+            for (NSUInteger row = 0; row < sparse_texture_height && sparse_texture_exact; ++row) {
+                sparse_texture_exact = memcmp(adapter_bytes + row * sparse_texture_row_bytes,
+                                              input_bytes + row * 128 * 4, 128 * 4) == 0;
+                for (NSUInteger index = 128 * 4; index < sparse_texture_row_bytes && sparse_texture_exact; ++index) {
+                    if (adapter_bytes[row * sparse_texture_row_bytes + index] != 0) sparse_texture_exact = NO;
+                }
+            }
+        }
+        if (!sparse_texture_exact || adapter_sparse_texture.sparseTextureTier != MTLTextureSparseTier1 ||
+            !adapter_sparse_texture.isSparse) {
+            fprintf(stderr, "metal-pixel: CPU placement-sparse texture mapping exactness failed\n");
             return 87;
+        }
+        MTL4CopySparseTextureMappingOperation adapter_sparse_texture_copy_operation = {
+            .sourceRegion = MTLRegionMake2D(0, 0, 1, 1),
+            .sourceLevel = 0,
+            .sourceSlice = 0,
+            /* A nonzero tile origin catches accidental zero-point handling
+             * in the X/Y sparse grid independently of viewport coordinates. */
+            .destinationOrigin = MTLOriginMake(1, 0, 0),
+            .destinationLevel = 0,
+            .destinationSlice = 0,
+        };
+        [metal4_sparse_queue copyTextureMappingsFromTexture:adapter_sparse_texture
+                                                   toTexture:adapter_sparse_texture_copy
+                                                   operations:&adapter_sparse_texture_copy_operation count:1];
+        memset(adapter_sparse_texture_output.contents, 0xa5, sparse_texture_bytes);
+        id<MTLCommandBuffer> adapter_sparse_texture_copy_command = [adapter_sparse_texture_legacy_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_sparse_texture_copy_encoder =
+            [adapter_sparse_texture_copy_command blitCommandEncoder];
+        [adapter_sparse_texture_copy_encoder copyFromTexture:adapter_sparse_texture_copy sourceSlice:0 sourceLevel:0
+                                                  sourceOrigin:MTLOriginMake(0, 0, 0)
+                                                    sourceSize:MTLSizeMake(sparse_texture_width, sparse_texture_height, 1)
+                                                       toBuffer:adapter_sparse_texture_output destinationOffset:0
+                                            destinationBytesPerRow:sparse_texture_row_bytes
+                                          destinationBytesPerImage:sparse_texture_bytes];
+        [adapter_sparse_texture_copy_encoder endEncoding];
+        [adapter_sparse_texture_copy_command commit];
+        [adapter_sparse_texture_copy_command waitUntilCompleted];
+        if (adapter_sparse_texture_copy == nil || adapter_sparse_texture_copy_encoder == nil ||
+            adapter_sparse_texture_copy_command.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: CPU sparse texture mapping copy failed\n");
+            return 88;
+        }
+        const uint8_t *copied_sparse_texture_bytes = adapter_sparse_texture_output.contents;
+        for (NSUInteger row = 0; row < sparse_texture_height; ++row) {
+            for (NSUInteger index = 0; index < 128 * 4; ++index) {
+                if (copied_sparse_texture_bytes[row * sparse_texture_row_bytes + index] != 0) {
+                    fprintf(stderr, "metal-pixel: CPU sparse texture mapping copy touched an unmapped row\n");
+                    return 89;
+                }
+            }
+            if (memcmp(copied_sparse_texture_bytes + row * sparse_texture_row_bytes + 128 * 4,
+                       sparse_texture_input_data.bytes + row * 128 * 4, 128 * 4) != 0) {
+                fprintf(stderr, "metal-pixel: CPU sparse texture mapping copy lost a mapped row\n");
+                return 89;
+            }
+        }
+        MTL4UpdateSparseTextureMappingOperation adapter_sparse_texture_unmap = adapter_sparse_texture_map;
+        adapter_sparse_texture_unmap.mode = MTLSparseTextureMappingModeUnmap;
+        [metal4_sparse_queue updateTextureMappings:adapter_sparse_texture heap:nil
+                                         operations:&adapter_sparse_texture_unmap count:1];
+        MTL4UpdateSparseTextureMappingOperation adapter_sparse_texture_copy_unmap = adapter_sparse_texture_unmap;
+        adapter_sparse_texture_copy_unmap.textureRegion = MTLRegionMake2D(1, 0, 1, 1);
+        [metal4_sparse_queue updateTextureMappings:adapter_sparse_texture_copy heap:nil
+                                         operations:&adapter_sparse_texture_copy_unmap count:1];
+        uint8_t adapter_sparse_texture_zero[sparse_texture_tile_bytes];
+        memset(adapter_sparse_texture_zero, 0xa5, sizeof(adapter_sparse_texture_zero));
+        [adapter_sparse_texture getBytes:adapter_sparse_texture_zero bytesPerRow:128 * 4
+                             fromRegion:MTLRegionMake2D(0, 0, 128, 128) mipmapLevel:0];
+        for (NSUInteger index = 0; index < sizeof(adapter_sparse_texture_zero); ++index) {
+            if (adapter_sparse_texture_zero[index] != 0) {
+                fprintf(stderr, "metal-pixel: CPU unbacked sparse texture read was not zero\n");
+                return 88;
+            }
         }
 
         id<MTLTexture> metal4_mip_copy = [adapter_device newTextureWithDescriptor:mip_descriptor];

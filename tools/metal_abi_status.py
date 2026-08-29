@@ -93,6 +93,10 @@ SOURCE_SYMBOL_ALIASES = {
     "MTL4Compiler.newRenderPipelineStateWithDescriptorDynamicLinking": "dynamicLinkingDescriptor",
     "MTL4Archive.newComputePipelineStateWithDescriptorDynamicLinking": "dynamicLinkingDescriptor",
     "MTL4Archive.newRenderPipelineStateWithDescriptorDynamicLinking": "dynamicLinkingDescriptor",
+    "MTLDevice.sparseTileSizeWithTextureTypeSparsePageSize": "sparseTileSizeWithTextureType",
+    "MTLDevice.newBufferWithLengthOptionsPlacementSparsePageSize": "placementSparsePageSize",
+    "MTLResourceStateCommandEncoder.updateTextureMappingIndirect": "updateTextureMapping",
+    "MTLResourceStateCommandEncoder.moveTextureMappings": "moveTextureMappingsFromTexture",
 }
 
 
