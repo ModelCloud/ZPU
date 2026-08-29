@@ -1370,6 +1370,11 @@ static BOOL zpu_vertex_layout_supported(MTLVertexDescriptor *descriptor, NSUInte
     MTLVertexAttributeDescriptor *position = descriptor.attributes[0];
     MTLVertexAttributeDescriptor *color = descriptor.attributes[1];
     MTLVertexBufferLayoutDescriptor *layout = descriptor.layouts[0];
+    /* Metal exposes 31 vertex attribute slots. The CPU profile only
+     * implements slots 0 and 1, so every remaining slot must stay invalid. */
+    for (NSUInteger index = 2; index < 31; ++index) {
+        if (descriptor.attributes[index].format != MTLVertexFormatInvalid) return NO;
+    }
     const BOOL empty = position.format == MTLVertexFormatInvalid &&
         color.format == MTLVertexFormatInvalid && layout.stride == 0 &&
         (layout.stepFunction == MTLVertexStepFunctionConstant ||
@@ -7288,6 +7293,8 @@ static id<MTLRenderPipelineState> zpu_mtl4_render_pipeline_for_descriptor(
     MTL4StaticLinkingDescriptor *vertex_linking = descriptor.vertexStaticLinkingDescriptor;
     MTL4StaticLinkingDescriptor *fragment_linking = descriptor.fragmentStaticLinkingDescriptor;
     MTLVertexDescriptor *vertex_descriptor = descriptor.vertexDescriptor;
+    NSUInteger ignored_vertex_stride = 0;
+    BOOL ignored_vertex_stride_dynamic = NO;
     MTLVertexAttributeDescriptor *position_attribute = vertex_descriptor.attributes[0];
     MTLVertexAttributeDescriptor *color_attribute = vertex_descriptor.attributes[1];
     MTLVertexBufferLayoutDescriptor *vertex_layout = vertex_descriptor.layouts[0];
@@ -7306,6 +7313,8 @@ static id<MTLRenderPipelineState> zpu_mtl4_render_pipeline_for_descriptor(
         descriptor.alphaToOneState != MTL4AlphaToOneStateDisabled ||
         descriptor.maxVertexAmplificationCount > 1 ||
         descriptor.colorAttachmentMappingState != MTL4LogicalToPhysicalColorAttachmentMappingStateIdentity ||
+        !zpu_vertex_layout_supported(vertex_descriptor, &ignored_vertex_stride,
+                                     &ignored_vertex_stride_dynamic) ||
         (!empty_vertex_descriptor && !fixed_vertex_descriptor) ||
         vertex_linking.functionDescriptors.count != 0 || vertex_linking.privateFunctionDescriptors.count != 0 ||
         vertex_linking.groups.count != 0 || fragment_linking.functionDescriptors.count != 0 ||

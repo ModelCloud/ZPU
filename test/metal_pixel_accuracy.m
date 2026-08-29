@@ -106,14 +106,14 @@ static int test_vertex_attribute_stride_against_native(
         MTLRenderPipelineDescriptor *native_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
         native_pipeline_descriptor.vertexFunction = native_vertex_function;
         native_pipeline_descriptor.fragmentFunction = native_fragment_function;
-            native_pipeline_descriptor.vertexDescriptor = vertex_descriptor;
-            native_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        native_pipeline_descriptor.vertexDescriptor = vertex_descriptor;
+        native_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
         native_pipeline_descriptor.supportIndirectCommandBuffers = YES;
         MTLRenderPipelineDescriptor *adapter_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
         adapter_pipeline_descriptor.vertexFunction = adapter_vertex_function;
         adapter_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
-            adapter_pipeline_descriptor.vertexDescriptor = [vertex_descriptor copy];
-            adapter_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        adapter_pipeline_descriptor.vertexDescriptor = [vertex_descriptor copy];
+        adapter_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
         adapter_pipeline_descriptor.supportIndirectCommandBuffers = YES;
         NSError *native_error = nil;
         NSError *adapter_error = nil;
@@ -193,6 +193,19 @@ static int test_vertex_attribute_stride_against_native(
                     (long)native_command_buffer.status, (long)adapter_command_buffer.status);
             return dynamic_stride ? 142 : 143;
         }
+    }
+    MTLVertexDescriptor *unsupported_vertex_descriptor = [MTLVertexDescriptor vertexDescriptor];
+    unsupported_vertex_descriptor.attributes[2].format = MTLVertexFormatFloat4;
+    MTLRenderPipelineDescriptor *unsupported_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
+    unsupported_pipeline_descriptor.vertexFunction = adapter_vertex_function;
+    unsupported_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
+    unsupported_pipeline_descriptor.vertexDescriptor = unsupported_vertex_descriptor;
+    unsupported_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    NSError *unsupported_error = nil;
+    if ([adapter_device newRenderPipelineStateWithDescriptor:unsupported_pipeline_descriptor
+                                                       error:&unsupported_error] != nil) {
+        fail_with_error("unsupported extra vertex attribute was accepted", unsupported_error);
+        return 145;
     }
     return 0;
 }
