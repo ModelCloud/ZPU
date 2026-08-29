@@ -13310,6 +13310,8 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     if (_pipelineState != nil) [encoder setComputePipelineState:(id<MTLComputePipelineState>)_pipelineState];
     if (_kernelBuffer != nil) {
         [encoder setBuffer:(id<MTLBuffer>)_kernelBuffer offset:_kernelBufferOffset atIndex:0];
+    } else if (!_owner->_inheritBuffers) {
+        [encoder setBuffer:nil offset:0 atIndex:0];
     }
     if (_hasDispatchThreads) {
         [encoder dispatchThreads:_threadsPerGrid threadsPerThreadgroup:_threadsPerThreadgroup];

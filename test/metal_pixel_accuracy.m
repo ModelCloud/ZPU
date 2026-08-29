@@ -8139,6 +8139,38 @@ int main(void) {
             }
         }
 
+        /* With buffer inheritance disabled, a command that omits its kernel
+         * buffer must not accidentally consume the compute encoder's prior
+         * binding. Native Metal rejects this dispatch; keep the CPU adapter
+         * equally fail-closed while retaining ZPU ownership of the resources. */
+        MTLIndirectCommandBufferDescriptor *noninherited_compute_descriptor = [compute_icb_descriptor copy];
+        noninherited_compute_descriptor.inheritBuffers = NO;
+        id<MTLIndirectCommandBuffer> noninherited_compute_icb =
+            [adapter_device newIndirectCommandBufferWithDescriptor:noninherited_compute_descriptor
+                                                     maxCommandCount:1 options:MTLResourceStorageModeShared];
+        id<MTLIndirectComputeCommand> noninherited_compute_command =
+            [noninherited_compute_icb indirectComputeCommandAtIndex:0];
+        [noninherited_compute_command setComputePipelineState:adapter_icb_compute_pipeline];
+        [noninherited_compute_command concurrentDispatchThreads:MTLSizeMake(width, height, 1)
+                                               threadsPerThreadgroup:MTLSizeMake(2, 2, 1)];
+        id<MTLTexture> noninherited_compute_texture =
+            [adapter_device newTextureWithDescriptor:compute_texture_descriptor];
+        id<MTLCommandBuffer> noninherited_compute_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> noninherited_compute_encoder =
+            [noninherited_compute_command_buffer computeCommandEncoder];
+        [noninherited_compute_encoder setBuffer:adapter_copy_buffer offset:0 atIndex:0];
+        [noninherited_compute_encoder setTexture:noninherited_compute_texture atIndex:1];
+        [noninherited_compute_encoder executeCommandsInBuffer:noninherited_compute_icb withRange:NSMakeRange(0, 1)];
+        [noninherited_compute_encoder endEncoding];
+        [noninherited_compute_command_buffer commit];
+        [noninherited_compute_command_buffer waitUntilCompleted];
+        if (noninherited_compute_icb == nil || noninherited_compute_command == nil ||
+            noninherited_compute_texture == nil || noninherited_compute_encoder == nil ||
+            noninherited_compute_command_buffer.status != MTLCommandBufferStatusError) {
+            fprintf(stderr, "metal-pixel: non-inherited indirect compute buffer binding did not fail closed\n");
+            return 136;
+        }
+
         id<MTLIndirectCommandBuffer> adapter_copied_compute_icb =
             [adapter_device newIndirectCommandBufferWithDescriptor:compute_icb_descriptor
                                                     maxCommandCount:1 options:MTLResourceStorageModeShared];
