@@ -176,7 +176,8 @@ triangle path:
   on the CPU compute encoder; compute- and blit-pass descriptor sampling
   attachments schedule ZPU timestamp samples at encoder start/end while
   retaining the CPU-owned counter buffers; resource-state pass descriptors
-  use the same CPU-owned start/end timestamp semantics
+  and acceleration-structure pass descriptors use the same CPU-owned start/end
+  timestamp semantics
 - render-pass descriptors schedule CPU timestamp samples for the configured
   vertex and fragment start/end boundaries while preserving the top-left
   ZPU raster grid

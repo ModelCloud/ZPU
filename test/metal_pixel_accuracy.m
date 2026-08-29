@@ -5001,6 +5001,7 @@ int main(void) {
          * native object is created only as an oracle for availability/shape;
          * no native build or ray-tracing command is submitted here. */
         BOOL adapter_acceleration_resources_ok = YES;
+        BOOL adapter_acceleration_pass_counter_ok = YES;
         id<MTLAccelerationStructureCommandEncoder> adapter_acceleration_encoder = nil;
         if (@available(macOS 13.0, iOS 16.0, *)) {
             MTLPrimitiveAccelerationStructureDescriptor *native_as_descriptor =
@@ -5101,6 +5102,47 @@ int main(void) {
                 adapter_as_copy_command_buffer.status == MTLCommandBufferStatusCompleted &&
                 adapter_as_compact_command_buffer.status == MTLCommandBufferStatusCompleted &&
                 (native_as == nil || (native_as.device == device && native_as.size >= native_as_allocation_size));
+
+            /* Acceleration pass descriptors use the same CPU-owned timestamp
+             * attachment contract as compute, blit, and resource-state passes.
+             * The descriptor is an Apple API object, but the adapter samples
+             * its ZPU counter buffer without submitting native work. */
+            MTLCounterSampleBufferDescriptor *adapter_as_counter_descriptor =
+                [MTLCounterSampleBufferDescriptor new];
+            adapter_as_counter_descriptor.counterSet = adapter_device.counterSets.firstObject;
+            adapter_as_counter_descriptor.storageMode = MTLStorageModeShared;
+            adapter_as_counter_descriptor.sampleCount = 2;
+            NSError *adapter_as_counter_error = nil;
+            id<MTLCounterSampleBuffer> adapter_as_counter_sample_buffer =
+                [adapter_device newCounterSampleBufferWithDescriptor:adapter_as_counter_descriptor
+                                                                  error:&adapter_as_counter_error];
+            MTLAccelerationStructurePassDescriptor *adapter_as_pass =
+                [MTLAccelerationStructurePassDescriptor accelerationStructurePassDescriptor];
+            adapter_as_pass.sampleBufferAttachments[0].sampleBuffer = adapter_as_counter_sample_buffer;
+            adapter_as_pass.sampleBufferAttachments[0].startOfEncoderSampleIndex = 0;
+            adapter_as_pass.sampleBufferAttachments[0].endOfEncoderSampleIndex = 1;
+            id<MTLCommandBuffer> adapter_as_pass_command_buffer = [adapter_queue commandBuffer];
+            id<MTLAccelerationStructureCommandEncoder> adapter_as_pass_encoder =
+                [adapter_as_pass_command_buffer accelerationStructureCommandEncoderWithDescriptor:adapter_as_pass];
+            [adapter_as_pass_encoder endEncoding];
+            [adapter_as_pass_command_buffer commit];
+            [adapter_as_pass_command_buffer waitUntilCompleted];
+            NSData *adapter_as_counter_resolved =
+                [adapter_as_counter_sample_buffer resolveCounterRange:NSMakeRange(0, 2)];
+            const MTLCounterResultTimestamp *adapter_as_counter_entries =
+                (const MTLCounterResultTimestamp *)adapter_as_counter_resolved.bytes;
+            adapter_acceleration_pass_counter_ok =
+                adapter_as_counter_sample_buffer != nil && adapter_as_pass_encoder != nil &&
+                adapter_as_pass_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                adapter_as_counter_resolved.length == 2 * sizeof(MTLCounterResultTimestamp) &&
+                adapter_as_counter_entries[0].timestamp != MTLCounterErrorValue &&
+                adapter_as_counter_entries[1].timestamp != MTLCounterErrorValue &&
+                adapter_as_counter_entries[0].timestamp != 0 &&
+                adapter_as_counter_entries[1].timestamp != 0;
+            if (!adapter_acceleration_pass_counter_ok) {
+                fail_with_error("CPU acceleration pass counter descriptor failed", adapter_as_counter_error);
+                return 81;
+            }
         }
         BOOL adapter_iosurface_ok = YES;
         if (@available(macOS 10.11, iOS 11.0, *)) {
@@ -5213,6 +5255,7 @@ int main(void) {
             [adapter_resource_state_encoder conformsToProtocol:@protocol(MTLResourceStateCommandEncoder)] &&
             adapter_resource_state_command_buffer.status == MTLCommandBufferStatusCompleted &&
             adapter_acceleration_resources_ok &&
+            adapter_acceleration_pass_counter_ok &&
             adapter_iosurface_ok &&
             [adapter_command_buffer accelerationStructureCommandEncoder] != nil;
         if (!adapter_protocols_ok || !adapter_selectors_ok || !adapter_fail_closed_ok) {

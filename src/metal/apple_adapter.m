@@ -1393,9 +1393,11 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @public
     ZPUCommandBuffer *_owner;
     NSString *_label;
+    id _passDescriptor;
     BOOL _ended;
 }
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner;
+- (BOOL)configurePassDescriptor:(id)descriptor;
 - (void)refitCPU:(id<MTLAccelerationStructure>)sourceAccelerationStructure
       descriptor:(MTLAccelerationStructureDescriptor *)descriptor
      destination:(id<MTLAccelerationStructure>)destinationAccelerationStructure
@@ -9577,7 +9579,14 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
         initWithOwner:self];
 }
 - (id<MTLAccelerationStructureCommandEncoder>)accelerationStructureCommandEncoderWithDescriptor:(MTLAccelerationStructurePassDescriptor *)descriptor API_AVAILABLE(macos(13.0), ios(16.0)) {
-    return descriptor == nil ? nil : [self accelerationStructureCommandEncoder];
+    if (descriptor == nil) return nil;
+    ZPUAccelerationStructureEncoder *encoder =
+        (ZPUAccelerationStructureEncoder *)[self accelerationStructureCommandEncoder];
+    if (encoder == nil || ![encoder configurePassDescriptor:descriptor]) {
+        if (encoder != nil) [encoder endEncoding];
+        return nil;
+    }
+    return (id<MTLAccelerationStructureCommandEncoder>)encoder;
 }
 - (void)encodeSignalEvent:(id<MTLEvent>)event value:(uint64_t)value API_AVAILABLE(macos(10.14), ios(12.0)) {
     ZPUSharedEvent *zpuEvent = (ZPUSharedEvent *)event;
@@ -13025,8 +13034,17 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 
 @implementation ZPUAccelerationStructureEncoder
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner {
-    if ((self = [super init])) _owner = owner;
+    if ((self = [super init])) {
+        _owner = owner;
+        _passDescriptor = nil;
+        _ended = NO;
+    }
     return self;
+}
+- (BOOL)configurePassDescriptor:(id)descriptor {
+    if (descriptor == nil || !zpu_sample_pass_attachments(_owner, [descriptor sampleBufferAttachments], YES)) return NO;
+    _passDescriptor = [descriptor copy];
+    return YES;
 }
 - (id<MTLDevice>)device { return [_owner device]; }
 - (NSString *)label { return _label; }
@@ -13228,7 +13246,13 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 - (void)insertDebugSignpost:(NSString *)string { (void)string; }
 - (void)pushDebugGroup:(NSString *)string { (void)string; }
 - (void)popDebugGroup {}
-- (void)endEncoding { _ended = YES; }
+- (void)endEncoding {
+    if (_ended) return;
+    _ended = YES;
+    if (_passDescriptor != nil && !zpu_sample_pass_attachments(_owner, [_passDescriptor sampleBufferAttachments], NO)) {
+        [_owner markError];
+    }
+}
 @end
 
 @implementation ZPURenderEncoder

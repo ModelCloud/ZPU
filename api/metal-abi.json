@@ -512,6 +512,7 @@
     "MTLResourceStatePassDescriptor.sampleBufferAttachments",
     "MTLCommandBuffer.accelerationStructureCommandEncoder",
     "MTLCommandBuffer.accelerationStructureCommandEncoderWithDescriptor",
+    "MTLAccelerationStructurePassDescriptor.sampleBufferAttachments",
     "MTLAccelerationStructureCommandEncoder.buildAccelerationStructure",
     "MTLAccelerationStructureCommandEncoder.refitAccelerationStructure",
     "MTLAccelerationStructureCommandEncoder.copyAccelerationStructure",
