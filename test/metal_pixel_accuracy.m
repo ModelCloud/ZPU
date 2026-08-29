@@ -14524,6 +14524,123 @@ int main(void) {
             return 30;
         }
 
+        /* The same nullable state must survive ICB recording when the ICB
+         * does not inherit depth/stencil state. Seed the outer encoder with
+         * the near draw, then replay a command that explicitly unbinds depth
+         * before drawing the farther red vertices. */
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTLIndirectCommandBufferDescriptor *nil_depth_icb_descriptor = [MTLIndirectCommandBufferDescriptor new];
+            nil_depth_icb_descriptor.commandTypes = MTLIndirectCommandTypeDraw;
+            nil_depth_icb_descriptor.inheritPipelineState = YES;
+            nil_depth_icb_descriptor.inheritBuffers = YES;
+            nil_depth_icb_descriptor.inheritDepthStencilState = NO;
+            id<MTLIndirectCommandBuffer> native_nil_depth_icb =
+                [device newIndirectCommandBufferWithDescriptor:nil_depth_icb_descriptor
+                                                maxCommandCount:1 options:MTLResourceStorageModeShared];
+            id<MTLIndirectRenderCommand> native_nil_depth_command =
+                [native_nil_depth_icb indirectRenderCommandAtIndex:0];
+            id<MTLIndirectCommandBuffer> adapter_nil_depth_icb =
+                [adapter_device newIndirectCommandBufferWithDescriptor:nil_depth_icb_descriptor
+                                                        maxCommandCount:1 options:MTLResourceStorageModeShared];
+            id<MTLIndirectRenderCommand> adapter_nil_depth_command =
+                [adapter_nil_depth_icb indirectRenderCommandAtIndex:0];
+            if (native_nil_depth_icb == nil || native_nil_depth_command == nil ||
+                adapter_nil_depth_icb == nil || adapter_nil_depth_command == nil) {
+                fprintf(stderr, "metal-pixel: nil-depth ICB allocation failed\n");
+                return 31;
+            }
+            BOOL native_nil_depth_icb_supported = YES;
+            @try {
+                [native_nil_depth_command setDepthStencilState:nil];
+                [native_nil_depth_command drawPrimitives:MTLPrimitiveTypeTriangle
+                                             vertexStart:0 vertexCount:6 instanceCount:1 baseInstance:0];
+            } @catch (NSException *exception) {
+                (void)exception;
+                native_nil_depth_icb_supported = NO;
+            }
+            if (native_nil_depth_icb_supported) {
+            [adapter_nil_depth_command setDepthStencilState:nil];
+            [adapter_nil_depth_command drawPrimitives:MTLPrimitiveTypeTriangle
+                                           vertexStart:0 vertexCount:6 instanceCount:1 baseInstance:0];
+
+            id<MTLTexture> native_nil_depth_color = [device newTextureWithDescriptor:texture_descriptor];
+            id<MTLTexture> adapter_nil_depth_color = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+            MTLTextureDescriptor *native_nil_depth_texture_descriptor = [metal_depth_texture_descriptor copy];
+            native_nil_depth_texture_descriptor.storageMode = MTLStorageModeShared;
+            MTLTextureDescriptor *adapter_nil_depth_texture_descriptor = [adapter_depth_texture_descriptor copy];
+            adapter_nil_depth_texture_descriptor.storageMode = MTLStorageModeShared;
+            id<MTLTexture> native_nil_depth_texture =
+                [device newTextureWithDescriptor:native_nil_depth_texture_descriptor];
+            id<MTLTexture> adapter_nil_depth_texture =
+                [adapter_device newTextureWithDescriptor:adapter_nil_depth_texture_descriptor];
+            if (native_nil_depth_color == nil || adapter_nil_depth_color == nil ||
+                native_nil_depth_texture == nil || adapter_nil_depth_texture == nil) {
+                fprintf(stderr, "metal-pixel: nil-depth ICB texture allocation failed\n");
+                return 32;
+            }
+            MTLRenderPassDescriptor *native_nil_depth_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            native_nil_depth_pass.colorAttachments[0].texture = native_nil_depth_color;
+            native_nil_depth_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            native_nil_depth_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            native_nil_depth_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+            native_nil_depth_pass.depthAttachment.texture = native_nil_depth_texture;
+            native_nil_depth_pass.depthAttachment.loadAction = MTLLoadActionClear;
+            native_nil_depth_pass.depthAttachment.storeAction = MTLStoreActionStore;
+            native_nil_depth_pass.depthAttachment.clearDepth = 1.0;
+            MTLRenderPassDescriptor *adapter_nil_depth_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            adapter_nil_depth_pass.colorAttachments[0].texture = adapter_nil_depth_color;
+            adapter_nil_depth_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            adapter_nil_depth_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            adapter_nil_depth_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+            adapter_nil_depth_pass.depthAttachment.texture = adapter_nil_depth_texture;
+            adapter_nil_depth_pass.depthAttachment.loadAction = MTLLoadActionClear;
+            adapter_nil_depth_pass.depthAttachment.storeAction = MTLStoreActionStore;
+            adapter_nil_depth_pass.depthAttachment.clearDepth = 1.0;
+            id<MTLCommandBuffer> native_nil_depth_command_buffer = [queue commandBuffer];
+            id<MTLCommandBuffer> adapter_nil_depth_command_buffer = [adapter_queue commandBuffer];
+            id<MTLRenderCommandEncoder> native_nil_depth_encoder =
+                [native_nil_depth_command_buffer renderCommandEncoderWithDescriptor:native_nil_depth_pass];
+            id<MTLRenderCommandEncoder> adapter_nil_depth_encoder =
+                [adapter_nil_depth_command_buffer renderCommandEncoderWithDescriptor:adapter_nil_depth_pass];
+            if (native_nil_depth_command_buffer == nil || adapter_nil_depth_command_buffer == nil ||
+                native_nil_depth_encoder == nil || adapter_nil_depth_encoder == nil) {
+                fprintf(stderr, "metal-pixel: nil-depth ICB encoder allocation failed\n");
+                return 33;
+            }
+            [native_nil_depth_encoder setRenderPipelineState:depth_pipeline];
+            [native_nil_depth_encoder setDepthStencilState:depth_state];
+            [native_nil_depth_encoder setVertexBuffer:metal_depth_vertex_buffer offset:0 atIndex:0];
+            [native_nil_depth_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:6 vertexCount:6];
+            [native_nil_depth_encoder executeCommandsInBuffer:native_nil_depth_icb withRange:NSMakeRange(0, 1)];
+            [native_nil_depth_encoder endEncoding];
+            [adapter_nil_depth_encoder setRenderPipelineState:adapter_depth_pipeline];
+            [adapter_nil_depth_encoder setDepthStencilState:adapter_depth_state];
+            [adapter_nil_depth_encoder setVertexBuffer:adapter_depth_vertex_buffer offset:0 atIndex:0];
+            [adapter_nil_depth_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:6 vertexCount:6];
+            [adapter_nil_depth_encoder executeCommandsInBuffer:adapter_nil_depth_icb withRange:NSMakeRange(0, 1)];
+            [adapter_nil_depth_encoder endEncoding];
+            [native_nil_depth_command_buffer commit];
+            [adapter_nil_depth_command_buffer commit];
+            [native_nil_depth_command_buffer waitUntilCompleted];
+            [adapter_nil_depth_command_buffer waitUntilCompleted];
+            uint8_t native_nil_depth_pixels[byte_count];
+            uint8_t adapter_nil_depth_pixels[byte_count];
+            [native_nil_depth_color getBytes:native_nil_depth_pixels bytesPerRow:(NSUInteger)width * 4
+                                   fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            [adapter_nil_depth_color getBytes:adapter_nil_depth_pixels bytesPerRow:(NSUInteger)width * 4
+                                     fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            if (native_nil_depth_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                adapter_nil_depth_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                memcmp(native_nil_depth_pixels, adapter_nil_depth_pixels, byte_count) != 0 ||
+                memcmp(adapter_nil_depth_pixels, (const uint8_t[]){255, 0, 0, 255}, 4) != 0) {
+                fprintf(stderr, "metal-pixel: nil-depth ICB replay mismatch\n");
+                fail_with_error("native nil-depth ICB error", native_nil_depth_command_buffer.error);
+                fail_with_error("adapter nil-depth ICB error", adapter_nil_depth_command_buffer.error);
+                return 34;
+            }
+            }
+        }
+
         /* Depth16Unorm uses the same CPU depth-test path, with an explicit
          * decode/store boundary around the ZPU-owned normalized texels. */
         enum { depth16_byte_count = width * height * 2 };

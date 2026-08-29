@@ -14723,6 +14723,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
              effectiveState->_patchType != MTLPatchTypeTriangle ||
              effectiveState->_patchControlPointCount != 3 ||
              (!_owner->_inheritPipelineState && state == nil) ||
+             (!_owner->_inheritDepthStencilState && !_hasDepthStencilState) ||
              ![factor isKindOfClass:[ZPUBuffer class]] || factor->_owner != [encoder->_owner device] ||
              (_hasIndexedPatches && effectiveState->_tessellationControlPointIndexType == MTLTessellationControlPointIndexTypeNone) ||
              (!_hasIndexedPatches && effectiveState->_tessellationControlPointIndexType != MTLTessellationControlPointIndexTypeNone)) {
@@ -14745,7 +14746,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         } else if (!_owner->_inheritBuffers) {
             [encoder setVertexBuffer:nil offset:0 atIndex:0];
         }
-        if (_hasDepthStencilState && _depthStencilState != nil) {
+        if (_hasDepthStencilState) {
             [encoder setDepthStencilState:(id<MTLDepthStencilState>)_depthStencilState];
         }
         if (_hasDepthBias) [encoder setDepthBias:_depthBias slopeScale:_slopeScale clamp:_depthBiasClamp];
@@ -14814,10 +14815,10 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     } else if (!_owner->_inheritBuffers) {
         [encoder setFragmentBuffer:nil offset:0 atIndex:0];
     }
-    /* MTLIndirectRenderCommand accepts a nullable depth-stencil state. The
-     * CPU render encoder quite correctly rejects nil, so an explicit nil
-     * command state is represented by leaving depth state unbound. */
-    if (_hasDepthStencilState && _depthStencilState != nil) {
+    /* MTLIndirectRenderCommand accepts a nullable depth-stencil state. Replay
+     * the explicit nil through the CPU encoder so it clears a previously
+     * inherited state instead of accidentally retaining it. */
+    if (_hasDepthStencilState) {
         [encoder setDepthStencilState:(id<MTLDepthStencilState>)_depthStencilState];
     }
     if (_hasDepthBias) [encoder setDepthBias:_depthBias slopeScale:_slopeScale clamp:_depthBiasClamp];
