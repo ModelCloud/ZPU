@@ -134,6 +134,21 @@ def load_manifest():
     return data
 
 
+def require_portable_version_parity(manifest):
+    expected = manifest["zpu_portable_abi"].get("version")
+    require(isinstance(expected, int) and expected > 0, "portable ABI version must be a positive integer")
+    header = (ROOT / "include/zpu/metal.h").read_text(encoding="utf-8")
+    zig_abi = (ROOT / "src/metal/abi.zig").read_text(encoding="utf-8")
+    header_match = re.search(r"#define\s+ZPU_METAL_ABI_VERSION\s+(\d+)u\b", header)
+    zig_match = re.search(r"pub const abi_version: u32\s*=\s*(\d+)\s*;", zig_abi)
+    require(header_match is not None, "public Metal header does not define ZPU_METAL_ABI_VERSION")
+    require(zig_match is not None, "Zig Metal ABI does not define abi_version")
+    header_version = int(header_match.group(1))
+    zig_version = int(zig_match.group(1))
+    require(header_version == expected == zig_version,
+            f"portable ABI version drift: manifest={expected} header={header_version} zig={zig_version}")
+
+
 def sdk_headers(sdk, platform="macosx"):
     if sdk is None:
         xcrun = shutil.which("xcrun")
@@ -205,6 +220,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         manifest = load_manifest()
+        require_portable_version_parity(manifest)
         source_count = source_symbol_count(manifest)
         require(source_count == len(manifest["implemented_native_abi"]), "manifest contains an unimplemented native ABI symbol")
         portable_count = portable_entry_point_count(manifest)

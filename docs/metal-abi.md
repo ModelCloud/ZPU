@@ -426,7 +426,7 @@ triangle path:
   drawable signal/wait validates the same ownership graph and remains a CPU
   no-op. Tensor shader binding, arbitrary ML graph execution, ray-intersection
   execution, opaque native 3D sparse-tail backing layout, and arbitrary
-  arbitrary tile/mesh render-pass features remain explicit fail-closed
+  tile/mesh render-pass features remain explicit fail-closed
   boundaries. The registered tile and mesh profiles are the bounded
   exceptions. Suspending/resuming render
   passes are represented as sequential ordinary CPU passes because the CPU
