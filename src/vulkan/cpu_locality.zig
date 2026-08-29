@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const tile_profile = @import("tile_profile.zig");
 
 const CpuSet = if (builtin.os.tag == .linux) std.os.linux.cpu_set_t else [1]usize;
 const cpu_capacity = @sizeOf(CpuSet) * 8;
@@ -23,6 +24,7 @@ var initialized = false;
 var selected_cpus: [cpu_capacity]usize = undefined;
 var selected_count: usize = 0;
 var selected_node: ?usize = null;
+var selected_tile_profile: tile_profile.Profile = tile_profile.baseline;
 threadlocal var pinned_role: ?Role = null;
 
 fn contains(set: CpuSet, cpu: usize) bool {
@@ -196,12 +198,22 @@ fn ensureInitialized() void {
     defer _ = std.c.pthread_mutex_unlock(&mutex);
     if (initialized) return;
     initialized = true;
+    selected_tile_profile = tile_profile.detect();
     if (builtin.os.tag == .linux) discoverLinux();
 }
 
 fn roleCpuIndex(role: Role, cpu_count: usize) usize {
     std.debug.assert(cpu_count != 0);
     return if (role == .render or cpu_count == 1) 0 else 1;
+}
+
+/// Returns the immutable raster geometry selected once for this process from
+/// the host CPU/OS vector-state capabilities.
+pub fn rasterTileProfile() tile_profile.Profile {
+    ensureInitialized();
+    _ = std.c.pthread_mutex_lock(&mutex);
+    defer _ = std.c.pthread_mutex_unlock(&mutex);
+    return selected_tile_profile;
 }
 
 /// Pins the current ZPU execution thread to a deterministic CPU within the
@@ -279,4 +291,11 @@ test "Linux CPU-list parser recognizes cache-sharing ranges" {
     try std.testing.expect(cpuListContains("0-3,8,10-12\n", 8));
     try std.testing.expect(cpuListContains("0-3,8,10-12\n", 11));
     try std.testing.expect(!cpuListContains("0-3,8,10-12\n", 9));
+}
+
+test "runtime raster tile profile is internally valid" {
+    const profile = rasterTileProfile();
+    try std.testing.expect(profile.scheduler_w >= profile.micro_w);
+    try std.testing.expect(profile.scheduler_h >= profile.micro_h);
+    try std.testing.expect(profile.vector_lanes == 1 or profile.vector_lanes == 4 or profile.vector_lanes == 8);
 }
