@@ -97,9 +97,11 @@ triangle path:
   resources, explicit aligned append placement is supported for heap buffers,
   and default heap hazard tracking is resolved as untracked, matching Metal's
   heap rules
-- owned depth32-float textures bound as render-pass depth attachments, with
-  configurable Metal compare functions, write masks, and depth clears
-- owned Stencil8 textures bound as render-pass stencil attachments, with
+- owned Depth16Unorm/Depth32Float and combined depth/stencil textures bound as
+  render-pass depth attachments, with configurable Metal compare functions,
+  write masks, explicit CPU pack/unpack, and depth clears
+- owned Stencil8/X32_Stencil8/X24_Stencil8 and combined textures bound as
+  render-pass stencil attachments, with
   front/back compare functions, fail/depth-fail/pass operations, read/write
   masks, references, and clear/load/store behavior
 - depth-only render passes are accepted by the legacy, parallel, and Metal 4

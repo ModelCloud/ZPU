@@ -6658,7 +6658,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         !zpu_stencil_format_supported(descriptor.stencilAttachmentPixelFormat) ||
         (descriptor != nil && !zpu_vertex_layout_supported(descriptor.vertexDescriptor,
                                                              &vertexStride, &vertexStrideDynamic))) {
-        zpu_set_error(error, @"ZPU Metal supports only the fixed Vertex ABI with supported CPU color, depth16/depth32-float, and stencil8 attachments");
+        zpu_set_error(error, @"ZPU Metal supports only the fixed Vertex ABI with supported CPU color, depth, and stencil attachments");
         return nil;
     }
     ZPUCPUFunction *vertexFunction = (ZPUCPUFunction *)descriptor.vertexFunction;
