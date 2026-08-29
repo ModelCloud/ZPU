@@ -9149,6 +9149,120 @@ int main(void) {
             return 115;
         }
 
+        /* Indexed patch commands use the pipeline's declared control-point
+         * index type and inherit the vertex buffer from the render encoder.
+         * Exercise that replay path separately so an ICB cannot accidentally
+         * discard the control-point index resource while preserving only the
+         * non-indexed patch fields. */
+        BOOL adapter_indexed_patch_profile_icb_exact = YES;
+        if (@available(macOS 14.0, iOS 17.0, *)) {
+            id<MTLFunction> adapter_indexed_patch_icb_vertex_function =
+                [adapter_default_library newFunctionWithName:@"zpu_cpu_tessellated_triangle_vertex"];
+            id<MTLFunction> adapter_indexed_patch_icb_fragment_function =
+                [adapter_default_library newFunctionWithName:@"zpu_cpu_tessellated_triangle_fragment"];
+            MTLRenderPipelineDescriptor *adapter_indexed_patch_icb_pipeline_descriptor =
+                [MTLRenderPipelineDescriptor new];
+            adapter_indexed_patch_icb_pipeline_descriptor.vertexFunction = adapter_indexed_patch_icb_vertex_function;
+            adapter_indexed_patch_icb_pipeline_descriptor.fragmentFunction = adapter_indexed_patch_icb_fragment_function;
+            adapter_indexed_patch_icb_pipeline_descriptor.rasterSampleCount = 1;
+            adapter_indexed_patch_icb_pipeline_descriptor.tessellationPartitionMode = MTLTessellationPartitionModeInteger;
+            adapter_indexed_patch_icb_pipeline_descriptor.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
+            adapter_indexed_patch_icb_pipeline_descriptor.tessellationFactorStepFunction =
+                MTLTessellationFactorStepFunctionPerPatchAndPerInstance;
+            adapter_indexed_patch_icb_pipeline_descriptor.tessellationOutputWindingOrder = MTLWindingClockwise;
+            adapter_indexed_patch_icb_pipeline_descriptor.tessellationFactorScaleEnabled = NO;
+            adapter_indexed_patch_icb_pipeline_descriptor.maxTessellationFactor = 1.0f;
+            adapter_indexed_patch_icb_pipeline_descriptor.supportIndirectCommandBuffers = YES;
+            adapter_indexed_patch_icb_pipeline_descriptor.tessellationControlPointIndexType =
+                MTLTessellationControlPointIndexTypeUInt16;
+            adapter_indexed_patch_icb_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+            id<MTLRenderPipelineState> adapter_indexed_patch_icb_pipeline =
+                [adapter_device newRenderPipelineStateWithDescriptor:adapter_indexed_patch_icb_pipeline_descriptor
+                                                                  error:&adapter_patch_error];
+            const uint16_t adapter_indexed_patch_icb_indices[] = {0, 1, 2};
+            id<MTLBuffer> adapter_indexed_patch_icb_control_point_index_buffer =
+                [adapter_device newBufferWithBytes:adapter_indexed_patch_icb_indices
+                                             length:sizeof(adapter_indexed_patch_icb_indices)
+                                            options:MTLResourceStorageModeShared];
+            const uint16_t adapter_indexed_patch_icb_factors[] = {0x3c00, 0x3c00, 0x3c00, 0x3c00};
+            id<MTLBuffer> adapter_indexed_patch_icb_factor_buffer =
+                [adapter_device newBufferWithBytes:adapter_indexed_patch_icb_factors
+                                             length:sizeof(adapter_indexed_patch_icb_factors)
+                                            options:MTLResourceStorageModeShared];
+            MTLIndirectCommandBufferDescriptor *adapter_indexed_patch_icb_descriptor =
+                [MTLIndirectCommandBufferDescriptor new];
+            adapter_indexed_patch_icb_descriptor.commandTypes =
+                (MTLIndirectCommandType)(1u << 3);
+            adapter_indexed_patch_icb_descriptor.inheritPipelineState = YES;
+            adapter_indexed_patch_icb_descriptor.inheritBuffers = YES;
+            id<MTLIndirectCommandBuffer> adapter_indexed_patch_icb =
+                [adapter_device newIndirectCommandBufferWithDescriptor:adapter_indexed_patch_icb_descriptor
+                                                            maxCommandCount:1
+                                                                    options:MTLResourceStorageModeShared];
+            id<MTLIndirectRenderCommand> adapter_indexed_patch_icb_command =
+                [adapter_indexed_patch_icb indirectRenderCommandAtIndex:0];
+            [adapter_indexed_patch_icb_command drawIndexedPatches:3
+                                                        patchStart:0
+                                                        patchCount:1
+                                                  patchIndexBuffer:nil
+                                            patchIndexBufferOffset:0
+                                           controlPointIndexBuffer:adapter_indexed_patch_icb_control_point_index_buffer
+                                     controlPointIndexBufferOffset:0
+                                                   instanceCount:1
+                                                    baseInstance:0
+                                       tessellationFactorBuffer:adapter_indexed_patch_icb_factor_buffer
+                                   tessellationFactorBufferOffset:0
+                            tessellationFactorBufferInstanceStride:sizeof(adapter_indexed_patch_icb_factors)];
+            MTLTextureDescriptor *adapter_indexed_patch_icb_texture_descriptor =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                    width:5 height:3 mipmapped:NO];
+            adapter_indexed_patch_icb_texture_descriptor.storageMode = MTLStorageModeShared;
+            adapter_indexed_patch_icb_texture_descriptor.usage = MTLTextureUsageRenderTarget;
+            id<MTLTexture> adapter_indexed_patch_icb_texture =
+                [adapter_device newTextureWithDescriptor:adapter_indexed_patch_icb_texture_descriptor];
+            MTLRenderPassDescriptor *adapter_indexed_patch_icb_pass =
+                [MTLRenderPassDescriptor renderPassDescriptor];
+            adapter_indexed_patch_icb_pass.colorAttachments[0].texture = adapter_indexed_patch_icb_texture;
+            adapter_indexed_patch_icb_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            adapter_indexed_patch_icb_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            adapter_indexed_patch_icb_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+            id<MTLCommandBuffer> adapter_indexed_patch_icb_command_buffer =
+                [adapter_queue commandBuffer];
+            id<MTLRenderCommandEncoder> adapter_indexed_patch_icb_encoder =
+                [adapter_indexed_patch_icb_command_buffer renderCommandEncoderWithDescriptor:adapter_indexed_patch_icb_pass];
+            [adapter_indexed_patch_icb_encoder setRenderPipelineState:adapter_indexed_patch_icb_pipeline];
+            [adapter_indexed_patch_icb_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+            [adapter_indexed_patch_icb_encoder executeCommandsInBuffer:adapter_indexed_patch_icb
+                                                               withRange:NSMakeRange(0, 1)];
+            [adapter_indexed_patch_icb_encoder endEncoding];
+            [adapter_indexed_patch_icb_command_buffer commit];
+            [adapter_indexed_patch_icb_command_buffer waitUntilCompleted];
+            uint8_t adapter_indexed_patch_icb_pixels[5 * 3 * 4] = {0};
+            if (adapter_indexed_patch_icb_texture != nil) {
+                [adapter_indexed_patch_icb_texture getBytes:adapter_indexed_patch_icb_pixels
+                                                bytesPerRow:5 * 4
+                                              fromRegion:MTLRegionMake2D(0, 0, 5, 3)
+                                             mipmapLevel:0];
+            }
+            adapter_indexed_patch_profile_icb_exact = adapter_indexed_patch_icb != nil &&
+                adapter_indexed_patch_icb_vertex_function != nil &&
+                adapter_indexed_patch_icb_fragment_function != nil &&
+                adapter_indexed_patch_icb_pipeline != nil &&
+                adapter_indexed_patch_icb_control_point_index_buffer != nil &&
+                adapter_indexed_patch_icb_factor_buffer != nil &&
+                adapter_indexed_patch_icb_command != nil &&
+                adapter_indexed_patch_icb_texture != nil &&
+                adapter_indexed_patch_icb_command_buffer != nil &&
+                adapter_indexed_patch_icb_encoder != nil &&
+                adapter_indexed_patch_icb_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                memcmp(adapter_indexed_patch_icb_pixels, adapter_patch_reference_pixels_for_indirect,
+                       sizeof(adapter_indexed_patch_icb_pixels)) == 0;
+        }
+        if (!adapter_indexed_patch_profile_icb_exact) {
+            fprintf(stderr, "metal-pixel: CPU indexed indirect patch command pixel exactness failed\n");
+            return 116;
+        }
+
         /* Function tables retain CPU-side handles/resources only. The native
          * table and handle below are an API/oracle probe; no native object is
          * passed into the adapter and no native table participates in ZPU
