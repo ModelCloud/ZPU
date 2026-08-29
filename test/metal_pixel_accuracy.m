@@ -4835,6 +4835,54 @@ int main(void) {
             return 82;
         }
 
+        id<MTLTexture> metal4_f16_upload_texture =
+            [adapter_device newTextureWithDescriptor:f16_three_d_descriptor];
+        id<MTLBuffer> metal4_f16_to_buffer =
+            [adapter_device newBufferWithLength:f16_download_buffer_length options:MTLResourceStorageModeShared];
+        if (metal4_f16_upload_texture != nil) {
+            [metal4_f16_upload_texture replaceRegion:MTLRegionMake3D(0, 0, 0, f16_three_d_width,
+                                                                       f16_three_d_height, f16_three_d_depth)
+                                           mipmapLevel:0 slice:0 withBytes:f16_three_d_clear
+                                           bytesPerRow:f16_three_d_row_bytes bytesPerImage:f16_three_d_plane_bytes];
+        }
+        if (metal4_f16_to_buffer != nil) {
+            memset(metal4_f16_to_buffer.contents, 0xab, metal4_f16_to_buffer.length);
+        }
+        id<MTL4CommandBuffer> metal4_f16_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_f16_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> metal4_f16_encoder =
+            [metal4_f16_command_buffer computeCommandEncoder];
+        [metal4_f16_encoder copyFromTexture:adapter_f16_three_d
+                                  sourceSlice:0 sourceLevel:0 sourceOrigin:f16_source_origin
+                                  sourceSize:f16_copy_size toBuffer:metal4_f16_to_buffer
+                             destinationOffset:f16_download_offset
+                        destinationBytesPerRow:f16_copy_row_stride
+                      destinationBytesPerImage:f16_copy_image_stride];
+        [metal4_f16_encoder copyFromBuffer:adapter_f16_upload_buffer sourceOffset:f16_upload_offset
+                           sourceBytesPerRow:f16_copy_row_stride sourceBytesPerImage:f16_copy_image_stride
+                                  sourceSize:f16_copy_size toTexture:metal4_f16_upload_texture
+                            destinationSlice:0 destinationLevel:0 destinationOrigin:f16_destination_origin];
+        [metal4_f16_encoder endEncoding];
+        [metal4_f16_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_f16_command_buffers[] = {metal4_f16_command_buffer};
+        [metal4_queue commit:metal4_f16_command_buffers count:1];
+        uint8_t metal4_f16_upload_texture_bytes[f16_three_d_bytes];
+        memset(metal4_f16_upload_texture_bytes, 0xa5, sizeof(metal4_f16_upload_texture_bytes));
+        [metal4_f16_upload_texture getBytes:metal4_f16_upload_texture_bytes
+                                bytesPerRow:f16_three_d_row_bytes bytesPerImage:f16_three_d_plane_bytes
+                                 fromRegion:MTLRegionMake3D(0, 0, 0, f16_three_d_width,
+                                                             f16_three_d_height, f16_three_d_depth)
+                                mipmapLevel:0 slice:0];
+        if (metal4_f16_upload_texture == nil || metal4_f16_to_buffer == nil ||
+            metal4_f16_command_buffer == nil || metal4_f16_encoder == nil ||
+            memcmp(metal4_f16_upload_texture_bytes, native_f16_three_d_bytes,
+                   sizeof(metal4_f16_upload_texture_bytes)) != 0 ||
+            memcmp(metal4_f16_to_buffer.contents, native_f16_download_buffer.contents,
+                   f16_download_buffer_length) != 0) {
+            fail_with_error("Metal 4 CPU RGBA16Float 3D copy failed", metal4_error);
+            return 113;
+        }
+
         if (@available(macOS 26.0, iOS 26.0, *)) {
             const NSInteger metal4_tensor_dimension_values[] = {3, 2};
             const NSInteger metal4_tensor_packed_stride_values[] = {1, 3};
