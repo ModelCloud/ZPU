@@ -688,7 +688,8 @@ static void zpu_set_error(NSError **error, NSString *description) {
 
 static BOOL zpu_render_pipeline_format_supported(MTLPixelFormat format) {
     return format == MTLPixelFormatInvalid || format == MTLPixelFormatRGBA8Unorm ||
-        format == MTLPixelFormatBGRA8Unorm;
+        format == MTLPixelFormatBGRA8Unorm || format == MTLPixelFormatR32Float ||
+        format == MTLPixelFormatRGBA16Float;
 }
 
 static BOOL zpu_depth_format_supported(MTLPixelFormat format) {
@@ -2224,7 +2225,7 @@ static uint64_t zpu_cpu_timestamp(void) {
     }
     for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
         if (!zpu_render_pipeline_format_supported(descriptor.colorAttachments[index].pixelFormat)) {
-            zpu_set_error(error, @"ZPU Metal supports only RGBA8/BGRA8 color attachments");
+            zpu_set_error(error, @"ZPU Metal supports only RGBA8/BGRA8/R32Float/RGBA16Float color attachments");
             return nil;
         }
     }

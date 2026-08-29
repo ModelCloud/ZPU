@@ -64,9 +64,101 @@ pub const StencilFace = struct {
     reference: u8 = 0,
 };
 
+pub const TargetFormat = enum { rgba8_unorm, bgra8_unorm, r32_float, rgba16_float };
+
+pub const Target = struct {
+    pixels: []u8,
+    width: u32,
+    height: u32,
+    stride: usize,
+    format: TargetFormat,
+
+    fn bytesPerPixel(format: TargetFormat) usize {
+        return switch (format) {
+            .rgba8_unorm, .bgra8_unorm, .r32_float => 4,
+            .rgba16_float => 8,
+        };
+    }
+
+    pub fn init(pixels: []u8, width: u32, height: u32, stride: usize, format: TargetFormat) !Target {
+        const row_bytes = try std.math.mul(usize, width, bytesPerPixel(format));
+        if (stride < row_bytes) return error.InvalidStride;
+        const required = if (height == 0) 0 else try std.math.add(usize, try std.math.mul(usize, height - 1, stride), row_bytes);
+        if (pixels.len < required) return error.BufferTooSmall;
+        return .{ .pixels = pixels, .width = width, .height = height, .stride = stride, .format = format };
+    }
+
+    pub fn row(self: *const Target, y: u32) []u8 {
+        const start = @as(usize, y) * self.stride;
+        return self.pixels[start .. start + @as(usize, self.width) * bytesPerPixel(self.format)];
+    }
+
+    fn readF32(row_bytes: []const u8, offset: usize) f32 {
+        return @bitCast(std.mem.readInt(u32, row_bytes[offset..][0..4], .little));
+    }
+
+    fn writeF32(row_bytes: []u8, offset: usize, value: f32) void {
+        std.mem.writeInt(u32, row_bytes[offset..][0..4], @bitCast(value), .little);
+    }
+
+    fn readF16(row_bytes: []const u8, offset: usize) f32 {
+        return @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, row_bytes[offset..][0..2], .little))));
+    }
+
+    fn writeF16(row_bytes: []u8, offset: usize, value: f32) void {
+        const half: f16 = @floatCast(value);
+        std.mem.writeInt(u16, row_bytes[offset..][0..2], @bitCast(half), .little);
+    }
+
+    fn readColor(self: *const Target, x: usize, y: usize) [4]f32 {
+        const row_bytes = self.row(@intCast(y));
+        const offset = x * bytesPerPixel(self.format);
+        return switch (self.format) {
+            .rgba8_unorm, .bgra8_unorm => blk: {
+                const format: surface.Format = if (self.format == .rgba8_unorm) .rgba8_unorm else .bgra8_unorm;
+                const color = surface.Surface.read(row_bytes, offset, format);
+                break :blk .{
+                    @as(f32, @floatFromInt(color.r)) / 255.0,
+                    @as(f32, @floatFromInt(color.g)) / 255.0,
+                    @as(f32, @floatFromInt(color.b)) / 255.0,
+                    @as(f32, @floatFromInt(color.a)) / 255.0,
+                };
+            },
+            .r32_float => .{ readF32(row_bytes, offset), 0, 0, 1 },
+            .rgba16_float => .{
+                readF16(row_bytes, offset), readF16(row_bytes, offset + 2),
+                readF16(row_bytes, offset + 4), readF16(row_bytes, offset + 6),
+            },
+        };
+    }
+
+    fn writeColor(self: *Target, x: usize, y: usize, color: [4]f32, write_mask: u8) void {
+        const row_bytes = self.row(@intCast(y));
+        const offset = x * bytesPerPixel(self.format);
+        switch (self.format) {
+            .rgba8_unorm, .bgra8_unorm => {
+                const format: surface.Format = if (self.format == .rgba8_unorm) .rgba8_unorm else .bgra8_unorm;
+                var output = surface.Surface.read(row_bytes, offset, format);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) output.r = colorByte(color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) output.g = colorByte(color[1]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) output.b = colorByte(color[2]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) output.a = colorByte(color[3]);
+                surface.Surface.write(row_bytes, offset, format, output);
+            },
+            .r32_float => if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeF32(row_bytes, offset, color[0]),
+            .rgba16_float => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeF16(row_bytes, offset, color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeF16(row_bytes, offset + 2, color[1]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) writeF16(row_bytes, offset + 4, color[2]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) writeF16(row_bytes, offset + 6, color[3]);
+            },
+        }
+    }
+};
+
 const Job = struct {
-    target: *surface.Surface,
-    extra_targets: []const *surface.Surface,
+    target: *Target,
+    extra_targets: []const *Target,
     depth: ?[]f32,
     stencil: ?[]u8,
     vertices: []const abi.Vertex,
@@ -146,27 +238,16 @@ fn applyStencil(stencil: []u8, index: usize, state: StencilFace, operation: abi.
     stencil[index] = (current & ~state.write_mask) | (result & state.write_mask);
 }
 
-fn writeColor(target: *surface.Surface, x: usize, y: usize, color: [4]f32, options: DrawOptions) void {
+fn writeColor(target: *Target, x: usize, y: usize, color: [4]f32, options: DrawOptions) void {
     if (x >= target.width or y >= target.height) return;
-    const destination = surface.Surface.read(target.row(@intCast(y)), x * 4, target.format);
-    const destination_color = .{
-        @as(f32, @floatFromInt(destination.r)) / 255.0,
-        @as(f32, @floatFromInt(destination.g)) / 255.0,
-        @as(f32, @floatFromInt(destination.b)) / 255.0,
-        @as(f32, @floatFromInt(destination.a)) / 255.0,
-    };
+    const destination_color = target.readColor(x, y);
     const output_color = if (options.blending_enabled) .{
         blendChannel(0, color[0], destination_color[0], color, destination_color, options.blend_color, options.source_rgb_factor, options.destination_rgb_factor, options.rgb_operation),
         blendChannel(1, color[1], destination_color[1], color, destination_color, options.blend_color, options.source_rgb_factor, options.destination_rgb_factor, options.rgb_operation),
         blendChannel(2, color[2], destination_color[2], color, destination_color, options.blend_color, options.source_rgb_factor, options.destination_rgb_factor, options.rgb_operation),
         blendChannel(3, color[3], destination_color[3], color, destination_color, options.blend_color, options.source_alpha_factor, options.destination_alpha_factor, options.alpha_operation),
     } else color;
-    var output = destination;
-    if ((options.color_write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) output.r = colorByte(output_color[0]);
-    if ((options.color_write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) output.g = colorByte(output_color[1]);
-    if ((options.color_write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) output.b = colorByte(output_color[2]);
-    if ((options.color_write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) output.a = colorByte(output_color[3]);
-    surface.Surface.write(target.row(@intCast(y)), x * 4, target.format, output);
+    target.writeColor(x, y, output_color, options.color_write_mask);
 }
 
 fn adjustedDepth(job: *const Job, z: f32, bias: f32) ?f32 {
@@ -437,7 +518,7 @@ fn addStats(a: Stats, b: Stats) Stats {
     };
 }
 
-pub fn drawWithTargets(target: *surface.Surface, extra_targets: []const *surface.Surface, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
+pub fn drawWithTargets(target: *Target, extra_targets: []const *Target, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
     var job = Job{ .target = target, .extra_targets = extra_targets, .depth = depth, .stencil = stencil, .vertices = vertices, .primitive = primitive, .options = options };
     const worker = std.Thread.spawn(.{}, renderWorker, .{&job}) catch {
         job.bands[0] = drawBand(&job, 0);
@@ -449,13 +530,30 @@ pub fn drawWithTargets(target: *surface.Surface, extra_targets: []const *surface
     return addStats(job.bands[0], job.bands[1]);
 }
 
-pub fn draw(target: *surface.Surface, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
-    return drawWithTargets(target, &[_]*surface.Surface{}, depth, stencil, vertices, primitive, options);
+pub fn draw(target: *Target, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
+    return drawWithTargets(target, &[_]*Target{}, depth, stencil, vertices, primitive, options);
+}
+
+pub fn drawSurface(target: *surface.Surface, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
+    var render_target = Target{
+        .pixels = target.pixels,
+        .width = target.width,
+        .height = target.height,
+        .stride = target.stride,
+        .format = if (target.format == .rgba8_unorm) .rgba8_unorm else .bgra8_unorm,
+    };
+    return draw(&render_target, depth, stencil, vertices, primitive, options);
 }
 
 fn clearSurfaceBand(target: *surface.Surface, color: surface.Color, y0: usize, y1: usize) void {
     if (y1 <= y0) return;
     raster.fillRect(target, .{ .x = 0, .y = @intCast(y0), .width = target.width, .height = @intCast(y1 - y0) }, color);
+}
+
+pub fn clearTarget(target: *Target, color: [4]f32) void {
+    for (0..target.height) |y| {
+        for (0..target.width) |x| target.writeColor(x, y, color, @intFromEnum(abi.ColorWriteMask.all));
+    }
 }
 
 pub fn clearSurface(target: *surface.Surface, color: surface.Color) void {
@@ -486,7 +584,7 @@ pub fn clearDepth(depth: []f32, width: u32, value: f32) void {
 
 test "Metal viewport and scissor origins use the top-left pixel grid" {
     var pixels = [_]u8{0} ** (8 * 8 * 4);
-    var target = try surface.Surface.init(&pixels, 8, 8, 8 * 4, .rgba8_unorm);
+    var target = try Target.init(&pixels, 8, 8, 8 * 4, .rgba8_unorm);
     const options = DrawOptions{
         .viewport = .{ .origin_x = 1, .origin_y = 2, .width = 6, .height = 4, .znear = 0, .zfar = 1 },
         .scissor = .{ .x = 1, .y = 2, .width = 6, .height = 4 },
@@ -524,7 +622,7 @@ test "Metal viewport and scissor origins use the top-left pixel grid" {
 
 test "Metal depth bias and clip modes are CPU deterministic" {
     var pixels = [_]u8{0} ** (4 * 4 * 4);
-    var target = try surface.Surface.init(&pixels, 4, 4, 4 * 4, .rgba8_unorm);
+    var target = try Target.init(&pixels, 4, 4, 4 * 4, .rgba8_unorm);
     var depth = [_]f32{1} ** (4 * 4);
     const vertices = [_]abi.Vertex{
         .{ .position = .{ -1, -1, 0.25, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
@@ -553,4 +651,21 @@ test "Metal depth bias and clip modes are CPU deterministic" {
     _ = draw(&target, depth[0..], null, &clipped_vertices, .triangle, options);
     try std.testing.expectEqual(@as(f32, 1), depth[15]);
     try std.testing.expectEqual(@as(u8, 255), pixels[15 * 4]);
+}
+
+test "float color targets retain native texel precision" {
+    var r32_bytes = [_]u8{0} ** (2 * 2 * 4);
+    var r32 = try Target.init(&r32_bytes, 2, 2, 2 * 4, .r32_float);
+    clearTarget(&r32, .{ 0.25, 0.5, 0.75, 1 });
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 0.25))), std.mem.readInt(u32, r32_bytes[0..4], .little));
+    try std.testing.expectEqual(@as(f32, 0.25), r32.readColor(0, 0)[0]);
+
+    var rgba16_bytes = [_]u8{0} ** (2 * 2 * 8);
+    var rgba16 = try Target.init(&rgba16_bytes, 2, 2, 2 * 8, .rgba16_float);
+    clearTarget(&rgba16, .{ 0.25, 0.5, 0.75, 1 });
+    const color = rgba16.readColor(0, 0);
+    try std.testing.expectEqual(@as(f32, 0.25), color[0]);
+    try std.testing.expectEqual(@as(f32, 0.5), color[1]);
+    try std.testing.expectEqual(@as(f32, 0.75), color[2]);
+    try std.testing.expectEqual(@as(f32, 1), color[3]);
 }

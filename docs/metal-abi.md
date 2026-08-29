@@ -23,7 +23,8 @@ triangle path:
 - owned RGBA8/BGRA8 buffers and 1D/2D/3D textures with checked region read/write
 - CPU-owned R32Float and RGBA16Float textures preserve native texel widths for
   raw transfers, views, buffer-backed storage, and heap allocation accounting;
-  render/compute paths still reject formats without a corresponding CPU shader
+  render/compute paths accept R32Float and RGBA16Float as CPU color targets;
+  formats without a corresponding CPU shader profile remain rejected
   profile
 - ordinary device-created 1D, 1D-array, 2D, and 2D-array textures with independently
   allocated CPU/ZPU slice×mip levels, exact level/slice read/write,
@@ -58,10 +59,11 @@ triangle path:
 - depth-only render passes are accepted by the legacy, parallel, and Metal 4
   adapters; a private discarded CPU color surface preserves the portable
   raster ABI while public depth bytes remain exact
-- up to eight RGBA8/BGRA8 color attachments can be described and cleared by a
-  CPU render pass; the explicit `zpu_test_mrt_fragment` profile mirrors one
-  logical fragment color to every extra target, while ordinary single-output
-  profiles leave extra targets at their load/clear value
+- up to eight RGBA8/BGRA8/R32Float/RGBA16Float color attachments can be
+  described and cleared by a CPU render pass; the explicit
+  `zpu_test_mrt_fragment` profile mirrors one logical fragment color to every
+  extra target, while ordinary single-output profiles leave extra targets at
+  their load/clear value
 - fixed-function render pipeline, depth-stencil, and sampler state objects;
   pipeline attachment format validation, blending factors/operations, color
   write masks, and Metal top-left triangle edge inclusion

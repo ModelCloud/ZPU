@@ -488,14 +488,104 @@ int main(void) {
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_vertex");
         id<MTLFunction> adapter_fragment_function =
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_fragment");
+        id<MTLCommandQueue> adapter_queue = [adapter_device newCommandQueue];
+        NSError *adapter_pipeline_error = nil;
+
+        /* Float color attachments use the same CPU raster path as normalized
+         * targets, but their stored representation must remain native Metal's
+         * R32Float or RGBA16Float bytes rather than an RGBA8 conversion. */
+        const zpu_metal_vertex float_vertices[] = {
+            {{x0, y0, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
+            {{x1, y0, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
+            {{x1, y1, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
+            {{x0, y0, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
+            {{x1, y1, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
+            {{x0, y1, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
+        };
+        id<MTLBuffer> native_float_vertex_buffer =
+            [device newBufferWithBytes:float_vertices length:sizeof(float_vertices)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_float_vertex_buffer =
+            [adapter_device newBufferWithBytes:float_vertices length:sizeof(float_vertices)
+                                        options:MTLResourceStorageModeShared];
+        const MTLPixelFormat float_formats[] = {
+            MTLPixelFormatR32Float, MTLPixelFormatRGBA16Float,
+        };
+        for (NSUInteger format_index = 0; format_index < sizeof(float_formats) / sizeof(float_formats[0]); ++format_index) {
+            const MTLPixelFormat format = float_formats[format_index];
+            const NSUInteger bytes_per_pixel = format == MTLPixelFormatR32Float ? 4 : 8;
+            const NSUInteger float_byte_count = (NSUInteger)width * height * bytes_per_pixel;
+            MTLRenderPipelineDescriptor *native_float_pipeline_descriptor = [pipeline_descriptor copy];
+            native_float_pipeline_descriptor.colorAttachments[0].pixelFormat = format;
+            id<MTLRenderPipelineState> native_float_pipeline =
+                [device newRenderPipelineStateWithDescriptor:native_float_pipeline_descriptor error:&error];
+            MTLTextureDescriptor *native_float_texture_descriptor = [texture_descriptor copy];
+            native_float_texture_descriptor.pixelFormat = format;
+            id<MTLTexture> native_float_texture = [device newTextureWithDescriptor:native_float_texture_descriptor];
+            MTLRenderPassDescriptor *native_float_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            native_float_pass.colorAttachments[0].texture = native_float_texture;
+            native_float_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            native_float_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            native_float_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+            id<MTLCommandBuffer> native_float_command_buffer = [queue commandBuffer];
+            id<MTLRenderCommandEncoder> native_float_encoder =
+                [native_float_command_buffer renderCommandEncoderWithDescriptor:native_float_pass];
+            [native_float_encoder setRenderPipelineState:native_float_pipeline];
+            [native_float_encoder setVertexBuffer:native_float_vertex_buffer offset:0 atIndex:0];
+            [native_float_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+            [native_float_encoder endEncoding];
+            [native_float_command_buffer commit];
+            [native_float_command_buffer waitUntilCompleted];
+
+            MTLRenderPipelineDescriptor *adapter_float_pipeline_descriptor = [native_float_pipeline_descriptor copy];
+            adapter_float_pipeline_descriptor.vertexFunction = adapter_vertex_function;
+            adapter_float_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
+            id<MTLRenderPipelineState> adapter_float_pipeline =
+                [adapter_device newRenderPipelineStateWithDescriptor:adapter_float_pipeline_descriptor error:&adapter_pipeline_error];
+            MTLTextureDescriptor *adapter_float_texture_descriptor = [native_float_texture_descriptor copy];
+            id<MTLTexture> adapter_float_texture = [adapter_device newTextureWithDescriptor:adapter_float_texture_descriptor];
+            MTLRenderPassDescriptor *adapter_float_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            adapter_float_pass.colorAttachments[0].texture = adapter_float_texture;
+            adapter_float_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            adapter_float_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            adapter_float_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+            id<MTLCommandBuffer> adapter_float_command_buffer = [adapter_queue commandBuffer];
+            id<MTLRenderCommandEncoder> adapter_float_encoder =
+                [adapter_float_command_buffer renderCommandEncoderWithDescriptor:adapter_float_pass];
+            [adapter_float_encoder setRenderPipelineState:adapter_float_pipeline];
+            [adapter_float_encoder setVertexBuffer:adapter_float_vertex_buffer offset:0 atIndex:0];
+            [adapter_float_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+            [adapter_float_encoder endEncoding];
+            [adapter_float_command_buffer commit];
+            [adapter_float_command_buffer waitUntilCompleted];
+            uint8_t native_float_bytes[float_byte_count];
+            uint8_t adapter_float_bytes[float_byte_count];
+            [native_float_texture getBytes:native_float_bytes bytesPerRow:(NSUInteger)width * bytes_per_pixel
+                                fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            [adapter_float_texture getBytes:adapter_float_bytes bytesPerRow:(NSUInteger)width * bytes_per_pixel
+                                  fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            if (native_float_pipeline == nil || native_float_texture == nil ||
+                native_float_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                adapter_float_pipeline == nil || adapter_float_texture == nil ||
+                adapter_float_command_buffer.status != MTLCommandBufferStatusCompleted) {
+                fail_with_error("float render target allocation or execution failed", adapter_pipeline_error);
+                return 90 + (int)format_index;
+            }
+            for (NSUInteger byte = 0; byte < float_byte_count; ++byte) {
+                if (native_float_bytes[byte] != adapter_float_bytes[byte]) {
+                    fprintf(stderr, "metal-pixel: float render mismatch format=%lu byte=%lu: Metal=%u ZPU=%u\n",
+                            (unsigned long)format, (unsigned long)byte,
+                            native_float_bytes[byte], adapter_float_bytes[byte]);
+                    return 92 + (int)format_index;
+                }
+            }
+        }
         MTLRenderPipelineDescriptor *adapter_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
         adapter_pipeline_descriptor.vertexFunction = adapter_vertex_function;
         adapter_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
         adapter_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
         adapter_pipeline_descriptor.supportIndirectCommandBuffers = YES;
-        id<MTLCommandQueue> adapter_queue = [adapter_device newCommandQueue];
         id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
-        NSError *adapter_pipeline_error = nil;
         id<MTLRenderPipelineState> adapter_pipeline =
             [adapter_device newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor error:&adapter_pipeline_error];
 

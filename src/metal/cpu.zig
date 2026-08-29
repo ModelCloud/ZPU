@@ -93,7 +93,7 @@ pub const CommandBuffer = struct {
                 if (three_dimensional) raster3d.clearSurface(target, toSurfaceColor(color)) else raster.clear(target, toSurfaceColor(color));
             },
             .fill => |fill| raster.fillRect(target, fill.rect, fill.color),
-            .draw => |draw| stats = addStats(stats, raster3d.draw(target, self.depth, null, draw.vertices, draw.primitive, draw.options)),
+            .draw => |draw| stats = addStats(stats, raster3d.drawSurface(target, self.depth, null, draw.vertices, draw.primitive, draw.options)),
         };
         self.completed_stats = stats;
         self.* = .{ .completed_stats = stats };

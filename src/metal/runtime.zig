@@ -11,9 +11,7 @@
 
 const std = @import("std");
 const abi = @import("abi.zig");
-const raster = @import("../raster/raster.zig");
 const raster3d = @import("raster3d.zig");
-const surface = @import("../surface.zig");
 
 const allocator = std.heap.c_allocator;
 
@@ -47,7 +45,7 @@ pub const TextureFormat = enum {
     }
 
     fn isColor(self: TextureFormat) bool {
-        return self == .rgba8_unorm or self == .bgra8_unorm;
+        return self == .rgba8_unorm or self == .bgra8_unorm or self == .r32_float or self == .rgba16_float;
     }
 };
 
@@ -132,7 +130,7 @@ pub const Texture = struct {
         self.magic = 0;
     }
 
-    fn asSurface(self: *Texture) surface.Surface {
+    fn asTarget(self: *Texture) raster3d.Target {
         std.debug.assert(self.format.isColor());
         return .{
             .pixels = self.bytes,
@@ -142,7 +140,8 @@ pub const Texture = struct {
             .format = switch (self.format) {
                 .rgba8_unorm => .rgba8_unorm,
                 .bgra8_unorm => .bgra8_unorm,
-                .r32_float, .rgba16_float => unreachable,
+                .r32_float => .r32_float,
+                .rgba16_float => .rgba16_float,
                 .depth32_float => unreachable,
                 .stencil8 => unreachable,
             },
@@ -315,18 +314,18 @@ pub const CommandBuffer = struct {
                 for (begin_render.color_attachments, 0..) |attachment, index| {
                     if (attachment) |value| {
                         if (!validTexture(value.texture) or value.texture.device != self.queue.device or
-                            !value.texture.format.isColor() or value.texture.width != begin_render.target.width or
+                    !value.texture.format.isColor() or value.texture.width != begin_render.target.width or
                             value.texture.height != begin_render.target.height) return self.fail(error.InvalidResource);
                         active_color_attachments[index] = value.texture;
                         if (value.pass.load_action == .clear) {
-                            var attachment_surface = value.texture.asSurface();
-                            raster.clear(&attachment_surface, toSurfaceColor(value.pass.clear_color));
+                            var attachment_target = value.texture.asTarget();
+                            raster3d.clearTarget(&attachment_target, toTargetColor(value.pass.clear_color));
                         }
                     }
                 }
                 active_depth = begin_render.depth;
                 active_stencil = begin_render.stencil;
-                const target = begin_render.target.asSurface();
+                const target = begin_render.target.asTarget();
                 if (begin_render.pass.depth.load_action != .dont_care) {
                     const depth = active_depth orelse return self.fail(error.InvalidResource);
                     const pixel_count = std.math.mul(usize, target.width, target.height) catch return self.fail(error.InvalidArgument);
@@ -348,14 +347,14 @@ pub const CommandBuffer = struct {
                 const target_handle = active_target orelse return self.fail(error.InvalidCommand);
                 if (!validTexture(target_handle)) return self.fail(error.InvalidResource);
                 if (draw.vertex_start > self.vertices.items.len or draw.vertex_count > self.vertices.items.len - draw.vertex_start) return self.fail(error.InvalidCommand);
-                var target = target_handle.asSurface();
-                var extra_surfaces: [7]surface.Surface = undefined;
-                var extra_targets: [7]*surface.Surface = undefined;
+                var target = target_handle.asTarget();
+                var extra_targets_storage: [7]raster3d.Target = undefined;
+                var extra_targets: [7]*raster3d.Target = undefined;
                 var extra_count: usize = 0;
                 for (active_color_attachments[1..]) |attachment| {
                     if (attachment) |value| {
-                        extra_surfaces[extra_count] = value.asSurface();
-                        extra_targets[extra_count] = &extra_surfaces[extra_count];
+                        extra_targets_storage[extra_count] = value.asTarget();
+                        extra_targets[extra_count] = &extra_targets_storage[extra_count];
                         extra_count += 1;
                     }
                 }
@@ -605,6 +604,8 @@ pub const RenderEncoder = struct {
                         0 => null,
                         @intFromEnum(abi.PixelFormat.rgba8_unorm) => abi.PixelFormat.rgba8_unorm,
                         @intFromEnum(abi.PixelFormat.bgra8_unorm) => abi.PixelFormat.bgra8_unorm,
+                        @intFromEnum(abi.PixelFormat.r32_float) => abi.PixelFormat.r32_float,
+                        @intFromEnum(abi.PixelFormat.rgba16_float) => abi.PixelFormat.rgba16_float,
                         else => return error.UnsupportedFormat,
                     };
                     const actual = if (attachment) |value| texturePixelFormat(value.texture) else null;
@@ -1990,13 +1991,8 @@ fn blendOperationFromInt(value: u8) ?abi.BlendOperation {
     };
 }
 
-fn toSurfaceColor(color: abi.Color) surface.Color {
-    return .{
-        .r = colorByte(color.red),
-        .g = colorByte(color.green),
-        .b = colorByte(color.blue),
-        .a = colorByte(color.alpha),
-    };
+fn toTargetColor(color: abi.Color) [4]f32 {
+    return .{ color.red, color.green, color.blue, color.alpha };
 }
 
 fn colorByte(value: f32) u8 {
