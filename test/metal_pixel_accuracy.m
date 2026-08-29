@@ -4940,6 +4940,10 @@ int main(void) {
             adapter_compute_function == nil || adapter_compute_pipeline == nil || adapter_default_library == nil ||
             adapter_default_compute_function == nil || adapter_compute_texture == nil || adapter_compute_encoder == nil ||
             adapter_compute_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_compute_command_buffer.GPUStartTime <= 0.0 ||
+            adapter_compute_command_buffer.GPUEndTime < adapter_compute_command_buffer.GPUStartTime ||
+            adapter_compute_command_buffer.kernelStartTime <= 0.0 ||
+            adapter_compute_command_buffer.kernelEndTime < adapter_compute_command_buffer.kernelStartTime ||
             adapter_non_argument_buffer_encoder != nil || !adapter_compute_link_ok) {
             if (!adapter_compute_link_ok) {
                 fprintf(stderr, "metal-pixel: compute pipeline link probe native=%p adapter=%p handle=%p first=%u/%u native_error=%s adapter_error=%s\n",

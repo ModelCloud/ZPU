@@ -1115,6 +1115,11 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     ZPUCPUDrawable *_pendingDrawable;
     CFTimeInterval _pendingPresentationTime;
     CFTimeInterval _pendingMinimumDuration;
+    CFTimeInterval _kernelStartTime;
+    CFTimeInterval _kernelEndTime;
+    CFTimeInterval _gpuStartTime;
+    CFTimeInterval _gpuEndTime;
+    BOOL _hasComputeWork;
 }
 - (instancetype)initWithOwner:(ZPUCommandQueue *)owner commandBuffer:(zpu_metal_command_buffer *)commandBuffer;
 - (void)retainResource:(id)resource;
@@ -8054,10 +8059,10 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 - (MTLCommandBufferErrorOption)errorOptions { return MTLCommandBufferErrorOptionNone; }
 - (NSString *)label { return _label; }
 - (void)setLabel:(NSString *)label { _label = [label copy]; }
-- (CFTimeInterval)kernelStartTime { return 0; }
-- (CFTimeInterval)kernelEndTime { return 0; }
-- (CFTimeInterval)GPUStartTime { return 0; }
-- (CFTimeInterval)GPUEndTime { return 0; }
+- (CFTimeInterval)kernelStartTime { return _hasComputeWork ? _kernelStartTime : 0.0; }
+- (CFTimeInterval)kernelEndTime { return _hasComputeWork ? _kernelEndTime : 0.0; }
+- (CFTimeInterval)GPUStartTime { return _gpuStartTime; }
+- (CFTimeInterval)GPUEndTime { return _gpuEndTime; }
 - (id<MTLLogContainer>)logs { return nil; }
 - (MTLCommandBufferStatus)status {
     switch (zpu_metal_command_buffer_get_status(_zpuCommandBuffer)) {
@@ -8072,6 +8077,8 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 - (void)commit {
     if (_scheduled) return;
     _scheduled = YES;
+    _gpuStartTime = zpu_drawable_host_time();
+    if (_hasComputeWork) _kernelStartTime = _gpuStartTime;
     NSArray *scheduled = [_scheduledHandlers copy];
     [_scheduledHandlers removeAllObjects];
     for (MTLCommandBufferHandler block in scheduled) block((id<MTLCommandBuffer>)self);
@@ -8096,6 +8103,8 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
      * render, compute, and blit paths CPU-owned while preserving placement
      * aliasing across separately retained Metal resources. */
     zpu_sparse_synchronize_resources();
+    _gpuEndTime = zpu_drawable_host_time();
+    if (_hasComputeWork) _kernelEndTime = _gpuEndTime;
     NSArray *completed = [_completedHandlers copy];
     [_completedHandlers removeAllObjects];
     for (MTLCommandBufferHandler block in completed) block((id<MTLCommandBuffer>)self);
@@ -8313,6 +8322,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 }
 - (id<MTLComputeCommandEncoder>)computeCommandEncoder {
     zpu_metal_compute_encoder *encoder = zpu_metal_command_buffer_compute_encoder(_zpuCommandBuffer);
+    if (encoder != NULL) _hasComputeWork = YES;
     return encoder == NULL ? nil : (id<MTLComputeCommandEncoder>)[[ZPUComputeEncoder alloc] initWithOwner:self encoder:encoder];
 }
 - (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDescriptor:(MTLComputePassDescriptor *)descriptor API_AVAILABLE(macos(11.0), ios(14.0)) {

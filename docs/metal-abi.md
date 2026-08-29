@@ -182,6 +182,10 @@ triangle path:
   encoder records the call
 - compute `setBytes` bindings are copied into command-buffer-owned ZPU buffers
   and follow the same deferred lifetime rules
+- CPU command buffers expose host-clock `GPUStartTime`/`GPUEndTime` around
+  synchronous ZPU execution; `kernelStartTime`/`kernelEndTime` are exposed for
+  command buffers that create a CPU compute encoder, and remain zero for
+  render/blit-only buffers
 - compute sampler/resource declarations, stage-in metadata, and memory
   barriers are accepted on the CPU encoder; barriers are ordered no-ops because
   the current ZPU command buffer executes serially, and registered kernels do
