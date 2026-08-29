@@ -2564,9 +2564,11 @@ static BOOL zpu_sparse_texture_tail_page_bindings(ZPUTexture *texture, NSUIntege
         NSUInteger tileCountZ = 0;
         if (!zpu_sparse_texture_tile_grid(texture, level, &tileCountX, &tileCountY, &tileCountZ) ||
             tileCountZ == 0) return NO;
-        for (NSUInteger tileY = 0; tileY < tileCountY; ++tileY) {
-            for (NSUInteger tileX = 0; tileX < tileCountX; ++tileX) {
-                for (NSUInteger tileZ = 0; tileZ < tileCountZ; ++tileZ) {
+        /* Metal assigns pages in row-major X/Y/Z order: X is the
+         * least-significant tile coordinate, followed by Y and then Z. */
+        for (NSUInteger tileZ = 0; tileZ < tileCountZ; ++tileZ) {
+            for (NSUInteger tileY = 0; tileY < tileCountY; ++tileY) {
+                for (NSUInteger tileX = 0; tileX < tileCountX; ++tileX) {
                     NSUInteger offset = 0;
                     NSUInteger length = 0;
                     if (!zpu_sparse_texture_tail_tile_range(texture, level, slice, tileX, tileY, tileZ,
@@ -2664,9 +2666,9 @@ static BOOL zpu_sparse_update_texture_tail_mapping(ZPUTexture *texture, ZPUHeap 
             NSUInteger tileCountZ = 0;
             if (!zpu_sparse_texture_tile_grid(texture, tailLevel, &tileCountX, &tileCountY, &tileCountZ) ||
                 tileCountZ == 0) return NO;
-            for (NSUInteger tileY = 0; tileY < tileCountY; ++tileY) {
-                for (NSUInteger tileX = 0; tileX < tileCountX; ++tileX) {
-                    for (NSUInteger tileZ = 0; tileZ < tileCountZ; ++tileZ) {
+            for (NSUInteger tileZ = 0; tileZ < tileCountZ; ++tileZ) {
+                for (NSUInteger tileY = 0; tileY < tileCountY; ++tileY) {
+                    for (NSUInteger tileX = 0; tileX < tileCountX; ++tileX) {
                         NSArray *key = zpu_sparse_texture_key(texture, tailLevel, slice, tileX, tileY, tileZ);
                         ZPUSparsePage *oldPage = texture->_sparseMappings[key];
                         if (oldPage != nil && !zpu_sparse_texture_copy_tile_to_page(texture, tailLevel, slice,
@@ -2694,9 +2696,9 @@ static BOOL zpu_sparse_update_texture_tail_mapping(ZPUTexture *texture, ZPUHeap 
         NSUInteger tileCountZ = 0;
         if (!zpu_sparse_texture_tile_grid(texture, tailLevel, &tileCountX, &tileCountY, &tileCountZ) ||
             tileCountZ == 0) return NO;
-        for (NSUInteger tileY = 0; tileY < tileCountY; ++tileY) {
-            for (NSUInteger tileX = 0; tileX < tileCountX; ++tileX) {
-                for (NSUInteger tileZ = 0; tileZ < tileCountZ; ++tileZ) {
+        for (NSUInteger tileZ = 0; tileZ < tileCountZ; ++tileZ) {
+            for (NSUInteger tileY = 0; tileY < tileCountY; ++tileY) {
+                for (NSUInteger tileX = 0; tileX < tileCountX; ++tileX) {
                     NSArray *key = zpu_sparse_texture_key(texture, tailLevel, slice, tileX, tileY, tileZ);
                     ZPUSparsePage *oldPage = texture->_sparseMappings[key];
                     if (oldPage != nil && !zpu_sparse_texture_copy_tile_to_page(texture, tailLevel, slice,
