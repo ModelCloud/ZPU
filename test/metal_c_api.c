@@ -1009,6 +1009,160 @@ int main(void) {
     zpu_metal_buffer_destroy(sparse_source);
     zpu_metal_buffer_destroy(sparse_upload);
 
+    const size_t sparse_texture_tile_bytes = 64u * 64u * 4u;
+    uint8_t sparse_texture_pattern[64u * 64u * 4u];
+    for (size_t index = 0; index < sizeof(sparse_texture_pattern); ++index) {
+        sparse_texture_pattern[index] = (uint8_t)((index * 23u + 9u) & 0xffu);
+    }
+    zpu_metal_texture_descriptor sparse_texture_descriptor = {
+        .width = 128,
+        .height = 64,
+        .format = ZPU_METAL_RGBA8_UNORM,
+    };
+    zpu_metal_texture_descriptor sparse_tile_descriptor = {
+        .width = 64,
+        .height = 64,
+        .format = ZPU_METAL_RGBA8_UNORM,
+    };
+    zpu_metal_texture *sparse_texture_source = zpu_metal_device_new_texture(
+        device, &sparse_tile_descriptor);
+    zpu_metal_texture *sparse_texture = zpu_metal_device_new_sparse_texture(
+        device, &sparse_texture_descriptor, sparse_page_bytes);
+    zpu_metal_texture *sparse_texture_destination = zpu_metal_device_new_sparse_texture(
+        device, &sparse_texture_descriptor, sparse_page_bytes);
+    zpu_metal_texture *sparse_texture_readback = zpu_metal_device_new_texture(
+        device, &sparse_tile_descriptor);
+    if (sparse_texture_source == NULL || sparse_texture == NULL ||
+        sparse_texture_destination == NULL || sparse_texture_readback == NULL ||
+        zpu_metal_texture_is_sparse(sparse_texture) != 1 ||
+        zpu_metal_texture_sparse_page_size(sparse_texture) != sparse_page_bytes ||
+        zpu_metal_texture_sparse_tile_width(sparse_texture) != 64 ||
+        zpu_metal_texture_sparse_tile_height(sparse_texture) != 64 ||
+        zpu_metal_texture_is_sparse(sparse_texture_source) != 0 ||
+        zpu_metal_texture_sparse_page_size(sparse_texture_source) != 0 ||
+        zpu_metal_texture_view(sparse_texture, ZPU_METAL_RGBA8_UNORM) != NULL ||
+        zpu_metal_device_new_sparse_texture(device, &sparse_texture_descriptor, 1234) != NULL) return 68;
+    if (zpu_metal_texture_replace_region(
+            sparse_texture_source, (zpu_metal_region){{0, 0, 0}, {64, 64, 1}},
+            sparse_texture_pattern, sizeof(sparse_texture_pattern), 64u * 4u) != 0) return 69;
+
+    zpu_metal_command_buffer *sparse_texture_upload_commands =
+        zpu_metal_command_queue_command_buffer(queue);
+    zpu_metal_resource_state_encoder *sparse_texture_upload_state =
+        zpu_metal_command_buffer_resource_state_encoder(sparse_texture_upload_commands);
+    if (sparse_texture_upload_commands == NULL || sparse_texture_upload_state == NULL ||
+        zpu_metal_resource_state_encoder_update_texture_mapping(
+            sparse_texture_upload_state, sparse_texture, ZPU_METAL_SPARSE_MAPPING_MAP,
+            (zpu_metal_region){{0, 0, 0}, {1, 1, 1}}) != 0 ||
+        zpu_metal_resource_state_encoder_update_texture_mapping(
+            sparse_texture_upload_state, sparse_texture_destination,
+            ZPU_METAL_SPARSE_MAPPING_MAP, (zpu_metal_region){{0, 0, 0}, {1, 1, 1}}) != 0 ||
+        zpu_metal_resource_state_encoder_end_encoding(sparse_texture_upload_state) != 0) return 70;
+    zpu_metal_resource_state_encoder_destroy(sparse_texture_upload_state);
+    zpu_metal_blit_encoder *sparse_texture_upload_encoder =
+        zpu_metal_command_buffer_blit_encoder(sparse_texture_upload_commands);
+    if (sparse_texture_upload_encoder == NULL ||
+        zpu_metal_blit_encoder_copy_texture_to_texture(
+            sparse_texture_upload_encoder, sparse_texture_source,
+            (zpu_metal_region){{0, 0, 0}, {64, 64, 1}}, sparse_texture,
+            (zpu_metal_region){{0, 0, 0}, {64, 64, 1}}) != 0 ||
+        zpu_metal_blit_encoder_end_encoding(sparse_texture_upload_encoder) != 0 ||
+        zpu_metal_command_buffer_commit(sparse_texture_upload_commands) != 0) return 71;
+    zpu_metal_blit_encoder_destroy(sparse_texture_upload_encoder);
+    zpu_metal_command_buffer_destroy(sparse_texture_upload_commands);
+
+    zpu_metal_command_buffer *sparse_texture_copy_commands =
+        zpu_metal_command_queue_command_buffer(queue);
+    zpu_metal_resource_state_encoder *sparse_texture_copy_state =
+        zpu_metal_command_buffer_resource_state_encoder(sparse_texture_copy_commands);
+    if (sparse_texture_copy_commands == NULL || sparse_texture_copy_state == NULL ||
+        zpu_metal_resource_state_encoder_copy_texture_mappings(
+            sparse_texture_copy_state, sparse_texture, sparse_texture_destination,
+            (zpu_metal_region){{0, 0, 0}, {1, 1, 1}},
+            (zpu_metal_origin){1, 0, 0}) != 0 ||
+        zpu_metal_resource_state_encoder_end_encoding(sparse_texture_copy_state) != 0) return 72;
+    zpu_metal_resource_state_encoder_destroy(sparse_texture_copy_state);
+    zpu_metal_blit_encoder *sparse_texture_copy_encoder =
+        zpu_metal_command_buffer_blit_encoder(sparse_texture_copy_commands);
+    if (sparse_texture_copy_encoder == NULL ||
+        zpu_metal_blit_encoder_copy_texture_to_texture(
+            sparse_texture_copy_encoder, sparse_texture_destination,
+            (zpu_metal_region){{64, 0, 0}, {64, 64, 1}}, sparse_texture_readback,
+            (zpu_metal_region){{0, 0, 0}, {64, 64, 1}}) != 0 ||
+        zpu_metal_blit_encoder_end_encoding(sparse_texture_copy_encoder) != 0 ||
+        zpu_metal_command_buffer_commit(sparse_texture_copy_commands) != 0) return 73;
+    uint8_t sparse_texture_readback_bytes[64u * 64u * 4u];
+    if (zpu_metal_texture_get_bytes(
+            sparse_texture_readback, sparse_texture_readback_bytes,
+            sizeof(sparse_texture_readback_bytes), 64u * 4u,
+            (zpu_metal_region){{0, 0, 0}, {64, 64, 1}}) != 0 ||
+        check_equal(sparse_texture_readback_bytes, sparse_texture_pattern,
+                    sparse_texture_tile_bytes) != 0) return 74;
+    zpu_metal_blit_encoder_destroy(sparse_texture_copy_encoder);
+    zpu_metal_command_buffer_destroy(sparse_texture_copy_commands);
+
+    memset(sparse_texture_pattern, 0, sizeof(sparse_texture_pattern));
+    if (zpu_metal_texture_replace_region(
+            sparse_texture_source, (zpu_metal_region){{0, 0, 0}, {64, 64, 1}},
+            sparse_texture_pattern, sizeof(sparse_texture_pattern), 64u * 4u) != 0) return 75;
+    zpu_metal_command_buffer *sparse_texture_alias_commands =
+        zpu_metal_command_queue_command_buffer(queue);
+    zpu_metal_blit_encoder *sparse_texture_alias_encoder =
+        zpu_metal_command_buffer_blit_encoder(sparse_texture_alias_commands);
+    if (sparse_texture_alias_commands == NULL || sparse_texture_alias_encoder == NULL ||
+        zpu_metal_blit_encoder_copy_texture_to_texture(
+            sparse_texture_alias_encoder, sparse_texture_source,
+            (zpu_metal_region){{0, 0, 0}, {64, 64, 1}}, sparse_texture,
+            (zpu_metal_region){{0, 0, 0}, {64, 64, 1}}) != 0 ||
+        zpu_metal_blit_encoder_copy_texture_to_texture(
+            sparse_texture_alias_encoder, sparse_texture_destination,
+            (zpu_metal_region){{64, 0, 0}, {64, 64, 1}}, sparse_texture_readback,
+            (zpu_metal_region){{0, 0, 0}, {64, 64, 1}}) != 0 ||
+        zpu_metal_blit_encoder_end_encoding(sparse_texture_alias_encoder) != 0 ||
+        zpu_metal_command_buffer_commit(sparse_texture_alias_commands) != 0 ||
+        zpu_metal_texture_get_bytes(
+            sparse_texture_readback, sparse_texture_readback_bytes,
+            sizeof(sparse_texture_readback_bytes), 64u * 4u,
+            (zpu_metal_region){{0, 0, 0}, {64, 64, 1}}) != 0 ||
+        check_equal(sparse_texture_readback_bytes, sparse_texture_pattern,
+                    sparse_texture_tile_bytes) != 0) return 76;
+    zpu_metal_blit_encoder_destroy(sparse_texture_alias_encoder);
+    zpu_metal_command_buffer_destroy(sparse_texture_alias_commands);
+
+    zpu_metal_command_buffer *sparse_texture_unmap_commands =
+        zpu_metal_command_queue_command_buffer(queue);
+    zpu_metal_resource_state_encoder *sparse_texture_unmap_state =
+        zpu_metal_command_buffer_resource_state_encoder(sparse_texture_unmap_commands);
+    if (sparse_texture_unmap_commands == NULL || sparse_texture_unmap_state == NULL ||
+        zpu_metal_resource_state_encoder_update_texture_mapping(
+            sparse_texture_unmap_state, sparse_texture_destination,
+            ZPU_METAL_SPARSE_MAPPING_UNMAP,
+            (zpu_metal_region){{1, 0, 0}, {1, 1, 1}}) != 0 ||
+        zpu_metal_resource_state_encoder_end_encoding(sparse_texture_unmap_state) != 0) return 77;
+    zpu_metal_resource_state_encoder_destroy(sparse_texture_unmap_state);
+    zpu_metal_blit_encoder *sparse_texture_unmap_encoder =
+        zpu_metal_command_buffer_blit_encoder(sparse_texture_unmap_commands);
+    if (sparse_texture_unmap_encoder == NULL ||
+        zpu_metal_blit_encoder_copy_texture_to_texture(
+            sparse_texture_unmap_encoder, sparse_texture_destination,
+            (zpu_metal_region){{64, 0, 0}, {64, 64, 1}}, sparse_texture_readback,
+            (zpu_metal_region){{0, 0, 0}, {64, 64, 1}}) != 0 ||
+        zpu_metal_blit_encoder_end_encoding(sparse_texture_unmap_encoder) != 0 ||
+        zpu_metal_command_buffer_commit(sparse_texture_unmap_commands) != 0 ||
+        zpu_metal_texture_get_bytes(
+            sparse_texture_readback, sparse_texture_readback_bytes,
+            sizeof(sparse_texture_readback_bytes), 64u * 4u,
+            (zpu_metal_region){{0, 0, 0}, {64, 64, 1}}) != 0) return 78;
+    const uint8_t sparse_texture_zero[64u * 64u * 4u] = {0};
+    if (check_equal(sparse_texture_readback_bytes, sparse_texture_zero,
+                    sparse_texture_tile_bytes) != 0) return 79;
+    zpu_metal_blit_encoder_destroy(sparse_texture_unmap_encoder);
+    zpu_metal_command_buffer_destroy(sparse_texture_unmap_commands);
+    zpu_metal_texture_destroy(sparse_texture_readback);
+    zpu_metal_texture_destroy(sparse_texture_destination);
+    zpu_metal_texture_destroy(sparse_texture);
+    zpu_metal_texture_destroy(sparse_texture_source);
+
     zpu_metal_command_buffer *error_command_buffer =
         zpu_metal_command_queue_command_buffer(queue);
     zpu_metal_render_encoder *error_encoder =

@@ -9,7 +9,7 @@
 /* Native ZPU CPU Metal-layer ABI. This is intentionally separate from the
  * Apple Objective-C framework ABI; it is the portable FFI surface used by
  * clients that select ZPU's CPU renderer. */
-#define ZPU_METAL_ABI_VERSION 23u
+#define ZPU_METAL_ABI_VERSION 24u
 
 typedef uint8_t zpu_metal_workload;
 enum {
@@ -455,6 +455,7 @@ size_t zpu_metal_buffer_sparse_page_size(const zpu_metal_buffer *buffer);
 size_t zpu_metal_buffer_heap_offset(const zpu_metal_buffer *buffer);
 int zpu_metal_buffer_write(zpu_metal_buffer *buffer, size_t offset, const void *bytes, size_t length);
 zpu_metal_texture *zpu_metal_device_new_texture(zpu_metal_device *device, const zpu_metal_texture_descriptor *descriptor);
+zpu_metal_texture *zpu_metal_device_new_sparse_texture(zpu_metal_device *device, const zpu_metal_texture_descriptor *descriptor, size_t page_bytes);
 zpu_metal_heap *zpu_metal_device_new_heap(zpu_metal_device *device, size_t size);
 void zpu_metal_heap_destroy(zpu_metal_heap *heap);
 size_t zpu_metal_heap_size(const zpu_metal_heap *heap);
@@ -471,6 +472,10 @@ void zpu_metal_texture_destroy(zpu_metal_texture *texture);
 zpu_metal_texture *zpu_metal_texture_view(const zpu_metal_texture *texture, zpu_metal_pixel_format format);
 uint32_t zpu_metal_texture_width(const zpu_metal_texture *texture);
 uint32_t zpu_metal_texture_height(const zpu_metal_texture *texture);
+int zpu_metal_texture_is_sparse(const zpu_metal_texture *texture);
+size_t zpu_metal_texture_sparse_page_size(const zpu_metal_texture *texture);
+size_t zpu_metal_texture_sparse_tile_width(const zpu_metal_texture *texture);
+size_t zpu_metal_texture_sparse_tile_height(const zpu_metal_texture *texture);
 size_t zpu_metal_texture_heap_offset(const zpu_metal_texture *texture);
 int zpu_metal_texture_get_bytes(const zpu_metal_texture *texture, void *destination, size_t destination_length, size_t bytes_per_row, zpu_metal_region region);
 int zpu_metal_texture_replace_region(zpu_metal_texture *texture, zpu_metal_region region, const void *source, size_t source_length, size_t bytes_per_row);
@@ -592,6 +597,8 @@ int zpu_metal_resource_state_encoder_update_fence(zpu_metal_resource_state_encod
 int zpu_metal_resource_state_encoder_wait_for_fence(zpu_metal_resource_state_encoder *encoder, zpu_metal_fence *fence);
 int zpu_metal_resource_state_encoder_update_buffer_mapping(zpu_metal_resource_state_encoder *encoder, zpu_metal_buffer *buffer, zpu_metal_sparse_mapping_mode mode, size_t offset, size_t length);
 int zpu_metal_resource_state_encoder_copy_buffer_mappings(zpu_metal_resource_state_encoder *encoder, zpu_metal_buffer *source, zpu_metal_buffer *destination, size_t source_offset, size_t destination_offset, size_t length);
+int zpu_metal_resource_state_encoder_update_texture_mapping(zpu_metal_resource_state_encoder *encoder, zpu_metal_texture *texture, zpu_metal_sparse_mapping_mode mode, zpu_metal_region region);
+int zpu_metal_resource_state_encoder_copy_texture_mappings(zpu_metal_resource_state_encoder *encoder, zpu_metal_texture *source, zpu_metal_texture *destination, zpu_metal_region source_region, zpu_metal_origin destination_origin);
 int zpu_metal_resource_state_encoder_end_encoding(zpu_metal_resource_state_encoder *encoder);
 void zpu_metal_resource_state_encoder_destroy(zpu_metal_resource_state_encoder *encoder);
 

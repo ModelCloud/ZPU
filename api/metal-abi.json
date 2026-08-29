@@ -17,7 +17,7 @@
     "reason": "SDK inventory alone cannot establish semantic coverage: this portable CPU layer does not implement the complete Metal framework or MSL runtime."
   },
   "zpu_portable_abi": {
-  "version": 23,
+  "version": 24,
     "entry_points": [
       "zpu_metal_render",
       "zpu_metal_device_create",
@@ -35,10 +35,15 @@
       "zpu_metal_buffer_heap_offset",
       "zpu_metal_buffer_write",
       "zpu_metal_device_new_texture",
+      "zpu_metal_device_new_sparse_texture",
       "zpu_metal_texture_destroy",
       "zpu_metal_texture_view",
       "zpu_metal_texture_width",
       "zpu_metal_texture_height",
+      "zpu_metal_texture_is_sparse",
+      "zpu_metal_texture_sparse_page_size",
+      "zpu_metal_texture_sparse_tile_width",
+      "zpu_metal_texture_sparse_tile_height",
       "zpu_metal_texture_heap_offset",
       "zpu_metal_texture_get_bytes",
       "zpu_metal_texture_replace_region",
@@ -153,6 +158,8 @@
       "zpu_metal_resource_state_encoder_wait_for_fence",
       "zpu_metal_resource_state_encoder_update_buffer_mapping",
       "zpu_metal_resource_state_encoder_copy_buffer_mappings",
+      "zpu_metal_resource_state_encoder_update_texture_mapping",
+      "zpu_metal_resource_state_encoder_copy_texture_mappings",
       "zpu_metal_resource_state_encoder_end_encoding",
       "zpu_metal_resource_state_encoder_destroy",
       "zpu_metal_command_buffer_compute_encoder",

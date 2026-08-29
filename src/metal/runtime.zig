@@ -287,6 +287,12 @@ const SparseMapping = struct {
     page: *SparsePage,
 };
 
+const SparseTextureMapping = struct {
+    tile_x: usize,
+    tile_y: usize,
+    page: *SparsePage,
+};
+
 pub const Buffer = struct {
     magic: u64 = buffer_magic,
     device: *Device,
@@ -319,8 +325,14 @@ pub const Texture = struct {
     heap: ?*Heap = null,
     heap_allocation_offset: usize = 0,
     heap_allocation_size: usize = 0,
+    sparse_page_bytes: usize = 0,
+    sparse_tile_width: usize = 0,
+    sparse_tile_height: usize = 0,
+    sparse_mappings: std.ArrayList(SparseTextureMapping) = .empty,
 
     pub fn deinit(self: *Texture) void {
+        for (self.sparse_mappings.items) |mapping| mapping.page.release();
+        self.sparse_mappings.deinit(allocator);
         if (self.owns_bytes) allocator.free(self.bytes);
         releaseHeapAllocation(self.heap, self.heap_allocation_size);
         self.magic = 0;
@@ -577,6 +589,19 @@ const SparseBufferCopyMappingCommand = struct {
     length: usize,
 };
 
+const SparseTextureMappingCommand = struct {
+    texture: *Texture,
+    mode: u8,
+    region: abi.Region,
+};
+
+const SparseTextureCopyMappingCommand = struct {
+    source: *Texture,
+    destination: *Texture,
+    source_region: abi.Region,
+    destination_origin: abi.Origin,
+};
+
 const SharedEventCommand = struct {
     event: *SharedEvent,
     value: u64,
@@ -614,6 +639,8 @@ const Command = union(enum) {
     synchronize_buffer: *Buffer,
     sparse_buffer_mapping: SparseBufferMappingCommand,
     sparse_buffer_copy_mapping: SparseBufferCopyMappingCommand,
+    sparse_texture_mapping: SparseTextureMappingCommand,
+    sparse_texture_copy_mapping: SparseTextureCopyMappingCommand,
     update_fence: *Fence,
     wait_fence: *Fence,
     signal_event: SharedEventCommand,
@@ -774,6 +801,8 @@ pub const CommandBuffer = struct {
         for (self.commands.items) |command| switch (command) {
             .begin_render => |begin_render| {
                 if (!validTexture(begin_render.target)) return self.fail(error.InvalidResource);
+                sparseFlushOptionalTexture(active_target);
+                for (active_color_attachments) |attachment| sparseFlushOptionalTexture(attachment);
                 if (active_depth_values) |values| {
                     if (active_depth_store_action == .store) storeDepthTexture(active_depth_texture.?, values);
                     allocator.free(values);
@@ -788,12 +817,14 @@ pub const CommandBuffer = struct {
                 active_color_attachments = [_]?*Texture{null} ** 8;
                 active_target = begin_render.target;
                 active_color_attachments[0] = begin_render.target;
+                sparseSyncTexture(begin_render.target);
                 for (begin_render.color_attachments, 0..) |attachment, index| {
                     if (attachment) |value| {
                         if (!validTexture(value.texture) or value.texture.device != self.queue.device or
                             !value.texture.format.isColor() or value.texture.width != begin_render.target.width or
                             value.texture.height != begin_render.target.height) return self.fail(error.InvalidResource);
                         active_color_attachments[index] = value.texture;
+                        sparseSyncTexture(value.texture);
                         if (value.pass.load_action == .clear) {
                             var attachment_target = value.texture.asTarget();
                             raster3d.clearTarget(&attachment_target, toTargetColor(value.pass.clear_color));
@@ -849,6 +880,12 @@ pub const CommandBuffer = struct {
             .draw => |draw| {
                 const target_handle = active_target orelse return self.fail(error.InvalidCommand);
                 if (!validTexture(target_handle)) return self.fail(error.InvalidResource);
+                sparseSyncTexture(target_handle);
+                for (active_color_attachments) |attachment| sparseSyncOptionalTexture(attachment);
+                defer {
+                    sparseFlushTexture(target_handle);
+                    for (active_color_attachments) |attachment| sparseFlushOptionalTexture(attachment);
+                }
                 sparseSyncOptionalBuffer(draw.vertex_buffer);
                 sparseSyncOptionalBuffer(draw.index_buffer);
                 sparseSyncOptionalBuffer(draw.indirect_buffer);
@@ -966,6 +1003,8 @@ pub const CommandBuffer = struct {
             .tile => |tile| {
                 const target_handle = active_target orelse return self.fail(error.InvalidCommand);
                 if (!validTexture(target_handle) or target_handle != tile.target) return self.fail(error.InvalidResource);
+                sparseSyncTexture(target_handle);
+                defer sparseFlushTexture(target_handle);
                 validateColorAttachmentOutputs(active_color_attachments, tile.color_attachment_map, 1) catch |err| return self.fail(err);
                 const output_texture = active_color_attachments[@as(usize, tile.color_attachment_map[0])] orelse return self.fail(error.InvalidResource);
                 if (tile.kernel != 1 or
@@ -1021,6 +1060,8 @@ pub const CommandBuffer = struct {
                 }
                 const target_handle = active_target orelse return self.fail(error.InvalidCommand);
                 if (!validTexture(target_handle) or target_handle != resolved_mesh.target) return self.fail(error.InvalidResource);
+                sparseSyncTexture(target_handle);
+                defer sparseFlushTexture(target_handle);
                 validateColorAttachmentOutputs(active_color_attachments, resolved_mesh.color_attachment_map, 1) catch |err| return self.fail(err);
                 const output_texture = active_color_attachments[@as(usize, resolved_mesh.color_attachment_map[0])] orelse return self.fail(error.InvalidResource);
                 const mesh_threads = resolved_mesh.threads_per_mesh_threadgroup;
@@ -1082,6 +1123,8 @@ pub const CommandBuffer = struct {
                     (target_handle.format != .rgba8_unorm and target_handle.format != .bgra8_unorm) or
                     resolved_patch.factor_scale != 1.0)
                     return self.fail(error.InvalidArgument);
+                sparseSyncTexture(target_handle);
+                defer sparseFlushTexture(target_handle);
                 if (resolved_patch.instance_count == 0 or resolved_patch.patch_count == 0) continue;
 
                 const patch_end = std.math.add(usize, resolved_patch.patch_start, resolved_patch.patch_count) catch
@@ -1246,24 +1289,36 @@ pub const CommandBuffer = struct {
                 if (!validBuffer(copy.buffer) or !validTexture(copy.texture)) return self.fail(error.InvalidResource);
                 if (copy.buffer.device != copy.texture.device) return self.fail(error.InvalidResource);
                 sparseSyncBuffer(copy.buffer);
+                sparseSyncTexture(copy.texture);
                 defer sparseFlushBuffer(copy.buffer);
+                defer sparseFlushTexture(copy.texture);
                 copyBufferToTexture(copy) catch |err| return self.fail(err);
             },
             .copy_texture_to_buffer => |copy| {
                 if (!validTexture(copy.texture) or !validBuffer(copy.buffer)) return self.fail(error.InvalidResource);
                 if (copy.texture.device != copy.buffer.device) return self.fail(error.InvalidResource);
+                sparseSyncTexture(copy.texture);
                 sparseSyncBuffer(copy.buffer);
+                defer sparseFlushTexture(copy.texture);
                 defer sparseFlushBuffer(copy.buffer);
                 copyTextureToBuffer(copy) catch |err| return self.fail(err);
             },
             .copy_texture_to_texture => |copy| {
                 if (!validTexture(copy.source) or !validTexture(copy.destination)) return self.fail(error.InvalidResource);
                 if (copy.source.device != copy.destination.device or copy.source.format != copy.destination.format) return self.fail(error.InvalidResource);
+                sparseSyncTexture(copy.source);
+                sparseSyncTexture(copy.destination);
+                defer sparseFlushTexture(copy.source);
+                defer sparseFlushTexture(copy.destination);
                 copyTextureToTexture(copy) catch |err| return self.fail(err);
             },
             .generate_mipmap => |mipmap| {
                 if (!validTexture(mipmap.source) or !validTexture(mipmap.destination)) return self.fail(error.InvalidResource);
                 if (mipmap.source.device != mipmap.destination.device) return self.fail(error.InvalidResource);
+                sparseSyncTexture(mipmap.source);
+                sparseSyncTexture(mipmap.destination);
+                defer sparseFlushTexture(mipmap.source);
+                defer sparseFlushTexture(mipmap.destination);
                 generateMipmap(mipmap) catch |err| return self.fail(err);
             },
             .generate_mipmap_3d => |mipmap| {
@@ -1271,6 +1326,12 @@ pub const CommandBuffer = struct {
                     (mipmap.source1 != null and !validTexture(mipmap.source1.?))) return self.fail(error.InvalidResource);
                 if (mipmap.source0.device != mipmap.destination.device or
                     (mipmap.source1 != null and mipmap.source1.?.device != mipmap.destination.device)) return self.fail(error.InvalidResource);
+                sparseSyncTexture(mipmap.source0);
+                sparseSyncOptionalTexture(mipmap.source1);
+                sparseSyncTexture(mipmap.destination);
+                defer sparseFlushTexture(mipmap.source0);
+                defer sparseFlushOptionalTexture(mipmap.source1);
+                defer sparseFlushTexture(mipmap.destination);
                 generateMipmap3D(mipmap) catch |err| return self.fail(err);
             },
             .generate_mipmap_3d_array => |mipmap| {
@@ -1279,6 +1340,10 @@ pub const CommandBuffer = struct {
                     if (!validTexture(source) or source.device != self.queue.device) return self.fail(error.InvalidResource);
                 }
                 if (mipmap.destination.device != self.queue.device) return self.fail(error.InvalidResource);
+                for (mipmap.source_planes) |source| sparseSyncTexture(source);
+                sparseSyncTexture(mipmap.destination);
+                defer for (mipmap.source_planes) |source| sparseFlushTexture(source);
+                defer sparseFlushTexture(mipmap.destination);
                 generateSrgb8Mipmap3DArray(mipmap) catch |err| return self.fail(err);
             },
             .fill_buffer => |fill| {
@@ -1356,6 +1421,16 @@ pub const CommandBuffer = struct {
                     mapping.source.device != self.queue.device or mapping.destination.device != self.queue.device)
                     return self.fail(error.InvalidResource);
                 sparseCopyBufferMappings(mapping.source, mapping.destination, mapping.source_offset, mapping.destination_offset, mapping.length) catch |err| return self.fail(err);
+            },
+            .sparse_texture_mapping => |mapping| {
+                if (!validTexture(mapping.texture) or mapping.texture.device != self.queue.device) return self.fail(error.InvalidResource);
+                sparseUpdateTextureMapping(mapping.texture, mapping.mode, mapping.region) catch |err| return self.fail(err);
+            },
+            .sparse_texture_copy_mapping => |mapping| {
+                if (!validTexture(mapping.source) or !validTexture(mapping.destination) or
+                    mapping.source.device != self.queue.device or mapping.destination.device != self.queue.device)
+                    return self.fail(error.InvalidResource);
+                sparseCopyTextureMappings(mapping.source, mapping.destination, mapping.source_region, mapping.destination_origin) catch |err| return self.fail(err);
             },
             .update_fence => |fence| {
                 if (!validFence(fence) or fence.device != self.queue.device) return self.fail(error.InvalidResource);
@@ -2676,6 +2751,34 @@ pub const ResourceStateEncoder = struct {
         } });
     }
 
+    pub fn updateTextureMapping(self: *ResourceStateEncoder, texture: *Texture, mode: u8, region: abi.Region) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        if (!validTexture(texture) or texture.device != self.command_buffer.queue.device or
+            texture.sparse_page_bytes == 0 or !sparseTextureRangeValid(texture, region) or
+            (mode != 0 and mode != 1)) return error.InvalidArgument;
+        _ = try self.command_buffer.append(.{ .sparse_texture_mapping = .{
+            .texture = texture,
+            .mode = mode,
+            .region = region,
+        } });
+    }
+
+    pub fn copyTextureMappings(self: *ResourceStateEncoder, source: *Texture, destination: *Texture, source_region: abi.Region, destination_origin: abi.Origin) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        const destination_region = abi.Region{ .origin = destination_origin, .size = source_region.size };
+        if (!validTexture(source) or !validTexture(destination) or source.device != self.command_buffer.queue.device or
+            destination.device != self.command_buffer.queue.device or source.sparse_page_bytes == 0 or
+            source.sparse_page_bytes != destination.sparse_page_bytes or source.sparse_tile_width != destination.sparse_tile_width or
+            source.sparse_tile_height != destination.sparse_tile_height or !sparseTextureRangeValid(source, source_region) or
+            !sparseTextureRangeValid(destination, destination_region)) return error.InvalidArgument;
+        _ = try self.command_buffer.append(.{ .sparse_texture_copy_mapping = .{
+            .source = source,
+            .destination = destination,
+            .source_region = source_region,
+            .destination_origin = destination_origin,
+        } });
+    }
+
     pub fn endEncoding(self: *ResourceStateEncoder) Error!void {
         if (!self.open()) return error.InvalidCommand;
         try self.command_buffer.end(.resource_state);
@@ -3404,6 +3507,19 @@ pub fn createTexture(device: *Device, width: u32, height: u32, format_raw: u16) 
     return result;
 }
 
+/// Create a bounded 2D level-0 placement-sparse texture. Tile geometry is
+/// derived from the Apple page-size contract for the supported CPU formats;
+/// mipmapped, array, and 3D sparse layouts remain outside this portable ABI.
+pub fn createSparseTexture(device: *Device, width: u32, height: u32, format_raw: u16, page_bytes: usize) Error!*Texture {
+    const result = try createTexture(device, width, height, format_raw);
+    errdefer destroyTexture(result);
+    const tile = sparseTextureTileDimensions(result.format, page_bytes) orelse return error.UnsupportedOperation;
+    result.sparse_page_bytes = page_bytes;
+    result.sparse_tile_width = tile.width;
+    result.sparse_tile_height = tile.height;
+    return result;
+}
+
 pub fn createTextureInHeap(heap: *Heap, width: u32, height: u32, format_raw: u16) Error!*Texture {
     if (!validHeap(heap)) return error.InvalidResource;
     const result = try createTexture(heap.device, width, height, format_raw);
@@ -3518,6 +3634,7 @@ pub fn destroyTexture(texture: *Texture) void {
 
 pub fn createTextureView(texture: *const Texture, format_raw: u16) Error!*Texture {
     if (texture.magic != texture_magic or !validDevice(texture.device)) return error.InvalidResource;
+    if (texture.sparse_page_bytes != 0) return error.UnsupportedOperation;
     const format = textureFormatFromRaw(format_raw) orelse return error.UnsupportedFormat;
     if (!textureFormatsViewCompatible(texture.format, format)) return error.UnsupportedFormat;
     const result = allocator.create(Texture) catch return error.OutOfMemory;
@@ -3690,6 +3807,7 @@ pub fn textureGetBytes(texture: *Texture, destination: ?[*]u8, destination_lengt
     try validateRegion(texture.width, texture.height, region, stride, destination_length, texture.format.bytesPerPixel());
     if (row_bytes != 0 and destination == null) return error.InvalidArgument;
     if (row_bytes == 0) return;
+    sparseSyncTexture(texture);
     for (0..region.size.height) |row| {
         const source_offset = (@as(usize, region.origin.y) + row) * texture.stride + @as(usize, region.origin.x) * texture.format.bytesPerPixel();
         const destination_offset = row * stride;
@@ -3704,11 +3822,13 @@ pub fn textureReplaceRegion(texture: *Texture, region: abi.Region, source: ?[*]c
     try validateRegion(texture.width, texture.height, region, stride, source_length, texture.format.bytesPerPixel());
     if (row_bytes != 0 and source == null) return error.InvalidArgument;
     if (row_bytes == 0) return;
+    sparseSyncTexture(texture);
     for (0..region.size.height) |row| {
         const source_offset = row * stride;
         const destination_offset = (@as(usize, region.origin.y) + row) * texture.stride + @as(usize, region.origin.x) * texture.format.bytesPerPixel();
         @memcpy(texture.bytes[destination_offset .. destination_offset + row_bytes], source.?[source_offset .. source_offset + row_bytes]);
     }
+    sparseFlushTexture(texture);
 }
 
 fn vertexCount(raw_len: usize, stride: usize) ?usize {
@@ -5142,6 +5262,14 @@ fn sparseFlushOptionalBuffer(buffer: ?*Buffer) void {
     if (buffer) |value| if (validBuffer(value)) sparseFlushBuffer(value);
 }
 
+fn sparseSyncOptionalTexture(texture: ?*Texture) void {
+    if (texture) |value| if (validTexture(value)) sparseSyncTexture(value);
+}
+
+fn sparseFlushOptionalTexture(texture: ?*Texture) void {
+    if (texture) |value| if (validTexture(value)) sparseFlushTexture(value);
+}
+
 fn sparseUpdateBufferMapping(buffer: *Buffer, mode: u8, offset: usize, length: usize) Error!void {
     if (!validBuffer(buffer) or buffer.sparse_page_bytes == 0 or !sparseRangeValid(buffer, offset, length)) return error.InvalidArgument;
     if (mode != 0 and mode != 1) return error.InvalidArgument;
@@ -5204,6 +5332,156 @@ fn sparseCopyBufferMappings(source: *Buffer, destination: *Buffer, source_offset
         }
     }
     sparseSyncBuffer(destination);
+}
+
+fn sparseTextureTileDimensions(format: TextureFormat, page_bytes: usize) ?struct { width: usize, height: usize } {
+    return switch (format) {
+        .rgba8_unorm, .bgra8_unorm, .r32_float => switch (page_bytes) {
+            16 * 1024 => .{ .width = 64, .height = 64 },
+            64 * 1024 => .{ .width = 128, .height = 128 },
+            256 * 1024 => .{ .width = 256, .height = 256 },
+            else => null,
+        },
+        .rgba16_float => switch (page_bytes) {
+            16 * 1024 => .{ .width = 64, .height = 32 },
+            64 * 1024 => .{ .width = 128, .height = 64 },
+            256 * 1024 => .{ .width = 256, .height = 128 },
+            else => null,
+        },
+        else => null,
+    };
+}
+
+fn sparseTextureMappingIndex(texture: *const Texture, tile_x: usize, tile_y: usize) ?usize {
+    for (texture.sparse_mappings.items, 0..) |mapping, index| {
+        if (mapping.tile_x == tile_x and mapping.tile_y == tile_y) return index;
+    }
+    return null;
+}
+
+fn sparseTextureRangeValid(texture: *const Texture, region: abi.Region) bool {
+    if (texture.sparse_page_bytes == 0 or texture.sparse_tile_width == 0 or
+        texture.sparse_tile_height == 0 or region.origin.z != 0 or region.size.depth != 1)
+        return false;
+    if (texture.width > std.math.maxInt(usize) - (texture.sparse_tile_width - 1) or
+        texture.height > std.math.maxInt(usize) - (texture.sparse_tile_height - 1)) return false;
+    const tile_count_x = (texture.width + texture.sparse_tile_width - 1) / texture.sparse_tile_width;
+    const tile_count_y = (texture.height + texture.sparse_tile_height - 1) / texture.sparse_tile_height;
+    return region.origin.x <= tile_count_x and region.size.width <= tile_count_x - region.origin.x and
+        region.origin.y <= tile_count_y and region.size.height <= tile_count_y - region.origin.y;
+}
+
+fn sparseSyncTexture(texture: *Texture) void {
+    if (texture.sparse_page_bytes == 0) return;
+    @memset(texture.bytes, 0);
+    const bytes_per_pixel = texture.format.bytesPerPixel();
+    for (texture.sparse_mappings.items) |mapping| {
+        const pixel_x = mapping.tile_x * texture.sparse_tile_width;
+        const pixel_y = mapping.tile_y * texture.sparse_tile_height;
+        if (pixel_x >= texture.width or pixel_y >= texture.height) continue;
+        const width = @min(texture.sparse_tile_width, texture.width - pixel_x);
+        const height = @min(texture.sparse_tile_height, texture.height - pixel_y);
+        const row_bytes = width * bytes_per_pixel;
+        const source_stride = texture.sparse_tile_width * bytes_per_pixel;
+        for (0..height) |row| {
+            const destination_offset = (pixel_y + row) * texture.stride + pixel_x * bytes_per_pixel;
+            @memcpy(texture.bytes[destination_offset .. destination_offset + row_bytes], mapping.page.bytes[row * source_stride .. row * source_stride + row_bytes]);
+        }
+    }
+}
+
+fn sparseFlushTexture(texture: *Texture) void {
+    if (texture.sparse_page_bytes == 0) return;
+    const bytes_per_pixel = texture.format.bytesPerPixel();
+    for (texture.sparse_mappings.items) |mapping| {
+        const pixel_x = mapping.tile_x * texture.sparse_tile_width;
+        const pixel_y = mapping.tile_y * texture.sparse_tile_height;
+        if (pixel_x >= texture.width or pixel_y >= texture.height) continue;
+        const width = @min(texture.sparse_tile_width, texture.width - pixel_x);
+        const height = @min(texture.sparse_tile_height, texture.height - pixel_y);
+        const row_bytes = width * bytes_per_pixel;
+        const source_stride = texture.sparse_tile_width * bytes_per_pixel;
+        @memset(mapping.page.bytes, 0);
+        for (0..height) |row| {
+            const source_offset = (pixel_y + row) * texture.stride + pixel_x * bytes_per_pixel;
+            @memcpy(mapping.page.bytes[row * source_stride .. row * source_stride + row_bytes], texture.bytes[source_offset .. source_offset + row_bytes]);
+        }
+    }
+}
+
+fn sparseUpdateTextureMapping(texture: *Texture, mode: u8, region: abi.Region) Error!void {
+    if (!validTexture(texture) or !sparseTextureRangeValid(texture, region) or (mode != 0 and mode != 1)) return error.InvalidArgument;
+    sparseFlushTexture(texture);
+    for (0..region.size.height) |row| {
+        for (0..region.size.width) |column| {
+            const tile_x = @as(usize, region.origin.x) + column;
+            const tile_y = @as(usize, region.origin.y) + row;
+            const mapping_index = sparseTextureMappingIndex(texture, tile_x, tile_y);
+            if (mode == 0) {
+                if (mapping_index == null) {
+                    const page = try SparsePage.create(texture.sparse_page_bytes);
+                    texture.sparse_mappings.append(allocator, .{ .tile_x = tile_x, .tile_y = tile_y, .page = page }) catch {
+                        page.release();
+                        return error.OutOfMemory;
+                    };
+                }
+            } else if (mapping_index) |index| {
+                const removed = texture.sparse_mappings.orderedRemove(index);
+                removed.page.release();
+            }
+        }
+    }
+    sparseSyncTexture(texture);
+}
+
+fn sparseCopyTextureMappings(source: *Texture, destination: *Texture, source_region: abi.Region, destination_origin: abi.Origin) Error!void {
+    const destination_region = abi.Region{ .origin = destination_origin, .size = source_region.size };
+    if (!validTexture(source) or !validTexture(destination) or source.device != destination.device or
+        source.sparse_page_bytes == 0 or source.sparse_page_bytes != destination.sparse_page_bytes or
+        source.sparse_tile_width != destination.sparse_tile_width or source.sparse_tile_height != destination.sparse_tile_height or
+        !sparseTextureRangeValid(source, source_region) or !sparseTextureRangeValid(destination, destination_region)) return error.InvalidArgument;
+    sparseFlushTexture(source);
+    sparseFlushTexture(destination);
+    const page_count = std.math.mul(usize, @as(usize, source_region.size.width), source_region.size.height) catch return error.InvalidArgument;
+    const pages = allocator.alloc(?*SparsePage, page_count) catch return error.OutOfMemory;
+    defer {
+        for (pages) |page| if (page) |value| value.release();
+        allocator.free(pages);
+    }
+    var page_index: usize = 0;
+    for (0..source_region.size.height) |row| {
+        for (0..source_region.size.width) |column| {
+            const tile_x = @as(usize, source_region.origin.x) + column;
+            const tile_y = @as(usize, source_region.origin.y) + row;
+            pages[page_index] = if (sparseTextureMappingIndex(source, tile_x, tile_y)) |mapping_index| blk: {
+                const page = source.sparse_mappings.items[mapping_index].page;
+                page.retain();
+                break :blk page;
+            } else null;
+            page_index += 1;
+        }
+    }
+    page_index = 0;
+    for (0..destination_region.size.height) |row| {
+        for (0..destination_region.size.width) |column| {
+            const tile_x = @as(usize, destination_region.origin.x) + column;
+            const tile_y = @as(usize, destination_region.origin.y) + row;
+            if (sparseTextureMappingIndex(destination, tile_x, tile_y)) |mapping_index| {
+                const removed = destination.sparse_mappings.orderedRemove(mapping_index);
+                removed.page.release();
+            }
+            if (pages[page_index]) |page| {
+                destination.sparse_mappings.append(allocator, .{ .tile_x = tile_x, .tile_y = tile_y, .page = page }) catch {
+                    page.release();
+                    pages[page_index] = null;
+                    return error.OutOfMemory;
+                };
+                pages[page_index] = null;
+            }
+            page_index += 1;
+        }
+    }
+    sparseSyncTexture(destination);
 }
 
 fn validTexture(texture: *Texture) bool {
@@ -7067,6 +7345,11 @@ pub export fn zpu_metal_device_new_texture(device: ?*Device, descriptor: ?*const
     return createTexture(device orelse return null, desc.width, desc.height, desc.format) catch null;
 }
 
+pub export fn zpu_metal_device_new_sparse_texture(device: ?*Device, descriptor: ?*const abi.TextureDescriptor, page_bytes: usize) callconv(.c) ?*Texture {
+    const desc = descriptor orelse return null;
+    return createSparseTexture(device orelse return null, desc.width, desc.height, desc.format, page_bytes) catch null;
+}
+
 pub export fn zpu_metal_heap_new_texture(heap: ?*Heap, descriptor: ?*const abi.TextureDescriptor) callconv(.c) ?*Texture {
     const value = heap orelse return null;
     const desc = descriptor orelse return null;
@@ -7097,6 +7380,26 @@ pub export fn zpu_metal_texture_height(texture: ?*const Texture) callconv(.c) u3
     const value = texture orelse return 0;
     if (value.magic != texture_magic) return 0;
     return value.height;
+}
+
+pub export fn zpu_metal_texture_is_sparse(texture: ?*const Texture) callconv(.c) c_int {
+    const value = texture orelse return 0;
+    return if (validTexture(@constCast(value)) and value.sparse_page_bytes != 0) 1 else 0;
+}
+
+pub export fn zpu_metal_texture_sparse_page_size(texture: ?*const Texture) callconv(.c) usize {
+    const value = texture orelse return 0;
+    return if (validTexture(@constCast(value))) value.sparse_page_bytes else 0;
+}
+
+pub export fn zpu_metal_texture_sparse_tile_width(texture: ?*const Texture) callconv(.c) usize {
+    const value = texture orelse return 0;
+    return if (validTexture(@constCast(value))) value.sparse_tile_width else 0;
+}
+
+pub export fn zpu_metal_texture_sparse_tile_height(texture: ?*const Texture) callconv(.c) usize {
+    const value = texture orelse return 0;
+    return if (validTexture(@constCast(value))) value.sparse_tile_height else 0;
 }
 
 pub export fn zpu_metal_texture_heap_offset(texture: ?*const Texture) callconv(.c) usize {
@@ -7711,6 +8014,32 @@ pub export fn zpu_metal_resource_state_encoder_copy_buffer_mappings(
         source_offset,
         destination_offset,
         length,
+    ) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_resource_state_encoder_update_texture_mapping(
+    encoder: ?*ResourceStateEncoder,
+    texture: ?*Texture,
+    mode: u8,
+    region: abi.Region,
+) callconv(.c) c_int {
+    (encoder orelse return -1).updateTextureMapping(texture orelse return -1, mode, region) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_resource_state_encoder_copy_texture_mappings(
+    encoder: ?*ResourceStateEncoder,
+    source: ?*Texture,
+    destination: ?*Texture,
+    source_region: abi.Region,
+    destination_origin: abi.Origin,
+) callconv(.c) c_int {
+    (encoder orelse return -1).copyTextureMappings(
+        source orelse return -1,
+        destination orelse return -1,
+        source_region,
+        destination_origin,
     ) catch |err| return errorCode(err);
     return 0;
 }

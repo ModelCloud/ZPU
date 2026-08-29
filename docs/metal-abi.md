@@ -463,10 +463,12 @@ The portable ABI also exposes CPU-owned placement-sparse buffers. A sparse
 buffer reports no public contents pointer; page-aligned map/unmap operations
 are recorded on the resource-state encoder, and mapping copies preserve page
 aliases. Ordinary ZPU blit/fill commands are the deterministic access path,
-with unmapped reads returning zero. The bounded ABI currently covers sparse
-buffers (not arbitrary sparse texture mip/tail layouts); the Apple adapter's
-Objective-C resource-state implementation additionally covers its documented
-CPU page model for sparse textures.
+with unmapped reads returning zero. The bounded ABI covers sparse buffers and
+single-level 2D sparse textures for the Apple page-size/tile geometries exposed
+by the portable constructors. Arbitrary sparse texture mip/tail/3D layouts are
+still outside this ABI; the Apple adapter's Objective-C resource-state
+implementation additionally covers its documented CPU page model for those
+layouts.
 
 On macOS, `zig build metal-pixel` compiles a tiny runtime MSL shader, renders a
 known triangle pair using Apple's Metal framework, renders the same vertices
