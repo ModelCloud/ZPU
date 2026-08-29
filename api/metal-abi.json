@@ -250,6 +250,7 @@
     "MTLDevice.newCommandQueue",
     "MTLDevice.newCommandQueueWithMaxCommandBufferCount",
     "MTLDevice.newCommandQueueWithDescriptor",
+    "MTLDevice.architecture",
     "MTLCommandQueue.commandBuffer",
     "MTLCommandBuffer.renderCommandEncoder",
     "MTLCommandBuffer.parallelRenderCommandEncoder",
