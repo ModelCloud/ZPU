@@ -70,9 +70,9 @@ triangle path:
 - the bounded `zpu_test_sample_fragment` profile samples a ZPU-owned color
   texture with interpolated normalized or texel-space coordinates; nearest/
   linear minification and magnification filters selected from CPU-computed
-  texture footprints, nearest/linear mip selection, LOD clamps, sampler
-  address modes, linear filtering, the three Metal border-color modes, and
-  weighted/minimum/maximum reduction are carried through the CPU raster path;
+  texture footprints, nearest/linear mip selection, LOD bias and clamps,
+  sampler address modes, linear filtering, the three Metal border-color modes,
+  and weighted/minimum/maximum reduction are carried through the CPU raster path;
   native Metal is used only as the byte-accuracy oracle where the native GPU
   exposes the requested feature
 - the bounded `zpu_cpu_uniform_color_fragment` profile consumes a 16-byte

@@ -754,6 +754,7 @@
     "MTLResourceStateCommandEncoder.endEncoding"
   ],
   "known_unimplemented_surface": [
+    "MTLSamplerDescriptor.maxAnisotropy greater than one CPU footprint execution",
     "MTLIndirectCommandBuffer mesh and tessellation shader execution",
     "MTL4RenderCommandEncoder tile/mesh execution",
     "MTL4MachineLearningCommandEncoder",
