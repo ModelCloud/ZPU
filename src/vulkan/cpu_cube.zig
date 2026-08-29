@@ -336,6 +336,12 @@ fn buildPreparedFlatSpans(prepared: *PreparedDraw, width: u32, height: u32) void
     if (width == 0 or height == 0 or height > flat_span_rows) return;
     for (prepared.triangles[0..prepared.count], 0..) |*triangle, index| {
         if (!triangle.valid) continue;
+        if (triangle.batch_raster.ready) {
+            const raster = &triangle.batch_raster;
+            var span_stepper = FlatSpanStepper.init(raster.p0, raster.p1, raster.p2, raster.inverse_area, raster.min_x, raster.max_x, raster.min_y);
+            for (@as(usize, @intCast(raster.min_y))..@as(usize, @intCast(raster.max_y))) |y| prepared.spans[index][y] = span_stepper.next();
+            continue;
+        }
         const p0 = [2]f32{ triangle.vertices[0].screen[0], triangle.vertices[0].screen[1] };
         const p1 = [2]f32{ triangle.vertices[1].screen[0], triangle.vertices[1].screen[1] };
         const p2 = [2]f32{ triangle.vertices[2].screen[0], triangle.vertices[2].screen[1] };
@@ -621,6 +627,16 @@ fn triangleLight(v0: Vertex, v1: Vertex, v2: Vertex) f32 {
     const dx2 = v2.screen[0] - v0.screen[0];
     const dy2 = v2.screen[1] - v0.screen[1];
     const dz2 = v2.screen[2] - v0.screen[2];
+    // Screen-space quads from 2D UI and materialized Vulkan faces have a
+    // constant depth. Their normal is exactly +/-Z, so avoid the square-root
+    // normalization while retaining the scalar path for all perspective
+    // triangles.
+    if (dz1 == 0 and dz2 == 0) {
+        const area = dx1 * dy2 - dy1 * dx2;
+        if (std.math.isFinite(area) and @abs(area) > 0.000001) {
+            return if (area > 0) 0.707 else 0.15;
+        }
+    }
     var normal = [3]f32{ dy1 * dz2 - dz1 * dy2, dz1 * dx2 - dx1 * dz2, dx1 * dy2 - dy1 * dx2 };
     const normal_length = @sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
     if (normal_length > 0.000001) {
@@ -1042,10 +1058,8 @@ fn prepareBatchRaster(prepared: *PreparedDraw, width: u32, height: u32, scissor:
     prepared.batch_fast = prepared.count != 0;
     for (prepared.triangles[0..prepared.count]) |*triangle| {
         triangle.batch_raster = .{};
-        if (!triangle.valid or (triangle.flat_color == null and !triangle.has_prelit_texture and !triangle.has_prelit_texture_16x16)) {
-            if (triangle.valid) prepared.batch_fast = false;
-            continue;
-        }
+        if (!triangle.valid) continue;
+        const has_batch_texture = triangle.flat_color != null or triangle.has_prelit_texture or triangle.has_prelit_texture_16x16;
         const p0 = [2]f32{ triangle.vertices[0].screen[0], triangle.vertices[0].screen[1] };
         const p1 = [2]f32{ triangle.vertices[1].screen[0], triangle.vertices[1].screen[1] };
         const p2 = [2]f32{ triangle.vertices[2].screen[0], triangle.vertices[2].screen[1] };
@@ -1061,7 +1075,10 @@ fn prepareBatchRaster(prepared: *PreparedDraw, width: u32, height: u32, scissor:
         const min_y = @max(@as(i32, @intFromFloat(@floor(@min(p0[1], @min(p1[1], p2[1]))))), scissor.y, 0);
         const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(p0[0], @max(p1[0], p2[0]))))), scissor.x + @as(i32, @intCast(scissor.width)), @as(i32, @intCast(width)));
         const max_y = @min(@as(i32, @intFromFloat(@ceil(@max(p0[1], @max(p1[1], p2[1]))))), scissor.y + @as(i32, @intCast(scissor.height)), @as(i32, @intCast(height)));
-        if (max_x <= min_x or max_y <= min_y) continue;
+        if (max_x <= min_x or max_y <= min_y) {
+            if (!has_batch_texture) prepared.batch_fast = false;
+            continue;
+        }
         const flat_inverse_w = 1.0 / triangle.vertices[0].clip_w;
         const inverse_w = flat_inverse_w;
         const b0_dx = (p2[1] - p1[1]) * inverse_area;
@@ -1090,6 +1107,7 @@ fn prepareBatchRaster(prepared: *PreparedDraw, width: u32, height: u32, scissor:
             .u_over_w_dx = b0_dx * u_over_w[0] + b1_dx * u_over_w[1] + b2_dx * u_over_w[2],
             .v_over_w_dx = b0_dx * v_over_w[0] + b1_dx * v_over_w[1] + b2_dx * v_over_w[2],
         };
+        if (!has_batch_texture) prepared.batch_fast = false;
     }
 }
 
@@ -1906,6 +1924,61 @@ fn refreshBatchPreparedUvs(prepared: *PreparedDraw, uniform: []const u8, vertex_
     const uv_base = std.math.mul(usize, @as(usize, vertex_count), 16) catch return false;
     const uv_start = 64 + uv_base;
     if (uv_start > uniform.len) return false;
+    // The dominant Vulkan sprite/text command is one non-indexed quad. Read
+    // its six UV records in one fixed-shape pass, then attach the shared
+    // diagonal values to both prepared triangles. The generic loop below is
+    // retained for indexed and multi-triangle streams and malformed tails.
+    if (prepared.count == 2 and vertex_count == 6 and prepared.triangles[0].valid and prepared.triangles[1].valid and uniform.len - uv_start >= 6 * 16) {
+        var uvs: [6][2]f32 = undefined;
+        inline for (0..6) |index| {
+            const offset = uv_start + index * 16;
+            uvs[index] = .{ readFloat(uniform, offset), readFloat(uniform, offset + 4) };
+        }
+        prepared.triangles[0].vertices[0].uv = uvs[0];
+        prepared.triangles[0].vertices[1].uv = uvs[1];
+        prepared.triangles[0].vertices[2].uv = uvs[2];
+        prepared.triangles[1].vertices[0].uv = uvs[3];
+        prepared.triangles[1].vertices[1].uv = uvs[4];
+        prepared.triangles[1].vertices[2].uv = uvs[5];
+        inline for (0..2) |triangle_index| {
+            const triangle = &prepared.triangles[triangle_index];
+            var unit_uv = true;
+            var same_texel = true;
+            var first_texel_u: usize = 0;
+            var first_texel_v: usize = 0;
+            inline for (0..3) |vertex_index| {
+                const uv = triangle.vertices[vertex_index].uv;
+                const in_unit = uv[0] >= 0 and uv[0] <= 1 and uv[1] >= 0 and uv[1] <= 1;
+                unit_uv = unit_uv and in_unit;
+                if (in_unit and (triangle.has_prelit_texture or triangle.has_prelit_texture_16x16)) {
+                    const texel_u = if (triangle.has_prelit_texture) unitTextureCoordinate(uv[0]) else unitTextureCoordinate16(uv[0]);
+                    const texel_v = if (triangle.has_prelit_texture) unitTextureCoordinate(uv[1]) else unitTextureCoordinate16(uv[1]);
+                    if (vertex_index == 0) {
+                        first_texel_u = texel_u;
+                        first_texel_v = texel_v;
+                    } else same_texel = same_texel and texel_u == first_texel_u and texel_v == first_texel_v;
+                } else same_texel = false;
+            }
+            triangle.unit_uv = unit_uv and ((triangle.vertices[0].clip_w > 0 and triangle.vertices[1].clip_w > 0 and triangle.vertices[2].clip_w > 0) or
+                (triangle.vertices[0].clip_w < 0 and triangle.vertices[1].clip_w < 0 and triangle.vertices[2].clip_w < 0));
+            if (!triangle.unit_uv) {
+                triangle.flat_color = null;
+                triangle.has_prelit_texture = false;
+                triangle.prelit_texture_ptr = null;
+                triangle.prelit_texture_16x16_ptr = null;
+                triangle.has_prelit_texture_16x16 = false;
+            } else if (!same_texel) {
+                triangle.flat_color = null;
+            } else if (triangle.has_prelit_texture) {
+                triangle.flat_color = (if (triangle.prelit_texture_ptr) |colors| colors else &triangle.prelit_texture)[first_texel_v * 4 + first_texel_u];
+            } else if (triangle.has_prelit_texture_16x16) {
+                triangle.flat_color = (if (triangle.prelit_texture_16x16_ptr) |colors| colors else &triangle.prelit_texture_16x16)[first_texel_v * 16 + first_texel_u];
+            } else {
+                triangle.flat_color = null;
+            }
+        }
+        return true;
+    }
     for (prepared.triangles[0..prepared.count], 0..) |*triangle, triangle_index| {
         if (!triangle.valid) continue;
         var unit_uv = true;
@@ -1965,6 +2038,14 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
     } else {
         prepareDraw(command.uniform, command.vertex_count, 0, command.viewport, null, output);
     }
+    var batch_raster_prepared = false;
+    if (!geometry_cache_hit) {
+        // Build the screen-space raster records once up front. Span building
+        // can reuse them below, avoiding a second area/bounds calculation on
+        // animated geometry.
+        prepareBatchRaster(output, width, height, command.scissor);
+        batch_raster_prepared = true;
+    }
 
     const span_cache: ?*BatchSpanCache = if (command_index < max_batch_span_cache_commands) &batch_span_cache[command_index] else null;
     const quad_span_cache: ?*BatchQuadSpanCache = if (command.vertex_count == 6) &batch_quad_span_cache[command_index] else null;
@@ -2004,7 +2085,11 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
         output.quad_spans_external = null;
     }
     const lighting_refresh = !geometry_cache_hit or command_cache.lighting_generation != lighting_generation;
-    if (lighting_refresh) {
+    // prepareDraw already assigns the quantized cached table used by 4x4
+    // unit-texture shading. Re-walking every triangle to look up that same
+    // pointer is redundant on the animated material path; retain the exact
+    // table refresh for larger textures and non-unit streams.
+    if (lighting_refresh and (command.texture_width != 4 or command.texture_height != 4)) {
         var previous_key: u32 = 0;
         var previous_table: ?*const [256]u8 = null;
         for (output.triangles[0..output.count]) |*triangle| {
@@ -2031,8 +2116,17 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
         (command.texture_revision != 0 and command_cache.texture_revision == command.texture_revision and command_cache.texture_address == @intFromPtr(command.texture.ptr) or
             command.texture_revision == 0 and command_cache.texture_revision == 0 and std.mem.eql(u8, command_snapshot.texture[0..command.texture.len], command.texture));
     if (!geometry_cache_hit or !texture_unchanged or lighting_refresh) prepareLitTextures(output, command.texture, command.texture_width, command.texture_height, command.texture_revision);
-    if (!(geometry_cache_hit and std.meta.eql(command_cache.scissor, command.scissor) and refreshBatchRasterUvs(output))) prepareBatchRaster(output, width, height, command.scissor);
-    refreshBatchFastFlag(output);
+    const reused_batch_raster = geometry_cache_hit and std.meta.eql(command_cache.scissor, command.scissor) and refreshBatchRasterUvs(output);
+    if (!reused_batch_raster and !batch_raster_prepared) {
+        // prepareBatchRaster computes the fast flag while constructing every
+        // raster record. Avoid immediately walking all triangles a second
+        // time on animated geometry revisions.
+        prepareBatchRaster(output, width, height, command.scissor);
+    } else if (reused_batch_raster or batch_raster_prepared) {
+        // UV-only updates can invalidate unit-texture/flat-color eligibility,
+        // so retain the validation pass for the cache-hit path.
+        refreshBatchFastFlag(output);
+    }
     // Color runs are thread-local scratch. The batch shares its prepared
     // geometry across both raster lanes, so the direct prelit span path is
     // used instead of retaining a pointer into one worker's scratch buffer.
@@ -2353,18 +2447,10 @@ fn rasterPreparedFlatColorQuad(comptime depth_test: bool, color_words: []align(4
     const last_y = @min(max_y, lane_max_y);
     if (first_y >= last_y) return 0;
 
-    // The fast writer is valid only when the two triangle spans form one
-    // contiguous row. Validate the lane before writing so an unusual quad
-    // cannot leave a partially rendered frame before falling back.
+    // Both callers prove that the two triangles form an axis-aligned quad.
+    // Their conservative spans are therefore contiguous on every covered
+    // row; avoid a validation pass over the span cache in this hot path.
     var y = first_y;
-    while (y < last_y) : (y += 1) {
-        const first = first_spans[@intCast(y)];
-        const second = second_spans[@intCast(y)];
-        if (first.last > first.first and second.last > second.first and (first.last < second.first or second.last < first.first)) {
-            return null;
-        }
-    }
-
     var pixels_written: usize = 0;
     y = first_y;
     while (y < last_y) : (y += 1) {
@@ -2464,6 +2550,39 @@ fn rasterFlatSpanTriangleTexture4x4(color_words: []align(4) u32, depth_words: []
         // can merge, so walk the covered pixels directly.
         if (last - first <= 32) {
             const row_offset = @as(usize, @intCast(y)) * @as(usize, width);
+            while (x + 8 <= last) : (x += 8) {
+                const pixel_index = row_offset + @as(usize, @intCast(x));
+                // Preserve the two four-pixel stepping operations used by
+                // the scalar reference. This keeps f32 rounding identical
+                // while allowing one eight-lane depth/color transaction.
+                const second_u = stepped_u_over_w + u_over_w_dx * 4.0;
+                const second_v = stepped_v_over_w + v_over_w_dx * 4.0;
+                var colors: [8]u32 = undefined;
+                inline for (0..4) |lane| {
+                    const lane_u = stepped_u_over_w + u_over_w_dx * @as(f32, @floatFromInt(lane));
+                    const lane_v = stepped_v_over_w + v_over_w_dx * @as(f32, @floatFromInt(lane));
+                    colors[lane] = shadeUnitTexture4x4(lane_u * flat_reciprocal_w, lane_v * flat_reciprocal_w, prelit);
+                }
+                inline for (4..8) |lane| {
+                    const lane_u = second_u + u_over_w_dx * @as(f32, @floatFromInt(lane - 4));
+                    const lane_v = second_v + v_over_w_dx * @as(f32, @floatFromInt(lane - 4));
+                    colors[lane] = shadeUnitTexture4x4(lane_u * flat_reciprocal_w, lane_v * flat_reciprocal_w, prelit);
+                }
+                const passes: @Vector(8, bool) = @as(@Vector(8, u32), @splat(flat_depth_bits)) <= depth_words[pixel_index..][0..8].*;
+                if (@reduce(.And, passes)) {
+                    depth_words[pixel_index..][0..8].* = @as(@Vector(8, u32), @splat(flat_depth_bits));
+                    color_words[pixel_index..][0..8].* = colors;
+                    pixels_written += 8;
+                } else {
+                    inline for (0..8) |lane| if (passes[lane]) {
+                        depth_words[pixel_index + lane] = flat_depth_bits;
+                        color_words[pixel_index + lane] = colors[lane];
+                        pixels_written += 1;
+                    };
+                }
+                stepped_u_over_w = second_u + u_over_w_dx * 4.0;
+                stepped_v_over_w = second_v + v_over_w_dx * 4.0;
+            }
             while (x + 4 <= last) : (x += 4) {
                 const pixel_index = row_offset + @as(usize, @intCast(x));
                 var colors: [4]u32 = undefined;
