@@ -14,7 +14,6 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
-#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -602,58 +601,6 @@ static zpu_metal_pixel_format zpu_pixel_format(MTLPixelFormat format) {
     if (format == MTLPixelFormatBGRA8Unorm) return ZPU_METAL_BGRA8_UNORM;
     if (format == MTLPixelFormatDepth32Float) return ZPU_METAL_DEPTH32_FLOAT;
     return ZPU_METAL_RGBA8_UNORM;
-}
-
-static BOOL zpu_generate_unorm_mipmap(zpu_metal_texture *source, zpu_metal_texture *destination) {
-    if (source == NULL || destination == NULL) return NO;
-    const size_t sourceWidth = zpu_metal_texture_width(source);
-    const size_t sourceHeight = zpu_metal_texture_height(source);
-    const size_t destinationWidth = zpu_metal_texture_width(destination);
-    const size_t destinationHeight = zpu_metal_texture_height(destination);
-    if (sourceWidth == 0 || sourceHeight == 0 || destinationWidth == 0 || destinationHeight == 0 ||
-        sourceWidth > SIZE_MAX / 4 || sourceHeight > SIZE_MAX / (sourceWidth * 4) ||
-        destinationWidth > SIZE_MAX / 4 || destinationHeight > SIZE_MAX / (destinationWidth * 4)) return NO;
-    const size_t sourceRowBytes = sourceWidth * 4;
-    const size_t destinationRowBytes = destinationWidth * 4;
-    const size_t sourceBytes = sourceRowBytes * sourceHeight;
-    const size_t destinationBytes = destinationRowBytes * destinationHeight;
-    uint8_t *sourcePixels = (uint8_t *)malloc(sourceBytes);
-    uint8_t *destinationPixels = (uint8_t *)malloc(destinationBytes);
-    if (sourcePixels == NULL || destinationPixels == NULL) {
-        free(sourcePixels);
-        free(destinationPixels);
-        return NO;
-    }
-    const zpu_metal_region sourceRegion = {{0, 0, 0}, {(uint32_t)sourceWidth, (uint32_t)sourceHeight, 1}};
-    const zpu_metal_region destinationRegion = {{0, 0, 0}, {(uint32_t)destinationWidth, (uint32_t)destinationHeight, 1}};
-    const BOOL sourceRead = zpu_metal_texture_get_bytes(source, sourcePixels, sourceBytes, sourceRowBytes, sourceRegion) == ZPU_METAL_OK;
-    BOOL destinationWritten = NO;
-    if (sourceRead) {
-        for (size_t y = 0; y < destinationHeight; ++y) {
-            for (size_t x = 0; x < destinationWidth; ++x) {
-                const size_t x0 = x * 2;
-                const size_t y0 = y * 2;
-                uint32_t sums[4] = {0, 0, 0, 0};
-                for (size_t sampleY = 0; sampleY < 2; ++sampleY) {
-                    const size_t sourceY = (y0 + sampleY < sourceHeight) ? y0 + sampleY : sourceHeight - 1;
-                    for (size_t sampleX = 0; sampleX < 2; ++sampleX) {
-                        const size_t sourceX = (x0 + sampleX < sourceWidth) ? x0 + sampleX : sourceWidth - 1;
-                        const uint8_t *pixel = sourcePixels + sourceY * sourceRowBytes + sourceX * 4;
-                        for (size_t component = 0; component < 4; ++component) sums[component] += pixel[component];
-                    }
-                }
-                uint8_t *destinationPixel = destinationPixels + y * destinationRowBytes + x * 4;
-                for (size_t component = 0; component < 4; ++component) {
-                    destinationPixel[component] = (uint8_t)((sums[component] + 2) / 4);
-                }
-            }
-        }
-        destinationWritten = zpu_metal_texture_replace_region(
-            destination, destinationRegion, destinationPixels, destinationBytes, destinationRowBytes) == ZPU_METAL_OK;
-    }
-    free(sourcePixels);
-    free(destinationPixels);
-    return destinationWritten;
 }
 
 static zpu_metal_load_action zpu_load_action(MTLLoadAction action) {
@@ -3483,7 +3430,8 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
         return;
     }
     for (NSUInteger level = 0; level + 1 < zpuTexture.mipmapLevelCount; ++level) {
-        if (!zpu_generate_unorm_mipmap([zpuTexture zpuTextureAtLevel:level], [zpuTexture zpuTextureAtLevel:level + 1])) {
+        if (zpu_metal_compute_encoder_generate_mipmap(
+                _legacy->_zpuEncoder, [zpuTexture zpuTextureAtLevel:level], [zpuTexture zpuTextureAtLevel:level + 1]) != ZPU_METAL_OK) {
             [_owner markError];
             return;
         }

@@ -1066,6 +1066,38 @@ int main(void) {
             return 70;
         }
 
+        id<MTLTexture> metal4_generate_mip_texture = [adapter_device newTextureWithDescriptor:generate_mip_descriptor];
+        [metal4_generate_mip_texture replaceRegion:MTLRegionMake2D(0, 0, 4, 4)
+                                       mipmapLevel:0
+                                         withBytes:generate_mip_base
+                                       bytesPerRow:4 * 4];
+        id<MTL4CommandBuffer> metal4_generate_mip_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_generate_mip_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> metal4_generate_mip_encoder =
+            [metal4_generate_mip_command_buffer computeCommandEncoder];
+        [metal4_generate_mip_encoder generateMipmapsForTexture:metal4_generate_mip_texture];
+        [metal4_generate_mip_encoder endEncoding];
+        [metal4_generate_mip_command_buffer endCommandBuffer];
+        uint8_t metal4_deferred_generated_mip_level_one[sizeof(mip_level_one)];
+        [metal4_generate_mip_texture getBytes:metal4_deferred_generated_mip_level_one
+                                  bytesPerRow:2 * 4
+                                   fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                  mipmapLevel:1];
+        id<MTL4CommandBuffer> metal4_generate_mip_command_buffers[] = {metal4_generate_mip_command_buffer};
+        [metal4_queue commit:metal4_generate_mip_command_buffers count:1];
+        uint8_t metal4_generated_mip_level_one[sizeof(mip_level_one)];
+        [metal4_generate_mip_texture getBytes:metal4_generated_mip_level_one
+                                  bytesPerRow:2 * 4
+                                   fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                  mipmapLevel:1];
+        if (metal4_generate_mip_texture == nil || metal4_generate_mip_command_buffer == nil ||
+            metal4_generate_mip_encoder == nil ||
+            memcmp(metal4_deferred_generated_mip_level_one, (const uint8_t[sizeof(mip_level_one)]){0}, sizeof(mip_level_one)) != 0 ||
+            memcmp(metal4_generated_mip_level_one, native_generated_mip_level_one, sizeof(mip_level_one)) != 0) {
+            fail_with_error("Metal 4 CPU mipmap generation failed", metal4_error);
+            return 73;
+        }
+
         const uint32_t metal4_indirect_threads[] = {width, height, 1, 8, 8, 1};
         id<MTLBuffer> metal4_indirect_threads_buffer =
             [adapter_device newBufferWithBytes:metal4_indirect_threads

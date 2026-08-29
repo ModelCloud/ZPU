@@ -913,6 +913,12 @@ pub const ComputeEncoder = struct {
         _ = try self.command_buffer.append(.{ .copy_texture_to_texture = .{ .source = source, .source_region = source_region, .destination = destination, .destination_region = destination_region } });
     }
 
+    pub fn generateMipmap(self: *ComputeEncoder, source: *Texture, destination: *Texture) Error!void {
+        if (!self.open() or !validTexture(source) or !validTexture(destination)) return error.InvalidArgument;
+        if (source.device != destination.device or source.format != destination.format) return error.InvalidArgument;
+        _ = try self.command_buffer.append(.{ .generate_mipmap = .{ .source = source, .destination = destination } });
+    }
+
     pub fn fillBuffer(self: *ComputeEncoder, buffer: *Buffer, offset: usize, length: usize, value: u8) Error!void {
         if (!self.open() or !validBuffer(buffer) or !rangeValid(buffer.bytes.len, offset, length)) return error.InvalidArgument;
         _ = try self.command_buffer.append(.{ .fill_buffer = .{ .buffer = buffer, .offset = offset, .length = length, .value = value } });
@@ -2310,6 +2316,11 @@ pub export fn zpu_metal_compute_encoder_copy_texture_to_buffer(encoder: ?*Comput
 
 pub export fn zpu_metal_compute_encoder_copy_texture_to_texture(encoder: ?*ComputeEncoder, source: ?*Texture, source_region: abi.Region, destination: ?*Texture, destination_region: abi.Region) callconv(.c) c_int {
     (encoder orelse return -1).copyTextureToTexture(source orelse return -1, source_region, destination orelse return -1, destination_region) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_compute_encoder_generate_mipmap(encoder: ?*ComputeEncoder, source: ?*Texture, destination: ?*Texture) callconv(.c) c_int {
+    (encoder orelse return -1).generateMipmap(source orelse return -1, destination orelse return -1) catch |err| return errorCode(err);
     return 0;
 }
 
