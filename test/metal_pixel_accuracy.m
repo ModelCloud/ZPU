@@ -3080,6 +3080,20 @@ int main(void) {
                                            bytesPerRow:(NSUInteger)width * 4
                                             fromRegion:MTLRegionMake2D(0, 0, width, height)
                                            mipmapLevel:0];
+        MTLComputePipelineReflection *adapter_mtl4_compute_reflection =
+            adapter_mtl4_compiled_pipeline.reflection;
+        MTLRenderPipelineReflection *adapter_mtl4_render_reflection =
+            adapter_mtl4_compiled_render_pipeline.reflection;
+        MTLComputePipelineReflection *native_compute_reflection = nil;
+        MTLRenderPipelineReflection *native_render_reflection = nil;
+        [device newComputePipelineStateWithFunction:native_compute_function
+                                             options:MTLPipelineOptionBindingInfo
+                                          reflection:&native_compute_reflection
+                                               error:&error];
+        [device newRenderPipelineStateWithDescriptor:pipeline_descriptor
+                                              options:MTLPipelineOptionBindingInfo
+                                           reflection:&native_render_reflection
+                                                error:&error];
         if (adapter_mtl4_serializer == nil ||
             ![adapter_mtl4_serializer conformsToProtocol:@protocol(MTL4PipelineDataSetSerializer)] ||
             adapter_mtl4_pipeline_script.length == 0 || !adapter_mtl4_archive_flushed ||
@@ -3103,6 +3117,19 @@ int main(void) {
             adapter_mtl4_compiler_command_buffer.status != MTLCommandBufferStatusCompleted ||
             adapter_mtl4_compiler_render_texture == nil || adapter_mtl4_compiler_render_encoder == nil ||
             adapter_mtl4_compiler_render_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_mtl4_compute_reflection == nil ||
+            adapter_mtl4_compute_reflection.bindings.count != 1 ||
+            ![adapter_mtl4_compute_reflection.bindings[0].name isEqualToString:@"output"] ||
+            adapter_mtl4_compute_reflection.bindings[0].type != MTLBindingTypeTexture ||
+            adapter_mtl4_compute_reflection.bindings[0].access != MTLBindingAccessWriteOnly ||
+            adapter_mtl4_render_reflection == nil ||
+            adapter_mtl4_render_reflection.vertexBindings.count != 1 ||
+            ![adapter_mtl4_render_reflection.vertexBindings[0].name isEqualToString:@"vertices"] ||
+            adapter_mtl4_render_reflection.vertexBindings[0].type != MTLBindingTypeBuffer ||
+            adapter_mtl4_render_reflection.vertexBindings[0].access != MTLBindingAccessReadOnly ||
+            adapter_mtl4_render_reflection.fragmentBindings.count != 0 ||
+            (native_compute_reflection != nil && native_compute_reflection.bindings.count != 1) ||
+            (native_render_reflection != nil && native_render_reflection.vertexBindings.count != 1) ||
             memcmp(metal_pixels, adapter_mtl4_compiler_render_pixels, byte_count) != 0 ||
             memcmp(native_compute_pixels, adapter_mtl4_compiler_pixels, byte_count) != 0) {
             fail_with_error("Metal 4 CPU compiler compute path failed", adapter_mtl4_compiler_error);

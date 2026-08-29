@@ -273,6 +273,76 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @end
 #pragma clang diagnostic pop
 
+/* Reflection is limited to the fixed CPU profiles. These objects describe
+ * binding metadata only; they do not expose an MSL compiler or native Metal
+ * reflection state. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+@interface ZPUArgument : MTLArgument {
+@public
+    NSString *_name;
+    MTLArgumentType _type;
+    MTLBindingAccess _access;
+    NSUInteger _index;
+    BOOL _active;
+    NSUInteger _bufferAlignment;
+    NSUInteger _bufferDataSize;
+    MTLDataType _bufferDataType;
+    MTLTextureType _textureType;
+    MTLDataType _textureDataType;
+    BOOL _depthTexture;
+    NSUInteger _arrayLength;
+}
+- (instancetype)initWithName:(NSString *)name type:(MTLArgumentType)type
+                       access:(MTLBindingAccess)access index:(NSUInteger)index;
+- (void)setBufferDataSize:(NSUInteger)size dataType:(MTLDataType)dataType;
+- (void)setTextureType:(MTLTextureType)textureType dataType:(MTLDataType)dataType arrayLength:(NSUInteger)arrayLength;
+@end
+
+API_AVAILABLE(macos(13.0), ios(16.0))
+@interface ZPUBinding : NSObject <MTLBinding, MTLBufferBinding, MTLTextureBinding> {
+@public
+    NSString *_name;
+    MTLBindingType _type;
+    MTLBindingAccess _access;
+    NSUInteger _index;
+    NSUInteger _bufferAlignment;
+    NSUInteger _bufferDataSize;
+    MTLDataType _bufferDataType;
+    MTLTextureType _textureType;
+    MTLDataType _textureDataType;
+    BOOL _depthTexture;
+    NSUInteger _arrayLength;
+}
+- (instancetype)initWithName:(NSString *)name type:(MTLBindingType)type
+                       access:(MTLBindingAccess)access index:(NSUInteger)index;
+- (void)setBufferDataSize:(NSUInteger)size dataType:(MTLDataType)dataType;
+- (void)setTextureType:(MTLTextureType)textureType dataType:(MTLDataType)dataType arrayLength:(NSUInteger)arrayLength;
+@end
+
+API_AVAILABLE(macos(10.11), ios(8.0))
+@interface ZPUComputePipelineReflection : MTLComputePipelineReflection {
+@public
+    NSArray *_arguments;
+    NSArray *_bindings;
+}
+- (instancetype)initWithArguments:(NSArray *)arguments bindings:(NSArray *)bindings;
+@end
+
+API_AVAILABLE(macos(10.11), ios(8.0))
+@interface ZPURenderPipelineReflection : MTLRenderPipelineReflection {
+@public
+    NSArray *_vertexArguments;
+    NSArray *_fragmentArguments;
+    NSArray *_vertexBindings;
+    NSArray *_fragmentBindings;
+}
+- (instancetype)initWithVertexArguments:(NSArray *)vertexArguments
+                        fragmentArguments:(NSArray *)fragmentArguments
+                           vertexBindings:(NSArray *)vertexBindings
+                         fragmentBindings:(NSArray *)fragmentBindings;
+@end
+
 @interface ZPURenderPipelineState : NSObject <MTLRenderPipelineState> {
 @public
     ZPUDevice *_owner;
@@ -296,6 +366,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLColorWriteMask _writeMask;
     NSString *_vertexFunctionName;
     NSString *_fragmentFunctionName;
+    MTLRenderPipelineReflection *_reflection;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLRenderPipelineDescriptor *)descriptor;
 @end
@@ -627,6 +698,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSUInteger _maxTotalThreadsPerThreadgroup;
     MTLSize _requiredThreadsPerThreadgroup;
     BOOL _supportsIndirectCommandBuffers;
+    MTLComputePipelineReflection *_reflection;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner function:(id<MTLFunction>)function error:(NSError **)error;
 @end
@@ -2026,6 +2098,224 @@ static uint64_t zpu_cpu_timestamp(void) {
 @end
 #pragma clang diagnostic pop
 
+@implementation ZPUArgument
+- (instancetype)initWithName:(NSString *)name type:(MTLArgumentType)type
+                       access:(MTLBindingAccess)access index:(NSUInteger)index {
+    if ((self = [super init])) {
+        _name = [name copy];
+        _type = type;
+        _access = access;
+        _index = index;
+        _active = YES;
+        _bufferAlignment = 1;
+        _textureType = MTLTextureType2D;
+        _textureDataType = MTLDataTypeFloat;
+        _arrayLength = 1;
+    }
+    return self;
+}
+- (NSString *)name { return _name; }
+- (MTLArgumentType)type { return _type; }
+- (MTLBindingAccess)access { return _access; }
+- (NSUInteger)index { return _index; }
+- (BOOL)isActive { return _active; }
+- (NSUInteger)bufferAlignment { return _bufferAlignment; }
+- (NSUInteger)bufferDataSize { return _bufferDataSize; }
+- (MTLDataType)bufferDataType { return _bufferDataType; }
+- (MTLStructType *)bufferStructType { return nil; }
+- (MTLPointerType *)bufferPointerType API_AVAILABLE(macos(10.13), ios(11.0)) { return nil; }
+- (NSUInteger)threadgroupMemoryAlignment { return 0; }
+- (NSUInteger)threadgroupMemoryDataSize { return 0; }
+- (MTLTextureType)textureType { return _textureType; }
+- (MTLDataType)textureDataType { return _textureDataType; }
+- (BOOL)isDepthTexture API_AVAILABLE(macos(10.12), ios(10.0)) { return _depthTexture; }
+- (NSUInteger)arrayLength API_AVAILABLE(macos(10.13), ios(10.0)) { return _arrayLength; }
+- (void)setBufferDataSize:(NSUInteger)size dataType:(MTLDataType)dataType {
+    _bufferDataSize = size;
+    _bufferDataType = dataType;
+}
+- (void)setTextureType:(MTLTextureType)textureType dataType:(MTLDataType)dataType arrayLength:(NSUInteger)arrayLength {
+    _textureType = textureType;
+    _textureDataType = dataType;
+    _arrayLength = arrayLength;
+}
+@end
+
+@implementation ZPUBinding
+- (instancetype)initWithName:(NSString *)name type:(MTLBindingType)type
+                       access:(MTLBindingAccess)access index:(NSUInteger)index {
+    if ((self = [super init])) {
+        _name = [name copy];
+        _type = type;
+        _access = access;
+        _index = index;
+        _bufferAlignment = 1;
+        _textureType = MTLTextureType2D;
+        _textureDataType = MTLDataTypeFloat;
+        _arrayLength = 1;
+    }
+    return self;
+}
+- (NSString *)name { return _name; }
+- (MTLBindingType)type { return _type; }
+- (MTLBindingAccess)access { return _access; }
+- (NSUInteger)index { return _index; }
+- (BOOL)isUsed { return YES; }
+- (BOOL)isArgument { return YES; }
+- (NSUInteger)bufferAlignment { return _bufferAlignment; }
+- (NSUInteger)bufferDataSize { return _bufferDataSize; }
+- (MTLDataType)bufferDataType { return _bufferDataType; }
+- (MTLStructType *)bufferStructType { return nil; }
+- (MTLPointerType *)bufferPointerType { return nil; }
+- (MTLTextureType)textureType { return _textureType; }
+- (MTLDataType)textureDataType { return _textureDataType; }
+- (BOOL)isDepthTexture { return _depthTexture; }
+- (NSUInteger)arrayLength { return _arrayLength; }
+- (void)setBufferDataSize:(NSUInteger)size dataType:(MTLDataType)dataType {
+    _bufferDataSize = size;
+    _bufferDataType = dataType;
+}
+- (void)setTextureType:(MTLTextureType)textureType dataType:(MTLDataType)dataType arrayLength:(NSUInteger)arrayLength {
+    _textureType = textureType;
+    _textureDataType = dataType;
+    _arrayLength = arrayLength;
+}
+@end
+
+@implementation ZPUComputePipelineReflection
+- (instancetype)initWithArguments:(NSArray *)arguments bindings:(NSArray *)bindings {
+    if ((self = [super init])) {
+        _arguments = [arguments copy];
+        _bindings = [bindings copy];
+    }
+    return self;
+}
+- (NSArray<id<MTLBinding>> *)bindings API_AVAILABLE(macos(13.0), ios(16.0)) { return _bindings; }
+- (NSArray<MTLArgument *> *)arguments { return _arguments; }
+@end
+
+@implementation ZPURenderPipelineReflection
+- (instancetype)initWithVertexArguments:(NSArray *)vertexArguments
+                        fragmentArguments:(NSArray *)fragmentArguments
+                           vertexBindings:(NSArray *)vertexBindings
+                         fragmentBindings:(NSArray *)fragmentBindings {
+    if ((self = [super init])) {
+        _vertexArguments = [vertexArguments copy];
+        _fragmentArguments = [fragmentArguments copy];
+        _vertexBindings = [vertexBindings copy];
+        _fragmentBindings = [fragmentBindings copy];
+    }
+    return self;
+}
+- (NSArray<id<MTLBinding>> *)vertexBindings API_AVAILABLE(macos(13.0), ios(16.0)) { return _vertexBindings; }
+- (NSArray<id<MTLBinding>> *)fragmentBindings API_AVAILABLE(macos(13.0), ios(16.0)) { return _fragmentBindings; }
+- (NSArray<id<MTLBinding>> *)tileBindings API_AVAILABLE(macos(13.0), ios(16.0)) { return @[]; }
+- (NSArray<id<MTLBinding>> *)objectBindings API_AVAILABLE(macos(13.0), ios(16.0)) { return @[]; }
+- (NSArray<id<MTLBinding>> *)meshBindings API_AVAILABLE(macos(13.0), ios(16.0)) { return @[]; }
+- (NSArray<MTLArgument *> *)vertexArguments { return _vertexArguments; }
+- (NSArray<MTLArgument *> *)fragmentArguments { return _fragmentArguments; }
+- (NSArray<MTLArgument *> *)tileArguments { return @[]; }
+@end
+
+static ZPUArgument *zpu_reflection_argument(NSString *name, MTLArgumentType type,
+                                              MTLBindingAccess access, NSUInteger index) {
+    return [[ZPUArgument alloc] initWithName:name type:type access:access index:index];
+}
+
+static ZPUBinding *zpu_reflection_binding(NSString *name, MTLBindingType type,
+                                           MTLBindingAccess access, NSUInteger index) {
+    return [[ZPUBinding alloc] initWithName:name type:type access:access index:index];
+}
+
+static MTLComputePipelineReflection *zpu_compute_pipeline_reflection(zpu_metal_compute_kernel kernel) {
+    NSMutableArray *arguments = [NSMutableArray array];
+    NSMutableArray *bindings = [NSMutableArray array];
+    if (kernel == ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE) {
+        ZPUArgument *source = zpu_reflection_argument(@"source", MTLArgumentTypeBuffer,
+                                                       MTLBindingAccessReadOnly, 0);
+        [source setBufferDataSize:sizeof(uint32_t) dataType:MTLDataTypeUChar4];
+        ZPUBinding *sourceBinding = zpu_reflection_binding(@"source", MTLBindingTypeBuffer,
+                                                            MTLBindingAccessReadOnly, 0);
+        [sourceBinding setBufferDataSize:sizeof(uint32_t) dataType:MTLDataTypeUChar4];
+        [arguments addObject:source];
+        [bindings addObject:sourceBinding];
+
+        ZPUArgument *output = zpu_reflection_argument(@"output", MTLArgumentTypeTexture,
+                                                       MTLBindingAccessWriteOnly, 1);
+        [output setTextureType:MTLTextureType2D dataType:MTLDataTypeFloat arrayLength:1];
+        ZPUBinding *outputBinding = zpu_reflection_binding(@"output", MTLBindingTypeTexture,
+                                                            MTLBindingAccessWriteOnly, 1);
+        [outputBinding setTextureType:MTLTextureType2D dataType:MTLDataTypeFloat arrayLength:1];
+        [arguments addObject:output];
+        [bindings addObject:outputBinding];
+    } else if (kernel != 0) {
+        const BOOL arrayTexture = kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY;
+        const BOOL volumeTexture = kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_3D;
+        const MTLTextureType textureType = volumeTexture ? MTLTextureType3D :
+            (arrayTexture ? MTLTextureType2DArray : MTLTextureType2D);
+        ZPUArgument *output = zpu_reflection_argument(@"output", MTLArgumentTypeTexture,
+                                                       MTLBindingAccessWriteOnly, 0);
+        [output setTextureType:textureType dataType:MTLDataTypeFloat
+                   arrayLength:arrayTexture ? 0 : 1];
+        ZPUBinding *outputBinding = zpu_reflection_binding(@"output", MTLBindingTypeTexture,
+                                                            MTLBindingAccessWriteOnly, 0);
+        [outputBinding setTextureType:textureType dataType:MTLDataTypeFloat
+                           arrayLength:arrayTexture ? 0 : 1];
+        [arguments addObject:output];
+        [bindings addObject:outputBinding];
+    }
+    return (MTLComputePipelineReflection *)[[ZPUComputePipelineReflection alloc]
+        initWithArguments:arguments bindings:bindings];
+}
+
+static MTLRenderPipelineReflection *zpu_render_pipeline_reflection(NSString *vertexName,
+                                                                     NSString *fragmentName) {
+    NSMutableArray *vertexArguments = [NSMutableArray array];
+    NSMutableArray *fragmentArguments = [NSMutableArray array];
+    NSMutableArray *vertexBindings = [NSMutableArray array];
+    NSMutableArray *fragmentBindings = [NSMutableArray array];
+    ZPUArgument *vertices = zpu_reflection_argument(@"vertices", MTLArgumentTypeBuffer,
+                                                     MTLBindingAccessReadOnly, 0);
+    [vertices setBufferDataSize:sizeof(zpu_metal_vertex) dataType:MTLDataTypeStruct];
+    ZPUBinding *verticesBinding = zpu_reflection_binding(@"vertices", MTLBindingTypeBuffer,
+                                                          MTLBindingAccessReadOnly, 0);
+    [verticesBinding setBufferDataSize:sizeof(zpu_metal_vertex) dataType:MTLDataTypeStruct];
+    if (vertexName.length != 0) {
+        [vertexArguments addObject:vertices];
+        [vertexBindings addObject:verticesBinding];
+    }
+    if ([fragmentName isEqualToString:@"zpu_cpu_uniform_color_fragment"]) {
+        ZPUArgument *uniform = zpu_reflection_argument(@"uniformColor", MTLArgumentTypeBuffer,
+                                                        MTLBindingAccessReadOnly, 0);
+        [uniform setBufferDataSize:sizeof(float) * 4 dataType:MTLDataTypeFloat4];
+        ZPUBinding *uniformBinding = zpu_reflection_binding(@"uniformColor", MTLBindingTypeBuffer,
+                                                             MTLBindingAccessReadOnly, 0);
+        [uniformBinding setBufferDataSize:sizeof(float) * 4 dataType:MTLDataTypeFloat4];
+        [fragmentArguments addObject:uniform];
+        [fragmentBindings addObject:uniformBinding];
+    } else if ([fragmentName isEqualToString:@"zpu_test_sample_fragment"]) {
+        ZPUArgument *source = zpu_reflection_argument(@"source", MTLArgumentTypeTexture,
+                                                       MTLBindingAccessReadOnly, 0);
+        [source setTextureType:MTLTextureType2D dataType:MTLDataTypeFloat arrayLength:1];
+        ZPUBinding *sourceBinding = zpu_reflection_binding(@"source", MTLBindingTypeTexture,
+                                                            MTLBindingAccessReadOnly, 0);
+        [sourceBinding setTextureType:MTLTextureType2D dataType:MTLDataTypeFloat arrayLength:1];
+        [fragmentArguments addObject:source];
+        [fragmentBindings addObject:sourceBinding];
+        ZPUArgument *sampler = zpu_reflection_argument(@"sourceSampler", MTLArgumentTypeSampler,
+                                                        MTLBindingAccessReadOnly, 0);
+        ZPUBinding *samplerBinding = zpu_reflection_binding(@"sourceSampler", MTLBindingTypeSampler,
+                                                             MTLBindingAccessReadOnly, 0);
+        [fragmentArguments addObject:sampler];
+        [fragmentBindings addObject:samplerBinding];
+    }
+    return (MTLRenderPipelineReflection *)[[ZPURenderPipelineReflection alloc]
+        initWithVertexArguments:vertexArguments fragmentArguments:fragmentArguments
+                 vertexBindings:vertexBindings fragmentBindings:fragmentBindings];
+}
+
+#pragma clang diagnostic pop
+
 @implementation ZPURenderPipelineState
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLRenderPipelineDescriptor *)descriptor {
     if ((self = [super init])) {
@@ -2103,7 +2393,7 @@ static uint64_t zpu_cpu_timestamp(void) {
     return (id<MTLIntersectionFunctionTable>)[[ZPUIntersectionFunctionTable alloc]
         initWithOwner:_owner functionCount:descriptor.functionCount];
 }
-- (MTLRenderPipelineReflection *)reflection API_AVAILABLE(macos(26.0), ios(26.0)) { return nil; }
+- (MTLRenderPipelineReflection *)reflection API_AVAILABLE(macos(26.0), ios(26.0)) { return _reflection; }
 - (id<MTLFunctionHandle>)functionHandleWithName:(NSString *)name stage:(MTLRenderStages)stage API_AVAILABLE(macos(26.0), ios(26.0)) {
     NSString *expectedName = stage == MTLRenderStageVertex ? _vertexFunctionName :
         (stage == MTLRenderStageFragment ? _fragmentFunctionName : nil);
@@ -3321,7 +3611,12 @@ static id<MTLRenderPipelineState> zpu_mtl4_render_pipeline_for_descriptor(
         destination.alphaBlendOperation = source.alphaBlendOperation;
         destination.writeMask = source.writeMask;
     }
-    return [owner newRenderPipelineStateWithDescriptor:legacy error:error];
+    id<MTLRenderPipelineState> pipeline = [owner newRenderPipelineStateWithDescriptor:legacy error:error];
+    if (pipeline != nil && [pipeline isKindOfClass:[ZPURenderPipelineState class]]) {
+        ((ZPURenderPipelineState *)pipeline)->_reflection =
+            zpu_render_pipeline_reflection(vertex.name, fragment.name);
+    }
+    return pipeline;
 }
 
 static BOOL zpu_mtl4_apply_compute_descriptor(
@@ -3402,6 +3697,10 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
         initWithOwner:_owner function:function error:error];
     if (pipeline != nil && !zpu_mtl4_apply_compute_descriptor(
             (ZPUComputePipelineState *)pipeline, descriptor, error)) return nil;
+    if (pipeline != nil) {
+        ((ZPUComputePipelineState *)pipeline)->_reflection =
+            zpu_compute_pipeline_reflection(((ZPUComputePipelineState *)pipeline)->_kernel);
+    }
     if (pipeline != nil && [_pipelineDataSetSerializer respondsToSelector:@selector(recordFunctionName:)]) {
         [(ZPUMTL4PipelineDataSetSerializer *)_pipelineDataSetSerializer recordFunctionName:function.name];
     }
@@ -3609,6 +3908,10 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
         initWithOwner:_owner function:function error:error];
     if (pipeline != nil && !zpu_mtl4_apply_compute_descriptor(
             (ZPUComputePipelineState *)pipeline, descriptor, error)) return nil;
+    if (pipeline != nil) {
+        ((ZPUComputePipelineState *)pipeline)->_reflection =
+            zpu_compute_pipeline_reflection(((ZPUComputePipelineState *)pipeline)->_kernel);
+    }
     return pipeline;
 }
 - (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTL4ComputePipelineDescriptor *)descriptor
@@ -5098,7 +5401,7 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
 - (MTLResourceID)gpuResourceID API_AVAILABLE(macos(13.0), ios(16.0)) { return (MTLResourceID){0}; }
 - (MTLShaderValidation)shaderValidation API_AVAILABLE(macos(15.0), ios(18.0)) { return (MTLShaderValidation)0; }
 - (MTLSize)requiredThreadsPerThreadgroup API_AVAILABLE(macos(26.0), ios(26.0)) { return _requiredThreadsPerThreadgroup; }
-- (MTLComputePipelineReflection *)reflection API_AVAILABLE(macos(26.0), ios(26.0)) { return nil; }
+- (MTLComputePipelineReflection *)reflection API_AVAILABLE(macos(26.0), ios(26.0)) { return _reflection; }
 - (id<MTLFunctionHandle>)functionHandleWithName:(NSString *)name API_AVAILABLE(macos(26.0), ios(26.0)) {
     NSString *kernelName = zpu_compute_kernel_name(_kernel);
     if (kernelName == nil || ![kernelName isEqualToString:name]) return nil;

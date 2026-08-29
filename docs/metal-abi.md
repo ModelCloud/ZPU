@@ -199,6 +199,10 @@ triangle path:
   owner, stage, and name, including Metal 4 binary-function metadata; foreign
   functions and unsupported stages fail closed. The Metal 4 device-level
   function-handle selector also returns handles for ZPU-owned CPU functions.
+- compiler/archive-created fixed CPU pipelines expose deterministic modern
+  binding reflection (and compatibility argument reflection) for their known
+  buffer, texture, and sampler interfaces; ordinary device-created pipelines
+  retain Metal's default `nil` reflection behavior
 - CPU indirect compute commands for those registered kernels; the command
   buffer inherits the ZPU encoder's texture bindings and records pipeline,
   buffer, and dispatch state for deferred execution
