@@ -3352,6 +3352,16 @@ int main(void) {
         [foreign_render_command_buffer commit];
         [foreign_render_command_buffer waitUntilCompleted];
 
+        id<MTLBuffer> foreign_blit_destination =
+            [adapter_device newBufferWithLength:sizeof(vertices) options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> foreign_blit_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> foreign_blit_encoder = [foreign_blit_command_buffer blitCommandEncoder];
+        [foreign_blit_encoder copyFromBuffer:foreign_adapter_buffer sourceOffset:0
+                                     toBuffer:foreign_blit_destination destinationOffset:0 size:sizeof(vertices)];
+        [foreign_blit_encoder endEncoding];
+        [foreign_blit_command_buffer commit];
+        [foreign_blit_command_buffer waitUntilCompleted];
+
         id<MTLSharedEvent> foreign_adapter_event = [foreign_adapter_device newSharedEvent];
         id<MTLCommandBuffer> foreign_event_command_buffer = [adapter_queue commandBuffer];
         [foreign_event_command_buffer encodeSignalEvent:foreign_adapter_event value:1];
@@ -3362,6 +3372,8 @@ int main(void) {
             foreign_compute_command_buffer.status != MTLCommandBufferStatusError ||
             foreign_render_texture == nil || foreign_render_encoder == nil ||
             foreign_render_command_buffer.status != MTLCommandBufferStatusError ||
+            foreign_blit_destination == nil || foreign_blit_encoder == nil ||
+            foreign_blit_command_buffer.status != MTLCommandBufferStatusError ||
             foreign_adapter_event == nil ||
             foreign_event_command_buffer.status != MTLCommandBufferStatusError) {
             fprintf(stderr, "metal-pixel: cross-device resource ownership did not fail closed\n");
