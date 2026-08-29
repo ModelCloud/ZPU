@@ -5684,6 +5684,12 @@ int main(void) {
         id<MTL4RenderCommandEncoder> adapter_metal4_origin_encoder =
             [adapter_metal4_origin_command_buffer renderCommandEncoderWithDescriptor:adapter_metal4_origin_pass];
         [adapter_metal4_origin_encoder setRenderPipelineState:adapter_pipeline];
+        MTLLogicalToPhysicalColorAttachmentMap *identity_color_map =
+            [MTLLogicalToPhysicalColorAttachmentMap new];
+        for (NSUInteger color_index = 0; color_index < 8; ++color_index) {
+            [identity_color_map setPhysicalIndex:color_index forLogicalIndex:color_index];
+        }
+        [adapter_metal4_origin_encoder setColorAttachmentMap:identity_color_map];
         [adapter_metal4_origin_encoder setViewport:origin_viewport];
         [adapter_metal4_origin_encoder setScissorRect:origin_scissor];
         [adapter_metal4_origin_encoder setArgumentTable:adapter_metal4_origin_table
@@ -5737,6 +5743,31 @@ int main(void) {
             invalid_grid_command_buffer.status != MTLCommandBufferStatusError) {
             fprintf(stderr, "metal-pixel: CPU Metal accepted unrepresentable multi-viewport grid state\n");
             return 70;
+        }
+
+        /* A color attachment remap changes the logical-to-physical pixel
+         * destination. The CPU rasterizer has one fixed attachment mapping,
+         * so identity is accepted and every non-identity map must fail
+         * closed instead of silently producing pixels in another attachment.
+         */
+        MTLLogicalToPhysicalColorAttachmentMap *invalid_color_map =
+            [MTLLogicalToPhysicalColorAttachmentMap new];
+        [invalid_color_map setPhysicalIndex:1 forLogicalIndex:0];
+        MTLRenderPassDescriptor *invalid_color_map_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        invalid_color_map_pass.colorAttachments[0].texture = adapter_metal4_origin_texture;
+        invalid_color_map_pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        invalid_color_map_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLCommandBuffer> invalid_color_map_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> invalid_color_map_encoder =
+            [invalid_color_map_command_buffer renderCommandEncoderWithDescriptor:invalid_color_map_pass];
+        [invalid_color_map_encoder setColorAttachmentMap:invalid_color_map];
+        [invalid_color_map_encoder endEncoding];
+        [invalid_color_map_command_buffer commit];
+        [invalid_color_map_command_buffer waitUntilCompleted];
+        if (invalid_color_map_command_buffer == nil || invalid_color_map_encoder == nil ||
+            invalid_color_map_command_buffer.status != MTLCommandBufferStatusError) {
+            fprintf(stderr, "metal-pixel: CPU Metal accepted a non-identity color attachment map\n");
+            return 71;
         }
 
         /* Metal 4 splits argument-table bindings by stage. Bind the vertex

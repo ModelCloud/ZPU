@@ -1389,6 +1389,15 @@ static BOOL zpu_texture_belongs_to_device(ZPUDevice *owner, ZPUTexture *texture)
     return [texture isKindOfClass:[ZPUTexture class]] && texture->_owner == owner;
 }
 
+static BOOL zpu_color_attachment_map_is_identity(MTLLogicalToPhysicalColorAttachmentMap *mapping)
+    API_AVAILABLE(macos(26.0), ios(26.0)) {
+    if (mapping == nil) return YES;
+    for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
+        if ([mapping getPhysicalIndexForLogicalIndex:index] != index) return NO;
+    }
+    return YES;
+}
+
 /* Sparse allocation is deliberately not advertised by the CPU adapter, but
  * Metal's pixel/tile conversion helpers are pure integer geometry. Keep them
  * useful for callers that use the helpers to prepare a mapping for another
@@ -5867,7 +5876,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 - (void)pushDebugGroup:(NSString *)string { (void)string; }
 - (void)popDebugGroup {}
 - (void)setColorAttachmentMap:(MTLLogicalToPhysicalColorAttachmentMap *)mapping {
-    if (mapping != nil) [_owner markError];
+    if (!zpu_color_attachment_map_is_identity(mapping)) [_owner markError];
 }
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)pipelineState {
     [(id)_legacy setRenderPipelineState:pipelineState];
@@ -8783,7 +8792,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     [_owner retainResource:sample];
 }
 - (void)setColorAttachmentMap:(MTLLogicalToPhysicalColorAttachmentMap *)mapping API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)mapping;
+    if (!zpu_color_attachment_map_is_identity(mapping)) [_owner markError];
 }
 - (void)setColorStoreAction:(MTLStoreAction)storeAction atIndex:(NSUInteger)colorAttachmentIndex {
     (void)storeAction;
