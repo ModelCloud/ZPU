@@ -127,6 +127,10 @@ triangle path:
   pixel grid and clip-space +Y direction as the legacy adapter
 - indirect threadgroup dispatch arguments are read from ZPU buffers at commit
   time, preserving Metal's deferred argument-buffer semantics
+- direct and indexed render draws read ZPU vertex and index buffer bindings at
+  commit time; inline `setVertexBytes` data remains an encode-time snapshot,
+  and filled-geometry oracles avoid conflating point raster coordinates with
+  resource visibility
 - Metal 4 indirect thread dispatch arguments (grid and threadgroup dimensions)
   are also read from the ZPU buffer at commit time, rather than when the
   encoder records the call

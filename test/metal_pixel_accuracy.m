@@ -1250,6 +1250,85 @@ int main(void) {
             return 120;
         }
 
+        const zpu_metal_vertex indexed_commit_vertices[] = {
+            {{x0, y0, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{x1, y0, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{x1, y1, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{x0, y1, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{x0, y0, 0.5f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+            {{x1, y0, 0.5f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+            {{x1, y1, 0.5f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+            {{x0, y1, 0.5f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+        };
+        const uint16_t indexed_initial_indices[] = {0, 1, 2, 0, 2, 3};
+        const uint16_t indexed_updated_indices[] = {4, 5, 6, 4, 6, 7};
+        id<MTLBuffer> native_indexed_commit_vertices =
+            [device newBufferWithBytes:indexed_commit_vertices length:sizeof(indexed_commit_vertices)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_indexed_commit_vertices =
+            [adapter_device newBufferWithBytes:indexed_commit_vertices length:sizeof(indexed_commit_vertices)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_indexed_commit_indices =
+            [device newBufferWithBytes:indexed_initial_indices length:sizeof(indexed_initial_indices)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_indexed_commit_indices =
+            [adapter_device newBufferWithBytes:indexed_initial_indices length:sizeof(indexed_initial_indices)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLTexture> native_indexed_commit_output = [device newTextureWithDescriptor:texture_descriptor];
+        id<MTLTexture> adapter_indexed_commit_output = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTLRenderPassDescriptor *native_indexed_commit_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_indexed_commit_pass.colorAttachments[0].texture = native_indexed_commit_output;
+        native_indexed_commit_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_indexed_commit_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_indexed_commit_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> native_indexed_commit_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_indexed_commit_encoder =
+            [native_indexed_commit_command_buffer renderCommandEncoderWithDescriptor:native_indexed_commit_pass];
+        [native_indexed_commit_encoder setRenderPipelineState:pipeline];
+        [native_indexed_commit_encoder setVertexBuffer:native_indexed_commit_vertices offset:0 atIndex:0];
+        [native_indexed_commit_encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:6 indexType:MTLIndexTypeUInt16
+                                                indexBuffer:native_indexed_commit_indices indexBufferOffset:0];
+        [native_indexed_commit_encoder endEncoding];
+        MTLRenderPassDescriptor *adapter_indexed_commit_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_indexed_commit_pass.colorAttachments[0].texture = adapter_indexed_commit_output;
+        adapter_indexed_commit_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_indexed_commit_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_indexed_commit_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> adapter_indexed_commit_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_indexed_commit_encoder =
+            [adapter_indexed_commit_command_buffer renderCommandEncoderWithDescriptor:adapter_indexed_commit_pass];
+        [adapter_indexed_commit_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_indexed_commit_encoder setVertexBuffer:adapter_indexed_commit_vertices offset:0 atIndex:0];
+        [adapter_indexed_commit_encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:6 indexType:MTLIndexTypeUInt16
+                                                 indexBuffer:adapter_indexed_commit_indices indexBufferOffset:0];
+        [adapter_indexed_commit_encoder endEncoding];
+        memcpy(native_indexed_commit_indices.contents, indexed_updated_indices, sizeof(indexed_updated_indices));
+        memcpy(adapter_indexed_commit_indices.contents, indexed_updated_indices, sizeof(indexed_updated_indices));
+        [native_indexed_commit_command_buffer commit];
+        [native_indexed_commit_command_buffer waitUntilCompleted];
+        [adapter_indexed_commit_command_buffer commit];
+        [adapter_indexed_commit_command_buffer waitUntilCompleted];
+        uint8_t native_indexed_commit_bytes[byte_count];
+        uint8_t adapter_indexed_commit_bytes[byte_count];
+        [native_indexed_commit_output getBytes:native_indexed_commit_bytes bytesPerRow:(NSUInteger)width * 4
+                                   fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_indexed_commit_output getBytes:adapter_indexed_commit_bytes bytesPerRow:(NSUInteger)width * 4
+                                     fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (native_indexed_commit_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_indexed_commit_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_indexed_commit_bytes, adapter_indexed_commit_bytes, byte_count) != 0 ||
+            memcmp(native_indexed_commit_bytes + commit_pixel_offset, (const uint8_t[]){0, 0, 255, 255}, 4) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < byte_count && native_indexed_commit_bytes[mismatch] == adapter_indexed_commit_bytes[mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: deferred index buffer mismatch (native=%lu adapter=%lu mismatch=%zu nativeByte=%u adapterByte=%u)\n",
+                    (unsigned long)native_indexed_commit_command_buffer.status,
+                    (unsigned long)adapter_indexed_commit_command_buffer.status,
+                    mismatch,
+                    mismatch < byte_count ? native_indexed_commit_bytes[mismatch] : 0,
+                    mismatch < byte_count ? adapter_indexed_commit_bytes[mismatch] : 0);
+            return 121;
+        }
+
         MTLRenderPipelineDescriptor *native_no_raster_descriptor = [pipeline_descriptor copy];
         native_no_raster_descriptor.rasterizationEnabled = NO;
         native_no_raster_descriptor.vertexFunction = no_raster_vertex_function;
@@ -5676,7 +5755,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, uniform fragment bytes/buffers, visibility results, legacy/Metal 4 counters, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, uniform fragment bytes/buffers, deferred vertex/index buffers, visibility results, legacy/Metal 4 counters, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }

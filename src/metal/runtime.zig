@@ -156,6 +156,11 @@ const DrawCommand = struct {
     options: raster3d.DrawOptions,
     vertex_buffer: ?*Buffer = null,
     vertex_buffer_offset: usize = 0,
+    vertex_source_count: usize = 0,
+    index_buffer: ?*Buffer = null,
+    index_buffer_offset: usize = 0,
+    index_type: abi.IndexType = .uint16,
+    base_vertex: i64 = 0,
     fragment_uniform_enabled: bool = false,
     fragment_uniform_buffer: ?*Buffer = null,
     fragment_uniform_buffer_offset: usize = 0,
@@ -314,11 +319,39 @@ pub const CommandBuffer = struct {
         return start;
     }
 
-    fn resolveDrawVertices(self: *CommandBuffer, draw: DrawCommand) Error![]const abi.Vertex {
+    fn resolveDrawVertices(self: *CommandBuffer, draw: DrawCommand, owned: *?[]abi.Vertex) Error![]const abi.Vertex {
         const source = if (draw.vertex_buffer) |buffer|
             try bufferVertices(buffer, draw.vertex_buffer_offset)
+        else if (draw.index_buffer != null) blk: {
+            if (draw.vertex_start > self.vertices.items.len or
+                draw.vertex_source_count > self.vertices.items.len - draw.vertex_start)
+                return error.InvalidCommand;
+            break :blk self.vertices.items[draw.vertex_start .. draw.vertex_start + draw.vertex_source_count];
+        }
         else
             self.vertices.items;
+        if (draw.index_buffer) |index_buffer| {
+            if (!validBuffer(index_buffer) or index_buffer.device != self.queue.device) return error.InvalidResource;
+            const index_size: usize = if (draw.index_type == .uint16) 2 else 4;
+            const index_bytes = std.math.mul(usize, draw.vertex_count, index_size) catch return error.InvalidArgument;
+            if (!rangeValid(index_buffer.bytes.len, draw.index_buffer_offset, index_bytes)) return error.InvalidArgument;
+            const result = allocator.alloc(abi.Vertex, draw.vertex_count) catch return error.OutOfMemory;
+            owned.* = result;
+            for (0..draw.vertex_count) |index| {
+                const offset = draw.index_buffer_offset + index * index_size;
+                const value: usize = if (draw.index_type == .uint16)
+                    @as(usize, index_buffer.bytes[offset]) | (@as(usize, index_buffer.bytes[offset + 1]) << 8)
+                else
+                    @as(usize, index_buffer.bytes[offset]) |
+                        (@as(usize, index_buffer.bytes[offset + 1]) << 8) |
+                        (@as(usize, index_buffer.bytes[offset + 2]) << 16) |
+                        (@as(usize, index_buffer.bytes[offset + 3]) << 24);
+                const signed_value = @as(i128, @intCast(value)) + @as(i128, draw.base_vertex);
+                if (signed_value < 0 or signed_value >= @as(i128, @intCast(source.len))) return error.InvalidArgument;
+                result[index] = source[@intCast(signed_value)];
+            }
+            return result;
+        }
         if (draw.vertex_start > source.len or draw.vertex_count > source.len - draw.vertex_start) return error.InvalidCommand;
         return source[draw.vertex_start .. draw.vertex_start + draw.vertex_count];
     }
@@ -373,7 +406,9 @@ pub const CommandBuffer = struct {
             .draw => |draw| {
                 const target_handle = active_target orelse return self.fail(error.InvalidCommand);
                 if (!validTexture(target_handle)) return self.fail(error.InvalidResource);
-                const draw_vertices = self.resolveDrawVertices(draw) catch |err| return self.fail(err);
+                var owned_vertices: ?[]abi.Vertex = null;
+                const draw_vertices = self.resolveDrawVertices(draw, &owned_vertices) catch |err| return self.fail(err);
+                defer if (owned_vertices) |vertices| allocator.free(vertices);
                 var draw_options = draw.options;
                 if (draw.fragment_uniform_enabled) {
                     if (draw.fragment_uniform_buffer) |buffer| {
@@ -1089,28 +1124,22 @@ pub const RenderEncoder = struct {
         const index_size: usize = if (index_type == .uint16) 2 else 4;
         const index_bytes = std.math.mul(usize, index_count, index_size) catch return error.InvalidArgument;
         if (!rangeValid(index_buffer.bytes.len, index_buffer_offset, index_bytes)) return error.InvalidArgument;
-        const raw = index_buffer.bytes[index_buffer_offset .. index_buffer_offset + index_bytes];
+        const bound_buffer = self.vertex_buffer;
+        const vertex_start = if (bound_buffer == null) try self.command_buffer.appendVertices(source) else 0;
         var instance: usize = 0;
         while (instance < instance_count) : (instance += 1) {
-            const start = self.command_buffer.vertices.items.len;
-            for (0..index_count) |index| {
-                const offset = index * index_size;
-                const value: usize = if (index_type == .uint16)
-                    @as(usize, raw[offset]) | (@as(usize, raw[offset + 1]) << 8)
-                else
-                    @as(usize, raw[offset]) |
-                        (@as(usize, raw[offset + 1]) << 8) |
-                        (@as(usize, raw[offset + 2]) << 16) |
-                        (@as(usize, raw[offset + 3]) << 24);
-                const signed_value = @as(i128, @intCast(value)) + @as(i128, base_vertex);
-                if (signed_value < 0 or signed_value >= @as(i128, @intCast(source.len))) return error.InvalidArgument;
-                self.command_buffer.vertices.append(allocator, source[@intCast(signed_value)]) catch return error.OutOfMemory;
-            }
             _ = try self.command_buffer.append(.{ .draw = .{
-                .vertex_start = start,
+                .vertex_start = vertex_start,
                 .vertex_count = index_count,
                 .primitive = primitive,
                 .options = self.options(),
+                .vertex_buffer = bound_buffer,
+                .vertex_buffer_offset = self.vertex_offset,
+                .vertex_source_count = if (bound_buffer == null) source.len else 0,
+                .index_buffer = index_buffer,
+                .index_buffer_offset = index_buffer_offset,
+                .index_type = index_type,
+                .base_vertex = base_vertex,
                 .fragment_uniform_enabled = self.fragment_uniform_enabled,
                 .fragment_uniform_buffer = self.fragment_uniform_buffer,
                 .fragment_uniform_buffer_offset = self.fragment_uniform_buffer_offset,
@@ -2860,6 +2889,45 @@ test "CPU vertex buffer bindings read at commit" {
     try encoder.endEncoding();
     destroyRenderEncoder(encoder);
     try bufferWrite(vertex_buffer, 0, @ptrCast(&updated), @sizeOf(@TypeOf(updated)));
+    try command_buffer.commit();
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, texture.bytes[40..44]);
+}
+
+test "CPU indexed draws read the index buffer at commit" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const texture = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(texture);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -0.5, -0.5, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 0.5, -0.5, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 0.5, 0.5, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -0.5, -0.5, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 0.5, 0.5, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -0.5, 0.5, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -0.5, -0.5, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .{ .position = .{ 0.5, -0.5, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .{ .position = .{ 0.5, 0.5, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .{ .position = .{ -0.5, -0.5, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .{ .position = .{ 0.5, 0.5, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .{ .position = .{ -0.5, 0.5, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+    };
+    const initial_indices = [_]u16{ 0, 1, 2, 0, 2, 3 };
+    const updated_indices = [_]u16{ 6, 7, 8, 6, 8, 9 };
+    const vertex_buffer = try createBuffer(device, @sizeOf(@TypeOf(vertices)), @ptrCast(&vertices));
+    defer destroyBuffer(vertex_buffer);
+    const index_buffer = try createBuffer(device, @sizeOf(@TypeOf(initial_indices)), @ptrCast(&initial_indices));
+    defer destroyBuffer(index_buffer);
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, texture, .{ .color = .{ .load_action = .clear, .store_action = .store } });
+    try encoder.setVertexBuffer(vertex_buffer, 0, 0);
+    try encoder.drawIndexedPrimitives(.triangle, initial_indices.len, .uint16, index_buffer, 0, 1);
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try bufferWrite(index_buffer, 0, @ptrCast(&updated_indices), @sizeOf(@TypeOf(updated_indices)));
     try command_buffer.commit();
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, texture.bytes[40..44]);
 }
