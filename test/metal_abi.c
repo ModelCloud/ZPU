@@ -3,7 +3,12 @@
 #include <stdint.h>
 #include "zpu/metal.h"
 
-_Static_assert(ZPU_METAL_ABI_VERSION == 19u, "Metal ABI version drift");
+_Static_assert(ZPU_METAL_ABI_VERSION == 20u, "Metal ABI version drift");
+_Static_assert(ZPU_METAL_DEPTH16_UNORM == 250, "Depth16Unorm value drift");
+_Static_assert(ZPU_METAL_DEPTH24_UNORM_STENCIL8 == 255, "Depth24Unorm_Stencil8 value drift");
+_Static_assert(ZPU_METAL_DEPTH32_FLOAT_STENCIL8 == 260, "Depth32Float_Stencil8 value drift");
+_Static_assert(ZPU_METAL_X32_STENCIL8 == 261, "X32_Stencil8 value drift");
+_Static_assert(ZPU_METAL_X24_STENCIL8 == 262, "X24_Stencil8 value drift");
 _Static_assert(sizeof(zpu_metal_color) == 16, "color layout drift");
 _Static_assert(sizeof(zpu_metal_vertex) == 32, "vertex layout drift");
 _Static_assert(sizeof(zpu_metal_viewport) == 24, "viewport layout drift");

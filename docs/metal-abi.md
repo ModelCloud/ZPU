@@ -28,6 +28,8 @@ triangle path:
   R32Float/RGBA16Unorm/RGBA16Snorm/RGBA16Float/RGBA16Uint/RGBA16Sint/
   RGBA32Uint/RGBA32Sint/
   RG32Float/RGBA32Float buffers and
+  Depth16Unorm/Depth32Float/Stencil8/Depth24Unorm_Stencil8/
+  Depth32Float_Stencil8/X32_Stencil8/X24_Stencil8 raw CPU resources and
   1D/2D/3D textures with
   checked region read/write
 - CPU-owned A8, R8Unorm/R8Unorm_sRGB/R8Snorm, R16Unorm/R16Snorm, R16Float,
@@ -36,7 +38,11 @@ triangle path:
   R32Float, RGBA16Unorm/RGBA16Snorm, RGBA16Float, RG32Float, RGBA32Float,
   and packed B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10/RGB9E5/BGR10A2 textures preserve
   native texel widths for raw transfers, views, buffer-backed storage, and heap
-  allocation accounting; render paths accept A8Unorm, R8Unorm/R8Unorm_sRGB, R8Snorm,
+  allocation accounting. Depth16Unorm and the combined depth/stencil formats
+  are transfer-only raw resources: their bytes, views, buffer-backed storage,
+  and heap accounting are CPU-owned, but they are not accepted as render
+  attachments until format-specific depth/stencil pack and compare semantics
+  are implemented; render paths accept A8Unorm, R8Unorm/R8Unorm_sRGB, R8Snorm,
   R16Unorm/R16Snorm, RG8Unorm/RG8Unorm_sRGB/RG8Snorm,
   RG16Unorm/RG16Snorm, R16Float, RG16Float, RGBA8Unorm/RGBA8Unorm_sRGB,
   RGBA8Snorm, BGRA8Unorm/BGRA8Unorm_sRGB, RGBA16Unorm/RGBA16Snorm,
@@ -373,7 +379,8 @@ R8Uint/R8Sint/R16Uint/R16Sint/RG8Uint/RG8Sint/RG16Uint/RG16Sint/
 RG32Uint/RG32Sint/RGBA8/BGRA8/RGBA8Unorm_sRGB/BGRA8Unorm_sRGB/RGBA8Snorm/RGBA8Uint/RGBA8Sint/
 packed B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10/RGB9E5/BGR10A2/
   R32Float/RGBA16Unorm/RGBA16Snorm/RGBA16Float/RGBA16Uint/RGBA16Sint/RGBA32Uint/RGBA32Sint/RG32Float/RGBA32Float/
-depth32-float/Stencil8 buffers and textures, records
+  Depth16Unorm/Depth32Float/Stencil8/Depth24Unorm_Stencil8/Depth32Float_Stencil8/
+  X32_Stencil8/X24_Stencil8 buffers and textures, records
 render/blit work, and executes it at command-buffer commit. Its render state
 uses a fixed `zpu_metal_vertex` ABI; it does not parse MSL or execute arbitrary
 shader functions. The optional Apple adapter supplies the supported

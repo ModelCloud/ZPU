@@ -17,7 +17,7 @@
     "reason": "SDK inventory alone cannot establish semantic coverage: this portable CPU layer does not implement the complete Metal framework or MSL runtime."
   },
   "zpu_portable_abi": {
-    "version": 19,
+    "version": 20,
     "entry_points": [
       "zpu_metal_render",
       "zpu_metal_device_create",
@@ -239,6 +239,11 @@
       "rg11b10_float",
       "rgb9e5_float",
       "bgr10a2_unorm",
+      "depth16_unorm",
+      "depth24_unorm_stencil8",
+      "depth32_float_stencil8",
+      "x32_stencil8",
+      "x24_stencil8",
       "device_and_queue_lifetimes",
       "command_buffer_lifecycle",
       "render_encoder_lifecycle",

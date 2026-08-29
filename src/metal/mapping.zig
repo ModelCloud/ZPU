@@ -65,6 +65,11 @@ pub const Api = enum {
     rgba32_uint,
     rgba32_sint,
     rgba32_float,
+    depth16_unorm,
+    depth24_unorm_stencil8,
+    depth32_float_stencil8,
+    x32_stencil8,
+    x24_stencil8,
     load_dont_care,
     load_load,
     load_clear,
@@ -150,7 +155,7 @@ pub fn entry(api: Api) Entry {
         .primitive_line_strip => .{ .kind = .direct_vulkan, .vulkan_value = 2 }, // VK_PRIMITIVE_TOPOLOGY_LINE_STRIP
         .primitive_triangle => .{ .kind = .direct_vulkan, .vulkan_value = 3 }, // VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
         .primitive_triangle_strip => .{ .kind = .direct_vulkan, .vulkan_value = 5 }, // VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
-        .device, .command_queue, .command_buffer, .render_command_encoder, .compute_command_encoder, .blit_command_encoder, .parallel_render_command_encoder, .render_pass_descriptor, .depth_attachment => .{ .kind = .native_metal },
+        .device, .command_queue, .command_buffer, .render_command_encoder, .compute_command_encoder, .blit_command_encoder, .parallel_render_command_encoder, .render_pass_descriptor, .depth_attachment, .depth16_unorm, .depth24_unorm_stencil8, .depth32_float_stencil8, .x32_stencil8, .x24_stencil8 => .{ .kind = .native_metal },
     };
 }
 
@@ -188,6 +193,11 @@ test "mapping policy keeps direct values separate from native lifetimes" {
     try @import("std").testing.expectEqual(@as(?u32, 108), entry(.rgba32_sint).vulkan_value);
     try @import("std").testing.expectEqual(@as(?u32, 103), entry(.rg32_float).vulkan_value);
     try @import("std").testing.expectEqual(@as(?u32, 101), entry(.rg32_uint).vulkan_value);
+    try @import("std").testing.expectEqual(Kind.native_metal, entry(.depth16_unorm).kind);
+    try @import("std").testing.expectEqual(Kind.native_metal, entry(.depth24_unorm_stencil8).kind);
+    try @import("std").testing.expectEqual(Kind.native_metal, entry(.depth32_float_stencil8).kind);
+    try @import("std").testing.expectEqual(Kind.native_metal, entry(.x32_stencil8).kind);
+    try @import("std").testing.expectEqual(Kind.native_metal, entry(.x24_stencil8).kind);
     try @import("std").testing.expectEqual(Kind.direct_vulkan, entry(.primitive_triangle_strip).kind);
     try @import("std").testing.expectEqual(@as(?u32, 5), entry(.primitive_triangle_strip).vulkan_value);
     try @import("std").testing.expectEqual(Kind.native_metal, entry(.command_buffer).kind);

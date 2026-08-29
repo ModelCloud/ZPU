@@ -2977,9 +2977,11 @@ int main(void) {
             }
         }
 
-        /* Packed and shared-exponent formats are also represented as raw
-         * CPU-owned texels. The oracle checks the descriptor acceptance and
-         * exact byte width without claiming a CPU packed-color shader path. */
+        /* Packed, shared-exponent, and device-supported depth formats are
+         * represented as raw CPU-owned texels. The oracle checks descriptor
+         * acceptance and exact byte width. Combined depth/stencil formats
+         * remain transfer-only and are covered by the CPU storage tests;
+         * some are unavailable or non-byte-preserving on this M4 device. */
         const struct { MTLPixelFormat format; NSUInteger bytes_per_pixel; } packed_formats[] = {
             {MTLPixelFormatA8Unorm, 1},
             {MTLPixelFormatB5G6R5Unorm, 2}, {MTLPixelFormatA1BGR5Unorm, 2},
@@ -2987,6 +2989,7 @@ int main(void) {
             {MTLPixelFormatRGB10A2Unorm, 4}, {MTLPixelFormatRGB10A2Uint, 4},
             {MTLPixelFormatRG11B10Float, 4}, {MTLPixelFormatRGB9E5Float, 4},
             {MTLPixelFormatBGR10A2Unorm, 4},
+            {MTLPixelFormatDepth16Unorm, 2},
         };
         for (NSUInteger format_index = 0; format_index < sizeof(packed_formats) / sizeof(packed_formats[0]); ++format_index) {
             const NSUInteger byte_count = integer_format_width * integer_format_height * packed_formats[format_index].bytes_per_pixel;
@@ -13485,7 +13488,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for R8/R16Unorm/R16Float/RG8/RG16Unorm/RG16Float/R8/R16/RG8/RG16/R32/RG32/RGBA8/RGBA16 Uint/Sint/R8/R16/RG8/RG16/RGBA8/RGBA16 Snorm/R8/RG8/RGBA8/BGRA8 sRGB/A8/B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10/RGB9E5/BGR10A2 packed/R32Uint/RGBA8/BGRA8/R32Float/RGBA16Unorm/RGBA16Float/RG32Float/RGBA32Float core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables and border colors, mip/coordinate/reduction/anisotropic sampler modes, visibility results, acceleration-structure resources, cube/cube-array textures, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for R8/R16Unorm/R16Float/RG8/RG16Unorm/RG16Float/R8/R16/RG8/RG16/R32/RG32/RGBA8/RGBA16 Uint/Sint/RGBA32Uint/RGBA32Sint/R8/R16/RG8/RG16/RGBA8/RGBA16 Snorm/R8/RG8/RGBA8/BGRA8 sRGB/A8/B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10/RGB9E5/BGR10A2 packed/Depth16Unorm raw/R32Uint/RGBA8/BGRA8/R32Float/RGBA16Unorm/RGBA16Float/RG32Float/RGBA32Float core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables and border colors, mip/coordinate/reduction/anisotropic sampler modes, visibility results, acceleration-structure resources, cube/cube-array textures, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }

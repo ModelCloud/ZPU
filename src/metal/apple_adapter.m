@@ -1388,13 +1388,23 @@ static BOOL zpu_integer_texture_format_supported(MTLPixelFormat format) {
 
 static BOOL zpu_texture_format_supported(MTLPixelFormat format) {
     return zpu_color_texture_format_supported(format) || zpu_integer_texture_format_supported(format) ||
-        format == MTLPixelFormatDepth32Float ||
-        format == MTLPixelFormatStencil8;
+        format == MTLPixelFormatDepth16Unorm || format == MTLPixelFormatDepth32Float ||
+        format == MTLPixelFormatStencil8 ||
+#if !TARGET_OS_IPHONE || TARGET_OS_MACCATALYST
+        format == MTLPixelFormatDepth24Unorm_Stencil8 || format == MTLPixelFormatDepth32Float_Stencil8 ||
+        format == MTLPixelFormatX32_Stencil8 || format == MTLPixelFormatX24_Stencil8 ||
+#endif
+        NO;
 }
 
 static BOOL zpu_buffer_texture_format_supported(MTLPixelFormat format) {
     return zpu_color_texture_format_supported(format) || zpu_integer_texture_format_supported(format) ||
-        format == MTLPixelFormatStencil8;
+        format == MTLPixelFormatDepth16Unorm || format == MTLPixelFormatStencil8 ||
+#if !TARGET_OS_IPHONE || TARGET_OS_MACCATALYST
+        format == MTLPixelFormatDepth24Unorm_Stencil8 || format == MTLPixelFormatDepth32Float_Stencil8 ||
+        format == MTLPixelFormatX32_Stencil8 || format == MTLPixelFormatX24_Stencil8 ||
+#endif
+        NO;
 }
 
 static zpu_metal_pixel_format zpu_pixel_format(MTLPixelFormat format) {
@@ -1448,8 +1458,15 @@ static zpu_metal_pixel_format zpu_pixel_format(MTLPixelFormat format) {
     if (format == MTLPixelFormatRGBA32Sint) return ZPU_METAL_RGBA32_SINT;
     if (format == MTLPixelFormatRG32Float) return ZPU_METAL_RG32_FLOAT;
     if (format == MTLPixelFormatRGBA32Float) return ZPU_METAL_RGBA32_FLOAT;
+    if (format == MTLPixelFormatDepth16Unorm) return ZPU_METAL_DEPTH16_UNORM;
     if (format == MTLPixelFormatDepth32Float) return ZPU_METAL_DEPTH32_FLOAT;
     if (format == MTLPixelFormatStencil8) return ZPU_METAL_STENCIL8;
+#if !TARGET_OS_IPHONE || TARGET_OS_MACCATALYST
+    if (format == MTLPixelFormatDepth24Unorm_Stencil8) return ZPU_METAL_DEPTH24_UNORM_STENCIL8;
+    if (format == MTLPixelFormatDepth32Float_Stencil8) return ZPU_METAL_DEPTH32_FLOAT_STENCIL8;
+    if (format == MTLPixelFormatX32_Stencil8) return ZPU_METAL_X32_STENCIL8;
+    if (format == MTLPixelFormatX24_Stencil8) return ZPU_METAL_X24_STENCIL8;
+#endif
     return ZPU_METAL_RGBA8_UNORM;
 }
 
@@ -1484,6 +1501,11 @@ static NSUInteger zpu_texture_bytes_per_pixel(MTLPixelFormat format) {
     if (format == MTLPixelFormatRG32Float) return 8;
     if (format == MTLPixelFormatRGBA32Uint || format == MTLPixelFormatRGBA32Sint) return 16;
     if (format == MTLPixelFormatRGBA32Float) return 16;
+    if (format == MTLPixelFormatDepth16Unorm) return 2;
+#if !TARGET_OS_IPHONE || TARGET_OS_MACCATALYST
+    if (format == MTLPixelFormatDepth24Unorm_Stencil8 || format == MTLPixelFormatX24_Stencil8) return 4;
+    if (format == MTLPixelFormatDepth32Float_Stencil8 || format == MTLPixelFormatX32_Stencil8) return 8;
+#endif
     return 4;
 }
 
