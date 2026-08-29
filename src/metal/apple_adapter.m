@@ -72,6 +72,7 @@ static const MTLBindingType zpu_mtl_binding_type_tensor = (MTLBindingType)37;
 @class ZPUIndirectCommandBuffer;
 @class ZPUIndirectComputeCommand;
 @class ZPUComputeEncoder;
+@class ZPUBlitEncoder;
 @class ZPUArgumentEncoder;
 @class ZPUMTL4CounterHeap;
 @class ZPUCounter;
@@ -98,6 +99,7 @@ static const MTLBindingType zpu_mtl_binding_type_tensor = (MTLBindingType)37;
 @class ZPUMTL4MachineLearningPipelineReflection;
 @class ZPUMTL4MachineLearningPipeline;
 @class ZPUMTL4MachineLearningIdentityOperation;
+@class ZPUMTL4MachineLearningFenceOperation;
 @class ZPUIOCommandQueue;
 
 @interface ZPUBuffer : NSObject <MTLBuffer> {
@@ -977,6 +979,16 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 }
 - (instancetype)initWithSource:(ZPUTensor *)source destination:(ZPUTensor *)destination;
 - (BOOL)execute;
+@end
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+@interface ZPUMTL4MachineLearningFenceOperation : NSObject {
+@public
+    ZPUFence *_fence;
+    BOOL _update;
+}
+- (instancetype)initWithFence:(ZPUFence *)fence update:(BOOL)update;
+- (BOOL)appendToEncoder:(ZPUBlitEncoder *)encoder;
 @end
 
 static CFTimeInterval zpu_drawable_host_time(void) {
@@ -4003,6 +4015,22 @@ static BOOL zpu_tensor_copy_identity(ZPUTensor *source, ZPUTensor *destination) 
     return self;
 }
 - (BOOL)execute { return zpu_tensor_copy_identity(_source, _destination); }
+@end
+
+@implementation ZPUMTL4MachineLearningFenceOperation
+- (instancetype)initWithFence:(ZPUFence *)fence update:(BOOL)update {
+    if ((self = [super init])) {
+        _fence = fence;
+        _update = update;
+    }
+    return self;
+}
+- (BOOL)appendToEncoder:(ZPUBlitEncoder *)encoder {
+    if (encoder == nil || encoder->_zpuEncoder == NULL || _fence == nil || _fence->_zpuFence == NULL) return NO;
+    return (_update ?
+        zpu_metal_blit_encoder_update_fence(encoder->_zpuEncoder, _fence->_zpuFence) :
+        zpu_metal_blit_encoder_wait_for_fence(encoder->_zpuEncoder, _fence->_zpuFence)) == ZPU_METAL_OK;
+}
 @end
 
 typedef int (*ZPUTensorBufferCopyFunction)(void *encoder, zpu_metal_buffer *source, size_t sourceOffset,
@@ -9764,12 +9792,36 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
         [self markError];
         return NO;
     }
-    for (ZPUMTL4MachineLearningIdentityOperation *operation in _machineLearningOperations) {
-        if (![operation execute]) {
+    ZPUBlitEncoder *fenceEncoder = nil;
+    for (id operation in _machineLearningOperations) {
+        if ([operation isKindOfClass:[ZPUMTL4MachineLearningIdentityOperation class]]) {
+            if (![(ZPUMTL4MachineLearningIdentityOperation *)operation execute]) {
+                [self markError];
+                return NO;
+            }
+            continue;
+        }
+        if ([operation isKindOfClass:[ZPUMTL4MachineLearningFenceOperation class]]) {
+            if (fenceEncoder == nil) {
+                zpu_metal_blit_encoder *rawEncoder =
+                    zpu_metal_command_buffer_blit_encoder(_legacyBuffer->_zpuCommandBuffer);
+                fenceEncoder = rawEncoder == NULL ? nil :
+                    [[ZPUBlitEncoder alloc] initWithOwner:_legacyBuffer encoder:rawEncoder];
+            }
+            if (fenceEncoder == nil || ![(ZPUMTL4MachineLearningFenceOperation *)operation appendToEncoder:fenceEncoder]) {
+                if (fenceEncoder != nil) [fenceEncoder endEncoding];
+                [self markError];
+                return NO;
+            }
+            continue;
+        }
+        if (operation != nil) {
+            if (fenceEncoder != nil) [fenceEncoder endEncoding];
             [self markError];
             return NO;
         }
     }
+    if (fenceEncoder != nil) [fenceEncoder endEncoding];
     [_legacyBuffer commit];
     _submitted = YES;
     if ([_legacyBuffer status] == MTLCommandBufferStatusError) {
@@ -9947,14 +9999,28 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
     (void)visibilityOptions;
 }
 - (void)updateFence:(id<MTLFence>)fence afterEncoderStages:(MTLStages)afterEncoderStages {
-    (void)fence;
     (void)afterEncoderStages;
-    [_owner markError];
+    ZPUFence *zpuFence = (ZPUFence *)fence;
+    if (_owner == nil || _owner->_legacyBuffer == nil || _ended || _owner->_failed ||
+        ![zpuFence isKindOfClass:[ZPUFence class]] || zpuFence->_owner != _owner->_owner) {
+        [_owner markError];
+        return;
+    }
+    [_owner->_machineLearningOperations addObject:
+        [[ZPUMTL4MachineLearningFenceOperation alloc] initWithFence:zpuFence update:YES]];
+    [_owner->_legacyBuffer retainResource:zpuFence];
 }
 - (void)waitForFence:(id<MTLFence>)fence beforeEncoderStages:(MTLStages)beforeEncoderStages {
-    (void)fence;
     (void)beforeEncoderStages;
-    [_owner markError];
+    ZPUFence *zpuFence = (ZPUFence *)fence;
+    if (_owner == nil || _owner->_legacyBuffer == nil || _ended || _owner->_failed ||
+        ![zpuFence isKindOfClass:[ZPUFence class]] || zpuFence->_owner != _owner->_owner) {
+        [_owner markError];
+        return;
+    }
+    [_owner->_machineLearningOperations addObject:
+        [[ZPUMTL4MachineLearningFenceOperation alloc] initWithFence:zpuFence update:NO]];
+    [_owner->_legacyBuffer retainResource:zpuFence];
 }
 - (void)insertDebugSignpost:(NSString *)string { (void)string; }
 - (void)pushDebugGroup:(NSString *)string { (void)string; }

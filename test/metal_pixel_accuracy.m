@@ -10211,6 +10211,7 @@ int main(void) {
                                                        error:&metal4_ml_identity_error];
         [metal4_ml_identity_table setResource:metal4_ml_identity_source.gpuResourceID atBufferIndex:0];
         [metal4_ml_identity_table setResource:metal4_ml_identity_destination.gpuResourceID atBufferIndex:1];
+        id<MTLFence> metal4_ml_identity_fence = [adapter_device newFence];
         id<MTL4CommandBuffer> metal4_ml_identity_command_buffer = [adapter_device newCommandBuffer];
         [metal4_ml_identity_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
         id<MTL4MachineLearningCommandEncoder> metal4_ml_identity_encoder =
@@ -10218,6 +10219,10 @@ int main(void) {
         [metal4_ml_identity_encoder setPipelineState:metal4_ml_identity_pipeline];
         [metal4_ml_identity_encoder setArgumentTable:metal4_ml_identity_table];
         [metal4_ml_identity_encoder dispatchNetworkWithIntermediatesHeap:adapter_three_d_heap];
+        [metal4_ml_identity_encoder updateFence:metal4_ml_identity_fence
+                             afterEncoderStages:MTLStageDispatch];
+        [metal4_ml_identity_encoder waitForFence:metal4_ml_identity_fence
+                            beforeEncoderStages:MTLStageDispatch];
         [metal4_ml_identity_source replaceSliceOrigin:metal4_ml_identity_zero
                                        sliceDimensions:metal4_ml_identity_dimensions
                                              withBytes:metal4_ml_identity_committed
@@ -10244,6 +10249,7 @@ int main(void) {
             metal4_ml_identity_pipeline.reflection.bindings[0].type != (MTLBindingType)37 ||
             metal4_ml_identity_pipeline.reflection.bindings[1].type != (MTLBindingType)37 ||
             metal4_ml_identity_table == nil || metal4_ml_identity_encoder == nil ||
+            metal4_ml_identity_fence == nil ||
             metal4_ml_identity_feedback_error != nil ||
             memcmp(metal4_ml_identity_values, metal4_ml_identity_committed,
                    sizeof(metal4_ml_identity_values)) != 0) {

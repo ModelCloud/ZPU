@@ -230,6 +230,9 @@ triangle path:
   names and emit deterministic ZPU metadata scripts or the existing ZPU
   binary-archive format; these outputs are not Apple metal-tt scripts or
   native GPU binaries
+- the registered `zpu_cpu_ml_identity` Metal 4 machine-learning profile also
+  preserves CPU fence update/wait ordering through the deferred ZPU command
+  buffer; arbitrary ML graphs remain fail-closed
 - owner-checked CPU function handles expose registered compute and visible
   callable names/types plus synthetic CPU resource IDs; visible function-table
   invocation remains unsupported because the fixed CPU kernels do not execute
@@ -386,8 +389,10 @@ triangle path:
   kernels, whose CPU execution has no hidden threadgroup storage. Reset slots
   remain legal no-ops
 - CPU indirect mesh command recording, copy, reset, and replay for the
-  registered mesh-gradient profile; its thread dimensions remain in the
-  CPU-owned ICB and arbitrary mesh shader execution fails closed at replay
+  registered mesh-gradient profile; its thread dimensions, object/mesh buffer
+  bindings, and object threadgroup-memory metadata remain in the CPU-owned ICB
+  and are applied at replay, while arbitrary mesh shader execution fails closed
+  at replay
 - CPU indirect patch and indexed-patch command recording, copy, reset, and
   replay for the registered factor-one triangle profile; patch buffers,
   tessellation-factor buffers, offsets, strides, and draw ranges are retained
