@@ -10410,7 +10410,7 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
     [(id)_legacy executeCommandsInBuffer:indirectCommandBuffer indirectBuffer:(id<MTLBuffer>)range indirectBufferOffset:rangeOffset];
 }
 - (void)setObjectThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index {
-    if (length != 0 || index != 0) [_owner markError];
+    [(id)_legacy setObjectThreadgroupMemoryLength:length atIndex:index];
 }
 - (void)drawMeshThreadgroups:(MTLSize)threadgroupsPerGrid threadsPerObjectThreadgroup:(MTLSize)threadsPerObjectThreadgroup threadsPerMeshThreadgroup:(MTLSize)threadsPerMeshThreadgroup {
     [(id)_legacy drawMeshThreadgroups:threadgroupsPerGrid
@@ -10475,6 +10475,15 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
         if ((stages & MTLRenderStageFragment) != 0) {
             [(id)_legacy setFragmentBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
         }
+        if ((stages & MTLRenderStageTile) != 0) {
+            [(id)_legacy setTileBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
+        }
+        if ((stages & zpu_mtl_render_stage_object) != 0) {
+            [(id)_legacy setObjectBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
+        }
+        if ((stages & zpu_mtl_render_stage_mesh) != 0) {
+            [(id)_legacy setMeshBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
+        }
     }
     const uint64_t *textureIDs = (const uint64_t *)_argumentTable->_textureResources.bytes;
     for (NSUInteger index = 0; index < _argumentTable->_maxTextureBindCount; ++index) {
@@ -10487,6 +10496,9 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
         if (resource == nil) continue;
         if ((stages & MTLRenderStageVertex) != 0) [(id)_legacy setVertexTexture:resource atIndex:index];
         if ((stages & MTLRenderStageFragment) != 0) [(id)_legacy setFragmentTexture:resource atIndex:index];
+        if ((stages & MTLRenderStageTile) != 0) [(id)_legacy setTileTexture:resource atIndex:index];
+        if ((stages & zpu_mtl_render_stage_object) != 0) [(id)_legacy setObjectTexture:resource atIndex:index];
+        if ((stages & zpu_mtl_render_stage_mesh) != 0) [(id)_legacy setMeshTexture:resource atIndex:index];
     }
     const uint64_t *samplerIDs = (const uint64_t *)_argumentTable->_samplerResources.bytes;
     for (NSUInteger index = 0; index < _argumentTable->_maxSamplerStateBindCount; ++index) {
@@ -10499,6 +10511,9 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
         if (resource == nil) continue;
         if ((stages & MTLRenderStageVertex) != 0) [(id)_legacy setVertexSamplerState:resource atIndex:index];
         if ((stages & MTLRenderStageFragment) != 0) [(id)_legacy setFragmentSamplerState:resource atIndex:index];
+        if ((stages & MTLRenderStageTile) != 0) [(id)_legacy setTileSamplerState:resource atIndex:index];
+        if ((stages & zpu_mtl_render_stage_object) != 0) [(id)_legacy setObjectSamplerState:resource atIndex:index];
+        if ((stages & zpu_mtl_render_stage_mesh) != 0) [(id)_legacy setMeshSamplerState:resource atIndex:index];
     }
 }
 - (void)setFrontFacingWinding:(MTLWinding)frontFacingWinding { [(id)_legacy setFrontFacingWinding:frontFacingWinding]; }

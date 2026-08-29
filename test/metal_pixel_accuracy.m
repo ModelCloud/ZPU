@@ -8300,6 +8300,17 @@ int main(void) {
             adapter_mtl4_tile_texture_descriptor.usage = MTLTextureUsageRenderTarget;
             adapter_mtl4_tile_texture =
                 [adapter_device newTextureWithDescriptor:adapter_mtl4_tile_texture_descriptor];
+            MTL4ArgumentTableDescriptor *adapter_mtl4_tile_stage_table_descriptor =
+                [MTL4ArgumentTableDescriptor new];
+            adapter_mtl4_tile_stage_table_descriptor.maxBufferBindCount = 1;
+            adapter_mtl4_tile_stage_table_descriptor.maxTextureBindCount = 1;
+            adapter_mtl4_tile_stage_table_descriptor.maxSamplerStateBindCount = 1;
+            id<MTL4ArgumentTable> adapter_mtl4_tile_stage_table =
+                [adapter_device newArgumentTableWithDescriptor:adapter_mtl4_tile_stage_table_descriptor
+                                                          error:&adapter_mtl4_tile_error];
+            [adapter_mtl4_tile_stage_table setAddress:adapter_vertex_buffer.gpuAddress atIndex:0];
+            [adapter_mtl4_tile_stage_table setTexture:adapter_mtl4_tile_texture.gpuResourceID atIndex:0];
+            [adapter_mtl4_tile_stage_table setSamplerState:adapter_sampler.gpuResourceID atIndex:0];
             MTL4RenderPassDescriptor *adapter_mtl4_tile_pass = [MTL4RenderPassDescriptor new];
             adapter_mtl4_tile_pass.colorAttachments[0].texture = adapter_mtl4_tile_texture;
             adapter_mtl4_tile_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -8312,6 +8323,8 @@ int main(void) {
             adapter_mtl4_tile_encoder =
                 [adapter_mtl4_tile_command_buffer renderCommandEncoderWithDescriptor:adapter_mtl4_tile_pass];
             [adapter_mtl4_tile_encoder setRenderPipelineState:adapter_mtl4_archived_tile_pipeline];
+            [adapter_mtl4_tile_encoder setArgumentTable:adapter_mtl4_tile_stage_table
+                                                 atStages:MTLRenderStageTile];
             [adapter_mtl4_tile_encoder dispatchThreadsPerTile:MTLSizeMake(2, 2, 1)];
             [adapter_mtl4_tile_encoder endEncoding];
             [adapter_mtl4_tile_command_buffer endCommandBuffer];
@@ -8337,7 +8350,8 @@ int main(void) {
             adapter_mtl4_tile_exact = adapter_mtl4_tile_pipeline != nil &&
                 adapter_mtl4_archived_tile_pipeline != nil &&
                 adapter_mtl4_tile_allocator != nil && adapter_mtl4_tile_queue != nil &&
-                adapter_mtl4_tile_texture != nil && adapter_mtl4_tile_command_buffer != nil &&
+                adapter_mtl4_tile_texture != nil && adapter_mtl4_tile_stage_table != nil &&
+                adapter_mtl4_tile_command_buffer != nil &&
                 adapter_mtl4_tile_encoder != nil &&
                 adapter_mtl4_tile_pipeline_script != nil &&
                 [[[NSString alloc] initWithData:adapter_mtl4_tile_pipeline_script
@@ -8778,6 +8792,17 @@ int main(void) {
             adapter_mtl4_mesh_texture_descriptor.usage = MTLTextureUsageRenderTarget;
             id<MTLTexture> adapter_mtl4_mesh_texture =
                 [adapter_device newTextureWithDescriptor:adapter_mtl4_mesh_texture_descriptor];
+            MTL4ArgumentTableDescriptor *adapter_mtl4_mesh_stage_table_descriptor =
+                [MTL4ArgumentTableDescriptor new];
+            adapter_mtl4_mesh_stage_table_descriptor.maxBufferBindCount = 1;
+            adapter_mtl4_mesh_stage_table_descriptor.maxTextureBindCount = 1;
+            adapter_mtl4_mesh_stage_table_descriptor.maxSamplerStateBindCount = 1;
+            id<MTL4ArgumentTable> adapter_mtl4_mesh_stage_table =
+                [adapter_device newArgumentTableWithDescriptor:adapter_mtl4_mesh_stage_table_descriptor
+                                                          error:&adapter_mtl4_mesh_error];
+            [adapter_mtl4_mesh_stage_table setAddress:adapter_vertex_buffer.gpuAddress atIndex:0];
+            [adapter_mtl4_mesh_stage_table setTexture:adapter_mtl4_mesh_texture.gpuResourceID atIndex:0];
+            [adapter_mtl4_mesh_stage_table setSamplerState:adapter_sampler.gpuResourceID atIndex:0];
             MTL4RenderPassDescriptor *adapter_mtl4_mesh_pass = [MTL4RenderPassDescriptor new];
             adapter_mtl4_mesh_pass.colorAttachments[0].texture = adapter_mtl4_mesh_texture;
             adapter_mtl4_mesh_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -8788,6 +8813,9 @@ int main(void) {
             id<MTL4RenderCommandEncoder> adapter_mtl4_mesh_encoder =
                 [adapter_mtl4_mesh_command_buffer renderCommandEncoderWithDescriptor:adapter_mtl4_mesh_pass];
             [adapter_mtl4_mesh_encoder setRenderPipelineState:adapter_mtl4_archived_mesh_pipeline];
+            [adapter_mtl4_mesh_encoder setArgumentTable:adapter_mtl4_mesh_stage_table
+                                                 atStages:MTLRenderStageObject | MTLRenderStageMesh];
+            [adapter_mtl4_mesh_encoder setObjectThreadgroupMemoryLength:16 atIndex:0];
             [adapter_mtl4_mesh_encoder drawMeshThreads:MTLSizeMake(5, 3, 1)
                              threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
                                threadsPerMeshThreadgroup:MTLSizeMake(1, 1, 1)];
@@ -8932,7 +8960,8 @@ int main(void) {
                                        encoding:NSUTF8StringEncoding]
                     rangeOfString:@"mesh zpu_cpu_mesh_gradient_rgba8"].location != NSNotFound &&
                 adapter_mtl4_mesh_indirect_exact &&
-                adapter_mtl4_mesh_texture != nil && adapter_mtl4_mesh_command_buffer != nil &&
+                adapter_mtl4_mesh_texture != nil && adapter_mtl4_mesh_stage_table != nil &&
+                adapter_mtl4_mesh_command_buffer != nil &&
                 adapter_mtl4_mesh_encoder != nil &&
                 adapter_mtl4_mesh_icb_exact &&
                 memcmp(adapter_mtl4_mesh_pixels, expected_mtl4_mesh_pixels,
