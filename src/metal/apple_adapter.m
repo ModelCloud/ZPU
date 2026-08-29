@@ -26,6 +26,7 @@
 @class ZPUHeap;
 @class ZPUResidencySet;
 @class ZPUSharedEvent;
+@class ZPUTexture;
 @class ZPUTextureViewPool;
 @class ZPUIndirectCommandBuffer;
 @class ZPUIndirectComputeCommand;
@@ -90,6 +91,7 @@
     uint64_t _resourceID;
     NSArray *_mipmapTextures;
     NSUInteger _baseMipmapLevel;
+    BOOL _shareable;
     NSString *_label;
     BOOL _aliasable;
 }
@@ -232,6 +234,14 @@ API_AVAILABLE(macos(15.0), ios(18.0))
     NSString *_label;
 }
 - (instancetype)initWithEvent:(ZPUSharedEvent *)event;
+@end
+
+@interface ZPUSharedTextureHandle : MTLSharedTextureHandle {
+@public
+    ZPUTexture *_texture;
+    NSString *_label;
+}
+- (instancetype)initWithTexture:(ZPUTexture *)texture;
 @end
 
 #pragma clang diagnostic push
@@ -936,7 +946,7 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
     _swizzle = descriptor.swizzle;
 }
 - (MTLTextureUsage)usage { return _backing != nil ? [_backing usage] : _usage; }
-- (BOOL)isShareable { return NO; }
+- (BOOL)isShareable { return _shareable; }
 - (BOOL)isFramebufferOnly { return NO; }
 - (BOOL)allowGPUOptimizedContents { return _backing != nil ? [_backing allowGPUOptimizedContents] : _allowGPUOptimizedContents; }
 - (MTLTextureCompressionType)compressionType { return _backing != nil ? [_backing compressionType] : _compressionType; }
@@ -1050,7 +1060,7 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
                                        swizzle:descriptor.swizzle];
 }
 - (MTLTextureSwizzleChannels)swizzle { return _backing != nil ? [_backing swizzle] : _swizzle; }
-- (MTLSharedTextureHandle *)newSharedTextureHandle { return nil; }
+- (MTLSharedTextureHandle *)newSharedTextureHandle { return [[ZPUSharedTextureHandle alloc] initWithTexture:self]; }
 - (kern_return_t)setOwnerWithIdentity:(task_id_token_t)task_id_token API_AVAILABLE(ios(17.4), watchos(10.4), tvos(17.4), macos(14.4)) {
     (void)task_id_token;
     return KERN_SUCCESS;
@@ -1354,6 +1364,24 @@ static BOOL zpu_residency_allocation_belongs_to_device(ZPUDevice *owner, id<MTLA
     return zpu_metal_shared_event_wait_until_signaled_value(_zpuEvent, value, milliseconds) == ZPU_METAL_OK;
 }
 - (MTLSharedEventHandle *)newSharedEventHandle { return [[ZPUSharedEventHandle alloc] initWithEvent:self]; }
+@end
+
+@implementation ZPUSharedTextureHandle
+- (instancetype)initWithTexture:(ZPUTexture *)texture {
+    if ((self = [super init])) {
+        _texture = texture;
+        _label = [texture.label copy];
+    }
+    return self;
+}
+- (id<MTLDevice>)device { return [_texture device]; }
+- (NSString *)label { return _label; }
++ (BOOL)supportsSecureCoding { return YES; }
+- (instancetype)initWithCoder:(NSCoder *)coder {
+    if ((self = [super init])) _label = [[coder decodeObjectOfClass:[NSString class] forKey:@"label"] copy];
+    return self;
+}
+- (void)encodeWithCoder:(NSCoder *)coder { [coder encodeObject:_label forKey:@"label"]; }
 @end
 
 static uint64_t zpu_cpu_timestamp(void) {
@@ -1817,12 +1845,16 @@ static uint64_t zpu_cpu_timestamp(void) {
     return nil;
 }
 - (id<MTLTexture>)newSharedTextureWithDescriptor:(MTLTextureDescriptor *)descriptor API_AVAILABLE(macos(10.14), ios(13.0)) {
-    (void)descriptor;
-    return nil;
+    ZPUTexture *texture = (ZPUTexture *)[self newTextureWithDescriptor:descriptor];
+    if (texture == nil) return nil;
+    texture->_shareable = YES;
+    return (id<MTLTexture>)texture;
 }
 - (id<MTLTexture>)newSharedTextureWithHandle:(MTLSharedTextureHandle *)sharedHandle API_AVAILABLE(macos(10.14), ios(13.0)) {
-    (void)sharedHandle;
-    return nil;
+    ZPUSharedTextureHandle *handle = (ZPUSharedTextureHandle *)sharedHandle;
+    if (![handle isKindOfClass:[ZPUSharedTextureHandle class]] || handle->_texture == nil ||
+        handle->_texture->_owner != self) return nil;
+    return (id<MTLTexture>)handle->_texture;
 }
 - (id<MTLArgumentEncoder>)newArgumentEncoderWithArguments:(NSArray<MTLArgumentDescriptor *> *)arguments API_AVAILABLE(macos(10.13), ios(11.0)) {
     return arguments == nil ? nil : (id<MTLArgumentEncoder>)[[ZPUArgumentEncoder alloc] initWithOwner:self arguments:arguments];

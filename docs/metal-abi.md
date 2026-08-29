@@ -113,6 +113,9 @@ triangle path:
 - process-local shared-event handles round-trip the same ZPU event and
   preserve monotonic signaling; decoded or foreign handles fail closed because
   the CPU adapter does not invent a cross-process GPU primitive
+- process-local shared-texture handles round-trip shareable ZPU textures and
+  preserve their CPU bytes and metadata; IOSurface-backed and foreign handles
+  remain unsupported rather than importing native storage
 - CPU indirect compute commands for those registered kernels; the command
   buffer inherits the ZPU encoder's texture bindings and records pipeline,
   buffer, and dispatch state for deferred execution

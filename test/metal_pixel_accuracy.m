@@ -1700,6 +1700,18 @@ int main(void) {
             fprintf(stderr, "metal-pixel: shared event adapter failed\n");
             return 19;
         }
+        id<MTLTexture> adapter_shared_texture =
+            [adapter_device newSharedTextureWithDescriptor:adapter_texture_descriptor];
+        MTLSharedTextureHandle *adapter_shared_texture_handle = [adapter_shared_texture newSharedTextureHandle];
+        id<MTLTexture> adapter_shared_texture_from_handle =
+            [adapter_device newSharedTextureWithHandle:adapter_shared_texture_handle];
+        if (adapter_shared_texture == nil || !adapter_shared_texture.isShareable ||
+            adapter_shared_texture_handle == nil || adapter_shared_texture_from_handle != adapter_shared_texture ||
+            adapter_shared_texture_from_handle.width != adapter_shared_texture.width ||
+            adapter_shared_texture_from_handle.height != adapter_shared_texture.height) {
+            fprintf(stderr, "metal-pixel: shared texture handle adapter failed\n");
+            return 74;
+        }
         id<MTLEvent> adapter_command_event = [adapter_device newEvent];
         id<MTLCommandBuffer> adapter_event_command_buffer = [adapter_queue commandBuffer];
         [adapter_event_command_buffer encodeSignalEvent:adapter_command_event value:9];
