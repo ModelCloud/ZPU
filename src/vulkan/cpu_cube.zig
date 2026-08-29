@@ -2976,34 +2976,31 @@ fn rasterFlatSpanTriangle(comptime depth_test: bool, color_words: []align(4) u32
 }
 
 fn fillPatternLane(bytes: []u8, pattern: u32, lane_index: usize) void {
-    const aligned: []align(4) u8 = @alignCast(bytes);
-    const words = std.mem.bytesAsSlice(u32, aligned);
-    const start = words.len * lane_index / parallel_band_count;
-    const end = words.len * (lane_index + 1) / parallel_band_count;
-    @memset(words[start..end], pattern);
+    const word_count = bytes.len / 4;
+    const start = word_count * lane_index / parallel_band_count;
+    const end = word_count * (lane_index + 1) / parallel_band_count;
+    for (start..end) |word| std.mem.writeInt(u32, bytes[word * 4 ..][0..4], pattern, .little);
+    if (lane_index == parallel_band_count - 1 and word_count * 4 < bytes.len) @memset(bytes[word_count * 4 ..], @truncate(pattern));
 }
 
 fn fillPatternRectLane(bytes: []u8, width: u32, rect: Rect, pattern: u32, lane_index: usize) void {
     if (rect.width == 0 or rect.height == 0) return;
-    const aligned: []align(4) u8 = @alignCast(bytes);
-    const words = std.mem.bytesAsSlice(u32, aligned);
     const first_row = @as(usize, @intCast(rect.y)) + @as(usize, rect.height) * lane_index / parallel_band_count;
     const last_row = @as(usize, @intCast(rect.y)) + @as(usize, rect.height) * (lane_index + 1) / parallel_band_count;
     const x: usize = @intCast(rect.x);
     for (first_row..last_row) |y| {
         const start = y * width + x;
-        @memset(words[start..][0..rect.width], pattern);
+        for (0..rect.width) |column| std.mem.writeInt(u32, bytes[(start + column) * 4 ..][0..4], pattern, .little);
     }
 }
 
 fn fillPatternRectAll(bytes: []u8, width: u32, rect: Rect, pattern: u32) void {
     if (rect.width == 0 or rect.height == 0) return;
-    const words = std.mem.bytesAsSlice(u32, @as([]align(4) u8, @alignCast(bytes)));
     const x: usize = @intCast(rect.x);
     const first_y: usize = @intCast(rect.y);
     for (first_y..first_y + rect.height) |y| {
         const start = y * width + x;
-        @memset(words[start..][0..rect.width], pattern);
+        for (0..rect.width) |column| std.mem.writeInt(u32, bytes[(start + column) * 4 ..][0..4], pattern, .little);
     }
 }
 
