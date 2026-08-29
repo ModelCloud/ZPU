@@ -11630,6 +11630,53 @@ int main(void) {
             (const MTLCounterResultTimestamp *)adapter_legacy_counter_buffer.contents;
         NSData *adapter_legacy_counter_resolved =
             [adapter_legacy_counter_sample_buffer resolveCounterRange:NSMakeRange(0, 2)];
+
+        MTLCounterSampleBufferDescriptor *adapter_pass_counter_descriptor = [MTLCounterSampleBufferDescriptor new];
+        adapter_pass_counter_descriptor.counterSet = adapter_device.counterSets.firstObject;
+        adapter_pass_counter_descriptor.storageMode = MTLStorageModeShared;
+        adapter_pass_counter_descriptor.sampleCount = 4;
+        id<MTLCounterSampleBuffer> adapter_pass_counter_sample_buffer =
+            [adapter_device newCounterSampleBufferWithDescriptor:adapter_pass_counter_descriptor error:&metal4_error];
+        MTLComputePassDescriptor *adapter_counter_compute_pass =
+            [MTLComputePassDescriptor computePassDescriptor];
+        adapter_counter_compute_pass.sampleBufferAttachments[0].sampleBuffer = adapter_pass_counter_sample_buffer;
+        adapter_counter_compute_pass.sampleBufferAttachments[0].startOfEncoderSampleIndex = 0;
+        adapter_counter_compute_pass.sampleBufferAttachments[0].endOfEncoderSampleIndex = 1;
+        id<MTLCommandBuffer> adapter_counter_compute_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> adapter_descriptor_compute_encoder =
+            [adapter_counter_compute_command_buffer computeCommandEncoderWithDescriptor:adapter_counter_compute_pass];
+        [adapter_descriptor_compute_encoder endEncoding];
+        [adapter_counter_compute_command_buffer commit];
+        [adapter_counter_compute_command_buffer waitUntilCompleted];
+
+        MTLBlitPassDescriptor *adapter_counter_blit_pass = [MTLBlitPassDescriptor blitPassDescriptor];
+        adapter_counter_blit_pass.sampleBufferAttachments[0].sampleBuffer = adapter_pass_counter_sample_buffer;
+        adapter_counter_blit_pass.sampleBufferAttachments[0].startOfEncoderSampleIndex = 2;
+        adapter_counter_blit_pass.sampleBufferAttachments[0].endOfEncoderSampleIndex = 3;
+        id<MTLCommandBuffer> adapter_counter_blit_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_descriptor_blit_encoder =
+            [adapter_counter_blit_command_buffer blitCommandEncoderWithDescriptor:adapter_counter_blit_pass];
+        [adapter_descriptor_blit_encoder endEncoding];
+        [adapter_counter_blit_command_buffer commit];
+        [adapter_counter_blit_command_buffer waitUntilCompleted];
+        NSData *adapter_pass_counter_resolved =
+            [adapter_pass_counter_sample_buffer resolveCounterRange:NSMakeRange(0, 4)];
+        const MTLCounterResultTimestamp *adapter_pass_counter_entries =
+            (const MTLCounterResultTimestamp *)adapter_pass_counter_resolved.bytes;
+        const BOOL adapter_pass_counter_ok =
+            adapter_pass_counter_sample_buffer != nil &&
+            adapter_descriptor_compute_encoder != nil && adapter_descriptor_blit_encoder != nil &&
+            adapter_counter_compute_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_counter_blit_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_pass_counter_resolved.length == 4 * sizeof(MTLCounterResultTimestamp) &&
+            adapter_pass_counter_entries[0].timestamp != MTLCounterErrorValue &&
+            adapter_pass_counter_entries[1].timestamp != MTLCounterErrorValue &&
+            adapter_pass_counter_entries[2].timestamp != MTLCounterErrorValue &&
+            adapter_pass_counter_entries[3].timestamp != MTLCounterErrorValue &&
+            adapter_pass_counter_entries[0].timestamp != 0 &&
+            adapter_pass_counter_entries[1].timestamp != 0 &&
+            adapter_pass_counter_entries[2].timestamp != 0 &&
+            adapter_pass_counter_entries[3].timestamp != 0;
         if (![adapter_device supportsCounterSampling:MTLCounterSamplingPointAtDrawBoundary] ||
             ![adapter_device supportsCounterSampling:MTLCounterSamplingPointAtDispatchBoundary] ||
             ![adapter_device supportsCounterSampling:MTLCounterSamplingPointAtBlitBoundary] ||
@@ -11642,7 +11689,8 @@ int main(void) {
             adapter_legacy_counter_resolved.length != 2 * sizeof(MTLCounterResultTimestamp) ||
             adapter_legacy_counter_entries[0].timestamp == MTLCounterErrorValue ||
             adapter_legacy_counter_entries[1].timestamp == MTLCounterErrorValue ||
-            adapter_legacy_counter_entries[0].timestamp == 0 || adapter_legacy_counter_entries[1].timestamp == 0) {
+            adapter_legacy_counter_entries[0].timestamp == 0 || adapter_legacy_counter_entries[1].timestamp == 0 ||
+            !adapter_pass_counter_ok) {
             fail_with_error("legacy CPU timestamp counter path failed", metal4_error);
             return 68;
         }

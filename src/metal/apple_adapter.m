@@ -1272,8 +1272,11 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     zpu_metal_compute_kernel _kernel;
     ZPUTexture *_boundTexture;
     NSUInteger _boundTextureIndex;
+    id _passDescriptor;
+    BOOL _ended;
 }
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner encoder:(zpu_metal_compute_encoder *)encoder;
+- (BOOL)configurePassDescriptor:(id)descriptor;
 - (void)setComputePipelineState:(id<MTLComputePipelineState>)state;
 - (void)setBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(10.11), ios(8.3));
 - (void)setBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index;
@@ -1364,8 +1367,11 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     zpu_metal_blit_encoder *_zpuEncoder;
     ZPUCommandBuffer *_owner;
     NSString *_label;
+    id _passDescriptor;
+    BOOL _ended;
 }
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner encoder:(zpu_metal_blit_encoder *)encoder;
+- (BOOL)configurePassDescriptor:(id)descriptor;
 @end
 
 @interface ZPUResourceStateEncoder : NSObject <MTLResourceStateCommandEncoder> {
@@ -5213,6 +5219,25 @@ static uint64_t zpu_cpu_timestamp(void) {
     }
 }
 @end
+
+/* Pass descriptors expose a small array of counter attachments without a
+ * count property. Metal permits four pass attachments; inspect that bounded
+ * descriptor range and turn the timestamp samples into CPU-side events. */
+static BOOL zpu_sample_pass_attachments(ZPUCommandBuffer *owner, id attachments, BOOL start) {
+    if (attachments == nil) return YES;
+    for (NSUInteger index = 0; index < 4; ++index) {
+        id attachment = [attachments objectAtIndexedSubscript:index];
+        id sampleBuffer = [attachment sampleBuffer];
+        if (sampleBuffer == nil) continue;
+        ZPUCounterSampleBuffer *sample = (ZPUCounterSampleBuffer *)sampleBuffer;
+        if (![sample isKindOfClass:[ZPUCounterSampleBuffer class]] || sample->_owner != [owner device]) return NO;
+        const NSUInteger sampleIndex = start ? [attachment startOfEncoderSampleIndex] : [attachment endOfEncoderSampleIndex];
+        if (sampleIndex == MTLCounterDontSample) continue;
+        if (![sample sampleAtIndex:sampleIndex]) return NO;
+        [owner retainResource:sample];
+    }
+    return YES;
+}
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
@@ -9473,13 +9498,21 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
         return nil;
     }
     ZPUComputeEncoder *encoder = (ZPUComputeEncoder *)[self computeCommandEncoder];
-    if (encoder == nil) return nil;
+    if (encoder == nil || ![encoder configurePassDescriptor:descriptor]) {
+        if (encoder != nil) [encoder endEncoding];
+        return nil;
+    }
     encoder->_dispatchType = descriptor.dispatchType;
     return (id<MTLComputeCommandEncoder>)encoder;
 }
 - (id<MTLBlitCommandEncoder>)blitCommandEncoderWithDescriptor:(MTLBlitPassDescriptor *)descriptor API_AVAILABLE(macos(11.0), ios(14.0)) {
-    (void)descriptor;
-    return [self blitCommandEncoder];
+    if (descriptor == nil) return nil;
+    ZPUBlitEncoder *encoder = (ZPUBlitEncoder *)[self blitCommandEncoder];
+    if (encoder == nil || ![encoder configurePassDescriptor:descriptor]) {
+        if (encoder != nil) [encoder endEncoding];
+        return nil;
+    }
+    return (id<MTLBlitCommandEncoder>)encoder;
 }
 - (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDispatchType:(MTLDispatchType)dispatchType API_AVAILABLE(macos(10.14), ios(12.0)) {
     if (dispatchType != MTLDispatchTypeSerial && dispatchType != MTLDispatchTypeConcurrent) return nil;
@@ -11528,14 +11561,21 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         _kernel = 0;
         _boundTexture = nil;
         _boundTextureIndex = 0;
+        _passDescriptor = nil;
+        _ended = NO;
     }
     return self;
 }
 - (void)dealloc {
     if (_zpuEncoder != NULL) {
-        (void)zpu_metal_compute_encoder_end_encoding(_zpuEncoder);
+        [self endEncoding];
         zpu_metal_compute_encoder_destroy(_zpuEncoder);
     }
+}
+- (BOOL)configurePassDescriptor:(id)descriptor {
+    if (descriptor == nil || !zpu_sample_pass_attachments(_owner, [descriptor sampleBufferAttachments], YES)) return NO;
+    _passDescriptor = [descriptor copy];
+    return YES;
 }
 - (id<MTLDevice>)device { return [_owner device]; }
 - (MTLDispatchType)dispatchType API_AVAILABLE(macos(10.14), ios(12.0)) { return _dispatchType; }
@@ -11955,6 +11995,11 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (void)pushDebugGroup:(NSString *)string { (void)string; }
 - (void)popDebugGroup {}
 - (void)endEncoding {
+    if (_ended) return;
+    _ended = YES;
+    if (_passDescriptor != nil && !zpu_sample_pass_attachments(_owner, [_passDescriptor sampleBufferAttachments], NO)) {
+        [_owner markError];
+    }
     if (_zpuEncoder != NULL) (void)zpu_metal_compute_encoder_end_encoding(_zpuEncoder);
 }
 @end
@@ -12285,15 +12330,25 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 
 @implementation ZPUBlitEncoder
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner encoder:(zpu_metal_blit_encoder *)encoder {
-    if ((self = [super init])) { _owner = owner; _zpuEncoder = encoder; }
+    if ((self = [super init])) {
+        _owner = owner;
+        _zpuEncoder = encoder;
+        _passDescriptor = nil;
+        _ended = NO;
+    }
     return self;
 }
 - (id<MTLDevice>)device { return [_owner device]; }
 - (void)dealloc {
     if (_zpuEncoder != NULL) {
-        (void)zpu_metal_blit_encoder_end_encoding(_zpuEncoder);
+        [self endEncoding];
         zpu_metal_blit_encoder_destroy(_zpuEncoder);
     }
+}
+- (BOOL)configurePassDescriptor:(id)descriptor {
+    if (descriptor == nil || !zpu_sample_pass_attachments(_owner, [descriptor sampleBufferAttachments], YES)) return NO;
+    _passDescriptor = [descriptor copy];
+    return YES;
 }
 - (void)synchronizeResource:(id<MTLResource>)resource {
     if ([resource isKindOfClass:[ZPUBuffer class]]) {
@@ -12730,6 +12785,11 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (void)pushDebugGroup:(NSString *)string { (void)string; }
 - (void)popDebugGroup {}
 - (void)endEncoding {
+    if (_ended) return;
+    _ended = YES;
+    if (_passDescriptor != nil && !zpu_sample_pass_attachments(_owner, [_passDescriptor sampleBufferAttachments], NO)) {
+        [_owner markError];
+    }
     if (_zpuEncoder != NULL) (void)zpu_metal_blit_encoder_end_encoding(_zpuEncoder);
 }
 @end
