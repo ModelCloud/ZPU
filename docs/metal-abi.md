@@ -169,6 +169,12 @@ triangle path:
   texture views, level-aware mipmap generation/copies, ordered MTLFence
   update/wait commands, and CPU-owned visibility result buffers with aligned
   boolean/counting modes plus reset/accumulate behavior
+- generic CPU blit synchronization accepts both ZPU buffers and textures;
+  texture synchronization and CPU/GPU-access optimization retain the requested
+  ZPU resource or valid mip/slice subresource without invoking native Metal
+- compute-pass descriptors preserve the Metal serial/concurrent dispatch type
+  on the CPU compute encoder; descriptor sampling attachments remain metadata
+  only until CPU counter attachment scheduling is implemented
 - identity rasterization-rate maps advertise capability consistently through
   `supportsRasterizationRateMapWithLayerCount:` and preserve native physical
   size/coordinate mappings; variable-rate maps remain rejected because the
