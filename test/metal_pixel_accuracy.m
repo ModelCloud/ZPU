@@ -5932,6 +5932,15 @@ int main(void) {
             [native_sparse_texture_wide_tail_descriptor copy];
         id<MTLTexture> adapter_sparse_texture_wide_tail =
             [adapter_device newTextureWithDescriptor:adapter_sparse_texture_wide_tail_descriptor];
+        MTLHeapDescriptor *adapter_sparse_texture_wide_heap_descriptor = [MTLHeapDescriptor new];
+        adapter_sparse_texture_wide_heap_descriptor.type = MTLHeapTypePlacement;
+        adapter_sparse_texture_wide_heap_descriptor.size = sparse_page_bytes * 7;
+        adapter_sparse_texture_wide_heap_descriptor.storageMode = MTLStorageModePrivate;
+        adapter_sparse_texture_wide_heap_descriptor.maxCompatiblePlacementSparsePageSize = MTLSparsePageSize64;
+        id<MTLHeap> adapter_sparse_texture_wide_heap =
+            [adapter_device newHeapWithDescriptor:adapter_sparse_texture_wide_heap_descriptor];
+        id<MTLTexture> adapter_sparse_texture_wide_mapped =
+            [adapter_sparse_texture_wide_heap newTextureWithDescriptor:adapter_sparse_texture_wide_tail_descriptor];
         id<MTLTexture> adapter_sparse_texture_tail_move =
             [adapter_sparse_texture_heap newTextureWithDescriptor:adapter_sparse_texture_tail_descriptor];
         id<MTLBuffer> adapter_sparse_texture_input =
@@ -5941,6 +5950,40 @@ int main(void) {
         id<MTLBuffer> adapter_sparse_texture_output =
             [adapter_device newBufferWithLength:sparse_texture_bytes options:MTLResourceStorageModeShared];
         id<MTLCommandQueue> adapter_sparse_texture_legacy_queue = [adapter_device newCommandQueue];
+        const NSUInteger sparse_texture_wide_tail_level = adapter_sparse_texture_wide_mapped == nil ? 0 :
+            adapter_sparse_texture_wide_mapped.firstMipmapInTail;
+        MTL4UpdateSparseTextureMappingOperation adapter_sparse_texture_wide_tail_map = {
+            .mode = MTLSparseTextureMappingModeMap,
+            .textureRegion = MTLRegionMake2D(0, 0, 1, 1),
+            .heapOffset = 0,
+            .textureLevel = sparse_texture_wide_tail_level,
+            .textureSlice = 0,
+        };
+        [metal4_sparse_queue updateTextureMappings:adapter_sparse_texture_wide_mapped
+                                              heap:adapter_sparse_texture_wide_heap
+                                         operations:&adapter_sparse_texture_wide_tail_map count:1];
+        NSMutableData *sparse_texture_wide_input = [NSMutableData dataWithLength:1024 * 64 * 4];
+        for (NSUInteger index = 0; index < sparse_texture_wide_input.length; ++index) {
+            ((uint8_t *)sparse_texture_wide_input.mutableBytes)[index] = (uint8_t)((index * 37u + 13u) & 0xffu);
+        }
+        [adapter_sparse_texture_wide_mapped replaceRegion:MTLRegionMake2D(0, 0, 1024, 64)
+                                               mipmapLevel:sparse_texture_wide_tail_level
+                                                  withBytes:sparse_texture_wide_input.bytes bytesPerRow:1024 * 4];
+        NSMutableData *sparse_texture_wide_output = [NSMutableData dataWithLength:sparse_texture_wide_input.length];
+        [adapter_sparse_texture_wide_mapped getBytes:sparse_texture_wide_output.mutableBytes
+                                          bytesPerRow:1024 * 4
+                                           fromRegion:MTLRegionMake2D(0, 0, 1024, 64)
+                                          mipmapLevel:sparse_texture_wide_tail_level];
+        BOOL sparse_texture_wide_tail_exact =
+            native_sparse_texture_wide_tail != nil && adapter_sparse_texture_wide_tail != nil &&
+            adapter_sparse_texture_wide_mapped != nil && sparse_texture_wide_tail_level == 0 &&
+            memcmp(sparse_texture_wide_output.bytes, sparse_texture_wide_input.bytes,
+                   sparse_texture_wide_input.length) == 0;
+        MTL4UpdateSparseTextureMappingOperation adapter_sparse_texture_wide_tail_unmap =
+            adapter_sparse_texture_wide_tail_map;
+        adapter_sparse_texture_wide_tail_unmap.mode = MTLSparseTextureMappingModeUnmap;
+        [metal4_sparse_queue updateTextureMappings:adapter_sparse_texture_wide_mapped heap:nil
+                                         operations:&adapter_sparse_texture_wide_tail_unmap count:1];
         const NSUInteger sparse_texture_tail_level = adapter_sparse_texture_tail == nil ? 0 :
             adapter_sparse_texture_tail.firstMipmapInTail;
         MTL4UpdateSparseTextureMappingOperation adapter_sparse_texture_tail_map = {
@@ -5980,7 +6023,8 @@ int main(void) {
             native_sparse_texture_wide_tail != nil && adapter_sparse_texture_wide_tail != nil &&
             adapter_sparse_texture_wide_tail.firstMipmapInTail == native_sparse_texture_wide_tail.firstMipmapInTail &&
             adapter_sparse_texture_wide_tail.tailSizeInBytes == native_sparse_texture_wide_tail.tailSizeInBytes &&
-            adapter_sparse_texture_wide_tail.tailSizeInBytes == sparse_page_bytes * 7;
+            adapter_sparse_texture_wide_tail.tailSizeInBytes == sparse_page_bytes * 7 &&
+            sparse_texture_wide_tail_exact;
         for (NSUInteger level = sparse_texture_tail_level;
              level < 4 && sparse_texture_tail_exact; ++level) {
             NSMutableData *levelOutput = [NSMutableData dataWithLength:
