@@ -197,7 +197,8 @@ triangle path:
   function-pointer dispatch and ray tracing remain unsupported
 - CPU render pipeline states resolve vertex/fragment function handles by
   owner, stage, and name, including Metal 4 binary-function metadata; foreign
-  functions and unsupported stages fail closed
+  functions and unsupported stages fail closed. The Metal 4 device-level
+  function-handle selector also returns handles for ZPU-owned CPU functions.
 - CPU indirect compute commands for those registered kernels; the command
   buffer inherits the ZPU encoder's texture bindings and records pipeline,
   buffer, and dispatch state for deferred execution

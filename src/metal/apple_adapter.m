@@ -2707,8 +2707,12 @@ static uint64_t zpu_cpu_timestamp(void) {
     return nil;
 }
 - (id<MTLFunctionHandle>)functionHandleWithFunction:(id<MTLFunction>)function API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)function;
-    return nil;
+    ZPUCPUFunction *cpuFunction = (ZPUCPUFunction *)function;
+    if (![cpuFunction isKindOfClass:[ZPUCPUFunction class]] || cpuFunction->_owner != self ||
+        cpuFunction->_name.length == 0) return nil;
+    return (id<MTLFunctionHandle>)[[ZPUFunctionHandle alloc] initWithOwner:self
+                                                                        name:cpuFunction->_name
+                                                                 functionType:cpuFunction.functionType];
 }
 - (id<MTLIOFileHandle>)newIOHandleWithURL:(NSURL *)url error:(NSError **)error API_AVAILABLE(macos(13.0), ios(16.0)) {
     (void)url;

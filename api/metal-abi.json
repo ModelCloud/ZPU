@@ -257,6 +257,7 @@
     "MTLDevice.newCompilerWithDescriptor",
     "MTLDevice.newArchiveWithURL",
     "MTLDevice.newPipelineDataSetSerializerWithDescriptor",
+    "MTLDevice.functionHandleWithFunction",
     "MTLLibrary.newFunctionWithName",
     "MTLLibrary.functionNames",
     "MTLBinaryArchive.device",

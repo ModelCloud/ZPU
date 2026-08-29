@@ -3006,6 +3006,10 @@ int main(void) {
                                                                  error:&adapter_mtl4_compiler_error];
         id<MTLFunctionHandle> adapter_mtl4_render_binary_handle = nil;
         id<MTLFunctionHandle> adapter_mtl4_render_function_handle = nil;
+        id<MTLFunctionHandle> adapter_device_function_handle = nil;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            adapter_device_function_handle = [adapter_device functionHandleWithFunction:adapter_fragment_function];
+        }
         if (@available(macOS 12.0, iOS 15.0, *)) {
             adapter_mtl4_render_function_handle =
                 [adapter_mtl4_compiled_render_pipeline functionHandleWithFunction:adapter_fragment_function
@@ -3167,6 +3171,8 @@ int main(void) {
             adapter_intersection_function_table.gpuResourceID._impl == 0 ||
             adapter_mtl4_render_function_handle == nil ||
             adapter_mtl4_render_binary_handle == nil ||
+            adapter_device_function_handle == nil ||
+            adapter_device_function_handle.functionType != MTLFunctionTypeFragment ||
             adapter_mtl4_render_function_handle.functionType != MTLFunctionTypeFragment ||
             ![adapter_mtl4_render_function_handle.name isEqualToString:@"zpu_test_fragment"] ||
             ![adapter_mtl4_render_binary_handle.name isEqualToString:@"zpu_test_fragment"]) {
