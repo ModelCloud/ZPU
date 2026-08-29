@@ -572,6 +572,39 @@ int main(void) {
             return 50;
         }
 
+        NSURL *adapter_source_url = [NSURL fileURLWithPath:
+            [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]]];
+        NSError *adapter_source_error = nil;
+        BOOL adapter_source_written = [adapter_cpu_source writeToURL:adapter_source_url
+                                                            atomically:YES
+                                                              encoding:NSUTF8StringEncoding
+                                                                 error:&adapter_source_error];
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        id<MTLLibrary> adapter_file_library =
+            [adapter_device newLibraryWithFile:adapter_source_url.path error:&adapter_source_error];
+        #pragma clang diagnostic pop
+        id<MTLLibrary> adapter_url_library =
+            [adapter_device newLibraryWithURL:adapter_source_url error:&adapter_source_error];
+        dispatch_data_t adapter_source_data = dispatch_data_create(
+            adapter_cpu_source.UTF8String,
+            [adapter_cpu_source lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+            dispatch_get_main_queue(), DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+        id<MTLLibrary> adapter_data_library =
+            [adapter_device newLibraryWithData:adapter_source_data error:&adapter_source_error];
+        id<MTLLibrary> adapter_bundle_library =
+            [adapter_device newDefaultLibraryWithBundle:[NSBundle mainBundle] error:&adapter_source_error];
+        [[NSFileManager defaultManager] removeItemAtURL:adapter_source_url error:nil];
+        if (!adapter_source_written || adapter_file_library == nil || adapter_url_library == nil ||
+            adapter_data_library == nil || adapter_bundle_library == nil ||
+            [adapter_file_library newFunctionWithName:@"zpu_cpu_copy_rgba8_buffer_to_texture"] == nil ||
+            [adapter_url_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8"] == nil ||
+            [adapter_data_library newFunctionWithName:@"zpu_cpu_copy_rgba8_buffer_to_texture"] == nil ||
+            [adapter_bundle_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8"] == nil) {
+            fail_with_error("CPU library file/data loading failed", adapter_source_error);
+            return 65;
+        }
+
         /* Binary archives remain CPU metadata caches. They persist only the
          * registered ZPU function names and never contain native Metal code. */
         NSError *adapter_archive_error = nil;

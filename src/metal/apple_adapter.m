@@ -1716,26 +1716,67 @@ static uint64_t zpu_cpu_timestamp(void) {
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
-    zpu_set_error(error, @"ZPU CPU Metal has no default shader library");
-    return nil;
+    id<MTLLibrary> library = [self newDefaultLibrary];
+    if (error != NULL) *error = library == nil ? [NSError errorWithDomain:@"ZPUMetal" code:ZPU_METAL_INVALID_ARGUMENT
+        userInfo:@{NSLocalizedDescriptionKey: @"ZPU CPU Metal default library creation failed"}] : nil;
+    return library;
 }
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 - (id<MTLLibrary>)newLibraryWithFile:(NSString *)filepath error:(NSError **)error {
-    (void)filepath;
-    zpu_set_error(error, @"ZPU CPU Metal does not load compiled metallib files");
-    return nil;
+    if (filepath == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal library file path is required");
+        return nil;
+    }
+    NSData *data = [NSData dataWithContentsOfFile:filepath];
+    NSString *source = data == nil ? nil : [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (source == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal library file must contain UTF-8 CPU function metadata");
+        return nil;
+    }
+    return [self newLibraryWithSource:source options:nil error:error];
 }
 #pragma clang diagnostic pop
 - (id<MTLLibrary>)newLibraryWithURL:(NSURL *)url error:(NSError **)error API_AVAILABLE(macos(10.13), ios(11.0)) {
-    (void)url;
-    zpu_set_error(error, @"ZPU CPU Metal does not load compiled metallib files");
-    return nil;
+    if (url == nil || !url.isFileURL) {
+        zpu_set_error(error, @"ZPU CPU Metal library URL must be a file URL");
+        return nil;
+    }
+    NSData *data = [NSData dataWithContentsOfURL:url];
+    NSString *source = data == nil ? nil : [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (source == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal library URL must contain UTF-8 CPU function metadata");
+        return nil;
+    }
+    return [self newLibraryWithSource:source options:nil error:error];
 }
 - (id<MTLLibrary>)newLibraryWithData:(dispatch_data_t)data error:(NSError **)error {
-    (void)data;
-    zpu_set_error(error, @"ZPU CPU Metal does not load compiled metallib data");
-    return nil;
+    if (data == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal library data is required");
+        return nil;
+    }
+    size_t size = dispatch_data_get_size(data);
+    if (size > NSUIntegerMax) {
+        zpu_set_error(error, @"ZPU CPU Metal library data is too large");
+        return nil;
+    }
+    NSMutableData *bytes = [NSMutableData dataWithLength:(NSUInteger)size];
+    __block BOOL valid = YES;
+    dispatch_data_apply(data, ^bool(dispatch_data_t region, size_t offset, const void *buffer, size_t regionSize) {
+        (void)region;
+        if (offset > size || regionSize > size - offset) {
+            valid = NO;
+            return false;
+        }
+        if (regionSize != 0) memcpy((uint8_t *)bytes.mutableBytes + offset, buffer, regionSize);
+        return true;
+    });
+    NSString *source = valid ? [[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding] : nil;
+    if (source == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal library data must contain UTF-8 CPU function metadata");
+        return nil;
+    }
+    return [self newLibraryWithSource:source options:nil error:error];
 }
 - (id<MTLLibrary>)newLibraryWithStitchedDescriptor:(MTLStitchedLibraryDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(12.0), ios(15.0)) {
     (void)descriptor;

@@ -197,6 +197,10 @@
     "MTLDevice.newSamplerStateWithDescriptor",
     "MTLDevice.newLibraryWithSource",
     "MTLDevice.newDefaultLibrary",
+    "MTLDevice.newDefaultLibraryWithBundle",
+    "MTLDevice.newLibraryWithFile",
+    "MTLDevice.newLibraryWithURL",
+    "MTLDevice.newLibraryWithData",
     "MTLDevice.newBinaryArchiveWithDescriptor",
     "MTLLibrary.newFunctionWithName",
     "MTLLibrary.functionNames",
@@ -485,7 +489,7 @@
     "MTLAccelerationStructure",
     "MTLRayTracingPipelineState",
     "MTLComputePipelineState.additional-function/reflection families",
-    "MTLLibrary file/data/stitched loading and arbitrary MSL compilation",
+    "MTLLibrary stitched loading and arbitrary MSL compilation",
     "MTLSparseTextureMapping"
   ]
 }
