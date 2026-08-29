@@ -12624,12 +12624,16 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (void)optimizeContentsForGPUAccess:(id<MTLTexture>)texture { if (!zpu_texture_belongs_to_device([_owner device], (ZPUTexture *)texture)) [_owner markError]; else [_owner retainResource:texture]; }
 - (void)optimizeContentsForCPUAccess:(id<MTLTexture>)texture { if (!zpu_texture_belongs_to_device([_owner device], (ZPUTexture *)texture)) [_owner markError]; else [_owner retainResource:texture]; }
 - (void)optimizeContentsForGPUAccess:(id<MTLTexture>)texture slice:(NSUInteger)slice level:(NSUInteger)level API_AVAILABLE(macos(10.14), ios(12.0)) {
-    if (!zpu_texture_belongs_to_device([_owner device], (ZPUTexture *)texture) || slice != 0 || level != 0) [_owner markError];
-    else [_owner retainResource:texture];
+    ZPUTexture *zpuTexture = (ZPUTexture *)texture;
+    if (!zpu_texture_belongs_to_device([_owner device], zpuTexture) ||
+        [zpuTexture zpuTextureAtLevel:level slice:slice] == NULL) [_owner markError];
+    else [_owner retainResource:zpuTexture];
 }
 - (void)optimizeContentsForCPUAccess:(id<MTLTexture>)texture slice:(NSUInteger)slice level:(NSUInteger)level API_AVAILABLE(macos(10.14), ios(12.0)) {
-    if (!zpu_texture_belongs_to_device([_owner device], (ZPUTexture *)texture) || slice != 0 || level != 0) [_owner markError];
-    else [_owner retainResource:texture];
+    ZPUTexture *zpuTexture = (ZPUTexture *)texture;
+    if (!zpu_texture_belongs_to_device([_owner device], zpuTexture) ||
+        [zpuTexture zpuTextureAtLevel:level slice:slice] == NULL) [_owner markError];
+    else [_owner retainResource:zpuTexture];
 }
 - (void)resetCommandsInBuffer:(id<MTLIndirectCommandBuffer>)buffer withRange:(NSRange)range API_AVAILABLE(macos(10.14), ios(12.0)) {
     ZPUIndirectCommandBuffer *zpuBuffer = (ZPUIndirectCommandBuffer *)buffer;

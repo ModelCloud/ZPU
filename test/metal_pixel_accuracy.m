@@ -5411,10 +5411,14 @@ int main(void) {
         id<MTLCommandBuffer> native_mip_sync_command_buffer = [queue commandBuffer];
         id<MTLBlitCommandEncoder> native_mip_sync_blit = [native_mip_sync_command_buffer blitCommandEncoder];
         [native_mip_sync_blit synchronizeResource:native_mip_texture];
+        [native_mip_sync_blit optimizeContentsForGPUAccess:native_mip_texture slice:0 level:1];
+        [native_mip_sync_blit optimizeContentsForCPUAccess:native_mip_texture slice:0 level:1];
         [native_mip_sync_blit endEncoding];
         [native_mip_sync_command_buffer commit];
         [native_mip_sync_command_buffer waitUntilCompleted];
         [adapter_mip_blit synchronizeResource:adapter_mip_texture];
+        [adapter_mip_blit optimizeContentsForGPUAccess:adapter_mip_texture slice:0 level:1];
+        [adapter_mip_blit optimizeContentsForCPUAccess:adapter_mip_texture slice:0 level:1];
         [adapter_mip_blit copyFromTexture:adapter_mip_texture
                               sourceSlice:0
                               sourceLevel:1
