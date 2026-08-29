@@ -24,6 +24,8 @@
 @class ZPUCommandQueue;
 @class ZPUCommandBuffer;
 @class ZPUHeap;
+@class ZPUDepthStencilState;
+@class ZPUSamplerState;
 @class ZPUResidencySet;
 @class ZPUSharedEvent;
 @class ZPUTexture;
@@ -172,6 +174,23 @@ API_AVAILABLE(macos(15.0), ios(18.0))
     NSUInteger _indexOffset;
     NSInteger _baseVertex;
     BOOL _hasIndexedDraw;
+    ZPUBuffer *_fragmentBuffer;
+    NSUInteger _fragmentOffset;
+    ZPUDepthStencilState *_depthStencilState;
+    float _depthBias;
+    float _slopeScale;
+    float _depthBiasClamp;
+    MTLDepthClipMode _depthClipMode;
+    MTLCullMode _cullMode;
+    MTLWinding _frontFacingWinding;
+    MTLTriangleFillMode _triangleFillMode;
+    BOOL _hasFragmentBuffer;
+    BOOL _hasDepthStencilState;
+    BOOL _hasDepthBias;
+    BOOL _hasDepthClipMode;
+    BOOL _hasCullMode;
+    BOOL _hasFrontFacingWinding;
+    BOOL _hasTriangleFillMode;
     BOOL _unsupportedCommand;
 }
 - (instancetype)initWithOwner:(ZPUIndirectCommandBuffer *)owner;
@@ -7654,6 +7673,23 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
             copy->_indexOffset = renderCommand->_indexOffset;
             copy->_baseVertex = renderCommand->_baseVertex;
             copy->_hasIndexedDraw = renderCommand->_hasIndexedDraw;
+            copy->_fragmentBuffer = renderCommand->_fragmentBuffer;
+            copy->_fragmentOffset = renderCommand->_fragmentOffset;
+            copy->_depthStencilState = renderCommand->_depthStencilState;
+            copy->_depthBias = renderCommand->_depthBias;
+            copy->_slopeScale = renderCommand->_slopeScale;
+            copy->_depthBiasClamp = renderCommand->_depthBiasClamp;
+            copy->_depthClipMode = renderCommand->_depthClipMode;
+            copy->_cullMode = renderCommand->_cullMode;
+            copy->_frontFacingWinding = renderCommand->_frontFacingWinding;
+            copy->_triangleFillMode = renderCommand->_triangleFillMode;
+            copy->_hasFragmentBuffer = renderCommand->_hasFragmentBuffer;
+            copy->_hasDepthStencilState = renderCommand->_hasDepthStencilState;
+            copy->_hasDepthBias = renderCommand->_hasDepthBias;
+            copy->_hasDepthClipMode = renderCommand->_hasDepthClipMode;
+            copy->_hasCullMode = renderCommand->_hasCullMode;
+            copy->_hasFrontFacingWinding = renderCommand->_hasFrontFacingWinding;
+            copy->_hasTriangleFillMode = renderCommand->_hasTriangleFillMode;
             copy->_unsupportedCommand = renderCommand->_unsupportedCommand;
             _commands[destinationIndex + index] = copy;
         } else if ([command isKindOfClass:[ZPUIndirectComputeCommand class]]) {
@@ -7719,20 +7755,54 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     _baseVertex = 0;
     _hasDraw = NO;
     _hasIndexedDraw = NO;
+    _fragmentBuffer = nil;
+    _fragmentOffset = 0;
+    _depthStencilState = nil;
+    _depthBias = 0;
+    _slopeScale = 0;
+    _depthBiasClamp = 0;
+    _depthClipMode = MTLDepthClipModeClip;
+    _cullMode = MTLCullModeNone;
+    _frontFacingWinding = MTLWindingClockwise;
+    _triangleFillMode = MTLTriangleFillModeFill;
+    _hasFragmentBuffer = NO;
+    _hasDepthStencilState = NO;
+    _hasDepthBias = NO;
+    _hasDepthClipMode = NO;
+    _hasCullMode = NO;
+    _hasFrontFacingWinding = NO;
+    _hasTriangleFillMode = NO;
     _unsupportedCommand = NO;
 }
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)pipelineState {
-    if (pipelineState != nil) _pipelineState = pipelineState;
+    if (pipelineState == nil) return;
+    ZPURenderPipelineState *state = (ZPURenderPipelineState *)pipelineState;
+    if (![state isKindOfClass:[ZPURenderPipelineState class]] || state->_owner != _owner->_owner) {
+        _unsupportedCommand = YES;
+        return;
+    }
+    _pipelineState = state;
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
-    if (index != 0 || ![(id)buffer isKindOfClass:[ZPUBuffer class]]) return;
-    _vertexBuffer = (ZPUBuffer *)buffer;
+    ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
+    if (index != 0 || ![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
+        zpuBuffer->_owner != _owner->_owner || offset > zpuBuffer.length) {
+        _unsupportedCommand = YES;
+        return;
+    }
+    _vertexBuffer = zpuBuffer;
     _vertexOffset = offset;
 }
 - (void)setFragmentBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
-    (void)buffer;
-    (void)offset;
-    (void)index;
+    ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
+    if (index != 0 || (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
+                                         zpuBuffer->_owner != _owner->_owner || offset > zpuBuffer.length))) {
+        _unsupportedCommand = YES;
+        return;
+    }
+    _fragmentBuffer = zpuBuffer;
+    _fragmentOffset = offset;
+    _hasFragmentBuffer = YES;
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0)) {
     (void)stride;
@@ -7804,30 +7874,51 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     _unsupportedCommand = YES;
 }
 - (void)setDepthStencilState:(id<MTLDepthStencilState>)depthStencilState API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)depthStencilState;
-    _unsupportedCommand = YES;
+    ZPUDepthStencilState *state = (ZPUDepthStencilState *)depthStencilState;
+    if (depthStencilState != nil && (![state isKindOfClass:[ZPUDepthStencilState class]] || state->_owner != _owner->_owner)) {
+        _unsupportedCommand = YES;
+        return;
+    }
+    _depthStencilState = state;
+    _hasDepthStencilState = YES;
 }
 - (void)setDepthBias:(float)depthBias slopeScale:(float)slopeScale clamp:(float)clamp API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)depthBias;
-    (void)slopeScale;
-    (void)clamp;
-    _unsupportedCommand = YES;
+    _depthBias = depthBias;
+    _slopeScale = slopeScale;
+    _depthBiasClamp = clamp;
+    _hasDepthBias = YES;
 }
 - (void)setDepthClipMode:(MTLDepthClipMode)depthClipMode API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)depthClipMode;
-    _unsupportedCommand = YES;
+    if (depthClipMode != MTLDepthClipModeClip && depthClipMode != MTLDepthClipModeClamp) {
+        _unsupportedCommand = YES;
+        return;
+    }
+    _depthClipMode = depthClipMode;
+    _hasDepthClipMode = YES;
 }
 - (void)setCullMode:(MTLCullMode)cullMode API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)cullMode;
-    _unsupportedCommand = YES;
+    if (cullMode > MTLCullModeBack) {
+        _unsupportedCommand = YES;
+        return;
+    }
+    _cullMode = cullMode;
+    _hasCullMode = YES;
 }
 - (void)setFrontFacingWinding:(MTLWinding)frontFacingWinding API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)frontFacingWinding;
-    _unsupportedCommand = YES;
+    if (frontFacingWinding != MTLWindingClockwise && frontFacingWinding != MTLWindingCounterClockwise) {
+        _unsupportedCommand = YES;
+        return;
+    }
+    _frontFacingWinding = frontFacingWinding;
+    _hasFrontFacingWinding = YES;
 }
 - (void)setTriangleFillMode:(MTLTriangleFillMode)fillMode API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)fillMode;
-    _unsupportedCommand = YES;
+    if (fillMode != MTLTriangleFillModeFill && fillMode != MTLTriangleFillModeLines) {
+        _unsupportedCommand = YES;
+        return;
+    }
+    _triangleFillMode = fillMode;
+    _hasTriangleFillMode = YES;
 }
 - (void)setBarrier API_AVAILABLE(macos(14.0), ios(17.0), tvos(18.1), visionos(2.1)) {}
 - (void)clearBarrier API_AVAILABLE(macos(14.0), ios(17.0), tvos(18.1), visionos(2.1)) {}
@@ -7838,6 +7929,13 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     }
     if (_pipelineState != nil) [encoder setRenderPipelineState:(id<MTLRenderPipelineState>)_pipelineState];
     if (_vertexBuffer != nil) [encoder setVertexBuffer:(id<MTLBuffer>)_vertexBuffer offset:_vertexOffset atIndex:0];
+    if (_hasFragmentBuffer) [encoder setFragmentBuffer:(id<MTLBuffer>)_fragmentBuffer offset:_fragmentOffset atIndex:0];
+    if (_hasDepthStencilState) [encoder setDepthStencilState:(id<MTLDepthStencilState>)_depthStencilState];
+    if (_hasDepthBias) [encoder setDepthBias:_depthBias slopeScale:_slopeScale clamp:_depthBiasClamp];
+    if (_hasDepthClipMode) [encoder setDepthClipMode:_depthClipMode];
+    if (_hasCullMode) [encoder setCullMode:_cullMode];
+    if (_hasFrontFacingWinding) [encoder setFrontFacingWinding:_frontFacingWinding];
+    if (_hasTriangleFillMode) [encoder setTriangleFillMode:_triangleFillMode];
     if (_hasDraw) {
         [encoder drawPrimitives:_primitiveType vertexStart:_vertexStart vertexCount:_vertexCount
                     instanceCount:_instanceCount baseInstance:_baseInstance];

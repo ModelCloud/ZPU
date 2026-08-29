@@ -94,6 +94,8 @@ triangle path:
 - ordered render, parallel-render, and blit encoders, command-buffer status,
   buffer copies/fills, texture transfers, indexed and indirect draws, render
   indirect command buffers (including CPU blit-copy of encoded commands),
+  including CPU replay of fragment-buffer bindings and Metal 4 fixed-function
+  indirect render state when the corresponding SDK/runtime selectors are used,
   texture views, level-aware mipmap generation/copies, ordered MTLFence
   update/wait commands, and CPU-owned visibility result buffers with aligned
   boolean/counting modes plus reset/accumulate behavior

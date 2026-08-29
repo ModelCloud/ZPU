@@ -5730,6 +5730,115 @@ int main(void) {
             }
         }
 
+        /* Metal 4 adds fixed-function state and fragment-buffer bindings to
+         * indirect render commands. Record those fields in each CPU-owned
+         * command and compare replay against Apple's native ICB. */
+        MTLIndirectCommandBufferDescriptor *state_icb_descriptor = [MTLIndirectCommandBufferDescriptor new];
+        state_icb_descriptor.commandTypes = MTLIndirectCommandTypeDraw;
+        state_icb_descriptor.inheritPipelineState = NO;
+        state_icb_descriptor.inheritBuffers = NO;
+        state_icb_descriptor.maxVertexBufferBindCount = 1;
+        state_icb_descriptor.maxFragmentBufferBindCount = 1;
+        id<MTLIndirectCommandBuffer> metal_state_icb =
+            [device newIndirectCommandBufferWithDescriptor:state_icb_descriptor
+                                           maxCommandCount:1
+                                                   options:MTLResourceStorageModeShared];
+        id<MTLIndirectRenderCommand> metal_state_icb_command =
+            [metal_state_icb indirectRenderCommandAtIndex:0];
+        [metal_state_icb_command setRenderPipelineState:native_uniform_pipeline];
+        [metal_state_icb_command setVertexBuffer:vertex_buffer offset:0 atIndex:0];
+        [metal_state_icb_command setFragmentBuffer:native_uniform_buffer offset:8 atIndex:0];
+        BOOL native_indirect_state_supported = YES;
+        @try {
+            [metal_state_icb_command setDepthBias:0.0f slopeScale:0.0f clamp:0.0f];
+            [metal_state_icb_command setDepthClipMode:MTLDepthClipModeClip];
+            [metal_state_icb_command setCullMode:MTLCullModeNone];
+            [metal_state_icb_command setFrontFacingWinding:MTLWindingClockwise];
+            [metal_state_icb_command setTriangleFillMode:MTLTriangleFillModeLines];
+        } @catch (NSException *exception) {
+            (void)exception;
+            native_indirect_state_supported = NO;
+        }
+        [metal_state_icb_command drawPrimitives:MTLPrimitiveTypeTriangle
+                                     vertexStart:0 vertexCount:6 instanceCount:1 baseInstance:0];
+        id<MTLTexture> metal_state_icb_texture = [device newTextureWithDescriptor:texture_descriptor];
+        MTLRenderPassDescriptor *metal_state_icb_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        metal_state_icb_pass.colorAttachments[0].texture = metal_state_icb_texture;
+        metal_state_icb_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        metal_state_icb_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        metal_state_icb_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> metal_state_icb_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> metal_state_icb_encoder =
+            [metal_state_icb_command_buffer renderCommandEncoderWithDescriptor:metal_state_icb_pass];
+        [metal_state_icb_encoder executeCommandsInBuffer:metal_state_icb withRange:NSMakeRange(0, 1)];
+        [metal_state_icb_encoder endEncoding];
+        [metal_state_icb_command_buffer commit];
+        [metal_state_icb_command_buffer waitUntilCompleted];
+        uint8_t metal_state_icb_pixels[byte_count];
+        [metal_state_icb_texture getBytes:metal_state_icb_pixels
+                              bytesPerRow:(NSUInteger)width * 4
+                               fromRegion:MTLRegionMake2D(0, 0, width, height)
+                              mipmapLevel:0];
+
+        id<MTLIndirectCommandBuffer> adapter_state_icb =
+            [adapter_device newIndirectCommandBufferWithDescriptor:state_icb_descriptor
+                                                    maxCommandCount:1
+                                                            options:MTLResourceStorageModeShared];
+        id<MTLIndirectRenderCommand> adapter_state_icb_command =
+            [adapter_state_icb indirectRenderCommandAtIndex:0];
+        [adapter_state_icb_command setRenderPipelineState:adapter_uniform_pipeline];
+        [adapter_state_icb_command setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_state_icb_command setFragmentBuffer:adapter_uniform_buffer offset:8 atIndex:0];
+        [adapter_state_icb_command setDepthBias:0.0f slopeScale:0.0f clamp:0.0f];
+        [adapter_state_icb_command setDepthClipMode:MTLDepthClipModeClip];
+        [adapter_state_icb_command setCullMode:MTLCullModeNone];
+        [adapter_state_icb_command setFrontFacingWinding:MTLWindingClockwise];
+        [adapter_state_icb_command setTriangleFillMode:MTLTriangleFillModeLines];
+        [adapter_state_icb_command drawPrimitives:MTLPrimitiveTypeTriangle
+                                       vertexStart:0 vertexCount:6 instanceCount:1 baseInstance:0];
+        id<MTLTexture> adapter_state_icb_texture = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTLRenderPassDescriptor *adapter_state_icb_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_state_icb_pass.colorAttachments[0].texture = adapter_state_icb_texture;
+        adapter_state_icb_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_state_icb_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_state_icb_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> adapter_state_icb_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_state_icb_encoder =
+            [adapter_state_icb_command_buffer renderCommandEncoderWithDescriptor:adapter_state_icb_pass];
+        [adapter_state_icb_encoder executeCommandsInBuffer:adapter_state_icb withRange:NSMakeRange(0, 1)];
+        [adapter_state_icb_encoder endEncoding];
+        [adapter_state_icb_command_buffer commit];
+        [adapter_state_icb_command_buffer waitUntilCompleted];
+        uint8_t adapter_state_icb_pixels[byte_count];
+        [adapter_state_icb_texture getBytes:adapter_state_icb_pixels
+                                bytesPerRow:(NSUInteger)width * 4
+                                 fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                mipmapLevel:0];
+        if (native_indirect_state_supported &&
+            (metal_state_icb == nil || metal_state_icb_command == nil ||
+            metal_state_icb_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_state_icb == nil || adapter_state_icb_command == nil ||
+            adapter_state_icb_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(metal_state_icb_pixels, adapter_state_icb_pixels, byte_count) != 0)) {
+            size_t mismatch = 0;
+            while (mismatch < byte_count && metal_state_icb_pixels[mismatch] == adapter_state_icb_pixels[mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: indirect render state mismatch (native=%lu adapter=%lu mismatch=%zu nativeByte=%u adapterByte=%u)\n",
+                    (unsigned long)metal_state_icb_command_buffer.status,
+                    (unsigned long)adapter_state_icb_command_buffer.status,
+                    mismatch,
+                    mismatch < byte_count ? metal_state_icb_pixels[mismatch] : 0,
+                    mismatch < byte_count ? adapter_state_icb_pixels[mismatch] : 0);
+            fail_with_error("native indirect render state error", metal_state_icb_command_buffer.error);
+            fail_with_error("adapter indirect render state error", adapter_state_icb_command_buffer.error);
+            return 126;
+        }
+        if (!native_indirect_state_supported &&
+            (adapter_state_icb == nil || adapter_state_icb_command == nil ||
+             adapter_state_icb_command_buffer.status != MTLCommandBufferStatusCompleted)) {
+            fail_with_error("adapter indirect render state fallback error", adapter_state_icb_command_buffer.error);
+            return 127;
+        }
+
         /* Blit-copy an encoded render command entirely within the CPU-owned
          * ICB representation, then execute the copy through the same ZPU
          * render path. The native ICB above remains the byte oracle. */
