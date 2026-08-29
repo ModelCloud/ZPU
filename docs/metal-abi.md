@@ -131,6 +131,10 @@ triangle path:
   commit time; inline `setVertexBytes` data remains an encode-time snapshot,
   and filled-geometry oracles avoid conflating point raster coordinates with
   resource visibility
+- direct and indexed indirect render draws read their ZPU argument buffers at
+  commit time, including `vertexStart`, `instanceCount`, `indexStart`, and
+  signed `baseVertex`; indexed `indexStart` is converted from elements to
+  bytes using the bound index type
 - Metal 4 indirect thread dispatch arguments (grid and threadgroup dimensions)
   are also read from the ZPU buffer at commit time, rather than when the
   encoder records the call

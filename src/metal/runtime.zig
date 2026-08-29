@@ -161,6 +161,8 @@ const DrawCommand = struct {
     index_buffer_offset: usize = 0,
     index_type: abi.IndexType = .uint16,
     base_vertex: i64 = 0,
+    indirect_buffer: ?*Buffer = null,
+    indirect_buffer_offset: usize = 0,
     fragment_uniform_enabled: bool = false,
     fragment_uniform_buffer: ?*Buffer = null,
     fragment_uniform_buffer_offset: usize = 0,
@@ -322,7 +324,7 @@ pub const CommandBuffer = struct {
     fn resolveDrawVertices(self: *CommandBuffer, draw: DrawCommand, owned: *?[]abi.Vertex) Error![]const abi.Vertex {
         const source = if (draw.vertex_buffer) |buffer|
             try bufferVertices(buffer, draw.vertex_buffer_offset)
-        else if (draw.index_buffer != null) blk: {
+        else if (draw.vertex_source_count != 0 or draw.index_buffer != null) blk: {
             if (draw.vertex_start > self.vertices.items.len or
                 draw.vertex_source_count > self.vertices.items.len - draw.vertex_start)
                 return error.InvalidCommand;
@@ -354,6 +356,26 @@ pub const CommandBuffer = struct {
         }
         if (draw.vertex_start > source.len or draw.vertex_count > source.len - draw.vertex_start) return error.InvalidCommand;
         return source[draw.vertex_start .. draw.vertex_start + draw.vertex_count];
+    }
+
+    fn resolveIndirectDraw(self: *CommandBuffer, draw: *DrawCommand) Error!usize {
+        const indirect_buffer = draw.indirect_buffer orelse return 1;
+        if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.queue.device) return error.InvalidResource;
+        const indexed = draw.index_buffer != null;
+        const argument_size: usize = if (indexed) 20 else 16;
+        if (!rangeValid(indirect_buffer.bytes.len, draw.indirect_buffer_offset, argument_size)) return error.InvalidArgument;
+        const offset = draw.indirect_buffer_offset;
+        const instance_count = readU32Little(indirect_buffer.bytes, offset + 4);
+        draw.vertex_count = readU32Little(indirect_buffer.bytes, offset);
+        draw.vertex_start = readU32Little(indirect_buffer.bytes, offset + 8);
+        if (indexed) {
+            const index_size: usize = if (draw.index_type == .uint16) 2 else 4;
+            const index_start_bytes = std.math.mul(usize, @as(usize, readU32Little(indirect_buffer.bytes, offset + 8)), index_size) catch return error.InvalidArgument;
+            draw.index_buffer_offset = std.math.add(usize, draw.index_buffer_offset, index_start_bytes) catch return error.InvalidArgument;
+            draw.base_vertex = @as(i64, @intCast(@as(i32, @bitCast(readU32Little(indirect_buffer.bytes, offset + 12)))));
+            draw.vertex_start = 0;
+        }
+        return instance_count;
     }
 
     pub fn commit(self: *CommandBuffer) Error!void {
@@ -406,16 +428,19 @@ pub const CommandBuffer = struct {
             .draw => |draw| {
                 const target_handle = active_target orelse return self.fail(error.InvalidCommand);
                 if (!validTexture(target_handle)) return self.fail(error.InvalidResource);
+                var resolved_draw = draw;
+                const instance_count = self.resolveIndirectDraw(&resolved_draw) catch |err| return self.fail(err);
+                if (instance_count == 0 or resolved_draw.vertex_count == 0) continue;
                 var owned_vertices: ?[]abi.Vertex = null;
-                const draw_vertices = self.resolveDrawVertices(draw, &owned_vertices) catch |err| return self.fail(err);
+                const draw_vertices = self.resolveDrawVertices(resolved_draw, &owned_vertices) catch |err| return self.fail(err);
                 defer if (owned_vertices) |vertices| allocator.free(vertices);
-                var draw_options = draw.options;
-                if (draw.fragment_uniform_enabled) {
-                    if (draw.fragment_uniform_buffer) |buffer| {
+                var draw_options = resolved_draw.options;
+                if (resolved_draw.fragment_uniform_enabled) {
+                    if (resolved_draw.fragment_uniform_buffer) |buffer| {
                         if (!validBuffer(buffer) or buffer.device != self.queue.device or
-                            !rangeValid(buffer.bytes.len, draw.fragment_uniform_buffer_offset, @sizeOf(abi.Color)))
+                            !rangeValid(buffer.bytes.len, resolved_draw.fragment_uniform_buffer_offset, @sizeOf(abi.Color)))
                             return self.fail(error.InvalidArgument);
-                        const raw = buffer.bytes[draw.fragment_uniform_buffer_offset .. draw.fragment_uniform_buffer_offset + @sizeOf(abi.Color)];
+                        const raw = buffer.bytes[resolved_draw.fragment_uniform_buffer_offset .. resolved_draw.fragment_uniform_buffer_offset + @sizeOf(abi.Color)];
                         var color: [4]f32 = undefined;
                         for (0..4) |channel| {
                             color[channel] = @bitCast(std.mem.readInt(u32, raw[channel * @sizeOf(f32) ..][0..@sizeOf(f32)], .little));
@@ -444,36 +469,39 @@ pub const CommandBuffer = struct {
                         extra_count += 1;
                     }
                 }
-                const stats = raster3d.drawWithTargets(
-                    @constCast(&target),
-                    extra_targets[0..extra_count],
-                    sample_target,
-                    active_depth,
-                    active_stencil,
-                    draw_vertices,
-                    draw.primitive,
-                    draw_options,
-                );
-                if (draw.visibility_mode != .disabled) {
-                    const visibility_buffer = draw.visibility_buffer orelse return self.fail(error.InvalidResource);
+                var stats: raster3d.Stats = .{};
+                for (0..instance_count) |_| {
+                    stats = addRasterStats(stats, raster3d.drawWithTargets(
+                        @constCast(&target),
+                        extra_targets[0..extra_count],
+                        sample_target,
+                        active_depth,
+                        active_stencil,
+                        draw_vertices,
+                        resolved_draw.primitive,
+                        draw_options,
+                    ));
+                }
+                if (resolved_draw.visibility_mode != .disabled) {
+                    const visibility_buffer = resolved_draw.visibility_buffer orelse return self.fail(error.InvalidResource);
                     if (!validBuffer(visibility_buffer) or visibility_buffer.device != self.queue.device or
-                        !rangeValid(visibility_buffer.bytes.len, draw.visibility_offset, @sizeOf(u64)))
+                        !rangeValid(visibility_buffer.bytes.len, resolved_draw.visibility_offset, @sizeOf(u64)))
                     {
                         return self.fail(error.InvalidArgument);
                     }
-                    if (draw.visibility_result_type == .reset and
-                        !visibilitySlotSeen(reset_visibility_slots.items, visibility_buffer, draw.visibility_offset))
+                    if (resolved_draw.visibility_result_type == .reset and
+                        !visibilitySlotSeen(reset_visibility_slots.items, visibility_buffer, resolved_draw.visibility_offset))
                     {
-                        writeU64Little(visibility_buffer.bytes, draw.visibility_offset, 0);
-                        reset_visibility_slots.append(allocator, .{ .buffer = visibility_buffer, .offset = draw.visibility_offset }) catch return self.fail(error.OutOfMemory);
+                        writeU64Little(visibility_buffer.bytes, resolved_draw.visibility_offset, 0);
+                        reset_visibility_slots.append(allocator, .{ .buffer = visibility_buffer, .offset = resolved_draw.visibility_offset }) catch return self.fail(error.OutOfMemory);
                     }
-                    const previous = readU64Little(visibility_buffer.bytes, draw.visibility_offset);
-                    const result = switch (draw.visibility_mode) {
+                    const previous = readU64Little(visibility_buffer.bytes, resolved_draw.visibility_offset);
+                    const result = switch (resolved_draw.visibility_mode) {
                         .disabled => unreachable,
                         .boolean => @max(previous, if (stats.fragments_covered != 0) @as(u64, 1) else 0),
                         .counting => previous +| stats.fragments_covered,
                     };
-                    writeU64Little(visibility_buffer.bytes, draw.visibility_offset, result);
+                    writeU64Little(visibility_buffer.bytes, resolved_draw.visibility_offset, result);
                 }
             },
             .copy_buffer => |copy| {
@@ -1105,10 +1133,28 @@ pub const RenderEncoder = struct {
     pub fn drawPrimitivesIndirect(self: *RenderEncoder, primitive: abi.PrimitiveType, indirect_buffer: *Buffer, indirect_buffer_offset: usize) Error!void {
         if (!self.open() or !validPrimitive(primitive) or !validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device) return error.InvalidArgument;
         if (indirect_buffer_offset % @alignOf(u32) != 0 or !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, 16)) return error.InvalidArgument;
-        const vertex_count = readU32Little(indirect_buffer.bytes, indirect_buffer_offset);
-        const instance_count = readU32Little(indirect_buffer.bytes, indirect_buffer_offset + 4);
-        const vertex_start = readU32Little(indirect_buffer.bytes, indirect_buffer_offset + 8);
-        try self.drawPrimitives(primitive, vertex_start, vertex_count, instance_count);
+        const source = try self.sourceVertices();
+        const bound_buffer = self.vertex_buffer;
+        const vertex_start = if (bound_buffer == null) try self.command_buffer.appendVertices(source) else 0;
+        _ = try self.command_buffer.append(.{ .draw = .{
+            .vertex_start = vertex_start,
+            .vertex_count = 0,
+            .primitive = primitive,
+            .options = self.options(),
+            .vertex_buffer = bound_buffer,
+            .vertex_buffer_offset = self.vertex_offset,
+            .vertex_source_count = if (bound_buffer == null) source.len else 0,
+            .indirect_buffer = indirect_buffer,
+            .indirect_buffer_offset = indirect_buffer_offset,
+            .fragment_uniform_enabled = self.fragment_uniform_enabled,
+            .fragment_uniform_buffer = self.fragment_uniform_buffer,
+            .fragment_uniform_buffer_offset = self.fragment_uniform_buffer_offset,
+            .sample_texture = if (self.sample_texture) self.fragment_texture else null,
+            .visibility_buffer = self.visibility_buffer,
+            .visibility_mode = self.visibility_mode,
+            .visibility_offset = self.visibility_offset,
+            .visibility_result_type = self.visibility_result_type,
+        } });
     }
 
     pub fn drawIndexedPrimitives(self: *RenderEncoder, primitive: abi.PrimitiveType, index_count: usize, index_type: abi.IndexType, index_buffer: *Buffer, index_buffer_offset: usize, instance_count: usize) Error!void {
@@ -1156,12 +1202,31 @@ pub const RenderEncoder = struct {
         if (!self.open() or !validPrimitive(primitive) or !validIndexType(index_type) or !validBuffer(index_buffer) or !validBuffer(indirect_buffer)) return error.InvalidArgument;
         if (index_buffer.device != self.command_buffer.queue.device or indirect_buffer.device != self.command_buffer.queue.device) return error.InvalidArgument;
         if (indirect_buffer_offset % @alignOf(u32) != 0 or !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, 20)) return error.InvalidArgument;
-        const index_count = readU32Little(indirect_buffer.bytes, indirect_buffer_offset);
-        const instance_count = readU32Little(indirect_buffer.bytes, indirect_buffer_offset + 4);
-        const index_start = readU32Little(indirect_buffer.bytes, indirect_buffer_offset + 8);
-        const base_vertex = @as(i64, @intCast(@as(i32, @bitCast(readU32Little(indirect_buffer.bytes, indirect_buffer_offset + 12)))));
-        const index_size: usize = if (index_type == .uint16) 2 else 4;
-        try self.drawIndexedPrimitivesWithBaseVertex(primitive, index_count, index_type, index_buffer, index_buffer_offset + @as(usize, index_start) * index_size, instance_count, base_vertex);
+        const source = try self.sourceVertices();
+        const bound_buffer = self.vertex_buffer;
+        const vertex_start = if (bound_buffer == null) try self.command_buffer.appendVertices(source) else 0;
+        _ = try self.command_buffer.append(.{ .draw = .{
+            .vertex_start = vertex_start,
+            .vertex_count = 0,
+            .primitive = primitive,
+            .options = self.options(),
+            .vertex_buffer = bound_buffer,
+            .vertex_buffer_offset = self.vertex_offset,
+            .vertex_source_count = if (bound_buffer == null) source.len else 0,
+            .index_buffer = index_buffer,
+            .index_buffer_offset = index_buffer_offset,
+            .index_type = index_type,
+            .indirect_buffer = indirect_buffer,
+            .indirect_buffer_offset = indirect_buffer_offset,
+            .fragment_uniform_enabled = self.fragment_uniform_enabled,
+            .fragment_uniform_buffer = self.fragment_uniform_buffer,
+            .fragment_uniform_buffer_offset = self.fragment_uniform_buffer_offset,
+            .sample_texture = if (self.sample_texture) self.fragment_texture else null,
+            .visibility_buffer = self.visibility_buffer,
+            .visibility_mode = self.visibility_mode,
+            .visibility_offset = self.visibility_offset,
+            .visibility_result_type = self.visibility_result_type,
+        } });
     }
 
     pub fn endEncoding(self: *RenderEncoder) Error!void {
@@ -1991,6 +2056,17 @@ fn bufferVertices(buffer: *Buffer, offset: usize) Error![]const abi.Vertex {
     if (raw.len % @sizeOf(abi.Vertex) != 0 or @intFromPtr(raw.ptr) % @alignOf(abi.Vertex) != 0) return error.InvalidArgument;
     const pointer: [*]const abi.Vertex = @ptrCast(@alignCast(raw.ptr));
     return pointer[0 .. raw.len / @sizeOf(abi.Vertex)];
+}
+
+fn addRasterStats(a: raster3d.Stats, b: raster3d.Stats) raster3d.Stats {
+    return .{
+        .primitives_submitted = a.primitives_submitted + b.primitives_submitted,
+        .primitives_rasterized = a.primitives_rasterized + b.primitives_rasterized,
+        .fragments_tested = a.fragments_tested + b.fragments_tested,
+        .fragments_covered = a.fragments_covered + b.fragments_covered,
+        .depth_tests_passed = a.depth_tests_passed + b.depth_tests_passed,
+        .color_writes = a.color_writes + b.color_writes,
+    };
 }
 
 fn copyBufferToTexture(command: BufferTextureCommand) Error!void {
@@ -2930,6 +3006,65 @@ test "CPU indexed draws read the index buffer at commit" {
     try bufferWrite(index_buffer, 0, @ptrCast(&updated_indices), @sizeOf(@TypeOf(updated_indices)));
     try command_buffer.commit();
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, texture.bytes[40..44]);
+}
+
+test "CPU indirect render arguments read at commit" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -0.5, -0.5, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 0.5, -0.5, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 0.5, 0.5, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -0.5, -0.5, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 0.5, 0.5, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -0.5, 0.5, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -0.5, -0.5, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .{ .position = .{ 0.5, -0.5, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .{ .position = .{ 0.5, 0.5, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .{ .position = .{ -0.5, -0.5, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .{ .position = .{ 0.5, 0.5, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .{ .position = .{ -0.5, 0.5, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+    };
+    const initial_direct_arguments = [_]u32{ 6, 1, 0, 0 };
+    const updated_direct_arguments = [_]u32{ 6, 1, 6, 0 };
+    const vertex_buffer = try createBuffer(device, @sizeOf(@TypeOf(vertices)), @ptrCast(&vertices));
+    defer destroyBuffer(vertex_buffer);
+    const direct_arguments = try createBuffer(device, @sizeOf(@TypeOf(initial_direct_arguments)), @ptrCast(&initial_direct_arguments));
+    defer destroyBuffer(direct_arguments);
+    const direct_texture = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(direct_texture);
+    var direct_command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(direct_command_buffer);
+    var direct_encoder = try beginRender(direct_command_buffer, direct_texture, .{ .color = .{ .load_action = .clear, .store_action = .store } });
+    try direct_encoder.setVertexBuffer(vertex_buffer, 0, 0);
+    try direct_encoder.drawPrimitivesIndirect(.triangle, direct_arguments, 0);
+    try direct_encoder.endEncoding();
+    destroyRenderEncoder(direct_encoder);
+    try bufferWrite(direct_arguments, 0, @ptrCast(&updated_direct_arguments), @sizeOf(@TypeOf(updated_direct_arguments)));
+    try direct_command_buffer.commit();
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, direct_texture.bytes[40..44]);
+
+    const indices = [_]u16{ 0, 1, 2, 0, 2, 3, 6, 7, 8, 6, 8, 11 };
+    const initial_indexed_arguments = [_]u32{ 6, 1, 0, 0, 0 };
+    const updated_indexed_arguments = [_]u32{ 6, 1, 6, 0, 0 };
+    const index_buffer = try createBuffer(device, @sizeOf(@TypeOf(indices)), @ptrCast(&indices));
+    defer destroyBuffer(index_buffer);
+    const indexed_arguments = try createBuffer(device, @sizeOf(@TypeOf(initial_indexed_arguments)), @ptrCast(&initial_indexed_arguments));
+    defer destroyBuffer(indexed_arguments);
+    const indexed_texture = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(indexed_texture);
+    var indexed_command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(indexed_command_buffer);
+    var indexed_encoder = try beginRender(indexed_command_buffer, indexed_texture, .{ .color = .{ .load_action = .clear, .store_action = .store } });
+    try indexed_encoder.setVertexBuffer(vertex_buffer, 0, 0);
+    try indexed_encoder.drawIndexedPrimitivesIndirect(.triangle, .uint16, index_buffer, 0, indexed_arguments, 0);
+    try indexed_encoder.endEncoding();
+    destroyRenderEncoder(indexed_encoder);
+    try bufferWrite(indexed_arguments, 0, @ptrCast(&updated_indexed_arguments), @sizeOf(@TypeOf(updated_indexed_arguments)));
+    try indexed_command_buffer.commit();
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, indexed_texture.bytes[40..44]);
 }
 
 test "depth texture attachment rejects farther fragments" {

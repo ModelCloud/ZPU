@@ -4939,6 +4939,161 @@ int main(void) {
             return 36;
         }
 
+        const zpu_metal_vertex deferred_indirect_vertices[] = {
+            {{x0, y0, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{x1, y0, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{x1, y1, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{x0, y0, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{x1, y1, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{x0, y1, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{x0, y0, 0.5f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+            {{x1, y0, 0.5f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+            {{x1, y1, 0.5f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+            {{x0, y0, 0.5f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+            {{x1, y1, 0.5f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+            {{x0, y1, 0.5f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+        };
+        const uint32_t deferred_initial_arguments[] = {6, 1, 0, 0};
+        const uint32_t deferred_updated_arguments[] = {6, 1, 6, 0};
+        id<MTLBuffer> native_deferred_vertex_buffer =
+            [device newBufferWithBytes:deferred_indirect_vertices length:sizeof(deferred_indirect_vertices)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_deferred_vertex_buffer =
+            [adapter_device newBufferWithBytes:deferred_indirect_vertices length:sizeof(deferred_indirect_vertices)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_deferred_arguments =
+            [device newBufferWithBytes:deferred_initial_arguments length:sizeof(deferred_initial_arguments)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_deferred_arguments =
+            [adapter_device newBufferWithBytes:deferred_initial_arguments length:sizeof(deferred_initial_arguments)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLTexture> native_deferred_output = [device newTextureWithDescriptor:texture_descriptor];
+        id<MTLTexture> adapter_deferred_output = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTLRenderPassDescriptor *native_deferred_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_deferred_pass.colorAttachments[0].texture = native_deferred_output;
+        native_deferred_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_deferred_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_deferred_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> native_deferred_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_deferred_encoder =
+            [native_deferred_command_buffer renderCommandEncoderWithDescriptor:native_deferred_pass];
+        [native_deferred_encoder setRenderPipelineState:pipeline];
+        [native_deferred_encoder setVertexBuffer:native_deferred_vertex_buffer offset:0 atIndex:0];
+        [native_deferred_encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                                  indirectBuffer:native_deferred_arguments indirectBufferOffset:0];
+        [native_deferred_encoder endEncoding];
+        MTLRenderPassDescriptor *adapter_deferred_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_deferred_pass.colorAttachments[0].texture = adapter_deferred_output;
+        adapter_deferred_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_deferred_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_deferred_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> adapter_deferred_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_deferred_encoder =
+            [adapter_deferred_command_buffer renderCommandEncoderWithDescriptor:adapter_deferred_pass];
+        [adapter_deferred_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_deferred_encoder setVertexBuffer:adapter_deferred_vertex_buffer offset:0 atIndex:0];
+        [adapter_deferred_encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                                    indirectBuffer:adapter_deferred_arguments indirectBufferOffset:0];
+        [adapter_deferred_encoder endEncoding];
+        memcpy(native_deferred_arguments.contents, deferred_updated_arguments, sizeof(deferred_updated_arguments));
+        memcpy(adapter_deferred_arguments.contents, deferred_updated_arguments, sizeof(deferred_updated_arguments));
+        [native_deferred_command_buffer commit];
+        [native_deferred_command_buffer waitUntilCompleted];
+        [adapter_deferred_command_buffer commit];
+        [adapter_deferred_command_buffer waitUntilCompleted];
+        uint8_t native_deferred_bytes[byte_count];
+        uint8_t adapter_deferred_bytes[byte_count];
+        [native_deferred_output getBytes:native_deferred_bytes bytesPerRow:(NSUInteger)width * 4
+                              fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_deferred_output getBytes:adapter_deferred_bytes bytesPerRow:(NSUInteger)width * 4
+                                fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (native_deferred_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_deferred_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_deferred_bytes, adapter_deferred_bytes, byte_count) != 0 ||
+            memcmp(native_deferred_bytes + (4 * (size_t)width + 4) * 4, (const uint8_t[]){0, 0, 255, 255}, 4) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < byte_count && native_deferred_bytes[mismatch] == adapter_deferred_bytes[mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: deferred render arguments mismatch (native=%lu adapter=%lu mismatch=%zu nativeByte=%u adapterByte=%u)\n",
+                    (unsigned long)native_deferred_command_buffer.status,
+                    (unsigned long)adapter_deferred_command_buffer.status,
+                    mismatch,
+                    mismatch < byte_count ? native_deferred_bytes[mismatch] : 0,
+                    mismatch < byte_count ? adapter_deferred_bytes[mismatch] : 0);
+            return 122;
+        }
+
+        const uint16_t deferred_index_values[] = {0, 1, 2, 0, 2, 3, 6, 7, 8, 6, 8, 11};
+        const uint32_t indexed_deferred_initial_arguments[] = {6, 1, 0, 0, 0};
+        const uint32_t indexed_deferred_updated_arguments[] = {6, 1, 6, 0, 0};
+        id<MTLBuffer> native_indexed_deferred_indices =
+            [device newBufferWithBytes:deferred_index_values length:sizeof(deferred_index_values)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_indexed_deferred_indices =
+            [adapter_device newBufferWithBytes:deferred_index_values length:sizeof(deferred_index_values)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_indexed_deferred_arguments =
+            [device newBufferWithBytes:indexed_deferred_initial_arguments length:sizeof(indexed_deferred_initial_arguments)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_indexed_deferred_arguments =
+            [adapter_device newBufferWithBytes:indexed_deferred_initial_arguments length:sizeof(indexed_deferred_initial_arguments)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLTexture> native_indexed_deferred_output = [device newTextureWithDescriptor:texture_descriptor];
+        id<MTLTexture> adapter_indexed_deferred_output = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTLRenderPassDescriptor *native_indexed_deferred_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_indexed_deferred_pass.colorAttachments[0].texture = native_indexed_deferred_output;
+        native_indexed_deferred_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_indexed_deferred_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_indexed_deferred_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> native_indexed_deferred_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_indexed_deferred_encoder =
+            [native_indexed_deferred_command_buffer renderCommandEncoderWithDescriptor:native_indexed_deferred_pass];
+        [native_indexed_deferred_encoder setRenderPipelineState:pipeline];
+        [native_indexed_deferred_encoder setVertexBuffer:native_deferred_vertex_buffer offset:0 atIndex:0];
+        [native_indexed_deferred_encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexType:MTLIndexTypeUInt16
+                                                  indexBuffer:native_indexed_deferred_indices indexBufferOffset:0
+                                                 indirectBuffer:native_indexed_deferred_arguments indirectBufferOffset:0];
+        [native_indexed_deferred_encoder endEncoding];
+        MTLRenderPassDescriptor *adapter_indexed_deferred_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_indexed_deferred_pass.colorAttachments[0].texture = adapter_indexed_deferred_output;
+        adapter_indexed_deferred_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_indexed_deferred_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_indexed_deferred_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> adapter_indexed_deferred_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_indexed_deferred_encoder =
+            [adapter_indexed_deferred_command_buffer renderCommandEncoderWithDescriptor:adapter_indexed_deferred_pass];
+        [adapter_indexed_deferred_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_indexed_deferred_encoder setVertexBuffer:adapter_deferred_vertex_buffer offset:0 atIndex:0];
+        [adapter_indexed_deferred_encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexType:MTLIndexTypeUInt16
+                                                   indexBuffer:adapter_indexed_deferred_indices indexBufferOffset:0
+                                                  indirectBuffer:adapter_indexed_deferred_arguments indirectBufferOffset:0];
+        [adapter_indexed_deferred_encoder endEncoding];
+        memcpy(native_indexed_deferred_arguments.contents, indexed_deferred_updated_arguments, sizeof(indexed_deferred_updated_arguments));
+        memcpy(adapter_indexed_deferred_arguments.contents, indexed_deferred_updated_arguments, sizeof(indexed_deferred_updated_arguments));
+        [native_indexed_deferred_command_buffer commit];
+        [native_indexed_deferred_command_buffer waitUntilCompleted];
+        [adapter_indexed_deferred_command_buffer commit];
+        [adapter_indexed_deferred_command_buffer waitUntilCompleted];
+        uint8_t native_indexed_deferred_bytes[byte_count];
+        uint8_t adapter_indexed_deferred_bytes[byte_count];
+        [native_indexed_deferred_output getBytes:native_indexed_deferred_bytes bytesPerRow:(NSUInteger)width * 4
+                                      fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_indexed_deferred_output getBytes:adapter_indexed_deferred_bytes bytesPerRow:(NSUInteger)width * 4
+                                        fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (native_indexed_deferred_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_indexed_deferred_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_indexed_deferred_bytes, adapter_indexed_deferred_bytes, byte_count) != 0 ||
+            memcmp(native_indexed_deferred_bytes + (4 * (size_t)width + 4) * 4, (const uint8_t[]){0, 0, 255, 255}, 4) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < byte_count && native_indexed_deferred_bytes[mismatch] == adapter_indexed_deferred_bytes[mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: deferred indexed render arguments mismatch (native=%lu adapter=%lu mismatch=%zu nativeByte=%u adapterByte=%u)\n",
+                    (unsigned long)native_indexed_deferred_command_buffer.status,
+                    (unsigned long)adapter_indexed_deferred_command_buffer.status,
+                    mismatch,
+                    mismatch < byte_count ? native_indexed_deferred_bytes[mismatch] : 0,
+                    mismatch < byte_count ? adapter_indexed_deferred_bytes[mismatch] : 0);
+            return 123;
+        }
+
         /* Indirect command buffers must preserve the same draw state and
          * vertex data as a directly encoded draw. Compare Apple's native ICB
          * execution with the explicit ZPU adapter byte-for-byte. */
@@ -5755,7 +5910,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, uniform fragment bytes/buffers, deferred vertex/index buffers, visibility results, legacy/Metal 4 counters, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, visibility results, legacy/Metal 4 counters, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }
