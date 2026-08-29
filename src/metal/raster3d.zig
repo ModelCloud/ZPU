@@ -25,6 +25,7 @@ const ProjectedVertex = struct {
     x: f32,
     y: f32,
     z: f32,
+    inverse_w: f32,
     color: [4]f32,
 };
 
@@ -291,8 +292,33 @@ fn project(vertex: abi.Vertex, viewport: abi.Viewport) ?ProjectedVertex {
         // with increasing Y down the image.
         .y = viewport.origin_y + (0.5 - ny * 0.5) * viewport.height,
         .z = viewport.znear + nz * (viewport.zfar - viewport.znear),
+        .inverse_w = inverse_w,
         .color = .{ vertex.color.red, vertex.color.green, vertex.color.blue, vertex.color.alpha },
     };
+}
+
+fn interpolateLineColor(a: ProjectedVertex, b: ProjectedVertex, t: f32) [4]f32 {
+    const weight_a = 1 - t;
+    const weight_b = t;
+    const denominator = a.inverse_w * weight_a + b.inverse_w * weight_b;
+    if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) return .{ 0, 0, 0, 1 };
+    var color: [4]f32 = undefined;
+    for (0..4) |channel| {
+        color[channel] = (a.color[channel] * a.inverse_w * weight_a + b.color[channel] * b.inverse_w * weight_b) / denominator;
+    }
+    return color;
+}
+
+fn interpolateTriangleColor(vertices: [3]ProjectedVertex, w0: f32, w1: f32, w2: f32) [4]f32 {
+    const denominator = vertices[0].inverse_w * w0 + vertices[1].inverse_w * w1 + vertices[2].inverse_w * w2;
+    if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) return .{ 0, 0, 0, 1 };
+    var color: [4]f32 = undefined;
+    for (0..4) |channel| {
+        color[channel] = (vertices[0].color[channel] * vertices[0].inverse_w * w0 +
+            vertices[1].color[channel] * vertices[1].inverse_w * w1 +
+            vertices[2].color[channel] * vertices[2].inverse_w * w2) / denominator;
+    }
+    return color;
 }
 
 fn edge(a: ProjectedVertex, b: ProjectedVertex, x: f32, y: f32) f32 {
@@ -494,12 +520,7 @@ fn drawLine(job: *Job, a: ProjectedVertex, b: ProjectedVertex, y0: usize, y1: us
         const x = pixelCoordinate(x_value, bounds.x1) orelse continue;
         const y = pixelCoordinate(y_value, bounds.y1) orelse continue;
         if (x < bounds.x0 or y < @max(bounds.y0, y0) or y >= @min(bounds.y1, y1)) continue;
-        writePixel(job, x, y, a.z + (b.z - a.z) * t, depth_adjust, .{
-            a.color[0] + (b.color[0] - a.color[0]) * t,
-            a.color[1] + (b.color[1] - a.color[1]) * t,
-            a.color[2] + (b.color[2] - a.color[2]) * t,
-            a.color[3] + (b.color[3] - a.color[3]) * t,
-        }, stats, true);
+        writePixel(job, x, y, a.z + (b.z - a.z) * t, depth_adjust, interpolateLineColor(a, b, t), stats, true);
     }
 }
 
@@ -548,12 +569,8 @@ fn drawTriangle(job: *Job, input: [3]ProjectedVertex, y0: usize, y1: usize, stat
             if (outsideTopLeft(w0, vertices[1], vertices[2]) or
                 outsideTopLeft(w1, vertices[2], vertices[0]) or
                 outsideTopLeft(w2, vertices[0], vertices[1])) continue;
-            writePixel(job, x, y, vertices[0].z * w0 + vertices[1].z * w1 + vertices[2].z * w2, depth_adjust, .{
-                vertices[0].color[0] * w0 + vertices[1].color[0] * w1 + vertices[2].color[0] * w2,
-                vertices[0].color[1] * w0 + vertices[1].color[1] * w1 + vertices[2].color[1] * w2,
-                vertices[0].color[2] * w0 + vertices[1].color[2] * w1 + vertices[2].color[2] * w2,
-                vertices[0].color[3] * w0 + vertices[1].color[3] * w1 + vertices[2].color[3] * w2,
-            }, stats, front_facing);
+            writePixel(job, x, y, vertices[0].z * w0 + vertices[1].z * w1 + vertices[2].z * w2, depth_adjust,
+                interpolateTriangleColor(vertices, w0, w1, w2), stats, front_facing);
         }
     }
     stats.primitives_rasterized += 1;

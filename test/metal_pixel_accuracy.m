@@ -183,6 +183,68 @@ int main(void) {
             }
         }
 
+        /* Metal's stage-in varyings are perspective-correct. Use distinct
+         * clip-space W values so a screen-space linear interpolation would
+         * produce a visibly different pixel result. */
+        const zpu_metal_vertex perspective_vertices[] = {
+            {{-0.50f, -0.50f, 0.5f, 1.00f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{ 0.75f, -0.75f, 0.5f, 1.50f}, {0.0f, 1.0f, 0.0f, 1.0f}},
+            {{ 0.00f,  0.25f, 0.5f, 0.50f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+        };
+        id<MTLBuffer> perspective_vertex_buffer =
+            [device newBufferWithBytes:perspective_vertices length:sizeof(perspective_vertices)
+                               options:MTLResourceStorageModeShared];
+        id<MTLTexture> perspective_texture = [device newTextureWithDescriptor:texture_descriptor];
+        if (perspective_vertex_buffer == nil || perspective_texture == nil) {
+            fprintf(stderr, "metal-pixel: perspective interpolation resources failed\n");
+            return 10;
+        }
+        MTLRenderPassDescriptor *perspective_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        perspective_pass.colorAttachments[0].texture = perspective_texture;
+        perspective_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        perspective_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        perspective_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        id<MTLCommandBuffer> perspective_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> perspective_encoder =
+            [perspective_command_buffer renderCommandEncoderWithDescriptor:perspective_pass];
+        [perspective_encoder setRenderPipelineState:pipeline];
+        [perspective_encoder setVertexBuffer:perspective_vertex_buffer offset:0 atIndex:0];
+        [perspective_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [perspective_encoder endEncoding];
+        [perspective_command_buffer commit];
+        [perspective_command_buffer waitUntilCompleted];
+        uint8_t metal_perspective_pixels[byte_count];
+        [perspective_texture getBytes:metal_perspective_pixels
+                          bytesPerRow:(NSUInteger)width * 4
+                           fromRegion:MTLRegionMake2D(0, 0, width, height)
+                          mipmapLevel:0];
+        uint8_t zpu_perspective_pixels[byte_count];
+        memset(zpu_perspective_pixels, 0xa5, sizeof(zpu_perspective_pixels));
+        zpu_metal_surface perspective_surface = {
+            .pixels = zpu_perspective_pixels,
+            .byte_length = sizeof(zpu_perspective_pixels),
+            .width = width,
+            .height = height,
+            .stride = (size_t)width * 4,
+            .format = ZPU_METAL_RGBA8_UNORM,
+        };
+        if (zpu_metal_render(&perspective_surface, &zpu_pass, &zpu_state, perspective_vertices, 3,
+                             ZPU_METAL_TRIANGLE, NULL, 0, &stats) != ZPU_METAL_OK) {
+            fprintf(stderr, "metal-pixel: ZPU perspective render failed\n");
+            return 11;
+        }
+        if (perspective_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: Metal perspective command did not complete\n");
+            return 12;
+        }
+        for (size_t index = 0; index < byte_count; index++) {
+            if (metal_perspective_pixels[index] != zpu_perspective_pixels[index]) {
+                fprintf(stderr, "metal-pixel: perspective mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                        index, metal_perspective_pixels[index], zpu_perspective_pixels[index]);
+                return 13;
+            }
+        }
+
         /* Metal texture rows and MTLViewport/MTLScissorRect coordinates are
          * top-left based on both Apple GPU families. Keep this asymmetric
          * oracle separate from the centered square above: a symmetric test
