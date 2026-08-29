@@ -117,6 +117,12 @@ fn f32From(value: usize) f32 {
     return @floatFromInt(value);
 }
 
+fn revisionBase(target: Target) u64 {
+    // Keep separate modeled application lifetimes from colliding when the
+    // allocator reuses command/uniform addresses between workload runs.
+    return (@as(u64, @intFromEnum(target)) + 1) * 1_000_000;
+}
+
 fn ndcX(pixel: f32) f32 {
     return pixel / @as(f32, @floatFromInt(width)) * 2.0 - 1.0;
 }
@@ -268,6 +274,7 @@ fn buildWorkload(allocator: std.mem.Allocator, target: Target) !Workload {
         }
     }
     workload.commands = try allocator.alloc(cube.DrawCommand, target_spec.draw_count);
+    const revision_base = revisionBase(target);
     const viewport = cube.Viewport{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 };
     const scissor = cube.Rect{ .x = 0, .y = 0, .width = width, .height = height };
     for (workload.draws, 0..) |draw, index| workload.commands[index] = .{
@@ -278,9 +285,9 @@ fn buildWorkload(allocator: std.mem.Allocator, target: Target) !Workload {
         .vertex_count = draw.vertex_count,
         .viewport = viewport,
         .scissor = scissor,
-        .uniform_revision = 1,
-        .geometry_revision = 1,
-        .texture_revision = 1,
+        .uniform_revision = revision_base + 1,
+        .geometry_revision = revision_base + 1,
+        .texture_revision = revision_base + 1,
     };
     return workload;
 }
@@ -289,13 +296,13 @@ fn updateWorkload(workload: *Workload, frame: usize) void {
     switch (workload.target) {
         .wezterm_terminal => for (workload.draws[1..], 0..) |draw, glyph| {
             writeTerminal(draw.uniform, glyph, frame);
-            workload.commands[glyph + 1].uniform_revision = @intCast(frame + 2);
+            workload.commands[glyph + 1].uniform_revision = revisionBase(.wezterm_terminal) + @as(u64, @intCast(frame + 2));
         },
         .imgui_vulkan_app => {},
         .khronos_complex_demo => for (workload.draws, 0..) |draw, object| {
             writeComplex(draw.uniform, object, frame);
-            workload.commands[object].uniform_revision = @intCast(frame + 2);
-            workload.commands[object].geometry_revision = @intCast(frame + 2);
+            workload.commands[object].uniform_revision = revisionBase(.khronos_complex_demo) + @as(u64, @intCast(frame + 2));
+            workload.commands[object].geometry_revision = revisionBase(.khronos_complex_demo) + @as(u64, @intCast(frame + 2));
         },
     }
 }
