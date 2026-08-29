@@ -2970,6 +2970,7 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
 }
 - (NSUInteger)allocatedSize {
     if (_backing != nil) return [_backing allocatedSize];
+    if (_sparseMappings != nil) return 0;
     if (_backingBuffer != nil) return _bufferBytesPerRow * [self height];
     NSUInteger total = 0;
     for (NSArray *slice in _sliceMipmapTextures) {

@@ -5959,6 +5959,7 @@ int main(void) {
             native_sparse_texture != nil && native_sparse_texture.isSparse &&
             native_sparse_texture.sparseTextureTier == MTLTextureSparseTier1 &&
             native_sparse_texture.firstMipmapInTail == adapter_sparse_texture.firstMipmapInTail &&
+            native_sparse_texture.allocatedSize == adapter_sparse_texture.allocatedSize &&
             adapter_sparse_texture_heap != nil &&
             adapter_sparse_texture != nil && adapter_sparse_texture_input != nil &&
             adapter_sparse_texture_output != nil && adapter_sparse_texture_legacy_queue != nil &&
