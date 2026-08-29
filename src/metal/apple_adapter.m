@@ -39,6 +39,7 @@
 @class ZPUCounter;
 @class ZPUCounterSet;
 @class ZPUCounterSampleBuffer;
+@class ZPULogState;
 @class ZPURenderEncoder;
 @class ZPUResourceStateEncoder;
 @class ZPULibrary;
@@ -560,6 +561,19 @@ API_AVAILABLE(macos(13.0), ios(16.0))
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLCounterSampleBufferDescriptor *)descriptor;
 - (BOOL)sampleAtIndex:(NSUInteger)index;
 @end
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+API_AVAILABLE(macos(15.0), ios(18.0))
+@interface ZPULogState : NSObject <MTLLogState> {
+@public
+    MTLLogLevel _level;
+    NSInteger _bufferSize;
+    NSMutableArray *_handlers;
+}
+- (instancetype)initWithDescriptor:(MTLLogStateDescriptor *)descriptor error:(NSError **)error;
+@end
+#pragma clang diagnostic pop
 
 @interface ZPUDevice : NSObject <MTLDevice> {
 @public
@@ -2635,6 +2649,33 @@ static uint64_t zpu_cpu_timestamp(void) {
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
+@implementation ZPULogState
+- (instancetype)initWithDescriptor:(MTLLogStateDescriptor *)descriptor error:(NSError **)error {
+    if (descriptor == nil || descriptor.bufferSize < 1024 ||
+        descriptor.level < MTLLogLevelUndefined || descriptor.level > MTLLogLevelFault) {
+        zpu_set_error(error, @"ZPU CPU Metal log state requires a valid level and at least 1 KiB of storage");
+        return nil;
+    }
+    if ((self = [super init])) {
+        _level = descriptor.level;
+        _bufferSize = descriptor.bufferSize;
+        _handlers = [NSMutableArray array];
+    }
+    if (error != NULL) *error = nil;
+    return self;
+}
+- (void)addLogHandler:(void (^)(NSString * _Nullable subSystem, NSString * _Nullable category,
+                                MTLLogLevel logLevel, NSString *message))block {
+    if (block == nil) return;
+    @synchronized (self) {
+        [_handlers addObject:[block copy]];
+    }
+}
+@end
+#pragma clang diagnostic pop
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
 
 @implementation ZPUMTL4CounterHeap
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTL4CounterHeapDescriptor *)descriptor {
@@ -4055,9 +4096,7 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
     return nil;
 }
 - (id<MTLLogState>)newLogStateWithDescriptor:(MTLLogStateDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(15.0), ios(18.0)) {
-    (void)descriptor;
-    zpu_set_error(error, @"ZPU CPU Metal has no GPU log-state implementation");
-    return nil;
+    return (id<MTLLogState>)[[ZPULogState alloc] initWithDescriptor:descriptor error:error];
 }
 - (id<MTLCounterSampleBuffer>)newCounterSampleBufferWithDescriptor:(MTLCounterSampleBufferDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(10.15), ios(14.0)) {
     if (descriptor == nil || descriptor.sampleCount == 0 || descriptor.storageMode != MTLStorageModeShared ||

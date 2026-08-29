@@ -876,6 +876,36 @@ int main(void) {
         id<MTLCommandQueue> adapter_queue = [adapter_device newCommandQueue];
         NSError *adapter_pipeline_error = nil;
 
+        /* Log-state registration is metadata-only for the CPU adapter: no
+         * shader can execute an Apple GPU log instruction here, but callers
+         * still receive a real CPU-owned MTLLogState with native descriptor
+         * validation and handler lifetime semantics. */
+        if (@available(macOS 15.0, iOS 18.0, *)) {
+            MTLLogStateDescriptor *log_descriptor = [MTLLogStateDescriptor new];
+            log_descriptor.level = MTLLogLevelInfo;
+            log_descriptor.bufferSize = 1024;
+            NSError *log_error = nil;
+            id<MTLLogState> log_state = [adapter_device newLogStateWithDescriptor:log_descriptor error:&log_error];
+            [log_state addLogHandler:^(NSString *subSystem, NSString *category, MTLLogLevel logLevel, NSString *message) {
+                (void)subSystem;
+                (void)category;
+                (void)logLevel;
+                (void)message;
+            }];
+            MTLLogStateDescriptor *invalid_log_descriptor = [MTLLogStateDescriptor new];
+            invalid_log_descriptor.level = MTLLogLevelInfo;
+            invalid_log_descriptor.bufferSize = 1023;
+            NSError *invalid_log_error = nil;
+            id<MTLLogState> invalid_log_state =
+                [adapter_device newLogStateWithDescriptor:invalid_log_descriptor error:&invalid_log_error];
+            if (log_state == nil || log_error != nil ||
+                ![log_state conformsToProtocol:@protocol(MTLLogState)] || invalid_log_state != nil ||
+                invalid_log_error == nil) {
+                fail_with_error("CPU Metal log-state implementation failed", log_error ?: invalid_log_error);
+                return 107;
+            }
+        }
+
         /* MTLTensor resources are CPU-owned too. Exercise both the directly
          * allocated form and a strided buffer view; the optional native block
          * is only an oracle probe and is allowed to be unavailable on a host
