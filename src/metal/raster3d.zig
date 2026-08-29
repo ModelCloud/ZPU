@@ -733,7 +733,7 @@ pub const Target = struct {
 
 const Job = struct {
     target: *Target,
-    extra_targets: []const *Target,
+    extra_targets: []const ?*Target,
     sample_texture: ?*const Target,
     sample_mipmaps: []const Target,
     depth: ?[]f32,
@@ -748,7 +748,7 @@ fn outputTarget(job: *const Job, physical_index: usize) ?*Target {
     if (physical_index == 0) return job.target;
     const extra_index = physical_index - 1;
     if (extra_index >= job.extra_targets.len) return null;
-    return job.extra_targets[extra_index];
+    return job.extra_targets[extra_index] orelse null;
 }
 
 fn project(vertex: abi.Vertex, viewport: abi.Viewport) ?ProjectedVertex {
@@ -1289,7 +1289,7 @@ fn addStats(a: Stats, b: Stats) Stats {
     };
 }
 
-pub fn drawWithTargetMipmaps(target: *Target, extra_targets: []const *Target, sample_texture: ?*const Target, sample_mipmaps: []const Target, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
+pub fn drawWithTargetMipmaps(target: *Target, extra_targets: []const ?*Target, sample_texture: ?*const Target, sample_mipmaps: []const Target, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
     if (!options.rasterization_enabled) return .{ .primitives_submitted = switch (primitive) {
         .point => @intCast(vertices.len),
         .line => @intCast(vertices.len / 2),
@@ -1308,12 +1308,12 @@ pub fn drawWithTargetMipmaps(target: *Target, extra_targets: []const *Target, sa
     return addStats(job.bands[0], job.bands[1]);
 }
 
-pub fn drawWithTargets(target: *Target, extra_targets: []const *Target, sample_texture: ?*const Target, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
+pub fn drawWithTargets(target: *Target, extra_targets: []const ?*Target, sample_texture: ?*const Target, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
     return drawWithTargetMipmaps(target, extra_targets, sample_texture, &.{}, depth, stencil, vertices, primitive, options);
 }
 
 pub fn draw(target: *Target, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
-    return drawWithTargets(target, &[_]*Target{}, null, depth, stencil, vertices, primitive, options);
+    return drawWithTargets(target, &[_]?*Target{}, null, depth, stencil, vertices, primitive, options);
 }
 
 pub fn drawSurface(target: *surface.Surface, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
@@ -1671,7 +1671,7 @@ test "CPU sampler selects minification and magnification filters from footprint"
     };
     var job = Job{
         .target = &output,
-        .extra_targets = &[_]*Target{},
+        .extra_targets = &[_]?*Target{},
         .sample_texture = &source,
         .sample_mipmaps = &.{},
         .depth = null,
@@ -1709,7 +1709,7 @@ test "CPU sampler LOD uses perspective-correct texture derivatives" {
     };
     var job = Job{
         .target = &output,
-        .extra_targets = &[_]*Target{},
+        .extra_targets = &[_]?*Target{},
         .sample_texture = &source,
         .sample_mipmaps = &.{},
         .depth = null,
@@ -1744,7 +1744,7 @@ test "CPU sampler mip filter selects clamped levels" {
     };
     var job = Job{
         .target = &level0,
-        .extra_targets = &[_]*Target{},
+        .extra_targets = &[_]?*Target{},
         .sample_texture = &level0,
         .sample_mipmaps = &levels,
         .depth = null,
@@ -1821,7 +1821,7 @@ test "CPU sampler uses bounded anisotropic major-axis taps" {
     };
     const selection = sampleSelectionWithFootprint(&Job{
         .target = &source,
-        .extra_targets = &.{},
+        .extra_targets = &[_]?*Target{},
         .sample_texture = &source,
         .sample_mipmaps = &.{},
         .depth = null,
@@ -1832,7 +1832,7 @@ test "CPU sampler uses bounded anisotropic major-axis taps" {
     }, 4, 1, 0.75, 0);
     var job = Job{
         .target = &source,
-        .extra_targets = &.{},
+        .extra_targets = &[_]?*Target{},
         .sample_texture = &source,
         .sample_mipmaps = &.{},
         .depth = null,

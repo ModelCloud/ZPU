@@ -745,14 +745,6 @@ pub const CommandBuffer = struct {
                         }
                     }
                 }
-                var missing_extra_attachment = false;
-                for (begin_render.color_attachments[1..]) |attachment| {
-                    if (attachment == null) {
-                        missing_extra_attachment = true;
-                    } else if (missing_extra_attachment) {
-                        return self.fail(error.InvalidResource);
-                    }
-                }
                 active_depth_texture = begin_render.depth_texture;
                 active_depth_store_action = begin_render.pass.depth.store_action;
                 active_depth = begin_render.depth;
@@ -835,7 +827,7 @@ pub const CommandBuffer = struct {
                 }
                 var target = target_handle.asTarget();
                 var extra_targets_storage: [7]raster3d.Target = undefined;
-                var extra_targets: [7]*raster3d.Target = undefined;
+                var extra_targets: [7]?*raster3d.Target = [_]?*raster3d.Target{null} ** 7;
                 var sample_target_storage: raster3d.Target = undefined;
                 var sample_target: ?*const raster3d.Target = null;
                 var sample_mipmap_targets: []raster3d.Target = &.{};
@@ -856,11 +848,11 @@ pub const CommandBuffer = struct {
                     }
                 }
                 var extra_count: usize = 0;
-                for (active_color_attachments[1..]) |attachment| {
+                for (active_color_attachments[1..], 0..) |attachment, physical_index| {
                     if (attachment) |value| {
-                        extra_targets_storage[extra_count] = value.asTarget();
-                        extra_targets[extra_count] = &extra_targets_storage[extra_count];
-                        extra_count += 1;
+                        extra_targets_storage[physical_index] = value.asTarget();
+                        extra_targets[physical_index] = &extra_targets_storage[physical_index];
+                        extra_count = @max(extra_count, physical_index + 1);
                     }
                 }
                 const logical_output_count: usize = if (draw_options.write_extra_targets)
@@ -1059,13 +1051,13 @@ pub const CommandBuffer = struct {
 
                 var target = target_handle.asTarget();
                 var extra_targets_storage: [7]raster3d.Target = undefined;
-                var extra_targets: [7]*raster3d.Target = undefined;
+                var extra_targets: [7]?*raster3d.Target = [_]?*raster3d.Target{null} ** 7;
                 var extra_count: usize = 0;
-                for (active_color_attachments[1..]) |attachment| {
+                for (active_color_attachments[1..], 0..) |attachment, physical_index| {
                     if (attachment) |value| {
-                        extra_targets_storage[extra_count] = value.asTarget();
-                        extra_targets[extra_count] = &extra_targets_storage[extra_count];
-                        extra_count += 1;
+                        extra_targets_storage[physical_index] = value.asTarget();
+                        extra_targets[physical_index] = &extra_targets_storage[physical_index];
+                        extra_count = @max(extra_count, physical_index + 1);
                     }
                 }
                 const logical_output_count: usize = if (draw_options.write_extra_targets)
@@ -6502,11 +6494,11 @@ test "CPU tile and mesh maps are captured per deferred command" {
         .store_action = .store,
         .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 },
     };
-    try encoder.setColorAttachment(tile_target, clear, 1);
-    try encoder.setColorAttachment(mesh_target, clear, 2);
-    try encoder.setColorAttachmentMap(&[_]u8{ 1, 0, 2, 3, 4, 5, 6, 7 }, 8);
-    try encoder.dispatchThreadsPerTile(1, .{ .width = 2, .height = 2, .depth = 1 }, .{ .width = 2, .height = 2, .depth = 1 });
+    try encoder.setColorAttachment(tile_target, clear, 2);
+    try encoder.setColorAttachment(mesh_target, clear, 3);
     try encoder.setColorAttachmentMap(&[_]u8{ 2, 0, 1, 3, 4, 5, 6, 7 }, 8);
+    try encoder.dispatchThreadsPerTile(1, .{ .width = 2, .height = 2, .depth = 1 }, .{ .width = 2, .height = 2, .depth = 1 });
+    try encoder.setColorAttachmentMap(&[_]u8{ 3, 0, 1, 2, 4, 5, 6, 7 }, 8);
     try encoder.drawMeshThreadgroups(1, .{ .width = 2, .height = 2, .depth = 1 }, .{ .width = 1, .height = 1, .depth = 1 }, .{ .width = 2, .height = 2, .depth = 1 });
     try encoder.endEncoding();
     try command_buffer.commit();
