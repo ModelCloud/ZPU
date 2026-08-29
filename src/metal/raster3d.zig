@@ -41,6 +41,7 @@ pub const DrawOptions = struct {
     depth_bias_clamp: f32 = 0,
     depth_test_min_bound: f32 = 0,
     depth_test_max_bound: f32 = 1,
+    fragment_color: ?[4]f32 = null,
     sample_filter: abi.SamplerFilter = .nearest,
     sample_address_s: abi.SamplerAddressMode = .clamp_to_edge,
     sample_address_t: abi.SamplerAddressMode = .clamp_to_edge,
@@ -460,7 +461,10 @@ fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [
         stats.depth_tests_passed += 1;
     }
     if (stencil_index) |index| applyStencil(job.stencil.?, index, stencil_state, stencil_state.depth_pass);
-    const fragment_color = if (job.sample_texture) |texture| texture.sample(color[0], color[1], job.options.sample_filter, job.options.sample_address_s, job.options.sample_address_t, job.options.sample_swizzle) else color;
+    const fragment_color = if (job.sample_texture) |texture|
+        texture.sample(color[0], color[1], job.options.sample_filter, job.options.sample_address_s, job.options.sample_address_t, job.options.sample_swizzle)
+    else
+        job.options.fragment_color orelse color;
     writeColor(job.target, x, y, fragment_color, job.options);
     if (job.options.write_extra_targets) for (job.extra_targets) |target| writeColor(target, x, y, fragment_color, job.options);
     stats.fragments_covered += 1;

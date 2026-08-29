@@ -578,6 +578,8 @@ pub const RenderEncoder = struct {
     blend_color: [4]f32 = .{ 0, 0, 0, 0 },
     stencil_front: raster3d.StencilFace = .{},
     stencil_back: raster3d.StencilFace = .{},
+    fragment_color: ?[4]f32 = null,
+    fragment_uniform_enabled: bool = false,
     visibility_buffer: ?*Buffer = null,
     visibility_mode: abi.VisibilityResultMode = .disabled,
     visibility_offset: usize = 0,
@@ -624,6 +626,7 @@ pub const RenderEncoder = struct {
             .blend_color = self.blend_color,
             .stencil_front = self.stencil_front,
             .stencil_back = self.stencil_back,
+            .fragment_color = if (self.fragment_uniform_enabled) self.fragment_color else null,
         };
     }
 
@@ -679,6 +682,24 @@ pub const RenderEncoder = struct {
             .blue = textureSwizzleFromInt(blue) orelse return error.InvalidArgument,
             .alpha = textureSwizzleFromInt(alpha) orelse return error.InvalidArgument,
         };
+    }
+
+    pub fn setFragmentUniformEnabled(self: *RenderEncoder, enabled: bool) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        self.fragment_uniform_enabled = enabled;
+    }
+
+    pub fn setFragmentBytes(self: *RenderEncoder, bytes: ?[*]const u8, length: usize, index: u32) Error!void {
+        if (!self.open() or (length != 0 and bytes == null)) return error.InvalidArgument;
+        if (!self.fragment_uniform_enabled) return;
+        if (index != 0 or length != @sizeOf(abi.Color)) return error.UnsupportedOperation;
+        var color: [4]f32 = undefined;
+        const raw = bytes.?[0..length];
+        for (0..4) |channel| {
+            color[channel] = @bitCast(std.mem.readInt(u32, raw[channel * @sizeOf(f32) ..][0..@sizeOf(f32)], .little));
+            if (!std.math.isFinite(color[channel])) return error.InvalidArgument;
+        }
+        self.fragment_color = color;
     }
 
     pub fn setRasterizationEnabled(self: *RenderEncoder, enabled: bool) Error!void {
@@ -2671,6 +2692,35 @@ test "render state validation rejects invalid CPU Metal state" {
     try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
 }
 
+test "CPU uniform fragment bytes override interpolated color" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const texture = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(texture);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.5, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .{ .position = .{ -1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 1, .blue = 1, .alpha = 1 } },
+    };
+    const uniform = abi.Color{ .red = 0.2, .green = 0.6, .blue = 0.9, .alpha = 0.4 };
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, texture, .{ .color = .{ .load_action = .clear, .store_action = .store } });
+    try encoder.setFragmentUniformEnabled(true);
+    try encoder.setFragmentBytes(@ptrCast(&uniform), @sizeOf(abi.Color), 0);
+    try encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
+    try encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try command_buffer.commit();
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 51, 153, 230, 102 }, texture.bytes[0..4]);
+}
+
 test "depth texture attachment rejects farther fragments" {
     const device = try createDevice();
     defer destroyDevice(device);
@@ -3245,6 +3295,16 @@ pub export fn zpu_metal_render_encoder_set_fragment_sampler(encoder: ?*RenderEnc
 
 pub export fn zpu_metal_render_encoder_set_fragment_texture_swizzle(encoder: ?*RenderEncoder, red: u8, green: u8, blue: u8, alpha: u8) callconv(.c) c_int {
     (encoder orelse return -1).setFragmentTextureSwizzle(red, green, blue, alpha) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_fragment_uniform_enabled(encoder: ?*RenderEncoder, enabled: bool) callconv(.c) c_int {
+    (encoder orelse return -1).setFragmentUniformEnabled(enabled) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_fragment_bytes(encoder: ?*RenderEncoder, bytes: ?[*]const u8, length: usize, index: u32) callconv(.c) c_int {
+    (encoder orelse return -1).setFragmentBytes(bytes, length, index) catch |err| return errorCode(err);
     return 0;
 }
 

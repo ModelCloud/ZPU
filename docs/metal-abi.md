@@ -67,6 +67,9 @@ triangle path:
 - the bounded `zpu_test_sample_fragment` profile samples a ZPU-owned color
   texture with interpolated normalized coordinates and nearest filtering;
   native Metal is used only as the byte-accuracy oracle
+- the bounded `zpu_cpu_uniform_color_fragment` profile consumes a 16-byte
+  `float4` from `setFragmentBytes:length:atIndex:0` and applies it through
+  the CPU raster path; other fragment byte layouts remain unsupported
 - fixed-function render pipeline, depth-stencil, and sampler state objects;
   pipeline attachment format validation, blending factors/operations, color
   write masks, depth bounds, and Metal top-left triangle edge inclusion

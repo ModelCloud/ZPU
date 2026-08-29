@@ -277,6 +277,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     BOOL _multiTargetOutput;
     BOOL _rasterizationEnabled;
     BOOL _supportsIndirectCommandBuffers;
+    BOOL _fragmentUniform;
     MTLPixelFormat _depthPixelFormat;
     MTLPixelFormat _stencilPixelFormat;
     BOOL _sampleTexture;
@@ -1929,6 +1930,7 @@ static uint64_t zpu_cpu_timestamp(void) {
         }
         _multiTargetOutput = [descriptor.fragmentFunction.name rangeOfString:@"mrt" options:NSCaseInsensitiveSearch].location != NSNotFound;
         _sampleTexture = [descriptor.fragmentFunction.name rangeOfString:@"sample" options:NSCaseInsensitiveSearch].location != NSNotFound;
+        _fragmentUniform = [descriptor.fragmentFunction.name isEqualToString:@"zpu_cpu_uniform_color_fragment"];
         _rasterizationEnabled = descriptor.rasterizationEnabled;
         _supportsIndirectCommandBuffers = descriptor.supportIndirectCommandBuffers;
         _depthPixelFormat = descriptor.depthAttachmentPixelFormat;
@@ -5692,6 +5694,10 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 }
 - (void)setFragmentBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index {
     if (index > UINT32_MAX || (bytes == NULL && length != 0)) { [_owner markError]; return; }
+    if (zpu_metal_render_encoder_set_fragment_bytes(_zpuEncoder, bytes, length, (uint32_t)index) != ZPU_METAL_OK) {
+        [_owner markError];
+        return;
+    }
     if (length != 0) [_owner retainResource:[NSData dataWithBytes:bytes length:length]];
 }
 - (void)setFragmentBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
@@ -5974,6 +5980,7 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
             (uint16_t)state->_depthPixelFormat, (uint16_t)state->_stencilPixelFormat) != ZPU_METAL_OK) [_owner markError];
     if (zpu_metal_render_encoder_set_multi_target_output(_zpuEncoder, state->_multiTargetOutput) != ZPU_METAL_OK) [_owner markError];
     if (zpu_metal_render_encoder_set_sample_texture(_zpuEncoder, state->_sampleTexture) != ZPU_METAL_OK) [_owner markError];
+    if (zpu_metal_render_encoder_set_fragment_uniform_enabled(_zpuEncoder, state->_fragmentUniform) != ZPU_METAL_OK) [_owner markError];
     if (zpu_metal_render_encoder_set_rasterization_enabled(_zpuEncoder, state->_rasterizationEnabled) != ZPU_METAL_OK) [_owner markError];
     if (zpu_metal_render_encoder_set_blend_state(
         _zpuEncoder, state->_blendingEnabled,
