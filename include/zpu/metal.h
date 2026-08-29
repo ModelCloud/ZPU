@@ -95,6 +95,16 @@ enum {
     ZPU_METAL_SAMPLER_CLAMP_TO_BORDER_COLOR = 4,
 };
 
+typedef uint8_t zpu_metal_texture_swizzle;
+enum {
+    ZPU_METAL_TEXTURE_SWIZZLE_ZERO = 0,
+    ZPU_METAL_TEXTURE_SWIZZLE_ONE = 1,
+    ZPU_METAL_TEXTURE_SWIZZLE_RED = 2,
+    ZPU_METAL_TEXTURE_SWIZZLE_GREEN = 3,
+    ZPU_METAL_TEXTURE_SWIZZLE_BLUE = 4,
+    ZPU_METAL_TEXTURE_SWIZZLE_ALPHA = 5,
+};
+
 typedef uint8_t zpu_metal_compare_function;
 enum {
     ZPU_METAL_COMPARE_NEVER = 0,
@@ -361,6 +371,7 @@ int zpu_metal_render_encoder_set_multi_target_output(zpu_metal_render_encoder *e
 int zpu_metal_render_encoder_set_sample_texture(zpu_metal_render_encoder *encoder, int enabled);
 int zpu_metal_render_encoder_set_fragment_texture(zpu_metal_render_encoder *encoder, zpu_metal_texture *texture, uint32_t index);
 int zpu_metal_render_encoder_set_fragment_sampler(zpu_metal_render_encoder *encoder, zpu_metal_sampler_filter filter, zpu_metal_sampler_address_mode address_s, zpu_metal_sampler_address_mode address_t);
+int zpu_metal_render_encoder_set_fragment_texture_swizzle(zpu_metal_render_encoder *encoder, zpu_metal_texture_swizzle red, zpu_metal_texture_swizzle green, zpu_metal_texture_swizzle blue, zpu_metal_texture_swizzle alpha);
 int zpu_metal_render_encoder_set_depth_compare_function(zpu_metal_render_encoder *encoder, zpu_metal_compare_function compare_function, int depth_write_enabled);
 int zpu_metal_render_encoder_set_blend_state(zpu_metal_render_encoder *encoder, int blending_enabled,
     zpu_metal_blend_factor source_rgb_factor, zpu_metal_blend_factor destination_rgb_factor,

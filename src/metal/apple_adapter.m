@@ -1364,6 +1364,7 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
     view->_depth = _depth;
     view->_baseMipmapLevel = _baseMipmapLevel;
     view->_baseSlice = _baseSlice;
+    view->_swizzle = [self swizzle];
     return (id<MTLTexture>)view;
 }
 - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)pixelFormat textureType:(MTLTextureType)textureType levels:(NSRange)levelRange slices:(NSRange)sliceRange {
@@ -1389,12 +1390,17 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
         zpu_texture_depth_at_level(self, levelRange.location) : 1;
     view->_baseMipmapLevel = _baseMipmapLevel + levelRange.location;
     view->_baseSlice = _baseSlice + sliceRange.location;
+    view->_swizzle = [self swizzle];
     return (id<MTLTexture>)view;
 }
 - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)pixelFormat textureType:(MTLTextureType)textureType levels:(NSRange)levelRange slices:(NSRange)sliceRange swizzle:(MTLTextureSwizzleChannels)swizzle {
-    if (swizzle.red != MTLTextureSwizzleRed || swizzle.green != MTLTextureSwizzleGreen ||
-        swizzle.blue != MTLTextureSwizzleBlue || swizzle.alpha != MTLTextureSwizzleAlpha) return nil;
-    return [self newTextureViewWithPixelFormat:pixelFormat textureType:textureType levels:levelRange slices:sliceRange];
+    ZPUTexture *view = (ZPUTexture *)[self newTextureViewWithPixelFormat:pixelFormat
+                                                               textureType:textureType
+                                                                    levels:levelRange
+                                                                    slices:sliceRange];
+    if (view == nil) return nil;
+    view->_swizzle = swizzle;
+    return (id<MTLTexture>)view;
 }
 - (id<MTLTexture>)newTextureViewWithDescriptor:(MTLTextureViewDescriptor *)descriptor API_AVAILABLE(macos(26.0), ios(26.0)) {
     if (descriptor == nil) return nil;
@@ -1404,7 +1410,7 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
                                         slices:descriptor.sliceRange
                                        swizzle:descriptor.swizzle];
 }
-- (MTLTextureSwizzleChannels)swizzle { return _backing != nil ? [_backing swizzle] : _swizzle; }
+- (MTLTextureSwizzleChannels)swizzle { return _swizzle; }
 - (MTLSharedTextureHandle *)newSharedTextureHandle { return [[ZPUSharedTextureHandle alloc] initWithTexture:self]; }
 - (kern_return_t)setOwnerWithIdentity:(task_id_token_t)task_id_token API_AVAILABLE(ios(17.4), watchos(10.4), tvos(17.4), macos(14.4)) {
     (void)task_id_token;
@@ -5659,6 +5665,12 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     }
     _fragmentTexture = zpuTexture;
     if (zpuTexture != nil) [_owner retainResource:zpuTexture];
+    const MTLTextureSwizzleChannels swizzle = zpuTexture == nil ? MTLTextureSwizzleChannelsDefault : zpuTexture.swizzle;
+    if (zpu_metal_render_encoder_set_fragment_texture_swizzle(
+            _zpuEncoder, (zpu_metal_texture_swizzle)swizzle.red,
+            (zpu_metal_texture_swizzle)swizzle.green,
+            (zpu_metal_texture_swizzle)swizzle.blue,
+            (zpu_metal_texture_swizzle)swizzle.alpha) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)setFragmentTextures:(const id<MTLTexture> __nullable [__nonnull])textures withRange:(NSRange)range {
     if (textures == NULL) { [_owner markError]; return; }

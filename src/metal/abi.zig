@@ -44,6 +44,20 @@ pub const SamplerAddressMode = enum(u8) {
     clamp_to_zero = 3,
     clamp_to_border_color = 4,
 };
+pub const TextureSwizzle = enum(u8) {
+    zero = 0,
+    one = 1,
+    red = 2,
+    green = 3,
+    blue = 4,
+    alpha = 5,
+};
+pub const TextureSwizzleChannels = extern struct {
+    red: TextureSwizzle,
+    green: TextureSwizzle,
+    blue: TextureSwizzle,
+    alpha: TextureSwizzle,
+};
 pub const CompareFunction = enum(u8) {
     never = 0,
     less = 1,

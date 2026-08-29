@@ -780,6 +780,83 @@ int main(void) {
             }
             return 98;
         }
+
+        const MTLTextureSwizzleChannels sample_swizzle = MTLTextureSwizzleChannelsMake(
+            MTLTextureSwizzleBlue, MTLTextureSwizzleRed, MTLTextureSwizzleGreen, MTLTextureSwizzleOne);
+        id<MTLTexture> native_sample_swizzled_source =
+            [native_sample_source newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                     textureType:MTLTextureType2D
+                                                          levels:NSMakeRange(0, 1)
+                                                          slices:NSMakeRange(0, 1)
+                                                         swizzle:sample_swizzle];
+        id<MTLTexture> adapter_sample_swizzled_source =
+            [adapter_sample_source newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                      textureType:MTLTextureType2D
+                                                           levels:NSMakeRange(0, 1)
+                                                           slices:NSMakeRange(0, 1)
+                                                          swizzle:sample_swizzle];
+        id<MTLTexture> native_swizzle_output = [device newTextureWithDescriptor:sample_output_descriptor];
+        id<MTLTexture> adapter_swizzle_output = [adapter_device newTextureWithDescriptor:sample_output_descriptor];
+        if (native_sample_swizzled_source == nil || adapter_sample_swizzled_source == nil ||
+            native_swizzle_output == nil || adapter_swizzle_output == nil ||
+            native_sample_swizzled_source.swizzle.red != sample_swizzle.red ||
+            adapter_sample_swizzled_source.swizzle.blue != sample_swizzle.blue) {
+            fprintf(stderr, "metal-pixel: texture-view swizzle allocation or metadata failed\n");
+            return 99;
+        }
+        MTLRenderPassDescriptor *native_swizzle_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_swizzle_pass.colorAttachments[0].texture = native_swizzle_output;
+        native_swizzle_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_swizzle_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_swizzle_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> native_swizzle_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_swizzle_encoder =
+            [native_swizzle_command_buffer renderCommandEncoderWithDescriptor:native_swizzle_pass];
+        [native_swizzle_encoder setRenderPipelineState:native_sample_pipeline];
+        [native_swizzle_encoder setVertexBuffer:native_sample_vertex_buffer offset:0 atIndex:0];
+        [native_swizzle_encoder setFragmentTexture:native_sample_swizzled_source atIndex:0];
+        [native_swizzle_encoder setFragmentSamplerState:native_sample_sampler atIndex:0];
+        [native_swizzle_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_swizzle_encoder endEncoding];
+        [native_swizzle_command_buffer commit];
+        [native_swizzle_command_buffer waitUntilCompleted];
+        MTLRenderPassDescriptor *adapter_swizzle_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_swizzle_pass.colorAttachments[0].texture = adapter_swizzle_output;
+        adapter_swizzle_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_swizzle_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_swizzle_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> adapter_swizzle_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_swizzle_encoder =
+            [adapter_swizzle_command_buffer renderCommandEncoderWithDescriptor:adapter_swizzle_pass];
+        [adapter_swizzle_encoder setRenderPipelineState:adapter_sample_pipeline];
+        [adapter_swizzle_encoder setVertexBuffer:adapter_sample_vertex_buffer offset:0 atIndex:0];
+        [adapter_swizzle_encoder setFragmentTexture:adapter_sample_swizzled_source atIndex:0];
+        [adapter_swizzle_encoder setFragmentSamplerState:adapter_sample_sampler atIndex:0];
+        [adapter_swizzle_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_swizzle_encoder endEncoding];
+        [adapter_swizzle_command_buffer commit];
+        [adapter_swizzle_command_buffer waitUntilCompleted];
+        uint8_t native_swizzle_bytes[byte_count];
+        uint8_t adapter_swizzle_bytes[byte_count];
+        [native_swizzle_output getBytes:native_swizzle_bytes bytesPerRow:(NSUInteger)width * 4
+                             fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_swizzle_output getBytes:adapter_swizzle_bytes bytesPerRow:(NSUInteger)width * 4
+                               fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (native_swizzle_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_swizzle_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fail_with_error("texture-view swizzle execution failed", adapter_pipeline_error);
+            return 100;
+        }
+        if (memcmp(native_swizzle_bytes, adapter_swizzle_bytes, byte_count) != 0) {
+            for (size_t byte = 0; byte < byte_count; ++byte) {
+                if (native_swizzle_bytes[byte] != adapter_swizzle_bytes[byte]) {
+                    fprintf(stderr, "metal-pixel: texture-view swizzle mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                            byte, native_swizzle_bytes[byte], adapter_swizzle_bytes[byte]);
+                    break;
+                }
+            }
+            return 101;
+        }
         MTLRenderPipelineDescriptor *adapter_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
         adapter_pipeline_descriptor.vertexFunction = adapter_vertex_function;
         adapter_pipeline_descriptor.fragmentFunction = adapter_fragment_function;

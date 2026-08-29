@@ -41,6 +41,12 @@ pub const DrawOptions = struct {
     sample_filter: abi.SamplerFilter = .nearest,
     sample_address_s: abi.SamplerAddressMode = .clamp_to_edge,
     sample_address_t: abi.SamplerAddressMode = .clamp_to_edge,
+    sample_swizzle: abi.TextureSwizzleChannels = .{
+        .red = .red,
+        .green = .green,
+        .blue = .blue,
+        .alpha = .alpha,
+    },
     depth_compare: abi.CompareFunction = .less_equal,
     depth_write_enabled: bool = true,
     blending_enabled: bool = false,
@@ -229,11 +235,32 @@ pub const Target = struct {
         return result;
     }
 
-    fn sample(self: *const Target, u: f32, v: f32, filter: abi.SamplerFilter, address_s: abi.SamplerAddressMode, address_t: abi.SamplerAddressMode) [4]f32 {
-        return switch (filter) {
+    fn swizzleValue(color: [4]f32, channel: abi.TextureSwizzle) f32 {
+        return switch (channel) {
+            .zero => 0,
+            .one => 1,
+            .red => color[0],
+            .green => color[1],
+            .blue => color[2],
+            .alpha => color[3],
+        };
+    }
+
+    fn applySwizzle(color: [4]f32, swizzle: abi.TextureSwizzleChannels) [4]f32 {
+        return .{
+            swizzleValue(color, swizzle.red),
+            swizzleValue(color, swizzle.green),
+            swizzleValue(color, swizzle.blue),
+            swizzleValue(color, swizzle.alpha),
+        };
+    }
+
+    fn sample(self: *const Target, u: f32, v: f32, filter: abi.SamplerFilter, address_s: abi.SamplerAddressMode, address_t: abi.SamplerAddressMode, swizzle: abi.TextureSwizzleChannels) [4]f32 {
+        const color = switch (filter) {
             .nearest => self.sampleNearest(u, v, address_s, address_t),
             .linear => self.sampleLinear(u, v, address_s, address_t),
         };
+        return applySwizzle(color, swizzle);
     }
 };
 
@@ -389,7 +416,7 @@ fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [
         stats.depth_tests_passed += 1;
     }
     if (stencil_index) |index| applyStencil(job.stencil.?, index, stencil_state, stencil_state.depth_pass);
-    const fragment_color = if (job.sample_texture) |texture| texture.sample(color[0], color[1], job.options.sample_filter, job.options.sample_address_s, job.options.sample_address_t) else color;
+    const fragment_color = if (job.sample_texture) |texture| texture.sample(color[0], color[1], job.options.sample_filter, job.options.sample_address_s, job.options.sample_address_t, job.options.sample_swizzle) else color;
     writeColor(job.target, x, y, fragment_color, job.options);
     if (job.options.write_extra_targets) for (job.extra_targets) |target| writeColor(target, x, y, fragment_color, job.options);
     stats.fragments_covered += 1;
@@ -782,4 +809,16 @@ test "CPU texture sampling supports linear filtering and address modes" {
     try std.testing.expectEqual(@as(f32, 1), mirrored[1]);
     const outside = target.sampleNearest(-0.25, 0.25, .clamp_to_zero, .clamp_to_zero);
     try std.testing.expectEqual([4]f32{ 0, 0, 0, 0 }, outside);
+}
+
+test "CPU texture sampling applies texture-view channel swizzles" {
+    var pixels = [_]u8{ 255, 0, 0, 255 };
+    const target = try Target.init(&pixels, 1, 1, 4, .rgba8_unorm);
+    const swizzled = target.sample(0.5, 0.5, .nearest, .clamp_to_edge, .clamp_to_edge, .{
+        .red = .blue,
+        .green = .red,
+        .blue = .one,
+        .alpha = .zero,
+    });
+    try std.testing.expectEqual([4]f32{ 0, 1, 1, 0 }, swizzled);
 }
