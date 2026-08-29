@@ -6339,6 +6339,46 @@ int main(void) {
             return 127;
         }
 
+        /* ICB object/mesh bindings have no CPU/ZPU shader-stage executor.
+         * They must invalidate the recorded command instead of being silently
+         * discarded before replay. */
+        MTLIndirectCommandBufferDescriptor *adapter_unsupported_icb_descriptor = [MTLIndirectCommandBufferDescriptor new];
+        adapter_unsupported_icb_descriptor.commandTypes = MTLIndirectCommandTypeDraw;
+        adapter_unsupported_icb_descriptor.inheritPipelineState = YES;
+        adapter_unsupported_icb_descriptor.inheritBuffers = YES;
+        adapter_unsupported_icb_descriptor.maxVertexBufferBindCount = 1;
+        id<MTLIndirectCommandBuffer> adapter_unsupported_icb =
+            [adapter_device newIndirectCommandBufferWithDescriptor:adapter_unsupported_icb_descriptor
+                                                    maxCommandCount:1
+                                                            options:MTLResourceStorageModeShared];
+        id<MTLIndirectRenderCommand> adapter_unsupported_icb_command =
+            [adapter_unsupported_icb indirectRenderCommandAtIndex:0];
+        [adapter_unsupported_icb_command setObjectThreadgroupMemoryLength:16 atIndex:0];
+        [adapter_unsupported_icb_command setObjectBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_unsupported_icb_command setMeshBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_unsupported_icb_command drawPrimitives:MTLPrimitiveTypeTriangle
+                                             vertexStart:0 vertexCount:6 instanceCount:1 baseInstance:0];
+        id<MTLTexture> adapter_unsupported_icb_texture = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTLRenderPassDescriptor *adapter_unsupported_icb_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_unsupported_icb_pass.colorAttachments[0].texture = adapter_unsupported_icb_texture;
+        adapter_unsupported_icb_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_unsupported_icb_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLCommandBuffer> adapter_unsupported_icb_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_unsupported_icb_encoder =
+            [adapter_unsupported_icb_command_buffer renderCommandEncoderWithDescriptor:adapter_unsupported_icb_pass];
+        [adapter_unsupported_icb_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_unsupported_icb_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_unsupported_icb_encoder executeCommandsInBuffer:adapter_unsupported_icb withRange:NSMakeRange(0, 1)];
+        [adapter_unsupported_icb_encoder endEncoding];
+        [adapter_unsupported_icb_command_buffer commit];
+        [adapter_unsupported_icb_command_buffer waitUntilCompleted];
+        if (adapter_unsupported_icb == nil || adapter_unsupported_icb_command == nil ||
+            adapter_unsupported_icb_encoder == nil ||
+            adapter_unsupported_icb_command_buffer.status != MTLCommandBufferStatusError) {
+            fprintf(stderr, "metal-pixel: unsupported ICB shader stage did not fail closed\n");
+            return 129;
+        }
+
         /* Blit-copy an encoded render command entirely within the CPU-owned
          * ICB representation, then execute the copy through the same ZPU
          * render path. The native ICB above remains the byte oracle. */
