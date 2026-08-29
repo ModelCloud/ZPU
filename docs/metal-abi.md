@@ -20,24 +20,24 @@ triangle path:
   viewport, scissor, cull, winding, fill-mode, color interpolation, depth
   bias/slope scale, and clip-vs-clamp depth behavior
 - two screen-band workers for a 3D draw: the submitting core plus one worker
-- owned R8/R8Snorm/R16Unorm/R16Snorm/R16Float/RG8/RG8Snorm/
+- owned R8/R8Unorm_sRGB/R8Snorm/R16Unorm/R16Snorm/R16Float/RG8/RG8Unorm_sRGB/RG8Snorm/
   RG16Unorm/RG16Snorm/RG16Float/R32Uint/R32Sint/
   R8Uint/R8Sint/R16Uint/R16Sint/RG8Uint/RG8Sint/RG16Uint/RG16Sint/
-  RG32Uint/RG32Sint/RGBA8/BGRA8/RGBA8Snorm/RGBA8Uint/RGBA8Sint/
+  RG32Uint/RG32Sint/RGBA8/BGRA8/RGBA8Unorm_sRGB/BGRA8Unorm_sRGB/RGBA8Snorm/RGBA8Uint/RGBA8Sint/
   R32Float/RGBA16Unorm/RGBA16Snorm/RGBA16Float/RGBA16Uint/RGBA16Sint/
   RG32Float/RGBA32Float buffers and
   1D/2D/3D textures with
   checked region read/write
-- CPU-owned R8Unorm/R8Snorm, R16Unorm/R16Snorm, R16Float,
-  RG8Unorm/RG8Snorm, RG16Unorm/RG16Snorm, RG16Float,
+- CPU-owned R8Unorm/R8Unorm_sRGB/R8Snorm, R16Unorm/R16Snorm, R16Float,
+  RG8Unorm/RG8Unorm_sRGB/RG8Snorm, RG16Unorm/RG16Snorm, RG16Float,
   R8/R16/RG8/RG16/R32/RG32/RGBA8/RGBA16 Uint/Sint,
   R32Float, RGBA16Unorm/RGBA16Snorm, RGBA16Float, RG32Float, and RGBA32Float textures preserve
   native texel widths for raw transfers, views, buffer-backed storage, and heap
   allocation accounting; render paths accept R8Unorm, R16Unorm, RG8Unorm,
   RG16Unorm, R16Float, RG16Float, RGBA16Unorm, RGBA16Float, R32Float,
   RG32Float, and RGBA32Float as CPU color targets; all Uint/Sint formats are
-  transfer-only; signed-normalized formats are transfer-only until signed
-  normalized CPU attachment conversion is added;
+  transfer-only; signed-normalized and sRGB formats are transfer-only until
+  their CPU attachment conversions are added;
   fixed CPU compute profiles remain explicitly format-specific;
 - formats without a corresponding CPU shader profile remain rejected
 - ordinary device-created 1D, 1D-array, 2D, 2D-array, cube, and cube-array
@@ -347,10 +347,10 @@ triangle path:
 
 The C header exposes both `zpu_metal_render`, an opt-in single-pass entry
 point, and a resource/command-buffer API for C, C++, and Objective-C clients.
-The latter owns R8/R8Snorm/R16Unorm/R16Snorm/R16Float/RG8/RG8Snorm/
+The latter owns R8/R8Unorm_sRGB/R8Snorm/R16Unorm/R16Snorm/R16Float/RG8/RG8Unorm_sRGB/RG8Snorm/
 RG16Unorm/RG16Snorm/RG16Float/R32Uint/R32Sint/
 R8Uint/R8Sint/R16Uint/R16Sint/RG8Uint/RG8Sint/RG16Uint/RG16Sint/
-RG32Uint/RG32Sint/RGBA8/BGRA8/RGBA8Snorm/RGBA8Uint/RGBA8Sint/
+RG32Uint/RG32Sint/RGBA8/BGRA8/RGBA8Unorm_sRGB/BGRA8Unorm_sRGB/RGBA8Snorm/RGBA8Uint/RGBA8Sint/
 R32Float/RGBA16Unorm/RGBA16Snorm/RGBA16Float/RGBA16Uint/RGBA16Sint/RG32Float/RGBA32Float/
 depth32-float/Stencil8 buffers and textures, records
 render/blit work, and executes it at command-buffer commit. Its render state

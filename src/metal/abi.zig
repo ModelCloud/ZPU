@@ -12,7 +12,7 @@
 /// This is intentionally not Apple's framework version.  The ZPU ABI is an
 /// opt-in compatibility surface and must never be confused with an
 /// implementation of the Objective-C Metal runtime.
-pub const abi_version: u32 = 16;
+pub const abi_version: u32 = 17;
 
 pub const Workload = enum(u8) {
     two_dimensional,
@@ -21,6 +21,7 @@ pub const Workload = enum(u8) {
 
 pub const PixelFormat = enum(u16) {
     r8_unorm = 10,
+    r8_unorm_srgb = 11,
     r8_snorm = 12,
     r8_uint = 13,
     r8_sint = 14,
@@ -30,6 +31,7 @@ pub const PixelFormat = enum(u16) {
     r16_sint = 24,
     r16_float = 25,
     rg8_unorm = 30,
+    rg8_unorm_srgb = 31,
     rg8_snorm = 32,
     rg8_uint = 33,
     rg8_sint = 34,
@@ -41,7 +43,9 @@ pub const PixelFormat = enum(u16) {
     r32_uint = 53,
     r32_sint = 54,
     bgra8_unorm = 80,
+    bgra8_unorm_srgb = 81,
     rgba8_unorm = 70,
+    rgba8_unorm_srgb = 71,
     rgba8_snorm = 72,
     rgba8_uint = 73,
     rgba8_sint = 74,
@@ -196,7 +200,7 @@ pub const CpuBudget = struct {
 
 test "Metal ABI layout and CPU budgets are pinned" {
     const std = @import("std");
-    try std.testing.expectEqual(@as(u32, 16), abi_version);
+    try std.testing.expectEqual(@as(u32, 17), abi_version);
     try std.testing.expectEqual(@as(u8, 1), (CpuBudget{ .workload = .two_dimensional }).maxCores());
     try std.testing.expectEqual(@as(u8, 2), (CpuBudget{ .workload = .three_dimensional }).maxCores());
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(Color));

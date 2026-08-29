@@ -1638,6 +1638,49 @@ int main(void) {
             }
         }
 
+        /* sRGB texture encodings preserve their native byte layout in the
+         * CPU-owned transfer path. Color-space conversion remains a separate
+         * raster-profile concern and is not silently approximated here. */
+        const struct { MTLPixelFormat format; NSUInteger bytes_per_pixel; } srgb_formats[] = {
+            {MTLPixelFormatR8Unorm_sRGB, 1}, {MTLPixelFormatRG8Unorm_sRGB, 2},
+            {MTLPixelFormatRGBA8Unorm_sRGB, 4}, {MTLPixelFormatBGRA8Unorm_sRGB, 4},
+        };
+        for (NSUInteger format_index = 0; format_index < sizeof(srgb_formats) / sizeof(srgb_formats[0]); ++format_index) {
+            const NSUInteger byte_count = integer_format_width * integer_format_height * srgb_formats[format_index].bytes_per_pixel;
+            for (NSUInteger byte = 0; byte < byte_count; ++byte) {
+                integer_source[byte] = (uint8_t)((byte * 23u + format_index * 19u + 11u) & 0xffu);
+            }
+            MTLTextureDescriptor *srgb_descriptor = [native_r32_descriptor copy];
+            srgb_descriptor.pixelFormat = srgb_formats[format_index].format;
+            srgb_descriptor.usage = MTLTextureUsageShaderRead;
+            id<MTLTexture> native_srgb_texture = [device newTextureWithDescriptor:srgb_descriptor];
+            id<MTLTexture> adapter_srgb_texture = [adapter_device newTextureWithDescriptor:srgb_descriptor];
+            if (native_srgb_texture == nil || adapter_srgb_texture == nil ||
+                adapter_srgb_texture.allocatedSize != byte_count) {
+                fprintf(stderr, "metal-pixel: sRGB texture allocation failed for format %lu\n",
+                        (unsigned long)srgb_formats[format_index].format);
+                return 84;
+            }
+            [native_srgb_texture replaceRegion:MTLRegionMake2D(0, 0, integer_format_width, integer_format_height)
+                                   mipmapLevel:0 withBytes:integer_source
+                                 bytesPerRow:integer_format_width * srgb_formats[format_index].bytes_per_pixel];
+            [adapter_srgb_texture replaceRegion:MTLRegionMake2D(0, 0, integer_format_width, integer_format_height)
+                                    mipmapLevel:0 withBytes:integer_source
+                                  bytesPerRow:integer_format_width * srgb_formats[format_index].bytes_per_pixel];
+            [native_srgb_texture getBytes:native_integer_bytes
+                               bytesPerRow:integer_format_width * srgb_formats[format_index].bytes_per_pixel
+                             fromRegion:MTLRegionMake2D(0, 0, integer_format_width, integer_format_height) mipmapLevel:0];
+            [adapter_srgb_texture getBytes:adapter_integer_bytes
+                                bytesPerRow:integer_format_width * srgb_formats[format_index].bytes_per_pixel
+                              fromRegion:MTLRegionMake2D(0, 0, integer_format_width, integer_format_height) mipmapLevel:0];
+            if (memcmp(native_integer_bytes, adapter_integer_bytes, byte_count) != 0 ||
+                memcmp(adapter_integer_bytes, integer_source, byte_count) != 0) {
+                fprintf(stderr, "metal-pixel: sRGB texture bytes mismatch for format %lu\n",
+                        (unsigned long)srgb_formats[format_index].format);
+                return 85;
+            }
+        }
+
         /* Narrow normalized formats must retain their one- and two-byte
          * texels through the same CPU-owned storage and transfer path. */
         enum { narrow_format_width = 4, narrow_format_height = 2,

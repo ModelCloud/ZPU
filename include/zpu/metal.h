@@ -9,7 +9,7 @@
 /* Native ZPU CPU Metal-layer ABI. This is intentionally separate from the
  * Apple Objective-C framework ABI; it is the portable FFI surface used by
  * clients that select ZPU's CPU renderer. */
-#define ZPU_METAL_ABI_VERSION 16u
+#define ZPU_METAL_ABI_VERSION 17u
 
 typedef uint8_t zpu_metal_workload;
 enum {
@@ -20,6 +20,7 @@ enum {
 typedef uint16_t zpu_metal_pixel_format;
 enum {
     ZPU_METAL_R8_UNORM = 10,
+    ZPU_METAL_R8_UNORM_SRGB = 11,
     ZPU_METAL_R8_SNORM = 12,
     ZPU_METAL_R8_UINT = 13,
     ZPU_METAL_R8_SINT = 14,
@@ -29,6 +30,7 @@ enum {
     ZPU_METAL_R16_SINT = 24,
     ZPU_METAL_R16_FLOAT = 25,
     ZPU_METAL_RG8_UNORM = 30,
+    ZPU_METAL_RG8_UNORM_SRGB = 31,
     ZPU_METAL_RG8_SNORM = 32,
     ZPU_METAL_RG8_UINT = 33,
     ZPU_METAL_RG8_SINT = 34,
@@ -40,10 +42,12 @@ enum {
     ZPU_METAL_R32_UINT = 53,
     ZPU_METAL_R32_SINT = 54,
     ZPU_METAL_RGBA8_UNORM = 70,
+    ZPU_METAL_RGBA8_UNORM_SRGB = 71,
     ZPU_METAL_RGBA8_SNORM = 72,
     ZPU_METAL_RGBA8_UINT = 73,
     ZPU_METAL_RGBA8_SINT = 74,
     ZPU_METAL_BGRA8_UNORM = 80,
+    ZPU_METAL_BGRA8_UNORM_SRGB = 81,
     ZPU_METAL_R32_FLOAT = 55,
     ZPU_METAL_RGBA16_UNORM = 110,
     ZPU_METAL_RGBA16_SNORM = 112,
