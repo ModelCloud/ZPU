@@ -26,6 +26,9 @@ jobs:
           if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
             sudo sed -i '/^Types: deb$/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources
           fi
+          if [ -f /etc/apt/sources.list ]; then
+            sudo sed -i '/^deb /s/^deb /deb [arch=amd64] /' /etc/apt/sources.list
+          fi
           codename=$(lsb_release -cs)
           printf '%s\n' \
             "Types: deb" \
