@@ -3310,6 +3310,35 @@ int main(void) {
                 return 106;
             }
 
+            /* ML tensors created from buffers obey the native offset and
+             * row-alignment contract before they can reach the identity
+             * pipeline. The direct tensor above has no buffer offset and is
+             * intentionally unaffected by these buffer-backed checks. */
+            MTLTensorDescriptor *metal4_ml_buffer_descriptor = [tensor_descriptor copy];
+            metal4_ml_buffer_descriptor.usage = MTLTensorUsageMachineLearning;
+            metal4_ml_buffer_descriptor.strides =
+                [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){1, 64}];
+            id<MTLBuffer> metal4_ml_buffer =
+                [adapter_device newBufferWithLength:192 options:MTLResourceStorageModeShared];
+            NSError *metal4_ml_buffer_error = nil;
+            id<MTLTensor> metal4_ml_valid_tensor =
+                [metal4_ml_buffer newTensorWithDescriptor:metal4_ml_buffer_descriptor
+                                                    offset:0 error:&metal4_ml_buffer_error];
+            id<MTLTensor> metal4_ml_offset_tensor =
+                [metal4_ml_buffer newTensorWithDescriptor:metal4_ml_buffer_descriptor
+                                                    offset:1 error:&metal4_ml_buffer_error];
+            MTLTensorDescriptor *metal4_ml_unaligned_descriptor = [metal4_ml_buffer_descriptor copy];
+            metal4_ml_unaligned_descriptor.strides = tensor_buffer_strides;
+            id<MTLTensor> metal4_ml_unaligned_tensor =
+                [metal4_ml_buffer newTensorWithDescriptor:metal4_ml_unaligned_descriptor
+                                                    offset:0 error:&metal4_ml_buffer_error];
+            if (metal4_ml_valid_tensor == nil || metal4_ml_valid_tensor.buffer != metal4_ml_buffer ||
+                metal4_ml_valid_tensor.bufferOffset != 0 || metal4_ml_offset_tensor != nil ||
+                metal4_ml_unaligned_tensor != nil || metal4_ml_buffer_error == nil) {
+                fail_with_error("CPU ML tensor buffer contract failed", metal4_ml_buffer_error);
+                return 113;
+            }
+
             if (@available(macOS 26.4, iOS 26.4, *)) {
                 MTLTensorDescriptor *unsupported_tensor_descriptor = [tensor_descriptor copy];
                 unsupported_tensor_descriptor.dataType = MTLTensorDataTypeInt4;

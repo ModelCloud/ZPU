@@ -3656,6 +3656,10 @@ static BOOL zpu_tensor_layout_for_descriptor(MTLTensorDescriptor *descriptor, ZP
             }
         }
     }
+    if ((descriptor.usage & MTLTensorUsageMachineLearning) != 0 && descriptor.strides != nil && rank > 1) {
+        if (layout->strides[1] > SIZE_MAX / elementSize ||
+            (layout->strides[1] * elementSize) % 64 != 0) return NO;
+    }
     NSUInteger lastElement = rank == 0 ? 0 : 1;
     if (rank != 0) {
         lastElement = 0;
@@ -3821,6 +3825,7 @@ static ZPUTensor *zpu_create_tensor(ZPUDevice *owner, ZPUBuffer *storageBuffer,
         (backingBuffer != nil && backingBuffer != storageBuffer && backingBuffer->_owner != owner) ||
         !zpu_tensor_layout_for_descriptor(descriptor, &layout) ||
         bufferOffset > storageBuffer.length || layout.size > storageBuffer.length - bufferOffset ||
+        ((descriptor.usage & MTLTensorUsageMachineLearning) != 0 && backingBuffer != nil && bufferOffset != 0) ||
         (backingBuffer != nil && descriptor.storageMode != backingBuffer.storageMode)) {
         zpu_set_error(error, @"ZPU CPU Metal tensor descriptor or backing range is invalid");
         return nil;
