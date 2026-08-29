@@ -3104,6 +3104,157 @@ int main(void) {
             return 81;
         }
 
+        /* RGBA16Float is the first supported format whose texel width is not
+         * four bytes. Exercise the padded 3D buffer paths with a non-zero
+         * x/y/z destination so a hard-coded RGBA8 row width cannot pass. */
+        enum {
+            f16_three_d_width = 3,
+            f16_three_d_height = 3,
+            f16_three_d_depth = 3,
+            f16_three_d_bytes_per_pixel = 8,
+            f16_three_d_row_bytes = f16_three_d_width * f16_three_d_bytes_per_pixel,
+            f16_three_d_plane_bytes = f16_three_d_row_bytes * f16_three_d_height,
+            f16_three_d_bytes = f16_three_d_plane_bytes * f16_three_d_depth,
+            f16_copy_width = 2,
+            f16_copy_height = 2,
+            f16_copy_depth = 2,
+            f16_copy_row_bytes = f16_copy_width * f16_three_d_bytes_per_pixel,
+            f16_copy_row_stride = f16_copy_row_bytes + 8,
+            f16_copy_image_stride = f16_copy_row_stride * f16_copy_height + 8,
+            f16_upload_offset = 8,
+            f16_upload_buffer_length = f16_upload_offset + f16_copy_image_stride * f16_copy_depth,
+            f16_download_offset = 4,
+            f16_download_buffer_length = f16_download_offset + f16_copy_image_stride * f16_copy_depth,
+        };
+        MTLTextureDescriptor *f16_three_d_descriptor = [MTLTextureDescriptor new];
+        f16_three_d_descriptor.textureType = MTLTextureType3D;
+        f16_three_d_descriptor.pixelFormat = MTLPixelFormatRGBA16Float;
+        f16_three_d_descriptor.width = f16_three_d_width;
+        f16_three_d_descriptor.height = f16_three_d_height;
+        f16_three_d_descriptor.depth = f16_three_d_depth;
+        f16_three_d_descriptor.arrayLength = 1;
+        f16_three_d_descriptor.mipmapLevelCount = 1;
+        f16_three_d_descriptor.sampleCount = 1;
+        f16_three_d_descriptor.storageMode = MTLStorageModeShared;
+        f16_three_d_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        id<MTLTexture> native_f16_three_d = [device newTextureWithDescriptor:f16_three_d_descriptor];
+        id<MTLTexture> adapter_f16_three_d = [adapter_device newTextureWithDescriptor:f16_three_d_descriptor];
+        uint8_t f16_three_d_clear[f16_three_d_bytes];
+        memset(f16_three_d_clear, 0, sizeof(f16_three_d_clear));
+        [native_f16_three_d replaceRegion:MTLRegionMake3D(0, 0, 0, f16_three_d_width,
+                                                           f16_three_d_height, f16_three_d_depth)
+                               mipmapLevel:0 slice:0 withBytes:f16_three_d_clear
+                               bytesPerRow:f16_three_d_row_bytes bytesPerImage:f16_three_d_plane_bytes];
+        [adapter_f16_three_d replaceRegion:MTLRegionMake3D(0, 0, 0, f16_three_d_width,
+                                                            f16_three_d_height, f16_three_d_depth)
+                                mipmapLevel:0 slice:0 withBytes:f16_three_d_clear
+                                bytesPerRow:f16_three_d_row_bytes bytesPerImage:f16_three_d_plane_bytes];
+
+        uint8_t f16_upload_source[f16_upload_buffer_length];
+        memset(f16_upload_source, 0xd7, sizeof(f16_upload_source));
+        for (NSUInteger plane = 0; plane < f16_copy_depth; ++plane) {
+            for (NSUInteger row = 0; row < f16_copy_height; ++row) {
+                for (NSUInteger column = 0; column < f16_copy_width; ++column) {
+                    const NSUInteger pixel_offset = f16_upload_offset + plane * f16_copy_image_stride +
+                        row * f16_copy_row_stride + column * f16_three_d_bytes_per_pixel;
+                    for (NSUInteger byte = 0; byte < f16_three_d_bytes_per_pixel; ++byte) {
+                        f16_upload_source[pixel_offset + byte] =
+                            (uint8_t)((plane * 67u + row * 29u + column * 13u + byte * 11u + 5u) & 0xffu);
+                    }
+                }
+            }
+        }
+        id<MTLBuffer> native_f16_upload_buffer =
+            [device newBufferWithBytes:f16_upload_source length:sizeof(f16_upload_source)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_f16_upload_buffer =
+            [adapter_device newBufferWithBytes:f16_upload_source length:sizeof(f16_upload_source)
+                                        options:MTLResourceStorageModeShared];
+        const MTLSize f16_copy_size = MTLSizeMake(f16_copy_width, f16_copy_height, f16_copy_depth);
+        const MTLOrigin f16_destination_origin = MTLOriginMake(1, 1, 1);
+        id<MTLCommandBuffer> native_f16_upload_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> native_f16_upload_blit =
+            [native_f16_upload_command_buffer blitCommandEncoder];
+        [native_f16_upload_blit copyFromBuffer:native_f16_upload_buffer sourceOffset:f16_upload_offset
+                              sourceBytesPerRow:f16_copy_row_stride sourceBytesPerImage:f16_copy_image_stride
+                                     sourceSize:f16_copy_size toTexture:native_f16_three_d
+                                destinationSlice:0 destinationLevel:0 destinationOrigin:f16_destination_origin];
+        [native_f16_upload_blit endEncoding];
+        [native_f16_upload_command_buffer commit];
+        [native_f16_upload_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> adapter_f16_upload_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_f16_upload_blit =
+            [adapter_f16_upload_command_buffer blitCommandEncoder];
+        [adapter_f16_upload_blit copyFromBuffer:adapter_f16_upload_buffer sourceOffset:f16_upload_offset
+                               sourceBytesPerRow:f16_copy_row_stride sourceBytesPerImage:f16_copy_image_stride
+                                      sourceSize:f16_copy_size toTexture:adapter_f16_three_d
+                                 destinationSlice:0 destinationLevel:0 destinationOrigin:f16_destination_origin];
+        [adapter_f16_upload_blit endEncoding];
+        [adapter_f16_upload_command_buffer commit];
+        [adapter_f16_upload_command_buffer waitUntilCompleted];
+
+        uint8_t native_f16_three_d_bytes[f16_three_d_bytes];
+        uint8_t adapter_f16_three_d_bytes[f16_three_d_bytes];
+        memset(native_f16_three_d_bytes, 0xa5, sizeof(native_f16_three_d_bytes));
+        memset(adapter_f16_three_d_bytes, 0xa5, sizeof(adapter_f16_three_d_bytes));
+        [native_f16_three_d getBytes:native_f16_three_d_bytes
+                         bytesPerRow:f16_three_d_row_bytes bytesPerImage:f16_three_d_plane_bytes
+                          fromRegion:MTLRegionMake3D(0, 0, 0, f16_three_d_width,
+                                                      f16_three_d_height, f16_three_d_depth)
+                         mipmapLevel:0 slice:0];
+        [adapter_f16_three_d getBytes:adapter_f16_three_d_bytes
+                          bytesPerRow:f16_three_d_row_bytes bytesPerImage:f16_three_d_plane_bytes
+                           fromRegion:MTLRegionMake3D(0, 0, 0, f16_three_d_width,
+                                                       f16_three_d_height, f16_three_d_depth)
+                          mipmapLevel:0 slice:0];
+
+        id<MTLBuffer> native_f16_download_buffer =
+            [device newBufferWithLength:f16_download_buffer_length options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_f16_download_buffer =
+            [adapter_device newBufferWithLength:f16_download_buffer_length options:MTLResourceStorageModeShared];
+        if (native_f16_download_buffer != nil) memset(native_f16_download_buffer.contents, 0xab,
+                                                       native_f16_download_buffer.length);
+        if (adapter_f16_download_buffer != nil) memset(adapter_f16_download_buffer.contents, 0xab,
+                                                        adapter_f16_download_buffer.length);
+        const MTLOrigin f16_source_origin = MTLOriginMake(1, 1, 1);
+        id<MTLCommandBuffer> native_f16_download_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> native_f16_download_blit =
+            [native_f16_download_command_buffer blitCommandEncoder];
+        [native_f16_download_blit copyFromTexture:native_f16_three_d
+                                       sourceSlice:0 sourceLevel:0 sourceOrigin:f16_source_origin
+                                       sourceSize:f16_copy_size toBuffer:native_f16_download_buffer
+                                  destinationOffset:f16_download_offset
+                             destinationBytesPerRow:f16_copy_row_stride
+                           destinationBytesPerImage:f16_copy_image_stride];
+        [native_f16_download_blit endEncoding];
+        [native_f16_download_command_buffer commit];
+        [native_f16_download_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> adapter_f16_download_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_f16_download_blit =
+            [adapter_f16_download_command_buffer blitCommandEncoder];
+        [adapter_f16_download_blit copyFromTexture:adapter_f16_three_d
+                                        sourceSlice:0 sourceLevel:0 sourceOrigin:f16_source_origin
+                                        sourceSize:f16_copy_size toBuffer:adapter_f16_download_buffer
+                                   destinationOffset:f16_download_offset
+                              destinationBytesPerRow:f16_copy_row_stride
+                            destinationBytesPerImage:f16_copy_image_stride];
+        [adapter_f16_download_blit endEncoding];
+        [adapter_f16_download_command_buffer commit];
+        [adapter_f16_download_command_buffer waitUntilCompleted];
+        if (native_f16_three_d == nil || adapter_f16_three_d == nil ||
+            native_f16_upload_buffer == nil || adapter_f16_upload_buffer == nil ||
+            native_f16_download_buffer == nil || adapter_f16_download_buffer == nil ||
+            native_f16_upload_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_f16_upload_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            native_f16_download_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_f16_download_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_f16_three_d_bytes, adapter_f16_three_d_bytes, sizeof(native_f16_three_d_bytes)) != 0 ||
+            memcmp(native_f16_download_buffer.contents, adapter_f16_download_buffer.contents,
+                   f16_download_buffer_length) != 0) {
+            fprintf(stderr, "metal-pixel: RGBA16Float 3D padded blit exactness failed\n");
+            return 87;
+        }
+
         enum { fractional_three_d_width = 5, fractional_three_d_height = 3, fractional_three_d_depth = 5,
                fractional_three_d_row_bytes = fractional_three_d_width * 4,
                fractional_three_d_plane_bytes = fractional_three_d_row_bytes * fractional_three_d_height,

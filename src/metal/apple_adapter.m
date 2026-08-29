@@ -6467,7 +6467,12 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     }
     if (zpu_texture_type_is_3d(source->_textureType)) {
         const NSUInteger levelDepth = zpu_texture_depth_at_level(source, sourceLevel);
-        const NSUInteger rowBytes = sourceSize.width * 4;
+        const NSUInteger bytesPerPixel = zpu_texture_bytes_per_pixel(source->_pixelFormat);
+        if (bytesPerPixel == 0 || sourceSize.width > SIZE_MAX / bytesPerPixel) {
+            [_owner markError];
+            return;
+        }
+        const NSUInteger rowBytes = sourceSize.width * bytesPerPixel;
         const NSUInteger rowStride = destinationBytesPerRow == 0 ? rowBytes : destinationBytesPerRow;
         if (sourceSlice != 0 || levelDepth == 0 || sourceOrigin.z > levelDepth ||
             sourceSize.depth > levelDepth - sourceOrigin.z || rowStride < rowBytes ||
@@ -6534,7 +6539,12 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     }
     if (zpu_texture_type_is_3d(destination->_textureType)) {
         const NSUInteger levelDepth = zpu_texture_depth_at_level(destination, destinationLevel);
-        const NSUInteger rowBytes = sourceSize.width * 4;
+        const NSUInteger bytesPerPixel = zpu_texture_bytes_per_pixel(destination->_pixelFormat);
+        if (bytesPerPixel == 0 || sourceSize.width > SIZE_MAX / bytesPerPixel) {
+            [_owner markError];
+            return;
+        }
+        const NSUInteger rowBytes = sourceSize.width * bytesPerPixel;
         const NSUInteger rowStride = sourceBytesPerRow == 0 ? rowBytes : sourceBytesPerRow;
         if (destinationSlice != 0 || levelDepth == 0 || destinationOrigin.z > levelDepth ||
             sourceSize.depth > levelDepth - destinationOrigin.z || rowStride < rowBytes ||
@@ -7796,7 +7806,9 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         const NSUInteger levelDepth = zpu_texture_depth_at_level(destination, destinationLevel);
         if (destinationSlice != 0 || levelDepth == 0 || destinationOrigin.z > levelDepth ||
             sourceSize.depth > levelDepth - destinationOrigin.z) { [_owner markError]; return; }
-        const NSUInteger rowBytes = sourceSize.width * 4;
+        const NSUInteger bytesPerPixel = zpu_texture_bytes_per_pixel(destination->_pixelFormat);
+        if (bytesPerPixel == 0 || sourceSize.width > SIZE_MAX / bytesPerPixel) { [_owner markError]; return; }
+        const NSUInteger rowBytes = sourceSize.width * bytesPerPixel;
         const NSUInteger rowStride = sourceBytesPerRow == 0 ? rowBytes : sourceBytesPerRow;
         if (rowStride < rowBytes || (sourceSize.height != 0 && rowStride > SIZE_MAX / sourceSize.height)) { [_owner markError]; return; }
         const NSUInteger imageStride = sourceBytesPerImage == 0 ? rowStride * sourceSize.height : sourceBytesPerImage;
@@ -7835,7 +7847,9 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         const NSUInteger levelDepth = zpu_texture_depth_at_level(source, sourceLevel);
         if (sourceSlice != 0 || levelDepth == 0 || sourceOrigin.z > levelDepth ||
             sourceSize.depth > levelDepth - sourceOrigin.z) { [_owner markError]; return; }
-        const NSUInteger rowBytes = sourceSize.width * 4;
+        const NSUInteger bytesPerPixel = zpu_texture_bytes_per_pixel(source->_pixelFormat);
+        if (bytesPerPixel == 0 || sourceSize.width > SIZE_MAX / bytesPerPixel) { [_owner markError]; return; }
+        const NSUInteger rowBytes = sourceSize.width * bytesPerPixel;
         const NSUInteger rowStride = destinationBytesPerRow == 0 ? rowBytes : destinationBytesPerRow;
         if (rowStride < rowBytes || (sourceSize.height != 0 && rowStride > SIZE_MAX / sourceSize.height)) { [_owner markError]; return; }
         const NSUInteger imageStride = destinationBytesPerImage == 0 ? rowStride * sourceSize.height : destinationBytesPerImage;
