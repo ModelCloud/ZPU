@@ -2996,6 +2996,24 @@ int main(void) {
             [adapter_mtl4_compiled_pipeline functionHandleWithName:@"zpu_cpu_fill_gradient_rgba8"];
         id<MTLFunctionHandle> adapter_mtl4_function_handle =
             [adapter_mtl4_compiled_pipeline functionHandleWithFunction:adapter_mtl4_compiler_function];
+        MTL4BinaryFunctionDescriptor *adapter_mtl4_render_binary_descriptor = [MTL4BinaryFunctionDescriptor new];
+        adapter_mtl4_render_binary_descriptor.name = @"zpu_test_fragment";
+        adapter_mtl4_render_binary_descriptor.functionDescriptor = adapter_mtl4_fragment_descriptor;
+        adapter_mtl4_render_binary_descriptor.options = MTL4BinaryFunctionOptionPipelineIndependent;
+        id<MTL4BinaryFunction> adapter_mtl4_render_binary_function =
+            [adapter_mtl4_compiler newBinaryFunctionWithDescriptor:adapter_mtl4_render_binary_descriptor
+                                                   compilerTaskOptions:nil
+                                                                 error:&adapter_mtl4_compiler_error];
+        id<MTLFunctionHandle> adapter_mtl4_render_binary_handle = nil;
+        id<MTLFunctionHandle> adapter_mtl4_render_function_handle = nil;
+        if (@available(macOS 12.0, iOS 15.0, *)) {
+            adapter_mtl4_render_function_handle =
+                [adapter_mtl4_compiled_render_pipeline functionHandleWithFunction:adapter_fragment_function
+                                                                               stage:MTLRenderStageFragment];
+            adapter_mtl4_render_binary_handle =
+                [adapter_mtl4_compiled_render_pipeline functionHandleWithBinaryFunction:adapter_mtl4_render_binary_function
+                                                                                      stage:MTLRenderStageFragment];
+        }
         __block id<MTL4BinaryFunction> adapter_mtl4_async_binary_function = nil;
         __block NSError *adapter_mtl4_async_error = nil;
         id<MTL4CompilerTask> adapter_mtl4_binary_task =
@@ -3109,7 +3127,7 @@ int main(void) {
         adapter_visible_descriptor.functionCount = 4;
         id<MTLVisibleFunctionTable> adapter_visible_function_table =
             [adapter_mtl4_compiled_pipeline newVisibleFunctionTableWithDescriptor:adapter_visible_descriptor];
-        id<MTLFunctionHandle> adapter_table_handle = adapter_mtl4_named_handle;
+        id<MTLFunctionHandle> adapter_table_handle = adapter_mtl4_render_function_handle;
         id<MTLFunctionHandle> adapter_table_handles[] = {adapter_table_handle, nil};
         [adapter_visible_function_table setFunction:adapter_table_handle atIndex:0];
         [adapter_visible_function_table setFunctions:adapter_table_handles withRange:NSMakeRange(1, 2)];
@@ -3146,7 +3164,12 @@ int main(void) {
             ![adapter_intersection_function_table conformsToProtocol:@protocol(MTLIntersectionFunctionTable)] ||
             adapter_intersection_function_table.device != adapter_device ||
             adapter_intersection_function_table.allocatedSize < 2 * sizeof(uint64_t) ||
-            adapter_intersection_function_table.gpuResourceID._impl == 0) {
+            adapter_intersection_function_table.gpuResourceID._impl == 0 ||
+            adapter_mtl4_render_function_handle == nil ||
+            adapter_mtl4_render_binary_handle == nil ||
+            adapter_mtl4_render_function_handle.functionType != MTLFunctionTypeFragment ||
+            ![adapter_mtl4_render_function_handle.name isEqualToString:@"zpu_test_fragment"] ||
+            ![adapter_mtl4_render_binary_handle.name isEqualToString:@"zpu_test_fragment"]) {
             fprintf(stderr, "metal-pixel: CPU function table layer failed\n");
             return 102;
         }

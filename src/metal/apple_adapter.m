@@ -294,6 +294,8 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLBlendFactor _destinationAlphaBlendFactor;
     MTLBlendOperation _alphaBlendOperation;
     MTLColorWriteMask _writeMask;
+    NSString *_vertexFunctionName;
+    NSString *_fragmentFunctionName;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLRenderPipelineDescriptor *)descriptor;
 @end
@@ -2029,6 +2031,8 @@ static uint64_t zpu_cpu_timestamp(void) {
     if ((self = [super init])) {
         _owner = owner;
         MTLRenderPipelineColorAttachmentDescriptor *attachment = descriptor.colorAttachments[0];
+        _vertexFunctionName = [descriptor.vertexFunction.name copy];
+        _fragmentFunctionName = [descriptor.fragmentFunction.name copy];
         _colorPixelFormat = attachment.pixelFormat;
         _colorAttachmentCount = 0;
         for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
@@ -2076,9 +2080,17 @@ static uint64_t zpu_cpu_timestamp(void) {
 - (MTLSize)requiredThreadsPerObjectThreadgroup API_AVAILABLE(macos(26.0), ios(26.0)) { return MTLSizeMake(0, 0, 0); }
 - (MTLSize)requiredThreadsPerMeshThreadgroup API_AVAILABLE(macos(26.0), ios(26.0)) { return MTLSizeMake(0, 0, 0); }
 - (id<MTLFunctionHandle>)functionHandleWithFunction:(id<MTLFunction>)function stage:(MTLRenderStages)stage API_AVAILABLE(macos(12.0), ios(15.0), tvos(16.0)) {
-    (void)function;
-    (void)stage;
-    return nil;
+    ZPUCPUFunction *cpuFunction = (ZPUCPUFunction *)function;
+    if (![cpuFunction isKindOfClass:[ZPUCPUFunction class]] || cpuFunction->_owner != _owner) return nil;
+    NSString *expectedName = stage == MTLRenderStageVertex ? _vertexFunctionName :
+        (stage == MTLRenderStageFragment ? _fragmentFunctionName : nil);
+    MTLFunctionType expectedType = stage == MTLRenderStageVertex ? MTLFunctionTypeVertex :
+        (stage == MTLRenderStageFragment ? MTLFunctionTypeFragment : MTLFunctionTypeKernel);
+    if (expectedName == nil || ![expectedName isEqualToString:cpuFunction.name] ||
+        cpuFunction.functionType != expectedType) return nil;
+    return (id<MTLFunctionHandle>)[[ZPUFunctionHandle alloc] initWithOwner:_owner
+                                                                        name:expectedName
+                                                                 functionType:expectedType];
 }
 - (id<MTLVisibleFunctionTable>)newVisibleFunctionTableWithDescriptor:(MTLVisibleFunctionTableDescriptor *)descriptor stage:(MTLRenderStages)stage API_AVAILABLE(macos(12.0), ios(15.0), tvos(16.0)) {
     if (descriptor == nil) return nil;
@@ -2093,14 +2105,27 @@ static uint64_t zpu_cpu_timestamp(void) {
 }
 - (MTLRenderPipelineReflection *)reflection API_AVAILABLE(macos(26.0), ios(26.0)) { return nil; }
 - (id<MTLFunctionHandle>)functionHandleWithName:(NSString *)name stage:(MTLRenderStages)stage API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)name;
-    (void)stage;
-    return nil;
+    NSString *expectedName = stage == MTLRenderStageVertex ? _vertexFunctionName :
+        (stage == MTLRenderStageFragment ? _fragmentFunctionName : nil);
+    MTLFunctionType expectedType = stage == MTLRenderStageVertex ? MTLFunctionTypeVertex :
+        (stage == MTLRenderStageFragment ? MTLFunctionTypeFragment : MTLFunctionTypeKernel);
+    if (expectedName == nil || ![expectedName isEqualToString:name]) return nil;
+    return (id<MTLFunctionHandle>)[[ZPUFunctionHandle alloc] initWithOwner:_owner
+                                                                        name:expectedName
+                                                                 functionType:expectedType];
 }
 - (id<MTLFunctionHandle>)functionHandleWithBinaryFunction:(id<MTL4BinaryFunction>)function stage:(MTLRenderStages)stage API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)function;
-    (void)stage;
-    return nil;
+    ZPUMTL4BinaryFunction *binary = (ZPUMTL4BinaryFunction *)function;
+    if (![binary isKindOfClass:[ZPUMTL4BinaryFunction class]] || binary->_owner != _owner) return nil;
+    NSString *expectedName = stage == MTLRenderStageVertex ? _vertexFunctionName :
+        (stage == MTLRenderStageFragment ? _fragmentFunctionName : nil);
+    MTLFunctionType expectedType = stage == MTLRenderStageVertex ? MTLFunctionTypeVertex :
+        (stage == MTLRenderStageFragment ? MTLFunctionTypeFragment : MTLFunctionTypeKernel);
+    if (expectedName == nil || ![expectedName isEqualToString:binary->_name] ||
+        binary->_functionType != expectedType) return nil;
+    return (id<MTLFunctionHandle>)[[ZPUFunctionHandle alloc] initWithOwner:_owner
+                                                                        name:expectedName
+                                                                 functionType:expectedType];
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithBinaryFunctions:(MTL4RenderPipelineBinaryFunctionsDescriptor *)binaryFunctionsDescriptor error:(NSError **)error API_AVAILABLE(macos(26.0), ios(26.0)) {
     (void)binaryFunctionsDescriptor;

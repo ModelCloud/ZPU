@@ -195,6 +195,9 @@ triangle path:
   buffer bindings, opaque-intersection signatures, and visible-table links;
   they expose deterministic CPU resource metadata and IDs, while arbitrary
   function-pointer dispatch and ray tracing remain unsupported
+- CPU render pipeline states resolve vertex/fragment function handles by
+  owner, stage, and name, including Metal 4 binary-function metadata; foreign
+  functions and unsupported stages fail closed
 - CPU indirect compute commands for those registered kernels; the command
   buffer inherits the ZPU encoder's texture bindings and records pipeline,
   buffer, and dispatch state for deferred execution
