@@ -272,6 +272,9 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @public
     ZPUDevice *_owner;
     MTLPixelFormat _colorPixelFormat;
+    MTLPixelFormat _colorPixelFormats[ZPU_METAL_MAX_COLOR_ATTACHMENTS];
+    NSUInteger _colorAttachmentCount;
+    BOOL _multiTargetOutput;
     MTLPixelFormat _depthPixelFormat;
     MTLPixelFormat _stencilPixelFormat;
     BOOL _blendingEnabled;
@@ -623,9 +626,10 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     zpu_metal_store_action _stencilStoreAction;
     uint8_t _stencilClearValue;
     zpu_metal_render_pass_descriptor _pass;
+    MTLRenderPassDescriptor *_descriptor;
     NSUInteger _childCount;
 }
-- (instancetype)initWithOwner:(ZPUCommandBuffer *)owner texture:(ZPUTexture *)texture renderTexture:(zpu_metal_texture *)renderTexture depthTexture:(zpu_metal_texture *)depthTexture stencilTexture:(zpu_metal_texture *)stencilTexture stencilLoadAction:(zpu_metal_load_action)stencilLoadAction stencilStoreAction:(zpu_metal_store_action)stencilStoreAction stencilClearValue:(uint8_t)stencilClearValue pass:(zpu_metal_render_pass_descriptor)pass;
+- (instancetype)initWithOwner:(ZPUCommandBuffer *)owner texture:(ZPUTexture *)texture renderTexture:(zpu_metal_texture *)renderTexture depthTexture:(zpu_metal_texture *)depthTexture stencilTexture:(zpu_metal_texture *)stencilTexture stencilLoadAction:(zpu_metal_load_action)stencilLoadAction stencilStoreAction:(zpu_metal_store_action)stencilStoreAction stencilClearValue:(uint8_t)stencilClearValue pass:(zpu_metal_render_pass_descriptor)pass descriptor:(MTLRenderPassDescriptor *)descriptor;
 @end
 
 static BOOL zpu_u32(NSUInteger value, uint32_t *result) {
@@ -718,6 +722,63 @@ static ZPUTexture *zpu_hidden_color_target(ZPUDevice *owner, ZPUTexture *attachm
     descriptor.storageMode = MTLStorageModeShared;
     descriptor.usage = MTLTextureUsageRenderTarget;
     return (ZPUTexture *)[owner newTextureWithDescriptor:descriptor];
+}
+
+static BOOL zpu_configure_additional_color_attachments(ZPUCommandBuffer *owner,
+                                                        zpu_metal_render_encoder *encoder,
+                                                        MTLRenderPassDescriptor *descriptor) {
+    if (owner == nil || encoder == NULL || descriptor == nil) return NO;
+    for (uint32_t index = 1; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
+        MTLRenderPassColorAttachmentDescriptor *attachment = descriptor.colorAttachments[index];
+        ZPUTexture *texture = (ZPUTexture *)attachment.texture;
+        if (texture == nil) continue;
+        if (![texture isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(texture->_textureType) ||
+            !zpu_render_pipeline_format_supported(texture->_pixelFormat)) return NO;
+        zpu_metal_texture *zpuTexture = [texture zpuTextureAtLevel:attachment.level slice:attachment.slice];
+        if (zpuTexture == NULL) return NO;
+        const zpu_metal_render_pass_color_attachment_descriptor pass = {
+            .load_action = zpu_load_action(attachment.loadAction),
+            .store_action = zpu_store_action(attachment.storeAction),
+            .clear_color = {
+                (float)attachment.clearColor.red,
+                (float)attachment.clearColor.green,
+                (float)attachment.clearColor.blue,
+                (float)attachment.clearColor.alpha,
+            },
+        };
+        if (zpu_metal_render_encoder_set_color_attachment(encoder, zpuTexture, &pass, index) != ZPU_METAL_OK) return NO;
+        [owner retainResource:texture];
+    }
+    return YES;
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+static BOOL zpu_configure_additional_metal4_color_attachments(ZPUCommandBuffer *owner,
+                                                               zpu_metal_render_encoder *encoder,
+                                                               MTL4RenderPassDescriptor *descriptor) {
+    if (owner == nil || encoder == NULL || descriptor == nil) return NO;
+    for (uint32_t index = 1; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
+        id attachment = descriptor.colorAttachments[index];
+        ZPUTexture *texture = (ZPUTexture *)[attachment texture];
+        if (texture == nil) continue;
+        if (![texture isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(texture->_textureType) ||
+            !zpu_render_pipeline_format_supported(texture->_pixelFormat)) return NO;
+        zpu_metal_texture *zpuTexture = [texture zpuTextureAtLevel:[attachment level] slice:[attachment slice]];
+        if (zpuTexture == NULL) return NO;
+        const zpu_metal_render_pass_color_attachment_descriptor pass = {
+            .load_action = zpu_load_action([attachment loadAction]),
+            .store_action = zpu_store_action([attachment storeAction]),
+            .clear_color = {
+                (float)[attachment clearColor].red,
+                (float)[attachment clearColor].green,
+                (float)[attachment clearColor].blue,
+                (float)[attachment clearColor].alpha,
+            },
+        };
+        if (zpu_metal_render_encoder_set_color_attachment(encoder, zpuTexture, &pass, index) != ZPU_METAL_OK) return NO;
+        [owner retainResource:texture];
+    }
+    return YES;
 }
 
 static BOOL zpu_texture_type_is_1d(MTLTextureType type) {
@@ -888,9 +949,6 @@ static BOOL zpu_metal4_render_pass_descriptor(ZPUDevice *owner,
     if (descriptor.renderTargetArrayLength > 1 || descriptor.defaultRasterSampleCount > 1 ||
         (descriptor.renderTargetWidth != 0 && descriptor.renderTargetWidth != zpu_metal_texture_width(colorTexture)) ||
         (descriptor.renderTargetHeight != 0 && descriptor.renderTargetHeight != zpu_metal_texture_height(colorTexture))) return NO;
-    for (NSUInteger index = 1; index < 8; ++index) {
-        if (descriptor.colorAttachments[index].texture != nil) return NO;
-    }
     *pass = (zpu_metal_render_pass_descriptor){
         .color = {
             .load_action = hasColor ? zpu_load_action(descriptor.colorAttachments[0].loadAction) : ZPU_METAL_LOAD_DONT_CARE,
@@ -1826,6 +1884,12 @@ static uint64_t zpu_cpu_timestamp(void) {
         _owner = owner;
         MTLRenderPipelineColorAttachmentDescriptor *attachment = descriptor.colorAttachments[0];
         _colorPixelFormat = attachment.pixelFormat;
+        _colorAttachmentCount = 0;
+        for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
+            _colorPixelFormats[index] = descriptor.colorAttachments[index].pixelFormat;
+            if (_colorPixelFormats[index] != MTLPixelFormatInvalid) _colorAttachmentCount = index + 1;
+        }
+        _multiTargetOutput = [descriptor.fragmentFunction.name rangeOfString:@"mrt" options:NSCaseInsensitiveSearch].location != NSNotFound;
         _depthPixelFormat = descriptor.depthAttachmentPixelFormat;
         _stencilPixelFormat = descriptor.stencilAttachmentPixelFormat;
         _blendingEnabled = attachment.blendingEnabled;
@@ -2152,11 +2216,17 @@ static uint64_t zpu_cpu_timestamp(void) {
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)descriptor error:(NSError **)error {
     if (descriptor == nil || descriptor.vertexFunction == nil || descriptor.fragmentFunction == nil ||
-        descriptor.rasterSampleCount != 1 || !zpu_render_pipeline_format_supported(descriptor.colorAttachments[0].pixelFormat) ||
+        descriptor.rasterSampleCount != 1 ||
         !zpu_depth_format_supported(descriptor.depthAttachmentPixelFormat) ||
         !zpu_stencil_format_supported(descriptor.stencilAttachmentPixelFormat)) {
         zpu_set_error(error, @"ZPU Metal supports only the fixed Vertex ABI with RGBA8/BGRA8, depth32-float, and stencil8 attachments");
         return nil;
+    }
+    for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
+        if (!zpu_render_pipeline_format_supported(descriptor.colorAttachments[index].pixelFormat)) {
+            zpu_set_error(error, @"ZPU Metal supports only RGBA8/BGRA8 color attachments");
+            return nil;
+        }
     }
     if (error != NULL) *error = nil;
     return (id<MTLRenderPipelineState>)[[ZPURenderPipelineState alloc] initWithOwner:self descriptor:descriptor];
@@ -2994,6 +3064,10 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     zpu_metal_render_encoder *encoder = zpu_metal_command_buffer_render_encoder(_zpuCommandBuffer, colorTexture, &pass);
     if (encoder == NULL) return nil;
     [self retainResource:texture];
+    if (!zpu_configure_additional_color_attachments(self, encoder, descriptor)) {
+        zpu_metal_render_encoder_destroy(encoder);
+        return nil;
+    }
     if (descriptor.depthAttachment.texture != nil) {
         ZPUTexture *depth = (ZPUTexture *)descriptor.depthAttachment.texture;
         [self retainResource:depth];
@@ -3074,7 +3148,7 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
         initWithOwner:self texture:texture renderTexture:colorTexture depthTexture:depthTexture stencilTexture:stencilTexture
         stencilLoadAction:descriptor.stencilAttachment.texture != nil ? zpu_load_action(descriptor.stencilAttachment.loadAction) : ZPU_METAL_LOAD_DONT_CARE
         stencilStoreAction:descriptor.stencilAttachment.texture != nil ? zpu_store_action(descriptor.stencilAttachment.storeAction) : ZPU_METAL_STORE_DONT_CARE
-        stencilClearValue:(uint8_t)descriptor.stencilAttachment.clearStencil pass:pass];
+        stencilClearValue:(uint8_t)descriptor.stencilAttachment.clearStencil pass:pass descriptor:descriptor];
 }
 - (id<MTLBlitCommandEncoder>)blitCommandEncoder {
     zpu_metal_blit_encoder *encoder = zpu_metal_command_buffer_blit_encoder(_zpuCommandBuffer);
@@ -3322,6 +3396,11 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     zpu_metal_render_encoder *encoder = zpu_metal_command_buffer_render_encoder(
         _legacyBuffer->_zpuCommandBuffer, colorTexture, &pass);
     if (encoder == NULL) {
+        [self markError];
+        return nil;
+    }
+    if (!zpu_configure_additional_metal4_color_attachments(_legacyBuffer, encoder, descriptor)) {
+        zpu_metal_render_encoder_destroy(encoder);
         [self markError];
         return nil;
     }
@@ -4896,7 +4975,7 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 @end
 
 @implementation ZPUParallelRenderEncoder
-- (instancetype)initWithOwner:(ZPUCommandBuffer *)owner texture:(ZPUTexture *)texture renderTexture:(zpu_metal_texture *)renderTexture depthTexture:(zpu_metal_texture *)depthTexture stencilTexture:(zpu_metal_texture *)stencilTexture stencilLoadAction:(zpu_metal_load_action)stencilLoadAction stencilStoreAction:(zpu_metal_store_action)stencilStoreAction stencilClearValue:(uint8_t)stencilClearValue pass:(zpu_metal_render_pass_descriptor)pass {
+- (instancetype)initWithOwner:(ZPUCommandBuffer *)owner texture:(ZPUTexture *)texture renderTexture:(zpu_metal_texture *)renderTexture depthTexture:(zpu_metal_texture *)depthTexture stencilTexture:(zpu_metal_texture *)stencilTexture stencilLoadAction:(zpu_metal_load_action)stencilLoadAction stencilStoreAction:(zpu_metal_store_action)stencilStoreAction stencilClearValue:(uint8_t)stencilClearValue pass:(zpu_metal_render_pass_descriptor)pass descriptor:(MTLRenderPassDescriptor *)descriptor {
     if ((self = [super init])) {
         _owner = owner;
         _texture = texture;
@@ -4907,6 +4986,7 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
         _stencilStoreAction = stencilStoreAction;
         _stencilClearValue = stencilClearValue;
         _pass = pass;
+        _descriptor = [descriptor copy];
     }
     return self;
 }
@@ -4920,6 +5000,10 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     zpu_metal_command_buffer *commandBuffer = _owner->_zpuCommandBuffer;
     zpu_metal_render_encoder *encoder = zpu_metal_command_buffer_render_encoder(commandBuffer, _renderTexture, &pass);
     if (encoder == NULL) return nil;
+    if (!zpu_configure_additional_color_attachments(_owner, encoder, _descriptor)) {
+        zpu_metal_render_encoder_destroy(encoder);
+        return nil;
+    }
     if (pass.depth.load_action != ZPU_METAL_LOAD_DONT_CARE) {
         if (_depthTexture == NULL || zpu_metal_render_encoder_set_depth_texture(encoder, _depthTexture) != ZPU_METAL_OK) {
             zpu_metal_render_encoder_destroy(encoder);
@@ -4937,6 +5021,7 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 }
 - (void)setColorStoreAction:(MTLStoreAction)storeAction atIndex:(NSUInteger)colorAttachmentIndex {
     if (colorAttachmentIndex == 0) _pass.color.store_action = zpu_store_action(storeAction);
+    else if (colorAttachmentIndex < ZPU_METAL_MAX_COLOR_ATTACHMENTS) _descriptor.colorAttachments[colorAttachmentIndex].storeAction = storeAction;
 }
 - (void)setDepthStoreAction:(MTLStoreAction)storeAction { _pass.depth.store_action = zpu_store_action(storeAction); }
 - (void)setStencilStoreAction:(MTLStoreAction)storeAction { _stencilStoreAction = zpu_store_action(storeAction); }
@@ -5763,9 +5848,14 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     if (![state isKindOfClass:[ZPURenderPipelineState class]]) return;
     _pipelineState = state;
     [_owner retainResource:state];
-    if (zpu_metal_render_encoder_set_pipeline_formats_with_stencil(
-            _zpuEncoder, (uint16_t)state->_colorPixelFormat,
+    uint16_t colorFormats[ZPU_METAL_MAX_COLOR_ATTACHMENTS];
+    for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
+        colorFormats[index] = (uint16_t)state->_colorPixelFormats[index];
+    }
+    if (zpu_metal_render_encoder_set_pipeline_color_formats(
+            _zpuEncoder, colorFormats, state->_colorAttachmentCount,
             (uint16_t)state->_depthPixelFormat, (uint16_t)state->_stencilPixelFormat) != ZPU_METAL_OK) [_owner markError];
+    if (zpu_metal_render_encoder_set_multi_target_output(_zpuEncoder, state->_multiTargetOutput) != ZPU_METAL_OK) [_owner markError];
     if (zpu_metal_render_encoder_set_blend_state(
         _zpuEncoder, state->_blendingEnabled,
         (zpu_metal_blend_factor)state->_sourceRGBBlendFactor,

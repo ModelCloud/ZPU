@@ -17,6 +17,9 @@ static const char *const kShaderSource =
     "vertex Vertex zpu_test_vertex(uint vertex_id [[vertex_id]], "
     "device const Vertex *vertices [[buffer(0)]]) { return vertices[vertex_id]; }\n"
     "fragment float4 zpu_test_fragment(Vertex input [[stage_in]]) { return input.color; }\n"
+    "struct MRTOutput { float4 first [[color(0)]]; float4 second [[color(1)]]; };\n"
+    "fragment MRTOutput zpu_test_mrt_fragment(Vertex input [[stage_in]]) { "
+    "MRTOutput output; output.first = input.color; output.second = input.color; return output; }\n"
     "kernel void zpu_cpu_fill_gradient_rgba8(texture2d<float, access::write> output [[texture(0)]], "
     "uint2 gid [[thread_position_in_grid]]) { "
     "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
@@ -61,7 +64,8 @@ int main(void) {
         }
         id<MTLFunction> vertex_function = [library newFunctionWithName:@"zpu_test_vertex"];
         id<MTLFunction> fragment_function = [library newFunctionWithName:@"zpu_test_fragment"];
-        if (vertex_function == nil || fragment_function == nil) {
+        id<MTLFunction> mrt_fragment_function = [library newFunctionWithName:@"zpu_test_mrt_fragment"];
+        if (vertex_function == nil || fragment_function == nil || mrt_fragment_function == nil) {
             fprintf(stderr, "metal-pixel: test functions missing\n");
             return 4;
         }
@@ -494,6 +498,107 @@ int main(void) {
         NSError *adapter_pipeline_error = nil;
         id<MTLRenderPipelineState> adapter_pipeline =
             [adapter_device newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor error:&adapter_pipeline_error];
+
+        /* Multiple color attachments use an explicit CPU shader profile. The
+         * native oracle writes the same interpolated color to RGBA8 target 0
+         * and BGRA8 target 1, including each target's native byte order. */
+        MTLRenderPipelineDescriptor *mrt_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
+        mrt_pipeline_descriptor.vertexFunction = vertex_function;
+        mrt_pipeline_descriptor.fragmentFunction = mrt_fragment_function;
+        mrt_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        mrt_pipeline_descriptor.colorAttachments[1].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        id<MTLRenderPipelineState> metal_mrt_pipeline =
+            [device newRenderPipelineStateWithDescriptor:mrt_pipeline_descriptor error:&error];
+        MTLTextureDescriptor *native_mrt_bgra_descriptor = [texture_descriptor copy];
+        native_mrt_bgra_descriptor.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        id<MTLTexture> native_mrt_rgba = [device newTextureWithDescriptor:texture_descriptor];
+        id<MTLTexture> native_mrt_bgra = [device newTextureWithDescriptor:native_mrt_bgra_descriptor];
+        MTLRenderPassDescriptor *native_mrt_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_mrt_pass.colorAttachments[0].texture = native_mrt_rgba;
+        native_mrt_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_mrt_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_mrt_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        native_mrt_pass.colorAttachments[1].texture = native_mrt_bgra;
+        native_mrt_pass.colorAttachments[1].loadAction = MTLLoadActionClear;
+        native_mrt_pass.colorAttachments[1].storeAction = MTLStoreActionStore;
+        native_mrt_pass.colorAttachments[1].clearColor = MTLClearColorMake(1.0, 1.0, 1.0, 1.0);
+        id<MTLCommandBuffer> native_mrt_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_mrt_encoder =
+            [native_mrt_command_buffer renderCommandEncoderWithDescriptor:native_mrt_pass];
+        [native_mrt_encoder setRenderPipelineState:metal_mrt_pipeline];
+        [native_mrt_encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
+        [native_mrt_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_mrt_encoder endEncoding];
+        [native_mrt_command_buffer commit];
+        [native_mrt_command_buffer waitUntilCompleted];
+        if (metal_mrt_pipeline == nil || native_mrt_rgba == nil || native_mrt_bgra == nil ||
+            native_mrt_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fail_with_error("MRT reference allocation or execution failed", error);
+            return 85;
+        }
+        uint8_t native_mrt_rgba_bytes[byte_count];
+        uint8_t native_mrt_bgra_bytes[byte_count];
+        [native_mrt_rgba getBytes:native_mrt_rgba_bytes bytesPerRow:(NSUInteger)width * 4
+                       fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [native_mrt_bgra getBytes:native_mrt_bgra_bytes bytesPerRow:(NSUInteger)width * 4
+                       fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+
+        id<MTLFunction> adapter_mrt_fragment =
+            ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_mrt_fragment");
+        MTLRenderPipelineDescriptor *adapter_mrt_pipeline_descriptor = [mrt_pipeline_descriptor copy];
+        adapter_mrt_pipeline_descriptor.vertexFunction = adapter_vertex_function;
+        adapter_mrt_pipeline_descriptor.fragmentFunction = adapter_mrt_fragment;
+        id<MTLRenderPipelineState> adapter_mrt_pipeline =
+            [adapter_device newRenderPipelineStateWithDescriptor:adapter_mrt_pipeline_descriptor error:&adapter_pipeline_error];
+        MTLTextureDescriptor *adapter_mrt_bgra_descriptor = [adapter_texture_descriptor copy];
+        adapter_mrt_bgra_descriptor.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        id<MTLTexture> adapter_mrt_rgba = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        id<MTLTexture> adapter_mrt_bgra = [adapter_device newTextureWithDescriptor:adapter_mrt_bgra_descriptor];
+        MTLRenderPassDescriptor *adapter_mrt_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_mrt_pass.colorAttachments[0].texture = adapter_mrt_rgba;
+        adapter_mrt_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_mrt_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_mrt_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        adapter_mrt_pass.colorAttachments[1].texture = adapter_mrt_bgra;
+        adapter_mrt_pass.colorAttachments[1].loadAction = MTLLoadActionClear;
+        adapter_mrt_pass.colorAttachments[1].storeAction = MTLStoreActionStore;
+        adapter_mrt_pass.colorAttachments[1].clearColor = MTLClearColorMake(1.0, 1.0, 1.0, 1.0);
+        id<MTLCommandBuffer> adapter_mrt_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_mrt_encoder =
+            [adapter_mrt_command_buffer renderCommandEncoderWithDescriptor:adapter_mrt_pass];
+        if (adapter_mrt_fragment == nil || adapter_mrt_pipeline == nil || adapter_mrt_rgba == nil ||
+            adapter_mrt_bgra == nil || adapter_mrt_command_buffer == nil || adapter_mrt_encoder == nil) {
+            fail_with_error("MRT adapter allocation failed", adapter_pipeline_error);
+            return 86;
+        }
+        [adapter_mrt_encoder setRenderPipelineState:adapter_mrt_pipeline];
+        [adapter_mrt_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_mrt_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_mrt_encoder endEncoding];
+        [adapter_mrt_command_buffer commit];
+        [adapter_mrt_command_buffer waitUntilCompleted];
+        if (adapter_mrt_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: MRT adapter command did not complete\n");
+            return 87;
+        }
+        uint8_t adapter_mrt_rgba_bytes[byte_count];
+        uint8_t adapter_mrt_bgra_bytes[byte_count];
+        [adapter_mrt_rgba getBytes:adapter_mrt_rgba_bytes bytesPerRow:(NSUInteger)width * 4
+                        fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_mrt_bgra getBytes:adapter_mrt_bgra_bytes bytesPerRow:(NSUInteger)width * 4
+                        fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        for (size_t index = 0; index < byte_count; ++index) {
+            if (native_mrt_rgba_bytes[index] != adapter_mrt_rgba_bytes[index]) {
+                fprintf(stderr, "metal-pixel: MRT RGBA mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                        index, native_mrt_rgba_bytes[index], adapter_mrt_rgba_bytes[index]);
+                return 88;
+            }
+            if (native_mrt_bgra_bytes[index] != adapter_mrt_bgra_bytes[index]) {
+                fprintf(stderr, "metal-pixel: MRT BGRA mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                        index, native_mrt_bgra_bytes[index], adapter_mrt_bgra_bytes[index]);
+                return 89;
+            }
+        }
         MTLSamplerDescriptor *adapter_sampler_descriptor = [MTLSamplerDescriptor new];
         id<MTLSamplerState> adapter_sampler =
             [adapter_device newSamplerStateWithDescriptor:adapter_sampler_descriptor];

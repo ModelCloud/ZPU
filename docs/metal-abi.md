@@ -54,6 +54,10 @@ triangle path:
 - depth-only render passes are accepted by the legacy, parallel, and Metal 4
   adapters; a private discarded CPU color surface preserves the portable
   raster ABI while public depth bytes remain exact
+- up to eight RGBA8/BGRA8 color attachments can be described and cleared by a
+  CPU render pass; the explicit `zpu_test_mrt_fragment` profile mirrors one
+  logical fragment color to every extra target, while ordinary single-output
+  profiles leave extra targets at their load/clear value
 - fixed-function render pipeline, depth-stencil, and sampler state objects;
   pipeline attachment format validation, blending factors/operations, color
   write masks, and Metal top-left triangle edge inclusion

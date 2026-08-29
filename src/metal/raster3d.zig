@@ -44,6 +44,7 @@ pub const DrawOptions = struct {
     destination_alpha_factor: abi.BlendFactor = .zero,
     alpha_operation: abi.BlendOperation = .add,
     color_write_mask: u8 = @intFromEnum(abi.ColorWriteMask.all),
+    write_extra_targets: bool = false,
     blend_color: [4]f32 = .{ 0, 0, 0, 0 },
     stencil_front: StencilFace = .{},
     stencil_back: StencilFace = .{},
@@ -61,6 +62,7 @@ pub const StencilFace = struct {
 
 const Job = struct {
     target: *surface.Surface,
+    extra_targets: []const *surface.Surface,
     depth: ?[]f32,
     stencil: ?[]u8,
     vertices: []const abi.Vertex,
@@ -140,6 +142,29 @@ fn applyStencil(stencil: []u8, index: usize, state: StencilFace, operation: abi.
     stencil[index] = (current & ~state.write_mask) | (result & state.write_mask);
 }
 
+fn writeColor(target: *surface.Surface, x: usize, y: usize, color: [4]f32, options: DrawOptions) void {
+    if (x >= target.width or y >= target.height) return;
+    const destination = surface.Surface.read(target.row(@intCast(y)), x * 4, target.format);
+    const destination_color = .{
+        @as(f32, @floatFromInt(destination.r)) / 255.0,
+        @as(f32, @floatFromInt(destination.g)) / 255.0,
+        @as(f32, @floatFromInt(destination.b)) / 255.0,
+        @as(f32, @floatFromInt(destination.a)) / 255.0,
+    };
+    const output_color = if (options.blending_enabled) .{
+        blendChannel(0, color[0], destination_color[0], color, destination_color, options.blend_color, options.source_rgb_factor, options.destination_rgb_factor, options.rgb_operation),
+        blendChannel(1, color[1], destination_color[1], color, destination_color, options.blend_color, options.source_rgb_factor, options.destination_rgb_factor, options.rgb_operation),
+        blendChannel(2, color[2], destination_color[2], color, destination_color, options.blend_color, options.source_rgb_factor, options.destination_rgb_factor, options.rgb_operation),
+        blendChannel(3, color[3], destination_color[3], color, destination_color, options.blend_color, options.source_alpha_factor, options.destination_alpha_factor, options.alpha_operation),
+    } else color;
+    var output = destination;
+    if ((options.color_write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) output.r = colorByte(output_color[0]);
+    if ((options.color_write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) output.g = colorByte(output_color[1]);
+    if ((options.color_write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) output.b = colorByte(output_color[2]);
+    if ((options.color_write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) output.a = colorByte(output_color[3]);
+    surface.Surface.write(target.row(@intCast(y)), x * 4, target.format, output);
+}
+
 fn writePixel(job: *Job, x: usize, y: usize, z: f32, color: [4]f32, stats: *Stats, front_facing: bool) void {
     const width: usize = @intCast(job.target.width);
     if (x >= width or y >= job.target.height) return;
@@ -177,27 +202,10 @@ fn writePixel(job: *Job, x: usize, y: usize, z: f32, color: [4]f32, stats: *Stat
         stats.depth_tests_passed += 1;
     }
     if (stencil_index) |index| applyStencil(job.stencil.?, index, stencil_state, stencil_state.depth_pass);
-    const destination = surface.Surface.read(job.target.row(@intCast(y)), x * 4, job.target.format);
-    const destination_color = .{
-        @as(f32, @floatFromInt(destination.r)) / 255.0,
-        @as(f32, @floatFromInt(destination.g)) / 255.0,
-        @as(f32, @floatFromInt(destination.b)) / 255.0,
-        @as(f32, @floatFromInt(destination.a)) / 255.0,
-    };
-    const output_color = if (job.options.blending_enabled) .{
-        blendChannel(0, color[0], destination_color[0], color, destination_color, job.options.blend_color, job.options.source_rgb_factor, job.options.destination_rgb_factor, job.options.rgb_operation),
-        blendChannel(1, color[1], destination_color[1], color, destination_color, job.options.blend_color, job.options.source_rgb_factor, job.options.destination_rgb_factor, job.options.rgb_operation),
-        blendChannel(2, color[2], destination_color[2], color, destination_color, job.options.blend_color, job.options.source_rgb_factor, job.options.destination_rgb_factor, job.options.rgb_operation),
-        blendChannel(3, color[3], destination_color[3], color, destination_color, job.options.blend_color, job.options.source_alpha_factor, job.options.destination_alpha_factor, job.options.alpha_operation),
-    } else color;
-    var output = destination;
-    if ((job.options.color_write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) output.r = colorByte(output_color[0]);
-    if ((job.options.color_write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) output.g = colorByte(output_color[1]);
-    if ((job.options.color_write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) output.b = colorByte(output_color[2]);
-    if ((job.options.color_write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) output.a = colorByte(output_color[3]);
-    surface.Surface.write(job.target.row(@intCast(y)), x * 4, job.target.format, output);
+    writeColor(job.target, x, y, color, job.options);
+    if (job.options.write_extra_targets) for (job.extra_targets) |target| writeColor(target, x, y, color, job.options);
     stats.fragments_covered += 1;
-    stats.color_writes += 1;
+    stats.color_writes += 1 + if (job.options.write_extra_targets) @as(u64, @intCast(job.extra_targets.len)) else 0;
 }
 
 fn blendChannel(channel: usize, source: f32, destination: f32, source_color: [4]f32, destination_color: [4]f32, blend_color: [4]f32, source_factor: abi.BlendFactor, destination_factor: abi.BlendFactor, operation: abi.BlendOperation) f32 {
@@ -398,8 +406,8 @@ fn addStats(a: Stats, b: Stats) Stats {
     };
 }
 
-pub fn draw(target: *surface.Surface, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
-    var job = Job{ .target = target, .depth = depth, .stencil = stencil, .vertices = vertices, .primitive = primitive, .options = options };
+pub fn drawWithTargets(target: *surface.Surface, extra_targets: []const *surface.Surface, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
+    var job = Job{ .target = target, .extra_targets = extra_targets, .depth = depth, .stencil = stencil, .vertices = vertices, .primitive = primitive, .options = options };
     const worker = std.Thread.spawn(.{}, renderWorker, .{&job}) catch {
         job.bands[0] = drawBand(&job, 0);
         job.bands[1] = drawBand(&job, 1);
@@ -408,6 +416,10 @@ pub fn draw(target: *surface.Surface, depth: ?[]f32, stencil: ?[]u8, vertices: [
     job.bands[1] = drawBand(&job, 1);
     worker.join();
     return addStats(job.bands[0], job.bands[1]);
+}
+
+pub fn draw(target: *surface.Surface, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
+    return drawWithTargets(target, &[_]*surface.Surface{}, depth, stencil, vertices, primitive, options);
 }
 
 fn clearSurfaceBand(target: *surface.Surface, color: surface.Color, y0: usize, y1: usize) void {

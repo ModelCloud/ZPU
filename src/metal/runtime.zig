@@ -156,9 +156,15 @@ const DrawCommand = struct {
     options: raster3d.DrawOptions,
 };
 
+const ColorAttachmentCommand = struct {
+    texture: *Texture,
+    pass: abi.RenderPassColorAttachmentDescriptor,
+};
+
 const BeginRenderCommand = struct {
     target: *Texture,
     pass: abi.RenderPassDescriptor,
+    color_attachments: [8]?ColorAttachmentCommand = [_]?ColorAttachmentCommand{null} ** 8,
     depth: ?[]f32 = null,
     stencil: ?[]u8 = null,
     stencil_load_action: abi.LoadAction = .dont_care,
@@ -297,6 +303,7 @@ pub const CommandBuffer = struct {
         if (self.magic != command_buffer_magic or self.status != .created or self.active_encoder != .none) return error.InvalidCommand;
         self.status = .committed;
         var active_target: ?*Texture = null;
+        var active_color_attachments: [8]?*Texture = [_]?*Texture{null} ** 8;
         var active_depth: ?[]f32 = null;
         var active_stencil: ?[]u8 = null;
 
@@ -304,12 +311,21 @@ pub const CommandBuffer = struct {
             .begin_render => |begin_render| {
                 if (!validTexture(begin_render.target)) return self.fail(error.InvalidResource);
                 active_target = begin_render.target;
+                for (begin_render.color_attachments, 0..) |attachment, index| {
+                    if (attachment) |value| {
+                        if (!validTexture(value.texture) or value.texture.device != self.queue.device or
+                            !value.texture.format.isColor() or value.texture.width != begin_render.target.width or
+                            value.texture.height != begin_render.target.height) return self.fail(error.InvalidResource);
+                        active_color_attachments[index] = value.texture;
+                        if (value.pass.load_action == .clear) {
+                            var attachment_surface = value.texture.asSurface();
+                            raster.clear(&attachment_surface, toSurfaceColor(value.pass.clear_color));
+                        }
+                    }
+                }
                 active_depth = begin_render.depth;
                 active_stencil = begin_render.stencil;
-                var target = begin_render.target.asSurface();
-                if (begin_render.pass.color.load_action == .clear) {
-                    raster.clear(&target, toSurfaceColor(begin_render.pass.color.clear_color));
-                }
+                const target = begin_render.target.asSurface();
                 if (begin_render.pass.depth.load_action != .dont_care) {
                     const depth = active_depth orelse return self.fail(error.InvalidResource);
                     const pixel_count = std.math.mul(usize, target.width, target.height) catch return self.fail(error.InvalidArgument);
@@ -332,8 +348,19 @@ pub const CommandBuffer = struct {
                 if (!validTexture(target_handle)) return self.fail(error.InvalidResource);
                 if (draw.vertex_start > self.vertices.items.len or draw.vertex_count > self.vertices.items.len - draw.vertex_start) return self.fail(error.InvalidCommand);
                 var target = target_handle.asSurface();
-                _ = raster3d.draw(
-                    &target,
+                var extra_surfaces: [7]surface.Surface = undefined;
+                var extra_targets: [7]*surface.Surface = undefined;
+                var extra_count: usize = 0;
+                for (active_color_attachments[1..]) |attachment| {
+                    if (attachment) |value| {
+                        extra_surfaces[extra_count] = value.asSurface();
+                        extra_targets[extra_count] = &extra_surfaces[extra_count];
+                        extra_count += 1;
+                    }
+                }
+                _ = raster3d.drawWithTargets(
+                    @constCast(&target),
+                    extra_targets[0..extra_count],
                     active_depth,
                     active_stencil,
                     self.vertices.items[draw.vertex_start .. draw.vertex_start + draw.vertex_count],
@@ -487,6 +514,7 @@ pub const RenderEncoder = struct {
     destination_alpha_factor: abi.BlendFactor = .zero,
     alpha_operation: abi.BlendOperation = .add,
     color_write_mask: u8 = @intFromEnum(abi.ColorWriteMask.all),
+    write_extra_targets: bool = false,
     blend_color: [4]f32 = .{ 0, 0, 0, 0 },
     stencil_front: raster3d.StencilFace = .{},
     stencil_back: raster3d.StencilFace = .{},
@@ -517,6 +545,7 @@ pub const RenderEncoder = struct {
             .destination_alpha_factor = self.destination_alpha_factor,
             .alpha_operation = self.alpha_operation,
             .color_write_mask = self.color_write_mask,
+            .write_extra_targets = self.write_extra_targets,
             .blend_color = self.blend_color,
             .stencil_front = self.stencil_front,
             .stencil_back = self.stencil_back,
@@ -527,14 +556,27 @@ pub const RenderEncoder = struct {
         return self.setPipelineFormatsWithStencil(color_format, depth_format, 0);
     }
 
-    pub fn setPipelineFormatsWithStencil(self: *RenderEncoder, color_format: u16, depth_format: u16, stencil_format: u16) Error!void {
+    pub fn setColorAttachment(self: *RenderEncoder, texture: *Texture, attachment: abi.RenderPassColorAttachmentDescriptor, index: u32) Error!void {
+        if (!self.open() or index == 0 or index >= 8 or !validTexture(texture) or
+            texture.device != self.command_buffer.queue.device or !texture.format.isColor() or
+            @intFromEnum(attachment.load_action) > @intFromEnum(abi.LoadAction.clear) or
+            @intFromEnum(attachment.store_action) > @intFromEnum(abi.StoreAction.store)) return error.InvalidArgument;
+        switch (self.command_buffer.commands.items[self.begin_index]) {
+            .begin_render => |*begin_render| {
+                if (texture.width != begin_render.target.width or texture.height != begin_render.target.height) return error.InvalidArgument;
+                begin_render.color_attachments[index] = .{ .texture = texture, .pass = attachment };
+            },
+            else => return error.InvalidCommand,
+        }
+    }
+
+    pub fn setMultiTargetOutput(self: *RenderEncoder, enabled: bool) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        const expected_color = switch (color_format) {
-            0 => null,
-            @intFromEnum(abi.PixelFormat.rgba8_unorm) => abi.PixelFormat.rgba8_unorm,
-            @intFromEnum(abi.PixelFormat.bgra8_unorm) => abi.PixelFormat.bgra8_unorm,
-            else => return error.UnsupportedFormat,
-        };
+        self.write_extra_targets = enabled;
+    }
+
+    pub fn setPipelineColorFormats(self: *RenderEncoder, color_formats: []const u16, depth_format: u16, stencil_format: u16) Error!void {
+        if (!self.open()) return error.InvalidCommand;
         const expected_depth = switch (depth_format) {
             0 => null,
             @intFromEnum(abi.PixelFormat.depth32_float) => abi.PixelFormat.depth32_float,
@@ -547,13 +589,32 @@ pub const RenderEncoder = struct {
         };
         switch (self.command_buffer.commands.items[self.begin_index]) {
             .begin_render => |begin_render| {
-                const actual_color = texturePixelFormat(begin_render.target) orelse return error.InvalidResource;
-                if (expected_color) |format| if (format != actual_color) return error.InvalidArgument;
+                if (color_formats.len > 8) return error.InvalidArgument;
+                for (begin_render.color_attachments, 0..) |attachment, index| {
+                    const expected_color = if (index < color_formats.len) color_formats[index] else 0;
+                    const expected = switch (expected_color) {
+                        0 => null,
+                        @intFromEnum(abi.PixelFormat.rgba8_unorm) => abi.PixelFormat.rgba8_unorm,
+                        @intFromEnum(abi.PixelFormat.bgra8_unorm) => abi.PixelFormat.bgra8_unorm,
+                        else => return error.UnsupportedFormat,
+                    };
+                    const actual = if (attachment) |value| texturePixelFormat(value.texture) else null;
+                    // Attachment zero may be the private discarded target
+                    // used by a depth/stencil-only pass.
+                    if (index == 0 and expected == null and attachment != null) continue;
+                    if ((expected == null) != (actual == null)) return error.InvalidArgument;
+                    if (expected) |format| if (actual == null or format != actual.?) return error.InvalidArgument;
+                }
                 if (expected_depth != null and begin_render.depth == null) return error.InvalidArgument;
                 if (expected_stencil != null and begin_render.stencil == null) return error.InvalidArgument;
             },
             else => return error.InvalidCommand,
         }
+    }
+
+    pub fn setPipelineFormatsWithStencil(self: *RenderEncoder, color_format: u16, depth_format: u16, stencil_format: u16) Error!void {
+        const color_formats = [_]u16{color_format};
+        return self.setPipelineColorFormats(&color_formats, depth_format, stencil_format);
     }
 
     pub fn setDepthCompareFunction(self: *RenderEncoder, compare_function: u8, depth_write_enabled: bool) Error!void {
@@ -1487,6 +1548,10 @@ pub fn beginRender(command_buffer: *CommandBuffer, texture: *Texture, pass: abi.
     try command_buffer.begin(.render);
     errdefer command_buffer.active_encoder = .none;
     const begin_index = try command_buffer.append(.{ .begin_render = .{ .target = texture, .pass = pass } });
+    switch (command_buffer.commands.items[begin_index]) {
+        .begin_render => |*begin_render| begin_render.color_attachments[0] = .{ .texture = texture, .pass = pass.color },
+        else => return error.InvalidCommand,
+    }
     const result = allocator.create(RenderEncoder) catch return error.OutOfMemory;
     result.* = .{
         .command_buffer = command_buffer,
@@ -2202,6 +2267,44 @@ test "stencil attachment applies compare and pass/failure operations" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, color.bytes[0..4]);
 }
 
+test "multiple color attachments share one CPU fragment output" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const color = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(color);
+    const secondary = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.bgra8_unorm));
+    defer destroyTexture(secondary);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+    };
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, color, .{
+        .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } },
+    });
+    try encoder.setColorAttachment(secondary, .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } }, 1);
+    try encoder.setPipelineColorFormats(&[_]u16{
+        @intFromEnum(abi.PixelFormat.rgba8_unorm),
+        @intFromEnum(abi.PixelFormat.bgra8_unorm),
+    }, 0, 0);
+    try encoder.setMultiTargetOutput(true);
+    try encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
+    try encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try command_buffer.commit();
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, color.bytes[0..4]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, secondary.bytes[0..4]);
+}
+
 test "fence update and wait preserve command ordering" {
     const device = try createDevice();
     defer destroyDevice(device);
@@ -2510,6 +2613,24 @@ pub export fn zpu_metal_render_encoder_set_pipeline_formats(encoder: ?*RenderEnc
 
 pub export fn zpu_metal_render_encoder_set_pipeline_formats_with_stencil(encoder: ?*RenderEncoder, color_format: u16, depth_format: u16, stencil_format: u16) callconv(.c) c_int {
     (encoder orelse return -1).setPipelineFormatsWithStencil(color_format, depth_format, stencil_format) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_color_attachment(encoder: ?*RenderEncoder, texture: ?*Texture, attachment: ?*const abi.RenderPassColorAttachmentDescriptor, index: u32) callconv(.c) c_int {
+    (encoder orelse return -1).setColorAttachment(texture orelse return -1, (attachment orelse return -1).*, index) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_pipeline_color_formats(encoder: ?*RenderEncoder, color_formats: ?[*]const u16, color_format_count: usize, depth_format: u16, stencil_format: u16) callconv(.c) c_int {
+    if (color_format_count > 8 or (color_format_count != 0 and color_formats == null)) return -1;
+    (encoder orelse return -1).setPipelineColorFormats(
+        if (color_formats) |formats| formats[0..color_format_count] else &[_]u16{}, depth_format, stencil_format,
+    ) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_multi_target_output(encoder: ?*RenderEncoder, enabled: bool) callconv(.c) c_int {
+    (encoder orelse return -1).setMultiTargetOutput(enabled) catch |err| return errorCode(err);
     return 0;
 }
 

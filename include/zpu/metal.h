@@ -169,6 +169,8 @@ typedef struct zpu_metal_render_pass_descriptor {
     zpu_metal_render_pass_depth_attachment_descriptor depth;
 } zpu_metal_render_pass_descriptor;
 
+#define ZPU_METAL_MAX_COLOR_ATTACHMENTS 8u
+
 /* The opt-in C entry point below is a bounded ZPU rendering ABI.  It is not
  * a replacement for Apple's Objective-C Metal framework and does not make
  * MTLCreateSystemDefaultDevice return a ZPU object. */
@@ -329,6 +331,9 @@ int zpu_metal_render_encoder_set_front_facing(zpu_metal_render_encoder *encoder,
 int zpu_metal_render_encoder_set_triangle_fill_mode(zpu_metal_render_encoder *encoder, zpu_metal_triangle_fill_mode fill_mode);
 int zpu_metal_render_encoder_set_pipeline_formats(zpu_metal_render_encoder *encoder, uint16_t color_format, uint16_t depth_format);
 int zpu_metal_render_encoder_set_pipeline_formats_with_stencil(zpu_metal_render_encoder *encoder, uint16_t color_format, uint16_t depth_format, uint16_t stencil_format);
+int zpu_metal_render_encoder_set_color_attachment(zpu_metal_render_encoder *encoder, zpu_metal_texture *texture, const zpu_metal_render_pass_color_attachment_descriptor *attachment, uint32_t index);
+int zpu_metal_render_encoder_set_pipeline_color_formats(zpu_metal_render_encoder *encoder, const uint16_t *color_formats, size_t color_format_count, uint16_t depth_format, uint16_t stencil_format);
+int zpu_metal_render_encoder_set_multi_target_output(zpu_metal_render_encoder *encoder, int enabled);
 int zpu_metal_render_encoder_set_depth_compare_function(zpu_metal_render_encoder *encoder, zpu_metal_compare_function compare_function, int depth_write_enabled);
 int zpu_metal_render_encoder_set_blend_state(zpu_metal_render_encoder *encoder, int blending_enabled,
     zpu_metal_blend_factor source_rgb_factor, zpu_metal_blend_factor destination_rgb_factor,
