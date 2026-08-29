@@ -1,7 +1,12 @@
 // Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
 // SPDX-License-Identifier: Apache-2.0
 
+//! Mosaic planning primitives: hierarchy/HZB culling, macrobins, and ordered
+//! physical LOCAL/MACRO/GLOBAL packet streams.
+
 const std = @import("std");
+
+pub const pipeline_name = "Mosaic";
 
 pub const ClusterId = u32;
 pub const DrawId = u32;

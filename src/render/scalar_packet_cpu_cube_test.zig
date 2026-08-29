@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const cube = @import("cpu_cube");
-const pipeline = @import("cluster_pipeline.zig");
+const pipeline = @import("mosaic_pipeline.zig");
 const prepared = @import("prepared_primitives.zig");
 const packets = @import("scalar_packet.zig");
 

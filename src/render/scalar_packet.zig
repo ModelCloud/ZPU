@@ -1,7 +1,7 @@
 // Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
 // SPDX-License-Identifier: Apache-2.0
 
-//! Scalar packet execution gate for the clustered renderer.
+//! Scalar packet execution gate for the Mosaic renderer.
 //!
 //! This module deliberately has no vector or ISA-specific implementation. It
 //! is the differential oracle for the planning redesign: the same prepared
@@ -10,7 +10,7 @@
 //! optimized executor is allowed to replace this path.
 
 const std = @import("std");
-const pipeline = @import("cluster_pipeline.zig");
+const pipeline = @import("mosaic_pipeline.zig");
 const prepared = @import("prepared_primitives.zig");
 
 pub const Surface = struct {

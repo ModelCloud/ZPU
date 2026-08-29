@@ -186,7 +186,7 @@ fn ensureInitialized() void {
     defer _ = std.c.pthread_mutex_unlock(&mutex);
     if (initialized) return;
     initialized = true;
-    // Clustered triangle kernels are not linked by this module. Keep this
+    // Mosaic triangle kernels are not linked by this module. Keep this
     // capability independent from the surface SIMD dispatcher: a v3 surface
     // artifact must not make an experimental 3D kernel executable.
     selected_tile_profile = tile_profile.detect(build_caps.standalone);

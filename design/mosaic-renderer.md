@@ -1,18 +1,20 @@
 <!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# Host-tuned clustered tile renderer
+# Mosaic: host-tuned packetized tile renderer
 
 ## Goal
 
-ZPU's long-term CPU rendering path is a clustered, cache-local renderer that preserves Vulkan semantics while avoiding triangle-by-triangle work when coarse geometry can be rejected earlier.
+**Mosaic** is ZPU's hierarchy-first, packetized tile renderer. It preserves
+Vulkan semantics while using clusters, macrobins, and cache-local tile work to
+avoid triangle-by-triangle processing when coarse geometry can be rejected.
 
 The target hierarchy is:
 
 ```text
 Vulkan eligible path ------------------------┐
                                              │
-Native clustered API ------------------------┤
+Native Mosaic API ---------------------------┤
                                              v
                                resource-aware pass graph
                                              │
@@ -49,7 +51,9 @@ Native clustered API ------------------------┤
                   strict ordered fallback for ineligible Vulkan work
 ```
 
-The current branch implements the planning foundation through ordered tile packets. It does not yet replace `cpu_cube.zig` as the raster executor.
+The current branch implements Mosaic planning, prepared primitives, physical
+packet streams, and a scalar packet executor with differential coverage against
+`cpu_cube.zig`. It does not yet route real Vulkan draws through Mosaic.
 
 ## Current executable foundation
 
@@ -67,6 +71,11 @@ Implemented in this branch:
 - two-pass contiguous macrobins;
 - tile packet construction that consumes macrobins rather than rescanning the full cluster list;
 - stable per-tile order keys;
+- O(n log n) ordered tile construction instead of insertion sorting;
+- admission-time hierarchy validation with topology and conservative-bound checks;
+- physical `LOCAL` / `MACRO` / `GLOBAL` packet streams;
+- prepared primitives that perform scalar triangle setup once;
+- scalar packet execution and differential testing against `cpu_cube`;
 - primitive-SIMD versus pixel-SIMD path classification using a post-setup coverage estimate;
 - compact visibility/depth storage for the future opaque deferred-shading path;
 - caller-owned bounded scratch and capacity helpers;
@@ -74,13 +83,11 @@ Implemented in this branch:
 
 Not implemented yet:
 
-- Vulkan draw lowering into clustered submissions;
-- a stable public native clustered API;
+- Vulkan draw lowering into Mosaic cluster submissions;
+- a stable public native Mosaic API;
 - instance/frustum/cone/LOD hierarchy generation;
-- triangle preparation exactly once after leaf visibility;
 - actual primitive-SIMD triangle kernels;
-- actual pixel-SIMD tile packet execution;
-- local/macro/global packet storage as separate physical streams;
+- actual pixel-SIMD packet execution;
 - visibility-buffer material reconstruction and quad shading;
 - complete Vulkan resource hazard derivation;
 - per-LLC work queues and work stealing;

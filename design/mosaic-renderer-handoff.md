@@ -1,7 +1,15 @@
 <!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# Clustered renderer continuation handoff
+# Mosaic renderer continuation handoff
+
+> **Current status:** Mosaic is the canonical name for this pipeline. PR #84
+> has been synchronized with `main` at `9785b9a`, and the Phase-9 scalar packet
+> differential gate exists. Older sections below remain useful as architectural
+> history, but any unresolved-item list must be read together with this status
+> and the current code. The next milestone is broad scalar semantic parity,
+> physical packet execution, and then the first narrow Vulkan Mosaic path—not
+> SIMD.
 
 This document is the continuation record for PR #84. It is intended for another engineering agent to pick up the work without reconstructing the design history from the commit stream.
 
@@ -16,12 +24,12 @@ Branch: `perf/host-tuned-tiles`
 Current PR title:
 
 ```text
-feat(experimental): add clustered render planning foundation
+feat(experimental): introduce the Mosaic render planning foundation
 ```
 
-The branch currently implements a planning foundation only. `src/vulkan/cpu_cube.zig` is still the actual Vulkan raster executor.
-
-Before any `cpu_cube.zig` integration, sync this branch with current `main` again. Main has continued moving during development of this PR and is actively changing the 3D path.
+The branch now implements planning, prepared primitives, and a scalar packet
+differential gate. `src/vulkan/cpu_cube.zig` remains the production Vulkan
+raster executor until Mosaic reaches broad scalar semantic parity.
 
 ## Product goal
 
@@ -54,7 +62,7 @@ triangles rasterized per second
 ```text
 Vulkan eligible path ---------------------------+
                                                  |
-Native clustered path --------------------------+
+Native Mosaic path -----------------------------+
                                                  v
                                       resource-aware pass DAG
                                                  |
@@ -135,7 +143,7 @@ executable_class = what kernel objects this artifact actually contains
 
 CPU feature bits alone must never enable an executable backend.
 
-This matters especially because the current AVX2 boundary in `src/simd/dispatch.zig` proves availability of the existing 2D/surface eight-lane kernels, not yet a future clustered-triangle AVX2 implementation.
+This matters especially because the current AVX2 boundary in `src/simd/dispatch.zig` proves availability of the existing 2D/surface eight-lane kernels, not yet a future Mosaic triangle AVX2 implementation.
 
 Long-term, compiled capability should become granular enough to distinguish at least:
 
@@ -359,7 +367,8 @@ Contains:
 - CPU-role pinning;
 - selected tile profile initialization.
 
-Important: current raster worker role modeling still only has five named raster roles. This is not enough for dozens/hundreds of cores.
+Raster worker IDs now map across all selected CPUs; there is no five-role ceiling.
+Topology-local persistent queues and stealing remain future execution work.
 
 ### `src/render/pass_dag.zig`
 
@@ -378,7 +387,7 @@ O(V + E + V log V)
 
 The DAG is not yet a complete Vulkan hazard graph.
 
-### `src/render/cluster_pipeline.zig`
+### `src/render/mosaic_pipeline.zig`
 
 Contains:
 
@@ -392,7 +401,7 @@ Contains:
 - macrobin-driven tile packets;
 - raster-path classifier.
 
-### `src/render/clustered_backend.zig`
+### `src/render/mosaic_backend.zig`
 
 Contains:
 
@@ -409,45 +418,49 @@ depth
  -> ordered tile packets
 ```
 
-### `design/host-tuned-tile-renderer.md`
+### `design/mosaic-renderer.md`
 
 Main architectural design document.
 
-## Remaining merge blockers from latest review
+## Historical review findings and current disposition
 
-### Blocker A: build capability dependency is coupled through `simd_dispatch`
+### Completed: artifact capability isolation
 
-`cpu_locality.zig` currently imports:
+`cpu_locality.zig` previously imported:
 
 ```text
 ../simd/dispatch.zig
 ```
 
-only to read `eight_lane_boundary`.
+only to read `eight_lane_boundary`. It now consumes the small artifact
+capability layer in `src/vulkan/build_caps.zig`; host capability and linked
+Mosaic kernels are separate facts.
 
 That dispatcher imports `zpu_config`.
 
 Several direct build roots historically compile the 3D/Vulkan path without explicitly injecting `zpu_config` into the root module. This makes the dependency fragile and may fail once CI reaches Zig compilation.
 
-Preferred fix:
+Implemented shape:
 
 Create a very small build-capability module that owns artifact-level compiled-kernel facts, for example:
 
 ```text
-src/build_caps.zig
+src/vulkan/build_caps.zig
 ```
 
 or pass a `CompiledKernels` value from a root that already owns build configuration.
 
 Do not make CPU topology code import the complete SIMD dispatcher.
 
-Also separate surface AVX2 capability from future clustered-raster AVX2 capability.
+Also separate surface AVX2 capability from future Mosaic-raster AVX2 capability.
 
-### Blocker B: hierarchy traversal trusts malformed graphs
+### Completed: hierarchy admission validation
 
-`cullHierarchyHzb()` currently assumes the hierarchy is a well-formed tree.
+Mosaic validates hierarchy topology, ranges, parentage, conservative bounds,
+and depth invariants before traversal. Validation can be cached by hierarchy
+revision.
 
-It needs admission-time validation for:
+The admission validator checks:
 
 ```text
 root indices in range
@@ -475,7 +488,8 @@ parent.best_depth >= every descendant best_depth
 
 If this invariant is violated, an HZB test may reject a parent while a visible child actually exists.
 
-Validation should run once when hierarchy content/revision changes, not every frame traversal.
+Validation runs at admission and can be reused while the hierarchy revision
+and slice identities remain unchanged.
 
 Use DFS coloring or an iterative equivalent:
 
@@ -489,11 +503,10 @@ A `visiting -> visiting` edge is a cycle.
 
 ## High-priority design corrections
 
-### 1. Extent classification must use full cluster fanout
+### 1. Completed: extent classification uses full cluster fanout
 
-Current code calculates `ExtentClass` after clipping a cluster to one macrobin.
-
-That is wrong.
+The obsolete implementation calculated `ExtentClass` after clipping a cluster
+to one macrobin. Mosaic now classifies the complete cluster fanout first.
 
 With default geometry:
 
@@ -519,11 +532,13 @@ full cluster bounds
            -> macrobin subdivision
 ```
 
-Store the classification in the macro reference or derive it from the original cluster before clipping.
+The classification is retained in the physical packet representation before
+macrobin clipping.
 
-### 2. Remove per-tile O(n^2) insertion sort
+### 2. Interim complete: insertion sort replaced by O(n log n) heapsort
 
-Current tile streams are made stable with insertion sort.
+Current tile streams use sub-quadratic heapsort. Stable ordered construction
+remains the preferred final representation when planning is parallelized.
 
 Correctness is good, scalability is not.
 
@@ -544,17 +559,15 @@ stable merge of already sorted producer runs
 
 Do not use insertion sort on very hot tiles.
 
-### 3. Remove the five-raster-worker ceiling
+### 3. Completed: remove the five-raster-worker ceiling
 
-Current role enum has only:
+The obsolete role enum had only:
 
 ```text
 raster_1 ... raster_5
 ```
 
-and `pinRasterWorker()` cycles those roles.
-
-Replace this with direct worker-index pinning:
+and `pinRasterWorker()` cycled those roles. Worker-index pinning now follows:
 
 ```text
 if selected_count <= 1:
@@ -583,9 +596,9 @@ const PreparedPrimitiveBatch = struct {
 
 A cluster may produce multiple batches with different paths.
 
-### 5. Return exact tile-packet capacity from requirements
+### 5. Completed: expose checked tile-packet capacity requirements
 
-`clustered_backend.requirements()` should directly return:
+`mosaic_backend.requirements()` directly returns:
 
 ```text
 tile_packets_upper_bound
@@ -601,9 +614,9 @@ macro_refs_upper_bound * tiles_per_macro
 
 but the caller should not have to duplicate internal formulas.
 
-### 6. Alias HZB level 0 instead of copying it
+### 6. Completed: alias HZB level 0 instead of copying it
 
-Current HZB storage duplicates full-resolution depth.
+The obsolete HZB storage duplicated full-resolution depth.
 
 At 4K D32:
 
@@ -619,7 +632,7 @@ base depth ~= 126.6 MiB
 full copied pyramid ~= 169 MiB
 ```
 
-Preferred representation:
+Implemented representation:
 
 ```zig
 const Hzb = struct {
@@ -634,42 +647,36 @@ Level 0 aliases `base_depth`.
 
 Scratch only stores level 1+.
 
-### 7. Sanitize or reject non-finite HZB source depth
+### 7. Completed: reject non-finite HZB source depth
 
 Cluster `best_depth` already fails open when non-finite.
 
-HZB source values also need an explicit rule.
+HZB construction rejects non-finite source depth before the hierarchy can use
+it for correctness-sensitive rejection.
 
-Preferred optimized-path contract:
+Optimized-path contract:
 
 ```text
 source depth must be finite
 ```
 
-If sanitizing instead, replace invalid samples with the conservative clear/hole value for the active depth convention.
 
-### 8. Experimental APIs should be explicitly namespaced
+### 8. Completed: experimental APIs are explicitly namespaced
 
-Current root exports:
-
-```zig
-pub const pass_dag
-pub const cluster_pipeline
-pub const clustered_backend
-```
-
-These are public Zig package APIs despite being described as experimental.
-
-Prefer:
+The API now exports the redesign under:
 
 ```zig
 pub const experimental = struct {
-    pub const clustered_backend = ...;
-    ...
+    pub const mosaic = struct {
+        pub const pass_dag = ...;
+        pub const pipeline = ...;
+        pub const backend = ...;
+    };
 };
 ```
 
-or keep the modules internal until stable.
+This namespace remains intentionally unstable until Vulkan execution and
+hazard contracts are complete.
 
 ### 9. Inclusive depth compare and packet reordering
 
@@ -708,7 +715,9 @@ This is lower priority than the items above.
 
 ## Physical macro/global packet design
 
-The current `ExtentClass` is metadata only. All work is still physically expanded into tile streams.
+Mosaic planning now emits physical `LOCAL`, `MACRO`, and `GLOBAL` streams.
+The remaining gate is to execute those streams directly and compare them with
+expanded tile packets and `cpu_cube`.
 
 Permanent design should have three physical storage classes:
 
@@ -879,7 +888,9 @@ Recommended stage order:
 7. performance gates
 ```
 
-This is especially important because the current branch introduces a fragile module dependency around `zpu_config` that CI has not yet compiled.
+The artifact-capability layer now isolates topology code from `zpu_config` and
+the SIMD dispatcher. Package-heavy CI dependencies still need to be split so
+they cannot block normal build/test evidence.
 
 ## Tests the next agent should add immediately
 
@@ -943,8 +954,8 @@ worker indexes beyond 5
 
 ```text
 no v3 kernels linked -> never executable AVX2
-AVX2 CPU + v3 surface kernels only -> clustered raster capability remains false
-future clustered AVX2 kernel linked -> clustered AVX2 capability true
+AVX2 CPU + v3 surface kernels only -> Mosaic raster capability remains false
+future Mosaic AVX2 kernel linked -> Mosaic AVX2 capability true
 ```
 
 ## Performance benchmarks to add before integration is called successful
@@ -983,7 +994,10 @@ mixed material scene
 1x and 4x MSAA once supported
 ```
 
-## Recommended implementation order
+## Historical implementation order
+
+Steps 1–7 established the current foundation. Continue with broad Phase-9B
+scalar semantic parity and physical packet execution before SIMD.
 
 ### Step 1 - make the current branch compile reliably
 
@@ -1008,8 +1022,8 @@ Tasks:
 Files:
 
 ```text
-src/render/cluster_pipeline.zig
-src/render/clustered_backend.zig
+src/render/mosaic_pipeline.zig
+src/render/mosaic_backend.zig
 ```
 
 Add a validated hierarchy object/revision concept.
@@ -1021,7 +1035,7 @@ Do not repeatedly validate static hierarchy topology every frame.
 Files:
 
 ```text
-src/render/cluster_pipeline.zig
+src/render/mosaic_pipeline.zig
 ```
 
 - classify extent from original full-cluster fanout;
@@ -1043,7 +1057,7 @@ Generalize raster worker pinning beyond five named roles.
 File:
 
 ```text
-src/render/cluster_pipeline.zig
+src/render/mosaic_pipeline.zig
 ```
 
 Alias level 0, store only coarse levels.
@@ -1112,18 +1126,18 @@ Do not:
 Before the planning foundation should be considered stable enough to build major execution work on top of it:
 
 ```text
-[ ] current branch synced to current main
-[ ] Zig build/test gates green
-[ ] artifact capability dependency cleaned up
-[ ] hierarchy validator rejects malformed topology and non-conservative bounds
+[x] current branch synced to current main
+[x] dependency-free Zig build/test gates green
+[x] artifact capability dependency cleaned up
+[x] hierarchy validator rejects malformed topology and non-conservative bounds
 [ ] HZB property tests pass normal/reverse Z and odd dimensions
-[ ] extent classification uses full cluster fanout
-[ ] tile ordering construction is sub-quadratic
-[ ] raster worker count is not capped at five
-[ ] tile packet upper-bound helper exposed
-[ ] HZB level 0 aliases source depth or memory duplication is otherwise justified by measurement
-[ ] experimental API namespace made explicit
-[ ] scalar packet-execution integration plan is ready
+[x] extent classification uses full cluster fanout
+[x] tile ordering construction is sub-quadratic
+[x] raster worker count is not capped at five
+[x] tile packet upper-bound helper exposed
+[x] HZB level 0 aliases source depth
+[x] experimental Mosaic API namespace made explicit
+[x] scalar packet executor has a real `cpu_cube` differential gate
 ```
 
 ## Final architectural summary for the next agent

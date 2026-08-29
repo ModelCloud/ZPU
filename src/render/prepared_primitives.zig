@@ -1,12 +1,12 @@
 // Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
 // SPDX-License-Identifier: Apache-2.0
 
-//! Scalar triangle setup boundary for the clustered renderer. The planner
+//! Scalar triangle setup boundary for the Mosaic renderer. The planner
 //! prepares each visible primitive once; tile execution consumes this stable
 //! representation instead of repeating vertex/edge/depth setup per tile.
 
 const std = @import("std");
-const pipeline = @import("cluster_pipeline.zig");
+const pipeline = @import("mosaic_pipeline.zig");
 
 pub const EdgeEquation = struct {
     a: f32,

@@ -26,11 +26,11 @@ pub fn build(b: *std.Build) void {
     const build_config = b.addOptions();
     build_config.addOption(bool, "v3_kernels", v3_available);
     build_config.addOption(bool, "surface_avx2", v3_available);
-    build_config.addOption(bool, "clustered_primitive_avx2", false);
-    build_config.addOption(bool, "clustered_pixel_avx2", false);
+    build_config.addOption(bool, "mosaic_primitive_avx2", false);
+    build_config.addOption(bool, "mosaic_pixel_avx2", false);
     build_config.addOption(bool, "surface_avx512", false);
-    build_config.addOption(bool, "clustered_primitive_avx512", false);
-    build_config.addOption(bool, "clustered_pixel_avx512", false);
+    build_config.addOption(bool, "mosaic_primitive_avx512", false);
+    build_config.addOption(bool, "mosaic_pixel_avx512", false);
     const build_config_module = build_config.createModule();
 
     // Kernel-free twin configuration: identical sources and flags except the
@@ -40,11 +40,11 @@ pub fn build(b: *std.Build) void {
     const clean_config = b.addOptions();
     clean_config.addOption(bool, "v3_kernels", false);
     clean_config.addOption(bool, "surface_avx2", false);
-    clean_config.addOption(bool, "clustered_primitive_avx2", false);
-    clean_config.addOption(bool, "clustered_pixel_avx2", false);
+    clean_config.addOption(bool, "mosaic_primitive_avx2", false);
+    clean_config.addOption(bool, "mosaic_pixel_avx2", false);
     clean_config.addOption(bool, "surface_avx512", false);
-    clean_config.addOption(bool, "clustered_primitive_avx512", false);
-    clean_config.addOption(bool, "clustered_pixel_avx512", false);
+    clean_config.addOption(bool, "mosaic_primitive_avx512", false);
+    clean_config.addOption(bool, "mosaic_pixel_avx512", false);
     const clean_config_module = clean_config.createModule();
     const release_fast = .ReleaseFast;
 
@@ -53,7 +53,7 @@ pub fn build(b: *std.Build) void {
     // cannot be hidden behind an integration setup failure.
     if (core_only) {
         const render_test = b.addTest(.{
-            .root_module = b.createModule(.{ .root_source_file = b.path("src/render/clustered_backend.zig"), .target = b.graph.host, .optimize = .Debug }),
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/render/mosaic_backend.zig"), .target = b.graph.host, .optimize = .Debug }),
         });
         const run_render_test = b.addRunArtifact(render_test);
         const locality_test = b.addTest(.{

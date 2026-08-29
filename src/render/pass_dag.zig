@@ -5,7 +5,7 @@ const std = @import("std");
 
 pub const PassId = u16;
 
-pub const Frontend = enum { vulkan, native_clustered, internal };
+pub const Frontend = enum { vulkan, native_mosaic, internal };
 pub const Kind = enum { graphics, compute, hzb_build, cluster_cull, macrobin, tile_raster, visibility_shade, resolve, present };
 
 pub const Pass = struct {
@@ -187,7 +187,7 @@ test "common DAG is deterministic by sequence" {
     var edges: [16]Edge = undefined;
     var dag = Dag.init(&passes, &edges);
     const late = try dag.addPass(.{ .frontend = .vulkan, .kind = .graphics, .sequence = 20 });
-    const early = try dag.addPass(.{ .frontend = .native_clustered, .kind = .graphics, .sequence = 10 });
+    const early = try dag.addPass(.{ .frontend = .native_mosaic, .kind = .graphics, .sequence = 10 });
     const hzb = try dag.addPass(.{ .frontend = .internal, .kind = .hzb_build, .sequence = 30 });
     const raster = try dag.addPass(.{ .frontend = .internal, .kind = .tile_raster, .sequence = 40 });
     try dag.addDependency(late, hzb);
