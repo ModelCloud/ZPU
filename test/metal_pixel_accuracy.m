@@ -2893,6 +2893,8 @@ int main(void) {
         id<MTLLibrary> adapter_default_library = [adapter_device newDefaultLibrary];
         id<MTLFunction> adapter_default_compute_function =
             [adapter_default_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8"];
+        id<MTLArgumentEncoder> adapter_non_argument_buffer_encoder =
+            [adapter_compute_function newArgumentEncoderWithBufferIndex:0];
         id<MTLTexture> adapter_compute_texture =
             [adapter_device newTextureWithDescriptor:compute_texture_descriptor];
         id<MTLCommandBuffer> adapter_compute_command_buffer = [adapter_queue commandBuffer];
@@ -2912,7 +2914,8 @@ int main(void) {
             native_compute_command_buffer.status != MTLCommandBufferStatusCompleted ||
             adapter_compute_function == nil || adapter_compute_pipeline == nil || adapter_default_library == nil ||
             adapter_default_compute_function == nil || adapter_compute_texture == nil || adapter_compute_encoder == nil ||
-            adapter_compute_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            adapter_compute_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_non_argument_buffer_encoder != nil) {
             fail_with_error("compute adapter execution failed", adapter_compute_error);
             return 42;
         }

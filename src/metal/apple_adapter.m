@@ -3279,7 +3279,11 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
 - (MTLFunctionOptions)options API_AVAILABLE(macos(11.0), ios(14.0)) { return MTLFunctionOptionNone; }
 - (id<MTLArgumentEncoder>)newArgumentEncoderWithBufferIndex:(NSUInteger)bufferIndex API_AVAILABLE(macos(10.13), ios(11.0)) {
     (void)bufferIndex;
-    return (id<MTLArgumentEncoder>)[(id)_owner newArgumentEncoderWithArguments:@[]];
+    /* The registered CPU profiles expose ordinary buffer/texture/sampler
+     * arguments, not an MSL argument-buffer parameter. Metal returns nil for
+     * this selector in that case; an empty encoder would incorrectly make a
+     * non-argument-buffer resource look encodable. */
+    return nil;
 }
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
