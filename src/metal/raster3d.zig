@@ -485,6 +485,15 @@ fn sampleSelection(job: *const Job, filter: abi.SamplerFilter, rho: f32) SampleS
     };
 }
 
+fn effectiveSampleReductionMode(options: DrawOptions) abi.SamplerReductionMode {
+    // Metal ignores reductionMode unless all three filtering stages can
+    // contribute a linear footprint. Keep this decision at sampler-state
+    // level rather than relying on the selected min/mag filter for one pixel.
+    if (options.sample_min_filter != .linear or options.sample_mag_filter != .linear or
+        options.sample_mip_filter != .linear) return .weighted_average;
+    return options.sample_reduction_mode;
+}
+
 fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [4]f32,
     selection: SampleSelection, stats: *Stats, front_facing: bool) void {
     const width: usize = @intCast(job.target.width);
@@ -528,15 +537,16 @@ fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [
         stats.depth_tests_passed += 1;
     }
     if (stencil_index) |index| applyStencil(job.stencil.?, index, stencil_state, stencil_state.depth_pass);
+    const reduction_mode = effectiveSampleReductionMode(job.options);
     const fragment_color = if (job.sample_texture) |texture| blk: {
         const level0 = if (job.sample_mipmaps.len != 0) &job.sample_mipmaps[selection.level0] else texture;
         const color0 = level0.sample(color[0], color[1], selection.filter, job.options.sample_address_s,
             job.options.sample_address_t, job.options.sample_border_color, job.options.sample_swizzle,
-            job.options.sample_normalized_coordinates, job.options.sample_reduction_mode);
+            job.options.sample_normalized_coordinates, reduction_mode);
         if (selection.level1 == selection.level0 or job.sample_mipmaps.len == 0) break :blk color0;
         const color1 = job.sample_mipmaps[selection.level1].sample(color[0], color[1], selection.filter,
             job.options.sample_address_s, job.options.sample_address_t, job.options.sample_border_color,
-            job.options.sample_swizzle, job.options.sample_normalized_coordinates, job.options.sample_reduction_mode);
+            job.options.sample_swizzle, job.options.sample_normalized_coordinates, reduction_mode);
         var result: [4]f32 = undefined;
         for (0..4) |channel| result[channel] = color0[channel] + (color1[channel] - color0[channel]) * selection.level_weight;
         break :blk result;
@@ -1181,4 +1191,26 @@ test "CPU sampler reduction modes reduce bilinear texels per channel" {
         try std.testing.expectApproxEqAbs(minimum_expected[channel], minimum[channel], 0.000001);
         try std.testing.expectApproxEqAbs(maximum_expected[channel], maximum[channel], 0.000001);
     }
+}
+
+test "CPU sampler ignores reduction when Metal filtering disables it" {
+    const weighted_options = DrawOptions{
+        .viewport = .{ .origin_x = 0, .origin_y = 0, .width = 1, .height = 1, .znear = 0, .zfar = 1 },
+        .scissor = .{ .x = 0, .y = 0, .width = 1, .height = 1 },
+    };
+    try std.testing.expectEqual(abi.SamplerReductionMode.weighted_average, effectiveSampleReductionMode(weighted_options));
+
+    var options = DrawOptions{
+        .viewport = weighted_options.viewport,
+        .scissor = weighted_options.scissor,
+        .sample_min_filter = .linear,
+        .sample_mag_filter = .linear,
+        .sample_mip_filter = .nearest,
+        .sample_reduction_mode = .minimum,
+    };
+    try std.testing.expectEqual(abi.SamplerReductionMode.weighted_average, effectiveSampleReductionMode(options));
+    options.sample_mip_filter = .linear;
+    try std.testing.expectEqual(abi.SamplerReductionMode.minimum, effectiveSampleReductionMode(options));
+    options.sample_mag_filter = .nearest;
+    try std.testing.expectEqual(abi.SamplerReductionMode.weighted_average, effectiveSampleReductionMode(options));
 }
