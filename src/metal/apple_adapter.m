@@ -24,6 +24,7 @@
 @class ZPUCommandQueue;
 @class ZPUCommandBuffer;
 @class ZPUHeap;
+@class ZPUResidencySet;
 @class ZPUTextureViewPool;
 @class ZPUIndirectCommandBuffer;
 @class ZPUIndirectComputeCommand;
@@ -119,6 +120,18 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLHazardTrackingMode _hazardTrackingMode;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner heap:(zpu_metal_heap *)heap descriptor:(MTLHeapDescriptor *)descriptor;
+@end
+
+API_AVAILABLE(macos(15.0), ios(18.0))
+@interface ZPUResidencySet : NSObject <MTLResidencySet> {
+@public
+    ZPUDevice *_owner;
+    NSString *_label;
+    NSMutableArray *_allocations;
+    uint64_t _committedAllocatedSize;
+    BOOL _resident;
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLResidencySetDescriptor *)descriptor;
 @end
 
 @interface ZPUIndirectRenderCommand : NSObject <MTLIndirectRenderCommand> {
@@ -1138,6 +1151,61 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
 }
 @end
 
+API_AVAILABLE(macos(15.0), ios(18.0))
+static BOOL zpu_residency_allocation_belongs_to_device(ZPUDevice *owner, id<MTLAllocation> allocation) {
+    if (allocation == nil || ![allocation respondsToSelector:@selector(allocatedSize)] ||
+        ![allocation respondsToSelector:@selector(device)]) return NO;
+    return [(id)allocation device] == owner;
+}
+
+@implementation ZPUResidencySet
+- (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLResidencySetDescriptor *)descriptor {
+    if ((self = [super init])) {
+        _owner = owner;
+        _label = [descriptor.label copy];
+        _allocations = [NSMutableArray arrayWithCapacity:descriptor.initialCapacity];
+        _committedAllocatedSize = 0;
+        _resident = NO;
+    }
+    return self;
+}
+- (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
+- (NSString *)label { return _label; }
+- (uint64_t)allocatedSize { return _committedAllocatedSize; }
+- (void)requestResidency {
+    [self commit];
+    _resident = YES;
+}
+- (void)endResidency { _resident = NO; }
+- (void)addAllocation:(id<MTLAllocation>)allocation {
+    if (!zpu_residency_allocation_belongs_to_device(_owner, allocation) || [_allocations containsObject:allocation]) return;
+    [_allocations addObject:allocation];
+}
+- (void)addAllocations:(const id<MTLAllocation>[])allocations count:(NSUInteger)count {
+    if (allocations == NULL) return;
+    for (NSUInteger index = 0; index < count; ++index) [self addAllocation:allocations[index]];
+}
+- (void)removeAllocation:(id<MTLAllocation>)allocation {
+    if (allocation != nil) [_allocations removeObject:allocation];
+}
+- (void)removeAllocations:(const id<MTLAllocation>[])allocations count:(NSUInteger)count {
+    if (allocations == NULL) return;
+    for (NSUInteger index = 0; index < count; ++index) [self removeAllocation:allocations[index]];
+}
+- (void)removeAllAllocations { [_allocations removeAllObjects]; }
+- (BOOL)containsAllocation:(id<MTLAllocation>)allocation { return allocation != nil && [_allocations containsObject:allocation]; }
+- (NSArray<id<MTLAllocation>> *)allAllocations { return [_allocations copy]; }
+- (NSUInteger)allocationCount { return _allocations.count; }
+- (void)commit {
+    uint64_t total = 0;
+    for (id<MTLAllocation> allocation in _allocations) {
+        const uint64_t size = (uint64_t)[allocation allocatedSize];
+        total = UINT64_MAX - total < size ? UINT64_MAX : total + size;
+    }
+    _committedAllocatedSize = total;
+}
+@end
+
 @implementation ZPUFence
 - (instancetype)initWithOwner:(ZPUDevice *)owner fence:(zpu_metal_fence *)fence {
     if ((self = [super init])) { _owner = owner; _zpuFence = fence; }
@@ -1849,9 +1917,12 @@ static uint64_t zpu_cpu_timestamp(void) {
 - (void)setShouldMaximizeConcurrentCompilation:(BOOL)value API_AVAILABLE(macos(13.3)) { (void)value; }
 - (NSUInteger)maximumConcurrentCompilationTaskCount API_AVAILABLE(macos(13.3), ios(26.0)) { return 1; }
 - (id<MTLResidencySet>)newResidencySetWithDescriptor:(MTLResidencySetDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(15.0), ios(18.0)) {
-    (void)descriptor;
-    zpu_set_error(error, @"ZPU CPU Metal has no residency-set implementation");
-    return nil;
+    if (descriptor == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal requires a residency-set descriptor");
+        return nil;
+    }
+    if (error != NULL) *error = nil;
+    return (id<MTLResidencySet>)[[ZPUResidencySet alloc] initWithOwner:self descriptor:descriptor];
 }
 - (MTLAccelerationStructureSizes)accelerationStructureSizesWithDescriptor:(MTLAccelerationStructureDescriptor *)descriptor API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
     (void)descriptor;
@@ -2269,8 +2340,14 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 - (NSString *)label { return _label; }
 - (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (void)insertDebugCaptureBoundary {}
-- (void)addResidencySet:(id)residencySet API_AVAILABLE(macos(15.0), ios(18.0)) { (void)residencySet; }
-- (void)addResidencySets:(const id<MTLResidencySet> __nonnull [__nonnull])residencySets count:(NSUInteger)count API_AVAILABLE(macos(15.0), ios(18.0)) { (void)residencySets; (void)count; }
+- (void)addResidencySet:(id)residencySet API_AVAILABLE(macos(15.0), ios(18.0)) {
+    ZPUResidencySet *zpuSet = (ZPUResidencySet *)residencySet;
+    if ([zpuSet isKindOfClass:[ZPUResidencySet class]] && zpuSet->_owner == _owner) [zpuSet commit];
+}
+- (void)addResidencySets:(const id<MTLResidencySet> __nonnull [__nonnull])residencySets count:(NSUInteger)count API_AVAILABLE(macos(15.0), ios(18.0)) {
+    if (residencySets == NULL) return;
+    for (NSUInteger index = 0; index < count; ++index) [self addResidencySet:residencySets[index]];
+}
 - (void)removeResidencySet:(id)residencySet API_AVAILABLE(macos(15.0), ios(18.0)) { (void)residencySet; }
 - (void)removeResidencySets:(const id<MTLResidencySet> __nonnull [__nonnull])residencySets count:(NSUInteger)count API_AVAILABLE(macos(15.0), ios(18.0)) { (void)residencySets; (void)count; }
 - (id<MTLCommandBuffer>)commandBuffer {
@@ -2480,11 +2557,20 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 - (void)pushDebugGroup:(NSString *)string { (void)string; }
 - (void)popDebugGroup {}
 - (void)useResidencySet:(id<MTLResidencySet>)residencySet API_AVAILABLE(macos(15.0), ios(18.0)) {
-    (void)residencySet;
+    ZPUResidencySet *zpuSet = (ZPUResidencySet *)residencySet;
+    if (![zpuSet isKindOfClass:[ZPUResidencySet class]] || zpuSet->_owner != [_owner device]) {
+        [self markError];
+        return;
+    }
+    [zpuSet commit];
+    [self retainResource:zpuSet];
 }
 - (void)useResidencySets:(const id<MTLResidencySet> __nonnull [__nonnull])residencySets count:(NSUInteger)count API_AVAILABLE(macos(15.0), ios(18.0)) {
-    (void)residencySets;
-    (void)count;
+    if (residencySets == NULL) {
+        if (count != 0) [self markError];
+        return;
+    }
+    for (NSUInteger index = 0; index < count; ++index) [self useResidencySet:residencySets[index]];
 }
 @end
 
@@ -2676,10 +2762,21 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     return (id<MTL4ComputeCommandEncoder>)encoder;
 }
 - (id<MTL4MachineLearningCommandEncoder>)machineLearningCommandEncoder { return nil; }
-- (void)useResidencySet:(id<MTLResidencySet>)residencySet { (void)residencySet; }
+- (void)useResidencySet:(id<MTLResidencySet>)residencySet {
+    ZPUResidencySet *zpuSet = (ZPUResidencySet *)residencySet;
+    if (![zpuSet isKindOfClass:[ZPUResidencySet class]] || zpuSet->_owner != _owner || _legacyBuffer == nil) {
+        [self markError];
+        return;
+    }
+    [zpuSet commit];
+    [_legacyBuffer retainResource:zpuSet];
+}
 - (void)useResidencySets:(const id<MTLResidencySet> __nonnull [__nonnull])residencySets count:(NSUInteger)count {
-    (void)residencySets;
-    (void)count;
+    if (residencySets == NULL) {
+        if (count != 0) [self markError];
+        return;
+    }
+    for (NSUInteger index = 0; index < count; ++index) [self useResidencySet:residencySets[index]];
 }
 - (void)pushDebugGroup:(NSString *)string { (void)string; }
 - (void)popDebugGroup {}
@@ -2778,8 +2875,14 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 }
 - (void)signalDrawable:(id<MTLDrawable>)drawable { (void)drawable; }
 - (void)waitForDrawable:(id<MTLDrawable>)drawable { (void)drawable; }
-- (void)addResidencySet:(id<MTLResidencySet>)residencySet { (void)residencySet; }
-- (void)addResidencySets:(const id<MTLResidencySet> __nonnull [__nonnull])residencySets count:(NSUInteger)count { (void)residencySets; (void)count; }
+- (void)addResidencySet:(id<MTLResidencySet>)residencySet {
+    ZPUResidencySet *zpuSet = (ZPUResidencySet *)residencySet;
+    if ([zpuSet isKindOfClass:[ZPUResidencySet class]] && zpuSet->_owner == _owner) [zpuSet commit];
+}
+- (void)addResidencySets:(const id<MTLResidencySet> __nonnull [__nonnull])residencySets count:(NSUInteger)count {
+    if (residencySets == NULL) return;
+    for (NSUInteger index = 0; index < count; ++index) [self addResidencySet:residencySets[index]];
+}
 - (void)removeResidencySet:(id<MTLResidencySet>)residencySet { (void)residencySet; }
 - (void)removeResidencySets:(const id<MTLResidencySet> __nonnull [__nonnull])residencySets count:(NSUInteger)count { (void)residencySets; (void)count; }
 - (void)updateTextureMappings:(id<MTLTexture>)texture heap:(id<MTLHeap>)heap operations:(const MTL4UpdateSparseTextureMappingOperation [_Nonnull])operations count:(NSUInteger)count { (void)texture; (void)heap; (void)operations; (void)count; }

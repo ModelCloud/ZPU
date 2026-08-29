@@ -475,6 +475,38 @@ int main(void) {
             fprintf(stderr, "metal-pixel: CPU adapter protocol/selector conformance failed\n");
             return 54;
         }
+        NSError *adapter_residency_error = nil;
+        MTLResidencySetDescriptor *adapter_residency_descriptor = [MTLResidencySetDescriptor new];
+        adapter_residency_descriptor.label = @"zpu-cpu-residency";
+        id<MTLResidencySet> adapter_residency_set =
+            [adapter_device newResidencySetWithDescriptor:adapter_residency_descriptor error:&adapter_residency_error];
+        id<MTLAllocation> adapter_allocations[] = {
+            (id<MTLAllocation>)adapter_vertex_buffer,
+            (id<MTLAllocation>)adapter_texture,
+        };
+        [adapter_residency_set addAllocations:adapter_allocations count:2];
+        [adapter_residency_set addAllocation:(id<MTLAllocation>)adapter_texture];
+        [adapter_residency_set commit];
+        [adapter_queue addResidencySet:adapter_residency_set];
+        const uint64_t adapter_expected_residency_size =
+            (uint64_t)adapter_vertex_buffer.length + (uint64_t)adapter_texture.allocatedSize;
+        BOOL adapter_residency_ok =
+            adapter_residency_set != nil &&
+            [adapter_residency_set conformsToProtocol:@protocol(MTLResidencySet)] &&
+            adapter_residency_set.allocationCount == 2 &&
+            [adapter_residency_set containsAllocation:(id<MTLAllocation>)adapter_vertex_buffer] &&
+            [adapter_residency_set containsAllocation:(id<MTLAllocation>)adapter_texture] &&
+            adapter_residency_set.allocatedSize == adapter_expected_residency_size &&
+            adapter_residency_set.allAllocations.count == 2;
+        [adapter_residency_set requestResidency];
+        [adapter_residency_set removeAllocation:(id<MTLAllocation>)adapter_texture];
+        [adapter_residency_set removeAllAllocations];
+        [adapter_residency_set endResidency];
+        adapter_residency_ok = adapter_residency_ok && adapter_residency_set.allocationCount == 0;
+        if (!adapter_residency_ok) {
+            fail_with_error("CPU residency-set metadata failed", adapter_residency_error);
+            return 66;
+        }
         MTLSizeAndAlign adapter_heap_size_align =
             [adapter_device heapTextureSizeAndAlignWithDescriptor:adapter_texture_descriptor];
         id<MTLCommandQueue> adapter_limited_queue =

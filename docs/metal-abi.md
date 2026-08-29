@@ -99,6 +99,8 @@ triangle path:
 - CPU resource-state encoders preserve Metal encoder boundaries and fence
   ordering. Resource/cache transitions are ordered no-ops over ZPU's unified
   CPU memory, while sparse texture mapping requests fail closed
+- CPU residency sets track ZPU allocations, committed byte totals, and
+  request/end-residency state without introducing a GPU residency domain
 - CPU indirect compute commands for those registered kernels; the command
   buffer inherits the ZPU encoder's texture bindings and records pipeline,
   buffer, and dispatch state for deferred execution
