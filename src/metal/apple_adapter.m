@@ -53,6 +53,7 @@
 @class ZPUMTL4ArgumentTable;
 @class ZPUMTL4ComputeEncoder;
 @class ZPUMTL4RenderEncoder;
+@class ZPUMTL4MachineLearningEncoder;
 
 @interface ZPUBuffer : NSObject <MTLBuffer> {
 @public
@@ -595,6 +596,24 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     BOOL _ended;
 }
 - (instancetype)initWithOwner:(ZPUMTL4CommandBuffer *)owner legacy:(ZPUComputeEncoder *)legacy;
+@end
+
+/* Metal 4 exposes machine-learning encoding as a separate command-encoder
+ * family. ZPU does not have a CPU implementation for arbitrary ML pipeline
+ * graphs yet, so the object is still CPU-owned but every operation that would
+ * execute a graph fails closed on the owning command buffer. Returning an
+ * object here is important: selector discovery and encoder lifetime must not
+ * depend on Apple's native Metal runtime. */
+API_AVAILABLE(macos(26.0), ios(26.0))
+@interface ZPUMTL4MachineLearningEncoder : NSObject <MTL4MachineLearningCommandEncoder> {
+@public
+    ZPUMTL4CommandBuffer *_owner;
+    id<MTL4MachineLearningPipelineState> _pipelineState;
+    ZPUMTL4ArgumentTable *_argumentTable;
+    NSString *_label;
+    BOOL _ended;
+}
+- (instancetype)initWithOwner:(ZPUMTL4CommandBuffer *)owner;
 @end
 
 #pragma clang diagnostic pop
@@ -5091,7 +5110,12 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     _activeEncoder = encoder;
     return (id<MTL4ComputeCommandEncoder>)encoder;
 }
-- (id<MTL4MachineLearningCommandEncoder>)machineLearningCommandEncoder { return nil; }
+- (id<MTL4MachineLearningCommandEncoder>)machineLearningCommandEncoder {
+    if (!_recording || _ended || _submitted || _failed || _activeEncoder != nil || _legacyBuffer == nil) return nil;
+    ZPUMTL4MachineLearningEncoder *encoder = [[ZPUMTL4MachineLearningEncoder alloc] initWithOwner:self];
+    _activeEncoder = encoder;
+    return (id<MTL4MachineLearningCommandEncoder>)encoder;
+}
 - (void)useResidencySet:(id<MTLResidencySet>)residencySet {
     ZPUResidencySet *zpuSet = (ZPUResidencySet *)residencySet;
     if (![zpuSet isKindOfClass:[ZPUResidencySet class]] || zpuSet->_owner != _owner || _legacyBuffer == nil) {
@@ -5141,6 +5165,69 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     [_legacyBuffer retainResource:heap];
     [_legacyBuffer retainResource:buffer];
     if (fenceToUpdate != nil) [_legacyBuffer retainResource:fenceToUpdate];
+}
+@end
+
+@implementation ZPUMTL4MachineLearningEncoder
+- (instancetype)initWithOwner:(ZPUMTL4CommandBuffer *)owner {
+    if ((self = [super init])) _owner = owner;
+    return self;
+}
+- (id<MTL4CommandBuffer>)commandBuffer { return _ended ? nil : (id<MTL4CommandBuffer>)_owner; }
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
+- (void)barrierAfterQueueStages:(MTLStages)afterQueueStages beforeStages:(MTLStages)beforeStages visibilityOptions:(MTL4VisibilityOptions)visibilityOptions {
+    (void)afterQueueStages;
+    (void)beforeStages;
+    (void)visibilityOptions;
+}
+- (void)barrierAfterStages:(MTLStages)afterStages beforeQueueStages:(MTLStages)beforeQueueStages visibilityOptions:(MTL4VisibilityOptions)visibilityOptions {
+    (void)afterStages;
+    (void)beforeQueueStages;
+    (void)visibilityOptions;
+}
+- (void)barrierAfterEncoderStages:(MTLStages)afterEncoderStages beforeEncoderStages:(MTLStages)beforeEncoderStages visibilityOptions:(MTL4VisibilityOptions)visibilityOptions {
+    (void)afterEncoderStages;
+    (void)beforeEncoderStages;
+    (void)visibilityOptions;
+}
+- (void)updateFence:(id<MTLFence>)fence afterEncoderStages:(MTLStages)afterEncoderStages {
+    (void)fence;
+    (void)afterEncoderStages;
+    [_owner markError];
+}
+- (void)waitForFence:(id<MTLFence>)fence beforeEncoderStages:(MTLStages)beforeEncoderStages {
+    (void)fence;
+    (void)beforeEncoderStages;
+    [_owner markError];
+}
+- (void)insertDebugSignpost:(NSString *)string { (void)string; }
+- (void)pushDebugGroup:(NSString *)string { (void)string; }
+- (void)popDebugGroup {}
+- (void)setPipelineState:(id<MTL4MachineLearningPipelineState>)pipelineState {
+    (void)pipelineState;
+    _pipelineState = nil;
+    [_owner markError];
+}
+- (void)setArgumentTable:(id<MTL4ArgumentTable>)argumentTable {
+    if (argumentTable != nil &&
+        (![argumentTable isKindOfClass:[ZPUMTL4ArgumentTable class]] ||
+         ((ZPUMTL4ArgumentTable *)argumentTable)->_owner != _owner->_owner)) {
+        [_owner markError];
+        return;
+    }
+    _argumentTable = (ZPUMTL4ArgumentTable *)argumentTable;
+}
+- (void)dispatchNetworkWithIntermediatesHeap:(id<MTLHeap>)heap {
+    (void)heap;
+    /* There is no portable ZPU ML graph executor yet. Keep this operation
+     * CPU-only and report the unsupported execution at submission time. */
+    [_owner markError];
+}
+- (void)endEncoding {
+    if (_ended) return;
+    _ended = YES;
+    if (_owner->_activeEncoder == self) _owner->_activeEncoder = nil;
 }
 @end
 

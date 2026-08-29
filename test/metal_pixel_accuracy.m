@@ -4022,6 +4022,32 @@ int main(void) {
             return 61;
         }
 
+        /* The ML encoder must be a CPU-owned object even though arbitrary ML
+         * graph execution is not implemented. Its dispatch path must report
+         * an error through Metal 4 feedback instead of returning nil or
+         * reaching Apple's native Metal runtime. */
+        id<MTL4CommandBuffer> metal4_ml_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_ml_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4MachineLearningCommandEncoder> metal4_ml_encoder =
+            [metal4_ml_command_buffer machineLearningCommandEncoder];
+        [metal4_ml_encoder setArgumentTable:metal4_table];
+        [metal4_ml_encoder dispatchNetworkWithIntermediatesHeap:adapter_three_d_heap];
+        [metal4_ml_encoder endEncoding];
+        [metal4_ml_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_ml_command_buffers[] = {metal4_ml_command_buffer};
+        MTL4CommitOptions *metal4_ml_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *metal4_ml_error = nil;
+        [metal4_ml_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            metal4_ml_error = feedback.error;
+        }];
+        [metal4_queue commit:metal4_ml_command_buffers count:1 options:metal4_ml_options];
+        if (metal4_ml_command_buffer == nil || metal4_ml_encoder == nil ||
+            ![metal4_ml_encoder conformsToProtocol:@protocol(MTL4MachineLearningCommandEncoder)] ||
+            metal4_ml_error == nil) {
+            fail_with_error("Metal 4 CPU ML encoder did not fail closed", metal4_error);
+            return 62;
+        }
+
         id<MTLTexture> metal4_mip_copy = [adapter_device newTextureWithDescriptor:mip_descriptor];
         id<MTL4CommandBuffer> metal4_mip_command_buffer = [adapter_device newCommandBuffer];
         [metal4_mip_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
