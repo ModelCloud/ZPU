@@ -145,9 +145,9 @@ triangle path:
   binary-archive format; these outputs are not Apple metal-tt scripts or
   native GPU binaries
 - owner-checked CPU function handles expose registered compute and visible
-  callable names/types and the required zero gpuResourceID sentinel; visible
-  function-table invocation remains unsupported because the fixed CPU kernels
-  do not execute arbitrary function-pointer shader code
+  callable names/types plus synthetic CPU resource IDs; visible function-table
+  invocation remains unsupported because the fixed CPU kernels do not execute
+  arbitrary function-pointer shader code
 - supported Apple-adapter render state and draw selectors propagate ZPU
   validation failures to `MTLCommandBufferStatusError`; invalid state is not
   silently reported as successful CPU work

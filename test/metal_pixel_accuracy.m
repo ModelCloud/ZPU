@@ -5738,6 +5738,13 @@ int main(void) {
                                                      withRange:NSMakeRange(0, 2)];
         [adapter_intersection_function_table setVisibleFunctionTable:adapter_visible_function_table atBufferIndex:0];
         adapter_intersection_function_table.label = @"zpu-cpu-intersection-functions";
+        BOOL adapter_function_handle_ids_ok = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            adapter_function_handle_ids_ok = adapter_mtl4_render_function_handle.gpuResourceID._impl != 0 &&
+                adapter_mtl4_binary_render_fragment_handle.gpuResourceID._impl != 0 &&
+                adapter_mtl4_binary_handle.gpuResourceID._impl != 0 &&
+                adapter_device_function_handle.gpuResourceID._impl != 0;
+        }
         if (adapter_visible_function_table == nil ||
             ![adapter_visible_function_table conformsToProtocol:@protocol(MTLVisibleFunctionTable)] ||
             adapter_visible_function_table.device != adapter_device ||
@@ -5748,6 +5755,7 @@ int main(void) {
             adapter_intersection_function_table.device != adapter_device ||
             adapter_intersection_function_table.allocatedSize < 2 * sizeof(uint64_t) ||
             adapter_intersection_function_table.gpuResourceID._impl == 0 ||
+            !adapter_function_handle_ids_ok ||
             adapter_mtl4_render_function_handle == nil ||
             adapter_mtl4_render_binary_handle == nil ||
             adapter_device_function_handle == nil ||

@@ -955,6 +955,7 @@ static uint64_t zpu_next_cpu_drawable_id;
     ZPUDevice *_owner;
     NSString *_name;
     MTLFunctionType _functionType;
+    uint64_t _resourceID;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
                   functionType:(MTLFunctionType)functionType;
@@ -6933,13 +6934,14 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         _owner = owner;
         _name = [name copy];
         _functionType = functionType;
+        _resourceID = zpu_register_resource(self);
     }
     return self;
 }
 - (MTLFunctionType)functionType { return _functionType; }
 - (NSString *)name { return _name; }
 - (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
-- (MTLResourceID)gpuResourceID API_AVAILABLE(macos(26.0), ios(26.0)) { return (MTLResourceID){0}; }
+- (MTLResourceID)gpuResourceID API_AVAILABLE(macos(26.0), ios(26.0)) { return (MTLResourceID){_resourceID}; }
 @end
 
 @implementation ZPUCPUFunction
