@@ -203,6 +203,9 @@ triangle path:
   binding reflection (and compatibility argument reflection) for their known
   buffer, texture, and sampler interfaces; ordinary device-created pipelines
   retain Metal's default `nil` reflection behavior
+- registered CPU library functions expose matching binding reflection with a
+  `nil` user annotation; unregistered functions and arbitrary specialized
+  descriptors remain unsupported
 - CPU indirect compute commands for those registered kernels; the command
   buffer inherits the ZPU encoder's texture bindings and records pipeline,
   buffer, and dispatch state for deferred execution

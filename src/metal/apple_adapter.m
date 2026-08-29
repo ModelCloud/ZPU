@@ -343,6 +343,15 @@ API_AVAILABLE(macos(10.11), ios(8.0))
                          fragmentBindings:(NSArray *)fragmentBindings;
 @end
 
+API_AVAILABLE(macos(26.0), ios(26.0))
+@interface ZPUFunctionReflection : MTLFunctionReflection {
+@public
+    NSArray *_bindings;
+    NSString *_userAnnotation;
+}
+- (instancetype)initWithBindings:(NSArray *)bindings userAnnotation:(NSString *)userAnnotation;
+@end
+
 @interface ZPURenderPipelineState : NSObject <MTLRenderPipelineState> {
 @public
     ZPUDevice *_owner;
@@ -2217,6 +2226,18 @@ static uint64_t zpu_cpu_timestamp(void) {
 - (NSArray<MTLArgument *> *)tileArguments { return @[]; }
 @end
 
+@implementation ZPUFunctionReflection
+- (instancetype)initWithBindings:(NSArray *)bindings userAnnotation:(NSString *)userAnnotation {
+    if ((self = [super init])) {
+        _bindings = [bindings copy];
+        _userAnnotation = [userAnnotation copy];
+    }
+    return self;
+}
+- (NSArray<id<MTLBinding>> *)bindings { return _bindings; }
+- (NSString *)userAnnotation { return _userAnnotation; }
+@end
+
 static ZPUArgument *zpu_reflection_argument(NSString *name, MTLArgumentType type,
                                               MTLBindingAccess access, NSUInteger index) {
     return [[ZPUArgument alloc] initWithName:name type:type access:access index:index];
@@ -2315,6 +2336,52 @@ static MTLRenderPipelineReflection *zpu_render_pipeline_reflection(NSString *ver
     return (MTLRenderPipelineReflection *)[[ZPURenderPipelineReflection alloc]
         initWithVertexArguments:vertexArguments fragmentArguments:fragmentArguments
                  vertexBindings:vertexBindings fragmentBindings:fragmentBindings];
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
+    if ([name isEqualToString:@"zpu_test_vertex"] || [name isEqualToString:@"zpu_test_no_raster_vertex"]) {
+        ZPUBinding *binding = zpu_reflection_binding(@"vertices", MTLBindingTypeBuffer,
+                                                      MTLBindingAccessReadOnly, 0);
+        [binding setBufferDataSize:sizeof(zpu_metal_vertex) dataType:MTLDataTypeStruct];
+        return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+            initWithBindings:@[binding] userAnnotation:nil];
+    }
+    if ([name isEqualToString:@"zpu_cpu_uniform_color_fragment"]) {
+        ZPUBinding *binding = zpu_reflection_binding(@"uniformColor", MTLBindingTypeBuffer,
+                                                      MTLBindingAccessReadOnly, 0);
+        [binding setBufferDataSize:sizeof(float) * 4 dataType:MTLDataTypeFloat4];
+        return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+            initWithBindings:@[binding] userAnnotation:nil];
+    }
+    if ([name isEqualToString:@"zpu_test_sample_fragment"]) {
+        ZPUBinding *source = zpu_reflection_binding(@"source", MTLBindingTypeTexture,
+                                                     MTLBindingAccessReadOnly, 0);
+        [source setTextureType:MTLTextureType2D dataType:MTLDataTypeFloat arrayLength:1];
+        ZPUBinding *sampler = zpu_reflection_binding(@"sourceSampler", MTLBindingTypeSampler,
+                                                      MTLBindingAccessReadOnly, 0);
+        return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+            initWithBindings:@[source, sampler] userAnnotation:nil];
+    }
+    if ([name hasPrefix:@"zpu_test_"] && [name rangeOfString:@"fragment" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+            initWithBindings:@[] userAnnotation:nil];
+    }
+    if ([name hasPrefix:@"zpu_cpu_"]) {
+        zpu_metal_compute_kernel kernel = 0;
+        if ([name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"]) kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8;
+        else if ([name isEqualToString:@"zpu_cpu_copy_rgba8_buffer_to_texture"]) kernel = ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE;
+        else if ([name isEqualToString:@"zpu_cpu_fill_gradient_rgba8_array"]) kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY;
+        else if ([name isEqualToString:@"zpu_cpu_fill_gradient_rgba8_3d"]) kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_3D;
+        else if ([name isEqualToString:@"zpu_cpu_fill_gradient_r32_float"]) kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_R32_FLOAT;
+        else if ([name isEqualToString:@"zpu_cpu_fill_gradient_rgba16_float"]) kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA16_FLOAT;
+        if (kernel != 0) {
+            MTLComputePipelineReflection *reflection = zpu_compute_pipeline_reflection(kernel);
+            return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+                initWithBindings:reflection.bindings userAnnotation:nil];
+        }
+    }
+    return nil;
 }
 
 #pragma clang diagnostic pop
@@ -3272,8 +3339,8 @@ static MTLRenderPipelineReflection *zpu_render_pipeline_reflection(NSString *ver
 - (MTLLibraryType)type API_AVAILABLE(macos(11.0), ios(14.0)) { return MTLLibraryTypeExecutable; }
 - (NSString *)installName API_AVAILABLE(macos(11.0), ios(14.0)) { return nil; }
 - (MTLFunctionReflection *)reflectionForFunctionWithName:(NSString *)functionName API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)functionName;
-    return nil;
+    if (![_functionNames containsObject:functionName]) return nil;
+    return zpu_function_reflection(functionName);
 }
 - (id<MTLFunction>)newFunctionWithDescriptor:(MTLFunctionDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(11.0), ios(14.0)) {
     (void)descriptor;

@@ -2947,6 +2947,14 @@ int main(void) {
         id<MTLLibrary> adapter_mtl4_library =
             [adapter_mtl4_compiler newLibraryWithDescriptor:adapter_mtl4_library_descriptor
                                                        error:&adapter_mtl4_compiler_error];
+        MTLFunctionReflection *adapter_mtl4_function_reflection = nil;
+        MTLFunctionReflection *native_function_reflection = nil;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            adapter_mtl4_function_reflection =
+                [adapter_mtl4_library reflectionForFunctionWithName:@"zpu_cpu_fill_gradient_rgba8"];
+            native_function_reflection =
+                [library reflectionForFunctionWithName:@"zpu_cpu_fill_gradient_rgba8"];
+        }
         MTL4LibraryFunctionDescriptor *adapter_mtl4_function_descriptor = [MTL4LibraryFunctionDescriptor new];
         adapter_mtl4_function_descriptor.name = @"zpu_cpu_fill_gradient_rgba8";
         adapter_mtl4_function_descriptor.library = adapter_mtl4_library;
@@ -3099,6 +3107,11 @@ int main(void) {
             adapter_mtl4_pipeline_script.length == 0 || !adapter_mtl4_archive_flushed ||
             adapter_mtl4_serializer_archive == nil || adapter_mtl4_serializer_binary == nil ||
             adapter_mtl4_compiler == nil || adapter_mtl4_library == nil ||
+            adapter_mtl4_function_reflection == nil ||
+            adapter_mtl4_function_reflection.bindings.count != 1 ||
+            ![adapter_mtl4_function_reflection.bindings[0].name isEqualToString:@"output"] ||
+            adapter_mtl4_function_reflection.bindings[0].type != MTLBindingTypeTexture ||
+            (native_function_reflection != nil && native_function_reflection.bindings.count != 1) ||
             adapter_mtl4_compiled_pipeline == nil || adapter_mtl4_compiled_render_pipeline == nil ||
             adapter_mtl4_archived_render_pipeline == nil || adapter_mtl4_binary_function == nil ||
             adapter_mtl4_compiled_pipeline.maxTotalThreadsPerThreadgroup != 64 ||
