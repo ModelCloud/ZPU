@@ -23,6 +23,15 @@
 #include "zpu/metal.h"
 #include "zpu/metal_apple.h"
 
+/* These enum members are introduced after the adapter's iOS 15 deployment
+ * target. Their Metal ABI bit positions are stable, so keep the internal
+ * capability masks available to older SDK deployment checks without
+ * referencing unavailable enum symbols. */
+static const MTLIndirectCommandType zpu_indirect_command_type_draw_mesh_threadgroups =
+    (MTLIndirectCommandType)(1u << 7);
+static const MTLIndirectCommandType zpu_indirect_command_type_draw_mesh_threads =
+    (MTLIndirectCommandType)(1u << 8);
+
 @class ZPUDevice;
 @class ZPUBuffer;
 @class ZPUCommandQueue;
@@ -6208,8 +6217,8 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (id<MTLIndirectCommandBuffer>)newIndirectCommandBufferWithDescriptor:(MTLIndirectCommandBufferDescriptor *)descriptor maxCommandCount:(NSUInteger)maxCount options:(MTLResourceOptions)options API_AVAILABLE(macos(10.14), ios(12.0)) {
     const MTLIndirectCommandType renderTypes = MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed;
-    const MTLIndirectCommandType meshTypes = MTLIndirectCommandTypeDrawMeshThreadgroups |
-        MTLIndirectCommandTypeDrawMeshThreads;
+    const MTLIndirectCommandType meshTypes = zpu_indirect_command_type_draw_mesh_threadgroups |
+        zpu_indirect_command_type_draw_mesh_threads;
     const MTLIndirectCommandType computeTypes = MTLIndirectCommandTypeConcurrentDispatch |
         MTLIndirectCommandTypeConcurrentDispatchThreads;
     const MTLIndirectCommandType supported = renderTypes | meshTypes | computeTypes;
@@ -12052,8 +12061,8 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         destinationIndex > _maxCommandCount || sourceRange.length > _maxCommandCount - destinationIndex) return NO;
     NSArray *commands = [source->_commands subarrayWithRange:sourceRange];
     const MTLIndirectCommandType renderTypes = MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed;
-    const MTLIndirectCommandType meshTypes = MTLIndirectCommandTypeDrawMeshThreadgroups |
-        MTLIndirectCommandTypeDrawMeshThreads;
+    const MTLIndirectCommandType meshTypes = zpu_indirect_command_type_draw_mesh_threadgroups |
+        zpu_indirect_command_type_draw_mesh_threads;
     const MTLIndirectCommandType computeTypes = MTLIndirectCommandTypeConcurrentDispatch |
         MTLIndirectCommandTypeConcurrentDispatchThreads;
     for (NSUInteger index = 0; index < commands.count; ++index) {
@@ -12066,9 +12075,9 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
                 (renderCommand->_hasDraw && (_commandTypes & MTLIndirectCommandTypeDraw) == 0) ||
                 (renderCommand->_hasIndexedDraw && (_commandTypes & MTLIndirectCommandTypeDrawIndexed) == 0) ||
                 (renderCommand->_hasMeshThreadgroups &&
-                 (_commandTypes & MTLIndirectCommandTypeDrawMeshThreadgroups) == 0) ||
+                 (_commandTypes & zpu_indirect_command_type_draw_mesh_threadgroups) == 0) ||
                 (renderCommand->_hasMeshThreads &&
-                 (_commandTypes & MTLIndirectCommandTypeDrawMeshThreads) == 0)) return NO;
+                 (_commandTypes & zpu_indirect_command_type_draw_mesh_threads) == 0)) return NO;
             ZPUIndirectRenderCommand *copy = [[ZPUIndirectRenderCommand alloc] initWithOwner:self];
             copy->_pipelineState = renderCommand->_pipelineState;
             copy->_vertexBuffer = renderCommand->_vertexBuffer;
@@ -12139,7 +12148,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 }
 - (id<MTLIndirectRenderCommand>)indirectRenderCommandAtIndex:(NSUInteger)commandIndex {
     const MTLIndirectCommandType renderTypes = MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed |
-        MTLIndirectCommandTypeDrawMeshThreadgroups | MTLIndirectCommandTypeDrawMeshThreads;
+        zpu_indirect_command_type_draw_mesh_threadgroups | zpu_indirect_command_type_draw_mesh_threads;
     if (commandIndex >= _maxCommandCount || (_commandTypes & renderTypes) == 0) return nil;
     id command = _commands[commandIndex];
     if ([command isKindOfClass:[NSNull class]]) {
@@ -12315,7 +12324,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     _unsupportedCommand = YES;
 }
 - (void)drawMeshThreadgroups:(MTLSize)threadgroupsPerGrid threadsPerObjectThreadgroup:(MTLSize)threadsPerObjectThreadgroup threadsPerMeshThreadgroup:(MTLSize)threadsPerMeshThreadgroup API_AVAILABLE(macos(14.0), ios(17.0), tvos(18.1), visionos(2.1)) {
-    if ((_owner->_commandTypes & MTLIndirectCommandTypeDrawMeshThreadgroups) == 0 ||
+    if ((_owner->_commandTypes & zpu_indirect_command_type_draw_mesh_threadgroups) == 0 ||
         !zpu_metal_size_fits_cpu_threadgroup(threadsPerObjectThreadgroup, 1024) ||
         !zpu_metal_size_fits_cpu_threadgroup(threadsPerMeshThreadgroup, 1024)) {
         _unsupportedCommand = YES;
@@ -12328,7 +12337,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     _hasMeshThreads = NO;
 }
 - (void)drawMeshThreads:(MTLSize)threadsPerGrid threadsPerObjectThreadgroup:(MTLSize)threadsPerObjectThreadgroup threadsPerMeshThreadgroup:(MTLSize)threadsPerMeshThreadgroup API_AVAILABLE(macos(14.0), ios(17.0), tvos(18.1), visionos(2.1)) {
-    if ((_owner->_commandTypes & MTLIndirectCommandTypeDrawMeshThreads) == 0 ||
+    if ((_owner->_commandTypes & zpu_indirect_command_type_draw_mesh_threads) == 0 ||
         !zpu_metal_size_fits_cpu_threadgroup(threadsPerObjectThreadgroup, 1024) ||
         !zpu_metal_size_fits_cpu_threadgroup(threadsPerMeshThreadgroup, 1024)) {
         _unsupportedCommand = YES;
