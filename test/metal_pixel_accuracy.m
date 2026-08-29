@@ -8913,6 +8913,82 @@ int main(void) {
             return 127;
         }
 
+        /* Mesh commands retain the CPU-owned ICB lifecycle even though mesh
+         * shader execution itself remains fail-closed. Native Metal is used
+         * here only to verify that the command-family descriptor is valid on
+         * this Apple host; no native mesh command is submitted. */
+        MTLIndirectCommandBufferDescriptor *mesh_icb_descriptor = [MTLIndirectCommandBufferDescriptor new];
+        mesh_icb_descriptor.commandTypes = MTLIndirectCommandTypeDrawMeshThreadgroups |
+            MTLIndirectCommandTypeDrawMeshThreads;
+        mesh_icb_descriptor.inheritPipelineState = YES;
+        mesh_icb_descriptor.inheritBuffers = YES;
+        id<MTLIndirectCommandBuffer> native_mesh_icb =
+            [device newIndirectCommandBufferWithDescriptor:mesh_icb_descriptor
+                                            maxCommandCount:2 options:0];
+        id<MTLIndirectRenderCommand> native_mesh_threads_command =
+            [native_mesh_icb indirectRenderCommandAtIndex:0];
+        id<MTLIndirectRenderCommand> native_mesh_threadgroups_command =
+            [native_mesh_icb indirectRenderCommandAtIndex:1];
+        if (native_mesh_threads_command != nil && native_mesh_threadgroups_command != nil) {
+            [native_mesh_threads_command drawMeshThreads:MTLSizeMake(8, 4, 1)
+                           threadsPerObjectThreadgroup:MTLSizeMake(8, 1, 1)
+                             threadsPerMeshThreadgroup:MTLSizeMake(8, 1, 1)];
+            [native_mesh_threadgroups_command drawMeshThreadgroups:MTLSizeMake(1, 1, 1)
+                                      threadsPerObjectThreadgroup:MTLSizeMake(8, 1, 1)
+                                        threadsPerMeshThreadgroup:MTLSizeMake(8, 1, 1)];
+        }
+        id<MTLIndirectCommandBuffer> adapter_mesh_icb =
+            [adapter_device newIndirectCommandBufferWithDescriptor:mesh_icb_descriptor
+                                                    maxCommandCount:2
+                                                            options:MTLResourceStorageModeShared];
+        id<MTLIndirectRenderCommand> adapter_mesh_threads_command =
+            [adapter_mesh_icb indirectRenderCommandAtIndex:0];
+        id<MTLIndirectRenderCommand> adapter_mesh_threadgroups_command =
+            [adapter_mesh_icb indirectRenderCommandAtIndex:1];
+        [adapter_mesh_threads_command drawMeshThreads:MTLSizeMake(8, 4, 1)
+                       threadsPerObjectThreadgroup:MTLSizeMake(8, 1, 1)
+                         threadsPerMeshThreadgroup:MTLSizeMake(8, 1, 1)];
+        [adapter_mesh_threadgroups_command drawMeshThreadgroups:MTLSizeMake(1, 1, 1)
+                                  threadsPerObjectThreadgroup:MTLSizeMake(8, 1, 1)
+                                    threadsPerMeshThreadgroup:MTLSizeMake(8, 1, 1)];
+        id<MTLIndirectCommandBuffer> adapter_mesh_copy_icb =
+            [adapter_device newIndirectCommandBufferWithDescriptor:mesh_icb_descriptor
+                                                    maxCommandCount:2
+                                                            options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> adapter_mesh_copy_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_mesh_copy_encoder =
+            [adapter_mesh_copy_command_buffer blitCommandEncoder];
+        [adapter_mesh_copy_encoder copyIndirectCommandBuffer:adapter_mesh_icb
+                                                  sourceRange:NSMakeRange(0, 2)
+                                                 destination:adapter_mesh_copy_icb
+                                            destinationIndex:0];
+        [adapter_mesh_copy_encoder endEncoding];
+        [adapter_mesh_copy_command_buffer commit];
+        [adapter_mesh_copy_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> adapter_mesh_execute_command_buffer = [adapter_queue commandBuffer];
+        MTLRenderPassDescriptor *adapter_mesh_execute_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_mesh_execute_pass.colorAttachments[0].texture = adapter_texture;
+        adapter_mesh_execute_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_mesh_execute_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> adapter_mesh_execute_encoder =
+            [adapter_mesh_execute_command_buffer renderCommandEncoderWithDescriptor:adapter_mesh_execute_pass];
+        [adapter_mesh_execute_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_mesh_execute_encoder executeCommandsInBuffer:adapter_mesh_copy_icb withRange:NSMakeRange(0, 2)];
+        [adapter_mesh_execute_encoder endEncoding];
+        [adapter_mesh_execute_command_buffer commit];
+        [adapter_mesh_execute_command_buffer waitUntilCompleted];
+        BOOL adapter_mesh_icb_exact = native_mesh_icb != nil &&
+            native_mesh_threads_command != nil && native_mesh_threadgroups_command != nil &&
+            adapter_mesh_icb != nil && adapter_mesh_threads_command != nil &&
+            adapter_mesh_threadgroups_command != nil && adapter_mesh_copy_icb != nil &&
+            adapter_mesh_copy_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_mesh_execute_command_buffer.status == MTLCommandBufferStatusError;
+        [adapter_mesh_copy_icb resetWithRange:NSMakeRange(0, 2)];
+        if (!adapter_mesh_icb_exact) {
+            fprintf(stderr, "metal-pixel: CPU indirect mesh command lifecycle failed\n");
+            return 130;
+        }
+
         /* ICB object/mesh bindings have no CPU/ZPU shader-stage executor.
          * They must invalidate the recorded command instead of being silently
          * discarded before replay. */

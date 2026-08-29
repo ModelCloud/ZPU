@@ -282,6 +282,12 @@ API_AVAILABLE(macos(15.0), ios(18.0))
     BOOL _hasFrontFacingWinding;
     BOOL _hasTriangleFillMode;
     BOOL _hasVertexBuffer;
+    BOOL _hasMeshThreadgroups;
+    MTLSize _meshThreadgroupsPerGrid;
+    MTLSize _meshThreadsPerObjectThreadgroup;
+    MTLSize _meshThreadsPerMeshThreadgroup;
+    BOOL _hasMeshThreads;
+    MTLSize _meshThreadsPerGrid;
     BOOL _unsupportedCommand;
 }
 - (instancetype)initWithOwner:(ZPUIndirectCommandBuffer *)owner;
@@ -6202,12 +6208,14 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (id<MTLIndirectCommandBuffer>)newIndirectCommandBufferWithDescriptor:(MTLIndirectCommandBufferDescriptor *)descriptor maxCommandCount:(NSUInteger)maxCount options:(MTLResourceOptions)options API_AVAILABLE(macos(10.14), ios(12.0)) {
     const MTLIndirectCommandType renderTypes = MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed;
+    const MTLIndirectCommandType meshTypes = MTLIndirectCommandTypeDrawMeshThreadgroups |
+        MTLIndirectCommandTypeDrawMeshThreads;
     const MTLIndirectCommandType computeTypes = MTLIndirectCommandTypeConcurrentDispatch |
         MTLIndirectCommandTypeConcurrentDispatchThreads;
-    const MTLIndirectCommandType supported = renderTypes | computeTypes;
+    const MTLIndirectCommandType supported = renderTypes | meshTypes | computeTypes;
     const MTLIndirectCommandType requested = descriptor == nil ? 0 : descriptor.commandTypes;
     if (descriptor == nil || maxCount == 0 || (requested & ~supported) != 0 || requested == 0 ||
-        ((requested & renderTypes) != 0 && (requested & computeTypes) != 0)) return nil;
+        ((requested & (renderTypes | meshTypes)) != 0 && (requested & computeTypes) != 0)) return nil;
     return (id<MTLIndirectCommandBuffer>)[[ZPUIndirectCommandBuffer alloc]
         initWithOwner:self descriptor:descriptor maxCommandCount:maxCount options:options];
 }
@@ -12044,6 +12052,8 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         destinationIndex > _maxCommandCount || sourceRange.length > _maxCommandCount - destinationIndex) return NO;
     NSArray *commands = [source->_commands subarrayWithRange:sourceRange];
     const MTLIndirectCommandType renderTypes = MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed;
+    const MTLIndirectCommandType meshTypes = MTLIndirectCommandTypeDrawMeshThreadgroups |
+        MTLIndirectCommandTypeDrawMeshThreads;
     const MTLIndirectCommandType computeTypes = MTLIndirectCommandTypeConcurrentDispatch |
         MTLIndirectCommandTypeConcurrentDispatchThreads;
     for (NSUInteger index = 0; index < commands.count; ++index) {
@@ -12052,9 +12062,13 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
             _commands[destinationIndex + index] = [NSNull null];
         } else if ([command isKindOfClass:[ZPUIndirectRenderCommand class]]) {
             ZPUIndirectRenderCommand *renderCommand = (ZPUIndirectRenderCommand *)command;
-            if ((_commandTypes & renderTypes) == 0 ||
+            if ((_commandTypes & (renderTypes | meshTypes)) == 0 ||
                 (renderCommand->_hasDraw && (_commandTypes & MTLIndirectCommandTypeDraw) == 0) ||
-                (renderCommand->_hasIndexedDraw && (_commandTypes & MTLIndirectCommandTypeDrawIndexed) == 0)) return NO;
+                (renderCommand->_hasIndexedDraw && (_commandTypes & MTLIndirectCommandTypeDrawIndexed) == 0) ||
+                (renderCommand->_hasMeshThreadgroups &&
+                 (_commandTypes & MTLIndirectCommandTypeDrawMeshThreadgroups) == 0) ||
+                (renderCommand->_hasMeshThreads &&
+                 (_commandTypes & MTLIndirectCommandTypeDrawMeshThreads) == 0)) return NO;
             ZPUIndirectRenderCommand *copy = [[ZPUIndirectRenderCommand alloc] initWithOwner:self];
             copy->_pipelineState = renderCommand->_pipelineState;
             copy->_vertexBuffer = renderCommand->_vertexBuffer;
@@ -12089,6 +12103,12 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
             copy->_hasFrontFacingWinding = renderCommand->_hasFrontFacingWinding;
             copy->_hasTriangleFillMode = renderCommand->_hasTriangleFillMode;
             copy->_hasVertexBuffer = renderCommand->_hasVertexBuffer;
+            copy->_hasMeshThreadgroups = renderCommand->_hasMeshThreadgroups;
+            copy->_meshThreadgroupsPerGrid = renderCommand->_meshThreadgroupsPerGrid;
+            copy->_meshThreadsPerObjectThreadgroup = renderCommand->_meshThreadsPerObjectThreadgroup;
+            copy->_meshThreadsPerMeshThreadgroup = renderCommand->_meshThreadsPerMeshThreadgroup;
+            copy->_hasMeshThreads = renderCommand->_hasMeshThreads;
+            copy->_meshThreadsPerGrid = renderCommand->_meshThreadsPerGrid;
             copy->_unsupportedCommand = renderCommand->_unsupportedCommand;
             if ((renderCommand->_hasVertexBuffer && _maxVertexBufferBindCount == 0) ||
                 (renderCommand->_hasFragmentBuffer && _maxFragmentBufferBindCount == 0)) return NO;
@@ -12118,7 +12138,9 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     return YES;
 }
 - (id<MTLIndirectRenderCommand>)indirectRenderCommandAtIndex:(NSUInteger)commandIndex {
-    if (commandIndex >= _maxCommandCount || (_commandTypes & (MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed)) == 0) return nil;
+    const MTLIndirectCommandType renderTypes = MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed |
+        MTLIndirectCommandTypeDrawMeshThreadgroups | MTLIndirectCommandTypeDrawMeshThreads;
+    if (commandIndex >= _maxCommandCount || (_commandTypes & renderTypes) == 0) return nil;
     id command = _commands[commandIndex];
     if ([command isKindOfClass:[NSNull class]]) {
         command = [[ZPUIndirectRenderCommand alloc] initWithOwner:self];
@@ -12176,6 +12198,12 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     _hasFrontFacingWinding = NO;
     _hasTriangleFillMode = NO;
     _hasVertexBuffer = NO;
+    _hasMeshThreadgroups = NO;
+    _meshThreadgroupsPerGrid = MTLSizeMake(0, 0, 0);
+    _meshThreadsPerObjectThreadgroup = MTLSizeMake(0, 0, 0);
+    _meshThreadsPerMeshThreadgroup = MTLSizeMake(0, 0, 0);
+    _hasMeshThreads = NO;
+    _meshThreadsPerGrid = MTLSizeMake(0, 0, 0);
     _unsupportedCommand = NO;
 }
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)pipelineState {
@@ -12287,16 +12315,30 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     _unsupportedCommand = YES;
 }
 - (void)drawMeshThreadgroups:(MTLSize)threadgroupsPerGrid threadsPerObjectThreadgroup:(MTLSize)threadsPerObjectThreadgroup threadsPerMeshThreadgroup:(MTLSize)threadsPerMeshThreadgroup API_AVAILABLE(macos(14.0), ios(17.0), tvos(18.1), visionos(2.1)) {
-    (void)threadgroupsPerGrid;
-    (void)threadsPerObjectThreadgroup;
-    (void)threadsPerMeshThreadgroup;
-    _unsupportedCommand = YES;
+    if ((_owner->_commandTypes & MTLIndirectCommandTypeDrawMeshThreadgroups) == 0 ||
+        !zpu_metal_size_fits_cpu_threadgroup(threadsPerObjectThreadgroup, 1024) ||
+        !zpu_metal_size_fits_cpu_threadgroup(threadsPerMeshThreadgroup, 1024)) {
+        _unsupportedCommand = YES;
+        return;
+    }
+    _meshThreadgroupsPerGrid = threadgroupsPerGrid;
+    _meshThreadsPerObjectThreadgroup = threadsPerObjectThreadgroup;
+    _meshThreadsPerMeshThreadgroup = threadsPerMeshThreadgroup;
+    _hasMeshThreadgroups = YES;
+    _hasMeshThreads = NO;
 }
 - (void)drawMeshThreads:(MTLSize)threadsPerGrid threadsPerObjectThreadgroup:(MTLSize)threadsPerObjectThreadgroup threadsPerMeshThreadgroup:(MTLSize)threadsPerMeshThreadgroup API_AVAILABLE(macos(14.0), ios(17.0), tvos(18.1), visionos(2.1)) {
-    (void)threadsPerGrid;
-    (void)threadsPerObjectThreadgroup;
-    (void)threadsPerMeshThreadgroup;
-    _unsupportedCommand = YES;
+    if ((_owner->_commandTypes & MTLIndirectCommandTypeDrawMeshThreads) == 0 ||
+        !zpu_metal_size_fits_cpu_threadgroup(threadsPerObjectThreadgroup, 1024) ||
+        !zpu_metal_size_fits_cpu_threadgroup(threadsPerMeshThreadgroup, 1024)) {
+        _unsupportedCommand = YES;
+        return;
+    }
+    _meshThreadsPerGrid = threadsPerGrid;
+    _meshThreadsPerObjectThreadgroup = threadsPerObjectThreadgroup;
+    _meshThreadsPerMeshThreadgroup = threadsPerMeshThreadgroup;
+    _hasMeshThreads = YES;
+    _hasMeshThreadgroups = NO;
 }
 - (void)setDepthStencilState:(id<MTLDepthStencilState>)depthStencilState API_AVAILABLE(macos(26.0), ios(26.0)) {
     ZPUDepthStencilState *state = (ZPUDepthStencilState *)depthStencilState;
@@ -12354,6 +12396,13 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     }
     /* A reset or never-recorded ICB slot is a legal no-op, even when the
      * descriptor does not inherit pipeline state. */
+    if (_hasMeshThreadgroups || _hasMeshThreads) {
+        /* The CPU adapter records mesh geometry commands so ICB ownership,
+         * reset, and copy semantics remain observable. It cannot execute an
+         * arbitrary object/mesh shader without a CPU shader interpreter. */
+        [encoder->_owner markError];
+        return;
+    }
     if (!_hasDraw && !_hasIndexedDraw) return;
     if (!_owner->_inheritPipelineState && _pipelineState == nil) {
         [encoder->_owner markError];
