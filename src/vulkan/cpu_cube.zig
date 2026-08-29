@@ -1071,6 +1071,8 @@ fn prepareLitTextures(prepared: *PreparedDraw, texture: []const u8, texture_widt
     var previous_flat_texel: usize = 0;
     var previous_flat_color: u32 = 0;
     var previous_flat_valid = false;
+    var previous_texture4_key: u32 = 0;
+    var previous_texture4: ?*const [16]u32 = null;
     for (prepared.triangles[0..prepared.count]) |*triangle| {
         if (!triangle.valid or !triangle.unit_uv) continue;
         triangle.prelit_texture_ptr = null;
@@ -1109,10 +1111,14 @@ fn prepareLitTextures(prepared: *PreparedDraw, texture: []const u8, texture_widt
                 triangle.flat_color = color;
                 continue;
             }
-            if (cachedPrelitTexture4(texture, triangle.light_key, texture_revision)) |colors| {
+            const cached_colors = if (previous_texture4) |colors| if (previous_texture4_key == triangle.light_key) colors else cachedPrelitTexture4(texture, triangle.light_key, texture_revision) else cachedPrelitTexture4(texture, triangle.light_key, texture_revision);
+            if (cached_colors) |colors| {
                 triangle.prelit_texture_ptr = colors;
+                previous_texture4_key = triangle.light_key;
+                previous_texture4 = colors;
             } else {
                 triangle.prelit_texture = prelitTexture4x4(texture, triangle.lighting);
+                previous_texture4 = null;
             }
             triangle.has_prelit_texture = true;
         } else if (texture_width == 16 and texture_height == 16) {
