@@ -21,6 +21,7 @@ pub fn build(b: *std.Build) void {
 
     const v3_tier_applicable = target.result.cpu.arch == .x86_64;
     const v3_available = v3_kernels_enabled and v3_tier_applicable;
+    const host_test_xcb = enable_xcb and target.result.cpu.arch == b.graph.host.result.cpu.arch and target.result.os.tag == b.graph.host.result.os.tag;
 
     const build_config = b.addOptions();
     build_config.addOption(bool, "v3_kernels", v3_available);
@@ -389,7 +390,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_vulkan_transfer.zig"), .target = b.graph.host, .optimize = .Debug }),
     });
     benchmark_vulkan_transfer_tests.root_module.link_libc = true;
-    if (enable_xcb) benchmark_vulkan_transfer_tests.root_module.linkSystemLibrary("xcb", .{});
+    if (host_test_xcb) benchmark_vulkan_transfer_tests.root_module.linkSystemLibrary("xcb", .{});
     const run_benchmark_vulkan_transfer_tests = b.addRunArtifact(benchmark_vulkan_transfer_tests);
     run_benchmark_vulkan_transfer_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&run_benchmark_vulkan_transfer_tests.step);
@@ -397,7 +398,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_vulkan_host_transfer.zig"), .target = b.graph.host, .optimize = .Debug }),
     });
     benchmark_vulkan_host_transfer_tests.root_module.link_libc = true;
-    if (enable_xcb) benchmark_vulkan_host_transfer_tests.root_module.linkSystemLibrary("xcb", .{});
+    if (host_test_xcb) benchmark_vulkan_host_transfer_tests.root_module.linkSystemLibrary("xcb", .{});
     const run_benchmark_vulkan_host_transfer_tests = b.addRunArtifact(benchmark_vulkan_host_transfer_tests);
     run_benchmark_vulkan_host_transfer_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&run_benchmark_vulkan_host_transfer_tests.step);
