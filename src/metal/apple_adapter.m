@@ -13327,7 +13327,10 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
                     withRange:(NSRange)range {
     if (samplers == NULL || lodMinClamps == NULL || lodMaxClamps == NULL || !zpu_u32_range_indices_fit(range)) { [_owner markError]; return; }
     for (NSUInteger index = 0; index < range.length; ++index) {
-        [self setFragmentSamplerState:samplers[index] atIndex:range.location + index];
+        [self setFragmentSamplerState:samplers[index]
+                       lodMinClamp:lodMinClamps[index]
+                       lodMaxClamp:lodMaxClamps[index]
+                            atIndex:range.location + index];
     }
 }
 - (void)setObjectBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {

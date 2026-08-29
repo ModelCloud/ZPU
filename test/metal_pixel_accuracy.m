@@ -315,7 +315,13 @@ static int test_mip_sampler_against_native(
     [native_encoder setRenderPipelineState:native_pipeline];
     [native_encoder setVertexBuffer:native_vertex_buffer offset:0 atIndex:0];
     [native_encoder setFragmentTexture:native_source atIndex:0];
-    [native_encoder setFragmentSamplerState:native_sampler atIndex:0];
+    const id<MTLSamplerState> native_samplers[] = {native_sampler};
+    const float native_lod_min_clamps[] = {lod_min_clamp};
+    const float native_lod_max_clamps[] = {lod_max_clamp};
+    [native_encoder setFragmentSamplerStates:native_samplers
+                               lodMinClamps:native_lod_min_clamps
+                               lodMaxClamps:native_lod_max_clamps
+                                   withRange:NSMakeRange(0, 1)];
     [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
     [native_encoder endEncoding];
     [native_command_buffer commit];
@@ -333,7 +339,13 @@ static int test_mip_sampler_against_native(
     [adapter_encoder setRenderPipelineState:adapter_pipeline];
     [adapter_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
     [adapter_encoder setFragmentTexture:adapter_source atIndex:0];
-    [adapter_encoder setFragmentSamplerState:adapter_sampler atIndex:0];
+    const id<MTLSamplerState> adapter_samplers[] = {adapter_sampler};
+    const float adapter_lod_min_clamps[] = {lod_min_clamp};
+    const float adapter_lod_max_clamps[] = {lod_max_clamp};
+    [adapter_encoder setFragmentSamplerStates:adapter_samplers
+                                lodMinClamps:adapter_lod_min_clamps
+                                lodMaxClamps:adapter_lod_max_clamps
+                                    withRange:NSMakeRange(0, 1)];
     [adapter_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
     [adapter_encoder endEncoding];
     [adapter_command_buffer commit];
