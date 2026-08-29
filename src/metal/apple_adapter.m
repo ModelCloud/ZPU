@@ -471,6 +471,16 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 - (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name;
 @end
 
+@interface ZPUFunctionHandle : NSObject <MTLFunctionHandle> {
+@public
+    ZPUDevice *_owner;
+    NSString *_name;
+    MTLFunctionType _functionType;
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
+                  functionType:(MTLFunctionType)functionType;
+@end
+
 /* A library is a CPU-side name table for registered ZPU kernels. It never
  * contains an Apple MTLLibrary or compiled MSL. */
 @interface ZPULibrary : NSObject <MTLLibrary> {
@@ -2792,9 +2802,30 @@ static uint64_t zpu_cpu_timestamp(void) {
 }
 - (uint64_t)queryTimestampFrequency API_AVAILABLE(macos(26.0), ios(26.0)) { return 1000000000ULL; }
 - (id<MTLFunctionHandle>)functionHandleWithBinaryFunction:(id<MTL4BinaryFunction>)function API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)function;
-    return nil;
+    ZPUMTL4BinaryFunction *binary = (ZPUMTL4BinaryFunction *)function;
+    if (![binary isKindOfClass:[ZPUMTL4BinaryFunction class]] || binary->_owner != self ||
+        (binary->_options & MTL4BinaryFunctionOptionPipelineIndependent) == 0 ||
+        binary->_name.length == 0) return nil;
+    return (id<MTLFunctionHandle>)[[ZPUFunctionHandle alloc] initWithOwner:self
+                                                                        name:binary->_name
+                                                                 functionType:binary->_functionType];
 }
+@end
+
+@implementation ZPUFunctionHandle
+- (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
+                  functionType:(MTLFunctionType)functionType {
+    if ((self = [super init])) {
+        _owner = owner;
+        _name = [name copy];
+        _functionType = functionType;
+    }
+    return self;
+}
+- (MTLFunctionType)functionType { return _functionType; }
+- (NSString *)name { return _name; }
+- (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
+- (MTLResourceID)gpuResourceID API_AVAILABLE(macos(26.0), ios(26.0)) { return (MTLResourceID){0}; }
 @end
 
 @implementation ZPUCPUFunction
@@ -4855,12 +4886,26 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 - (MTLSize)requiredThreadsPerThreadgroup API_AVAILABLE(macos(26.0), ios(26.0)) { return MTLSizeMake(0, 0, 0); }
 - (MTLComputePipelineReflection *)reflection API_AVAILABLE(macos(26.0), ios(26.0)) { return nil; }
 - (id<MTLFunctionHandle>)functionHandleWithName:(NSString *)name API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)name;
-    return nil;
+    NSString *kernelName = nil;
+    switch (_kernel) {
+        case ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8: kernelName = @"zpu_cpu_fill_gradient_rgba8"; break;
+        case ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE: kernelName = @"zpu_cpu_copy_rgba8_buffer_to_texture"; break;
+        case ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY: kernelName = @"zpu_cpu_fill_gradient_rgba8_array"; break;
+        case ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_3D: kernelName = @"zpu_cpu_fill_gradient_rgba8_3d"; break;
+        case ZPU_METAL_COMPUTE_FILL_GRADIENT_R32_FLOAT: kernelName = @"zpu_cpu_fill_gradient_r32_float"; break;
+        case ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA16_FLOAT: kernelName = @"zpu_cpu_fill_gradient_rgba16_float"; break;
+        default: break;
+    }
+    if (kernelName == nil || ![kernelName isEqualToString:name]) return nil;
+    return (id<MTLFunctionHandle>)[[ZPUFunctionHandle alloc] initWithOwner:_owner
+                                                                        name:kernelName
+                                                                 functionType:MTLFunctionTypeKernel];
 }
 - (id<MTLFunctionHandle>)functionHandleWithBinaryFunction:(id<MTL4BinaryFunction>)function API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)function;
-    return nil;
+    ZPUMTL4BinaryFunction *binary = (ZPUMTL4BinaryFunction *)function;
+    if (![binary isKindOfClass:[ZPUMTL4BinaryFunction class]] || binary->_owner != _owner ||
+        binary->_functionType != MTLFunctionTypeKernel) return nil;
+    return [self functionHandleWithName:binary->_name];
 }
 - (id<MTLComputePipelineState>)newComputePipelineStateWithBinaryFunctions:(NSArray<id<MTL4BinaryFunction>> *)additionalBinaryFunctions error:(NSError **)error API_AVAILABLE(macos(26.0), ios(26.0)) {
     (void)additionalBinaryFunctions;
@@ -4872,8 +4917,10 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     return 0;
 }
 - (id<MTLFunctionHandle>)functionHandleWithFunction:(id<MTLFunction>)function API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)function;
-    return nil;
+    ZPUCPUFunction *cpuFunction = (ZPUCPUFunction *)function;
+    if (![cpuFunction isKindOfClass:[ZPUCPUFunction class]] || cpuFunction->_owner != _owner ||
+        cpuFunction.functionType != MTLFunctionTypeKernel) return nil;
+    return [self functionHandleWithName:cpuFunction->_name];
 }
 - (id<MTLComputePipelineState>)newComputePipelineStateWithAdditionalBinaryFunctions:(NSArray<id<MTLFunction>> *)functions error:(NSError **)error API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
     (void)functions;

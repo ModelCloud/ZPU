@@ -2964,6 +2964,14 @@ int main(void) {
             [adapter_mtl4_compiler newBinaryFunctionWithDescriptor:adapter_mtl4_binary_descriptor
                                                   compilerTaskOptions:nil
                                                                 error:&adapter_mtl4_compiler_error];
+        id<MTLFunctionHandle> adapter_mtl4_binary_handle =
+            [adapter_device functionHandleWithBinaryFunction:adapter_mtl4_binary_function];
+        id<MTLFunction> adapter_mtl4_compiler_function =
+            [adapter_mtl4_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8"];
+        id<MTLFunctionHandle> adapter_mtl4_named_handle =
+            [adapter_mtl4_compiled_pipeline functionHandleWithName:@"zpu_cpu_fill_gradient_rgba8"];
+        id<MTLFunctionHandle> adapter_mtl4_function_handle =
+            [adapter_mtl4_compiled_pipeline functionHandleWithFunction:adapter_mtl4_compiler_function];
         __block id<MTL4BinaryFunction> adapter_mtl4_async_binary_function = nil;
         __block NSError *adapter_mtl4_async_error = nil;
         id<MTL4CompilerTask> adapter_mtl4_binary_task =
@@ -3011,6 +3019,8 @@ int main(void) {
             adapter_mtl4_serializer_archive == nil || adapter_mtl4_serializer_binary == nil ||
             adapter_mtl4_compiler == nil || adapter_mtl4_library == nil ||
             adapter_mtl4_compiled_pipeline == nil || adapter_mtl4_binary_function == nil ||
+            adapter_mtl4_binary_handle == nil || adapter_mtl4_named_handle == nil ||
+            adapter_mtl4_function_handle == nil ||
             ![adapter_mtl4_binary_function conformsToProtocol:@protocol(MTL4BinaryFunction)] ||
             ![adapter_mtl4_binary_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_mtl4_binary_function.functionType != MTLFunctionTypeKernel ||
