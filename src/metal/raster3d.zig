@@ -201,22 +201,26 @@ pub const Target = struct {
     }
 
     fn sampleTexel(self: *const Target, x: i64, y: i64, address_s: abi.SamplerAddressMode, address_t: abi.SamplerAddressMode) [4]f32 {
-        const sample_x = sampleIndex(x, self.width, address_s) orelse return .{ 0, 0, 0, 0 };
-        const sample_y = sampleIndex(y, self.height, address_t) orelse return .{ 0, 0, 0, 0 };
+        const sample_x = sampleIndex(x, self.width, address_s) orelse return self.zeroSampleColor();
+        const sample_y = sampleIndex(y, self.height, address_t) orelse return self.zeroSampleColor();
         return self.readColor(sample_x, sample_y);
     }
 
+    fn zeroSampleColor(self: *const Target) [4]f32 {
+        return if (self.format == .r32_float) .{ 0, 0, 0, 1 } else .{ 0, 0, 0, 0 };
+    }
+
     fn sampleNearest(self: *const Target, u: f32, v: f32, address_s: abi.SamplerAddressMode, address_t: abi.SamplerAddressMode) [4]f32 {
-        const normalized_u = addressCoordinate(u, address_s) orelse return .{ 0, 0, 0, 0 };
-        const normalized_v = addressCoordinate(v, address_t) orelse return .{ 0, 0, 0, 0 };
+        const normalized_u = addressCoordinate(u, address_s) orelse return self.zeroSampleColor();
+        const normalized_v = addressCoordinate(v, address_t) orelse return self.zeroSampleColor();
         const x: i64 = @intFromFloat(@min(normalized_u, 0.99999994) * @as(f32, @floatFromInt(self.width)));
         const y: i64 = @intFromFloat(@min(normalized_v, 0.99999994) * @as(f32, @floatFromInt(self.height)));
         return self.sampleTexel(x, y, address_s, address_t);
     }
 
     fn sampleLinear(self: *const Target, u: f32, v: f32, address_s: abi.SamplerAddressMode, address_t: abi.SamplerAddressMode) [4]f32 {
-        const normalized_u = addressCoordinate(u, address_s) orelse return .{ 0, 0, 0, 0 };
-        const normalized_v = addressCoordinate(v, address_t) orelse return .{ 0, 0, 0, 0 };
+        const normalized_u = addressCoordinate(u, address_s) orelse return self.zeroSampleColor();
+        const normalized_v = addressCoordinate(v, address_t) orelse return self.zeroSampleColor();
         const x = normalized_u * @as(f32, @floatFromInt(self.width)) - 0.5;
         const y = normalized_v * @as(f32, @floatFromInt(self.height)) - 0.5;
         const x0_float = @floor(x);
@@ -830,6 +834,11 @@ test "CPU texture sampling supports linear filtering and address modes" {
     try std.testing.expectEqual(@as(f32, 1), mirror_clamped[0]);
     const outside = target.sampleNearest(-0.25, 0.25, .clamp_to_zero, .clamp_to_zero);
     try std.testing.expectEqual([4]f32{ 0, 0, 0, 0 }, outside);
+
+    var scalar_pixels = [_]u8{ 0, 0, 128, 63 };
+    const scalar_target = try Target.init(&scalar_pixels, 1, 1, 4, .r32_float);
+    const scalar_outside = scalar_target.sampleNearest(-0.25, 0.5, .clamp_to_zero, .clamp_to_zero);
+    try std.testing.expectEqual([4]f32{ 0, 0, 0, 1 }, scalar_outside);
 }
 
 test "CPU texture sampling applies texture-view channel swizzles" {
