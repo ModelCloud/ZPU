@@ -140,6 +140,9 @@ const BatchRasterTriangle = struct {
     flat_reciprocal_w: f32 = 0,
     u_over_w: [3]f32 = .{ 0, 0, 0 },
     v_over_w: [3]f32 = .{ 0, 0, 0 },
+    b0_dx: f32 = 0,
+    b1_dx: f32 = 0,
+    b2_dx: f32 = 0,
     u_over_w_dx: f32 = 0,
     v_over_w_dx: f32 = 0,
 };
@@ -177,7 +180,7 @@ const PreparedDraw = struct {
     spans: [max_prepared_triangles][flat_span_rows]FlatSpan = [_][flat_span_rows]FlatSpan{[_]FlatSpan{.{}} ** flat_span_rows} ** max_prepared_triangles,
     spans_valid: bool = false,
     spans_external: ?*const [max_prepared_triangles][flat_span_rows]FlatSpan = null,
-    quad_spans_external: ?*const [flat_span_rows]FlatSpan = null,
+    quad_spans_external: ?*const [2][flat_span_rows]FlatSpan = null,
     opaque_quad: OpaqueQuad = .{},
     batch_fast: bool = false,
 };
@@ -349,6 +352,7 @@ fn buildPreparedFlatSpans(prepared: *PreparedDraw, width: u32, height: u32) void
 }
 
 fn preparedSpan(prepared: *const PreparedDraw, triangle_index: usize) *const [flat_span_rows]FlatSpan {
+    if (triangle_index < 2) if (prepared.quad_spans_external) |external| return &external[triangle_index];
     return if (prepared.spans_external) |external| &external[triangle_index] else &prepared.spans[triangle_index];
 }
 
@@ -849,6 +853,7 @@ const PrelitTexture4Cache = struct {
     valid: bool = false,
     texture_address: usize = 0,
     lighting_key: u32 = 0,
+    texture_revision: u64 = 0,
     texture_snapshot: [16 * 4]u8 = undefined,
     colors: [16]u32 = undefined,
 };
@@ -873,16 +878,19 @@ fn exactPrelitTexture4(texture: []const u8, light_key: u32) [16]u32 {
     return colors;
 }
 
-fn cachedPrelitTexture4(texture: []const u8, light_key: u32) ?*const [16]u32 {
+fn cachedPrelitTexture4(texture: []const u8, light_key: u32, texture_revision: u64) ?*const [16]u32 {
     if (texture.len != 4 * 4 * 4) return null;
     const texture_address = @intFromPtr(texture.ptr);
     const cache_index = ((texture_address >> 6) ^ (@as(usize, light_key) *% 2654435761)) % prelit_texture4_cache_slots;
     const entry = &prelit_texture4_cache[cache_index];
-    if (entry.valid and entry.texture_address == texture_address and entry.lighting_key == light_key and std.mem.eql(u8, entry.texture_snapshot[0..], texture)) return &entry.colors;
+    if (entry.valid and entry.texture_address == texture_address and entry.lighting_key == light_key and
+        ((texture_revision != 0 and entry.texture_revision == texture_revision) or
+            (texture_revision == 0 and entry.texture_revision == 0 and std.mem.eql(u8, entry.texture_snapshot[0..], texture)))) return &entry.colors;
     @memcpy(entry.texture_snapshot[0..], texture);
     entry.colors = exactPrelitTexture4(texture, light_key);
     entry.texture_address = texture_address;
     entry.lighting_key = light_key;
+    entry.texture_revision = texture_revision;
     entry.valid = true;
     return &entry.colors;
 }
@@ -892,6 +900,7 @@ const PrelitTexture16Cache = struct {
     valid: bool = false,
     texture_address: usize = 0,
     lighting_address: usize = 0,
+    texture_revision: u64 = 0,
     texture_snapshot: [16 * 16 * 4]u8 = undefined,
     colors: [256]u32 = undefined,
 };
@@ -908,7 +917,7 @@ fn prelitTexture16CacheIndex(texture_address: usize, lighting_address: usize) us
     return ((texture_address >> 6) ^ (lighting_address >> 4) ^ (lighting_address >> 12)) % prelit_texture16_index_slots;
 }
 
-fn cachedPrelitTexture16(texture: []const u8, table: *const [256]u8) ?*const [256]u32 {
+fn cachedPrelitTexture16(texture: []const u8, table: *const [256]u8, texture_revision: u64) ?*const [256]u32 {
     if (texture.len != 16 * 16 * 4) return null;
     const texture_address = @intFromPtr(texture.ptr);
     const lighting_address = @intFromPtr(table);
@@ -916,11 +925,13 @@ fn cachedPrelitTexture16(texture: []const u8, table: *const [256]u8) ?*const [25
     if (prelit_texture16_cache_index[index] != 0) {
         const entry = &prelit_texture16_cache[prelit_texture16_cache_index[index] - 1];
         if (entry.valid and entry.texture_address == texture_address and entry.lighting_address == lighting_address and
-            std.mem.eql(u8, entry.texture_snapshot[0..], texture)) return &entry.colors;
+            ((texture_revision != 0 and entry.texture_revision == texture_revision) or
+                (texture_revision == 0 and entry.texture_revision == 0 and std.mem.eql(u8, entry.texture_snapshot[0..], texture)))) return &entry.colors;
     }
     for (&prelit_texture16_cache, 0..) |*entry, entry_index| {
         if (entry.valid and entry.texture_address == texture_address and entry.lighting_address == lighting_address and
-            std.mem.eql(u8, entry.texture_snapshot[0..], texture))
+            ((texture_revision != 0 and entry.texture_revision == texture_revision) or
+                (texture_revision == 0 and entry.texture_revision == 0 and std.mem.eql(u8, entry.texture_snapshot[0..], texture))))
         {
             prelit_texture16_cache_index[index] = @intCast(entry_index + 1);
             return &entry.colors;
@@ -932,6 +943,7 @@ fn cachedPrelitTexture16(texture: []const u8, table: *const [256]u8) ?*const [25
         entry.colors = prelitTexture16x16(texture, table);
         entry.texture_address = texture_address;
         entry.lighting_address = lighting_address;
+        entry.texture_revision = texture_revision;
         entry.valid = true;
         prelit_texture16_cache_index[index] = @intCast(entry_index + 1);
         return &entry.colors;
@@ -943,7 +955,7 @@ fn fillPrelitTexture(color: u32) [16]u32 {
     return [_]u32{color} ** 16;
 }
 
-fn prepareLitTextures(prepared: *PreparedDraw, texture: []const u8, texture_width: u32, texture_height: u32) void {
+fn prepareLitTextures(prepared: *PreparedDraw, texture: []const u8, texture_width: u32, texture_height: u32, texture_revision: u64) void {
     for (prepared.triangles[0..prepared.count]) |*triangle| {
         if (!triangle.valid or !triangle.unit_uv) continue;
         triangle.prelit_texture_ptr = null;
@@ -973,14 +985,14 @@ fn prepareLitTextures(prepared: *PreparedDraw, texture: []const u8, texture_widt
                 triangle.flat_color = color;
                 continue;
             }
-            if (cachedPrelitTexture4(texture, triangle.light_key)) |colors| {
+            if (cachedPrelitTexture4(texture, triangle.light_key, texture_revision)) |colors| {
                 triangle.prelit_texture_ptr = colors;
             } else {
                 triangle.prelit_texture = prelitTexture4x4(texture, triangle.lighting);
             }
             triangle.has_prelit_texture = true;
         } else if (texture_width == 16 and texture_height == 16) {
-            if (cachedPrelitTexture16(texture, triangle.lighting)) |colors| {
+            if (cachedPrelitTexture16(texture, triangle.lighting, texture_revision)) |colors| {
                 triangle.prelit_texture_16x16_ptr = colors;
             } else {
                 triangle.prelit_texture_16x16 = prelitTexture16x16(texture, triangle.lighting);
@@ -1043,6 +1055,9 @@ fn prepareBatchRaster(prepared: *PreparedDraw, width: u32, height: u32, scissor:
             .flat_reciprocal_w = 1.0 / flat_inverse_w,
             .u_over_w = u_over_w,
             .v_over_w = v_over_w,
+            .b0_dx = b0_dx,
+            .b1_dx = b1_dx,
+            .b2_dx = b2_dx,
             .u_over_w_dx = b0_dx * u_over_w[0] + b1_dx * u_over_w[1] + b2_dx * u_over_w[2],
             .v_over_w_dx = b0_dx * v_over_w[0] + b1_dx * v_over_w[1] + b2_dx * v_over_w[2],
         };
@@ -1057,13 +1072,10 @@ fn refreshBatchRasterUvs(prepared: *PreparedDraw) bool {
         const inverse_w = raster.inverse_w;
         const u_over_w = [3]f32{ triangle.vertices[0].uv[0] * inverse_w, triangle.vertices[1].uv[0] * inverse_w, triangle.vertices[2].uv[0] * inverse_w };
         const v_over_w = [3]f32{ triangle.vertices[0].uv[1] * inverse_w, triangle.vertices[1].uv[1] * inverse_w, triangle.vertices[2].uv[1] * inverse_w };
-        const b0_dx = (raster.p2[1] - raster.p1[1]) * raster.inverse_area;
-        const b1_dx = (raster.p0[1] - raster.p2[1]) * raster.inverse_area;
-        const b2_dx = (raster.p1[1] - raster.p0[1]) * raster.inverse_area;
         raster.u_over_w = u_over_w;
         raster.v_over_w = v_over_w;
-        raster.u_over_w_dx = b0_dx * u_over_w[0] + b1_dx * u_over_w[1] + b2_dx * u_over_w[2];
-        raster.v_over_w_dx = b0_dx * v_over_w[0] + b1_dx * v_over_w[1] + b2_dx * v_over_w[2];
+        raster.u_over_w_dx = raster.b0_dx * u_over_w[0] + raster.b1_dx * u_over_w[1] + raster.b2_dx * u_over_w[2];
+        raster.v_over_w_dx = raster.b0_dx * v_over_w[0] + raster.b1_dx * v_over_w[1] + raster.b2_dx * v_over_w[2];
     }
     return true;
 }
@@ -1906,7 +1918,6 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
     const lighting_generation = exact_lighting_cache_generation.load(.acquire);
     const command_cache = &batch_command_cache[command_index];
     const command_snapshot = &batch_command_snapshots[command_index];
-    if (batchCommandCacheMatches(command_cache, command_snapshot, command, commands_address, width, height, lighting_generation)) return;
 
     var geometry_cache_hit = batchGeometryCacheMatches(command_cache, command_snapshot, command);
     if (geometry_cache_hit) {
@@ -1922,18 +1933,17 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
     const quad_span_cache: ?*BatchQuadSpanCache = if (command.vertex_count == 6) &batch_quad_span_cache[command_index] else null;
     const geometry_revision_changed = command.geometry_revision != 0 and command.geometry_revision != command_cache.geometry_revision;
     if (geometry_cache_hit and quad_span_cache != null and quad_span_cache.?.valid and quad_span_cache.?.width == width and quad_span_cache.?.height == height) {
-        @memcpy(output.spans[0..2], quad_span_cache.?.spans[0..2]);
         output.spans_valid = true;
         output.spans_external = null;
-        output.quad_spans_external = null;
+        output.quad_spans_external = &quad_span_cache.?.spans;
     } else if (geometry_cache_hit and span_cache != null and span_cache.?.valid) {
         output.spans_valid = true;
         output.spans_external = &span_cache.?.spans;
-        output.quad_spans_external = if (span_cache.?.quad_spans_valid) &span_cache.?.quad_spans else null;
+        output.quad_spans_external = null;
     } else if (!geometry_revision_changed and span_cache != null and batchSpanCacheMatches(span_cache.?, output, width, height)) {
         output.spans_valid = true;
         output.spans_external = &span_cache.?.spans;
-        output.quad_spans_external = if (span_cache.?.quad_spans_valid) &span_cache.?.quad_spans else null;
+        output.quad_spans_external = null;
     } else if (!geometry_revision_changed) {
         buildPreparedFlatSpans(output, width, height);
         if (span_cache) |cache| rememberBatchSpanCache(cache, output, width, height);
@@ -1945,7 +1955,7 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
         }
         output.spans_valid = true;
         output.spans_external = if (span_cache) |cache| &cache.spans else null;
-        output.quad_spans_external = if (span_cache) |cache| if (cache.quad_spans_valid) &cache.quad_spans else null else null;
+        output.quad_spans_external = if (quad_span_cache) |cache| &cache.spans else null;
     } else {
         // Geometry revisions invalidate the retained screen-space spans, but
         // rebuilding them while the command is already prepared keeps the
@@ -1961,7 +1971,7 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
         }
         output.spans_valid = true;
         output.spans_external = if (span_cache) |cache| &cache.spans else null;
-        output.quad_spans_external = if (span_cache) |cache| if (cache.quad_spans_valid) &cache.quad_spans else null else null;
+        output.quad_spans_external = if (quad_span_cache) |cache| &cache.spans else null;
     }
     const lighting_refresh = !geometry_cache_hit or command_cache.lighting_generation != lighting_generation;
     if (lighting_refresh) {
@@ -1990,7 +2000,7 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
         command_cache.texture_width == command.texture_width and command_cache.texture_height == command.texture_height and
         (command.texture_revision != 0 and command_cache.texture_revision == command.texture_revision and command_cache.texture_address == @intFromPtr(command.texture.ptr) or
             command.texture_revision == 0 and command_cache.texture_revision == 0 and std.mem.eql(u8, command_snapshot.texture[0..command.texture.len], command.texture));
-    if (!geometry_cache_hit or !texture_unchanged or lighting_refresh) prepareLitTextures(output, command.texture, command.texture_width, command.texture_height);
+    if (!geometry_cache_hit or !texture_unchanged or lighting_refresh) prepareLitTextures(output, command.texture, command.texture_width, command.texture_height, command.texture_revision);
     if (!(geometry_cache_hit and std.meta.eql(command_cache.scissor, command.scissor) and refreshBatchRasterUvs(output))) prepareBatchRaster(output, width, height, command.scissor);
     refreshBatchFastFlag(output);
     // Color runs are thread-local scratch. The batch shares its prepared
@@ -2909,7 +2919,7 @@ fn drawParallel(target: []u8, depth: ?[]u8, width: u32, height: u32, uniform: []
     _ = cpu_locality.pinCurrent(.render);
     var prepared: PreparedDraw = undefined;
     prepareDraw(uniform, vertex_count, base_vertex, viewport, indexed, &prepared);
-    prepareLitTextures(&prepared, texture, texture_width, texture_height);
+    prepareLitTextures(&prepared, texture, texture_width, texture_height, 0);
     if (bounds) |output| output.* = preparedBounds(&prepared, width, height, scissor);
     if (dirty_output) |output| markPreparedDirtyTiles(&prepared, width, height, scissor, cull_mode, front_face, output);
     var context = ParallelDraw{ .target = target, .depth = depth, .width = width, .height = height, .uniform = uniform, .texture = texture, .texture_width = texture_width, .texture_height = texture_height, .vertex_count = vertex_count, .base_vertex = base_vertex, .viewport = viewport, .scissor = scissor, .cull_mode = cull_mode, .front_face = front_face, .indexed = indexed, .prepared = &prepared, .stripe_count = parallel_slice_count };
@@ -2945,7 +2955,7 @@ fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, unif
         }
         prepared_cache.lighting_generation = exact_lighting_cache_generation.load(.acquire);
     }
-    prepareLitTextures(&prepared, texture, texture_width, texture_height);
+    prepareLitTextures(&prepared, texture, texture_width, texture_height, 0);
     if (inline_fast and !cache_status.hit) {
         prepareBatchRaster(&prepared, width, height, scissor);
         refreshBatchFastFlag(&prepared);
@@ -3751,7 +3761,7 @@ fn drawPreparedInlineCached(target: []u8, depth: []u8, width: u32, height: u32, 
             if (triangle.valid) triangle.lighting = exactCachedLightingTable(@bitCast(triangle.light_key));
         }
         entry.lighting_generation = exact_lighting_cache_generation.load(.acquire);
-        prepareLitTextures(&entry.prepared, texture, texture_width, texture_height);
+        prepareLitTextures(&entry.prepared, texture, texture_width, texture_height, 0);
         prepareBatchRaster(&entry.prepared, width, height, scissor);
         refreshBatchFastFlag(&entry.prepared);
         if (!entry.prepared.batch_fast) {
@@ -3782,7 +3792,7 @@ fn drawPreparedInlineCached(target: []u8, depth: []u8, width: u32, height: u32, 
             }
             entry.lighting_generation = exact_lighting_cache_generation.load(.acquire);
         }
-        prepareLitTextures(&entry.prepared, texture, texture_width, texture_height);
+        prepareLitTextures(&entry.prepared, texture, texture_width, texture_height, 0);
         refreshBatchFastFlag(&entry.prepared);
         if (!entry.prepared.batch_fast) {
             entry.valid = false;
