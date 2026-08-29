@@ -573,6 +573,107 @@ int main(void) {
             return 55;
         }
 
+        /* Mip levels are independent ZPU textures in the CPU adapter. Apple
+         * Metal remains the byte oracle; no native texture is used by the
+         * adapter implementation. Exercise the level coordinate space,
+         * level-range views, and legacy blit level selection. */
+        MTLTextureDescriptor *mip_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                width:4
+                                                               height:4
+                                                            mipmapped:YES];
+        mip_descriptor.storageMode = MTLStorageModeShared;
+        mip_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        id<MTLTexture> native_mip_texture = [device newTextureWithDescriptor:mip_descriptor];
+        id<MTLTexture> adapter_mip_texture = [adapter_device newTextureWithDescriptor:mip_descriptor];
+        const uint8_t mip_level_one[] = {
+            0x03, 0x17, 0x29, 0x3b,  0x4d, 0x5f, 0x71, 0x83,
+            0x95, 0xa7, 0xb9, 0xcb,  0xdd, 0xef, 0x01, 0x13,
+        };
+        [native_mip_texture replaceRegion:MTLRegionMake2D(0, 0, 2, 2)
+                              mipmapLevel:1
+                                withBytes:mip_level_one
+                              bytesPerRow:2 * 4];
+        [adapter_mip_texture replaceRegion:MTLRegionMake2D(0, 0, 2, 2)
+                               mipmapLevel:1
+                                 withBytes:mip_level_one
+                               bytesPerRow:2 * 4];
+        uint8_t native_mip_level_one[sizeof(mip_level_one)];
+        uint8_t adapter_mip_level_one[sizeof(mip_level_one)];
+        [native_mip_texture getBytes:native_mip_level_one
+                         bytesPerRow:2 * 4
+                          fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                         mipmapLevel:1];
+        [adapter_mip_texture getBytes:adapter_mip_level_one
+                          bytesPerRow:2 * 4
+                           fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                          mipmapLevel:1];
+        id<MTLTexture> adapter_mip_view =
+            [adapter_mip_texture newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                    textureType:MTLTextureType2D
+                                                         levels:NSMakeRange(1, 1)
+                                                         slices:NSMakeRange(0, 1)];
+        uint8_t adapter_mip_view_bytes[sizeof(mip_level_one)];
+        [adapter_mip_view getBytes:adapter_mip_view_bytes
+                        bytesPerRow:2 * 4
+                         fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                        mipmapLevel:0];
+        id<MTLTexture> adapter_mip_copy = [adapter_device newTextureWithDescriptor:mip_descriptor];
+        id<MTLBuffer> adapter_mip_buffer =
+            [adapter_device newBufferWithLength:sizeof(mip_level_one) options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> adapter_mip_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_mip_blit = [adapter_mip_command_buffer blitCommandEncoder];
+        [adapter_mip_blit copyFromTexture:adapter_mip_texture
+                              sourceSlice:0
+                              sourceLevel:1
+                             sourceOrigin:MTLOriginMake(0, 0, 0)
+                               sourceSize:MTLSizeMake(2, 2, 1)
+                                 toBuffer:adapter_mip_buffer
+                        destinationOffset:0
+                   destinationBytesPerRow:2 * 4
+                 destinationBytesPerImage:0];
+        [adapter_mip_blit copyFromBuffer:adapter_mip_buffer
+                            sourceOffset:0
+                       sourceBytesPerRow:2 * 4
+                     sourceBytesPerImage:0
+                            sourceSize:MTLSizeMake(2, 2, 1)
+                              toTexture:adapter_mip_copy
+                       destinationSlice:0
+                       destinationLevel:1
+                      destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [adapter_mip_blit copyFromTexture:adapter_mip_texture
+                              sourceSlice:0
+                              sourceLevel:1
+                             sourceOrigin:MTLOriginMake(0, 0, 0)
+                               sourceSize:MTLSizeMake(2, 2, 1)
+                             toTexture:adapter_mip_copy
+                      destinationSlice:0
+                      destinationLevel:1
+                     destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [adapter_mip_blit endEncoding];
+        [adapter_mip_command_buffer commit];
+        [adapter_mip_command_buffer waitUntilCompleted];
+        uint8_t adapter_mip_copy_bytes[sizeof(mip_level_one)];
+        [adapter_mip_copy getBytes:adapter_mip_copy_bytes
+                        bytesPerRow:2 * 4
+                         fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                        mipmapLevel:1];
+        const NSUInteger expected_mip_allocated_size = (4 * 4 + 2 * 2 + 1) * 4;
+        if (native_mip_texture == nil || adapter_mip_texture == nil ||
+            native_mip_texture.mipmapLevelCount != 3 || adapter_mip_texture.mipmapLevelCount != 3 ||
+            adapter_mip_texture.allocatedSize != expected_mip_allocated_size ||
+            adapter_mip_view == nil || adapter_mip_view.width != 2 || adapter_mip_view.height != 2 ||
+            adapter_mip_view.mipmapLevelCount != 1 || adapter_mip_view.parentRelativeLevel != 1 ||
+            adapter_mip_buffer == nil || adapter_mip_copy == nil ||
+            adapter_mip_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_mip_level_one, mip_level_one, sizeof(mip_level_one)) != 0 ||
+            memcmp(adapter_mip_level_one, native_mip_level_one, sizeof(mip_level_one)) != 0 ||
+            memcmp(adapter_mip_view_bytes, native_mip_level_one, sizeof(mip_level_one)) != 0 ||
+            memcmp(adapter_mip_copy_bytes, native_mip_level_one, sizeof(mip_level_one)) != 0) {
+            fprintf(stderr, "metal-pixel: mip-level/view/blit exactness failed\n");
+            return 69;
+        }
+
         /* Library/function discovery is also CPU metadata. The source text
          * is inspected only for registered ZPU kernel names; it is never sent
          * to Apple's compiler by the adapter. */
@@ -806,6 +907,34 @@ int main(void) {
             memcmp(native_compute_pixels, metal4_pixels, byte_count) != 0) {
             fail_with_error("Metal 4 CPU command submission failed", metal4_error);
             return 60;
+        }
+
+        id<MTLTexture> metal4_mip_copy = [adapter_device newTextureWithDescriptor:mip_descriptor];
+        id<MTL4CommandBuffer> metal4_mip_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_mip_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> metal4_mip_encoder = [metal4_mip_command_buffer computeCommandEncoder];
+        [metal4_mip_encoder copyFromTexture:adapter_mip_texture
+                                sourceSlice:0
+                                sourceLevel:1
+                               sourceOrigin:MTLOriginMake(0, 0, 0)
+                                 sourceSize:MTLSizeMake(2, 2, 1)
+                               toTexture:metal4_mip_copy
+                        destinationSlice:0
+                        destinationLevel:1
+                       destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [metal4_mip_encoder endEncoding];
+        [metal4_mip_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_mip_command_buffers[] = {metal4_mip_command_buffer};
+        [metal4_queue commit:metal4_mip_command_buffers count:1];
+        uint8_t metal4_mip_copy_bytes[sizeof(mip_level_one)];
+        [metal4_mip_copy getBytes:metal4_mip_copy_bytes
+                       bytesPerRow:2 * 4
+                        fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                       mipmapLevel:1];
+        if (metal4_mip_copy == nil || metal4_mip_command_buffer == nil || metal4_mip_encoder == nil ||
+            memcmp(metal4_mip_copy_bytes, native_mip_level_one, sizeof(mip_level_one)) != 0) {
+            fail_with_error("Metal 4 CPU mip-level copy failed", metal4_error);
+            return 70;
         }
 
         const uint32_t metal4_indirect_threads[] = {width, height, 1, 8, 8, 1};

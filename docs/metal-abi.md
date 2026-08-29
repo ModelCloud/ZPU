@@ -20,6 +20,10 @@ triangle path:
   viewport, scissor, cull, winding, fill-mode, color interpolation, and depth
 - two screen-band workers for a 3D draw: the submitting core plus one worker
 - owned RGBA8/BGRA8 buffers and 2D textures with checked region read/write
+- ordinary device-created 2D textures with independently allocated CPU/ZPU
+  mip levels, exact level read/write, level-range views, and level-aware blit
+  copies; buffer-backed and heap-backed textures remain explicitly limited to
+  one level until a portable strided mip layout is added
 - buffer and texture resource options preserve the requested storage mode, CPU
   cache mode, hazard mode, texture usage, optimization flag, compression mode,
   and swizzle metadata; indirect command buffers preserve their resource
@@ -106,7 +110,7 @@ triangle path:
   buffer, and dispatch state for deferred execution
 - Metal 4 basic buffer/texture copy and buffer-fill commands append deferred
   ZPU work; tensor, advanced optimization, acceleration-structure,
-  sparse, drawable, residency, machine-learning, and tile/mesh render-pass
+  sparse, drawable, machine-learning, and tile/mesh render-pass
   features remain explicit fail-closed boundaries. Suspending/resuming render
   passes are represented as sequential ordinary CPU passes because the CPU
   implementation has no tile-memory stitching requirement. The
