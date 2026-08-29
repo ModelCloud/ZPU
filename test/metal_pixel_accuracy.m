@@ -3610,6 +3610,27 @@ int main(void) {
             adapter_cube_render_command_buffer.status == MTLCommandBufferStatusCompleted &&
             adapter_cube_render_encoder != nil && adapter_cube_render_pipeline != nil &&
             memcmp(native_cube_render_bytes, adapter_cube_render_bytes, cube_face_bytes) == 0;
+        MTLSizeAndAlign cube_heap_size_align =
+            [adapter_device heapTextureSizeAndAlignWithDescriptor:cube_descriptor];
+        MTLHeapDescriptor *cube_heap_descriptor = [MTLHeapDescriptor new];
+        cube_heap_descriptor.size = cube_heap_size_align.size;
+        cube_heap_descriptor.storageMode = MTLStorageModeShared;
+        id<MTLHeap> adapter_cube_heap = [adapter_device newHeapWithDescriptor:cube_heap_descriptor];
+        id<MTLTexture> adapter_cube_heap_texture =
+            [adapter_cube_heap newTextureWithDescriptor:cube_descriptor];
+        uint8_t adapter_cube_heap_bytes[cube_face_bytes];
+        [adapter_cube_heap_texture replaceRegion:MTLRegionMake2D(0, 0, cube_size, cube_size)
+                                      mipmapLevel:0
+                                            slice:cube_face_count - 1
+                                        withBytes:cube_face_source[cube_face_count - 1]
+                                      bytesPerRow:cube_size * 4
+                                    bytesPerImage:cube_face_bytes];
+        [adapter_cube_heap_texture getBytes:adapter_cube_heap_bytes
+                                bytesPerRow:cube_size * 4
+                              bytesPerImage:cube_face_bytes
+                               fromRegion:MTLRegionMake2D(0, 0, cube_size, cube_size)
+                              mipmapLevel:0
+                                     slice:cube_face_count - 1];
         const NSUInteger expected_cube_allocated_size = cube_face_count * cube_mip_bytes;
         const NSUInteger expected_cube_array_allocated_size = cube_array_count * expected_cube_allocated_size;
         if (native_cube_texture == nil || adapter_cube_texture == nil ||
@@ -3626,6 +3647,12 @@ int main(void) {
             native_cube_texture.mipmapLevelCount != 3 || adapter_cube_texture.mipmapLevelCount != 3 ||
             adapter_cube_texture.allocatedSize != expected_cube_allocated_size ||
             adapter_cube_array_texture.allocatedSize != expected_cube_array_allocated_size ||
+            cube_heap_size_align.size != expected_cube_allocated_size || cube_heap_size_align.align != 4 ||
+            adapter_cube_heap == nil || adapter_cube_heap_texture == nil ||
+            adapter_cube_heap_texture.arrayLength != 1 ||
+            adapter_cube_heap_texture.allocatedSize != expected_cube_allocated_size ||
+            adapter_cube_heap.usedSize != expected_cube_allocated_size ||
+            memcmp(adapter_cube_heap_bytes, cube_face_source[cube_face_count - 1], cube_face_bytes) != 0 ||
             !cube_bytes_match || !cube_array_bytes_match || !cube_mips_match || !cube_copy_match || !cube_render_match ||
             native_cube_array_view == nil || adapter_cube_array_view == nil ||
             native_cube_array_view.arrayLength != 1 || adapter_cube_array_view.arrayLength != 1 ||
