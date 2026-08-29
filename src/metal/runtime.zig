@@ -2646,6 +2646,31 @@ test "indexed render encoding produces the same pixels as direct vertices" {
     try std.testing.expect(std.mem.indexOfScalar(u8, texture.bytes, 255) != null);
 }
 
+test "render state validation rejects invalid CPU Metal state" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const texture = try createTexture(device, 1, 1, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(texture);
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, texture, .{ .color = .{} });
+    try std.testing.expectError(error.InvalidArgument, encoder.setViewport(.{
+        .origin_x = 0,
+        .origin_y = 0,
+        .width = -1,
+        .height = 1,
+        .znear = 0,
+        .zfar = 1,
+    }));
+    try std.testing.expectError(error.InvalidArgument, encoder.setDepthTestBounds(0.75, 0.25));
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try command_buffer.commit();
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+}
+
 test "depth texture attachment rejects farther fragments" {
     const device = try createDevice();
     defer destroyDevice(device);

@@ -5882,10 +5882,10 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 }
 #pragma clang diagnostic pop
 - (void)setViewport:(MTLViewport)viewport {
-    (void)zpu_metal_render_encoder_set_viewport(_zpuEncoder, (zpu_metal_viewport){
+    if (zpu_metal_render_encoder_set_viewport(_zpuEncoder, (zpu_metal_viewport){
         (float)viewport.originX, (float)viewport.originY, (float)viewport.width,
         (float)viewport.height, (float)viewport.znear, (float)viewport.zfar,
-    });
+    }) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)setViewports:(const MTLViewport [__nonnull])viewports count:(NSUInteger)count API_AVAILABLE(macos(10.13), ios(12.0), tvos(14.5)) {
     if (viewports == NULL || count == 0) { [_owner markError]; return; }
@@ -5897,14 +5897,19 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 }
 - (void)setScissorRect:(MTLScissorRect)scissorRect {
     uint32_t x, y, width, height;
-    if (!zpu_u32(scissorRect.x, &x) || !zpu_u32(scissorRect.y, &y) || !zpu_u32(scissorRect.width, &width) || !zpu_u32(scissorRect.height, &height)) return;
-    (void)zpu_metal_render_encoder_set_scissor_rect(_zpuEncoder, (zpu_metal_scissor_rect){x, y, width, height});
+    if (!zpu_u32(scissorRect.x, &x) || !zpu_u32(scissorRect.y, &y) || !zpu_u32(scissorRect.width, &width) || !zpu_u32(scissorRect.height, &height)) {
+        [_owner markError];
+        return;
+    }
+    if (zpu_metal_render_encoder_set_scissor_rect(_zpuEncoder, (zpu_metal_scissor_rect){x, y, width, height}) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)setScissorRects:(const MTLScissorRect [__nonnull])scissorRects count:(NSUInteger)count API_AVAILABLE(macos(10.13), ios(12.0), tvos(14.5)) {
     if (scissorRects == NULL || count == 0) { [_owner markError]; return; }
     [self setScissorRect:scissorRects[0]];
 }
-- (void)setCullMode:(MTLCullMode)cullMode { (void)zpu_metal_render_encoder_set_cull_mode(_zpuEncoder, (zpu_metal_cull_mode)cullMode); }
+- (void)setCullMode:(MTLCullMode)cullMode {
+    if (zpu_metal_render_encoder_set_cull_mode(_zpuEncoder, (zpu_metal_cull_mode)cullMode) != ZPU_METAL_OK) [_owner markError];
+}
 - (void)setDepthClipMode:(MTLDepthClipMode)depthClipMode API_AVAILABLE(macos(10.11), ios(11.0)) {
     if (zpu_metal_render_encoder_set_depth_clip_mode(_zpuEncoder, (zpu_metal_depth_clip_mode)depthClipMode) != ZPU_METAL_OK) [_owner markError];
 }
@@ -5914,8 +5919,12 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 - (void)setDepthTestMinBound:(float)minBound maxBound:(float)maxBound API_AVAILABLE(macos(26.0), ios(26.0)) {
     if (zpu_metal_render_encoder_set_depth_test_bounds(_zpuEncoder, minBound, maxBound) != ZPU_METAL_OK) [_owner markError];
 }
-- (void)setFrontFacingWinding:(MTLWinding)frontFacingWinding { (void)zpu_metal_render_encoder_set_front_facing(_zpuEncoder, (zpu_metal_winding)frontFacingWinding); }
-- (void)setTriangleFillMode:(MTLTriangleFillMode)fillMode { (void)zpu_metal_render_encoder_set_triangle_fill_mode(_zpuEncoder, (zpu_metal_triangle_fill_mode)fillMode); }
+- (void)setFrontFacingWinding:(MTLWinding)frontFacingWinding {
+    if (zpu_metal_render_encoder_set_front_facing(_zpuEncoder, (zpu_metal_winding)frontFacingWinding) != ZPU_METAL_OK) [_owner markError];
+}
+- (void)setTriangleFillMode:(MTLTriangleFillMode)fillMode {
+    if (zpu_metal_render_encoder_set_triangle_fill_mode(_zpuEncoder, (zpu_metal_triangle_fill_mode)fillMode) != ZPU_METAL_OK) [_owner markError];
+}
 - (void)setDepthStencilState:(id<MTLDepthStencilState>)depthStencilState {
     ZPUDepthStencilState *state = (ZPUDepthStencilState *)depthStencilState;
     if (![state isKindOfClass:[ZPUDepthStencilState class]]) return;
@@ -6000,7 +6009,7 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     [self drawPrimitives:primitiveType vertexStart:vertexStart vertexCount:vertexCount instanceCount:1];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)primitiveType vertexStart:(NSUInteger)vertexStart vertexCount:(NSUInteger)vertexCount instanceCount:(NSUInteger)instanceCount {
-    (void)zpu_metal_render_encoder_draw_primitives(_zpuEncoder, (zpu_metal_primitive_type)primitiveType, vertexStart, vertexCount, instanceCount);
+    if (zpu_metal_render_encoder_draw_primitives(_zpuEncoder, (zpu_metal_primitive_type)primitiveType, vertexStart, vertexCount, instanceCount) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)primitiveType vertexStart:(NSUInteger)vertexStart vertexCount:(NSUInteger)vertexCount instanceCount:(NSUInteger)instanceCount baseInstance:(NSUInteger)baseInstance {
     (void)baseInstance;
@@ -6008,42 +6017,42 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 }
 - (void)drawPrimitives:(MTLPrimitiveType)primitiveType indirectBuffer:(id<MTLBuffer>)indirectBuffer indirectBufferOffset:(NSUInteger)indirectBufferOffset {
     ZPUBuffer *zpuIndirectBuffer = (ZPUBuffer *)indirectBuffer;
-    if (![zpuIndirectBuffer isKindOfClass:[ZPUBuffer class]]) return;
+    if (![zpuIndirectBuffer isKindOfClass:[ZPUBuffer class]]) { [_owner markError]; return; }
     [_owner retainResource:zpuIndirectBuffer];
-    (void)zpu_metal_render_encoder_draw_primitives_indirect(_zpuEncoder, (zpu_metal_primitive_type)primitiveType, zpuIndirectBuffer->_zpuBuffer, indirectBufferOffset);
+    if (zpu_metal_render_encoder_draw_primitives_indirect(_zpuEncoder, (zpu_metal_primitive_type)primitiveType, zpuIndirectBuffer->_zpuBuffer, indirectBufferOffset) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)primitiveType indexCount:(NSUInteger)indexCount indexType:(MTLIndexType)indexType indexBuffer:(id<MTLBuffer>)indexBuffer indexBufferOffset:(NSUInteger)indexBufferOffset {
     ZPUBuffer *zpuIndexBuffer = (ZPUBuffer *)indexBuffer;
-    if (![zpuIndexBuffer isKindOfClass:[ZPUBuffer class]]) return;
+    if (![zpuIndexBuffer isKindOfClass:[ZPUBuffer class]]) { [_owner markError]; return; }
     [_owner retainResource:zpuIndexBuffer];
-    (void)zpu_metal_render_encoder_draw_indexed_primitives(_zpuEncoder, (zpu_metal_primitive_type)primitiveType, indexCount, (zpu_metal_index_type)(indexType == MTLIndexTypeUInt16 ? ZPU_METAL_INDEX_UINT16 : ZPU_METAL_INDEX_UINT32), zpuIndexBuffer->_zpuBuffer, indexBufferOffset, 1);
+    if (zpu_metal_render_encoder_draw_indexed_primitives(_zpuEncoder, (zpu_metal_primitive_type)primitiveType, indexCount, (zpu_metal_index_type)(indexType == MTLIndexTypeUInt16 ? ZPU_METAL_INDEX_UINT16 : ZPU_METAL_INDEX_UINT32), zpuIndexBuffer->_zpuBuffer, indexBufferOffset, 1) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)primitiveType indexCount:(NSUInteger)indexCount indexType:(MTLIndexType)indexType indexBuffer:(id<MTLBuffer>)indexBuffer indexBufferOffset:(NSUInteger)indexBufferOffset instanceCount:(NSUInteger)instanceCount {
     ZPUBuffer *zpuIndexBuffer = (ZPUBuffer *)indexBuffer;
-    if (![zpuIndexBuffer isKindOfClass:[ZPUBuffer class]]) return;
+    if (![zpuIndexBuffer isKindOfClass:[ZPUBuffer class]]) { [_owner markError]; return; }
     [_owner retainResource:zpuIndexBuffer];
-    (void)zpu_metal_render_encoder_draw_indexed_primitives(
+    if (zpu_metal_render_encoder_draw_indexed_primitives(
         _zpuEncoder, (zpu_metal_primitive_type)primitiveType, indexCount,
         (zpu_metal_index_type)(indexType == MTLIndexTypeUInt16 ? ZPU_METAL_INDEX_UINT16 : ZPU_METAL_INDEX_UINT32),
-        zpuIndexBuffer->_zpuBuffer, indexBufferOffset, instanceCount);
+        zpuIndexBuffer->_zpuBuffer, indexBufferOffset, instanceCount) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)primitiveType indexCount:(NSUInteger)indexCount indexType:(MTLIndexType)indexType indexBuffer:(id<MTLBuffer>)indexBuffer indexBufferOffset:(NSUInteger)indexBufferOffset instanceCount:(NSUInteger)instanceCount baseVertex:(NSInteger)baseVertex baseInstance:(NSUInteger)baseInstance {
     (void)baseInstance;
     ZPUBuffer *zpuIndexBuffer = (ZPUBuffer *)indexBuffer;
-    if (![zpuIndexBuffer isKindOfClass:[ZPUBuffer class]]) return;
+    if (![zpuIndexBuffer isKindOfClass:[ZPUBuffer class]]) { [_owner markError]; return; }
     [_owner retainResource:zpuIndexBuffer];
-    (void)zpu_metal_render_encoder_draw_indexed_primitives_base_vertex(
+    if (zpu_metal_render_encoder_draw_indexed_primitives_base_vertex(
         _zpuEncoder, (zpu_metal_primitive_type)primitiveType, indexCount,
         (zpu_metal_index_type)(indexType == MTLIndexTypeUInt16 ? ZPU_METAL_INDEX_UINT16 : ZPU_METAL_INDEX_UINT32),
-        zpuIndexBuffer->_zpuBuffer, indexBufferOffset, instanceCount, (int64_t)baseVertex);
+        zpuIndexBuffer->_zpuBuffer, indexBufferOffset, instanceCount, (int64_t)baseVertex) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)primitiveType indexType:(MTLIndexType)indexType indexBuffer:(id<MTLBuffer>)indexBuffer indexBufferOffset:(NSUInteger)indexBufferOffset indirectBuffer:(id<MTLBuffer>)indirectBuffer indirectBufferOffset:(NSUInteger)indirectBufferOffset {
     ZPUBuffer *zpuIndexBuffer = (ZPUBuffer *)indexBuffer;
     ZPUBuffer *zpuIndirectBuffer = (ZPUBuffer *)indirectBuffer;
-    if (![zpuIndexBuffer isKindOfClass:[ZPUBuffer class]] || ![zpuIndirectBuffer isKindOfClass:[ZPUBuffer class]]) return;
+    if (![zpuIndexBuffer isKindOfClass:[ZPUBuffer class]] || ![zpuIndirectBuffer isKindOfClass:[ZPUBuffer class]]) { [_owner markError]; return; }
     [_owner retainResource:zpuIndexBuffer];
     [_owner retainResource:zpuIndirectBuffer];
-    (void)zpu_metal_render_encoder_draw_indexed_primitives_indirect(_zpuEncoder, (zpu_metal_primitive_type)primitiveType, (zpu_metal_index_type)(indexType == MTLIndexTypeUInt16 ? ZPU_METAL_INDEX_UINT16 : ZPU_METAL_INDEX_UINT32), zpuIndexBuffer->_zpuBuffer, indexBufferOffset, zpuIndirectBuffer->_zpuBuffer, indirectBufferOffset);
+    if (zpu_metal_render_encoder_draw_indexed_primitives_indirect(_zpuEncoder, (zpu_metal_primitive_type)primitiveType, (zpu_metal_index_type)(indexType == MTLIndexTypeUInt16 ? ZPU_METAL_INDEX_UINT16 : ZPU_METAL_INDEX_UINT32), zpuIndexBuffer->_zpuBuffer, indexBufferOffset, zpuIndirectBuffer->_zpuBuffer, indirectBufferOffset) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)setTessellationFactorBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset instanceStride:(NSUInteger)instanceStride API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)buffer;

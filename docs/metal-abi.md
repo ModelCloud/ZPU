@@ -108,6 +108,9 @@ triangle path:
   argument tables; Metal 4 compute dispatches bridge process-local argument
   table resource IDs to ZPU-owned resources and execute through the same
   deferred CPU kernels
+- supported Apple-adapter render state and draw selectors propagate ZPU
+  validation failures to `MTLCommandBufferStatusError`; invalid state is not
+  silently reported as successful CPU work
 - CPU-owned Metal 4 commit options and feedback; the explicit
   `ZPUMetalCreateCPUCommitOptions()` extension creates options whose feedback
   handlers receive host-time start/end values after the ZPU command buffers

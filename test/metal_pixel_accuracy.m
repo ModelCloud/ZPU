@@ -1251,6 +1251,20 @@ int main(void) {
             fprintf(stderr, "metal-pixel: CPU adapter protocol/selector conformance failed\n");
             return 54;
         }
+        /* Supported render state must not discard a runtime validation error.
+         * This intentionally exercises only the CPU adapter: an invalid
+         * enum is rejected by ZPU and must surface as command-buffer error. */
+        id<MTLCommandBuffer> adapter_invalid_state_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_invalid_state_encoder =
+            [adapter_invalid_state_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+        [adapter_invalid_state_encoder setCullMode:(MTLCullMode)99];
+        [adapter_invalid_state_encoder endEncoding];
+        [adapter_invalid_state_command_buffer commit];
+        [adapter_invalid_state_command_buffer waitUntilCompleted];
+        if (adapter_invalid_state_command_buffer.status != MTLCommandBufferStatusError) {
+            fprintf(stderr, "metal-pixel: invalid CPU render state did not fail closed\n");
+            return 55;
+        }
         NSError *adapter_residency_error = nil;
         MTLResidencySetDescriptor *adapter_residency_descriptor = [MTLResidencySetDescriptor new];
         adapter_residency_descriptor.label = @"zpu-cpu-residency";
