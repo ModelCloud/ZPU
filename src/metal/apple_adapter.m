@@ -481,8 +481,8 @@ API_AVAILABLE(macos(26.0), ios(26.0))
                   functionType:(MTLFunctionType)functionType;
 @end
 
-/* A library is a CPU-side name table for registered ZPU kernels. It never
- * contains an Apple MTLLibrary or compiled MSL. */
+/* A library is a CPU-side name table for registered ZPU kernels and fixed
+ * CPU render profiles. It never contains an Apple MTLLibrary or compiled MSL. */
 @interface ZPULibrary : NSObject <MTLLibrary> {
 @public
     ZPUDevice *_owner;
@@ -2871,6 +2871,14 @@ static uint64_t zpu_cpu_timestamp(void) {
         _owner = owner;
         NSMutableArray *names = [NSMutableArray array];
         for (NSString *name in @[
+            @"zpu_test_vertex",
+            @"zpu_test_no_raster_vertex",
+            @"zpu_test_fragment",
+            @"zpu_test_uniform_fragment",
+            @"zpu_test_depth_bounds_oracle",
+            @"zpu_test_mrt_fragment",
+            @"zpu_test_sample_fragment",
+            @"zpu_cpu_uniform_color_fragment",
             @"zpu_cpu_fill_gradient_rgba8",
             @"zpu_cpu_copy_rgba8_buffer_to_texture",
             @"zpu_cpu_fill_gradient_rgba8_array",
@@ -3176,6 +3184,84 @@ static id<MTL4BinaryFunction> zpu_mtl4_binary_function_for_descriptor(
         initWithOwner:owner name:function.name functionType:function.functionType options:descriptor.options];
 }
 
+static id<MTLRenderPipelineState> zpu_mtl4_render_pipeline_for_descriptor(
+    ZPUDevice *owner, MTL4RenderPipelineDescriptor *descriptor, NSError **error) {
+    if (descriptor == nil || descriptor.vertexFunctionDescriptor == nil ||
+        descriptor.fragmentFunctionDescriptor == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 requires registered vertex and fragment functions");
+        return nil;
+    }
+    if (descriptor.rasterSampleCount != 0 && descriptor.rasterSampleCount != 1) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 supports only one-sample CPU render targets");
+        return nil;
+    }
+    MTL4StaticLinkingDescriptor *vertex_linking = descriptor.vertexStaticLinkingDescriptor;
+    MTL4StaticLinkingDescriptor *fragment_linking = descriptor.fragmentStaticLinkingDescriptor;
+    MTLVertexDescriptor *vertex_descriptor = descriptor.vertexDescriptor;
+    MTLVertexAttributeDescriptor *position_attribute = vertex_descriptor.attributes[0];
+    MTLVertexAttributeDescriptor *color_attribute = vertex_descriptor.attributes[1];
+    MTLVertexBufferLayoutDescriptor *vertex_layout = vertex_descriptor.layouts[0];
+    const BOOL empty_vertex_descriptor = vertex_descriptor == nil ||
+        (position_attribute.format == MTLVertexFormatInvalid && color_attribute.format == MTLVertexFormatInvalid &&
+         vertex_layout.stride == 0 &&
+         (vertex_layout.stepFunction == MTLVertexStepFunctionConstant ||
+          vertex_layout.stepFunction == MTLVertexStepFunctionPerVertex));
+    const BOOL fixed_vertex_descriptor = vertex_descriptor != nil &&
+        position_attribute.format == MTLVertexFormatFloat4 && position_attribute.offset == 0 &&
+        position_attribute.bufferIndex == 0 && color_attribute.format == MTLVertexFormatFloat4 &&
+        color_attribute.offset == sizeof(float) * 4 && color_attribute.bufferIndex == 0 &&
+        vertex_layout.stride == sizeof(zpu_metal_vertex) &&
+        vertex_layout.stepFunction == MTLVertexStepFunctionPerVertex && vertex_layout.stepRate == 1;
+    if (descriptor.alphaToCoverageState != MTL4AlphaToCoverageStateDisabled ||
+        descriptor.alphaToOneState != MTL4AlphaToOneStateDisabled ||
+        descriptor.maxVertexAmplificationCount > 1 ||
+        descriptor.colorAttachmentMappingState != MTL4LogicalToPhysicalColorAttachmentMappingStateIdentity ||
+        (!empty_vertex_descriptor && !fixed_vertex_descriptor) ||
+        vertex_linking.functionDescriptors.count != 0 || vertex_linking.privateFunctionDescriptors.count != 0 ||
+        vertex_linking.groups.count != 0 || fragment_linking.functionDescriptors.count != 0 ||
+        fragment_linking.privateFunctionDescriptors.count != 0 || fragment_linking.groups.count != 0 ||
+        descriptor.supportVertexBinaryLinking || descriptor.supportFragmentBinaryLinking) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 render pipeline uses unsupported specialization or vertex layout state");
+        return nil;
+    }
+    id<MTLFunction> vertex = zpu_mtl4_resolve_library_function(owner, descriptor.vertexFunctionDescriptor, error);
+    id<MTLFunction> fragment = zpu_mtl4_resolve_library_function(owner, descriptor.fragmentFunctionDescriptor, error);
+    if (vertex == nil || fragment == nil ||
+        vertex.functionType != MTLFunctionTypeVertex || fragment.functionType != MTLFunctionTypeFragment) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 render pipeline requires CPU vertex and fragment profiles");
+        return nil;
+    }
+    MTLRenderPipelineDescriptor *legacy = [MTLRenderPipelineDescriptor new];
+    legacy.vertexFunction = vertex;
+    legacy.fragmentFunction = fragment;
+    legacy.rasterSampleCount = descriptor.rasterSampleCount == 0 ? 1 : descriptor.rasterSampleCount;
+    legacy.alphaToCoverageEnabled = NO;
+    legacy.alphaToOneEnabled = NO;
+    legacy.rasterizationEnabled = descriptor.rasterizationEnabled;
+    legacy.maxVertexAmplificationCount = descriptor.maxVertexAmplificationCount == 0 ? 1 : descriptor.maxVertexAmplificationCount;
+    legacy.inputPrimitiveTopology = descriptor.inputPrimitiveTopology;
+    legacy.supportIndirectCommandBuffers =
+        descriptor.supportIndirectCommandBuffers == MTL4IndirectCommandBufferSupportStateEnabled;
+    for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
+        MTL4RenderPipelineColorAttachmentDescriptor *source = descriptor.colorAttachments[index];
+        MTLRenderPipelineColorAttachmentDescriptor *destination = legacy.colorAttachments[index];
+        destination.pixelFormat = source.pixelFormat;
+        if (source.blendingState == MTL4BlendStateUnspecialized) {
+            zpu_set_error(error, @"ZPU CPU Metal 4 does not specialize unspecialized blending state");
+            return nil;
+        }
+        destination.blendingEnabled = source.blendingState == MTL4BlendStateEnabled;
+        destination.sourceRGBBlendFactor = source.sourceRGBBlendFactor;
+        destination.destinationRGBBlendFactor = source.destinationRGBBlendFactor;
+        destination.rgbBlendOperation = source.rgbBlendOperation;
+        destination.sourceAlphaBlendFactor = source.sourceAlphaBlendFactor;
+        destination.destinationAlphaBlendFactor = source.destinationAlphaBlendFactor;
+        destination.alphaBlendOperation = source.alphaBlendOperation;
+        destination.writeMask = source.writeMask;
+    }
+    return [owner newRenderPipelineStateWithDescriptor:legacy error:error];
+}
+
 static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     return (id<MTL4CompilerTask>)[[ZPUMTL4CompilerTask alloc] initWithCompiler:compiler];
 }
@@ -3247,10 +3333,21 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4PipelineDescriptor *)descriptor
                                                    compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
                                                                  error:(NSError **)error {
-    (void)descriptor;
     (void)compilerTaskOptions;
-    zpu_set_error(error, @"ZPU CPU Metal 4 has no compiler path for render, tile, or mesh pipelines");
-    return nil;
+    if (![descriptor isKindOfClass:[MTL4RenderPipelineDescriptor class]]) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 compiler supports only ordinary render descriptors");
+        return nil;
+    }
+    id<MTLRenderPipelineState> pipeline =
+        zpu_mtl4_render_pipeline_for_descriptor(_owner, (MTL4RenderPipelineDescriptor *)descriptor, error);
+    if (pipeline != nil && [_pipelineDataSetSerializer respondsToSelector:@selector(recordFunctionName:)]) {
+        MTL4RenderPipelineDescriptor *render = (MTL4RenderPipelineDescriptor *)descriptor;
+        MTL4LibraryFunctionDescriptor *vertex = (MTL4LibraryFunctionDescriptor *)render.vertexFunctionDescriptor;
+        MTL4LibraryFunctionDescriptor *fragment = (MTL4LibraryFunctionDescriptor *)render.fragmentFunctionDescriptor;
+        [(ZPUMTL4PipelineDataSetSerializer *)_pipelineDataSetSerializer recordFunctionName:vertex.name];
+        [(ZPUMTL4PipelineDataSetSerializer *)_pipelineDataSetSerializer recordFunctionName:fragment.name];
+    }
+    return pipeline;
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4PipelineDescriptor *)descriptor
                                             dynamicLinkingDescriptor:(MTL4RenderPipelineDynamicLinkingDescriptor *)dynamicLinkingDescriptor
@@ -3259,7 +3356,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     (void)descriptor;
     (void)dynamicLinkingDescriptor;
     (void)compilerTaskOptions;
-    zpu_set_error(error, @"ZPU CPU Metal 4 has no compiler path for render, tile, or mesh pipelines");
+    zpu_set_error(error, @"ZPU CPU Metal 4 does not link dynamic render functions");
     return nil;
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateBySpecializationWithDescriptor:(MTL4PipelineDescriptor *)descriptor
@@ -3432,16 +3529,27 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     return nil;
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4PipelineDescriptor *)descriptor error:(NSError **)error {
-    (void)descriptor;
-    zpu_set_error(error, @"ZPU CPU Metal 4 archives have no render, tile, or mesh pipeline implementation");
-    return nil;
+    if (![descriptor isKindOfClass:[MTL4RenderPipelineDescriptor class]]) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 archive supports only ordinary render descriptors");
+        return nil;
+    }
+    MTL4RenderPipelineDescriptor *render = (MTL4RenderPipelineDescriptor *)descriptor;
+    MTL4LibraryFunctionDescriptor *vertex = (MTL4LibraryFunctionDescriptor *)render.vertexFunctionDescriptor;
+    MTL4LibraryFunctionDescriptor *fragment = (MTL4LibraryFunctionDescriptor *)render.fragmentFunctionDescriptor;
+    if (![vertex isKindOfClass:[MTL4LibraryFunctionDescriptor class]] ||
+        ![fragment isKindOfClass:[MTL4LibraryFunctionDescriptor class]] ||
+        ![_functionNames containsObject:vertex.name] || ![_functionNames containsObject:fragment.name]) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 archive does not contain this render pipeline");
+        return nil;
+    }
+    return zpu_mtl4_render_pipeline_for_descriptor(_owner, render, error);
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4PipelineDescriptor *)descriptor
                                             dynamicLinkingDescriptor:(MTL4RenderPipelineDynamicLinkingDescriptor *)dynamicLinkingDescriptor
                                                                error:(NSError **)error {
     (void)descriptor;
     (void)dynamicLinkingDescriptor;
-    zpu_set_error(error, @"ZPU CPU Metal 4 archives have no render, tile, or mesh pipeline implementation");
+    zpu_set_error(error, @"ZPU CPU Metal 4 archives do not link dynamic render functions");
     return nil;
 }
 - (id<MTL4BinaryFunction>)newBinaryFunctionWithDescriptor:(MTL4BinaryFunctionDescriptor *)descriptor error:(NSError **)error {

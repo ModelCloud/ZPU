@@ -2956,6 +2956,26 @@ int main(void) {
             [adapter_mtl4_compiler newComputePipelineStateWithDescriptor:adapter_mtl4_compute_descriptor
                                                         compilerTaskOptions:nil
                                                                       error:&adapter_mtl4_compiler_error];
+        MTL4RenderPipelineDescriptor *adapter_mtl4_render_descriptor = [MTL4RenderPipelineDescriptor new];
+        MTL4LibraryFunctionDescriptor *adapter_mtl4_vertex_descriptor = [MTL4LibraryFunctionDescriptor new];
+        adapter_mtl4_vertex_descriptor.name = @"zpu_test_vertex";
+        adapter_mtl4_vertex_descriptor.library = adapter_mtl4_library;
+        MTL4LibraryFunctionDescriptor *adapter_mtl4_fragment_descriptor = [MTL4LibraryFunctionDescriptor new];
+        adapter_mtl4_fragment_descriptor.name = @"zpu_test_fragment";
+        adapter_mtl4_fragment_descriptor.library = adapter_mtl4_library;
+        adapter_mtl4_render_descriptor.vertexFunctionDescriptor = adapter_mtl4_vertex_descriptor;
+        adapter_mtl4_render_descriptor.fragmentFunctionDescriptor = adapter_mtl4_fragment_descriptor;
+        adapter_mtl4_render_descriptor.rasterSampleCount = 1;
+        adapter_mtl4_render_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        NSError *adapter_mtl4_render_error = nil;
+        id<MTLRenderPipelineState> adapter_mtl4_compiled_render_pipeline =
+            [adapter_mtl4_compiler newRenderPipelineStateWithDescriptor:adapter_mtl4_render_descriptor
+                                                        compilerTaskOptions:nil
+                                                                      error:&adapter_mtl4_render_error];
+        NSError *adapter_mtl4_archive_render_error = nil;
+        id<MTLRenderPipelineState> adapter_mtl4_archived_render_pipeline =
+            [adapter_mtl4_archive newRenderPipelineStateWithDescriptor:adapter_mtl4_render_descriptor
+                                                                   error:&adapter_mtl4_archive_render_error];
         MTL4BinaryFunctionDescriptor *adapter_mtl4_binary_descriptor = [MTL4BinaryFunctionDescriptor new];
         adapter_mtl4_binary_descriptor.name = @"zpu_cpu_fill_gradient_rgba8";
         adapter_mtl4_binary_descriptor.functionDescriptor = adapter_mtl4_function_descriptor;
@@ -3013,12 +3033,34 @@ int main(void) {
                                       bytesPerRow:(NSUInteger)width * 4
                                        fromRegion:MTLRegionMake2D(0, 0, width, height)
                                       mipmapLevel:0];
+        id<MTLTexture> adapter_mtl4_compiler_render_texture =
+            [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTLRenderPassDescriptor *adapter_mtl4_compiler_render_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_mtl4_compiler_render_pass.colorAttachments[0].texture = adapter_mtl4_compiler_render_texture;
+        adapter_mtl4_compiler_render_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_mtl4_compiler_render_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_mtl4_compiler_render_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        id<MTLCommandBuffer> adapter_mtl4_compiler_render_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_mtl4_compiler_render_encoder =
+            [adapter_mtl4_compiler_render_command_buffer renderCommandEncoderWithDescriptor:adapter_mtl4_compiler_render_pass];
+        [adapter_mtl4_compiler_render_encoder setRenderPipelineState:adapter_mtl4_compiled_render_pipeline];
+        [adapter_mtl4_compiler_render_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_mtl4_compiler_render_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_mtl4_compiler_render_encoder endEncoding];
+        [adapter_mtl4_compiler_render_command_buffer commit];
+        [adapter_mtl4_compiler_render_command_buffer waitUntilCompleted];
+        uint8_t adapter_mtl4_compiler_render_pixels[byte_count];
+        [adapter_mtl4_compiler_render_texture getBytes:adapter_mtl4_compiler_render_pixels
+                                           bytesPerRow:(NSUInteger)width * 4
+                                            fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                           mipmapLevel:0];
         if (adapter_mtl4_serializer == nil ||
             ![adapter_mtl4_serializer conformsToProtocol:@protocol(MTL4PipelineDataSetSerializer)] ||
             adapter_mtl4_pipeline_script.length == 0 || !adapter_mtl4_archive_flushed ||
             adapter_mtl4_serializer_archive == nil || adapter_mtl4_serializer_binary == nil ||
             adapter_mtl4_compiler == nil || adapter_mtl4_library == nil ||
-            adapter_mtl4_compiled_pipeline == nil || adapter_mtl4_binary_function == nil ||
+            adapter_mtl4_compiled_pipeline == nil || adapter_mtl4_compiled_render_pipeline == nil ||
+            adapter_mtl4_archived_render_pipeline == nil || adapter_mtl4_binary_function == nil ||
             adapter_mtl4_binary_handle == nil || adapter_mtl4_named_handle == nil ||
             adapter_mtl4_function_handle == nil ||
             ![adapter_mtl4_binary_function conformsToProtocol:@protocol(MTL4BinaryFunction)] ||
@@ -3028,6 +3070,9 @@ int main(void) {
             adapter_mtl4_async_binary_function == nil || adapter_mtl4_async_error != nil ||
             adapter_mtl4_compiler_texture == nil || adapter_mtl4_compiler_encoder == nil ||
             adapter_mtl4_compiler_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_mtl4_compiler_render_texture == nil || adapter_mtl4_compiler_render_encoder == nil ||
+            adapter_mtl4_compiler_render_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(metal_pixels, adapter_mtl4_compiler_render_pixels, byte_count) != 0 ||
             memcmp(native_compute_pixels, adapter_mtl4_compiler_pixels, byte_count) != 0) {
             fail_with_error("Metal 4 CPU compiler compute path failed", adapter_mtl4_compiler_error);
             return 101;
@@ -6110,7 +6155,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, visibility results, legacy/Metal 4 counters, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, visibility results, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }

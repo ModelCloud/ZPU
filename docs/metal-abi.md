@@ -170,9 +170,10 @@ triangle path:
   blit sample points resolve to `MTLCounterResultTimestamp` records in shared
   ZPU buffers. Unsupported hardware-only counters remain unavailable rather
   than being reported as fabricated statistics
-- CPU library metadata can discover the six registered kernel names from
-  source text, UTF-8 file/URL/data inputs, and the default bundle query;
-  unsupported arbitrary MSL and stitched libraries fail closed
+- CPU library metadata can discover the six registered kernel names and fixed
+  CPU render profiles from source text, UTF-8 file/URL/data inputs, and the
+  default bundle query; unsupported arbitrary MSL and stitched libraries fail
+  closed
 - `newDefaultLibrary` returns the same CPU metadata library for the registered
   ZPU kernels, including the array and 3D kernels; it does not load or compile an Apple
   `.metallib`
@@ -226,7 +227,7 @@ coverage, color interpolation, BGRA channel order, object lifetimes, depth
 ordering, pipeline/depth/sampler state, blending, texture views, indirect
 draws, render and compute indirect command buffers, the CPU compute path
   against a native Metal oracle, the Metal 4 CPU argument-table compute and
-  ordinary render paths, compiler-created Metal 4 compute and archive
+  ordinary render paths, compiler-created Metal 4 compute/render and archive
   metadata paths, deferred indirect-thread dispatch, and deferred
   indirect array z filtering, explicit 3D texture plane/stride copies, and
   legacy/Metal 4 3D mipmap generation, 2D float mipmap raw-byte exactness, and
