@@ -276,6 +276,52 @@ int main(void) {
     zpu_metal_command_buffer_destroy(compute_bgra_copy_commands);
     zpu_metal_texture_destroy(compute_bgra_copy_texture);
 
+    const zpu_metal_texture_descriptor mesh_descriptor = {
+        .width = 5,
+        .height = 3,
+        .format = ZPU_METAL_BGRA8_UNORM,
+    };
+    zpu_metal_texture *mesh_texture =
+        zpu_metal_device_new_texture(device, &mesh_descriptor);
+    const uint32_t mesh_arguments_initial[] = {0, 1, 1, 1};
+    zpu_metal_buffer *mesh_arguments = zpu_metal_device_new_buffer(
+        device, sizeof(mesh_arguments_initial), mesh_arguments_initial);
+    zpu_metal_command_buffer *mesh_commands =
+        zpu_metal_command_queue_command_buffer(queue);
+    zpu_metal_render_encoder *mesh_encoder =
+        zpu_metal_command_buffer_render_encoder(mesh_commands, mesh_texture, &render_pass);
+    const uint32_t mesh_arguments_updated[] = {3, 2, 1};
+    if (mesh_texture == NULL || mesh_arguments == NULL || mesh_commands == NULL ||
+        mesh_encoder == NULL ||
+        zpu_metal_render_encoder_draw_mesh_threadgroups_indirect(
+            mesh_encoder, ZPU_METAL_MESH_FILL_GRADIENT_RGBA8, mesh_arguments,
+            sizeof(uint32_t), (zpu_metal_size){1, 1, 1},
+            (zpu_metal_size){2, 2, 1}) != 0 ||
+        zpu_metal_buffer_write(mesh_arguments, sizeof(uint32_t), mesh_arguments_updated,
+                               sizeof(mesh_arguments_updated)) != 0 ||
+        zpu_metal_render_encoder_end_encoding(mesh_encoder) != 0 ||
+        zpu_metal_command_buffer_get_status(mesh_commands) != ZPU_METAL_COMMAND_BUFFER_CREATED ||
+        zpu_metal_command_buffer_commit(mesh_commands) != 0 ||
+        zpu_metal_command_buffer_get_status(mesh_commands) != ZPU_METAL_COMMAND_BUFFER_COMPLETED) return 45;
+    uint8_t mesh_pixels[5 * 3 * 4] = {0};
+    uint8_t expected_mesh_pixels[sizeof(mesh_pixels)] = {0};
+    for (size_t y = 0; y < 3; ++y) {
+        for (size_t x = 0; x < 5; ++x) {
+            const size_t pixel = (y * 5 + x) * 4;
+            expected_mesh_pixels[pixel + 0] = 64;
+            expected_mesh_pixels[pixel + 1] = (uint8_t)(((y + 1) * 255 + 4) / 8);
+            expected_mesh_pixels[pixel + 2] = (uint8_t)(((x + 1) * 255 + 4) / 8);
+            expected_mesh_pixels[pixel + 3] = 255;
+        }
+    }
+    if (zpu_metal_texture_get_bytes(mesh_texture, mesh_pixels, sizeof(mesh_pixels), 5 * 4,
+                                    (zpu_metal_region){{0, 0, 0}, {5, 3, 1}}) != 0 ||
+        memcmp(mesh_pixels, expected_mesh_pixels, sizeof(mesh_pixels)) != 0) return 46;
+    zpu_metal_render_encoder_destroy(mesh_encoder);
+    zpu_metal_command_buffer_destroy(mesh_commands);
+    zpu_metal_buffer_destroy(mesh_arguments);
+    zpu_metal_texture_destroy(mesh_texture);
+
     const uint8_t indirect_dispatch_args[] = {2, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0};
     const uint8_t initial_indirect_dispatch_args[] = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
     zpu_metal_texture *compute_indirect_texture =
