@@ -857,7 +857,7 @@ pub const CommandBuffer = struct {
                 }
                 const logical_output_count: usize = if (draw_options.write_extra_targets)
                     @min(extra_count + 1, 8)
-                    else
+                else
                     1;
                 validateColorAttachmentOutputs(active_color_attachments, draw_options.color_attachment_map, logical_output_count) catch |err| return self.fail(err);
                 var stats: raster3d.Stats = .{};
@@ -1062,7 +1062,7 @@ pub const CommandBuffer = struct {
                 }
                 const logical_output_count: usize = if (draw_options.write_extra_targets)
                     @min(extra_count + 1, 8)
-                    else
+                else
                     1;
                 validateColorAttachmentOutputs(active_color_attachments, draw_options.color_attachment_map, logical_output_count) catch |err| return self.fail(err);
                 var stats: raster3d.Stats = .{};
