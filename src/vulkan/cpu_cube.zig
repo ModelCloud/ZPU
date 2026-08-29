@@ -199,6 +199,28 @@ const PreparedCache = struct {
 
 threadlocal var prepared_cache: PreparedCache = .{};
 
+const public_geometry_cache_capacity = 256;
+const public_geometry_cache_bytes = 64 + max_prepared_triangles * 3 * 16;
+const PublicGeometryCacheEntry = struct {
+    valid: bool = false,
+    uniform_address: usize = 0,
+    uniform_len: usize = 0,
+    geometry_len: usize = 0,
+    vertex_count: u32 = 0,
+    target_width: u32 = 0,
+    target_height: u32 = 0,
+    texture_width: u32 = 0,
+    texture_height: u32 = 0,
+    viewport: Viewport = undefined,
+    scissor: Rect = undefined,
+    lighting_generation: u64 = 0,
+    geometry: [public_geometry_cache_bytes]u8 = undefined,
+    prepared: PreparedDraw = .{},
+};
+
+threadlocal var public_geometry_cache: [public_geometry_cache_capacity]PublicGeometryCacheEntry = [_]PublicGeometryCacheEntry{.{}} ** public_geometry_cache_capacity;
+threadlocal var public_geometry_cache_next: usize = 0;
+
 pub const IndexStream = struct {
     bytes: []const u8,
     index_type: i32,
@@ -2606,6 +2628,7 @@ fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, unif
     var prepared: PreparedDraw = undefined;
     const cache_status = prepareDrawCached(uniform, texture, texture_width, texture_height, vertex_count, viewport, &prepared);
     const inline_fast = counters == null and clear_color_pattern == null and clear_depth_pattern == null and expected_target == null and !clear_spans_requested;
+    if (inline_fast) if (drawPreparedInlineCached(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor)) |pixels| return pixels;
     if (!cache_status.hit) buildPreparedFlatSpans(&prepared, width, height);
     const lighting_generation = exact_lighting_cache_generation.load(.acquire);
     if (!cache_status.hit or prepared_cache.lighting_generation != lighting_generation) {
@@ -3335,6 +3358,103 @@ test "parallel shutdown waits for an active render job" {
     _ = std.c.pthread_mutex_unlock(&parallel_mutex);
     shutdown_thread.join();
     try std.testing.expect(done.load(.acquire));
+}
+
+fn publicGeometryCacheIndex(uniform: []const u8, vertex_count: u32) usize {
+    return ((@intFromPtr(uniform.ptr) >> 6) ^ (@as(usize, vertex_count) *% 2654435761)) % public_geometry_cache_capacity;
+}
+
+fn publicGeometryCacheWorthwhile(uniform: []const u8, vertex_count: u32, viewport: Viewport) bool {
+    if (vertex_count != 6 or !isIdentityTransform(uniform)) return true;
+    var min_x = readFloat(uniform, 64);
+    var max_x = min_x;
+    var min_y = readFloat(uniform, 68);
+    var max_y = min_y;
+    for (1..6) |index| {
+        const position_base = 64 + index * 16;
+        const x = readFloat(uniform, position_base);
+        const y = readFloat(uniform, position_base + 4);
+        min_x = @min(min_x, x);
+        max_x = @max(max_x, x);
+        min_y = @min(min_y, y);
+        max_y = @max(max_y, y);
+    }
+    const screen_width = @abs(max_x - min_x) * @abs(viewport.width) * 0.5;
+    const screen_height = @abs(max_y - min_y) * @abs(viewport.height) * 0.5;
+    return std.math.isFinite(screen_width) and std.math.isFinite(screen_height) and screen_width * screen_height >= 512;
+}
+
+fn publicGeometryCacheMatches(entry: *const PublicGeometryCacheEntry, uniform: []const u8, geometry_len: usize, vertex_count: u32, target_width: u32, target_height: u32, texture_width: u32, texture_height: u32, viewport: Viewport, scissor: Rect) bool {
+    return entry.valid and entry.uniform_address == @intFromPtr(uniform.ptr) and entry.uniform_len == uniform.len and
+        entry.geometry_len == geometry_len and entry.vertex_count == vertex_count and entry.target_width == target_width and
+        entry.target_height == target_height and entry.texture_width == texture_width and entry.texture_height == texture_height and
+        std.meta.eql(entry.viewport, viewport) and std.meta.eql(entry.scissor, scissor) and
+        std.mem.eql(u8, entry.geometry[0..geometry_len], uniform[0..geometry_len]);
+}
+
+fn drawPreparedInlineCached(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect) ?usize {
+    if ((texture_width != 1 and texture_width != 4 and texture_width != 16) or texture_height != texture_width) return null;
+    if (vertex_count == 0 or vertex_count % 3 != 0 or vertex_count > max_prepared_triangles * 3) return null;
+    const geometry_len = 64 + @as(usize, vertex_count) * 16;
+    if (uniform.len < geometry_len) return null;
+    if (!publicGeometryCacheWorthwhile(uniform, vertex_count, viewport)) return null;
+    var entry = &public_geometry_cache[publicGeometryCacheIndex(uniform, vertex_count)];
+    var hit = publicGeometryCacheMatches(entry, uniform, geometry_len, vertex_count, width, height, texture_width, texture_height, viewport, scissor);
+    if (!hit) for (&public_geometry_cache) |*candidate| {
+        if (publicGeometryCacheMatches(candidate, uniform, geometry_len, vertex_count, width, height, texture_width, texture_height, viewport, scissor)) {
+            entry = candidate;
+            hit = true;
+            break;
+        }
+    };
+    if (!hit) {
+        entry = &public_geometry_cache[public_geometry_cache_next];
+        public_geometry_cache_next = (public_geometry_cache_next + 1) % public_geometry_cache_capacity;
+        prepareDraw(uniform, vertex_count, 0, viewport, null, &entry.prepared);
+        buildPreparedFlatSpans(&entry.prepared, width, height);
+        for (entry.prepared.triangles[0..entry.prepared.count]) |*triangle| {
+            if (triangle.valid) triangle.lighting = exactCachedLightingTable(@bitCast(triangle.light_key));
+        }
+        entry.lighting_generation = exact_lighting_cache_generation.load(.acquire);
+        prepareLitTextures(&entry.prepared, texture, texture_width, texture_height);
+        prepareBatchRaster(&entry.prepared, width, height, scissor);
+        refreshBatchFastFlag(&entry.prepared);
+        if (!entry.prepared.batch_fast) {
+            entry.valid = false;
+            return null;
+        }
+        @memcpy(entry.geometry[0..geometry_len], uniform[0..geometry_len]);
+        entry.uniform_address = @intFromPtr(uniform.ptr);
+        entry.uniform_len = uniform.len;
+        entry.geometry_len = geometry_len;
+        entry.vertex_count = vertex_count;
+        entry.target_width = width;
+        entry.target_height = height;
+        entry.texture_width = texture_width;
+        entry.texture_height = texture_height;
+        entry.viewport = viewport;
+        entry.scissor = scissor;
+        entry.valid = true;
+    } else {
+        if (!refreshBatchPreparedUvs(&entry.prepared, uniform, vertex_count) or !refreshBatchRasterUvs(&entry.prepared)) {
+            entry.valid = false;
+            return null;
+        }
+        const lighting_generation = exact_lighting_cache_generation.load(.acquire);
+        if (entry.lighting_generation != lighting_generation) {
+            for (entry.prepared.triangles[0..entry.prepared.count]) |*triangle| {
+                if (triangle.valid) triangle.lighting = exactCachedLightingTable(@bitCast(triangle.light_key));
+            }
+            entry.lighting_generation = exact_lighting_cache_generation.load(.acquire);
+        }
+        prepareLitTextures(&entry.prepared, texture, texture_width, texture_height);
+        refreshBatchFastFlag(&entry.prepared);
+        if (!entry.prepared.batch_fast) {
+            entry.valid = false;
+            return null;
+        }
+    }
+    return drawPreparedBatchFastSerial(target, depth, width, height, &entry.prepared);
 }
 fn drawPreparedBatchFast(comptime color_only: bool, target: []u8, depth: []u8, width: u32, height: u32, prepared: *const PreparedDraw, lane_index: usize, tile_min: ?[]u32, tile_max: ?[]u32, tile_columns: usize, tile_count: usize) ?usize {
     return drawPreparedBatchFastImpl(color_only, target, depth, width, height, prepared, lane_index, parallel_band_count, tile_min, tile_max, tile_columns, tile_count);
