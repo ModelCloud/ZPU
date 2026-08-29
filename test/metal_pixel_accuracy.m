@@ -6967,12 +6967,15 @@ int main(void) {
              "kernel void zpu_cpu_copy_rgba8_buffer_to_texture() {}\n"
              "kernel void zpu_cpu_fill_gradient_rgba8_array() {}\n"
              "kernel void zpu_cpu_fill_gradient_rgba8_3d() {}\n"
+             "kernel void zpu_cpu_tile_gradient_rgba8() {}\n"
              "[[visible]] float4 zpu_test_visible(float4 value) { return value; }\n"
              "[[visible]] float4 zpu_test_visible_secondary(float4 value) { return value + 1.0; }";
         id<MTLLibrary> adapter_library =
             [adapter_device newLibraryWithSource:adapter_cpu_source options:nil error:&adapter_library_error];
         id<MTLFunction> adapter_library_function =
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8"];
+        id<MTLFunction> adapter_tile_function =
+            [adapter_library newFunctionWithName:@"zpu_cpu_tile_gradient_rgba8"];
         id<MTLFunction> adapter_constant_function =
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8"
                                   constantValues:[MTLFunctionConstantValues new]
@@ -6987,9 +6990,10 @@ int main(void) {
             adapter_constant_function == nil ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 6 ||
+            adapter_library.functionNames.count != 7 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_3d"] == nil ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_tile_gradient_rgba8"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_test_visible"].functionType != MTLFunctionTypeVisible ||
             [adapter_library newFunctionWithName:@"zpu_test_visible_secondary"].functionType != MTLFunctionTypeVisible ||
             !adapter_library_completion_called ||
@@ -7089,6 +7093,17 @@ int main(void) {
         BOOL adapter_archive_render_added =
             [adapter_archive addRenderPipelineFunctionsWithDescriptor:adapter_archive_render_descriptor
                                                                   error:&adapter_archive_error];
+        BOOL adapter_archive_tile_added = YES;
+        MTLTileRenderPipelineDescriptor *adapter_archive_tile_descriptor = nil;
+        if (@available(macOS 11.0, iOS 11.0, *)) {
+            adapter_archive_tile_descriptor = [MTLTileRenderPipelineDescriptor new];
+            adapter_archive_tile_descriptor.tileFunction = adapter_tile_function;
+            adapter_archive_tile_descriptor.rasterSampleCount = 1;
+            adapter_archive_tile_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+            adapter_archive_tile_added =
+                [adapter_archive addTileRenderPipelineFunctionsWithDescriptor:adapter_archive_tile_descriptor
+                                                                          error:&adapter_archive_error];
+        }
         NSURL *adapter_archive_url = [NSURL fileURLWithPath:
             [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]]];
         BOOL adapter_archive_serialized = [adapter_archive serializeToURL:adapter_archive_url error:&adapter_archive_error];
@@ -7099,6 +7114,12 @@ int main(void) {
         BOOL adapter_archive_reloaded =
             [adapter_reloaded_archive addComputePipelineFunctionsWithDescriptor:adapter_archive_compute_descriptor
                                                                              error:&adapter_archive_error];
+        BOOL adapter_archive_reloaded_tile = YES;
+        if (@available(macOS 11.0, iOS 11.0, *)) {
+            adapter_archive_reloaded_tile =
+                [adapter_reloaded_archive addTileRenderPipelineFunctionsWithDescriptor:adapter_archive_tile_descriptor
+                                                                                   error:&adapter_archive_error];
+        }
         id<MTL4Archive> adapter_mtl4_archive =
             [adapter_device newArchiveWithURL:adapter_archive_url error:&adapter_archive_error];
         MTL4LibraryFunctionDescriptor *adapter_archive_function_descriptor = [MTL4LibraryFunctionDescriptor new];
@@ -7118,8 +7139,9 @@ int main(void) {
         [[NSFileManager defaultManager] removeItemAtURL:adapter_archive_url error:nil];
         if (adapter_archive == nil ||
             ![adapter_archive conformsToProtocol:@protocol(MTLBinaryArchive)] ||
-            !adapter_archive_compute_added || !adapter_archive_render_added ||
+            !adapter_archive_compute_added || !adapter_archive_render_added || !adapter_archive_tile_added ||
             !adapter_archive_serialized || !adapter_reloaded_archive || !adapter_archive_reloaded ||
+            !adapter_archive_reloaded_tile ||
             adapter_mtl4_archive == nil || adapter_archive_binary_function == nil ||
             ![adapter_archive_binary_function conformsToProtocol:@protocol(MTL4BinaryFunction)] ||
             adapter_archive_mtl4_compute_pipeline == nil) {
@@ -8099,9 +8121,14 @@ int main(void) {
         BOOL adapter_mtl4_tile_exact = YES;
         NSError *adapter_mtl4_tile_error = nil;
         id<MTLRenderPipelineState> adapter_mtl4_tile_pipeline = nil;
+        id<MTLRenderPipelineState> adapter_mtl4_archived_tile_pipeline = nil;
         id<MTLTexture> adapter_mtl4_tile_texture = nil;
         id<MTL4CommandBuffer> adapter_mtl4_tile_command_buffer = nil;
         id<MTL4RenderCommandEncoder> adapter_mtl4_tile_encoder = nil;
+        NSData *adapter_mtl4_tile_pipeline_script = nil;
+        NSURL *adapter_mtl4_tile_archive_url = nil;
+        id<MTL4Archive> adapter_mtl4_tile_archive = nil;
+        BOOL adapter_mtl4_tile_archive_flushed = YES;
         uint8_t adapter_mtl4_tile_pixels[5 * 3 * 4] = {0};
         if (@available(macOS 26.0, iOS 26.0, *)) {
             MTL4CommandAllocatorDescriptor *adapter_mtl4_tile_allocator_descriptor =
@@ -8130,6 +8157,19 @@ int main(void) {
                 [adapter_mtl4_compiler newRenderPipelineStateWithDescriptor:adapter_mtl4_tile_descriptor
                                                             compilerTaskOptions:nil
                                                                           error:&adapter_mtl4_tile_error];
+            adapter_mtl4_tile_pipeline_script =
+                [adapter_mtl4_serializer serializeAsPipelinesScriptWithError:&adapter_mtl4_tile_error];
+            adapter_mtl4_tile_archive_url = [NSURL fileURLWithPath:
+                [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]]];
+            adapter_mtl4_tile_archive_flushed =
+                [adapter_mtl4_serializer serializeAsArchiveAndFlushToURL:adapter_mtl4_tile_archive_url
+                                                                      error:&adapter_mtl4_tile_error];
+            adapter_mtl4_tile_archive =
+                [adapter_device newArchiveWithURL:adapter_mtl4_tile_archive_url
+                                             error:&adapter_mtl4_tile_error];
+            adapter_mtl4_archived_tile_pipeline =
+                [adapter_mtl4_tile_archive newRenderPipelineStateWithDescriptor:adapter_mtl4_tile_descriptor
+                                                                            error:&adapter_mtl4_tile_error];
             MTLTextureDescriptor *adapter_mtl4_tile_texture_descriptor =
                 [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                     width:5 height:3 mipmapped:NO];
@@ -8148,7 +8188,7 @@ int main(void) {
             [adapter_mtl4_tile_command_buffer beginCommandBufferWithAllocator:adapter_mtl4_tile_allocator];
             adapter_mtl4_tile_encoder =
                 [adapter_mtl4_tile_command_buffer renderCommandEncoderWithDescriptor:adapter_mtl4_tile_pass];
-            [adapter_mtl4_tile_encoder setRenderPipelineState:adapter_mtl4_tile_pipeline];
+            [adapter_mtl4_tile_encoder setRenderPipelineState:adapter_mtl4_archived_tile_pipeline];
             [adapter_mtl4_tile_encoder dispatchThreadsPerTile:MTLSizeMake(2, 2, 1)];
             [adapter_mtl4_tile_encoder endEncoding];
             [adapter_mtl4_tile_command_buffer endCommandBuffer];
@@ -8172,9 +8212,15 @@ int main(void) {
                 }
             }
             adapter_mtl4_tile_exact = adapter_mtl4_tile_pipeline != nil &&
+                adapter_mtl4_archived_tile_pipeline != nil &&
                 adapter_mtl4_tile_allocator != nil && adapter_mtl4_tile_queue != nil &&
                 adapter_mtl4_tile_texture != nil && adapter_mtl4_tile_command_buffer != nil &&
                 adapter_mtl4_tile_encoder != nil &&
+                adapter_mtl4_tile_pipeline_script != nil &&
+                [[[NSString alloc] initWithData:adapter_mtl4_tile_pipeline_script
+                                       encoding:NSUTF8StringEncoding]
+                    rangeOfString:@"tile zpu_cpu_tile_gradient_rgba8"].location != NSNotFound &&
+                adapter_mtl4_tile_archive_flushed && adapter_mtl4_tile_archive != nil &&
                 adapter_mtl4_tile_pipeline.maxTotalThreadsPerThreadgroup == 4 &&
                 adapter_mtl4_tile_pipeline.threadgroupSizeMatchesTileSize &&
                 adapter_mtl4_tile_pipeline.requiredThreadsPerTileThreadgroup.width == 2 &&
@@ -8182,6 +8228,9 @@ int main(void) {
                 adapter_mtl4_tile_pipeline.requiredThreadsPerTileThreadgroup.depth == 1 &&
                 memcmp(adapter_mtl4_tile_pixels, expected_tile_pixels,
                        sizeof(expected_tile_pixels)) == 0;
+        }
+        if (adapter_mtl4_tile_archive_url != nil) {
+            [[NSFileManager defaultManager] removeItemAtURL:adapter_mtl4_tile_archive_url error:nil];
         }
         if (!adapter_mtl4_tile_exact) {
             fail_with_error("Metal 4 CPU tile dispatch pixel exactness failed", adapter_mtl4_tile_error);

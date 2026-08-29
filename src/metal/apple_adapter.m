@@ -1122,9 +1122,11 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     ZPUDevice *_owner;
     MTL4PipelineDataSetSerializerConfiguration _configuration;
     NSMutableSet *_functionNames;
+    NSMutableSet *_tileFunctionNames;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTL4PipelineDataSetSerializerDescriptor *)descriptor;
 - (void)recordFunctionName:(NSString *)name;
+- (void)recordTileFunctionName:(NSString *)name;
 @end
 
 API_AVAILABLE(macos(26.0), ios(26.0))
@@ -7753,9 +7755,15 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     return YES;
 }
 - (BOOL)addTileRenderPipelineFunctionsWithDescriptor:(MTLTileRenderPipelineDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
-    (void)descriptor;
-    zpu_binary_archive_add_error(error, @"ZPU CPU Metal binary archives have no tile-shader implementation");
-    return NO;
+    NSString *name = descriptor == nil ? nil : zpu_binary_archive_function_name(_owner, descriptor.tileFunction);
+    if (name == nil || descriptor.tileFunction.functionType != MTLFunctionTypeKernel ||
+        ![name isEqualToString:zpu_cpu_tile_gradient_function_name]) {
+        zpu_binary_archive_add_error(error, @"ZPU CPU Metal binary archives accept only the registered CPU tile profile");
+        return NO;
+    }
+    [_functionNames addObject:name];
+    if (error != NULL) *error = nil;
+    return YES;
 }
 - (BOOL)addMeshRenderPipelineFunctionsWithDescriptor:(MTLMeshRenderPipelineDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(15.0), ios(18.0)) {
     (void)descriptor;
@@ -7812,12 +7820,18 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
         _owner = owner;
         _configuration = descriptor.configuration;
         _functionNames = [NSMutableSet set];
+        _tileFunctionNames = [NSMutableSet set];
     }
     return self;
 }
 - (void)recordFunctionName:(NSString *)name {
     if (name.length != 0) {
         @synchronized (self) { [_functionNames addObject:name]; }
+    }
+}
+- (void)recordTileFunctionName:(NSString *)name {
+    if (name.length != 0) {
+        @synchronized (self) { [_tileFunctionNames addObject:name]; }
     }
 }
 - (BOOL)serializeAsArchiveAndFlushToURL:(NSURL *)url error:(NSError **)error {
@@ -7831,7 +7845,11 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     }
     NSMutableString *serialized = [NSMutableString stringWithString:@"ZPU CPU Metal Binary Archive v1\n"];
     NSArray<NSString *> *sortedNames;
-    @synchronized (self) { sortedNames = [[_functionNames allObjects] sortedArrayUsingSelector:@selector(compare:)]; }
+    @synchronized (self) {
+        NSMutableSet *allNames = [_functionNames mutableCopy];
+        [allNames unionSet:_tileFunctionNames];
+        sortedNames = [[allNames allObjects] sortedArrayUsingSelector:@selector(compare:)];
+    }
     for (NSString *name in sortedNames) [serialized appendFormat:@"%@\n", name];
     NSData *data = [serialized dataUsingEncoding:NSUTF8StringEncoding];
     NSError *writeError = nil;
@@ -7841,7 +7859,10 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
         return NO;
     }
     if (error != NULL) *error = nil;
-    @synchronized (self) { [_functionNames removeAllObjects]; }
+    @synchronized (self) {
+        [_functionNames removeAllObjects];
+        [_tileFunctionNames removeAllObjects];
+    }
     return YES;
 }
 - (NSData *)serializeAsPipelinesScriptWithError:(NSError **)error {
@@ -7850,9 +7871,14 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
         return nil;
     }
     NSMutableString *serialized = [NSMutableString stringWithString:@"ZPU CPU Metal Pipeline Script v1\n"];
-    NSArray<NSString *> *sortedNames;
-    @synchronized (self) { sortedNames = [[_functionNames allObjects] sortedArrayUsingSelector:@selector(compare:)]; }
-    for (NSString *name in sortedNames) [serialized appendFormat:@"compute %@\n", name];
+    NSArray<NSString *> *sortedComputeNames;
+    NSArray<NSString *> *sortedTileNames;
+    @synchronized (self) {
+        sortedComputeNames = [[_functionNames allObjects] sortedArrayUsingSelector:@selector(compare:)];
+        sortedTileNames = [[_tileFunctionNames allObjects] sortedArrayUsingSelector:@selector(compare:)];
+    }
+    for (NSString *name in sortedComputeNames) [serialized appendFormat:@"compute %@\n", name];
+    for (NSString *name in sortedTileNames) [serialized appendFormat:@"tile %@\n", name];
     if (error != NULL) *error = nil;
     return [serialized dataUsingEncoding:NSUTF8StringEncoding];
 }
@@ -8280,8 +8306,17 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
                                                                  error:(NSError **)error {
     (void)compilerTaskOptions;
     if ([descriptor isKindOfClass:[MTL4TileRenderPipelineDescriptor class]]) {
-        return zpu_mtl4_tile_pipeline_for_descriptor(
+        id<MTLRenderPipelineState> pipeline = zpu_mtl4_tile_pipeline_for_descriptor(
             _owner, (MTL4TileRenderPipelineDescriptor *)descriptor, error);
+        if (pipeline != nil && [_pipelineDataSetSerializer respondsToSelector:@selector(recordTileFunctionName:)]) {
+            MTL4FunctionDescriptor *function_descriptor =
+                ((MTL4TileRenderPipelineDescriptor *)descriptor).tileFunctionDescriptor;
+            if ([function_descriptor isKindOfClass:[MTL4LibraryFunctionDescriptor class]]) {
+                [(ZPUMTL4PipelineDataSetSerializer *)_pipelineDataSetSerializer
+                    recordTileFunctionName:((MTL4LibraryFunctionDescriptor *)function_descriptor).name];
+            }
+        }
+        return pipeline;
     }
     if (![descriptor isKindOfClass:[MTL4RenderPipelineDescriptor class]]) {
         zpu_set_error(error, @"ZPU CPU Metal 4 compiler supports only ordinary render descriptors");
@@ -8599,6 +8634,17 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
         dynamicLinkingDescriptor.binaryLinkedFunctions ?: @[] error:error];
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4PipelineDescriptor *)descriptor error:(NSError **)error {
+    if ([descriptor isKindOfClass:[MTL4TileRenderPipelineDescriptor class]]) {
+        MTL4TileRenderPipelineDescriptor *tile = (MTL4TileRenderPipelineDescriptor *)descriptor;
+        MTL4LibraryFunctionDescriptor *function =
+            (MTL4LibraryFunctionDescriptor *)tile.tileFunctionDescriptor;
+        if (![function isKindOfClass:[MTL4LibraryFunctionDescriptor class]] ||
+            ![_functionNames containsObject:function.name]) {
+            zpu_set_error(error, @"ZPU CPU Metal 4 archive does not contain this tile pipeline");
+            return nil;
+        }
+        return zpu_mtl4_tile_pipeline_for_descriptor(_owner, tile, error);
+    }
     if (![descriptor isKindOfClass:[MTL4RenderPipelineDescriptor class]]) {
         zpu_set_error(error, @"ZPU CPU Metal 4 archive supports only ordinary render descriptors");
         return nil;
@@ -8617,6 +8663,27 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4PipelineDescriptor *)descriptor
                                             dynamicLinkingDescriptor:(MTL4RenderPipelineDynamicLinkingDescriptor *)dynamicLinkingDescriptor
                                                                error:(NSError **)error {
+    if ([descriptor isKindOfClass:[MTL4TileRenderPipelineDescriptor class]]) {
+        id<MTLRenderPipelineState> pipeline = [self newRenderPipelineStateWithDescriptor:descriptor error:error];
+        if (pipeline == nil || dynamicLinkingDescriptor == nil) return pipeline;
+        if (!zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.vertexLinkingDescriptor, error) ||
+            !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.fragmentLinkingDescriptor, error) ||
+            !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.tileLinkingDescriptor, error) ||
+            !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.objectLinkingDescriptor, error) ||
+            !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.meshLinkingDescriptor, error)) {
+            return nil;
+        }
+        if (dynamicLinkingDescriptor.vertexLinkingDescriptor.binaryLinkedFunctions.count != 0 ||
+            dynamicLinkingDescriptor.fragmentLinkingDescriptor.binaryLinkedFunctions.count != 0 ||
+            dynamicLinkingDescriptor.tileLinkingDescriptor.binaryLinkedFunctions.count != 0 ||
+            dynamicLinkingDescriptor.objectLinkingDescriptor.binaryLinkedFunctions.count != 0 ||
+            dynamicLinkingDescriptor.meshLinkingDescriptor.binaryLinkedFunctions.count != 0) {
+            zpu_set_error(error, @"ZPU CPU Metal 4 archived tile pipelines do not support binary linking");
+            return nil;
+        }
+        if (error != NULL) *error = nil;
+        return pipeline;
+    }
     id<MTLRenderPipelineState> pipeline = [self newRenderPipelineStateWithDescriptor:descriptor error:error];
     if (pipeline == nil || dynamicLinkingDescriptor == nil) return pipeline;
     if (!zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.vertexLinkingDescriptor, error) ||

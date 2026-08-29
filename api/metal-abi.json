@@ -373,6 +373,7 @@
     "MTLBinaryArchive.label",
     "MTLBinaryArchive.addComputePipelineFunctionsWithDescriptor",
     "MTLBinaryArchive.addRenderPipelineFunctionsWithDescriptor",
+    "MTLBinaryArchive.addTileRenderPipelineFunctionsWithDescriptor",
     "MTLBinaryArchive.serializeToURL",
     "MTL4Compiler.device",
     "MTL4Compiler.label",
