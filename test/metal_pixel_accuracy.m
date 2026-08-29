@@ -5844,6 +5844,28 @@ int main(void) {
             return 71;
         }
 
+        /* A single-sample CPU target cannot represent a multisample resolve
+         * store action. Do not coerce it to ordinary Store, which would make
+         * the public pass descriptor and resulting bytes disagree. */
+        MTLRenderPassDescriptor *unsupported_store_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        unsupported_store_pass.colorAttachments[0].texture = adapter_metal4_origin_texture;
+        unsupported_store_pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        unsupported_store_pass.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+        id<MTLCommandBuffer> unsupported_store_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> unsupported_store_encoder =
+            [unsupported_store_command_buffer renderCommandEncoderWithDescriptor:unsupported_store_pass];
+        BOOL unsupported_store_rejected = unsupported_store_encoder == nil;
+        if (unsupported_store_encoder != nil) {
+            [unsupported_store_encoder endEncoding];
+            [unsupported_store_command_buffer commit];
+            [unsupported_store_command_buffer waitUntilCompleted];
+            unsupported_store_rejected = unsupported_store_command_buffer.status == MTLCommandBufferStatusError;
+        }
+        if (!unsupported_store_rejected) {
+            fprintf(stderr, "metal-pixel: CPU Metal coerced an unsupported multisample store action\n");
+            return 133;
+        }
+
         /* Metal 4 splits argument-table bindings by stage. Bind the vertex
          * buffer through one table and the uniform fragment buffer through a
          * second table, then compare the CPU/ZPU result with the native

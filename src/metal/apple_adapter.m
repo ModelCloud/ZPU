@@ -1065,6 +1065,10 @@ static zpu_metal_store_action zpu_store_action(MTLStoreAction action) {
     return action == MTLStoreActionDontCare ? ZPU_METAL_STORE_DONT_CARE : ZPU_METAL_STORE_STORE;
 }
 
+static BOOL zpu_store_action_supported(MTLStoreAction action) {
+    return action == MTLStoreActionDontCare || action == MTLStoreActionStore;
+}
+
 static void zpu_set_error(NSError **error, NSString *description) {
     if (error != NULL) {
         *error = [NSError errorWithDomain:@"ZPUMetal" code:ZPU_METAL_INVALID_ARGUMENT
@@ -1120,7 +1124,8 @@ static BOOL zpu_configure_additional_color_attachments(ZPUCommandBuffer *owner,
         ZPUTexture *texture = (ZPUTexture *)attachment.texture;
         if (texture == nil) continue;
         if (![texture isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(texture->_textureType) ||
-            !zpu_render_pipeline_format_supported(texture->_pixelFormat)) return NO;
+            !zpu_render_pipeline_format_supported(texture->_pixelFormat) ||
+            !zpu_store_action_supported(attachment.storeAction)) return NO;
         zpu_metal_texture *zpuTexture = [texture zpuTextureAtLevel:attachment.level slice:attachment.slice];
         if (zpuTexture == NULL) return NO;
         const zpu_metal_render_pass_color_attachment_descriptor pass = {
@@ -1149,7 +1154,8 @@ static BOOL zpu_configure_additional_metal4_color_attachments(ZPUCommandBuffer *
         ZPUTexture *texture = (ZPUTexture *)[attachment texture];
         if (texture == nil) continue;
         if (![texture isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(texture->_textureType) ||
-            !zpu_render_pipeline_format_supported(texture->_pixelFormat)) return NO;
+            !zpu_render_pipeline_format_supported(texture->_pixelFormat) ||
+            !zpu_store_action_supported([attachment storeAction])) return NO;
         zpu_metal_texture *zpuTexture = [texture zpuTextureAtLevel:[attachment level] slice:[attachment slice]];
         if (zpuTexture == NULL) return NO;
         const zpu_metal_render_pass_color_attachment_descriptor pass = {
@@ -1360,6 +1366,7 @@ static BOOL zpu_metal4_render_pass_descriptor(ZPUDevice *owner,
     if (descriptor.renderTargetArrayLength > 1 || descriptor.defaultRasterSampleCount > 1 ||
         (descriptor.renderTargetWidth != 0 && descriptor.renderTargetWidth != zpu_metal_texture_width(colorTexture)) ||
         (descriptor.renderTargetHeight != 0 && descriptor.renderTargetHeight != zpu_metal_texture_height(colorTexture))) return NO;
+    if (hasColor && !zpu_store_action_supported(descriptor.colorAttachments[0].storeAction)) return NO;
     *pass = (zpu_metal_render_pass_descriptor){
         .color = {
             .load_action = hasColor ? zpu_load_action(descriptor.colorAttachments[0].loadAction) : ZPU_METAL_LOAD_DONT_CARE,
@@ -1375,7 +1382,8 @@ static BOOL zpu_metal4_render_pass_descriptor(ZPUDevice *owner,
     };
     ZPUTexture *depth = (ZPUTexture *)descriptor.depthAttachment.texture;
     if (depth != nil) {
-        if (![depth isKindOfClass:[ZPUTexture class]] || depth->_pixelFormat != MTLPixelFormatDepth32Float) return NO;
+        if (![depth isKindOfClass:[ZPUTexture class]] || depth->_pixelFormat != MTLPixelFormatDepth32Float ||
+            !zpu_store_action_supported(descriptor.depthAttachment.storeAction)) return NO;
         zpu_metal_texture *depthTexture = [depth zpuTextureAtLevel:descriptor.depthAttachment.level
                                                               slice:descriptor.depthAttachment.slice];
         if (depthTexture == NULL || zpu_metal_texture_width(depthTexture) != zpu_metal_texture_width(colorTexture) ||
@@ -1386,7 +1394,8 @@ static BOOL zpu_metal4_render_pass_descriptor(ZPUDevice *owner,
     }
     ZPUTexture *stencil = (ZPUTexture *)descriptor.stencilAttachment.texture;
     if (stencil != nil) {
-        if (![stencil isKindOfClass:[ZPUTexture class]] || stencil->_pixelFormat != MTLPixelFormatStencil8) return NO;
+        if (![stencil isKindOfClass:[ZPUTexture class]] || stencil->_pixelFormat != MTLPixelFormatStencil8 ||
+            !zpu_store_action_supported(descriptor.stencilAttachment.storeAction)) return NO;
         zpu_metal_texture *stencilTexture = [stencil zpuTextureAtLevel:descriptor.stencilAttachment.level
                                                                    slice:descriptor.stencilAttachment.slice];
         if (stencilTexture == NULL || zpu_metal_texture_width(stencilTexture) != zpu_metal_texture_width(colorTexture) ||
@@ -5189,6 +5198,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
                                           depthAttachmentTexture != nil ? descriptor.depthAttachment.slice : descriptor.stencilAttachment.slice);
         if (texture == nil) return nil;
     }
+    if (colorAttachment.texture != nil && !zpu_store_action_supported(colorAttachment.storeAction)) return nil;
     if (![texture isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(texture->_textureType)) return nil;
     zpu_metal_texture *colorTexture = [texture zpuTextureAtLevel:colorAttachment.texture != nil ? colorAttachment.level : 0
                                                             slice:colorAttachment.texture != nil ? colorAttachment.slice : 0];
@@ -5211,7 +5221,8 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     if (descriptor.depthAttachment.texture != nil) {
         ZPUTexture *depth = (ZPUTexture *)descriptor.depthAttachment.texture;
         if (![depth isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(depth->_textureType) ||
-            depth->_pixelFormat != MTLPixelFormatDepth32Float) return nil;
+            depth->_pixelFormat != MTLPixelFormatDepth32Float ||
+            !zpu_store_action_supported(descriptor.depthAttachment.storeAction)) return nil;
         depthTexture = [depth zpuTextureAtLevel:descriptor.depthAttachment.level
                                            slice:descriptor.depthAttachment.slice];
         if (depthTexture == NULL) return nil;
@@ -5222,7 +5233,8 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     if (descriptor.stencilAttachment.texture != nil) {
         ZPUTexture *stencil = (ZPUTexture *)descriptor.stencilAttachment.texture;
         if (![stencil isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(stencil->_textureType) ||
-            stencil->_pixelFormat != MTLPixelFormatStencil8) return nil;
+            stencil->_pixelFormat != MTLPixelFormatStencil8 ||
+            !zpu_store_action_supported(descriptor.stencilAttachment.storeAction)) return nil;
         stencilTexture = [stencil zpuTextureAtLevel:descriptor.stencilAttachment.level
                                                slice:descriptor.stencilAttachment.slice];
         if (stencilTexture == NULL || zpu_metal_texture_width(stencilTexture) != zpu_metal_texture_width(colorTexture) ||
@@ -5274,6 +5286,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
                                           depthAttachmentTexture != nil ? descriptor.depthAttachment.slice : descriptor.stencilAttachment.slice);
         if (texture == nil) return nil;
     }
+    if (colorAttachment.texture != nil && !zpu_store_action_supported(colorAttachment.storeAction)) return nil;
     if (![texture isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(texture->_textureType)) return nil;
     zpu_metal_texture *colorTexture = [texture zpuTextureAtLevel:colorAttachment.texture != nil ? colorAttachment.level : 0
                                                             slice:colorAttachment.texture != nil ? colorAttachment.slice : 0];
@@ -5296,7 +5309,8 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     if (descriptor.depthAttachment.texture != nil) {
         ZPUTexture *depth = (ZPUTexture *)descriptor.depthAttachment.texture;
         if (![depth isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(depth->_textureType) ||
-            depth->_pixelFormat != MTLPixelFormatDepth32Float) return nil;
+            depth->_pixelFormat != MTLPixelFormatDepth32Float ||
+            !zpu_store_action_supported(descriptor.depthAttachment.storeAction)) return nil;
         depthTexture = [depth zpuTextureAtLevel:descriptor.depthAttachment.level
                                            slice:descriptor.depthAttachment.slice];
         if (depthTexture == NULL) return nil;
@@ -5307,7 +5321,8 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     if (descriptor.stencilAttachment.texture != nil) {
         ZPUTexture *stencil = (ZPUTexture *)descriptor.stencilAttachment.texture;
         if (![stencil isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(stencil->_textureType) ||
-            stencil->_pixelFormat != MTLPixelFormatStencil8) return nil;
+            stencil->_pixelFormat != MTLPixelFormatStencil8 ||
+            !zpu_store_action_supported(descriptor.stencilAttachment.storeAction)) return nil;
         stencilTexture = [stencil zpuTextureAtLevel:descriptor.stencilAttachment.level
                                                slice:descriptor.stencilAttachment.slice];
         if (stencilTexture == NULL || zpu_metal_texture_width(stencilTexture) != zpu_metal_texture_width(colorTexture) ||
@@ -7696,14 +7711,31 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     return (id<MTLRenderCommandEncoder>)[[ZPURenderEncoder alloc] initWithOwner:_owner encoder:encoder];
 }
 - (void)setColorStoreAction:(MTLStoreAction)storeAction atIndex:(NSUInteger)colorAttachmentIndex {
+    if (!zpu_store_action_supported(storeAction) || colorAttachmentIndex >= ZPU_METAL_MAX_COLOR_ATTACHMENTS) {
+        [_owner markError];
+        return;
+    }
     if (colorAttachmentIndex == 0) _pass.color.store_action = zpu_store_action(storeAction);
     else if (colorAttachmentIndex < ZPU_METAL_MAX_COLOR_ATTACHMENTS) _descriptor.colorAttachments[colorAttachmentIndex].storeAction = storeAction;
 }
-- (void)setDepthStoreAction:(MTLStoreAction)storeAction { _pass.depth.store_action = zpu_store_action(storeAction); }
-- (void)setStencilStoreAction:(MTLStoreAction)storeAction { _stencilStoreAction = zpu_store_action(storeAction); }
-- (void)setColorStoreActionOptions:(MTLStoreActionOptions)options atIndex:(NSUInteger)colorAttachmentIndex { (void)options; (void)colorAttachmentIndex; }
-- (void)setDepthStoreActionOptions:(MTLStoreActionOptions)options { (void)options; }
-- (void)setStencilStoreActionOptions:(MTLStoreActionOptions)options { (void)options; }
+- (void)setDepthStoreAction:(MTLStoreAction)storeAction {
+    if (!zpu_store_action_supported(storeAction)) [_owner markError];
+    else _pass.depth.store_action = zpu_store_action(storeAction);
+}
+- (void)setStencilStoreAction:(MTLStoreAction)storeAction {
+    if (!zpu_store_action_supported(storeAction)) [_owner markError];
+    else _stencilStoreAction = zpu_store_action(storeAction);
+}
+- (void)setColorStoreActionOptions:(MTLStoreActionOptions)options atIndex:(NSUInteger)colorAttachmentIndex {
+    (void)colorAttachmentIndex;
+    if (options != 0) [_owner markError];
+}
+- (void)setDepthStoreActionOptions:(MTLStoreActionOptions)options {
+    if (options != 0) [_owner markError];
+}
+- (void)setStencilStoreActionOptions:(MTLStoreActionOptions)options {
+    if (options != 0) [_owner markError];
+}
 - (NSString *)label { return _label; }
 - (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (void)barrierAfterQueueStages:(MTLStages)afterQueueStages beforeStages:(MTLStages)beforeStages API_AVAILABLE(macos(26.0), ios(26.0)) {
