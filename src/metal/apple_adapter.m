@@ -1375,6 +1375,7 @@ static BOOL zpu_color_texture_format_supported(MTLPixelFormat format) {
 
 static BOOL zpu_integer_texture_format_supported(MTLPixelFormat format) {
     return format == MTLPixelFormatRGB10A2Uint ||
+        format == MTLPixelFormatRGBA32Uint || format == MTLPixelFormatRGBA32Sint ||
         format == MTLPixelFormatR8Uint || format == MTLPixelFormatR8Sint ||
         format == MTLPixelFormatR16Uint || format == MTLPixelFormatR16Sint ||
         format == MTLPixelFormatRG8Uint || format == MTLPixelFormatRG8Sint ||
@@ -1443,6 +1444,8 @@ static zpu_metal_pixel_format zpu_pixel_format(MTLPixelFormat format) {
     if (format == MTLPixelFormatRGBA16Float) return ZPU_METAL_RGBA16_FLOAT;
     if (format == MTLPixelFormatRG32Uint) return ZPU_METAL_RG32_UINT;
     if (format == MTLPixelFormatRG32Sint) return ZPU_METAL_RG32_SINT;
+    if (format == MTLPixelFormatRGBA32Uint) return ZPU_METAL_RGBA32_UINT;
+    if (format == MTLPixelFormatRGBA32Sint) return ZPU_METAL_RGBA32_SINT;
     if (format == MTLPixelFormatRG32Float) return ZPU_METAL_RG32_FLOAT;
     if (format == MTLPixelFormatRGBA32Float) return ZPU_METAL_RGBA32_FLOAT;
     if (format == MTLPixelFormatDepth32Float) return ZPU_METAL_DEPTH32_FLOAT;
@@ -1479,6 +1482,7 @@ static NSUInteger zpu_texture_bytes_per_pixel(MTLPixelFormat format) {
         format == MTLPixelFormatRGBA16Sint || format == MTLPixelFormatRGBA16Float) return 8;
     if (format == MTLPixelFormatRG32Uint || format == MTLPixelFormatRG32Sint) return 8;
     if (format == MTLPixelFormatRG32Float) return 8;
+    if (format == MTLPixelFormatRGBA32Uint || format == MTLPixelFormatRGBA32Sint) return 16;
     if (format == MTLPixelFormatRGBA32Float) return 16;
     return 4;
 }

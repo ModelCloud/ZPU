@@ -26,6 +26,7 @@ triangle path:
   RG32Uint/RG32Sint/RGBA8/BGRA8/RGBA8Unorm_sRGB/BGRA8Unorm_sRGB/RGBA8Snorm/RGBA8Uint/RGBA8Sint/
   B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10/RGB9E5/BGR10A2 packed formats/
   R32Float/RGBA16Unorm/RGBA16Snorm/RGBA16Float/RGBA16Uint/RGBA16Sint/
+  RGBA32Uint/RGBA32Sint/
   RG32Float/RGBA32Float buffers and
   1D/2D/3D textures with
   checked region read/write
@@ -40,7 +41,8 @@ triangle path:
   RG16Unorm/RG16Snorm, R16Float, RG16Float, RGBA8Unorm/RGBA8Unorm_sRGB,
   RGBA8Snorm, BGRA8Unorm/BGRA8Unorm_sRGB, RGBA16Unorm/RGBA16Snorm,
   RGBA16Float, RG11B10Float, RGB9E5Float, R32Float, RG32Float, and RGBA32Float
-  as CPU color targets;
+  as CPU color targets; RGBA32Uint and RGBA32Sint remain transfer-only while
+  preserving their native 16-byte texel widths;
   sRGB RGB channels
   use Apple's 12-bit linear fixed-point transfer profile for CPU sampling,
   attachment stores, clears, and mip generation; 2D mip levels are filtered
@@ -370,7 +372,7 @@ RG16Unorm/RG16Snorm/RG16Float/R32Uint/R32Sint/
 R8Uint/R8Sint/R16Uint/R16Sint/RG8Uint/RG8Sint/RG16Uint/RG16Sint/
 RG32Uint/RG32Sint/RGBA8/BGRA8/RGBA8Unorm_sRGB/BGRA8Unorm_sRGB/RGBA8Snorm/RGBA8Uint/RGBA8Sint/
 packed B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10/RGB9E5/BGR10A2/
-R32Float/RGBA16Unorm/RGBA16Snorm/RGBA16Float/RGBA16Uint/RGBA16Sint/RG32Float/RGBA32Float/
+  R32Float/RGBA16Unorm/RGBA16Snorm/RGBA16Float/RGBA16Uint/RGBA16Sint/RGBA32Uint/RGBA32Sint/RG32Float/RGBA32Float/
 depth32-float/Stencil8 buffers and textures, records
 render/blit work, and executes it at command-buffer commit. Its render state
 uses a fixed `zpu_metal_vertex` ABI; it does not parse MSL or execute arbitrary

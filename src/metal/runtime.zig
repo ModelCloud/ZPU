@@ -77,6 +77,8 @@ pub const TextureFormat = enum {
     rg32_uint,
     rg32_sint,
     rg32_float,
+    rgba32_uint,
+    rgba32_sint,
     rgba32_float,
     depth32_float,
     stencil8,
@@ -101,7 +103,7 @@ pub const TextureFormat = enum {
             .stencil8 => 1,
             .rgba16_unorm, .rgba16_snorm, .rgba16_uint, .rgba16_sint, .rgba16_float => 8,
             .rg32_uint, .rg32_sint, .rg32_float => 8,
-            .rgba32_float => 16,
+            .rgba32_uint, .rgba32_sint, .rgba32_float => 16,
             else => 4,
         };
     }
@@ -166,6 +168,8 @@ fn textureFormatFromRaw(format_raw: u16) ?TextureFormat {
         @intFromEnum(abi.PixelFormat.rg32_uint) => .rg32_uint,
         @intFromEnum(abi.PixelFormat.rg32_sint) => .rg32_sint,
         @intFromEnum(abi.PixelFormat.rg32_float) => .rg32_float,
+        @intFromEnum(abi.PixelFormat.rgba32_uint) => .rgba32_uint,
+        @intFromEnum(abi.PixelFormat.rgba32_sint) => .rgba32_sint,
         @intFromEnum(abi.PixelFormat.rgba32_float) => .rgba32_float,
         @intFromEnum(abi.PixelFormat.depth32_float) => .depth32_float,
         @intFromEnum(abi.PixelFormat.stencil8) => .stencil8,
@@ -309,6 +313,7 @@ pub const Texture = struct {
                 .rgba16_float => .rgba16_float,
                 .rg32_uint, .rg32_sint => unreachable,
                 .rg32_float => .rg32_float,
+                .rgba32_uint, .rgba32_sint => unreachable,
                 .rgba32_float => .rgba32_float,
                 .depth32_float => unreachable,
                 .stencil8 => unreachable,
@@ -2291,7 +2296,7 @@ fn executeCompute(command: ComputeCommand) Error!void {
                         command.texture.bytes[offset + 2] = red;
                         command.texture.bytes[offset + 3] = 255;
                     },
-                    .a8_unorm, .r8_unorm_srgb, .r8_snorm, .r8_uint, .r8_sint, .r16_snorm, .r16_uint, .r16_sint, .r16_unorm, .r16_float, .rg8_unorm_srgb, .rg8_snorm, .rg8_uint, .rg8_sint, .rg16_snorm, .rg16_uint, .rg16_sint, .rg16_unorm, .rg16_float, .r32_uint, .r32_sint, .r32_float, .rgba8_unorm_srgb, .rgba8_snorm, .rgba8_uint, .rgba8_sint, .rgba16_snorm, .rgba16_unorm, .rgba16_uint, .rgba16_sint, .rgba16_float, .rg32_uint, .rg32_sint, .rg32_float, .rgba32_float, .bgra8_unorm_srgb, .b5g6r5_unorm, .a1bgr5_unorm, .abgr4_unorm, .bgr5a1_unorm, .rgb10a2_unorm, .rgb10a2_uint, .rg11b10_float, .rgb9e5_float, .bgr10a2_unorm, .depth32_float, .stencil8 => return error.UnsupportedFormat,
+                    .a8_unorm, .r8_unorm_srgb, .r8_snorm, .r8_uint, .r8_sint, .r16_snorm, .r16_uint, .r16_sint, .r16_unorm, .r16_float, .rg8_unorm_srgb, .rg8_snorm, .rg8_uint, .rg8_sint, .rg16_snorm, .rg16_uint, .rg16_sint, .rg16_unorm, .rg16_float, .r32_uint, .r32_sint, .r32_float, .rgba8_unorm_srgb, .rgba8_snorm, .rgba8_uint, .rgba8_sint, .rgba16_snorm, .rgba16_unorm, .rgba16_uint, .rgba16_sint, .rgba16_float, .rg32_uint, .rg32_sint, .rg32_float, .rgba32_uint, .rgba32_sint, .rgba32_float, .bgra8_unorm_srgb, .b5g6r5_unorm, .a1bgr5_unorm, .abgr4_unorm, .bgr5a1_unorm, .rgb10a2_unorm, .rgb10a2_uint, .rg11b10_float, .rgb9e5_float, .bgr10a2_unorm, .depth32_float, .stencil8 => return error.UnsupportedFormat,
                 }
             }
         },
@@ -2327,7 +2332,7 @@ fn executeCompute(command: ComputeCommand) Error!void {
                             command.texture.bytes[destination_offset + 2] = source.bytes[source_offset + 0];
                             command.texture.bytes[destination_offset + 3] = source.bytes[source_offset + 3];
                         },
-                        .a8_unorm, .r8_unorm_srgb, .r8_snorm, .r8_uint, .r8_sint, .r16_snorm, .r16_uint, .r16_sint, .r16_unorm, .r16_float, .rg8_unorm_srgb, .rg8_snorm, .rg8_uint, .rg8_sint, .rg16_snorm, .rg16_uint, .rg16_sint, .rg16_unorm, .rg16_float, .r32_uint, .r32_sint, .r32_float, .rgba8_unorm_srgb, .rgba8_snorm, .rgba8_uint, .rgba8_sint, .rgba16_snorm, .rgba16_unorm, .rgba16_uint, .rgba16_sint, .rgba16_float, .rg32_uint, .rg32_sint, .rg32_float, .rgba32_float, .bgra8_unorm_srgb, .b5g6r5_unorm, .a1bgr5_unorm, .abgr4_unorm, .bgr5a1_unorm, .rgb10a2_unorm, .rgb10a2_uint, .rg11b10_float, .rgb9e5_float, .bgr10a2_unorm, .depth32_float, .stencil8 => return error.UnsupportedFormat,
+                        .a8_unorm, .r8_unorm_srgb, .r8_snorm, .r8_uint, .r8_sint, .r16_snorm, .r16_uint, .r16_sint, .r16_unorm, .r16_float, .rg8_unorm_srgb, .rg8_snorm, .rg8_uint, .rg8_sint, .rg16_snorm, .rg16_uint, .rg16_sint, .rg16_unorm, .rg16_float, .r32_uint, .r32_sint, .r32_float, .rgba8_unorm_srgb, .rgba8_snorm, .rgba8_uint, .rgba8_sint, .rgba16_snorm, .rgba16_unorm, .rgba16_uint, .rgba16_sint, .rgba16_float, .rg32_uint, .rg32_sint, .rg32_float, .rgba32_uint, .rgba32_sint, .rgba32_float, .bgra8_unorm_srgb, .b5g6r5_unorm, .a1bgr5_unorm, .abgr4_unorm, .bgr5a1_unorm, .rgb10a2_unorm, .rgb10a2_uint, .rg11b10_float, .rgb9e5_float, .bgr10a2_unorm, .depth32_float, .stencil8 => return error.UnsupportedFormat,
                     }
                 }
             }
@@ -2558,6 +2563,8 @@ pub fn createTextureFromBuffer(buffer: *Buffer, width: u32, height: u32, format_
         @intFromEnum(abi.PixelFormat.rg32_uint) => .rg32_uint,
         @intFromEnum(abi.PixelFormat.rg32_sint) => .rg32_sint,
         @intFromEnum(abi.PixelFormat.rg32_float) => .rg32_float,
+        @intFromEnum(abi.PixelFormat.rgba32_uint) => .rgba32_uint,
+        @intFromEnum(abi.PixelFormat.rgba32_sint) => .rgba32_sint,
         @intFromEnum(abi.PixelFormat.rgba32_float) => .rgba32_float,
         @intFromEnum(abi.PixelFormat.stencil8) => .stencil8,
         else => return error.UnsupportedFormat,
@@ -4043,6 +4050,8 @@ fn texturePixelFormat(texture: *const Texture) ?abi.PixelFormat {
         .rg32_uint => .rg32_uint,
         .rg32_sint => .rg32_sint,
         .rg32_float => .rg32_float,
+        .rgba32_uint => .rgba32_uint,
+        .rgba32_sint => .rgba32_sint,
         .rgba32_float => .rgba32_float,
         .depth32_float => .depth32_float,
         .stencil8 => .stencil8,

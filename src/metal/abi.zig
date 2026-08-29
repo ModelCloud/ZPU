@@ -12,7 +12,7 @@
 /// This is intentionally not Apple's framework version.  The ZPU ABI is an
 /// opt-in compatibility surface and must never be confused with an
 /// implementation of the Objective-C Metal runtime.
-pub const abi_version: u32 = 18;
+pub const abi_version: u32 = 19;
 
 pub const Workload = enum(u8) {
     two_dimensional,
@@ -69,6 +69,8 @@ pub const PixelFormat = enum(u16) {
     rg32_sint = 104,
     rg32_float = 105,
     rgba32_float = 125,
+    rgba32_uint = 123,
+    rgba32_sint = 124,
     depth32_float = 252,
     stencil8 = 253,
 };
@@ -210,7 +212,7 @@ pub const CpuBudget = struct {
 
 test "Metal ABI layout and CPU budgets are pinned" {
     const std = @import("std");
-    try std.testing.expectEqual(@as(u32, 18), abi_version);
+    try std.testing.expectEqual(@as(u32, 19), abi_version);
     try std.testing.expectEqual(@as(u8, 1), (CpuBudget{ .workload = .two_dimensional }).maxCores());
     try std.testing.expectEqual(@as(u8, 2), (CpuBudget{ .workload = .three_dimensional }).maxCores());
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(Color));

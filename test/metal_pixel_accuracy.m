@@ -1898,6 +1898,59 @@ static int test_color_sampling_against_native(
     return 0;
 }
 
+static int test_rgba32_integer_transfers_against_native(id<MTLDevice> native_device, id<MTLDevice> adapter_device) {
+    enum { width = 3, height = 2, texel_count = width * height, byte_count = texel_count * 16 };
+    const struct {
+        MTLPixelFormat format;
+        const char *name;
+    } formats[] = {
+        {MTLPixelFormatRGBA32Uint, "RGBA32Uint"},
+        {MTLPixelFormatRGBA32Sint, "RGBA32Sint"},
+    };
+    const uint32_t source[texel_count * 4] = {
+        0x00000000, 0x00000001, 0x80000000, 0xffffffff,
+        0x10203040, 0x50607080, 0x90a0b0c0, 0xd0e0f000,
+        0x7fffffff, 0x80000001, 0x13579bdf, 0x2468ace0,
+        0xffffffff, 0x00000000, 0xaaaaaaaa, 0x55555555,
+        0x01020304, 0x11223344, 0xdeadbeef, 0xcafebabe,
+        0x3f800000, 0x40000000, 0x40400000, 0x40800000,
+    };
+    for (NSUInteger index = 0; index < sizeof(formats) / sizeof(formats[0]); ++index) {
+        MTLTextureDescriptor *descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:formats[index].format
+                                                                width:width height:height mipmapped:NO];
+        descriptor.storageMode = MTLStorageModeShared;
+        descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:descriptor];
+        id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:descriptor];
+        if (native_texture == nil || adapter_texture == nil || adapter_texture.allocatedSize != byte_count) {
+            fprintf(stderr, "metal-pixel: %s allocation failed\n", formats[index].name);
+            return 177;
+        }
+        [native_texture replaceRegion:MTLRegionMake2D(0, 0, width, height)
+                           mipmapLevel:0 withBytes:source bytesPerRow:width * 16];
+        [adapter_texture replaceRegion:MTLRegionMake2D(0, 0, width, height)
+                            mipmapLevel:0 withBytes:source bytesPerRow:width * 16];
+        uint8_t native_bytes[byte_count];
+        uint8_t adapter_bytes[byte_count];
+        [native_texture getBytes:native_bytes bytesPerRow:width * 16
+                       fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_texture getBytes:adapter_bytes bytesPerRow:width * 16
+                        fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (memcmp(native_bytes, adapter_bytes, byte_count) != 0 ||
+            memcmp(adapter_bytes, source, byte_count) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < byte_count && native_bytes[mismatch] == adapter_bytes[mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: %s transfer mismatch at byte %zu native=%u adapter=%u\n",
+                    formats[index].name, mismatch,
+                    mismatch < byte_count ? native_bytes[mismatch] : 0,
+                    mismatch < byte_count ? adapter_bytes[mismatch] : 0);
+            return 178;
+        }
+    }
+    return 0;
+}
+
 int main(void) {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -2272,6 +2325,8 @@ int main(void) {
 
         const int io_result = test_cpu_io_against_native(device, adapter_rate_map_device);
         if (io_result != 0) return io_result;
+        const int rgba32_integer_result = test_rgba32_integer_transfers_against_native(device, adapter_rate_map_device);
+        if (rgba32_integer_result != 0) return rgba32_integer_result;
         const int drawable_result = test_cpu_drawable_lifecycle(device, adapter_rate_map_device);
         if (drawable_result != 0) return drawable_result;
 
@@ -2512,7 +2567,7 @@ int main(void) {
         /* Scalar, packed floating-point, and integer resource formats have a
          * byte-exact contract. The adapter must preserve native Metal texel
          * widths for R32Uint, R16Float, RG16Float, R32Float, RGBA16Unorm,
-         * RGBA16Float, and RGBA32Float transfers. */
+         * RGBA16Float, RGBA32Uint, RGBA32Sint, and RGBA32Float transfers. */
         enum { raw_format_width = 3, raw_format_height = 2,
                raw_r16_bytes = raw_format_width * raw_format_height * 2,
                raw_rg16_bytes = raw_format_width * raw_format_height * 4,

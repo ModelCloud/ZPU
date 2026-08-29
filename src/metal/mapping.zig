@@ -62,6 +62,8 @@ pub const Api = enum {
     rg32_uint,
     rg32_sint,
     rg32_float,
+    rgba32_uint,
+    rgba32_sint,
     rgba32_float,
     load_dont_care,
     load_load,
@@ -135,6 +137,8 @@ pub fn entry(api: Api) Entry {
         .rg32_uint => .{ .kind = .direct_vulkan, .vulkan_value = 101 }, // VK_FORMAT_R32G32_UINT
         .rg32_sint => .{ .kind = .direct_vulkan, .vulkan_value = 102 }, // VK_FORMAT_R32G32_SINT
         .rg32_float => .{ .kind = .direct_vulkan, .vulkan_value = 103 }, // VK_FORMAT_R32G32_SFLOAT
+        .rgba32_uint => .{ .kind = .direct_vulkan, .vulkan_value = 107 }, // VK_FORMAT_R32G32B32A32_UINT
+        .rgba32_sint => .{ .kind = .direct_vulkan, .vulkan_value = 108 }, // VK_FORMAT_R32G32B32A32_SINT
         .rgba32_float => .{ .kind = .direct_vulkan, .vulkan_value = 109 }, // VK_FORMAT_R32G32B32A32_SFLOAT
         .load_dont_care => .{ .kind = .direct_vulkan, .vulkan_value = 1 }, // VK_ATTACHMENT_LOAD_OP_DONT_CARE
         .load_load => .{ .kind = .direct_vulkan, .vulkan_value = 0 }, // VK_ATTACHMENT_LOAD_OP_LOAD
@@ -180,6 +184,8 @@ test "mapping policy keeps direct values separate from native lifetimes" {
     try @import("std").testing.expectEqual(@as(?u32, 41), entry(.rgba8_uint).vulkan_value);
     try @import("std").testing.expectEqual(@as(?u32, 43), entry(.rgba8_unorm_srgb).vulkan_value);
     try @import("std").testing.expectEqual(@as(?u32, 109), entry(.rgba32_float).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 107), entry(.rgba32_uint).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 108), entry(.rgba32_sint).vulkan_value);
     try @import("std").testing.expectEqual(@as(?u32, 103), entry(.rg32_float).vulkan_value);
     try @import("std").testing.expectEqual(@as(?u32, 101), entry(.rg32_uint).vulkan_value);
     try @import("std").testing.expectEqual(Kind.direct_vulkan, entry(.primitive_triangle_strip).kind);

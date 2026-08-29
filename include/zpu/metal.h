@@ -9,7 +9,7 @@
 /* Native ZPU CPU Metal-layer ABI. This is intentionally separate from the
  * Apple Objective-C framework ABI; it is the portable FFI surface used by
  * clients that select ZPU's CPU renderer. */
-#define ZPU_METAL_ABI_VERSION 18u
+#define ZPU_METAL_ABI_VERSION 19u
 
 typedef uint8_t zpu_metal_workload;
 enum {
@@ -68,6 +68,8 @@ enum {
     ZPU_METAL_RG32_UINT = 103,
     ZPU_METAL_RG32_SINT = 104,
     ZPU_METAL_RGBA32_FLOAT = 125,
+    ZPU_METAL_RGBA32_UINT = 123,
+    ZPU_METAL_RGBA32_SINT = 124,
     ZPU_METAL_DEPTH32_FLOAT = 252,
     ZPU_METAL_STENCIL8 = 253,
 };
