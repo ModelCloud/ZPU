@@ -3,8 +3,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const build_caps = @import("build_caps.zig");
 const tile_profile = @import("tile_profile.zig");
-const simd_dispatch = @import("../simd/dispatch.zig");
 
 const CpuSet = if (builtin.os.tag == .linux) std.os.linux.cpu_set_t else [1]usize;
 const cpu_capacity = @sizeOf(CpuSet) * 8;
@@ -12,12 +12,7 @@ const bits_per_word = @bitSizeOf(usize);
 
 pub const Role = enum(usize) {
     render = 0,
-    raster_1 = 1,
-    raster_2 = 2,
-    raster_3 = 3,
-    raster_4 = 4,
     present = 5,
-    raster_5 = 6,
 };
 
 var mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER;
@@ -27,6 +22,7 @@ var selected_count: usize = 0;
 var selected_node: ?usize = null;
 var selected_tile_profile: tile_profile.Profile = tile_profile.baseline;
 threadlocal var pinned_role: ?Role = null;
+threadlocal var pinned_cpu: ?usize = null;
 
 fn contains(set: CpuSet, cpu: usize) bool {
     return set[cpu / bits_per_word] & (@as(usize, 1) << @intCast(cpu % bits_per_word)) != 0;
@@ -95,7 +91,9 @@ fn prioritizeCacheLocalPair(scores: []const u64) void {
     var largest_group: usize = 0;
     for (0..selected_count) |first| {
         var group_size: usize = 0;
-        for (0..selected_count) |second| if (shareCache(selected_cpus[first], selected_cpus[second])) group_size += 1;
+        for (0..selected_count) |second| {
+            if (shareCache(selected_cpus[first], selected_cpus[second])) group_size += 1;
+        }
         if (group_size > largest_group or (group_size == largest_group and scores[first] > scores[anchor])) {
             anchor = first;
             largest_group = group_size;
@@ -188,27 +186,25 @@ fn ensureInitialized() void {
     defer _ = std.c.pthread_mutex_unlock(&mutex);
     if (initialized) return;
     initialized = true;
-    selected_tile_profile = tile_profile.detect(.{
-        .portable_vector = true,
-        .avx2 = simd_dispatch.eight_lane_boundary,
-        .avx512 = false,
-    });
+    // Clustered triangle kernels are not linked by this module. Keep this
+    // capability independent from the surface SIMD dispatcher: a v3 surface
+    // artifact must not make an experimental 3D kernel executable.
+    selected_tile_profile = tile_profile.detect(build_caps.standalone);
     if (builtin.os.tag == .linux) discoverLinux();
 }
 
 fn roleCpuIndex(role: Role, cpu_count: usize) usize {
     std.debug.assert(cpu_count != 0);
-    if (role == .render or cpu_count == 1) return 0;
-    if (role == .present) return @min(@as(usize, 1), cpu_count - 1);
-    const raster_ordinal: usize = switch (role) {
-        .raster_1 => 0,
-        .raster_2 => 1,
-        .raster_3 => 2,
-        .raster_4 => 3,
-        .raster_5 => 4,
-        else => 0,
+    return switch (role) {
+        .render => 0,
+        .present => @min(@as(usize, 1), cpu_count - 1),
     };
-    return 1 + raster_ordinal % @max(@as(usize, 1), cpu_count - 1);
+}
+
+fn workerCpuIndex(worker_index: usize, cpu_count: usize) usize {
+    std.debug.assert(cpu_count != 0);
+    if (cpu_count <= 1) return 0;
+    return 1 + worker_index % (cpu_count - 1);
 }
 
 pub fn rasterTileProfile() tile_profile.Profile {
@@ -240,12 +236,23 @@ pub fn pinCurrent(role: Role) bool {
     }
     std.os.linux.sched_setaffinity(0, &role_mask) catch return false;
     pinned_role = role;
+    pinned_cpu = selected_cpus[role_index];
     return true;
 }
 
 pub fn pinRasterWorker(worker_index: usize) bool {
-    const roles = [_]Role{ .raster_1, .raster_2, .raster_3, .raster_4, .raster_5 };
-    return pinCurrent(roles[worker_index % roles.len]);
+    if (builtin.os.tag != .linux) return false;
+    ensureInitialized();
+    _ = std.c.pthread_mutex_lock(&mutex);
+    defer _ = std.c.pthread_mutex_unlock(&mutex);
+    if (selected_count == 0) return false;
+    const role_index = workerCpuIndex(worker_index, selected_count);
+    if (pinned_cpu == selected_cpus[role_index]) return true;
+    var worker_mask = singleton(selected_cpus[role_index]);
+    std.os.linux.sched_setaffinity(0, &worker_mask) catch return false;
+    pinned_role = null;
+    pinned_cpu = selected_cpus[role_index];
+    return true;
 }
 
 pub fn prepareMemory(bytes: []u8) void {
@@ -279,11 +286,24 @@ test "CPU masks select exactly one requested processor" {
 
 test "raster roles fan out when CPUs are available" {
     try std.testing.expectEqual(@as(usize, 0), roleCpuIndex(.render, 8));
-    try std.testing.expectEqual(@as(usize, 1), roleCpuIndex(.raster_1, 8));
-    try std.testing.expectEqual(@as(usize, 2), roleCpuIndex(.raster_2, 8));
-    try std.testing.expectEqual(@as(usize, 5), roleCpuIndex(.raster_5, 8));
     try std.testing.expectEqual(@as(usize, 1), roleCpuIndex(.present, 8));
-    try std.testing.expectEqual(@as(usize, 1), roleCpuIndex(.raster_5, 2));
+}
+
+test "raster worker assignment has no fixed role ceiling" {
+    const cpu_counts = [_]usize{ 1, 2, 6, 32, 64, 128 };
+    for (cpu_counts) |cpu_count| {
+        var seen = [_]bool{false} ** 128;
+        const worker_count = if (cpu_count <= 1) 1 else cpu_count - 1;
+        for (0..worker_count) |worker| {
+            const cpu = workerCpuIndex(worker, cpu_count);
+            try std.testing.expect(cpu < cpu_count);
+            try std.testing.expect(!seen[cpu]);
+            seen[cpu] = true;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 6), workerCpuIndex(5, 8));
+    try std.testing.expectEqual(@as(usize, 32), workerCpuIndex(31, 128));
+    try std.testing.expectEqual(@as(usize, 1), workerCpuIndex(127, 128));
 }
 
 test "Linux CPU-list parser recognizes cache-sharing ranges" {

@@ -3,6 +3,7 @@
 
 const builtin = @import("builtin");
 const std = @import("std");
+const build_caps = @import("build_caps.zig");
 
 pub const IsaClass = enum { scalar, portable_vector, avx2, avx512 };
 
@@ -18,11 +19,7 @@ pub const Capabilities = struct {
 /// Separates CPU capability from the kernel objects actually present in the
 /// artifact. A host feature bit alone must never make an unsupported backend
 /// executable.
-pub const CompiledKernels = struct {
-    portable_vector: bool = true,
-    avx2: bool = false,
-    avx512: bool = false,
-};
+pub const CompiledKernels = build_caps.Compiled;
 
 pub const Profile = struct {
     host_class: IsaClass,
@@ -72,8 +69,8 @@ pub fn hostClass(caps: Capabilities) IsaClass {
 /// shape until measurements justify doing so.
 pub fn choose(caps: Capabilities, compiled: CompiledKernels) Profile {
     const host = hostClass(caps);
-    const can_avx2 = (host == .avx2 or host == .avx512) and compiled.avx2;
-    const can_avx512 = host == .avx512 and compiled.avx512;
+    const can_avx2 = (host == .avx2 or host == .avx512) and compiled.hasClusteredAvx2();
+    const can_avx512 = host == .avx512 and compiled.hasClusteredAvx512();
 
     if (can_avx512) return .{
         .host_class = host,
@@ -182,27 +179,27 @@ test "kernel linkage gates executable ISA" {
     try std.testing.expectEqual(IsaClass.portable_vector, portable.executable_class);
     try std.testing.expectEqual(@as(u8, 4), portable.vector_lanes);
 
-    const avx2 = choose(host_avx512, .{ .avx2 = true });
+    const avx2 = choose(host_avx512, .{ .clustered_primitive_avx2 = true });
     try std.testing.expectEqual(IsaClass.avx2, avx2.executable_class);
     try std.testing.expectEqual(@as(u16, 32), avx2.scheduler_w);
     try std.testing.expectEqual(@as(u8, 8), avx2.vector_lanes);
 
-    const avx512 = choose(host_avx512, .{ .avx2 = true, .avx512 = true });
+    const avx512 = choose(host_avx512, .{ .clustered_primitive_avx2 = true, .clustered_pixel_avx512 = true });
     try std.testing.expectEqual(IsaClass.avx512, avx512.executable_class);
     try std.testing.expectEqual(@as(u8, 16), avx512.vector_lanes);
 }
 
 test "OS vector state gates host class" {
-    const no_ymm = choose(.{ .avx = true, .osxsave = true, .avx2 = true }, .{ .avx2 = true });
+    const no_ymm = choose(.{ .avx = true, .osxsave = true, .avx2 = true }, .{ .clustered_primitive_avx2 = true });
     try std.testing.expectEqual(IsaClass.portable_vector, no_ymm.executable_class);
-    const no_zmm = choose(.{ .avx = true, .osxsave = true, .ymm_state = true, .avx2 = true, .avx512f = true }, .{ .avx2 = true, .avx512 = true });
+    const no_zmm = choose(.{ .avx = true, .osxsave = true, .ymm_state = true, .avx2 = true, .avx512f = true }, .{ .clustered_primitive_avx2 = true, .clustered_pixel_avx512 = true });
     try std.testing.expectEqual(IsaClass.avx2, no_zmm.host_class);
     try std.testing.expectEqual(IsaClass.avx2, no_zmm.executable_class);
 }
 
 test "profile geometry remains aligned" {
     const caps = Capabilities{ .avx = true, .osxsave = true, .ymm_state = true, .zmm_state = true, .avx2 = true, .avx512f = true };
-    const profiles = [_]Profile{ choose(.{}, .{}), choose(caps, .{ .avx2 = true }), choose(caps, .{ .avx2 = true, .avx512 = true }) };
+    const profiles = [_]Profile{ choose(.{}, .{}), choose(caps, .{ .clustered_primitive_avx2 = true }), choose(caps, .{ .clustered_primitive_avx2 = true, .clustered_pixel_avx512 = true }) };
     for (profiles) |profile| {
         try std.testing.expect(profile.scheduler_w % profile.micro_w == 0);
         try std.testing.expect(profile.scheduler_h % profile.micro_h == 0);

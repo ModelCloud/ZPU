@@ -11,7 +11,8 @@ pub fn build(b: *std.Build) void {
     // `-Dv3-kernels=false` produces fully kernel-free baseline artifacts for
     // the ISA disassembly evidence gates.
     const v3_kernels_enabled = b.option(bool, "v3-kernels", "Link the separately compiled x86-64-v3 eight-lane kernel objects") orelse true;
-    const enable_xcb = b.option(bool, "xcb", "Build the xcb-dependent artifacts (ICD, demo)") orelse true;
+    const core_only = b.option(bool, "core-only", "Run only dependency-free render foundation compiler/tests") orelse false;
+    const enable_xcb = b.option(bool, "xcb", "Build the xcb-dependent artifacts (ICD, demo)") orelse !core_only;
     const target = b.standardTargetOptions(.{ .default_target = .{ .cpu_model = .baseline } });
     const optimize = b.standardOptimizeOption(.{});
     if (b.option([]const u8, "search-prefix", "Extra library search prefix for cross builds (e.g. /usr/lib/aarch64-linux-gnu)")) |prefix| {
@@ -23,6 +24,12 @@ pub fn build(b: *std.Build) void {
 
     const build_config = b.addOptions();
     build_config.addOption(bool, "v3_kernels", v3_available);
+    build_config.addOption(bool, "surface_avx2", v3_available);
+    build_config.addOption(bool, "clustered_primitive_avx2", false);
+    build_config.addOption(bool, "clustered_pixel_avx2", false);
+    build_config.addOption(bool, "surface_avx512", false);
+    build_config.addOption(bool, "clustered_primitive_avx512", false);
+    build_config.addOption(bool, "clustered_pixel_avx512", false);
     const build_config_module = build_config.createModule();
 
     // Kernel-free twin configuration: identical sources and flags except the
@@ -31,8 +38,44 @@ pub fn build(b: *std.Build) void {
     // keeping the strongest evidence inside the normal test contract.
     const clean_config = b.addOptions();
     clean_config.addOption(bool, "v3_kernels", false);
+    clean_config.addOption(bool, "surface_avx2", false);
+    clean_config.addOption(bool, "clustered_primitive_avx2", false);
+    clean_config.addOption(bool, "clustered_pixel_avx2", false);
+    clean_config.addOption(bool, "surface_avx512", false);
+    clean_config.addOption(bool, "clustered_primitive_avx512", false);
+    clean_config.addOption(bool, "clustered_pixel_avx512", false);
     const clean_config_module = clean_config.createModule();
     const release_fast = .ReleaseFast;
+
+    // This path is intentionally small and dependency-free. CI runs it before
+    // installing kcov/X11/Vulkan packages so render-planning compiler failures
+    // cannot be hidden behind an integration setup failure.
+    if (core_only) {
+        const render_test = b.addTest(.{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/render/clustered_backend.zig"), .target = b.graph.host, .optimize = .Debug }),
+        });
+        const run_render_test = b.addRunArtifact(render_test);
+        const locality_test = b.addTest(.{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/vulkan/cpu_locality.zig"), .target = b.graph.host, .optimize = .Debug }),
+        });
+        locality_test.root_module.link_libc = true;
+        const run_locality_test = b.addRunArtifact(locality_test);
+        const prepared_test = b.addTest(.{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/render/prepared_primitives.zig"), .target = b.graph.host, .optimize = .Debug }),
+        });
+        const run_prepared_test = b.addRunArtifact(prepared_test);
+        const scalar_packet_test = b.addTest(.{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/render/scalar_packet.zig"), .target = b.graph.host, .optimize = .Debug }),
+        });
+        const run_scalar_packet_test = b.addRunArtifact(scalar_packet_test);
+        const test_step = b.step("test", "Run dependency-free render foundation tests");
+        test_step.dependOn(&run_render_test.step);
+        test_step.dependOn(&run_locality_test.step);
+        test_step.dependOn(&run_prepared_test.step);
+        test_step.dependOn(&run_scalar_packet_test.step);
+        b.getInstallStep().dependOn(test_step);
+        return;
+    }
 
     const v3_kernels_main: ?*std.Build.Step.Compile =
         if (v3_available) addV3Kernels(b, target, "zpu-x86-64-v3-kernels") else null;

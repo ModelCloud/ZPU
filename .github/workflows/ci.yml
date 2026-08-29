@@ -15,6 +15,11 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+      - run: tools/limited-cpus.sh zig fmt --check build.zig src tools
+      - name: Dependency-free render compiler gate
+        run: tools/limited-cpus.sh zig build -Dcore-only=true
+      - name: Dependency-free render test gate
+        run: tools/limited-cpus.sh zig build test -Dcore-only=true
       - name: Enable arm64 APT multiarch sources
         run: |
           # GitHub's Ubuntu 24.04 Azure mirror does not publish arm64 indexes,
@@ -39,7 +44,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends kcov libvulkan1 libvulkan-dev libxcb1-dev libxcb1-dev:arm64 libvulkan-dev:arm64 twm vulkan-tools xauth xvfb
           dpkg-query -W -f='${Package}=${Version}\n' kcov libvulkan1 libvulkan-dev libxcb1-dev libxcb1-dev:arm64 libvulkan-dev:arm64 twm vulkan-tools xauth xvfb
-      - run: tools/limited-cpus.sh zig fmt --check build.zig src tools
       - run: tools/limited-cpus.sh zig build
       - run: test "$(realpath zig-out/share/vulkan/icd.d/../../../lib/libvulkan_zpu.so)" = "$(realpath zig-out/lib/libvulkan_zpu.so)"
       - run: tools/limited-cpus.sh zig build test
