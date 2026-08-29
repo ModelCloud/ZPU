@@ -3896,6 +3896,86 @@ int main(void) {
             }
         }
 
+        /* A depth-only pass has no color attachment at all. The adapter uses
+         * an internal discarded CPU color surface solely to keep the portable
+         * raster ABI shape; the public depth texture must still match native
+         * Metal byte-for-byte. */
+        MTLRenderPipelineDescriptor *depth_only_pipeline_descriptor = [depth_pipeline_descriptor copy];
+        depth_only_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatInvalid;
+        id<MTLRenderPipelineState> metal_depth_only_pipeline =
+            [device newRenderPipelineStateWithDescriptor:depth_only_pipeline_descriptor error:&error];
+        MTLTextureDescriptor *metal_depth_only_texture_descriptor = [metal_depth_texture_descriptor copy];
+        metal_depth_only_texture_descriptor.storageMode = MTLStorageModeShared;
+        id<MTLTexture> metal_depth_only_texture =
+            [device newTextureWithDescriptor:metal_depth_only_texture_descriptor];
+        if (metal_depth_only_pipeline == nil || metal_depth_only_texture == nil) {
+            fail_with_error("depth-only reference allocation failed", error);
+            return 77;
+        }
+        MTLRenderPassDescriptor *metal_depth_only_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        metal_depth_only_pass.depthAttachment.texture = metal_depth_only_texture;
+        metal_depth_only_pass.depthAttachment.loadAction = MTLLoadActionClear;
+        metal_depth_only_pass.depthAttachment.storeAction = MTLStoreActionStore;
+        metal_depth_only_pass.depthAttachment.clearDepth = 1.0;
+        id<MTLCommandBuffer> metal_depth_only_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> metal_depth_only_encoder =
+            [metal_depth_only_command_buffer renderCommandEncoderWithDescriptor:metal_depth_only_pass];
+        [metal_depth_only_encoder setRenderPipelineState:metal_depth_only_pipeline];
+        [metal_depth_only_encoder setDepthStencilState:depth_state];
+        [metal_depth_only_encoder setVertexBuffer:metal_depth_vertex_buffer offset:0 atIndex:0];
+        [metal_depth_only_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
+        [metal_depth_only_encoder endEncoding];
+        [metal_depth_only_command_buffer commit];
+        [metal_depth_only_command_buffer waitUntilCompleted];
+        if (metal_depth_only_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: depth-only reference command did not complete\n");
+            return 78;
+        }
+        uint8_t metal_depth_only_pixels[width * height * sizeof(float)];
+        [metal_depth_only_texture getBytes:metal_depth_only_pixels
+                               bytesPerRow:(NSUInteger)width * sizeof(float)
+                                fromRegion:MTLRegionMake2D(0, 0, width, height)
+                               mipmapLevel:0];
+
+        id<MTLTexture> adapter_depth_only_texture =
+            [adapter_device newTextureWithDescriptor:metal_depth_only_texture_descriptor];
+        id<MTLCommandBuffer> adapter_depth_only_command_buffer = [adapter_queue commandBuffer];
+        MTLRenderPassDescriptor *adapter_depth_only_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_depth_only_pass.depthAttachment.texture = adapter_depth_only_texture;
+        adapter_depth_only_pass.depthAttachment.loadAction = MTLLoadActionClear;
+        adapter_depth_only_pass.depthAttachment.storeAction = MTLStoreActionStore;
+        adapter_depth_only_pass.depthAttachment.clearDepth = 1.0;
+        id<MTLRenderCommandEncoder> adapter_depth_only_encoder =
+            [adapter_depth_only_command_buffer renderCommandEncoderWithDescriptor:adapter_depth_only_pass];
+        NSError *adapter_depth_only_pipeline_error = nil;
+        id<MTLRenderPipelineState> adapter_depth_only_pipeline =
+            [adapter_device newRenderPipelineStateWithDescriptor:depth_only_pipeline_descriptor
+                                                            error:&adapter_depth_only_pipeline_error];
+        if (adapter_depth_only_texture == nil || adapter_depth_only_command_buffer == nil ||
+            adapter_depth_only_encoder == nil || adapter_depth_only_pipeline == nil) {
+            fail_with_error("depth-only adapter pipeline allocation failed", adapter_depth_only_pipeline_error);
+            return 79;
+        }
+        [adapter_depth_only_encoder setRenderPipelineState:adapter_depth_only_pipeline];
+        [adapter_depth_only_encoder setDepthStencilState:depth_state];
+        [adapter_depth_only_encoder setVertexBuffer:adapter_depth_vertex_buffer offset:0 atIndex:0];
+        [adapter_depth_only_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
+        [adapter_depth_only_encoder endEncoding];
+        [adapter_depth_only_command_buffer commit];
+        [adapter_depth_only_command_buffer waitUntilCompleted];
+        uint8_t adapter_depth_only_pixels[width * height * sizeof(float)];
+        [adapter_depth_only_texture getBytes:adapter_depth_only_pixels
+                                  bytesPerRow:(NSUInteger)width * sizeof(float)
+                                   fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                  mipmapLevel:0];
+        for (size_t index = 0; index < sizeof(adapter_depth_only_pixels); index++) {
+            if (metal_depth_only_pixels[index] != adapter_depth_only_pixels[index]) {
+                fprintf(stderr, "metal-pixel: depth-only mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                        index, metal_depth_only_pixels[index], adapter_depth_only_pixels[index]);
+                return 80;
+            }
+        }
+
         /* Stencil is also a CPU-owned attachment. Use native Metal only as
          * the oracle: a passing draw increments the clear value, then a
          * reference mismatch takes the stencil-failure operation and leaves
@@ -4048,6 +4128,86 @@ int main(void) {
                 fprintf(stderr, "metal-pixel: stencil value mismatch at byte %zu: Metal=%u ZPU=%u\n",
                         index, metal_stencil_values[index], adapter_stencil_values[index]);
                 return 35;
+            }
+        }
+
+        /* Stencil-only passes use the same no-color path as depth-only
+         * passes, with stencil bytes as the observable attachment. */
+        MTLRenderPipelineDescriptor *stencil_only_pipeline_descriptor = [stencil_pipeline_descriptor copy];
+        stencil_only_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatInvalid;
+        id<MTLRenderPipelineState> metal_stencil_only_pipeline =
+            [device newRenderPipelineStateWithDescriptor:stencil_only_pipeline_descriptor error:&error];
+        id<MTLTexture> metal_stencil_only_texture =
+            [device newTextureWithDescriptor:metal_stencil_texture_descriptor];
+        if (metal_stencil_only_pipeline == nil || metal_stencil_only_texture == nil) {
+            fail_with_error("stencil-only reference allocation failed", error);
+            return 81;
+        }
+        MTLRenderPassDescriptor *metal_stencil_only_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        metal_stencil_only_pass.stencilAttachment.texture = metal_stencil_only_texture;
+        metal_stencil_only_pass.stencilAttachment.loadAction = MTLLoadActionClear;
+        metal_stencil_only_pass.stencilAttachment.storeAction = MTLStoreActionStore;
+        metal_stencil_only_pass.stencilAttachment.clearStencil = 3;
+        id<MTLCommandBuffer> metal_stencil_only_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> metal_stencil_only_encoder =
+            [metal_stencil_only_command_buffer renderCommandEncoderWithDescriptor:metal_stencil_only_pass];
+        [metal_stencil_only_encoder setRenderPipelineState:metal_stencil_only_pipeline];
+        [metal_stencil_only_encoder setDepthStencilState:metal_stencil_state];
+        [metal_stencil_only_encoder setStencilReferenceValue:3];
+        [metal_stencil_only_encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
+        [metal_stencil_only_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [metal_stencil_only_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [metal_stencil_only_encoder endEncoding];
+        [metal_stencil_only_command_buffer commit];
+        [metal_stencil_only_command_buffer waitUntilCompleted];
+        if (metal_stencil_only_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: stencil-only reference command did not complete\n");
+            return 82;
+        }
+        uint8_t metal_stencil_only_values[stencil_byte_count];
+        [metal_stencil_only_texture getBytes:metal_stencil_only_values
+                                bytesPerRow:(NSUInteger)width
+                                 fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                mipmapLevel:0];
+
+        id<MTLTexture> adapter_stencil_only_texture =
+            [adapter_device newTextureWithDescriptor:adapter_stencil_texture_descriptor];
+        id<MTLCommandBuffer> adapter_stencil_only_command_buffer = [adapter_queue commandBuffer];
+        MTLRenderPassDescriptor *adapter_stencil_only_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_stencil_only_pass.stencilAttachment.texture = adapter_stencil_only_texture;
+        adapter_stencil_only_pass.stencilAttachment.loadAction = MTLLoadActionClear;
+        adapter_stencil_only_pass.stencilAttachment.storeAction = MTLStoreActionStore;
+        adapter_stencil_only_pass.stencilAttachment.clearStencil = 3;
+        id<MTLRenderCommandEncoder> adapter_stencil_only_encoder =
+            [adapter_stencil_only_command_buffer renderCommandEncoderWithDescriptor:adapter_stencil_only_pass];
+        NSError *adapter_stencil_only_pipeline_error = nil;
+        id<MTLRenderPipelineState> adapter_stencil_only_pipeline =
+            [adapter_device newRenderPipelineStateWithDescriptor:stencil_only_pipeline_descriptor
+                                                            error:&adapter_stencil_only_pipeline_error];
+        if (adapter_stencil_only_texture == nil || adapter_stencil_only_command_buffer == nil ||
+            adapter_stencil_only_encoder == nil || adapter_stencil_only_pipeline == nil) {
+            fail_with_error("stencil-only adapter pipeline allocation failed", adapter_stencil_only_pipeline_error);
+            return 83;
+        }
+        [adapter_stencil_only_encoder setRenderPipelineState:adapter_stencil_only_pipeline];
+        [adapter_stencil_only_encoder setDepthStencilState:adapter_stencil_state];
+        [adapter_stencil_only_encoder setStencilReferenceValue:3];
+        [adapter_stencil_only_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_stencil_only_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_stencil_only_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_stencil_only_encoder endEncoding];
+        [adapter_stencil_only_command_buffer commit];
+        [adapter_stencil_only_command_buffer waitUntilCompleted];
+        uint8_t adapter_stencil_only_values[stencil_byte_count];
+        [adapter_stencil_only_texture getBytes:adapter_stencil_only_values
+                                   bytesPerRow:(NSUInteger)width
+                                    fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                   mipmapLevel:0];
+        for (size_t index = 0; index < stencil_byte_count; index++) {
+            if (metal_stencil_only_values[index] != adapter_stencil_only_values[index]) {
+                fprintf(stderr, "metal-pixel: stencil-only mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                        index, metal_stencil_only_values[index], adapter_stencil_only_values[index]);
+                return 84;
             }
         }
         zpu_metal_render_encoder_destroy(zpu_encoder);

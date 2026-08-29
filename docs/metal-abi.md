@@ -51,6 +51,9 @@ triangle path:
 - owned Stencil8 textures bound as render-pass stencil attachments, with
   front/back compare functions, fail/depth-fail/pass operations, read/write
   masks, references, and clear/load/store behavior
+- depth-only render passes are accepted by the legacy, parallel, and Metal 4
+  adapters; a private discarded CPU color surface preserves the portable
+  raster ABI while public depth bytes remain exact
 - fixed-function render pipeline, depth-stencil, and sampler state objects;
   pipeline attachment format validation, blending factors/operations, color
   write masks, and Metal top-left triangle edge inclusion
