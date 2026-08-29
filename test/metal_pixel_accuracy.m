@@ -1356,7 +1356,7 @@ int main(void) {
             [native_array_compute_command_buffer computeCommandEncoder];
         [native_array_compute_encoder setComputePipelineState:native_array_compute_pipeline];
         [native_array_compute_encoder setTexture:native_array_compute_texture atIndex:0];
-        [native_array_compute_encoder dispatchThreads:MTLSizeMake(width, height, 2)
+        [native_array_compute_encoder dispatchThreads:MTLSizeMake(width, height, 3)
                                   threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
         [native_array_compute_encoder endEncoding];
         [native_array_compute_command_buffer commit];
@@ -1372,7 +1372,7 @@ int main(void) {
             [adapter_array_compute_command_buffer computeCommandEncoder];
         [adapter_array_compute_encoder setComputePipelineState:adapter_array_compute_pipeline];
         [adapter_array_compute_encoder setTexture:adapter_array_compute_texture atIndex:0];
-        [adapter_array_compute_encoder dispatchThreads:MTLSizeMake(width, height, 2)
+        [adapter_array_compute_encoder dispatchThreads:MTLSizeMake(width, height, 3)
                                    threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
         [adapter_array_compute_encoder endEncoding];
         uint8_t adapter_array_compute_deferred[2][byte_count];
@@ -1712,7 +1712,7 @@ int main(void) {
             [metal4_array_compute_command_buffer computeCommandEncoder];
         [metal4_array_compute_encoder setComputePipelineState:adapter_array_compute_pipeline];
         [metal4_array_compute_encoder setArgumentTable:metal4_array_compute_table];
-        [metal4_array_compute_encoder dispatchThreads:MTLSizeMake(width, height, 2)
+        [metal4_array_compute_encoder dispatchThreads:MTLSizeMake(width, height, 3)
                                   threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
         [metal4_array_compute_encoder endEncoding];
         [metal4_array_compute_command_buffer endCommandBuffer];

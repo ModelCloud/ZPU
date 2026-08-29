@@ -4006,12 +4006,11 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     }
     const BOOL arrayKernel = _kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY;
     if (arrayKernel) {
-        if (_boundTexture == nil || _boundTexture->_textureType != MTLTextureType2DArray ||
-            threadsPerGrid.depth > _boundTexture.arrayLength) {
+        if (_boundTexture == nil || _boundTexture->_textureType != MTLTextureType2DArray) {
             [_owner markError];
             return;
         }
-        for (NSUInteger slice = 0; slice < threadsPerGrid.depth; ++slice) {
+        for (NSUInteger slice = 0; slice < threadsPerGrid.depth && slice < _boundTexture.arrayLength; ++slice) {
             zpu_metal_texture *sliceTexture = [_boundTexture zpuTextureAtLevel:0 slice:slice];
             if (sliceTexture == NULL ||
                 zpu_metal_compute_encoder_set_texture(_zpuEncoder, sliceTexture, (uint32_t)_boundTextureIndex) != ZPU_METAL_OK ||
