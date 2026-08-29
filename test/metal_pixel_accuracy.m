@@ -5720,6 +5720,7 @@ int main(void) {
             [identity_color_map setPhysicalIndex:color_index forLogicalIndex:color_index];
         }
         [adapter_metal4_origin_encoder setColorAttachmentMap:identity_color_map];
+        [adapter_metal4_origin_encoder setColorStoreAction:MTLStoreActionStore atIndex:0];
         [adapter_metal4_origin_encoder setViewport:origin_viewport];
         [adapter_metal4_origin_encoder setScissorRect:origin_scissor];
         [adapter_metal4_origin_encoder setArgumentTable:adapter_metal4_origin_table

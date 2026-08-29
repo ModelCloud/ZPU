@@ -5961,13 +5961,13 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     [(id)_legacy setVisibilityResultMode:mode offset:offset];
 }
 - (void)setColorStoreAction:(MTLStoreAction)storeAction atIndex:(NSUInteger)colorAttachmentIndex {
-    if (colorAttachmentIndex != 0 || storeAction == MTLStoreActionUnknown) [_owner markError];
+    [(id)_legacy setColorStoreAction:storeAction atIndex:colorAttachmentIndex];
 }
 - (void)setDepthStoreAction:(MTLStoreAction)storeAction {
-    if (storeAction == MTLStoreActionUnknown) [_owner markError];
+    [(id)_legacy setDepthStoreAction:storeAction];
 }
 - (void)setStencilStoreAction:(MTLStoreAction)storeAction {
-    if (storeAction == MTLStoreActionUnknown) [_owner markError];
+    [(id)_legacy setStencilStoreAction:storeAction];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)primitiveType vertexStart:(NSUInteger)vertexStart vertexCount:(NSUInteger)vertexCount {
     [(id)_legacy drawPrimitives:primitiveType vertexStart:vertexStart vertexCount:vertexCount];
@@ -8834,17 +8834,30 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     if (!zpu_color_attachment_map_is_identity(mapping)) [_owner markError];
 }
 - (void)setColorStoreAction:(MTLStoreAction)storeAction atIndex:(NSUInteger)colorAttachmentIndex {
-    (void)storeAction;
-    (void)colorAttachmentIndex;
+    if (colorAttachmentIndex > UINT32_MAX ||
+        zpu_metal_render_encoder_set_color_store_action(
+            _zpuEncoder, (zpu_metal_store_action)storeAction, (uint32_t)colorAttachmentIndex) != ZPU_METAL_OK) {
+        [_owner markError];
+    }
 }
 - (void)setColorStoreActionOptions:(MTLStoreActionOptions)options atIndex:(NSUInteger)colorAttachmentIndex {
-    (void)options;
     (void)colorAttachmentIndex;
+    if (options != 0) [_owner markError];
 }
-- (void)setDepthStoreAction:(MTLStoreAction)storeAction { (void)storeAction; }
-- (void)setDepthStoreActionOptions:(MTLStoreActionOptions)options { (void)options; }
-- (void)setStencilStoreAction:(MTLStoreAction)storeAction { (void)storeAction; }
-- (void)setStencilStoreActionOptions:(MTLStoreActionOptions)options { (void)options; }
+- (void)setDepthStoreAction:(MTLStoreAction)storeAction {
+    if (zpu_metal_render_encoder_set_depth_store_action(
+            _zpuEncoder, (zpu_metal_store_action)storeAction) != ZPU_METAL_OK) [_owner markError];
+}
+- (void)setDepthStoreActionOptions:(MTLStoreActionOptions)options {
+    if (options != 0) [_owner markError];
+}
+- (void)setStencilStoreAction:(MTLStoreAction)storeAction {
+    if (zpu_metal_render_encoder_set_stencil_store_action(
+            _zpuEncoder, (zpu_metal_store_action)storeAction) != ZPU_METAL_OK) [_owner markError];
+}
+- (void)setStencilStoreActionOptions:(MTLStoreActionOptions)options {
+    if (options != 0) [_owner markError];
+}
 - (NSString *)label { return nil; }
 - (void)setLabel:(NSString *)label { (void)label; }
 - (void)barrierAfterQueueStages:(MTLStages)afterQueueStages beforeStages:(MTLStages)beforeStages API_AVAILABLE(macos(26.0), ios(26.0)) {

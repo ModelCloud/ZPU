@@ -742,6 +742,34 @@ pub const RenderEncoder = struct {
         }
     }
 
+    pub fn setColorStoreAction(self: *RenderEncoder, store_action: u8, index: u32) Error!void {
+        if (!self.open() or index >= 8 or store_action > @intFromEnum(abi.StoreAction.store)) return error.InvalidArgument;
+        switch (self.command_buffer.commands.items[self.begin_index]) {
+            .begin_render => |*begin_render| {
+                const action: abi.StoreAction = @enumFromInt(store_action);
+                if (index == 0) begin_render.pass.color.store_action = action;
+                if (begin_render.color_attachments[index]) |*attachment| attachment.pass.store_action = action;
+            },
+            else => return error.InvalidCommand,
+        }
+    }
+
+    pub fn setDepthStoreAction(self: *RenderEncoder, store_action: u8) Error!void {
+        if (!self.open() or store_action > @intFromEnum(abi.StoreAction.store)) return error.InvalidArgument;
+        switch (self.command_buffer.commands.items[self.begin_index]) {
+            .begin_render => |*begin_render| begin_render.pass.depth.store_action = @enumFromInt(store_action),
+            else => return error.InvalidCommand,
+        }
+    }
+
+    pub fn setStencilStoreAction(self: *RenderEncoder, store_action: u8) Error!void {
+        if (!self.open() or store_action > @intFromEnum(abi.StoreAction.store)) return error.InvalidArgument;
+        switch (self.command_buffer.commands.items[self.begin_index]) {
+            .begin_render => |*begin_render| begin_render.stencil_store_action = @enumFromInt(store_action),
+            else => return error.InvalidCommand,
+        }
+    }
+
     pub fn setMultiTargetOutput(self: *RenderEncoder, enabled: bool) Error!void {
         if (!self.open()) return error.InvalidCommand;
         self.write_extra_targets = enabled;
@@ -3614,6 +3642,21 @@ pub export fn zpu_metal_render_encoder_set_pipeline_formats_with_stencil(encoder
 
 pub export fn zpu_metal_render_encoder_set_color_attachment(encoder: ?*RenderEncoder, texture: ?*Texture, attachment: ?*const abi.RenderPassColorAttachmentDescriptor, index: u32) callconv(.c) c_int {
     (encoder orelse return -1).setColorAttachment(texture orelse return -1, (attachment orelse return -1).*, index) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_color_store_action(encoder: ?*RenderEncoder, store_action: u8, index: u32) callconv(.c) c_int {
+    (encoder orelse return -1).setColorStoreAction(store_action, index) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_depth_store_action(encoder: ?*RenderEncoder, store_action: u8) callconv(.c) c_int {
+    (encoder orelse return -1).setDepthStoreAction(store_action) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_stencil_store_action(encoder: ?*RenderEncoder, store_action: u8) callconv(.c) c_int {
+    (encoder orelse return -1).setStencilStoreAction(store_action) catch |err| return errorCode(err);
     return 0;
 }
 

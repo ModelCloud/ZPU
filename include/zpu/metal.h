@@ -383,6 +383,9 @@ int zpu_metal_render_encoder_set_depth_test_bounds(zpu_metal_render_encoder *enc
 int zpu_metal_render_encoder_set_pipeline_formats(zpu_metal_render_encoder *encoder, uint16_t color_format, uint16_t depth_format);
 int zpu_metal_render_encoder_set_pipeline_formats_with_stencil(zpu_metal_render_encoder *encoder, uint16_t color_format, uint16_t depth_format, uint16_t stencil_format);
 int zpu_metal_render_encoder_set_color_attachment(zpu_metal_render_encoder *encoder, zpu_metal_texture *texture, const zpu_metal_render_pass_color_attachment_descriptor *attachment, uint32_t index);
+int zpu_metal_render_encoder_set_color_store_action(zpu_metal_render_encoder *encoder, zpu_metal_store_action store_action, uint32_t index);
+int zpu_metal_render_encoder_set_depth_store_action(zpu_metal_render_encoder *encoder, zpu_metal_store_action store_action);
+int zpu_metal_render_encoder_set_stencil_store_action(zpu_metal_render_encoder *encoder, zpu_metal_store_action store_action);
 int zpu_metal_render_encoder_set_pipeline_color_formats(zpu_metal_render_encoder *encoder, const uint16_t *color_formats, size_t color_format_count, uint16_t depth_format, uint16_t stencil_format);
 int zpu_metal_render_encoder_set_multi_target_output(zpu_metal_render_encoder *encoder, int enabled);
 int zpu_metal_render_encoder_set_sample_texture(zpu_metal_render_encoder *encoder, int enabled);
