@@ -81,6 +81,10 @@ triangle path:
   from the adapter's CPU clock domain, resolve into ZPU buffers, and support
   immediate CPU-range invalidation. `queryTimestampFrequency` reports
   nanoseconds for this CPU clock domain; no hardware GPU timestamp is exposed
+- CPU-owned legacy timestamp counter sets/sample buffers; draw, dispatch, and
+  blit sample points resolve to `MTLCounterResultTimestamp` records in shared
+  ZPU buffers. Unsupported hardware-only counters remain unavailable rather
+  than being reported as fabricated statistics
 - CPU library metadata can discover the two registered kernel names from
   source text and create ZPU-owned `MTLFunction` descriptors; unsupported
   arbitrary MSL, file/data libraries, and stitched libraries fail closed

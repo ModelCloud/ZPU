@@ -758,6 +758,53 @@ int main(void) {
             return 65;
         }
 
+        MTLCounterSampleBufferDescriptor *adapter_legacy_counter_descriptor =
+            [MTLCounterSampleBufferDescriptor new];
+        adapter_legacy_counter_descriptor.counterSet = adapter_device.counterSets.firstObject;
+        adapter_legacy_counter_descriptor.label = @"zpu-cpu-legacy-timestamps";
+        adapter_legacy_counter_descriptor.storageMode = MTLStorageModeShared;
+        adapter_legacy_counter_descriptor.sampleCount = 4;
+        id<MTLCounterSampleBuffer> adapter_legacy_counter_sample_buffer =
+            [adapter_device newCounterSampleBufferWithDescriptor:adapter_legacy_counter_descriptor
+                                                            error:&metal4_error];
+        id<MTLBuffer> adapter_legacy_counter_buffer =
+            [adapter_device newBufferWithLength:4 * sizeof(MTLCounterResultTimestamp)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> adapter_legacy_counter_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_legacy_counter_encoder =
+            [adapter_legacy_counter_command_buffer blitCommandEncoder];
+        [adapter_legacy_counter_encoder sampleCountersInBuffer:adapter_legacy_counter_sample_buffer
+                                                  atSampleIndex:0 withBarrier:YES];
+        [adapter_legacy_counter_encoder sampleCountersInBuffer:adapter_legacy_counter_sample_buffer
+                                                  atSampleIndex:1 withBarrier:NO];
+        [adapter_legacy_counter_encoder resolveCounters:adapter_legacy_counter_sample_buffer
+                                                 inRange:NSMakeRange(0, 2)
+                                      destinationBuffer:adapter_legacy_counter_buffer
+                                      destinationOffset:0];
+        [adapter_legacy_counter_encoder endEncoding];
+        [adapter_legacy_counter_command_buffer commit];
+        [adapter_legacy_counter_command_buffer waitUntilCompleted];
+        const MTLCounterResultTimestamp *adapter_legacy_counter_entries =
+            (const MTLCounterResultTimestamp *)adapter_legacy_counter_buffer.contents;
+        NSData *adapter_legacy_counter_resolved =
+            [adapter_legacy_counter_sample_buffer resolveCounterRange:NSMakeRange(0, 2)];
+        if (![adapter_device supportsCounterSampling:MTLCounterSamplingPointAtDrawBoundary] ||
+            ![adapter_device supportsCounterSampling:MTLCounterSamplingPointAtDispatchBoundary] ||
+            ![adapter_device supportsCounterSampling:MTLCounterSamplingPointAtBlitBoundary] ||
+            [adapter_device supportsCounterSampling:MTLCounterSamplingPointAtTileDispatchBoundary] ||
+            adapter_device.counterSets.count != 1 || adapter_legacy_counter_sample_buffer == nil ||
+            ![adapter_legacy_counter_sample_buffer.label isEqualToString:@"zpu-cpu-legacy-timestamps"] ||
+            adapter_legacy_counter_sample_buffer.sampleCount != 4 || adapter_legacy_counter_buffer == nil ||
+            adapter_legacy_counter_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_legacy_counter_encoder == nil ||
+            adapter_legacy_counter_resolved.length != 2 * sizeof(MTLCounterResultTimestamp) ||
+            adapter_legacy_counter_entries[0].timestamp == MTLCounterErrorValue ||
+            adapter_legacy_counter_entries[1].timestamp == MTLCounterErrorValue ||
+            adapter_legacy_counter_entries[0].timestamp == 0 || adapter_legacy_counter_entries[1].timestamp == 0) {
+            fail_with_error("legacy CPU timestamp counter path failed", metal4_error);
+            return 68;
+        }
+
         MTLResourceViewPoolDescriptor *adapter_view_pool_descriptor = [MTLResourceViewPoolDescriptor new];
         adapter_view_pool_descriptor.resourceViewCount = 2;
         id<MTLTextureViewPool> adapter_view_pool =
@@ -1252,6 +1299,8 @@ int main(void) {
         [adapter_origin_encoder setScissorRect:origin_scissor];
         [adapter_origin_encoder setVertexBuffer:adapter_origin_vertex_buffer offset:0 atIndex:0];
         [adapter_origin_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
+        [adapter_origin_encoder sampleCountersInBuffer:adapter_legacy_counter_sample_buffer
+                                          atSampleIndex:2 withBarrier:YES];
         [adapter_origin_encoder endEncoding];
         [adapter_origin_command_buffer commit];
         [adapter_origin_command_buffer waitUntilCompleted];
@@ -1266,6 +1315,16 @@ int main(void) {
             memcmp(metal_origin_pixels, adapter_origin_pixels, sizeof(metal_origin_pixels)) != 0) {
             fprintf(stderr, "metal-pixel: Objective-C adapter origin-coordinate mismatch\n");
             return 53;
+        }
+        NSData *adapter_legacy_render_counter_resolved =
+            [adapter_legacy_counter_sample_buffer resolveCounterRange:NSMakeRange(2, 1)];
+        const MTLCounterResultTimestamp *adapter_legacy_render_counter_entry =
+            (const MTLCounterResultTimestamp *)adapter_legacy_render_counter_resolved.bytes;
+        if (adapter_legacy_render_counter_resolved.length != sizeof(MTLCounterResultTimestamp) ||
+            adapter_legacy_render_counter_entry[0].timestamp == MTLCounterErrorValue ||
+            adapter_legacy_render_counter_entry[0].timestamp == 0) {
+            fail_with_error("legacy CPU render timestamp path failed", metal4_error);
+            return 69;
         }
 
         /* MTL4 uses the same top-left attachment pixel grid as legacy Metal,
@@ -1952,7 +2011,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, Metal 4 render/dispatch/copy/counters, view pools, argument encoders, depth, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, legacy/Metal 4 counters, render/dispatch/copy, view pools, argument encoders, depth, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }

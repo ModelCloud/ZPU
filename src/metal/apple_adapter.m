@@ -15,6 +15,7 @@
 #import <Metal/Metal.h>
 
 #include <string.h>
+#include <time.h>
 
 #include "zpu/metal.h"
 #include "zpu/metal_apple.h"
@@ -29,6 +30,9 @@
 @class ZPUComputeEncoder;
 @class ZPUArgumentEncoder;
 @class ZPUMTL4CounterHeap;
+@class ZPUCounter;
+@class ZPUCounterSet;
+@class ZPUCounterSampleBuffer;
 @class ZPURenderEncoder;
 @class ZPULibrary;
 @class ZPUMTL4CommandAllocator;
@@ -253,9 +257,37 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLSamplerDescriptor *)descriptor;
 @end
 
+@interface ZPUCounter : NSObject <MTLCounter> {
+@public
+    NSString *_name;
+}
+- (instancetype)initWithName:(NSString *)name;
+@end
+
+@interface ZPUCounterSet : NSObject <MTLCounterSet> {
+@public
+    NSString *_name;
+    NSArray *_counters;
+}
+- (instancetype)initWithName:(NSString *)name counters:(NSArray *)counters;
+@end
+
+@interface ZPUCounterSampleBuffer : NSObject <MTLCounterSampleBuffer> {
+@public
+    ZPUDevice *_owner;
+    NSString *_label;
+    NSUInteger _sampleCount;
+    id<MTLCounterSet> _counterSet;
+    NSMutableData *_entries;
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLCounterSampleBufferDescriptor *)descriptor;
+- (BOOL)sampleAtIndex:(NSUInteger)index;
+@end
+
 @interface ZPUDevice : NSObject <MTLDevice> {
 @public
     zpu_metal_device *_zpuDevice;
+    NSArray *_counterSets;
 }
 - (instancetype)initWithDevice:(zpu_metal_device *)device;
 @end
@@ -1135,9 +1167,71 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
 - (MTLSharedEventHandle *)newSharedEventHandle { return nil; }
 @end
 
+static uint64_t zpu_cpu_timestamp(void) {
+    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+}
+
+@implementation ZPUCounter
+- (instancetype)initWithName:(NSString *)name {
+    if ((self = [super init])) _name = [name copy];
+    return self;
+}
+- (NSString *)name { return _name; }
+@end
+
+@implementation ZPUCounterSet
+- (instancetype)initWithName:(NSString *)name counters:(NSArray *)counters {
+    if ((self = [super init])) {
+        _name = [name copy];
+        _counters = [counters copy];
+    }
+    return self;
+}
+- (NSString *)name { return _name; }
+- (NSArray *)counters { return _counters; }
+@end
+
+@implementation ZPUCounterSampleBuffer
+- (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLCounterSampleBufferDescriptor *)descriptor {
+    if ((self = [super init])) {
+        _owner = owner;
+        _label = [descriptor.label copy];
+        _sampleCount = descriptor.sampleCount;
+        _counterSet = descriptor.counterSet;
+        if (_sampleCount == 0 || descriptor.storageMode != MTLStorageModeShared ||
+            ![_counterSet isKindOfClass:[ZPUCounterSet class]] ||
+            ![[_counterSet name] isEqualToString:MTLCommonCounterSetTimestamp]) {
+            return nil;
+        }
+        if (_sampleCount > SIZE_MAX / sizeof(MTLCounterResultTimestamp)) return nil;
+        _entries = [NSMutableData dataWithLength:_sampleCount * sizeof(MTLCounterResultTimestamp)];
+        MTLCounterResultTimestamp *entries = (MTLCounterResultTimestamp *)_entries.mutableBytes;
+        for (NSUInteger index = 0; index < _sampleCount; ++index) entries[index].timestamp = MTLCounterErrorValue;
+    }
+    return self;
+}
+- (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
+- (NSString *)label { return _label; }
+- (NSUInteger)sampleCount { return _sampleCount; }
+- (BOOL)sampleAtIndex:(NSUInteger)index {
+    if (index >= _sampleCount) return NO;
+    @synchronized (self) {
+        ((MTLCounterResultTimestamp *)_entries.mutableBytes)[index].timestamp = zpu_cpu_timestamp();
+    }
+    return YES;
+}
+- (NSData *)resolveCounterRange:(NSRange)range {
+    if (range.location > _sampleCount || range.length > _sampleCount - range.location) return nil;
+    @synchronized (self) {
+        return [_entries subdataWithRange:NSMakeRange(
+            range.location * sizeof(MTLCounterResultTimestamp),
+            range.length * sizeof(MTLCounterResultTimestamp))];
+    }
+}
+@end
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
-static volatile uint64_t zpu_cpu_timestamp_counter = 1;
 
 @implementation ZPUMTL4CounterHeap
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTL4CounterHeapDescriptor *)descriptor {
@@ -1159,7 +1253,7 @@ static volatile uint64_t zpu_cpu_timestamp_counter = 1;
 - (MTL4CounterHeapType)type { return _type; }
 - (BOOL)writeTimestampAtIndex:(NSUInteger)index {
     if (_type != MTL4CounterHeapTypeTimestamp || index >= _count) return NO;
-    const uint64_t timestamp = __sync_fetch_and_add(&zpu_cpu_timestamp_counter, 1);
+    const uint64_t timestamp = zpu_cpu_timestamp();
     @synchronized (self) {
         ((MTL4TimestampHeapEntry *)_entries.mutableBytes)[index].timestamp = timestamp;
     }
@@ -1297,6 +1391,10 @@ static volatile uint64_t zpu_cpu_timestamp_counter = 1;
 - (instancetype)initWithDevice:(zpu_metal_device *)device {
     if ((self = [super init])) {
         _zpuDevice = device;
+        ZPUCounter *timestampCounter = [[ZPUCounter alloc] initWithName:MTLCommonCounterTimestamp];
+        ZPUCounterSet *timestampSet = [[ZPUCounterSet alloc] initWithName:MTLCommonCounterSetTimestamp
+                                                                    counters:@[timestampCounter]];
+        _counterSets = @[timestampSet];
     }
     return self;
 }
@@ -1341,13 +1439,18 @@ static volatile uint64_t zpu_cpu_timestamp_counter = 1;
 - (BOOL)supportsDynamicLibraries { return NO; }
 - (BOOL)supportsRenderDynamicLibraries { return NO; }
 - (BOOL)supportsRaytracing { return NO; }
-- (BOOL)supportsCounterSampling:(MTLCounterSamplingPoint)point { (void)point; return NO; }
+- (BOOL)supportsCounterSampling:(MTLCounterSamplingPoint)point {
+    return point == MTLCounterSamplingPointAtDrawBoundary ||
+           point == MTLCounterSamplingPointAtDispatchBoundary ||
+           point == MTLCounterSamplingPointAtBlitBoundary;
+}
 - (NSUInteger)sparseTileSizeInBytes { return 0; }
 - (NSUInteger)sparseTileSizeInBytesForSparsePageSize:(MTLSparsePageSize)pageSize API_AVAILABLE(macos(13.0), ios(16.0)) { (void)pageSize; return 0; }
-- (NSArray *)counterSets { return @[]; }
+- (NSArray *)counterSets { return _counterSets; }
 - (void)sampleTimestamps:(MTLTimestamp *)cpuTimestamp gpuTimestamp:(MTLTimestamp *)gpuTimestamp {
-    if (cpuTimestamp != NULL) *cpuTimestamp = 0;
-    if (gpuTimestamp != NULL) *gpuTimestamp = 0;
+    const MTLTimestamp timestamp = (MTLTimestamp)zpu_cpu_timestamp();
+    if (cpuTimestamp != NULL) *cpuTimestamp = timestamp;
+    if (gpuTimestamp != NULL) *gpuTimestamp = timestamp;
 }
 - (MTLArgumentBuffersTier)argumentBuffersSupport { return MTLArgumentBuffersTier1; }
 - (BOOL)supportsFamily:(MTLGPUFamily)family { return family == MTLGPUFamilyApple7 || family == MTLGPUFamilyMac2; }
@@ -1732,9 +1835,14 @@ static volatile uint64_t zpu_cpu_timestamp_counter = 1;
     return nil;
 }
 - (id<MTLCounterSampleBuffer>)newCounterSampleBufferWithDescriptor:(MTLCounterSampleBufferDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(10.15), ios(14.0)) {
-    (void)descriptor;
-    zpu_set_error(error, @"ZPU CPU Metal has no hardware counter implementation");
-    return nil;
+    if (descriptor == nil || descriptor.sampleCount == 0 || descriptor.storageMode != MTLStorageModeShared ||
+        ![descriptor.counterSet isKindOfClass:[ZPUCounterSet class]] ||
+        ![descriptor.counterSet.name isEqualToString:MTLCommonCounterSetTimestamp]) {
+        zpu_set_error(error, @"ZPU CPU Metal supports only shared timestamp counter sample buffers");
+        return nil;
+    }
+    if (error != NULL) *error = nil;
+    return (id<MTLCounterSampleBuffer>)[[ZPUCounterSampleBuffer alloc] initWithOwner:self descriptor:descriptor];
 }
 - (MTLSize)sparseTileSizeWithTextureType:(MTLTextureType)textureType pixelFormat:(MTLPixelFormat)pixelFormat sampleCount:(NSUInteger)sampleCount API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(13.0), tvos(16.0)) {
     (void)textureType;
@@ -3124,9 +3232,14 @@ static volatile uint64_t zpu_cpu_timestamp_counter = 1;
     [self useResources:resources count:count usage:MTLResourceUsageRead | MTLResourceUsageWrite];
 }
 - (void)sampleCountersInBuffer:(id<MTLCounterSampleBuffer>)sampleBuffer atSampleIndex:(NSUInteger)sampleIndex withBarrier:(BOOL)barrier API_AVAILABLE(macos(10.15), ios(14.0)) {
-    (void)sampleBuffer;
-    (void)sampleIndex;
     (void)barrier;
+    ZPUCounterSampleBuffer *sample = (ZPUCounterSampleBuffer *)sampleBuffer;
+    if (![sample isKindOfClass:[ZPUCounterSampleBuffer class]] || sample->_owner != [_owner device] ||
+        ![sample sampleAtIndex:sampleIndex]) {
+        [_owner markError];
+        return;
+    }
+    [_owner retainResource:sample];
 }
 - (void)dispatchThreads:(MTLSize)threadsPerGrid threadsPerThreadgroup:(MTLSize)threadsPerThreadgroup API_AVAILABLE(macos(10.13), ios(11.0), tvos(14.5)) {
     if (!zpu_u32(threadsPerGrid.width, &(uint32_t){0}) || !zpu_u32(threadsPerGrid.height, &(uint32_t){0}) ||
@@ -3643,17 +3756,29 @@ static volatile uint64_t zpu_cpu_timestamp_counter = 1;
     [_owner retainResource:zpuBuffer];
 }
 - (void)sampleCountersInBuffer:(id<MTLCounterSampleBuffer>)sampleBuffer atSampleIndex:(NSUInteger)sampleIndex withBarrier:(BOOL)barrier API_AVAILABLE(macos(10.15), ios(14.0)) {
-    (void)sampleBuffer;
-    (void)sampleIndex;
     (void)barrier;
-    [_owner markError];
+    ZPUCounterSampleBuffer *sample = (ZPUCounterSampleBuffer *)sampleBuffer;
+    if (![sample isKindOfClass:[ZPUCounterSampleBuffer class]] || sample->_owner != [_owner device] ||
+        ![sample sampleAtIndex:sampleIndex]) {
+        [_owner markError];
+        return;
+    }
+    [_owner retainResource:sample];
 }
 - (void)resolveCounters:(id<MTLCounterSampleBuffer>)sampleBuffer inRange:(NSRange)range destinationBuffer:(id<MTLBuffer>)destinationBuffer destinationOffset:(NSUInteger)destinationOffset API_AVAILABLE(macos(10.15), ios(14.0)) {
-    (void)sampleBuffer;
-    (void)range;
-    (void)destinationBuffer;
-    (void)destinationOffset;
-    [_owner markError];
+    ZPUCounterSampleBuffer *sample = (ZPUCounterSampleBuffer *)sampleBuffer;
+    ZPUBuffer *destination = (ZPUBuffer *)destinationBuffer;
+    NSData *resolved = [sample isKindOfClass:[ZPUCounterSampleBuffer class]] ? [sample resolveCounterRange:range] : nil;
+    if (![sample isKindOfClass:[ZPUCounterSampleBuffer class]] || sample->_owner != [_owner device] ||
+        ![destination isKindOfClass:[ZPUBuffer class]] || destination->_owner != [_owner device] ||
+        resolved == nil || destinationOffset > destination.length ||
+        resolved.length > destination.length - destinationOffset) {
+        [_owner markError];
+        return;
+    }
+    if (resolved.length != 0) memcpy((uint8_t *)destination.contents + destinationOffset, resolved.bytes, resolved.length);
+    [_owner retainResource:sample];
+    [_owner retainResource:destination];
 }
 - (void)getTextureAccessCounters:(id<MTLTexture>)texture region:(MTLRegion)region mipLevel:(NSUInteger)mipLevel slice:(NSUInteger)slice resetCounters:(BOOL)resetCounters countersBuffer:(id<MTLBuffer>)countersBuffer countersBufferOffset:(NSUInteger)countersBufferOffset API_AVAILABLE(macos(11.0), macCatalyst(14.0)) {
     (void)texture;
@@ -4188,10 +4313,14 @@ static volatile uint64_t zpu_cpu_timestamp_counter = 1;
                          withRange:NSMakeRange(range.location, range.length)];
 }
 - (void)sampleCountersInBuffer:(id<MTLCounterSampleBuffer>)sampleBuffer atSampleIndex:(NSUInteger)sampleIndex withBarrier:(BOOL)barrier API_AVAILABLE(macos(10.15), ios(14.0)) {
-    (void)sampleBuffer;
-    (void)sampleIndex;
     (void)barrier;
-    [_owner markError];
+    ZPUCounterSampleBuffer *sample = (ZPUCounterSampleBuffer *)sampleBuffer;
+    if (![sample isKindOfClass:[ZPUCounterSampleBuffer class]] || sample->_owner != [_owner device] ||
+        ![sample sampleAtIndex:sampleIndex]) {
+        [_owner markError];
+        return;
+    }
+    [_owner retainResource:sample];
 }
 - (void)setColorAttachmentMap:(MTLLogicalToPhysicalColorAttachmentMap *)mapping API_AVAILABLE(macos(26.0), ios(26.0)) {
     (void)mapping;
