@@ -40,6 +40,10 @@
 @class ZPUResourceStateEncoder;
 @class ZPULibrary;
 @class ZPUBinaryArchive;
+@class ZPUMTL4BinaryFunction;
+@class ZPUMTL4CompilerTask;
+@class ZPUMTL4Compiler;
+@class ZPUMTL4Archive;
 @class ZPUMTL4CommandAllocator;
 @class ZPUMTL4CommandQueue;
 @class ZPUMTL4CommandBuffer;
@@ -488,6 +492,55 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLBinaryArchiveDescriptor *)descriptor error:(NSError **)error;
 @end
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+
+/* Metal 4 compiler objects are CPU-side metadata adapters. They can describe
+ * and instantiate registered ZPU compute kernels, but never invoke Apple's
+ * MSL compiler or produce a native GPU binary. */
+API_AVAILABLE(macos(26.0), ios(26.0))
+@interface ZPUMTL4BinaryFunction : NSObject <MTL4BinaryFunction> {
+@public
+    ZPUDevice *_owner;
+    NSString *_name;
+    MTLFunctionType _functionType;
+    MTL4BinaryFunctionOptions _options;
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
+                  functionType:(MTLFunctionType)functionType options:(MTL4BinaryFunctionOptions)options;
+@end
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+@interface ZPUMTL4CompilerTask : NSObject <MTL4CompilerTask> {
+@public
+    id<MTL4Compiler> _compiler;
+}
+- (instancetype)initWithCompiler:(id<MTL4Compiler>)compiler;
+@end
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+@interface ZPUMTL4Compiler : NSObject <MTL4Compiler> {
+@public
+    ZPUDevice *_owner;
+    NSString *_label;
+    id<MTL4PipelineDataSetSerializer> _pipelineDataSetSerializer;
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTL4CompilerDescriptor *)descriptor;
+@end
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+@interface ZPUMTL4Archive : NSObject <MTL4Archive> {
+@public
+    ZPUDevice *_owner;
+    NSMutableSet *_functionNames;
+    NSURL *_sourceURL;
+    NSString *_label;
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner url:(NSURL *)url error:(NSError **)error;
+@end
+
+#pragma clang diagnostic pop
 
 @interface ZPUCommandQueue : NSObject <MTLCommandQueue> {
 @public
@@ -2694,14 +2747,15 @@ static uint64_t zpu_cpu_timestamp(void) {
     return (id<MTLTextureViewPool>)[[ZPUTextureViewPool alloc] initWithOwner:self descriptor:descriptor];
 }
 - (id<MTL4Compiler>)newCompilerWithDescriptor:(MTL4CompilerDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)descriptor;
-    zpu_set_error(error, @"ZPU CPU Metal has no Metal 4 compiler");
-    return nil;
+    if (descriptor == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal requires a Metal 4 compiler descriptor");
+        return nil;
+    }
+    if (error != NULL) *error = nil;
+    return (id<MTL4Compiler>)[[ZPUMTL4Compiler alloc] initWithOwner:self descriptor:descriptor];
 }
 - (id<MTL4Archive>)newArchiveWithURL:(NSURL *)url error:(NSError **)error API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)url;
-    zpu_set_error(error, @"ZPU CPU Metal has no Metal 4 archive");
-    return nil;
+    return (id<MTL4Archive>)[[ZPUMTL4Archive alloc] initWithOwner:self url:url error:error];
 }
 - (id<MTL4PipelineDataSetSerializer>)newPipelineDataSetSerializerWithDescriptor:(MTL4PipelineDataSetSerializerDescriptor *)descriptor API_AVAILABLE(macos(26.0), ios(26.0)) {
     (void)descriptor;
@@ -2951,6 +3005,353 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     return YES;
 }
 @end
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+
+@implementation ZPUMTL4BinaryFunction
+- (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
+                  functionType:(MTLFunctionType)functionType options:(MTL4BinaryFunctionOptions)options {
+    if ((self = [super init])) {
+        _owner = owner;
+        _name = [name copy];
+        _functionType = functionType;
+        _options = options;
+    }
+    return self;
+}
+- (NSString *)name { return _name; }
+- (MTLFunctionType)functionType { return _functionType; }
+@end
+
+@implementation ZPUMTL4CompilerTask
+- (instancetype)initWithCompiler:(id<MTL4Compiler>)compiler {
+    if ((self = [super init])) _compiler = compiler;
+    return self;
+}
+- (id<MTL4Compiler>)compiler { return _compiler; }
+- (MTL4CompilerTaskStatus)status { return MTL4CompilerTaskStatusFinished; }
+- (void)waitUntilCompleted {}
+@end
+
+static id<MTLFunction> zpu_mtl4_resolve_library_function(
+    ZPUDevice *owner, MTL4FunctionDescriptor *descriptor, NSError **error) {
+    if (![descriptor isKindOfClass:[MTL4LibraryFunctionDescriptor class]]) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 accepts only library function descriptors");
+        return nil;
+    }
+    MTL4LibraryFunctionDescriptor *library_descriptor = (MTL4LibraryFunctionDescriptor *)descriptor;
+    ZPULibrary *library = (ZPULibrary *)library_descriptor.library;
+    if (![library isKindOfClass:[ZPULibrary class]] || library->_owner != owner ||
+        library_descriptor.name.length == 0) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 requires a ZPU-owned registered library function");
+        return nil;
+    }
+    id<MTLFunction> function = [library newFunctionWithName:library_descriptor.name];
+    if (function == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 function is not registered");
+        return nil;
+    }
+    if (error != NULL) *error = nil;
+    return function;
+}
+
+static id<MTL4BinaryFunction> zpu_mtl4_binary_function_for_descriptor(
+    ZPUDevice *owner, MTL4BinaryFunctionDescriptor *descriptor, NSError **error) {
+    if (descriptor == nil || descriptor.name.length == 0 || descriptor.functionDescriptor == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 requires a named binary function descriptor");
+        return nil;
+    }
+    const NSUInteger supported_options = MTL4BinaryFunctionOptionPipelineIndependent;
+    if ((descriptor.options & ~supported_options) != 0) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 does not support these binary function options");
+        return nil;
+    }
+    id<MTLFunction> function = zpu_mtl4_resolve_library_function(owner, descriptor.functionDescriptor, error);
+    if (function == nil || ![descriptor.name isEqualToString:function.name]) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 binary function name does not match its library function");
+        return nil;
+    }
+    return (id<MTL4BinaryFunction>)[[ZPUMTL4BinaryFunction alloc]
+        initWithOwner:owner name:function.name functionType:function.functionType options:descriptor.options];
+}
+
+static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
+    return (id<MTL4CompilerTask>)[[ZPUMTL4CompilerTask alloc] initWithCompiler:compiler];
+}
+
+@implementation ZPUMTL4Compiler
+- (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTL4CompilerDescriptor *)descriptor {
+    if ((self = [super init])) {
+        _owner = owner;
+        _label = [descriptor.label copy];
+        _pipelineDataSetSerializer = descriptor.pipelineDataSetSerializer;
+    }
+    return self;
+}
+- (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
+- (NSString *)label { return _label; }
+- (id<MTL4PipelineDataSetSerializer>)pipelineDataSetSerializer { return _pipelineDataSetSerializer; }
+- (id<MTLLibrary>)newLibraryWithDescriptor:(MTL4LibraryDescriptor *)descriptor error:(NSError **)error {
+    if (descriptor == nil || descriptor.source == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 library creation requires source text");
+        return nil;
+    }
+    ZPULibrary *library = [[ZPULibrary alloc] initWithOwner:_owner source:descriptor.source];
+    if (library->_functionNames.count == 0) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 source contains no registered CPU kernel");
+        return nil;
+    }
+    if (descriptor.name.length != 0) library->_label = [descriptor.name copy];
+    if (error != NULL) *error = nil;
+    return (id<MTLLibrary>)library;
+}
+- (id<MTLDynamicLibrary>)newDynamicLibrary:(id<MTLLibrary>)library error:(NSError **)error {
+    (void)library;
+    zpu_set_error(error, @"ZPU CPU Metal 4 has no dynamic library implementation");
+    return nil;
+}
+- (id<MTLDynamicLibrary>)newDynamicLibraryWithURL:(NSURL *)url error:(NSError **)error {
+    (void)url;
+    zpu_set_error(error, @"ZPU CPU Metal 4 has no dynamic library implementation");
+    return nil;
+}
+- (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTL4ComputePipelineDescriptor *)descriptor
+                                                  compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
+                                                                error:(NSError **)error {
+    (void)compilerTaskOptions;
+    if (descriptor == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 requires a compute pipeline descriptor");
+        return nil;
+    }
+    id<MTLFunction> function = zpu_mtl4_resolve_library_function(_owner, descriptor.computeFunctionDescriptor, error);
+    if (function == nil) return nil;
+    return (id<MTLComputePipelineState>)[[ZPUComputePipelineState alloc]
+        initWithOwner:_owner function:function error:error];
+}
+- (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTL4ComputePipelineDescriptor *)descriptor
+                                           dynamicLinkingDescriptor:(MTL4PipelineStageDynamicLinkingDescriptor *)dynamicLinkingDescriptor
+                                                compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
+                                                              error:(NSError **)error {
+    (void)compilerTaskOptions;
+    if (dynamicLinkingDescriptor != nil) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 does not link dynamic binary functions");
+        return nil;
+    }
+    return [self newComputePipelineStateWithDescriptor:descriptor compilerTaskOptions:nil error:error];
+}
+- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4PipelineDescriptor *)descriptor
+                                                   compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
+                                                                 error:(NSError **)error {
+    (void)descriptor;
+    (void)compilerTaskOptions;
+    zpu_set_error(error, @"ZPU CPU Metal 4 has no compiler path for render, tile, or mesh pipelines");
+    return nil;
+}
+- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4PipelineDescriptor *)descriptor
+                                            dynamicLinkingDescriptor:(MTL4RenderPipelineDynamicLinkingDescriptor *)dynamicLinkingDescriptor
+                                                 compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
+                                                               error:(NSError **)error {
+    (void)descriptor;
+    (void)dynamicLinkingDescriptor;
+    (void)compilerTaskOptions;
+    zpu_set_error(error, @"ZPU CPU Metal 4 has no compiler path for render, tile, or mesh pipelines");
+    return nil;
+}
+- (id<MTLRenderPipelineState>)newRenderPipelineStateBySpecializationWithDescriptor:(MTL4PipelineDescriptor *)descriptor
+                                                                                pipeline:(id<MTLRenderPipelineState>)pipeline
+                                                                                   error:(NSError **)error {
+    (void)descriptor;
+    (void)pipeline;
+    zpu_set_error(error, @"ZPU CPU Metal 4 does not specialize render pipelines");
+    return nil;
+}
+- (id<MTL4BinaryFunction>)newBinaryFunctionWithDescriptor:(MTL4BinaryFunctionDescriptor *)descriptor
+                                        compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
+                                                      error:(NSError **)error {
+    (void)compilerTaskOptions;
+    return zpu_mtl4_binary_function_for_descriptor(_owner, descriptor, error);
+}
+- (id<MTL4CompilerTask>)newLibraryWithDescriptor:(MTL4LibraryDescriptor *)descriptor
+                               completionHandler:(MTLNewLibraryCompletionHandler)completionHandler {
+    NSError *error = nil;
+    id<MTLLibrary> library = [self newLibraryWithDescriptor:descriptor error:&error];
+    if (completionHandler != nil) completionHandler(library, error);
+    return zpu_mtl4_finished_task(self);
+}
+- (id<MTL4CompilerTask>)newDynamicLibrary:(id<MTLLibrary>)library
+                        completionHandler:(MTLNewDynamicLibraryCompletionHandler)completionHandler {
+    NSError *error = nil;
+    id<MTLDynamicLibrary> result = [self newDynamicLibrary:library error:&error];
+    if (completionHandler != nil) completionHandler(result, error);
+    return zpu_mtl4_finished_task(self);
+}
+- (id<MTL4CompilerTask>)newDynamicLibraryWithURL:(NSURL *)url
+                               completionHandler:(MTLNewDynamicLibraryCompletionHandler)completionHandler {
+    NSError *error = nil;
+    id<MTLDynamicLibrary> result = [self newDynamicLibraryWithURL:url error:&error];
+    if (completionHandler != nil) completionHandler(result, error);
+    return zpu_mtl4_finished_task(self);
+}
+- (id<MTL4CompilerTask>)newComputePipelineStateWithDescriptor:(MTL4ComputePipelineDescriptor *)descriptor
+                                          compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
+                                            completionHandler:(MTLNewComputePipelineStateCompletionHandler)completionHandler {
+    NSError *error = nil;
+    id<MTLComputePipelineState> pipeline = [self newComputePipelineStateWithDescriptor:descriptor
+                                                                     compilerTaskOptions:compilerTaskOptions
+                                                                                   error:&error];
+    if (completionHandler != nil) completionHandler(pipeline, error);
+    return zpu_mtl4_finished_task(self);
+}
+- (id<MTL4CompilerTask>)newComputePipelineStateWithDescriptor:(MTL4ComputePipelineDescriptor *)descriptor
+                                     dynamicLinkingDescriptor:(MTL4PipelineStageDynamicLinkingDescriptor *)dynamicLinkingDescriptor
+                                          compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
+                                            completionHandler:(MTLNewComputePipelineStateCompletionHandler)completionHandler {
+    NSError *error = nil;
+    id<MTLComputePipelineState> pipeline = [self newComputePipelineStateWithDescriptor:descriptor
+                                                                    dynamicLinkingDescriptor:dynamicLinkingDescriptor
+                                                                         compilerTaskOptions:compilerTaskOptions
+                                                                                       error:&error];
+    if (completionHandler != nil) completionHandler(pipeline, error);
+    return zpu_mtl4_finished_task(self);
+}
+- (id<MTL4CompilerTask>)newRenderPipelineStateWithDescriptor:(MTL4PipelineDescriptor *)descriptor
+                                         compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
+                                           completionHandler:(MTLNewRenderPipelineStateCompletionHandler)completionHandler {
+    NSError *error = nil;
+    id<MTLRenderPipelineState> pipeline = [self newRenderPipelineStateWithDescriptor:descriptor
+                                                                     compilerTaskOptions:compilerTaskOptions
+                                                                                   error:&error];
+    if (completionHandler != nil) completionHandler(pipeline, error);
+    return zpu_mtl4_finished_task(self);
+}
+- (id<MTL4CompilerTask>)newRenderPipelineStateWithDescriptor:(MTL4PipelineDescriptor *)descriptor
+                                    dynamicLinkingDescriptor:(MTL4RenderPipelineDynamicLinkingDescriptor *)dynamicLinkingDescriptor
+                                         compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
+                                           completionHandler:(MTLNewRenderPipelineStateCompletionHandler)completionHandler {
+    NSError *error = nil;
+    id<MTLRenderPipelineState> pipeline = [self newRenderPipelineStateWithDescriptor:descriptor
+                                                                    dynamicLinkingDescriptor:dynamicLinkingDescriptor
+                                                                         compilerTaskOptions:compilerTaskOptions
+                                                                                       error:&error];
+    if (completionHandler != nil) completionHandler(pipeline, error);
+    return zpu_mtl4_finished_task(self);
+}
+- (id<MTL4CompilerTask>)newRenderPipelineStateBySpecializationWithDescriptor:(MTL4PipelineDescriptor *)descriptor
+                                                                    pipeline:(id<MTLRenderPipelineState>)pipeline
+                                                           completionHandler:(MTLNewRenderPipelineStateCompletionHandler)completionHandler {
+    NSError *error = nil;
+    id<MTLRenderPipelineState> result = [self newRenderPipelineStateBySpecializationWithDescriptor:descriptor
+                                                                                             pipeline:pipeline
+                                                                                                error:&error];
+    if (completionHandler != nil) completionHandler(result, error);
+    return zpu_mtl4_finished_task(self);
+}
+- (id<MTL4CompilerTask>)newBinaryFunctionWithDescriptor:(MTL4BinaryFunctionDescriptor *)descriptor
+                                    compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
+                                      completionHandler:(MTL4NewBinaryFunctionCompletionHandler)completionHandler {
+    NSError *error = nil;
+    id<MTL4BinaryFunction> function = [self newBinaryFunctionWithDescriptor:descriptor
+                                                          compilerTaskOptions:compilerTaskOptions
+                                                                        error:&error];
+    if (completionHandler != nil) completionHandler(function, error);
+    return zpu_mtl4_finished_task(self);
+}
+- (id<MTL4MachineLearningPipelineState>)newMachineLearningPipelineStateWithDescriptor:(MTL4MachineLearningPipelineDescriptor *)descriptor
+                                                                                  error:(NSError **)error {
+    (void)descriptor;
+    zpu_set_error(error, @"ZPU CPU Metal 4 has no machine-learning pipeline implementation");
+    return nil;
+}
+- (id<MTL4CompilerTask>)newMachineLearningPipelineStateWithDescriptor:(MTL4MachineLearningPipelineDescriptor *)descriptor
+                                                      completionHandler:(MTL4NewMachineLearningPipelineStateCompletionHandler)completionHandler {
+    NSError *error = nil;
+    id<MTL4MachineLearningPipelineState> pipeline = [self newMachineLearningPipelineStateWithDescriptor:descriptor error:&error];
+    if (completionHandler != nil) completionHandler(pipeline, error);
+    return zpu_mtl4_finished_task(self);
+}
+@end
+
+@implementation ZPUMTL4Archive
+- (instancetype)initWithOwner:(ZPUDevice *)owner url:(NSURL *)url error:(NSError **)error {
+    if (url == nil || !url.isFileURL) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 archives require a file URL");
+        return nil;
+    }
+    NSData *data = [NSData dataWithContentsOfURL:url];
+    NSString *serialized = data == nil ? nil : [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    NSArray<NSString *> *lines = [serialized componentsSeparatedByString:@"\n"];
+    if (serialized == nil || lines.count == 0 || ![lines[0] isEqualToString:@"ZPU CPU Metal Binary Archive v1"]) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 archive is not a ZPU archive");
+        return nil;
+    }
+    if ((self = [super init])) {
+        _owner = owner;
+        _sourceURL = [url copy];
+        _functionNames = [NSMutableSet set];
+        ZPULibrary *registered = [[ZPULibrary alloc] initWithOwner:owner source:serialized];
+        for (NSUInteger index = 1; index < lines.count; ++index) {
+            NSString *name = lines[index];
+            if (name.length != 0 && [registered newFunctionWithName:name] != nil) [_functionNames addObject:name];
+        }
+    }
+    if (error != NULL) *error = nil;
+    return self;
+}
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
+- (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTL4ComputePipelineDescriptor *)descriptor error:(NSError **)error {
+    if (descriptor == nil || ![descriptor.computeFunctionDescriptor isKindOfClass:[MTL4LibraryFunctionDescriptor class]]) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 archive requires a library compute function descriptor");
+        return nil;
+    }
+    MTL4LibraryFunctionDescriptor *function_descriptor = (MTL4LibraryFunctionDescriptor *)descriptor.computeFunctionDescriptor;
+    if (![_functionNames containsObject:function_descriptor.name]) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 archive does not contain this compute function");
+        return nil;
+    }
+    id<MTLFunction> function = zpu_mtl4_resolve_library_function(_owner, descriptor.computeFunctionDescriptor, error);
+    if (function == nil) return nil;
+    return (id<MTLComputePipelineState>)[[ZPUComputePipelineState alloc]
+        initWithOwner:_owner function:function error:error];
+}
+- (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTL4ComputePipelineDescriptor *)descriptor
+                                           dynamicLinkingDescriptor:(MTL4PipelineStageDynamicLinkingDescriptor *)dynamicLinkingDescriptor
+                                                               error:(NSError **)error {
+    (void)descriptor;
+    (void)dynamicLinkingDescriptor;
+    zpu_set_error(error, @"ZPU CPU Metal 4 archives do not link dynamic binary functions");
+    return nil;
+}
+- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4PipelineDescriptor *)descriptor error:(NSError **)error {
+    (void)descriptor;
+    zpu_set_error(error, @"ZPU CPU Metal 4 archives have no render, tile, or mesh pipeline implementation");
+    return nil;
+}
+- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4PipelineDescriptor *)descriptor
+                                            dynamicLinkingDescriptor:(MTL4RenderPipelineDynamicLinkingDescriptor *)dynamicLinkingDescriptor
+                                                               error:(NSError **)error {
+    (void)descriptor;
+    (void)dynamicLinkingDescriptor;
+    zpu_set_error(error, @"ZPU CPU Metal 4 archives have no render, tile, or mesh pipeline implementation");
+    return nil;
+}
+- (id<MTL4BinaryFunction>)newBinaryFunctionWithDescriptor:(MTL4BinaryFunctionDescriptor *)descriptor error:(NSError **)error {
+    if (descriptor == nil || descriptor.name.length == 0 || ![_functionNames containsObject:descriptor.name]) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 archive does not contain this binary function");
+        return nil;
+    }
+    if ((descriptor.options & ~((NSUInteger)MTL4BinaryFunctionOptionPipelineIndependent)) != 0) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 does not support these binary function options");
+        return nil;
+    }
+    if (error != NULL) *error = nil;
+    return (id<MTL4BinaryFunction>)[[ZPUMTL4BinaryFunction alloc]
+        initWithOwner:_owner name:descriptor.name functionType:MTLFunctionTypeKernel options:descriptor.options];
+}
+@end
+
+#pragma clang diagnostic pop
 
 @implementation ZPUCommandQueue
 - (instancetype)initWithOwner:(ZPUDevice *)owner queue:(zpu_metal_command_queue *)queue {

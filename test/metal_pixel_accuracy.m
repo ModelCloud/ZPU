@@ -2831,11 +2831,30 @@ int main(void) {
         BOOL adapter_archive_reloaded =
             [adapter_reloaded_archive addComputePipelineFunctionsWithDescriptor:adapter_archive_compute_descriptor
                                                                              error:&adapter_archive_error];
+        id<MTL4Archive> adapter_mtl4_archive =
+            [adapter_device newArchiveWithURL:adapter_archive_url error:&adapter_archive_error];
+        MTL4LibraryFunctionDescriptor *adapter_archive_function_descriptor = [MTL4LibraryFunctionDescriptor new];
+        adapter_archive_function_descriptor.name = @"zpu_cpu_fill_gradient_rgba8";
+        adapter_archive_function_descriptor.library = adapter_library;
+        MTL4BinaryFunctionDescriptor *adapter_archive_binary_descriptor = [MTL4BinaryFunctionDescriptor new];
+        adapter_archive_binary_descriptor.name = @"zpu_cpu_fill_gradient_rgba8";
+        adapter_archive_binary_descriptor.functionDescriptor = adapter_archive_function_descriptor;
+        id<MTL4BinaryFunction> adapter_archive_binary_function =
+            [adapter_mtl4_archive newBinaryFunctionWithDescriptor:adapter_archive_binary_descriptor
+                                                              error:&adapter_archive_error];
+        MTL4ComputePipelineDescriptor *adapter_archive_mtl4_compute_descriptor = [MTL4ComputePipelineDescriptor new];
+        adapter_archive_mtl4_compute_descriptor.computeFunctionDescriptor = adapter_archive_function_descriptor;
+        id<MTLComputePipelineState> adapter_archive_mtl4_compute_pipeline =
+            [adapter_mtl4_archive newComputePipelineStateWithDescriptor:adapter_archive_mtl4_compute_descriptor
+                                                                    error:&adapter_archive_error];
         [[NSFileManager defaultManager] removeItemAtURL:adapter_archive_url error:nil];
         if (adapter_archive == nil ||
             ![adapter_archive conformsToProtocol:@protocol(MTLBinaryArchive)] ||
             !adapter_archive_compute_added || !adapter_archive_render_added ||
-            !adapter_archive_serialized || !adapter_reloaded_archive || !adapter_archive_reloaded) {
+            !adapter_archive_serialized || !adapter_reloaded_archive || !adapter_archive_reloaded ||
+            adapter_mtl4_archive == nil || adapter_archive_binary_function == nil ||
+            ![adapter_archive_binary_function conformsToProtocol:@protocol(MTL4BinaryFunction)] ||
+            adapter_archive_mtl4_compute_pipeline == nil) {
             fail_with_error("CPU binary archive metadata failed", adapter_archive_error);
             return 64;
         }
@@ -2903,6 +2922,79 @@ int main(void) {
                         index, native_compute_pixels[index], adapter_compute_pixels[index]);
                 return 43;
             }
+        }
+
+        /* Metal 4 compiler-created compute pipelines are still CPU-owned.
+         * The compiler accepts only registered ZPU library functions; the
+         * native Metal compiler above remains the pixel oracle. */
+        NSError *adapter_mtl4_compiler_error = nil;
+        MTL4CompilerDescriptor *adapter_mtl4_compiler_descriptor = [MTL4CompilerDescriptor new];
+        adapter_mtl4_compiler_descriptor.label = @"zpu-cpu-compiler";
+        id<MTL4Compiler> adapter_mtl4_compiler =
+            [adapter_device newCompilerWithDescriptor:adapter_mtl4_compiler_descriptor
+                                                 error:&adapter_mtl4_compiler_error];
+        MTL4LibraryDescriptor *adapter_mtl4_library_descriptor = [MTL4LibraryDescriptor new];
+        adapter_mtl4_library_descriptor.name = @"zpu-cpu-library";
+        adapter_mtl4_library_descriptor.source = [NSString stringWithUTF8String:kShaderSource];
+        id<MTLLibrary> adapter_mtl4_library =
+            [adapter_mtl4_compiler newLibraryWithDescriptor:adapter_mtl4_library_descriptor
+                                                       error:&adapter_mtl4_compiler_error];
+        MTL4LibraryFunctionDescriptor *adapter_mtl4_function_descriptor = [MTL4LibraryFunctionDescriptor new];
+        adapter_mtl4_function_descriptor.name = @"zpu_cpu_fill_gradient_rgba8";
+        adapter_mtl4_function_descriptor.library = adapter_mtl4_library;
+        MTL4ComputePipelineDescriptor *adapter_mtl4_compute_descriptor = [MTL4ComputePipelineDescriptor new];
+        adapter_mtl4_compute_descriptor.computeFunctionDescriptor = adapter_mtl4_function_descriptor;
+        id<MTLComputePipelineState> adapter_mtl4_compiled_pipeline =
+            [adapter_mtl4_compiler newComputePipelineStateWithDescriptor:adapter_mtl4_compute_descriptor
+                                                        compilerTaskOptions:nil
+                                                                      error:&adapter_mtl4_compiler_error];
+        MTL4BinaryFunctionDescriptor *adapter_mtl4_binary_descriptor = [MTL4BinaryFunctionDescriptor new];
+        adapter_mtl4_binary_descriptor.name = @"zpu_cpu_fill_gradient_rgba8";
+        adapter_mtl4_binary_descriptor.functionDescriptor = adapter_mtl4_function_descriptor;
+        adapter_mtl4_binary_descriptor.options = MTL4BinaryFunctionOptionPipelineIndependent;
+        id<MTL4BinaryFunction> adapter_mtl4_binary_function =
+            [adapter_mtl4_compiler newBinaryFunctionWithDescriptor:adapter_mtl4_binary_descriptor
+                                                  compilerTaskOptions:nil
+                                                                error:&adapter_mtl4_compiler_error];
+        __block id<MTL4BinaryFunction> adapter_mtl4_async_binary_function = nil;
+        __block NSError *adapter_mtl4_async_error = nil;
+        id<MTL4CompilerTask> adapter_mtl4_binary_task =
+            [adapter_mtl4_compiler newBinaryFunctionWithDescriptor:adapter_mtl4_binary_descriptor
+                                                  compilerTaskOptions:nil
+                                                    completionHandler:^(id<MTL4BinaryFunction> function, NSError *binary_error) {
+                adapter_mtl4_async_binary_function = function;
+                adapter_mtl4_async_error = binary_error;
+            }];
+        [adapter_mtl4_binary_task waitUntilCompleted];
+        id<MTLTexture> adapter_mtl4_compiler_texture =
+            [adapter_device newTextureWithDescriptor:compute_texture_descriptor];
+        id<MTLCommandBuffer> adapter_mtl4_compiler_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> adapter_mtl4_compiler_encoder =
+            [adapter_mtl4_compiler_command_buffer computeCommandEncoder];
+        [adapter_mtl4_compiler_encoder setComputePipelineState:adapter_mtl4_compiled_pipeline];
+        [adapter_mtl4_compiler_encoder setTexture:adapter_mtl4_compiler_texture atIndex:0];
+        [adapter_mtl4_compiler_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                  threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+        [adapter_mtl4_compiler_encoder endEncoding];
+        [adapter_mtl4_compiler_command_buffer commit];
+        [adapter_mtl4_compiler_command_buffer waitUntilCompleted];
+        uint8_t adapter_mtl4_compiler_pixels[byte_count];
+        [adapter_mtl4_compiler_texture getBytes:adapter_mtl4_compiler_pixels
+                                      bytesPerRow:(NSUInteger)width * 4
+                                       fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                      mipmapLevel:0];
+        if (adapter_mtl4_compiler == nil || adapter_mtl4_library == nil ||
+            adapter_mtl4_compiled_pipeline == nil || adapter_mtl4_binary_function == nil ||
+            ![adapter_mtl4_binary_function conformsToProtocol:@protocol(MTL4BinaryFunction)] ||
+            ![adapter_mtl4_binary_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
+            adapter_mtl4_binary_function.functionType != MTLFunctionTypeKernel ||
+            adapter_mtl4_binary_task == nil || adapter_mtl4_binary_task.status != MTL4CompilerTaskStatusFinished ||
+            adapter_mtl4_async_binary_function == nil || adapter_mtl4_async_error != nil ||
+            adapter_mtl4_compiler_texture == nil || adapter_mtl4_compiler_encoder == nil ||
+            adapter_mtl4_compiler_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_compute_pixels, adapter_mtl4_compiler_pixels, byte_count) != 0) {
+            fail_with_error("Metal 4 CPU compiler compute path failed", adapter_mtl4_compiler_error);
+            return 101;
         }
 
         const MTLPixelFormat compute_float_formats[] = {
