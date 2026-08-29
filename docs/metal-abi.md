@@ -240,6 +240,12 @@ triangle path:
 - supported Apple-adapter render state and draw selectors propagate ZPU
   validation failures to `MTLCommandBufferStatusError`; invalid state is not
   silently reported as successful CPU work
+- legacy and Metal 4 color attachment maps validate an eight-entry unique
+  logical-to-physical permutation, preserve the physical attachment order,
+  and route registered CPU fragment outputs without translating through native
+  Metal. Non-identity maps require the render-pass opt-in; Metal 4 pipelines
+  additionally require inherited mapping state. Missing or unrepresentable
+  physical targets fail closed
 - legacy and Metal 4 render pipeline callable linking accepts only same-device
   registered visible CPU functions for vertex and fragment stages; derived
   pipeline states retain the fixed ZPU raster profile and expose stage-scoped

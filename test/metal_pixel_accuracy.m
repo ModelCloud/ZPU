@@ -12780,11 +12780,9 @@ int main(void) {
             return 70;
         }
 
-        /* A color attachment remap changes the logical-to-physical pixel
-         * destination. The CPU rasterizer has one fixed attachment mapping,
-         * so identity is accepted and every non-identity map must fail
-         * closed instead of silently producing pixels in another attachment.
-         */
+        /* A mapping request is rejected when the pass did not opt into the
+         * Metal mapping feature. This guards the CPU path against silently
+         * changing the logical pixel destination. */
         MTLLogicalToPhysicalColorAttachmentMap *invalid_color_map =
             [MTLLogicalToPhysicalColorAttachmentMap new];
         [invalid_color_map setPhysicalIndex:1 forLogicalIndex:0];
@@ -12803,6 +12801,138 @@ int main(void) {
             invalid_color_map_command_buffer.status != MTLCommandBufferStatusError) {
             fprintf(stderr, "metal-pixel: CPU Metal accepted a non-identity color attachment map\n");
             return 71;
+        }
+
+        /* With mapping enabled, compare a logical-output 0 -> physical
+         * attachment 1 swap against Apple's Metal 4 encoder. Its inherited
+         * pipeline state exercises the mapping contract directly. The adapter
+         * still executes only its CPU/ZPU raster path. */
+        id<MTLTexture> native_remap_physical0 = [device newTextureWithDescriptor:texture_descriptor];
+        id<MTLTexture> native_remap_physical1 = [device newTextureWithDescriptor:texture_descriptor];
+        id<MTLTexture> adapter_remap_physical0 = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        id<MTLTexture> adapter_remap_physical1 = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        NSError *native_remap_error = nil;
+        NSError *adapter_remap_error = nil;
+        MTL4CompilerDescriptor *native_remap_compiler_descriptor = [MTL4CompilerDescriptor new];
+        id<MTL4Compiler> native_remap_compiler =
+            [device newCompilerWithDescriptor:native_remap_compiler_descriptor error:&native_remap_error];
+        MTL4LibraryDescriptor *native_remap_library_descriptor = [MTL4LibraryDescriptor new];
+        native_remap_library_descriptor.source = [NSString stringWithUTF8String:kShaderSource];
+        id<MTLLibrary> native_remap_library =
+            [native_remap_compiler newLibraryWithDescriptor:native_remap_library_descriptor error:&native_remap_error];
+        MTL4LibraryFunctionDescriptor *native_remap_vertex_descriptor = [MTL4LibraryFunctionDescriptor new];
+        native_remap_vertex_descriptor.name = @"zpu_test_vertex";
+        native_remap_vertex_descriptor.library = native_remap_library;
+        MTL4LibraryFunctionDescriptor *native_remap_fragment_descriptor = [MTL4LibraryFunctionDescriptor new];
+        native_remap_fragment_descriptor.name = @"zpu_test_fragment";
+        native_remap_fragment_descriptor.library = native_remap_library;
+        MTL4RenderPipelineDescriptor *native_remap_pipeline_descriptor = [MTL4RenderPipelineDescriptor new];
+        native_remap_pipeline_descriptor.vertexFunctionDescriptor = native_remap_vertex_descriptor;
+        native_remap_pipeline_descriptor.fragmentFunctionDescriptor = native_remap_fragment_descriptor;
+        native_remap_pipeline_descriptor.rasterSampleCount = 1;
+        native_remap_pipeline_descriptor.colorAttachmentMappingState =
+            MTL4LogicalToPhysicalColorAttachmentMappingStateInherited;
+        native_remap_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        native_remap_pipeline_descriptor.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        id<MTLRenderPipelineState> native_remap_pipeline =
+            [native_remap_compiler newRenderPipelineStateWithDescriptor:native_remap_pipeline_descriptor
+                                                       compilerTaskOptions:nil error:&native_remap_error];
+        MTL4RenderPipelineDescriptor *adapter_remap_pipeline_descriptor = [adapter_mtl4_render_descriptor copy];
+        adapter_remap_pipeline_descriptor.colorAttachmentMappingState =
+            MTL4LogicalToPhysicalColorAttachmentMappingStateInherited;
+        adapter_remap_pipeline_descriptor.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        id<MTLRenderPipelineState> adapter_remap_pipeline =
+            [adapter_mtl4_compiler newRenderPipelineStateWithDescriptor:adapter_remap_pipeline_descriptor
+                                                        compilerTaskOptions:nil error:&adapter_remap_error];
+        MTLLogicalToPhysicalColorAttachmentMap *remap_color_map =
+            [MTLLogicalToPhysicalColorAttachmentMap new];
+        [remap_color_map setPhysicalIndex:1 forLogicalIndex:0];
+        [remap_color_map setPhysicalIndex:0 forLogicalIndex:1];
+        MTL4RenderPassDescriptor *native_remap_pass = [MTL4RenderPassDescriptor new];
+        native_remap_pass.supportColorAttachmentMapping = YES;
+        native_remap_pass.colorAttachments[0].texture = native_remap_physical0;
+        native_remap_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_remap_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_remap_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        native_remap_pass.colorAttachments[1].texture = native_remap_physical1;
+        native_remap_pass.colorAttachments[1].loadAction = MTLLoadActionClear;
+        native_remap_pass.colorAttachments[1].storeAction = MTLStoreActionStore;
+        native_remap_pass.colorAttachments[1].clearColor = MTLClearColorMake(1.0, 1.0, 1.0, 1.0);
+        MTL4CommandAllocatorDescriptor *native_remap_allocator_descriptor = [MTL4CommandAllocatorDescriptor new];
+        id<MTL4CommandAllocator> native_remap_allocator =
+            [device newCommandAllocatorWithDescriptor:native_remap_allocator_descriptor error:&native_remap_error];
+        id<MTL4CommandQueue> native_remap_queue = [device newMTL4CommandQueue];
+        MTL4ArgumentTableDescriptor *native_remap_table_descriptor = [MTL4ArgumentTableDescriptor new];
+        native_remap_table_descriptor.maxBufferBindCount = 1;
+        id<MTL4ArgumentTable> native_remap_table =
+            [device newArgumentTableWithDescriptor:native_remap_table_descriptor error:&native_remap_error];
+        [native_remap_table setAddress:vertex_buffer.gpuAddress atIndex:0];
+        id<MTL4CommandBuffer> native_remap_command_buffer = [device newCommandBuffer];
+        [native_remap_command_buffer beginCommandBufferWithAllocator:native_remap_allocator];
+        id<MTL4RenderCommandEncoder> native_remap_encoder =
+            [native_remap_command_buffer renderCommandEncoderWithDescriptor:native_remap_pass];
+        [native_remap_encoder setRenderPipelineState:native_remap_pipeline];
+        [native_remap_encoder setColorAttachmentMap:remap_color_map];
+        [native_remap_encoder setArgumentTable:native_remap_table
+                                       atStages:MTLRenderStageVertex | MTLRenderStageFragment];
+        [native_remap_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_remap_encoder endEncoding];
+        [native_remap_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> native_remap_command_buffers[] = {native_remap_command_buffer};
+        [native_remap_queue commit:native_remap_command_buffers count:1];
+        id<MTLSharedEvent> native_remap_done = [device newSharedEvent];
+        [native_remap_queue signalEvent:native_remap_done value:1];
+        BOOL native_remap_waited = [native_remap_done waitUntilSignaledValue:1 timeoutMS:10000];
+
+        MTL4RenderPassDescriptor *adapter_remap_pass = [MTL4RenderPassDescriptor new];
+        adapter_remap_pass.supportColorAttachmentMapping = YES;
+        adapter_remap_pass.colorAttachments[0].texture = adapter_remap_physical0;
+        adapter_remap_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_remap_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_remap_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        adapter_remap_pass.colorAttachments[1].texture = adapter_remap_physical1;
+        adapter_remap_pass.colorAttachments[1].loadAction = MTLLoadActionClear;
+        adapter_remap_pass.colorAttachments[1].storeAction = MTLStoreActionStore;
+        adapter_remap_pass.colorAttachments[1].clearColor = MTLClearColorMake(1.0, 1.0, 1.0, 1.0);
+        MTL4ArgumentTableDescriptor *adapter_remap_table_descriptor = [MTL4ArgumentTableDescriptor new];
+        adapter_remap_table_descriptor.maxBufferBindCount = 1;
+        id<MTL4ArgumentTable> adapter_remap_table =
+            [adapter_device newArgumentTableWithDescriptor:adapter_remap_table_descriptor error:&adapter_remap_error];
+        [adapter_remap_table setAddress:adapter_vertex_buffer.gpuAddress atIndex:0];
+        id<MTL4CommandBuffer> adapter_remap_command_buffer = [adapter_device newCommandBuffer];
+        [adapter_remap_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4RenderCommandEncoder> adapter_remap_encoder =
+            [adapter_remap_command_buffer renderCommandEncoderWithDescriptor:adapter_remap_pass];
+        [adapter_remap_encoder setRenderPipelineState:adapter_remap_pipeline];
+        [adapter_remap_encoder setColorAttachmentMap:remap_color_map];
+        [adapter_remap_encoder setArgumentTable:adapter_remap_table
+                                        atStages:MTLRenderStageVertex | MTLRenderStageFragment];
+        [adapter_remap_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_remap_encoder endEncoding];
+        [adapter_remap_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> adapter_remap_command_buffers[] = {adapter_remap_command_buffer};
+        [metal4_queue commit:adapter_remap_command_buffers count:1];
+        uint8_t native_remap0_bytes[byte_count];
+        uint8_t native_remap1_bytes[byte_count];
+        uint8_t adapter_remap0_bytes[byte_count];
+        uint8_t adapter_remap1_bytes[byte_count];
+        [native_remap_physical0 getBytes:native_remap0_bytes bytesPerRow:(NSUInteger)width * 4
+                             fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [native_remap_physical1 getBytes:native_remap1_bytes bytesPerRow:(NSUInteger)width * 4
+                             fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_remap_physical0 getBytes:adapter_remap0_bytes bytesPerRow:(NSUInteger)width * 4
+                              fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_remap_physical1 getBytes:adapter_remap1_bytes bytesPerRow:(NSUInteger)width * 4
+                              fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (native_remap_pipeline == nil || adapter_remap_pipeline == nil ||
+            native_remap_compiler == nil || native_remap_library == nil ||
+            native_remap_allocator == nil || native_remap_queue == nil || native_remap_table == nil ||
+            native_remap_command_buffer == nil || native_remap_encoder == nil || !native_remap_waited ||
+            adapter_remap_table == nil || adapter_remap_command_buffer == nil || adapter_remap_encoder == nil ||
+            memcmp(native_remap0_bytes, adapter_remap0_bytes, byte_count) != 0 ||
+            memcmp(native_remap1_bytes, adapter_remap1_bytes, byte_count) != 0) {
+            fail_with_error("Metal 4 CPU color attachment mapping mismatch", adapter_remap_error ?: native_remap_error);
+            return 72;
         }
 
         /* A single-sample CPU target cannot represent a multisample resolve

@@ -445,6 +445,19 @@ const BeginRenderCommand = struct {
     stencil_clear: u8 = 0,
 };
 
+const identity_color_attachment_map: [8]u8 = .{ 0, 1, 2, 3, 4, 5, 6, 7 };
+
+fn validColorAttachmentMap(mapping: [8]u8) bool {
+    var seen: u8 = 0;
+    for (mapping) |physical_index| {
+        if (physical_index >= 8) return false;
+        const bit = @as(u8, 1) << @intCast(physical_index);
+        if ((seen & bit) != 0) return false;
+        seen |= bit;
+    }
+    return true;
+}
+
 const CopyBufferCommand = struct {
     source: *Buffer,
     source_offset: usize,
@@ -707,7 +720,9 @@ pub const CommandBuffer = struct {
                     active_stencil_values = null;
                 }
                 reset_visibility_slots.clearRetainingCapacity();
+                active_color_attachments = [_]?*Texture{null} ** 8;
                 active_target = begin_render.target;
+                active_color_attachments[0] = begin_render.target;
                 for (begin_render.color_attachments, 0..) |attachment, index| {
                     if (attachment) |value| {
                         if (!validTexture(value.texture) or value.texture.device != self.queue.device or
@@ -828,6 +843,24 @@ pub const CommandBuffer = struct {
                         extra_targets_storage[extra_count] = value.asTarget();
                         extra_targets[extra_count] = &extra_targets_storage[extra_count];
                         extra_count += 1;
+                    }
+                }
+                const logical_output_count: usize = if (draw_options.write_extra_targets)
+                    @min(extra_count + 1, 8)
+                    else
+                    1;
+                if (!validColorAttachmentMap(draw_options.color_attachment_map))
+                    return self.fail(error.InvalidArgument);
+                var highest_mapped_physical: usize = 0;
+                for (draw_options.color_attachment_map[0..logical_output_count]) |physical_index| {
+                    if (physical_index >= 8) return self.fail(error.InvalidArgument);
+                    highest_mapped_physical = @max(highest_mapped_physical, @as(usize, physical_index));
+                }
+                if (!std.mem.eql(u8, &draw_options.color_attachment_map, &identity_color_attachment_map)) {
+                    for (active_color_attachments[0 .. highest_mapped_physical + 1], 0..) |attachment, physical_index| {
+                        if (attachment == null) return self.fail(error.InvalidResource);
+                        if (physical_index > 0 and physical_index - 1 >= extra_count)
+                            return self.fail(error.InvalidResource);
                     }
                 }
                 var stats: raster3d.Stats = .{};
@@ -1293,6 +1326,7 @@ pub const RenderEncoder = struct {
     alpha_operation: abi.BlendOperation = .add,
     color_write_mask: u8 = @intFromEnum(abi.ColorWriteMask.all),
     write_extra_targets: bool = false,
+    color_attachment_map: [8]u8 = identity_color_attachment_map,
     blend_color: [4]f32 = .{ 0, 0, 0, 0 },
     stencil_front: raster3d.StencilFace = .{},
     stencil_back: raster3d.StencilFace = .{},
@@ -1357,6 +1391,7 @@ pub const RenderEncoder = struct {
             .alpha_operation = self.alpha_operation,
             .color_write_mask = self.color_write_mask,
             .write_extra_targets = self.write_extra_targets,
+            .color_attachment_map = self.color_attachment_map,
             .blend_color = self.blend_color,
             .stencil_front = self.stencil_front,
             .stencil_back = self.stencil_back,
@@ -1380,6 +1415,20 @@ pub const RenderEncoder = struct {
             },
             else => return error.InvalidCommand,
         }
+    }
+
+    pub fn setColorAttachmentMap(self: *RenderEncoder, mapping: ?[*]const u8, count: usize) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        if (mapping == null) {
+            if (count != 0) return error.InvalidArgument;
+            self.color_attachment_map = identity_color_attachment_map;
+            return;
+        }
+        if (count != identity_color_attachment_map.len) return error.InvalidArgument;
+        var values: [8]u8 = undefined;
+        @memcpy(&values, mapping.?[0..values.len]);
+        if (!validColorAttachmentMap(values)) return error.InvalidArgument;
+        self.color_attachment_map = values;
     }
 
     pub fn setColorStoreAction(self: *RenderEncoder, store_action: u8, index: u32) Error!void {
@@ -1577,7 +1626,14 @@ pub const RenderEncoder = struct {
             .begin_render => |begin_render| {
                 if (color_formats.len > 8) return error.InvalidArgument;
                 for (begin_render.color_attachments, 0..) |attachment, index| {
-                    const expected_color = if (index < color_formats.len) color_formats[index] else 0;
+                    var logical_index: ?usize = null;
+                    for (self.color_attachment_map, 0..) |physical_index, candidate| {
+                        if (physical_index == index) {
+                            logical_index = candidate;
+                            break;
+                        }
+                    }
+                    const expected_color = if (logical_index) |logical| if (logical < color_formats.len) color_formats[logical] else 0 else 0;
                     const expected = switch (expected_color) {
                         0 => null,
                         @intFromEnum(abi.PixelFormat.a8_unorm) => abi.PixelFormat.a8_unorm,
@@ -1618,7 +1674,12 @@ pub const RenderEncoder = struct {
                     // Attachment zero may be the private discarded target
                     // used by a depth/stencil-only pass.
                     if (index == 0 and expected == null and attachment != null) continue;
-                    if ((expected == null) != (actual == null)) return error.InvalidArgument;
+                    if ((expected == null) != (actual == null)) {
+                        const unmapped_physical_attachment = actual != null and
+                            !std.mem.eql(u8, &self.color_attachment_map, &identity_color_attachment_map) and
+                            (logical_index == null or logical_index.? >= color_formats.len);
+                        if (!unmapped_physical_attachment) return error.InvalidArgument;
+                    }
                     if (expected) |format| if (actual == null or format != actual.?) return error.InvalidArgument;
                 }
                 if (expected_depth != null and begin_render.depth == null and begin_render.depth_texture == null) return error.InvalidArgument;
@@ -6363,6 +6424,44 @@ test "multiple color attachments share one CPU fragment output" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, secondary.bytes[0..4]);
 }
 
+test "CPU color attachment mapping routes logical output to its physical target" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const color = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(color);
+    const secondary = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.bgra8_unorm));
+    defer destroyTexture(secondary);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+    };
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, color, .{
+        .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } },
+    });
+    defer destroyRenderEncoder(encoder);
+    try encoder.setColorAttachment(secondary, .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } }, 1);
+    try std.testing.expectError(error.InvalidArgument, encoder.setColorAttachmentMap(&[_]u8{ 1, 1, 2, 3, 4, 5, 6, 7 }, 8));
+    try encoder.setColorAttachmentMap(&[_]u8{ 1, 0, 2, 3, 4, 5, 6, 7 }, 8);
+    try encoder.setPipelineColorFormats(&[_]u16{
+        @intFromEnum(abi.PixelFormat.bgra8_unorm),
+    }, 0, 0);
+    try encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
+    try encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
+    try encoder.endEncoding();
+    try command_buffer.commit();
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 255 }, color.bytes[0..4]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, secondary.bytes[0..4]);
+}
+
 test "visibility results count CPU-covered fragments and accumulate" {
     const device = try createDevice();
     defer destroyDevice(device);
@@ -6752,6 +6851,11 @@ pub export fn zpu_metal_render_encoder_set_pipeline_formats_with_stencil(encoder
 
 pub export fn zpu_metal_render_encoder_set_color_attachment(encoder: ?*RenderEncoder, texture: ?*Texture, attachment: ?*const abi.RenderPassColorAttachmentDescriptor, index: u32) callconv(.c) c_int {
     (encoder orelse return -1).setColorAttachment(texture orelse return -1, (attachment orelse return -1).*, index) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_color_attachment_map(encoder: ?*RenderEncoder, mapping: ?[*]const u8, count: usize) callconv(.c) c_int {
+    (encoder orelse return -1).setColorAttachmentMap(mapping, count) catch |err| return errorCode(err);
     return 0;
 }
 

@@ -612,6 +612,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     BOOL _supportsAddingVertexBinaryFunctions;
     BOOL _supportsAddingFragmentBinaryFunctions;
     BOOL _invalidLinking;
+    BOOL _colorAttachmentMappingInherited;
     BOOL _blendingEnabled;
     BOOL _blendingStateUnspecialized;
     MTLBlendFactor _sourceRGBBlendFactor;
@@ -1346,6 +1347,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     ZPURenderPipelineState *_pipelineState;
     ZPUDepthStencilState *_depthStencilState;
     id _passDescriptor;
+    BOOL _supportsColorAttachmentMapping;
     BOOL _ended;
     ZPUBuffer *_tessellationFactorBuffer;
     NSUInteger _tessellationFactorBufferOffset;
@@ -1371,6 +1373,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSString *_label;
     NSUInteger _tileWidth;
     NSUInteger _tileHeight;
+    BOOL _colorAttachmentMapNonIdentity;
     BOOL _ended;
 }
 - (instancetype)initWithOwner:(ZPUMTL4CommandBuffer *)owner legacy:(ZPURenderEncoder *)legacy
@@ -2167,11 +2170,25 @@ static BOOL zpu_u32_range_indices_fit(NSRange range) {
         (range.location <= UINT32_MAX && range.location <= UINT32_MAX - (range.length - 1));
 }
 
+static BOOL zpu_color_attachment_map_values(MTLLogicalToPhysicalColorAttachmentMap *mapping,
+                                             uint8_t values[ZPU_METAL_MAX_COLOR_ATTACHMENTS])
+    API_AVAILABLE(macos(26.0), ios(26.0)) {
+    BOOL used[ZPU_METAL_MAX_COLOR_ATTACHMENTS] = { NO };
+    for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
+        const NSUInteger physical = mapping == nil ? index : [mapping getPhysicalIndexForLogicalIndex:index];
+        if (physical >= ZPU_METAL_MAX_COLOR_ATTACHMENTS || used[physical]) return NO;
+        used[physical] = YES;
+        values[index] = (uint8_t)physical;
+    }
+    return YES;
+}
+
 static BOOL zpu_color_attachment_map_is_identity(MTLLogicalToPhysicalColorAttachmentMap *mapping)
     API_AVAILABLE(macos(26.0), ios(26.0)) {
-    if (mapping == nil) return YES;
+    uint8_t values[ZPU_METAL_MAX_COLOR_ATTACHMENTS];
+    if (!zpu_color_attachment_map_values(mapping, values)) return NO;
     for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
-        if ([mapping getPhysicalIndexForLogicalIndex:index] != index) return NO;
+        if (values[index] != index) return NO;
     }
     return YES;
 }
@@ -5893,6 +5910,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _supportsAddingVertexBinaryFunctions = pipeline->_supportsAddingVertexBinaryFunctions;
         _supportsAddingFragmentBinaryFunctions = pipeline->_supportsAddingFragmentBinaryFunctions;
         _invalidLinking = pipeline->_invalidLinking;
+        _colorAttachmentMappingInherited = pipeline->_colorAttachmentMappingInherited;
         _blendingEnabled = pipeline->_blendingEnabled;
         _blendingStateUnspecialized = pipeline->_blendingStateUnspecialized;
         _sourceRGBBlendFactor = pipeline->_sourceRGBBlendFactor;
@@ -8364,7 +8382,8 @@ static id<MTLRenderPipelineState> zpu_mtl4_render_pipeline_for_descriptor(
     if (descriptor.alphaToCoverageState != MTL4AlphaToCoverageStateDisabled ||
         descriptor.alphaToOneState != MTL4AlphaToOneStateDisabled ||
         descriptor.maxVertexAmplificationCount > 1 ||
-        descriptor.colorAttachmentMappingState != MTL4LogicalToPhysicalColorAttachmentMappingStateIdentity ||
+        (descriptor.colorAttachmentMappingState != MTL4LogicalToPhysicalColorAttachmentMappingStateIdentity &&
+         descriptor.colorAttachmentMappingState != MTL4LogicalToPhysicalColorAttachmentMappingStateInherited) ||
         !zpu_vertex_layout_supported(vertex_descriptor, &ignored_vertex_stride,
                                      &ignored_vertex_stride_dynamic) ||
         (!empty_vertex_descriptor && !fixed_vertex_descriptor) ||
@@ -8424,6 +8443,8 @@ static id<MTLRenderPipelineState> zpu_mtl4_render_pipeline_for_descriptor(
     }
     id<MTLRenderPipelineState> pipeline = [owner newRenderPipelineStateWithDescriptor:legacy error:error];
     if (pipeline != nil && [pipeline isKindOfClass:[ZPURenderPipelineState class]]) {
+        ((ZPURenderPipelineState *)pipeline)->_colorAttachmentMappingInherited =
+            descriptor.colorAttachmentMappingState == MTL4LogicalToPhysicalColorAttachmentMappingStateInherited;
         ((ZPURenderPipelineState *)pipeline)->_blendingStateUnspecialized = unspecialized_blending;
         ((ZPURenderPipelineState *)pipeline)->_reflection =
             zpu_render_pipeline_reflection(vertex.name, fragment.name);
@@ -9473,6 +9494,9 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     ZPURenderEncoder *result = [[ZPURenderEncoder alloc] initWithOwner:self encoder:encoder];
     result->_tileWidth = descriptor.tileWidth;
     result->_tileHeight = descriptor.tileHeight;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        result->_supportsColorAttachmentMapping = descriptor.supportColorAttachmentMapping;
+    }
     if (@available(macOS 11.0, iOS 14.0, *)) {
         if (![result configurePassDescriptor:descriptor]) {
             [result endEncoding];
@@ -9889,6 +9913,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
         return nil;
     }
     ZPURenderEncoder *legacy = [[ZPURenderEncoder alloc] initWithOwner:_legacyBuffer encoder:encoder];
+    legacy->_supportsColorAttachmentMapping = descriptor.supportColorAttachmentMapping;
     ZPUMTL4RenderEncoder *result = [[ZPUMTL4RenderEncoder alloc] initWithOwner:self legacy:legacy
                                                                         tileWidth:descriptor.tileWidth
                                                                        tileHeight:descriptor.tileHeight];
@@ -10354,9 +10379,27 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
 - (void)pushDebugGroup:(NSString *)string { (void)string; }
 - (void)popDebugGroup {}
 - (void)setColorAttachmentMap:(MTLLogicalToPhysicalColorAttachmentMap *)mapping {
-    if (!zpu_color_attachment_map_is_identity(mapping)) [_owner markError];
+    uint8_t values[ZPU_METAL_MAX_COLOR_ATTACHMENTS];
+    if (!zpu_color_attachment_map_values(mapping, values)) {
+        [_owner markError];
+        return;
+    }
+    _colorAttachmentMapNonIdentity = !zpu_color_attachment_map_is_identity(mapping);
+    if (_colorAttachmentMapNonIdentity && _legacy->_pipelineState != nil &&
+        !_legacy->_pipelineState->_colorAttachmentMappingInherited) {
+        [_owner markError];
+        return;
+    }
+    [(id)_legacy setColorAttachmentMap:mapping];
 }
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)pipelineState {
+    ZPURenderPipelineState *state = (ZPURenderPipelineState *)pipelineState;
+    if (_colorAttachmentMapNonIdentity &&
+        (![state isKindOfClass:[ZPURenderPipelineState class]] ||
+         !state->_colorAttachmentMappingInherited)) {
+        [_owner markError];
+        return;
+    }
     [(id)_legacy setRenderPipelineState:pipelineState];
 }
 - (void)setViewport:(MTLViewport)viewport { [(id)_legacy setViewport:viewport]; }
@@ -12423,7 +12466,11 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         return nil;
     }
     _childCount += 1;
-    return (id<MTLRenderCommandEncoder>)[[ZPURenderEncoder alloc] initWithOwner:_owner encoder:encoder];
+    ZPURenderEncoder *child = [[ZPURenderEncoder alloc] initWithOwner:_owner encoder:encoder];
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        child->_supportsColorAttachmentMapping = _descriptor.supportColorAttachmentMapping;
+    }
+    return (id<MTLRenderCommandEncoder>)child;
 }
 - (void)setColorStoreAction:(MTLStoreAction)storeAction atIndex:(NSUInteger)colorAttachmentIndex {
     if (!zpu_store_action_supported(storeAction) || colorAttachmentIndex >= ZPU_METAL_MAX_COLOR_ATTACHMENTS) {
@@ -13431,6 +13478,7 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
         _zpuEncoder = encoder;
         _stageBindings = [NSMutableDictionary dictionary];
         _passDescriptor = nil;
+        _supportsColorAttachmentMapping = NO;
         _ended = NO;
     }
     return self;
@@ -14489,7 +14537,12 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
     [_owner retainResource:sample];
 }
 - (void)setColorAttachmentMap:(MTLLogicalToPhysicalColorAttachmentMap *)mapping API_AVAILABLE(macos(26.0), ios(26.0)) {
-    if (!zpu_color_attachment_map_is_identity(mapping)) [_owner markError];
+    uint8_t values[ZPU_METAL_MAX_COLOR_ATTACHMENTS];
+    if (!zpu_color_attachment_map_values(mapping, values) ||
+        (!zpu_color_attachment_map_is_identity(mapping) && !_supportsColorAttachmentMapping) ||
+        zpu_metal_render_encoder_set_color_attachment_map(_zpuEncoder, values, ZPU_METAL_MAX_COLOR_ATTACHMENTS) != ZPU_METAL_OK) {
+        [_owner markError];
+    }
 }
 - (void)setColorStoreAction:(MTLStoreAction)storeAction atIndex:(NSUInteger)colorAttachmentIndex {
     if (colorAttachmentIndex > UINT32_MAX ||

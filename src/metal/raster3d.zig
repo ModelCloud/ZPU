@@ -72,6 +72,10 @@ pub const DrawOptions = struct {
     alpha_operation: abi.BlendOperation = .add,
     color_write_mask: u8 = @intFromEnum(abi.ColorWriteMask.all),
     write_extra_targets: bool = false,
+    // Metal's logical fragment outputs are remapped to physical render-pass
+    // attachments by the encoder. Keep this in the draw snapshot so a later
+    // encoder state change cannot alter an already-recorded draw.
+    color_attachment_map: [8]u8 = .{ 0, 1, 2, 3, 4, 5, 6, 7 },
     blend_color: [4]f32 = .{ 0, 0, 0, 0 },
     stencil_front: StencilFace = .{},
     stencil_back: StencilFace = .{},
@@ -740,6 +744,13 @@ const Job = struct {
     bands: [2]Stats = .{ .{}, .{} },
 };
 
+fn outputTarget(job: *const Job, physical_index: usize) ?*Target {
+    if (physical_index == 0) return job.target;
+    const extra_index = physical_index - 1;
+    if (extra_index >= job.extra_targets.len) return null;
+    return job.extra_targets[extra_index];
+}
+
 fn project(vertex: abi.Vertex, viewport: abi.Viewport) ?ProjectedVertex {
     const p = vertex.position;
     if (!std.math.isFinite(p[0]) or !std.math.isFinite(p[1]) or !std.math.isFinite(p[2]) or !std.math.isFinite(p[3]) or @abs(p[3]) < 0.000001) return null;
@@ -1002,10 +1013,19 @@ fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [
         sampleTextureWithSelection(job, color[0], color[1], selection)
     else
         job.options.fragment_color orelse color;
-    writeColor(job.target, x, y, fragment_color, job.options);
-    if (job.options.write_extra_targets) for (job.extra_targets) |target| writeColor(target, x, y, fragment_color, job.options);
+    const logical_output_count: usize = if (job.options.write_extra_targets)
+        @min(job.extra_targets.len + 1, 8)
+    else
+        1;
+    var color_writes: u64 = 0;
+    for (0..logical_output_count) |logical_index| {
+        if (outputTarget(job, job.options.color_attachment_map[logical_index])) |target| {
+            writeColor(target, x, y, fragment_color, job.options);
+            color_writes += 1;
+        }
+    }
     stats.fragments_covered += 1;
-    stats.color_writes += 1 + if (job.options.write_extra_targets) @as(u64, @intCast(job.extra_targets.len)) else 0;
+    stats.color_writes += color_writes;
 }
 
 fn blendChannel(channel: usize, source: f32, destination: f32, source_color: [4]f32, destination_color: [4]f32, blend_color: [4]f32, source_factor: abi.BlendFactor, destination_factor: abi.BlendFactor, operation: abi.BlendOperation) f32 {
