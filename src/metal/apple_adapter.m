@@ -405,6 +405,7 @@ API_AVAILABLE(macos(15.0), ios(18.0))
     BOOL _supportRayTracing;
     BOOL _supportDynamicAttributeStride;
     BOOL _supportColorAttachmentMapping;
+    uint64_t _resourceID;
     NSMutableArray *_commands;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLIndirectCommandBufferDescriptor *)descriptor maxCommandCount:(NSUInteger)maxCount options:(MTLResourceOptions)options;
@@ -10558,6 +10559,8 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
             resourceID = ((ZPUVisibleFunctionTable *)object)->_resourceID;
         } else if ([object isKindOfClass:[ZPUIntersectionFunctionTable class]]) {
             resourceID = ((ZPUIntersectionFunctionTable *)object)->_resourceID;
+        } else if ([object isKindOfClass:[ZPUIndirectCommandBuffer class]]) {
+            resourceID = ((ZPUIndirectCommandBuffer *)object)->_resourceID;
         }
         memcpy((uint8_t *)_argumentBuffer.contents + destinationOffset, &resourceID, sizeof(resourceID));
         memcpy((uint8_t *)_argumentBuffer.contents + destinationOffset + sizeof(resourceID), &auxiliary, sizeof(auxiliary));
@@ -12267,6 +12270,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         if (@available(macOS 26.0, iOS 26.0, *)) {
             _supportColorAttachmentMapping = descriptor.supportColorAttachmentMapping;
         }
+        _resourceID = zpu_register_resource(self);
         _commands = [NSMutableArray arrayWithCapacity:maxCount];
         for (NSUInteger index = 0; index < maxCount; ++index) [_commands addObject:[NSNull null]];
     }
@@ -12282,7 +12286,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 - (MTLHazardTrackingMode)hazardTrackingMode {
     return zpu_effective_hazard_tracking_mode(_hazardTrackingMode, MTLHazardTrackingModeTracked);
 }
-- (MTLResourceID)gpuResourceID API_AVAILABLE(macos(13.0), ios(16.0)) { return (MTLResourceID){0}; }
+- (MTLResourceID)gpuResourceID API_AVAILABLE(macos(13.0), ios(16.0)) { return (MTLResourceID){_resourceID}; }
 - (NSUInteger)allocatedSize { return [self size]; }
 - (id<MTLHeap>)heap { return nil; }
 - (NSUInteger)heapOffset { return 0; }

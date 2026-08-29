@@ -7708,14 +7708,18 @@ int main(void) {
             [adapter_argument_encoder newArgumentEncoderForBufferAtIndex:0];
         uint64_t encoded_argument_resource = 0;
         uint64_t encoded_argument_offset = 0;
+        uint64_t encoded_argument_icb_resource = 0;
         if (adapter_argument_buffer != nil) {
             memcpy(&encoded_argument_resource, adapter_argument_buffer.contents, sizeof(encoded_argument_resource));
             memcpy(&encoded_argument_offset, (uint8_t *)adapter_argument_buffer.contents + sizeof(encoded_argument_resource), sizeof(encoded_argument_offset));
+            memcpy(&encoded_argument_icb_resource, (uint8_t *)adapter_argument_buffer.contents + 3 * 16,
+                   sizeof(encoded_argument_icb_resource));
         }
         if (adapter_argument_encoder == nil || adapter_argument_buffer == nil || nested_argument_encoder == nil ||
             [adapter_argument_encoder encodedLength] < 16 || [adapter_argument_encoder alignment] != 16 ||
             bound_constant_data == NULL || memcmp(bound_constant_data, &argument_constant, sizeof(argument_constant)) != 0 ||
-            encoded_argument_resource != adapter_copy_buffer.gpuAddress || encoded_argument_offset != 0) {
+            encoded_argument_resource != adapter_copy_buffer.gpuAddress || encoded_argument_offset != 0 ||
+            encoded_argument_icb_resource != adapter_compute_icb.gpuResourceID._impl) {
             fprintf(stderr, "metal-pixel: CPU argument encoder allocation failed\n");
             return 49;
         }
@@ -8925,6 +8929,7 @@ int main(void) {
             return 39;
         }
         if (metal_icb.size != 1 || adapter_icb.size != metal_icb.size ||
+            metal_icb.gpuResourceID._impl == 0 || adapter_icb.gpuResourceID._impl == 0 ||
             adapter_icb.resourceOptions != (MTLResourceStorageModePrivate | MTLResourceHazardTrackingModeUntracked) ||
             adapter_icb.storageMode != MTLStorageModePrivate ||
             adapter_icb.hazardTrackingMode != MTLHazardTrackingModeUntracked) {

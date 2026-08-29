@@ -96,6 +96,8 @@ triangle path:
 - ordered render, parallel-render, and blit encoders, command-buffer status,
   buffer copies/fills, texture transfers, indexed and indirect draws, render
   indirect command buffers (including CPU blit-copy of encoded commands),
+  process-local synthetic `gpuResourceID` values for CPU indirect command
+  buffers and argument-buffer serialization of those identities,
   including CPU replay of fragment-buffer bindings and Metal 4 fixed-function
   indirect render state when the corresponding SDK/runtime selectors are used,
   descriptor inheritance and binding-count enforcement, indexed ICB ownership,
