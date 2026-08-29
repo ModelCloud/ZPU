@@ -276,6 +276,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSUInteger _colorAttachmentCount;
     BOOL _multiTargetOutput;
     BOOL _rasterizationEnabled;
+    BOOL _supportsIndirectCommandBuffers;
     MTLPixelFormat _depthPixelFormat;
     MTLPixelFormat _stencilPixelFormat;
     BOOL _sampleTexture;
@@ -1905,6 +1906,7 @@ static uint64_t zpu_cpu_timestamp(void) {
         _multiTargetOutput = [descriptor.fragmentFunction.name rangeOfString:@"mrt" options:NSCaseInsensitiveSearch].location != NSNotFound;
         _sampleTexture = [descriptor.fragmentFunction.name rangeOfString:@"sample" options:NSCaseInsensitiveSearch].location != NSNotFound;
         _rasterizationEnabled = descriptor.rasterizationEnabled;
+        _supportsIndirectCommandBuffers = descriptor.supportIndirectCommandBuffers;
         _depthPixelFormat = descriptor.depthAttachmentPixelFormat;
         _stencilPixelFormat = descriptor.stencilAttachmentPixelFormat;
         _blendingEnabled = attachment.blendingEnabled;
@@ -1934,7 +1936,7 @@ static uint64_t zpu_cpu_timestamp(void) {
     (void)imageblockDimensions;
     return 0;
 }
-- (BOOL)supportIndirectCommandBuffers API_AVAILABLE(macos(10.14), ios(12.0)) { return YES; }
+- (BOOL)supportIndirectCommandBuffers API_AVAILABLE(macos(10.14), ios(12.0)) { return _supportsIndirectCommandBuffers; }
 - (MTLResourceID)gpuResourceID API_AVAILABLE(macos(13.0), ios(16.0)) { return (MTLResourceID){0}; }
 - (MTLShaderValidation)shaderValidation API_AVAILABLE(macos(15.0), ios(18.0)) { return (MTLShaderValidation)0; }
 - (MTLSize)requiredThreadsPerTileThreadgroup API_AVAILABLE(macos(26.0), ios(26.0)) { return MTLSizeMake(0, 0, 0); }

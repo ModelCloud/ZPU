@@ -702,7 +702,8 @@ int main(void) {
         if (native_sample_pipeline == nil || native_sample_source == nil || native_sample_vertex_buffer == nil ||
             native_sample_output == nil || native_sample_sampler == nil || adapter_sample_fragment_function == nil ||
             adapter_sample_pipeline == nil || adapter_sample_source == nil || adapter_sample_vertex_buffer == nil ||
-            adapter_sample_output == nil || adapter_sample_sampler == nil) {
+            adapter_sample_output == nil || adapter_sample_sampler == nil ||
+            native_sample_pipeline.supportIndirectCommandBuffers || adapter_sample_pipeline.supportIndirectCommandBuffers) {
             fail_with_error("sample pipeline or resource allocation failed", adapter_pipeline_error);
             return 94;
         }
