@@ -5441,6 +5441,63 @@ int main(void) {
             return 100;
         }
 
+        /* Metal 4 sampler bindings are resource IDs rather than Objective-C
+         * sampler objects at the encoder call site. Resolve them through the
+         * CPU-owned table and compare the resulting sampled pixels with the
+         * native Metal oracle. The quad deliberately uses an asymmetric
+         * viewport-independent UV pattern so nearest filtering and the
+         * attachment's top-left row origin are both observable. */
+        id<MTLTexture> adapter_metal4_sampler_texture =
+            [adapter_device newTextureWithDescriptor:sample_output_descriptor];
+        MTL4RenderPassDescriptor *adapter_metal4_sampler_pass = [MTL4RenderPassDescriptor new];
+        adapter_metal4_sampler_pass.colorAttachments[0].texture = adapter_metal4_sampler_texture;
+        adapter_metal4_sampler_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_metal4_sampler_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_metal4_sampler_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        MTL4ArgumentTableDescriptor *adapter_metal4_sampler_vertex_descriptor = [MTL4ArgumentTableDescriptor new];
+        adapter_metal4_sampler_vertex_descriptor.maxBufferBindCount = 1;
+        id<MTL4ArgumentTable> adapter_metal4_sampler_vertex_table =
+            [adapter_device newArgumentTableWithDescriptor:adapter_metal4_sampler_vertex_descriptor error:&metal4_error];
+        [adapter_metal4_sampler_vertex_table setAddress:adapter_sample_vertex_buffer.gpuAddress atIndex:0];
+        MTL4ArgumentTableDescriptor *adapter_metal4_sampler_fragment_descriptor = [MTL4ArgumentTableDescriptor new];
+        adapter_metal4_sampler_fragment_descriptor.maxTextureBindCount = 1;
+        adapter_metal4_sampler_fragment_descriptor.maxSamplerStateBindCount = 1;
+        id<MTL4ArgumentTable> adapter_metal4_sampler_fragment_table =
+            [adapter_device newArgumentTableWithDescriptor:adapter_metal4_sampler_fragment_descriptor error:&metal4_error];
+        [adapter_metal4_sampler_fragment_table setTexture:adapter_sample_source.gpuResourceID atIndex:0];
+        [adapter_metal4_sampler_fragment_table setSamplerState:adapter_sample_sampler.gpuResourceID atIndex:0];
+        id<MTL4CommandBuffer> adapter_metal4_sampler_command_buffer = [adapter_device newCommandBuffer];
+        [adapter_metal4_sampler_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4RenderCommandEncoder> adapter_metal4_sampler_encoder =
+            [adapter_metal4_sampler_command_buffer renderCommandEncoderWithDescriptor:adapter_metal4_sampler_pass];
+        [adapter_metal4_sampler_encoder setRenderPipelineState:adapter_sample_pipeline];
+        [adapter_metal4_sampler_encoder setArgumentTable:adapter_metal4_sampler_vertex_table
+                                                 atStages:MTLRenderStageVertex];
+        [adapter_metal4_sampler_encoder setArgumentTable:adapter_metal4_sampler_fragment_table
+                                                 atStages:MTLRenderStageFragment];
+        [adapter_metal4_sampler_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_metal4_sampler_encoder endEncoding];
+        [adapter_metal4_sampler_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> adapter_metal4_sampler_command_buffers[] = {adapter_metal4_sampler_command_buffer};
+        [metal4_queue commit:adapter_metal4_sampler_command_buffers count:1];
+        uint8_t adapter_metal4_sampler_pixels[byte_count];
+        [adapter_metal4_sampler_texture getBytes:adapter_metal4_sampler_pixels
+                                      bytesPerRow:(NSUInteger)width * 4
+                                       fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                      mipmapLevel:0];
+        if (adapter_metal4_sampler_texture == nil || adapter_metal4_sampler_vertex_table == nil ||
+            adapter_metal4_sampler_fragment_table == nil || adapter_metal4_sampler_command_buffer == nil ||
+            adapter_metal4_sampler_encoder == nil ||
+            memcmp(native_sample_bytes, adapter_metal4_sampler_pixels, byte_count) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < byte_count && native_sample_bytes[mismatch] == adapter_metal4_sampler_pixels[mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: Metal 4 sampler table mismatch (mismatch=%zu nativeByte=%u adapterByte=%u)\n",
+                    mismatch,
+                    mismatch < byte_count ? native_sample_bytes[mismatch] : 0,
+                    mismatch < byte_count ? adapter_metal4_sampler_pixels[mismatch] : 0);
+            return 101;
+        }
+
         /* MTL4 carries the same visibility mode but sources its result buffer
          * from the render-pass descriptor. Verify that descriptor path also
          * stays CPU-owned and agrees with the native legacy oracle. */
@@ -7278,7 +7335,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, visibility results, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables, visibility results, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }

@@ -5615,6 +5615,18 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
         if ((stages & MTLRenderStageVertex) != 0) [(id)_legacy setVertexTexture:resource atIndex:index];
         if ((stages & MTLRenderStageFragment) != 0) [(id)_legacy setFragmentTexture:resource atIndex:index];
     }
+    const uint64_t *samplerIDs = (const uint64_t *)_argumentTable->_samplerResources.bytes;
+    for (NSUInteger index = 0; index < _argumentTable->_maxSamplerStateBindCount; ++index) {
+        id resource = zpu_resource_for_id(samplerIDs[index]);
+        if (samplerIDs[index] != 0 &&
+            (![resource isKindOfClass:[ZPUSamplerState class]] || ((ZPUSamplerState *)resource)->_owner != _owner->_owner)) {
+            [_owner markError];
+            return;
+        }
+        if (resource == nil) continue;
+        if ((stages & MTLRenderStageVertex) != 0) [(id)_legacy setVertexSamplerState:resource atIndex:index];
+        if ((stages & MTLRenderStageFragment) != 0) [(id)_legacy setFragmentSamplerState:resource atIndex:index];
+    }
 }
 - (void)setFrontFacingWinding:(MTLWinding)frontFacingWinding { [(id)_legacy setFrontFacingWinding:frontFacingWinding]; }
 - (void)writeTimestampWithGranularity:(MTL4TimestampGranularity)granularity afterStage:(MTLRenderStages)stage intoHeap:(id<MTL4CounterHeap>)counterHeap atIndex:(NSUInteger)index {
@@ -5780,6 +5792,17 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
         }
         if (resource == nil) continue;
         [_legacy setTexture:(id<MTLTexture>)resource atIndex:index];
+    }
+    const uint64_t *samplerIDs = (const uint64_t *)_argumentTable->_samplerResources.bytes;
+    for (NSUInteger index = 0; index < _argumentTable->_maxSamplerStateBindCount; ++index) {
+        id resource = zpu_resource_for_id(samplerIDs[index]);
+        if (samplerIDs[index] != 0 &&
+            (![resource isKindOfClass:[ZPUSamplerState class]] || ((ZPUSamplerState *)resource)->_owner != _owner->_owner)) {
+            [_owner markError];
+            return;
+        }
+        if (resource == nil) continue;
+        [_legacy setSamplerState:(id<MTLSamplerState>)resource atIndex:index];
     }
 }
 - (void)copyFromTexture:(id<MTLTexture>)sourceTexture toTexture:(id<MTLTexture>)destinationTexture {
