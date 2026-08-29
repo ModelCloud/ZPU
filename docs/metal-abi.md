@@ -231,10 +231,11 @@ triangle path:
   buffer, and dispatch state for deferred execution, with device ownership,
   command-type, buffer-offset, dimension, and CPU threadgroup-limit checks;
   reset slots remain legal no-ops
-- Metal 4 basic buffer/texture copy, buffer-fill, and tensor-slice copy commands
-  append deferred ZPU work; CPU-owned tensors also provide contiguous and
-  strided byte-addressable slice transfers. Tensor shader binding, advanced
-  optimization, ray-intersection execution,
+- Metal 4 buffer/texture/tensor copies, buffer-fill, indirect-command reset/copy,
+  and CPU/GPU access optimization commands append or apply CPU-owned ZPU work;
+  CPU-owned tensors also provide contiguous and strided byte-addressable slice
+  transfers. Acceleration-structure build/refit/copy/compaction commands use
+  the same CPU-owned storage path. Tensor shader binding, ray-intersection execution,
   sparse, drawable, machine-learning, and tile/mesh render-pass
   features remain explicit fail-closed boundaries. Suspending/resuming render
   passes are represented as sequential ordinary CPU passes because the CPU

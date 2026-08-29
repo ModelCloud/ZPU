@@ -1457,6 +1457,22 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(ZPUDevice *owner, MTLGPUAddress 
     return buffer->_owner == owner ? buffer : nil;
 }
 
+API_AVAILABLE(macos(26.0), ios(26.0))
+static BOOL zpu_metal4_buffer_range(MTL4BufferRange range, ZPUDevice *owner,
+                                     ZPUBuffer **buffer, NSUInteger *offset) {
+    if (buffer == NULL || offset == NULL || range.bufferAddress == 0 ||
+        range.length > (uint64_t)NSUIntegerMax) return NO;
+    ZPUBuffer *value = zpu_metal4_buffer_for_address(owner, range.bufferAddress);
+    if (value == nil || range.length > value.length) return NO;
+    *buffer = value;
+    *offset = 0;
+    /* ZPU resource IDs are opaque handles, not arithmetic GPU addresses. A
+     * Metal 4 range can therefore only name the beginning of a CPU buffer;
+     * rejecting an unrepresentable interior address preserves ownership and
+     * bounds validation instead of silently binding a different resource. */
+    return YES;
+}
+
 static BOOL zpu_buffer_belongs_to_device(ZPUDevice *owner, ZPUBuffer *buffer) {
     return [buffer isKindOfClass:[ZPUBuffer class]] && buffer->_owner == owner;
 }
@@ -2369,6 +2385,18 @@ static NSUInteger zpu_acceleration_structure_size_for_descriptor(
         if ([descriptor isKindOfClass:[MTLIndirectInstanceAccelerationStructureDescriptor class]]) {
             recognized = YES;
             primitiveCount = ((MTLIndirectInstanceAccelerationStructureDescriptor *)descriptor).maxInstanceCount;
+        }
+    }
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        if ([descriptor isKindOfClass:[MTL4PrimitiveAccelerationStructureDescriptor class]]) {
+            recognized = YES;
+            primitiveCount = ((MTL4PrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors.count;
+        } else if ([descriptor isKindOfClass:[MTL4InstanceAccelerationStructureDescriptor class]]) {
+            recognized = YES;
+            primitiveCount = ((MTL4InstanceAccelerationStructureDescriptor *)descriptor).instanceCount;
+        } else if ([descriptor isKindOfClass:[MTL4IndirectInstanceAccelerationStructureDescriptor class]]) {
+            recognized = YES;
+            primitiveCount = ((MTL4IndirectInstanceAccelerationStructureDescriptor *)descriptor).maxInstanceCount;
         }
     }
     if (!recognized) return 0;
@@ -6861,12 +6889,78 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     [_owner->_legacyBuffer retainResource:zpuBuffer];
     _stages |= MTLStageBlit;
 }
-- (void)buildAccelerationStructure:(id<MTLAccelerationStructure>)accelerationStructure descriptor:(MTL4AccelerationStructureDescriptor *)descriptor scratchBuffer:(MTL4BufferRange)scratchBuffer { (void)accelerationStructure; (void)descriptor; (void)scratchBuffer; [_owner markError]; }
-- (void)refitAccelerationStructure:(id<MTLAccelerationStructure>)sourceAccelerationStructure descriptor:(MTL4AccelerationStructureDescriptor *)descriptor destination:(id<MTLAccelerationStructure>)destinationAccelerationStructure scratchBuffer:(MTL4BufferRange)scratchBuffer { (void)sourceAccelerationStructure; (void)descriptor; (void)destinationAccelerationStructure; (void)scratchBuffer; [_owner markError]; }
-- (void)refitAccelerationStructure:(id<MTLAccelerationStructure>)sourceAccelerationStructure descriptor:(MTL4AccelerationStructureDescriptor *)descriptor destination:(id<MTLAccelerationStructure>)destinationAccelerationStructure scratchBuffer:(MTL4BufferRange)scratchBuffer options:(MTLAccelerationStructureRefitOptions)options { (void)sourceAccelerationStructure; (void)descriptor; (void)destinationAccelerationStructure; (void)scratchBuffer; (void)options; [_owner markError]; }
-- (void)copyAccelerationStructure:(id<MTLAccelerationStructure>)sourceAccelerationStructure toAccelerationStructure:(id<MTLAccelerationStructure>)destinationAccelerationStructure { (void)sourceAccelerationStructure; (void)destinationAccelerationStructure; [_owner markError]; }
-- (void)writeCompactedAccelerationStructureSize:(id<MTLAccelerationStructure>)accelerationStructure toBuffer:(MTL4BufferRange)buffer { (void)accelerationStructure; (void)buffer; [_owner markError]; }
-- (void)copyAndCompactAccelerationStructure:(id<MTLAccelerationStructure>)sourceAccelerationStructure toAccelerationStructure:(id<MTLAccelerationStructure>)destinationAccelerationStructure { (void)sourceAccelerationStructure; (void)destinationAccelerationStructure; [_owner markError]; }
+- (void)buildAccelerationStructure:(id<MTLAccelerationStructure>)accelerationStructure descriptor:(MTL4AccelerationStructureDescriptor *)descriptor scratchBuffer:(MTL4BufferRange)scratchBuffer {
+    ZPUBuffer *scratch = nil;
+    NSUInteger scratchOffset = 0;
+    if (scratchBuffer.bufferAddress != 0 &&
+        !zpu_metal4_buffer_range(scratchBuffer, _owner->_owner, &scratch, &scratchOffset)) {
+        [_owner markError];
+        return;
+    }
+    ZPUAccelerationStructureEncoder *encoder = [[ZPUAccelerationStructureEncoder alloc]
+        initWithOwner:_owner->_legacyBuffer];
+    [encoder buildAccelerationStructure:accelerationStructure descriptor:descriptor
+                          scratchBuffer:scratch scratchBufferOffset:scratchOffset];
+    _stages |= MTLStageAccelerationStructure;
+}
+- (void)refitAccelerationStructure:(id<MTLAccelerationStructure>)sourceAccelerationStructure descriptor:(MTL4AccelerationStructureDescriptor *)descriptor destination:(id<MTLAccelerationStructure>)destinationAccelerationStructure scratchBuffer:(MTL4BufferRange)scratchBuffer {
+    ZPUBuffer *scratch = nil;
+    NSUInteger scratchOffset = 0;
+    if (scratchBuffer.bufferAddress != 0 &&
+        !zpu_metal4_buffer_range(scratchBuffer, _owner->_owner, &scratch, &scratchOffset)) {
+        [_owner markError];
+        return;
+    }
+    ZPUAccelerationStructureEncoder *encoder = [[ZPUAccelerationStructureEncoder alloc]
+        initWithOwner:_owner->_legacyBuffer];
+    [encoder refitCPU:sourceAccelerationStructure descriptor:descriptor
+        destination:destinationAccelerationStructure scratchBuffer:scratch
+        scratchBufferOffset:scratchOffset options:3];
+    _stages |= MTLStageAccelerationStructure;
+}
+- (void)refitAccelerationStructure:(id<MTLAccelerationStructure>)sourceAccelerationStructure descriptor:(MTL4AccelerationStructureDescriptor *)descriptor destination:(id<MTLAccelerationStructure>)destinationAccelerationStructure scratchBuffer:(MTL4BufferRange)scratchBuffer options:(MTLAccelerationStructureRefitOptions)options {
+    ZPUBuffer *scratch = nil;
+    NSUInteger scratchOffset = 0;
+    if (scratchBuffer.bufferAddress != 0 &&
+        !zpu_metal4_buffer_range(scratchBuffer, _owner->_owner, &scratch, &scratchOffset)) {
+        [_owner markError];
+        return;
+    }
+    ZPUAccelerationStructureEncoder *encoder = [[ZPUAccelerationStructureEncoder alloc]
+        initWithOwner:_owner->_legacyBuffer];
+    [encoder refitCPU:sourceAccelerationStructure descriptor:descriptor
+        destination:destinationAccelerationStructure scratchBuffer:scratch
+        scratchBufferOffset:scratchOffset options:(NSUInteger)options];
+    _stages |= MTLStageAccelerationStructure;
+}
+- (void)copyAccelerationStructure:(id<MTLAccelerationStructure>)sourceAccelerationStructure toAccelerationStructure:(id<MTLAccelerationStructure>)destinationAccelerationStructure {
+    ZPUAccelerationStructureEncoder *encoder = [[ZPUAccelerationStructureEncoder alloc]
+        initWithOwner:_owner->_legacyBuffer];
+    [encoder copyAccelerationStructure:sourceAccelerationStructure
+                 toAccelerationStructure:destinationAccelerationStructure];
+    _stages |= MTLStageAccelerationStructure;
+}
+- (void)writeCompactedAccelerationStructureSize:(id<MTLAccelerationStructure>)accelerationStructure toBuffer:(MTL4BufferRange)buffer {
+    ZPUBuffer *destination = nil;
+    NSUInteger destinationOffset = 0;
+    if (!zpu_metal4_buffer_range(buffer, _owner->_owner, &destination, &destinationOffset) ||
+        buffer.length < sizeof(uint64_t)) {
+        [_owner markError];
+        return;
+    }
+    ZPUAccelerationStructureEncoder *encoder = [[ZPUAccelerationStructureEncoder alloc]
+        initWithOwner:_owner->_legacyBuffer];
+    [encoder writeCompactedAccelerationStructureSize:accelerationStructure
+        toBuffer:destination offset:destinationOffset sizeDataType:MTLDataTypeULong];
+    _stages |= MTLStageAccelerationStructure;
+}
+- (void)copyAndCompactAccelerationStructure:(id<MTLAccelerationStructure>)sourceAccelerationStructure toAccelerationStructure:(id<MTLAccelerationStructure>)destinationAccelerationStructure {
+    ZPUAccelerationStructureEncoder *encoder = [[ZPUAccelerationStructureEncoder alloc]
+        initWithOwner:_owner->_legacyBuffer];
+    [encoder copyAndCompactAccelerationStructure:sourceAccelerationStructure
+                         toAccelerationStructure:destinationAccelerationStructure];
+    _stages |= MTLStageAccelerationStructure;
+}
 - (void)writeTimestampWithGranularity:(MTL4TimestampGranularity)granularity intoHeap:(id<MTL4CounterHeap>)counterHeap atIndex:(NSUInteger)index {
     (void)granularity;
     ZPUMTL4CounterHeap *heap = (ZPUMTL4CounterHeap *)counterHeap;

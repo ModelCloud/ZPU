@@ -4766,6 +4766,66 @@ int main(void) {
             return 60;
         }
 
+        /* Metal 4 acceleration commands share the CPU-owned storage and
+         * descriptor-size model of the legacy acceleration encoder. Native
+         * Metal is not used for this operation; only the earlier render and
+         * compute paths use it as a byte oracle. */
+        MTL4PrimitiveAccelerationStructureDescriptor *metal4_as_descriptor =
+            [MTL4PrimitiveAccelerationStructureDescriptor new];
+        metal4_as_descriptor.geometryDescriptors = @[];
+        MTLAccelerationStructureSizes metal4_as_sizes =
+            [adapter_device accelerationStructureSizesWithDescriptor:metal4_as_descriptor];
+        const NSUInteger metal4_as_size = metal4_as_sizes.accelerationStructureSize;
+        id<MTLAccelerationStructure> metal4_as =
+            [adapter_device newAccelerationStructureWithSize:metal4_as_size];
+        id<MTLAccelerationStructure> metal4_as_copy =
+            [adapter_device newAccelerationStructureWithSize:metal4_as_size];
+        const NSUInteger metal4_compacted_size = metal4_as_size / 2 == 0 ? 1 : metal4_as_size / 2;
+        id<MTLAccelerationStructure> metal4_as_compact =
+            [adapter_device newAccelerationStructureWithSize:metal4_compacted_size];
+        id<MTLBuffer> metal4_as_scratch = [adapter_device newBufferWithLength:
+            metal4_as_sizes.buildScratchBufferSize == 0 ? 1 : metal4_as_sizes.buildScratchBufferSize
+                                                                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> metal4_as_status =
+            [adapter_device newBufferWithLength:sizeof(uint64_t) options:MTLResourceStorageModeShared];
+        id<MTL4CommandBuffer> metal4_as_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_as_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> metal4_as_encoder = [metal4_as_command_buffer computeCommandEncoder];
+        [metal4_as_encoder buildAccelerationStructure:metal4_as descriptor:metal4_as_descriptor
+                                         scratchBuffer:MTL4BufferRangeMake(metal4_as_scratch.gpuAddress,
+                                                                            metal4_as_scratch.length)];
+        [metal4_as_encoder refitAccelerationStructure:metal4_as descriptor:metal4_as_descriptor
+                                           destination:nil
+                                         scratchBuffer:MTL4BufferRangeMake(metal4_as_scratch.gpuAddress,
+                                                                            metal4_as_scratch.length)];
+        [metal4_as_encoder writeCompactedAccelerationStructureSize:metal4_as
+                                                          toBuffer:MTL4BufferRangeMake(metal4_as_status.gpuAddress,
+                                                                                        metal4_as_status.length)];
+        [metal4_as_encoder copyAccelerationStructure:metal4_as toAccelerationStructure:metal4_as_copy];
+        [metal4_as_encoder copyAndCompactAccelerationStructure:metal4_as
+                                       toAccelerationStructure:metal4_as_compact];
+        const MTLStages metal4_as_stages = metal4_as_encoder.stages;
+        [metal4_as_encoder endEncoding];
+        [metal4_as_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_as_command_buffers[] = {metal4_as_command_buffer};
+        MTL4CommitOptions *metal4_as_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *metal4_as_error = nil;
+        [metal4_as_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            metal4_as_error = feedback.error;
+        }];
+        [metal4_queue commit:metal4_as_command_buffers count:1 options:metal4_as_options];
+        uint64_t metal4_as_compacted_value = 0;
+        if (metal4_as_status != nil) memcpy(&metal4_as_compacted_value, metal4_as_status.contents,
+                                            sizeof(metal4_as_compacted_value));
+        if (metal4_as_size == 0 || metal4_as == nil || metal4_as_copy == nil || metal4_as_compact == nil ||
+            metal4_as_scratch == nil || metal4_as_status == nil || metal4_as_command_buffer == nil ||
+            metal4_as_encoder == nil || metal4_as_error != nil ||
+            (metal4_as_stages & MTLStageAccelerationStructure) == 0 ||
+            metal4_as_compacted_value != metal4_compacted_size) {
+            fail_with_error("Metal 4 CPU acceleration commands failed", metal4_as_error);
+            return 66;
+        }
+
         /* GPU addresses are only meaningful for resources owned by the
          * device that records the command. A native buffer is used here only
          * to supply a foreign address; it is never submitted to native Metal
