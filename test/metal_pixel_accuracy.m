@@ -8948,6 +8948,19 @@ int main(void) {
                 adapter_patch_reference_command_buffer.status == MTLCommandBufferStatusCompleted &&
                 memcmp(adapter_patch_pixels, adapter_patch_reference_pixels,
                        sizeof(adapter_patch_pixels)) == 0;
+            if (@available(macOS 26.0, iOS 26.0, *)) {
+                MTLFunctionReflection *adapter_patch_vertex_reflection =
+                    [adapter_default_library reflectionForFunctionWithName:@"zpu_cpu_tessellated_triangle_vertex"];
+                MTLFunctionReflection *adapter_patch_fragment_reflection =
+                    [adapter_default_library reflectionForFunctionWithName:@"zpu_cpu_tessellated_triangle_fragment"];
+                adapter_patch_exact = adapter_patch_exact &&
+                    adapter_patch_vertex_reflection != nil &&
+                    adapter_patch_vertex_reflection.bindings.count == 1 &&
+                    [adapter_patch_vertex_reflection.bindings[0].name isEqualToString:@"vertices"] &&
+                    adapter_patch_vertex_reflection.bindings[0].type == MTLBindingTypeBuffer &&
+                    adapter_patch_fragment_reflection != nil &&
+                    adapter_patch_fragment_reflection.bindings.count == 0;
+            }
 
             MTLRenderPipelineDescriptor *adapter_indexed_patch_descriptor = [adapter_patch_descriptor copy];
             adapter_indexed_patch_descriptor.tessellationControlPointIndexType =

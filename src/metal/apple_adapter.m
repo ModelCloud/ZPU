@@ -5548,6 +5548,17 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
             initWithBindings:@[source, sampler] userAnnotation:nil];
     }
+    if ([name isEqualToString:zpu_cpu_patch_triangle_vertex_name]) {
+        ZPUBinding *vertices = zpu_reflection_binding(@"vertices", MTLBindingTypeBuffer,
+                                                       MTLBindingAccessReadOnly, 0);
+        [vertices setBufferDataSize:sizeof(zpu_metal_vertex) dataType:MTLDataTypeStruct];
+        return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+            initWithBindings:@[vertices] userAnnotation:nil];
+    }
+    if ([name isEqualToString:zpu_cpu_patch_triangle_fragment_name]) {
+        return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+            initWithBindings:@[] userAnnotation:nil];
+    }
     if ([name hasPrefix:@"zpu_test_"] && [name rangeOfString:@"fragment" options:NSCaseInsensitiveSearch].location != NSNotFound) {
         return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
             initWithBindings:@[] userAnnotation:nil];
