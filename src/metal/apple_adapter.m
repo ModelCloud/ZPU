@@ -41,6 +41,7 @@
 @class ZPULibrary;
 @class ZPUBinaryArchive;
 @class ZPUMTL4BinaryFunction;
+@class ZPUMTL4PipelineDataSetSerializer;
 @class ZPUMTL4CompilerTask;
 @class ZPUMTL4Compiler;
 @class ZPUMTL4Archive;
@@ -499,6 +500,17 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 /* Metal 4 compiler objects are CPU-side metadata adapters. They can describe
  * and instantiate registered ZPU compute kernels, but never invoke Apple's
  * MSL compiler or produce a native GPU binary. */
+API_AVAILABLE(macos(26.0), ios(26.0))
+@interface ZPUMTL4PipelineDataSetSerializer : NSObject <MTL4PipelineDataSetSerializer> {
+@public
+    ZPUDevice *_owner;
+    MTL4PipelineDataSetSerializerConfiguration _configuration;
+    NSMutableSet *_functionNames;
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTL4PipelineDataSetSerializerDescriptor *)descriptor;
+- (void)recordFunctionName:(NSString *)name;
+@end
+
 API_AVAILABLE(macos(26.0), ios(26.0))
 @interface ZPUMTL4BinaryFunction : NSObject <MTL4BinaryFunction> {
 @public
@@ -2758,8 +2770,13 @@ static uint64_t zpu_cpu_timestamp(void) {
     return (id<MTL4Archive>)[[ZPUMTL4Archive alloc] initWithOwner:self url:url error:error];
 }
 - (id<MTL4PipelineDataSetSerializer>)newPipelineDataSetSerializerWithDescriptor:(MTL4PipelineDataSetSerializerDescriptor *)descriptor API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)descriptor;
-    return nil;
+    if (descriptor == nil ||
+        (descriptor.configuration & ~((NSUInteger)MTL4PipelineDataSetSerializerConfigurationCaptureDescriptors |
+                                      (NSUInteger)MTL4PipelineDataSetSerializerConfigurationCaptureBinaries)) != 0) {
+        return nil;
+    }
+    return (id<MTL4PipelineDataSetSerializer>)[[ZPUMTL4PipelineDataSetSerializer alloc]
+        initWithOwner:self descriptor:descriptor];
 }
 - (id<MTL4CounterHeap>)newCounterHeapWithDescriptor:(MTL4CounterHeapDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(26.0), ios(26.0)) {
     if (descriptor == nil || descriptor.type != MTL4CounterHeapTypeTimestamp || descriptor.count == 0 ||
@@ -3009,6 +3026,58 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
 
+@implementation ZPUMTL4PipelineDataSetSerializer
+- (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTL4PipelineDataSetSerializerDescriptor *)descriptor {
+    if ((self = [super init])) {
+        _owner = owner;
+        _configuration = descriptor.configuration;
+        _functionNames = [NSMutableSet set];
+    }
+    return self;
+}
+- (void)recordFunctionName:(NSString *)name {
+    if (name.length != 0) {
+        @synchronized (self) { [_functionNames addObject:name]; }
+    }
+}
+- (BOOL)serializeAsArchiveAndFlushToURL:(NSURL *)url error:(NSError **)error {
+    if ((_configuration & MTL4PipelineDataSetSerializerConfigurationCaptureBinaries) == 0) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 serializer was not configured to capture binaries");
+        return NO;
+    }
+    if (url == nil || !url.isFileURL) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 serializer requires a file URL");
+        return NO;
+    }
+    NSMutableString *serialized = [NSMutableString stringWithString:@"ZPU CPU Metal Binary Archive v1\n"];
+    NSArray<NSString *> *sortedNames;
+    @synchronized (self) { sortedNames = [[_functionNames allObjects] sortedArrayUsingSelector:@selector(compare:)]; }
+    for (NSString *name in sortedNames) [serialized appendFormat:@"%@\n", name];
+    NSData *data = [serialized dataUsingEncoding:NSUTF8StringEncoding];
+    NSError *writeError = nil;
+    BOOL result = [data writeToURL:url options:NSDataWritingAtomic error:&writeError];
+    if (!result) {
+        if (error != NULL) *error = writeError;
+        return NO;
+    }
+    if (error != NULL) *error = nil;
+    @synchronized (self) { [_functionNames removeAllObjects]; }
+    return YES;
+}
+- (NSData *)serializeAsPipelinesScriptWithError:(NSError **)error {
+    if ((_configuration & MTL4PipelineDataSetSerializerConfigurationCaptureDescriptors) == 0) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 serializer was not configured to capture descriptors");
+        return nil;
+    }
+    NSMutableString *serialized = [NSMutableString stringWithString:@"ZPU CPU Metal Pipeline Script v1\n"];
+    NSArray<NSString *> *sortedNames;
+    @synchronized (self) { sortedNames = [[_functionNames allObjects] sortedArrayUsingSelector:@selector(compare:)]; }
+    for (NSString *name in sortedNames) [serialized appendFormat:@"compute %@\n", name];
+    if (error != NULL) *error = nil;
+    return [serialized dataUsingEncoding:NSUTF8StringEncoding];
+}
+@end
+
 @implementation ZPUMTL4BinaryFunction
 - (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
                   functionType:(MTLFunctionType)functionType options:(MTL4BinaryFunctionOptions)options {
@@ -3126,8 +3195,12 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     }
     id<MTLFunction> function = zpu_mtl4_resolve_library_function(_owner, descriptor.computeFunctionDescriptor, error);
     if (function == nil) return nil;
-    return (id<MTLComputePipelineState>)[[ZPUComputePipelineState alloc]
+    id<MTLComputePipelineState> pipeline = (id<MTLComputePipelineState>)[[ZPUComputePipelineState alloc]
         initWithOwner:_owner function:function error:error];
+    if (pipeline != nil && [_pipelineDataSetSerializer respondsToSelector:@selector(recordFunctionName:)]) {
+        [(ZPUMTL4PipelineDataSetSerializer *)_pipelineDataSetSerializer recordFunctionName:function.name];
+    }
+    return pipeline;
 }
 - (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTL4ComputePipelineDescriptor *)descriptor
                                            dynamicLinkingDescriptor:(MTL4PipelineStageDynamicLinkingDescriptor *)dynamicLinkingDescriptor
@@ -3170,7 +3243,11 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
                                         compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
                                                       error:(NSError **)error {
     (void)compilerTaskOptions;
-    return zpu_mtl4_binary_function_for_descriptor(_owner, descriptor, error);
+    id<MTL4BinaryFunction> function = zpu_mtl4_binary_function_for_descriptor(_owner, descriptor, error);
+    if (function != nil && [_pipelineDataSetSerializer respondsToSelector:@selector(recordFunctionName:)]) {
+        [(ZPUMTL4PipelineDataSetSerializer *)_pipelineDataSetSerializer recordFunctionName:function.name];
+    }
+    return function;
 }
 - (id<MTL4CompilerTask>)newLibraryWithDescriptor:(MTL4LibraryDescriptor *)descriptor
                                completionHandler:(MTLNewLibraryCompletionHandler)completionHandler {

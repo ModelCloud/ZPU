@@ -2928,8 +2928,16 @@ int main(void) {
          * The compiler accepts only registered ZPU library functions; the
          * native Metal compiler above remains the pixel oracle. */
         NSError *adapter_mtl4_compiler_error = nil;
+        MTL4PipelineDataSetSerializerDescriptor *adapter_mtl4_serializer_descriptor =
+            [MTL4PipelineDataSetSerializerDescriptor new];
+        adapter_mtl4_serializer_descriptor.configuration =
+            MTL4PipelineDataSetSerializerConfigurationCaptureDescriptors |
+            MTL4PipelineDataSetSerializerConfigurationCaptureBinaries;
+        id<MTL4PipelineDataSetSerializer> adapter_mtl4_serializer =
+            [adapter_device newPipelineDataSetSerializerWithDescriptor:adapter_mtl4_serializer_descriptor];
         MTL4CompilerDescriptor *adapter_mtl4_compiler_descriptor = [MTL4CompilerDescriptor new];
         adapter_mtl4_compiler_descriptor.label = @"zpu-cpu-compiler";
+        adapter_mtl4_compiler_descriptor.pipelineDataSetSerializer = adapter_mtl4_serializer;
         id<MTL4Compiler> adapter_mtl4_compiler =
             [adapter_device newCompilerWithDescriptor:adapter_mtl4_compiler_descriptor
                                                  error:&adapter_mtl4_compiler_error];
@@ -2966,6 +2974,20 @@ int main(void) {
                 adapter_mtl4_async_error = binary_error;
             }];
         [adapter_mtl4_binary_task waitUntilCompleted];
+        NSData *adapter_mtl4_pipeline_script =
+            [adapter_mtl4_serializer serializeAsPipelinesScriptWithError:&adapter_mtl4_compiler_error];
+        NSURL *adapter_mtl4_serializer_url = [NSURL fileURLWithPath:
+            [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]]];
+        BOOL adapter_mtl4_archive_flushed =
+            [adapter_mtl4_serializer serializeAsArchiveAndFlushToURL:adapter_mtl4_serializer_url
+                                                                  error:&adapter_mtl4_compiler_error];
+        id<MTL4Archive> adapter_mtl4_serializer_archive =
+            [adapter_device newArchiveWithURL:adapter_mtl4_serializer_url
+                                         error:&adapter_mtl4_compiler_error];
+        id<MTL4BinaryFunction> adapter_mtl4_serializer_binary =
+            [adapter_mtl4_serializer_archive newBinaryFunctionWithDescriptor:adapter_mtl4_binary_descriptor
+                                                                          error:&adapter_mtl4_compiler_error];
+        [[NSFileManager defaultManager] removeItemAtURL:adapter_mtl4_serializer_url error:nil];
         id<MTLTexture> adapter_mtl4_compiler_texture =
             [adapter_device newTextureWithDescriptor:compute_texture_descriptor];
         id<MTLCommandBuffer> adapter_mtl4_compiler_command_buffer = [adapter_queue commandBuffer];
@@ -2983,7 +3005,11 @@ int main(void) {
                                       bytesPerRow:(NSUInteger)width * 4
                                        fromRegion:MTLRegionMake2D(0, 0, width, height)
                                       mipmapLevel:0];
-        if (adapter_mtl4_compiler == nil || adapter_mtl4_library == nil ||
+        if (adapter_mtl4_serializer == nil ||
+            ![adapter_mtl4_serializer conformsToProtocol:@protocol(MTL4PipelineDataSetSerializer)] ||
+            adapter_mtl4_pipeline_script.length == 0 || !adapter_mtl4_archive_flushed ||
+            adapter_mtl4_serializer_archive == nil || adapter_mtl4_serializer_binary == nil ||
+            adapter_mtl4_compiler == nil || adapter_mtl4_library == nil ||
             adapter_mtl4_compiled_pipeline == nil || adapter_mtl4_binary_function == nil ||
             ![adapter_mtl4_binary_function conformsToProtocol:@protocol(MTL4BinaryFunction)] ||
             ![adapter_mtl4_binary_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
