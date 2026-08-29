@@ -217,7 +217,7 @@ static int test_mip_sampler_against_native(
     id<MTLFunction> adapter_vertex_function, id<MTLFunction> adapter_fragment_function,
     MTLSamplerMinMagFilter min_filter, MTLSamplerMinMagFilter mag_filter,
     MTLSamplerMipFilter mip_filter, MTLSamplerReductionMode reduction_mode,
-    float lod_min_clamp, float lod_max_clamp,
+    float lod_bias, float lod_min_clamp, float lod_max_clamp,
     BOOL normalized_coordinates) {
     enum { output_width = 4, output_height = 4, mip_width = 16, mip_height = 16,
            mip_levels = 5, byte_count = output_width * output_height * 4 };
@@ -289,7 +289,10 @@ static int test_mip_sampler_against_native(
     sampler_descriptor.normalizedCoordinates = normalized_coordinates;
     sampler_descriptor.lodMinClamp = lod_min_clamp;
     sampler_descriptor.lodMaxClamp = lod_max_clamp;
-    if (@available(macOS 26.0, iOS 26.0, *)) sampler_descriptor.reductionMode = reduction_mode;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        sampler_descriptor.lodBias = lod_bias;
+        sampler_descriptor.reductionMode = reduction_mode;
+    }
     id<MTLSamplerState> native_sampler = [native_device newSamplerStateWithDescriptor:sampler_descriptor];
     id<MTLSamplerState> adapter_sampler = [adapter_device newSamplerStateWithDescriptor:sampler_descriptor];
     if (native_source == nil || adapter_source == nil || native_pipeline == nil || adapter_pipeline == nil ||
@@ -1351,22 +1354,31 @@ int main(void) {
             adapter_vertex_function, adapter_sample_fragment_function,
             MTLSamplerMinMagFilterNearest, MTLSamplerMinMagFilterNearest,
             MTLSamplerMipFilterNearest, MTLSamplerReductionModeWeightedAverage,
-            0.0f, FLT_MAX, YES);
+            0.0f, 0.0f, FLT_MAX, YES);
         if (mip_nearest_result != 0) return mip_nearest_result;
         const int mip_linear_result = test_mip_sampler_against_native(
             device, adapter_device, vertex_function, sample_fragment_function,
             adapter_vertex_function, adapter_sample_fragment_function,
             MTLSamplerMinMagFilterNearest, MTLSamplerMinMagFilterNearest,
             MTLSamplerMipFilterLinear, MTLSamplerReductionModeWeightedAverage,
-            1.5f, 1.5f, YES);
+            0.0f, 1.5f, 1.5f, YES);
         if (mip_linear_result != 0) return mip_linear_result;
         const int unnormalized_sampler_result = test_mip_sampler_against_native(
             device, adapter_device, vertex_function, sample_fragment_function,
             adapter_vertex_function, adapter_sample_fragment_function,
             MTLSamplerMinMagFilterNearest, MTLSamplerMinMagFilterNearest,
             MTLSamplerMipFilterNotMipmapped, MTLSamplerReductionModeWeightedAverage,
-            0.0f, 0.0f, NO);
+            0.0f, 0.0f, 0.0f, NO);
         if (unnormalized_sampler_result != 0) return unnormalized_sampler_result;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            const int lod_bias_result = test_mip_sampler_against_native(
+                device, adapter_device, vertex_function, sample_fragment_function,
+                adapter_vertex_function, adapter_sample_fragment_function,
+                MTLSamplerMinMagFilterNearest, MTLSamplerMinMagFilterNearest,
+                MTLSamplerMipFilterNearest, MTLSamplerReductionModeWeightedAverage,
+                1.0f, 0.0f, FLT_MAX, YES);
+            if (lod_bias_result != 0) return lod_bias_result;
+        }
         if (@available(macOS 26.0, iOS 26.0, *)) {
             /* The reductionMode property is present in the SDK on all 26.x
              * systems, but native execution is only defined on Apple10 and
@@ -1380,14 +1392,14 @@ int main(void) {
                     adapter_vertex_function, adapter_sample_fragment_function,
                     MTLSamplerMinMagFilterLinear, MTLSamplerMinMagFilterLinear,
                     MTLSamplerMipFilterLinear, MTLSamplerReductionModeMinimum,
-                    0.0f, 0.0f, YES);
+                    0.0f, 0.0f, 0.0f, YES);
                 if (reduction_min_result != 0) return reduction_min_result;
                 const int reduction_max_result = test_mip_sampler_against_native(
                     device, adapter_device, vertex_function, sample_fragment_function,
                     adapter_vertex_function, adapter_sample_fragment_function,
                     MTLSamplerMinMagFilterLinear, MTLSamplerMinMagFilterLinear,
                     MTLSamplerMipFilterLinear, MTLSamplerReductionModeMaximum,
-                    0.0f, 0.0f, YES);
+                    0.0f, 0.0f, 0.0f, YES);
                 if (reduction_max_result != 0) return reduction_max_result;
             }
         }

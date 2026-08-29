@@ -678,6 +678,7 @@ pub const RenderEncoder = struct {
     sample_mip_filter: abi.SamplerMipFilter = .not_mipmapped,
     sample_lod_min_clamp: f32 = 0,
     sample_lod_max_clamp: f32 = std.math.floatMax(f32),
+    sample_lod_bias: f32 = 0,
     sample_normalized_coordinates: bool = true,
     sample_reduction_mode: abi.SamplerReductionMode = .weighted_average,
     sample_address_s: abi.SamplerAddressMode = .clamp_to_edge,
@@ -741,6 +742,7 @@ pub const RenderEncoder = struct {
             .sample_mip_filter = self.sample_mip_filter,
             .sample_lod_min_clamp = self.sample_lod_min_clamp,
             .sample_lod_max_clamp = self.sample_lod_max_clamp,
+            .sample_lod_bias = self.sample_lod_bias,
             .sample_normalized_coordinates = self.sample_normalized_coordinates,
             .sample_reduction_mode = self.sample_reduction_mode,
             .sample_address_s = self.sample_address_s,
@@ -879,6 +881,11 @@ pub const RenderEncoder = struct {
             lod_min_clamp < 0 or lod_max_clamp < lod_min_clamp) return error.InvalidArgument;
         self.sample_lod_min_clamp = lod_min_clamp;
         self.sample_lod_max_clamp = lod_max_clamp;
+    }
+
+    pub fn setFragmentSamplerLodBias(self: *RenderEncoder, lod_bias: f32) Error!void {
+        if (!self.open() or !std.math.isFinite(lod_bias) or lod_bias < -16 or lod_bias >= 16) return error.InvalidArgument;
+        self.sample_lod_bias = lod_bias;
     }
 
     pub fn setFragmentSamplerNormalizedCoordinates(self: *RenderEncoder, normalized_coordinates: bool) Error!void {
@@ -3910,6 +3917,13 @@ pub export fn zpu_metal_render_encoder_set_fragment_sampler_lod_clamps(
     encoder: ?*RenderEncoder, lod_min_clamp: f32, lod_max_clamp: f32,
 ) callconv(.c) c_int {
     (encoder orelse return -1).setFragmentSamplerLodClamps(lod_min_clamp, lod_max_clamp) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_fragment_sampler_lod_bias(
+    encoder: ?*RenderEncoder, lod_bias: f32,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setFragmentSamplerLodBias(lod_bias) catch |err| return errorCode(err);
     return 0;
 }
 

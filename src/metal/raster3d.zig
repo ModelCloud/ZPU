@@ -47,6 +47,7 @@ pub const DrawOptions = struct {
     sample_mip_filter: abi.SamplerMipFilter = .not_mipmapped,
     sample_lod_min_clamp: f32 = 0,
     sample_lod_max_clamp: f32 = std.math.floatMax(f32),
+    sample_lod_bias: f32 = 0,
     sample_normalized_coordinates: bool = true,
     sample_reduction_mode: abi.SamplerReductionMode = .weighted_average,
     sample_address_s: abi.SamplerAddressMode = .clamp_to_edge,
@@ -466,6 +467,7 @@ fn sampleSelection(job: *const Job, filter: abi.SamplerFilter, rho: f32) SampleS
         return .{ .filter = filter };
     }
     var lod = if (std.math.isFinite(rho) and rho > 0) std.math.log2(rho) else 0;
+    lod += job.options.sample_lod_bias;
     lod = std.math.clamp(lod, job.options.sample_lod_min_clamp, job.options.sample_lod_max_clamp);
     lod = std.math.clamp(lod, 0, @as(f32, @floatFromInt(job.sample_mipmaps.len - 1)));
     return switch (job.options.sample_mip_filter) {
@@ -1175,6 +1177,12 @@ test "CPU sampler mip filter selects clamped levels" {
     try std.testing.expectEqual(@as(usize, 0), selection.level0);
     try std.testing.expectEqual(@as(usize, 1), selection.level1);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), selection.level_weight, 0.000001);
+
+    job.options.sample_lod_min_clamp = 0;
+    job.options.sample_lod_max_clamp = std.math.floatMax(f32);
+    job.options.sample_lod_bias = 1;
+    const biased = sampleSelection(&job, .nearest, 1);
+    try std.testing.expectEqual(@as(usize, 1), biased.level0);
 }
 
 test "CPU sampler reduction modes reduce bilinear texels per channel" {

@@ -642,6 +642,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     BOOL _normalizedCoordinates;
     float _lodMinClamp;
     float _lodMaxClamp;
+    float _lodBias;
     uint64_t _resourceID;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLSamplerDescriptor *)descriptor;
@@ -5519,6 +5520,8 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _normalizedCoordinates = descriptor.normalizedCoordinates;
         _lodMinClamp = descriptor.lodMinClamp;
         _lodMaxClamp = descriptor.lodMaxClamp;
+        _lodBias = 0.0f;
+        if (@available(macOS 26.0, iOS 26.0, *)) _lodBias = descriptor.lodBias;
         _resourceID = zpu_register_resource(self);
     }
     return self;
@@ -12051,11 +12054,14 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         (zpu_metal_sampler_mip_filter)zpuSampler->_mipFilter;
     const float lodMinClamp = sampler == nil ? 0.0f : zpuSampler->_lodMinClamp;
     const float lodMaxClamp = sampler == nil ? FLT_MAX : zpuSampler->_lodMaxClamp;
+    const float lodBias = sampler == nil ? 0.0f : zpuSampler->_lodBias;
     const BOOL normalizedCoordinates = sampler == nil ? YES : zpuSampler->_normalizedCoordinates;
     if (zpu_metal_render_encoder_set_fragment_sampler_with_filters_and_mip_filter(
             _zpuEncoder, minFilter, magFilter, address_s, address_t, borderColor, mipFilter) != ZPU_METAL_OK ||
         zpu_metal_render_encoder_set_fragment_sampler_lod_clamps(
             _zpuEncoder, lodMinClamp, lodMaxClamp) != ZPU_METAL_OK ||
+        zpu_metal_render_encoder_set_fragment_sampler_lod_bias(
+            _zpuEncoder, lodBias) != ZPU_METAL_OK ||
         zpu_metal_render_encoder_set_fragment_sampler_normalized_coordinates(
             _zpuEncoder, normalizedCoordinates) != ZPU_METAL_OK ||
         zpu_metal_render_encoder_set_fragment_sampler_reduction_mode(
