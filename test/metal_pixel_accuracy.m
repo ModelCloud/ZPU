@@ -2952,6 +2952,10 @@ int main(void) {
         adapter_mtl4_function_descriptor.library = adapter_mtl4_library;
         MTL4ComputePipelineDescriptor *adapter_mtl4_compute_descriptor = [MTL4ComputePipelineDescriptor new];
         adapter_mtl4_compute_descriptor.computeFunctionDescriptor = adapter_mtl4_function_descriptor;
+        adapter_mtl4_compute_descriptor.maxTotalThreadsPerThreadgroup = 64;
+        adapter_mtl4_compute_descriptor.requiredThreadsPerThreadgroup = MTLSizeMake(8, 8, 1);
+        adapter_mtl4_compute_descriptor.supportIndirectCommandBuffers =
+            MTL4IndirectCommandBufferSupportStateEnabled;
         id<MTLComputePipelineState> adapter_mtl4_compiled_pipeline =
             [adapter_mtl4_compiler newComputePipelineStateWithDescriptor:adapter_mtl4_compute_descriptor
                                                         compilerTaskOptions:nil
@@ -3061,6 +3065,11 @@ int main(void) {
             adapter_mtl4_compiler == nil || adapter_mtl4_library == nil ||
             adapter_mtl4_compiled_pipeline == nil || adapter_mtl4_compiled_render_pipeline == nil ||
             adapter_mtl4_archived_render_pipeline == nil || adapter_mtl4_binary_function == nil ||
+            adapter_mtl4_compiled_pipeline.maxTotalThreadsPerThreadgroup != 64 ||
+            adapter_mtl4_compiled_pipeline.requiredThreadsPerThreadgroup.width != 8 ||
+            adapter_mtl4_compiled_pipeline.requiredThreadsPerThreadgroup.height != 8 ||
+            adapter_mtl4_compiled_pipeline.requiredThreadsPerThreadgroup.depth != 1 ||
+            !adapter_mtl4_compiled_pipeline.supportIndirectCommandBuffers ||
             adapter_mtl4_binary_handle == nil || adapter_mtl4_named_handle == nil ||
             adapter_mtl4_function_handle == nil ||
             ![adapter_mtl4_binary_function conformsToProtocol:@protocol(MTL4BinaryFunction)] ||

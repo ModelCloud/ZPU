@@ -593,6 +593,9 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @public
     ZPUDevice *_owner;
     zpu_metal_compute_kernel _kernel;
+    NSUInteger _maxTotalThreadsPerThreadgroup;
+    MTLSize _requiredThreadsPerThreadgroup;
+    BOOL _supportsIndirectCommandBuffers;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner function:(id<MTLFunction>)function error:(NSError **)error;
 @end
@@ -3262,6 +3265,30 @@ static id<MTLRenderPipelineState> zpu_mtl4_render_pipeline_for_descriptor(
     return [owner newRenderPipelineStateWithDescriptor:legacy error:error];
 }
 
+static BOOL zpu_mtl4_apply_compute_descriptor(
+    ZPUComputePipelineState *pipeline, MTL4ComputePipelineDescriptor *descriptor, NSError **error) {
+    if (pipeline == nil || descriptor == nil ||
+        (descriptor.supportIndirectCommandBuffers != MTL4IndirectCommandBufferSupportStateDisabled &&
+         descriptor.supportIndirectCommandBuffers != MTL4IndirectCommandBufferSupportStateEnabled)) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 compute pipeline has invalid descriptor state");
+        return NO;
+    }
+    MTL4StaticLinkingDescriptor *linking = descriptor.staticLinkingDescriptor;
+    if (descriptor.supportBinaryLinking || linking.functionDescriptors.count != 0 ||
+        linking.privateFunctionDescriptors.count != 0 || linking.groups.count != 0 ||
+        descriptor.maxTotalThreadsPerThreadgroup > pipeline->_maxTotalThreadsPerThreadgroup) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 compute pipeline uses unsupported linking or thread limits");
+        return NO;
+    }
+    if (descriptor.maxTotalThreadsPerThreadgroup != 0) {
+        pipeline->_maxTotalThreadsPerThreadgroup = descriptor.maxTotalThreadsPerThreadgroup;
+    }
+    pipeline->_requiredThreadsPerThreadgroup = descriptor.requiredThreadsPerThreadgroup;
+    pipeline->_supportsIndirectCommandBuffers =
+        descriptor.supportIndirectCommandBuffers == MTL4IndirectCommandBufferSupportStateEnabled;
+    return YES;
+}
+
 static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     return (id<MTL4CompilerTask>)[[ZPUMTL4CompilerTask alloc] initWithCompiler:compiler];
 }
@@ -3314,6 +3341,8 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     if (function == nil) return nil;
     id<MTLComputePipelineState> pipeline = (id<MTLComputePipelineState>)[[ZPUComputePipelineState alloc]
         initWithOwner:_owner function:function error:error];
+    if (pipeline != nil && !zpu_mtl4_apply_compute_descriptor(
+            (ZPUComputePipelineState *)pipeline, descriptor, error)) return nil;
     if (pipeline != nil && [_pipelineDataSetSerializer respondsToSelector:@selector(recordFunctionName:)]) {
         [(ZPUMTL4PipelineDataSetSerializer *)_pipelineDataSetSerializer recordFunctionName:function.name];
     }
@@ -3517,8 +3546,11 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     }
     id<MTLFunction> function = zpu_mtl4_resolve_library_function(_owner, descriptor.computeFunctionDescriptor, error);
     if (function == nil) return nil;
-    return (id<MTLComputePipelineState>)[[ZPUComputePipelineState alloc]
+    id<MTLComputePipelineState> pipeline = (id<MTLComputePipelineState>)[[ZPUComputePipelineState alloc]
         initWithOwner:_owner function:function error:error];
+    if (pipeline != nil && !zpu_mtl4_apply_compute_descriptor(
+            (ZPUComputePipelineState *)pipeline, descriptor, error)) return nil;
+    return pipeline;
 }
 - (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTL4ComputePipelineDescriptor *)descriptor
                                            dynamicLinkingDescriptor:(MTL4PipelineStageDynamicLinkingDescriptor *)dynamicLinkingDescriptor
@@ -4970,6 +5002,9 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
     if ((self = [super init])) {
         _owner = owner;
         _kernel = 0;
+        _maxTotalThreadsPerThreadgroup = 1024;
+        _requiredThreadsPerThreadgroup = MTLSizeMake(0, 0, 0);
+        _supportsIndirectCommandBuffers = YES;
         NSString *name = [function respondsToSelector:@selector(name)] ? [function name] : nil;
         BOOL is_kernel = ![function respondsToSelector:@selector(functionType)] ||
             [function functionType] == MTLFunctionTypeKernel;
@@ -4997,13 +5032,13 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
 - (NSUInteger)allocatedSize API_AVAILABLE(macos(15.0), ios(18.0)) { return 0; }
 - (NSString *)label { return @"ZPU CPU compute pipeline"; }
 - (void)setLabel:(NSString *)label { (void)label; }
-- (NSUInteger)maxTotalThreadsPerThreadgroup { return 1024; }
+- (NSUInteger)maxTotalThreadsPerThreadgroup { return _maxTotalThreadsPerThreadgroup; }
 - (NSUInteger)threadExecutionWidth { return 1; }
 - (NSUInteger)staticThreadgroupMemoryLength { return 0; }
-- (BOOL)supportIndirectCommandBuffers API_AVAILABLE(macos(10.14), ios(12.0)) { return YES; }
+- (BOOL)supportIndirectCommandBuffers API_AVAILABLE(macos(10.14), ios(12.0)) { return _supportsIndirectCommandBuffers; }
 - (MTLResourceID)gpuResourceID API_AVAILABLE(macos(13.0), ios(16.0)) { return (MTLResourceID){0}; }
 - (MTLShaderValidation)shaderValidation API_AVAILABLE(macos(15.0), ios(18.0)) { return (MTLShaderValidation)0; }
-- (MTLSize)requiredThreadsPerThreadgroup API_AVAILABLE(macos(26.0), ios(26.0)) { return MTLSizeMake(0, 0, 0); }
+- (MTLSize)requiredThreadsPerThreadgroup API_AVAILABLE(macos(26.0), ios(26.0)) { return _requiredThreadsPerThreadgroup; }
 - (MTLComputePipelineReflection *)reflection API_AVAILABLE(macos(26.0), ios(26.0)) { return nil; }
 - (id<MTLFunctionHandle>)functionHandleWithName:(NSString *)name API_AVAILABLE(macos(26.0), ios(26.0)) {
     NSString *kernelName = zpu_compute_kernel_name(_kernel);
