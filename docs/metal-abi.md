@@ -194,7 +194,9 @@ triangle path:
   than being reported as fabricated statistics
 - CPU integer geometry for `convertSparsePixelRegions:...` and
   `convertSparseTileRegions:...`; outward and inward alignment are overflow
-  checked and work even though sparse resource allocation remains unsupported
+  checked; placement sparse buffers additionally provide CPU-owned page
+  mapping, copied-page aliasing, unmap-to-zero behavior, and exact byte
+  transfers, while sparse texture allocation remains unsupported
 - CPU library metadata can discover the six registered kernel names and fixed
   CPU render profiles from source text, UTF-8 file/URL/data inputs, and the
   default bundle query; unsupported arbitrary MSL and stitched libraries fail
@@ -254,7 +256,7 @@ triangle path:
   CPU-owned tensors also provide contiguous and strided byte-addressable slice
   transfers. Acceleration-structure build/refit/copy/compaction commands use
   the same CPU-owned storage path. Tensor shader binding, ray-intersection execution,
-  sparse, drawable, machine-learning, and tile/mesh render-pass
+  sparse texture, drawable, machine-learning, and tile/mesh render-pass
   features remain explicit fail-closed boundaries. Suspending/resuming render
   passes are represented as sequential ordinary CPU passes because the CPU
   implementation has no tile-memory stitching requirement. The
@@ -262,9 +264,9 @@ triangle path:
 - classic Metal resource, pipeline, blit, event, indirect-command, and
   command-buffer selectors that have no portable CPU meaning are represented
   explicitly: metadata-only operations are deterministic no-ops, while
-  arbitrary shader compilation, unregistered or arbitrary binary linking, sparse/placement
-  resources, ray tracing, tensor shader/ML execution, I/O, and unsupported Metal 4 advanced
-  families return nil or a stable error. They never fall through to Apple's
+  arbitrary shader compilation, unregistered or arbitrary binary linking, sparse texture
+  resources, drawable access, ray tracing, tensor shader/ML execution, and unsupported
+  Metal 4 advanced families return nil or a stable error. They never fall through to Apple's
   native Metal runtime
 
 The C header exposes both `zpu_metal_render`, an opt-in single-pass entry

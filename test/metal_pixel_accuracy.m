@@ -5691,19 +5691,175 @@ int main(void) {
             return 62;
         }
 
-        /* Placement-sparse mappings are not represented by ZPU resources.
-         * A nonzero queue mapping request must poison that CPU queue and
-         * surface an error on its next feedback-enabled commit. */
+        /* Placement-sparse buffers use CPU-owned physical pages. The native
+         * Metal sparse implementation is not used for this path; its only
+         * role in this test suite is to define the page-size and mapping
+         * contract that the adapter mirrors. A mapped page must round-trip
+         * through ordinary ZPU copies, copied mappings must alias the same
+         * physical page, and an unmapped read must be zero. */
+        const NSUInteger sparse_page_bytes_16 =
+            [adapter_device sparseTileSizeInBytesForSparsePageSize:MTLSparsePageSize16];
+        const NSUInteger sparse_page_bytes =
+            [adapter_device sparseTileSizeInBytesForSparsePageSize:MTLSparsePageSize64];
+        const NSUInteger sparse_page_bytes_256 =
+            [adapter_device sparseTileSizeInBytesForSparsePageSize:MTLSparsePageSize256];
+        NSMutableData *sparse_input_data = [NSMutableData dataWithLength:sparse_page_bytes];
+        for (NSUInteger index = 0; index < sparse_page_bytes; ++index) {
+            ((uint8_t *)sparse_input_data.mutableBytes)[index] = (uint8_t)((index * 29u + 11u) & 0xffu);
+        }
+        id<MTLHeap> sparse_heap = nil;
+        id<MTLBuffer> sparse_source = nil;
+        id<MTLBuffer> sparse_destination = nil;
+        id<MTLBuffer> sparse_roundtrip = nil;
+        id<MTLBuffer> sparse_output = nil;
+        id<MTLBuffer> sparse_alias_output = nil;
+        id<MTLBuffer> sparse_zero_output = nil;
+        if (sparse_page_bytes_16 != 16u * 1024u || sparse_page_bytes != 64u * 1024u ||
+            sparse_page_bytes_256 != 256u * 1024u ||
+            [device sparseTileSizeInBytesForSparsePageSize:MTLSparsePageSize16] != sparse_page_bytes_16 ||
+            [device sparseTileSizeInBytesForSparsePageSize:MTLSparsePageSize64] != sparse_page_bytes ||
+            [device sparseTileSizeInBytesForSparsePageSize:MTLSparsePageSize256] != sparse_page_bytes_256) {
+            fprintf(stderr, "metal-pixel: CPU sparse page sizes are incorrect\n");
+            return 85;
+        }
+        MTLHeapDescriptor *sparse_heap_descriptor = [MTLHeapDescriptor new];
+        sparse_heap_descriptor.type = MTLHeapTypePlacement;
+        sparse_heap_descriptor.size = sparse_page_bytes * 2;
+        sparse_heap_descriptor.storageMode = MTLStorageModePrivate;
+        sparse_heap_descriptor.maxCompatiblePlacementSparsePageSize = MTLSparsePageSize64;
+        sparse_heap = [adapter_device newHeapWithDescriptor:sparse_heap_descriptor];
+        sparse_source = [adapter_device newBufferWithLength:sparse_page_bytes
+                                                    options:MTLResourceStorageModePrivate
+                                   placementSparsePageSize:MTLSparsePageSize64];
+        sparse_destination = [adapter_device newBufferWithLength:sparse_page_bytes
+                                                         options:MTLResourceStorageModePrivate
+                                        placementSparsePageSize:MTLSparsePageSize64];
+        sparse_roundtrip = [adapter_device newBufferWithLength:sparse_page_bytes
+                                                        options:MTLResourceStorageModePrivate
+                                       placementSparsePageSize:MTLSparsePageSize64];
+        sparse_output = [adapter_device newBufferWithLength:sparse_page_bytes
+                                                     options:MTLResourceStorageModeShared];
+        sparse_alias_output = [adapter_device newBufferWithLength:sparse_page_bytes
+                                                           options:MTLResourceStorageModeShared];
+        sparse_zero_output = [adapter_device newBufferWithLength:sparse_page_bytes
+                                                          options:MTLResourceStorageModeShared];
+        if (sparse_output != nil) memset(sparse_output.contents, 0, sparse_output.length);
+        if (sparse_alias_output != nil) memset(sparse_alias_output.contents, 0xa5,
+                                               sparse_alias_output.length);
+        if (sparse_zero_output != nil) memset(sparse_zero_output.contents, 0xa5,
+                                              sparse_zero_output.length);
+        id<MTLBuffer> sparse_input =
+            [adapter_device newBufferWithBytes:sparse_input_data.bytes
+                                         length:sparse_input_data.length
+                                        options:MTLResourceStorageModeShared];
         id<MTL4CommandQueue> metal4_sparse_queue = [adapter_device newMTL4CommandQueue];
-        MTL4UpdateSparseBufferMappingOperation metal4_sparse_operation = {
+        MTL4UpdateSparseBufferMappingOperation metal4_sparse_map_operation = {
             .mode = MTLSparseTextureMappingModeMap,
             .bufferRange = NSMakeRange(0, 1),
             .heapOffset = 0,
         };
-        [metal4_sparse_queue updateBufferMappings:adapter_copy_buffer
-                                             heap:adapter_three_d_heap
-                                        operations:&metal4_sparse_operation
+        [metal4_sparse_queue updateBufferMappings:sparse_source
+                                             heap:sparse_heap
+                                        operations:&metal4_sparse_map_operation
                                              count:1];
+        id<MTLCommandQueue> sparse_legacy_queue = [adapter_device newCommandQueue];
+        id<MTLCommandBuffer> sparse_upload_command_buffer = [sparse_legacy_queue commandBuffer];
+        id<MTLBlitCommandEncoder> sparse_upload_encoder = [sparse_upload_command_buffer blitCommandEncoder];
+        [sparse_upload_encoder copyFromBuffer:sparse_input sourceOffset:0
+                                     toBuffer:sparse_source destinationOffset:0 size:sparse_page_bytes];
+        [sparse_upload_encoder endEncoding];
+        [sparse_upload_command_buffer commit];
+        [sparse_upload_command_buffer waitUntilCompleted];
+        MTL4CopySparseBufferMappingOperation metal4_sparse_copy_operation = {
+            .sourceRange = NSMakeRange(0, 1),
+            .destinationOffset = 0,
+        };
+        [metal4_sparse_queue copyBufferMappingsFromBuffer:sparse_source
+                                                  toBuffer:sparse_destination
+                                                operations:&metal4_sparse_copy_operation
+                                                     count:1];
+        id<MTLCommandBuffer> sparse_download_command_buffer = [sparse_legacy_queue commandBuffer];
+        id<MTLBlitCommandEncoder> sparse_download_encoder = [sparse_download_command_buffer blitCommandEncoder];
+        [sparse_download_encoder copyFromBuffer:sparse_destination sourceOffset:0
+                                       toBuffer:sparse_output destinationOffset:0 size:sparse_page_bytes];
+        [sparse_download_encoder endEncoding];
+        [sparse_download_command_buffer commit];
+        [sparse_download_command_buffer waitUntilCompleted];
+        MTL4UpdateSparseBufferMappingOperation metal4_sparse_unmap_operation = {
+            .mode = MTLSparseTextureMappingModeUnmap,
+            .bufferRange = NSMakeRange(0, 1),
+            .heapOffset = 0,
+        };
+        [metal4_sparse_queue updateBufferMappings:sparse_source
+                                             heap:nil
+                                        operations:&metal4_sparse_unmap_operation
+                                             count:1];
+        [metal4_sparse_queue updateBufferMappings:sparse_destination
+                                             heap:nil
+                                        operations:&metal4_sparse_unmap_operation
+                                             count:1];
+        id<MTLCommandBuffer> sparse_zero_command_buffer = [sparse_legacy_queue commandBuffer];
+        id<MTLBlitCommandEncoder> sparse_zero_encoder = [sparse_zero_command_buffer blitCommandEncoder];
+        [sparse_zero_encoder copyFromBuffer:sparse_source sourceOffset:0
+                                    toBuffer:sparse_zero_output destinationOffset:0 size:sparse_page_bytes];
+        [sparse_zero_encoder endEncoding];
+        [sparse_zero_command_buffer commit];
+        [sparse_zero_command_buffer waitUntilCompleted];
+        [metal4_sparse_queue updateBufferMappings:sparse_roundtrip
+                                             heap:sparse_heap
+                                        operations:&metal4_sparse_map_operation
+                                             count:1];
+        id<MTLCommandBuffer> sparse_roundtrip_command_buffer = [sparse_legacy_queue commandBuffer];
+        id<MTLBlitCommandEncoder> sparse_roundtrip_encoder = [sparse_roundtrip_command_buffer blitCommandEncoder];
+        [sparse_roundtrip_encoder copyFromBuffer:sparse_roundtrip sourceOffset:0
+                                         toBuffer:sparse_alias_output destinationOffset:0 size:sparse_page_bytes];
+        [sparse_roundtrip_encoder endEncoding];
+        [sparse_roundtrip_command_buffer commit];
+        [sparse_roundtrip_command_buffer waitUntilCompleted];
+        BOOL sparse_zero_exact = sparse_zero_output != nil;
+        if (sparse_zero_exact) {
+            const uint8_t *bytes = sparse_zero_output.contents;
+            for (NSUInteger index = 0; index < sparse_page_bytes; ++index) {
+                if (bytes[index] != 0) {
+                    sparse_zero_exact = NO;
+                    break;
+                }
+            }
+        }
+        if (sparse_heap == nil || sparse_source == nil || sparse_destination == nil ||
+            sparse_roundtrip == nil || sparse_input == nil || sparse_output == nil ||
+            sparse_alias_output == nil || sparse_zero_output == nil || sparse_source.contents != nil ||
+            sparse_destination.contents != nil || sparse_roundtrip.contents != nil ||
+            sparse_upload_encoder == nil || sparse_download_encoder == nil ||
+            sparse_zero_encoder == nil || sparse_roundtrip_encoder == nil ||
+            sparse_upload_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            sparse_zero_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            sparse_download_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            sparse_roundtrip_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            !sparse_zero_exact ||
+            memcmp(sparse_output.contents, sparse_input_data.bytes, sparse_page_bytes) != 0 ||
+            memcmp(sparse_alias_output.contents, sparse_input_data.bytes, sparse_page_bytes) != 0) {
+            fprintf(stderr, "metal-pixel: CPU placement-sparse buffer mapping exactness failed\n");
+            return 86;
+        }
+        [metal4_sparse_queue updateBufferMappings:sparse_roundtrip
+                                             heap:nil
+                                        operations:&metal4_sparse_unmap_operation
+                                             count:1];
+
+        /* Sparse texture mapping remains deliberately fail-closed until the
+         * CPU texture pager has the same page/format contract. */
+        MTL4UpdateSparseTextureMappingOperation metal4_sparse_texture_operation = {
+            .mode = MTLSparseTextureMappingModeMap,
+            .textureRegion = MTLRegionMake2D(0, 0, 1, 1),
+            .heapOffset = 0,
+            .textureLevel = 0,
+            .textureSlice = 0,
+        };
+        [metal4_sparse_queue updateTextureMappings:adapter_compute_texture
+                                              heap:adapter_three_d_heap
+                                         operations:&metal4_sparse_texture_operation
+                                              count:1];
         id<MTL4CommandBuffer> metal4_sparse_command_buffer = [adapter_device newCommandBuffer];
         [metal4_sparse_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
         [metal4_sparse_command_buffer endCommandBuffer];
@@ -5716,8 +5872,8 @@ int main(void) {
         [metal4_sparse_queue commit:metal4_sparse_command_buffers count:1 options:metal4_sparse_options];
         if (metal4_sparse_queue == nil || metal4_sparse_command_buffer == nil ||
             metal4_sparse_error == nil) {
-            fail_with_error("Metal 4 CPU sparse mapping did not fail closed", metal4_error);
-            return 63;
+            fail_with_error("Metal 4 CPU sparse texture mapping did not fail closed", metal4_error);
+            return 87;
         }
 
         id<MTLTexture> metal4_mip_copy = [adapter_device newTextureWithDescriptor:mip_descriptor];
