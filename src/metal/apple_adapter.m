@@ -1363,7 +1363,10 @@ static BOOL zpu_color_texture_format_supported(MTLPixelFormat format) {
         format == MTLPixelFormatBGRA8Unorm || format == MTLPixelFormatBGRA8Unorm_sRGB ||
         format == MTLPixelFormatR32Float || format == MTLPixelFormatRGBA16Unorm ||
         format == MTLPixelFormatRGBA16Float || format == MTLPixelFormatRG32Float ||
-        format == MTLPixelFormatRGBA32Float;
+        format == MTLPixelFormatRGBA32Float || format == MTLPixelFormatR8Snorm ||
+        format == MTLPixelFormatR16Snorm || format == MTLPixelFormatRG8Snorm ||
+        format == MTLPixelFormatRG16Snorm || format == MTLPixelFormatRGBA8Snorm ||
+        format == MTLPixelFormatRGBA16Snorm;
 }
 
 static BOOL zpu_integer_texture_format_supported(MTLPixelFormat format) {
@@ -1377,12 +1380,6 @@ static BOOL zpu_integer_texture_format_supported(MTLPixelFormat format) {
         format == MTLPixelFormatRG11B10Float ||
         format == MTLPixelFormatRGB9E5Float ||
         format == MTLPixelFormatBGR10A2Unorm ||
-        format == MTLPixelFormatR8Snorm ||
-        format == MTLPixelFormatR16Snorm ||
-        format == MTLPixelFormatRG8Snorm ||
-        format == MTLPixelFormatRG16Snorm ||
-        format == MTLPixelFormatRGBA8Snorm ||
-        format == MTLPixelFormatRGBA16Snorm ||
         format == MTLPixelFormatR8Uint || format == MTLPixelFormatR8Sint ||
         format == MTLPixelFormatR16Uint || format == MTLPixelFormatR16Sint ||
         format == MTLPixelFormatRG8Uint || format == MTLPixelFormatRG8Sint ||

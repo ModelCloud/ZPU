@@ -107,10 +107,10 @@ pub const TextureFormat = enum {
     }
 
     fn isColor(self: TextureFormat) bool {
-        return self == .r8_unorm or self == .r8_unorm_srgb or self == .r16_unorm or self == .r16_float or
-            self == .rg8_unorm or self == .rg8_unorm_srgb or self == .rg16_unorm or self == .rg16_float or
-            self == .rgba8_unorm or self == .rgba8_unorm_srgb or self == .bgra8_unorm or self == .bgra8_unorm_srgb or
-            self == .r32_float or self == .rgba16_unorm or self == .rgba16_float or self == .rg32_float or self == .rgba32_float;
+        return self == .r8_unorm or self == .r8_unorm_srgb or self == .r8_snorm or self == .r16_unorm or self == .r16_snorm or self == .r16_float or
+            self == .rg8_unorm or self == .rg8_unorm_srgb or self == .rg8_snorm or self == .rg16_unorm or self == .rg16_snorm or self == .rg16_float or
+            self == .rgba8_unorm or self == .rgba8_unorm_srgb or self == .rgba8_snorm or self == .bgra8_unorm or self == .bgra8_unorm_srgb or
+            self == .r32_float or self == .rgba16_unorm or self == .rgba16_snorm or self == .rgba16_float or self == .rg32_float or self == .rgba32_float;
     }
 };
 
@@ -270,24 +270,24 @@ pub const Texture = struct {
                 .a8_unorm => unreachable,
                 .r8_unorm => .r8_unorm,
                 .r8_unorm_srgb => .r8_unorm_srgb,
-                .r8_snorm => unreachable,
+                .r8_snorm => .r8_snorm,
                 .r8_uint, .r8_sint => unreachable,
                 .r16_unorm => .r16_unorm,
-                .r16_snorm => unreachable,
+                .r16_snorm => .r16_snorm,
                 .r16_uint, .r16_sint => unreachable,
                 .r16_float => .r16_float,
                 .rg8_unorm => .rg8_unorm,
                 .rg8_unorm_srgb => .rg8_unorm_srgb,
-                .rg8_snorm => unreachable,
+                .rg8_snorm => .rg8_snorm,
                 .rg8_uint, .rg8_sint => unreachable,
                 .rg16_unorm => .rg16_unorm,
-                .rg16_snorm => unreachable,
+                .rg16_snorm => .rg16_snorm,
                 .rg16_uint, .rg16_sint => unreachable,
                 .rg16_float => .rg16_float,
                 .r32_uint, .r32_sint => unreachable,
                 .rgba8_unorm => .rgba8_unorm,
                 .rgba8_unorm_srgb => .rgba8_unorm_srgb,
-                .rgba8_snorm => unreachable,
+                .rgba8_snorm => .rgba8_snorm,
                 .rgba8_uint, .rgba8_sint => unreachable,
                 .bgra8_unorm => .bgra8_unorm,
                 .bgra8_unorm_srgb => .bgra8_unorm_srgb,
@@ -295,7 +295,7 @@ pub const Texture = struct {
                 .rgb10a2_unorm, .rgb10a2_uint, .rg11b10_float, .rgb9e5_float, .bgr10a2_unorm => unreachable,
                 .r32_float => .r32_float,
                 .rgba16_unorm => .rgba16_unorm,
-                .rgba16_snorm => unreachable,
+                .rgba16_snorm => .rgba16_snorm,
                 .rgba16_uint, .rgba16_sint => unreachable,
                 .rgba16_float => .rgba16_float,
                 .rg32_uint, .rg32_sint => unreachable,
@@ -1176,15 +1176,21 @@ pub const RenderEncoder = struct {
                         0 => null,
                         @intFromEnum(abi.PixelFormat.r8_unorm) => abi.PixelFormat.r8_unorm,
                         @intFromEnum(abi.PixelFormat.r8_unorm_srgb) => abi.PixelFormat.r8_unorm_srgb,
+                        @intFromEnum(abi.PixelFormat.r8_snorm) => abi.PixelFormat.r8_snorm,
                         @intFromEnum(abi.PixelFormat.r16_unorm) => abi.PixelFormat.r16_unorm,
+                        @intFromEnum(abi.PixelFormat.r16_snorm) => abi.PixelFormat.r16_snorm,
                         @intFromEnum(abi.PixelFormat.r16_float) => abi.PixelFormat.r16_float,
                         @intFromEnum(abi.PixelFormat.rg8_unorm) => abi.PixelFormat.rg8_unorm,
                         @intFromEnum(abi.PixelFormat.rg8_unorm_srgb) => abi.PixelFormat.rg8_unorm_srgb,
+                        @intFromEnum(abi.PixelFormat.rg8_snorm) => abi.PixelFormat.rg8_snorm,
                         @intFromEnum(abi.PixelFormat.rg16_unorm) => abi.PixelFormat.rg16_unorm,
+                        @intFromEnum(abi.PixelFormat.rg16_snorm) => abi.PixelFormat.rg16_snorm,
                         @intFromEnum(abi.PixelFormat.rg16_float) => abi.PixelFormat.rg16_float,
                         @intFromEnum(abi.PixelFormat.rgba16_unorm) => abi.PixelFormat.rgba16_unorm,
+                        @intFromEnum(abi.PixelFormat.rgba16_snorm) => abi.PixelFormat.rgba16_snorm,
                         @intFromEnum(abi.PixelFormat.rgba8_unorm) => abi.PixelFormat.rgba8_unorm,
                         @intFromEnum(abi.PixelFormat.rgba8_unorm_srgb) => abi.PixelFormat.rgba8_unorm_srgb,
+                        @intFromEnum(abi.PixelFormat.rgba8_snorm) => abi.PixelFormat.rgba8_snorm,
                         @intFromEnum(abi.PixelFormat.bgra8_unorm) => abi.PixelFormat.bgra8_unorm,
                         @intFromEnum(abi.PixelFormat.bgra8_unorm_srgb) => abi.PixelFormat.bgra8_unorm_srgb,
                         @intFromEnum(abi.PixelFormat.r32_float) => abi.PixelFormat.r32_float,
@@ -2086,6 +2092,151 @@ fn unorm16ChannelCount(format: TextureFormat) usize {
     };
 }
 
+fn snorm8ChannelCount(format: TextureFormat) usize {
+    return switch (format) {
+        .r8_snorm => 1,
+        .rg8_snorm => 2,
+        .rgba8_snorm => 4,
+        else => unreachable,
+    };
+}
+
+fn snorm16ChannelCount(format: TextureFormat) usize {
+    return switch (format) {
+        .r16_snorm => 1,
+        .rg16_snorm => 2,
+        .rgba16_snorm => 4,
+        else => unreachable,
+    };
+}
+
+fn readMipmapS8(bytes: []const u8, offset: usize) f64 {
+    const value: i8 = @bitCast(bytes[offset]);
+    return if (value == std.math.minInt(i8)) -1 else @as(f64, @floatFromInt(value)) / 127.0;
+}
+
+fn readMipmapS16(bytes: []const u8, offset: usize) f64 {
+    const value = std.mem.readInt(i16, bytes[offset..][0..2], .little);
+    return if (value == std.math.minInt(i16)) -1 else @as(f64, @floatFromInt(value)) / 32767.0;
+}
+
+fn snorm8Value(value: f64) i8 {
+    const clamped = std.math.clamp(value, -1, 1);
+    const scaled = clamped * 127.0;
+    const magnitude = if (scaled < 0) -scaled else scaled;
+    const lower = @floor(magnitude);
+    const rounded = if (magnitude - lower > 0.5) lower + 1 else lower;
+    const quantized: i16 = if (scaled < 0) -@as(i16, @intFromFloat(rounded)) else @intFromFloat(rounded);
+    return @intCast(std.math.clamp(quantized, -128, 127));
+}
+
+fn snorm16Value(value: f64) i16 {
+    const clamped = std.math.clamp(value, -1, 1);
+    const scaled = clamped * 32767.0;
+    const magnitude = if (scaled < 0) -scaled else scaled;
+    const lower = @floor(magnitude);
+    const rounded = if (magnitude - lower > 0.5) lower + 1 else lower;
+    const quantized: i32 = if (scaled < 0) -@as(i32, @intFromFloat(rounded)) else @intFromFloat(rounded);
+    return @intCast(std.math.clamp(quantized, -32768, 32767));
+}
+
+fn readSnormMipmapColor(texture: *const Texture, x: usize, y: usize) [4]f64 {
+    const offset = y * texture.stride + x * texture.format.bytesPerPixel();
+    return switch (texture.format) {
+        .r8_snorm => .{ readMipmapS8(texture.bytes, offset), 0, 0, 1 },
+        .rg8_snorm => .{ readMipmapS8(texture.bytes, offset), readMipmapS8(texture.bytes, offset + 1), 0, 1 },
+        .rgba8_snorm => .{
+            readMipmapS8(texture.bytes, offset),     readMipmapS8(texture.bytes, offset + 1),
+            readMipmapS8(texture.bytes, offset + 2), readMipmapS8(texture.bytes, offset + 3),
+        },
+        .r16_snorm => .{ readMipmapS16(texture.bytes, offset), 0, 0, 1 },
+        .rg16_snorm => .{ readMipmapS16(texture.bytes, offset), readMipmapS16(texture.bytes, offset + 2), 0, 1 },
+        .rgba16_snorm => .{
+            readMipmapS16(texture.bytes, offset),     readMipmapS16(texture.bytes, offset + 2),
+            readMipmapS16(texture.bytes, offset + 4), readMipmapS16(texture.bytes, offset + 6),
+        },
+        else => unreachable,
+    };
+}
+
+fn writeSnormMipmapColor(texture: *Texture, x: usize, y: usize, color: [4]f64) void {
+    const offset = y * texture.stride + x * texture.format.bytesPerPixel();
+    switch (texture.format) {
+        .r8_snorm => texture.bytes[offset] = @bitCast(snorm8Value(color[0])),
+        .rg8_snorm => {
+            texture.bytes[offset] = @bitCast(snorm8Value(color[0]));
+            texture.bytes[offset + 1] = @bitCast(snorm8Value(color[1]));
+        },
+        .rgba8_snorm => {
+            texture.bytes[offset] = @bitCast(snorm8Value(color[0]));
+            texture.bytes[offset + 1] = @bitCast(snorm8Value(color[1]));
+            texture.bytes[offset + 2] = @bitCast(snorm8Value(color[2]));
+            texture.bytes[offset + 3] = @bitCast(snorm8Value(color[3]));
+        },
+        .r16_snorm => std.mem.writeInt(i16, texture.bytes[offset..][0..2], snorm16Value(color[0]), .little),
+        .rg16_snorm => {
+            std.mem.writeInt(i16, texture.bytes[offset..][0..2], snorm16Value(color[0]), .little);
+            std.mem.writeInt(i16, texture.bytes[offset + 2 ..][0..2], snorm16Value(color[1]), .little);
+        },
+        .rgba16_snorm => {
+            std.mem.writeInt(i16, texture.bytes[offset..][0..2], snorm16Value(color[0]), .little);
+            std.mem.writeInt(i16, texture.bytes[offset + 2 ..][0..2], snorm16Value(color[1]), .little);
+            std.mem.writeInt(i16, texture.bytes[offset + 4 ..][0..2], snorm16Value(color[2]), .little);
+            std.mem.writeInt(i16, texture.bytes[offset + 6 ..][0..2], snorm16Value(color[3]), .little);
+        },
+        else => unreachable,
+    }
+}
+
+fn readSnormMipmapCode(texture: *const Texture, x: usize, y: usize, component: usize) i128 {
+    const offset = y * texture.stride + x * texture.format.bytesPerPixel();
+    return switch (texture.format) {
+        .r8_snorm => @as(i128, @intCast(if (@as(i8, @bitCast(texture.bytes[offset])) == std.math.minInt(i8)) -127 else @as(i8, @bitCast(texture.bytes[offset])))),
+        .rg8_snorm, .rgba8_snorm => @as(i128, @intCast(if (@as(i8, @bitCast(texture.bytes[offset + component])) == std.math.minInt(i8)) -127 else @as(i8, @bitCast(texture.bytes[offset + component])))),
+        .r16_snorm => @as(i128, @intCast(if (std.mem.readInt(i16, texture.bytes[offset..][0..2], .little) == std.math.minInt(i16)) -32767 else std.mem.readInt(i16, texture.bytes[offset..][0..2], .little))),
+        .rg16_snorm, .rgba16_snorm => @as(i128, @intCast(if (std.mem.readInt(i16, texture.bytes[offset + component * 2 ..][0..2], .little) == std.math.minInt(i16)) -32767 else std.mem.readInt(i16, texture.bytes[offset + component * 2 ..][0..2], .little))),
+        else => unreachable,
+    };
+}
+
+fn averagedSnormCode(sum: i128, denominator: u64, maximum: i128) i128 {
+    const denominator_i128: i128 = @intCast(denominator);
+    const magnitude = if (sum < 0) -sum else sum;
+    const remainder = @rem(magnitude, denominator_i128);
+    const rounded = @divTrunc(magnitude, denominator_i128) + @as(i128, @intFromBool(remainder * 2 > denominator_i128));
+    const signed = if (sum < 0) -rounded else rounded;
+    return std.math.clamp(signed, -maximum, maximum);
+}
+
+fn writeSnormMipmapCode(texture: *Texture, x: usize, y: usize, codes: [4]i128) void {
+    const offset = y * texture.stride + x * texture.format.bytesPerPixel();
+    switch (texture.format) {
+        .r8_snorm => texture.bytes[offset] = @bitCast(@as(i8, @intCast(codes[0]))),
+        .rg8_snorm => {
+            texture.bytes[offset] = @bitCast(@as(i8, @intCast(codes[0])));
+            texture.bytes[offset + 1] = @bitCast(@as(i8, @intCast(codes[1])));
+        },
+        .rgba8_snorm => {
+            texture.bytes[offset] = @bitCast(@as(i8, @intCast(codes[0])));
+            texture.bytes[offset + 1] = @bitCast(@as(i8, @intCast(codes[1])));
+            texture.bytes[offset + 2] = @bitCast(@as(i8, @intCast(codes[2])));
+            texture.bytes[offset + 3] = @bitCast(@as(i8, @intCast(codes[3])));
+        },
+        .r16_snorm => std.mem.writeInt(i16, texture.bytes[offset..][0..2], @intCast(codes[0]), .little),
+        .rg16_snorm => {
+            std.mem.writeInt(i16, texture.bytes[offset..][0..2], @intCast(codes[0]), .little);
+            std.mem.writeInt(i16, texture.bytes[offset + 2 ..][0..2], @intCast(codes[1]), .little);
+        },
+        .rgba16_snorm => {
+            std.mem.writeInt(i16, texture.bytes[offset..][0..2], @intCast(codes[0]), .little);
+            std.mem.writeInt(i16, texture.bytes[offset + 2 ..][0..2], @intCast(codes[1]), .little);
+            std.mem.writeInt(i16, texture.bytes[offset + 4 ..][0..2], @intCast(codes[2]), .little);
+            std.mem.writeInt(i16, texture.bytes[offset + 6 ..][0..2], @intCast(codes[3]), .little);
+        },
+        else => unreachable,
+    }
+}
+
 fn executeCompute(command: ComputeCommand) Error!void {
     if (!validTexture(command.texture) or !command.texture.format.isColor()) return error.InvalidResource;
     if (command.kernel != 3 and command.kernel != 4 and command.threads_per_grid.depth != 1) return error.InvalidArgument;
@@ -2944,10 +3095,61 @@ fn generateUnorm16Mipmap(command: MipmapCommand) Error!void {
     }
 }
 
+fn generateSnormMipmap(command: MipmapCommand) Error!void {
+    const channels = switch (command.source.format) {
+        .r8_snorm, .rg8_snorm, .rgba8_snorm => snorm8ChannelCount(command.source.format),
+        .r16_snorm, .rg16_snorm, .rgba16_snorm => snorm16ChannelCount(command.source.format),
+        else => unreachable,
+    };
+    const maximum: i128 = switch (command.source.format) {
+        .r8_snorm, .rg8_snorm, .rgba8_snorm => 127,
+        .r16_snorm, .rg16_snorm, .rgba16_snorm => 32767,
+        else => unreachable,
+    };
+    const destination_width: u32 = if (command.source.width > 1) command.source.width / 2 else 1;
+    const destination_height: u32 = if (command.source.height > 1) command.source.height / 2 else 1;
+    if (command.destination.width != destination_width or command.destination.height != destination_height or
+        command.destination.format != command.source.format) return error.InvalidArgument;
+    for (0..destination_height) |y| {
+        const source_y = mipmapAxis(command.source.height, destination_height, y);
+        for (0..destination_width) |x| {
+            const source_x = mipmapAxis(command.source.width, destination_width, x);
+            var sums = [_]i128{ 0, 0, 0, 0 };
+            const x_samples = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_x.low, .weight = source_x.low_weight },
+                .{ .index = source_x.high, .weight = source_x.high_weight },
+            };
+            const y_samples = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_y.low, .weight = source_y.low_weight },
+                .{ .index = source_y.high, .weight = source_y.high_weight },
+            };
+            for (y_samples) |y_sample| {
+                if (y_sample.weight == 0) continue;
+                for (x_samples) |x_sample| {
+                    if (x_sample.weight == 0) continue;
+                    const weight: i128 = @intCast(x_sample.weight * y_sample.weight);
+                    for (0..channels) |component| {
+                        sums[component] += readSnormMipmapCode(command.source, x_sample.index, y_sample.index, component) * weight;
+                    }
+                }
+            }
+            const denominator = source_x.denominator * source_y.denominator;
+            writeSnormMipmapCode(command.destination, x, y, .{
+                averagedSnormCode(sums[0], denominator, maximum),
+                averagedSnormCode(sums[1], denominator, maximum),
+                averagedSnormCode(sums[2], denominator, maximum),
+                averagedSnormCode(sums[3], denominator, maximum),
+            });
+        }
+    }
+}
+
 fn generateMipmap(command: MipmapCommand) Error!void {
     if (command.source == command.destination or !command.source.format.isColor()) return error.UnsupportedFormat;
     if (command.source.format == .r8_unorm_srgb or command.source.format == .rg8_unorm_srgb or
         command.source.format == .rgba8_unorm_srgb or command.source.format == .bgra8_unorm_srgb) return generateSrgb8Mipmap(command);
+    if (command.source.format == .r8_snorm or command.source.format == .rg8_snorm or command.source.format == .rgba8_snorm or
+        command.source.format == .r16_snorm or command.source.format == .rg16_snorm or command.source.format == .rgba16_snorm) return generateSnormMipmap(command);
     if (command.source.format == .r16_unorm or command.source.format == .rg16_unorm or command.source.format == .rgba16_unorm) return generateUnorm16Mipmap(command);
     if (command.source.format == .r16_float or command.source.format == .rg16_float or command.source.format == .r32_float or command.source.format == .rgba16_float or command.source.format == .rgba32_float) {
         return generateFloatMipmap(command);
@@ -3239,10 +3441,83 @@ fn generateUnorm16Mipmap3D(command: Mipmap3DCommand) Error!void {
     }
 }
 
+fn generateSnormMipmap3D(command: Mipmap3DCommand) Error!void {
+    const channels = switch (command.source0.format) {
+        .r8_snorm, .rg8_snorm, .rgba8_snorm => snorm8ChannelCount(command.source0.format),
+        .r16_snorm, .rg16_snorm, .rgba16_snorm => snorm16ChannelCount(command.source0.format),
+        else => unreachable,
+    };
+    const maximum: i128 = switch (command.source0.format) {
+        .r8_snorm, .rg8_snorm, .rgba8_snorm => 127,
+        .r16_snorm, .rg16_snorm, .rgba16_snorm => 32767,
+        else => unreachable,
+    };
+    if (command.source1_weight_denominator == 0 or command.source1_weight_numerator > command.source1_weight_denominator or
+        (command.source1 == null and command.source1_weight_numerator != 0)) return error.InvalidArgument;
+    const source1 = command.source1;
+    if (source1) |value| {
+        if (value == command.destination or value.width != command.source0.width or
+            value.height != command.source0.height or value.format != command.source0.format) return error.InvalidArgument;
+    }
+    const destination_width: u32 = if (command.source0.width > 1) command.source0.width / 2 else 1;
+    const destination_height: u32 = if (command.source0.height > 1) command.source0.height / 2 else 1;
+    if (command.destination.width != destination_width or command.destination.height != destination_height or
+        command.destination.format != command.source0.format) return error.InvalidArgument;
+    const source0_z_weight = @as(u64, command.source1_weight_denominator - command.source1_weight_numerator);
+    const source1_z_weight = @as(u64, command.source1_weight_numerator);
+    for (0..destination_height) |y| {
+        const source_y = mipmapAxis(command.source0.height, destination_height, y);
+        for (0..destination_width) |x| {
+            const source_x = mipmapAxis(command.source0.width, destination_width, x);
+            const xy_denominator = source_x.denominator * source_y.denominator;
+            const denominator = xy_denominator * command.source1_weight_denominator;
+            var sums = [_]i128{ 0, 0, 0, 0 };
+            const x_samples = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_x.low, .weight = source_x.low_weight },
+                .{ .index = source_x.high, .weight = source_x.high_weight },
+            };
+            const y_samples = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_y.low, .weight = source_y.low_weight },
+                .{ .index = source_y.high, .weight = source_y.high_weight },
+            };
+            if (source0_z_weight != 0) for (y_samples) |y_sample| {
+                if (y_sample.weight == 0) continue;
+                for (x_samples) |x_sample| {
+                    if (x_sample.weight == 0) continue;
+                    const weight: i128 = @intCast(source0_z_weight * x_sample.weight * y_sample.weight);
+                    for (0..channels) |component| {
+                        sums[component] += readSnormMipmapCode(command.source0, x_sample.index, y_sample.index, component) * weight;
+                    }
+                }
+            };
+            if (source1) |value| {
+                if (source1_z_weight != 0) for (y_samples) |y_sample| {
+                    if (y_sample.weight == 0) continue;
+                    for (x_samples) |x_sample| {
+                        if (x_sample.weight == 0) continue;
+                        const weight: i128 = @intCast(source1_z_weight * x_sample.weight * y_sample.weight);
+                        for (0..channels) |component| {
+                            sums[component] += readSnormMipmapCode(value, x_sample.index, y_sample.index, component) * weight;
+                        }
+                    }
+                };
+            }
+            writeSnormMipmapCode(command.destination, x, y, .{
+                averagedSnormCode(sums[0], denominator, maximum),
+                averagedSnormCode(sums[1], denominator, maximum),
+                averagedSnormCode(sums[2], denominator, maximum),
+                averagedSnormCode(sums[3], denominator, maximum),
+            });
+        }
+    }
+}
+
 fn generateMipmap3D(command: Mipmap3DCommand) Error!void {
     if (command.source0 == command.destination or !command.source0.format.isColor()) return error.UnsupportedFormat;
     if (command.source0.format == .r8_unorm_srgb or command.source0.format == .rg8_unorm_srgb or
         command.source0.format == .rgba8_unorm_srgb or command.source0.format == .bgra8_unorm_srgb) return generateSrgb8Mipmap3D(command);
+    if (command.source0.format == .r8_snorm or command.source0.format == .rg8_snorm or command.source0.format == .rgba8_snorm or
+        command.source0.format == .r16_snorm or command.source0.format == .rg16_snorm or command.source0.format == .rgba16_snorm) return generateSnormMipmap3D(command);
     if (command.source0.format == .r16_unorm or command.source0.format == .rg16_unorm or command.source0.format == .rgba16_unorm) return generateUnorm16Mipmap3D(command);
     if (command.source0.format == .r16_float or command.source0.format == .rg16_float or command.source0.format == .r32_float or command.source0.format == .rgba16_float or command.source0.format == .rgba32_float) {
         return generateFloatMipmap3D(command);

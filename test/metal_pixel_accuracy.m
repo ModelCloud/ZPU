@@ -945,6 +945,209 @@ static int test_srgb_3d_mipmaps_against_native(
     return 0;
 }
 
+static int test_snorm_render_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
+    id<MTLFunction> adapter_vertex_function, id<MTLFunction> adapter_fragment_function) {
+    enum { width = 8, height = 8, max_byte_count = width * height * 8 };
+    const struct {
+        MTLPixelFormat format;
+        NSUInteger bytes_per_pixel;
+        const char *name;
+    } formats[] = {
+        {MTLPixelFormatR8Snorm, 1, "R8Snorm"},
+        {MTLPixelFormatR16Snorm, 2, "R16Snorm"},
+        {MTLPixelFormatRG8Snorm, 2, "RG8Snorm"},
+        {MTLPixelFormatRG16Snorm, 4, "RG16Snorm"},
+        {MTLPixelFormatRGBA8Snorm, 4, "RGBA8Snorm"},
+        {MTLPixelFormatRGBA16Snorm, 8, "RGBA16Snorm"},
+    };
+    const zpu_metal_vertex vertices[] = {
+        {{-1.0f, -1.0f, 0.5f, 1.0f}, {-0.25f, 0.50f, 0.75f, -0.625f}},
+        {{ 1.0f, -1.0f, 0.5f, 1.0f}, {-0.25f, 0.50f, 0.75f, -0.625f}},
+        {{ 1.0f,  1.0f, 0.5f, 1.0f}, {-0.25f, 0.50f, 0.75f, -0.625f}},
+        {{-1.0f, -1.0f, 0.5f, 1.0f}, {-0.25f, 0.50f, 0.75f, -0.625f}},
+        {{ 1.0f,  1.0f, 0.5f, 1.0f}, {-0.25f, 0.50f, 0.75f, -0.625f}},
+        {{-1.0f,  1.0f, 0.5f, 1.0f}, {-0.25f, 0.50f, 0.75f, -0.625f}},
+    };
+    for (NSUInteger index = 0; index < sizeof(formats) / sizeof(formats[0]); ++index) {
+        const MTLPixelFormat format = formats[index].format;
+        MTLRenderPipelineDescriptor *native_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
+        native_pipeline_descriptor.vertexFunction = native_vertex_function;
+        native_pipeline_descriptor.fragmentFunction = native_fragment_function;
+        native_pipeline_descriptor.colorAttachments[0].pixelFormat = format;
+        MTLRenderPipelineDescriptor *adapter_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
+        adapter_pipeline_descriptor.vertexFunction = adapter_vertex_function;
+        adapter_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
+        adapter_pipeline_descriptor.colorAttachments[0].pixelFormat = format;
+        NSError *native_error = nil;
+        NSError *adapter_error = nil;
+        id<MTLRenderPipelineState> native_pipeline =
+            [native_device newRenderPipelineStateWithDescriptor:native_pipeline_descriptor error:&native_error];
+        id<MTLRenderPipelineState> adapter_pipeline =
+            [adapter_device newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor error:&adapter_error];
+        MTLTextureDescriptor *native_texture_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:width height:height mipmapped:NO];
+        native_texture_descriptor.storageMode = MTLStorageModeShared;
+        native_texture_descriptor.usage = MTLTextureUsageRenderTarget;
+        MTLTextureDescriptor *adapter_texture_descriptor = [native_texture_descriptor copy];
+        id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:native_texture_descriptor];
+        id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        id<MTLBuffer> native_buffer =
+            [native_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_buffer =
+            [adapter_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+        if (native_pipeline == nil || adapter_pipeline == nil || native_texture == nil || adapter_texture == nil ||
+            native_buffer == nil || adapter_buffer == nil) {
+            fail_with_error(formats[index].name, adapter_error ?: native_error);
+            return 154;
+        }
+        MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_pass.colorAttachments[0].texture = native_texture;
+        native_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.1, -0.2, 0.3, -0.4);
+        MTLRenderPassDescriptor *adapter_pass = [native_pass copy];
+        adapter_pass.colorAttachments[0].texture = adapter_texture;
+        id<MTLCommandBuffer> native_command_buffer = [[native_device newCommandQueue] commandBuffer];
+        id<MTLCommandBuffer> adapter_command_buffer = [[adapter_device newCommandQueue] commandBuffer];
+        id<MTLRenderCommandEncoder> native_encoder = [native_command_buffer renderCommandEncoderWithDescriptor:native_pass];
+        id<MTLRenderCommandEncoder> adapter_encoder = [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+        [native_encoder setRenderPipelineState:native_pipeline];
+        [native_encoder setVertexBuffer:native_buffer offset:0 atIndex:0];
+        [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_encoder endEncoding];
+        [adapter_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_encoder setVertexBuffer:adapter_buffer offset:0 atIndex:0];
+        [adapter_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_encoder endEncoding];
+        [native_command_buffer commit];
+        [adapter_command_buffer commit];
+        [native_command_buffer waitUntilCompleted];
+        [adapter_command_buffer waitUntilCompleted];
+        uint8_t native_pixels[max_byte_count];
+        uint8_t adapter_pixels[max_byte_count];
+        const NSUInteger byte_count = width * height * formats[index].bytes_per_pixel;
+        [native_texture getBytes:native_pixels bytesPerRow:width * formats[index].bytes_per_pixel
+                       fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_texture getBytes:adapter_pixels bytesPerRow:width * formats[index].bytes_per_pixel
+                         fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_pixels, adapter_pixels, byte_count) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < byte_count && native_pixels[mismatch] == adapter_pixels[mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: %s render mismatch at byte %zu native=%u adapter=%u statuses=%ld/%ld\n",
+                    formats[index].name, mismatch,
+                    mismatch < byte_count ? native_pixels[mismatch] : 0,
+                    mismatch < byte_count ? adapter_pixels[mismatch] : 0,
+                    (long)native_command_buffer.status, (long)adapter_command_buffer.status);
+            return 155;
+        }
+    }
+    return 0;
+}
+
+static int test_snorm_mipmaps_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device) {
+    enum { width = 8, height = 8, mipmap_levels = 4 };
+    const struct {
+        MTLPixelFormat format;
+        NSUInteger bytes_per_pixel;
+        NSUInteger component_bytes;
+        NSUInteger channels;
+        const char *name;
+    } formats[] = {
+        {MTLPixelFormatR8Snorm, 1, 1, 1, "R8Snorm mipmaps"},
+        {MTLPixelFormatR16Snorm, 2, 2, 1, "R16Snorm mipmaps"},
+        {MTLPixelFormatRG8Snorm, 2, 1, 2, "RG8Snorm mipmaps"},
+        {MTLPixelFormatRG16Snorm, 4, 2, 2, "RG16Snorm mipmaps"},
+        {MTLPixelFormatRGBA8Snorm, 4, 1, 4, "RGBA8Snorm mipmaps"},
+        {MTLPixelFormatRGBA16Snorm, 8, 2, 4, "RGBA16Snorm mipmaps"},
+    };
+    for (NSUInteger index = 0; index < sizeof(formats) / sizeof(formats[0]); ++index) {
+        const NSUInteger source_byte_count = width * height * formats[index].bytes_per_pixel;
+        uint8_t source_bytes[source_byte_count];
+        const int maximum = formats[index].component_bytes == 1 ? 127 : 32767;
+        const int span = maximum * 2 + 1;
+        for (NSUInteger pixel = 0; pixel < width * height; ++pixel) {
+            for (NSUInteger channel = 0; channel < formats[index].channels; ++channel) {
+                const NSUInteger offset = pixel * formats[index].bytes_per_pixel +
+                    channel * formats[index].component_bytes;
+                const int value = (int)((pixel * 37u + channel * 71u + 19u) % (NSUInteger)span) - maximum;
+                if (formats[index].component_bytes == 1) {
+                    source_bytes[offset] = (uint8_t)(int8_t)value;
+                } else {
+                    source_bytes[offset] = (uint8_t)(value & 0xff);
+                    source_bytes[offset + 1] = (uint8_t)((value >> 8) & 0xff);
+                }
+            }
+        }
+        MTLTextureDescriptor *native_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:formats[index].format
+                                                                width:width height:height mipmapped:YES];
+        native_descriptor.mipmapLevelCount = mipmap_levels;
+        native_descriptor.storageMode = MTLStorageModeShared;
+        native_descriptor.usage = MTLTextureUsageShaderRead;
+        MTLTextureDescriptor *adapter_descriptor = [native_descriptor copy];
+        id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:native_descriptor];
+        id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:adapter_descriptor];
+        if (native_texture == nil || adapter_texture == nil) {
+            fprintf(stderr, "metal-pixel: %s texture allocation failed\n", formats[index].name);
+            return 156;
+        }
+        [native_texture replaceRegion:MTLRegionMake2D(0, 0, width, height)
+                           mipmapLevel:0 withBytes:source_bytes
+                         bytesPerRow:width * formats[index].bytes_per_pixel];
+        [adapter_texture replaceRegion:MTLRegionMake2D(0, 0, width, height)
+                            mipmapLevel:0 withBytes:source_bytes
+                          bytesPerRow:width * formats[index].bytes_per_pixel];
+        id<MTLCommandBuffer> native_command_buffer = [[native_device newCommandQueue] commandBuffer];
+        id<MTLCommandBuffer> adapter_command_buffer = [[adapter_device newCommandQueue] commandBuffer];
+        id<MTLBlitCommandEncoder> native_encoder = [native_command_buffer blitCommandEncoder];
+        id<MTLBlitCommandEncoder> adapter_encoder = [adapter_command_buffer blitCommandEncoder];
+        [native_encoder generateMipmapsForTexture:native_texture];
+        [adapter_encoder generateMipmapsForTexture:adapter_texture];
+        [native_encoder endEncoding];
+        [adapter_encoder endEncoding];
+        [native_command_buffer commit];
+        [adapter_command_buffer commit];
+        [native_command_buffer waitUntilCompleted];
+        [adapter_command_buffer waitUntilCompleted];
+        if (native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: %s command failed statuses=%ld/%ld\n", formats[index].name,
+                    (long)native_command_buffer.status, (long)adapter_command_buffer.status);
+            return 157;
+        }
+        for (NSUInteger level = 1; level < mipmap_levels; ++level) {
+            const NSUInteger level_width = MAX(width >> level, 1);
+            const NSUInteger level_height = MAX(height >> level, 1);
+            const NSUInteger level_byte_count = level_width * level_height * formats[index].bytes_per_pixel;
+            uint8_t native_level[level_byte_count];
+            uint8_t adapter_level[level_byte_count];
+            [native_texture getBytes:native_level
+                         bytesPerRow:level_width * formats[index].bytes_per_pixel
+                           fromRegion:MTLRegionMake2D(0, 0, level_width, level_height)
+                          mipmapLevel:level];
+            [adapter_texture getBytes:adapter_level
+                          bytesPerRow:level_width * formats[index].bytes_per_pixel
+                            fromRegion:MTLRegionMake2D(0, 0, level_width, level_height)
+                           mipmapLevel:level];
+            if (memcmp(native_level, adapter_level, level_byte_count) != 0) {
+                size_t mismatch = 0;
+                while (mismatch < level_byte_count && native_level[mismatch] == adapter_level[mismatch]) mismatch += 1;
+                fprintf(stderr, "metal-pixel: %s level %lu mismatch at byte %zu native=%u adapter=%u\n",
+                        formats[index].name, (unsigned long)level, mismatch,
+                        mismatch < level_byte_count ? native_level[mismatch] : 0,
+                        mismatch < level_byte_count ? adapter_level[mismatch] : 0);
+                return 158;
+            }
+        }
+    }
+    return 0;
+}
+
 static int test_srgb_sampling_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_vertex_function, id<MTLFunction> native_sample_function,
@@ -2222,6 +2425,12 @@ int main(void) {
             device, adapter_device, vertex_function, fragment_function,
             adapter_vertex_function, adapter_fragment_function);
         if (srgb_render_result != 0) return srgb_render_result;
+        const int snorm_render_result = test_snorm_render_against_native(
+            device, adapter_device, vertex_function, fragment_function,
+            adapter_vertex_function, adapter_fragment_function);
+        if (snorm_render_result != 0) return snorm_render_result;
+        const int snorm_mipmap_result = test_snorm_mipmaps_against_native(device, adapter_device);
+        if (snorm_mipmap_result != 0) return snorm_mipmap_result;
         const int srgb_3d_mipmap_result = test_srgb_3d_mipmaps_against_native(
             device, adapter_device);
         if (srgb_3d_mipmap_result != 0) return srgb_3d_mipmap_result;

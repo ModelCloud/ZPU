@@ -90,18 +90,24 @@ pub const StencilFace = struct {
 pub const TargetFormat = enum {
     r8_unorm,
     r8_unorm_srgb,
+    r8_snorm,
     r16_unorm,
+    r16_snorm,
     r16_float,
     rg8_unorm,
     rg8_unorm_srgb,
+    rg8_snorm,
     rg16_unorm,
+    rg16_snorm,
     rg16_float,
     rgba8_unorm,
     rgba8_unorm_srgb,
+    rgba8_snorm,
     bgra8_unorm,
     bgra8_unorm_srgb,
     r32_float,
     rgba16_unorm,
+    rgba16_snorm,
     rgba16_float,
     rg32_float,
     rgba32_float,
@@ -116,14 +122,14 @@ pub const Target = struct {
 
     fn bytesPerPixel(format: TargetFormat) usize {
         return switch (format) {
-            .r8_unorm, .r8_unorm_srgb => 1,
-            .r16_unorm => 2,
+            .r8_unorm, .r8_unorm_srgb, .r8_snorm => 1,
+            .r16_unorm, .r16_snorm => 2,
             .r16_float => 2,
-            .rg8_unorm, .rg8_unorm_srgb => 2,
-            .rg16_unorm => 4,
+            .rg8_unorm, .rg8_unorm_srgb, .rg8_snorm => 2,
+            .rg16_unorm, .rg16_snorm => 4,
             .rg16_float => 4,
-            .rgba8_unorm, .rgba8_unorm_srgb, .bgra8_unorm, .bgra8_unorm_srgb, .r32_float => 4,
-            .rgba16_unorm, .rgba16_float => 8,
+            .rgba8_unorm, .rgba8_unorm_srgb, .rgba8_snorm, .bgra8_unorm, .bgra8_unorm_srgb, .r32_float => 4,
+            .rgba16_unorm, .rgba16_snorm, .rgba16_float => 8,
             .rg32_float => 8,
             .rgba32_float => 16,
         };
@@ -158,6 +164,16 @@ pub const Target = struct {
         return @as(f32, @floatFromInt(std.mem.readInt(u16, row_bytes[offset..][0..2], .little))) / 65535.0;
     }
 
+    fn readS8(row_bytes: []const u8, offset: usize) f32 {
+        const value: i8 = @bitCast(row_bytes[offset]);
+        return if (value == std.math.minInt(i8)) -1 else @as(f32, @floatFromInt(value)) / 127.0;
+    }
+
+    fn readS16(row_bytes: []const u8, offset: usize) f32 {
+        const value = std.mem.readInt(i16, row_bytes[offset..][0..2], .little);
+        return if (value == std.math.minInt(i16)) -1 else @as(f32, @floatFromInt(value)) / 32767.0;
+    }
+
     fn writeF16(row_bytes: []u8, offset: usize, value: f32) void {
         const half: f16 = @floatCast(value);
         std.mem.writeInt(u16, row_bytes[offset..][0..2], @bitCast(half), .little);
@@ -166,6 +182,24 @@ pub const Target = struct {
     fn writeU16(row_bytes: []u8, offset: usize, value: f32) void {
         const quantized: u16 = @intFromFloat(std.math.clamp(value, 0, 1) * 65535.0 + 0.5);
         std.mem.writeInt(u16, row_bytes[offset..][0..2], quantized, .little);
+    }
+
+    fn writeS8(row_bytes: []u8, offset: usize, value: f32) void {
+        const clamped = std.math.clamp(value, -1, 1);
+        const quantized: i16 = if (clamped < 0)
+            @intFromFloat(clamped * 127.0 - 0.5)
+        else
+            @intFromFloat(clamped * 127.0 + 0.5);
+        row_bytes[offset] = @bitCast(@as(i8, @intCast(std.math.clamp(quantized, -128, 127))));
+    }
+
+    fn writeS16(row_bytes: []u8, offset: usize, value: f32) void {
+        const clamped = std.math.clamp(value, -1, 1);
+        const quantized: i32 = if (clamped < 0)
+            @intFromFloat(clamped * 32767.0 - 0.5)
+        else
+            @intFromFloat(clamped * 32767.0 + 0.5);
+        std.mem.writeInt(i16, row_bytes[offset..][0..2], @intCast(std.math.clamp(quantized, -32768, 32767)), .little);
     }
 
     fn srgbToLinear(value: u8) f32 {
@@ -197,7 +231,9 @@ pub const Target = struct {
         return switch (self.format) {
             .r8_unorm => .{ @as(f32, @floatFromInt(row_bytes[offset])) / 255.0, 0, 0, 1 },
             .r8_unorm_srgb => .{ srgbToLinear(row_bytes[offset]), 0, 0, 1 },
+            .r8_snorm => .{ readS8(row_bytes, offset), 0, 0, 1 },
             .r16_unorm => .{ readU16(row_bytes, offset), 0, 0, 1 },
+            .r16_snorm => .{ readS16(row_bytes, offset), 0, 0, 1 },
             .r16_float => .{ readF16(row_bytes, offset), 0, 0, 1 },
             .rg8_unorm => .{
                 @as(f32, @floatFromInt(row_bytes[offset])) / 255.0,
@@ -206,8 +242,14 @@ pub const Target = struct {
                 1,
             },
             .rg8_unorm_srgb => .{ srgbToLinear(row_bytes[offset]), srgbToLinear(row_bytes[offset + 1]), 0, 1 },
+            .rg8_snorm => .{ readS8(row_bytes, offset), readS8(row_bytes, offset + 1), 0, 1 },
             .rg16_unorm => .{ readU16(row_bytes, offset), readU16(row_bytes, offset + 2), 0, 1 },
+            .rg16_snorm => .{ readS16(row_bytes, offset), readS16(row_bytes, offset + 2), 0, 1 },
             .rg16_float => .{ readF16(row_bytes, offset), readF16(row_bytes, offset + 2), 0, 1 },
+            .rgba8_snorm => .{
+                readS8(row_bytes, offset), readS8(row_bytes, offset + 1),
+                readS8(row_bytes, offset + 2), readS8(row_bytes, offset + 3),
+            },
             .rgba8_unorm, .rgba8_unorm_srgb, .bgra8_unorm, .bgra8_unorm_srgb => blk: {
                 const format: surface.Format = if (self.format == .rgba8_unorm or self.format == .rgba8_unorm_srgb)
                     .rgba8_unorm
@@ -223,6 +265,7 @@ pub const Target = struct {
             },
             .r32_float => .{ readF32(row_bytes, offset), 0, 0, 1 },
             .rgba16_unorm => .{ readU16(row_bytes, offset), readU16(row_bytes, offset + 2), readU16(row_bytes, offset + 4), readU16(row_bytes, offset + 6) },
+            .rgba16_snorm => .{ readS16(row_bytes, offset), readS16(row_bytes, offset + 2), readS16(row_bytes, offset + 4), readS16(row_bytes, offset + 6) },
             .rgba16_float => .{
                 readF16(row_bytes, offset),     readF16(row_bytes, offset + 2),
                 readF16(row_bytes, offset + 4), readF16(row_bytes, offset + 6),
@@ -242,8 +285,14 @@ pub const Target = struct {
             .r8_unorm, .r8_unorm_srgb => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) row_bytes[offset] = if (self.format == .r8_unorm_srgb) srgbByte(color[0]) else colorByte(color[0]);
             },
+            .r8_snorm => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeS8(row_bytes, offset, color[0]);
+            },
             .r16_unorm => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeU16(row_bytes, offset, color[0]);
+            },
+            .r16_snorm => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeS16(row_bytes, offset, color[0]);
             },
             .r16_float => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeF16(row_bytes, offset, color[0]);
@@ -252,13 +301,27 @@ pub const Target = struct {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) row_bytes[offset] = if (self.format == .rg8_unorm_srgb) srgbByte(color[0]) else colorByte(color[0]);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) row_bytes[offset + 1] = if (self.format == .rg8_unorm_srgb) srgbByte(color[1]) else colorByte(color[1]);
             },
+            .rg8_snorm => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeS8(row_bytes, offset, color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeS8(row_bytes, offset + 1, color[1]);
+            },
             .rg16_unorm => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeU16(row_bytes, offset, color[0]);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeU16(row_bytes, offset + 2, color[1]);
             },
+            .rg16_snorm => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeS16(row_bytes, offset, color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeS16(row_bytes, offset + 2, color[1]);
+            },
             .rg16_float => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeF16(row_bytes, offset, color[0]);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeF16(row_bytes, offset + 2, color[1]);
+            },
+            .rgba8_snorm => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeS8(row_bytes, offset, color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeS8(row_bytes, offset + 1, color[1]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) writeS8(row_bytes, offset + 2, color[2]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) writeS8(row_bytes, offset + 3, color[3]);
             },
             .rgba8_unorm, .rgba8_unorm_srgb, .bgra8_unorm, .bgra8_unorm_srgb => {
                 const srgb = self.format == .rgba8_unorm_srgb or self.format == .bgra8_unorm_srgb;
@@ -279,6 +342,12 @@ pub const Target = struct {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeU16(row_bytes, offset + 2, color[1]);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) writeU16(row_bytes, offset + 4, color[2]);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) writeU16(row_bytes, offset + 6, color[3]);
+            },
+            .rgba16_snorm => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeS16(row_bytes, offset, color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeS16(row_bytes, offset + 2, color[1]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) writeS16(row_bytes, offset + 4, color[2]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) writeS16(row_bytes, offset + 6, color[3]);
             },
             .rgba16_float => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeF16(row_bytes, offset, color[0]);
