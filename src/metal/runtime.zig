@@ -29,6 +29,7 @@ const fence_magic: u64 = 0x5a50555f46454e43; // ZPU_FENC
 const shared_event_magic: u64 = 0x5a50555f53455654; // ZPU_SEVT
 
 pub const TextureFormat = enum {
+    a8_unorm,
     r8_unorm,
     r8_unorm_srgb,
     r8_snorm,
@@ -58,6 +59,15 @@ pub const TextureFormat = enum {
     rgba8_sint,
     bgra8_unorm,
     bgra8_unorm_srgb,
+    b5g6r5_unorm,
+    a1bgr5_unorm,
+    abgr4_unorm,
+    bgr5a1_unorm,
+    rgb10a2_unorm,
+    rgb10a2_uint,
+    rg11b10_float,
+    rgb9e5_float,
+    bgr10a2_unorm,
     r32_float,
     rgba16_unorm,
     rgba16_snorm,
@@ -73,6 +83,7 @@ pub const TextureFormat = enum {
 
     fn bytesPerPixel(self: TextureFormat) usize {
         return switch (self) {
+            .a8_unorm => 1,
             .r8_unorm, .r8_unorm_srgb, .r8_snorm => 1,
             .r8_uint, .r8_sint => 1,
             .r16_unorm, .r16_snorm => 2,
@@ -85,6 +96,8 @@ pub const TextureFormat = enum {
             .rg16_float => 4,
             .r32_uint, .r32_sint => 4,
             .rgba8_unorm_srgb, .rgba8_snorm, .rgba8_uint, .rgba8_sint => 4,
+            .b5g6r5_unorm, .a1bgr5_unorm, .abgr4_unorm, .bgr5a1_unorm => 2,
+            .rgb10a2_unorm, .rgb10a2_uint, .rg11b10_float, .rgb9e5_float, .bgr10a2_unorm => 4,
             .stencil8 => 1,
             .rgba16_unorm, .rgba16_snorm, .rgba16_uint, .rgba16_sint, .rgba16_float => 8,
             .rg32_uint, .rg32_sint, .rg32_float => 8,
@@ -100,6 +113,7 @@ pub const TextureFormat = enum {
 
 fn textureFormatFromRaw(format_raw: u16) ?TextureFormat {
     return switch (format_raw) {
+        @intFromEnum(abi.PixelFormat.a8_unorm) => .a8_unorm,
         @intFromEnum(abi.PixelFormat.r8_unorm) => .r8_unorm,
         @intFromEnum(abi.PixelFormat.r8_unorm_srgb) => .r8_unorm_srgb,
         @intFromEnum(abi.PixelFormat.r8_snorm) => .r8_snorm,
@@ -129,6 +143,15 @@ fn textureFormatFromRaw(format_raw: u16) ?TextureFormat {
         @intFromEnum(abi.PixelFormat.rgba8_sint) => .rgba8_sint,
         @intFromEnum(abi.PixelFormat.bgra8_unorm) => .bgra8_unorm,
         @intFromEnum(abi.PixelFormat.bgra8_unorm_srgb) => .bgra8_unorm_srgb,
+        @intFromEnum(abi.PixelFormat.b5g6r5_unorm) => .b5g6r5_unorm,
+        @intFromEnum(abi.PixelFormat.a1bgr5_unorm) => .a1bgr5_unorm,
+        @intFromEnum(abi.PixelFormat.abgr4_unorm) => .abgr4_unorm,
+        @intFromEnum(abi.PixelFormat.bgr5a1_unorm) => .bgr5a1_unorm,
+        @intFromEnum(abi.PixelFormat.rgb10a2_unorm) => .rgb10a2_unorm,
+        @intFromEnum(abi.PixelFormat.rgb10a2_uint) => .rgb10a2_uint,
+        @intFromEnum(abi.PixelFormat.rg11b10_float) => .rg11b10_float,
+        @intFromEnum(abi.PixelFormat.rgb9e5_float) => .rgb9e5_float,
+        @intFromEnum(abi.PixelFormat.bgr10a2_unorm) => .bgr10a2_unorm,
         @intFromEnum(abi.PixelFormat.r32_float) => .r32_float,
         @intFromEnum(abi.PixelFormat.rgba16_unorm) => .rgba16_unorm,
         @intFromEnum(abi.PixelFormat.rgba16_snorm) => .rgba16_snorm,
@@ -241,6 +264,7 @@ pub const Texture = struct {
             .height = self.height,
             .stride = self.stride,
             .format = switch (self.format) {
+                .a8_unorm => unreachable,
                 .r8_unorm => .r8_unorm,
                 .r8_unorm_srgb => unreachable,
                 .r8_snorm => unreachable,
@@ -264,6 +288,8 @@ pub const Texture = struct {
                 .rgba8_uint, .rgba8_sint => unreachable,
                 .bgra8_unorm => .bgra8_unorm,
                 .bgra8_unorm_srgb => unreachable,
+                .b5g6r5_unorm, .a1bgr5_unorm, .abgr4_unorm, .bgr5a1_unorm => unreachable,
+                .rgb10a2_unorm, .rgb10a2_uint, .rg11b10_float, .rgb9e5_float, .bgr10a2_unorm => unreachable,
                 .r32_float => .r32_float,
                 .rgba16_unorm => .rgba16_unorm,
                 .rgba16_snorm => unreachable,
@@ -1951,7 +1977,7 @@ fn executeCompute(command: ComputeCommand) Error!void {
                         command.texture.bytes[offset + 2] = red;
                         command.texture.bytes[offset + 3] = 255;
                     },
-                    .r8_unorm_srgb, .r8_snorm, .r8_uint, .r8_sint, .r16_snorm, .r16_uint, .r16_sint, .r16_unorm, .r16_float, .rg8_unorm_srgb, .rg8_snorm, .rg8_uint, .rg8_sint, .rg16_snorm, .rg16_uint, .rg16_sint, .rg16_unorm, .rg16_float, .r32_uint, .r32_sint, .r32_float, .rgba8_unorm_srgb, .rgba8_snorm, .rgba8_uint, .rgba8_sint, .rgba16_snorm, .rgba16_unorm, .rgba16_uint, .rgba16_sint, .rgba16_float, .rg32_uint, .rg32_sint, .rg32_float, .rgba32_float, .bgra8_unorm_srgb, .depth32_float, .stencil8 => return error.UnsupportedFormat,
+                    .a8_unorm, .r8_unorm_srgb, .r8_snorm, .r8_uint, .r8_sint, .r16_snorm, .r16_uint, .r16_sint, .r16_unorm, .r16_float, .rg8_unorm_srgb, .rg8_snorm, .rg8_uint, .rg8_sint, .rg16_snorm, .rg16_uint, .rg16_sint, .rg16_unorm, .rg16_float, .r32_uint, .r32_sint, .r32_float, .rgba8_unorm_srgb, .rgba8_snorm, .rgba8_uint, .rgba8_sint, .rgba16_snorm, .rgba16_unorm, .rgba16_uint, .rgba16_sint, .rgba16_float, .rg32_uint, .rg32_sint, .rg32_float, .rgba32_float, .bgra8_unorm_srgb, .b5g6r5_unorm, .a1bgr5_unorm, .abgr4_unorm, .bgr5a1_unorm, .rgb10a2_unorm, .rgb10a2_uint, .rg11b10_float, .rgb9e5_float, .bgr10a2_unorm, .depth32_float, .stencil8 => return error.UnsupportedFormat,
                 }
             }
         },
@@ -1987,7 +2013,7 @@ fn executeCompute(command: ComputeCommand) Error!void {
                             command.texture.bytes[destination_offset + 2] = source.bytes[source_offset + 0];
                             command.texture.bytes[destination_offset + 3] = source.bytes[source_offset + 3];
                         },
-                        .r8_unorm_srgb, .r8_snorm, .r8_uint, .r8_sint, .r16_snorm, .r16_uint, .r16_sint, .r16_unorm, .r16_float, .rg8_unorm_srgb, .rg8_snorm, .rg8_uint, .rg8_sint, .rg16_snorm, .rg16_uint, .rg16_sint, .rg16_unorm, .rg16_float, .r32_uint, .r32_sint, .r32_float, .rgba8_unorm_srgb, .rgba8_snorm, .rgba8_uint, .rgba8_sint, .rgba16_snorm, .rgba16_unorm, .rgba16_uint, .rgba16_sint, .rgba16_float, .rg32_uint, .rg32_sint, .rg32_float, .rgba32_float, .bgra8_unorm_srgb, .depth32_float, .stencil8 => return error.UnsupportedFormat,
+                        .a8_unorm, .r8_unorm_srgb, .r8_snorm, .r8_uint, .r8_sint, .r16_snorm, .r16_uint, .r16_sint, .r16_unorm, .r16_float, .rg8_unorm_srgb, .rg8_snorm, .rg8_uint, .rg8_sint, .rg16_snorm, .rg16_uint, .rg16_sint, .rg16_unorm, .rg16_float, .r32_uint, .r32_sint, .r32_float, .rgba8_unorm_srgb, .rgba8_snorm, .rgba8_uint, .rgba8_sint, .rgba16_snorm, .rgba16_unorm, .rgba16_uint, .rgba16_sint, .rgba16_float, .rg32_uint, .rg32_sint, .rg32_float, .rgba32_float, .bgra8_unorm_srgb, .b5g6r5_unorm, .a1bgr5_unorm, .abgr4_unorm, .bgr5a1_unorm, .rgb10a2_unorm, .rgb10a2_uint, .rg11b10_float, .rgb9e5_float, .bgr10a2_unorm, .depth32_float, .stencil8 => return error.UnsupportedFormat,
                     }
                 }
             }
@@ -2170,6 +2196,7 @@ pub fn createTextureInHeapAtOffset(heap: *Heap, width: u32, height: u32, format_
 pub fn createTextureFromBuffer(buffer: *Buffer, width: u32, height: u32, format_raw: u16, offset: usize, bytes_per_row: usize) Error!*Texture {
     if (!validBuffer(buffer)) return error.InvalidResource;
     const format: TextureFormat = switch (format_raw) {
+        @intFromEnum(abi.PixelFormat.a8_unorm) => .a8_unorm,
         @intFromEnum(abi.PixelFormat.r8_unorm) => .r8_unorm,
         @intFromEnum(abi.PixelFormat.r8_unorm_srgb) => .r8_unorm_srgb,
         @intFromEnum(abi.PixelFormat.r8_snorm) => .r8_snorm,
@@ -2199,6 +2226,15 @@ pub fn createTextureFromBuffer(buffer: *Buffer, width: u32, height: u32, format_
         @intFromEnum(abi.PixelFormat.rgba8_sint) => .rgba8_sint,
         @intFromEnum(abi.PixelFormat.bgra8_unorm) => .bgra8_unorm,
         @intFromEnum(abi.PixelFormat.bgra8_unorm_srgb) => .bgra8_unorm_srgb,
+        @intFromEnum(abi.PixelFormat.b5g6r5_unorm) => .b5g6r5_unorm,
+        @intFromEnum(abi.PixelFormat.a1bgr5_unorm) => .a1bgr5_unorm,
+        @intFromEnum(abi.PixelFormat.abgr4_unorm) => .abgr4_unorm,
+        @intFromEnum(abi.PixelFormat.bgr5a1_unorm) => .bgr5a1_unorm,
+        @intFromEnum(abi.PixelFormat.rgb10a2_unorm) => .rgb10a2_unorm,
+        @intFromEnum(abi.PixelFormat.rgb10a2_uint) => .rgb10a2_uint,
+        @intFromEnum(abi.PixelFormat.rg11b10_float) => .rg11b10_float,
+        @intFromEnum(abi.PixelFormat.rgb9e5_float) => .rgb9e5_float,
+        @intFromEnum(abi.PixelFormat.bgr10a2_unorm) => .bgr10a2_unorm,
         @intFromEnum(abi.PixelFormat.r32_float) => .r32_float,
         @intFromEnum(abi.PixelFormat.rgba16_unorm) => .rgba16_unorm,
         @intFromEnum(abi.PixelFormat.rgba16_snorm) => .rgba16_snorm,
@@ -2971,6 +3007,7 @@ fn visibilitySlotSeen(slots: []const VisibilitySlot, buffer: *Buffer, offset: us
 
 fn texturePixelFormat(texture: *const Texture) ?abi.PixelFormat {
     return switch (texture.format) {
+        .a8_unorm => .a8_unorm,
         .r8_unorm => .r8_unorm,
         .r8_unorm_srgb => .r8_unorm_srgb,
         .r8_snorm => .r8_snorm,
@@ -3000,6 +3037,15 @@ fn texturePixelFormat(texture: *const Texture) ?abi.PixelFormat {
         .rgba8_sint => .rgba8_sint,
         .bgra8_unorm => .bgra8_unorm,
         .bgra8_unorm_srgb => .bgra8_unorm_srgb,
+        .b5g6r5_unorm => .b5g6r5_unorm,
+        .a1bgr5_unorm => .a1bgr5_unorm,
+        .abgr4_unorm => .abgr4_unorm,
+        .bgr5a1_unorm => .bgr5a1_unorm,
+        .rgb10a2_unorm => .rgb10a2_unorm,
+        .rgb10a2_uint => .rgb10a2_uint,
+        .rg11b10_float => .rg11b10_float,
+        .rgb9e5_float => .rgb9e5_float,
+        .bgr10a2_unorm => .bgr10a2_unorm,
         .r32_float => .r32_float,
         .rgba16_unorm => .rgba16_unorm,
         .rgba16_snorm => .rgba16_snorm,
@@ -3681,6 +3727,16 @@ test "signed normalized and sRGB texture formats preserve native widths" {
         .{ .format = @intFromEnum(abi.PixelFormat.rg8_unorm_srgb), .bytes_per_pixel = 2 },
         .{ .format = @intFromEnum(abi.PixelFormat.rgba8_unorm_srgb), .bytes_per_pixel = 4 },
         .{ .format = @intFromEnum(abi.PixelFormat.bgra8_unorm_srgb), .bytes_per_pixel = 4 },
+        .{ .format = @intFromEnum(abi.PixelFormat.a8_unorm), .bytes_per_pixel = 1 },
+        .{ .format = @intFromEnum(abi.PixelFormat.b5g6r5_unorm), .bytes_per_pixel = 2 },
+        .{ .format = @intFromEnum(abi.PixelFormat.a1bgr5_unorm), .bytes_per_pixel = 2 },
+        .{ .format = @intFromEnum(abi.PixelFormat.abgr4_unorm), .bytes_per_pixel = 2 },
+        .{ .format = @intFromEnum(abi.PixelFormat.bgr5a1_unorm), .bytes_per_pixel = 2 },
+        .{ .format = @intFromEnum(abi.PixelFormat.rgb10a2_unorm), .bytes_per_pixel = 4 },
+        .{ .format = @intFromEnum(abi.PixelFormat.rgb10a2_uint), .bytes_per_pixel = 4 },
+        .{ .format = @intFromEnum(abi.PixelFormat.rg11b10_float), .bytes_per_pixel = 4 },
+        .{ .format = @intFromEnum(abi.PixelFormat.rgb9e5_float), .bytes_per_pixel = 4 },
+        .{ .format = @intFromEnum(abi.PixelFormat.bgr10a2_unorm), .bytes_per_pixel = 4 },
     };
     var values: [48]u8 = undefined;
     for (formats, 0..) |format, format_index| {

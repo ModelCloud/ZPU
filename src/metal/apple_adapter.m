@@ -1352,7 +1352,17 @@ static BOOL zpu_color_texture_format_supported(MTLPixelFormat format) {
 }
 
 static BOOL zpu_integer_texture_format_supported(MTLPixelFormat format) {
-    return format == MTLPixelFormatR8Unorm_sRGB ||
+    return format == MTLPixelFormatA8Unorm ||
+        format == MTLPixelFormatB5G6R5Unorm ||
+        format == MTLPixelFormatA1BGR5Unorm ||
+        format == MTLPixelFormatABGR4Unorm ||
+        format == MTLPixelFormatBGR5A1Unorm ||
+        format == MTLPixelFormatRGB10A2Unorm ||
+        format == MTLPixelFormatRGB10A2Uint ||
+        format == MTLPixelFormatRG11B10Float ||
+        format == MTLPixelFormatRGB9E5Float ||
+        format == MTLPixelFormatBGR10A2Unorm ||
+        format == MTLPixelFormatR8Unorm_sRGB ||
         format == MTLPixelFormatRG8Unorm_sRGB ||
         format == MTLPixelFormatRGBA8Unorm_sRGB ||
         format == MTLPixelFormatBGRA8Unorm_sRGB ||
@@ -1384,6 +1394,7 @@ static BOOL zpu_buffer_texture_format_supported(MTLPixelFormat format) {
 }
 
 static zpu_metal_pixel_format zpu_pixel_format(MTLPixelFormat format) {
+    if (format == MTLPixelFormatA8Unorm) return ZPU_METAL_A8_UNORM;
     if (format == MTLPixelFormatR8Unorm) return ZPU_METAL_R8_UNORM;
     if (format == MTLPixelFormatR8Unorm_sRGB) return ZPU_METAL_R8_UNORM_SRGB;
     if (format == MTLPixelFormatR8Snorm) return ZPU_METAL_R8_SNORM;
@@ -1408,6 +1419,15 @@ static zpu_metal_pixel_format zpu_pixel_format(MTLPixelFormat format) {
     if (format == MTLPixelFormatR32Sint) return ZPU_METAL_R32_SINT;
     if (format == MTLPixelFormatBGRA8Unorm) return ZPU_METAL_BGRA8_UNORM;
     if (format == MTLPixelFormatBGRA8Unorm_sRGB) return ZPU_METAL_BGRA8_UNORM_SRGB;
+    if (format == MTLPixelFormatB5G6R5Unorm) return ZPU_METAL_B5G6R5_UNORM;
+    if (format == MTLPixelFormatA1BGR5Unorm) return ZPU_METAL_A1BGR5_UNORM;
+    if (format == MTLPixelFormatABGR4Unorm) return ZPU_METAL_ABGR4_UNORM;
+    if (format == MTLPixelFormatBGR5A1Unorm) return ZPU_METAL_BGR5A1_UNORM;
+    if (format == MTLPixelFormatRGB10A2Unorm) return ZPU_METAL_RGB10A2_UNORM;
+    if (format == MTLPixelFormatRGB10A2Uint) return ZPU_METAL_RGB10A2_UINT;
+    if (format == MTLPixelFormatRG11B10Float) return ZPU_METAL_RG11B10_FLOAT;
+    if (format == MTLPixelFormatRGB9E5Float) return ZPU_METAL_RGB9E5_FLOAT;
+    if (format == MTLPixelFormatBGR10A2Unorm) return ZPU_METAL_BGR10A2_UNORM;
     if (format == MTLPixelFormatRGBA8Snorm) return ZPU_METAL_RGBA8_SNORM;
     if (format == MTLPixelFormatRGBA8Unorm_sRGB) return ZPU_METAL_RGBA8_UNORM_SRGB;
     if (format == MTLPixelFormatRGBA8Uint) return ZPU_METAL_RGBA8_UINT;
@@ -1428,6 +1448,7 @@ static zpu_metal_pixel_format zpu_pixel_format(MTLPixelFormat format) {
 }
 
 static NSUInteger zpu_texture_bytes_per_pixel(MTLPixelFormat format) {
+    if (format == MTLPixelFormatA8Unorm) return 1;
     if (format == MTLPixelFormatR8Unorm || format == MTLPixelFormatR8Unorm_sRGB) return 1;
     if (format == MTLPixelFormatR8Snorm) return 1;
     if (format == MTLPixelFormatR8Uint || format == MTLPixelFormatR8Sint) return 1;
@@ -1445,6 +1466,11 @@ static NSUInteger zpu_texture_bytes_per_pixel(MTLPixelFormat format) {
     if (format == MTLPixelFormatR32Uint || format == MTLPixelFormatR32Sint) return 4;
     if (format == MTLPixelFormatRGBA8Unorm_sRGB || format == MTLPixelFormatBGRA8Unorm_sRGB ||
         format == MTLPixelFormatRGBA8Snorm || format == MTLPixelFormatRGBA8Uint || format == MTLPixelFormatRGBA8Sint) return 4;
+    if (format == MTLPixelFormatB5G6R5Unorm || format == MTLPixelFormatA1BGR5Unorm ||
+        format == MTLPixelFormatABGR4Unorm || format == MTLPixelFormatBGR5A1Unorm) return 2;
+    if (format == MTLPixelFormatRGB10A2Unorm || format == MTLPixelFormatRGB10A2Uint ||
+        format == MTLPixelFormatRG11B10Float || format == MTLPixelFormatRGB9E5Float ||
+        format == MTLPixelFormatBGR10A2Unorm) return 4;
     if (format == MTLPixelFormatStencil8) return 1;
     if (format == MTLPixelFormatRGBA16Unorm || format == MTLPixelFormatRGBA16Snorm || format == MTLPixelFormatRGBA16Uint ||
         format == MTLPixelFormatRGBA16Sint || format == MTLPixelFormatRGBA16Float) return 8;

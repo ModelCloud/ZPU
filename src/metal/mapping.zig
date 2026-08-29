@@ -11,6 +11,7 @@
 pub const Kind = enum { direct_vulkan, native_metal };
 
 pub const Api = enum {
+    a8_unorm,
     color,
     viewport,
     scissor_rect,
@@ -43,6 +44,15 @@ pub const Api = enum {
     rgba8_sint,
     bgra8_unorm,
     bgra8_unorm_srgb,
+    b5g6r5_unorm,
+    a1bgr5_unorm,
+    abgr4_unorm,
+    bgr5a1_unorm,
+    rgb10a2_unorm,
+    rgb10a2_uint,
+    rg11b10_float,
+    rgb9e5_float,
+    bgr10a2_unorm,
     r32_float,
     rgba16_unorm,
     rgba16_snorm,
@@ -84,6 +94,9 @@ pub const Entry = struct {
 pub fn entry(api: Api) Entry {
     return switch (api) {
         .color, .viewport, .scissor_rect => .{ .kind = .direct_vulkan },
+        .a8_unorm, .a1bgr5_unorm, .abgr4_unorm, .rgb10a2_unorm, .rgb10a2_uint, .rg11b10_float, .rgb9e5_float, .bgr10a2_unorm => .{ .kind = .native_metal },
+        .b5g6r5_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 5 }, // VK_FORMAT_B5G6R5_UNORM_PACK16
+        .bgr5a1_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 7 }, // VK_FORMAT_B5G5R5A1_UNORM_PACK16
         .r8_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 9 }, // VK_FORMAT_R8_UNORM
         .r8_unorm_srgb => .{ .kind = .direct_vulkan, .vulkan_value = 15 }, // VK_FORMAT_R8_SRGB
         .r8_snorm => .{ .kind = .direct_vulkan, .vulkan_value = 10 }, // VK_FORMAT_R8_SNORM
@@ -139,6 +152,9 @@ pub fn entry(api: Api) Entry {
 
 test "mapping policy keeps direct values separate from native lifetimes" {
     try @import("std").testing.expectEqual(@as(?u32, 9), entry(.r8_unorm).vulkan_value);
+    try @import("std").testing.expectEqual(Kind.native_metal, entry(.a8_unorm).kind);
+    try @import("std").testing.expectEqual(@as(?u32, 5), entry(.b5g6r5_unorm).vulkan_value);
+    try @import("std").testing.expectEqual(Kind.native_metal, entry(.rgb10a2_unorm).kind);
     try @import("std").testing.expectEqual(@as(?u32, 15), entry(.r8_unorm_srgb).vulkan_value);
     try @import("std").testing.expectEqual(@as(?u32, 10), entry(.r8_snorm).vulkan_value);
     try @import("std").testing.expectEqual(@as(?u32, 13), entry(.r8_uint).vulkan_value);

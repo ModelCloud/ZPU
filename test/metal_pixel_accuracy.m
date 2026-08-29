@@ -1681,6 +1681,53 @@ int main(void) {
             }
         }
 
+        /* Packed and shared-exponent formats are also represented as raw
+         * CPU-owned texels. The oracle checks the descriptor acceptance and
+         * exact byte width without claiming a CPU packed-color shader path. */
+        const struct { MTLPixelFormat format; NSUInteger bytes_per_pixel; } packed_formats[] = {
+            {MTLPixelFormatA8Unorm, 1},
+            {MTLPixelFormatB5G6R5Unorm, 2}, {MTLPixelFormatA1BGR5Unorm, 2},
+            {MTLPixelFormatABGR4Unorm, 2}, {MTLPixelFormatBGR5A1Unorm, 2},
+            {MTLPixelFormatRGB10A2Unorm, 4}, {MTLPixelFormatRGB10A2Uint, 4},
+            {MTLPixelFormatRG11B10Float, 4}, {MTLPixelFormatRGB9E5Float, 4},
+            {MTLPixelFormatBGR10A2Unorm, 4},
+        };
+        for (NSUInteger format_index = 0; format_index < sizeof(packed_formats) / sizeof(packed_formats[0]); ++format_index) {
+            const NSUInteger byte_count = integer_format_width * integer_format_height * packed_formats[format_index].bytes_per_pixel;
+            for (NSUInteger byte = 0; byte < byte_count; ++byte) {
+                integer_source[byte] = (uint8_t)((byte * 41u + format_index * 23u + 7u) & 0xffu);
+            }
+            MTLTextureDescriptor *packed_descriptor = [native_r32_descriptor copy];
+            packed_descriptor.pixelFormat = packed_formats[format_index].format;
+            packed_descriptor.usage = MTLTextureUsageShaderRead;
+            id<MTLTexture> native_packed_texture = [device newTextureWithDescriptor:packed_descriptor];
+            id<MTLTexture> adapter_packed_texture = [adapter_device newTextureWithDescriptor:packed_descriptor];
+            if (native_packed_texture == nil || adapter_packed_texture == nil ||
+                adapter_packed_texture.allocatedSize != byte_count) {
+                fprintf(stderr, "metal-pixel: packed texture allocation failed for format %lu\n",
+                        (unsigned long)packed_formats[format_index].format);
+                return 86;
+            }
+            [native_packed_texture replaceRegion:MTLRegionMake2D(0, 0, integer_format_width, integer_format_height)
+                                     mipmapLevel:0 withBytes:integer_source
+                                   bytesPerRow:integer_format_width * packed_formats[format_index].bytes_per_pixel];
+            [adapter_packed_texture replaceRegion:MTLRegionMake2D(0, 0, integer_format_width, integer_format_height)
+                                      mipmapLevel:0 withBytes:integer_source
+                                    bytesPerRow:integer_format_width * packed_formats[format_index].bytes_per_pixel];
+            [native_packed_texture getBytes:native_integer_bytes
+                                bytesPerRow:integer_format_width * packed_formats[format_index].bytes_per_pixel
+                              fromRegion:MTLRegionMake2D(0, 0, integer_format_width, integer_format_height) mipmapLevel:0];
+            [adapter_packed_texture getBytes:adapter_integer_bytes
+                                 bytesPerRow:integer_format_width * packed_formats[format_index].bytes_per_pixel
+                               fromRegion:MTLRegionMake2D(0, 0, integer_format_width, integer_format_height) mipmapLevel:0];
+            if (memcmp(native_integer_bytes, adapter_integer_bytes, byte_count) != 0 ||
+                memcmp(adapter_integer_bytes, integer_source, byte_count) != 0) {
+                fprintf(stderr, "metal-pixel: packed texture bytes mismatch for format %lu\n",
+                        (unsigned long)packed_formats[format_index].format);
+                return 87;
+            }
+        }
+
         /* Narrow normalized formats must retain their one- and two-byte
          * texels through the same CPU-owned storage and transfer path. */
         enum { narrow_format_width = 4, narrow_format_height = 2,
@@ -12108,7 +12155,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for R8/R16Unorm/R16Float/RG8/RG16Unorm/RG16Float/R8/R16/RG8/RG16/R32/RG32/RGBA8/RGBA16 Uint/Sint/R8/R16/RG8/RG16/RGBA8/RGBA16 Snorm/R32Uint/RGBA8/BGRA8/R32Float/RGBA16Unorm/RGBA16Float/RG32Float/RGBA32Float core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables and border colors, mip/coordinate/reduction/anisotropic sampler modes, visibility results, acceleration-structure resources, cube/cube-array textures, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for R8/R16Unorm/R16Float/RG8/RG16Unorm/RG16Float/R8/R16/RG8/RG16/R32/RG32/RGBA8/RGBA16 Uint/Sint/R8/R16/RG8/RG16/RGBA8/RGBA16 Snorm/R8/RG8/RGBA8/BGRA8 sRGB/A8/B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10/RGB9E5/BGR10A2 packed/R32Uint/RGBA8/BGRA8/R32Float/RGBA16Unorm/RGBA16Float/RG32Float/RGBA32Float core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables and border colors, mip/coordinate/reduction/anisotropic sampler modes, visibility results, acceleration-structure resources, cube/cube-array textures, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }
