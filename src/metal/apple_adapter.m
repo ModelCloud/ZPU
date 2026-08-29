@@ -167,6 +167,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @public
     zpu_metal_heap *_zpuHeap;
     ZPUDevice *_owner;
+    NSString *_label;
     MTLHeapType _type;
     MTLStorageMode _storageMode;
     MTLCPUCacheMode _cpuCacheMode;
@@ -253,6 +254,7 @@ API_AVAILABLE(macos(15.0), ios(18.0))
 @interface ZPUIndirectCommandBuffer : NSObject <MTLIndirectCommandBuffer> {
 @public
     ZPUDevice *_owner;
+    NSString *_label;
     NSUInteger _maxCommandCount;
     MTLIndirectCommandType _commandTypes;
     MTLResourceOptions _resourceOptions;
@@ -413,6 +415,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @interface ZPURenderPipelineState : NSObject <MTLRenderPipelineState> {
 @public
     ZPUDevice *_owner;
+    NSString *_label;
     MTLPixelFormat _colorPixelFormat;
     MTLPixelFormat _colorPixelFormats[ZPU_METAL_MAX_COLOR_ATTACHMENTS];
     NSUInteger _colorAttachmentCount;
@@ -441,6 +444,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @interface ZPUDepthStencilState : NSObject <MTLDepthStencilState> {
 @public
     ZPUDevice *_owner;
+    NSString *_label;
     MTLCompareFunction _depthCompareFunction;
     BOOL _depthWriteEnabled;
     MTLCompareFunction _frontStencilCompareFunction;
@@ -462,6 +466,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @interface ZPUSamplerState : NSObject <MTLSamplerState> {
 @public
     ZPUDevice *_owner;
+    NSString *_label;
     MTLSamplerMinMagFilter _minFilter;
     MTLSamplerMinMagFilter _magFilter;
     MTLSamplerMipFilter _mipFilter;
@@ -478,6 +483,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @interface ZPURasterizationRateMap : NSObject <MTLRasterizationRateMap> {
 @public
     ZPUDevice *_owner;
+    NSString *_label;
     MTLSize _screenSize;
     MTLSize _physicalGranularity;
     NSUInteger _layerCount;
@@ -871,6 +877,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @public
     zpu_metal_compute_encoder *_zpuEncoder;
     ZPUCommandBuffer *_owner;
+    NSString *_label;
     MTLDispatchType _dispatchType;
     zpu_metal_compute_kernel _kernel;
     ZPUTexture *_boundTexture;
@@ -924,6 +931,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @public
     zpu_metal_render_encoder *_zpuEncoder;
     ZPUCommandBuffer *_owner;
+    NSString *_label;
     ZPUBuffer *_vertexBuffer;
     ZPUTexture *_fragmentTexture;
     ZPURenderPipelineState *_pipelineState;
@@ -954,6 +962,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @public
     zpu_metal_blit_encoder *_zpuEncoder;
     ZPUCommandBuffer *_owner;
+    NSString *_label;
 }
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner encoder:(zpu_metal_blit_encoder *)encoder;
 @end
@@ -971,6 +980,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @interface ZPUParallelRenderEncoder : NSObject <MTLParallelRenderCommandEncoder> {
 @public
     ZPUCommandBuffer *_owner;
+    NSString *_label;
     ZPUTexture *_texture;
     zpu_metal_texture *_renderTexture;
     zpu_metal_texture *_depthTexture;
@@ -2307,8 +2317,8 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
 - (void)dealloc {
     if (_zpuHeap != NULL) zpu_metal_heap_destroy(_zpuHeap);
 }
-- (NSString *)label { return nil; }
-- (void)setLabel:(NSString *)label { (void)label; }
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
 - (MTLStorageMode)storageMode { return _storageMode; }
 - (MTLCPUCacheMode)cpuCacheMode { return _cpuCacheMode; }
@@ -3008,6 +3018,7 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLRenderPipelineDescriptor *)descriptor {
     if ((self = [super init])) {
         _owner = owner;
+        _label = [descriptor.label copy];
         MTLRenderPipelineColorAttachmentDescriptor *attachment = descriptor.colorAttachments[0];
         _vertexFunctionName = [descriptor.vertexFunction.name copy];
         _fragmentFunctionName = [descriptor.fragmentFunction.name copy];
@@ -3037,8 +3048,8 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
 }
 - (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
 - (NSUInteger)allocatedSize API_AVAILABLE(macos(15.0), ios(18.0)) { return 0; }
-- (NSString *)label { return nil; }
-- (void)setLabel:(NSString *)label { (void)label; }
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (NSUInteger)maxTotalThreadsPerThreadgroup { return 1; }
 - (NSUInteger)maxTotalThreadsPerObjectThreadgroup { return 1; }
 - (NSUInteger)maxTotalThreadsPerMeshThreadgroup API_AVAILABLE(macos(13.0), ios(16.0)) { return 0; }
@@ -3122,6 +3133,7 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLDepthStencilDescriptor *)descriptor {
     if ((self = [super init])) {
         _owner = owner;
+        _label = [descriptor.label copy];
         _depthCompareFunction = descriptor.depthCompareFunction;
         _depthWriteEnabled = descriptor.depthWriteEnabled;
         MTLStencilDescriptor *front = descriptor.frontFaceStencil;
@@ -3142,8 +3154,8 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
     return self;
 }
 - (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
-- (NSString *)label { return nil; }
-- (void)setLabel:(NSString *)label { (void)label; }
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (MTLResourceID)gpuResourceID API_AVAILABLE(macos(26.0), ios(26.0)) { return (MTLResourceID){0}; }
 @end
 
@@ -3151,6 +3163,7 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLSamplerDescriptor *)descriptor {
     if ((self = [super init])) {
         _owner = owner;
+        _label = [descriptor.label copy];
         _minFilter = descriptor.minFilter;
         _magFilter = descriptor.magFilter;
         _mipFilter = descriptor.mipFilter;
@@ -3161,8 +3174,8 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
     return self;
 }
 - (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
-- (NSString *)label { return nil; }
-- (void)setLabel:(NSString *)label { (void)label; }
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (MTLResourceID)gpuResourceID API_AVAILABLE(macos(13.0), ios(16.0)) { return (MTLResourceID){_resourceID}; }
 @end
 
@@ -3190,6 +3203,7 @@ static BOOL zpu_rasterization_rate_layer_is_identity(MTLRasterizationRateLayerDe
     }
     if ((self = [super init])) {
         _owner = owner;
+        _label = [descriptor.label copy];
         _screenSize = MTLSizeMake(descriptor.screenSize.width, descriptor.screenSize.height, 0);
         /* Apple GPU rate maps report a 32x32 physical granularity even for
          * an identity 1:1 map. Preserve that observable descriptor property
@@ -3200,7 +3214,7 @@ static BOOL zpu_rasterization_rate_layer_is_identity(MTLRasterizationRateLayerDe
     return self;
 }
 - (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
-- (NSString *)label { return nil; }
+- (NSString *)label { return _label; }
 - (MTLSize)screenSize { return _screenSize; }
 - (MTLSize)physicalGranularity { return _physicalGranularity; }
 - (NSUInteger)layerCount { return _layerCount; }
@@ -7020,8 +7034,8 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (id<MTLDevice>)device { return [_owner device]; }
 - (MTLDispatchType)dispatchType API_AVAILABLE(macos(10.14), ios(12.0)) { return _dispatchType; }
-- (NSString *)label { return nil; }
-- (void)setLabel:(NSString *)label { (void)label; }
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (void)setComputePipelineState:(id<MTLComputePipelineState>)state {
     ZPUComputePipelineState *pipeline = (ZPUComputePipelineState *)state;
     if (![pipeline isKindOfClass:[ZPUComputePipelineState class]] ||
@@ -7689,8 +7703,8 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (void)setColorStoreActionOptions:(MTLStoreActionOptions)options atIndex:(NSUInteger)colorAttachmentIndex { (void)options; (void)colorAttachmentIndex; }
 - (void)setDepthStoreActionOptions:(MTLStoreActionOptions)options { (void)options; }
 - (void)setStencilStoreActionOptions:(MTLStoreActionOptions)options { (void)options; }
-- (NSString *)label { return nil; }
-- (void)setLabel:(NSString *)label { (void)label; }
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (void)barrierAfterQueueStages:(MTLStages)afterQueueStages beforeStages:(MTLStages)beforeStages API_AVAILABLE(macos(26.0), ios(26.0)) {
     (void)afterQueueStages;
     (void)beforeStages;
@@ -8076,8 +8090,8 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     [_owner retainResource:source];
     [_owner retainResource:destination];
 }
-- (NSString *)label { return nil; }
-- (void)setLabel:(NSString *)label { (void)label; }
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (void)barrierAfterQueueStages:(MTLStages)afterQueueStages beforeStages:(MTLStages)beforeStages API_AVAILABLE(macos(26.0), ios(26.0)) {
     (void)afterQueueStages;
     (void)beforeStages;
@@ -8858,8 +8872,8 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (void)setStencilStoreActionOptions:(MTLStoreActionOptions)options {
     if (options != 0) [_owner markError];
 }
-- (NSString *)label { return nil; }
-- (void)setLabel:(NSString *)label { (void)label; }
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (void)barrierAfterQueueStages:(MTLStages)afterQueueStages beforeStages:(MTLStages)beforeStages API_AVAILABLE(macos(26.0), ios(26.0)) {
     (void)afterQueueStages;
     (void)beforeStages;
@@ -8892,8 +8906,8 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     }
     return self;
 }
-- (NSString *)label { return nil; }
-- (void)setLabel:(NSString *)label { (void)label; }
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
 - (NSUInteger)size { return _maxCommandCount * 64; }
 - (MTLResourceOptions)resourceOptions { return _resourceOptions; }

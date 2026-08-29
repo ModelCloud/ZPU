@@ -1697,6 +1697,7 @@ int main(void) {
             return 104;
         }
         MTLRenderPipelineDescriptor *adapter_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
+        adapter_pipeline_descriptor.label = @"zpu cpu render pipeline";
         adapter_pipeline_descriptor.vertexFunction = adapter_vertex_function;
         adapter_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
         adapter_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
@@ -2122,6 +2123,7 @@ int main(void) {
             }
         }
         MTLSamplerDescriptor *adapter_sampler_descriptor = [MTLSamplerDescriptor new];
+        adapter_sampler_descriptor.label = @"zpu cpu sampler";
         id<MTLSamplerState> adapter_sampler =
             [adapter_device newSamplerStateWithDescriptor:adapter_sampler_descriptor];
         MTLRenderPassDescriptor *adapter_pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -2140,6 +2142,13 @@ int main(void) {
             fail_with_error("Objective-C adapter pipeline/resource allocation failed", adapter_pipeline_error);
             fprintf(stderr, "metal-pixel: Objective-C adapter allocation failed\n");
             return 18;
+        }
+        [adapter_encoder setLabel:@"zpu cpu render encoder"];
+        if (![adapter_pipeline.label isEqualToString:@"zpu cpu render pipeline"] ||
+            ![adapter_sampler.label isEqualToString:@"zpu cpu sampler"] ||
+            ![adapter_encoder.label isEqualToString:@"zpu cpu render encoder"]) {
+            fprintf(stderr, "metal-pixel: CPU Metal object labels were not retained\n");
+            return 127;
         }
         const BOOL adapter_protocols_ok =
             [adapter_device conformsToProtocol:@protocol(MTLDevice)] &&
@@ -6205,6 +6214,7 @@ int main(void) {
         adapter_heap_descriptor.size = 64;
         adapter_heap_descriptor.storageMode = MTLStorageModeShared;
         id<MTLHeap> adapter_heap = [adapter_device newHeapWithDescriptor:adapter_heap_descriptor];
+        [adapter_heap setLabel:@"zpu cpu heap"];
         const NSUInteger adapter_allocated_before_heap_resources = adapter_device.currentAllocatedSize;
         id<MTLBuffer> adapter_heap_mismatched_buffer =
             [adapter_heap newBufferWithLength:4 options:MTLResourceStorageModePrivate];
@@ -6226,7 +6236,8 @@ int main(void) {
             25, 26, 27, 28, 29, 30, 31, 32,
         };
         uint8_t heap_pixels_copy[sizeof(heap_pixels)] = {0};
-        if (adapter_heap == nil || adapter_heap_mismatched_buffer != nil ||
+        if (adapter_heap == nil || ![adapter_heap.label isEqualToString:@"zpu cpu heap"] ||
+            adapter_heap_mismatched_buffer != nil ||
             adapter_heap_mismatched_texture != nil || adapter_heap_buffer == nil || adapter_heap_texture == nil ||
             adapter_heap.size != 64 || adapter_heap.usedSize != 32 ||
             [adapter_heap maxAvailableSizeWithAlignment:4] != 32 ||
@@ -7134,6 +7145,7 @@ int main(void) {
         id<MTLRenderPipelineState> depth_pipeline =
             [device newRenderPipelineStateWithDescriptor:depth_pipeline_descriptor error:&error];
         MTLDepthStencilDescriptor *depth_state_descriptor = [MTLDepthStencilDescriptor new];
+        depth_state_descriptor.label = @"zpu cpu depth state";
         depth_state_descriptor.depthCompareFunction = MTLCompareFunctionLessEqual;
         depth_state_descriptor.depthWriteEnabled = YES;
         id<MTLDepthStencilState> depth_state =
@@ -7220,7 +7232,8 @@ int main(void) {
             [adapter_device newDepthStencilStateWithDescriptor:depth_state_descriptor];
         if (adapter_depth_color == nil || adapter_depth_texture == nil ||
             adapter_depth_vertex_buffer == nil || adapter_depth_command_buffer == nil ||
-            adapter_depth_encoder == nil || adapter_depth_pipeline == nil || adapter_depth_state == nil) {
+            adapter_depth_encoder == nil || adapter_depth_pipeline == nil || adapter_depth_state == nil ||
+            ![adapter_depth_state.label isEqualToString:@"zpu cpu depth state"]) {
             fail_with_error("depth adapter pipeline allocation failed", adapter_depth_pipeline_error);
             fprintf(stderr, "metal-pixel: depth adapter allocation failed\n");
             return 28;
