@@ -35,5 +35,10 @@ if python3 "$root/tools/metal_abi_status.py" --require-complete >"$tmp/strict-ou
     echo "strict Metal coverage unexpectedly passed" >&2
     exit 1
 fi
-rg -F "coverage" "$tmp/strict-err" >/dev/null
+if ! rg -F "coverage" "$tmp/strict-err" >/dev/null &&
+   ! rg -F "Apple SDK unavailable" "$tmp/strict-err" >/dev/null; then
+    cat "$tmp/strict-err" >&2
+    echo "metal-abi: strict gate failed for an unexpected reason" >&2
+    exit 1
+fi
 echo "metal-abi: native C ABI, mapping manifest, and fail-closed strict gate: PASS"
