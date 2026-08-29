@@ -154,6 +154,8 @@ const DrawCommand = struct {
     vertex_count: usize,
     primitive: abi.PrimitiveType,
     options: raster3d.DrawOptions,
+    vertex_buffer: ?*Buffer = null,
+    vertex_buffer_offset: usize = 0,
     fragment_uniform_enabled: bool = false,
     fragment_uniform_buffer: ?*Buffer = null,
     fragment_uniform_buffer_offset: usize = 0,
@@ -312,6 +314,15 @@ pub const CommandBuffer = struct {
         return start;
     }
 
+    fn resolveDrawVertices(self: *CommandBuffer, draw: DrawCommand) Error![]const abi.Vertex {
+        const source = if (draw.vertex_buffer) |buffer|
+            try bufferVertices(buffer, draw.vertex_buffer_offset)
+        else
+            self.vertices.items;
+        if (draw.vertex_start > source.len or draw.vertex_count > source.len - draw.vertex_start) return error.InvalidCommand;
+        return source[draw.vertex_start .. draw.vertex_start + draw.vertex_count];
+    }
+
     pub fn commit(self: *CommandBuffer) Error!void {
         if (self.magic != command_buffer_magic or self.status != .created or self.active_encoder != .none) return error.InvalidCommand;
         self.status = .committed;
@@ -362,7 +373,7 @@ pub const CommandBuffer = struct {
             .draw => |draw| {
                 const target_handle = active_target orelse return self.fail(error.InvalidCommand);
                 if (!validTexture(target_handle)) return self.fail(error.InvalidResource);
-                if (draw.vertex_start > self.vertices.items.len or draw.vertex_count > self.vertices.items.len - draw.vertex_start) return self.fail(error.InvalidCommand);
+                const draw_vertices = self.resolveDrawVertices(draw) catch |err| return self.fail(err);
                 var draw_options = draw.options;
                 if (draw.fragment_uniform_enabled) {
                     if (draw.fragment_uniform_buffer) |buffer| {
@@ -404,7 +415,7 @@ pub const CommandBuffer = struct {
                     sample_target,
                     active_depth,
                     active_stencil,
-                    self.vertices.items[draw.vertex_start .. draw.vertex_start + draw.vertex_count],
+                    draw_vertices,
                     draw.primitive,
                     draw_options,
                 );
@@ -951,6 +962,9 @@ pub const RenderEncoder = struct {
         if (buffer) |value| {
             if (!validBuffer(value) or value.device != self.command_buffer.queue.device or offset > value.bytes.len) return error.InvalidArgument;
         }
+        // Metal bindings are last-write-wins. A nil buffer must also clear
+        // an older setBytes snapshot instead of silently reusing it.
+        self.inline_vertices.clearRetainingCapacity();
         self.vertex_buffer = buffer;
         self.vertex_offset = offset;
     }
@@ -1018,13 +1032,9 @@ pub const RenderEncoder = struct {
     }
 
     fn sourceVertices(self: *const RenderEncoder) Error![]const abi.Vertex {
-        if (self.inline_vertices.items.len != 0) return self.inline_vertices.items;
+        if (self.vertex_buffer == null and self.inline_vertices.items.len != 0) return self.inline_vertices.items;
         const buffer = self.vertex_buffer orelse return error.InvalidArgument;
-        if (!validBuffer(buffer) or self.vertex_offset > buffer.bytes.len) return error.InvalidArgument;
-        const raw = buffer.bytes[self.vertex_offset..];
-        if (raw.len % @sizeOf(abi.Vertex) != 0 or @intFromPtr(raw.ptr) % @alignOf(abi.Vertex) != 0) return error.InvalidArgument;
-        const pointer: [*]const abi.Vertex = @ptrCast(@alignCast(raw.ptr));
-        return pointer[0 .. raw.len / @sizeOf(abi.Vertex)];
+        return bufferVertices(buffer, self.vertex_offset);
     }
 
     pub fn drawPrimitives(self: *RenderEncoder, primitive: abi.PrimitiveType, vertex_start: usize, vertex_count: usize, instance_count: usize) Error!void {
@@ -1036,12 +1046,15 @@ pub const RenderEncoder = struct {
         const selected = source[vertex_start .. vertex_start + vertex_count];
         var instance: usize = 0;
         while (instance < instance_count) : (instance += 1) {
-            const start = try self.command_buffer.appendVertices(selected);
+            const bound_buffer = self.vertex_buffer;
+            const start = if (bound_buffer == null) try self.command_buffer.appendVertices(selected) else vertex_start;
             _ = try self.command_buffer.append(.{ .draw = .{
                 .vertex_start = start,
                 .vertex_count = selected.len,
                 .primitive = primitive,
                 .options = self.options(),
+                .vertex_buffer = bound_buffer,
+                .vertex_buffer_offset = self.vertex_offset,
                 .fragment_uniform_enabled = self.fragment_uniform_enabled,
                 .fragment_uniform_buffer = self.fragment_uniform_buffer,
                 .fragment_uniform_buffer_offset = self.fragment_uniform_buffer_offset,
@@ -1943,6 +1956,14 @@ fn appendVertexBytes(list: *std.ArrayList(abi.Vertex), raw: []const u8) Error!vo
     }
 }
 
+fn bufferVertices(buffer: *Buffer, offset: usize) Error![]const abi.Vertex {
+    if (!validBuffer(buffer) or offset > buffer.bytes.len) return error.InvalidResource;
+    const raw = buffer.bytes[offset..];
+    if (raw.len % @sizeOf(abi.Vertex) != 0 or @intFromPtr(raw.ptr) % @alignOf(abi.Vertex) != 0) return error.InvalidArgument;
+    const pointer: [*]const abi.Vertex = @ptrCast(@alignCast(raw.ptr));
+    return pointer[0 .. raw.len / @sizeOf(abi.Vertex)];
+}
+
 fn copyBufferToTexture(command: BufferTextureCommand) Error!void {
     const row_bytes = std.math.mul(usize, command.region.size.width, command.texture.format.bytesPerPixel()) catch return error.InvalidArgument;
     const stride = if (command.bytes_per_row == 0) row_bytes else command.bytes_per_row;
@@ -2804,6 +2825,43 @@ test "CPU uniform fragment buffer reads at commit with offset" {
     try bufferWrite(uniform_buffer, 8, @ptrCast(&updated), @sizeOf(abi.Color));
     try command_buffer.commit();
     try std.testing.expectEqualSlices(u8, &[_]u8{ 51, 153, 224, 102 }, texture.bytes[0..4]);
+}
+
+test "CPU vertex buffer bindings read at commit" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const texture = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(texture);
+    const initial = [_]abi.Vertex{
+        .{ .position = .{ -0.5, -0.5, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 0.5, -0.5, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 0.5, 0.5, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -0.5, -0.5, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 0.5, 0.5, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -0.5, 0.5, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+    };
+    const updated = [_]abi.Vertex{
+        .{ .position = .{ -0.5, -0.5, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .{ .position = .{ 0.5, -0.5, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .{ .position = .{ 0.5, 0.5, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .{ .position = .{ -0.5, -0.5, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .{ .position = .{ 0.5, 0.5, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .{ .position = .{ -0.5, 0.5, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+    };
+    const vertex_buffer = try createBuffer(device, @sizeOf(@TypeOf(initial)), @ptrCast(&initial));
+    defer destroyBuffer(vertex_buffer);
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, texture, .{ .color = .{ .load_action = .clear, .store_action = .store } });
+    try encoder.setVertexBuffer(vertex_buffer, 0, 0);
+    try encoder.drawPrimitives(.triangle, 0, initial.len, 1);
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try bufferWrite(vertex_buffer, 0, @ptrCast(&updated), @sizeOf(@TypeOf(updated)));
+    try command_buffer.commit();
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, texture.bytes[40..44]);
 }
 
 test "depth texture attachment rejects farther fragments" {

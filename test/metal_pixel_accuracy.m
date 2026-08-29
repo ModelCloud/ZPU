@@ -1169,6 +1169,87 @@ int main(void) {
         id<MTLRenderPipelineState> adapter_pipeline =
             [adapter_device newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor error:&adapter_pipeline_error];
 
+        /* Bound vertex resources are read when the draw executes. Mutating
+         * native and ZPU-owned storage after encoding but before commit checks
+         * the CPU adapter's deferred buffer-binding semantics. */
+        const zpu_metal_vertex commit_initial_vertices[] = {
+            {{x0, y0, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{x1, y0, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{x1, y1, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{x0, y0, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{x1, y1, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{x0, y1, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+        };
+        const zpu_metal_vertex commit_updated_vertices[] = {
+            {{x0, y0, 0.5f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+            {{x1, y0, 0.5f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+            {{x1, y1, 0.5f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+            {{x0, y0, 0.5f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+            {{x1, y1, 0.5f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+            {{x0, y1, 0.5f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+        };
+        id<MTLBuffer> native_commit_vertex_buffer =
+            [device newBufferWithBytes:commit_initial_vertices length:sizeof(commit_initial_vertices)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_commit_vertex_buffer =
+            [adapter_device newBufferWithBytes:commit_initial_vertices length:sizeof(commit_initial_vertices)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLTexture> native_commit_output = [device newTextureWithDescriptor:texture_descriptor];
+        id<MTLTexture> adapter_commit_output = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTLRenderPassDescriptor *native_commit_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_commit_pass.colorAttachments[0].texture = native_commit_output;
+        native_commit_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_commit_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_commit_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> native_commit_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_commit_encoder =
+            [native_commit_command_buffer renderCommandEncoderWithDescriptor:native_commit_pass];
+        [native_commit_encoder setRenderPipelineState:pipeline];
+        [native_commit_encoder setVertexBytes:commit_initial_vertices length:sizeof(commit_initial_vertices) atIndex:0];
+        [native_commit_encoder setVertexBuffer:native_commit_vertex_buffer offset:0 atIndex:0];
+        [native_commit_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_commit_encoder endEncoding];
+        MTLRenderPassDescriptor *adapter_commit_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_commit_pass.colorAttachments[0].texture = adapter_commit_output;
+        adapter_commit_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_commit_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_commit_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> adapter_commit_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_commit_encoder =
+            [adapter_commit_command_buffer renderCommandEncoderWithDescriptor:adapter_commit_pass];
+        [adapter_commit_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_commit_encoder setVertexBytes:commit_initial_vertices length:sizeof(commit_initial_vertices) atIndex:0];
+        [adapter_commit_encoder setVertexBuffer:adapter_commit_vertex_buffer offset:0 atIndex:0];
+        [adapter_commit_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_commit_encoder endEncoding];
+        memcpy(native_commit_vertex_buffer.contents, commit_updated_vertices, sizeof(commit_updated_vertices));
+        memcpy(adapter_commit_vertex_buffer.contents, commit_updated_vertices, sizeof(commit_updated_vertices));
+        [native_commit_command_buffer commit];
+        [native_commit_command_buffer waitUntilCompleted];
+        [adapter_commit_command_buffer commit];
+        [adapter_commit_command_buffer waitUntilCompleted];
+        uint8_t native_commit_bytes[byte_count];
+        uint8_t adapter_commit_bytes[byte_count];
+        [native_commit_output getBytes:native_commit_bytes bytesPerRow:(NSUInteger)width * 4
+                            fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_commit_output getBytes:adapter_commit_bytes bytesPerRow:(NSUInteger)width * 4
+                              fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        const size_t commit_pixel_offset = (4 * (size_t)width + 4) * 4;
+        if (native_commit_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_commit_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_commit_bytes, adapter_commit_bytes, byte_count) != 0 ||
+            memcmp(native_commit_bytes + commit_pixel_offset, (const uint8_t[]){0, 0, 255, 255}, 4) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < byte_count && native_commit_bytes[mismatch] == adapter_commit_bytes[mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: deferred vertex buffer mismatch (native=%lu adapter=%lu mismatch=%zu nativeByte=%u adapterByte=%u)\n",
+                    (unsigned long)native_commit_command_buffer.status,
+                    (unsigned long)adapter_commit_command_buffer.status,
+                    mismatch,
+                    mismatch < byte_count ? native_commit_bytes[mismatch] : 0,
+                    mismatch < byte_count ? adapter_commit_bytes[mismatch] : 0);
+            return 120;
+        }
+
         MTLRenderPipelineDescriptor *native_no_raster_descriptor = [pipeline_descriptor copy];
         native_no_raster_descriptor.rasterizationEnabled = NO;
         native_no_raster_descriptor.vertexFunction = no_raster_vertex_function;
