@@ -432,6 +432,7 @@
     "MTLRenderPipelineState.functionHandleWithFunction",
     "MTLRenderPipelineState.functionHandleWithName",
     "MTLRenderPipelineState.functionHandleWithBinaryFunction",
+    "MTLRenderPipelineState.newRenderPipelineDescriptorForSpecialization",
     "MTLRenderPipelineState.newRenderPipelineStateWithAdditionalBinaryFunctions",
     "MTLRenderPipelineState.newRenderPipelineStateWithBinaryFunctions",
     "MTLRenderPipelineState.reflection",

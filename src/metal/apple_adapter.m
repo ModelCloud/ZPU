@@ -626,6 +626,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSString *_fragmentFunctionName;
     MTLRenderPipelineReflection *_reflection;
     MTLRenderPipelineReflection *_legacyReflection;
+    id _specializationDescriptor;
     NSArray *_vertexBinaryFunctionNames;
     NSArray *_fragmentBinaryFunctionNames;
     BOOL _isTilePipeline;
@@ -5949,6 +5950,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _tessellationControlPointIndexType = pipeline->_tessellationControlPointIndexType;
         _reflection = pipeline->_reflection;
         _legacyReflection = pipeline->_legacyReflection;
+        _specializationDescriptor = [pipeline->_specializationDescriptor copy];
     }
     return self;
 }
@@ -6146,7 +6148,9 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         fragmentFunctionNames:_fragmentLinkedFunctionNames vertexBinaryNames:vertexNames
         fragmentBinaryNames:fragmentNames];
 }
-- (MTL4PipelineDescriptor *)newRenderPipelineDescriptorForSpecialization API_AVAILABLE(macos(26.0), ios(26.0)) { return nil; }
+- (MTL4PipelineDescriptor *)newRenderPipelineDescriptorForSpecialization API_AVAILABLE(macos(26.0), ios(26.0)) {
+    return [_specializationDescriptor copy];
+}
 @end
 
 @implementation ZPUDepthStencilState
@@ -8449,6 +8453,7 @@ static id<MTLRenderPipelineState> zpu_mtl4_render_pipeline_for_descriptor(
         ((ZPURenderPipelineState *)pipeline)->_blendingStateUnspecialized = unspecialized_blending;
         ((ZPURenderPipelineState *)pipeline)->_reflection =
             zpu_render_pipeline_reflection(vertex.name, fragment.name);
+        ((ZPURenderPipelineState *)pipeline)->_specializationDescriptor = [descriptor copy];
     }
     return pipeline;
 }

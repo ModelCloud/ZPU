@@ -340,6 +340,9 @@ triangle path:
   CPU render profiles from source text, UTF-8 file/URL/data inputs, and the
   default bundle query; unsupported arbitrary MSL and stitched libraries fail
   closed
+- CPU-created Metal 4 render pipelines retain a ZPU-owned specialization
+  descriptor, so supported unspecialized blend state can be resolved through
+  `newRenderPipelineDescriptorForSpecialization` and the CPU compiler path
 - `newDefaultLibrary` returns the same CPU metadata library for the registered
   ZPU kernels, including the array, 3D, and bounded tile kernels; it does not load or compile an Apple
   `.metallib`
