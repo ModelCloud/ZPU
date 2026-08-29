@@ -1391,6 +1391,14 @@ int main(void) {
                 if (reduction_max_result != 0) return reduction_max_result;
             }
         }
+        MTLSamplerDescriptor *unsupported_anisotropy_descriptor = [MTLSamplerDescriptor new];
+        unsupported_anisotropy_descriptor.maxAnisotropy = 2;
+        id<MTLSamplerState> adapter_anisotropic_sampler =
+            [adapter_device newSamplerStateWithDescriptor:unsupported_anisotropy_descriptor];
+        if (adapter_anisotropic_sampler != nil) {
+            fprintf(stderr, "metal-pixel: CPU adapter silently accepted unsupported anisotropic sampling\n");
+            return 152;
+        }
 
         if (adapter_stage_in_vertex_function == nil ||
             ZPUMetalCreateCPUFunction(adapter_device, @"arbitrary_unregistered_vertex") != nil) {
