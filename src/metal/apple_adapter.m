@@ -1332,6 +1332,8 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     ZPUTexture *_fragmentTexture;
     ZPURenderPipelineState *_pipelineState;
     ZPUDepthStencilState *_depthStencilState;
+    id _passDescriptor;
+    BOOL _ended;
     ZPUBuffer *_tessellationFactorBuffer;
     NSUInteger _tessellationFactorBufferOffset;
     NSUInteger _tessellationFactorBufferInstanceStride;
@@ -1340,6 +1342,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSUInteger _tileHeight;
 }
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner encoder:(zpu_metal_render_encoder *)encoder;
+- (BOOL)configurePassDescriptor:(id)descriptor;
 - (BOOL)applyVertexAttributeStride:(NSUInteger)stride allowStaticToken:(BOOL)allowStaticToken;
 - (BOOL)validateVertexStrideForDraw;
 @end
@@ -5236,6 +5239,23 @@ static BOOL zpu_sample_pass_attachments(ZPUCommandBuffer *owner, id attachments,
         const NSUInteger sampleIndex = start ? [attachment startOfEncoderSampleIndex] : [attachment endOfEncoderSampleIndex];
         if (sampleIndex == MTLCounterDontSample) continue;
         if (![sample sampleAtIndex:sampleIndex]) return NO;
+        [owner retainResource:sample];
+    }
+    return YES;
+}
+
+static BOOL zpu_sample_render_pass_attachments(ZPUCommandBuffer *owner, id attachments, BOOL start) {
+    if (attachments == nil) return YES;
+    for (NSUInteger index = 0; index < 4; ++index) {
+        id attachment = [attachments objectAtIndexedSubscript:index];
+        id sampleBuffer = [attachment sampleBuffer];
+        if (sampleBuffer == nil) continue;
+        ZPUCounterSampleBuffer *sample = (ZPUCounterSampleBuffer *)sampleBuffer;
+        if (![sample isKindOfClass:[ZPUCounterSampleBuffer class]] || sample->_owner != [owner device]) return NO;
+        const NSUInteger vertexIndex = start ? [attachment startOfVertexSampleIndex] : [attachment endOfVertexSampleIndex];
+        const NSUInteger fragmentIndex = start ? [attachment startOfFragmentSampleIndex] : [attachment endOfFragmentSampleIndex];
+        if (vertexIndex != MTLCounterDontSample && ![sample sampleAtIndex:vertexIndex]) return NO;
+        if (fragmentIndex != MTLCounterDontSample && ![sample sampleAtIndex:fragmentIndex]) return NO;
         [owner retainResource:sample];
     }
     return YES;
@@ -9419,6 +9439,12 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     ZPURenderEncoder *result = [[ZPURenderEncoder alloc] initWithOwner:self encoder:encoder];
     result->_tileWidth = descriptor.tileWidth;
     result->_tileHeight = descriptor.tileHeight;
+    if (@available(macOS 11.0, iOS 14.0, *)) {
+        if (![result configurePassDescriptor:descriptor]) {
+            [result endEncoding];
+            return nil;
+        }
+    }
     return (id<MTLRenderCommandEncoder>)result;
 }
 - (id<MTLParallelRenderCommandEncoder>)parallelRenderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)descriptor {
@@ -13186,8 +13212,18 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 
 @implementation ZPURenderEncoder
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner encoder:(zpu_metal_render_encoder *)encoder {
-    if ((self = [super init])) { _owner = owner; _zpuEncoder = encoder; }
+    if ((self = [super init])) {
+        _owner = owner;
+        _zpuEncoder = encoder;
+        _passDescriptor = nil;
+        _ended = NO;
+    }
     return self;
+}
+- (BOOL)configurePassDescriptor:(id)descriptor {
+    if (descriptor == nil || !zpu_sample_render_pass_attachments(_owner, [descriptor sampleBufferAttachments], YES)) return NO;
+    _passDescriptor = [descriptor copy];
+    return YES;
 }
 - (BOOL)applyVertexAttributeStride:(NSUInteger)stride allowStaticToken:(BOOL)allowStaticToken {
     const BOOL staticToken = stride == NSUIntegerMax;
@@ -13216,7 +13252,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 - (id<MTLDevice>)device { return [_owner device]; }
 - (void)dealloc {
     if (_zpuEncoder != NULL) {
-        (void)zpu_metal_render_encoder_end_encoding(_zpuEncoder);
+        [self endEncoding];
         zpu_metal_render_encoder_destroy(_zpuEncoder);
     }
 }
@@ -14192,6 +14228,11 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 - (void)pushDebugGroup:(NSString *)string { (void)string; }
 - (void)popDebugGroup {}
 - (void)endEncoding {
+    if (_ended) return;
+    _ended = YES;
+    if (_passDescriptor != nil && !zpu_sample_render_pass_attachments(_owner, [_passDescriptor sampleBufferAttachments], NO)) {
+        [_owner markError];
+    }
     if (_zpuEncoder != NULL) (void)zpu_metal_render_encoder_end_encoding(_zpuEncoder);
 }
 @end

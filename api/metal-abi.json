@@ -801,6 +801,7 @@
     "MTLTexture.rootResource",
     "MTLRenderPassAttachmentDescriptor.level",
     "MTLRenderPassAttachmentDescriptor.slice",
+    "MTLRenderPassDescriptor.sampleBufferAttachments",
     "MTLSharedEvent.newSharedEventHandle",
     "MTLDevice.newSharedEventWithHandle",
     "MTLTexture.newSharedTextureHandle",
