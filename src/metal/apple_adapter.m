@@ -2260,9 +2260,14 @@ static BOOL zpu_sparse_texture_get_plane(ZPUTexture *texture, NSUInteger level, 
                                          MTLRegion region, void *destination,
                                          NSUInteger bytesPerRow) {
     if (texture == nil || destination == NULL || !zpu_region_fits(region) ||
-        region.origin.z != 0 || region.size.depth != 1 || level >= texture->_mipmapTextures.count) return NO;
+        region.size.depth != 1 || level >= texture->_mipmapTextures.count ||
+        (!zpu_texture_type_is_3d(texture->_textureType) && region.origin.z != 0)) return NO;
     zpu_metal_texture *levelTexture = [texture zpuTextureAtLevel:level slice:slice];
-    if (levelTexture == NULL || region.origin.x > zpu_metal_texture_width(levelTexture) ||
+    const NSUInteger levelDepth = zpu_texture_type_is_3d(texture->_textureType) ?
+        zpu_texture_depth_at_level(texture, level) : 1;
+    if (levelTexture == NULL || region.origin.z > levelDepth ||
+        region.size.depth > levelDepth - region.origin.z ||
+        region.origin.x > zpu_metal_texture_width(levelTexture) ||
         region.size.width > zpu_metal_texture_width(levelTexture) - region.origin.x ||
         region.origin.y > zpu_metal_texture_height(levelTexture) ||
         region.size.height > zpu_metal_texture_height(levelTexture) - region.origin.y) return NO;
@@ -2284,9 +2289,14 @@ static BOOL zpu_sparse_texture_get_plane(ZPUTexture *texture, NSUInteger level, 
     const NSUInteger lastX = (region.origin.x + region.size.width - 1) / tileWidth;
     const NSUInteger firstY = region.origin.y / tileHeight;
     const NSUInteger lastY = (region.origin.y + region.size.height - 1) / tileHeight;
-    for (NSUInteger tileY = firstY; tileY <= lastY; ++tileY) {
-        for (NSUInteger tileX = firstX; tileX <= lastX; ++tileX) {
-            ZPUSparsePage *page = zpu_sparse_texture_page(texture, level, slice, tileX, tileY, 0, NO);
+    const NSUInteger tileDepth = texture->_sparseTileSize.depth;
+    if (tileDepth == 0 || region.origin.z > SIZE_MAX - region.size.depth) return NO;
+    const NSUInteger firstZ = region.origin.z / tileDepth;
+    const NSUInteger lastZ = (region.origin.z + region.size.depth - 1) / tileDepth;
+    for (NSUInteger tileZ = firstZ; tileZ <= lastZ; ++tileZ) {
+        for (NSUInteger tileY = firstY; tileY <= lastY; ++tileY) {
+            for (NSUInteger tileX = firstX; tileX <= lastX; ++tileX) {
+            ZPUSparsePage *page = zpu_sparse_texture_page(texture, level, slice, tileX, tileY, tileZ, NO);
             if (page == nil) continue;
             NSUInteger levelWidth = 0;
             NSUInteger levelHeight = 0;
@@ -2322,6 +2332,7 @@ static BOOL zpu_sparse_texture_get_plane(ZPUTexture *texture, NSUInteger level, 
                 if (!zpu_sparse_page_read(page, sourceOffset,
                                            (uint8_t *)destination + destinationOffset, copyBytes)) return NO;
             }
+            }
         }
     }
     return YES;
@@ -2330,10 +2341,15 @@ static BOOL zpu_sparse_texture_get_plane(ZPUTexture *texture, NSUInteger level, 
 static BOOL zpu_sparse_texture_replace_plane(ZPUTexture *texture, NSUInteger level, NSUInteger slice,
                                              MTLRegion region, const void *source,
                                              NSUInteger bytesPerRow) {
-    if (texture == nil || source == NULL || !zpu_region_fits(region) || region.origin.z != 0 ||
-        region.size.depth != 1 || level >= texture->_mipmapTextures.count) return NO;
+    if (texture == nil || source == NULL || !zpu_region_fits(region) ||
+        region.size.depth != 1 || level >= texture->_mipmapTextures.count ||
+        (!zpu_texture_type_is_3d(texture->_textureType) && region.origin.z != 0)) return NO;
     zpu_metal_texture *levelTexture = [texture zpuTextureAtLevel:level slice:slice];
-    if (levelTexture == NULL || region.origin.x > zpu_metal_texture_width(levelTexture) ||
+    const NSUInteger levelDepth = zpu_texture_type_is_3d(texture->_textureType) ?
+        zpu_texture_depth_at_level(texture, level) : 1;
+    if (levelTexture == NULL || region.origin.z > levelDepth ||
+        region.size.depth > levelDepth - region.origin.z ||
+        region.origin.x > zpu_metal_texture_width(levelTexture) ||
         region.size.width > zpu_metal_texture_width(levelTexture) - region.origin.x ||
         region.origin.y > zpu_metal_texture_height(levelTexture) ||
         region.size.height > zpu_metal_texture_height(levelTexture) - region.origin.y) return NO;
@@ -2352,9 +2368,14 @@ static BOOL zpu_sparse_texture_replace_plane(ZPUTexture *texture, NSUInteger lev
     const NSUInteger lastX = (region.origin.x + region.size.width - 1) / tileWidth;
     const NSUInteger firstY = region.origin.y / tileHeight;
     const NSUInteger lastY = (region.origin.y + region.size.height - 1) / tileHeight;
-    for (NSUInteger tileY = firstY; tileY <= lastY; ++tileY) {
-        for (NSUInteger tileX = firstX; tileX <= lastX; ++tileX) {
-            ZPUSparsePage *page = zpu_sparse_texture_page(texture, level, slice, tileX, tileY, 0, NO);
+    const NSUInteger tileDepth = texture->_sparseTileSize.depth;
+    if (tileDepth == 0 || region.origin.z > SIZE_MAX - region.size.depth) return NO;
+    const NSUInteger firstZ = region.origin.z / tileDepth;
+    const NSUInteger lastZ = (region.origin.z + region.size.depth - 1) / tileDepth;
+    for (NSUInteger tileZ = firstZ; tileZ <= lastZ; ++tileZ) {
+        for (NSUInteger tileY = firstY; tileY <= lastY; ++tileY) {
+            for (NSUInteger tileX = firstX; tileX <= lastX; ++tileX) {
+            ZPUSparsePage *page = zpu_sparse_texture_page(texture, level, slice, tileX, tileY, tileZ, NO);
             if (page == nil) continue;
             NSUInteger levelWidth = 0;
             NSUInteger levelHeight = 0;
@@ -2392,9 +2413,10 @@ static BOOL zpu_sparse_texture_replace_plane(ZPUTexture *texture, NSUInteger lev
                 if (!zpu_sparse_page_write(page, destinationOffset,
                                             (const uint8_t *)source + sourceOffset, copyBytes)) return NO;
             }
-            if (!zpu_sparse_texture_copy_page_to_tile(texture, level, slice, tileX, tileY, 0, page)) return NO;
+            if (!zpu_sparse_texture_copy_page_to_tile(texture, level, slice, tileX, tileY, tileZ, page)) return NO;
+            }
+            }
         }
-    }
     return YES;
 }
 
@@ -3644,7 +3666,7 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
             if (region.size.depth > 1 && imageStride > SIZE_MAX / (region.size.depth - 1)) return;
             for (NSUInteger plane = 0; plane < region.size.depth; ++plane) {
                 if (!zpu_sparse_texture_get_plane(self, level, 0,
-                        MTLRegionMake3D(region.origin.x, region.origin.y, 0,
+                        MTLRegionMake3D(region.origin.x, region.origin.y, region.origin.z + plane,
                                         region.size.width, region.size.height, 1),
                         (uint8_t *)destination + plane * imageStride, rowStride)) return;
             }
@@ -3691,7 +3713,7 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
             if (region.size.depth > 1 && imageStride > SIZE_MAX / (region.size.depth - 1)) return;
             for (NSUInteger plane = 0; plane < region.size.depth; ++plane) {
                 if (!zpu_sparse_texture_replace_plane(self, level, 0,
-                        MTLRegionMake3D(region.origin.x, region.origin.y, 0,
+                        MTLRegionMake3D(region.origin.x, region.origin.y, region.origin.z + plane,
                                         region.size.width, region.size.height, 1),
                         (const uint8_t *)source + plane * imageStride, rowStride)) return;
             }
@@ -3740,7 +3762,7 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
             if (region.size.depth > 1 && imageStride > SIZE_MAX / (region.size.depth - 1)) return;
             for (NSUInteger plane = 0; plane < region.size.depth; ++plane) {
                 if (!zpu_sparse_texture_get_plane(self, level, 0,
-                        MTLRegionMake3D(region.origin.x, region.origin.y, 0,
+                        MTLRegionMake3D(region.origin.x, region.origin.y, region.origin.z + plane,
                                         region.size.width, region.size.height, 1),
                         (uint8_t *)destination + plane * imageStride, rowStride)) return;
             }
@@ -3790,7 +3812,7 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
             if (region.size.depth > 1 && imageStride > SIZE_MAX / (region.size.depth - 1)) return;
             for (NSUInteger plane = 0; plane < region.size.depth; ++plane) {
                 if (!zpu_sparse_texture_replace_plane(self, level, 0,
-                        MTLRegionMake3D(region.origin.x, region.origin.y, 0,
+                        MTLRegionMake3D(region.origin.x, region.origin.y, region.origin.z + plane,
                                         region.size.width, region.size.height, 1),
                         (const uint8_t *)source + plane * imageStride, rowStride)) return;
             }
