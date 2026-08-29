@@ -26,6 +26,15 @@
 #include "zpu/metal.h"
 #include "zpu/metal_apple.h"
 
+/* The portable runtime exposes this adapter-private hook so the richer
+ * Objective-C sparse-resource model can still be inserted at an exact point
+ * in the CPU/ZPU command stream. It is deliberately not a native Metal
+ * callback and is not part of the public portable ABI. */
+typedef int (*zpu_metal_command_callback)(void *context);
+extern int zpu_metal_command_buffer_append_callback(zpu_metal_command_buffer *command_buffer,
+                                                     zpu_metal_command_callback callback,
+                                                     void *context);
+
 /* These enum members are introduced after the adapter's iOS 15 deployment
  * target. Their Metal ABI bit positions are stable, so keep the internal
  * capability masks available to older SDK deployment checks without
@@ -60,6 +69,7 @@ static const MTLBindingType zpu_mtl_binding_type_tensor = (MTLBindingType)37;
 @class ZPUBuffer;
 @class ZPUCommandQueue;
 @class ZPUCommandBuffer;
+@class ZPUDeferredOperation;
 @class ZPUHeap;
 @class ZPUAccelerationStructure;
 @class ZPUAccelerationStructureEncoder;
@@ -753,6 +763,16 @@ API_AVAILABLE(macos(13.0), ios(16.0))
 
 typedef BOOL (^ZPUIOOperationBlock)(NSError **error);
 
+typedef BOOL (^ZPUDeferredOperationBlock)(void);
+
+@interface ZPUDeferredOperation : NSObject {
+@public
+    ZPUDeferredOperationBlock _block;
+}
+- (instancetype)initWithBlock:(ZPUDeferredOperationBlock)block;
+- (BOOL)execute;
+@end
+
 API_AVAILABLE(macos(13.0), ios(16.0))
 @interface ZPUIOCommandBuffer : NSObject <MTLIOCommandBuffer> {
 @public
@@ -1238,6 +1258,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     zpu_metal_command_buffer *_zpuCommandBuffer;
     ZPUCommandQueue *_owner;
     NSMutableArray *_retainedResources;
+    NSMutableArray *_deferredOperations;
     NSMutableArray *_scheduledHandlers;
     NSMutableArray *_completedHandlers;
     NSError *_error;
@@ -1256,6 +1277,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 }
 - (instancetype)initWithOwner:(ZPUCommandQueue *)owner commandBuffer:(zpu_metal_command_buffer *)commandBuffer;
 - (void)retainResource:(id)resource;
+- (BOOL)appendDeferredOperation:(ZPUDeferredOperation *)operation;
 - (void)markError;
 @end
 
@@ -2684,6 +2706,15 @@ static BOOL zpu_sparse_texture_tail_region_valid(ZPUTexture *texture, NSUInteger
         region.origin.x <= tileCountX && region.size.width <= tileCountX - region.origin.x;
 }
 
+static BOOL zpu_sparse_texture_mapping_region_valid(ZPUTexture *texture, NSUInteger level,
+                                                    NSUInteger slice, MTLRegion region) {
+    if (texture != nil && texture->_sparseFirstMipmapInTail < texture->_mipmapTextures.count &&
+        level >= texture->_sparseFirstMipmapInTail) {
+        return zpu_sparse_texture_tail_region_valid(texture, level, slice, region);
+    }
+    return zpu_sparse_texture_region_valid(texture, level, slice, region);
+}
+
 static BOOL zpu_sparse_texture_tail_tile_range(ZPUTexture *texture, NSUInteger level,
                                                NSUInteger slice, NSUInteger tileX,
                                                NSUInteger tileY, NSUInteger tileZ,
@@ -3311,6 +3342,42 @@ static BOOL zpu_sparse_update_texture_mapping(ZPUTexture *texture, ZPUHeap *heap
                 }
             }
         }
+    }
+    return YES;
+}
+
+/* MTLMapIndirectArguments is read when the command buffer executes, not when
+ * the resource-state encoder records the command. Keep the complete
+ * validation pass before mutating the CPU page map so a malformed deferred
+ * record cannot leave a partially applied mapping behind. */
+static BOOL zpu_sparse_update_texture_mapping_indirect(ZPUTexture *texture,
+                                                       MTLSparseTextureMappingMode mode,
+                                                       ZPUBuffer *buffer,
+                                                       NSUInteger bufferOffset) {
+    if (texture == nil || buffer == nil || texture->_sparseMappings == nil || buffer.contents == nil ||
+        (mode != MTLSparseTextureMappingModeMap && mode != MTLSparseTextureMappingModeUnmap) ||
+        bufferOffset % sizeof(uint32_t) != 0 || bufferOffset > buffer.length ||
+        buffer.length - bufferOffset < sizeof(uint32_t)) return NO;
+    const uint8_t *bytes = (const uint8_t *)buffer.contents + bufferOffset;
+    uint32_t mappingCount = 0;
+    memcpy(&mappingCount, bytes, sizeof(mappingCount));
+    const NSUInteger available = buffer.length - bufferOffset - sizeof(uint32_t);
+    if (mappingCount > available / sizeof(MTLMapIndirectArguments)) return NO;
+    for (uint32_t index = 0; index < mappingCount; ++index) {
+        MTLMapIndirectArguments arguments;
+        memcpy(&arguments, bytes + sizeof(uint32_t) + (NSUInteger)index * sizeof(arguments), sizeof(arguments));
+        const MTLRegion region = MTLRegionMake3D(arguments.regionOriginX, arguments.regionOriginY,
+                                                  arguments.regionOriginZ, arguments.regionSizeWidth,
+                                                  arguments.regionSizeHeight, arguments.regionSizeDepth);
+        if (!zpu_sparse_texture_mapping_region_valid(texture, arguments.mipMapLevel, arguments.sliceId, region)) return NO;
+    }
+    for (uint32_t index = 0; index < mappingCount; ++index) {
+        MTLMapIndirectArguments arguments;
+        memcpy(&arguments, bytes + sizeof(uint32_t) + (NSUInteger)index * sizeof(arguments), sizeof(arguments));
+        if (!zpu_sparse_update_texture_mapping(texture, nil, mode,
+                MTLRegionMake3D(arguments.regionOriginX, arguments.regionOriginY, arguments.regionOriginZ,
+                                arguments.regionSizeWidth, arguments.regionSizeHeight, arguments.regionSizeDepth),
+                arguments.mipMapLevel, arguments.sliceId, 0)) return NO;
     }
     return YES;
 }
@@ -9288,12 +9355,32 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 }
 @end
 
+@implementation ZPUDeferredOperation
+- (instancetype)initWithBlock:(ZPUDeferredOperationBlock)block {
+    if ((self = [super init])) _block = [block copy];
+    return self;
+}
+- (BOOL)execute { return _block != nil && _block(); }
+@end
+
+static int zpu_execute_deferred_operation(void *context) {
+    if (context == NULL) return -1;
+    ZPUDeferredOperation *operation = (__bridge ZPUDeferredOperation *)context;
+    return [operation execute] ? 0 : -1;
+}
+
+static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlock block) {
+    ZPUDeferredOperation *operation = [[ZPUDeferredOperation alloc] initWithBlock:block];
+    return operation != nil && [owner appendDeferredOperation:operation];
+}
+
 @implementation ZPUCommandBuffer
 - (instancetype)initWithOwner:(ZPUCommandQueue *)owner commandBuffer:(zpu_metal_command_buffer *)commandBuffer {
     if ((self = [super init])) {
         _owner = owner;
         _zpuCommandBuffer = commandBuffer;
         _retainedResources = [NSMutableArray array];
+        _deferredOperations = [NSMutableArray array];
         _scheduledHandlers = [NSMutableArray array];
         _completedHandlers = [NSMutableArray array];
         _retainedReferences = YES;
@@ -9306,6 +9393,16 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 }
 - (void)retainResource:(id)resource {
     if (_retainedReferences && resource != nil) [_retainedResources addObject:resource];
+}
+- (BOOL)appendDeferredOperation:(ZPUDeferredOperation *)operation {
+    if (operation == nil || _scheduled || _zpuCommandBuffer == NULL ||
+        zpu_metal_command_buffer_append_callback(_zpuCommandBuffer,
+                                                  zpu_execute_deferred_operation,
+                                                  (__bridge void *)operation) != ZPU_METAL_OK) {
+        return NO;
+    }
+    [_deferredOperations addObject:operation];
+    return YES;
 }
 - (void)markError { zpu_metal_command_buffer_mark_error(_zpuCommandBuffer); }
 - (id<MTLDevice>)device { return [_owner device]; }
@@ -13033,10 +13130,24 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         [_owner markError];
         return;
     }
-    zpu_sparse_synchronize_resources();
+    if (mode != MTLSparseTextureMappingModeMap && mode != MTLSparseTextureMappingModeUnmap) {
+        [_owner markError];
+        return;
+    }
     for (NSUInteger index = 0; index < numRegions; ++index) {
-        if (!zpu_sparse_update_texture_mapping(zpuTexture, nil, mode, regions[index],
-                                               mipLevels[index], slices[index], 0)) {
+        if (!zpu_sparse_texture_mapping_region_valid(zpuTexture, mipLevels[index], slices[index], regions[index])) {
+            [_owner markError];
+            return;
+        }
+    }
+    for (NSUInteger index = 0; index < numRegions; ++index) {
+        const MTLRegion region = regions[index];
+        const NSUInteger level = mipLevels[index];
+        const NSUInteger slice = slices[index];
+        if (!zpu_defer_operation(_owner, ^BOOL {
+            zpu_sparse_synchronize_resources();
+            return zpu_sparse_update_texture_mapping(zpuTexture, nil, mode, region, level, slice, 0);
+        })) {
             [_owner markError];
             return;
         }
@@ -13054,8 +13165,12 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         [_owner markError];
         return;
     }
-    zpu_sparse_synchronize_resources();
-    if (!zpu_sparse_update_texture_mapping(zpuTexture, nil, mode, region, mipLevel, slice, 0)) {
+    if (!zpu_sparse_texture_mapping_region_valid(zpuTexture, mipLevel, slice, region) ||
+        (mode != MTLSparseTextureMappingModeMap && mode != MTLSparseTextureMappingModeUnmap) ||
+        !zpu_defer_operation(_owner, ^BOOL {
+            zpu_sparse_synchronize_resources();
+            return zpu_sparse_update_texture_mapping(zpuTexture, nil, mode, region, mipLevel, slice, 0);
+        })) {
         [_owner markError];
         return;
     }
@@ -13074,24 +13189,14 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         [_owner markError];
         return;
     }
-    const uint8_t *bytes = (const uint8_t *)zpuBuffer.contents + indirectBufferOffset;
-    uint32_t mappingCount = 0;
-    memcpy(&mappingCount, bytes, sizeof(mappingCount));
-    if (mappingCount > (zpuBuffer.length - indirectBufferOffset - sizeof(uint32_t)) / sizeof(MTLMapIndirectArguments)) {
+    if ((mode != MTLSparseTextureMappingModeMap && mode != MTLSparseTextureMappingModeUnmap) ||
+        !zpu_defer_operation(_owner, ^BOOL {
+            zpu_sparse_synchronize_resources();
+            return zpu_sparse_update_texture_mapping_indirect(zpuTexture, mode, zpuBuffer,
+                                                              indirectBufferOffset);
+        })) {
         [_owner markError];
         return;
-    }
-    zpu_sparse_synchronize_resources();
-    for (uint32_t index = 0; index < mappingCount; ++index) {
-        MTLMapIndirectArguments arguments;
-        memcpy(&arguments, bytes + sizeof(uint32_t) + (NSUInteger)index * sizeof(arguments), sizeof(arguments));
-        if (!zpu_sparse_update_texture_mapping(zpuTexture, nil, mode,
-                MTLRegionMake3D(arguments.regionOriginX, arguments.regionOriginY, arguments.regionOriginZ,
-                                arguments.regionSizeWidth, arguments.regionSizeHeight, arguments.regionSizeDepth),
-                arguments.mipMapLevel, arguments.sliceId, 0)) {
-            [_owner markError];
-            return;
-        }
     }
     [_owner retainResource:zpuTexture];
     [_owner retainResource:zpuBuffer];
@@ -13113,11 +13218,18 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         [_owner markError];
         return;
     }
-    zpu_sparse_synchronize_resources();
-    if (!zpu_sparse_move_texture_mapping(source, destination,
-            MTLRegionMake3D(sourceOrigin.x, sourceOrigin.y, sourceOrigin.z,
-                            sourceSize.width, sourceSize.height, sourceSize.depth), sourceLevel,
-            sourceSlice, destinationOrigin, destinationLevel, destinationSlice)) {
+    const MTLRegion region = MTLRegionMake3D(sourceOrigin.x, sourceOrigin.y, sourceOrigin.z,
+                                              sourceSize.width, sourceSize.height, sourceSize.depth);
+    if (!zpu_sparse_texture_mapping_region_valid(source, sourceLevel, sourceSlice, region) ||
+        !zpu_sparse_texture_mapping_region_valid(destination, destinationLevel, destinationSlice,
+                                                  MTLRegionMake3D(destinationOrigin.x, destinationOrigin.y,
+                                                                   destinationOrigin.z, sourceSize.width,
+                                                                   sourceSize.height, sourceSize.depth)) ||
+        !zpu_defer_operation(_owner, ^BOOL {
+            zpu_sparse_synchronize_resources();
+            return zpu_sparse_move_texture_mapping(source, destination, region, sourceLevel, sourceSlice,
+                                                   destinationOrigin, destinationLevel, destinationSlice);
+        })) {
         [_owner markError];
         return;
     }

@@ -11231,6 +11231,139 @@ int main(void) {
             }
         }
 
+        /* Legacy resource-state encoders must defer CPU page-map mutations
+         * until command-buffer commit. The callback is inserted into the
+         * same ZPU command stream, so a following blit observes the mapping
+         * while a pre-commit CPU read still observes the unbacked zero page.
+         * The indirect form also verifies that the count and records are
+         * consumed at commit, matching Metal's deferred MTLMapIndirectArguments
+         * behavior. The nonzero X tile catches accidental pixel/grid-origin
+         * confusion independently of the render viewport tests above. */
+        id<MTLTexture> legacy_deferred_texture =
+            [adapter_device newTextureWithDescriptor:adapter_sparse_texture_descriptor];
+        id<MTLBuffer> legacy_deferred_input =
+            [adapter_device newBufferWithBytes:sparse_texture_input_data.bytes
+                                         length:sparse_texture_input_data.length
+                                        options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> legacy_deferred_command = [adapter_sparse_texture_legacy_queue commandBuffer];
+        id<MTLResourceStateCommandEncoder> legacy_deferred_state =
+            [legacy_deferred_command resourceStateCommandEncoder];
+        [legacy_deferred_state updateTextureMapping:legacy_deferred_texture
+                                               mode:MTLSparseTextureMappingModeMap
+                                             region:MTLRegionMake2D(0, 0, 1, 1)
+                                           mipLevel:0 slice:0];
+        [legacy_deferred_state endEncoding];
+        uint8_t legacy_deferred_before[sparse_texture_tile_bytes];
+        memset(legacy_deferred_before, 0xa5, sizeof(legacy_deferred_before));
+        [legacy_deferred_texture getBytes:legacy_deferred_before
+                              bytesPerRow:128 * 4
+                             fromRegion:MTLRegionMake2D(0, 0, 128, 128)
+                            mipmapLevel:0];
+        id<MTLBlitCommandEncoder> legacy_deferred_blit =
+            [legacy_deferred_command blitCommandEncoder];
+        [legacy_deferred_blit copyFromBuffer:legacy_deferred_input sourceOffset:0
+                              sourceBytesPerRow:128 * 4 sourceBytesPerImage:sparse_texture_tile_bytes
+                                    sourceSize:MTLSizeMake(128, 128, 1)
+                                       toTexture:legacy_deferred_texture destinationSlice:0 destinationLevel:0
+                              destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [legacy_deferred_blit endEncoding];
+        BOOL legacy_deferred_unmapped_before_commit = YES;
+        for (NSUInteger index = 0; index < sizeof(legacy_deferred_before); ++index) {
+            if (legacy_deferred_before[index] != 0) {
+                legacy_deferred_unmapped_before_commit = NO;
+                break;
+            }
+        }
+        [legacy_deferred_command commit];
+        [legacy_deferred_command waitUntilCompleted];
+        uint8_t legacy_deferred_after[sparse_texture_tile_bytes];
+        memset(legacy_deferred_after, 0xa5, sizeof(legacy_deferred_after));
+        [legacy_deferred_texture getBytes:legacy_deferred_after
+                              bytesPerRow:128 * 4
+                             fromRegion:MTLRegionMake2D(0, 0, 128, 128)
+                            mipmapLevel:0];
+        BOOL legacy_deferred_direct_exact =
+            legacy_deferred_texture != nil && legacy_deferred_input != nil &&
+            legacy_deferred_command.status == MTLCommandBufferStatusCompleted &&
+            legacy_deferred_state != nil && legacy_deferred_blit != nil &&
+            legacy_deferred_unmapped_before_commit &&
+            memcmp(legacy_deferred_after, sparse_texture_input_data.bytes,
+                   sizeof(legacy_deferred_after)) == 0;
+
+        id<MTLTexture> legacy_indirect_texture =
+            [adapter_device newTextureWithDescriptor:adapter_sparse_texture_descriptor];
+        id<MTLBuffer> legacy_indirect_input =
+            [adapter_device newBufferWithBytes:sparse_texture_input_data.bytes
+                                         length:sparse_texture_input_data.length
+                                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> legacy_indirect_arguments =
+            [adapter_device newBufferWithLength:sizeof(uint32_t) + sizeof(MTLMapIndirectArguments)
+                                         options:MTLResourceStorageModeShared];
+        uint32_t legacy_indirect_count = 0;
+        memcpy(legacy_indirect_arguments.contents, &legacy_indirect_count, sizeof(legacy_indirect_count));
+        id<MTLCommandBuffer> legacy_indirect_command = [adapter_sparse_texture_legacy_queue commandBuffer];
+        id<MTLResourceStateCommandEncoder> legacy_indirect_state =
+            [legacy_indirect_command resourceStateCommandEncoder];
+        [legacy_indirect_state updateTextureMapping:legacy_indirect_texture
+                                               mode:MTLSparseTextureMappingModeMap
+                                      indirectBuffer:legacy_indirect_arguments
+                                indirectBufferOffset:0];
+        [legacy_indirect_state endEncoding];
+        MTLMapIndirectArguments legacy_indirect_mapping = {
+            .regionOriginX = 1,
+            .regionOriginY = 0,
+            .regionOriginZ = 0,
+            .regionSizeWidth = 1,
+            .regionSizeHeight = 1,
+            .regionSizeDepth = 1,
+            .mipMapLevel = 0,
+            .sliceId = 0,
+        };
+        memcpy((uint8_t *)legacy_indirect_arguments.contents + sizeof(legacy_indirect_count),
+               &legacy_indirect_mapping, sizeof(legacy_indirect_mapping));
+        legacy_indirect_count = 1;
+        memcpy(legacy_indirect_arguments.contents, &legacy_indirect_count, sizeof(legacy_indirect_count));
+        uint8_t legacy_indirect_before[sparse_texture_tile_bytes];
+        memset(legacy_indirect_before, 0xa5, sizeof(legacy_indirect_before));
+        [legacy_indirect_texture getBytes:legacy_indirect_before
+                              bytesPerRow:128 * 4
+                             fromRegion:MTLRegionMake2D(128, 0, 128, 128)
+                            mipmapLevel:0];
+        id<MTLBlitCommandEncoder> legacy_indirect_blit =
+            [legacy_indirect_command blitCommandEncoder];
+        [legacy_indirect_blit copyFromBuffer:legacy_indirect_input sourceOffset:0
+                              sourceBytesPerRow:128 * 4 sourceBytesPerImage:sparse_texture_tile_bytes
+                                    sourceSize:MTLSizeMake(128, 128, 1)
+                                       toTexture:legacy_indirect_texture destinationSlice:0 destinationLevel:0
+                              destinationOrigin:MTLOriginMake(128, 0, 0)];
+        [legacy_indirect_blit endEncoding];
+        BOOL legacy_indirect_unmapped_before_commit = YES;
+        for (NSUInteger index = 0; index < sizeof(legacy_indirect_before); ++index) {
+            if (legacy_indirect_before[index] != 0) {
+                legacy_indirect_unmapped_before_commit = NO;
+                break;
+            }
+        }
+        [legacy_indirect_command commit];
+        [legacy_indirect_command waitUntilCompleted];
+        uint8_t legacy_indirect_after[sparse_texture_tile_bytes];
+        memset(legacy_indirect_after, 0xa5, sizeof(legacy_indirect_after));
+        [legacy_indirect_texture getBytes:legacy_indirect_after
+                              bytesPerRow:128 * 4
+                             fromRegion:MTLRegionMake2D(128, 0, 128, 128)
+                            mipmapLevel:0];
+        BOOL legacy_deferred_indirect_exact =
+            legacy_indirect_texture != nil && legacy_indirect_input != nil &&
+            legacy_indirect_arguments != nil && legacy_indirect_command.status == MTLCommandBufferStatusCompleted &&
+            legacy_indirect_state != nil && legacy_indirect_blit != nil &&
+            legacy_indirect_unmapped_before_commit &&
+            memcmp(legacy_indirect_after, sparse_texture_input_data.bytes,
+                   sizeof(legacy_indirect_after)) == 0;
+        if (!legacy_deferred_direct_exact || !legacy_deferred_indirect_exact) {
+            fprintf(stderr, "metal-pixel: deferred CPU resource-state mapping exactness failed\n");
+            return 180;
+        }
+
         id<MTLTexture> metal4_mip_copy = [adapter_device newTextureWithDescriptor:mip_descriptor];
         id<MTL4CommandBuffer> metal4_mip_command_buffer = [adapter_device newCommandBuffer];
         [metal4_mip_command_buffer beginCommandBufferWithAllocator:metal4_allocator];

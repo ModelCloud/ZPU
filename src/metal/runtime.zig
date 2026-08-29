@@ -616,6 +616,16 @@ const SparseTextureMoveMappingCommand = struct {
     destination_origin: abi.Origin,
 };
 
+/// Adapter-private CPU callbacks let the Objective-C compatibility layer
+/// preserve command ordering for Metal-shaped operations whose complete
+/// resource model lives outside the portable ABI. The callback is still
+/// executed by the ZPU CPU command stream; it is never an escape hatch to a
+/// native GPU command encoder.
+const ExternalCallbackCommand = struct {
+    callback: *const fn (?*anyopaque) callconv(.c) c_int,
+    context: ?*anyopaque,
+};
+
 const SharedEventCommand = struct {
     event: *SharedEvent,
     value: u64,
@@ -657,6 +667,7 @@ const Command = union(enum) {
     sparse_texture_mapping_indirect: SparseTextureMappingIndirectCommand,
     sparse_texture_move_mapping: SparseTextureMoveMappingCommand,
     sparse_texture_copy_mapping: SparseTextureCopyMappingCommand,
+    external_callback: ExternalCallbackCommand,
     update_fence: *Fence,
     wait_fence: *Fence,
     signal_event: SharedEventCommand,
@@ -1459,6 +1470,9 @@ pub const CommandBuffer = struct {
                     mapping.source.device != self.queue.device or mapping.destination.device != self.queue.device)
                     return self.fail(error.InvalidResource);
                 sparseCopyTextureMappings(mapping.source, mapping.destination, mapping.source_region, mapping.destination_origin) catch |err| return self.fail(err);
+            },
+            .external_callback => |callback| {
+                if (callback.callback(callback.context) != 0) return self.fail(error.InvalidCommand);
             },
             .update_fence => |fence| {
                 if (!validFence(fence) or fence.device != self.queue.device) return self.fail(error.InvalidResource);
@@ -7692,6 +7706,25 @@ pub export fn zpu_metal_command_buffer_encode_signal_event(command_buffer: ?*Com
 
 pub export fn zpu_metal_command_buffer_encode_wait_for_event(command_buffer: ?*CommandBuffer, event: ?*SharedEvent, value: u64) callconv(.c) c_int {
     encodeWaitForEvent(command_buffer orelse return -1, event orelse return -1, value) catch |err| return errorCode(err);
+    return 0;
+}
+
+/// Append an adapter-private CPU callback at the current command-stream
+/// position. The caller owns the context lifetime until command completion.
+/// This hook is intentionally not part of the portable Metal ABI; it exists
+/// only so the Apple compatibility layer can defer its richer CPU metadata
+/// operations without importing native Metal storage or execution.
+pub export fn zpu_metal_command_buffer_append_callback(
+    command_buffer: ?*CommandBuffer,
+    callback: ?*const fn (?*anyopaque) callconv(.c) c_int,
+    context: ?*anyopaque,
+) callconv(.c) c_int {
+    const value = command_buffer orelse return -1;
+    const callback_value = callback orelse return -1;
+    _ = value.append(.{ .external_callback = .{
+        .callback = callback_value,
+        .context = context,
+    } }) catch |err| return errorCode(err);
     return 0;
 }
 
