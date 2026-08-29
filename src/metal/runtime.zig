@@ -96,6 +96,7 @@ pub const Buffer = struct {
     device: *Device,
     bytes: []u8,
     heap: ?*Heap = null,
+    heap_allocation_offset: usize = 0,
     heap_allocation_size: usize = 0,
 
     pub fn deinit(self: *Buffer) void {
@@ -115,6 +116,7 @@ pub const Texture = struct {
     bytes: []u8,
     owns_bytes: bool = true,
     heap: ?*Heap = null,
+    heap_allocation_offset: usize = 0,
     heap_allocation_size: usize = 0,
 
     pub fn deinit(self: *Texture) void {
@@ -1119,7 +1121,7 @@ fn reserveHeapAllocation(heap: *Heap, size: usize, alignment: usize) Error!usize
     const end = std.math.add(usize, start, size) catch return error.InvalidArgument;
     if (end > heap.size) return error.OutOfMemory;
     heap.used = end;
-    return end - previous;
+    return start;
 }
 
 fn releaseHeapAllocation(heap: ?*Heap, allocation_size: usize) void {
@@ -1139,9 +1141,11 @@ pub fn createBufferInHeap(heap: *Heap, length: usize, initial_bytes: ?[*]const u
     if (!validHeap(heap)) return error.InvalidResource;
     const result = try createBuffer(heap.device, length, initial_bytes);
     errdefer destroyBuffer(result);
-    const allocation_size = try reserveHeapAllocation(heap, length, @alignOf(u32));
+    const previous = heap.used;
+    const allocation_offset = try reserveHeapAllocation(heap, length, @alignOf(u32));
     result.heap = heap;
-    result.heap_allocation_size = allocation_size;
+    result.heap_allocation_offset = allocation_offset;
+    result.heap_allocation_size = heap.used - previous;
     return result;
 }
 
@@ -1184,9 +1188,11 @@ pub fn createTextureInHeap(heap: *Heap, width: u32, height: u32, format_raw: u16
     if (!validHeap(heap)) return error.InvalidResource;
     const result = try createTexture(heap.device, width, height, format_raw);
     errdefer destroyTexture(result);
-    const allocation_size = try reserveHeapAllocation(heap, result.bytes.len, @alignOf(f32));
+    const previous = heap.used;
+    const allocation_offset = try reserveHeapAllocation(heap, result.bytes.len, @alignOf(f32));
     result.heap = heap;
-    result.heap_allocation_size = allocation_size;
+    result.heap_allocation_offset = allocation_offset;
+    result.heap_allocation_size = heap.used - previous;
     return result;
 }
 
@@ -1957,6 +1963,11 @@ pub export fn zpu_metal_buffer_contents(buffer: ?*Buffer) callconv(.c) ?[*]u8 {
     return value.bytes.ptr;
 }
 
+pub export fn zpu_metal_buffer_heap_offset(buffer: ?*const Buffer) callconv(.c) usize {
+    const value = buffer orelse return 0;
+    return if (value.magic == buffer_magic) value.heap_allocation_offset else 0;
+}
+
 pub export fn zpu_metal_buffer_write(buffer: ?*Buffer, offset: usize, bytes: ?[*]const u8, length: usize) callconv(.c) c_int {
     bufferWrite(buffer orelse return -1, offset, bytes, length) catch |err| return errorCode(err);
     return 0;
@@ -1987,6 +1998,11 @@ pub export fn zpu_metal_texture_height(texture: ?*const Texture) callconv(.c) u3
     const value = texture orelse return 0;
     if (value.magic != texture_magic) return 0;
     return value.height;
+}
+
+pub export fn zpu_metal_texture_heap_offset(texture: ?*const Texture) callconv(.c) usize {
+    const value = texture orelse return 0;
+    return if (value.magic == texture_magic) value.heap_allocation_offset else 0;
 }
 
 pub export fn zpu_metal_texture_get_bytes(texture: ?*Texture, destination: ?[*]u8, destination_length: usize, bytes_per_row: usize, region: abi.Region) callconv(.c) c_int {

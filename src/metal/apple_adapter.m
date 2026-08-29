@@ -57,6 +57,7 @@
     MTLCPUCacheMode _cpuCacheMode;
     MTLHazardTrackingMode _hazardTrackingMode;
     uint64_t _resourceID;
+    NSUInteger _heapOffset;
     void (^_deallocator)(void *pointer, NSUInteger length);
     void *_deallocatorPointer;
     NSUInteger _deallocatorLength;
@@ -78,6 +79,7 @@
     ZPUHeap *_heap;
     NSUInteger _bufferOffset;
     NSUInteger _bufferBytesPerRow;
+    NSUInteger _heapOffset;
     MTLTextureType _textureType;
     MTLPixelFormat _pixelFormat;
     MTLTextureUsage _usage;
@@ -819,6 +821,7 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
         _storageMode = MTLStorageModeShared;
         _cpuCacheMode = MTLCPUCacheModeDefaultCache;
         _hazardTrackingMode = MTLHazardTrackingModeTracked;
+        _heapOffset = zpu_metal_buffer_heap_offset(buffer);
         _resourceID = zpu_register_resource(self);
     }
     return self;
@@ -855,7 +858,7 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
 }
 - (NSUInteger)allocatedSize { return [self length]; }
 - (id<MTLHeap>)heap { return (id<MTLHeap>)_heap; }
-- (NSUInteger)heapOffset { return 0; }
+- (NSUInteger)heapOffset { return _heapOffset; }
 - (BOOL)isAliasable { return _aliasable; }
 - (void)makeAliasable { _aliasable = YES; }
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return state; }
@@ -919,6 +922,7 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
         _heap = nil;
         _bufferOffset = offset;
         _bufferBytesPerRow = bytesPerRow;
+        _heapOffset = zpu_metal_texture_heap_offset(texture);
         _textureType = type;
         _pixelFormat = pixelFormat;
         _usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget;
@@ -1044,7 +1048,7 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
     return total;
 }
 - (id<MTLHeap>)heap { return (id<MTLHeap>)_heap; }
-- (NSUInteger)heapOffset { return 0; }
+- (NSUInteger)heapOffset { return _backing != nil ? [_backing heapOffset] : _heapOffset; }
 - (NSUInteger)parentRelativeLevel { return _baseMipmapLevel; }
 - (NSUInteger)parentRelativeSlice { return _baseSlice; }
 - (IOSurfaceRef)iosurface API_AVAILABLE(macos(10.11), ios(11.0)) { return nil; }

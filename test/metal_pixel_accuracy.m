@@ -2360,6 +2360,7 @@ int main(void) {
             adapter_heap_mismatched_texture != nil || adapter_heap_buffer == nil || adapter_heap_texture == nil ||
             adapter_heap.size != 64 || adapter_heap.usedSize != 32 ||
             [adapter_heap maxAvailableSizeWithAlignment:4] != 32 ||
+            adapter_heap_buffer.heapOffset != 0 || adapter_heap_texture.heapOffset != adapter_heap_buffer.length ||
             adapter_heap.hazardTrackingMode != MTLHazardTrackingModeUntracked ||
             adapter_heap_buffer.hazardTrackingMode != MTLHazardTrackingModeUntracked ||
             adapter_heap_texture.hazardTrackingMode != MTLHazardTrackingModeUntracked) {
@@ -2379,6 +2380,8 @@ int main(void) {
         adapter_mip_heap_descriptor.size = 256;
         adapter_mip_heap_descriptor.storageMode = MTLStorageModeShared;
         id<MTLHeap> adapter_mip_heap = [adapter_device newHeapWithDescriptor:adapter_mip_heap_descriptor];
+        id<MTLBuffer> adapter_mip_heap_prefix =
+            [adapter_mip_heap newBufferWithLength:4 options:MTLResourceStorageModeShared];
         MTLTextureDescriptor *adapter_heap_mip_descriptor = [MTLTextureDescriptor new];
         adapter_heap_mip_descriptor.textureType = MTLTextureType2DArray;
         adapter_heap_mip_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
@@ -2409,7 +2412,9 @@ int main(void) {
         const NSUInteger expected_heap_mip_size = 2 * (4 * 4 + 2 * 2 + 1) * 4;
         if (adapter_mip_heap == nil || adapter_heap_mip_texture == nil ||
             adapter_heap_mip_size_align.size != expected_heap_mip_size || adapter_heap_mip_size_align.align != 4 ||
-            adapter_mip_heap.usedSize != expected_heap_mip_size || adapter_heap_mip_texture.arrayLength != 2 ||
+            adapter_mip_heap_prefix == nil || adapter_mip_heap.usedSize != 4 + expected_heap_mip_size ||
+            adapter_heap_mip_texture.heapOffset != adapter_mip_heap_prefix.length ||
+            adapter_heap_mip_texture.arrayLength != 2 ||
             adapter_heap_mip_texture.mipmapLevelCount != 3 || adapter_heap_mip_texture.allocatedSize != expected_heap_mip_size ||
             memcmp(adapter_heap_mip_bytes, native_array_level_one, sizeof(adapter_heap_mip_bytes)) != 0) {
             fprintf(stderr, "metal-pixel: heap array/mipmap texture exactness failed\n");

@@ -263,6 +263,7 @@ void zpu_metal_buffer_destroy(zpu_metal_buffer *buffer);
 zpu_metal_texture *zpu_metal_buffer_new_texture(zpu_metal_buffer *buffer, const zpu_metal_texture_descriptor *descriptor, size_t offset, size_t bytes_per_row);
 size_t zpu_metal_buffer_length(const zpu_metal_buffer *buffer);
 void *zpu_metal_buffer_contents(zpu_metal_buffer *buffer);
+size_t zpu_metal_buffer_heap_offset(const zpu_metal_buffer *buffer);
 int zpu_metal_buffer_write(zpu_metal_buffer *buffer, size_t offset, const void *bytes, size_t length);
 zpu_metal_texture *zpu_metal_device_new_texture(zpu_metal_device *device, const zpu_metal_texture_descriptor *descriptor);
 zpu_metal_heap *zpu_metal_device_new_heap(zpu_metal_device *device, size_t size);
@@ -275,6 +276,7 @@ zpu_metal_texture *zpu_metal_heap_new_texture(zpu_metal_heap *heap, const zpu_me
 void zpu_metal_texture_destroy(zpu_metal_texture *texture);
 uint32_t zpu_metal_texture_width(const zpu_metal_texture *texture);
 uint32_t zpu_metal_texture_height(const zpu_metal_texture *texture);
+size_t zpu_metal_texture_heap_offset(const zpu_metal_texture *texture);
 int zpu_metal_texture_get_bytes(const zpu_metal_texture *texture, void *destination, size_t destination_length, size_t bytes_per_row, zpu_metal_region region);
 int zpu_metal_texture_replace_region(zpu_metal_texture *texture, zpu_metal_region region, const void *source, size_t source_length, size_t bytes_per_row);
 zpu_metal_fence *zpu_metal_device_new_fence(zpu_metal_device *device);

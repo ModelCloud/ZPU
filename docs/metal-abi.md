@@ -24,16 +24,19 @@ triangle path:
   allocated CPU/ZPU slice×mip levels, exact level/slice read/write,
   level/slice-range views, and level/slice-aware blit copies; CPU box-filter
   mipmap generation matches the native RGBA8 oracle; buffer-backed and
-  heap-backed textures remain explicitly limited to one level until a portable
-  strided mip layout is added
+  heap-backed textures use independently allocated CPU/ZPU slice×mip levels
+  with full allocation-size accounting; buffer-backed textures remain
+  explicitly limited to one level because their caller-supplied stride cannot
+  describe a portable mip layout
 - buffer and texture resource options preserve the requested storage mode, CPU
   cache mode, hazard mode, texture usage, optimization flag, compression mode,
   and swizzle metadata; indirect command buffers preserve their resource
   options, and texture views inherit those properties from their ZPU-owned
   backing resource
 - heap-backed buffers and textures with bounded allocation accounting; heap
-  storage/cache mismatches are rejected and default heap hazard tracking is
-  resolved as untracked, matching Metal's heap rules
+  storage/cache mismatches are rejected, heap offsets are retained for
+  resources, and default heap hazard tracking is resolved as untracked,
+  matching Metal's heap rules
 - owned depth32-float textures bound as render-pass depth attachments, with
   configurable Metal compare functions, write masks, and depth clears
 - fixed-function render pipeline, depth-stencil, and sampler state objects;
