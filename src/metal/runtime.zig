@@ -1450,6 +1450,8 @@ pub const CommandBuffer = struct {
                 if (wait.event.signaled_value < wait.value) return self.fail(error.InvalidCommand);
             },
         };
+        sparseFlushOptionalTexture(active_target);
+        for (active_color_attachments) |attachment| sparseFlushOptionalTexture(attachment);
         self.status = .completed;
     }
 
