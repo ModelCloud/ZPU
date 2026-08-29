@@ -896,6 +896,63 @@ int main(void) {
             fprintf(stderr, "metal-pixel: 2D-array slice/level exactness failed\n");
             return 75;
         }
+        MTLTextureDescriptor *array_render_descriptor = [array_descriptor copy];
+        array_render_descriptor.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> native_array_render_texture = [device newTextureWithDescriptor:array_render_descriptor];
+        id<MTLTexture> adapter_array_render_texture = [adapter_device newTextureWithDescriptor:array_render_descriptor];
+        MTLRenderPassDescriptor *native_array_render_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_array_render_pass.colorAttachments[0].texture = native_array_render_texture;
+        native_array_render_pass.colorAttachments[0].level = 1;
+        native_array_render_pass.colorAttachments[0].slice = 1;
+        native_array_render_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_array_render_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_array_render_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        id<MTLCommandBuffer> native_array_render_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_array_render_encoder =
+            [native_array_render_command_buffer renderCommandEncoderWithDescriptor:native_array_render_pass];
+        [native_array_render_encoder setRenderPipelineState:pipeline];
+        [native_array_render_encoder setVertexBuffer:native_mip_render_vertex_buffer offset:0 atIndex:0];
+        [native_array_render_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_array_render_encoder endEncoding];
+        [native_array_render_command_buffer commit];
+        [native_array_render_command_buffer waitUntilCompleted];
+        MTLRenderPassDescriptor *adapter_array_render_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_array_render_pass.colorAttachments[0].texture = adapter_array_render_texture;
+        adapter_array_render_pass.colorAttachments[0].level = 1;
+        adapter_array_render_pass.colorAttachments[0].slice = 1;
+        adapter_array_render_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_array_render_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_array_render_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        id<MTLCommandBuffer> adapter_array_render_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_array_render_encoder =
+            [adapter_array_render_command_buffer renderCommandEncoderWithDescriptor:adapter_array_render_pass];
+        [adapter_array_render_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_array_render_encoder setVertexBuffer:adapter_mip_render_vertex_buffer offset:0 atIndex:0];
+        [adapter_array_render_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_array_render_encoder endEncoding];
+        [adapter_array_render_command_buffer commit];
+        [adapter_array_render_command_buffer waitUntilCompleted];
+        uint8_t native_array_render_pixels[2 * 2 * 4];
+        uint8_t adapter_array_render_pixels[2 * 2 * 4];
+        [native_array_render_texture getBytes:native_array_render_pixels
+                                  bytesPerRow:2 * 4
+                                bytesPerImage:sizeof(native_array_render_pixels)
+                                 fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                mipmapLevel:1
+                                       slice:1];
+        [adapter_array_render_texture getBytes:adapter_array_render_pixels
+                                   bytesPerRow:2 * 4
+                                 bytesPerImage:sizeof(adapter_array_render_pixels)
+                                  fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                 mipmapLevel:1
+                                        slice:1];
+        if (native_array_render_texture == nil || adapter_array_render_texture == nil ||
+            native_array_render_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_array_render_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_array_render_pixels, adapter_array_render_pixels, sizeof(native_array_render_pixels)) != 0) {
+            fprintf(stderr, "metal-pixel: 2D-array slice/level render exactness failed\n");
+            return 77;
+        }
 
         /* Library/function discovery is also CPU metadata. The source text
          * is inspected only for registered ZPU kernel names; it is never sent
