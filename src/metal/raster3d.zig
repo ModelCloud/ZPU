@@ -34,6 +34,10 @@ pub const DrawOptions = struct {
     cull_mode: abi.CullMode = .none,
     winding: abi.Winding = .clockwise,
     fill_mode: abi.TriangleFillMode = .fill,
+    depth_clip_mode: abi.DepthClipMode = .clip,
+    depth_bias: f32 = 0,
+    slope_scale: f32 = 0,
+    depth_bias_clamp: f32 = 0,
     depth_compare: abi.CompareFunction = .less_equal,
     depth_write_enabled: bool = true,
     blending_enabled: bool = false,
@@ -165,9 +169,29 @@ fn writeColor(target: *surface.Surface, x: usize, y: usize, color: [4]f32, optio
     surface.Surface.write(target.row(@intCast(y)), x * 4, target.format, output);
 }
 
-fn writePixel(job: *Job, x: usize, y: usize, z: f32, color: [4]f32, stats: *Stats, front_facing: bool) void {
+fn adjustedDepth(job: *const Job, z: f32, bias: f32) ?f32 {
+    var result = z + bias;
+    if (job.options.depth_clip_mode == .clamp) {
+        result = std.math.clamp(result, 0, 1);
+    } else if (result < 0 or result > 1) {
+        return null;
+    }
+    return result;
+}
+
+fn depthBias(job: *const Job, slope: f32) f32 {
+    var result = job.options.depth_bias + job.options.slope_scale * slope;
+    if (job.options.depth_bias_clamp != 0) {
+        const limit = @abs(job.options.depth_bias_clamp);
+        result = std.math.clamp(result, -limit, limit);
+    }
+    return result;
+}
+
+fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [4]f32, stats: *Stats, front_facing: bool) void {
     const width: usize = @intCast(job.target.width);
     if (x >= width or y >= job.target.height) return;
+    const adjusted_depth = adjustedDepth(job, z, depth_adjust) orelse return;
     stats.fragments_tested += 1;
     const stencil_state = if (front_facing) job.options.stencil_front else job.options.stencil_back;
     var stencil_index: ?usize = null;
@@ -180,25 +204,25 @@ fn writePixel(job: *Job, x: usize, y: usize, z: f32, color: [4]f32, stats: *Stat
             return;
         }
     }
-    if (job.depth) |depth| {
+    if (job.depth) |depth_buffer| {
         const index = y * width + x;
-        if (index >= depth.len) return;
-        const current = depth[index];
+        if (index >= depth_buffer.len) return;
+        const current = depth_buffer[index];
         const passes = switch (job.options.depth_compare) {
             .never => false,
-            .less => z < current,
-            .equal => z == current,
-            .less_equal => z <= current,
-            .greater => z > current,
-            .not_equal => z != current,
-            .greater_equal => z >= current,
+            .less => adjusted_depth < current,
+            .equal => adjusted_depth == current,
+            .less_equal => adjusted_depth <= current,
+            .greater => adjusted_depth > current,
+            .not_equal => adjusted_depth != current,
+            .greater_equal => adjusted_depth >= current,
             .always => true,
         };
         if (!passes) {
             if (stencil_index) |stencil_pixel_index| applyStencil(job.stencil.?, stencil_pixel_index, stencil_state, stencil_state.depth_failure);
             return;
         }
-        if (job.options.depth_write_enabled) depth[index] = z;
+        if (job.options.depth_write_enabled) depth_buffer[index] = adjusted_depth;
         stats.depth_tests_passed += 1;
     }
     if (stencil_index) |index| applyStencil(job.stencil.?, index, stencil_state, stencil_state.depth_pass);
@@ -258,7 +282,7 @@ fn drawPoint(job: *Job, vertex: ProjectedVertex, y0: usize, y1: usize, stats: *S
     const x = pixelCoordinate(vertex.x, bounds.x1) orelse return;
     const y = pixelCoordinate(vertex.y, bounds.y1) orelse return;
     if (x < bounds.x0 or y < @max(bounds.y0, y0) or y >= @min(bounds.y1, y1)) return;
-    writePixel(job, x, y, vertex.z, vertex.color, stats, true);
+    writePixel(job, x, y, vertex.z, depthBias(job, 0), vertex.color, stats, true);
 }
 
 fn drawLine(job: *Job, a: ProjectedVertex, b: ProjectedVertex, y0: usize, y1: usize, stats: *Stats) void {
@@ -270,6 +294,8 @@ fn drawLine(job: *Job, a: ProjectedVertex, b: ProjectedVertex, y0: usize, y1: us
         drawPoint(job, a, y0, y1, stats);
         return;
     }
+    const slope = @abs(b.z - a.z) / @as(f32, @floatFromInt(steps));
+    const depth_adjust = depthBias(job, slope);
     for (0..steps + 1) |step| {
         const t = @as(f32, @floatFromInt(step)) / @as(f32, @floatFromInt(steps));
         const x_value = a.x + (b.x - a.x) * t;
@@ -277,7 +303,7 @@ fn drawLine(job: *Job, a: ProjectedVertex, b: ProjectedVertex, y0: usize, y1: us
         const x = pixelCoordinate(x_value, bounds.x1) orelse continue;
         const y = pixelCoordinate(y_value, bounds.y1) orelse continue;
         if (x < bounds.x0 or y < @max(bounds.y0, y0) or y >= @min(bounds.y1, y1)) continue;
-        writePixel(job, x, y, a.z + (b.z - a.z) * t, .{
+        writePixel(job, x, y, a.z + (b.z - a.z) * t, depth_adjust, .{
             a.color[0] + (b.color[0] - a.color[0]) * t,
             a.color[1] + (b.color[1] - a.color[1]) * t,
             a.color[2] + (b.color[2] - a.color[2]) * t,
@@ -315,6 +341,11 @@ fn drawTriangle(job: *Job, input: [3]ProjectedVertex, y0: usize, y1: usize, stat
         vertices[1] = vertices[2];
         vertices[2] = second;
     }
+    const depth_dx = ((vertices[1].z - vertices[0].z) * (vertices[2].y - vertices[0].y) -
+        (vertices[2].z - vertices[0].z) * (vertices[1].y - vertices[0].y)) / area;
+    const depth_dy = ((vertices[1].x - vertices[0].x) * (vertices[2].z - vertices[0].z) -
+        (vertices[2].x - vertices[0].x) * (vertices[1].z - vertices[0].z)) / area;
+    const depth_adjust = depthBias(job, @max(@abs(depth_dx), @abs(depth_dy)));
     const inverse_area = 1.0 / @abs(area);
     for (row_start..row_end) |y| {
         for (x_start..x_end) |x| {
@@ -326,7 +357,7 @@ fn drawTriangle(job: *Job, input: [3]ProjectedVertex, y0: usize, y1: usize, stat
             if (outsideTopLeft(w0, vertices[1], vertices[2]) or
                 outsideTopLeft(w1, vertices[2], vertices[0]) or
                 outsideTopLeft(w2, vertices[0], vertices[1])) continue;
-            writePixel(job, x, y, vertices[0].z * w0 + vertices[1].z * w1 + vertices[2].z * w2, .{
+            writePixel(job, x, y, vertices[0].z * w0 + vertices[1].z * w1 + vertices[2].z * w2, depth_adjust, .{
                 vertices[0].color[0] * w0 + vertices[1].color[0] * w1 + vertices[2].color[0] * w2,
                 vertices[0].color[1] * w0 + vertices[1].color[1] * w1 + vertices[2].color[1] * w2,
                 vertices[0].color[2] * w0 + vertices[1].color[2] * w1 + vertices[2].color[2] * w2,
@@ -489,4 +520,37 @@ test "Metal viewport and scissor origins use the top-left pixel grid" {
     try std.testing.expectEqual(@as(u8, 0), pixels[1 * 8 * 4 + 3 * 4]);
     try std.testing.expectEqual(@as(u8, 0), pixels[6 * 8 * 4 + 3 * 4]);
     try std.testing.expectEqual(@as(u8, 0), pixels[3 * 8 * 4 + 0 * 4]);
+}
+
+test "Metal depth bias and clip modes are CPU deterministic" {
+    var pixels = [_]u8{0} ** (4 * 4 * 4);
+    var target = try surface.Surface.init(&pixels, 4, 4, 4 * 4, .rgba8_unorm);
+    var depth = [_]f32{1} ** (4 * 4);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.25, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.25, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.25, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+    };
+    var options = DrawOptions{
+        .viewport = .{ .origin_x = 0, .origin_y = 0, .width = 4, .height = 4, .znear = 0, .zfar = 1 },
+        .scissor = .{ .x = 0, .y = 0, .width = 4, .height = 4 },
+        .depth_bias = 0.25,
+    };
+    _ = draw(&target, depth[0..], null, &vertices, .triangle, options);
+    try std.testing.expectEqual(@as(f32, 0.5), depth[15]);
+
+    pixels = [_]u8{0} ** (4 * 4 * 4);
+    depth = [_]f32{1} ** (4 * 4);
+    options.depth_bias = 0;
+    options.depth_clip_mode = .clip;
+    var clipped_vertices = vertices;
+    for (&clipped_vertices) |*vertex| vertex.position[2] = 1.25;
+    _ = draw(&target, depth[0..], null, &clipped_vertices, .triangle, options);
+    try std.testing.expectEqual(@as(f32, 1), depth[15]);
+    try std.testing.expectEqual(@as(u8, 0), pixels[0]);
+
+    options.depth_clip_mode = .clamp;
+    _ = draw(&target, depth[0..], null, &clipped_vertices, .triangle, options);
+    try std.testing.expectEqual(@as(f32, 1), depth[15]);
+    try std.testing.expectEqual(@as(u8, 255), pixels[15 * 4]);
 }

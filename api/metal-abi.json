@@ -72,6 +72,8 @@
       "zpu_metal_render_encoder_set_cull_mode",
       "zpu_metal_render_encoder_set_front_facing",
       "zpu_metal_render_encoder_set_triangle_fill_mode",
+      "zpu_metal_render_encoder_set_depth_clip_mode",
+      "zpu_metal_render_encoder_set_depth_bias",
       "zpu_metal_render_encoder_set_pipeline_formats",
       "zpu_metal_render_encoder_set_pipeline_formats_with_stencil",
       "zpu_metal_render_encoder_set_color_attachment",

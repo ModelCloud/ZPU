@@ -505,6 +505,10 @@ pub const RenderEncoder = struct {
     cull_mode: abi.CullMode = .none,
     winding: abi.Winding = .clockwise,
     fill_mode: abi.TriangleFillMode = .fill,
+    depth_clip_mode: abi.DepthClipMode = .clip,
+    depth_bias: f32 = 0,
+    slope_scale: f32 = 0,
+    depth_bias_clamp: f32 = 0,
     depth_compare: abi.CompareFunction = .less_equal,
     depth_write_enabled: bool = true,
     blending_enabled: bool = false,
@@ -536,6 +540,10 @@ pub const RenderEncoder = struct {
             .cull_mode = self.cull_mode,
             .winding = self.winding,
             .fill_mode = self.fill_mode,
+            .depth_clip_mode = self.depth_clip_mode,
+            .depth_bias = self.depth_bias,
+            .slope_scale = self.slope_scale,
+            .depth_bias_clamp = self.depth_bias_clamp,
             .depth_compare = self.depth_compare,
             .depth_write_enabled = self.depth_write_enabled,
             .blending_enabled = self.blending_enabled,
@@ -782,6 +790,22 @@ pub const RenderEncoder = struct {
     pub fn setTriangleFillMode(self: *RenderEncoder, fill_mode: abi.TriangleFillMode) Error!void {
         if (!self.open() or !validFillMode(fill_mode)) return error.InvalidCommand;
         self.fill_mode = fill_mode;
+    }
+
+    pub fn setDepthClipMode(self: *RenderEncoder, depth_clip_mode: u8) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        self.depth_clip_mode = switch (depth_clip_mode) {
+            @intFromEnum(abi.DepthClipMode.clip) => .clip,
+            @intFromEnum(abi.DepthClipMode.clamp) => .clamp,
+            else => return error.InvalidArgument,
+        };
+    }
+
+    pub fn setDepthBias(self: *RenderEncoder, depth_bias: f32, slope_scale: f32, clamp: f32) Error!void {
+        if (!self.open() or !std.math.isFinite(depth_bias) or !std.math.isFinite(slope_scale) or !std.math.isFinite(clamp)) return error.InvalidArgument;
+        self.depth_bias = depth_bias;
+        self.slope_scale = slope_scale;
+        self.depth_bias_clamp = clamp;
     }
 
     fn sourceVertices(self: *const RenderEncoder) Error![]const abi.Vertex {
@@ -2627,6 +2651,16 @@ pub export fn zpu_metal_render_encoder_set_front_facing(encoder: ?*RenderEncoder
 
 pub export fn zpu_metal_render_encoder_set_triangle_fill_mode(encoder: ?*RenderEncoder, fill_mode: abi.TriangleFillMode) callconv(.c) c_int {
     (encoder orelse return -1).setTriangleFillMode(fill_mode) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_depth_clip_mode(encoder: ?*RenderEncoder, depth_clip_mode: u8) callconv(.c) c_int {
+    (encoder orelse return -1).setDepthClipMode(depth_clip_mode) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_depth_bias(encoder: ?*RenderEncoder, depth_bias: f32, slope_scale: f32, clamp: f32) callconv(.c) c_int {
+    (encoder orelse return -1).setDepthBias(depth_bias, slope_scale, clamp) catch |err| return errorCode(err);
     return 0;
 }
 

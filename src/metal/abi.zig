@@ -35,6 +35,7 @@ pub const IndexType = enum(u8) { uint16, uint32 };
 pub const CullMode = enum(u8) { none, front, back };
 pub const Winding = enum(u8) { clockwise, counter_clockwise };
 pub const TriangleFillMode = enum(u8) { fill, lines };
+pub const DepthClipMode = enum(u8) { clip = 0, clamp = 1 };
 pub const CompareFunction = enum(u8) {
     never = 0,
     less = 1,

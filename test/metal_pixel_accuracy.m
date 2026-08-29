@@ -3901,6 +3901,14 @@ int main(void) {
             {{ 1.0f,  1.0f, 0.25f, 1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}},
             {{-1.0f,  1.0f, 0.25f, 1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}},
         };
+        const zpu_metal_vertex depth_clip_vertices[] = {
+            {{-1.0f, -1.0f, 1.25f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{ 1.0f, -1.0f, 1.25f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{ 1.0f,  1.0f, 1.25f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{-1.0f, -1.0f, 1.25f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{ 1.0f,  1.0f, 1.25f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{-1.0f,  1.0f, 1.25f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+        };
         MTLRenderPipelineDescriptor *depth_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
         depth_pipeline_descriptor.vertexFunction = vertex_function;
         depth_pipeline_descriptor.fragmentFunction = fragment_function;
@@ -3945,6 +3953,7 @@ int main(void) {
             [metal_depth_command_buffer renderCommandEncoderWithDescriptor:metal_depth_pass];
         [metal_depth_encoder setRenderPipelineState:depth_pipeline];
         [metal_depth_encoder setDepthStencilState:depth_state];
+        [metal_depth_encoder setDepthBias:0.125f slopeScale:0.0f clamp:0.0f];
         [metal_depth_encoder setVertexBuffer:metal_depth_vertex_buffer offset:0 atIndex:0];
         [metal_depth_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
         [metal_depth_encoder endEncoding];
@@ -3998,6 +4007,7 @@ int main(void) {
         }
         [adapter_depth_encoder setRenderPipelineState:adapter_depth_pipeline];
         [adapter_depth_encoder setDepthStencilState:adapter_depth_state];
+        [adapter_depth_encoder setDepthBias:0.125f slopeScale:0.0f clamp:0.0f];
         [adapter_depth_encoder setVertexBuffer:adapter_depth_vertex_buffer offset:0 atIndex:0];
         [adapter_depth_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
         [adapter_depth_encoder endEncoding];
@@ -4011,6 +4021,99 @@ int main(void) {
                 fprintf(stderr, "metal-pixel: depth mismatch at byte %zu: Metal=%u ZPU=%u\n",
                         index, metal_depth_pixels[index], adapter_depth_pixels[index]);
                 return 29;
+            }
+        }
+
+        /* Depth clip mode uses the same top-left pixel grid but differs at
+         * the normalized depth boundary: clip discards out-of-range depth,
+         * while clamp retains the fragment at the nearest endpoint. */
+        id<MTLBuffer> metal_depth_clip_vertex_buffer =
+            [device newBufferWithBytes:depth_clip_vertices length:sizeof(depth_clip_vertices)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_depth_clip_vertex_buffer =
+            [adapter_device newBufferWithBytes:depth_clip_vertices length:sizeof(depth_clip_vertices)
+                                        options:MTLResourceStorageModeShared];
+        if (metal_depth_clip_vertex_buffer == nil || adapter_depth_clip_vertex_buffer == nil) {
+            fprintf(stderr, "metal-pixel: depth clip vertex allocation failed\n");
+            return 80;
+        }
+        metal_depth_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        metal_depth_pass.depthAttachment.loadAction = MTLLoadActionClear;
+        id<MTLCommandBuffer> metal_depth_clip_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> metal_depth_clip_encoder =
+            [metal_depth_clip_command_buffer renderCommandEncoderWithDescriptor:metal_depth_pass];
+        [metal_depth_clip_encoder setRenderPipelineState:depth_pipeline];
+        [metal_depth_clip_encoder setDepthStencilState:depth_state];
+        [metal_depth_clip_encoder setDepthClipMode:MTLDepthClipModeClip];
+        [metal_depth_clip_encoder setVertexBuffer:metal_depth_clip_vertex_buffer offset:0 atIndex:0];
+        [metal_depth_clip_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [metal_depth_clip_encoder endEncoding];
+        [metal_depth_clip_command_buffer commit];
+        [metal_depth_clip_command_buffer waitUntilCompleted];
+        adapter_depth_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_depth_pass.depthAttachment.loadAction = MTLLoadActionClear;
+        id<MTLCommandBuffer> adapter_depth_clip_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_depth_clip_encoder =
+            [adapter_depth_clip_command_buffer renderCommandEncoderWithDescriptor:adapter_depth_pass];
+        [adapter_depth_clip_encoder setRenderPipelineState:adapter_depth_pipeline];
+        [adapter_depth_clip_encoder setDepthStencilState:adapter_depth_state];
+        [adapter_depth_clip_encoder setDepthClipMode:MTLDepthClipModeClip];
+        [adapter_depth_clip_encoder setVertexBuffer:adapter_depth_clip_vertex_buffer offset:0 atIndex:0];
+        [adapter_depth_clip_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_depth_clip_encoder endEncoding];
+        [adapter_depth_clip_command_buffer commit];
+        [adapter_depth_clip_command_buffer waitUntilCompleted];
+        uint8_t metal_depth_clip_pixels[byte_count];
+        uint8_t adapter_depth_clip_pixels[byte_count];
+        [metal_depth_color getBytes:metal_depth_clip_pixels bytesPerRow:(NSUInteger)width * 4
+                          fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_depth_color getBytes:adapter_depth_clip_pixels bytesPerRow:(NSUInteger)width * 4
+                            fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        for (size_t index = 0; index < byte_count; index++) {
+            if (metal_depth_clip_pixels[index] != adapter_depth_clip_pixels[index]) {
+                fprintf(stderr, "metal-pixel: depth clip mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                        index, metal_depth_clip_pixels[index], adapter_depth_clip_pixels[index]);
+                return 81;
+            }
+        }
+
+        metal_depth_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        metal_depth_pass.depthAttachment.loadAction = MTLLoadActionClear;
+        metal_depth_clip_command_buffer = [queue commandBuffer];
+        metal_depth_clip_encoder =
+            [metal_depth_clip_command_buffer renderCommandEncoderWithDescriptor:metal_depth_pass];
+        [metal_depth_clip_encoder setRenderPipelineState:depth_pipeline];
+        [metal_depth_clip_encoder setDepthStencilState:depth_state];
+        [metal_depth_clip_encoder setDepthClipMode:MTLDepthClipModeClamp];
+        [metal_depth_clip_encoder setVertexBuffer:metal_depth_clip_vertex_buffer offset:0 atIndex:0];
+        [metal_depth_clip_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [metal_depth_clip_encoder endEncoding];
+        [metal_depth_clip_command_buffer commit];
+        [metal_depth_clip_command_buffer waitUntilCompleted];
+        adapter_depth_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_depth_pass.depthAttachment.loadAction = MTLLoadActionClear;
+        adapter_depth_clip_command_buffer = [adapter_queue commandBuffer];
+        adapter_depth_clip_encoder =
+            [adapter_depth_clip_command_buffer renderCommandEncoderWithDescriptor:adapter_depth_pass];
+        [adapter_depth_clip_encoder setRenderPipelineState:adapter_depth_pipeline];
+        [adapter_depth_clip_encoder setDepthStencilState:adapter_depth_state];
+        [adapter_depth_clip_encoder setDepthClipMode:MTLDepthClipModeClamp];
+        [adapter_depth_clip_encoder setVertexBuffer:adapter_depth_clip_vertex_buffer offset:0 atIndex:0];
+        [adapter_depth_clip_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_depth_clip_encoder endEncoding];
+        [adapter_depth_clip_command_buffer commit];
+        [adapter_depth_clip_command_buffer waitUntilCompleted];
+        uint8_t metal_depth_clamp_pixels[byte_count];
+        uint8_t adapter_depth_clamp_pixels[byte_count];
+        [metal_depth_color getBytes:metal_depth_clamp_pixels bytesPerRow:(NSUInteger)width * 4
+                          fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_depth_color getBytes:adapter_depth_clamp_pixels bytesPerRow:(NSUInteger)width * 4
+                            fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        for (size_t index = 0; index < byte_count; index++) {
+            if (metal_depth_clamp_pixels[index] != adapter_depth_clamp_pixels[index]) {
+                fprintf(stderr, "metal-pixel: depth clamp mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                        index, metal_depth_clamp_pixels[index], adapter_depth_clamp_pixels[index]);
+                return 82;
             }
         }
 

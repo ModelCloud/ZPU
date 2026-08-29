@@ -74,6 +74,12 @@ enum {
     ZPU_METAL_LINES = 1,
 };
 
+typedef uint8_t zpu_metal_depth_clip_mode;
+enum {
+    ZPU_METAL_DEPTH_CLIP = 0,
+    ZPU_METAL_DEPTH_CLAMP = 1,
+};
+
 typedef uint8_t zpu_metal_compare_function;
 enum {
     ZPU_METAL_COMPARE_NEVER = 0,
@@ -330,6 +336,8 @@ int zpu_metal_render_encoder_set_scissor_rect(zpu_metal_render_encoder *encoder,
 int zpu_metal_render_encoder_set_cull_mode(zpu_metal_render_encoder *encoder, zpu_metal_cull_mode cull_mode);
 int zpu_metal_render_encoder_set_front_facing(zpu_metal_render_encoder *encoder, zpu_metal_winding winding);
 int zpu_metal_render_encoder_set_triangle_fill_mode(zpu_metal_render_encoder *encoder, zpu_metal_triangle_fill_mode fill_mode);
+int zpu_metal_render_encoder_set_depth_clip_mode(zpu_metal_render_encoder *encoder, zpu_metal_depth_clip_mode depth_clip_mode);
+int zpu_metal_render_encoder_set_depth_bias(zpu_metal_render_encoder *encoder, float depth_bias, float slope_scale, float clamp);
 int zpu_metal_render_encoder_set_pipeline_formats(zpu_metal_render_encoder *encoder, uint16_t color_format, uint16_t depth_format);
 int zpu_metal_render_encoder_set_pipeline_formats_with_stencil(zpu_metal_render_encoder *encoder, uint16_t color_format, uint16_t depth_format, uint16_t stencil_format);
 int zpu_metal_render_encoder_set_color_attachment(zpu_metal_render_encoder *encoder, zpu_metal_texture *texture, const zpu_metal_render_pass_color_attachment_descriptor *attachment, uint32_t index);

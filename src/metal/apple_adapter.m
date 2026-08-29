@@ -5803,8 +5803,12 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     [self setScissorRect:scissorRects[0]];
 }
 - (void)setCullMode:(MTLCullMode)cullMode { (void)zpu_metal_render_encoder_set_cull_mode(_zpuEncoder, (zpu_metal_cull_mode)cullMode); }
-- (void)setDepthClipMode:(MTLDepthClipMode)depthClipMode API_AVAILABLE(macos(10.11), ios(11.0)) { (void)depthClipMode; }
-- (void)setDepthBias:(float)depthBias slopeScale:(float)slopeScale clamp:(float)clamp { (void)depthBias; (void)slopeScale; (void)clamp; }
+- (void)setDepthClipMode:(MTLDepthClipMode)depthClipMode API_AVAILABLE(macos(10.11), ios(11.0)) {
+    if (zpu_metal_render_encoder_set_depth_clip_mode(_zpuEncoder, (zpu_metal_depth_clip_mode)depthClipMode) != ZPU_METAL_OK) [_owner markError];
+}
+- (void)setDepthBias:(float)depthBias slopeScale:(float)slopeScale clamp:(float)clamp {
+    if (zpu_metal_render_encoder_set_depth_bias(_zpuEncoder, depthBias, slopeScale, clamp) != ZPU_METAL_OK) [_owner markError];
+}
 - (void)setDepthTestMinBound:(float)minBound maxBound:(float)maxBound API_AVAILABLE(macos(26.0), ios(26.0)) { (void)minBound; (void)maxBound; }
 - (void)setFrontFacingWinding:(MTLWinding)frontFacingWinding { (void)zpu_metal_render_encoder_set_front_facing(_zpuEncoder, (zpu_metal_winding)frontFacingWinding); }
 - (void)setTriangleFillMode:(MTLTriangleFillMode)fillMode { (void)zpu_metal_render_encoder_set_triangle_fill_mode(_zpuEncoder, (zpu_metal_triangle_fill_mode)fillMode); }
