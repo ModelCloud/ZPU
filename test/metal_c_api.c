@@ -1050,13 +1050,26 @@ int main(void) {
         zpu_metal_command_queue_command_buffer(queue);
     zpu_metal_resource_state_encoder *sparse_texture_upload_state =
         zpu_metal_command_buffer_resource_state_encoder(sparse_texture_upload_commands);
+    const zpu_metal_region sparse_texture_mapping_regions[] = {
+        {{0, 0, 0}, {1, 1, 1}},
+        {{1, 0, 0}, {1, 1, 1}},
+    };
+    const size_t sparse_texture_mapping_levels[] = {0, 0};
+    const size_t sparse_texture_mapping_slices[] = {0, 0};
+    const size_t sparse_texture_invalid_levels[] = {1, 0};
     if (sparse_texture_upload_commands == NULL || sparse_texture_upload_state == NULL ||
-        zpu_metal_resource_state_encoder_update_texture_mapping(
+        zpu_metal_resource_state_encoder_update_texture_mappings(
             sparse_texture_upload_state, sparse_texture, ZPU_METAL_SPARSE_MAPPING_MAP,
-            (zpu_metal_region){{0, 0, 0}, {1, 1, 1}}) != 0 ||
-        zpu_metal_resource_state_encoder_update_texture_mapping(
+            sparse_texture_mapping_regions, 2, sparse_texture_mapping_levels,
+            sparse_texture_mapping_slices) != 0 ||
+        zpu_metal_resource_state_encoder_update_texture_mappings(
             sparse_texture_upload_state, sparse_texture_destination,
-            ZPU_METAL_SPARSE_MAPPING_MAP, (zpu_metal_region){{0, 0, 0}, {1, 1, 1}}) != 0 ||
+            ZPU_METAL_SPARSE_MAPPING_MAP, sparse_texture_mapping_regions, 2,
+            sparse_texture_mapping_levels, sparse_texture_mapping_slices) != 0 ||
+        zpu_metal_resource_state_encoder_update_texture_mappings(
+            sparse_texture_upload_state, sparse_texture, ZPU_METAL_SPARSE_MAPPING_MAP,
+            sparse_texture_mapping_regions, 2, sparse_texture_invalid_levels,
+            sparse_texture_mapping_slices) == 0 ||
         zpu_metal_resource_state_encoder_end_encoding(sparse_texture_upload_state) != 0) return 70;
     zpu_metal_resource_state_encoder_destroy(sparse_texture_upload_state);
     zpu_metal_blit_encoder *sparse_texture_upload_encoder =

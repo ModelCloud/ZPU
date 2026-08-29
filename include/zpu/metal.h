@@ -9,7 +9,7 @@
 /* Native ZPU CPU Metal-layer ABI. This is intentionally separate from the
  * Apple Objective-C framework ABI; it is the portable FFI surface used by
  * clients that select ZPU's CPU renderer. */
-#define ZPU_METAL_ABI_VERSION 24u
+#define ZPU_METAL_ABI_VERSION 25u
 
 typedef uint8_t zpu_metal_workload;
 enum {
@@ -598,6 +598,10 @@ int zpu_metal_resource_state_encoder_wait_for_fence(zpu_metal_resource_state_enc
 int zpu_metal_resource_state_encoder_update_buffer_mapping(zpu_metal_resource_state_encoder *encoder, zpu_metal_buffer *buffer, zpu_metal_sparse_mapping_mode mode, size_t offset, size_t length);
 int zpu_metal_resource_state_encoder_copy_buffer_mappings(zpu_metal_resource_state_encoder *encoder, zpu_metal_buffer *source, zpu_metal_buffer *destination, size_t source_offset, size_t destination_offset, size_t length);
 int zpu_metal_resource_state_encoder_update_texture_mapping(zpu_metal_resource_state_encoder *encoder, zpu_metal_texture *texture, zpu_metal_sparse_mapping_mode mode, zpu_metal_region region);
+/* Regions are sparse-tile coordinates in the bounded portable profile. Each
+ * mip-level and slice entry corresponds to one region entry; only level 0 and
+ * slice 0 are currently representable by the portable 2D texture object. */
+int zpu_metal_resource_state_encoder_update_texture_mappings(zpu_metal_resource_state_encoder *encoder, zpu_metal_texture *texture, zpu_metal_sparse_mapping_mode mode, const zpu_metal_region *regions, size_t region_count, const size_t *mip_levels, const size_t *slices);
 int zpu_metal_resource_state_encoder_copy_texture_mappings(zpu_metal_resource_state_encoder *encoder, zpu_metal_texture *source, zpu_metal_texture *destination, zpu_metal_region source_region, zpu_metal_origin destination_origin);
 int zpu_metal_resource_state_encoder_end_encoding(zpu_metal_resource_state_encoder *encoder);
 void zpu_metal_resource_state_encoder_destroy(zpu_metal_resource_state_encoder *encoder);

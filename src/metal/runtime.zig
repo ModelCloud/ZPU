@@ -2709,16 +2709,26 @@ pub const ResourceStateEncoder = struct {
         _ = try self.command_buffer.append(.{ .wait_fence = fence });
     }
 
-    /// Sparse mappings have no CPU/ZPU representation yet. Fail at record
-    /// time, matching the adapter's explicit unsupported-feature boundary.
-    pub fn updateTextureMappings(self: *ResourceStateEncoder, texture: *Texture, mode: u32, regions: []const abi.Region, mip_levels: []const usize, slices: []const usize) Error!void {
-        _ = texture;
-        _ = mode;
-        _ = regions;
-        _ = mip_levels;
-        _ = slices;
+    /// Record the legacy Metal batch mapping form against the same CPU-owned
+    /// page store as updateTextureMapping. Regions use sparse-tile coordinates
+    /// in this bounded profile; level 0 and slice 0 are the only representable
+    /// subresources, so invalid entries fail before any command is appended.
+    pub fn updateTextureMappings(self: *ResourceStateEncoder, texture: *Texture, mode: u8, regions: []const abi.Region, mip_levels: []const usize, slices: []const usize) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        return error.UnsupportedOperation;
+        if (!validTexture(texture) or texture.device != self.command_buffer.queue.device or
+            texture.sparse_page_bytes == 0 or (mode != 0 and mode != 1) or
+            regions.len != mip_levels.len or regions.len != slices.len) return error.InvalidArgument;
+        for (regions, 0..) |region, index| {
+            if (mip_levels[index] != 0 or slices[index] != 0 or !sparseTextureRangeValid(texture, region))
+                return error.InvalidArgument;
+        }
+        for (regions) |region| {
+            _ = try self.command_buffer.append(.{ .sparse_texture_mapping = .{
+                .texture = texture,
+                .mode = mode,
+                .region = region,
+            } });
+        }
     }
 
     /// Map or unmap page-aligned ranges of a sparse buffer. Mapping commands
@@ -8027,6 +8037,37 @@ pub export fn zpu_metal_resource_state_encoder_update_texture_mapping(
     region: abi.Region,
 ) callconv(.c) c_int {
     (encoder orelse return -1).updateTextureMapping(texture orelse return -1, mode, region) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_resource_state_encoder_update_texture_mappings(
+    encoder: ?*ResourceStateEncoder,
+    texture: ?*Texture,
+    mode: u8,
+    regions: ?[*]const abi.Region,
+    region_count: usize,
+    mip_levels: ?[*]const usize,
+    slices: ?[*]const usize,
+) callconv(.c) c_int {
+    const region_values: []const abi.Region = if (region_count == 0)
+        &[_]abi.Region{}
+    else
+        (regions orelse return -1)[0..region_count];
+    const mip_values: []const usize = if (region_count == 0)
+        &[_]usize{}
+    else
+        (mip_levels orelse return -1)[0..region_count];
+    const slice_values: []const usize = if (region_count == 0)
+        &[_]usize{}
+    else
+        (slices orelse return -1)[0..region_count];
+    (encoder orelse return -1).updateTextureMappings(
+        texture orelse return -1,
+        mode,
+        region_values,
+        mip_values,
+        slice_values,
+    ) catch |err| return errorCode(err);
     return 0;
 }
 
