@@ -5436,6 +5436,7 @@ test "combined depth stencil textures pack CPU attachment results" {
         });
         try encoder.setDepthTexture(depth_stencil);
         try encoder.setStencilTexture(depth_stencil, @intFromEnum(abi.LoadAction.clear), @intFromEnum(abi.StoreAction.store), 3);
+        try encoder.setPipelineFormatsWithStencil(@intFromEnum(abi.PixelFormat.rgba8_unorm), format.raw, format.raw);
         try encoder.setStencilState(true, @intFromEnum(abi.CompareFunction.equal), @intFromEnum(abi.StencilOperation.keep), @intFromEnum(abi.StencilOperation.keep), @intFromEnum(abi.StencilOperation.increment_clamp), 0xff, 0xff);
         try encoder.setStencilState(false, @intFromEnum(abi.CompareFunction.equal), @intFromEnum(abi.StencilOperation.keep), @intFromEnum(abi.StencilOperation.keep), @intFromEnum(abi.StencilOperation.increment_clamp), 0xff, 0xff);
         try encoder.setStencilReference(3, 3);
@@ -5449,6 +5450,56 @@ test "combined depth stencil textures pack CPU attachment results" {
             const offset = index * format.bytes_per_pixel;
             try std.testing.expectEqualSlices(u8, &format.depth_bytes, depth_stencil.bytes[offset..][0..3]);
             try std.testing.expectEqual(@as(u8, 4), depth_stencil.bytes[offset + format.stencil_offset]);
+        }
+    }
+}
+
+test "x stencil textures pack CPU stencil attachment results" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+    };
+    const x_formats = [_]struct { raw: u16, bytes_per_pixel: usize, stencil_offset: usize }{
+        .{ .raw = @intFromEnum(abi.PixelFormat.x24_stencil8), .bytes_per_pixel = 4, .stencil_offset = 3 },
+        .{ .raw = @intFromEnum(abi.PixelFormat.x32_stencil8), .bytes_per_pixel = 8, .stencil_offset = 4 },
+    };
+    for (x_formats) |format| {
+        const color = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+        defer destroyTexture(color);
+        const stencil = try createTexture(device, 4, 4, format.raw);
+        defer destroyTexture(stencil);
+        @memset(stencil.bytes, 0xa5);
+        var command_buffer = try createCommandBuffer(queue);
+        defer destroyCommandBuffer(command_buffer);
+        var encoder = try beginRender(command_buffer, color, .{
+            .color = .{ .load_action = .clear, .store_action = .store },
+        });
+        try encoder.setStencilTexture(stencil, @intFromEnum(abi.LoadAction.clear), @intFromEnum(abi.StoreAction.store), 3);
+        try encoder.setPipelineFormatsWithStencil(@intFromEnum(abi.PixelFormat.rgba8_unorm), 0, format.raw);
+        try encoder.setStencilState(true, @intFromEnum(abi.CompareFunction.equal), @intFromEnum(abi.StencilOperation.keep), @intFromEnum(abi.StencilOperation.keep), @intFromEnum(abi.StencilOperation.increment_clamp), 0xff, 0xff);
+        try encoder.setStencilState(false, @intFromEnum(abi.CompareFunction.equal), @intFromEnum(abi.StencilOperation.keep), @intFromEnum(abi.StencilOperation.keep), @intFromEnum(abi.StencilOperation.increment_clamp), 0xff, 0xff);
+        try encoder.setStencilReference(3, 3);
+        try encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
+        try encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
+        try encoder.endEncoding();
+        destroyRenderEncoder(encoder);
+        try command_buffer.commit();
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, color.bytes[0..4]);
+        for (0..4 * 4) |index| {
+            const offset = index * format.bytes_per_pixel;
+            for (0..format.bytes_per_pixel) |byte| {
+                if (byte == format.stencil_offset) continue;
+                try std.testing.expectEqual(@as(u8, 0xa5), stencil.bytes[offset + byte]);
+            }
+            try std.testing.expectEqual(@as(u8, 4), stencil.bytes[offset + format.stencil_offset]);
         }
     }
 }

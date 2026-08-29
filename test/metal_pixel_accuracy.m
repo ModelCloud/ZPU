@@ -2980,9 +2980,9 @@ int main(void) {
 
         /* Packed, shared-exponent, and device-supported depth formats are
          * represented as raw CPU-owned texels. The oracle checks descriptor
-         * acceptance and exact byte width. Combined depth/stencil formats
-         * remain transfer-only and are covered by the CPU storage tests;
-         * some are unavailable or non-byte-preserving on this M4 device. */
+         * acceptance and exact byte width. Combined depth/stencil render
+         * behavior and byte packing are covered by the CPU tests; native
+         * combined raw readback is device-specific on this M4. */
         const struct { MTLPixelFormat format; NSUInteger bytes_per_pixel; } packed_formats[] = {
             {MTLPixelFormatA8Unorm, 1},
             {MTLPixelFormatB5G6R5Unorm, 2}, {MTLPixelFormatA1BGR5Unorm, 2},
