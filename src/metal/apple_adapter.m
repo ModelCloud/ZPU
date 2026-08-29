@@ -315,7 +315,10 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @public
     ZPUDevice *_owner;
     MTLSamplerMinMagFilter _minFilter;
+    MTLSamplerMinMagFilter _magFilter;
     MTLSamplerMipFilter _mipFilter;
+    MTLSamplerAddressMode _sAddressMode;
+    MTLSamplerAddressMode _tAddressMode;
     uint64_t _resourceID;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLSamplerDescriptor *)descriptor;
@@ -2002,7 +2005,10 @@ static uint64_t zpu_cpu_timestamp(void) {
     if ((self = [super init])) {
         _owner = owner;
         _minFilter = descriptor.minFilter;
+        _magFilter = descriptor.magFilter;
         _mipFilter = descriptor.mipFilter;
+        _sAddressMode = descriptor.sAddressMode;
+        _tAddressMode = descriptor.tAddressMode;
         _resourceID = zpu_register_resource(self);
     }
     return self;
@@ -5659,19 +5665,40 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     for (NSUInteger index = 0; index < range.length; ++index) [self setFragmentTexture:textures[index] atIndex:range.location + index];
 }
 - (void)setFragmentSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
-    [self setVertexSamplerState:sampler atIndex:index];
+    ZPUSamplerState *zpuSampler = (ZPUSamplerState *)sampler;
+    if (index > UINT32_MAX || (sampler != nil && ![zpuSampler isKindOfClass:[ZPUSamplerState class]])) {
+        [_owner markError];
+        return;
+    }
+    const zpu_metal_sampler_filter filter = sampler == nil ? ZPU_METAL_SAMPLER_NEAREST :
+        (zpu_metal_sampler_filter)zpuSampler->_magFilter;
+    const zpu_metal_sampler_address_mode address_s = sampler == nil ? ZPU_METAL_SAMPLER_CLAMP_TO_EDGE :
+        (zpu_metal_sampler_address_mode)zpuSampler->_sAddressMode;
+    const zpu_metal_sampler_address_mode address_t = sampler == nil ? ZPU_METAL_SAMPLER_CLAMP_TO_EDGE :
+        (zpu_metal_sampler_address_mode)zpuSampler->_tAddressMode;
+    if (zpu_metal_render_encoder_set_fragment_sampler(_zpuEncoder, filter, address_s, address_t) != ZPU_METAL_OK) {
+        [_owner markError];
+        return;
+    }
+    if (sampler != nil) [_owner retainResource:sampler];
 }
 - (void)setFragmentSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers withRange:(NSRange)range {
-    [self setVertexSamplerStates:samplers withRange:range];
+    if (samplers == NULL) { [_owner markError]; return; }
+    for (NSUInteger index = 0; index < range.length; ++index) [self setFragmentSamplerState:samplers[index] atIndex:range.location + index];
 }
 - (void)setFragmentSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMinClamp lodMaxClamp:(float)lodMaxClamp atIndex:(NSUInteger)index {
-    [self setVertexSamplerState:sampler lodMinClamp:lodMinClamp lodMaxClamp:lodMaxClamp atIndex:index];
+    (void)lodMinClamp;
+    (void)lodMaxClamp;
+    [self setFragmentSamplerState:sampler atIndex:index];
 }
 - (void)setFragmentSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers
                 lodMinClamps:(const float [__nonnull])lodMinClamps
                 lodMaxClamps:(const float [__nonnull])lodMaxClamps
                     withRange:(NSRange)range {
-    [self setVertexSamplerStates:samplers lodMinClamps:lodMinClamps lodMaxClamps:lodMaxClamps withRange:range];
+    if (samplers == NULL || lodMinClamps == NULL || lodMaxClamps == NULL) { [_owner markError]; return; }
+    for (NSUInteger index = 0; index < range.length; ++index) {
+        [self setFragmentSamplerState:samplers[index] atIndex:range.location + index];
+    }
 }
 - (void)setObjectBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
     [self setFragmentBytes:bytes length:length atIndex:index];

@@ -519,6 +519,9 @@ pub const RenderEncoder = struct {
     depth_bias_clamp: f32 = 0,
     fragment_texture: ?*Texture = null,
     sample_texture: bool = false,
+    sample_filter: abi.SamplerFilter = .nearest,
+    sample_address_s: abi.SamplerAddressMode = .clamp_to_edge,
+    sample_address_t: abi.SamplerAddressMode = .clamp_to_edge,
     depth_compare: abi.CompareFunction = .less_equal,
     depth_write_enabled: bool = true,
     blending_enabled: bool = false,
@@ -554,6 +557,9 @@ pub const RenderEncoder = struct {
             .depth_bias = self.depth_bias,
             .slope_scale = self.slope_scale,
             .depth_bias_clamp = self.depth_bias_clamp,
+            .sample_filter = self.sample_filter,
+            .sample_address_s = self.sample_address_s,
+            .sample_address_t = self.sample_address_t,
             .depth_compare = self.depth_compare,
             .depth_write_enabled = self.depth_write_enabled,
             .blending_enabled = self.blending_enabled,
@@ -605,6 +611,13 @@ pub const RenderEncoder = struct {
             if (!validTexture(value) or value.device != self.command_buffer.queue.device or !value.format.isColor()) return error.InvalidResource;
         }
         self.fragment_texture = texture;
+    }
+
+    pub fn setFragmentSampler(self: *RenderEncoder, filter: u8, address_s: u8, address_t: u8) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        self.sample_filter = samplerFilterFromInt(filter) orelse return error.InvalidArgument;
+        self.sample_address_s = samplerAddressModeFromInt(address_s) orelse return error.InvalidArgument;
+        self.sample_address_t = samplerAddressModeFromInt(address_t) orelse return error.InvalidArgument;
     }
 
     pub fn setPipelineColorFormats(self: *RenderEncoder, color_formats: []const u16, depth_format: u16, stencil_format: u16) Error!void {
@@ -2019,6 +2032,25 @@ fn blendOperationFromInt(value: u8) ?abi.BlendOperation {
     };
 }
 
+fn samplerFilterFromInt(value: u8) ?abi.SamplerFilter {
+    return switch (value) {
+        @intFromEnum(abi.SamplerFilter.nearest) => .nearest,
+        @intFromEnum(abi.SamplerFilter.linear) => .linear,
+        else => null,
+    };
+}
+
+fn samplerAddressModeFromInt(value: u8) ?abi.SamplerAddressMode {
+    return switch (value) {
+        @intFromEnum(abi.SamplerAddressMode.clamp_to_edge) => .clamp_to_edge,
+        @intFromEnum(abi.SamplerAddressMode.mirror_repeat) => .mirror_repeat,
+        @intFromEnum(abi.SamplerAddressMode.repeat) => .repeat,
+        @intFromEnum(abi.SamplerAddressMode.clamp_to_zero) => .clamp_to_zero,
+        @intFromEnum(abi.SamplerAddressMode.clamp_to_border_color) => .clamp_to_border_color,
+        else => null,
+    };
+}
+
 fn toTargetColor(color: abi.Color) [4]f32 {
     return .{ color.red, color.green, color.blue, color.alpha };
 }
@@ -2723,6 +2755,11 @@ pub export fn zpu_metal_render_encoder_set_sample_texture(encoder: ?*RenderEncod
 
 pub export fn zpu_metal_render_encoder_set_fragment_texture(encoder: ?*RenderEncoder, texture: ?*Texture, index: u32) callconv(.c) c_int {
     (encoder orelse return -1).setFragmentTexture(texture, index) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_fragment_sampler(encoder: ?*RenderEncoder, filter: u8, address_s: u8, address_t: u8) callconv(.c) c_int {
+    (encoder orelse return -1).setFragmentSampler(filter, address_s, address_t) catch |err| return errorCode(err);
     return 0;
 }
 

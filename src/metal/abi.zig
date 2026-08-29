@@ -36,6 +36,14 @@ pub const CullMode = enum(u8) { none, front, back };
 pub const Winding = enum(u8) { clockwise, counter_clockwise };
 pub const TriangleFillMode = enum(u8) { fill, lines };
 pub const DepthClipMode = enum(u8) { clip = 0, clamp = 1 };
+pub const SamplerFilter = enum(u8) { nearest = 0, linear = 1 };
+pub const SamplerAddressMode = enum(u8) {
+    clamp_to_edge = 0,
+    mirror_repeat = 1,
+    repeat = 2,
+    clamp_to_zero = 3,
+    clamp_to_border_color = 4,
+};
 pub const CompareFunction = enum(u8) {
     never = 0,
     less = 1,

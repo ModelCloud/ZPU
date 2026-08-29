@@ -38,6 +38,9 @@ pub const DrawOptions = struct {
     depth_bias: f32 = 0,
     slope_scale: f32 = 0,
     depth_bias_clamp: f32 = 0,
+    sample_filter: abi.SamplerFilter = .nearest,
+    sample_address_s: abi.SamplerAddressMode = .clamp_to_edge,
+    sample_address_t: abi.SamplerAddressMode = .clamp_to_edge,
     depth_compare: abi.CompareFunction = .less_equal,
     depth_write_enabled: bool = true,
     blending_enabled: bool = false,
@@ -155,13 +158,82 @@ pub const Target = struct {
         }
     }
 
-    fn sampleNearest(self: *const Target, u: f32, v: f32) [4]f32 {
-        if (self.width == 0 or self.height == 0 or !std.math.isFinite(u) or !std.math.isFinite(v)) return .{ 0, 0, 0, 1 };
-        const normalized_u = std.math.clamp(u, 0, 0.99999994);
-        const normalized_v = std.math.clamp(v, 0, 0.99999994);
-        const x: usize = @min(@as(usize, self.width - 1), @as(usize, @intFromFloat(normalized_u * @as(f32, @floatFromInt(self.width)))));
-        const y: usize = @min(@as(usize, self.height - 1), @as(usize, @intFromFloat(normalized_v * @as(f32, @floatFromInt(self.height)))));
-        return self.readColor(x, y);
+    fn addressCoordinate(value: f32, mode: abi.SamplerAddressMode) ?f32 {
+        if (!std.math.isFinite(value)) return null;
+        return switch (mode) {
+            .clamp_to_edge => std.math.clamp(value, 0, 1),
+            .repeat => value - @floor(value),
+            .mirror_repeat => blk: {
+                const period = value - @floor(value / 2) * 2;
+                break :blk if (period <= 1) period else 2 - period;
+            },
+            .clamp_to_zero, .clamp_to_border_color => if (value < 0 or value > 1) null else value,
+        };
+    }
+
+    fn sampleIndex(index: i64, limit: u32, mode: abi.SamplerAddressMode) ?usize {
+        if (limit == 0) return null;
+        const extent: i64 = @intCast(limit);
+        return switch (mode) {
+            .clamp_to_edge => @intCast(std.math.clamp(index, 0, extent - 1)),
+            .repeat => blk: {
+                var wrapped = @rem(index, extent);
+                if (wrapped < 0) wrapped += extent;
+                break :blk @intCast(wrapped);
+            },
+            .mirror_repeat => blk: {
+                const period = extent * 2;
+                var wrapped = @rem(index, period);
+                if (wrapped < 0) wrapped += period;
+                break :blk @intCast(if (wrapped < extent) wrapped else period - wrapped - 1);
+            },
+            .clamp_to_zero, .clamp_to_border_color => if (index < 0 or index >= extent) null else @intCast(index),
+        };
+    }
+
+    fn sampleTexel(self: *const Target, x: i64, y: i64, address_s: abi.SamplerAddressMode, address_t: abi.SamplerAddressMode) [4]f32 {
+        const sample_x = sampleIndex(x, self.width, address_s) orelse return .{ 0, 0, 0, 0 };
+        const sample_y = sampleIndex(y, self.height, address_t) orelse return .{ 0, 0, 0, 0 };
+        return self.readColor(sample_x, sample_y);
+    }
+
+    fn sampleNearest(self: *const Target, u: f32, v: f32, address_s: abi.SamplerAddressMode, address_t: abi.SamplerAddressMode) [4]f32 {
+        const normalized_u = addressCoordinate(u, address_s) orelse return .{ 0, 0, 0, 0 };
+        const normalized_v = addressCoordinate(v, address_t) orelse return .{ 0, 0, 0, 0 };
+        const x: i64 = @intFromFloat(@min(normalized_u, 0.99999994) * @as(f32, @floatFromInt(self.width)));
+        const y: i64 = @intFromFloat(@min(normalized_v, 0.99999994) * @as(f32, @floatFromInt(self.height)));
+        return self.sampleTexel(x, y, address_s, address_t);
+    }
+
+    fn sampleLinear(self: *const Target, u: f32, v: f32, address_s: abi.SamplerAddressMode, address_t: abi.SamplerAddressMode) [4]f32 {
+        const normalized_u = addressCoordinate(u, address_s) orelse return .{ 0, 0, 0, 0 };
+        const normalized_v = addressCoordinate(v, address_t) orelse return .{ 0, 0, 0, 0 };
+        const x = normalized_u * @as(f32, @floatFromInt(self.width)) - 0.5;
+        const y = normalized_v * @as(f32, @floatFromInt(self.height)) - 0.5;
+        const x0_float = @floor(x);
+        const y0_float = @floor(y);
+        const x0: i64 = @intFromFloat(x0_float);
+        const y0: i64 = @intFromFloat(y0_float);
+        const x_weight = x - x0_float;
+        const y_weight = y - y0_float;
+        const top_left = self.sampleTexel(x0, y0, address_s, address_t);
+        const top_right = self.sampleTexel(x0 + 1, y0, address_s, address_t);
+        const bottom_left = self.sampleTexel(x0, y0 + 1, address_s, address_t);
+        const bottom_right = self.sampleTexel(x0 + 1, y0 + 1, address_s, address_t);
+        var result: [4]f32 = undefined;
+        for (0..4) |channel| {
+            const top = top_left[channel] + (top_right[channel] - top_left[channel]) * x_weight;
+            const bottom = bottom_left[channel] + (bottom_right[channel] - bottom_left[channel]) * x_weight;
+            result[channel] = top + (bottom - top) * y_weight;
+        }
+        return result;
+    }
+
+    fn sample(self: *const Target, u: f32, v: f32, filter: abi.SamplerFilter, address_s: abi.SamplerAddressMode, address_t: abi.SamplerAddressMode) [4]f32 {
+        return switch (filter) {
+            .nearest => self.sampleNearest(u, v, address_s, address_t),
+            .linear => self.sampleLinear(u, v, address_s, address_t),
+        };
     }
 };
 
@@ -317,7 +389,7 @@ fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [
         stats.depth_tests_passed += 1;
     }
     if (stencil_index) |index| applyStencil(job.stencil.?, index, stencil_state, stencil_state.depth_pass);
-    const fragment_color = if (job.sample_texture) |texture| texture.sampleNearest(color[0], color[1]) else color;
+    const fragment_color = if (job.sample_texture) |texture| texture.sample(color[0], color[1], job.options.sample_filter, job.options.sample_address_s, job.options.sample_address_t) else color;
     writeColor(job.target, x, y, fragment_color, job.options);
     if (job.options.write_extra_targets) for (job.extra_targets) |target| writeColor(target, x, y, fragment_color, job.options);
     stats.fragments_covered += 1;
@@ -687,8 +759,27 @@ test "CPU texture sampling uses normalized top-left texel coordinates" {
         0, 0, 255, 255,   255, 255, 255, 255,
     };
     const target = try Target.init(&pixels, 2, 2, 2 * 4, .rgba8_unorm);
-    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.25, 0.25)[0]);
-    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.75, 0.25)[1]);
-    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.25, 0.75)[2]);
-    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.75, 0.75)[0]);
+    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.25, 0.25, .clamp_to_edge, .clamp_to_edge)[0]);
+    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.75, 0.25, .clamp_to_edge, .clamp_to_edge)[1]);
+    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.25, 0.75, .clamp_to_edge, .clamp_to_edge)[2]);
+    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.75, 0.75, .clamp_to_edge, .clamp_to_edge)[0]);
+}
+
+test "CPU texture sampling supports linear filtering and address modes" {
+    var pixels = [_]u8{
+        255, 0, 0, 255,   0, 255, 0, 255,
+        0, 0, 255, 255,   255, 255, 255, 255,
+    };
+    const target = try Target.init(&pixels, 2, 2, 2 * 4, .rgba8_unorm);
+    const center = target.sampleLinear(0.5, 0.5, .clamp_to_edge, .clamp_to_edge);
+    for (center[0..3]) |channel| try std.testing.expectApproxEqAbs(@as(f32, 0.5), channel, 0.001);
+    try std.testing.expectEqual(@as(f32, 1), center[3]);
+
+    const repeated = target.sampleNearest(1.25, 0.25, .repeat, .repeat);
+    try std.testing.expectEqual(@as(f32, 1), repeated[0]);
+    try std.testing.expectEqual(@as(f32, 0), repeated[1]);
+    const mirrored = target.sampleNearest(1.25, 0.25, .mirror_repeat, .mirror_repeat);
+    try std.testing.expectEqual(@as(f32, 1), mirrored[1]);
+    const outside = target.sampleNearest(-0.25, 0.25, .clamp_to_zero, .clamp_to_zero);
+    try std.testing.expectEqual([4]f32{ 0, 0, 0, 0 }, outside);
 }
