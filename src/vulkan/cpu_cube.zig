@@ -183,6 +183,7 @@ const PreparedDraw = struct {
     spans_valid: bool = false,
     spans_external: ?*const [max_prepared_triangles][flat_span_rows]FlatSpan = null,
     quad_spans_external: ?*const [2][flat_span_rows]FlatSpan = null,
+    quad_union_spans_external: ?*const [flat_span_rows]FlatSpan = null,
     opaque_quad: OpaqueQuad = .{},
     batch_fast: bool = false,
 };
@@ -679,6 +680,7 @@ fn prepareDraw(uniform: []const u8, vertex_count: u32, base_vertex: u32, viewpor
         output.spans_valid = false;
         output.spans_external = null;
         output.quad_spans_external = null;
+        output.quad_union_spans_external = null;
         output.batch_fast = false;
         return;
     }
@@ -686,8 +688,58 @@ fn prepareDraw(uniform: []const u8, vertex_count: u32, base_vertex: u32, viewpor
     output.spans_valid = false;
     output.spans_external = null;
     output.quad_spans_external = null;
+    output.quad_union_spans_external = null;
     output.batch_fast = false;
     const identity_transform = isIdentityTransform(uniform);
+    // Vulkan scene streams commonly emit each quad as two triangles with
+    // duplicated diagonal vertices. Preserve the emitted attributes while
+    // transforming each face corner only once when all six faces match that
+    // layout; any other stream falls through to the general path below.
+    if (base_vertex == 0 and indexed == null and vertex_count == 36) {
+        var repeated_quads = true;
+        for (0..6) |face| {
+            const base = 64 + face * 6 * 16;
+            repeated_quads = repeated_quads and
+                std.mem.eql(u8, uniform[base + 3 * 16 ..][0..16], uniform[base..][0..16]) and
+                std.mem.eql(u8, uniform[base + 4 * 16 ..][0..16], uniform[base + 2 * 16 ..][0..16]);
+        }
+        if (repeated_quads) {
+            var face_vertices: [24]Vertex = undefined;
+            var all_valid = true;
+            for (0..6) |face| {
+                const source_base: u32 = @intCast(face * 6);
+                inline for (0..4) |corner| {
+                    const source_index: u32 = source_base + switch (corner) {
+                        0 => 0,
+                        1 => 1,
+                        2 => 2,
+                        else => 5,
+                    };
+                    face_vertices[face * 4 + corner] = (if (identity_transform)
+                        transformedIdentityVertex(uniform, source_index, source_vertex_count, viewport, null)
+                    else
+                        transformedVertex(uniform, source_index, source_vertex_count, viewport, null)) orelse {
+                        all_valid = false;
+                        break;
+                    };
+                }
+            }
+            if (all_valid) {
+                for (0..6) |face| {
+                    const triangle_index = face * 2;
+                    var second_v0 = face_vertices[face * 4];
+                    var second_v2 = face_vertices[face * 4 + 2];
+                    const attributes_base = 64 + 36 * 16 + face * 6 * 16;
+                    second_v0.uv = .{ readFloat(uniform, attributes_base + 3 * 16), readFloat(uniform, attributes_base + 3 * 16 + 4) };
+                    second_v2.uv = .{ readFloat(uniform, attributes_base + 4 * 16), readFloat(uniform, attributes_base + 4 * 16 + 4) };
+                    const first_vertices = [3]Vertex{ face_vertices[face * 4], face_vertices[face * 4 + 1], face_vertices[face * 4 + 2] };
+                    initializePreparedTriangle(&output.triangles[triangle_index], first_vertices, null);
+                    initializePreparedTriangle(&output.triangles[triangle_index + 1], .{ second_v0, second_v2, face_vertices[face * 4 + 3] }, if (canReuseFlatTriangleLight(output.triangles[triangle_index].vertices, .{ second_v0, second_v2, face_vertices[face * 4 + 3] })) output.triangles[triangle_index].light_key else null);
+                }
+                return;
+            }
+        }
+    }
     if (base_vertex == 0 and indexed == null and vertex_count == 6 and uniform.len >= 64 + 6 * 32 and
         std.mem.eql(u8, uniform[64 + 3 * 16 ..][0..16], uniform[64..][0..16]) and
         std.mem.eql(u8, uniform[64 + 4 * 16 ..][0..16], uniform[64 + 2 * 16 ..][0..16]))
@@ -2054,14 +2106,17 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
         output.spans_valid = true;
         output.spans_external = null;
         output.quad_spans_external = &quad_span_cache.?.spans;
+        output.quad_union_spans_external = null;
     } else if (geometry_cache_hit and span_cache != null and span_cache.?.valid) {
         output.spans_valid = true;
         output.spans_external = &span_cache.?.spans;
         output.quad_spans_external = null;
+        output.quad_union_spans_external = if (span_cache.?.quad_spans_valid) &span_cache.?.quad_spans else null;
     } else if (!geometry_revision_changed and span_cache != null and batchSpanCacheMatches(span_cache.?, output, width, height)) {
         output.spans_valid = true;
         output.spans_external = &span_cache.?.spans;
         output.quad_spans_external = null;
+        output.quad_union_spans_external = if (span_cache.?.quad_spans_valid) &span_cache.?.quad_spans else null;
     } else if (!geometry_revision_changed) {
         buildPreparedFlatSpans(output, width, height);
         if (span_cache) |cache| rememberBatchSpanCache(cache, output, width, height);
@@ -2074,12 +2129,17 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
         output.spans_valid = true;
         output.spans_external = if (span_cache) |cache| &cache.spans else null;
         output.quad_spans_external = if (quad_span_cache) |cache| &cache.spans else null;
+        output.quad_union_spans_external = if (span_cache) |cache| if (cache.quad_spans_valid) &cache.quad_spans else null else null;
     } else {
         // Geometry revisions invalidate the retained screen-space spans, but
         // rebuilding them while the command is already prepared keeps the
         // raster phase on the cached-span path. This is especially important
         // for animated 3D streams where every command changes each frame.
         buildPreparedFlatSpans(output, width, height);
+        if (span_cache) |cache| if (output.count == 2) {
+            rememberBatchSpanCache(cache, output, width, height);
+            output.quad_union_spans_external = if (cache.quad_spans_valid) &cache.quad_spans else null;
+        };
         output.spans_valid = true;
         output.spans_external = null;
         output.quad_spans_external = null;
@@ -2185,6 +2245,7 @@ fn drawPreparedBatchFastImpl(comptime color_only: bool, target: []u8, depth: []u
     const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / lane_count);
     var pixels_written: usize = 0;
     if (prepared.count == 2 and prepared.opaque_quad.valid and prepared.spans_valid) if (prepared.opaque_quad.flat_color) |color| {
+        if (prepared.quad_union_spans_external) |spans| return rasterPreparedFlatSpan(!color_only, color_words, depth_words, width, height, lane_index, lane_count, prepared.opaque_quad.min_y, prepared.opaque_quad.max_y, spans, prepared.opaque_quad.depth_bits, color);
         if (rasterPreparedFlatColorQuad(!color_only, color_words, depth_words, width, height, lane_index, lane_count, prepared.opaque_quad.min_y, prepared.opaque_quad.max_y, preparedSpan(prepared, 0), preparedSpan(prepared, 1), prepared.opaque_quad.depth_bits, color)) |pixels| return pixels;
     };
     if (comptime color_only) if (prepared.count == 2 and prepared.opaque_quad.valid and prepared.spans_valid) {
@@ -2436,6 +2497,21 @@ inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: [
             stepped_v_over_w += raster.v_over_w_dx * run_length;
             x = run_last;
         }
+    }
+    return pixels_written;
+}
+
+inline fn rasterPreparedFlatSpan(comptime depth_test: bool, color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, lane_count: usize, min_y: i32, max_y: i32, spans: *const [flat_span_rows]FlatSpan, depth_bits: u32, color: u32) usize {
+    const lane_min_y: i32 = @intCast(@as(usize, height) * lane_index / lane_count);
+    const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / lane_count);
+    const first_y = @max(min_y, lane_min_y);
+    const last_y = @min(max_y, lane_max_y);
+    if (first_y >= last_y) return 0;
+    var pixels_written: usize = 0;
+    var y = first_y;
+    while (y < last_y) : (y += 1) {
+        const span = spans[@intCast(y)];
+        if (span.last > span.first) pixels_written += writeFlatColorSpanAtRow(depth_test, color_words, depth_words, @as(usize, @intCast(y)) * @as(usize, width), span.first, span.last, depth_bits, color);
     }
     return pixels_written;
 }
