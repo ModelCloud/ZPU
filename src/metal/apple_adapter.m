@@ -1379,9 +1379,11 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     zpu_metal_resource_state_encoder *_zpuEncoder;
     ZPUCommandBuffer *_owner;
     NSString *_label;
+    id _passDescriptor;
     BOOL _ended;
 }
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner encoder:(zpu_metal_resource_state_encoder *)encoder;
+- (BOOL)configurePassDescriptor:(id)descriptor;
 @end
 
 @interface ZPUAccelerationStructureEncoder : NSObject <MTLAccelerationStructureCommandEncoder> {
@@ -9529,7 +9531,12 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 }
 - (id<MTLResourceStateCommandEncoder>)resourceStateCommandEncoderWithDescriptor:(MTLResourceStatePassDescriptor *)descriptor API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
     if (descriptor == nil) return nil;
-    return [self resourceStateCommandEncoder];
+    ZPUResourceStateEncoder *encoder = (ZPUResourceStateEncoder *)[self resourceStateCommandEncoder];
+    if (encoder == nil || ![encoder configurePassDescriptor:descriptor]) {
+        if (encoder != nil) [encoder endEncoding];
+        return nil;
+    }
+    return (id<MTLResourceStateCommandEncoder>)encoder;
 }
 - (id<MTLAccelerationStructureCommandEncoder>)accelerationStructureCommandEncoder API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
     return (id<MTLAccelerationStructureCommandEncoder>)[[ZPUAccelerationStructureEncoder alloc]
@@ -12799,15 +12806,22 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     if ((self = [super init])) {
         _owner = owner;
         _zpuEncoder = encoder;
+        _passDescriptor = nil;
+        _ended = NO;
     }
     return self;
+}
+- (BOOL)configurePassDescriptor:(id)descriptor {
+    if (descriptor == nil || !zpu_sample_pass_attachments(_owner, [descriptor sampleBufferAttachments], YES)) return NO;
+    _passDescriptor = [descriptor copy];
+    return YES;
 }
 - (id<MTLDevice>)device { return [_owner device]; }
 - (NSString *)label { return _label; }
 - (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (void)dealloc {
     if (_zpuEncoder != NULL) {
-        (void)zpu_metal_resource_state_encoder_end_encoding(_zpuEncoder);
+        [self endEncoding];
         zpu_metal_resource_state_encoder_destroy(_zpuEncoder);
     }
 }
@@ -12941,6 +12955,9 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (void)popDebugGroup {}
 - (void)endEncoding {
     if (_zpuEncoder != NULL && !_ended) {
+        if (_passDescriptor != nil && !zpu_sample_pass_attachments(_owner, [_passDescriptor sampleBufferAttachments], NO)) {
+            [_owner markError];
+        }
         (void)zpu_metal_resource_state_encoder_end_encoding(_zpuEncoder);
         _ended = YES;
     }

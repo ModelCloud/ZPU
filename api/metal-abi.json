@@ -509,6 +509,7 @@
     "MTLCommandBuffer.blitCommandEncoderWithDescriptor",
     "MTLCommandBuffer.resourceStateCommandEncoder",
     "MTLCommandBuffer.resourceStateCommandEncoderWithDescriptor",
+    "MTLResourceStatePassDescriptor.sampleBufferAttachments",
     "MTLCommandBuffer.accelerationStructureCommandEncoder",
     "MTLCommandBuffer.accelerationStructureCommandEncoderWithDescriptor",
     "MTLAccelerationStructureCommandEncoder.buildAccelerationStructure",

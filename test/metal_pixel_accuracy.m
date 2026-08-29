@@ -11659,6 +11659,18 @@ int main(void) {
         [adapter_descriptor_blit_encoder endEncoding];
         [adapter_counter_blit_command_buffer commit];
         [adapter_counter_blit_command_buffer waitUntilCompleted];
+
+        MTLResourceStatePassDescriptor *adapter_counter_resource_pass =
+            [MTLResourceStatePassDescriptor resourceStatePassDescriptor];
+        adapter_counter_resource_pass.sampleBufferAttachments[0].sampleBuffer = adapter_pass_counter_sample_buffer;
+        adapter_counter_resource_pass.sampleBufferAttachments[0].startOfEncoderSampleIndex = 0;
+        adapter_counter_resource_pass.sampleBufferAttachments[0].endOfEncoderSampleIndex = 1;
+        id<MTLCommandBuffer> adapter_counter_resource_command_buffer = [adapter_queue commandBuffer];
+        id<MTLResourceStateCommandEncoder> adapter_descriptor_resource_encoder =
+            [adapter_counter_resource_command_buffer resourceStateCommandEncoderWithDescriptor:adapter_counter_resource_pass];
+        [adapter_descriptor_resource_encoder endEncoding];
+        [adapter_counter_resource_command_buffer commit];
+        [adapter_counter_resource_command_buffer waitUntilCompleted];
         NSData *adapter_pass_counter_resolved =
             [adapter_pass_counter_sample_buffer resolveCounterRange:NSMakeRange(0, 4)];
         const MTLCounterResultTimestamp *adapter_pass_counter_entries =
@@ -11666,8 +11678,10 @@ int main(void) {
         const BOOL adapter_pass_counter_ok =
             adapter_pass_counter_sample_buffer != nil &&
             adapter_descriptor_compute_encoder != nil && adapter_descriptor_blit_encoder != nil &&
+            adapter_descriptor_resource_encoder != nil &&
             adapter_counter_compute_command_buffer.status == MTLCommandBufferStatusCompleted &&
             adapter_counter_blit_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_counter_resource_command_buffer.status == MTLCommandBufferStatusCompleted &&
             adapter_pass_counter_resolved.length == 4 * sizeof(MTLCounterResultTimestamp) &&
             adapter_pass_counter_entries[0].timestamp != MTLCounterErrorValue &&
             adapter_pass_counter_entries[1].timestamp != MTLCounterErrorValue &&

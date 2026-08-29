@@ -175,7 +175,8 @@ triangle path:
 - compute-pass descriptors preserve the Metal serial/concurrent dispatch type
   on the CPU compute encoder; compute- and blit-pass descriptor sampling
   attachments schedule ZPU timestamp samples at encoder start/end while
-  retaining the CPU-owned counter buffers
+  retaining the CPU-owned counter buffers; resource-state pass descriptors
+  use the same CPU-owned start/end timestamp semantics
 - identity rasterization-rate maps advertise capability consistently through
   `supportsRasterizationRateMapWithLayerCount:` and preserve native physical
   size/coordinate mappings; variable-rate maps remain rejected because the
