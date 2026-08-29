@@ -2222,11 +2222,13 @@ static ZPUArgument *zpu_reflection_argument(NSString *name, MTLArgumentType type
     return [[ZPUArgument alloc] initWithName:name type:type access:access index:index];
 }
 
+API_AVAILABLE(macos(13.0), ios(16.0))
 static ZPUBinding *zpu_reflection_binding(NSString *name, MTLBindingType type,
                                            MTLBindingAccess access, NSUInteger index) {
     return [[ZPUBinding alloc] initWithName:name type:type access:access index:index];
 }
 
+API_AVAILABLE(macos(26.0), ios(26.0))
 static MTLComputePipelineReflection *zpu_compute_pipeline_reflection(zpu_metal_compute_kernel kernel) {
     NSMutableArray *arguments = [NSMutableArray array];
     NSMutableArray *bindings = [NSMutableArray array];
@@ -2268,6 +2270,7 @@ static MTLComputePipelineReflection *zpu_compute_pipeline_reflection(zpu_metal_c
         initWithArguments:arguments bindings:bindings];
 }
 
+API_AVAILABLE(macos(26.0), ios(26.0))
 static MTLRenderPipelineReflection *zpu_render_pipeline_reflection(NSString *vertexName,
                                                                      NSString *fragmentName) {
     NSMutableArray *vertexArguments = [NSMutableArray array];
