@@ -751,6 +751,6 @@
     "MTLComputePipelineState unregistered reflection",
     "MTL4Compiler machine-learning and arbitrary MSL families",
     "MTLLibrary stitched loading and arbitrary MSL compilation",
-    "MTLSparseTextureTailPacking"
+    "MTLSparseTextureTailPacking for unsupported 3D depth-packed layouts"
   ]
 }
