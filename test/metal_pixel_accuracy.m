@@ -8946,6 +8946,22 @@ int main(void) {
             fprintf(stderr, "metal-pixel: CPU command-buffer retention/options metadata failed\n");
             return 22;
         }
+        id<MTLCommandBuffer> malformed_binding_range_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> malformed_binding_range_encoder =
+            [malformed_binding_range_command_buffer computeCommandEncoder];
+        id<MTLBuffer> malformed_binding_buffers[] = {adapter_copy_buffer};
+        const NSUInteger malformed_binding_offsets[] = {0};
+        [malformed_binding_range_encoder setBuffers:malformed_binding_buffers
+                                            offsets:malformed_binding_offsets
+                                          withRange:NSMakeRange(NSUIntegerMax, 2)];
+        [malformed_binding_range_encoder endEncoding];
+        [malformed_binding_range_command_buffer commit];
+        [malformed_binding_range_command_buffer waitUntilCompleted];
+        if (malformed_binding_range_encoder == nil ||
+            malformed_binding_range_command_buffer.status != MTLCommandBufferStatusError) {
+            fprintf(stderr, "metal-pixel: overflowing CPU binding range did not fail closed\n");
+            return 23;
+        }
         uint8_t adapter_pixels[byte_count];
         memset(adapter_pixels, 0xa5, sizeof(adapter_pixels));
         [adapter_texture getBytes:adapter_pixels
