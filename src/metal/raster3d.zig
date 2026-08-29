@@ -140,7 +140,7 @@ pub const Target = struct {
             },
             .r32_float => .{ readF32(row_bytes, offset), 0, 0, 1 },
             .rgba16_float => .{
-                readF16(row_bytes, offset), readF16(row_bytes, offset + 2),
+                readF16(row_bytes, offset),     readF16(row_bytes, offset + 2),
                 readF16(row_bytes, offset + 4), readF16(row_bytes, offset + 6),
             },
         };
@@ -596,8 +596,7 @@ fn drawTriangle(job: *Job, input: [3]ProjectedVertex, y0: usize, y1: usize, stat
             const w0 = edge0 * edge_sign * inverse_area;
             const w1 = edge1 * edge_sign * inverse_area;
             const w2 = edge2 * edge_sign * inverse_area;
-            writePixel(job, x, y, vertices[0].z * w0 + vertices[1].z * w1 + vertices[2].z * w2, depth_adjust,
-                interpolateTriangleColor(vertices, w0, w1, w2), stats, front_facing);
+            writePixel(job, x, y, vertices[0].z * w0 + vertices[1].z * w1 + vertices[2].z * w2, depth_adjust, interpolateTriangleColor(vertices, w0, w1, w2), stats, front_facing);
         }
     }
     stats.primitives_rasterized += 1;
@@ -859,8 +858,8 @@ test "float color targets retain native texel precision" {
 
 test "CPU texture sampling uses normalized top-left texel coordinates" {
     var pixels = [_]u8{
-        255, 0, 0, 255,   0, 255, 0, 255,
-        0, 0, 255, 255,   255, 255, 255, 255,
+        255, 0, 0,   255, 0,   255, 0,   255,
+        0,   0, 255, 255, 255, 255, 255, 255,
     };
     const target = try Target.init(&pixels, 2, 2, 2 * 4, .rgba8_unorm);
     try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.25, 0.25, .clamp_to_edge, .clamp_to_edge)[0]);
@@ -871,8 +870,8 @@ test "CPU texture sampling uses normalized top-left texel coordinates" {
 
 test "CPU texture sampling supports linear filtering and address modes" {
     var pixels = [_]u8{
-        255, 0, 0, 255,   0, 255, 0, 255,
-        0, 0, 255, 255,   255, 255, 255, 255,
+        255, 0, 0,   255, 0,   255, 0,   255,
+        0,   0, 255, 255, 255, 255, 255, 255,
     };
     const target = try Target.init(&pixels, 2, 2, 2 * 4, .rgba8_unorm);
     const center = target.sampleLinear(0.5, 0.5, .clamp_to_edge, .clamp_to_edge);

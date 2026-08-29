@@ -329,9 +329,7 @@ pub const CommandBuffer = struct {
                 draw.vertex_source_count > self.vertices.items.len - draw.vertex_start)
                 return error.InvalidCommand;
             break :blk self.vertices.items[draw.vertex_start .. draw.vertex_start + draw.vertex_source_count];
-        }
-        else
-            self.vertices.items;
+        } else self.vertices.items;
         if (draw.index_buffer) |index_buffer| {
             if (!validBuffer(index_buffer) or index_buffer.device != self.queue.device) return error.InvalidResource;
             const index_size: usize = if (draw.index_type == .uint16) 2 else 4;
@@ -396,7 +394,7 @@ pub const CommandBuffer = struct {
                 for (begin_render.color_attachments, 0..) |attachment, index| {
                     if (attachment) |value| {
                         if (!validTexture(value.texture) or value.texture.device != self.queue.device or
-                    !value.texture.format.isColor() or value.texture.width != begin_render.target.width or
+                            !value.texture.format.isColor() or value.texture.width != begin_render.target.width or
                             value.texture.height != begin_render.target.height) return self.fail(error.InvalidResource);
                         active_color_attachments[index] = value.texture;
                         if (value.pass.load_action == .clear) {
@@ -2626,7 +2624,7 @@ test "CPU blit mipmap generation is deferred and deterministic" {
     try std.testing.expectEqual(@as(u8, 0), destination.bytes[0]);
     try command_buffer.commit();
     try std.testing.expectEqualSlices(u8, &[_]u8{
-        17, 18, 19, 255, 53, 54, 55, 255,
+        17,  18,  19,  255, 53,  54,  55,  255,
         101, 102, 103, 255, 197, 198, 199, 255,
     }, destination.bytes);
 }
@@ -2641,8 +2639,7 @@ test "CPU float mipmap generation preserves format precision" {
     defer destroyTexture(r32_source);
     const r32_destination = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.r32_float));
     defer destroyTexture(r32_destination);
-    for (0..4) |y| for (0..4) |x| writeMipmapF32(r32_source.bytes,
-        y * r32_source.stride + x * 4, @floatFromInt(x + y * 4));
+    for (0..4) |y| for (0..4) |x| writeMipmapF32(r32_source.bytes, y * r32_source.stride + x * 4, @floatFromInt(x + y * 4));
 
     const rgba16_source = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba16_float));
     defer destroyTexture(rgba16_source);
@@ -2802,12 +2799,7 @@ test "raw texture formats preserve their native texel widths" {
     try std.testing.expectEqual(@as(usize, 24), r32.bytes.len);
     try std.testing.expectEqual(@as(usize, 48), rgba16.bytes.len);
     const r32_values = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23 };
-    const rgba16_values = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
-        0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7,
-        0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7,
-        0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7,
-        0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7,
-        0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7 };
+    const rgba16_values = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7 };
     try textureReplaceRegion(r32, .{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = 3, .height = 2, .depth = 1 } }, &r32_values, r32_values.len, 12);
     try textureReplaceRegion(rgba16, .{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = 3, .height = 2, .depth = 1 } }, &rgba16_values, rgba16_values.len, 24);
     try std.testing.expectEqualSlices(u8, &r32_values, r32.bytes);
@@ -3190,11 +3182,7 @@ test "stencil attachment applies compare and pass/failure operations" {
     });
     try encoder.setStencilTexture(stencil, @intFromEnum(abi.LoadAction.clear), @intFromEnum(abi.StoreAction.store), 3);
     for ([_]bool{ true, false }) |front_face| {
-        try encoder.setStencilState(front_face,
-            @intFromEnum(abi.CompareFunction.equal),
-            @intFromEnum(abi.StencilOperation.zero),
-            @intFromEnum(abi.StencilOperation.keep),
-            @intFromEnum(abi.StencilOperation.increment_clamp), 0xff, 0xff);
+        try encoder.setStencilState(front_face, @intFromEnum(abi.CompareFunction.equal), @intFromEnum(abi.StencilOperation.zero), @intFromEnum(abi.StencilOperation.keep), @intFromEnum(abi.StencilOperation.increment_clamp), 0xff, 0xff);
     }
     try encoder.setStencilReference(3, 3);
     try encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
@@ -3632,7 +3620,9 @@ pub export fn zpu_metal_render_encoder_set_color_attachment(encoder: ?*RenderEnc
 pub export fn zpu_metal_render_encoder_set_pipeline_color_formats(encoder: ?*RenderEncoder, color_formats: ?[*]const u16, color_format_count: usize, depth_format: u16, stencil_format: u16) callconv(.c) c_int {
     if (color_format_count > 8 or (color_format_count != 0 and color_formats == null)) return -1;
     (encoder orelse return -1).setPipelineColorFormats(
-        if (color_formats) |formats| formats[0..color_format_count] else &[_]u16{}, depth_format, stencil_format,
+        if (color_formats) |formats| formats[0..color_format_count] else &[_]u16{},
+        depth_format,
+        stencil_format,
     ) catch |err| return errorCode(err);
     return 0;
 }

@@ -336,7 +336,7 @@ pub fn build(b: *std.Build) void {
     else
         b.addSystemCommand(&.{ "python3", "tools/metal_abi_status.py" });
     metal_abi_status.step.dependOn(&require_limited.step);
-    const metal_abi_tests = b.addSystemCommand(&.{ "test/metal_abi.sh" });
+    const metal_abi_tests = b.addSystemCommand(&.{"test/metal_abi.sh"});
     metal_abi_tests.step.dependOn(&require_limited.step);
     const metal_abi_step = b.step("metal-abi", "Validate the native Metal ABI and report SDK coverage");
     metal_abi_step.dependOn(&metal_abi_status.step);
