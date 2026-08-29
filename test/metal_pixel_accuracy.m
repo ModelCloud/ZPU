@@ -8944,6 +8944,45 @@ int main(void) {
             }
         }
 
+        /* The command buffer owns resources referenced by an encoded ICB
+         * until completion. Verify that render replay retains the CPU-owned
+         * ICB after the caller drops its last reference, while avoiding an
+         * artificial command-to-ICB retain cycle. */
+        __weak id<MTLIndirectCommandBuffer> weak_lifetime_icb = nil;
+        id<MTLCommandBuffer> lifetime_command_buffer = [adapter_queue commandBuffer];
+        id<MTLTexture> lifetime_texture = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTLRenderPassDescriptor *lifetime_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        lifetime_pass.colorAttachments[0].texture = lifetime_texture;
+        lifetime_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        lifetime_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> lifetime_encoder =
+            [lifetime_command_buffer renderCommandEncoderWithDescriptor:lifetime_pass];
+        id<MTLIndirectCommandBuffer> lifetime_icb =
+            [adapter_device newIndirectCommandBufferWithDescriptor:icb_descriptor
+                                                    maxCommandCount:1
+                                                            options:MTLResourceStorageModeShared];
+        id<MTLIndirectRenderCommand> lifetime_command = [lifetime_icb indirectRenderCommandAtIndex:0];
+        [lifetime_command drawPrimitives:MTLPrimitiveTypeTriangle
+                            vertexStart:0 vertexCount:6 instanceCount:1 baseInstance:0];
+        weak_lifetime_icb = lifetime_icb;
+        [lifetime_encoder setRenderPipelineState:adapter_pipeline];
+        [lifetime_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [lifetime_encoder executeCommandsInBuffer:lifetime_icb withRange:NSMakeRange(0, 1)];
+        [lifetime_encoder endEncoding];
+        lifetime_command = nil;
+        lifetime_icb = nil;
+        if (weak_lifetime_icb == nil) {
+            fprintf(stderr, "metal-pixel: render ICB was not retained by command buffer\n");
+            return 132;
+        }
+        [lifetime_command_buffer commit];
+        [lifetime_command_buffer waitUntilCompleted];
+        if (lifetime_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: retained render ICB command did not complete\n");
+            fail_with_error("retained render ICB command error", lifetime_command_buffer.error);
+            return 133;
+        }
+
         /* The CPU renderer currently has one representable vertex binding.
          * An ICB descriptor may advertise more slots, but accepting an index
          * other than zero would replay that resource at the wrong slot. The

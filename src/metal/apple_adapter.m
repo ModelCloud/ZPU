@@ -286,7 +286,7 @@ API_AVAILABLE(macos(15.0), ios(18.0))
 
 @interface ZPUIndirectRenderCommand : NSObject <MTLIndirectRenderCommand> {
 @public
-    ZPUIndirectCommandBuffer *_owner;
+    __weak ZPUIndirectCommandBuffer *_owner;
     id _pipelineState;
     ZPUBuffer *_vertexBuffer;
     NSUInteger _vertexOffset;
@@ -354,7 +354,7 @@ API_AVAILABLE(macos(15.0), ios(18.0))
 
 @interface ZPUIndirectComputeCommand : NSObject <MTLIndirectComputeCommand> {
 @public
-    ZPUIndirectCommandBuffer *_owner;
+    __weak ZPUIndirectCommandBuffer *_owner;
     id _pipelineState;
     ZPUBuffer *_kernelBuffer;
     NSUInteger _kernelBufferOffset;
@@ -12142,6 +12142,10 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         [_owner markError];
         return;
     }
+    /* Keep the CPU-owned ICB alive for the lifetime of the command buffer,
+     * matching Metal's retained-reference behavior even though replay is
+     * performed synchronously while encoding. */
+    [_owner retainResource:buffer];
     for (NSUInteger index = executionRange.location; index < executionRange.location + executionRange.length; ++index) {
         id command = buffer->_commands[index];
         if ([command isKindOfClass:[ZPUIndirectRenderCommand class]]) {
