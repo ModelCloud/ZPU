@@ -13870,6 +13870,141 @@ int main(void) {
             }
         }
 
+        /* A non-identity attachment map is encoder state, but Metal 4 also
+         * requires the deferred ICB to opt into carrying that state through
+         * replay. Keep the check on the CPU replay boundary: a non-opted-in
+         * ICB must fail even when the outer render pass supports mapping. An
+         * opted-in ICB must retain the map for its draw, including the
+         * physical attachment hole/order represented by the pass. */
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTLLogicalToPhysicalColorAttachmentMap *icb_color_map =
+                [MTLLogicalToPhysicalColorAttachmentMap new];
+            [icb_color_map setPhysicalIndex:1 forLogicalIndex:0];
+            [icb_color_map setPhysicalIndex:0 forLogicalIndex:1];
+
+            MTLIndirectCommandBufferDescriptor *unmapped_icb_descriptor = [icb_descriptor copy];
+            unmapped_icb_descriptor.supportColorAttachmentMapping = NO;
+            id<MTLIndirectCommandBuffer> unmapped_icb =
+                [adapter_device newIndirectCommandBufferWithDescriptor:unmapped_icb_descriptor
+                                                        maxCommandCount:1
+                                                                options:MTLResourceStorageModeShared];
+            id<MTLIndirectRenderCommand> unmapped_icb_command =
+                [unmapped_icb indirectRenderCommandAtIndex:0];
+            [unmapped_icb_command drawPrimitives:MTLPrimitiveTypeTriangle
+                                      vertexStart:0 vertexCount:6 instanceCount:1 baseInstance:0];
+            MTLRenderPassDescriptor *unmapped_icb_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            unmapped_icb_pass.supportColorAttachmentMapping = YES;
+            unmapped_icb_pass.colorAttachments[0].texture = adapter_icb_texture;
+            unmapped_icb_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            unmapped_icb_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            id<MTLCommandBuffer> unmapped_icb_command_buffer = [adapter_queue commandBuffer];
+            id<MTLRenderCommandEncoder> unmapped_icb_encoder =
+                [unmapped_icb_command_buffer renderCommandEncoderWithDescriptor:unmapped_icb_pass];
+            [unmapped_icb_encoder setRenderPipelineState:adapter_pipeline];
+            [unmapped_icb_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+            [unmapped_icb_encoder setColorAttachmentMap:icb_color_map];
+            [unmapped_icb_encoder executeCommandsInBuffer:unmapped_icb withRange:NSMakeRange(0, 1)];
+            [unmapped_icb_encoder endEncoding];
+            [unmapped_icb_command_buffer commit];
+            [unmapped_icb_command_buffer waitUntilCompleted];
+            if (unmapped_icb == nil || unmapped_icb_command == nil || unmapped_icb_encoder == nil ||
+                unmapped_icb_command_buffer.status != MTLCommandBufferStatusError) {
+                fprintf(stderr, "metal-pixel: non-opted-in ICB accepted a non-identity color map\n");
+                return 161;
+            }
+
+            MTLRenderPipelineDescriptor *adapter_icb_mapping_pipeline_descriptor =
+                [adapter_pipeline_descriptor copy];
+            adapter_icb_mapping_pipeline_descriptor.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA8Unorm;
+            NSError *adapter_icb_mapping_error = nil;
+            id<MTLRenderPipelineState> adapter_icb_mapping_pipeline =
+                [adapter_device newRenderPipelineStateWithDescriptor:adapter_icb_mapping_pipeline_descriptor
+                                                                  error:&adapter_icb_mapping_error];
+            MTLIndirectCommandBufferDescriptor *mapped_icb_descriptor = [icb_descriptor copy];
+            mapped_icb_descriptor.supportColorAttachmentMapping = YES;
+            id<MTLIndirectCommandBuffer> mapped_icb =
+                [adapter_device newIndirectCommandBufferWithDescriptor:mapped_icb_descriptor
+                                                        maxCommandCount:1
+                                                                options:MTLResourceStorageModeShared];
+            id<MTLIndirectRenderCommand> mapped_icb_command =
+                [mapped_icb indirectRenderCommandAtIndex:0];
+            [mapped_icb_command drawPrimitives:MTLPrimitiveTypeTriangle
+                                    vertexStart:0 vertexCount:6 instanceCount:1 baseInstance:0];
+            id<MTLTexture> adapter_mapped_icb_physical0 =
+                [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+            id<MTLTexture> adapter_mapped_icb_physical1 =
+                [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+            MTLRenderPassDescriptor *mapped_icb_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            mapped_icb_pass.supportColorAttachmentMapping = YES;
+            mapped_icb_pass.colorAttachments[0].texture = adapter_mapped_icb_physical0;
+            mapped_icb_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            mapped_icb_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            mapped_icb_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+            mapped_icb_pass.colorAttachments[1].texture = adapter_mapped_icb_physical1;
+            mapped_icb_pass.colorAttachments[1].loadAction = MTLLoadActionClear;
+            mapped_icb_pass.colorAttachments[1].storeAction = MTLStoreActionStore;
+            mapped_icb_pass.colorAttachments[1].clearColor = MTLClearColorMake(1, 1, 1, 1);
+            id<MTLCommandBuffer> mapped_icb_command_buffer = [adapter_queue commandBuffer];
+            id<MTLRenderCommandEncoder> mapped_icb_encoder =
+                [mapped_icb_command_buffer renderCommandEncoderWithDescriptor:mapped_icb_pass];
+            [mapped_icb_encoder setRenderPipelineState:adapter_icb_mapping_pipeline];
+            [mapped_icb_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+            [mapped_icb_encoder setColorAttachmentMap:icb_color_map];
+            [mapped_icb_encoder executeCommandsInBuffer:mapped_icb withRange:NSMakeRange(0, 1)];
+            [mapped_icb_encoder endEncoding];
+            [mapped_icb_command_buffer commit];
+            [mapped_icb_command_buffer waitUntilCompleted];
+
+            id<MTLTexture> adapter_direct_icb_physical0 =
+                [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+            id<MTLTexture> adapter_direct_icb_physical1 =
+                [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+            MTLRenderPassDescriptor *direct_icb_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            direct_icb_pass.supportColorAttachmentMapping = YES;
+            direct_icb_pass.colorAttachments[0].texture = adapter_direct_icb_physical0;
+            direct_icb_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            direct_icb_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            direct_icb_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+            direct_icb_pass.colorAttachments[1].texture = adapter_direct_icb_physical1;
+            direct_icb_pass.colorAttachments[1].loadAction = MTLLoadActionClear;
+            direct_icb_pass.colorAttachments[1].storeAction = MTLStoreActionStore;
+            direct_icb_pass.colorAttachments[1].clearColor = MTLClearColorMake(1, 1, 1, 1);
+            id<MTLCommandBuffer> direct_icb_command_buffer = [adapter_queue commandBuffer];
+            id<MTLRenderCommandEncoder> direct_icb_encoder =
+                [direct_icb_command_buffer renderCommandEncoderWithDescriptor:direct_icb_pass];
+            [direct_icb_encoder setRenderPipelineState:adapter_icb_mapping_pipeline];
+            [direct_icb_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+            [direct_icb_encoder setColorAttachmentMap:icb_color_map];
+            [direct_icb_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+            [direct_icb_encoder endEncoding];
+            [direct_icb_command_buffer commit];
+            [direct_icb_command_buffer waitUntilCompleted];
+            uint8_t mapped_icb_physical0_bytes[byte_count];
+            uint8_t mapped_icb_physical1_bytes[byte_count];
+            uint8_t direct_icb_physical0_bytes[byte_count];
+            uint8_t direct_icb_physical1_bytes[byte_count];
+            [adapter_mapped_icb_physical0 getBytes:mapped_icb_physical0_bytes
+                                       bytesPerRow:(NSUInteger)width * 4
+                                      fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            [adapter_mapped_icb_physical1 getBytes:mapped_icb_physical1_bytes
+                                       bytesPerRow:(NSUInteger)width * 4
+                                      fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            [adapter_direct_icb_physical0 getBytes:direct_icb_physical0_bytes
+                                       bytesPerRow:(NSUInteger)width * 4
+                                      fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            [adapter_direct_icb_physical1 getBytes:direct_icb_physical1_bytes
+                                       bytesPerRow:(NSUInteger)width * 4
+                                      fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            if (adapter_icb_mapping_pipeline == nil || mapped_icb == nil || mapped_icb_command == nil ||
+                mapped_icb_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                direct_icb_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                memcmp(mapped_icb_physical0_bytes, direct_icb_physical0_bytes, byte_count) != 0 ||
+                memcmp(mapped_icb_physical1_bytes, direct_icb_physical1_bytes, byte_count) != 0) {
+                fail_with_error("CPU ICB color attachment mapping replay failed", adapter_icb_mapping_error);
+                return 162;
+            }
+        }
+
         /* ICB dynamic vertex strides are part of the command, not the
          * encoder. Preserve the stride through CPU replay and compare the
          * stage-in result with Apple's native ICB byte-for-byte. */

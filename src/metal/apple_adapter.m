@@ -1348,6 +1348,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     ZPUDepthStencilState *_depthStencilState;
     id _passDescriptor;
     BOOL _supportsColorAttachmentMapping;
+    BOOL _colorAttachmentMapNonIdentity;
     BOOL _ended;
     ZPUBuffer *_tessellationFactorBuffer;
     NSUInteger _tessellationFactorBufferOffset;
@@ -13483,6 +13484,7 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
         _stageBindings = [NSMutableDictionary dictionary];
         _passDescriptor = nil;
         _supportsColorAttachmentMapping = NO;
+        _colorAttachmentMapNonIdentity = NO;
         _ended = NO;
     }
     return self;
@@ -14500,6 +14502,10 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
         [_owner markError];
         return;
     }
+    if (_colorAttachmentMapNonIdentity && !buffer->_supportColorAttachmentMapping) {
+        [_owner markError];
+        return;
+    }
     /* Keep the CPU-owned ICB alive for the lifetime of the command buffer,
      * matching Metal's retained-reference behavior even though replay is
      * performed synchronously while encoding. */
@@ -14546,7 +14552,9 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
         (!zpu_color_attachment_map_is_identity(mapping) && !_supportsColorAttachmentMapping) ||
         zpu_metal_render_encoder_set_color_attachment_map(_zpuEncoder, values, ZPU_METAL_MAX_COLOR_ATTACHMENTS) != ZPU_METAL_OK) {
         [_owner markError];
+        return;
     }
+    _colorAttachmentMapNonIdentity = !zpu_color_attachment_map_is_identity(mapping);
 }
 - (void)setColorStoreAction:(MTLStoreAction)storeAction atIndex:(NSUInteger)colorAttachmentIndex {
     if (colorAttachmentIndex > UINT32_MAX ||
