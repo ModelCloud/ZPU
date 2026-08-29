@@ -173,8 +173,9 @@ triangle path:
   texture synchronization and CPU/GPU-access optimization retain the requested
   ZPU resource or valid mip/slice subresource without invoking native Metal
 - compute-pass descriptors preserve the Metal serial/concurrent dispatch type
-  on the CPU compute encoder; descriptor sampling attachments remain metadata
-  only until CPU counter attachment scheduling is implemented
+  on the CPU compute encoder; compute- and blit-pass descriptor sampling
+  attachments schedule ZPU timestamp samples at encoder start/end while
+  retaining the CPU-owned counter buffers
 - identity rasterization-rate maps advertise capability consistently through
   `supportsRasterizationRateMapWithLayerCount:` and preserve native physical
   size/coordinate mappings; variable-rate maps remain rejected because the
