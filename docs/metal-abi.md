@@ -214,8 +214,10 @@ triangle path:
 - CPU indirect compute commands for those registered kernels; the command
   buffer inherits the ZPU encoder's texture bindings and records pipeline,
   buffer, and dispatch state for deferred execution
-- Metal 4 basic buffer/texture copy and buffer-fill commands append deferred
-  ZPU work; tensor, advanced optimization, acceleration-structure,
+- Metal 4 basic buffer/texture copy, buffer-fill, and tensor-slice copy commands
+  append deferred ZPU work; CPU-owned tensors also provide contiguous and
+  strided byte-addressable slice transfers. Tensor shader binding, advanced
+  optimization, acceleration-structure,
   sparse, drawable, machine-learning, and tile/mesh render-pass
   features remain explicit fail-closed boundaries. Suspending/resuming render
   passes are represented as sequential ordinary CPU passes because the CPU
@@ -225,7 +227,7 @@ triangle path:
   command-buffer selectors that have no portable CPU meaning are represented
   explicitly: metadata-only operations are deterministic no-ops, while
   arbitrary shader compilation, binary linking, sparse/placement
-  resources, ray tracing, tensors, I/O, and unsupported Metal 4 advanced
+  resources, ray tracing, tensor shader/ML execution, I/O, and unsupported Metal 4 advanced
   families return nil or a stable error. They never fall through to Apple's
   native Metal runtime
 
@@ -312,7 +314,7 @@ Metal ABI. The remaining framework surface includes additional compute and
 Metal 4 encoders, resource and pipeline descriptors beyond the fixed-function state
 implemented here, Metal 4 tile/mesh render and remaining copy/optimization families, ICB patch/mesh commands, other
 synchronization families, ray tracing execution, sparse resources, machine
-learning/tensors, and arbitrary shader compilation. Function-table storage is
+learning/tensor execution, and arbitrary shader compilation. Function-table storage is
 implemented, but it does not imply ray-tracing or arbitrary function-pointer
 execution. A strict completeness claim belongs only after the Apple SDK
 inventory and macOS/iOS behavior tests pass.

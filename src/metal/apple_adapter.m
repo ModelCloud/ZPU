@@ -77,6 +77,34 @@
 - (void)applyResourceOptions:(MTLResourceOptions)options;
 @end
 
+API_AVAILABLE(macos(26.0), ios(26.0))
+@interface ZPUTensor : NSObject <MTLTensor> {
+@public
+    ZPUDevice *_owner;
+    ZPUBuffer *_storageBuffer;
+    ZPUBuffer *_backingBuffer;
+    NSUInteger _bufferOffset;
+    NSUInteger _allocatedSize;
+    NSUInteger _elementSize;
+    MTLTensorExtents *_dimensions;
+    MTLTensorExtents *_strides;
+    MTLTensorDataType _dataType;
+    MTLTensorUsage _usage;
+    MTLResourceOptions _resourceOptions;
+    MTLStorageMode _storageMode;
+    MTLCPUCacheMode _cpuCacheMode;
+    MTLHazardTrackingMode _hazardTrackingMode;
+    uint64_t _resourceID;
+    NSString *_label;
+    BOOL _aliasable;
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner storageBuffer:(ZPUBuffer *)storageBuffer
+                 backingBuffer:(ZPUBuffer *)backingBuffer bufferOffset:(NSUInteger)bufferOffset
+                    dimensions:(MTLTensorExtents *)dimensions strides:(MTLTensorExtents *)strides
+                       dataType:(MTLTensorDataType)dataType usage:(MTLTensorUsage)usage
+                resourceOptions:(MTLResourceOptions)resourceOptions allocatedSize:(NSUInteger)allocatedSize;
+@end
+
 @interface ZPUTexture : NSObject <MTLTexture> {
 @public
     zpu_metal_texture *_zpuTexture;
@@ -1266,6 +1294,141 @@ static BOOL zpu_sparse_axis_to_pixels(NSUInteger origin, NSUInteger size, NSUInt
     return YES;
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+
+typedef struct {
+    NSUInteger rank;
+    NSUInteger dimensions[MTL_TENSOR_MAX_RANK];
+    NSUInteger strides[MTL_TENSOR_MAX_RANK];
+    NSUInteger elementSize;
+    NSUInteger size;
+} ZPUTensorLayout;
+
+static NSUInteger zpu_tensor_element_size(MTLTensorDataType dataType) {
+    switch (dataType) {
+        case MTLTensorDataTypeFloat32:
+        case MTLTensorDataTypeInt32:
+        case MTLTensorDataTypeUInt32:
+            return 4;
+        case MTLTensorDataTypeFloat16:
+        case MTLTensorDataTypeBFloat16:
+        case MTLTensorDataTypeInt16:
+        case MTLTensorDataTypeUInt16:
+            return 2;
+        case MTLTensorDataTypeInt8:
+        case MTLTensorDataTypeUInt8:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static BOOL zpu_tensor_read_extents(MTLTensorExtents *extents, NSUInteger rank, NSUInteger *values,
+                                    BOOL allowZero) {
+    if (extents == nil || values == NULL || extents.rank != rank || rank > MTL_TENSOR_MAX_RANK) return NO;
+    for (NSUInteger index = 0; index < rank; ++index) {
+        const NSInteger value = [extents extentAtDimensionIndex:index];
+        if (value < 0 || (!allowZero && value == 0)) return NO;
+        values[index] = (NSUInteger)value;
+    }
+    return YES;
+}
+
+static MTLTensorExtents *zpu_tensor_make_extents(NSUInteger rank, const NSUInteger *values) {
+    NSInteger signedValues[MTL_TENSOR_MAX_RANK];
+    if (rank > MTL_TENSOR_MAX_RANK || (rank != 0 && values == NULL)) return nil;
+    for (NSUInteger index = 0; index < rank; ++index) {
+        if (values[index] > (NSUInteger)NSIntegerMax) return nil;
+        signedValues[index] = (NSInteger)values[index];
+    }
+    return [[MTLTensorExtents alloc] initWithRank:rank values:rank == 0 ? NULL : signedValues];
+}
+
+static BOOL zpu_tensor_layout_for_descriptor(MTLTensorDescriptor *descriptor, ZPUTensorLayout *layout) {
+    if (descriptor == nil || layout == NULL || descriptor.dimensions == nil ||
+        descriptor.dimensions.rank > MTL_TENSOR_MAX_RANK ||
+        (descriptor.usage & ~((MTLTensorUsageCompute | MTLTensorUsageRender | MTLTensorUsageMachineLearning))) != 0 ||
+        descriptor.usage == 0) return NO;
+    const NSUInteger rank = descriptor.dimensions.rank;
+    const NSUInteger elementSize = zpu_tensor_element_size(descriptor.dataType);
+    if (elementSize == 0 || !zpu_tensor_read_extents(descriptor.dimensions, rank, layout->dimensions, NO)) return NO;
+    layout->rank = rank;
+    layout->elementSize = elementSize;
+    if (descriptor.strides != nil) {
+        if (!zpu_tensor_read_extents(descriptor.strides, rank, layout->strides, NO) ||
+            (rank != 0 && layout->strides[0] != 1)) return NO;
+        for (NSUInteger index = 1; index < rank; ++index) {
+            if (layout->strides[index - 1] > SIZE_MAX / layout->dimensions[index - 1] ||
+                layout->strides[index] < layout->strides[index - 1] * layout->dimensions[index - 1]) return NO;
+        }
+    } else {
+        NSUInteger stride = 1;
+        for (NSUInteger index = 0; index < rank; ++index) {
+            layout->strides[index] = stride;
+            if (index + 1 < rank) {
+                if (stride > SIZE_MAX / layout->dimensions[index]) return NO;
+                stride *= layout->dimensions[index];
+            }
+        }
+    }
+    NSUInteger lastElement = rank == 0 ? 0 : 1;
+    if (rank != 0) {
+        lastElement = 0;
+        for (NSUInteger index = 0; index < rank; ++index) {
+            if (layout->dimensions[index] == 0 || layout->dimensions[index] - 1 > SIZE_MAX / layout->strides[index] ||
+                lastElement > SIZE_MAX - (layout->dimensions[index] - 1) * layout->strides[index]) return NO;
+            lastElement += (layout->dimensions[index] - 1) * layout->strides[index];
+        }
+    }
+    if (lastElement == SIZE_MAX || lastElement + 1 > SIZE_MAX / elementSize) return NO;
+    layout->size = (lastElement + 1) * elementSize;
+    return YES;
+}
+
+static BOOL zpu_tensor_slice_parameters(ZPUTensor *tensor, MTLTensorExtents *sliceOrigin,
+                                        MTLTensorExtents *sliceDimensions, MTLTensorExtents *sourceStrides,
+                                        NSUInteger *origin, NSUInteger *dimensions, NSUInteger *strides,
+                                        NSUInteger *elementCount) {
+    if (tensor == nil || sliceOrigin == nil || sliceDimensions == nil || origin == NULL ||
+        dimensions == NULL || strides == NULL || elementCount == NULL ||
+        !zpu_tensor_read_extents(sliceOrigin, tensor->_dimensions.rank, origin, YES) ||
+        !zpu_tensor_read_extents(sliceDimensions, tensor->_dimensions.rank, dimensions, YES)) return NO;
+    const NSUInteger rank = tensor->_dimensions.rank;
+    NSUInteger tensorDimensions[MTL_TENSOR_MAX_RANK];
+    if (!zpu_tensor_read_extents(tensor->_dimensions, rank, tensorDimensions, NO)) return NO;
+    for (NSUInteger index = 0; index < rank; ++index) {
+        if (origin[index] > tensorDimensions[index] || dimensions[index] > tensorDimensions[index] - origin[index]) return NO;
+    }
+    if (sourceStrides != nil) {
+        if (!zpu_tensor_read_extents(sourceStrides, rank, strides, NO) || (rank != 0 && strides[0] == 0)) return NO;
+        for (NSUInteger index = 1; index < rank; ++index) {
+            if (strides[index - 1] > SIZE_MAX / dimensions[index - 1] ||
+                strides[index] < strides[index - 1] * dimensions[index - 1]) return NO;
+        }
+    } else {
+        NSUInteger stride = 1;
+        for (NSUInteger index = 0; index < rank; ++index) {
+            strides[index] = stride;
+            if (index + 1 < rank) {
+                if (stride > SIZE_MAX / dimensions[index]) return NO;
+                stride *= dimensions[index];
+            }
+        }
+    }
+    NSUInteger count = rank == 0 ? 1 : 1;
+    for (NSUInteger index = 0; index < rank; ++index) {
+        if (dimensions[index] != 0 && count > SIZE_MAX / dimensions[index]) return NO;
+        count *= dimensions[index];
+    }
+    *elementCount = count;
+    return YES;
+}
+
+static ZPUTensor *zpu_create_tensor(ZPUDevice *owner, ZPUBuffer *storageBuffer,
+                                    ZPUBuffer *backingBuffer, NSUInteger bufferOffset,
+                                    MTLTensorDescriptor *descriptor, NSError **error);
+
 @implementation ZPUBuffer
 - (instancetype)initWithOwner:(id)owner buffer:(zpu_metal_buffer *)buffer {
     return [self initWithOwner:owner buffer:buffer heap:nil];
@@ -1334,10 +1497,7 @@ static BOOL zpu_sparse_axis_to_pixels(NSUInteger origin, NSUInteger size, NSUInt
 - (MTLGPUAddress)gpuAddress API_AVAILABLE(macos(13.0), ios(16.0)) { return _resourceID; }
 - (MTLBufferSparseTier)sparseBufferTier API_AVAILABLE(macos(26.0), ios(26.0)) { return MTLBufferSparseTierNone; }
 - (id<MTLTensor>)newTensorWithDescriptor:(MTLTensorDescriptor *)descriptor offset:(NSUInteger)offset error:(NSError **)error API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)descriptor;
-    (void)offset;
-    zpu_set_error(error, @"ZPU CPU Metal has no tensor implementation");
-    return nil;
+    return (id<MTLTensor>)zpu_create_tensor((ZPUDevice *)_owner, self, self, offset, descriptor, error);
 }
 - (kern_return_t)setOwnerWithIdentity:(task_id_token_t)task_id_token API_AVAILABLE(ios(17.4), watchos(10.4), tvos(17.4), macos(14.4)) {
     (void)task_id_token;
@@ -1364,6 +1524,232 @@ static BOOL zpu_sparse_axis_to_pixels(NSUInteger origin, NSUInteger size, NSUInt
     return (id<MTLTexture>)result;
 }
 @end
+
+static ZPUTensor *zpu_create_tensor(ZPUDevice *owner, ZPUBuffer *storageBuffer,
+                                    ZPUBuffer *backingBuffer, NSUInteger bufferOffset,
+                                    MTLTensorDescriptor *descriptor, NSError **error) {
+    ZPUTensorLayout layout;
+    if (owner == nil || storageBuffer == nil || storageBuffer->_owner != owner ||
+        (backingBuffer != nil && backingBuffer != storageBuffer && backingBuffer->_owner != owner) ||
+        !zpu_tensor_layout_for_descriptor(descriptor, &layout) ||
+        bufferOffset > storageBuffer.length || layout.size > storageBuffer.length - bufferOffset ||
+        (backingBuffer != nil && descriptor.storageMode != backingBuffer.storageMode)) {
+        zpu_set_error(error, @"ZPU CPU Metal tensor descriptor or backing range is invalid");
+        return nil;
+    }
+    MTLTensorExtents *dimensions = zpu_tensor_make_extents(layout.rank, layout.dimensions);
+    MTLTensorExtents *strides = zpu_tensor_make_extents(layout.rank, layout.strides);
+    if (dimensions == nil || strides == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal could not represent tensor extents");
+        return nil;
+    }
+    if (error != NULL) *error = nil;
+    return [[ZPUTensor alloc] initWithOwner:owner storageBuffer:storageBuffer
+                              backingBuffer:backingBuffer bufferOffset:bufferOffset
+                                 dimensions:dimensions strides:strides
+                                    dataType:descriptor.dataType usage:descriptor.usage
+                             resourceOptions:descriptor.resourceOptions allocatedSize:layout.size];
+}
+
+static BOOL zpu_tensor_transfer_bytes(ZPUTensor *tensor, MTLTensorExtents *sliceOrigin,
+                                      MTLTensorExtents *sliceDimensions, MTLTensorExtents *strides,
+                                      const void *bytes, BOOL write) {
+    NSUInteger origin[MTL_TENSOR_MAX_RANK];
+    NSUInteger dimensions[MTL_TENSOR_MAX_RANK];
+    NSUInteger sourceStrides[MTL_TENSOR_MAX_RANK];
+    NSUInteger elementCount = 0;
+    if (bytes == NULL || !zpu_tensor_slice_parameters(tensor, sliceOrigin, sliceDimensions, strides,
+                                                       origin, dimensions, sourceStrides, &elementCount)) return NO;
+    if (elementCount == 0) return YES;
+    NSUInteger tensorStrides[MTL_TENSOR_MAX_RANK];
+    const NSUInteger rank = tensor->_dimensions.rank;
+    if (!zpu_tensor_read_extents(tensor->_strides, rank, tensorStrides, NO) ||
+        tensor->_storageBuffer == nil || tensor->_storageBuffer.contents == NULL) return NO;
+    NSUInteger coordinates[MTL_TENSOR_MAX_RANK] = {0};
+    uint8_t *storage = (uint8_t *)tensor->_storageBuffer.contents;
+    for (NSUInteger element = 0; element < elementCount; ++element) {
+        NSUInteger destinationElement = 0;
+        NSUInteger sourceElement = 0;
+        for (NSUInteger dimension = 0; dimension < rank; ++dimension) {
+            if (origin[dimension] > SIZE_MAX / tensorStrides[dimension] ||
+                destinationElement > SIZE_MAX - origin[dimension] * tensorStrides[dimension] ||
+                coordinates[dimension] > SIZE_MAX / tensorStrides[dimension] ||
+                destinationElement > SIZE_MAX - coordinates[dimension] * tensorStrides[dimension] ||
+                coordinates[dimension] > SIZE_MAX / sourceStrides[dimension] ||
+                sourceElement > SIZE_MAX - coordinates[dimension] * sourceStrides[dimension]) return NO;
+            destinationElement += origin[dimension] * tensorStrides[dimension];
+            destinationElement += coordinates[dimension] * tensorStrides[dimension];
+            sourceElement += coordinates[dimension] * sourceStrides[dimension];
+        }
+        if (destinationElement > SIZE_MAX / tensor->_elementSize ||
+            sourceElement > SIZE_MAX / tensor->_elementSize ||
+            tensor->_bufferOffset > SIZE_MAX - destinationElement * tensor->_elementSize) return NO;
+        const NSUInteger destinationByte = tensor->_bufferOffset + destinationElement * tensor->_elementSize;
+        const NSUInteger sourceByte = sourceElement * tensor->_elementSize;
+        if (write) {
+            memmove(storage + destinationByte, (const uint8_t *)bytes + sourceByte, tensor->_elementSize);
+        } else {
+            memmove((uint8_t *)bytes + sourceByte, storage + destinationByte, tensor->_elementSize);
+        }
+        for (NSUInteger dimension = 0; dimension < rank; ++dimension) {
+            coordinates[dimension] += 1;
+            if (coordinates[dimension] < dimensions[dimension]) break;
+            coordinates[dimension] = 0;
+        }
+    }
+    return YES;
+}
+
+typedef int (*ZPUTensorBufferCopyFunction)(void *encoder, zpu_metal_buffer *source, size_t sourceOffset,
+                                           zpu_metal_buffer *destination, size_t destinationOffset, size_t length);
+
+static int zpu_tensor_blit_copy(void *encoder, zpu_metal_buffer *source, size_t sourceOffset,
+                                zpu_metal_buffer *destination, size_t destinationOffset, size_t length) {
+    return zpu_metal_blit_encoder_copy_buffer((zpu_metal_blit_encoder *)encoder, source, sourceOffset,
+                                              destination, destinationOffset, length);
+}
+
+static int zpu_tensor_compute_copy(void *encoder, zpu_metal_buffer *source, size_t sourceOffset,
+                                   zpu_metal_buffer *destination, size_t destinationOffset, size_t length) {
+    return zpu_metal_compute_encoder_copy_buffer((zpu_metal_compute_encoder *)encoder, source, sourceOffset,
+                                                 destination, destinationOffset, length);
+}
+
+static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *sourceOrigin,
+                                         MTLTensorExtents *sourceDimensions, ZPUTensor *destination,
+                                         MTLTensorExtents *destinationOrigin, MTLTensorExtents *destinationDimensions,
+                                         void *encoder, BOOL computeEncoder) {
+    if (source == nil || destination == nil || source->_dataType != destination->_dataType ||
+        source->_elementSize == 0 || destination->_elementSize != source->_elementSize ||
+        sourceDimensions == nil || sourceOrigin == nil || destinationOrigin == nil || destinationDimensions == nil ||
+        sourceDimensions.rank != source->_dimensions.rank || destinationOrigin.rank != destination->_dimensions.rank ||
+        destinationDimensions.rank != destination->_dimensions.rank) return NO;
+    const NSUInteger rank = sourceDimensions.rank;
+    NSUInteger dimensions[MTL_TENSOR_MAX_RANK];
+    if (!zpu_tensor_read_extents(sourceDimensions, rank, dimensions, YES)) return NO;
+    NSUInteger destinationDimensionsValues[MTL_TENSOR_MAX_RANK];
+    if (!zpu_tensor_read_extents(destinationDimensions, rank, destinationDimensionsValues, YES) ||
+        memcmp(dimensions, destinationDimensionsValues, rank * sizeof(NSUInteger)) != 0) return NO;
+    NSUInteger sourceOriginValues[MTL_TENSOR_MAX_RANK];
+    NSUInteger sourceSliceDimensions[MTL_TENSOR_MAX_RANK];
+    NSUInteger sourceStrides[MTL_TENSOR_MAX_RANK];
+    NSUInteger sourceCount = 0;
+    if (!zpu_tensor_slice_parameters(source, sourceOrigin, sourceDimensions, source->_strides,
+                                      sourceOriginValues, sourceSliceDimensions, sourceStrides, &sourceCount)) return NO;
+    NSUInteger destinationOriginValues[MTL_TENSOR_MAX_RANK];
+    NSUInteger destinationSliceDimensions[MTL_TENSOR_MAX_RANK];
+    NSUInteger destinationStrides[MTL_TENSOR_MAX_RANK];
+    NSUInteger destinationCount = 0;
+    if (!zpu_tensor_slice_parameters(destination, destinationOrigin, sourceDimensions, destination->_strides,
+                                      destinationOriginValues, destinationSliceDimensions, destinationStrides, &destinationCount) ||
+        sourceCount != destinationCount || memcmp(sourceSliceDimensions, destinationSliceDimensions,
+                                                   rank * sizeof(NSUInteger)) != 0) return NO;
+    if (sourceCount == 0 || encoder == NULL || source->_storageBuffer == nil || destination->_storageBuffer == nil) return sourceCount == 0;
+    ZPUTensorBufferCopyFunction copy = computeEncoder ? zpu_tensor_compute_copy : zpu_tensor_blit_copy;
+    NSUInteger sourceTensorStrides[MTL_TENSOR_MAX_RANK];
+    NSUInteger destinationTensorStrides[MTL_TENSOR_MAX_RANK];
+    if (!zpu_tensor_read_extents(source->_strides, rank, sourceTensorStrides, NO) ||
+        !zpu_tensor_read_extents(destination->_strides, rank, destinationTensorStrides, NO)) return NO;
+    NSUInteger coordinates[MTL_TENSOR_MAX_RANK] = {0};
+    for (NSUInteger element = 0; element < sourceCount; ++element) {
+        NSUInteger sourceElement = 0;
+        NSUInteger destinationElement = 0;
+        for (NSUInteger dimension = 0; dimension < rank; ++dimension) {
+            if (sourceOriginValues[dimension] > SIZE_MAX / sourceTensorStrides[dimension] ||
+                sourceElement > SIZE_MAX - sourceOriginValues[dimension] * sourceTensorStrides[dimension] ||
+                coordinates[dimension] > SIZE_MAX / sourceStrides[dimension] ||
+                sourceElement > SIZE_MAX - coordinates[dimension] * sourceStrides[dimension] ||
+                destinationOriginValues[dimension] > SIZE_MAX / destinationTensorStrides[dimension] ||
+                destinationElement > SIZE_MAX - destinationOriginValues[dimension] * destinationTensorStrides[dimension] ||
+                coordinates[dimension] > SIZE_MAX / destinationStrides[dimension] ||
+                destinationElement > SIZE_MAX - coordinates[dimension] * destinationStrides[dimension]) return NO;
+            sourceElement += sourceOriginValues[dimension] * sourceTensorStrides[dimension];
+            sourceElement += coordinates[dimension] * sourceStrides[dimension];
+            destinationElement += destinationOriginValues[dimension] * destinationTensorStrides[dimension];
+            destinationElement += coordinates[dimension] * destinationStrides[dimension];
+        }
+        if (sourceElement > SIZE_MAX / source->_elementSize || destinationElement > SIZE_MAX / destination->_elementSize ||
+            source->_bufferOffset > SIZE_MAX - sourceElement * source->_elementSize ||
+            destination->_bufferOffset > SIZE_MAX - destinationElement * destination->_elementSize ||
+            copy(encoder, source->_storageBuffer->_zpuBuffer,
+                 source->_bufferOffset + sourceElement * source->_elementSize,
+                 destination->_storageBuffer->_zpuBuffer,
+                 destination->_bufferOffset + destinationElement * destination->_elementSize,
+                 source->_elementSize) != ZPU_METAL_OK) return NO;
+        for (NSUInteger dimension = 0; dimension < rank; ++dimension) {
+            coordinates[dimension] += 1;
+            if (coordinates[dimension] < dimensions[dimension]) break;
+            coordinates[dimension] = 0;
+        }
+    }
+    return YES;
+}
+
+@implementation ZPUTensor
+- (instancetype)initWithOwner:(ZPUDevice *)owner storageBuffer:(ZPUBuffer *)storageBuffer
+                 backingBuffer:(ZPUBuffer *)backingBuffer bufferOffset:(NSUInteger)bufferOffset
+                    dimensions:(MTLTensorExtents *)dimensions strides:(MTLTensorExtents *)strides
+                       dataType:(MTLTensorDataType)dataType usage:(MTLTensorUsage)usage
+                resourceOptions:(MTLResourceOptions)resourceOptions allocatedSize:(NSUInteger)allocatedSize {
+    if ((self = [super init])) {
+        _owner = owner;
+        _storageBuffer = storageBuffer;
+        _backingBuffer = backingBuffer;
+        _bufferOffset = bufferOffset;
+        _allocatedSize = allocatedSize;
+        _elementSize = zpu_tensor_element_size(dataType);
+        _dimensions = [dimensions copy];
+        _strides = [strides copy];
+        _dataType = dataType;
+        _usage = usage;
+        _resourceOptions = resourceOptions;
+        _storageMode = (MTLStorageMode)((resourceOptions & MTLResourceStorageModeMask) >> MTLResourceStorageModeShift);
+        _cpuCacheMode = (MTLCPUCacheMode)((resourceOptions & MTLResourceCPUCacheModeMask) >> MTLResourceCPUCacheModeShift);
+        _hazardTrackingMode = (MTLHazardTrackingMode)((resourceOptions & MTLResourceHazardTrackingModeMask) >> MTLResourceHazardTrackingModeShift);
+        _resourceID = zpu_register_resource(self);
+    }
+    return self;
+}
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
+- (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
+- (MTLCPUCacheMode)cpuCacheMode { return _cpuCacheMode; }
+- (MTLStorageMode)storageMode { return _storageMode; }
+- (MTLHazardTrackingMode)hazardTrackingMode {
+    return zpu_effective_hazard_tracking_mode(_hazardTrackingMode, MTLHazardTrackingModeTracked);
+}
+- (MTLResourceOptions)resourceOptions { return _resourceOptions; }
+- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return state; }
+- (id<MTLHeap>)heap { return nil; }
+- (NSUInteger)heapOffset { return 0; }
+- (NSUInteger)allocatedSize { return _allocatedSize; }
+- (BOOL)isAliasable { return _aliasable; }
+- (void)makeAliasable { _aliasable = YES; }
+- (id<MTLResource>)rootResource { return (id<MTLResource>)self; }
+- (MTLResourceID)gpuResourceID API_AVAILABLE(macos(13.0), ios(16.0)) { return (MTLResourceID){_resourceID}; }
+- (kern_return_t)setOwnerWithIdentity:(task_id_token_t)task_id_token API_AVAILABLE(ios(17.4), watchos(10.4), tvos(17.4), macos(14.4)) {
+    (void)task_id_token;
+    return KERN_SUCCESS;
+}
+- (id<MTLBuffer>)buffer { return (id<MTLBuffer>)_backingBuffer; }
+- (NSUInteger)bufferOffset { return _backingBuffer == nil ? 0 : _bufferOffset; }
+- (MTLTensorExtents *)strides { return _backingBuffer == nil ? nil : _strides; }
+- (MTLTensorExtents *)dimensions { return _dimensions; }
+- (MTLTensorDataType)dataType { return _dataType; }
+- (MTLTensorUsage)usage { return _usage; }
+- (void)replaceSliceOrigin:(MTLTensorExtents *)sliceOrigin
+           sliceDimensions:(MTLTensorExtents *)sliceDimensions
+                 withBytes:(const void *)bytes
+                   strides:(MTLTensorExtents *)strides {
+    (void)zpu_tensor_transfer_bytes(self, sliceOrigin, sliceDimensions, strides, bytes, YES);
+}
+- (void)getBytes:(void *)bytes strides:(MTLTensorExtents *)strides
+ fromSliceOrigin:(MTLTensorExtents *)sliceOrigin sliceDimensions:(MTLTensorExtents *)sliceDimensions {
+    (void)zpu_tensor_transfer_bytes(self, sliceOrigin, sliceDimensions, strides, bytes, NO);
+}
+@end
+
+#pragma clang diagnostic pop
 
 @implementation ZPUTexture
 - (instancetype)initWithOwner:(id)owner texture:(zpu_metal_texture *)texture type:(MTLTextureType)type pixelFormat:(MTLPixelFormat)pixelFormat {
@@ -3113,13 +3499,24 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
     return (MTLSizeAndAlign){0, 0};
 }
 - (MTLSizeAndAlign)tensorSizeAndAlignWithDescriptor:(MTLTensorDescriptor *)descriptor API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)descriptor;
-    return (MTLSizeAndAlign){0, 0};
+    ZPUTensorLayout layout;
+    return zpu_tensor_layout_for_descriptor(descriptor, &layout) ?
+        (MTLSizeAndAlign){layout.size, 4} : (MTLSizeAndAlign){0, 0};
 }
 - (id<MTLTensor>)newTensorWithDescriptor:(MTLTensorDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)descriptor;
-    zpu_set_error(error, @"ZPU CPU Metal has no tensor implementation");
-    return nil;
+    ZPUTensorLayout layout;
+    if (!zpu_tensor_layout_for_descriptor(descriptor, &layout)) {
+        zpu_set_error(error, @"ZPU CPU Metal tensor descriptor is unsupported or invalid");
+        return nil;
+    }
+    zpu_metal_buffer *buffer = zpu_metal_device_new_buffer(_zpuDevice, layout.size, NULL);
+    if (buffer == NULL) {
+        zpu_set_error(error, @"ZPU CPU Metal could not allocate tensor storage");
+        return nil;
+    }
+    ZPUBuffer *storageBuffer = [[ZPUBuffer alloc] initWithOwner:self buffer:buffer];
+    [storageBuffer applyResourceOptions:descriptor.resourceOptions];
+    return (id<MTLTensor>)zpu_create_tensor(self, storageBuffer, nil, 0, descriptor, error);
 }
 - (id<MTLFunctionHandle>)functionHandleWithFunction:(id<MTLFunction>)function API_AVAILABLE(macos(26.0), ios(26.0)) {
     ZPUCPUFunction *cpuFunction = (ZPUCPUFunction *)function;
@@ -5405,7 +5802,19 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     if (options != MTLBlitOptionNone) { [_owner markError]; return; }
     [self copyFromBuffer:sourceBuffer sourceOffset:sourceOffset sourceBytesPerRow:sourceBytesPerRow sourceBytesPerImage:sourceBytesPerImage sourceSize:sourceSize toTexture:destinationTexture destinationSlice:destinationSlice destinationLevel:destinationLevel destinationOrigin:destinationOrigin];
 }
-- (void)copyFromTensor:(id<MTLTensor>)sourceTensor sourceOrigin:(MTLTensorExtents *)sourceOrigin sourceDimensions:(MTLTensorExtents *)sourceDimensions toTensor:(id<MTLTensor>)destinationTensor destinationOrigin:(MTLTensorExtents *)destinationOrigin destinationDimensions:(MTLTensorExtents *)destinationDimensions { (void)sourceTensor; (void)sourceOrigin; (void)sourceDimensions; (void)destinationTensor; (void)destinationOrigin; (void)destinationDimensions; [_owner markError]; }
+- (void)copyFromTensor:(id<MTLTensor>)sourceTensor sourceOrigin:(MTLTensorExtents *)sourceOrigin sourceDimensions:(MTLTensorExtents *)sourceDimensions toTensor:(id<MTLTensor>)destinationTensor destinationOrigin:(MTLTensorExtents *)destinationOrigin destinationDimensions:(MTLTensorExtents *)destinationDimensions {
+    ZPUTensor *source = (ZPUTensor *)sourceTensor;
+    ZPUTensor *destination = (ZPUTensor *)destinationTensor;
+    if (![source isKindOfClass:[ZPUTensor class]] || ![destination isKindOfClass:[ZPUTensor class]] ||
+        source->_owner != [_owner device] || destination->_owner != [_owner device] ||
+        !zpu_tensor_encode_copy_slice(source, sourceOrigin, sourceDimensions, destination, destinationOrigin,
+                                       destinationDimensions, _legacy->_zpuEncoder, NO)) {
+        [_owner markError];
+        return;
+    }
+    [_owner->_legacyBuffer retainResource:source];
+    [_owner->_legacyBuffer retainResource:destination];
+}
 - (void)generateMipmapsForTexture:(id<MTLTexture>)texture {
     ZPUTexture *zpuTexture = (ZPUTexture *)texture;
     if (![zpuTexture isKindOfClass:[ZPUTexture class]] ||
@@ -6850,13 +7259,17 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     [_owner markError];
 }
 - (void)copyFromTensor:(id<MTLTensor>)sourceTensor sourceOrigin:(MTLTensorExtents *)sourceOrigin sourceDimensions:(MTLTensorExtents *)sourceDimensions toTensor:(id<MTLTensor>)destinationTensor destinationOrigin:(MTLTensorExtents *)destinationOrigin destinationDimensions:(MTLTensorExtents *)destinationDimensions API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)sourceTensor;
-    (void)sourceOrigin;
-    (void)sourceDimensions;
-    (void)destinationTensor;
-    (void)destinationOrigin;
-    (void)destinationDimensions;
-    [_owner markError];
+    ZPUTensor *source = (ZPUTensor *)sourceTensor;
+    ZPUTensor *destination = (ZPUTensor *)destinationTensor;
+    if (![source isKindOfClass:[ZPUTensor class]] || ![destination isKindOfClass:[ZPUTensor class]] ||
+        source->_owner != [_owner device] || destination->_owner != [_owner device] ||
+        !zpu_tensor_encode_copy_slice(source, sourceOrigin, sourceDimensions, destination, destinationOrigin,
+                                       destinationDimensions, _zpuEncoder, NO)) {
+        [_owner markError];
+        return;
+    }
+    [_owner retainResource:source];
+    [_owner retainResource:destination];
 }
 - (NSString *)label { return nil; }
 - (void)setLabel:(NSString *)label { (void)label; }

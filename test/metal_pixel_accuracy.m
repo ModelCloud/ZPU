@@ -642,6 +642,214 @@ int main(void) {
         id<MTLCommandQueue> adapter_queue = [adapter_device newCommandQueue];
         NSError *adapter_pipeline_error = nil;
 
+        /* MTLTensor resources are CPU-owned too. Exercise both the directly
+         * allocated form and a strided buffer view; the optional native block
+         * is only an oracle probe and is allowed to be unavailable on a host
+         * whose Metal runtime exposes the SDK declarations without tensor
+         * execution support. */
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            const NSInteger tensor_dimension_values[] = {3, 2};
+            const NSInteger tensor_packed_stride_values[] = {1, 3};
+            const NSInteger tensor_buffer_stride_values[] = {1, 4};
+            MTLTensorExtents *tensor_dimensions =
+                [[MTLTensorExtents alloc] initWithRank:2 values:tensor_dimension_values];
+            MTLTensorExtents *tensor_packed_strides =
+                [[MTLTensorExtents alloc] initWithRank:2 values:tensor_packed_stride_values];
+            MTLTensorExtents *tensor_buffer_strides =
+                [[MTLTensorExtents alloc] initWithRank:2 values:tensor_buffer_stride_values];
+            MTLTensorDescriptor *tensor_descriptor = [MTLTensorDescriptor new];
+            tensor_descriptor.dimensions = tensor_dimensions;
+            tensor_descriptor.dataType = MTLTensorDataTypeUInt8;
+            tensor_descriptor.usage = MTLTensorUsageCompute | MTLTensorUsageRender;
+            tensor_descriptor.resourceOptions = MTLResourceStorageModeShared;
+            tensor_descriptor.storageMode = MTLStorageModeShared;
+            MTLSizeAndAlign adapter_tensor_size_align =
+                [adapter_device tensorSizeAndAlignWithDescriptor:tensor_descriptor];
+            id<MTLTensor> adapter_tensor =
+                [adapter_device newTensorWithDescriptor:tensor_descriptor error:&adapter_pipeline_error];
+            const uint8_t tensor_initial_values[] = {10, 11, 12, 20, 21, 22};
+            uint8_t adapter_tensor_values[sizeof(tensor_initial_values)] = {0};
+            if (adapter_tensor == nil || adapter_tensor_size_align.size != sizeof(tensor_initial_values) ||
+                adapter_tensor_size_align.align == 0 || adapter_tensor.buffer != nil ||
+                adapter_tensor.bufferOffset != 0 || adapter_tensor.strides != nil ||
+                adapter_tensor.dimensions.rank != 2 ||
+                [adapter_tensor.dimensions extentAtDimensionIndex:0] != 3 ||
+                [adapter_tensor.dimensions extentAtDimensionIndex:1] != 2 ||
+                adapter_tensor.dataType != MTLTensorDataTypeUInt8 ||
+                adapter_tensor.usage != tensor_descriptor.usage) {
+                fail_with_error("CPU tensor metadata allocation failed", adapter_pipeline_error);
+                return 105;
+            }
+            [adapter_tensor replaceSliceOrigin:
+                                  [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                             sliceDimensions:tensor_dimensions
+                                   withBytes:tensor_initial_values
+                                     strides:tensor_packed_strides];
+            [adapter_tensor getBytes:adapter_tensor_values
+                             strides:tensor_packed_strides
+                    fromSliceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                     sliceDimensions:tensor_dimensions];
+            if (memcmp(adapter_tensor_values, tensor_initial_values, sizeof(tensor_initial_values)) != 0) {
+                fprintf(stderr, "metal-pixel: standalone tensor strided transfer mismatch\n");
+                return 106;
+            }
+
+            if (@available(macOS 26.4, iOS 26.4, *)) {
+                MTLTensorDescriptor *unsupported_tensor_descriptor = [tensor_descriptor copy];
+                unsupported_tensor_descriptor.dataType = MTLTensorDataTypeInt4;
+                NSError *unsupported_tensor_error = nil;
+                id<MTLTensor> unsupported_tensor =
+                    [adapter_device newTensorWithDescriptor:unsupported_tensor_descriptor
+                                                       error:&unsupported_tensor_error];
+                if (unsupported_tensor != nil || unsupported_tensor_error == nil) {
+                    fail_with_error("unsupported sub-byte tensor was not rejected", unsupported_tensor_error);
+                    return 111;
+                }
+            }
+
+            BOOL native_tensor_oracle_ok = NO;
+            id<MTLTensor> native_tensor = nil;
+            @try {
+                native_tensor = [device newTensorWithDescriptor:tensor_descriptor error:&error];
+                if (native_tensor != nil) {
+                    uint8_t native_tensor_values[sizeof(tensor_initial_values)] = {0};
+                    [native_tensor replaceSliceOrigin:
+                                      [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                 sliceDimensions:tensor_dimensions
+                                       withBytes:tensor_initial_values
+                                         strides:tensor_packed_strides];
+                    [native_tensor getBytes:native_tensor_values
+                                     strides:tensor_packed_strides
+                            fromSliceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                             sliceDimensions:tensor_dimensions];
+                    native_tensor_oracle_ok = memcmp(native_tensor_values, adapter_tensor_values,
+                                                     sizeof(native_tensor_values)) == 0;
+                }
+            } @catch (NSException *exception) {
+                (void)exception;
+                native_tensor_oracle_ok = NO;
+            }
+            if (native_tensor != nil && !native_tensor_oracle_ok) {
+                fprintf(stderr, "metal-pixel: native tensor transfer oracle mismatch\n");
+                return 107;
+            }
+
+            MTLTensorDescriptor *tensor_buffer_descriptor = [tensor_descriptor copy];
+            tensor_buffer_descriptor.strides = tensor_buffer_strides;
+            id<MTLBuffer> adapter_tensor_source_buffer =
+                [adapter_device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> adapter_tensor_destination_buffer =
+                [adapter_device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+            id<MTLTensor> adapter_source_tensor =
+                [adapter_tensor_source_buffer newTensorWithDescriptor:tensor_buffer_descriptor
+                                                                  offset:1 error:&adapter_pipeline_error];
+            id<MTLTensor> adapter_destination_tensor =
+                [adapter_tensor_destination_buffer newTensorWithDescriptor:tensor_buffer_descriptor
+                                                                       offset:2 error:&adapter_pipeline_error];
+            const NSInteger tensor_zero_values[] = {0, 0};
+            MTLTensorExtents *tensor_zero =
+                [[MTLTensorExtents alloc] initWithRank:2 values:tensor_zero_values];
+            const uint8_t tensor_committed_values[] = {30, 31, 32, 40, 41, 42};
+            uint8_t adapter_tensor_copy_values[sizeof(tensor_committed_values)] = {0};
+            id<MTLCommandBuffer> adapter_tensor_command_buffer = [adapter_queue commandBuffer];
+            id<MTLBlitCommandEncoder> adapter_tensor_blit_encoder =
+                [adapter_tensor_command_buffer blitCommandEncoder];
+            if (adapter_source_tensor == nil || adapter_destination_tensor == nil ||
+                adapter_source_tensor.buffer != adapter_tensor_source_buffer ||
+                adapter_destination_tensor.buffer != adapter_tensor_destination_buffer ||
+                adapter_source_tensor.bufferOffset != 1 || adapter_destination_tensor.bufferOffset != 2 ||
+                [adapter_source_tensor.strides extentAtDimensionIndex:0] != 1 ||
+                [adapter_source_tensor.strides extentAtDimensionIndex:1] != 4 ||
+                adapter_tensor_blit_encoder == nil) {
+                fail_with_error("buffer-backed CPU tensor allocation failed", adapter_pipeline_error);
+                return 108;
+            }
+            [adapter_source_tensor replaceSliceOrigin:tensor_zero
+                                       sliceDimensions:tensor_dimensions
+                                             withBytes:tensor_initial_values
+                                               strides:tensor_packed_strides];
+            [adapter_tensor_blit_encoder copyFromTensor:adapter_source_tensor
+                                           sourceOrigin:tensor_zero
+                                       sourceDimensions:tensor_dimensions
+                                               toTensor:adapter_destination_tensor
+                                      destinationOrigin:tensor_zero
+                                  destinationDimensions:tensor_dimensions];
+            [adapter_tensor_blit_encoder endEncoding];
+            /* This mutation occurs after encoding and therefore proves the
+             * tensor copy is deferred with the surrounding ZPU command. */
+            [adapter_source_tensor replaceSliceOrigin:tensor_zero
+                                       sliceDimensions:tensor_dimensions
+                                             withBytes:tensor_committed_values
+                                               strides:tensor_packed_strides];
+            [adapter_tensor_command_buffer commit];
+            [adapter_tensor_command_buffer waitUntilCompleted];
+            [adapter_destination_tensor getBytes:adapter_tensor_copy_values
+                                         strides:tensor_packed_strides
+                                fromSliceOrigin:tensor_zero
+                                 sliceDimensions:tensor_dimensions];
+            if (adapter_tensor_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                memcmp(adapter_tensor_copy_values, tensor_committed_values,
+                       sizeof(tensor_committed_values)) != 0) {
+                fail_with_error("deferred CPU tensor copy failed", adapter_pipeline_error);
+                return 109;
+            }
+
+            BOOL native_tensor_copy_oracle_ok = NO;
+            id<MTLTensor> native_source_tensor = nil;
+            id<MTLTensor> native_destination_tensor = nil;
+            @try {
+                id<MTLBuffer> native_tensor_source_buffer =
+                    [device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+                id<MTLBuffer> native_tensor_destination_buffer =
+                    [device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+                native_source_tensor =
+                    [native_tensor_source_buffer newTensorWithDescriptor:tensor_buffer_descriptor
+                                                                     offset:1 error:&error];
+                native_destination_tensor =
+                    [native_tensor_destination_buffer newTensorWithDescriptor:tensor_buffer_descriptor
+                                                                          offset:2 error:&error];
+                if (native_source_tensor != nil && native_destination_tensor != nil) {
+                    [native_source_tensor replaceSliceOrigin:tensor_zero
+                                               sliceDimensions:tensor_dimensions
+                                                     withBytes:tensor_initial_values
+                                                       strides:tensor_packed_strides];
+                    id<MTLCommandBuffer> native_tensor_command_buffer = [queue commandBuffer];
+                    id<MTLBlitCommandEncoder> native_tensor_blit_encoder =
+                        [native_tensor_command_buffer blitCommandEncoder];
+                    [native_tensor_blit_encoder copyFromTensor:native_source_tensor
+                                                   sourceOrigin:tensor_zero
+                                               sourceDimensions:tensor_dimensions
+                                                       toTensor:native_destination_tensor
+                                              destinationOrigin:tensor_zero
+                                          destinationDimensions:tensor_dimensions];
+                    [native_tensor_blit_encoder endEncoding];
+                    [native_source_tensor replaceSliceOrigin:tensor_zero
+                                               sliceDimensions:tensor_dimensions
+                                                     withBytes:tensor_committed_values
+                                                       strides:tensor_packed_strides];
+                    [native_tensor_command_buffer commit];
+                    [native_tensor_command_buffer waitUntilCompleted];
+                    uint8_t native_tensor_copy_values[sizeof(tensor_committed_values)] = {0};
+                    [native_destination_tensor getBytes:native_tensor_copy_values
+                                                 strides:tensor_packed_strides
+                                        fromSliceOrigin:tensor_zero
+                                         sliceDimensions:tensor_dimensions];
+                    native_tensor_copy_oracle_ok =
+                        native_tensor_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                        memcmp(native_tensor_copy_values, adapter_tensor_copy_values,
+                               sizeof(native_tensor_copy_values)) == 0;
+                }
+            } @catch (NSException *exception) {
+                (void)exception;
+                native_tensor_copy_oracle_ok = NO;
+            }
+            if (native_source_tensor != nil && native_destination_tensor != nil &&
+                !native_tensor_copy_oracle_ok) {
+                fprintf(stderr, "metal-pixel: native tensor copy oracle mismatch\n");
+                return 110;
+            }
+        }
+
         /* Float color attachments use the same CPU raster path as normalized
          * targets, but their stored representation must remain native Metal's
          * R32Float or RGBA16Float bytes rather than an RGBA8 conversion. */
@@ -6569,7 +6777,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, visibility results, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, visibility results, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }
