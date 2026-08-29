@@ -90,8 +90,8 @@ triangle path:
   ZPU buffers. Unsupported hardware-only counters remain unavailable rather
   than being reported as fabricated statistics
 - CPU library metadata can discover the two registered kernel names from
-  source text and create ZPU-owned `MTLFunction` descriptors; unsupported
-  arbitrary MSL, file/data libraries, and stitched libraries fail closed
+  source text, UTF-8 file/URL/data inputs, and the default bundle query;
+  unsupported arbitrary MSL and stitched libraries fail closed
 - `newDefaultLibrary` returns the same CPU metadata library for the registered
   ZPU kernels; it does not load or compile an Apple `.metallib`
 - CPU binary archives persist and reload deterministic metadata for registered
