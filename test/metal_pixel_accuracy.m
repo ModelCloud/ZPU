@@ -954,6 +954,91 @@ int main(void) {
             return 77;
         }
 
+        id<MTLTexture> native_array_mipmap_texture = [device newTextureWithDescriptor:array_descriptor];
+        id<MTLTexture> adapter_array_mipmap_texture = [adapter_device newTextureWithDescriptor:array_descriptor];
+        uint8_t array_mipmap_base[2][4 * 4 * 4];
+        for (NSUInteger slice = 0; slice < 2; ++slice) {
+            for (NSUInteger index = 0; index < sizeof(array_mipmap_base[slice]); ++index) {
+                array_mipmap_base[slice][index] = (uint8_t)((index * 37u + slice * 61u + 11u) & 0xffu);
+            }
+            [native_array_mipmap_texture replaceRegion:MTLRegionMake2D(0, 0, 4, 4)
+                                          mipmapLevel:0
+                                                slice:slice
+                                            withBytes:array_mipmap_base[slice]
+                                          bytesPerRow:4 * 4
+                                        bytesPerImage:4 * 4 * 4];
+            [adapter_array_mipmap_texture replaceRegion:MTLRegionMake2D(0, 0, 4, 4)
+                                           mipmapLevel:0
+                                                 slice:slice
+                                             withBytes:array_mipmap_base[slice]
+                                           bytesPerRow:4 * 4
+                                         bytesPerImage:4 * 4 * 4];
+        }
+        id<MTLCommandBuffer> native_array_mipmap_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> native_array_mipmap_blit = [native_array_mipmap_command_buffer blitCommandEncoder];
+        [native_array_mipmap_blit generateMipmapsForTexture:native_array_mipmap_texture];
+        [native_array_mipmap_blit endEncoding];
+        [native_array_mipmap_command_buffer commit];
+        [native_array_mipmap_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> adapter_array_mipmap_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_array_mipmap_blit = [adapter_array_mipmap_command_buffer blitCommandEncoder];
+        [adapter_array_mipmap_blit generateMipmapsForTexture:adapter_array_mipmap_texture];
+        [adapter_array_mipmap_blit endEncoding];
+        uint8_t adapter_array_deferred_mip_level_one[2][2 * 2 * 4];
+        for (NSUInteger slice = 0; slice < 2; ++slice) {
+            [adapter_array_mipmap_texture getBytes:adapter_array_deferred_mip_level_one[slice]
+                                      bytesPerRow:2 * 4
+                                    bytesPerImage:2 * 2 * 4
+                                     fromRegion:MTLRegionMake3D(0, 0, 0, 2, 2, 1)
+                                    mipmapLevel:1
+                                           slice:slice];
+        }
+        [adapter_array_mipmap_command_buffer commit];
+        [adapter_array_mipmap_command_buffer waitUntilCompleted];
+        uint8_t native_array_mip_level_one[2][2 * 2 * 4];
+        uint8_t adapter_array_mip_level_one[2][2 * 2 * 4];
+        uint8_t native_array_mip_level_two[2][4];
+        uint8_t adapter_array_mip_level_two[2][4];
+        for (NSUInteger slice = 0; slice < 2; ++slice) {
+            [native_array_mipmap_texture getBytes:native_array_mip_level_one[slice]
+                                     bytesPerRow:2 * 4
+                                   bytesPerImage:2 * 2 * 4
+                                    fromRegion:MTLRegionMake3D(0, 0, 0, 2, 2, 1)
+                                   mipmapLevel:1
+                                          slice:slice];
+            [adapter_array_mipmap_texture getBytes:adapter_array_mip_level_one[slice]
+                                      bytesPerRow:2 * 4
+                                    bytesPerImage:2 * 2 * 4
+                                     fromRegion:MTLRegionMake3D(0, 0, 0, 2, 2, 1)
+                                    mipmapLevel:1
+                                           slice:slice];
+            [native_array_mipmap_texture getBytes:native_array_mip_level_two[slice]
+                                     bytesPerRow:4
+                                   bytesPerImage:4
+                                    fromRegion:MTLRegionMake3D(0, 0, 0, 1, 1, 1)
+                                   mipmapLevel:2
+                                          slice:slice];
+            [adapter_array_mipmap_texture getBytes:adapter_array_mip_level_two[slice]
+                                      bytesPerRow:4
+                                    bytesPerImage:4
+                                     fromRegion:MTLRegionMake3D(0, 0, 0, 1, 1, 1)
+                                    mipmapLevel:2
+                                           slice:slice];
+        }
+        BOOL array_mipmap_exact = native_array_mipmap_texture != nil && adapter_array_mipmap_texture != nil &&
+            native_array_mipmap_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_array_mipmap_command_buffer.status == MTLCommandBufferStatusCompleted;
+        for (NSUInteger slice = 0; slice < 2; ++slice) {
+            array_mipmap_exact = array_mipmap_exact &&
+                memcmp(adapter_array_deferred_mip_level_one[slice], (const uint8_t[2 * 2 * 4]){0}, 2 * 2 * 4) == 0 &&
+                memcmp(native_array_mip_level_one[slice], adapter_array_mip_level_one[slice], 2 * 2 * 4) == 0 &&
+                memcmp(native_array_mip_level_two[slice], adapter_array_mip_level_two[slice], 4) == 0;
+        }
+        if (!array_mipmap_exact) {
+            fprintf(stderr, "metal-pixel: 2D-array mipmap generation exactness failed\n");
+            return 78;
+        }
+
         /* Library/function discovery is also CPU metadata. The source text
          * is inspected only for registered ZPU kernel names; it is never sent
          * to Apple's compiler by the adapter. */
