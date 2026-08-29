@@ -2179,7 +2179,8 @@ static NSUInteger zpu_sparse_tail_payload_bytes(MTLTextureType textureType, NSUI
 static NSUInteger zpu_sparse_tail_bytes(NSInteger pageSize, MTLTextureType textureType,
                                         NSUInteger width, NSUInteger height, NSUInteger depth,
                                         NSUInteger firstMipmapInTail, NSUInteger mipmapLevelCount,
-                                        MTLTextureUsage usage, NSUInteger bytesPerPixel) {
+                                        MTLTextureUsage usage, NSUInteger bytesPerPixel,
+                                        MTLSize tileSize) {
     const NSUInteger pageBytes = zpu_sparse_page_bytes(pageSize);
     if (pageBytes == 0 || firstMipmapInTail >= mipmapLevelCount) return 0;
     const NSUInteger payloadBytes = zpu_sparse_tail_payload_bytes(textureType, width, height, depth,
@@ -2187,15 +2188,46 @@ static NSUInteger zpu_sparse_tail_bytes(NSInteger pageSize, MTLTextureType textu
                                                                    bytesPerPixel);
     if (payloadBytes == 0 || payloadBytes > SIZE_MAX - (pageBytes - 1)) return 0;
     NSUInteger pageCount = (payloadBytes + pageBytes - 1) / pageBytes;
+    NSUInteger tailDepth = 0;
+    NSUInteger tailWidth = width;
+    NSUInteger tailHeight = height;
+    for (NSUInteger level = 0; level < firstMipmapInTail; ++level) {
+        tailWidth = tailWidth > 1 ? tailWidth / 2 : 1;
+        tailHeight = tailHeight > 1 ? tailHeight / 2 : 1;
+    }
     if (zpu_texture_type_is_3d(textureType)) {
-        NSUInteger tailDepth = depth;
+        tailDepth = depth;
         for (NSUInteger level = 0; level < firstMipmapInTail; ++level) {
             tailDepth = tailDepth > 1 ? tailDepth / 2 : 1;
         }
         if (tailDepth > pageCount) pageCount = tailDepth;
     }
     if ((usage & MTLTextureUsageShaderWrite) != 0) {
-        const NSUInteger overhead = zpu_sparse_tail_page_overhead(pageSize);
+        /* Apple reserves extra depth-packed pages for writable 3D tails.
+         * The reservation scales with the depth of the first tail level;
+         * 2D/array tails retain the fixed page-size-specific overhead. */
+        NSUInteger overhead = zpu_sparse_tail_page_overhead(pageSize);
+        if (zpu_texture_type_is_3d(textureType)) {
+            if (tailWidth < tileSize.width && tailHeight < tileSize.height) {
+                switch (pageSize) {
+                    case MTLSparsePageSize16:
+                        overhead = 0;
+                        break;
+                    case MTLSparsePageSize64:
+                        overhead = tailDepth / 2;
+                        if (overhead == 0) overhead = 1;
+                        break;
+                    case MTLSparsePageSize256:
+                        if (tailDepth > SIZE_MAX / 3) return 0;
+                        overhead = (tailDepth * 3) / 4;
+                        if (overhead < 2) overhead = 2;
+                        break;
+                    default:
+                        overhead = 0;
+                        break;
+                }
+            }
+        }
         if (pageCount > SIZE_MAX - overhead) return 0;
         pageCount += overhead;
     }
@@ -4137,7 +4169,8 @@ static NSArray *zpu_make_texture_view_slices(NSArray *sourceSliceMipmapTextures,
                                                      _sparseFirstMipmapInTail,
                                                      descriptor.mipmapLevelCount,
                                                      descriptor.usage,
-                                                     zpu_texture_bytes_per_pixel(_pixelFormat));
+                                                     zpu_texture_bytes_per_pixel(_pixelFormat),
+                                                     _sparseTileSize);
             _sparseMappings = [NSMutableDictionary dictionary];
         }
     }

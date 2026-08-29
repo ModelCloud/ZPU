@@ -8993,6 +8993,79 @@ int main(void) {
             [device newTextureWithDescriptor:native_sparse_texture_3d_tail_descriptor];
         id<MTLTexture> adapter_sparse_texture_3d_tail =
             [adapter_device newTextureWithDescriptor:native_sparse_texture_3d_tail_descriptor];
+        /* The 3D tail is the one sparse layout for which a byte-for-byte
+         * native backing-store oracle is not exposed by Metal.  Still compare
+         * every public sizing property across several aspect ratios and
+         * depth-packed tails; the CPU adapter must agree before any mapping
+         * or transfer is attempted. */
+        struct {
+            NSUInteger width;
+            NSUInteger height;
+            NSUInteger depth;
+            NSUInteger mipmapLevelCount;
+            MTLTextureUsage usage;
+            MTLSparsePageSize pageSize;
+        } sparse_3d_tail_probe_shapes[] = {
+            {128, 128, 1, 4, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, MTLSparsePageSize64},
+            {128, 128, 2, 4, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, MTLSparsePageSize64},
+            {256, 128, 4, 5, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, MTLSparsePageSize64},
+            {256, 256, 8, 6, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, MTLSparsePageSize64},
+            {512, 64, 4, 6, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, MTLSparsePageSize64},
+            {128, 128, 8, 2, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, MTLSparsePageSize64},
+            {128, 128, 8, 3, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, MTLSparsePageSize64},
+            {128, 128, 8, 4, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, MTLSparsePageSize64},
+            {128, 128, 8, 5, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, MTLSparsePageSize64},
+            {128, 128, 8, 5, MTLTextureUsageShaderRead, MTLSparsePageSize64},
+            {128, 128, 16, 5, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, MTLSparsePageSize64},
+            {128, 128, 16, 5, MTLTextureUsageShaderRead, MTLSparsePageSize64},
+            {128, 128, 32, 6, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, MTLSparsePageSize64},
+            {128, 128, 32, 6, MTLTextureUsageShaderRead, MTLSparsePageSize64},
+            {128, 128, 8, 5, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, MTLSparsePageSize16},
+            {128, 128, 16, 5, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, MTLSparsePageSize16},
+            {128, 128, 8, 5, MTLTextureUsageShaderRead, MTLSparsePageSize16},
+            {256, 256, 2, 5, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, MTLSparsePageSize256},
+            {256, 256, 4, 5, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, MTLSparsePageSize256},
+            {256, 256, 8, 6, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, MTLSparsePageSize256},
+            {256, 256, 16, 6, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, MTLSparsePageSize256},
+            {256, 256, 2, 5, MTLTextureUsageShaderRead, MTLSparsePageSize256},
+            {256, 256, 4, 5, MTLTextureUsageShaderRead, MTLSparsePageSize256},
+            {256, 256, 8, 6, MTLTextureUsageShaderRead, MTLSparsePageSize256},
+        };
+        BOOL sparse_3d_tail_properties_exact = YES;
+        for (NSUInteger probe_index = 0;
+             probe_index < sizeof(sparse_3d_tail_probe_shapes) / sizeof(sparse_3d_tail_probe_shapes[0]);
+             ++probe_index) {
+            const typeof(sparse_3d_tail_probe_shapes[0]) probe = sparse_3d_tail_probe_shapes[probe_index];
+            MTLTextureDescriptor *native_probe_descriptor = [native_sparse_texture_3d_descriptor copy];
+            native_probe_descriptor.width = probe.width;
+            native_probe_descriptor.height = probe.height;
+            native_probe_descriptor.depth = probe.depth;
+            native_probe_descriptor.mipmapLevelCount = probe.mipmapLevelCount;
+            native_probe_descriptor.usage = probe.usage;
+            native_probe_descriptor.placementSparsePageSize = probe.pageSize;
+            MTLTextureDescriptor *adapter_probe_descriptor = [native_probe_descriptor copy];
+            id<MTLTexture> native_probe = [device newTextureWithDescriptor:native_probe_descriptor];
+            id<MTLTexture> adapter_probe = [adapter_device newTextureWithDescriptor:adapter_probe_descriptor];
+            if (native_probe == nil || adapter_probe == nil) {
+                sparse_3d_tail_properties_exact = NO;
+                continue;
+            }
+            const BOOL probe_exact = native_probe.firstMipmapInTail == adapter_probe.firstMipmapInTail &&
+                native_probe.tailSizeInBytes == adapter_probe.tailSizeInBytes;
+            if (!probe_exact) {
+                fprintf(stderr,
+                        "metal-pixel: 3D sparse tail property mismatch for %lux%lux%lu mips=%lu page=%lu: "
+                        "native=(%lu,%lu) adapter=(%lu,%lu)\n",
+                        (unsigned long)probe.width, (unsigned long)probe.height,
+                        (unsigned long)probe.depth, (unsigned long)probe.mipmapLevelCount,
+                        (unsigned long)probe.pageSize,
+                        (unsigned long)native_probe.firstMipmapInTail,
+                        (unsigned long)native_probe.tailSizeInBytes,
+                        (unsigned long)adapter_probe.firstMipmapInTail,
+                        (unsigned long)adapter_probe.tailSizeInBytes);
+            }
+            sparse_3d_tail_properties_exact = sparse_3d_tail_properties_exact && probe_exact;
+        }
         MTLTextureDescriptor *native_sparse_texture_array_tail_descriptor =
             [native_sparse_texture_tail_descriptor copy];
         native_sparse_texture_array_tail_descriptor.textureType = MTLTextureType2DArray;
@@ -9149,7 +9222,7 @@ int main(void) {
         MTL4UpdateSparseTextureMappingOperation adapter_sparse_texture_3d_tail_map = {
             .mode = MTLSparseTextureMappingModeMap,
             .textureRegion = MTLRegionMake3D(0, 0, 0, 1, 1, 1),
-            .heapOffset = 0,
+            .heapOffset = 1,
             .textureLevel = 1,
             .textureSlice = 0,
         };
@@ -9191,7 +9264,8 @@ int main(void) {
             [metal4_sparse_queue updateTextureMappings:adapter_sparse_texture_3d_tail heap:nil
                                              operations:&adapter_sparse_texture_3d_tail_unmap count:1];
         }
-        sparse_texture_3d_exact = sparse_texture_3d_exact && sparse_texture_3d_tail_mapping_exact;
+        sparse_texture_3d_exact = sparse_texture_3d_exact && sparse_3d_tail_properties_exact &&
+            sparse_texture_3d_tail_mapping_exact;
         const NSUInteger sparse_texture_array_tail_level = adapter_sparse_texture_array_tail == nil ? 0 :
             adapter_sparse_texture_array_tail.firstMipmapInTail;
         MTL4UpdateSparseTextureMappingOperation adapter_sparse_texture_array_tail_map = {

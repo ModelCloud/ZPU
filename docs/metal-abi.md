@@ -277,8 +277,11 @@ triangle path:
   1D/2D and array textures, lower mipmaps are CPU-packed into the native
   sparse-tail byte size; mapping the first tail level maps every tail level,
   and tail copy/move/unmap operations preserve the same CPU page-range model.
-  3D depth-packed tail layouts remain fail-closed until their native packing
-  contract is covered by an oracle test
+  3D tails also match the native first-tail and allocation-size contract for
+  read-only and writable RGBA8 shapes across 16/64/256 KiB sparse pages,
+  including depth-packed reservations; the opaque native physical byte layout
+  is not exposed by Metal, so raw depth-packed backing-store equivalence
+  remains an explicit oracle boundary
 - CPU library metadata can discover the registered CPU kernel names and fixed
   CPU render profiles from source text, UTF-8 file/URL/data inputs, and the
   default bundle query; unsupported arbitrary MSL and stitched libraries fail
