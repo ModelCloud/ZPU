@@ -2809,7 +2809,7 @@ test "CPU compute encoder preserves deferred Metal 4 copy and fill ordering" {
     try std.testing.expectEqualSlices(u8, &source_bytes, round_trip.bytes);
 }
 
-test "CPU compute encoder resolves Metal 4 indirect thread arguments at commit" {
+test "CPU compute encoder resolves Metal 4 indirect thread arguments at commit and offset" {
     const device = try createDevice();
     defer destroyDevice(device);
     const queue = try createQueue(device);
@@ -2817,18 +2817,22 @@ test "CPU compute encoder resolves Metal 4 indirect thread arguments at commit" 
     const texture = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
     defer destroyTexture(texture);
     const initial_arguments = [_]u32{ 4, 3, 1, 2, 2, 1 };
-    const indirect = try createBuffer(device, @sizeOf(@TypeOf(initial_arguments)), @ptrCast(&initial_arguments));
+    const indirect = try createBuffer(device, 16 + @sizeOf(@TypeOf(initial_arguments)), null);
     defer destroyBuffer(indirect);
+    try bufferWrite(indirect, 0, @ptrCast(&initial_arguments), @sizeOf(@TypeOf(initial_arguments)));
+    try bufferWrite(indirect, 16, @ptrCast(&initial_arguments), @sizeOf(@TypeOf(initial_arguments)));
     var command_buffer = try createCommandBuffer(queue);
     defer destroyCommandBuffer(command_buffer);
     var encoder = try beginCompute(command_buffer);
     try encoder.setKernel(1);
     try encoder.setTexture(texture, 0);
     try encoder.dispatchThreadsIndirect(indirect);
+    try encoder.dispatchThreadsIndirectAtOffset(indirect, 16);
     try encoder.endEncoding();
     destroyComputeEncoder(encoder);
     const updated_arguments = [_]u32{ 2, 3, 1, 1, 1, 1 };
     try bufferWrite(indirect, 0, @ptrCast(&updated_arguments), @sizeOf(@TypeOf(updated_arguments)));
+    try bufferWrite(indirect, 16, @ptrCast(&updated_arguments), @sizeOf(@TypeOf(updated_arguments)));
     try std.testing.expectEqual(@as(u8, 0), texture.bytes[0]);
     try command_buffer.commit();
     try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
