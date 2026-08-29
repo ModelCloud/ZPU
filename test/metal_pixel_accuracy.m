@@ -9213,6 +9213,21 @@ int main(void) {
                                        tessellationFactorBuffer:adapter_indexed_patch_icb_factor_buffer
                                    tessellationFactorBufferOffset:sizeof(uint32_t)
                             tessellationFactorBufferInstanceStride:sizeof(adapter_indexed_patch_icb_factors)];
+            id<MTLIndirectCommandBuffer> adapter_indexed_patch_icb_copy =
+                [adapter_device newIndirectCommandBufferWithDescriptor:adapter_indexed_patch_icb_descriptor
+                                                            maxCommandCount:1
+                                                                    options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> adapter_indexed_patch_icb_copy_command_buffer =
+                [adapter_queue commandBuffer];
+            id<MTLBlitCommandEncoder> adapter_indexed_patch_icb_copy_encoder =
+                [adapter_indexed_patch_icb_copy_command_buffer blitCommandEncoder];
+            [adapter_indexed_patch_icb_copy_encoder copyIndirectCommandBuffer:adapter_indexed_patch_icb
+                                                                   sourceRange:NSMakeRange(0, 1)
+                                                                  destination:adapter_indexed_patch_icb_copy
+                                                             destinationIndex:0];
+            [adapter_indexed_patch_icb_copy_encoder endEncoding];
+            [adapter_indexed_patch_icb_copy_command_buffer commit];
+            [adapter_indexed_patch_icb_copy_command_buffer waitUntilCompleted];
             MTLTextureDescriptor *adapter_indexed_patch_icb_texture_descriptor =
                 [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                                                     width:5 height:3 mipmapped:NO];
@@ -9232,7 +9247,7 @@ int main(void) {
                 [adapter_indexed_patch_icb_command_buffer renderCommandEncoderWithDescriptor:adapter_indexed_patch_icb_pass];
             [adapter_indexed_patch_icb_encoder setRenderPipelineState:adapter_indexed_patch_icb_pipeline];
             [adapter_indexed_patch_icb_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
-            [adapter_indexed_patch_icb_encoder executeCommandsInBuffer:adapter_indexed_patch_icb
+            [adapter_indexed_patch_icb_encoder executeCommandsInBuffer:adapter_indexed_patch_icb_copy
                                                                withRange:NSMakeRange(0, 1)];
             [adapter_indexed_patch_icb_encoder endEncoding];
             [adapter_indexed_patch_icb_command_buffer commit];
@@ -9251,6 +9266,10 @@ int main(void) {
                 adapter_indexed_patch_icb_control_point_index_buffer != nil &&
                 adapter_indexed_patch_icb_factor_buffer != nil &&
                 adapter_indexed_patch_icb_command != nil &&
+                adapter_indexed_patch_icb_copy != nil &&
+                adapter_indexed_patch_icb_copy_command_buffer != nil &&
+                adapter_indexed_patch_icb_copy_encoder != nil &&
+                adapter_indexed_patch_icb_copy_command_buffer.status == MTLCommandBufferStatusCompleted &&
                 adapter_indexed_patch_icb_texture != nil &&
                 adapter_indexed_patch_icb_command_buffer != nil &&
                 adapter_indexed_patch_icb_encoder != nil &&
