@@ -209,9 +209,10 @@ triangle path:
   they expose deterministic CPU resource metadata and IDs, while arbitrary
   function-pointer dispatch and ray tracing remain unsupported
 - CPU acceleration-structure resources expose deterministic ZPU-backed storage,
-  heap placement, resource IDs, and descriptor-derived size queries; build,
-  refit, compact, and ray-intersection execution remain fail-closed until a
-  CPU traversal implementation is available
+  heap placement, resource IDs, and descriptor-derived size queries. Their CPU
+  command encoder supports build, refit, copy, compact-size, and compaction
+  metadata/storage operations; ray-intersection execution remains fail-closed
+  until a CPU traversal implementation is available
 - CPU render pipeline states resolve vertex/fragment function handles by
   owner, stage, and name, including Metal 4 binary-function metadata; foreign
   functions and unsupported stages fail closed. The Metal 4 device-level
@@ -233,7 +234,7 @@ triangle path:
 - Metal 4 basic buffer/texture copy, buffer-fill, and tensor-slice copy commands
   append deferred ZPU work; CPU-owned tensors also provide contiguous and
   strided byte-addressable slice transfers. Tensor shader binding, advanced
-  optimization, acceleration-structure build/refit/compact commands,
+  optimization, ray-intersection execution,
   sparse, drawable, machine-learning, and tile/mesh render-pass
   features remain explicit fail-closed boundaries. Suspending/resuming render
   passes are represented as sequential ordinary CPU passes because the CPU
@@ -329,7 +330,7 @@ The current checked-in implementation is intentionally not 100% of the Apple
 Metal ABI. The remaining framework surface includes additional compute and
 Metal 4 encoders, resource and pipeline descriptors beyond the fixed-function state
 implemented here, Metal 4 tile/mesh render and remaining copy/optimization families, ICB patch/mesh commands, other
-synchronization families, acceleration-structure build/refit/compact and ray tracing execution, sparse resources, machine
+synchronization families, ray-tracing execution, sparse resources, machine
 learning/tensor execution, and arbitrary shader compilation. Function-table storage is
 implemented, but it does not imply ray-tracing or arbitrary function-pointer
 execution. A strict completeness claim belongs only after the Apple SDK

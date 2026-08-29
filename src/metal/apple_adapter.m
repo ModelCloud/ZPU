@@ -26,6 +26,7 @@
 @class ZPUCommandBuffer;
 @class ZPUHeap;
 @class ZPUAccelerationStructure;
+@class ZPUAccelerationStructureEncoder;
 @class ZPUDepthStencilState;
 @class ZPUSamplerState;
 @class ZPUResidencySet;
@@ -98,8 +99,11 @@
     MTLCPUCacheMode _cpuCacheMode;
     MTLHazardTrackingMode _hazardTrackingMode;
     uint64_t _resourceID;
+    NSUInteger _compactedSize;
     NSString *_label;
     BOOL _aliasable;
+    BOOL _built;
+    BOOL _compacted;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner storage:(ZPUBuffer *)storage heap:(ZPUHeap *)heap;
 @end
@@ -1000,6 +1004,20 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     BOOL _ended;
 }
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner encoder:(zpu_metal_resource_state_encoder *)encoder;
+@end
+
+@interface ZPUAccelerationStructureEncoder : NSObject <MTLAccelerationStructureCommandEncoder> {
+@public
+    ZPUCommandBuffer *_owner;
+    NSString *_label;
+    BOOL _ended;
+}
+- (instancetype)initWithOwner:(ZPUCommandBuffer *)owner;
+- (void)refitCPU:(id<MTLAccelerationStructure>)sourceAccelerationStructure
+      descriptor:(MTLAccelerationStructureDescriptor *)descriptor
+     destination:(id<MTLAccelerationStructure>)destinationAccelerationStructure
+   scratchBuffer:(id<MTLBuffer>)scratchBuffer
+ scratchBufferOffset:(NSUInteger)scratchBufferOffset options:(NSUInteger)options;
 @end
 
 @interface ZPUParallelRenderEncoder : NSObject <MTLParallelRenderCommandEncoder> {
@@ -2510,6 +2528,7 @@ static NSUInteger zpu_acceleration_structure_size_for_descriptor(
         _cpuCacheMode = storage.cpuCacheMode;
         _hazardTrackingMode = storage.hazardTrackingMode;
         _resourceID = zpu_register_resource(self);
+        _compactedSize = _size / 2 == 0 ? 1 : _size / 2;
     }
     return self;
 }
@@ -5496,11 +5515,11 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     return [self resourceStateCommandEncoder];
 }
 - (id<MTLAccelerationStructureCommandEncoder>)accelerationStructureCommandEncoder API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    return nil;
+    return (id<MTLAccelerationStructureCommandEncoder>)[[ZPUAccelerationStructureEncoder alloc]
+        initWithOwner:self];
 }
 - (id<MTLAccelerationStructureCommandEncoder>)accelerationStructureCommandEncoderWithDescriptor:(MTLAccelerationStructurePassDescriptor *)descriptor API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)descriptor;
-    return nil;
+    return descriptor == nil ? nil : [self accelerationStructureCommandEncoder];
 }
 - (void)encodeSignalEvent:(id<MTLEvent>)event value:(uint64_t)value API_AVAILABLE(macos(10.14), ios(12.0)) {
     ZPUSharedEvent *zpuEvent = (ZPUSharedEvent *)event;
@@ -8398,6 +8417,226 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         _ended = YES;
     }
 }
+@end
+
+static BOOL zpu_acceleration_structure_belongs_to_device(ZPUDevice *owner,
+                                                          id<MTLAccelerationStructure> structure) {
+    return [structure isKindOfClass:[ZPUAccelerationStructure class]] &&
+        ((ZPUAccelerationStructure *)structure)->_owner == owner;
+}
+
+static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *structure,
+                                                  NSUInteger length) {
+    return structure != nil && structure->_storage != nil &&
+        structure->_storage.contents != NULL && length <= structure->_size;
+}
+
+@implementation ZPUAccelerationStructureEncoder
+- (instancetype)initWithOwner:(ZPUCommandBuffer *)owner {
+    if ((self = [super init])) _owner = owner;
+    return self;
+}
+- (id<MTLDevice>)device { return [_owner device]; }
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
+- (void)buildAccelerationStructure:(id<MTLAccelerationStructure>)accelerationStructure
+                        descriptor:(MTLAccelerationStructureDescriptor *)descriptor
+                     scratchBuffer:(id<MTLBuffer>)scratchBuffer
+               scratchBufferOffset:(NSUInteger)scratchBufferOffset {
+    ZPUAccelerationStructure *target = (ZPUAccelerationStructure *)accelerationStructure;
+    ZPUBuffer *scratch = (ZPUBuffer *)scratchBuffer;
+    const NSUInteger required = zpu_acceleration_structure_size_for_descriptor(descriptor);
+    if (!zpu_acceleration_structure_belongs_to_device([_owner device], accelerationStructure) ||
+        required == 0 || target->_size < required ||
+        (scratchBuffer != nil && (!zpu_buffer_belongs_to_device([_owner device], scratch) ||
+            scratchBufferOffset > scratch.length))) {
+        [_owner markError];
+        return;
+    }
+    if (!zpu_acceleration_storage_range_valid(target, target->_size)) {
+        [_owner markError];
+        return;
+    }
+    memset(target->_storage.contents, 0, target->_size);
+    const uint64_t descriptorTag = [descriptor isKindOfClass:[MTLPrimitiveAccelerationStructureDescriptor class]] ? 1 :
+        ([descriptor isKindOfClass:[MTLInstanceAccelerationStructureDescriptor class]] ? 2 : 3);
+    memcpy(target->_storage.contents, &descriptorTag, sizeof(descriptorTag));
+    target->_compactedSize = target->_size / 2 == 0 ? 1 : target->_size / 2;
+    target->_built = YES;
+    target->_compacted = NO;
+    [_owner retainResource:target];
+    if (scratch != nil) [_owner retainResource:scratch];
+}
+- (void)refitAccelerationStructure:(id<MTLAccelerationStructure>)sourceAccelerationStructure
+                        descriptor:(MTLAccelerationStructureDescriptor *)descriptor
+                       destination:(id<MTLAccelerationStructure>)destinationAccelerationStructure
+                     scratchBuffer:(id<MTLBuffer>)scratchBuffer
+               scratchBufferOffset:(NSUInteger)scratchBufferOffset {
+    [self refitCPU:sourceAccelerationStructure descriptor:descriptor
+        destination:destinationAccelerationStructure scratchBuffer:scratchBuffer
+        scratchBufferOffset:scratchBufferOffset options:3];
+}
+- (void)refitCPU:(id<MTLAccelerationStructure>)sourceAccelerationStructure
+                        descriptor:(MTLAccelerationStructureDescriptor *)descriptor
+                       destination:(id<MTLAccelerationStructure>)destinationAccelerationStructure
+                     scratchBuffer:(id<MTLBuffer>)scratchBuffer
+               scratchBufferOffset:(NSUInteger)scratchBufferOffset
+                           options:(NSUInteger)options {
+    ZPUAccelerationStructure *source = (ZPUAccelerationStructure *)sourceAccelerationStructure;
+    ZPUAccelerationStructure *destination = destinationAccelerationStructure == nil ? source :
+        (ZPUAccelerationStructure *)destinationAccelerationStructure;
+    ZPUBuffer *scratch = (ZPUBuffer *)scratchBuffer;
+    const NSUInteger required = zpu_acceleration_structure_size_for_descriptor(descriptor);
+    if (!zpu_acceleration_structure_belongs_to_device([_owner device], sourceAccelerationStructure) ||
+        !zpu_acceleration_structure_belongs_to_device([_owner device], (id<MTLAccelerationStructure>)destination) ||
+        !source->_built || required == 0 || source->_size < required || destination->_size < source->_size ||
+        (options & ~((NSUInteger)3)) != 0 ||
+        (scratchBuffer != nil && (!zpu_buffer_belongs_to_device([_owner device], scratch) ||
+            scratchBufferOffset > scratch.length)) || !zpu_acceleration_storage_range_valid(source, source->_size) ||
+        !zpu_acceleration_storage_range_valid(destination, source->_size)) {
+        [_owner markError];
+        return;
+    }
+    if (source != destination) memcpy(destination->_storage.contents, source->_storage.contents, source->_size);
+    destination->_built = YES;
+    destination->_compacted = NO;
+    destination->_compactedSize = source->_compactedSize;
+    [_owner retainResource:source];
+    [_owner retainResource:destination];
+    if (scratch != nil) [_owner retainResource:scratch];
+}
+- (void)refitAccelerationStructure:(id<MTLAccelerationStructure>)sourceAccelerationStructure
+                        descriptor:(MTLAccelerationStructureDescriptor *)descriptor
+                       destination:(id<MTLAccelerationStructure>)destinationAccelerationStructure
+                     scratchBuffer:(id<MTLBuffer>)scratchBuffer
+               scratchBufferOffset:(NSUInteger)scratchBufferOffset
+                           options:(MTLAccelerationStructureRefitOptions)options
+    API_AVAILABLE(macos(13.0), ios(16.0)) {
+    [self refitCPU:sourceAccelerationStructure descriptor:descriptor
+        destination:destinationAccelerationStructure scratchBuffer:scratchBuffer
+        scratchBufferOffset:scratchBufferOffset options:(NSUInteger)options];
+}
+- (void)copyAccelerationStructure:(id<MTLAccelerationStructure>)sourceAccelerationStructure
+          toAccelerationStructure:(id<MTLAccelerationStructure>)destinationAccelerationStructure {
+    ZPUAccelerationStructure *source = (ZPUAccelerationStructure *)sourceAccelerationStructure;
+    ZPUAccelerationStructure *destination = (ZPUAccelerationStructure *)destinationAccelerationStructure;
+    const NSUInteger copySize = source == nil ? 0 : (source->_compacted ? source->_compactedSize : source->_size);
+    if (!zpu_acceleration_structure_belongs_to_device([_owner device], sourceAccelerationStructure) ||
+        !zpu_acceleration_structure_belongs_to_device([_owner device], destinationAccelerationStructure) ||
+        source == destination || !source->_built || destination->_size < copySize ||
+        !zpu_acceleration_storage_range_valid(source, copySize) ||
+        !zpu_acceleration_storage_range_valid(destination, copySize)) {
+        [_owner markError];
+        return;
+    }
+    memcpy(destination->_storage.contents, source->_storage.contents, copySize);
+    destination->_built = YES;
+    destination->_compacted = source->_compacted;
+    destination->_compactedSize = source->_compactedSize;
+    [_owner retainResource:source];
+    [_owner retainResource:destination];
+}
+- (void)writeCompactedAccelerationStructureSize:(id<MTLAccelerationStructure>)accelerationStructure
+                                       toBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset {
+    [self writeCompactedAccelerationStructureSize:accelerationStructure toBuffer:buffer offset:offset
+                                      sizeDataType:MTLDataTypeUInt];
+}
+- (void)writeCompactedAccelerationStructureSize:(id<MTLAccelerationStructure>)accelerationStructure
+                                       toBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset
+                                   sizeDataType:(MTLDataType)sizeDataType {
+    ZPUAccelerationStructure *source = (ZPUAccelerationStructure *)accelerationStructure;
+    ZPUBuffer *destination = (ZPUBuffer *)buffer;
+    const NSUInteger size = source == nil ? 0 : source->_compactedSize;
+    const NSUInteger width = sizeDataType == MTLDataTypeULong ? sizeof(uint64_t) : sizeof(uint32_t);
+    if (!zpu_acceleration_structure_belongs_to_device([_owner device], accelerationStructure) ||
+        !zpu_buffer_belongs_to_device([_owner device], destination) || !source->_built ||
+        (sizeDataType != MTLDataTypeUInt && sizeDataType != MTLDataTypeULong) ||
+        size > (sizeDataType == MTLDataTypeUInt ? UINT32_MAX : UINT64_MAX) ||
+        offset > destination.length || width > destination.length - offset) {
+        [_owner markError];
+        return;
+    }
+    if (sizeDataType == MTLDataTypeUInt) {
+        const uint32_t value = (uint32_t)size;
+        if (zpu_metal_buffer_write(destination->_zpuBuffer, offset, (const uint8_t *)&value, width) != ZPU_METAL_OK) [_owner markError];
+    } else {
+        const uint64_t value = (uint64_t)size;
+        if (zpu_metal_buffer_write(destination->_zpuBuffer, offset, (const uint8_t *)&value, width) != ZPU_METAL_OK) [_owner markError];
+    }
+    [_owner retainResource:source];
+    [_owner retainResource:destination];
+}
+- (void)copyAndCompactAccelerationStructure:(id<MTLAccelerationStructure>)sourceAccelerationStructure
+                    toAccelerationStructure:(id<MTLAccelerationStructure>)destinationAccelerationStructure {
+    ZPUAccelerationStructure *source = (ZPUAccelerationStructure *)sourceAccelerationStructure;
+    ZPUAccelerationStructure *destination = (ZPUAccelerationStructure *)destinationAccelerationStructure;
+    const NSUInteger copySize = source == nil ? 0 : source->_compactedSize;
+    if (!zpu_acceleration_structure_belongs_to_device([_owner device], sourceAccelerationStructure) ||
+        !zpu_acceleration_structure_belongs_to_device([_owner device], destinationAccelerationStructure) ||
+        source == destination || !source->_built || destination->_size < copySize ||
+        !zpu_acceleration_storage_range_valid(source, copySize) ||
+        !zpu_acceleration_storage_range_valid(destination, copySize)) {
+        [_owner markError];
+        return;
+    }
+    memset(destination->_storage.contents, 0, destination->_size);
+    memcpy(destination->_storage.contents, source->_storage.contents, copySize);
+    destination->_built = YES;
+    destination->_compacted = YES;
+    destination->_compactedSize = copySize;
+    [_owner retainResource:source];
+    [_owner retainResource:destination];
+}
+- (void)updateFence:(id<MTLFence>)fence {
+    ZPUFence *zpuFence = (ZPUFence *)fence;
+    if (![zpuFence isKindOfClass:[ZPUFence class]] || zpuFence->_owner != [_owner device]) [_owner markError];
+    else [_owner retainResource:zpuFence];
+}
+- (void)waitForFence:(id<MTLFence>)fence {
+    ZPUFence *zpuFence = (ZPUFence *)fence;
+    if (![zpuFence isKindOfClass:[ZPUFence class]] || zpuFence->_owner != [_owner device]) [_owner markError];
+    else [_owner retainResource:zpuFence];
+}
+- (void)useResource:(id<MTLResource>)resource usage:(MTLResourceUsage)usage {
+    (void)usage;
+    if (resource == nil) return;
+    if ([(id)resource isKindOfClass:[ZPUBuffer class]] && zpu_buffer_belongs_to_device([_owner device], (ZPUBuffer *)resource)) {
+        [_owner retainResource:resource];
+    } else if ([(id)resource isKindOfClass:[ZPUAccelerationStructure class]] &&
+               zpu_acceleration_structure_belongs_to_device([_owner device], (id<MTLAccelerationStructure>)resource)) {
+        [_owner retainResource:resource];
+    } else {
+        [_owner markError];
+    }
+}
+- (void)useResources:(const id<MTLResource> __nonnull [__nonnull])resources count:(NSUInteger)count usage:(MTLResourceUsage)usage {
+    if (resources == NULL) { if (count != 0) [_owner markError]; return; }
+    for (NSUInteger index = 0; index < count; ++index) [self useResource:resources[index] usage:usage];
+}
+- (void)useHeap:(id<MTLHeap>)heap {
+    if (![heap isKindOfClass:[ZPUHeap class]] || ((ZPUHeap *)heap)->_owner != [_owner device]) [_owner markError];
+    else [_owner retainResource:heap];
+}
+- (void)useHeaps:(const id<MTLHeap> __nonnull [__nonnull])heaps count:(NSUInteger)count {
+    if (heaps == NULL) { if (count != 0) [_owner markError]; return; }
+    for (NSUInteger index = 0; index < count; ++index) [self useHeap:heaps[index]];
+}
+- (void)sampleCountersInBuffer:(id<MTLCounterSampleBuffer>)sampleBuffer atSampleIndex:(NSUInteger)sampleIndex withBarrier:(BOOL)barrier {
+    (void)barrier;
+    ZPUCounterSampleBuffer *buffer = (ZPUCounterSampleBuffer *)sampleBuffer;
+    if (![buffer isKindOfClass:[ZPUCounterSampleBuffer class]] || buffer->_owner != [_owner device] ||
+        ![buffer sampleAtIndex:sampleIndex]) [_owner markError];
+    else [_owner retainResource:buffer];
+}
+- (void)barrierAfterQueueStages:(MTLStages)afterQueueStages beforeStages:(MTLStages)beforeStages
+    API_AVAILABLE(macos(26.0), ios(26.0)) {
+    (void)afterQueueStages;
+    (void)beforeStages;
+}
+- (void)insertDebugSignpost:(NSString *)string { (void)string; }
+- (void)pushDebugGroup:(NSString *)string { (void)string; }
+- (void)popDebugGroup {}
+- (void)endEncoding { _ended = YES; }
 @end
 
 @implementation ZPURenderEncoder

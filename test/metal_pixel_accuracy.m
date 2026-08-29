@@ -2203,6 +2203,7 @@ int main(void) {
          * native object is created only as an oracle for availability/shape;
          * no native build or ray-tracing command is submitted here. */
         BOOL adapter_acceleration_resources_ok = YES;
+        id<MTLAccelerationStructureCommandEncoder> adapter_acceleration_encoder = nil;
         if (@available(macOS 13.0, iOS 16.0, *)) {
             MTLPrimitiveAccelerationStructureDescriptor *native_as_descriptor =
                 [MTLPrimitiveAccelerationStructureDescriptor descriptor];
@@ -2243,6 +2244,47 @@ int main(void) {
             id<MTLHeap> adapter_as_heap = [adapter_device newHeapWithDescriptor:as_heap_descriptor];
             id<MTLAccelerationStructure> adapter_heap_as =
                 [adapter_as_heap newAccelerationStructureWithSize:256];
+            id<MTLAccelerationStructure> adapter_copy_as =
+                [adapter_device newAccelerationStructureWithSize:adapter_as_allocation_size];
+            const NSUInteger adapter_compacted_size = adapter_as_sizes.accelerationStructureSize / 2 == 0 ?
+                1 : adapter_as_sizes.accelerationStructureSize / 2;
+            id<MTLAccelerationStructure> adapter_compacted_as =
+                [adapter_device newAccelerationStructureWithSize:adapter_compacted_size];
+            id<MTLBuffer> adapter_as_status_buffer =
+                [adapter_device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> adapter_as_scratch = [adapter_device newBufferWithLength:
+                adapter_as_sizes.buildScratchBufferSize == 0 ? 1 : adapter_as_sizes.buildScratchBufferSize
+                                                                       options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> adapter_as_command_buffer = [adapter_queue commandBuffer];
+            adapter_acceleration_encoder = [adapter_as_command_buffer accelerationStructureCommandEncoder];
+            [adapter_acceleration_encoder buildAccelerationStructure:adapter_as descriptor:native_as_descriptor
+                                                       scratchBuffer:adapter_as_scratch scratchBufferOffset:0];
+            [adapter_acceleration_encoder writeCompactedAccelerationStructureSize:adapter_as
+                                                                          toBuffer:adapter_as_status_buffer offset:0
+                                                                      sizeDataType:MTLDataTypeULong];
+            [adapter_acceleration_encoder endEncoding];
+            [adapter_as_command_buffer commit];
+            [adapter_as_command_buffer waitUntilCompleted];
+            uint64_t adapter_compacted_size_value = 0;
+            if (adapter_as_status_buffer != nil) {
+                memcpy(&adapter_compacted_size_value, adapter_as_status_buffer.contents, sizeof(adapter_compacted_size_value));
+            }
+            id<MTLCommandBuffer> adapter_as_copy_command_buffer = [adapter_queue commandBuffer];
+            id<MTLAccelerationStructureCommandEncoder> adapter_as_copy_encoder =
+                [adapter_as_copy_command_buffer accelerationStructureCommandEncoder];
+            [adapter_as_copy_encoder copyAccelerationStructure:adapter_as
+                                      toAccelerationStructure:adapter_copy_as];
+            [adapter_as_copy_encoder endEncoding];
+            [adapter_as_copy_command_buffer commit];
+            [adapter_as_copy_command_buffer waitUntilCompleted];
+            id<MTLCommandBuffer> adapter_as_compact_command_buffer = [adapter_queue commandBuffer];
+            id<MTLAccelerationStructureCommandEncoder> adapter_as_compact_encoder =
+                [adapter_as_compact_command_buffer accelerationStructureCommandEncoder];
+            [adapter_as_compact_encoder copyAndCompactAccelerationStructure:adapter_as
+                                                    toAccelerationStructure:adapter_compacted_as];
+            [adapter_as_compact_encoder endEncoding];
+            [adapter_as_compact_command_buffer commit];
+            [adapter_as_compact_command_buffer waitUntilCompleted];
             adapter_acceleration_resources_ok =
                 adapter_as != nil && adapter_as.size == adapter_as_allocation_size &&
                 adapter_descriptor_as != nil && adapter_descriptor_as.size == adapter_as_allocation_size &&
@@ -2253,6 +2295,13 @@ int main(void) {
                 adapter_as_heap != nil && adapter_heap_as != nil &&
                 adapter_heap_as.heap == adapter_as_heap && adapter_heap_as.heapOffset == 0 &&
                 adapter_heap_as.gpuResourceID._impl != 0 &&
+                adapter_copy_as != nil && adapter_compacted_as != nil &&
+                adapter_as_status_buffer != nil && adapter_compacted_size_value == adapter_compacted_size &&
+                adapter_acceleration_encoder != nil && adapter_as_copy_encoder != nil &&
+                adapter_as_compact_encoder != nil &&
+                adapter_as_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                adapter_as_copy_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                adapter_as_compact_command_buffer.status == MTLCommandBufferStatusCompleted &&
                 (native_as == nil || (native_as.device == device && native_as.size >= native_as_allocation_size));
         }
         id<MTLCommandBuffer> adapter_resource_state_command_buffer = [adapter_queue commandBuffer];
@@ -2276,7 +2325,7 @@ int main(void) {
             [adapter_resource_state_encoder conformsToProtocol:@protocol(MTLResourceStateCommandEncoder)] &&
             adapter_resource_state_command_buffer.status == MTLCommandBufferStatusCompleted &&
             adapter_acceleration_resources_ok &&
-            [adapter_command_buffer accelerationStructureCommandEncoder] == nil;
+            [adapter_command_buffer accelerationStructureCommandEncoder] != nil;
         if (!adapter_protocols_ok || !adapter_selectors_ok || !adapter_fail_closed_ok) {
             fprintf(stderr, "metal-pixel: protocol flags=%d selectors=%d fail-closed=%d (%d,%d,%d,%d,%d)\n",
                     adapter_protocols_ok, adapter_selectors_ok, adapter_selector_resource_state,
