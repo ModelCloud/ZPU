@@ -911,7 +911,7 @@ pub const RenderEncoder = struct {
     }
 
     pub fn setFragmentSamplerMaxAnisotropy(self: *RenderEncoder, max_anisotropy: u32) Error!void {
-        if (!self.open() or max_anisotropy == 0) return error.InvalidArgument;
+        if (!self.open() or max_anisotropy == 0 or max_anisotropy > 16) return error.InvalidArgument;
         self.sample_max_anisotropy = max_anisotropy;
     }
 
@@ -3128,6 +3128,9 @@ test "render state validation rejects invalid CPU Metal state" {
         .zfar = 1,
     }));
     try std.testing.expectError(error.InvalidArgument, encoder.setDepthTestBounds(0.75, 0.25));
+    try encoder.setFragmentSamplerMaxAnisotropy(16);
+    try std.testing.expectError(error.InvalidArgument, encoder.setFragmentSamplerMaxAnisotropy(0));
+    try std.testing.expectError(error.InvalidArgument, encoder.setFragmentSamplerMaxAnisotropy(17));
     try encoder.endEncoding();
     destroyRenderEncoder(encoder);
     try command_buffer.commit();

@@ -1419,7 +1419,14 @@ int main(void) {
         invalid_anisotropy_descriptor.normalizedCoordinates = NO;
         id<MTLSamplerState> adapter_invalid_anisotropic_sampler =
             [adapter_device newSamplerStateWithDescriptor:invalid_anisotropy_descriptor];
-        if (adapter_anisotropic_sampler == nil || adapter_invalid_anisotropic_sampler != nil) {
+        MTLSamplerDescriptor *out_of_range_anisotropy_descriptor = [anisotropy_descriptor copy];
+        out_of_range_anisotropy_descriptor.maxAnisotropy = 17;
+        id<MTLSamplerState> native_out_of_range_anisotropic_sampler =
+            [device newSamplerStateWithDescriptor:out_of_range_anisotropy_descriptor];
+        id<MTLSamplerState> adapter_out_of_range_anisotropic_sampler =
+            [adapter_device newSamplerStateWithDescriptor:out_of_range_anisotropy_descriptor];
+        if (adapter_anisotropic_sampler == nil || adapter_invalid_anisotropic_sampler != nil ||
+            (native_out_of_range_anisotropic_sampler == nil) != (adapter_out_of_range_anisotropic_sampler == nil)) {
             fprintf(stderr, "metal-pixel: CPU sampler anisotropy validation mismatch\n");
             return 152;
         }
@@ -11605,7 +11612,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables and border colors, mip/coordinate/reduction sampler modes, visibility results, acceleration-structure resources, cube/cube-array textures, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables and border colors, mip/coordinate/reduction/anisotropic sampler modes, visibility results, acceleration-structure resources, cube/cube-array textures, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }

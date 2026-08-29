@@ -5596,7 +5596,10 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _lodMaxClamp = descriptor.lodMaxClamp;
         _lodBias = 0.0f;
         if (@available(macOS 26.0, iOS 26.0, *)) _lodBias = descriptor.lodBias;
-        _maxAnisotropy = descriptor.maxAnisotropy == 0 ? 1 : descriptor.maxAnisotropy;
+        /* Apple accepts descriptors above the documented 1..16 range on the
+         * tested M4 device and clamps the effective sampler state. Keep the
+         * same observable state while the portable ABI remains bounded. */
+        _maxAnisotropy = descriptor.maxAnisotropy == 0 ? 1 : MIN(descriptor.maxAnisotropy, (NSUInteger)16);
         _resourceID = zpu_register_resource(self);
     }
     return self;
@@ -6513,7 +6516,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     const NSUInteger maxAnisotropy = descriptor == nil || descriptor.maxAnisotropy == 0 ?
         1 : descriptor.maxAnisotropy;
     if (descriptor == nil || descriptor.borderColor > MTLSamplerBorderColorOpaqueWhite ||
-        maxAnisotropy > UINT32_MAX || (maxAnisotropy > 1 && !descriptor.normalizedCoordinates)) return nil;
+        (maxAnisotropy > 1 && !descriptor.normalizedCoordinates)) return nil;
     return (id<MTLSamplerState>)[[ZPUSamplerState alloc] initWithOwner:self descriptor:descriptor];
 }
 - (id<MTLLibrary>)newLibraryWithSource:(NSString *)source options:(MTLCompileOptions *)options error:(NSError **)error {

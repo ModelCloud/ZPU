@@ -232,7 +232,7 @@ triangle path:
   and tail copy/move/unmap operations preserve the same CPU page-range model.
   3D depth-packed tail layouts remain fail-closed until their native packing
   contract is covered by an oracle test
-- CPU library metadata can discover the six registered kernel names and fixed
+- CPU library metadata can discover the registered CPU kernel names and fixed
   CPU render profiles from source text, UTF-8 file/URL/data inputs, and the
   default bundle query; unsupported arbitrary MSL and stitched libraries fail
   closed
