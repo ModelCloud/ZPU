@@ -1215,6 +1215,38 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
     return [resource isKindOfClass:[ZPUBuffer class]] ? (ZPUBuffer *)resource : nil;
 }
 
+/* Sparse allocation is deliberately not advertised by the CPU adapter, but
+ * Metal's pixel/tile conversion helpers are pure integer geometry. Keep them
+ * useful for callers that use the helpers to prepare a mapping for another
+ * device, without manufacturing a sparse resource or hardware page size. */
+static BOOL zpu_sparse_axis_to_tiles(NSUInteger origin, NSUInteger size, NSUInteger tile,
+                                     MTLSparseTextureRegionAlignmentMode mode,
+                                     NSUInteger *tileOrigin, NSUInteger *tileSize) {
+    if (tile == 0 || tileOrigin == NULL || tileSize == NULL ||
+        (mode != MTLSparseTextureRegionAlignmentModeOutward &&
+         mode != MTLSparseTextureRegionAlignmentModeInward) ||
+        size > NSUIntegerMax - origin) return NO;
+    const NSUInteger end = origin + size;
+    const NSUInteger floorOrigin = origin / tile;
+    const NSUInteger ceilOrigin = floorOrigin + (origin % tile != 0 ? 1 : 0);
+    const NSUInteger floorEnd = end / tile;
+    const NSUInteger ceilEnd = floorEnd + (end % tile != 0 ? 1 : 0);
+    const NSUInteger start = mode == MTLSparseTextureRegionAlignmentModeOutward ? floorOrigin : ceilOrigin;
+    const NSUInteger finish = mode == MTLSparseTextureRegionAlignmentModeOutward ? ceilEnd : floorEnd;
+    *tileOrigin = start;
+    *tileSize = finish > start ? finish - start : 0;
+    return YES;
+}
+
+static BOOL zpu_sparse_axis_to_pixels(NSUInteger origin, NSUInteger size, NSUInteger tile,
+                                      NSUInteger *pixelOrigin, NSUInteger *pixelSize) {
+    if (tile == 0 || pixelOrigin == NULL || pixelSize == NULL ||
+        origin > NSUIntegerMax / tile || size > NSUIntegerMax / tile) return NO;
+    *pixelOrigin = origin * tile;
+    *pixelSize = size * tile;
+    return YES;
+}
+
 @implementation ZPUBuffer
 - (instancetype)initWithOwner:(id)owner buffer:(zpu_metal_buffer *)buffer {
     return [self initWithOwner:owner buffer:buffer heap:nil];
@@ -3134,17 +3166,32 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
     return MTLSizeMake(0, 0, 0);
 }
 - (void)convertSparsePixelRegions:(const MTLRegion[_Nonnull])pixelRegions toTileRegions:(MTLRegion[_Nonnull])tileRegions withTileSize:(MTLSize)tileSize alignmentMode:(MTLSparseTextureRegionAlignmentMode)mode numRegions:(NSUInteger)numRegions API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(13.0), tvos(16.0)) {
-    (void)pixelRegions;
-    (void)tileRegions;
-    (void)tileSize;
-    (void)mode;
-    (void)numRegions;
+    if (pixelRegions == NULL || tileRegions == NULL) return;
+    for (NSUInteger index = 0; index < numRegions; ++index) {
+        MTLRegion result = {MTLOriginMake(0, 0, 0), MTLSizeMake(0, 0, 0)};
+        const BOOL valid =
+            zpu_sparse_axis_to_tiles(pixelRegions[index].origin.x, pixelRegions[index].size.width,
+                                     tileSize.width, mode, &result.origin.x, &result.size.width) &&
+            zpu_sparse_axis_to_tiles(pixelRegions[index].origin.y, pixelRegions[index].size.height,
+                                     tileSize.height, mode, &result.origin.y, &result.size.height) &&
+            zpu_sparse_axis_to_tiles(pixelRegions[index].origin.z, pixelRegions[index].size.depth,
+                                     tileSize.depth, mode, &result.origin.z, &result.size.depth);
+        tileRegions[index] = valid ? result : (MTLRegion){MTLOriginMake(0, 0, 0), MTLSizeMake(0, 0, 0)};
+    }
 }
 - (void)convertSparseTileRegions:(const MTLRegion[_Nonnull])tileRegions toPixelRegions:(MTLRegion[_Nonnull])pixelRegions withTileSize:(MTLSize)tileSize numRegions:(NSUInteger)numRegions API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(13.0), tvos(16.0)) {
-    (void)tileRegions;
-    (void)pixelRegions;
-    (void)tileSize;
-    (void)numRegions;
+    if (tileRegions == NULL || pixelRegions == NULL) return;
+    for (NSUInteger index = 0; index < numRegions; ++index) {
+        MTLRegion result = {MTLOriginMake(0, 0, 0), MTLSizeMake(0, 0, 0)};
+        const BOOL valid =
+            zpu_sparse_axis_to_pixels(tileRegions[index].origin.x, tileRegions[index].size.width,
+                                      tileSize.width, &result.origin.x, &result.size.width) &&
+            zpu_sparse_axis_to_pixels(tileRegions[index].origin.y, tileRegions[index].size.height,
+                                      tileSize.height, &result.origin.y, &result.size.height) &&
+            zpu_sparse_axis_to_pixels(tileRegions[index].origin.z, tileRegions[index].size.depth,
+                                      tileSize.depth, &result.origin.z, &result.size.depth);
+        pixelRegions[index] = valid ? result : (MTLRegion){MTLOriginMake(0, 0, 0), MTLSizeMake(0, 0, 0)};
+    }
 }
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)options placementSparsePageSize:(MTLSparsePageSize)placementSparsePageSize API_AVAILABLE(macos(26.0), ios(26.0)) {
     (void)length;

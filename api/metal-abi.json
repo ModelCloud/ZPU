@@ -551,6 +551,8 @@
     "MTLDevice.counterSets",
     "MTLDevice.newCounterSampleBufferWithDescriptor",
     "MTLDevice.sampleTimestamps",
+    "MTLDevice.convertSparsePixelRegions",
+    "MTLDevice.convertSparseTileRegions",
     "MTLCounter.name",
     "MTLCounterSet.name",
     "MTLCounterSet.counters",

@@ -482,6 +482,70 @@ int main(void) {
          * supported way to use ZPU through Metal-shaped objects; it must keep
          * the same byte contract as both C entry points and Apple's device. */
         id<MTLDevice> adapter_device = ZPUMetalCreateSystemDefaultDevice();
+        const MTLRegion sparse_pixels[] = {
+            MTLRegionMake3D(1, 2, 1, 7, 5, 3),
+            MTLRegionMake3D(8, 7, 0, 4, 2, 2),
+        };
+        const MTLSize sparse_tile_size = MTLSizeMake(4, 3, 2);
+        MTLRegion adapter_sparse_outward[2];
+        MTLRegion adapter_sparse_inward[2];
+        MTLRegion adapter_sparse_roundtrip[2];
+        [adapter_device convertSparsePixelRegions:sparse_pixels
+                                     toTileRegions:adapter_sparse_outward
+                                      withTileSize:sparse_tile_size
+                                     alignmentMode:MTLSparseTextureRegionAlignmentModeOutward
+                                        numRegions:2];
+        [adapter_device convertSparsePixelRegions:sparse_pixels
+                                     toTileRegions:adapter_sparse_inward
+                                      withTileSize:sparse_tile_size
+                                     alignmentMode:MTLSparseTextureRegionAlignmentModeInward
+                                        numRegions:2];
+        [adapter_device convertSparseTileRegions:adapter_sparse_outward
+                                     toPixelRegions:adapter_sparse_roundtrip
+                                      withTileSize:sparse_tile_size
+                                        numRegions:2];
+        const MTLRegion expected_sparse_outward[] = {
+            MTLRegionMake3D(0, 0, 0, 2, 3, 2),
+            MTLRegionMake3D(2, 2, 0, 1, 1, 1),
+        };
+        const MTLRegion expected_sparse_inward[] = {
+            MTLRegionMake3D(1, 1, 1, 1, 1, 1),
+            MTLRegionMake3D(2, 3, 0, 1, 0, 1),
+        };
+        const MTLRegion expected_sparse_roundtrip[] = {
+            MTLRegionMake3D(0, 0, 0, 8, 9, 4),
+            MTLRegionMake3D(8, 6, 0, 4, 3, 2),
+        };
+        const BOOL sparse_geometry_ok =
+            memcmp(adapter_sparse_outward, expected_sparse_outward, sizeof(expected_sparse_outward)) == 0 &&
+            memcmp(adapter_sparse_inward, expected_sparse_inward, sizeof(expected_sparse_inward)) == 0 &&
+            memcmp(adapter_sparse_roundtrip, expected_sparse_roundtrip, sizeof(expected_sparse_roundtrip)) == 0;
+        MTLSize native_sparse_tile_size =
+            [device sparseTileSizeWithTextureType:MTLTextureType2D
+                                       pixelFormat:MTLPixelFormatRGBA8Unorm
+                                       sampleCount:1];
+        BOOL native_sparse_geometry_ok = YES;
+        if (native_sparse_tile_size.width != 0 && native_sparse_tile_size.height != 0 &&
+            native_sparse_tile_size.depth != 0) {
+            MTLRegion native_sparse_outward[2];
+            MTLRegion adapter_native_sparse_outward[2];
+            [device convertSparsePixelRegions:sparse_pixels
+                                 toTileRegions:native_sparse_outward
+                                  withTileSize:native_sparse_tile_size
+                                 alignmentMode:MTLSparseTextureRegionAlignmentModeOutward
+                                    numRegions:2];
+            [adapter_device convertSparsePixelRegions:sparse_pixels
+                                         toTileRegions:adapter_native_sparse_outward
+                                          withTileSize:native_sparse_tile_size
+                                         alignmentMode:MTLSparseTextureRegionAlignmentModeOutward
+                                            numRegions:2];
+            native_sparse_geometry_ok = memcmp(native_sparse_outward, adapter_native_sparse_outward,
+                                               sizeof(native_sparse_outward)) == 0;
+        }
+        if (!sparse_geometry_ok || !native_sparse_geometry_ok) {
+            fprintf(stderr, "metal-pixel: sparse region conversion mismatch\n");
+            return 18;
+        }
         MTLTextureDescriptor *adapter_texture_descriptor =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                 width:width
