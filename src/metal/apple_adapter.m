@@ -5791,7 +5791,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 - (void)copyFromTexture:(id<MTLTexture>)sourceTexture sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel toTexture:(id<MTLTexture>)destinationTexture destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel sliceCount:(NSUInteger)sliceCount levelCount:(NSUInteger)levelCount {
     ZPUTexture *source = (ZPUTexture *)sourceTexture;
     ZPUTexture *destination = (ZPUTexture *)destinationTexture;
-    if (![source isKindOfClass:[ZPUTexture class]] || ![destination isKindOfClass:[ZPUTexture class]] ||
+    if (!zpu_texture_belongs_to_device([_owner device], source) || !zpu_texture_belongs_to_device([_owner device], destination) ||
         sliceCount == 0 || levelCount == 0 ||
         sourceSlice > source.arrayLength || sliceCount > source.arrayLength - sourceSlice ||
         destinationSlice > destination.arrayLength || sliceCount > destination.arrayLength - destinationSlice ||
@@ -7156,37 +7156,37 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)synchronizeResource:(id<MTLResource>)resource {
     ZPUBuffer *buffer = (ZPUBuffer *)resource;
-    if (![buffer isKindOfClass:[ZPUBuffer class]]) return;
+    if (!zpu_buffer_belongs_to_device([_owner device], buffer)) { [_owner markError]; return; }
     [_owner retainResource:buffer];
-    (void)zpu_metal_blit_encoder_synchronize_resource(_zpuEncoder, buffer->_zpuBuffer);
+    if (zpu_metal_blit_encoder_synchronize_resource(_zpuEncoder, buffer->_zpuBuffer) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)synchronizeTexture:(id<MTLTexture>)texture slice:(NSUInteger)slice level:(NSUInteger)level API_AVAILABLE(macos(10.11), macCatalyst(13.0)) API_UNAVAILABLE(ios) {
     ZPUTexture *zpuTexture = (ZPUTexture *)texture;
-    if (![zpuTexture isKindOfClass:[ZPUTexture class]] || [zpuTexture zpuTextureAtLevel:level slice:slice] == NULL) return;
+    if (!zpu_texture_belongs_to_device([_owner device], zpuTexture) || [zpuTexture zpuTextureAtLevel:level slice:slice] == NULL) { [_owner markError]; return; }
     [_owner retainResource:zpuTexture];
 }
 - (void)copyFromBuffer:(id<MTLBuffer>)sourceBuffer sourceOffset:(NSUInteger)sourceOffset toBuffer:(id<MTLBuffer>)destinationBuffer destinationOffset:(NSUInteger)destinationOffset size:(NSUInteger)size {
     ZPUBuffer *source = (ZPUBuffer *)sourceBuffer;
     ZPUBuffer *destination = (ZPUBuffer *)destinationBuffer;
-    if (![source isKindOfClass:[ZPUBuffer class]] || ![destination isKindOfClass:[ZPUBuffer class]]) return;
+    if (!zpu_buffer_belongs_to_device([_owner device], source) || !zpu_buffer_belongs_to_device([_owner device], destination)) { [_owner markError]; return; }
     [_owner retainResource:source];
     [_owner retainResource:destination];
-    (void)zpu_metal_blit_encoder_copy_buffer(_zpuEncoder, source->_zpuBuffer, sourceOffset, destination->_zpuBuffer, destinationOffset, size);
+    if (zpu_metal_blit_encoder_copy_buffer(_zpuEncoder, source->_zpuBuffer, sourceOffset, destination->_zpuBuffer, destinationOffset, size) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)copyFromBuffer:(id<MTLBuffer>)sourceBuffer sourceOffset:(NSUInteger)sourceOffset sourceBytesPerRow:(NSUInteger)sourceBytesPerRow sourceBytesPerImage:(NSUInteger)sourceBytesPerImage sourceSize:(MTLSize)sourceSize toTexture:(id<MTLTexture>)destinationTexture destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel destinationOrigin:(MTLOrigin)destinationOrigin {
     ZPUBuffer *source = (ZPUBuffer *)sourceBuffer;
     ZPUTexture *destination = (ZPUTexture *)destinationTexture;
     MTLRegion region = MTLRegionMake3D(destinationOrigin.x, destinationOrigin.y, destinationOrigin.z, sourceSize.width, sourceSize.height, sourceSize.depth);
-    if (![source isKindOfClass:[ZPUBuffer class]] || ![destination isKindOfClass:[ZPUTexture class]] || !zpu_region_fits(region)) return;
+    if (!zpu_buffer_belongs_to_device([_owner device], source) || !zpu_texture_belongs_to_device([_owner device], destination) || !zpu_region_fits(region)) { [_owner markError]; return; }
     if (zpu_texture_type_is_3d(destination->_textureType)) {
         const NSUInteger levelDepth = zpu_texture_depth_at_level(destination, destinationLevel);
         if (destinationSlice != 0 || levelDepth == 0 || destinationOrigin.z > levelDepth ||
-            sourceSize.depth > levelDepth - destinationOrigin.z) return;
+            sourceSize.depth > levelDepth - destinationOrigin.z) { [_owner markError]; return; }
         const NSUInteger rowBytes = sourceSize.width * 4;
         const NSUInteger rowStride = sourceBytesPerRow == 0 ? rowBytes : sourceBytesPerRow;
-        if (rowStride < rowBytes || (sourceSize.height != 0 && rowStride > SIZE_MAX / sourceSize.height)) return;
+        if (rowStride < rowBytes || (sourceSize.height != 0 && rowStride > SIZE_MAX / sourceSize.height)) { [_owner markError]; return; }
         const NSUInteger imageStride = sourceBytesPerImage == 0 ? rowStride * sourceSize.height : sourceBytesPerImage;
-        if (sourceSize.depth > 1 && imageStride > SIZE_MAX / (sourceSize.depth - 1)) return;
+        if (sourceSize.depth > 1 && imageStride > SIZE_MAX / (sourceSize.depth - 1)) { [_owner markError]; return; }
         for (NSUInteger plane = 0; plane < sourceSize.depth; ++plane) {
             zpu_metal_texture *destinationTextureAtLevel =
                 [destination zpuTextureAtLevel:destinationLevel slice:destinationOrigin.z + plane];
@@ -7194,19 +7194,19 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
                 zpu_metal_blit_encoder_copy_buffer_to_texture(_zpuEncoder, source->_zpuBuffer,
                     sourceOffset + plane * imageStride, sourceBytesPerRow, destinationTextureAtLevel,
                     zpu_region(MTLRegionMake3D(destinationOrigin.x, destinationOrigin.y, 0,
-                                                sourceSize.width, sourceSize.height, 1))) != ZPU_METAL_OK) return;
+                                                sourceSize.width, sourceSize.height, 1))) != ZPU_METAL_OK) { [_owner markError]; return; }
         }
         [_owner retainResource:source];
         [_owner retainResource:destination];
         return;
     }
     (void)sourceBytesPerImage;
-    if (sourceSize.depth != 1) return;
+    if (sourceSize.depth != 1) { [_owner markError]; return; }
     zpu_metal_texture *destinationTextureAtLevel = [destination zpuTextureAtLevel:destinationLevel slice:destinationSlice];
-    if (destinationTextureAtLevel == NULL) return;
+    if (destinationTextureAtLevel == NULL) { [_owner markError]; return; }
     [_owner retainResource:source];
     [_owner retainResource:destination];
-    (void)zpu_metal_blit_encoder_copy_buffer_to_texture(_zpuEncoder, source->_zpuBuffer, sourceOffset, sourceBytesPerRow, destinationTextureAtLevel, zpu_region(region));
+    if (zpu_metal_blit_encoder_copy_buffer_to_texture(_zpuEncoder, source->_zpuBuffer, sourceOffset, sourceBytesPerRow, destinationTextureAtLevel, zpu_region(region)) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)copyFromBuffer:(id<MTLBuffer>)sourceBuffer sourceOffset:(NSUInteger)sourceOffset sourceBytesPerRow:(NSUInteger)sourceBytesPerRow sourceBytesPerImage:(NSUInteger)sourceBytesPerImage sourceSize:(MTLSize)sourceSize toTexture:(id<MTLTexture>)destinationTexture destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel destinationOrigin:(MTLOrigin)destinationOrigin options:(MTLBlitOption)options API_AVAILABLE(macos(10.11), ios(9.0)) {
     (void)options;
@@ -7216,16 +7216,16 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     ZPUTexture *source = (ZPUTexture *)sourceTexture;
     ZPUBuffer *destination = (ZPUBuffer *)destinationBuffer;
     MTLRegion region = MTLRegionMake3D(sourceOrigin.x, sourceOrigin.y, sourceOrigin.z, sourceSize.width, sourceSize.height, sourceSize.depth);
-    if (![source isKindOfClass:[ZPUTexture class]] || ![destination isKindOfClass:[ZPUBuffer class]] || !zpu_region_fits(region)) return;
+    if (!zpu_texture_belongs_to_device([_owner device], source) || !zpu_buffer_belongs_to_device([_owner device], destination) || !zpu_region_fits(region)) { [_owner markError]; return; }
     if (zpu_texture_type_is_3d(source->_textureType)) {
         const NSUInteger levelDepth = zpu_texture_depth_at_level(source, sourceLevel);
         if (sourceSlice != 0 || levelDepth == 0 || sourceOrigin.z > levelDepth ||
-            sourceSize.depth > levelDepth - sourceOrigin.z) return;
+            sourceSize.depth > levelDepth - sourceOrigin.z) { [_owner markError]; return; }
         const NSUInteger rowBytes = sourceSize.width * 4;
         const NSUInteger rowStride = destinationBytesPerRow == 0 ? rowBytes : destinationBytesPerRow;
-        if (rowStride < rowBytes || (sourceSize.height != 0 && rowStride > SIZE_MAX / sourceSize.height)) return;
+        if (rowStride < rowBytes || (sourceSize.height != 0 && rowStride > SIZE_MAX / sourceSize.height)) { [_owner markError]; return; }
         const NSUInteger imageStride = destinationBytesPerImage == 0 ? rowStride * sourceSize.height : destinationBytesPerImage;
-        if (sourceSize.depth > 1 && imageStride > SIZE_MAX / (sourceSize.depth - 1)) return;
+        if (sourceSize.depth > 1 && imageStride > SIZE_MAX / (sourceSize.depth - 1)) { [_owner markError]; return; }
         for (NSUInteger plane = 0; plane < sourceSize.depth; ++plane) {
             zpu_metal_texture *sourceTextureAtLevel =
                 [source zpuTextureAtLevel:sourceLevel slice:sourceOrigin.z + plane];
@@ -7233,19 +7233,19 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
                 zpu_metal_blit_encoder_copy_texture_to_buffer(_zpuEncoder, sourceTextureAtLevel,
                     zpu_region(MTLRegionMake3D(sourceOrigin.x, sourceOrigin.y, 0,
                                                 sourceSize.width, sourceSize.height, 1)),
-                    destination->_zpuBuffer, destinationOffset + plane * imageStride, destinationBytesPerRow) != ZPU_METAL_OK) return;
+                    destination->_zpuBuffer, destinationOffset + plane * imageStride, destinationBytesPerRow) != ZPU_METAL_OK) { [_owner markError]; return; }
         }
         [_owner retainResource:source];
         [_owner retainResource:destination];
         return;
     }
     (void)destinationBytesPerImage;
-    if (sourceSize.depth != 1) return;
+    if (sourceSize.depth != 1) { [_owner markError]; return; }
     zpu_metal_texture *sourceTextureAtLevel = [source zpuTextureAtLevel:sourceLevel slice:sourceSlice];
-    if (sourceTextureAtLevel == NULL) return;
+    if (sourceTextureAtLevel == NULL) { [_owner markError]; return; }
     [_owner retainResource:source];
     [_owner retainResource:destination];
-    (void)zpu_metal_blit_encoder_copy_texture_to_buffer(_zpuEncoder, sourceTextureAtLevel, zpu_region(region), destination->_zpuBuffer, destinationOffset, destinationBytesPerRow);
+    if (zpu_metal_blit_encoder_copy_texture_to_buffer(_zpuEncoder, sourceTextureAtLevel, zpu_region(region), destination->_zpuBuffer, destinationOffset, destinationBytesPerRow) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)copyFromTexture:(id<MTLTexture>)sourceTexture sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel sourceOrigin:(MTLOrigin)sourceOrigin sourceSize:(MTLSize)sourceSize toBuffer:(id<MTLBuffer>)destinationBuffer destinationOffset:(NSUInteger)destinationOffset destinationBytesPerRow:(NSUInteger)destinationBytesPerRow destinationBytesPerImage:(NSUInteger)destinationBytesPerImage options:(MTLBlitOption)options API_AVAILABLE(macos(10.11), ios(9.0)) {
     (void)options;
@@ -7254,7 +7254,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (void)copyFromTexture:(id<MTLTexture>)sourceTexture sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel sourceOrigin:(MTLOrigin)sourceOrigin sourceSize:(MTLSize)sourceSize toTexture:(id<MTLTexture>)destinationTexture destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel destinationOrigin:(MTLOrigin)destinationOrigin {
     ZPUTexture *source = (ZPUTexture *)sourceTexture;
     ZPUTexture *destination = (ZPUTexture *)destinationTexture;
-    if (![source isKindOfClass:[ZPUTexture class]] || ![destination isKindOfClass:[ZPUTexture class]]) return;
+    if (!zpu_texture_belongs_to_device([_owner device], source) || !zpu_texture_belongs_to_device([_owner device], destination)) { [_owner markError]; return; }
     if (zpu_texture_type_is_3d(source->_textureType) || zpu_texture_type_is_3d(destination->_textureType)) {
         if (!zpu_texture_type_is_3d(source->_textureType) || !zpu_texture_type_is_3d(destination->_textureType) ||
             sourceSlice != 0 || destinationSlice != 0 ||
@@ -7265,7 +7265,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
             !zpu_region_fits(MTLRegionMake3D(sourceOrigin.x, sourceOrigin.y, sourceOrigin.z,
                                               sourceSize.width, sourceSize.height, sourceSize.depth)) ||
             !zpu_region_fits(MTLRegionMake3D(destinationOrigin.x, destinationOrigin.y, destinationOrigin.z,
-                                              sourceSize.width, sourceSize.height, sourceSize.depth))) return;
+                                              sourceSize.width, sourceSize.height, sourceSize.depth))) { [_owner markError]; return; }
         for (NSUInteger plane = 0; plane < sourceSize.depth; ++plane) {
             zpu_metal_texture *sourceTextureAtLevel =
                 [source zpuTextureAtLevel:sourceLevel slice:sourceOrigin.z + plane];
@@ -7276,22 +7276,22 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
                     zpu_region(MTLRegionMake3D(sourceOrigin.x, sourceOrigin.y, 0,
                                                 sourceSize.width, sourceSize.height, 1)),
                     destinationTextureAtLevel, zpu_region(MTLRegionMake3D(destinationOrigin.x, destinationOrigin.y, 0,
-                                                                          sourceSize.width, sourceSize.height, 1))) != ZPU_METAL_OK) return;
+                                                                          sourceSize.width, sourceSize.height, 1))) != ZPU_METAL_OK) { [_owner markError]; return; }
         }
         [_owner retainResource:source];
         [_owner retainResource:destination];
         return;
     }
-    if (sourceSize.depth != 1) return;
+    if (sourceSize.depth != 1) { [_owner markError]; return; }
     zpu_metal_texture *sourceTextureAtLevel = [source zpuTextureAtLevel:sourceLevel slice:sourceSlice];
     zpu_metal_texture *destinationTextureAtLevel = [destination zpuTextureAtLevel:destinationLevel slice:destinationSlice];
-    if (sourceTextureAtLevel == NULL || destinationTextureAtLevel == NULL) return;
+    if (sourceTextureAtLevel == NULL || destinationTextureAtLevel == NULL) { [_owner markError]; return; }
     [_owner retainResource:source];
     [_owner retainResource:destination];
     MTLRegion sourceRegion = MTLRegionMake3D(sourceOrigin.x, sourceOrigin.y, sourceOrigin.z, sourceSize.width, sourceSize.height, sourceSize.depth);
     MTLRegion destinationRegion = MTLRegionMake3D(destinationOrigin.x, destinationOrigin.y, destinationOrigin.z, sourceSize.width, sourceSize.height, sourceSize.depth);
-    if (!zpu_region_fits(sourceRegion) || !zpu_region_fits(destinationRegion)) return;
-    (void)zpu_metal_blit_encoder_copy_texture_to_texture(_zpuEncoder, sourceTextureAtLevel, zpu_region(sourceRegion), destinationTextureAtLevel, zpu_region(destinationRegion));
+    if (!zpu_region_fits(sourceRegion) || !zpu_region_fits(destinationRegion)) { [_owner markError]; return; }
+    if (zpu_metal_blit_encoder_copy_texture_to_texture(_zpuEncoder, sourceTextureAtLevel, zpu_region(sourceRegion), destinationTextureAtLevel, zpu_region(destinationRegion)) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)copyFromTexture:(id<MTLTexture>)sourceTexture sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel toTexture:(id<MTLTexture>)destinationTexture destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel sliceCount:(NSUInteger)sliceCount levelCount:(NSUInteger)levelCount API_AVAILABLE(macos(10.15), ios(13.0)) {
     ZPUTexture *source = (ZPUTexture *)sourceTexture;
@@ -7368,32 +7368,32 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)fillBuffer:(id<MTLBuffer>)buffer range:(NSRange)range value:(uint8_t)value {
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
-    if (![zpuBuffer isKindOfClass:[ZPUBuffer class]] || range.location > SIZE_MAX - range.length) return;
+    if (!zpu_buffer_belongs_to_device([_owner device], zpuBuffer) || range.location > SIZE_MAX - range.length) { [_owner markError]; return; }
     [_owner retainResource:zpuBuffer];
-    (void)zpu_metal_blit_encoder_fill_buffer(_zpuEncoder, zpuBuffer->_zpuBuffer, range.location, range.length, value);
+    if (zpu_metal_blit_encoder_fill_buffer(_zpuEncoder, zpuBuffer->_zpuBuffer, range.location, range.length, value) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)updateFence:(id<MTLFence>)fence {
     ZPUFence *zpuFence = (ZPUFence *)fence;
-    if (![zpuFence isKindOfClass:[ZPUFence class]]) return;
+    if (![zpuFence isKindOfClass:[ZPUFence class]] || zpuFence->_owner != [_owner device]) { [_owner markError]; return; }
     [_owner retainResource:zpuFence];
-    (void)zpu_metal_blit_encoder_update_fence(_zpuEncoder, zpuFence->_zpuFence);
+    if (zpu_metal_blit_encoder_update_fence(_zpuEncoder, zpuFence->_zpuFence) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)waitForFence:(id<MTLFence>)fence {
     ZPUFence *zpuFence = (ZPUFence *)fence;
-    if (![zpuFence isKindOfClass:[ZPUFence class]]) return;
+    if (![zpuFence isKindOfClass:[ZPUFence class]] || zpuFence->_owner != [_owner device]) { [_owner markError]; return; }
     [_owner retainResource:zpuFence];
-    (void)zpu_metal_blit_encoder_wait_for_fence(_zpuEncoder, zpuFence->_zpuFence);
+    if (zpu_metal_blit_encoder_wait_for_fence(_zpuEncoder, zpuFence->_zpuFence) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)generateMipmapsForTexture:(id<MTLTexture>)texture {
     ZPUTexture *zpuTexture = (ZPUTexture *)texture;
-    if (![zpuTexture isKindOfClass:[ZPUTexture class]] ||
+    if (!zpu_texture_belongs_to_device([_owner device], zpuTexture) ||
         !zpu_render_pipeline_format_supported(zpuTexture->_pixelFormat) ||
-        zpuTexture.mipmapLevelCount < 2) return;
+        zpuTexture.mipmapLevelCount < 2) { [_owner markError]; return; }
     if (zpu_texture_type_is_3d(zpuTexture->_textureType)) {
         for (NSUInteger level = 0; level + 1 < zpuTexture.mipmapLevelCount; ++level) {
             const NSUInteger sourceDepth = zpu_texture_depth_at_level(zpuTexture, level);
             const NSUInteger destinationDepth = zpu_texture_depth_at_level(zpuTexture, level + 1);
-            if (sourceDepth == 0 || destinationDepth != (sourceDepth > 1 ? sourceDepth / 2 : 1)) return;
+            if (sourceDepth == 0 || destinationDepth != (sourceDepth > 1 ? sourceDepth / 2 : 1)) { [_owner markError]; return; }
             const NSUInteger zDenominator = destinationDepth * 2;
             for (NSUInteger plane = 0; plane < destinationDepth; ++plane) {
                 const NSUInteger zPositionNumerator = (plane * 2 + 1) * sourceDepth - destinationDepth;
@@ -7407,7 +7407,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
                 if (sourceTexture0 == NULL || (hasSource1 && sourceTexture1 == NULL) || destinationTexture == NULL ||
                     zpu_metal_blit_encoder_generate_mipmap_3d_weighted(_zpuEncoder, sourceTexture0,
                         sourceTexture1, destinationTexture, hasSource1 ? (uint32_t)zRemainder : 0,
-                        hasSource1 ? (uint32_t)zDenominator : 1) != ZPU_METAL_OK) return;
+                        hasSource1 ? (uint32_t)zDenominator : 1) != ZPU_METAL_OK) { [_owner markError]; return; }
             }
         }
         [_owner retainResource:zpuTexture];
@@ -7417,24 +7417,24 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         for (NSUInteger level = 0; level + 1 < zpuTexture.mipmapLevelCount; ++level) {
             if (zpu_metal_blit_encoder_generate_mipmap(
                     _zpuEncoder, [zpuTexture zpuTextureAtLevel:level slice:slice],
-                    [zpuTexture zpuTextureAtLevel:level + 1 slice:slice]) != ZPU_METAL_OK) return;
+                    [zpuTexture zpuTextureAtLevel:level + 1 slice:slice]) != ZPU_METAL_OK) { [_owner markError]; return; }
         }
     }
     [_owner retainResource:zpuTexture];
 }
-- (void)optimizeContentsForGPUAccess:(id<MTLTexture>)texture { (void)texture; }
-- (void)optimizeContentsForCPUAccess:(id<MTLTexture>)texture { (void)texture; }
+- (void)optimizeContentsForGPUAccess:(id<MTLTexture>)texture { if (!zpu_texture_belongs_to_device([_owner device], (ZPUTexture *)texture)) [_owner markError]; else [_owner retainResource:texture]; }
+- (void)optimizeContentsForCPUAccess:(id<MTLTexture>)texture { if (!zpu_texture_belongs_to_device([_owner device], (ZPUTexture *)texture)) [_owner markError]; else [_owner retainResource:texture]; }
 - (void)optimizeContentsForGPUAccess:(id<MTLTexture>)texture slice:(NSUInteger)slice level:(NSUInteger)level API_AVAILABLE(macos(10.14), ios(12.0)) {
-    if (![texture isKindOfClass:[ZPUTexture class]] || slice != 0 || level != 0) [_owner markError];
+    if (!zpu_texture_belongs_to_device([_owner device], (ZPUTexture *)texture) || slice != 0 || level != 0) [_owner markError];
     else [_owner retainResource:texture];
 }
 - (void)optimizeContentsForCPUAccess:(id<MTLTexture>)texture slice:(NSUInteger)slice level:(NSUInteger)level API_AVAILABLE(macos(10.14), ios(12.0)) {
-    if (![texture isKindOfClass:[ZPUTexture class]] || slice != 0 || level != 0) [_owner markError];
+    if (!zpu_texture_belongs_to_device([_owner device], (ZPUTexture *)texture) || slice != 0 || level != 0) [_owner markError];
     else [_owner retainResource:texture];
 }
 - (void)resetCommandsInBuffer:(id<MTLIndirectCommandBuffer>)buffer withRange:(NSRange)range API_AVAILABLE(macos(10.14), ios(12.0)) {
     ZPUIndirectCommandBuffer *zpuBuffer = (ZPUIndirectCommandBuffer *)buffer;
-    if (![zpuBuffer isKindOfClass:[ZPUIndirectCommandBuffer class]]) {
+    if (![zpuBuffer isKindOfClass:[ZPUIndirectCommandBuffer class]] || zpuBuffer->_owner != [_owner device]) {
         [_owner markError];
         return;
     }
@@ -7444,8 +7444,8 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (void)copyIndirectCommandBuffer:(id<MTLIndirectCommandBuffer>)source sourceRange:(NSRange)sourceRange destination:(id<MTLIndirectCommandBuffer>)destination destinationIndex:(NSUInteger)destinationIndex API_AVAILABLE(macos(10.14), ios(12.0)) {
     ZPUIndirectCommandBuffer *sourceBuffer = (ZPUIndirectCommandBuffer *)source;
     ZPUIndirectCommandBuffer *destinationBuffer = (ZPUIndirectCommandBuffer *)destination;
-    if (![sourceBuffer isKindOfClass:[ZPUIndirectCommandBuffer class]] ||
-        ![destinationBuffer isKindOfClass:[ZPUIndirectCommandBuffer class]] ||
+    if (![sourceBuffer isKindOfClass:[ZPUIndirectCommandBuffer class]] || sourceBuffer->_owner != [_owner device] ||
+        ![destinationBuffer isKindOfClass:[ZPUIndirectCommandBuffer class]] || destinationBuffer->_owner != [_owner device] ||
         ![destinationBuffer copyCommandsFrom:sourceBuffer sourceRange:sourceRange destinationIndex:destinationIndex]) {
         [_owner markError];
         return;
@@ -7455,7 +7455,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)optimizeIndirectCommandBuffer:(id<MTLIndirectCommandBuffer>)indirectCommandBuffer withRange:(NSRange)range API_AVAILABLE(macos(10.14), ios(12.0)) {
     ZPUIndirectCommandBuffer *zpuBuffer = (ZPUIndirectCommandBuffer *)indirectCommandBuffer;
-    if (![zpuBuffer isKindOfClass:[ZPUIndirectCommandBuffer class]] ||
+    if (![zpuBuffer isKindOfClass:[ZPUIndirectCommandBuffer class]] || zpuBuffer->_owner != [_owner device] ||
         range.location > zpuBuffer->_maxCommandCount || range.length > zpuBuffer->_maxCommandCount - range.location) {
         [_owner markError];
         return;
