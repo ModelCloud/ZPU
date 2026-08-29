@@ -635,7 +635,10 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLSamplerAddressMode _sAddressMode;
     MTLSamplerAddressMode _tAddressMode;
     MTLSamplerBorderColor _borderColor;
-    MTLSamplerReductionMode _reductionMode;
+    /* Store the SDK enum as its stable NSUInteger value so this class remains
+     * compilable for the iOS 15 deployment target; the typed property is only
+     * read inside its iOS/macOS 26 availability guard below. */
+    NSUInteger _reductionMode;
     BOOL _normalizedCoordinates;
     float _lodMinClamp;
     float _lodMaxClamp;
@@ -5511,8 +5514,8 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _sAddressMode = descriptor.sAddressMode;
         _tAddressMode = descriptor.tAddressMode;
         _borderColor = descriptor.borderColor;
-        _reductionMode = MTLSamplerReductionModeWeightedAverage;
-        if (@available(macOS 26.0, iOS 26.0, *)) _reductionMode = descriptor.reductionMode;
+        _reductionMode = 0;
+        if (@available(macOS 26.0, iOS 26.0, *)) _reductionMode = (NSUInteger)descriptor.reductionMode;
         _normalizedCoordinates = descriptor.normalizedCoordinates;
         _lodMinClamp = descriptor.lodMinClamp;
         _lodMaxClamp = descriptor.lodMaxClamp;
@@ -12056,7 +12059,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         zpu_metal_render_encoder_set_fragment_sampler_normalized_coordinates(
             _zpuEncoder, normalizedCoordinates) != ZPU_METAL_OK ||
         zpu_metal_render_encoder_set_fragment_sampler_reduction_mode(
-            _zpuEncoder, sampler == nil ? (uint8_t)MTLSamplerReductionModeWeightedAverage :
+            _zpuEncoder, sampler == nil ? 0 :
                 (uint8_t)zpuSampler->_reductionMode) != ZPU_METAL_OK) {
         [_owner markError];
         return;
