@@ -4128,6 +4128,39 @@ int main(void) {
             return 61;
         }
 
+        /* An otherwise empty argument table is still scoped to its creating
+         * device. This catches a foreign-table handoff before any resource
+         * ID happens to make the ownership violation visible. */
+        MTL4ArgumentTableDescriptor *foreign_metal4_table_descriptor = [MTL4ArgumentTableDescriptor new];
+        id<MTL4ArgumentTable> foreign_metal4_table =
+            [foreign_adapter_device newArgumentTableWithDescriptor:foreign_metal4_table_descriptor error:&metal4_error];
+        id<MTL4CommandBuffer> foreign_metal4_table_command_buffer = [adapter_device newCommandBuffer];
+        [foreign_metal4_table_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> foreign_metal4_table_encoder =
+            [foreign_metal4_table_command_buffer computeCommandEncoder];
+        [foreign_metal4_table_encoder setComputePipelineState:adapter_compute_pipeline];
+        [foreign_metal4_table_encoder setArgumentTable:foreign_metal4_table];
+        [foreign_metal4_table_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                  threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+        [foreign_metal4_table_encoder endEncoding];
+        [foreign_metal4_table_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> foreign_metal4_table_command_buffers[] = {
+            foreign_metal4_table_command_buffer,
+        };
+        MTL4CommitOptions *foreign_metal4_table_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *foreign_metal4_table_error = nil;
+        [foreign_metal4_table_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            foreign_metal4_table_error = feedback.error;
+        }];
+        [metal4_queue commit:foreign_metal4_table_command_buffers
+                        count:1
+                       options:foreign_metal4_table_options];
+        if (foreign_metal4_table == nil || foreign_metal4_table_command_buffer == nil ||
+            foreign_metal4_table_encoder == nil || foreign_metal4_table_error == nil) {
+            fail_with_error("Metal 4 CPU adapter accepted a foreign argument table", metal4_error);
+            return 63;
+        }
+
         /* The ML encoder must be a CPU-owned object even though arbitrary ML
          * graph execution is not implemented. Its dispatch path must report
          * an error through Metal 4 feedback instead of returning nil or

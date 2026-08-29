@@ -5578,7 +5578,9 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     [_owner markError];
 }
 - (void)setArgumentTable:(id<MTL4ArgumentTable>)argumentTable atStages:(MTLRenderStages)stages {
-    if (argumentTable != nil && ![(id)argumentTable isKindOfClass:[ZPUMTL4ArgumentTable class]]) {
+    if (argumentTable != nil &&
+        (![argumentTable isKindOfClass:[ZPUMTL4ArgumentTable class]] ||
+         ((ZPUMTL4ArgumentTable *)argumentTable)->_owner != _owner->_owner)) {
         [_owner markError];
         return;
     }
@@ -5760,7 +5762,9 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     if (_owner->_activeEncoder == self) _owner->_activeEncoder = nil;
 }
 - (void)setArgumentTable:(id<MTL4ArgumentTable>)argumentTable {
-    if (argumentTable != nil && ![(id)argumentTable isKindOfClass:[ZPUMTL4ArgumentTable class]]) {
+    if (argumentTable != nil &&
+        (![argumentTable isKindOfClass:[ZPUMTL4ArgumentTable class]] ||
+         ((ZPUMTL4ArgumentTable *)argumentTable)->_owner != _owner->_owner)) {
         [_owner markError];
         return;
     }
