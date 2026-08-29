@@ -77,6 +77,10 @@ triangle path:
   and serialize supported buffer/texture/sampler bindings into deterministic
   CPU-side 16-byte slots containing synthetic resource IDs and buffer offsets;
   arbitrary shader-specific Metal layouts are still not synthesized
+- CPU-owned Metal 4 timestamp counter heaps; timestamps are monotonic values
+  from the adapter's CPU clock domain, resolve into ZPU buffers, and support
+  immediate CPU-range invalidation. `queryTimestampFrequency` reports
+  nanoseconds for this CPU clock domain; no hardware GPU timestamp is exposed
 - CPU library metadata can discover the two registered kernel names from
   source text and create ZPU-owned `MTLFunction` descriptors; unsupported
   arbitrary MSL, file/data libraries, and stitched libraries fail closed
@@ -84,7 +88,7 @@ triangle path:
   buffer inherits the ZPU encoder's texture bindings and records pipeline,
   buffer, and dispatch state for deferred execution
 - Metal 4 basic buffer/texture copy and buffer-fill commands append deferred
-  ZPU work; tensor, advanced optimization, acceleration-structure, counter,
+  ZPU work; tensor, advanced optimization, acceleration-structure,
   sparse, drawable, residency, machine-learning, and tile/mesh render-pass
   features remain explicit fail-closed boundaries. Suspending/resuming render
   passes are represented as sequential ordinary CPU passes because the CPU
@@ -93,7 +97,7 @@ triangle path:
 - classic Metal resource, pipeline, blit, event, indirect-command, and
   command-buffer selectors that have no portable CPU meaning are represented
   explicitly: metadata-only operations are deterministic no-ops, while
-  arbitrary shader compilation, binary linking, counters, sparse/placement
+  arbitrary shader compilation, binary linking, sparse/placement
   resources, ray tracing, tensors, I/O, and unsupported Metal 4 advanced
   families return nil or a stable error. They never fall through to Apple's
   native Metal runtime
@@ -174,7 +178,7 @@ reference: <https://developer.apple.com/documentation/metal>.
 The current checked-in implementation is intentionally not 100% of the Apple
 Metal ABI. The remaining framework surface includes additional compute and
 Metal 4 encoders, resource and pipeline descriptors beyond the fixed-function state
-implemented here, Metal 4 tile/mesh/counter render and copy/optimization families, ICB patch/mesh commands, other
+implemented here, Metal 4 tile/mesh render and remaining copy/optimization families, ICB patch/mesh commands, other
 synchronization families, ray tracing, sparse resources, machine
 learning/tensors, and arbitrary shader compilation. A strict completeness claim
 belongs only after the Apple SDK inventory and macOS/iOS behavior tests pass.

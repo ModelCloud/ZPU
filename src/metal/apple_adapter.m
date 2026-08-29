@@ -28,6 +28,7 @@
 @class ZPUIndirectComputeCommand;
 @class ZPUComputeEncoder;
 @class ZPUArgumentEncoder;
+@class ZPUMTL4CounterHeap;
 @class ZPURenderEncoder;
 @class ZPULibrary;
 @class ZPUMTL4CommandAllocator;
@@ -199,6 +200,22 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner event:(zpu_metal_shared_event *)event;
 @end
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+API_AVAILABLE(macos(26.0), ios(26.0))
+@interface ZPUMTL4CounterHeap : NSObject <MTL4CounterHeap> {
+@public
+    ZPUDevice *_owner;
+    MTL4CounterHeapType _type;
+    NSUInteger _count;
+    NSString *_label;
+    NSMutableData *_entries;
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTL4CounterHeapDescriptor *)descriptor;
+- (BOOL)writeTimestampAtIndex:(NSUInteger)index;
+@end
+#pragma clang diagnostic pop
 
 @interface ZPURenderPipelineState : NSObject <MTLRenderPipelineState> {
 @public
@@ -1118,6 +1135,54 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
 - (MTLSharedEventHandle *)newSharedEventHandle { return nil; }
 @end
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+static volatile uint64_t zpu_cpu_timestamp_counter = 1;
+
+@implementation ZPUMTL4CounterHeap
+- (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTL4CounterHeapDescriptor *)descriptor {
+    if ((self = [super init])) {
+        _owner = owner;
+        _type = descriptor.type;
+        _count = descriptor.count;
+        if (_type != MTL4CounterHeapTypeTimestamp || _count == 0 ||
+            _count > SIZE_MAX / sizeof(MTL4TimestampHeapEntry)) {
+            return nil;
+        }
+        _entries = [NSMutableData dataWithLength:_count * sizeof(MTL4TimestampHeapEntry)];
+    }
+    return self;
+}
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
+- (NSUInteger)count { return _count; }
+- (MTL4CounterHeapType)type { return _type; }
+- (BOOL)writeTimestampAtIndex:(NSUInteger)index {
+    if (_type != MTL4CounterHeapTypeTimestamp || index >= _count) return NO;
+    const uint64_t timestamp = __sync_fetch_and_add(&zpu_cpu_timestamp_counter, 1);
+    @synchronized (self) {
+        ((MTL4TimestampHeapEntry *)_entries.mutableBytes)[index].timestamp = timestamp;
+    }
+    return YES;
+}
+- (NSData *)resolveCounterRange:(NSRange)range {
+    if (range.location > _count || range.length > _count - range.location) return nil;
+    @synchronized (self) {
+        return [_entries subdataWithRange:NSMakeRange(
+            range.location * sizeof(MTL4TimestampHeapEntry),
+            range.length * sizeof(MTL4TimestampHeapEntry))];
+    }
+}
+- (void)invalidateCounterRange:(NSRange)range {
+    if (range.location > _count || range.length > _count - range.location) return;
+    @synchronized (self) {
+        memset((uint8_t *)_entries.mutableBytes + range.location * sizeof(MTL4TimestampHeapEntry), 0,
+               range.length * sizeof(MTL4TimestampHeapEntry));
+    }
+}
+@end
+#pragma clang diagnostic pop
+
 @implementation ZPURenderPipelineState
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLRenderPipelineDescriptor *)descriptor {
     if ((self = [super init])) {
@@ -1760,15 +1825,18 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
     return nil;
 }
 - (id<MTL4CounterHeap>)newCounterHeapWithDescriptor:(MTL4CounterHeapDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)descriptor;
-    zpu_set_error(error, @"ZPU CPU Metal has no Metal 4 counter heap");
-    return nil;
+    if (descriptor == nil || descriptor.type != MTL4CounterHeapTypeTimestamp || descriptor.count == 0 ||
+        descriptor.count > SIZE_MAX / sizeof(MTL4TimestampHeapEntry)) {
+        zpu_set_error(error, @"ZPU CPU Metal supports only non-empty Metal 4 timestamp counter heaps");
+        return nil;
+    }
+    if (error != NULL) *error = nil;
+    return (id<MTL4CounterHeap>)[[ZPUMTL4CounterHeap alloc] initWithOwner:self descriptor:descriptor];
 }
 - (NSUInteger)sizeOfCounterHeapEntry:(MTL4CounterHeapType)type API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)type;
-    return 0;
+    return type == MTL4CounterHeapTypeTimestamp ? sizeof(MTL4TimestampHeapEntry) : 0;
 }
-- (uint64_t)queryTimestampFrequency API_AVAILABLE(macos(26.0), ios(26.0)) { return 0; }
+- (uint64_t)queryTimestampFrequency API_AVAILABLE(macos(26.0), ios(26.0)) { return 1000000000ULL; }
 - (id<MTLFunctionHandle>)functionHandleWithBinaryFunction:(id<MTL4BinaryFunction>)function API_AVAILABLE(macos(26.0), ios(26.0)) {
     (void)function;
     return nil;
@@ -2280,17 +2348,36 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
 - (void)pushDebugGroup:(NSString *)string { (void)string; }
 - (void)popDebugGroup {}
 - (void)writeTimestampIntoHeap:(id<MTL4CounterHeap>)counterHeap atIndex:(NSUInteger)index {
-    (void)counterHeap;
-    (void)index;
-    [self markError];
+    ZPUMTL4CounterHeap *heap = (ZPUMTL4CounterHeap *)counterHeap;
+    if (![heap isKindOfClass:[ZPUMTL4CounterHeap class]] || heap->_owner != _owner || _legacyBuffer == nil ||
+        ![heap writeTimestampAtIndex:index]) {
+        [self markError];
+        return;
+    }
+    if (_legacyBuffer != nil) [_legacyBuffer retainResource:heap];
 }
 - (void)resolveCounterHeap:(id<MTL4CounterHeap>)counterHeap withRange:(NSRange)range intoBuffer:(MTL4BufferRange)bufferRange waitFence:(id<MTLFence>)fenceToWait updateFence:(id<MTLFence>)fenceToUpdate {
-    (void)counterHeap;
-    (void)range;
-    (void)bufferRange;
-    (void)fenceToWait;
-    (void)fenceToUpdate;
-    [self markError];
+    ZPUMTL4CounterHeap *heap = (ZPUMTL4CounterHeap *)counterHeap;
+    ZPUBuffer *buffer = zpu_metal4_buffer_for_address(bufferRange.bufferAddress);
+    if (![heap isKindOfClass:[ZPUMTL4CounterHeap class]] || heap->_owner != _owner || _legacyBuffer == nil ||
+        ![buffer isKindOfClass:[ZPUBuffer class]] || buffer->_owner != _owner ||
+        (fenceToWait != nil && ![(id)fenceToWait isKindOfClass:[ZPUFence class]]) ||
+        (fenceToUpdate != nil && ![(id)fenceToUpdate isKindOfClass:[ZPUFence class]])) {
+        [self markError];
+        return;
+    }
+    NSData *resolved = [heap resolveCounterRange:range];
+    if (resolved == nil || resolved.length > buffer.length ||
+        bufferRange.bufferAddress != buffer->_resourceID ||
+        (bufferRange.length != UINT64_MAX &&
+         (bufferRange.length < resolved.length || bufferRange.length > (uint64_t)buffer.length))) {
+        [self markError];
+        return;
+    }
+    if (resolved.length != 0) memcpy((uint8_t *)buffer.contents, resolved.bytes, resolved.length);
+    [_legacyBuffer retainResource:heap];
+    [_legacyBuffer retainResource:buffer];
+    if (fenceToUpdate != nil) [_legacyBuffer retainResource:fenceToUpdate];
 }
 @end
 
@@ -2559,9 +2646,13 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
 - (void)writeTimestampWithGranularity:(MTL4TimestampGranularity)granularity afterStage:(MTLRenderStages)stage intoHeap:(id<MTL4CounterHeap>)counterHeap atIndex:(NSUInteger)index {
     (void)granularity;
     (void)stage;
-    (void)counterHeap;
-    (void)index;
-    [_owner markError];
+    ZPUMTL4CounterHeap *heap = (ZPUMTL4CounterHeap *)counterHeap;
+    if (![heap isKindOfClass:[ZPUMTL4CounterHeap class]] || heap->_owner != _owner->_owner ||
+        ![heap writeTimestampAtIndex:index]) {
+        [_owner markError];
+        return;
+    }
+    [_owner->_legacyBuffer retainResource:heap];
 }
 - (void)endEncoding {
     if (_ended) return;
@@ -2765,7 +2856,16 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
 - (void)copyAccelerationStructure:(id<MTLAccelerationStructure>)sourceAccelerationStructure toAccelerationStructure:(id<MTLAccelerationStructure>)destinationAccelerationStructure { (void)sourceAccelerationStructure; (void)destinationAccelerationStructure; [_owner markError]; }
 - (void)writeCompactedAccelerationStructureSize:(id<MTLAccelerationStructure>)accelerationStructure toBuffer:(MTL4BufferRange)buffer { (void)accelerationStructure; (void)buffer; [_owner markError]; }
 - (void)copyAndCompactAccelerationStructure:(id<MTLAccelerationStructure>)sourceAccelerationStructure toAccelerationStructure:(id<MTLAccelerationStructure>)destinationAccelerationStructure { (void)sourceAccelerationStructure; (void)destinationAccelerationStructure; [_owner markError]; }
-- (void)writeTimestampWithGranularity:(MTL4TimestampGranularity)granularity intoHeap:(id<MTL4CounterHeap>)counterHeap atIndex:(NSUInteger)index { (void)granularity; (void)counterHeap; (void)index; [_owner markError]; }
+- (void)writeTimestampWithGranularity:(MTL4TimestampGranularity)granularity intoHeap:(id<MTL4CounterHeap>)counterHeap atIndex:(NSUInteger)index {
+    (void)granularity;
+    ZPUMTL4CounterHeap *heap = (ZPUMTL4CounterHeap *)counterHeap;
+    if (![heap isKindOfClass:[ZPUMTL4CounterHeap class]] || heap->_owner != _owner->_owner ||
+        ![heap writeTimestampAtIndex:index]) {
+        [_owner markError];
+        return;
+    }
+    [_owner->_legacyBuffer retainResource:heap];
+}
 @end
 
 #pragma clang diagnostic pop

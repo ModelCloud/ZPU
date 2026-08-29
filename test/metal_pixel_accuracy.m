@@ -700,6 +700,64 @@ int main(void) {
             return 63;
         }
 
+        /* Metal 4 timestamp counters are CPU-owned too. Their values are
+         * deliberately not compared with native Metal timestamps: the
+         * portable adapter exposes a monotonic CPU clock domain, while the
+         * native path is used only as the pixel oracle above. Exercise the
+         * command-buffer, compute, and render encoder write paths,
+         * GPU-address resolution, CPU resolution, and immediate invalidation. */
+        MTL4CounterHeapDescriptor *adapter_counter_descriptor = [MTL4CounterHeapDescriptor new];
+        adapter_counter_descriptor.type = MTL4CounterHeapTypeTimestamp;
+        adapter_counter_descriptor.count = 4;
+        id<MTL4CounterHeap> adapter_counter_heap =
+            [adapter_device newCounterHeapWithDescriptor:adapter_counter_descriptor error:&metal4_error];
+        id<MTLBuffer> adapter_counter_buffer =
+            [adapter_device newBufferWithLength:4 * sizeof(MTL4TimestampHeapEntry)
+                                        options:MTLResourceStorageModeShared];
+        id<MTL4CommandBuffer> adapter_counter_command_buffer = [adapter_device newCommandBuffer];
+        [adapter_counter_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        [adapter_counter_command_buffer writeTimestampIntoHeap:adapter_counter_heap atIndex:0];
+        id<MTL4ComputeCommandEncoder> adapter_counter_compute_encoder =
+            [adapter_counter_command_buffer computeCommandEncoder];
+        [adapter_counter_compute_encoder writeTimestampWithGranularity:MTL4TimestampGranularityPrecise
+                                                               intoHeap:adapter_counter_heap atIndex:1];
+        [adapter_counter_compute_encoder endEncoding];
+        [adapter_counter_command_buffer endCommandBuffer];
+        [adapter_counter_command_buffer resolveCounterHeap:adapter_counter_heap
+                                                 withRange:NSMakeRange(0, 2)
+                                                intoBuffer:MTL4BufferRangeMake(adapter_counter_buffer.gpuAddress,
+                                                                                2 * sizeof(MTL4TimestampHeapEntry))
+                                                 waitFence:nil
+                                               updateFence:nil];
+        id<MTL4CommandBuffer> adapter_counter_command_buffers[] = {adapter_counter_command_buffer};
+        [metal4_queue commit:adapter_counter_command_buffers count:1];
+        const MTL4TimestampHeapEntry *adapter_counter_entries =
+            (const MTL4TimestampHeapEntry *)adapter_counter_buffer.contents;
+        NSData *adapter_counter_resolved = [adapter_counter_heap resolveCounterRange:NSMakeRange(0, 2)];
+        if (adapter_counter_heap == nil || adapter_counter_heap.count != 4 ||
+            adapter_counter_heap.type != MTL4CounterHeapTypeTimestamp ||
+            [adapter_device sizeOfCounterHeapEntry:MTL4CounterHeapTypeTimestamp] != sizeof(MTL4TimestampHeapEntry) ||
+            [adapter_device queryTimestampFrequency] != 1000000000ULL ||
+            adapter_counter_buffer == nil || adapter_counter_command_buffer == nil ||
+            adapter_counter_compute_encoder == nil ||
+            adapter_counter_resolved.length != 2 * sizeof(MTL4TimestampHeapEntry) ||
+            adapter_counter_entries[0].timestamp == 0 || adapter_counter_entries[1].timestamp == 0 ||
+            adapter_counter_entries[0].timestamp >= adapter_counter_entries[1].timestamp) {
+            fail_with_error("Metal 4 CPU timestamp counter path failed", metal4_error);
+            return 64;
+        }
+        const uint64_t preserved_counter_timestamp = adapter_counter_entries[1].timestamp;
+        [adapter_counter_heap invalidateCounterRange:NSMakeRange(0, 1)];
+        NSData *adapter_counter_invalidated = [adapter_counter_heap resolveCounterRange:NSMakeRange(0, 2)];
+        const MTL4TimestampHeapEntry *adapter_counter_invalidated_entries =
+            (const MTL4TimestampHeapEntry *)adapter_counter_invalidated.bytes;
+        if (adapter_counter_invalidated.length != 2 * sizeof(MTL4TimestampHeapEntry) ||
+            adapter_counter_invalidated_entries[0].timestamp != 0 ||
+            adapter_counter_invalidated_entries[1].timestamp != preserved_counter_timestamp) {
+            fail_with_error("Metal 4 CPU timestamp counter invalidation failed", metal4_error);
+            return 65;
+        }
+
         MTLResourceViewPoolDescriptor *adapter_view_pool_descriptor = [MTLResourceViewPoolDescriptor new];
         adapter_view_pool_descriptor.resourceViewCount = 2;
         id<MTLTextureViewPool> adapter_view_pool =
@@ -1238,6 +1296,9 @@ int main(void) {
         [adapter_metal4_origin_encoder setArgumentTable:adapter_metal4_origin_table
                                                 atStages:MTLRenderStageVertex | MTLRenderStageFragment];
         [adapter_metal4_origin_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
+        [adapter_metal4_origin_encoder writeTimestampWithGranularity:MTL4TimestampGranularityPrecise
+                                                            afterStage:MTLRenderStageFragment
+                                                             intoHeap:adapter_counter_heap atIndex:2];
         [adapter_metal4_origin_encoder endEncoding];
         [adapter_metal4_origin_command_buffer endCommandBuffer];
         id<MTL4CommandBuffer> adapter_metal4_origin_command_buffers[] = {adapter_metal4_origin_command_buffer};
@@ -1252,6 +1313,14 @@ int main(void) {
             memcmp(metal_origin_pixels, adapter_metal4_origin_pixels, sizeof(metal_origin_pixels)) != 0) {
             fail_with_error("Metal 4 CPU origin-coordinate render failed", metal4_error);
             return 62;
+        }
+        NSData *adapter_render_counter_resolved = [adapter_counter_heap resolveCounterRange:NSMakeRange(2, 1)];
+        const MTL4TimestampHeapEntry *adapter_render_counter_entry =
+            (const MTL4TimestampHeapEntry *)adapter_render_counter_resolved.bytes;
+        if (adapter_render_counter_resolved.length != sizeof(MTL4TimestampHeapEntry) ||
+            adapter_render_counter_entry[0].timestamp == 0) {
+            fail_with_error("Metal 4 CPU render timestamp path failed", metal4_error);
+            return 67;
         }
 
         id<MTLTexture> adapter_metal4_split_texture =
@@ -1883,7 +1952,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, Metal 4 render/dispatch/copy, view pools, argument encoders, depth, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, Metal 4 render/dispatch/copy/counters, view pools, argument encoders, depth, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }
