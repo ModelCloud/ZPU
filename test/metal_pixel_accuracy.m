@@ -2198,6 +2198,63 @@ int main(void) {
         const BOOL adapter_selector_scissors = [adapter_encoder respondsToSelector:@selector(setScissorRects:count:)];
         const BOOL adapter_selectors_ok = adapter_selector_resource_state && adapter_selector_acceleration &&
             adapter_selector_event && adapter_selector_viewports && adapter_selector_scissors;
+
+        /* Acceleration structures are CPU-owned allocations and metadata. The
+         * native object is created only as an oracle for availability/shape;
+         * no native build or ray-tracing command is submitted here. */
+        BOOL adapter_acceleration_resources_ok = YES;
+        if (@available(macOS 13.0, iOS 16.0, *)) {
+            MTLPrimitiveAccelerationStructureDescriptor *native_as_descriptor =
+                [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+            native_as_descriptor.geometryDescriptors = @[];
+            MTLAccelerationStructureSizes native_as_sizes =
+                [device accelerationStructureSizesWithDescriptor:native_as_descriptor];
+            MTLAccelerationStructureSizes adapter_as_sizes =
+                [adapter_device accelerationStructureSizesWithDescriptor:native_as_descriptor];
+            const NSUInteger native_as_allocation_size = native_as_sizes.accelerationStructureSize == 0 ?
+                256 : native_as_sizes.accelerationStructureSize;
+            const NSUInteger adapter_as_allocation_size = adapter_as_sizes.accelerationStructureSize == 0 ?
+                256 : adapter_as_sizes.accelerationStructureSize;
+            id<MTLAccelerationStructure> native_as =
+                [device newAccelerationStructureWithSize:native_as_allocation_size];
+            id<MTLAccelerationStructure> adapter_as =
+                [adapter_device newAccelerationStructureWithSize:adapter_as_allocation_size];
+            id<MTLAccelerationStructure> adapter_descriptor_as =
+                [adapter_device newAccelerationStructureWithDescriptor:native_as_descriptor];
+            MTLArgumentDescriptor *as_argument_descriptor = [MTLArgumentDescriptor argumentDescriptor];
+            as_argument_descriptor.dataType = MTLDataTypePointer;
+            as_argument_descriptor.index = 1;
+            id<MTLArgumentEncoder> as_argument_encoder =
+                [adapter_device newArgumentEncoderWithArguments:@[as_argument_descriptor]];
+            id<MTLBuffer> as_argument_buffer =
+                [adapter_device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+            [as_argument_encoder setArgumentBuffer:as_argument_buffer offset:0];
+            [as_argument_encoder setAccelerationStructure:adapter_as atIndex:1];
+            uint64_t encoded_as_resource = 0;
+            if (as_argument_buffer != nil) {
+                memcpy(&encoded_as_resource, (uint8_t *)as_argument_buffer.contents + 16,
+                       sizeof(encoded_as_resource));
+            }
+            MTLHeapDescriptor *as_heap_descriptor = [MTLHeapDescriptor new];
+            as_heap_descriptor.size = adapter_as_allocation_size + 512;
+            as_heap_descriptor.storageMode = MTLStorageModeShared;
+            as_heap_descriptor.cpuCacheMode = MTLCPUCacheModeDefaultCache;
+            as_heap_descriptor.hazardTrackingMode = MTLHazardTrackingModeTracked;
+            id<MTLHeap> adapter_as_heap = [adapter_device newHeapWithDescriptor:as_heap_descriptor];
+            id<MTLAccelerationStructure> adapter_heap_as =
+                [adapter_as_heap newAccelerationStructureWithSize:256];
+            adapter_acceleration_resources_ok =
+                adapter_as != nil && adapter_as.size == adapter_as_allocation_size &&
+                adapter_descriptor_as != nil && adapter_descriptor_as.size == adapter_as_allocation_size &&
+                adapter_as.device == adapter_device && adapter_as.heap == nil &&
+                adapter_as.gpuResourceID._impl != 0 &&
+                as_argument_encoder != nil && as_argument_buffer != nil &&
+                encoded_as_resource == adapter_as.gpuResourceID._impl &&
+                adapter_as_heap != nil && adapter_heap_as != nil &&
+                adapter_heap_as.heap == adapter_as_heap && adapter_heap_as.heapOffset == 0 &&
+                adapter_heap_as.gpuResourceID._impl != 0 &&
+                (native_as == nil || (native_as.device == device && native_as.size >= native_as_allocation_size));
+        }
         id<MTLCommandBuffer> adapter_resource_state_command_buffer = [adapter_queue commandBuffer];
         id<MTLResourceStateCommandEncoder> adapter_resource_state_encoder =
             [adapter_resource_state_command_buffer resourceStateCommandEncoderWithDescriptor:
@@ -2218,6 +2275,7 @@ int main(void) {
             adapter_resource_state_encoder != nil &&
             [adapter_resource_state_encoder conformsToProtocol:@protocol(MTLResourceStateCommandEncoder)] &&
             adapter_resource_state_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_acceleration_resources_ok &&
             [adapter_command_buffer accelerationStructureCommandEncoder] == nil;
         if (!adapter_protocols_ok || !adapter_selectors_ok || !adapter_fail_closed_ok) {
             fprintf(stderr, "metal-pixel: protocol flags=%d selectors=%d fail-closed=%d (%d,%d,%d,%d,%d)\n",
@@ -8134,7 +8192,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables, visibility results, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables, visibility results, acceleration-structure resources, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }

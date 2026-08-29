@@ -25,6 +25,7 @@
 @class ZPUCommandQueue;
 @class ZPUCommandBuffer;
 @class ZPUHeap;
+@class ZPUAccelerationStructure;
 @class ZPUDepthStencilState;
 @class ZPUSamplerState;
 @class ZPUResidencySet;
@@ -79,6 +80,28 @@
 - (instancetype)initWithOwner:(id)owner buffer:(zpu_metal_buffer *)buffer heap:(ZPUHeap *)heap;
 - (instancetype)initWithOwner:(id)owner buffer:(zpu_metal_buffer *)buffer deallocator:(void (^)(void *pointer, NSUInteger length))deallocator pointer:(void *)pointer length:(NSUInteger)length;
 - (void)applyResourceOptions:(MTLResourceOptions)options;
+@end
+
+/* Acceleration structures are resources even when ray-intersection execution
+ * is unavailable. Keep their storage and resource identity entirely in ZPU so
+ * allocation, heap placement, and argument-buffer encoding remain useful to
+ * CPU clients without importing an Apple allocation. */
+@interface ZPUAccelerationStructure : NSObject <MTLAccelerationStructure> {
+@public
+    ZPUDevice *_owner;
+    ZPUBuffer *_storage;
+    ZPUHeap *_heap;
+    NSUInteger _size;
+    NSUInteger _heapOffset;
+    MTLResourceOptions _resourceOptions;
+    MTLStorageMode _storageMode;
+    MTLCPUCacheMode _cpuCacheMode;
+    MTLHazardTrackingMode _hazardTrackingMode;
+    uint64_t _resourceID;
+    NSString *_label;
+    BOOL _aliasable;
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner storage:(ZPUBuffer *)storage heap:(ZPUHeap *)heap;
 @end
 
 API_AVAILABLE(macos(26.0), ios(26.0))
@@ -2312,6 +2335,33 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
 @end
 #pragma clang diagnostic pop
 
+static NSUInteger zpu_acceleration_structure_size_for_descriptor(
+    MTLAccelerationStructureDescriptor *descriptor)
+    API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
+    if (descriptor == nil) return 0;
+    NSUInteger primitiveCount = 0;
+    BOOL recognized = NO;
+    if ([descriptor isKindOfClass:[MTLPrimitiveAccelerationStructureDescriptor class]]) {
+        recognized = YES;
+        primitiveCount = ((MTLPrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors.count;
+    } else if ([descriptor isKindOfClass:[MTLInstanceAccelerationStructureDescriptor class]]) {
+        recognized = YES;
+        primitiveCount = ((MTLInstanceAccelerationStructureDescriptor *)descriptor).instanceCount;
+    } else if (@available(macOS 14.0, iOS 17.0, *)) {
+        if ([descriptor isKindOfClass:[MTLIndirectInstanceAccelerationStructureDescriptor class]]) {
+            recognized = YES;
+            primitiveCount = ((MTLIndirectInstanceAccelerationStructureDescriptor *)descriptor).maxInstanceCount;
+        }
+    }
+    if (!recognized) return 0;
+    if (primitiveCount == 0) primitiveCount = 1;
+    if (primitiveCount > (SIZE_MAX - 256) / 256) return 0;
+    /* This is a deterministic CPU backing footprint, not an Apple hardware
+     * BVH-size prediction. The descriptor query and allocation APIs need a
+     * stable nonzero size even though traversal remains unsupported. */
+    return 256 + primitiveCount * 256;
+}
+
 @implementation ZPUHeap
 - (instancetype)initWithOwner:(ZPUDevice *)owner heap:(zpu_metal_heap *)heap descriptor:(MTLHeapDescriptor *)descriptor {
     if ((self = [super init])) {
@@ -2425,22 +2475,70 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
     return [self zpuNewTextureWithDescriptor:descriptor firstOffset:offset explicitOffset:YES];
 }
 - (id<MTLAccelerationStructure>)newAccelerationStructureWithSize:(NSUInteger)size API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)size;
-    return nil;
+    if (size == 0) return nil;
+    ZPUBuffer *storage = (ZPUBuffer *)[self newBufferWithLength:size options:[self resourceOptions]];
+    return storage == nil ? nil : (id<MTLAccelerationStructure>)[[ZPUAccelerationStructure alloc]
+        initWithOwner:_owner storage:storage heap:self];
 }
 - (id<MTLAccelerationStructure>)newAccelerationStructureWithDescriptor:(MTLAccelerationStructureDescriptor *)descriptor API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)descriptor;
-    return nil;
+    const NSUInteger size = zpu_acceleration_structure_size_for_descriptor(descriptor);
+    return size == 0 ? nil : [self newAccelerationStructureWithSize:size];
 }
 - (id<MTLAccelerationStructure>)newAccelerationStructureWithSize:(NSUInteger)size offset:(NSUInteger)offset API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)size;
-    (void)offset;
-    return nil;
+    if (size == 0) return nil;
+    ZPUBuffer *storage = (ZPUBuffer *)[self newBufferWithLength:size options:[self resourceOptions] offset:offset];
+    return storage == nil ? nil : (id<MTLAccelerationStructure>)[[ZPUAccelerationStructure alloc]
+        initWithOwner:_owner storage:storage heap:self];
 }
 - (id<MTLAccelerationStructure>)newAccelerationStructureWithDescriptor:(MTLAccelerationStructureDescriptor *)descriptor offset:(NSUInteger)offset API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)descriptor;
-    (void)offset;
-    return nil;
+    const NSUInteger size = zpu_acceleration_structure_size_for_descriptor(descriptor);
+    return size == 0 ? nil : [self newAccelerationStructureWithSize:size offset:offset];
+}
+@end
+
+@implementation ZPUAccelerationStructure
+- (instancetype)initWithOwner:(ZPUDevice *)owner storage:(ZPUBuffer *)storage heap:(ZPUHeap *)heap {
+    if (owner == nil || storage == nil || storage->_owner != owner) return nil;
+    if ((self = [super init])) {
+        _owner = owner;
+        _storage = storage;
+        _heap = heap;
+        _size = storage.length;
+        _heapOffset = storage.heapOffset;
+        _resourceOptions = storage.resourceOptions;
+        _storageMode = storage.storageMode;
+        _cpuCacheMode = storage.cpuCacheMode;
+        _hazardTrackingMode = storage.hazardTrackingMode;
+        _resourceID = zpu_register_resource(self);
+    }
+    return self;
+}
+- (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
+- (MTLCPUCacheMode)cpuCacheMode { return _cpuCacheMode; }
+- (MTLStorageMode)storageMode { return _storageMode; }
+- (MTLHazardTrackingMode)hazardTrackingMode { return _hazardTrackingMode; }
+- (MTLResourceOptions)resourceOptions { return _resourceOptions; }
+- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return state; }
+- (id<MTLHeap>)heap { return (id<MTLHeap>)_heap; }
+- (NSUInteger)heapOffset { return _heapOffset; }
+- (NSUInteger)allocatedSize { return _size; }
+- (void)makeAliasable {
+    if (_heap != nil) {
+        _aliasable = YES;
+        [_storage makeAliasable];
+    }
+}
+- (BOOL)isAliasable { return _aliasable; }
+- (kern_return_t)setOwnerWithIdentity:(task_id_token_t)task_id_token
+    API_AVAILABLE(ios(17.4), watchos(10.4), tvos(17.4), macos(14.4)) {
+    (void)task_id_token;
+    return KERN_SUCCESS;
+}
+- (NSUInteger)size { return _size; }
+- (MTLResourceID)gpuResourceID API_AVAILABLE(macos(13.0), ios(16.0)) {
+    return (MTLResourceID){_resourceID};
 }
 @end
 
@@ -4067,24 +4165,28 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
     return (id<MTLResidencySet>)[[ZPUResidencySet alloc] initWithOwner:self descriptor:descriptor];
 }
 - (MTLAccelerationStructureSizes)accelerationStructureSizesWithDescriptor:(MTLAccelerationStructureDescriptor *)descriptor API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)descriptor;
-    return (MTLAccelerationStructureSizes){0, 0, 0};
+    const NSUInteger size = zpu_acceleration_structure_size_for_descriptor(descriptor);
+    return size == 0 ? (MTLAccelerationStructureSizes){0, 0, 0} :
+        (MTLAccelerationStructureSizes){size, size / 2, 256};
 }
 - (id<MTLAccelerationStructure>)newAccelerationStructureWithSize:(NSUInteger)size API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)size;
-    return nil;
+    if (size == 0) return nil;
+    zpu_metal_buffer *buffer = zpu_metal_device_new_buffer(_zpuDevice, size, NULL);
+    if (buffer == NULL) return nil;
+    ZPUBuffer *storage = [[ZPUBuffer alloc] initWithOwner:self buffer:buffer];
+    return (id<MTLAccelerationStructure>)[[ZPUAccelerationStructure alloc]
+        initWithOwner:self storage:storage heap:nil];
 }
 - (id<MTLAccelerationStructure>)newAccelerationStructureWithDescriptor:(MTLAccelerationStructureDescriptor *)descriptor API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)descriptor;
-    return nil;
+    const NSUInteger size = zpu_acceleration_structure_size_for_descriptor(descriptor);
+    return size == 0 ? nil : [self newAccelerationStructureWithSize:size];
 }
 - (MTLSizeAndAlign)heapAccelerationStructureSizeAndAlignWithSize:(NSUInteger)size API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)size;
-    return (MTLSizeAndAlign){0, 0};
+    return size == 0 ? (MTLSizeAndAlign){0, 0} : (MTLSizeAndAlign){size, 256};
 }
 - (MTLSizeAndAlign)heapAccelerationStructureSizeAndAlignWithDescriptor:(MTLAccelerationStructureDescriptor *)descriptor API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)descriptor;
-    return (MTLSizeAndAlign){0, 0};
+    const NSUInteger size = zpu_acceleration_structure_size_for_descriptor(descriptor);
+    return size == 0 ? (MTLSizeAndAlign){0, 0} : (MTLSizeAndAlign){size, 256};
 }
 - (MTLSizeAndAlign)tensorSizeAndAlignWithDescriptor:(MTLTensorDescriptor *)descriptor API_AVAILABLE(macos(26.0), ios(26.0)) {
     ZPUTensorLayout layout;
@@ -7581,6 +7683,12 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
             resourceID = ((ZPUTexture *)object)->_resourceID;
         } else if ([object isKindOfClass:[ZPUSamplerState class]]) {
             resourceID = ((ZPUSamplerState *)object)->_resourceID;
+        } else if ([object isKindOfClass:[ZPUAccelerationStructure class]]) {
+            resourceID = ((ZPUAccelerationStructure *)object)->_resourceID;
+        } else if ([object isKindOfClass:[ZPUVisibleFunctionTable class]]) {
+            resourceID = ((ZPUVisibleFunctionTable *)object)->_resourceID;
+        } else if ([object isKindOfClass:[ZPUIntersectionFunctionTable class]]) {
+            resourceID = ((ZPUIntersectionFunctionTable *)object)->_resourceID;
         }
         memcpy((uint8_t *)_argumentBuffer.contents + destinationOffset, &resourceID, sizeof(resourceID));
         memcpy((uint8_t *)_argumentBuffer.contents + destinationOffset + sizeof(resourceID), &auxiliary, sizeof(auxiliary));
@@ -7663,24 +7771,31 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     for (NSUInteger index = 0; index < range.length; ++index) [self setIndirectCommandBuffer:buffers[index] atIndex:range.location + index];
 }
 - (void)setAccelerationStructure:(id<MTLAccelerationStructure>)accelerationStructure atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)accelerationStructure;
-    (void)index;
+    ZPUAccelerationStructure *structure = (ZPUAccelerationStructure *)accelerationStructure;
+    if (accelerationStructure != nil && (![structure isKindOfClass:[ZPUAccelerationStructure class]] || structure->_owner != _owner)) return;
+    [self remember:accelerationStructure atIndex:index];
 }
 - (void)setVisibleFunctionTable:(id<MTLVisibleFunctionTable>)visibleFunctionTable atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)visibleFunctionTable;
-    (void)index;
+    ZPUVisibleFunctionTable *table = (ZPUVisibleFunctionTable *)visibleFunctionTable;
+    if (visibleFunctionTable != nil && (![table isKindOfClass:[ZPUVisibleFunctionTable class]] || table->_owner != _owner)) return;
+    [self remember:visibleFunctionTable atIndex:index];
 }
 - (void)setVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __nullable [__nonnull])visibleFunctionTables withRange:(NSRange)range API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)visibleFunctionTables;
-    (void)range;
+    if (visibleFunctionTables == NULL) return;
+    for (NSUInteger index = 0; index < range.length; ++index) {
+        [self setVisibleFunctionTable:visibleFunctionTables[index] atIndex:range.location + index];
+    }
 }
 - (void)setIntersectionFunctionTable:(id<MTLIntersectionFunctionTable>)intersectionFunctionTable atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)intersectionFunctionTable;
-    (void)index;
+    ZPUIntersectionFunctionTable *table = (ZPUIntersectionFunctionTable *)intersectionFunctionTable;
+    if (intersectionFunctionTable != nil && (![table isKindOfClass:[ZPUIntersectionFunctionTable class]] || table->_owner != _owner)) return;
+    [self remember:intersectionFunctionTable atIndex:index];
 }
 - (void)setIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> __nullable [__nonnull])intersectionFunctionTables withRange:(NSRange)range API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)intersectionFunctionTables;
-    (void)range;
+    if (intersectionFunctionTables == NULL) return;
+    for (NSUInteger index = 0; index < range.length; ++index) {
+        [self setIntersectionFunctionTable:intersectionFunctionTables[index] atIndex:range.location + index];
+    }
 }
 - (void)setDepthStencilState:(id<MTLDepthStencilState>)depthStencilState atIndex:(NSUInteger)index API_AVAILABLE(macos(26.0), ios(26.0)) {
     (void)depthStencilState;
