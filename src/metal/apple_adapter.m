@@ -3232,6 +3232,15 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         zpu_set_error(error, @"ZPU Metal supports only the fixed Vertex ABI with RGBA8/BGRA8, depth32-float, and stencil8 attachments");
         return nil;
     }
+    ZPUCPUFunction *vertexFunction = (ZPUCPUFunction *)descriptor.vertexFunction;
+    ZPUCPUFunction *fragmentFunction = (ZPUCPUFunction *)descriptor.fragmentFunction;
+    if (![vertexFunction isKindOfClass:[ZPUCPUFunction class]] || vertexFunction->_owner != self ||
+        vertexFunction.functionType != MTLFunctionTypeVertex ||
+        ![fragmentFunction isKindOfClass:[ZPUCPUFunction class]] || fragmentFunction->_owner != self ||
+        fragmentFunction.functionType != MTLFunctionTypeFragment) {
+        zpu_set_error(error, @"ZPU CPU Metal render pipelines require ZPU-owned CPU vertex and fragment functions");
+        return nil;
+    }
     for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
         if (!zpu_render_pipeline_format_supported(descriptor.colorAttachments[index].pixelFormat)) {
             zpu_set_error(error, @"ZPU Metal supports only RGBA8/BGRA8/R32Float/RGBA16Float color attachments");
@@ -5950,9 +5959,14 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
         _maxTotalThreadsPerThreadgroup = 1024;
         _requiredThreadsPerThreadgroup = MTLSizeMake(0, 0, 0);
         _supportsIndirectCommandBuffers = YES;
-        NSString *name = [function respondsToSelector:@selector(name)] ? [function name] : nil;
-        BOOL is_kernel = ![function respondsToSelector:@selector(functionType)] ||
-            [function functionType] == MTLFunctionTypeKernel;
+        ZPUCPUFunction *cpuFunction = (ZPUCPUFunction *)function;
+        if (![cpuFunction isKindOfClass:[ZPUCPUFunction class]] || cpuFunction->_owner != owner ||
+            cpuFunction.functionType != MTLFunctionTypeKernel) {
+            zpu_set_error(error, @"ZPU CPU Metal compute pipelines require a ZPU-owned CPU kernel function");
+            return nil;
+        }
+        NSString *name = cpuFunction->_name;
+        BOOL is_kernel = YES;
         if (is_kernel && [name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"]) {
             _kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8;
         } else if (is_kernel && [name isEqualToString:@"zpu_cpu_copy_rgba8_buffer_to_texture"]) {

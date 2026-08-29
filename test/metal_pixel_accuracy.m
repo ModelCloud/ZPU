@@ -1440,6 +1440,12 @@ int main(void) {
         id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
         id<MTLRenderPipelineState> adapter_pipeline =
             [adapter_device newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor error:&adapter_pipeline_error];
+        MTLRenderPipelineDescriptor *foreign_function_descriptor = [pipeline_descriptor copy];
+        if ([adapter_device newRenderPipelineStateWithDescriptor:foreign_function_descriptor
+                                                           error:&adapter_pipeline_error] != nil) {
+            fprintf(stderr, "metal-pixel: adapter accepted a native Metal render function\n");
+            return 129;
+        }
 
         /* Cover every core Metal primitive topology through the same
          * Objective-C adapter. Constant vertex colors isolate coverage and
@@ -4676,6 +4682,12 @@ int main(void) {
         [native_copy_texture getBytes:native_copy_pixels bytesPerRow:(NSUInteger)width * 4
                             fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
 
+        if ([adapter_device newComputePipelineStateWithFunction:native_copy_function
+                                                           error:&adapter_compute_error] != nil) {
+            fprintf(stderr, "metal-pixel: adapter accepted a native Metal compute function\n");
+            return 130;
+        }
+
         id<MTLFunction> adapter_copy_function =
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_copy_rgba8_buffer_to_texture");
         id<MTLComputePipelineState> adapter_copy_pipeline =
@@ -5424,8 +5436,11 @@ int main(void) {
         [metal_blend_texture getBytes:metal_blend_pixels bytesPerRow:(NSUInteger)width * 4
                            fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
 
+        MTLRenderPipelineDescriptor *adapter_blend_descriptor = [blend_descriptor copy];
+        adapter_blend_descriptor.vertexFunction = adapter_vertex_function;
+        adapter_blend_descriptor.fragmentFunction = adapter_fragment_function;
         id<MTLRenderPipelineState> adapter_blend_pipeline =
-            [adapter_device newRenderPipelineStateWithDescriptor:blend_descriptor error:&adapter_pipeline_error];
+            [adapter_device newRenderPipelineStateWithDescriptor:adapter_blend_descriptor error:&adapter_pipeline_error];
         id<MTLTexture> adapter_blend_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
         id<MTLBuffer> adapter_blend_buffer =
             [adapter_device newBufferWithBytes:blend_vertices length:sizeof(blend_vertices)
@@ -6491,8 +6506,11 @@ int main(void) {
         id<MTLRenderCommandEncoder> adapter_depth_encoder =
             [adapter_depth_command_buffer renderCommandEncoderWithDescriptor:adapter_depth_pass];
         NSError *adapter_depth_pipeline_error = nil;
+        MTLRenderPipelineDescriptor *adapter_depth_pipeline_descriptor = [depth_pipeline_descriptor copy];
+        adapter_depth_pipeline_descriptor.vertexFunction = adapter_vertex_function;
+        adapter_depth_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
         id<MTLRenderPipelineState> adapter_depth_pipeline =
-            [adapter_device newRenderPipelineStateWithDescriptor:depth_pipeline_descriptor error:&adapter_depth_pipeline_error];
+            [adapter_device newRenderPipelineStateWithDescriptor:adapter_depth_pipeline_descriptor error:&adapter_depth_pipeline_error];
         id<MTLDepthStencilState> adapter_depth_state =
             [adapter_device newDepthStencilStateWithDescriptor:depth_state_descriptor];
         if (adapter_depth_color == nil || adapter_depth_texture == nil ||
@@ -6575,7 +6593,7 @@ int main(void) {
         id<MTLRenderCommandEncoder> adapter_depth_bounds_encoder =
             [adapter_depth_bounds_command_buffer renderCommandEncoderWithDescriptor:adapter_depth_bounds_pass];
         id<MTLRenderPipelineState> adapter_depth_bounds_pipeline =
-            [adapter_device newRenderPipelineStateWithDescriptor:depth_pipeline_descriptor error:&adapter_depth_pipeline_error];
+            [adapter_device newRenderPipelineStateWithDescriptor:adapter_depth_pipeline_descriptor error:&adapter_depth_pipeline_error];
         id<MTLDepthStencilState> adapter_depth_bounds_state =
             [adapter_device newDepthStencilStateWithDescriptor:depth_state_descriptor];
         if (metal_depth_bounds_oracle_pipeline == nil || metal_depth_bounds_texture == nil || metal_depth_bounds_color == nil ||
@@ -6751,8 +6769,11 @@ int main(void) {
         id<MTLRenderCommandEncoder> adapter_depth_only_encoder =
             [adapter_depth_only_command_buffer renderCommandEncoderWithDescriptor:adapter_depth_only_pass];
         NSError *adapter_depth_only_pipeline_error = nil;
+        MTLRenderPipelineDescriptor *adapter_depth_only_pipeline_descriptor = [depth_only_pipeline_descriptor copy];
+        adapter_depth_only_pipeline_descriptor.vertexFunction = adapter_vertex_function;
+        adapter_depth_only_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
         id<MTLRenderPipelineState> adapter_depth_only_pipeline =
-            [adapter_device newRenderPipelineStateWithDescriptor:depth_only_pipeline_descriptor
+            [adapter_device newRenderPipelineStateWithDescriptor:adapter_depth_only_pipeline_descriptor
                                                             error:&adapter_depth_only_pipeline_error];
         if (adapter_depth_only_texture == nil || adapter_depth_only_command_buffer == nil ||
             adapter_depth_only_encoder == nil || adapter_depth_only_pipeline == nil) {
@@ -6875,8 +6896,11 @@ int main(void) {
         adapter_stencil_texture_descriptor.usage = MTLTextureUsageRenderTarget;
         id<MTLTexture> adapter_stencil_texture =
             [adapter_device newTextureWithDescriptor:adapter_stencil_texture_descriptor];
+        MTLRenderPipelineDescriptor *adapter_stencil_pipeline_descriptor = [stencil_pipeline_descriptor copy];
+        adapter_stencil_pipeline_descriptor.vertexFunction = adapter_vertex_function;
+        adapter_stencil_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
         id<MTLRenderPipelineState> adapter_stencil_pipeline =
-            [adapter_device newRenderPipelineStateWithDescriptor:stencil_pipeline_descriptor error:&error];
+            [adapter_device newRenderPipelineStateWithDescriptor:adapter_stencil_pipeline_descriptor error:&adapter_pipeline_error];
         id<MTLDepthStencilState> adapter_stencil_state =
             [adapter_device newDepthStencilStateWithDescriptor:stencil_state_descriptor];
         if (adapter_stencil_color == nil || adapter_stencil_texture == nil ||
@@ -6984,8 +7008,11 @@ int main(void) {
         id<MTLRenderCommandEncoder> adapter_stencil_only_encoder =
             [adapter_stencil_only_command_buffer renderCommandEncoderWithDescriptor:adapter_stencil_only_pass];
         NSError *adapter_stencil_only_pipeline_error = nil;
+        MTLRenderPipelineDescriptor *adapter_stencil_only_pipeline_descriptor = [stencil_only_pipeline_descriptor copy];
+        adapter_stencil_only_pipeline_descriptor.vertexFunction = adapter_vertex_function;
+        adapter_stencil_only_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
         id<MTLRenderPipelineState> adapter_stencil_only_pipeline =
-            [adapter_device newRenderPipelineStateWithDescriptor:stencil_only_pipeline_descriptor
+            [adapter_device newRenderPipelineStateWithDescriptor:adapter_stencil_only_pipeline_descriptor
                                                             error:&adapter_stencil_only_pipeline_error];
         if (adapter_stencil_only_texture == nil || adapter_stencil_only_command_buffer == nil ||
             adapter_stencil_only_encoder == nil || adapter_stencil_only_pipeline == nil) {
