@@ -5675,8 +5675,10 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     ZPUBuffer *buffer = zpu_metal4_buffer_for_address(_owner, bufferRange.bufferAddress);
     if (![heap isKindOfClass:[ZPUMTL4CounterHeap class]] || heap->_owner != _owner || _legacyBuffer == nil ||
         ![buffer isKindOfClass:[ZPUBuffer class]] || buffer->_owner != _owner ||
-        (fenceToWait != nil && ![(id)fenceToWait isKindOfClass:[ZPUFence class]]) ||
-        (fenceToUpdate != nil && ![(id)fenceToUpdate isKindOfClass:[ZPUFence class]])) {
+        (fenceToWait != nil && (![fenceToWait isKindOfClass:[ZPUFence class]] ||
+                                ((ZPUFence *)fenceToWait)->_owner != _owner)) ||
+        (fenceToUpdate != nil && (![fenceToUpdate isKindOfClass:[ZPUFence class]] ||
+                                  ((ZPUFence *)fenceToUpdate)->_owner != _owner))) {
         [self markError];
         return;
     }
@@ -5691,6 +5693,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     if (resolved.length != 0) memcpy((uint8_t *)buffer.contents, resolved.bytes, resolved.length);
     [_legacyBuffer retainResource:heap];
     [_legacyBuffer retainResource:buffer];
+    if (fenceToWait != nil) [_legacyBuffer retainResource:fenceToWait];
     if (fenceToUpdate != nil) [_legacyBuffer retainResource:fenceToUpdate];
 }
 @end

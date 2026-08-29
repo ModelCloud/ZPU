@@ -5067,6 +5067,37 @@ int main(void) {
             return 65;
         }
 
+        /* Metal 4 counter resolution accepts optional fences, but a fence
+         * from another CPU adapter device must not cross the ownership
+         * boundary merely because it has the right Objective-C protocol. */
+        id<MTLFence> foreign_counter_wait_fence = [foreign_adapter_device newFence];
+        id<MTLFence> foreign_counter_update_fence = [foreign_adapter_device newFence];
+        id<MTL4CommandBuffer> foreign_counter_fence_command_buffer = [adapter_device newCommandBuffer];
+        [foreign_counter_fence_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        [foreign_counter_fence_command_buffer endCommandBuffer];
+        [foreign_counter_fence_command_buffer resolveCounterHeap:adapter_counter_heap
+                                                         withRange:NSMakeRange(0, 1)
+                                                        intoBuffer:MTL4BufferRangeMake(adapter_counter_buffer.gpuAddress,
+                                                                                        sizeof(MTL4TimestampHeapEntry))
+                                                         waitFence:foreign_counter_wait_fence
+                                                       updateFence:foreign_counter_update_fence];
+        id<MTL4CommandBuffer> foreign_counter_fence_command_buffers[] = {
+            foreign_counter_fence_command_buffer,
+        };
+        MTL4CommitOptions *foreign_counter_fence_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *foreign_counter_fence_error = nil;
+        [foreign_counter_fence_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            foreign_counter_fence_error = feedback.error;
+        }];
+        [metal4_queue commit:foreign_counter_fence_command_buffers
+                        count:1
+                       options:foreign_counter_fence_options];
+        if (foreign_counter_wait_fence == nil || foreign_counter_update_fence == nil ||
+            foreign_counter_fence_command_buffer == nil || foreign_counter_fence_error == nil) {
+            fail_with_error("Metal 4 CPU counter resolution accepted a foreign fence", metal4_error);
+            return 66;
+        }
+
         MTLCounterSampleBufferDescriptor *adapter_legacy_counter_descriptor =
             [MTLCounterSampleBufferDescriptor new];
         adapter_legacy_counter_descriptor.counterSet = adapter_device.counterSets.firstObject;
