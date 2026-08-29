@@ -1741,6 +1741,123 @@ int main(void) {
             return 129;
         }
 
+        /* Render-pipeline callable linking is also CPU metadata. Native Metal
+         * supplies the byte oracle for the same fixed vertex/fragment draw;
+         * the adapter links only registered visible CPU functions and keeps
+         * the rasterizer entirely on ZPU. */
+        BOOL adapter_render_link_ok = YES;
+        if (@available(macOS 12.0, iOS 15.0, tvOS 16.0, *)) {
+            MTLRenderPipelineDescriptor *native_render_link_descriptor = [pipeline_descriptor copy];
+            native_render_link_descriptor.supportAddingVertexBinaryFunctions = YES;
+            native_render_link_descriptor.supportAddingFragmentBinaryFunctions = YES;
+            MTLLinkedFunctions *native_vertex_linked_functions = [MTLLinkedFunctions new];
+            native_vertex_linked_functions.functions = @[[library newFunctionWithName:@"zpu_test_visible"]];
+            native_render_link_descriptor.vertexLinkedFunctions = native_vertex_linked_functions;
+            MTLLinkedFunctions *native_fragment_linked_functions = [MTLLinkedFunctions new];
+            native_fragment_linked_functions.functions = @[[library newFunctionWithName:@"zpu_test_visible"]];
+            native_render_link_descriptor.fragmentLinkedFunctions = native_fragment_linked_functions;
+            id<MTLRenderPipelineState> native_render_link_base =
+                [device newRenderPipelineStateWithDescriptor:native_render_link_descriptor error:&error];
+            MTLFunctionDescriptor *native_render_additional_descriptor = [MTLFunctionDescriptor new];
+            native_render_additional_descriptor.name = @"zpu_test_visible_secondary";
+            native_render_additional_descriptor.options = MTLFunctionOptionCompileToBinary;
+            id<MTLFunction> native_render_additional_function =
+                [library newFunctionWithDescriptor:native_render_additional_descriptor error:&error];
+            MTLRenderPipelineFunctionsDescriptor *native_render_functions =
+                [MTLRenderPipelineFunctionsDescriptor new];
+            native_render_functions.vertexAdditionalBinaryFunctions = @[native_render_additional_function];
+            native_render_functions.fragmentAdditionalBinaryFunctions = @[native_render_additional_function];
+            id<MTLRenderPipelineState> native_render_linked_pipeline =
+                [native_render_link_base newRenderPipelineStateWithAdditionalBinaryFunctions:native_render_functions
+                                                                                          error:&error];
+
+            MTLRenderPipelineDescriptor *adapter_render_link_descriptor = [adapter_pipeline_descriptor copy];
+            adapter_render_link_descriptor.supportAddingVertexBinaryFunctions = YES;
+            adapter_render_link_descriptor.supportAddingFragmentBinaryFunctions = YES;
+            MTLLinkedFunctions *adapter_vertex_linked_functions = [MTLLinkedFunctions new];
+            adapter_vertex_linked_functions.functions = @[
+                ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_visible")];
+            adapter_render_link_descriptor.vertexLinkedFunctions = adapter_vertex_linked_functions;
+            MTLLinkedFunctions *adapter_fragment_linked_functions = [MTLLinkedFunctions new];
+            adapter_fragment_linked_functions.functions = @[
+                ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_visible")];
+            adapter_render_link_descriptor.fragmentLinkedFunctions = adapter_fragment_linked_functions;
+            id<MTLRenderPipelineState> adapter_render_link_base =
+                [adapter_device newRenderPipelineStateWithDescriptor:adapter_render_link_descriptor
+                                                                  error:&adapter_pipeline_error];
+            id<MTLFunction> adapter_render_additional_function =
+                ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_visible_secondary");
+            MTLRenderPipelineFunctionsDescriptor *adapter_render_functions =
+                [MTLRenderPipelineFunctionsDescriptor new];
+            adapter_render_functions.vertexAdditionalBinaryFunctions = @[adapter_render_additional_function];
+            adapter_render_functions.fragmentAdditionalBinaryFunctions = @[adapter_render_additional_function];
+            id<MTLRenderPipelineState> adapter_render_linked_pipeline =
+                [adapter_render_link_base newRenderPipelineStateWithAdditionalBinaryFunctions:adapter_render_functions
+                                                                                          error:&adapter_pipeline_error];
+            id<MTLFunctionHandle> adapter_render_vertex_handle =
+                [adapter_render_linked_pipeline functionHandleWithFunction:adapter_render_additional_function
+                                                                       stage:MTLRenderStageVertex];
+            id<MTLFunctionHandle> adapter_render_fragment_handle =
+                [adapter_render_linked_pipeline functionHandleWithFunction:adapter_render_additional_function
+                                                                       stage:MTLRenderStageFragment];
+            id<MTLTexture> native_render_link_texture = [device newTextureWithDescriptor:texture_descriptor];
+            id<MTLTexture> adapter_render_link_texture =
+                [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+            MTLRenderPassDescriptor *native_render_link_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            native_render_link_pass.colorAttachments[0].texture = native_render_link_texture;
+            native_render_link_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            native_render_link_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            native_render_link_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+            id<MTLCommandBuffer> native_render_link_command_buffer = [queue commandBuffer];
+            id<MTLRenderCommandEncoder> native_render_link_encoder =
+                [native_render_link_command_buffer renderCommandEncoderWithDescriptor:native_render_link_pass];
+            if (native_render_linked_pipeline != nil && native_render_link_encoder != nil) {
+                [native_render_link_encoder setRenderPipelineState:native_render_linked_pipeline];
+                [native_render_link_encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
+                [native_render_link_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+                [native_render_link_encoder endEncoding];
+                [native_render_link_command_buffer commit];
+                [native_render_link_command_buffer waitUntilCompleted];
+            }
+            MTLRenderPassDescriptor *adapter_render_link_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            adapter_render_link_pass.colorAttachments[0].texture = adapter_render_link_texture;
+            adapter_render_link_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            adapter_render_link_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            adapter_render_link_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+            id<MTLCommandBuffer> adapter_render_link_command_buffer = [adapter_queue commandBuffer];
+            id<MTLRenderCommandEncoder> adapter_render_link_encoder =
+                [adapter_render_link_command_buffer renderCommandEncoderWithDescriptor:adapter_render_link_pass];
+            if (adapter_render_linked_pipeline != nil && adapter_render_link_encoder != nil) {
+                [adapter_render_link_encoder setRenderPipelineState:adapter_render_linked_pipeline];
+                [adapter_render_link_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+                [adapter_render_link_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+                [adapter_render_link_encoder endEncoding];
+                [adapter_render_link_command_buffer commit];
+                [adapter_render_link_command_buffer waitUntilCompleted];
+            }
+            uint8_t native_render_link_pixels[byte_count] = {0};
+            uint8_t adapter_render_link_pixels[byte_count] = {0};
+            if (native_render_link_texture != nil) {
+                [native_render_link_texture getBytes:native_render_link_pixels bytesPerRow:(NSUInteger)width * 4
+                                           fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            }
+            if (adapter_render_link_texture != nil) {
+                [adapter_render_link_texture getBytes:adapter_render_link_pixels bytesPerRow:(NSUInteger)width * 4
+                                            fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            }
+            adapter_render_link_ok = native_render_link_base != nil && native_render_additional_function != nil &&
+                native_render_linked_pipeline != nil && adapter_render_link_base != nil &&
+                adapter_render_additional_function != nil && adapter_render_linked_pipeline != nil &&
+                adapter_render_vertex_handle != nil && adapter_render_fragment_handle != nil &&
+                native_render_link_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                adapter_render_link_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                memcmp(native_render_link_pixels, adapter_render_link_pixels, byte_count) == 0;
+        }
+        if (!adapter_render_link_ok) {
+            fail_with_error("render pipeline callable linking failed", adapter_pipeline_error);
+            return 137;
+        }
+
         /* Cover every core Metal primitive topology through the same
          * Objective-C adapter. Constant vertex colors isolate coverage and
          * the asymmetric viewport/scissor below keeps the test sensitive to
@@ -4414,6 +4531,8 @@ int main(void) {
         adapter_mtl4_render_descriptor.vertexFunctionDescriptor = adapter_mtl4_vertex_descriptor;
         adapter_mtl4_render_descriptor.fragmentFunctionDescriptor = adapter_mtl4_fragment_descriptor;
         adapter_mtl4_render_descriptor.rasterSampleCount = 1;
+        adapter_mtl4_render_descriptor.supportVertexBinaryLinking = YES;
+        adapter_mtl4_render_descriptor.supportFragmentBinaryLinking = YES;
         adapter_mtl4_render_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
         NSError *adapter_mtl4_render_error = nil;
         id<MTLRenderPipelineState> adapter_mtl4_compiled_render_pipeline =
@@ -4480,6 +4599,44 @@ int main(void) {
             [adapter_mtl4_compiler newBinaryFunctionWithDescriptor:adapter_mtl4_render_binary_descriptor
                                                    compilerTaskOptions:nil
                                                                  error:&adapter_mtl4_compiler_error];
+        id<MTL4BinaryFunction> adapter_mtl4_render_additional_binary_function = nil;
+        id<MTLRenderPipelineState> adapter_mtl4_binary_render_linked_pipeline = nil;
+        id<MTLFunctionHandle> adapter_mtl4_binary_render_fragment_handle = nil;
+        BOOL adapter_mtl4_render_binary_link_ok = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTL4LibraryFunctionDescriptor *adapter_mtl4_render_additional_function_descriptor =
+                [MTL4LibraryFunctionDescriptor new];
+            adapter_mtl4_render_additional_function_descriptor.name = @"zpu_test_visible_secondary";
+            adapter_mtl4_render_additional_function_descriptor.library = adapter_mtl4_library;
+            MTL4BinaryFunctionDescriptor *adapter_mtl4_render_additional_binary_descriptor =
+                [MTL4BinaryFunctionDescriptor new];
+            adapter_mtl4_render_additional_binary_descriptor.name = @"zpu_test_visible_secondary";
+            adapter_mtl4_render_additional_binary_descriptor.functionDescriptor =
+                adapter_mtl4_render_additional_function_descriptor;
+            adapter_mtl4_render_additional_binary_descriptor.options = MTL4BinaryFunctionOptionPipelineIndependent;
+            adapter_mtl4_render_additional_binary_function =
+                [adapter_mtl4_compiler newBinaryFunctionWithDescriptor:
+                    adapter_mtl4_render_additional_binary_descriptor compilerTaskOptions:nil
+                    error:&adapter_mtl4_compiler_error];
+            MTL4RenderPipelineBinaryFunctionsDescriptor *adapter_mtl4_render_binary_functions =
+                [MTL4RenderPipelineBinaryFunctionsDescriptor new];
+            if (adapter_mtl4_render_additional_binary_function != nil &&
+                adapter_mtl4_compiled_render_pipeline != nil) {
+                adapter_mtl4_render_binary_functions.vertexAdditionalBinaryFunctions = @[
+                    adapter_mtl4_render_additional_binary_function];
+                adapter_mtl4_render_binary_functions.fragmentAdditionalBinaryFunctions = @[
+                    adapter_mtl4_render_additional_binary_function];
+                adapter_mtl4_binary_render_linked_pipeline =
+                    [adapter_mtl4_compiled_render_pipeline newRenderPipelineStateWithBinaryFunctions:
+                        adapter_mtl4_render_binary_functions error:&adapter_mtl4_compiler_error];
+                adapter_mtl4_binary_render_fragment_handle =
+                    [adapter_mtl4_binary_render_linked_pipeline functionHandleWithBinaryFunction:
+                        adapter_mtl4_render_additional_binary_function stage:MTLRenderStageFragment];
+            }
+            adapter_mtl4_render_binary_link_ok = adapter_mtl4_render_additional_binary_function != nil &&
+                adapter_mtl4_binary_render_linked_pipeline != nil &&
+                adapter_mtl4_binary_render_fragment_handle != nil;
+        }
         id<MTLFunctionHandle> adapter_mtl4_render_binary_handle = nil;
         id<MTLFunctionHandle> adapter_mtl4_render_function_handle = nil;
         id<MTLFunctionHandle> adapter_device_function_handle = nil;
@@ -4546,7 +4703,8 @@ int main(void) {
         id<MTLCommandBuffer> adapter_mtl4_compiler_render_command_buffer = [adapter_queue commandBuffer];
         id<MTLRenderCommandEncoder> adapter_mtl4_compiler_render_encoder =
             [adapter_mtl4_compiler_render_command_buffer renderCommandEncoderWithDescriptor:adapter_mtl4_compiler_render_pass];
-        [adapter_mtl4_compiler_render_encoder setRenderPipelineState:adapter_mtl4_compiled_render_pipeline];
+        [adapter_mtl4_compiler_render_encoder setRenderPipelineState:
+            adapter_mtl4_binary_render_linked_pipeline ?: adapter_mtl4_compiled_render_pipeline];
         [adapter_mtl4_compiler_render_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
         [adapter_mtl4_compiler_render_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
         [adapter_mtl4_compiler_render_encoder endEncoding];
@@ -4586,7 +4744,7 @@ int main(void) {
             (native_function_reflection != nil && native_function_reflection.bindings.count != 1) ||
             adapter_mtl4_compiled_pipeline == nil || adapter_mtl4_compiled_render_pipeline == nil ||
             adapter_mtl4_archived_render_pipeline == nil || adapter_mtl4_binary_function == nil ||
-            !adapter_mtl4_binary_link_ok ||
+            !adapter_mtl4_binary_link_ok || !adapter_mtl4_render_binary_link_ok ||
             adapter_mtl4_compiled_pipeline.maxTotalThreadsPerThreadgroup != 64 ||
             adapter_mtl4_compiled_pipeline.requiredThreadsPerThreadgroup.width != 8 ||
             adapter_mtl4_compiled_pipeline.requiredThreadsPerThreadgroup.height != 8 ||

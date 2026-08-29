@@ -325,6 +325,8 @@
     "MTLRenderPipelineState.functionHandleWithFunction",
     "MTLRenderPipelineState.functionHandleWithName",
     "MTLRenderPipelineState.functionHandleWithBinaryFunction",
+    "MTLRenderPipelineState.newRenderPipelineStateWithAdditionalBinaryFunctions",
+    "MTLRenderPipelineState.newRenderPipelineStateWithBinaryFunctions",
     "MTLRenderPipelineState.reflection",
     "MTLComputePipelineState.reflection",
     "MTLComputePipelineState.functionHandleWithName",

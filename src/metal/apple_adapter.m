@@ -457,6 +457,11 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLPixelFormat _depthPixelFormat;
     MTLPixelFormat _stencilPixelFormat;
     BOOL _sampleTexture;
+    NSArray *_vertexLinkedFunctionNames;
+    NSArray *_fragmentLinkedFunctionNames;
+    BOOL _supportsAddingVertexBinaryFunctions;
+    BOOL _supportsAddingFragmentBinaryFunctions;
+    BOOL _invalidLinking;
     BOOL _blendingEnabled;
     MTLBlendFactor _sourceRGBBlendFactor;
     MTLBlendFactor _destinationRGBBlendFactor;
@@ -469,8 +474,15 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSString *_fragmentFunctionName;
     MTLRenderPipelineReflection *_reflection;
     MTLRenderPipelineReflection *_legacyReflection;
+    NSArray *_vertexBinaryFunctionNames;
+    NSArray *_fragmentBinaryFunctionNames;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLRenderPipelineDescriptor *)descriptor;
+- (instancetype)initWithPipeline:(ZPURenderPipelineState *)pipeline
+             vertexFunctionNames:(NSArray<NSString *> *)vertexFunctionNames
+           fragmentFunctionNames:(NSArray<NSString *> *)fragmentFunctionNames
+           vertexBinaryNames:(NSArray<NSString *> *)vertexBinaryNames
+         fragmentBinaryNames:(NSArray<NSString *> *)fragmentBinaryNames;
 @end
 
 @interface ZPUDepthStencilState : NSObject <MTLDepthStencilState> {
@@ -3198,6 +3210,53 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
 
 #pragma clang diagnostic pop
 
+static NSString *zpu_compute_visible_function_name_for_name(NSString *name) {
+    return ([name isEqualToString:@"zpu_test_visible"] ||
+            [name isEqualToString:@"zpu_test_visible_secondary"]) ? name : nil;
+}
+
+static BOOL zpu_append_visible_function_names(
+    ZPUDevice *owner, NSArray<id<MTLFunction>> *functions, NSMutableSet<NSString *> *allNames,
+    NSMutableArray<NSString *> *exportedNames, NSError **error, BOOL exportHandles) {
+    for (id<MTLFunction> function in functions) {
+        ZPUCPUFunction *cpuFunction = (ZPUCPUFunction *)function;
+        if (![cpuFunction isKindOfClass:[ZPUCPUFunction class]] || cpuFunction->_owner != owner ||
+            cpuFunction.functionType != MTLFunctionTypeVisible) {
+            zpu_set_error(error, @"ZPU CPU Metal render pipeline has an invalid or duplicate linked function");
+            return NO;
+        }
+        NSString *name = cpuFunction->_name;
+        if (name.length == 0 || zpu_compute_visible_function_name_for_name(name) == nil ||
+            [allNames containsObject:name]) {
+            zpu_set_error(error, @"ZPU CPU Metal render pipeline has an invalid or duplicate linked function");
+            return NO;
+        }
+        [allNames addObject:name];
+        if (exportHandles) [exportedNames addObject:name];
+    }
+    return YES;
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+static BOOL zpu_append_visible_binary_function_names(
+    ZPUDevice *owner, NSArray<id<MTL4BinaryFunction>> *functions,
+    NSMutableSet<NSString *> *allNames, NSMutableArray<NSString *> *exportedNames,
+    NSError **error) {
+    for (id<MTL4BinaryFunction> function in functions) {
+        ZPUMTL4BinaryFunction *binary = (ZPUMTL4BinaryFunction *)function;
+        if (![binary isKindOfClass:[ZPUMTL4BinaryFunction class]] || binary->_owner != owner ||
+            binary->_functionType != MTLFunctionTypeVisible || binary->_name.length == 0 ||
+            zpu_compute_visible_function_name_for_name(binary->_name) == nil ||
+            [allNames containsObject:binary->_name]) {
+            zpu_set_error(error, @"ZPU CPU Metal render pipeline has an invalid or duplicate binary function");
+            return NO;
+        }
+        [allNames addObject:binary->_name];
+        [exportedNames addObject:binary->_name];
+    }
+    return YES;
+}
+
 @implementation ZPURenderPipelineState
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLRenderPipelineDescriptor *)descriptor {
     if ((self = [super init])) {
@@ -3206,6 +3265,10 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         MTLRenderPipelineColorAttachmentDescriptor *attachment = descriptor.colorAttachments[0];
         _vertexFunctionName = [descriptor.vertexFunction.name copy];
         _fragmentFunctionName = [descriptor.fragmentFunction.name copy];
+        _vertexLinkedFunctionNames = @[];
+        _fragmentLinkedFunctionNames = @[];
+        _vertexBinaryFunctionNames = @[];
+        _fragmentBinaryFunctionNames = @[];
         _colorPixelFormat = attachment.pixelFormat;
         _colorAttachmentCount = 0;
         for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
@@ -3227,6 +3290,70 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         _destinationAlphaBlendFactor = attachment.destinationAlphaBlendFactor;
         _alphaBlendOperation = attachment.alphaBlendOperation;
         _writeMask = attachment.writeMask;
+        if (@available(macOS 12.0, iOS 15.0, tvOS 16.0, *)) {
+            _supportsAddingVertexBinaryFunctions = descriptor.supportAddingVertexBinaryFunctions;
+            _supportsAddingFragmentBinaryFunctions = descriptor.supportAddingFragmentBinaryFunctions;
+            NSMutableSet<NSString *> *allVertexNames = [NSMutableSet set];
+            NSMutableArray<NSString *> *vertexNames = [NSMutableArray array];
+            MTLLinkedFunctions *vertexLinked = descriptor.vertexLinkedFunctions;
+            if (vertexLinked != nil &&
+                zpu_append_visible_function_names(owner, vertexLinked.functions ?: @[], allVertexNames,
+                                                   vertexNames, NULL, YES) &&
+                zpu_append_visible_function_names(owner, vertexLinked.privateFunctions ?: @[], allVertexNames,
+                                                   vertexNames, NULL, NO)) {
+                _vertexLinkedFunctionNames = [vertexNames copy];
+            } else if (vertexLinked != nil) _invalidLinking = YES;
+            NSMutableSet<NSString *> *allFragmentNames = [NSMutableSet set];
+            NSMutableArray<NSString *> *fragmentNames = [NSMutableArray array];
+            MTLLinkedFunctions *fragmentLinked = descriptor.fragmentLinkedFunctions;
+            if (fragmentLinked != nil &&
+                zpu_append_visible_function_names(owner, fragmentLinked.functions ?: @[], allFragmentNames,
+                                                   fragmentNames, NULL, YES) &&
+                zpu_append_visible_function_names(owner, fragmentLinked.privateFunctions ?: @[], allFragmentNames,
+                                                   fragmentNames, NULL, NO)) {
+                _fragmentLinkedFunctionNames = [fragmentNames copy];
+            } else if (fragmentLinked != nil) _invalidLinking = YES;
+        }
+    }
+    return self;
+}
+- (instancetype)initWithPipeline:(ZPURenderPipelineState *)pipeline
+             vertexFunctionNames:(NSArray<NSString *> *)vertexFunctionNames
+           fragmentFunctionNames:(NSArray<NSString *> *)fragmentFunctionNames
+             vertexBinaryNames:(NSArray<NSString *> *)vertexBinaryNames
+           fragmentBinaryNames:(NSArray<NSString *> *)fragmentBinaryNames {
+    if ((self = [super init])) {
+        _owner = pipeline->_owner;
+        _label = [pipeline->_label copy];
+        _colorPixelFormat = pipeline->_colorPixelFormat;
+        memcpy(_colorPixelFormats, pipeline->_colorPixelFormats, sizeof(_colorPixelFormats));
+        _colorAttachmentCount = pipeline->_colorAttachmentCount;
+        _multiTargetOutput = pipeline->_multiTargetOutput;
+        _rasterizationEnabled = pipeline->_rasterizationEnabled;
+        _supportsIndirectCommandBuffers = pipeline->_supportsIndirectCommandBuffers;
+        _fragmentUniform = pipeline->_fragmentUniform;
+        _depthPixelFormat = pipeline->_depthPixelFormat;
+        _stencilPixelFormat = pipeline->_stencilPixelFormat;
+        _sampleTexture = pipeline->_sampleTexture;
+        _supportsAddingVertexBinaryFunctions = pipeline->_supportsAddingVertexBinaryFunctions;
+        _supportsAddingFragmentBinaryFunctions = pipeline->_supportsAddingFragmentBinaryFunctions;
+        _invalidLinking = pipeline->_invalidLinking;
+        _blendingEnabled = pipeline->_blendingEnabled;
+        _sourceRGBBlendFactor = pipeline->_sourceRGBBlendFactor;
+        _destinationRGBBlendFactor = pipeline->_destinationRGBBlendFactor;
+        _rgbBlendOperation = pipeline->_rgbBlendOperation;
+        _sourceAlphaBlendFactor = pipeline->_sourceAlphaBlendFactor;
+        _destinationAlphaBlendFactor = pipeline->_destinationAlphaBlendFactor;
+        _alphaBlendOperation = pipeline->_alphaBlendOperation;
+        _writeMask = pipeline->_writeMask;
+        _vertexFunctionName = [pipeline->_vertexFunctionName copy];
+        _fragmentFunctionName = [pipeline->_fragmentFunctionName copy];
+        _vertexLinkedFunctionNames = [vertexFunctionNames copy];
+        _fragmentLinkedFunctionNames = [fragmentFunctionNames copy];
+        _vertexBinaryFunctionNames = [vertexBinaryNames copy];
+        _fragmentBinaryFunctionNames = [fragmentBinaryNames copy];
+        _reflection = pipeline->_reflection;
+        _legacyReflection = pipeline->_legacyReflection;
     }
     return self;
 }
@@ -3259,11 +3386,21 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         (stage == MTLRenderStageFragment ? _fragmentFunctionName : nil);
     MTLFunctionType expectedType = stage == MTLRenderStageVertex ? MTLFunctionTypeVertex :
         (stage == MTLRenderStageFragment ? MTLFunctionTypeFragment : MTLFunctionTypeKernel);
-    if (expectedName == nil || ![expectedName isEqualToString:cpuFunction.name] ||
-        cpuFunction.functionType != expectedType) return nil;
+    NSArray<NSString *> *linkedNames = stage == MTLRenderStageVertex ? _vertexLinkedFunctionNames :
+        (stage == MTLRenderStageFragment ? _fragmentLinkedFunctionNames : @[]);
+    NSArray<NSString *> *binaryNames = stage == MTLRenderStageVertex ? _vertexBinaryFunctionNames :
+        (stage == MTLRenderStageFragment ? _fragmentBinaryFunctionNames : @[]);
+    const BOOL isBaseFunction = expectedName != nil && [expectedName isEqualToString:cpuFunction.name] &&
+        cpuFunction.functionType == expectedType;
+    const BOOL isLinkedFunction = cpuFunction.functionType == MTLFunctionTypeVisible &&
+        [linkedNames containsObject:cpuFunction.name];
+    const BOOL isBinaryFunction = cpuFunction.functionType == MTLFunctionTypeVisible &&
+        [binaryNames containsObject:cpuFunction.name];
+    if (!isBaseFunction && !isLinkedFunction && !isBinaryFunction) return nil;
+    MTLFunctionType handleType = isBaseFunction ? expectedType : MTLFunctionTypeVisible;
     return (id<MTLFunctionHandle>)[[ZPUFunctionHandle alloc] initWithOwner:_owner
-                                                                        name:expectedName
-                                                                 functionType:expectedType];
+                                                                        name:cpuFunction.name
+                                                                 functionType:handleType];
 }
 - (id<MTLVisibleFunctionTable>)newVisibleFunctionTableWithDescriptor:(MTLVisibleFunctionTableDescriptor *)descriptor stage:(MTLRenderStages)stage API_AVAILABLE(macos(12.0), ios(15.0), tvos(16.0)) {
     if (descriptor == nil) return nil;
@@ -3282,7 +3419,10 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         (stage == MTLRenderStageFragment ? _fragmentFunctionName : nil);
     MTLFunctionType expectedType = stage == MTLRenderStageVertex ? MTLFunctionTypeVertex :
         (stage == MTLRenderStageFragment ? MTLFunctionTypeFragment : MTLFunctionTypeKernel);
-    if (expectedName == nil || ![expectedName isEqualToString:name]) return nil;
+    NSArray<NSString *> *linkedNames = stage == MTLRenderStageVertex ? _vertexLinkedFunctionNames :
+        (stage == MTLRenderStageFragment ? _fragmentLinkedFunctionNames : @[]);
+    if (expectedName == nil || (![expectedName isEqualToString:name] && ![linkedNames containsObject:name])) return nil;
+    if ([linkedNames containsObject:name]) expectedType = MTLFunctionTypeVisible;
     return (id<MTLFunctionHandle>)[[ZPUFunctionHandle alloc] initWithOwner:_owner
                                                                         name:expectedName
                                                                  functionType:expectedType];
@@ -3294,21 +3434,91 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         (stage == MTLRenderStageFragment ? _fragmentFunctionName : nil);
     MTLFunctionType expectedType = stage == MTLRenderStageVertex ? MTLFunctionTypeVertex :
         (stage == MTLRenderStageFragment ? MTLFunctionTypeFragment : MTLFunctionTypeKernel);
-    if (expectedName == nil || ![expectedName isEqualToString:binary->_name] ||
-        binary->_functionType != expectedType) return nil;
+    NSArray<NSString *> *binaryNames = stage == MTLRenderStageVertex ? _vertexBinaryFunctionNames :
+        (stage == MTLRenderStageFragment ? _fragmentBinaryFunctionNames : @[]);
+    const BOOL isBaseFunction = expectedName != nil && [expectedName isEqualToString:binary->_name] &&
+        binary->_functionType == expectedType;
+    const BOOL isBinaryFunction = binary->_functionType == MTLFunctionTypeVisible &&
+        [binaryNames containsObject:binary->_name];
+    if (!isBaseFunction && !isBinaryFunction) return nil;
+    if (isBinaryFunction) expectedType = MTLFunctionTypeVisible;
     return (id<MTLFunctionHandle>)[[ZPUFunctionHandle alloc] initWithOwner:_owner
-                                                                        name:expectedName
+                                                                        name:binary->_name
                                                                  functionType:expectedType];
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithBinaryFunctions:(MTL4RenderPipelineBinaryFunctionsDescriptor *)binaryFunctionsDescriptor error:(NSError **)error API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)binaryFunctionsDescriptor;
-    zpu_set_error(error, @"ZPU CPU Metal does not link Metal 4 binary functions");
-    return nil;
+    if (binaryFunctionsDescriptor == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal render pipeline binary functions must be non-nil");
+        return nil;
+    }
+    NSMutableArray<NSString *> *vertexNames = [_vertexBinaryFunctionNames mutableCopy];
+    NSMutableArray<NSString *> *fragmentNames = [_fragmentBinaryFunctionNames mutableCopy];
+    NSMutableSet<NSString *> *allVertexNames = [NSMutableSet setWithArray:_vertexLinkedFunctionNames];
+    [allVertexNames addObjectsFromArray:vertexNames];
+    NSMutableSet<NSString *> *allFragmentNames = [NSMutableSet setWithArray:_fragmentLinkedFunctionNames];
+    [allFragmentNames addObjectsFromArray:fragmentNames];
+    if (binaryFunctionsDescriptor.vertexAdditionalBinaryFunctions.count != 0 &&
+        !_supportsAddingVertexBinaryFunctions) {
+        zpu_set_error(error, @"ZPU CPU Metal render pipeline does not support vertex binary linking");
+        return nil;
+    }
+    if (binaryFunctionsDescriptor.fragmentAdditionalBinaryFunctions.count != 0 &&
+        !_supportsAddingFragmentBinaryFunctions) {
+        zpu_set_error(error, @"ZPU CPU Metal render pipeline does not support fragment binary linking");
+        return nil;
+    }
+    if (binaryFunctionsDescriptor.tileAdditionalBinaryFunctions.count != 0 ||
+        binaryFunctionsDescriptor.objectAdditionalBinaryFunctions.count != 0 ||
+        binaryFunctionsDescriptor.meshAdditionalBinaryFunctions.count != 0 ||
+        !zpu_append_visible_binary_function_names(_owner, binaryFunctionsDescriptor.vertexAdditionalBinaryFunctions ?: @[],
+                                                   allVertexNames, vertexNames, error) ||
+        !zpu_append_visible_binary_function_names(_owner, binaryFunctionsDescriptor.fragmentAdditionalBinaryFunctions ?: @[],
+                                                   allFragmentNames, fragmentNames, error)) {
+        if (error != NULL && *error == nil) {
+            zpu_set_error(error, @"ZPU CPU Metal render pipeline supports only vertex and fragment binary functions");
+        }
+        return nil;
+    }
+    if (error != NULL) *error = nil;
+    return (id<MTLRenderPipelineState>)[[ZPURenderPipelineState alloc]
+        initWithPipeline:self vertexFunctionNames:_vertexLinkedFunctionNames
+        fragmentFunctionNames:_fragmentLinkedFunctionNames vertexBinaryNames:vertexNames
+        fragmentBinaryNames:fragmentNames];
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithAdditionalBinaryFunctions:(MTLRenderPipelineFunctionsDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(12.0), ios(15.0), tvos(16.0)) {
-    (void)descriptor;
-    zpu_set_error(error, @"ZPU CPU Metal does not link binary functions");
-    return nil;
+    if (descriptor == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal render pipeline binary functions must be non-nil");
+        return nil;
+    }
+    NSMutableArray<NSString *> *vertexNames = [_vertexBinaryFunctionNames mutableCopy];
+    NSMutableArray<NSString *> *fragmentNames = [_fragmentBinaryFunctionNames mutableCopy];
+    NSMutableSet<NSString *> *allVertexNames = [NSMutableSet setWithArray:_vertexLinkedFunctionNames];
+    [allVertexNames addObjectsFromArray:vertexNames];
+    NSMutableSet<NSString *> *allFragmentNames = [NSMutableSet setWithArray:_fragmentLinkedFunctionNames];
+    [allFragmentNames addObjectsFromArray:fragmentNames];
+    if (descriptor.vertexAdditionalBinaryFunctions.count != 0 && !_supportsAddingVertexBinaryFunctions) {
+        zpu_set_error(error, @"ZPU CPU Metal render pipeline does not support vertex binary linking");
+        return nil;
+    }
+    if (descriptor.fragmentAdditionalBinaryFunctions.count != 0 && !_supportsAddingFragmentBinaryFunctions) {
+        zpu_set_error(error, @"ZPU CPU Metal render pipeline does not support fragment binary linking");
+        return nil;
+    }
+    if (descriptor.tileAdditionalBinaryFunctions.count != 0 ||
+        !zpu_append_visible_function_names(_owner, descriptor.vertexAdditionalBinaryFunctions ?: @[],
+                                            allVertexNames, vertexNames, error, YES) ||
+        !zpu_append_visible_function_names(_owner, descriptor.fragmentAdditionalBinaryFunctions ?: @[],
+                                            allFragmentNames, fragmentNames, error, YES)) {
+        if (error != NULL && *error == nil) {
+            zpu_set_error(error, @"ZPU CPU Metal render pipeline supports only vertex and fragment binary functions");
+        }
+        return nil;
+    }
+    if (error != NULL) *error = nil;
+    return (id<MTLRenderPipelineState>)[[ZPURenderPipelineState alloc]
+        initWithPipeline:self vertexFunctionNames:_vertexLinkedFunctionNames
+        fragmentFunctionNames:_fragmentLinkedFunctionNames vertexBinaryNames:vertexNames
+        fragmentBinaryNames:fragmentNames];
 }
 - (MTL4PipelineDescriptor *)newRenderPipelineDescriptorForSpecialization API_AVAILABLE(macos(26.0), ios(26.0)) { return nil; }
 @end
@@ -3722,7 +3932,6 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
 #pragma clang diagnostic pop
 
 static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel);
-static NSString *zpu_compute_visible_function_name_for_name(NSString *name);
 
 static BOOL zpu_append_legacy_compute_functions(
     ZPUComputePipelineState *pipeline, NSArray<id<MTLFunction>> *functions,
@@ -4016,7 +4225,12 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         }
     }
     if (error != NULL) *error = nil;
-    return (id<MTLRenderPipelineState>)[[ZPURenderPipelineState alloc] initWithOwner:self descriptor:descriptor];
+    ZPURenderPipelineState *pipeline = [[ZPURenderPipelineState alloc] initWithOwner:self descriptor:descriptor];
+    if (pipeline->_invalidLinking) {
+        zpu_set_error(error, @"ZPU CPU Metal render pipeline has unsupported linked functions");
+        return nil;
+    }
+    return (id<MTLRenderPipelineState>)pipeline;
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)descriptor options:(MTLPipelineOption)options reflection:(MTLRenderPipelineReflection **)reflection error:(NSError **)error {
     if (reflection != NULL) *reflection = nil;
@@ -5066,8 +5280,7 @@ static id<MTLRenderPipelineState> zpu_mtl4_render_pipeline_for_descriptor(
         (!empty_vertex_descriptor && !fixed_vertex_descriptor) ||
         vertex_linking.functionDescriptors.count != 0 || vertex_linking.privateFunctionDescriptors.count != 0 ||
         vertex_linking.groups.count != 0 || fragment_linking.functionDescriptors.count != 0 ||
-        fragment_linking.privateFunctionDescriptors.count != 0 || fragment_linking.groups.count != 0 ||
-        descriptor.supportVertexBinaryLinking || descriptor.supportFragmentBinaryLinking) {
+        fragment_linking.privateFunctionDescriptors.count != 0 || fragment_linking.groups.count != 0) {
         zpu_set_error(error, @"ZPU CPU Metal 4 render pipeline uses unsupported specialization or vertex layout state");
         return nil;
     }
@@ -5087,6 +5300,8 @@ static id<MTLRenderPipelineState> zpu_mtl4_render_pipeline_for_descriptor(
     legacy.rasterizationEnabled = descriptor.rasterizationEnabled;
     legacy.maxVertexAmplificationCount = descriptor.maxVertexAmplificationCount == 0 ? 1 : descriptor.maxVertexAmplificationCount;
     legacy.inputPrimitiveTopology = descriptor.inputPrimitiveTopology;
+    legacy.supportAddingVertexBinaryFunctions = descriptor.supportVertexBinaryLinking;
+    legacy.supportAddingFragmentBinaryFunctions = descriptor.supportFragmentBinaryLinking;
     legacy.supportIndirectCommandBuffers =
         descriptor.supportIndirectCommandBuffers == MTL4IndirectCommandBufferSupportStateEnabled;
     for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
@@ -7219,11 +7434,6 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
         case ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA16_FLOAT: return @"zpu_cpu_fill_gradient_rgba16_float";
         default: return nil;
     }
-}
-
-static NSString *zpu_compute_visible_function_name_for_name(NSString *name) {
-    return ([name isEqualToString:@"zpu_test_visible"] ||
-            [name isEqualToString:@"zpu_test_visible_secondary"]) ? name : nil;
 }
 
 @implementation ZPUComputePipelineState
