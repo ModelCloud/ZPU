@@ -659,6 +659,7 @@
     "MTLComputePipelineState.additional-function/reflection families",
     "MTL4Compiler dynamic-library, machine-learning, specialization, dynamic-linking, and arbitrary MSL families",
     "MTLLibrary stitched loading and arbitrary MSL compilation",
+    "MTLIO compressed file-handle decoding",
     "MTLSparseTextureMapping"
   ]
 }

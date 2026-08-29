@@ -63,6 +63,170 @@ static void fail_with_error(const char *message, NSError *error) {
     }
 }
 
+static int test_cpu_io_against_native(id<MTLDevice> native_device, id<MTLDevice> adapter_device) {
+    const uint8_t source_bytes[] = {
+        0x10, 0x20, 0x30, 0xff, 0x40, 0x50, 0x60, 0xff, 0x70, 0x80, 0x90, 0xff,
+        0xa0, 0xb0, 0xc0, 0xff, 0xd0, 0xe0, 0xf0, 0xff, 0x01, 0x02, 0x03, 0xff,
+    };
+    NSURL *url = [NSURL fileURLWithPath:[NSTemporaryDirectory()
+        stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]]];
+    NSError *error = nil;
+    NSData *source = [NSData dataWithBytes:source_bytes length:sizeof(source_bytes)];
+    if (![source writeToURL:url options:NSDataWritingAtomic error:&error]) {
+        fail_with_error("Metal I/O test source file creation failed", error);
+        return 60;
+    }
+
+    MTLIOCommandQueueDescriptor *native_descriptor = [MTLIOCommandQueueDescriptor new];
+    native_descriptor.maxCommandBufferCount = 4;
+    native_descriptor.type = MTLIOCommandQueueTypeSerial;
+    id<MTLIOCommandQueue> native_queue =
+        [native_device newIOCommandQueueWithDescriptor:native_descriptor error:&error];
+    id<MTLIOFileHandle> native_handle = [native_device newIOFileHandleWithURL:url error:&error];
+    MTLIOCommandQueueDescriptor *adapter_descriptor = [MTLIOCommandQueueDescriptor new];
+    adapter_descriptor.maxCommandBufferCount = 4;
+    adapter_descriptor.type = MTLIOCommandQueueTypeSerial;
+    id<MTLIOCommandQueue> adapter_queue =
+        [adapter_device newIOCommandQueueWithDescriptor:adapter_descriptor error:&error];
+    id<MTLIOFileHandle> adapter_handle = [adapter_device newIOFileHandleWithURL:url error:&error];
+    if (native_queue == nil || native_handle == nil || adapter_queue == nil || adapter_handle == nil) {
+        fail_with_error("Metal I/O raw queue or handle creation failed", error);
+        [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+        return 61;
+    }
+    native_queue.label = @"native-io-oracle";
+    adapter_queue.label = @"zpu-cpu-io";
+    native_handle.label = @"native-raw-file";
+    adapter_handle.label = @"zpu-raw-file";
+    if (![adapter_queue.label isEqualToString:@"zpu-cpu-io"] ||
+        ![adapter_handle.label isEqualToString:@"zpu-raw-file"]) {
+        fprintf(stderr, "metal-pixel: CPU Metal I/O labels did not round-trip\n");
+        [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+        return 62;
+    }
+
+    id<MTLBuffer> native_buffer =
+        [native_device newBufferWithLength:sizeof(source_bytes) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_buffer =
+        [adapter_device newBufferWithLength:sizeof(source_bytes) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> native_status = [native_device newBufferWithLength:sizeof(uint32_t)
+                                                               options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_status = [adapter_device newBufferWithLength:sizeof(uint32_t)
+                                                                 options:MTLResourceStorageModeShared];
+    MTLTextureDescriptor *texture_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:8 height:8 mipmapped:NO];
+    texture_descriptor.storageMode = MTLStorageModeShared;
+    texture_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLIOCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+    id<MTLIOCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+    if (native_buffer == nil || adapter_buffer == nil || native_status == nil || adapter_status == nil ||
+        native_texture == nil || adapter_texture == nil || native_command_buffer == nil ||
+        adapter_command_buffer == nil) {
+        fprintf(stderr, "metal-pixel: Metal I/O resource or command buffer creation failed\n");
+        [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+        return 63;
+    }
+    const MTLSize texture_size = MTLSizeMake(3, 2, 1);
+    const MTLOrigin texture_origin = MTLOriginMake(2, 3, 0);
+    [native_command_buffer loadBuffer:native_buffer offset:0 size:sizeof(source_bytes)
+                         sourceHandle:native_handle sourceHandleOffset:0];
+    [adapter_command_buffer loadBuffer:adapter_buffer offset:0 size:sizeof(source_bytes)
+                         sourceHandle:adapter_handle sourceHandleOffset:0];
+    [native_command_buffer loadTexture:native_texture slice:0 level:0 size:texture_size
+                    sourceBytesPerRow:12 sourceBytesPerImage:24 destinationOrigin:texture_origin
+                         sourceHandle:native_handle sourceHandleOffset:0];
+    [adapter_command_buffer loadTexture:adapter_texture slice:0 level:0 size:texture_size
+                    sourceBytesPerRow:12 sourceBytesPerImage:24 destinationOrigin:texture_origin
+                         sourceHandle:adapter_handle sourceHandleOffset:0];
+    [native_command_buffer copyStatusToBuffer:native_status offset:0];
+    [adapter_command_buffer copyStatusToBuffer:adapter_status offset:0];
+    [native_command_buffer commit];
+    [native_command_buffer waitUntilCompleted];
+    [adapter_command_buffer commit];
+    [adapter_command_buffer waitUntilCompleted];
+    if (native_command_buffer.status != MTLIOStatusComplete ||
+        adapter_command_buffer.status != MTLIOStatusComplete ||
+        memcmp(native_buffer.contents, adapter_buffer.contents, sizeof(source_bytes)) != 0 ||
+        memcmp(native_status.contents, adapter_status.contents, sizeof(uint32_t)) != 0) {
+        fprintf(stderr, "metal-pixel: native/CPU Metal I/O buffer or status mismatch\n");
+        [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+        return 64;
+    }
+    uint8_t native_texture_bytes[8 * 8 * 4];
+    uint8_t adapter_texture_bytes[8 * 8 * 4];
+    [native_texture getBytes:native_texture_bytes bytesPerRow:8 * 4
+                   fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
+    [adapter_texture getBytes:adapter_texture_bytes bytesPerRow:8 * 4
+                    fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
+    if (memcmp(native_texture_bytes, adapter_texture_bytes, sizeof(native_texture_bytes)) != 0 ||
+        memcmp(adapter_texture_bytes + (3 * 8 + 2) * 4, source_bytes, 12) != 0 ||
+        memcmp(adapter_texture_bytes + (4 * 8 + 2) * 4, source_bytes + 12, 12) != 0) {
+        fprintf(stderr, "metal-pixel: native/CPU Metal I/O texture origin or bytes mismatch\n");
+        [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+        return 65;
+    }
+
+    uint8_t native_bytes[8] = {0};
+    uint8_t adapter_bytes[8] = {0};
+    id<MTLIOCommandBuffer> native_bytes_command_buffer = [native_queue commandBuffer];
+    id<MTLIOCommandBuffer> adapter_bytes_command_buffer = [adapter_queue commandBuffer];
+    [native_bytes_command_buffer loadBytes:native_bytes size:sizeof(native_bytes)
+                              sourceHandle:native_handle sourceHandleOffset:4];
+    [adapter_bytes_command_buffer loadBytes:adapter_bytes size:sizeof(adapter_bytes)
+                              sourceHandle:adapter_handle sourceHandleOffset:4];
+    [native_bytes_command_buffer commit];
+    [native_bytes_command_buffer waitUntilCompleted];
+    [adapter_bytes_command_buffer commit];
+    [adapter_bytes_command_buffer waitUntilCompleted];
+    if (native_bytes_command_buffer.status != MTLIOStatusComplete ||
+        adapter_bytes_command_buffer.status != MTLIOStatusComplete ||
+        memcmp(native_bytes, adapter_bytes, sizeof(native_bytes)) != 0 ||
+        memcmp(adapter_bytes, source_bytes + 4, sizeof(adapter_bytes)) != 0) {
+        fprintf(stderr, "metal-pixel: native/CPU Metal I/O loadBytes mismatch\n");
+        [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+        return 66;
+    }
+
+    id<MTLSharedEvent> event = [adapter_device newSharedEvent];
+    id<MTLIOCommandBuffer> signal_command_buffer = [adapter_queue commandBuffer];
+    id<MTLIOCommandBuffer> wait_command_buffer = [adapter_queue commandBuffer];
+    [signal_command_buffer signalEvent:event value:7];
+    [signal_command_buffer commit];
+    [wait_command_buffer waitForEvent:event value:7];
+    [wait_command_buffer commit];
+    id<MTLIOCommandBuffer> cancelled_command_buffer = [adapter_queue commandBuffer];
+    [cancelled_command_buffer tryCancel];
+    if (event.signaledValue != 7 || wait_command_buffer.status != MTLIOStatusComplete ||
+        cancelled_command_buffer.status != MTLIOStatusCancelled) {
+        fprintf(stderr, "metal-pixel: CPU Metal I/O shared-event or cancellation semantics failed\n");
+        [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+        return 67;
+    }
+    if ([adapter_device newIOFileHandleWithURL:url compressionMethod:MTLIOCompressionMethodZlib error:&error] != nil) {
+        fprintf(stderr, "metal-pixel: compressed CPU Metal I/O handle was not rejected\n");
+        [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+        return 68;
+    }
+    id<MTLDevice> foreign_device = ZPUMetalCreateSystemDefaultDevice();
+    id<MTLBuffer> foreign_buffer = [foreign_device newBufferWithLength:sizeof(source_bytes)
+                                                                   options:MTLResourceStorageModeShared];
+    id<MTLIOCommandBuffer> invalid_command_buffer = [adapter_queue commandBuffer];
+    [invalid_command_buffer loadBuffer:foreign_buffer offset:0 size:4
+                          sourceHandle:adapter_handle sourceHandleOffset:0];
+    [invalid_command_buffer commit];
+    if (foreign_device == nil || foreign_buffer == nil ||
+        invalid_command_buffer.status != MTLIOStatusError || invalid_command_buffer.error == nil) {
+        fprintf(stderr, "metal-pixel: CPU Metal I/O foreign-resource validation failed\n");
+        [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+        return 69;
+    }
+    [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+    return 0;
+}
+
 int main(void) {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -428,6 +592,9 @@ int main(void) {
             fprintf(stderr, "metal-pixel: variable-rate map was not rejected by CPU adapter\n");
             return 46;
         }
+
+        const int io_result = test_cpu_io_against_native(device, adapter_rate_map_device);
+        if (io_result != 0) return io_result;
 
         /* Repeat the reference comparison for BGRA8. This catches a channel
          * order bug even when geometry and interpolation are otherwise exact. */
@@ -7482,7 +7649,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, identity rasterization-rate maps, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables, visibility results, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables, visibility results, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }

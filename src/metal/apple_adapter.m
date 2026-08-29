@@ -55,6 +55,7 @@
 @class ZPUMTL4ComputeEncoder;
 @class ZPUMTL4RenderEncoder;
 @class ZPUMTL4MachineLearningEncoder;
+@class ZPUIOCommandQueue;
 
 @interface ZPUBuffer : NSObject <MTLBuffer> {
 @public
@@ -482,6 +483,56 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLRasterizationRateMapDescriptor *)descriptor;
 @end
+
+/* Metal I/O is represented by CPU-owned file data and ordered operations.
+ * Committing an I/O buffer executes its operations synchronously against ZPU
+ * buffers/textures; no native MTL resource or command encoder is involved. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+API_AVAILABLE(macos(13.0), ios(16.0))
+@interface ZPUIOFileHandle : NSObject <MTLIOFileHandle> {
+@public
+    ZPUDevice *_owner;
+    NSData *_data;
+    NSString *_label;
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner url:(NSURL *)url error:(NSError **)error;
+@end
+
+typedef BOOL (^ZPUIOOperationBlock)(NSError **error);
+
+API_AVAILABLE(macos(13.0), ios(16.0))
+@interface ZPUIOCommandBuffer : NSObject <MTLIOCommandBuffer> {
+@public
+    ZPUIOCommandQueue *_owner;
+    NSMutableArray *_operations;
+    NSMutableArray *_statusTargets;
+    NSMutableArray *_completedHandlers;
+    MTLIOStatus _status;
+    NSError *_error;
+    NSString *_label;
+    BOOL _committed;
+    BOOL _cancelRequested;
+}
+- (instancetype)initWithOwner:(ZPUIOCommandQueue *)owner;
+- (void)addOperation:(ZPUIOOperationBlock)operation;
+- (void)addFailure:(NSString *)message;
+@end
+
+API_AVAILABLE(macos(13.0), ios(16.0))
+@interface ZPUIOCommandQueue : NSObject <MTLIOCommandQueue> {
+@public
+    ZPUDevice *_owner;
+    NSString *_label;
+    NSUInteger _maxCommandBufferCount;
+    MTLIOPriority _priority;
+    MTLIOCommandQueueType _type;
+    NSUInteger _maxCommandsInFlight;
+    id<MTLIOScratchBufferAllocator> _scratchBufferAllocator;
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLIOCommandQueueDescriptor *)descriptor;
+@end
+#pragma clang diagnostic pop
 
 @interface ZPUCounter : NSObject <MTLCounter> {
 @public
@@ -3119,6 +3170,309 @@ static BOOL zpu_rasterization_rate_layer_is_identity(MTLRasterizationRateLayerDe
 }
 @end
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+
+static BOOL zpu_io_data_range(NSData *data, NSUInteger offset, NSUInteger length) {
+    return data != nil && offset <= data.length && length <= data.length - offset;
+}
+
+static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUInteger level,
+                                MTLSize size, NSUInteger sourceBytesPerRow,
+                                NSUInteger sourceBytesPerImage, MTLOrigin destinationOrigin,
+                                NSData *data, NSUInteger sourceHandleOffset, NSError **error) {
+    if (!zpu_texture_type_is_supported(texture->_textureType) ||
+        texture->_pixelFormat == MTLPixelFormatInvalid || size.width == 0 || size.height == 0 || size.depth == 0 ||
+        destinationOrigin.x > UINT32_MAX || destinationOrigin.y > UINT32_MAX || destinationOrigin.z > UINT32_MAX ||
+        size.width > UINT32_MAX || size.height > UINT32_MAX || size.depth > UINT32_MAX) {
+        zpu_set_error(error, @"ZPU CPU Metal I/O texture load has an invalid texture region");
+        return NO;
+    }
+    const BOOL is3D = zpu_texture_type_is_3d(texture->_textureType);
+    if (is3D) {
+        if (slice != 0 || destinationOrigin.z > zpu_texture_depth_at_level(texture, level) ||
+            size.depth > zpu_texture_depth_at_level(texture, level) - destinationOrigin.z) {
+            zpu_set_error(error, @"ZPU CPU Metal I/O 3D texture load has an invalid slice or depth");
+            return NO;
+        }
+    } else if (destinationOrigin.z != 0 || size.depth != 1) {
+        zpu_set_error(error, @"ZPU CPU Metal I/O array texture load must address one slice");
+        return NO;
+    }
+    zpu_metal_texture *firstTexture = [texture zpuTextureAtLevel:level slice:is3D ? 0 : slice];
+    if (firstTexture == NULL) {
+        zpu_set_error(error, @"ZPU CPU Metal I/O texture level or slice is invalid");
+        return NO;
+    }
+    const NSUInteger textureWidth = zpu_metal_texture_width(firstTexture);
+    const NSUInteger textureHeight = zpu_metal_texture_height(firstTexture);
+    if (destinationOrigin.x > textureWidth || size.width > textureWidth - destinationOrigin.x ||
+        destinationOrigin.y > textureHeight || size.height > textureHeight - destinationOrigin.y) {
+        zpu_set_error(error, @"ZPU CPU Metal I/O texture load is outside the destination texture");
+        return NO;
+    }
+    const NSUInteger bytesPerPixel = zpu_texture_bytes_per_pixel(texture->_pixelFormat);
+    if (bytesPerPixel == 0 || size.width > SIZE_MAX / bytesPerPixel) {
+        zpu_set_error(error, @"ZPU CPU Metal I/O texture load row size overflows");
+        return NO;
+    }
+    const NSUInteger rowBytes = size.width * bytesPerPixel;
+    const NSUInteger rowStride = sourceBytesPerRow == 0 ? rowBytes : sourceBytesPerRow;
+    if (rowStride < rowBytes || size.height > SIZE_MAX / rowStride) {
+        zpu_set_error(error, @"ZPU CPU Metal I/O texture load has an invalid source row stride");
+        return NO;
+    }
+    const NSUInteger rowsBytes = rowStride * size.height;
+    const NSUInteger imageStride = sourceBytesPerImage == 0 ? rowsBytes : sourceBytesPerImage;
+    if (imageStride < rowsBytes || size.depth - 1 > SIZE_MAX / imageStride) {
+        zpu_set_error(error, @"ZPU CPU Metal I/O texture load has an invalid source image stride");
+        return NO;
+    }
+    const NSUInteger lastPlaneOffset = (size.depth - 1) * imageStride;
+    const NSUInteger lastRowOffset = (size.height - 1) * rowStride;
+    if (lastPlaneOffset > SIZE_MAX - lastRowOffset ||
+        lastPlaneOffset + lastRowOffset > SIZE_MAX - rowBytes ||
+        !zpu_io_data_range(data, sourceHandleOffset, lastPlaneOffset + lastRowOffset + rowBytes)) {
+        zpu_set_error(error, @"ZPU CPU Metal I/O texture source range is outside the file");
+        return NO;
+    }
+    const uint8_t *source = (const uint8_t *)data.bytes + sourceHandleOffset;
+    for (NSUInteger plane = 0; plane < size.depth; ++plane) {
+        const NSUInteger planeOffset = plane * imageStride;
+        zpu_metal_texture *destination = [texture zpuTextureAtLevel:level
+                                                                 slice:is3D ? destinationOrigin.z + plane : slice];
+        if (destination == NULL || zpu_metal_texture_replace_region(
+                destination,
+                (zpu_metal_region){
+                    .origin = {(uint32_t)destinationOrigin.x, (uint32_t)destinationOrigin.y, 0},
+                    .size = {(uint32_t)size.width, (uint32_t)size.height, 1},
+                },
+                source + planeOffset, data.length - sourceHandleOffset - planeOffset,
+                rowStride) != ZPU_METAL_OK) {
+            zpu_set_error(error, @"ZPU CPU Metal I/O texture write failed");
+            return NO;
+        }
+    }
+    return YES;
+}
+
+@implementation ZPUIOFileHandle
+- (instancetype)initWithOwner:(ZPUDevice *)owner url:(NSURL *)url error:(NSError **)error {
+    if (owner == nil || url == nil || !url.isFileURL) {
+        zpu_set_error(error, @"ZPU CPU Metal I/O handle requires a file URL");
+        return nil;
+    }
+    NSError *readError = nil;
+    NSData *data = [NSData dataWithContentsOfURL:url options:0 error:&readError];
+    if (data == nil) {
+        if (error != NULL) *error = readError != nil ? readError : [NSError errorWithDomain:@"ZPUMetal"
+            code:ZPU_METAL_INVALID_ARGUMENT userInfo:@{NSLocalizedDescriptionKey: @"ZPU CPU Metal I/O file could not be read"}];
+        return nil;
+    }
+    if ((self = [super init])) {
+        _owner = owner;
+        _data = data;
+    }
+    if (error != NULL) *error = nil;
+    return self;
+}
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
+@end
+
+@implementation ZPUIOCommandBuffer
+- (instancetype)initWithOwner:(ZPUIOCommandQueue *)owner {
+    if ((self = [super init])) {
+        _owner = owner;
+        _operations = [NSMutableArray array];
+        _statusTargets = [NSMutableArray array];
+        _completedHandlers = [NSMutableArray array];
+        _status = MTLIOStatusPending;
+    }
+    return self;
+}
+- (void)addOperation:(ZPUIOOperationBlock)operation {
+    if (!_committed && !_cancelRequested && operation != nil) [_operations addObject:[operation copy]];
+}
+- (void)addFailure:(NSString *)message {
+    [self addOperation:^BOOL(NSError **error) {
+        zpu_set_error(error, message);
+        return NO;
+    }];
+}
+- (void)notifyCompleted {
+    NSArray *handlers = [_completedHandlers copy];
+    [_completedHandlers removeAllObjects];
+    for (MTLIOCommandBufferHandler block in handlers) block((id<MTLIOCommandBuffer>)self);
+}
+- (void)addCompletedHandler:(MTLIOCommandBufferHandler)block {
+    if (block == nil) return;
+    if (_status != MTLIOStatusPending) {
+        block((id<MTLIOCommandBuffer>)self);
+        return;
+    }
+    [_completedHandlers addObject:[block copy]];
+}
+- (void)loadBytes:(void *)pointer size:(NSUInteger)size sourceHandle:(id<MTLIOFileHandle>)sourceHandle sourceHandleOffset:(NSUInteger)sourceHandleOffset {
+    ZPUIOFileHandle *handle = (ZPUIOFileHandle *)sourceHandle;
+    if (![handle isKindOfClass:[ZPUIOFileHandle class]] || handle->_owner != _owner->_owner ||
+        (pointer == NULL && size != 0)) {
+        [self addFailure:@"ZPU CPU Metal I/O loadBytes requires a same-device raw file handle and destination pointer"];
+        return;
+    }
+    NSData *data = handle->_data;
+    [self addOperation:^BOOL(NSError **error) {
+        if (!zpu_io_data_range(data, sourceHandleOffset, size)) {
+            zpu_set_error(error, @"ZPU CPU Metal I/O byte source range is outside the file");
+            return NO;
+        }
+        if (size != 0) memcpy(pointer, (const uint8_t *)data.bytes + sourceHandleOffset, size);
+        return YES;
+    }];
+}
+- (void)loadBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset size:(NSUInteger)size sourceHandle:(id<MTLIOFileHandle>)sourceHandle sourceHandleOffset:(NSUInteger)sourceHandleOffset {
+    ZPUIOFileHandle *handle = (ZPUIOFileHandle *)sourceHandle;
+    ZPUBuffer *destination = (ZPUBuffer *)buffer;
+    if (![handle isKindOfClass:[ZPUIOFileHandle class]] || handle->_owner != _owner->_owner ||
+        !zpu_buffer_belongs_to_device(_owner->_owner, destination) || offset > destination.length ||
+        size > destination.length - offset) {
+        [self addFailure:@"ZPU CPU Metal I/O loadBuffer requires same-device file and buffer ranges"];
+        return;
+    }
+    NSData *data = handle->_data;
+    [self addOperation:^BOOL(NSError **error) {
+        if (!zpu_io_data_range(data, sourceHandleOffset, size) ||
+            zpu_metal_buffer_write(destination->_zpuBuffer, offset,
+                                   (const uint8_t *)data.bytes + sourceHandleOffset, size) != ZPU_METAL_OK) {
+            zpu_set_error(error, @"ZPU CPU Metal I/O buffer write failed");
+            return NO;
+        }
+        return YES;
+    }];
+}
+- (void)loadTexture:(id<MTLTexture>)texture slice:(NSUInteger)slice level:(NSUInteger)level size:(MTLSize)size sourceBytesPerRow:(NSUInteger)sourceBytesPerRow sourceBytesPerImage:(NSUInteger)sourceBytesPerImage destinationOrigin:(MTLOrigin)destinationOrigin sourceHandle:(id<MTLIOFileHandle>)sourceHandle sourceHandleOffset:(NSUInteger)sourceHandleOffset {
+    ZPUIOFileHandle *handle = (ZPUIOFileHandle *)sourceHandle;
+    ZPUTexture *destination = (ZPUTexture *)texture;
+    if (![handle isKindOfClass:[ZPUIOFileHandle class]] || handle->_owner != _owner->_owner ||
+        !zpu_texture_belongs_to_device(_owner->_owner, destination)) {
+        [self addFailure:@"ZPU CPU Metal I/O loadTexture requires same-device file and texture resources"];
+        return;
+    }
+    NSData *data = handle->_data;
+    [self addOperation:^BOOL(NSError **error) {
+        return zpu_io_texture_load(destination, slice, level, size, sourceBytesPerRow,
+                                   sourceBytesPerImage, destinationOrigin, data, sourceHandleOffset, error);
+    }];
+}
+- (void)copyStatusToBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset {
+    ZPUBuffer *destination = (ZPUBuffer *)buffer;
+    if (!zpu_buffer_belongs_to_device(_owner->_owner, destination) || offset > destination.length ||
+        sizeof(uint32_t) > destination.length - offset) {
+        [self addFailure:@"ZPU CPU Metal I/O copyStatusToBuffer requires a same-device buffer range"];
+        return;
+    }
+    [_statusTargets addObject:@[destination, @(offset)]];
+}
+- (void)commit {
+    if (_committed) return;
+    _committed = YES;
+    if (_cancelRequested) {
+        _status = MTLIOStatusCancelled;
+        [self notifyCompleted];
+        return;
+    }
+    for (ZPUIOOperationBlock operation in [_operations copy]) {
+        NSError *operationError = nil;
+        if (!operation(&operationError)) {
+            _error = operationError != nil ? operationError : [NSError errorWithDomain:@"ZPUMetal"
+                code:ZPU_METAL_INVALID_COMMAND userInfo:@{NSLocalizedDescriptionKey: @"ZPU CPU Metal I/O operation failed"}];
+            _status = MTLIOStatusError;
+            break;
+        }
+    }
+    if (_status == MTLIOStatusPending) _status = MTLIOStatusComplete;
+    const uint32_t statusValue = (uint32_t)_status;
+    for (NSArray *target in _statusTargets) {
+        ZPUBuffer *buffer = target[0];
+        const NSUInteger offset = [target[1] unsignedIntegerValue];
+        if (zpu_metal_buffer_write(buffer->_zpuBuffer, offset, &statusValue, sizeof(statusValue)) != ZPU_METAL_OK &&
+            _status == MTLIOStatusComplete) {
+            _status = MTLIOStatusError;
+            _error = [NSError errorWithDomain:@"ZPUMetal" code:ZPU_METAL_INVALID_COMMAND
+                userInfo:@{NSLocalizedDescriptionKey: @"ZPU CPU Metal I/O status write failed"}];
+        }
+    }
+    [self notifyCompleted];
+}
+- (void)waitUntilCompleted { [self commit]; }
+- (void)tryCancel {
+    if (_committed) return;
+    _cancelRequested = YES;
+    [self commit];
+}
+- (void)addBarrier {}
+- (void)pushDebugGroup:(NSString *)string { (void)string; }
+- (void)popDebugGroup {}
+- (void)enqueue { [self commit]; }
+- (void)waitForEvent:(id<MTLSharedEvent>)event value:(uint64_t)value {
+    ZPUSharedEvent *zpuEvent = (ZPUSharedEvent *)event;
+    if (![zpuEvent isKindOfClass:[ZPUSharedEvent class]] || zpuEvent->_owner != _owner->_owner) {
+        [self addFailure:@"ZPU CPU Metal I/O waitForEvent requires a same-device shared event"];
+        return;
+    }
+    [self addOperation:^BOOL(NSError **error) {
+        if (![zpuEvent waitUntilSignaledValue:value timeoutMS:UINT64_MAX]) {
+            zpu_set_error(error, @"ZPU CPU Metal I/O shared-event wait failed");
+            return NO;
+        }
+        return YES;
+    }];
+}
+- (void)signalEvent:(id<MTLSharedEvent>)event value:(uint64_t)value {
+    ZPUSharedEvent *zpuEvent = (ZPUSharedEvent *)event;
+    if (![zpuEvent isKindOfClass:[ZPUSharedEvent class]] || zpuEvent->_owner != _owner->_owner) {
+        [self addFailure:@"ZPU CPU Metal I/O signalEvent requires a same-device shared event"];
+        return;
+    }
+    [self addOperation:^BOOL(NSError **error) {
+        if (value < zpuEvent.signaledValue) {
+            zpu_set_error(error, @"ZPU CPU Metal I/O shared-event value cannot decrease");
+            return NO;
+        }
+        zpuEvent.signaledValue = value;
+        return YES;
+    }];
+}
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
+- (MTLIOStatus)status { return _status; }
+- (NSError *)error { return _error; }
+@end
+
+@implementation ZPUIOCommandQueue
+- (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLIOCommandQueueDescriptor *)descriptor {
+    if (owner == nil || descriptor == nil) return nil;
+    if ((self = [super init])) {
+        _owner = owner;
+        _maxCommandBufferCount = descriptor.maxCommandBufferCount;
+        _priority = descriptor.priority;
+        _type = descriptor.type;
+        _maxCommandsInFlight = descriptor.maxCommandsInFlight;
+        _scratchBufferAllocator = descriptor.scratchBufferAllocator;
+    }
+    return self;
+}
+- (void)enqueueBarrier {}
+- (id<MTLIOCommandBuffer>)commandBuffer {
+    return (id<MTLIOCommandBuffer>)[[ZPUIOCommandBuffer alloc] initWithOwner:self];
+}
+- (id<MTLIOCommandBuffer>)commandBufferWithUnretainedReferences { return [self commandBuffer]; }
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
+@end
+
+#pragma clang diagnostic pop
+
 @implementation ZPUDevice
 - (instancetype)initWithDevice:(zpu_metal_device *)device {
     if ((self = [super init])) {
@@ -3665,30 +4019,30 @@ static BOOL zpu_rasterization_rate_layer_is_identity(MTLRasterizationRateLayerDe
                                                                  functionType:cpuFunction.functionType];
 }
 - (id<MTLIOFileHandle>)newIOHandleWithURL:(NSURL *)url error:(NSError **)error API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)url;
-    zpu_set_error(error, @"ZPU CPU Metal has no Metal I/O implementation");
-    return nil;
+    return (id<MTLIOFileHandle>)[[ZPUIOFileHandle alloc] initWithOwner:self url:url error:error];
 }
 - (id<MTLIOFileHandle>)newIOHandleWithURL:(NSURL *)url compressionMethod:(MTLIOCompressionMethod)compressionMethod error:(NSError **)error API_AVAILABLE(macos(13.0), ios(16.0)) {
     (void)url;
     (void)compressionMethod;
-    zpu_set_error(error, @"ZPU CPU Metal has no Metal I/O implementation");
+    zpu_set_error(error, @"ZPU CPU Metal I/O supports raw file handles only; compressed handles are unsupported");
     return nil;
 }
 - (id<MTLIOCommandQueue>)newIOCommandQueueWithDescriptor:(MTLIOCommandQueueDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)descriptor;
-    zpu_set_error(error, @"ZPU CPU Metal has no Metal I/O implementation");
-    return nil;
+    if (descriptor == nil || descriptor.priority < MTLIOPriorityHigh || descriptor.priority > MTLIOPriorityLow ||
+        descriptor.type < MTLIOCommandQueueTypeConcurrent || descriptor.type > MTLIOCommandQueueTypeSerial) {
+        zpu_set_error(error, @"ZPU CPU Metal I/O command queue descriptor is invalid");
+        return nil;
+    }
+    if (error != NULL) *error = nil;
+    return (id<MTLIOCommandQueue>)[[ZPUIOCommandQueue alloc] initWithOwner:self descriptor:descriptor];
 }
 - (id<MTLIOFileHandle>)newIOFileHandleWithURL:(NSURL *)url error:(NSError **)error API_AVAILABLE(macos(14.0), ios(17.0)) {
-    (void)url;
-    zpu_set_error(error, @"ZPU CPU Metal has no Metal I/O implementation");
-    return nil;
+    return (id<MTLIOFileHandle>)[[ZPUIOFileHandle alloc] initWithOwner:self url:url error:error];
 }
 - (id<MTLIOFileHandle>)newIOFileHandleWithURL:(NSURL *)url compressionMethod:(MTLIOCompressionMethod)compressionMethod error:(NSError **)error API_AVAILABLE(macos(14.0), ios(17.0)) {
     (void)url;
     (void)compressionMethod;
-    zpu_set_error(error, @"ZPU CPU Metal has no Metal I/O implementation");
+    zpu_set_error(error, @"ZPU CPU Metal I/O supports raw file handles only; compressed handles are unsupported");
     return nil;
 }
 - (id<MTLLogState>)newLogStateWithDescriptor:(MTLLogStateDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(15.0), ios(18.0)) {
