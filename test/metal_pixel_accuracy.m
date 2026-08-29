@@ -8132,6 +8132,7 @@ int main(void) {
         id<MTL4BinaryFunction> adapter_mtl4_tile_binary_function = nil;
         id<MTLFunctionHandle> adapter_mtl4_tile_binary_handle = nil;
         id<MTLFunctionHandle> adapter_mtl4_tile_function_handle = nil;
+        NSData *adapter_mtl4_tile_binary_script = nil;
         uint8_t adapter_mtl4_tile_pixels[5 * 3 * 4] = {0};
         if (@available(macOS 26.0, iOS 26.0, *)) {
             MTL4CommandAllocatorDescriptor *adapter_mtl4_tile_allocator_descriptor =
@@ -8188,6 +8189,8 @@ int main(void) {
             adapter_mtl4_tile_function_handle =
                 [adapter_mtl4_archived_tile_pipeline functionHandleWithFunction:adapter_tile_function
                                                                              stage:MTLRenderStageTile];
+            adapter_mtl4_tile_binary_script =
+                [adapter_mtl4_serializer serializeAsPipelinesScriptWithError:&adapter_mtl4_tile_error];
             MTLTextureDescriptor *adapter_mtl4_tile_texture_descriptor =
                 [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                     width:5 height:3 mipmapped:NO];
@@ -8242,6 +8245,10 @@ int main(void) {
                 adapter_mtl4_tile_binary_function != nil &&
                 adapter_mtl4_tile_binary_handle != nil &&
                 adapter_mtl4_tile_function_handle != nil &&
+                adapter_mtl4_tile_binary_script != nil &&
+                [[[NSString alloc] initWithData:adapter_mtl4_tile_binary_script
+                                       encoding:NSUTF8StringEncoding]
+                    rangeOfString:@"tile zpu_cpu_tile_gradient_rgba8"].location != NSNotFound &&
                 adapter_mtl4_tile_pipeline.maxTotalThreadsPerThreadgroup == 4 &&
                 adapter_mtl4_tile_pipeline.threadgroupSizeMatchesTileSize &&
                 adapter_mtl4_tile_pipeline.requiredThreadsPerTileThreadgroup.width == 2 &&
