@@ -578,7 +578,7 @@ fn drawLine(job: *Job, a: ProjectedVertex, b: ProjectedVertex, y0: usize, y1: us
     }
 }
 
-fn triangleSampleFilter(job: *const Job, vertices: [3]ProjectedVertex) abi.SamplerFilter {
+fn triangleSampleFilter(job: *const Job, vertices: [3]ProjectedVertex, w0: f32, w1: f32, w2: f32) abi.SamplerFilter {
     if (job.sample_texture == null) return job.options.sample_mag_filter;
     const area = edge(vertices[0], vertices[1], vertices[2].x, vertices[2].y);
     if (!std.math.isFinite(area) or @abs(area) < 0.000001) return job.options.sample_mag_filter;
@@ -587,14 +587,33 @@ fn triangleSampleFilter(job: *const Job, vertices: [3]ProjectedVertex) abi.Sampl
     const dy10 = vertices[1].y - vertices[0].y;
     const dy20 = vertices[2].y - vertices[0].y;
     const denominator = -area;
-    const du1 = vertices[1].color[0] - vertices[0].color[0];
-    const du2 = vertices[2].color[0] - vertices[0].color[0];
-    const dv1 = vertices[1].color[1] - vertices[0].color[1];
-    const dv2 = vertices[2].color[1] - vertices[0].color[1];
-    const du_dx = (du1 * dy20 - du2 * dy10) / denominator;
-    const du_dy = (dx10 * du2 - dx20 * du1) / denominator;
-    const dv_dx = (dv1 * dy20 - dv2 * dy10) / denominator;
-    const dv_dy = (dx10 * dv2 - dx20 * dv1) / denominator;
+    const perspective_denominator = vertices[0].inverse_w * w0 + vertices[1].inverse_w * w1 + vertices[2].inverse_w * w2;
+    if (!std.math.isFinite(perspective_denominator) or @abs(perspective_denominator) < 0.000001) return job.options.sample_mag_filter;
+    const uq0 = vertices[0].color[0] * vertices[0].inverse_w;
+    const uq1 = vertices[1].color[0] * vertices[1].inverse_w;
+    const uq2 = vertices[2].color[0] * vertices[2].inverse_w;
+    const vq0 = vertices[0].color[1] * vertices[0].inverse_w;
+    const vq1 = vertices[1].color[1] * vertices[1].inverse_w;
+    const vq2 = vertices[2].color[1] * vertices[2].inverse_w;
+    const d_u_dx_numerator = ((uq1 - uq0) * dy20 - (uq2 - uq0) * dy10) / denominator;
+    const d_u_dy_numerator = (dx10 * (uq2 - uq0) - dx20 * (uq1 - uq0)) / denominator;
+    const d_v_dx_numerator = ((vq1 - vq0) * dy20 - (vq2 - vq0) * dy10) / denominator;
+    const d_v_dy_numerator = (dx10 * (vq2 - vq0) - dx20 * (vq1 - vq0)) / denominator;
+    const d_w_dx = ((vertices[1].inverse_w - vertices[0].inverse_w) * dy20 -
+        (vertices[2].inverse_w - vertices[0].inverse_w) * dy10) / denominator;
+    const d_w_dy = (dx10 * (vertices[2].inverse_w - vertices[0].inverse_w) -
+        dx20 * (vertices[1].inverse_w - vertices[0].inverse_w)) / denominator;
+    const denominator_squared = perspective_denominator * perspective_denominator;
+    const du_dx = (d_u_dx_numerator * perspective_denominator -
+        (uq0 * w0 + uq1 * w1 + uq2 * w2) * d_w_dx) / denominator_squared;
+    const du_dy = (d_u_dy_numerator * perspective_denominator -
+        (uq0 * w0 + uq1 * w1 + uq2 * w2) * d_w_dy) / denominator_squared;
+    const dv_dx = (d_v_dx_numerator * perspective_denominator -
+        (vq0 * w0 + vq1 * w1 + vq2 * w2) * d_w_dx) / denominator_squared;
+    const dv_dy = (d_v_dy_numerator * perspective_denominator -
+        (vq0 * w0 + vq1 * w1 + vq2 * w2) * d_w_dy) / denominator_squared;
+    if (!std.math.isFinite(du_dx) or !std.math.isFinite(du_dy) or
+        !std.math.isFinite(dv_dx) or !std.math.isFinite(dv_dy)) return job.options.sample_mag_filter;
     const texture = job.sample_texture.?;
     const width = @as(f32, @floatFromInt(texture.width));
     const height = @as(f32, @floatFromInt(texture.height));
@@ -649,7 +668,7 @@ fn drawTriangle(job: *Job, input: [3]ProjectedVertex, y0: usize, y1: usize, stat
             const w1 = edge1 * edge_sign * inverse_area;
             const w2 = edge2 * edge_sign * inverse_area;
             writePixel(job, x, y, vertices[0].z * w0 + vertices[1].z * w1 + vertices[2].z * w2,
-                depth_adjust, interpolateTriangleColor(vertices, w0, w1, w2), triangleSampleFilter(job, vertices), stats, front_facing);
+                depth_adjust, interpolateTriangleColor(vertices, w0, w1, w2), triangleSampleFilter(job, vertices, w0, w1, w2), stats, front_facing);
         }
     }
     stats.primitives_rasterized += 1;
@@ -992,8 +1011,50 @@ test "CPU sampler selects minification and magnification filters from footprint"
         .primitive = .triangle,
         .options = options,
     };
-    try std.testing.expectEqual(abi.SamplerFilter.linear, triangleSampleFilter(&job, projected));
+    try std.testing.expectEqual(abi.SamplerFilter.linear, triangleSampleFilter(&job, projected, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0));
     projected[1].color = .{ 0.1, 0, 0, 1 };
     projected[2].color = .{ 0.1, 0.1, 0, 1 };
-    try std.testing.expectEqual(abi.SamplerFilter.nearest, triangleSampleFilter(&job, projected));
+    try std.testing.expectEqual(abi.SamplerFilter.nearest, triangleSampleFilter(&job, projected, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0));
+}
+
+test "CPU sampler LOD uses perspective-correct texture derivatives" {
+    var output_pixels = [_]u8{0} ** 16;
+    var source_pixels = [_]u8{0} ** 64;
+    var output = try Target.init(&output_pixels, 2, 2, 2 * 4, .rgba8_unorm);
+    var source = try Target.init(&source_pixels, 4, 4, 4 * 4, .rgba8_unorm);
+    const options = DrawOptions{
+        .viewport = .{ .origin_x = 0, .origin_y = 0, .width = 2, .height = 2, .znear = 0, .zfar = 1 },
+        .scissor = .{ .x = 0, .y = 0, .width = 2, .height = 2 },
+        .sample_min_filter = .linear,
+        .sample_mag_filter = .nearest,
+    };
+    var vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 0.5, -0.5, 0.5, 0.5 }, .color = .{ .red = 0.5, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 0, 1, 0.5, 2 }, .color = .{ .red = 1, .green = 1, .blue = 0, .alpha = 1 } },
+    };
+    const projected = [3]ProjectedVertex{
+        project(vertices[0], options.viewport).?,
+        project(vertices[1], options.viewport).?,
+        project(vertices[2], options.viewport).?,
+    };
+    var job = Job{
+        .target = &output,
+        .extra_targets = &[_]*Target{},
+        .sample_texture = &source,
+        .depth = null,
+        .stencil = null,
+        .vertices = &vertices,
+        .primitive = .triangle,
+        .options = options,
+    };
+    const area = edge(projected[0], projected[1], projected[2].x, projected[2].y);
+    const inverse_area = 1.0 / @abs(area);
+    const edge_sign: f32 = if (area > 0) 1.0 else -1.0;
+    const sample_x: f32 = 0.5;
+    const sample_y: f32 = 0.5;
+    const w0 = edge(projected[1], projected[2], sample_x, sample_y) * edge_sign * inverse_area;
+    const w1 = edge(projected[2], projected[0], sample_x, sample_y) * edge_sign * inverse_area;
+    const w2 = edge(projected[0], projected[1], sample_x, sample_y) * edge_sign * inverse_area;
+    try std.testing.expectEqual(abi.SamplerFilter.linear, triangleSampleFilter(&job, projected, w0, w1, w2));
 }
