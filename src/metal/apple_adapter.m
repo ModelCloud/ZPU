@@ -334,6 +334,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @public
     zpu_metal_device *_zpuDevice;
     NSArray *_counterSets;
+    NSHashTable *_heaps;
 }
 - (instancetype)initWithDevice:(zpu_metal_device *)device;
 @end
@@ -750,6 +751,11 @@ static id zpu_resource_for_id(uint64_t resourceID) {
     @synchronized (zpu_resource_registry) {
         return [zpu_resource_registry objectForKey:@(resourceID)];
     }
+}
+
+static void zpu_add_allocated_size(NSUInteger value, NSUInteger *total) {
+    if (value > SIZE_MAX - *total) *total = SIZE_MAX;
+    else *total += value;
 }
 
 static BOOL zpu_metal4_region(MTLOrigin origin, MTLSize size, zpu_metal_region *result) {
@@ -1212,6 +1218,7 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
         _storageMode = descriptor.storageMode;
         _cpuCacheMode = descriptor.cpuCacheMode;
         _hazardTrackingMode = descriptor.hazardTrackingMode;
+        [_owner->_heaps addObject:self];
     }
     return self;
 }
@@ -1711,6 +1718,7 @@ static uint64_t zpu_cpu_timestamp(void) {
         ZPUCounterSet *timestampSet = [[ZPUCounterSet alloc] initWithName:MTLCommonCounterSetTimestamp
                                                                     counters:@[timestampCounter]];
         _counterSets = @[timestampSet];
+        _heaps = [NSHashTable weakObjectsHashTable];
     }
     return self;
 }
@@ -1742,7 +1750,27 @@ static uint64_t zpu_cpu_timestamp(void) {
 - (BOOL)supportsPullModelInterpolation { return NO; }
 - (BOOL)areBarycentricCoordsSupported { return NO; }
 - (BOOL)supportsShaderBarycentricCoordinates { return NO; }
-- (NSUInteger)currentAllocatedSize { return 0; }
+- (NSUInteger)currentAllocatedSize {
+    NSUInteger total = 0;
+    zpu_init_resource_registry();
+    @synchronized (zpu_resource_registry) {
+        for (id resource in zpu_resource_registry.objectEnumerator) {
+            if ([resource isKindOfClass:[ZPUBuffer class]]) {
+                ZPUBuffer *buffer = (ZPUBuffer *)resource;
+                if (buffer->_owner == self && buffer->_heap == nil) zpu_add_allocated_size(buffer.length, &total);
+            } else if ([resource isKindOfClass:[ZPUTexture class]]) {
+                ZPUTexture *texture = (ZPUTexture *)resource;
+                if (texture->_owner == self && texture->_backing == nil && texture->_backingBuffer == nil && texture->_heap == nil) {
+                    zpu_add_allocated_size(texture.allocatedSize, &total);
+                }
+            }
+        }
+    }
+    @synchronized (_heaps) {
+        for (ZPUHeap *heap in _heaps) zpu_add_allocated_size(heap.usedSize, &total);
+    }
+    return total;
+}
 - (NSUInteger)maxThreadgroupMemoryLength { return 0; }
 - (NSUInteger)maxArgumentBufferSamplerCount { return 1024; }
 - (BOOL)areProgrammableSamplePositionsSupported { return NO; }

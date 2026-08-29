@@ -400,6 +400,11 @@ int main(void) {
         id<MTLBuffer> adapter_vertex_buffer =
             [adapter_device newBufferWithBytes:vertices length:sizeof(vertices)
                                        options:MTLResourceStorageModeShared];
+        const NSUInteger adapter_initial_allocated_size = adapter_texture.allocatedSize + adapter_vertex_buffer.length;
+        if (adapter_device.currentAllocatedSize != adapter_initial_allocated_size) {
+            fprintf(stderr, "metal-pixel: direct CPU allocation accounting failed\n");
+            return 19;
+        }
         id<MTLFunction> adapter_vertex_function =
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_vertex");
         id<MTLFunction> adapter_fragment_function =
@@ -2425,6 +2430,7 @@ int main(void) {
         adapter_heap_descriptor.size = 64;
         adapter_heap_descriptor.storageMode = MTLStorageModeShared;
         id<MTLHeap> adapter_heap = [adapter_device newHeapWithDescriptor:adapter_heap_descriptor];
+        const NSUInteger adapter_allocated_before_heap_resources = adapter_device.currentAllocatedSize;
         id<MTLBuffer> adapter_heap_mismatched_buffer =
             [adapter_heap newBufferWithLength:4 options:MTLResourceStorageModePrivate];
         MTLTextureDescriptor *adapter_heap_texture_descriptor =
@@ -2452,7 +2458,8 @@ int main(void) {
             adapter_heap_buffer.heapOffset != 0 || adapter_heap_texture.heapOffset != adapter_heap_buffer.length ||
             adapter_heap.hazardTrackingMode != MTLHazardTrackingModeUntracked ||
             adapter_heap_buffer.hazardTrackingMode != MTLHazardTrackingModeUntracked ||
-            adapter_heap_texture.hazardTrackingMode != MTLHazardTrackingModeUntracked) {
+            adapter_heap_texture.hazardTrackingMode != MTLHazardTrackingModeUntracked ||
+            adapter_device.currentAllocatedSize != adapter_allocated_before_heap_resources + adapter_heap.usedSize) {
             fprintf(stderr, "metal-pixel: heap allocation/accounting failed\n");
             return 37;
         }
@@ -2469,7 +2476,8 @@ int main(void) {
         id<MTLBuffer> adapter_heap_bad_offset_buffer =
             [adapter_heap newBufferWithLength:4 options:MTLResourceStorageModeShared offset:49];
         if (adapter_heap_offset_buffer == nil || adapter_heap_bad_offset_buffer != nil ||
-            adapter_heap_offset_buffer.heapOffset != 32 || adapter_heap.usedSize != 48) {
+            adapter_heap_offset_buffer.heapOffset != 32 || adapter_heap.usedSize != 48 ||
+            adapter_device.currentAllocatedSize != adapter_allocated_before_heap_resources + adapter_heap.usedSize) {
             fprintf(stderr, "metal-pixel: explicit heap buffer offset handling failed\n");
             return 40;
         }
@@ -2480,6 +2488,7 @@ int main(void) {
         id<MTLHeap> adapter_mip_heap = [adapter_device newHeapWithDescriptor:adapter_mip_heap_descriptor];
         id<MTLBuffer> adapter_mip_heap_prefix =
             [adapter_mip_heap newBufferWithLength:4 options:MTLResourceStorageModeShared];
+        const NSUInteger adapter_allocated_before_mip_heap_texture = adapter_device.currentAllocatedSize;
         MTLTextureDescriptor *adapter_heap_mip_descriptor = [MTLTextureDescriptor new];
         adapter_heap_mip_descriptor.textureType = MTLTextureType2DArray;
         adapter_heap_mip_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
@@ -2514,6 +2523,7 @@ int main(void) {
             adapter_heap_mip_texture.heapOffset != adapter_mip_heap_prefix.length ||
             adapter_heap_mip_texture.arrayLength != 2 ||
             adapter_heap_mip_texture.mipmapLevelCount != 3 || adapter_heap_mip_texture.allocatedSize != expected_heap_mip_size ||
+            adapter_device.currentAllocatedSize != adapter_allocated_before_mip_heap_texture + adapter_heap_mip_texture.allocatedSize ||
             memcmp(adapter_heap_mip_bytes, native_array_level_one, sizeof(adapter_heap_mip_bytes)) != 0) {
             fprintf(stderr, "metal-pixel: heap array/mipmap texture exactness failed\n");
             return 39;
