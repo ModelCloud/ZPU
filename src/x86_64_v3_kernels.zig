@@ -46,7 +46,7 @@ fn packedColor(color: s.Color, format: s.Format) u32 {
 }
 
 fn checkedFormat(format_tag: u8) s.Format {
-    return switch (format_tag & ~abi.opaque_format_bit) {
+    return switch (format_tag & ~(abi.opaque_format_bit | abi.binary_alpha_format_bit)) {
         0 => .rgba8_unorm,
         1 => .bgra8_unorm,
         // Only dispatch.zig calls these wrappers; a tag outside the two known
@@ -142,6 +142,7 @@ fn blendPixelsRowsImpl(row_ptr: [*]u8, row_len: usize, stride: usize, source_ptr
 fn blendSpriteBatchImpl(row_ptr: [*]u8, row_len: usize, stride: usize, commands: [*]const abi.SpriteCommand, command_count: usize, source_ptr: [*]const u8, source_len: usize, source_stride: usize, format_tag: u8) callconv(.c) void {
     const format = checkedFormat(format_tag);
     const opaque_destination = format_tag & abi.opaque_format_bit != 0;
+    const binary_alpha = format_tag & abi.binary_alpha_format_bit != 0;
     for (0..command_count) |index| {
         const command = commands[index];
         if (command.x < 0 or command.y < 0) @trap();
@@ -161,6 +162,10 @@ fn blendSpriteBatchImpl(row_ptr: [*]u8, row_len: usize, stride: usize, commands:
             const source_dy = std.math.mul(usize, dy, source_stride) catch @trap();
             if (opaque_destination)
                 vector.blendPixelsOpaque(8, row_ptr[destination_offset + destination_dy .. row_len], destination_start, source_ptr[source_origin + source_dy .. source_len], command.width, format)
+            else if (binary_alpha and format == .rgba8_unorm)
+                vector.blendPixelsBinaryRgba(8, row_ptr[destination_offset + destination_dy .. row_len], destination_start, source_ptr[source_origin + source_dy .. source_len], command.width)
+            else if (binary_alpha)
+                vector.blendPixelsBinary(8, row_ptr[destination_offset + destination_dy .. row_len], destination_start, source_ptr[source_origin + source_dy .. source_len], command.width, format)
             else
                 vector.blendPixels(8, row_ptr[destination_offset + destination_dy .. row_len], destination_start, source_ptr[source_origin + source_dy .. source_len], command.width, format);
         }

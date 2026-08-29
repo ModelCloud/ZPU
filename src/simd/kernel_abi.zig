@@ -36,6 +36,10 @@ pub const blend_sprite_batch_8_name = "zpu_v3_blend_sprite_batch_8";
 /// Internal format-tag bit used by the row/span kernels for the proven-opaque
 /// destination fast path. The low bit remains the public RGBA/BGRA format.
 pub const opaque_format_bit: u8 = 0x80;
+/// Internal format-tag bit for atlas/mask sources whose alpha channel is
+/// guaranteed to be either zero or 255. This skips source-over arithmetic
+/// while retaining the same sprite-batch ABI and draw order.
+pub const binary_alpha_format_bit: u8 = 0x40;
 
 pub const FillSpan8Fn = *const fn ([*]u8, usize, usize, usize, u8, u32) callconv(.c) void;
 pub const BlendSpan8Fn = *const fn ([*]u8, usize, usize, usize, u8, u32) callconv(.c) void;

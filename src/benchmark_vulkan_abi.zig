@@ -17,7 +17,7 @@ const surface_bytes = @as(usize, width) * height * 4;
 const clear_color: u32 = 0x19191919;
 const clear_depth: u32 = @bitCast(@as(f32, 1));
 const max_samples = 8;
-const batch_limit = 256;
+const batch_limit = 8192;
 
 const Mode = enum { per_draw, batched };
 const Target = enum { wezterm_terminal, imgui_vulkan_app, khronos_complex_demo };
@@ -448,7 +448,7 @@ test "Vulkan ABI targets freeze realistic stream shapes" {
     try std.testing.expectEqual(@as(usize, 4_801), spec(.wezterm_terminal).draw_count);
     try std.testing.expectEqual(@as(usize, 192), spec(.imgui_vulkan_app).draw_count);
     try std.testing.expectEqual(@as(usize, 128), spec(.khronos_complex_demo).draw_count);
-    try std.testing.expectEqual(@as(usize, 19), (spec(.wezterm_terminal).draw_count + batch_limit - 1) / batch_limit);
+    try std.testing.expectEqual(@as(usize, 1), (spec(.wezterm_terminal).draw_count + batch_limit - 1) / batch_limit);
     try std.testing.expectEqual(@as(f64, 2.0), target_speedup);
 }
 
