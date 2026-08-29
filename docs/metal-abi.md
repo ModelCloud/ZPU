@@ -20,11 +20,12 @@ triangle path:
   viewport, scissor, cull, winding, fill-mode, color interpolation, and depth
 - two screen-band workers for a 3D draw: the submitting core plus one worker
 - owned RGBA8/BGRA8 buffers and 2D textures with checked region read/write
-- ordinary device-created 2D textures with independently allocated CPU/ZPU
-  mip levels, exact level read/write, level-range views, and level-aware blit
-  copies; CPU box-filter mipmap generation matches the native RGBA8 oracle;
-  buffer-backed and heap-backed textures remain explicitly limited to one
-  level until a portable strided mip layout is added
+- ordinary device-created 2D and 2D-array textures with independently
+  allocated CPU/ZPU slice×mip levels, exact level/slice read/write,
+  level/slice-range views, and level/slice-aware blit copies; CPU box-filter
+  mipmap generation matches the native RGBA8 oracle; buffer-backed and
+  heap-backed textures remain explicitly limited to one level until a portable
+  strided mip layout is added
 - buffer and texture resource options preserve the requested storage mode, CPU
   cache mode, hazard mode, texture usage, optimization flag, compression mode,
   and swizzle metadata; indirect command buffers preserve their resource
@@ -45,9 +46,10 @@ triangle path:
   test. This is the Metal texture coordinate space on both macOS and iOS; any
   AppKit/UIKit view-coordinate conversion belongs to the caller and is not
   silently applied by the CPU adapter
-- render-pass attachment mip levels select the corresponding ZPU texture and
-  use that level's width/height for rasterization; array/depth-plane slices
-  remain explicitly rejected until sliced CPU storage is added
+- render-pass attachment mip levels and single array slices select the
+  corresponding ZPU texture and use that target's width/height for
+  rasterization; multi-layer render passes and depth planes remain explicitly
+  rejected
 - buffer-backed texture views that alias storage with checked row strides and
   preserve the backing resource lifetime
 - CPU-owned `MTLTextureViewPool` slots that create/copy ZPU texture views or

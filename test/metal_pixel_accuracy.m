@@ -803,6 +803,100 @@ int main(void) {
             return 72;
         }
 
+        MTLTextureDescriptor *array_descriptor = [MTLTextureDescriptor new];
+        array_descriptor.textureType = MTLTextureType2DArray;
+        array_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        array_descriptor.width = 4;
+        array_descriptor.height = 4;
+        array_descriptor.arrayLength = 2;
+        array_descriptor.mipmapLevelCount = 3;
+        array_descriptor.sampleCount = 1;
+        array_descriptor.storageMode = MTLStorageModeShared;
+        array_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        id<MTLTexture> native_array_texture = [device newTextureWithDescriptor:array_descriptor];
+        id<MTLTexture> adapter_array_texture = [adapter_device newTextureWithDescriptor:array_descriptor];
+        const uint8_t array_level_one[] = {
+            0x21, 0x32, 0x43, 0x54,  0x65, 0x76, 0x87, 0x98,
+            0xa9, 0xba, 0xcb, 0xdc,  0xed, 0xfe, 0x0f, 0x10,
+        };
+        [native_array_texture replaceRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                mipmapLevel:1
+                                      slice:1
+                                  withBytes:array_level_one
+                                bytesPerRow:2 * 4
+                              bytesPerImage:sizeof(array_level_one)];
+        [adapter_array_texture replaceRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                 mipmapLevel:1
+                                       slice:1
+                                   withBytes:array_level_one
+                                 bytesPerRow:2 * 4
+                               bytesPerImage:sizeof(array_level_one)];
+        uint8_t native_array_level_one[sizeof(array_level_one)];
+        uint8_t adapter_array_level_one[sizeof(array_level_one)];
+        [native_array_texture getBytes:native_array_level_one
+                           bytesPerRow:2 * 4
+                         bytesPerImage:sizeof(array_level_one)
+                          fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                         mipmapLevel:1
+                                slice:1];
+        [adapter_array_texture getBytes:adapter_array_level_one
+                            bytesPerRow:2 * 4
+                          bytesPerImage:sizeof(array_level_one)
+                           fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                          mipmapLevel:1
+                                 slice:1];
+        id<MTLTexture> adapter_array_view =
+            [adapter_array_texture newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                       textureType:MTLTextureType2DArray
+                                                            levels:NSMakeRange(1, 1)
+                                                            slices:NSMakeRange(1, 1)];
+        uint8_t adapter_array_view_bytes[sizeof(array_level_one)];
+        [adapter_array_view getBytes:adapter_array_view_bytes
+                         bytesPerRow:2 * 4
+                       bytesPerImage:sizeof(array_level_one)
+                        fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                       mipmapLevel:0
+                              slice:0];
+        id<MTLTexture> adapter_array_copy = [adapter_device newTextureWithDescriptor:array_descriptor];
+        id<MTLCommandBuffer> adapter_array_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_array_blit = [adapter_array_command_buffer blitCommandEncoder];
+        [adapter_array_blit copyFromTexture:adapter_array_texture
+                                sourceSlice:1
+                                sourceLevel:1
+                               sourceOrigin:MTLOriginMake(0, 0, 0)
+                                 sourceSize:MTLSizeMake(2, 2, 1)
+                               toTexture:adapter_array_copy
+                        destinationSlice:0
+                        destinationLevel:1
+                       destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [adapter_array_blit endEncoding];
+        [adapter_array_command_buffer commit];
+        [adapter_array_command_buffer waitUntilCompleted];
+        uint8_t adapter_array_copy_bytes[sizeof(array_level_one)];
+        [adapter_array_copy getBytes:adapter_array_copy_bytes
+                          bytesPerRow:2 * 4
+                        bytesPerImage:sizeof(array_level_one)
+                         fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                        mipmapLevel:1
+                               slice:0];
+        const NSUInteger expected_array_allocated_size = 2 * (4 * 4 + 2 * 2 + 1) * 4;
+        if (native_array_texture == nil || adapter_array_texture == nil ||
+            native_array_texture.arrayLength != 2 || adapter_array_texture.arrayLength != 2 ||
+            native_array_texture.mipmapLevelCount != 3 || adapter_array_texture.mipmapLevelCount != 3 ||
+            adapter_array_texture.allocatedSize != expected_array_allocated_size ||
+            adapter_array_view == nil || adapter_array_view.arrayLength != 1 ||
+            adapter_array_view.width != 2 || adapter_array_view.height != 2 ||
+            adapter_array_view.mipmapLevelCount != 1 || adapter_array_view.parentRelativeLevel != 1 ||
+            adapter_array_view.parentRelativeSlice != 1 || adapter_array_copy == nil ||
+            adapter_array_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_array_level_one, array_level_one, sizeof(array_level_one)) != 0 ||
+            memcmp(adapter_array_level_one, native_array_level_one, sizeof(array_level_one)) != 0 ||
+            memcmp(adapter_array_view_bytes, native_array_level_one, sizeof(array_level_one)) != 0 ||
+            memcmp(adapter_array_copy_bytes, native_array_level_one, sizeof(array_level_one)) != 0) {
+            fprintf(stderr, "metal-pixel: 2D-array slice/level exactness failed\n");
+            return 75;
+        }
+
         /* Library/function discovery is also CPU metadata. The source text
          * is inspected only for registered ZPU kernel names; it is never sent
          * to Apple's compiler by the adapter. */
