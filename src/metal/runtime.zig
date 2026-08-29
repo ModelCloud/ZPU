@@ -3065,6 +3065,24 @@ test "CPU indirect render arguments read at commit" {
     try bufferWrite(indexed_arguments, 0, @ptrCast(&updated_indexed_arguments), @sizeOf(@TypeOf(updated_indexed_arguments)));
     try indexed_command_buffer.commit();
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, indexed_texture.bytes[40..44]);
+
+    const base_vertex_indices = [_]u32{ 0, 1, 2, 0, 2, 5 };
+    const base_vertex_arguments = [_]u32{ 6, 1, 0, 6, 0 };
+    const base_vertex_index_buffer = try createBuffer(device, @sizeOf(@TypeOf(base_vertex_indices)), @ptrCast(&base_vertex_indices));
+    defer destroyBuffer(base_vertex_index_buffer);
+    const base_vertex_argument_buffer = try createBuffer(device, @sizeOf(@TypeOf(base_vertex_arguments)), @ptrCast(&base_vertex_arguments));
+    defer destroyBuffer(base_vertex_argument_buffer);
+    const base_vertex_texture = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(base_vertex_texture);
+    var base_vertex_command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(base_vertex_command_buffer);
+    var base_vertex_encoder = try beginRender(base_vertex_command_buffer, base_vertex_texture, .{ .color = .{ .load_action = .clear, .store_action = .store } });
+    try base_vertex_encoder.setVertexBuffer(vertex_buffer, 0, 0);
+    try base_vertex_encoder.drawIndexedPrimitivesIndirect(.triangle, .uint32, base_vertex_index_buffer, 0, base_vertex_argument_buffer, 0);
+    try base_vertex_encoder.endEncoding();
+    destroyRenderEncoder(base_vertex_encoder);
+    try base_vertex_command_buffer.commit();
+    try std.testing.expectEqualSlices(u8, direct_texture.bytes, base_vertex_texture.bytes);
 }
 
 test "depth texture attachment rejects farther fragments" {

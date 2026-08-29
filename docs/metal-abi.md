@@ -156,7 +156,7 @@ triangle path:
   blit sample points resolve to `MTLCounterResultTimestamp` records in shared
   ZPU buffers. Unsupported hardware-only counters remain unavailable rather
   than being reported as fabricated statistics
-- CPU library metadata can discover the four registered kernel names from
+- CPU library metadata can discover the six registered kernel names from
   source text, UTF-8 file/URL/data inputs, and the default bundle query;
   unsupported arbitrary MSL and stitched libraries fail closed
 - `newDefaultLibrary` returns the same CPU metadata library for the registered

@@ -5094,6 +5094,78 @@ int main(void) {
             return 123;
         }
 
+        /* Indexed indirect arguments use element-based indexStart and a
+         * signed baseVertex. Exercise the uint32 path with a zero-based
+         * index buffer selecting the same blue vertices. */
+        const uint32_t base_vertex_indices[] = {0, 1, 2, 0, 2, 5};
+        const uint32_t base_vertex_arguments[] = {6, 1, 0, 6, 0};
+        id<MTLBuffer> native_base_vertex_indices =
+            [device newBufferWithBytes:base_vertex_indices length:sizeof(base_vertex_indices)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_base_vertex_indices =
+            [adapter_device newBufferWithBytes:base_vertex_indices length:sizeof(base_vertex_indices)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_base_vertex_arguments =
+            [device newBufferWithBytes:base_vertex_arguments length:sizeof(base_vertex_arguments)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_base_vertex_arguments =
+            [adapter_device newBufferWithBytes:base_vertex_arguments length:sizeof(base_vertex_arguments)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLTexture> native_base_vertex_output = [device newTextureWithDescriptor:texture_descriptor];
+        id<MTLTexture> adapter_base_vertex_output = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTLRenderPassDescriptor *native_base_vertex_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_base_vertex_pass.colorAttachments[0].texture = native_base_vertex_output;
+        native_base_vertex_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_base_vertex_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_base_vertex_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> native_base_vertex_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_base_vertex_encoder =
+            [native_base_vertex_command_buffer renderCommandEncoderWithDescriptor:native_base_vertex_pass];
+        [native_base_vertex_encoder setRenderPipelineState:pipeline];
+        [native_base_vertex_encoder setVertexBuffer:native_deferred_vertex_buffer offset:0 atIndex:0];
+        [native_base_vertex_encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexType:MTLIndexTypeUInt32
+                                             indexBuffer:native_base_vertex_indices indexBufferOffset:0
+                                            indirectBuffer:native_base_vertex_arguments indirectBufferOffset:0];
+        [native_base_vertex_encoder endEncoding];
+        MTLRenderPassDescriptor *adapter_base_vertex_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_base_vertex_pass.colorAttachments[0].texture = adapter_base_vertex_output;
+        adapter_base_vertex_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_base_vertex_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_base_vertex_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> adapter_base_vertex_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_base_vertex_encoder =
+            [adapter_base_vertex_command_buffer renderCommandEncoderWithDescriptor:adapter_base_vertex_pass];
+        [adapter_base_vertex_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_base_vertex_encoder setVertexBuffer:adapter_deferred_vertex_buffer offset:0 atIndex:0];
+        [adapter_base_vertex_encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexType:MTLIndexTypeUInt32
+                                              indexBuffer:adapter_base_vertex_indices indexBufferOffset:0
+                                             indirectBuffer:adapter_base_vertex_arguments indirectBufferOffset:0];
+        [adapter_base_vertex_encoder endEncoding];
+        [native_base_vertex_command_buffer commit];
+        [native_base_vertex_command_buffer waitUntilCompleted];
+        [adapter_base_vertex_command_buffer commit];
+        [adapter_base_vertex_command_buffer waitUntilCompleted];
+        uint8_t native_base_vertex_bytes[byte_count];
+        uint8_t adapter_base_vertex_bytes[byte_count];
+        [native_base_vertex_output getBytes:native_base_vertex_bytes bytesPerRow:(NSUInteger)width * 4
+                                 fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_base_vertex_output getBytes:adapter_base_vertex_bytes bytesPerRow:(NSUInteger)width * 4
+                                  fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (native_base_vertex_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_base_vertex_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_base_vertex_bytes, adapter_base_vertex_bytes, byte_count) != 0 ||
+            memcmp(native_base_vertex_bytes, native_deferred_bytes, byte_count) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < byte_count && native_base_vertex_bytes[mismatch] == adapter_base_vertex_bytes[mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: uint32/baseVertex indexed indirect mismatch (native=%lu adapter=%lu mismatch=%zu nativeByte=%u adapterByte=%u)\n",
+                    (unsigned long)native_base_vertex_command_buffer.status,
+                    (unsigned long)adapter_base_vertex_command_buffer.status,
+                    mismatch,
+                    mismatch < byte_count ? native_base_vertex_bytes[mismatch] : 0,
+                    mismatch < byte_count ? adapter_base_vertex_bytes[mismatch] : 0);
+            return 124;
+        }
+
         /* Indirect command buffers must preserve the same draw state and
          * vertex data as a directly encoded draw. Compare Apple's native ICB
          * execution with the explicit ZPU adapter byte-for-byte. */
