@@ -2181,9 +2181,39 @@ inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: [
             // per-run division and look-ahead samples cost more than they
             // save on these short atlas spans.
             if (last_x - first_x <= 8) {
+                while (x + 4 <= last_x) : (x += 4) {
+                    const pixel_index = row_offset + @as(usize, @intCast(x));
+                    var lane_u = stepped_u_over_w;
+                    var colors: [4]u32 = undefined;
+                    inline for (0..4) |lane| {
+                        colors[lane] = shadeUnitTexture16x16Row(lane_u * raster.flat_reciprocal_w, texture_y, prelit);
+                        lane_u += raster.u_over_w_dx;
+                    }
+                    if (comptime depth_test) {
+                        const passes: @Vector(4, bool) = @as(@Vector(4, u32), @splat(raster.flat_depth_bits)) <= depth_words[pixel_index..][0..4].*;
+                        if (@reduce(.And, passes)) {
+                            depth_words[pixel_index..][0..4].* = @as(@Vector(4, u32), @splat(raster.flat_depth_bits));
+                            color_words[pixel_index..][0..4].* = colors;
+                            pixels_written += 4;
+                        } else inline for (0..4) |lane| if (passes[lane]) {
+                            depth_words[pixel_index + lane] = raster.flat_depth_bits;
+                            color_words[pixel_index + lane] = colors[lane];
+                            pixels_written += 1;
+                        };
+                    } else {
+                        color_words[pixel_index..][0..4].* = colors;
+                        pixels_written += 4;
+                    }
+                    stepped_u_over_w = lane_u;
+                }
                 while (x < last_x) : (x += 1) {
                     const color = shadeUnitTexture16x16Row(stepped_u_over_w * raster.flat_reciprocal_w, texture_y, prelit);
-                    pixels_written += writeFlatColorSpanAtRow(depth_test, color_words, depth_words, row_offset, @intCast(x), @intCast(x + 1), raster.flat_depth_bits, color);
+                    if (comptime depth_test) {
+                        pixels_written += writeFlatColorSpanAtRow(true, color_words, depth_words, row_offset, @intCast(x), @intCast(x + 1), raster.flat_depth_bits, color);
+                    } else {
+                        color_words[row_offset + @as(usize, @intCast(x))] = color;
+                        pixels_written += 1;
+                    }
                     stepped_u_over_w += raster.u_over_w_dx;
                 }
                 continue;
@@ -2265,6 +2295,12 @@ inline fn rasterPreparedFlatColor(comptime depth_test: bool, color_words: []alig
 
 fn rasterFlatSpanTriangleTexture4x4(color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, stripe_count: usize, lane_index: usize, p0: [2]f32, p1: [2]f32, p2: [2]f32, inverse_area: f32, min_x: i32, min_y: i32, max_x: i32, max_y: i32, lane_min_y: i32, lane_max_y: i32, cached_spans: ?*const [flat_span_rows]FlatSpan, flat_depth_bits: u32, prelit: *const [16]u32, flat_reciprocal_w: f32, u_over_w0: f32, u_over_w1: f32, u_over_w2: f32, v_over_w0: f32, v_over_w1: f32, v_over_w2: f32, u_over_w_dx: f32, v_over_w_dx: f32) usize {
     var pixels_written: usize = 0;
+    const du = u_over_w_dx * flat_reciprocal_w;
+    const dv = v_over_w_dx * flat_reciprocal_w;
+    const scaled_du = du * 3.999999;
+    const scaled_dv = dv * 3.999999;
+    const scaled_negative_du = -du * 3.999999;
+    const scaled_negative_dv = -dv * 3.999999;
     const first_lane_y = @max(min_y, lane_min_y);
     const last_lane_y = @min(max_y, lane_max_y);
     var span_stepper: ?FlatSpanStepper = if (cached_spans == null and stripe_count <= parallel_band_count)
@@ -2286,9 +2322,42 @@ fn rasterFlatSpanTriangleTexture4x4(color_words: []align(4) u32, depth_words: []
         const b2 = edge(p0, p1, first_sample) * inverse_area;
         var stepped_u_over_w = b0 * u_over_w0 + b1 * u_over_w1 + b2 * u_over_w2;
         var stepped_v_over_w = b0 * v_over_w0 + b1 * v_over_w1 + b2 * v_over_w2;
-        const du = u_over_w_dx * flat_reciprocal_w;
-        const dv = v_over_w_dx * flat_reciprocal_w;
         var x = first;
+        // Small material spans rarely cross enough texels to amortize the
+        // transition estimator's divisions and look-ahead samples. Walk these
+        // spans directly while retaining the exact same affine stepping and
+        // depth-test path as a one-pixel run.
+        if (last - first <= 32) {
+            const row_offset = @as(usize, @intCast(y)) * @as(usize, width);
+            while (x + 4 <= last) : (x += 4) {
+                const pixel_index = row_offset + @as(usize, @intCast(x));
+                var colors: [4]u32 = undefined;
+                inline for (0..4) |lane| {
+                    const lane_u = stepped_u_over_w + u_over_w_dx * @as(f32, @floatFromInt(lane));
+                    const lane_v = stepped_v_over_w + v_over_w_dx * @as(f32, @floatFromInt(lane));
+                    colors[lane] = shadeUnitTexture4x4(lane_u * flat_reciprocal_w, lane_v * flat_reciprocal_w, prelit);
+                }
+                const passes: @Vector(4, bool) = @as(@Vector(4, u32), @splat(flat_depth_bits)) <= depth_words[pixel_index..][0..4].*;
+                if (@reduce(.And, passes)) {
+                    depth_words[pixel_index..][0..4].* = @as(@Vector(4, u32), @splat(flat_depth_bits));
+                    color_words[pixel_index..][0..4].* = colors;
+                    pixels_written += 4;
+                } else inline for (0..4) |lane| if (passes[lane]) {
+                    depth_words[pixel_index + lane] = flat_depth_bits;
+                    color_words[pixel_index + lane] = colors[lane];
+                    pixels_written += 1;
+                };
+                stepped_u_over_w += u_over_w_dx * 4.0;
+                stepped_v_over_w += v_over_w_dx * 4.0;
+            }
+            while (x < last) : (x += 1) {
+                const color = shadeUnitTexture4x4(stepped_u_over_w * flat_reciprocal_w, stepped_v_over_w * flat_reciprocal_w, prelit);
+                pixels_written += writeFlatColorSpanAtRow(true, color_words, depth_words, row_offset, @intCast(x), @intCast(x + 1), flat_depth_bits, color);
+                stepped_u_over_w += u_over_w_dx;
+                stepped_v_over_w += v_over_w_dx;
+            }
+            continue;
+        }
         while (x < last) {
             const sampled_u = stepped_u_over_w * flat_reciprocal_w;
             const sampled_v = stepped_v_over_w * flat_reciprocal_w;
@@ -2296,25 +2365,21 @@ fn rasterFlatSpanTriangleTexture4x4(color_words: []align(4) u32, depth_words: []
             var run_last = x + 1;
             if (du > 0) {
                 const scaled_u = sampled_u * 3.999999;
-                const scaled_du = du * 3.999999;
                 const next_texel = @as(f32, @floatFromInt(unitTextureCoordinate(sampled_u) + 1));
                 run_last = @min(last, x + @max(@as(i32, @intFromFloat((next_texel - scaled_u) / scaled_du)), 1));
             } else if (du < 0) {
                 const scaled_u = sampled_u * 3.999999;
-                const scaled_du = -du * 3.999999;
                 const texel = unitTextureCoordinate(sampled_u);
-                run_last = @min(last, x + @max(@as(i32, @intFromFloat((scaled_u - @as(f32, @floatFromInt(texel))) / scaled_du)) + 1, 1));
+                run_last = @min(last, x + @max(@as(i32, @intFromFloat((scaled_u - @as(f32, @floatFromInt(texel))) / scaled_negative_du)) + 1, 1));
             }
             if (dv > 0) {
                 const scaled_v = sampled_v * 3.999999;
-                const scaled_dv = dv * 3.999999;
                 const next_texel = @as(f32, @floatFromInt(unitTextureCoordinate(sampled_v) + 1));
                 run_last = @min(run_last, x + @max(@as(i32, @intFromFloat((next_texel - scaled_v) / scaled_dv)), 1));
             } else if (dv < 0) {
                 const scaled_v = sampled_v * 3.999999;
-                const scaled_dv = -dv * 3.999999;
                 const texel = unitTextureCoordinate(sampled_v);
-                run_last = @min(run_last, x + @max(@as(i32, @intFromFloat((scaled_v - @as(f32, @floatFromInt(texel))) / scaled_dv)) + 1, 1));
+                run_last = @min(run_last, x + @max(@as(i32, @intFromFloat((scaled_v - @as(f32, @floatFromInt(texel))) / scaled_negative_dv)) + 1, 1));
             } else if (du == 0) {
                 run_last = last;
             }
