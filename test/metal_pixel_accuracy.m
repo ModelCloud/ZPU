@@ -3557,6 +3557,59 @@ int main(void) {
                                       fromRegion:MTLRegionMake2D(0, 0, cube_size, cube_size)
                                      mipmapLevel:0 slice:0];
         }
+        MTLRenderPipelineDescriptor *cube_render_pipeline_descriptor = [pipeline_descriptor copy];
+        cube_render_pipeline_descriptor.vertexFunction = adapter_vertex_function;
+        cube_render_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
+        id<MTLRenderPipelineState> adapter_cube_render_pipeline =
+            [adapter_device newRenderPipelineStateWithDescriptor:cube_render_pipeline_descriptor
+                                                            error:&adapter_pipeline_error];
+        const NSUInteger cube_render_slice = 4;
+        MTLRenderPassDescriptor *native_cube_render_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_cube_render_pass.colorAttachments[0].texture = native_cube_texture;
+        native_cube_render_pass.colorAttachments[0].slice = cube_render_slice;
+        native_cube_render_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_cube_render_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_cube_render_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        id<MTLCommandBuffer> native_cube_render_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_cube_render_encoder =
+            [native_cube_render_command_buffer renderCommandEncoderWithDescriptor:native_cube_render_pass];
+        [native_cube_render_encoder setRenderPipelineState:pipeline];
+        [native_cube_render_encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
+        [native_cube_render_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_cube_render_encoder endEncoding];
+        [native_cube_render_command_buffer commit];
+        [native_cube_render_command_buffer waitUntilCompleted];
+        MTLRenderPassDescriptor *adapter_cube_render_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_cube_render_pass.colorAttachments[0].texture = adapter_cube_texture;
+        adapter_cube_render_pass.colorAttachments[0].slice = cube_render_slice;
+        adapter_cube_render_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_cube_render_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_cube_render_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        id<MTLCommandBuffer> adapter_cube_render_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_cube_render_encoder =
+            [adapter_cube_render_command_buffer renderCommandEncoderWithDescriptor:adapter_cube_render_pass];
+        [adapter_cube_render_encoder setRenderPipelineState:adapter_cube_render_pipeline];
+        [adapter_cube_render_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_cube_render_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_cube_render_encoder endEncoding];
+        [adapter_cube_render_command_buffer commit];
+        [adapter_cube_render_command_buffer waitUntilCompleted];
+        uint8_t native_cube_render_bytes[cube_face_bytes];
+        uint8_t adapter_cube_render_bytes[cube_face_bytes];
+        [native_cube_texture getBytes:native_cube_render_bytes
+                          bytesPerRow:cube_size * 4
+                        bytesPerImage:cube_face_bytes
+                         fromRegion:MTLRegionMake2D(0, 0, cube_size, cube_size)
+                        mipmapLevel:0 slice:cube_render_slice];
+        [adapter_cube_texture getBytes:adapter_cube_render_bytes
+                           bytesPerRow:cube_size * 4
+                         bytesPerImage:cube_face_bytes
+                          fromRegion:MTLRegionMake2D(0, 0, cube_size, cube_size)
+                         mipmapLevel:0 slice:cube_render_slice];
+        const BOOL cube_render_match = native_cube_render_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_cube_render_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_cube_render_encoder != nil && adapter_cube_render_pipeline != nil &&
+            memcmp(native_cube_render_bytes, adapter_cube_render_bytes, cube_face_bytes) == 0;
         const NSUInteger expected_cube_allocated_size = cube_face_count * cube_mip_bytes;
         const NSUInteger expected_cube_array_allocated_size = cube_array_count * expected_cube_allocated_size;
         if (native_cube_texture == nil || adapter_cube_texture == nil ||
@@ -3573,7 +3626,7 @@ int main(void) {
             native_cube_texture.mipmapLevelCount != 3 || adapter_cube_texture.mipmapLevelCount != 3 ||
             adapter_cube_texture.allocatedSize != expected_cube_allocated_size ||
             adapter_cube_array_texture.allocatedSize != expected_cube_array_allocated_size ||
-            !cube_bytes_match || !cube_array_bytes_match || !cube_mips_match || !cube_copy_match ||
+            !cube_bytes_match || !cube_array_bytes_match || !cube_mips_match || !cube_copy_match || !cube_render_match ||
             native_cube_array_view == nil || adapter_cube_array_view == nil ||
             native_cube_array_view.arrayLength != 1 || adapter_cube_array_view.arrayLength != 1 ||
             adapter_cube_array_view.parentRelativeSlice != cube_face_count ||

@@ -1539,7 +1539,8 @@ static BOOL zpu_texture_type_is_supported(MTLTextureType type) {
 }
 
 static BOOL zpu_render_texture_type_supported(MTLTextureType type) {
-    return type == MTLTextureType2D || type == MTLTextureType2DArray;
+    return type == MTLTextureType2D || type == MTLTextureType2DArray ||
+        type == MTLTextureTypeCube || type == MTLTextureTypeCubeArray;
 }
 
 /* ZPU stores every non-3D Metal slice as an independent 2D texture. Metal

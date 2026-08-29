@@ -85,8 +85,8 @@ triangle path:
   test. This is the Metal texture coordinate space on both macOS and iOS; any
   AppKit/UIKit view-coordinate conversion belongs to the caller and is not
   silently applied by the CPU adapter
-- render-pass attachment mip levels and single array slices select the
-  corresponding ZPU texture and use that target's width/height for
+- render-pass attachment mip levels and single array/cube face slices select
+  the corresponding ZPU texture and use that target's width/height for
   rasterization; multi-layer render passes and depth planes remain explicitly
   rejected
 - buffer-backed texture views that alias storage with checked row strides and
