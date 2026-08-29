@@ -905,6 +905,125 @@ int main(void) {
             fprintf(stderr, "metal-pixel: 2D-array slice/level exactness failed\n");
             return 75;
         }
+
+        MTLTextureDescriptor *one_d_descriptor = [MTLTextureDescriptor new];
+        one_d_descriptor.textureType = MTLTextureType1D;
+        one_d_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        one_d_descriptor.width = width;
+        one_d_descriptor.height = 1;
+        one_d_descriptor.depth = 1;
+        one_d_descriptor.arrayLength = 1;
+        one_d_descriptor.mipmapLevelCount = 1;
+        one_d_descriptor.sampleCount = 1;
+        one_d_descriptor.storageMode = MTLStorageModeShared;
+        one_d_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        id<MTLTexture> native_one_d_texture = [device newTextureWithDescriptor:one_d_descriptor];
+        id<MTLTexture> adapter_one_d_texture = [adapter_device newTextureWithDescriptor:one_d_descriptor];
+        uint8_t one_d_bytes[width * 4];
+        for (NSUInteger index = 0; index < sizeof(one_d_bytes); ++index) {
+            one_d_bytes[index] = (uint8_t)((index * 29u + 7u) & 0xffu);
+        }
+        [native_one_d_texture replaceRegion:MTLRegionMake1D(0, width)
+                                mipmapLevel:0
+                                  withBytes:one_d_bytes
+                                bytesPerRow:sizeof(one_d_bytes)];
+        [adapter_one_d_texture replaceRegion:MTLRegionMake1D(0, width)
+                                 mipmapLevel:0
+                                   withBytes:one_d_bytes
+                                 bytesPerRow:sizeof(one_d_bytes)];
+        uint8_t native_one_d_bytes[sizeof(one_d_bytes)];
+        uint8_t adapter_one_d_bytes[sizeof(one_d_bytes)];
+        [native_one_d_texture getBytes:native_one_d_bytes
+                           bytesPerRow:sizeof(native_one_d_bytes)
+                            fromRegion:MTLRegionMake1D(0, width)
+                           mipmapLevel:0];
+        [adapter_one_d_texture getBytes:adapter_one_d_bytes
+                            bytesPerRow:sizeof(adapter_one_d_bytes)
+                             fromRegion:MTLRegionMake1D(0, width)
+                            mipmapLevel:0];
+
+        MTLTextureDescriptor *buffer_texture_descriptor = [texture_descriptor copy];
+        id<MTLBuffer> native_buffer_backing =
+            [device newBufferWithLength:byte_count options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_buffer_backing =
+            [adapter_device newBufferWithLength:byte_count options:MTLResourceStorageModeShared];
+        uint8_t buffer_texture_bytes[byte_count];
+        for (NSUInteger index = 0; index < sizeof(buffer_texture_bytes); ++index) {
+            buffer_texture_bytes[index] = (uint8_t)((index * 47u + 23u) & 0xffu);
+        }
+        if (native_buffer_backing != nil) memcpy(native_buffer_backing.contents, buffer_texture_bytes, sizeof(buffer_texture_bytes));
+        if (adapter_buffer_backing != nil) memcpy(adapter_buffer_backing.contents, buffer_texture_bytes, sizeof(buffer_texture_bytes));
+        id<MTLTexture> native_buffer_texture =
+            [native_buffer_backing newTextureWithDescriptor:buffer_texture_descriptor offset:0 bytesPerRow:width * 4];
+        id<MTLTexture> adapter_buffer_texture =
+            [adapter_buffer_backing newTextureWithDescriptor:buffer_texture_descriptor offset:0 bytesPerRow:width * 4];
+        uint8_t native_buffer_texture_bytes[byte_count];
+        uint8_t adapter_buffer_texture_bytes[byte_count];
+        [native_buffer_texture getBytes:native_buffer_texture_bytes
+                            bytesPerRow:width * 4
+                             fromRegion:MTLRegionMake2D(0, 0, width, height)
+                            mipmapLevel:0];
+        [adapter_buffer_texture getBytes:adapter_buffer_texture_bytes
+                             bytesPerRow:width * 4
+                              fromRegion:MTLRegionMake2D(0, 0, width, height)
+                             mipmapLevel:0];
+
+        MTLTextureDescriptor *one_d_array_descriptor = [one_d_descriptor copy];
+        one_d_array_descriptor.textureType = MTLTextureType1DArray;
+        one_d_array_descriptor.arrayLength = 2;
+        id<MTLTexture> native_one_d_array_texture = [device newTextureWithDescriptor:one_d_array_descriptor];
+        id<MTLTexture> adapter_one_d_array_texture = [adapter_device newTextureWithDescriptor:one_d_array_descriptor];
+        uint8_t one_d_array_bytes[width * 4];
+        for (NSUInteger index = 0; index < sizeof(one_d_array_bytes); ++index) {
+            one_d_array_bytes[index] = (uint8_t)((index * 43u + 19u) & 0xffu);
+        }
+        [native_one_d_array_texture replaceRegion:MTLRegionMake1D(0, width)
+                                      mipmapLevel:0
+                                            slice:1
+                                        withBytes:one_d_array_bytes
+                                      bytesPerRow:sizeof(one_d_array_bytes)
+                                    bytesPerImage:sizeof(one_d_array_bytes)];
+        [adapter_one_d_array_texture replaceRegion:MTLRegionMake1D(0, width)
+                                       mipmapLevel:0
+                                             slice:1
+                                         withBytes:one_d_array_bytes
+                                       bytesPerRow:sizeof(one_d_array_bytes)
+                                     bytesPerImage:sizeof(one_d_array_bytes)];
+        uint8_t native_one_d_array_bytes[sizeof(one_d_array_bytes)];
+        uint8_t adapter_one_d_array_bytes[sizeof(one_d_array_bytes)];
+        [native_one_d_array_texture getBytes:native_one_d_array_bytes
+                                  bytesPerRow:sizeof(native_one_d_array_bytes)
+                                bytesPerImage:sizeof(native_one_d_array_bytes)
+                                 fromRegion:MTLRegionMake1D(0, width)
+                                mipmapLevel:0
+                                       slice:1];
+        [adapter_one_d_array_texture getBytes:adapter_one_d_array_bytes
+                                   bytesPerRow:sizeof(adapter_one_d_array_bytes)
+                                 bytesPerImage:sizeof(adapter_one_d_array_bytes)
+                                  fromRegion:MTLRegionMake1D(0, width)
+                                 mipmapLevel:0
+                                        slice:1];
+        const NSUInteger expected_one_d_array_allocated_size = 2 * width * 4;
+        if (native_one_d_texture == nil || adapter_one_d_texture == nil ||
+            native_one_d_texture.textureType != MTLTextureType1D ||
+            adapter_one_d_texture.textureType != MTLTextureType1D ||
+            native_one_d_texture.height != 1 || adapter_one_d_texture.height != 1 ||
+            native_one_d_array_texture == nil || adapter_one_d_array_texture == nil ||
+            native_one_d_array_texture.textureType != MTLTextureType1DArray ||
+            adapter_one_d_array_texture.textureType != MTLTextureType1DArray ||
+            native_one_d_array_texture.arrayLength != 2 || adapter_one_d_array_texture.arrayLength != 2 ||
+            adapter_one_d_array_texture.allocatedSize != expected_one_d_array_allocated_size ||
+            native_buffer_backing == nil || adapter_buffer_backing == nil ||
+            native_buffer_texture == nil || adapter_buffer_texture == nil ||
+            memcmp(native_one_d_bytes, one_d_bytes, sizeof(one_d_bytes)) != 0 ||
+            memcmp(adapter_one_d_bytes, native_one_d_bytes, sizeof(one_d_bytes)) != 0 ||
+            memcmp(native_buffer_texture_bytes, buffer_texture_bytes, sizeof(buffer_texture_bytes)) != 0 ||
+            memcmp(adapter_buffer_texture_bytes, native_buffer_texture_bytes, sizeof(buffer_texture_bytes)) != 0 ||
+            memcmp(native_one_d_array_bytes, one_d_array_bytes, sizeof(one_d_array_bytes)) != 0 ||
+            memcmp(adapter_one_d_array_bytes, native_one_d_array_bytes, sizeof(one_d_array_bytes)) != 0) {
+            fprintf(stderr, "metal-pixel: 1D texture and 1D-array exactness failed\n");
+            return 77;
+        }
         MTLTextureDescriptor *array_render_descriptor = [array_descriptor copy];
         array_render_descriptor.usage = MTLTextureUsageRenderTarget;
         id<MTLTexture> native_array_render_texture = [device newTextureWithDescriptor:array_render_descriptor];
@@ -2726,6 +2845,36 @@ int main(void) {
             memcmp(adapter_heap_mip_bytes, native_array_level_one, sizeof(adapter_heap_mip_bytes)) != 0) {
             fprintf(stderr, "metal-pixel: heap array/mipmap texture exactness failed\n");
             return 39;
+        }
+
+        MTLHeapDescriptor *adapter_one_d_heap_descriptor = [MTLHeapDescriptor new];
+        adapter_one_d_heap_descriptor.size = expected_one_d_array_allocated_size;
+        adapter_one_d_heap_descriptor.storageMode = MTLStorageModeShared;
+        id<MTLHeap> adapter_one_d_heap = [adapter_device newHeapWithDescriptor:adapter_one_d_heap_descriptor];
+        MTLSizeAndAlign adapter_one_d_heap_size_align =
+            [adapter_device heapTextureSizeAndAlignWithDescriptor:one_d_array_descriptor];
+        id<MTLTexture> adapter_one_d_heap_texture =
+            [adapter_one_d_heap newTextureWithDescriptor:one_d_array_descriptor];
+        uint8_t adapter_one_d_heap_bytes[sizeof(one_d_array_bytes)] = {0};
+        [adapter_one_d_heap_texture replaceRegion:MTLRegionMake1D(0, width)
+                                      mipmapLevel:0
+                                            slice:1
+                                        withBytes:one_d_array_bytes
+                                      bytesPerRow:sizeof(one_d_array_bytes)
+                                    bytesPerImage:sizeof(one_d_array_bytes)];
+        [adapter_one_d_heap_texture getBytes:adapter_one_d_heap_bytes
+                                  bytesPerRow:sizeof(adapter_one_d_heap_bytes)
+                                bytesPerImage:sizeof(adapter_one_d_heap_bytes)
+                                 fromRegion:MTLRegionMake1D(0, width)
+                                mipmapLevel:0
+                                       slice:1];
+        if (adapter_one_d_heap == nil || adapter_one_d_heap_texture == nil ||
+            adapter_one_d_heap_size_align.size != expected_one_d_array_allocated_size ||
+            adapter_one_d_heap_size_align.align != 4 || adapter_one_d_heap.usedSize != expected_one_d_array_allocated_size ||
+            adapter_one_d_heap_texture.heapOffset != 0 ||
+            memcmp(adapter_one_d_heap_bytes, one_d_array_bytes, sizeof(one_d_array_bytes)) != 0) {
+            fprintf(stderr, "metal-pixel: heap 1D-array texture exactness failed\n");
+            return 41;
         }
 
         const uint32_t adapter_indirect_arguments[] = {6, 1, 0, 0};

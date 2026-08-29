@@ -19,15 +19,15 @@ triangle path:
 - clip-space point, line, line-strip, triangle, and triangle-strip draws with
   viewport, scissor, cull, winding, fill-mode, color interpolation, and depth
 - two screen-band workers for a 3D draw: the submitting core plus one worker
-- owned RGBA8/BGRA8 buffers and 2D textures with checked region read/write
-- ordinary device-created 2D and 2D-array textures with independently
+- owned RGBA8/BGRA8 buffers and 1D/2D textures with checked region read/write
+- ordinary device-created 1D, 1D-array, 2D, and 2D-array textures with independently
   allocated CPU/ZPU slice×mip levels, exact level/slice read/write,
   level/slice-range views, and level/slice-aware blit copies; CPU box-filter
   mipmap generation matches the native RGBA8 oracle; buffer-backed and
   heap-backed textures use independently allocated CPU/ZPU slice×mip levels
-  with full allocation-size accounting; buffer-backed textures remain
-  explicitly limited to one level because their caller-supplied stride cannot
-  describe a portable mip layout
+  with full allocation-size accounting; linear buffer-backed textures remain
+  explicitly limited to one 2D level because their caller-supplied stride
+  cannot describe a portable mip layout
 - buffer and texture resource options preserve the requested storage mode, CPU
   cache mode, hazard mode, texture usage, optimization flag, compression mode,
   and swizzle metadata; indirect command buffers preserve their resource

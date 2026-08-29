@@ -664,11 +664,29 @@ static BOOL zpu_depth_format_supported(MTLPixelFormat format) {
     return format == MTLPixelFormatInvalid || format == MTLPixelFormatDepth32Float;
 }
 
+static BOOL zpu_texture_type_is_1d(MTLTextureType type) {
+    return type == MTLTextureType1D || type == MTLTextureType1DArray;
+}
+
+static BOOL zpu_texture_type_is_array(MTLTextureType type) {
+    return type == MTLTextureType1DArray || type == MTLTextureType2DArray;
+}
+
+static BOOL zpu_texture_type_is_supported(MTLTextureType type) {
+    return type == MTLTextureType1D || type == MTLTextureType1DArray ||
+        type == MTLTextureType2D || type == MTLTextureType2DArray;
+}
+
+static BOOL zpu_render_texture_type_supported(MTLTextureType type) {
+    return type == MTLTextureType2D || type == MTLTextureType2DArray;
+}
+
 static BOOL zpu_texture_descriptor_size(MTLTextureDescriptor *descriptor, NSUInteger *size) {
     if (descriptor == nil || size == NULL ||
-        (descriptor.textureType != MTLTextureType2D && descriptor.textureType != MTLTextureType2DArray) ||
+        !zpu_texture_type_is_supported(descriptor.textureType) ||
         descriptor.depth != 1 || descriptor.arrayLength == 0 ||
-        (descriptor.textureType == MTLTextureType2D && descriptor.arrayLength != 1) ||
+        (!zpu_texture_type_is_array(descriptor.textureType) && descriptor.arrayLength != 1) ||
+        (zpu_texture_type_is_1d(descriptor.textureType) && descriptor.height != 1) ||
         descriptor.mipmapLevelCount == 0 || descriptor.sampleCount != 1 ||
         descriptor.width > UINT32_MAX || descriptor.height > UINT32_MAX ||
         (descriptor.pixelFormat != MTLPixelFormatRGBA8Unorm && descriptor.pixelFormat != MTLPixelFormatBGRA8Unorm &&
@@ -677,7 +695,7 @@ static BOOL zpu_texture_descriptor_size(MTLTextureDescriptor *descriptor, NSUInt
     for (NSUInteger slice = 0; slice < descriptor.arrayLength; ++slice) {
         (void)slice;
         NSUInteger width = descriptor.width;
-        NSUInteger height = descriptor.height;
+        NSUInteger height = zpu_texture_type_is_1d(descriptor.textureType) ? 1 : descriptor.height;
         for (NSUInteger level = 0; level < descriptor.mipmapLevelCount; ++level) {
             if (height != 0 && width > SIZE_MAX / (height * 4)) return NO;
             const NSUInteger levelSize = width * height * 4;
@@ -773,6 +791,7 @@ static BOOL zpu_metal4_render_pass_descriptor(MTL4RenderPassDescriptor *descript
     if (descriptor == nil || color_texture == NULL || depth_texture == NULL || pass == NULL) return NO;
     ZPUTexture *color = (ZPUTexture *)descriptor.colorAttachments[0].texture;
     if (![color isKindOfClass:[ZPUTexture class]] ||
+        !zpu_render_texture_type_supported(color->_textureType) ||
         !zpu_render_pipeline_format_supported(color->_pixelFormat)) return NO;
     zpu_metal_texture *colorTexture = [color zpuTextureAtLevel:descriptor.colorAttachments[0].level
                                                           slice:descriptor.colorAttachments[0].slice];
@@ -896,7 +915,8 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
     return KERN_SUCCESS;
 }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor offset:(NSUInteger)offset bytesPerRow:(NSUInteger)bytesPerRow {
-    if (descriptor == nil || descriptor.textureType != MTLTextureType2D || descriptor.depth != 1 ||
+    if (descriptor == nil || (descriptor.textureType != MTLTextureType1D && descriptor.textureType != MTLTextureType2D) ||
+        (descriptor.textureType == MTLTextureType1D && descriptor.height != 1) || descriptor.depth != 1 ||
         descriptor.arrayLength != 1 || descriptor.mipmapLevelCount != 1 || descriptor.sampleCount != 1 ||
         (descriptor.pixelFormat != MTLPixelFormatRGBA8Unorm && descriptor.pixelFormat != MTLPixelFormatBGRA8Unorm)) return nil;
     if (descriptor.width > UINT32_MAX || descriptor.height > UINT32_MAX) return nil;
@@ -1262,7 +1282,7 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
     for (NSUInteger slice = 0; slice < descriptor.arrayLength; ++slice) {
         NSMutableArray *mipmaps = [NSMutableArray arrayWithCapacity:descriptor.mipmapLevelCount];
         NSUInteger levelWidth = descriptor.width;
-        NSUInteger levelHeight = descriptor.height;
+        NSUInteger levelHeight = zpu_texture_type_is_1d(descriptor.textureType) ? 1 : descriptor.height;
         for (NSUInteger level = 0; level < descriptor.mipmapLevelCount; ++level) {
             zpu_metal_texture_descriptor zpu_descriptor = {
                 (uint32_t)levelWidth, (uint32_t)levelHeight, zpu_pixel_format(descriptor.pixelFormat),
@@ -1855,9 +1875,10 @@ static uint64_t zpu_cpu_timestamp(void) {
     return (id<MTLBuffer>)result;
 }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor {
-    if (descriptor == nil || (descriptor.textureType != MTLTextureType2D && descriptor.textureType != MTLTextureType2DArray) ||
+    if (descriptor == nil || !zpu_texture_type_is_supported(descriptor.textureType) ||
         descriptor.depth != 1 || descriptor.arrayLength == 0 ||
-        (descriptor.textureType == MTLTextureType2D && descriptor.arrayLength != 1) ||
+        (!zpu_texture_type_is_array(descriptor.textureType) && descriptor.arrayLength != 1) ||
+        (zpu_texture_type_is_1d(descriptor.textureType) && descriptor.height != 1) ||
         descriptor.mipmapLevelCount == 0 || descriptor.sampleCount != 1) return nil;
     if (descriptor.width > UINT32_MAX || descriptor.height > UINT32_MAX) return nil;
     if (descriptor.pixelFormat != MTLPixelFormatRGBA8Unorm && descriptor.pixelFormat != MTLPixelFormatBGRA8Unorm && descriptor.pixelFormat != MTLPixelFormatDepth32Float) return nil;
@@ -1865,7 +1886,7 @@ static uint64_t zpu_cpu_timestamp(void) {
     for (NSUInteger slice = 0; slice < descriptor.arrayLength; ++slice) {
         NSMutableArray *mipmaps = [NSMutableArray arrayWithCapacity:descriptor.mipmapLevelCount];
         NSUInteger levelWidth = descriptor.width;
-        NSUInteger levelHeight = descriptor.height;
+        NSUInteger levelHeight = zpu_texture_type_is_1d(descriptor.textureType) ? 1 : descriptor.height;
         for (NSUInteger level = 0; level < descriptor.mipmapLevelCount; ++level) {
             zpu_metal_texture_descriptor zpu_descriptor = {
                 (uint32_t)levelWidth, (uint32_t)levelHeight, zpu_pixel_format(descriptor.pixelFormat),
@@ -2696,7 +2717,7 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 - (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)descriptor {
     if (descriptor == nil || descriptor.colorAttachments[0].texture == nil) return nil;
     ZPUTexture *texture = (ZPUTexture *)descriptor.colorAttachments[0].texture;
-    if (![texture isKindOfClass:[ZPUTexture class]]) return nil;
+    if (![texture isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(texture->_textureType)) return nil;
     zpu_metal_texture *colorTexture = [texture zpuTextureAtLevel:descriptor.colorAttachments[0].level
                                                             slice:descriptor.colorAttachments[0].slice];
     if (colorTexture == NULL) return nil;
@@ -2716,7 +2737,8 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     };
     if (descriptor.depthAttachment.texture != nil) {
         ZPUTexture *depth = (ZPUTexture *)descriptor.depthAttachment.texture;
-        if (![depth isKindOfClass:[ZPUTexture class]] || depth->_pixelFormat != MTLPixelFormatDepth32Float) return nil;
+        if (![depth isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(depth->_textureType) ||
+            depth->_pixelFormat != MTLPixelFormatDepth32Float) return nil;
         depthTexture = [depth zpuTextureAtLevel:descriptor.depthAttachment.level
                                            slice:descriptor.depthAttachment.slice];
         if (depthTexture == NULL) return nil;
@@ -2740,7 +2762,7 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 - (id<MTLParallelRenderCommandEncoder>)parallelRenderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)descriptor {
     if (descriptor == nil || descriptor.colorAttachments[0].texture == nil) return nil;
     ZPUTexture *texture = (ZPUTexture *)descriptor.colorAttachments[0].texture;
-    if (![texture isKindOfClass:[ZPUTexture class]]) return nil;
+    if (![texture isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(texture->_textureType)) return nil;
     zpu_metal_texture *colorTexture = [texture zpuTextureAtLevel:descriptor.colorAttachments[0].level
                                                             slice:descriptor.colorAttachments[0].slice];
     if (colorTexture == NULL) return nil;
@@ -2760,7 +2782,8 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     };
     if (descriptor.depthAttachment.texture != nil) {
         ZPUTexture *depth = (ZPUTexture *)descriptor.depthAttachment.texture;
-        if (![depth isKindOfClass:[ZPUTexture class]] || depth->_pixelFormat != MTLPixelFormatDepth32Float) return nil;
+        if (![depth isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(depth->_textureType) ||
+            depth->_pixelFormat != MTLPixelFormatDepth32Float) return nil;
         depthTexture = [depth zpuTextureAtLevel:descriptor.depthAttachment.level
                                            slice:descriptor.depthAttachment.slice];
         if (depthTexture == NULL) return nil;
