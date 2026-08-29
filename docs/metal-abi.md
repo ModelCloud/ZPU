@@ -96,6 +96,8 @@ triangle path:
   indirect command buffers (including CPU blit-copy of encoded commands),
   including CPU replay of fragment-buffer bindings and Metal 4 fixed-function
   indirect render state when the corresponding SDK/runtime selectors are used,
+  descriptor inheritance and binding-count enforcement, indexed ICB ownership,
+  index-type/alignment/range validation, and legal reset no-ops,
   texture views, level-aware mipmap generation/copies, ordered MTLFence
   update/wait commands, and CPU-owned visibility result buffers with aligned
   boolean/counting modes plus reset/accumulate behavior

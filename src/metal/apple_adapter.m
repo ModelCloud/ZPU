@@ -219,6 +219,7 @@ API_AVAILABLE(macos(15.0), ios(18.0))
     BOOL _hasCullMode;
     BOOL _hasFrontFacingWinding;
     BOOL _hasTriangleFillMode;
+    BOOL _hasVertexBuffer;
     BOOL _unsupportedCommand;
 }
 - (instancetype)initWithOwner:(ZPUIndirectCommandBuffer *)owner;
@@ -254,6 +255,11 @@ API_AVAILABLE(macos(15.0), ios(18.0))
     MTLStorageMode _storageMode;
     MTLCPUCacheMode _cpuCacheMode;
     MTLHazardTrackingMode _hazardTrackingMode;
+    BOOL _inheritPipelineState;
+    BOOL _inheritBuffers;
+    NSUInteger _maxVertexBufferBindCount;
+    NSUInteger _maxFragmentBufferBindCount;
+    NSUInteger _maxKernelBufferBindCount;
     NSMutableArray *_commands;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLIndirectCommandBufferDescriptor *)descriptor maxCommandCount:(NSUInteger)maxCount options:(MTLResourceOptions)options;
@@ -892,6 +898,19 @@ static BOOL zpu_metal_size_fits_cpu_threadgroup(MTLSize size, NSUInteger maxTota
     const uint64_t maximum = (uint64_t)maxTotalThreads;
     return area <= maximum && area <= UINT64_MAX / (uint64_t)size.depth &&
         area * (uint64_t)size.depth <= maximum;
+}
+
+static BOOL zpu_metal_indirect_primitive_supported(MTLPrimitiveType primitiveType) {
+    switch (primitiveType) {
+        case MTLPrimitiveTypePoint:
+        case MTLPrimitiveTypeLine:
+        case MTLPrimitiveTypeLineStrip:
+        case MTLPrimitiveTypeTriangle:
+        case MTLPrimitiveTypeTriangleStrip:
+            return YES;
+        default:
+            return NO;
+    }
 }
 
 static BOOL zpu_region_fits(MTLRegion region) {
@@ -8029,6 +8048,11 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         _storageMode = (MTLStorageMode)((options & MTLResourceStorageModeMask) >> MTLResourceStorageModeShift);
         _cpuCacheMode = (MTLCPUCacheMode)((options & MTLResourceCPUCacheModeMask) >> MTLResourceCPUCacheModeShift);
         _hazardTrackingMode = (MTLHazardTrackingMode)((options & MTLResourceHazardTrackingModeMask) >> MTLResourceHazardTrackingModeShift);
+        _inheritPipelineState = descriptor.inheritPipelineState;
+        _inheritBuffers = descriptor.inheritBuffers;
+        _maxVertexBufferBindCount = descriptor.maxVertexBufferBindCount;
+        _maxFragmentBufferBindCount = descriptor.maxFragmentBufferBindCount;
+        _maxKernelBufferBindCount = descriptor.maxKernelBufferBindCount;
         _commands = [NSMutableArray arrayWithCapacity:maxCount];
         for (NSUInteger index = 0; index < maxCount; ++index) [_commands addObject:[NSNull null]];
     }
@@ -8114,7 +8138,10 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
             copy->_hasCullMode = renderCommand->_hasCullMode;
             copy->_hasFrontFacingWinding = renderCommand->_hasFrontFacingWinding;
             copy->_hasTriangleFillMode = renderCommand->_hasTriangleFillMode;
+            copy->_hasVertexBuffer = renderCommand->_hasVertexBuffer;
             copy->_unsupportedCommand = renderCommand->_unsupportedCommand;
+            if ((renderCommand->_hasVertexBuffer && _maxVertexBufferBindCount == 0) ||
+                (renderCommand->_hasFragmentBuffer && _maxFragmentBufferBindCount == 0)) return NO;
             _commands[destinationIndex + index] = copy;
         } else if ([command isKindOfClass:[ZPUIndirectComputeCommand class]]) {
             ZPUIndirectComputeCommand *computeCommand = (ZPUIndirectComputeCommand *)command;
@@ -8132,6 +8159,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
             copy->_threadgroupsPerGrid = computeCommand->_threadgroupsPerGrid;
             copy->_threadgroupsPerThreadgroup = computeCommand->_threadgroupsPerThreadgroup;
             copy->_unsupportedCommand = computeCommand->_unsupportedCommand;
+            if (computeCommand->_kernelBuffer != nil && _maxKernelBufferBindCount == 0) return NO;
             _commands[destinationIndex + index] = copy;
         } else {
             return NO;
@@ -8197,6 +8225,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     _hasCullMode = NO;
     _hasFrontFacingWinding = NO;
     _hasTriangleFillMode = NO;
+    _hasVertexBuffer = NO;
     _unsupportedCommand = NO;
 }
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)pipelineState {
@@ -8210,17 +8239,19 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
-    if (index != 0 || ![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
-        zpuBuffer->_owner != _owner->_owner || offset > zpuBuffer.length) {
+    if (index >= _owner->_maxVertexBufferBindCount ||
+        (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
+                            zpuBuffer->_owner != _owner->_owner || offset > zpuBuffer.length))) {
         _unsupportedCommand = YES;
         return;
     }
     _vertexBuffer = zpuBuffer;
-    _vertexOffset = offset;
+    _vertexOffset = buffer == nil ? 0 : offset;
+    _hasVertexBuffer = YES;
 }
 - (void)setFragmentBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
-    if (index != 0 || (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
+    if (index >= _owner->_maxFragmentBufferBindCount || (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
                                          zpuBuffer->_owner != _owner->_owner || offset > zpuBuffer.length))) {
         _unsupportedCommand = YES;
         return;
@@ -8230,10 +8261,18 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     _hasFragmentBuffer = YES;
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0)) {
-    (void)stride;
+    if (stride != 0) {
+        _unsupportedCommand = YES;
+        return;
+    }
     [self setVertexBuffer:buffer offset:offset atIndex:index];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)primitiveType vertexStart:(NSUInteger)vertexStart vertexCount:(NSUInteger)vertexCount instanceCount:(NSUInteger)instanceCount baseInstance:(NSUInteger)baseInstance {
+    if ((_owner->_commandTypes & MTLIndirectCommandTypeDraw) == 0 ||
+        !zpu_metal_indirect_primitive_supported(primitiveType)) {
+        _unsupportedCommand = YES;
+        return;
+    }
     _primitiveType = primitiveType;
     _vertexStart = vertexStart;
     _vertexCount = vertexCount;
@@ -8243,11 +8282,22 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     _hasIndexedDraw = NO;
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)primitiveType indexCount:(NSUInteger)indexCount indexType:(MTLIndexType)indexType indexBuffer:(id<MTLBuffer>)indexBuffer indexBufferOffset:(NSUInteger)indexBufferOffset instanceCount:(NSUInteger)instanceCount baseVertex:(NSInteger)baseVertex baseInstance:(NSUInteger)baseInstance {
-    if (![(id)indexBuffer isKindOfClass:[ZPUBuffer class]]) return;
+    ZPUBuffer *zpuIndexBuffer = (ZPUBuffer *)indexBuffer;
+    const NSUInteger indexSize = indexType == MTLIndexTypeUInt16 ? sizeof(uint16_t) : sizeof(uint32_t);
+    if ((_owner->_commandTypes & MTLIndirectCommandTypeDrawIndexed) == 0 ||
+        !zpu_metal_indirect_primitive_supported(primitiveType) ||
+        (indexType != MTLIndexTypeUInt16 && indexType != MTLIndexTypeUInt32) ||
+        ![zpuIndexBuffer isKindOfClass:[ZPUBuffer class]] ||
+        zpuIndexBuffer->_owner != _owner->_owner ||
+        indexBufferOffset % indexSize != 0 || indexBufferOffset > zpuIndexBuffer.length ||
+        indexCount > (zpuIndexBuffer.length - indexBufferOffset) / indexSize) {
+        _unsupportedCommand = YES;
+        return;
+    }
     _primitiveType = primitiveType;
     _indexCount = indexCount;
     _indexType = indexType;
-    _indexBuffer = (ZPUBuffer *)indexBuffer;
+    _indexBuffer = zpuIndexBuffer;
     _indexOffset = indexBufferOffset;
     _instanceCount = instanceCount;
     _baseVertex = baseVertex;
@@ -8352,9 +8402,24 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         [encoder->_owner markError];
         return;
     }
+    /* A reset or never-recorded ICB slot is a legal no-op, even when the
+     * descriptor does not inherit pipeline state. */
+    if (!_hasDraw && !_hasIndexedDraw) return;
+    if (!_owner->_inheritPipelineState && _pipelineState == nil) {
+        [encoder->_owner markError];
+        return;
+    }
     if (_pipelineState != nil) [encoder setRenderPipelineState:(id<MTLRenderPipelineState>)_pipelineState];
-    if (_vertexBuffer != nil) [encoder setVertexBuffer:(id<MTLBuffer>)_vertexBuffer offset:_vertexOffset atIndex:0];
-    if (_hasFragmentBuffer) [encoder setFragmentBuffer:(id<MTLBuffer>)_fragmentBuffer offset:_fragmentOffset atIndex:0];
+    if (_hasVertexBuffer) {
+        [encoder setVertexBuffer:(id<MTLBuffer>)_vertexBuffer offset:_vertexOffset atIndex:0];
+    } else if (!_owner->_inheritBuffers) {
+        [encoder setVertexBuffer:nil offset:0 atIndex:0];
+    }
+    if (_hasFragmentBuffer) {
+        [encoder setFragmentBuffer:(id<MTLBuffer>)_fragmentBuffer offset:_fragmentOffset atIndex:0];
+    } else if (!_owner->_inheritBuffers) {
+        [encoder setFragmentBuffer:nil offset:0 atIndex:0];
+    }
     if (_hasDepthStencilState) [encoder setDepthStencilState:(id<MTLDepthStencilState>)_depthStencilState];
     if (_hasDepthBias) [encoder setDepthBias:_depthBias slopeScale:_slopeScale clamp:_depthBiasClamp];
     if (_hasDepthClipMode) [encoder setDepthClipMode:_depthClipMode];
@@ -8403,7 +8468,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)setKernelBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
-    if (index != 0 || (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
+    if (index >= _owner->_maxKernelBufferBindCount || (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
                                          zpuBuffer->_owner != _owner->_owner || offset > zpuBuffer.length))) {
         _unsupportedCommand = YES;
         return;

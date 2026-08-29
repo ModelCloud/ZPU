@@ -6001,6 +6001,111 @@ int main(void) {
             }
         }
 
+        /* Indexed ICB commands carry their index resource inside the CPU
+         * command record. Compare that deferred path against Apple's native
+         * command buffer so index type, offset, and lookup semantics remain
+         * pixel-identical as well. */
+        MTLIndirectCommandBufferDescriptor *indexed_icb_descriptor = [MTLIndirectCommandBufferDescriptor new];
+        indexed_icb_descriptor.commandTypes = MTLIndirectCommandTypeDrawIndexed;
+        indexed_icb_descriptor.inheritPipelineState = YES;
+        indexed_icb_descriptor.inheritBuffers = YES;
+        indexed_icb_descriptor.maxVertexBufferBindCount = 1;
+        id<MTLIndirectCommandBuffer> metal_indexed_icb =
+            [device newIndirectCommandBufferWithDescriptor:indexed_icb_descriptor
+                                           maxCommandCount:1
+                                                   options:0];
+        id<MTLIndirectRenderCommand> metal_indexed_icb_command =
+            [metal_indexed_icb indirectRenderCommandAtIndex:0];
+        [metal_indexed_icb_command drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                                              indexCount:6
+                                               indexType:MTLIndexTypeUInt16
+                                           indexBuffer:native_indexed_commit_indices
+                                     indexBufferOffset:0
+                                          instanceCount:1
+                                           baseVertex:0
+                                         baseInstance:0];
+        id<MTLTexture> metal_indexed_icb_texture = [device newTextureWithDescriptor:texture_descriptor];
+        MTLRenderPassDescriptor *metal_indexed_icb_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        metal_indexed_icb_pass.colorAttachments[0].texture = metal_indexed_icb_texture;
+        metal_indexed_icb_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        metal_indexed_icb_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        metal_indexed_icb_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        id<MTLCommandBuffer> metal_indexed_icb_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> metal_indexed_icb_encoder =
+            [metal_indexed_icb_command_buffer renderCommandEncoderWithDescriptor:metal_indexed_icb_pass];
+        [metal_indexed_icb_encoder setRenderPipelineState:pipeline];
+        [metal_indexed_icb_encoder setVertexBuffer:native_indexed_commit_vertices offset:0 atIndex:0];
+        [metal_indexed_icb_encoder useResource:native_indexed_commit_vertices
+                                         usage:MTLResourceUsageRead
+                                         stages:MTLRenderStageVertex];
+        [metal_indexed_icb_encoder useResource:native_indexed_commit_indices
+                                         usage:MTLResourceUsageRead
+                                         stages:MTLRenderStageVertex];
+        [metal_indexed_icb_encoder useResource:metal_indexed_icb
+                                         usage:MTLResourceUsageRead
+                                         stages:MTLRenderStageVertex];
+        [metal_indexed_icb_encoder executeCommandsInBuffer:metal_indexed_icb withRange:NSMakeRange(0, 1)];
+        [metal_indexed_icb_encoder endEncoding];
+        [metal_indexed_icb_command_buffer commit];
+        [metal_indexed_icb_command_buffer waitUntilCompleted];
+        uint8_t metal_indexed_icb_pixels[byte_count];
+        [metal_indexed_icb_texture getBytes:metal_indexed_icb_pixels
+                                  bytesPerRow:(NSUInteger)width * 4
+                                  fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                 mipmapLevel:0];
+
+        id<MTLIndirectCommandBuffer> adapter_indexed_icb =
+            [adapter_device newIndirectCommandBufferWithDescriptor:indexed_icb_descriptor
+                                                    maxCommandCount:1
+                                                            options:MTLResourceStorageModeShared];
+        id<MTLIndirectRenderCommand> adapter_indexed_icb_command =
+            [adapter_indexed_icb indirectRenderCommandAtIndex:0];
+        [adapter_indexed_icb_command drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                                                indexCount:6
+                                                 indexType:MTLIndexTypeUInt16
+                                             indexBuffer:adapter_indexed_commit_indices
+                                       indexBufferOffset:0
+                                            instanceCount:1
+                                             baseVertex:0
+                                           baseInstance:0];
+        id<MTLTexture> adapter_indexed_icb_texture = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTLRenderPassDescriptor *adapter_indexed_icb_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_indexed_icb_pass.colorAttachments[0].texture = adapter_indexed_icb_texture;
+        adapter_indexed_icb_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_indexed_icb_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_indexed_icb_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        id<MTLCommandBuffer> adapter_indexed_icb_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_indexed_icb_encoder =
+            [adapter_indexed_icb_command_buffer renderCommandEncoderWithDescriptor:adapter_indexed_icb_pass];
+        [adapter_indexed_icb_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_indexed_icb_encoder setVertexBuffer:adapter_indexed_commit_vertices offset:0 atIndex:0];
+        [adapter_indexed_icb_encoder executeCommandsInBuffer:adapter_indexed_icb withRange:NSMakeRange(0, 1)];
+        [adapter_indexed_icb_encoder endEncoding];
+        [adapter_indexed_icb_command_buffer commit];
+        [adapter_indexed_icb_command_buffer waitUntilCompleted];
+        uint8_t adapter_indexed_icb_pixels[byte_count];
+        [adapter_indexed_icb_texture getBytes:adapter_indexed_icb_pixels
+                                    bytesPerRow:(NSUInteger)width * 4
+                                    fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                   mipmapLevel:0];
+        if (metal_indexed_icb == nil || metal_indexed_icb_command == nil ||
+            metal_indexed_icb_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_indexed_icb == nil || adapter_indexed_icb_command == nil ||
+            adapter_indexed_icb_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(metal_indexed_icb_pixels, adapter_indexed_icb_pixels, byte_count) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < byte_count && metal_indexed_icb_pixels[mismatch] == adapter_indexed_icb_pixels[mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: indexed indirect command buffer mismatch (native=%lu adapter=%lu mismatch=%zu nativeByte=%u adapterByte=%u)\n",
+                    (unsigned long)metal_indexed_icb_command_buffer.status,
+                    (unsigned long)adapter_indexed_icb_command_buffer.status,
+                    mismatch,
+                    mismatch < byte_count ? metal_indexed_icb_pixels[mismatch] : 0,
+                    mismatch < byte_count ? adapter_indexed_icb_pixels[mismatch] : 0);
+            fail_with_error("native indexed indirect command buffer error", metal_indexed_icb_command_buffer.error);
+            fail_with_error("adapter indexed indirect command buffer error", adapter_indexed_icb_command_buffer.error);
+            return 128;
+        }
+
         /* Metal 4 adds fixed-function state and fragment-buffer bindings to
          * indirect render commands. Record those fields in each CPU-owned
          * command and compare replay against Apple's native ICB. */
@@ -6914,7 +7019,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, visibility results, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, visibility results, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }
