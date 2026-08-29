@@ -13,6 +13,7 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <IOSurface/IOSurfaceRef.h>
 
 #include <string.h>
 #include <math.h>
@@ -162,6 +163,8 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSUInteger _depth;
     NSUInteger _baseMipmapLevel;
     NSUInteger _baseSlice;
+    IOSurfaceRef _iosurface;
+    NSUInteger _iosurfacePlane;
     BOOL _shareable;
     NSString *_label;
     BOOL _aliasable;
@@ -2052,6 +2055,7 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
             }
         }
     }
+    if (_iosurface != NULL) CFRelease(_iosurface);
 }
 - (NSString *)label { return _label; }
 - (void)setLabel:(NSString *)label { _label = [label copy]; }
@@ -2131,8 +2135,8 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
 - (NSUInteger)heapOffset { return _backing != nil ? [_backing heapOffset] : _heapOffset; }
 - (NSUInteger)parentRelativeLevel { return _baseMipmapLevel; }
 - (NSUInteger)parentRelativeSlice { return _baseSlice; }
-- (IOSurfaceRef)iosurface API_AVAILABLE(macos(10.11), ios(11.0)) { return nil; }
-- (NSUInteger)iosurfacePlane API_AVAILABLE(macos(10.11), ios(11.0)) { return 0; }
+- (IOSurfaceRef)iosurface API_AVAILABLE(macos(10.11), ios(11.0)) { return _iosurface; }
+- (NSUInteger)iosurfacePlane API_AVAILABLE(macos(10.11), ios(11.0)) { return _iosurfacePlane; }
 - (NSUInteger)firstMipmapInTail API_AVAILABLE(macos(11.0), ios(13.0)) { return 0; }
 - (NSUInteger)tailSizeInBytes API_AVAILABLE(macos(11.0), ios(13.0)) { return 0; }
 - (BOOL)isSparse API_AVAILABLE(macos(11.0), ios(13.0)) { return NO; }
@@ -3991,10 +3995,40 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
     return (id<MTLSharedEvent>)handle->_event;
 }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor iosurface:(IOSurfaceRef)iosurface plane:(NSUInteger)plane API_AVAILABLE(macos(10.11), ios(11.0)) {
-    (void)descriptor;
-    (void)iosurface;
-    (void)plane;
-    return nil;
+    const size_t planeCount = iosurface == NULL ? 0 : IOSurfaceGetPlaneCount(iosurface);
+    if (descriptor == nil || iosurface == NULL || (planeCount == 0 ? plane != 0 : plane >= planeCount) ||
+        descriptor.textureType != MTLTextureType2D || descriptor.depth != 1 || descriptor.arrayLength != 1 ||
+        descriptor.mipmapLevelCount != 1 || descriptor.sampleCount != 1 ||
+        (descriptor.pixelFormat != MTLPixelFormatRGBA8Unorm && descriptor.pixelFormat != MTLPixelFormatBGRA8Unorm &&
+         descriptor.pixelFormat != MTLPixelFormatR32Float && descriptor.pixelFormat != MTLPixelFormatRGBA16Float &&
+         descriptor.pixelFormat != MTLPixelFormatStencil8)) return nil;
+    const NSUInteger width = planeCount == 0 ? IOSurfaceGetWidth(iosurface) : IOSurfaceGetWidthOfPlane(iosurface, plane);
+    const NSUInteger height = planeCount == 0 ? IOSurfaceGetHeight(iosurface) : IOSurfaceGetHeightOfPlane(iosurface, plane);
+    const NSUInteger bytesPerRow = planeCount == 0 ? IOSurfaceGetBytesPerRow(iosurface) : IOSurfaceGetBytesPerRowOfPlane(iosurface, plane);
+    const NSUInteger bytesPerPixel = zpu_texture_bytes_per_pixel(descriptor.pixelFormat);
+    void *baseAddress = planeCount == 0 ? IOSurfaceGetBaseAddress(iosurface) : IOSurfaceGetBaseAddressOfPlane(iosurface, plane);
+    if (width == 0 || height == 0 || bytesPerPixel == 0 || baseAddress == NULL ||
+        descriptor.width != width || descriptor.height != height || width > SIZE_MAX / bytesPerPixel ||
+        bytesPerRow < width * bytesPerPixel || height > SIZE_MAX / bytesPerRow) return nil;
+    const NSUInteger length = height * bytesPerRow;
+    zpu_metal_buffer *buffer = zpu_metal_device_new_buffer_no_copy(_zpuDevice, length, baseAddress);
+    if (buffer == NULL) return nil;
+    ZPUBuffer *backingBuffer = [[ZPUBuffer alloc] initWithOwner:self buffer:buffer];
+    [backingBuffer applyResourceOptions:descriptor.resourceOptions];
+    zpu_metal_texture_descriptor zpu_descriptor = {
+        (uint32_t)width, (uint32_t)height, zpu_pixel_format(descriptor.pixelFormat),
+    };
+    zpu_metal_texture *texture = zpu_metal_buffer_new_texture(buffer, &zpu_descriptor, 0, bytesPerRow);
+    if (texture == NULL) return nil;
+    ZPUTexture *result = [[ZPUTexture alloc] initWithOwner:self texture:texture
+                                                      type:descriptor.textureType
+                                               pixelFormat:descriptor.pixelFormat
+                                             backingBuffer:backingBuffer offset:0 bytesPerRow:bytesPerRow];
+    if (result == nil) return nil;
+    result->_iosurface = (IOSurfaceRef)CFRetain(iosurface);
+    result->_iosurfacePlane = plane;
+    [result applyDescriptor:descriptor];
+    return (id<MTLTexture>)result;
 }
 - (id<MTLTexture>)newSharedTextureWithDescriptor:(MTLTextureDescriptor *)descriptor API_AVAILABLE(macos(10.14), ios(13.0)) {
     ZPUTexture *texture = (ZPUTexture *)[self newTextureWithDescriptor:descriptor];

@@ -203,7 +203,9 @@ triangle path:
   the CPU adapter does not invent a cross-process GPU primitive
 - process-local shared-texture handles round-trip shareable ZPU textures and
   preserve their CPU bytes and metadata; IOSurface-backed and foreign handles
-  remain unsupported rather than importing native storage
+  use a retained CPU no-copy view when explicitly created through the
+  IOSurface texture initializer; foreign handles remain unsupported rather
+  than importing native storage
 - CPU visible/intersection function tables retain ZPU-owned function handles,
   buffer bindings, opaque-intersection signatures, and visible-table links;
   they expose deterministic CPU resource metadata and IDs, while arbitrary

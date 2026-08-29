@@ -29,6 +29,10 @@ SOURCE_ROOT = ROOT / "src/metal"
 SOURCE_SYMBOL_ALIASES = {
     "MTLDevice.newBuffer": "zpu_metal_device_new_buffer",
     "MTLDevice.newTexture": "zpu_metal_device_new_texture",
+    # The source inventory intentionally records overloaded Objective-C
+    # selectors by their reviewed manifest name; the SDK spelling is the
+    # `newTextureWithDescriptor:iosurface:plane:` overload.
+    "MTLDevice.newTextureWithDescriptorIOSurfacePlane": "newTextureWithDescriptor",
     "MTLBuffer.contents": "zpu_metal_buffer_contents",
     "MTLBuffer.length": "zpu_metal_buffer_length",
     "MTLTexture.width": "zpu_metal_texture_width",

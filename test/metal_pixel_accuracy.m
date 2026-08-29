@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0 */
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <IOSurface/IOSurfaceRef.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -2304,6 +2305,96 @@ int main(void) {
                 adapter_as_compact_command_buffer.status == MTLCommandBufferStatusCompleted &&
                 (native_as == nil || (native_as.device == device && native_as.size >= native_as_allocation_size));
         }
+        BOOL adapter_iosurface_ok = YES;
+        if (@available(macOS 10.11, iOS 11.0, *)) {
+            const NSUInteger iosurface_width = 4;
+            const NSUInteger iosurface_height = 4;
+            const NSUInteger iosurface_stride = 32;
+            NSDictionary *iosurface_properties = @{
+                (id)kIOSurfaceWidth: @(iosurface_width),
+                (id)kIOSurfaceHeight: @(iosurface_height),
+                (id)kIOSurfaceBytesPerElement: @(4),
+                (id)kIOSurfaceBytesPerRow: @(iosurface_stride),
+                (id)kIOSurfaceAllocSize: @(iosurface_stride * iosurface_height),
+            };
+            IOSurfaceRef iosurface = IOSurfaceCreate((CFDictionaryRef)iosurface_properties);
+            BOOL iosurface_locked = NO;
+            if (iosurface != NULL && IOSurfaceLock(iosurface, 0, NULL) == kIOReturnSuccess) {
+                iosurface_locked = YES;
+                uint8_t *iosurface_bytes = (uint8_t *)IOSurfaceGetBaseAddress(iosurface);
+                for (NSUInteger y = 0; y < iosurface_height; ++y) {
+                    for (NSUInteger x = 0; x < iosurface_width; ++x) {
+                        uint8_t *pixel = iosurface_bytes + y * iosurface_stride + x * 4;
+                        pixel[0] = (uint8_t)(x + 1);
+                        pixel[1] = (uint8_t)(y + 17);
+                        pixel[2] = (uint8_t)(x + y + 33);
+                        pixel[3] = 255;
+                    }
+                }
+                MTLTextureDescriptor *iosurface_descriptor =
+                    [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                        width:iosurface_width
+                                                                       height:iosurface_height
+                                                                    mipmapped:NO];
+                iosurface_descriptor.storageMode = MTLStorageModeShared;
+                iosurface_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+                id<MTLTexture> native_iosurface_texture =
+                    [device newTextureWithDescriptor:iosurface_descriptor iosurface:iosurface plane:0];
+                id<MTLTexture> adapter_iosurface_texture =
+                    [adapter_device newTextureWithDescriptor:iosurface_descriptor iosurface:iosurface plane:0];
+                uint8_t adapter_iosurface_bytes[iosurface_width * iosurface_height * 4];
+                memset(adapter_iosurface_bytes, 0, sizeof(adapter_iosurface_bytes));
+                if (adapter_iosurface_texture != nil) {
+                    [adapter_iosurface_texture getBytes:adapter_iosurface_bytes
+                                            bytesPerRow:iosurface_width * 4
+                                             fromRegion:MTLRegionMake2D(0, 0, iosurface_width, iosurface_height)
+                                            mipmapLevel:0];
+                }
+                BOOL native_iosurface_match = YES;
+                if (native_iosurface_texture != nil) {
+                    uint8_t native_iosurface_bytes[sizeof(adapter_iosurface_bytes)];
+                    [native_iosurface_texture getBytes:native_iosurface_bytes
+                                            bytesPerRow:iosurface_width * 4
+                                             fromRegion:MTLRegionMake2D(0, 0, iosurface_width, iosurface_height)
+                                            mipmapLevel:0];
+                    native_iosurface_match = memcmp(native_iosurface_bytes, adapter_iosurface_bytes,
+                                                     sizeof(adapter_iosurface_bytes)) == 0;
+                }
+                const uint8_t iosurface_patch[] = {
+                    91, 92, 93, 255, 101, 102, 103, 255,
+                    111, 112, 113, 255, 121, 122, 123, 255,
+                };
+                if (adapter_iosurface_texture != nil) {
+                    [adapter_iosurface_texture replaceRegion:MTLRegionMake2D(1, 1, 2, 2)
+                                                 mipmapLevel:0 withBytes:iosurface_patch bytesPerRow:8];
+                }
+                uint8_t adapter_iosurface_after[sizeof(adapter_iosurface_bytes)];
+                memset(adapter_iosurface_after, 0, sizeof(adapter_iosurface_after));
+                if (adapter_iosurface_texture != nil) {
+                    [adapter_iosurface_texture getBytes:adapter_iosurface_after
+                                            bytesPerRow:iosurface_width * 4
+                                             fromRegion:MTLRegionMake2D(0, 0, iosurface_width, iosurface_height)
+                                            mipmapLevel:0];
+                }
+                BOOL iosurface_matches_surface = YES;
+                for (NSUInteger y = 0; y < iosurface_height; ++y) {
+                    iosurface_matches_surface = iosurface_matches_surface &&
+                        memcmp(adapter_iosurface_after + y * iosurface_width * 4,
+                               iosurface_bytes + y * iosurface_stride, iosurface_width * 4) == 0;
+                }
+                adapter_iosurface_ok = adapter_iosurface_texture != nil &&
+                    [adapter_iosurface_texture iosurface] == iosurface &&
+                    adapter_iosurface_texture.iosurfacePlane == 0 &&
+                    native_iosurface_match &&
+                    iosurface_matches_surface &&
+                    memcmp(iosurface_bytes + iosurface_stride + 4, iosurface_patch, 8) == 0 &&
+                    memcmp(iosurface_bytes + 2 * iosurface_stride + 4, iosurface_patch + 8, 8) == 0;
+            } else {
+                adapter_iosurface_ok = NO;
+            }
+            if (iosurface_locked) IOSurfaceUnlock(iosurface, 0, NULL);
+            if (iosurface != NULL) CFRelease(iosurface);
+        }
         id<MTLCommandBuffer> adapter_resource_state_command_buffer = [adapter_queue commandBuffer];
         id<MTLResourceStateCommandEncoder> adapter_resource_state_encoder =
             [adapter_resource_state_command_buffer resourceStateCommandEncoderWithDescriptor:
@@ -2325,6 +2416,7 @@ int main(void) {
             [adapter_resource_state_encoder conformsToProtocol:@protocol(MTLResourceStateCommandEncoder)] &&
             adapter_resource_state_command_buffer.status == MTLCommandBufferStatusCompleted &&
             adapter_acceleration_resources_ok &&
+            adapter_iosurface_ok &&
             [adapter_command_buffer accelerationStructureCommandEncoder] != nil;
         if (!adapter_protocols_ok || !adapter_selectors_ok || !adapter_fail_closed_ok) {
             fprintf(stderr, "metal-pixel: protocol flags=%d selectors=%d fail-closed=%d (%d,%d,%d,%d,%d)\n",
