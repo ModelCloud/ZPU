@@ -10450,6 +10450,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (void)executeCommandsInBuffer:(id<MTLIndirectCommandBuffer>)indirectCommandBuffer indirectBuffer:(id<MTLBuffer>)indirectRangeBuffer indirectBufferOffset:(NSUInteger)indirectBufferOffset API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(13.0)) {
     ZPUBuffer *rangeBuffer = (ZPUBuffer *)indirectRangeBuffer;
     if (![rangeBuffer isKindOfClass:[ZPUBuffer class]] ||
+        !zpu_buffer_belongs_to_device([_owner device], rangeBuffer) ||
         indirectBufferOffset > rangeBuffer.length ||
         rangeBuffer.length - indirectBufferOffset < sizeof(MTLIndirectCommandBufferExecutionRange)) {
         [_owner markError];

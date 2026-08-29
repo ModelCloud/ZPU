@@ -4456,6 +4456,11 @@ int main(void) {
         id<MTLBuffer> foreign_adapter_buffer =
             [foreign_adapter_device newBufferWithBytes:vertices length:sizeof(vertices)
                                                 options:MTLResourceStorageModeShared];
+        const uint32_t foreign_compute_range_words[] = {0, 0};
+        id<MTLBuffer> foreign_compute_range_buffer =
+            [foreign_adapter_device newBufferWithBytes:foreign_compute_range_words
+                                                length:sizeof(foreign_compute_range_words)
+                                               options:MTLResourceStorageModeShared];
         id<MTLCommandBuffer> foreign_compute_command_buffer = [adapter_queue commandBuffer];
         id<MTLComputeCommandEncoder> foreign_compute_encoder =
             [foreign_compute_command_buffer computeCommandEncoder];
@@ -4474,6 +4479,9 @@ int main(void) {
         id<MTLIndirectCommandBuffer> foreign_compute_icb =
             [foreign_adapter_device newIndirectCommandBufferWithDescriptor:foreign_compute_icb_descriptor
                                                             maxCommandCount:1 options:0];
+        id<MTLIndirectCommandBuffer> adapter_foreign_range_icb =
+            [adapter_device newIndirectCommandBufferWithDescriptor:foreign_compute_icb_descriptor
+                                                     maxCommandCount:1 options:0];
         id<MTLFence> foreign_compute_fence = [foreign_adapter_device newFence];
         id<MTLCommandBuffer> foreign_compute_state_command_buffer = [adapter_queue commandBuffer];
         id<MTLComputeCommandEncoder> foreign_compute_state_encoder =
@@ -4495,6 +4503,16 @@ int main(void) {
         [foreign_indirect_dispatch_encoder endEncoding];
         [foreign_indirect_dispatch_command_buffer commit];
         [foreign_indirect_dispatch_command_buffer waitUntilCompleted];
+
+        id<MTLCommandBuffer> foreign_indirect_icb_range_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> foreign_indirect_icb_range_encoder =
+            [foreign_indirect_icb_range_command_buffer computeCommandEncoder];
+        [foreign_indirect_icb_range_encoder executeCommandsInBuffer:adapter_foreign_range_icb
+                                                    indirectBuffer:foreign_compute_range_buffer
+                                               indirectBufferOffset:0];
+        [foreign_indirect_icb_range_encoder endEncoding];
+        [foreign_indirect_icb_range_command_buffer commit];
+        [foreign_indirect_icb_range_command_buffer waitUntilCompleted];
 
         id<MTLTexture> foreign_render_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
         MTLRenderPassDescriptor *foreign_render_pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -4548,13 +4566,16 @@ int main(void) {
         [foreign_event_command_buffer commit];
         [foreign_event_command_buffer waitUntilCompleted];
         if (foreign_adapter_device == nil || foreign_adapter_buffer == nil ||
+            foreign_compute_range_buffer == nil ||
             foreign_compute_encoder == nil ||
             foreign_compute_command_buffer.status != MTLCommandBufferStatusError ||
-            foreign_compute_icb == nil || foreign_compute_fence == nil ||
+            foreign_compute_icb == nil || adapter_foreign_range_icb == nil || foreign_compute_fence == nil ||
             foreign_compute_state_encoder == nil ||
             foreign_compute_state_command_buffer.status != MTLCommandBufferStatusError ||
             foreign_indirect_dispatch_encoder == nil ||
             foreign_indirect_dispatch_command_buffer.status != MTLCommandBufferStatusError ||
+            foreign_indirect_icb_range_encoder == nil ||
+            foreign_indirect_icb_range_command_buffer.status != MTLCommandBufferStatusError ||
             foreign_render_texture == nil || foreign_render_encoder == nil ||
             foreign_render_command_buffer.status != MTLCommandBufferStatusError ||
             foreign_adapter_heap == nil || foreign_use_resource_encoder == nil ||
