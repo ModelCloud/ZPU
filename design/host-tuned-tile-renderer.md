@@ -1,605 +1,479 @@
 <!-- Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# Host-tuned tile renderer
+# Host-tuned clustered tile renderer
 
-## Purpose
+## Goal
 
-ZPU is a CPU renderer, so its execution geometry should be shaped around the CPU that actually runs it rather than around a fixed GPU-like workgroup size. The long-term rendering model is an ordered, tile-binned command stream with two independent levels of spatial granularity:
+ZPU's long-term CPU rendering path is a clustered, cache-local renderer that preserves Vulkan semantics while avoiding triangle-by-triangle work when coarse geometry can be rejected earlier.
 
-- **scheduler tiles** divide the framebuffer into independent CPU work units;
-- **microtiles** describe the preferred contiguous pixel shape for the active SIMD kernel.
-
-The scheduler tile controls locality, parallel work distribution, and binning overhead. The microtile controls vector utilization and the shape of the innermost raster loop. These are deliberately separate decisions.
-
-This document describes the target architecture and the first implementation step introduced by this branch. It does not claim that the complete tile-command scheduler is implemented yet.
-
-## Current branch boundary
-
-This branch establishes the host profile used by the future scheduler:
-
-- runtime CPU/OS vector-state detection;
-- deterministic selection of scheduler-tile and microtile geometry;
-- separate **host capability** and **executable ISA** classes;
-- initialization through the existing CPU-locality path;
-- pure policy tests that can exercise every capability tier on any test host.
-
-The existing x86-64-v3 AVX2 kernel boundary remains unchanged. AVX-512 capability may affect scheduler geometry, but ZPU does not execute AVX-512 instructions until a separately compiled and validated v4 kernel boundary exists.
-
-The existing 32x32 dirty/depth metadata grid also remains unchanged. Metadata granularity and scheduler granularity are separate concepts.
-
----
-
-## Target execution hierarchy
-
-```mermaid
-flowchart TD
-    A[Vulkan command stream] --> B[ZPU render IR]
-    B --> C[Dependency epochs]
-    C --> D[Geometry / 2D preparation]
-    D --> E[Spatial binning]
-    E --> F1[Scheduler tile]
-    E --> F2[Scheduler tile]
-    E --> F3[Scheduler tile]
-    F1 --> G1[Ordered tile command stream]
-    F2 --> G2[Ordered tile command stream]
-    F3 --> G3[Ordered tile command stream]
-    G1 --> H1[ISA-specific microtiles]
-    G2 --> H2[ISA-specific microtiles]
-    G3 --> H3[ISA-specific microtiles]
-    H1 --> I1[SIMD raster kernel]
-    H2 --> I2[SIMD raster kernel]
-    H3 --> I3[SIMD raster kernel]
-```
-
-The intended parallelism hierarchy is:
+The target hierarchy is:
 
 ```text
-Frame
-  -> scheduler tiles             CPU/core parallelism
-      -> ordered tile commands   Vulkan-visible ordering preserved
-          -> microtiles          coverage/locality unit
-              -> SIMD lanes      AVX2 / future AVX-512 / portable vectors
-                  -> pixels
+Vulkan eligible path ------------------------┐
+                                             │
+Native clustered API ------------------------┤
+                                             v
+                               resource-aware pass graph
+                                             │
+                                             v
+                              instance / cluster hierarchy
+                           frustum + cone + LOD selection
+                                             │
+                                             v
+                         valid HZB source: prepass or temporal
+                                             │
+                                             v
+                                      macrobin assignment
+                                             │
+                                             v
+                              visible leaf-cluster expansion
+                                  triangle setup exactly once
+                                             │
+                                             v
+                        tile primitive subsets / coverage masks
+                                             │
+                     +-----------------------+-----------------------+
+                     v                                               v
+            primitive-SIMD batches                           pixel-SIMD tiles
+             tiny triangles                                normal/large triangles
+                     │                                               │
+                     +-----------------------+-----------------------+
+                                             v
+                          eligible opaque visibility buffer
+                                             │
+                                             v
+                              2x2 quad/material shading
+                                             │
+                                             v
+                  strict ordered fallback for ineligible Vulkan work
 ```
 
-A scheduler tile is owned by one raster worker at a time. No two workers write the same tile concurrently. That keeps the hot framebuffer path free of per-pixel locks and minimizes cache-line bouncing.
+The current branch implements the planning foundation through ordered tile packets. It does not yet replace `cpu_cube.zig` as the raster executor.
 
----
+## Current executable foundation
 
-## The tile command stream
+Implemented in this branch:
 
-Each spatial tile has a vertical, ordered stream of references to render operations that affect it.
+- runtime host SIMD/OS-state detection;
+- explicit separation between host capability and compiled executable kernels;
+- scheduler-tile and microtile profiles;
+- bounded common pass DAG with deterministic sequence ordering;
+- coarse leaf-cluster packets;
+- optional cluster hierarchy and iterative subtree culling;
+- conservative HZB construction for normal-Z and reverse-Z depth tests;
+- explicit HZB source/provenance policy;
+- exact HZB power-of-two footprints for odd framebuffer dimensions;
+- two-pass contiguous macrobins;
+- tile packet construction that consumes macrobins rather than rescanning the full cluster list;
+- stable per-tile order keys;
+- primitive-SIMD versus pixel-SIMD path classification using a post-setup coverage estimate;
+- compact visibility/depth storage for the future opaque deferred-shading path;
+- caller-owned bounded scratch and capacity helpers;
+- CPU role fanout across available selected CPUs instead of forcing all raster roles onto one secondary CPU.
+
+Not implemented yet:
+
+- Vulkan draw lowering into clustered submissions;
+- a stable public native clustered API;
+- instance/frustum/cone/LOD hierarchy generation;
+- triangle preparation exactly once after leaf visibility;
+- actual primitive-SIMD triangle kernels;
+- actual pixel-SIMD tile packet execution;
+- local/macro/global packet storage as separate physical streams;
+- visibility-buffer material reconstruction and quad shading;
+- complete Vulkan resource hazard derivation;
+- per-LLC work queues and work stealing;
+- startup benchmarking/autotuning;
+- x86-64-v4 AVX-512 kernel objects.
+
+## Scheduler tiles versus microtiles
+
+These are separate decisions.
 
 ```text
-                     tile (x=12, y=7)
-                           |
-                           v
-                 +---------------------+
-                 | clear background    |
-                 | triangle draw 72/17 |
-                 | triangle draw 72/18 |
-                 | sprite draw 80      |
-                 | alpha rectangle 14  |
-                 | glyph run 298       |
-                 +---------------------+
-                           |
-                           v
-                     raster worker
-```
-
-Commands within one tile retain their required order. Different tiles can execute concurrently when their resource dependencies permit it.
-
-The internal stream should be unified across 2D and 3D operations rather than maintaining separate 2D and 3D queues that later need to be merged back into API order.
-
-A representative operation union is:
-
-```zig
-const TileOp = union(enum) {
-    clear: ClearRef,
-    fill: FillRef,
-    blit: BlitRef,
-    sprite: SpriteRef,
-    triangle: TriangleRef,
-    resolve: ResolveRef,
-};
-```
-
-The tile stream contains compact references, not copies of large render commands.
-
----
-
-## Compact bin storage
-
-Thousands of independent heap-backed queues would add allocator traffic and pointer chasing. Tile membership should instead use contiguous storage similar to a compressed sparse row layout.
-
-```text
-TileHeaders
-+--------+--------+-------+
-| tile   | offset | count |
-+--------+--------+-------+
-|   0    |      0 |    14 |
-|   1    |     14 |     7 |
-|   2    |     21 |    22 |
-|  ...   |    ... |   ... |
-+--------+--------+-------+
-
-TileEntries
-+----+----+----+----+----+----+----+--------------------+
-| op | op | op | op | op | op | op | ... contiguous ... |
-+----+----+----+----+----+----+----+--------------------+
-```
-
-A tile entry can remain very small:
-
-```zig
-const TileEntry = struct {
-    op_index: u32,
-    primitive_begin: u32,
-    primitive_count: u16,
-    flags: u16,
-};
-```
-
-This layout gives deterministic memory use, sequential reads, easy prefetching, and cheap range assignment to workers.
-
----
-
-## Scheduler tile versus microtile
-
-The outer tile should not be forced to match SIMD width.
-
-Example AVX2 profile:
-
-```text
-32 x 32 scheduler tile
-
-+--------+--------+--------+--------+
-|  8x4   |  8x4   |  8x4   |  8x4   |
-+--------+--------+--------+--------+
-|  8x4   |  8x4   |  8x4   |  8x4   |
-+--------+--------+--------+--------+
-|  8x4   |  8x4   |  8x4   |  8x4   |
-+--------+--------+--------+--------+
-|  ... repeated through 32 rows ...  |
+scheduler tile
 +-----------------------------------+
-
-8 contiguous pixels -> one eight-lane vector operation
+|  micro  |  micro  |  micro        |
+|  tile   |  tile   |  tile         |
+|         |         |               |
++-----------------------------------+
+|          more microtiles          |
++-----------------------------------+
 ```
 
-A future 16-lane implementation may prefer a different inner shape without changing the ordering model:
+Scheduler tiles control:
+
+- work ownership;
+- tile-packet metadata;
+- cache locality;
+- worker scheduling;
+- binning fanout.
+
+Microtiles control:
+
+- SIMD lane shape;
+- coverage stepping;
+- depth/vector operations;
+- inner raster-loop geometry.
+
+The current deterministic defaults are candidates, not measured optima:
+
+| Executable kernel | Scheduler tile | Microtile | Vector lanes |
+| --- | ---: | ---: | ---: |
+| portable vector | 16x16 | 4x2 | 4 |
+| AVX2 | 32x32 | 8x4 | 8 |
+| future AVX-512 | 64x16 | 16x4 | 16 |
+
+An AVX-512-capable host does **not** receive the AVX-512 profile unless compiled and validated AVX-512 kernel objects exist.
+
+## ISA safety boundary
 
 ```text
-possible future microtile
-
-16 pixels wide x N rows
-+-------------------------------+
-| p0 ... p15                    |
-| p0 ... p15                    |
-| ...                           |
-+-------------------------------+
+CPUID + OS vector state
+          │
+          v
+    host capability
+          │
+          +-----------------------------+
+                                        │
+compiled kernel boundary ---------------+
+                                        v
+                                executable kernel class
 ```
 
-Square scheduler tiles are not an architectural requirement. Wider SIMD, cache geometry, attachment footprint, and scene behavior can favor rectangular scheduler tiles.
+`host_class` records what the machine could support.
 
----
+`executable_class` records what the artifact can actually execute.
 
-## Host profile selection
+Both conditions are required before a wider backend is selected.
 
-At initialization ZPU detects what the processor and operating system can safely support, then chooses a profile once. Hot raster loops consume the selected values and should not repeatedly run CPUID/XGETBV policy logic.
+## HZB model
 
-```mermaid
-flowchart TD
-    A[Process starts / device initializes] --> B[CPUID feature detection]
-    B --> C[XGETBV OS vector-state validation]
-    C --> D[Host capability class]
-    D --> E[Executable kernel boundary available?]
-    E --> F[Choose scheduler geometry]
-    E --> G[Choose executable microtile geometry]
-    F --> H[Cached Profile]
-    G --> H
-    H --> I[Raster scheduler and kernels]
-```
-
-The profile deliberately distinguishes these two facts:
+HZB means **Hierarchical Z-Buffer**. It is a mip-like hierarchy built by repeatedly reducing 2x2 depth blocks.
 
 ```text
-host_class        = what the CPU + OS state could support
-executable_class  = what ZPU has a validated compiled kernel for
+level 0: full-resolution depth
+             │
+             v 2x2 reduction
+level 1: half-ish dimensions
+             │
+             v 2x2 reduction
+level 2: quarter-ish dimensions
+             │
+             v
+          ...
 ```
 
-That distinction prevents a wide host from making unsupported instructions reachable.
+For normal-Z LESS-family depth tests, each coarse cell stores the maximum/farthest depth in its covered region.
 
-### Initial deterministic profiles
+For reverse-Z GREATER-family depth tests, each coarse cell stores the minimum/farthest-in-compare-space depth.
 
-The first policy uses these candidate shapes:
+Every HZB level stores an exact `footprint_shift`. Level `L` covers base pixels in blocks of `2^L`; odd framebuffer dimensions only truncate the final block. Coordinate mapping therefore uses shifts, never `ceil(base_width / mip_width)` approximations.
 
-| Host capability | Executable class | Scheduler tile | Microtile | Group | Command batch | Active vector lanes |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| portable vector | portable vector | 16x16 | 4x2 | 2x2 | 8 | 4 |
-| AVX2 | AVX2 | 32x32 | 8x4 | 2x2 | 16 | 8 |
-| AVX-512 capable | AVX2 today | 64x16 | 8x4 | 2x4 | 24 | 8 |
+### Conservative occlusion conditions
 
-These values are **initial policy choices, not final measured optima**. They provide explicit geometry that can be tested now and later replaced by startup autotuning without changing the scheduler ABI.
-
----
-
-## Why AVX-512 capability does not imply AVX-512 execution
-
-The existing ZPU ISA boundary is intentionally strict. A capability bit is not sufficient to execute an instruction family. The binary must also contain a separately compiled kernel boundary and the OS must have enabled the required extended state.
-
-```mermaid
-flowchart LR
-    A[AVX-512F CPUID bit] --> D{All requirements?}
-    B[XMM/YMM/opmask/ZMM state enabled] --> D
-    C[Validated v4 kernel objects linked] --> D
-    D -->|yes| E[Future AVX-512 executable class]
-    D -->|no| F[Use validated AVX2/portable kernel]
-```
-
-In the current branch, AVX-512-capable hosts may select a different scheduler shape, but `executable_class` remains AVX2.
-
----
-
-## Cache-footprint constraint
-
-Scheduler geometry should fit a useful fraction of the core's local cache after accounting for active framebuffer attachments.
-
-A useful first-order model is:
+For a cluster's best possible depth `z_best` and the aggregate occluder depth `z_hzb`:
 
 ```text
-tile_attachment_bytes =
-    tile_width * tile_height *
-    (color_bytes_per_pixel + depth_bytes_per_pixel + stencil_bytes_per_pixel) *
-    samples
+LESS          occluded when z_best >= z_hzb
+LESS_OR_EQUAL occluded when z_best >  z_hzb
+GREATER       occluded when z_best <= z_hzb
+GREATER_EQUAL occluded when z_best <  z_hzb
 ```
 
-For RGBA8 + D32 at one sample:
+A hole/background sample makes the relevant coarse aggregate conservative and prevents false rejection.
+
+### HZB provenance
+
+The planner requires an explicit source policy:
 
 ```text
-32 * 32 * 4 bytes color = 4 KiB
-32 * 32 * 4 bytes depth = 4 KiB
---------------------------------
-attachment footprint            = 8 KiB
+same_frame_completed
+    depth written by completed earlier work
+
+depth_prepass
+    dedicated completed occluder/depth pass
+
+previous_frame_conservative
+    accepted only when conservative reprojection validity is explicitly proven
 ```
 
-At 4x MSAA the same nominal tile would require roughly 32 KiB of attachment data before shader state, texture lines, command data, stack, and other working state are considered. That is a strong reason to allow tile geometry to vary with render-target configuration rather than binding one size permanently to an ISA.
+A stale previous-frame depth buffer is not accepted by default.
 
-Future selection should therefore consider both host properties and render-target properties.
+## Cluster hierarchy
 
-```mermaid
-flowchart TD
-    A[CPU ISA / vector width] --> F[Candidate generator]
-    B[L1D / L2 / LLC topology] --> F
-    C[Color/depth formats] --> F
-    D[Sample count] --> F
-    E[Worker / NUMA topology] --> F
-    F --> G[Legal candidate profiles]
-    G --> H[Measured or deterministic selection]
-```
-
----
-
-## 3D path: prepare once, bin prepared primitives
-
-A raw draw command should not be transformed independently in every tile it touches. Vertex work and triangle setup happen once; tile bins reference prepared primitive packets.
-
-```mermaid
-flowchart TD
-    A[Draw] --> B[Vertex execution / transform]
-    B --> C[Primitive assembly]
-    C --> D[Triangle setup]
-    D --> E[Bounding box / edge equations]
-    D --> F[Depth / varying gradients]
-    E --> G[Tile binner]
-    F --> G
-    G --> H1[Tile A entry -> prepared triangle]
-    G --> H2[Tile B entry -> prepared triangle]
-    G --> H3[Tile C entry -> prepared triangle]
-```
-
-A prepared triangle packet can contain the data that every covered tile reuses:
+The performance target is not to inspect every source triangle or every leaf cluster.
 
 ```text
-screen-space bounds
-edge equations
-reciprocal-W data
-Z gradients
-varying gradients
-pipeline/state identifiers
-texture identifiers
+root node
+  ├── internal node
+  │     ├── leaf cluster range
+  │     └── leaf cluster range
+  └── internal node
+        ├── subtree
+        └── subtree
 ```
 
-The expensive setup is paid once. Tiles only execute the coverage/shading work relevant to their region.
+Internal nodes carry conservative screen bounds and best possible depth. If an internal node is HZB-occluded, the entire subtree is rejected without visiting its leaf clusters.
 
----
+The current hierarchy is intentionally minimal. Future node data should include object-space bounds, LOD error and normal-cone data so frustum, backface/cone and LOD rejection can occur before screen-space HZB tests.
 
-## 2D path
+## Macrobins are a real hierarchy level
 
-2D operations map naturally to spatial bins. Interior tiles can be marked as full coverage while boundary tiles retain clipping information.
-
-```text
-large rectangle
-
-+----+----+----+----+----+
-|edge|full|full|full|edge|
-+----+----+----+----+----+
-|edge|full|full|full|edge|
-+----+----+----+----+----+
-|edge|full|full|full|edge|
-+----+----+----+----+----+
-```
-
-Full-coverage tiles can skip repeated geometric clipping. Opaque full-tile overwrites can also enable ordering-safe elimination of earlier framebuffer work when no prior result is semantically observable.
-
----
-
-## Large and global operations
-
-Naively inserting a full-screen command into every tile can create excessive bin metadata. Operations should eventually be classified by spatial extent:
+The current execution-planning chain is:
 
 ```text
-LOCAL     -> explicit entries in affected tile streams
-MACRO     -> region/broadcast entry covering a tile range
-GLOBAL    -> epoch/global prefix seen implicitly by all tiles
-```
-
-Examples:
-
-| Operation | Likely class |
-| --- | --- |
-| small triangle | local |
-| sprite | local |
-| medium blit | local or macro |
-| large background layer | macro |
-| full-surface clear | global |
-| full-screen triangle | macro or global |
-
-A global clear can also be materialized lazily when a tile is first opened instead of eagerly writing untouched tiles.
-
----
-
-## Ordering and dependency epochs
-
-Tile parallelism must not weaken Vulkan synchronization or visible draw ordering. The scheduler should divide work into dependency epochs.
-
-```text
-Epoch 0
-  draw A
-  draw B
-  draw C
-       |
-       | barrier / dependency boundary
+visible leaf clusters
+       │
        v
-Epoch 1
-  draw D
-  draw E
-       |
-       | barrier / dependency boundary
+   macrobins
+       │
        v
-Epoch 2
-  draw F
+scheduler tiles inside each macrobin
 ```
 
-Within an epoch, independent tiles can execute concurrently. A required dependency boundary prevents later work from observing incomplete earlier work.
+Tile packet generation consumes macrobin headers and references. It does not independently rescan all visible clusters.
 
-```mermaid
-flowchart LR
-    A1[Tile 0] --> B[Epoch barrier]
-    A2[Tile 1] --> B
-    A3[Tile 2] --> B
-    A4[Tile 3] --> B
-    B --> C1[Next-epoch Tile 0]
-    B --> C2[Next-epoch Tile 1]
-    B --> C3[Next-epoch Tile 2]
-```
+Macro dimensions must be exact multiples of scheduler-tile dimensions in this implementation. This gives each scheduler tile exactly one macrobin parent and prevents duplicate cluster-to-tile emission across macrobin boundaries.
 
-More complex resource interactions can conservatively fall back until dependency analysis is proven correct.
+## Ordered tile packet streams
 
----
-
-## Locality groups and traversal swizzle
-
-Tile execution order should maximize reuse of render state, texture lines, prepared geometry, and framebuffer cache lines. Neighboring tiles can be grouped into a supertile/locality group.
-
-Example 2x2 groups:
+A tile packet represents a cluster triangle range, not one triangle.
 
 ```text
-+----+----+  +----+----+
-| 00 | 01 |  | 04 | 05 |
-+----+----+  +----+----+
-| 02 | 03 |  | 06 | 07 |
-+----+----+  +----+----+
-
-+----+----+  +----+----+
-| 08 | 09 |  | 12 | 13 |
-+----+----+  +----+----+
-| 10 | 11 |  | 14 | 15 |
-+----+----+  +----+----+
+TilePacket
+  order_key
+  ordering class
+  draw id
+  cluster id
+  material id
+  triangle range
+  raster path
+  extent class
 ```
 
-A Morton/Z-order-like traversal is another candidate because it preserves spatial locality over multiple scales:
+Order is explicit:
 
 ```text
- 0   1   4   5
- 2   3   6   7
- 8   9  12  13
-10  11  14  15
+OrderKey = submission / command / primitive-group
 ```
 
-Workers should prefer local groups first and steal work when imbalance becomes more important than locality.
+Tile streams are stably sorted by that key after construction. This remains correct if cluster generation or macrobin construction is later parallelized.
 
----
-
-## CPU / LLC / NUMA scheduling
-
-The existing CPU-locality layer already discovers allowed CPUs, prefers one NUMA node, measures CPU capacity, and tries to keep the current two-core renderer in a cache-sharing domain. The tile scheduler can generalize that model.
-
-```mermaid
-flowchart TD
-    A[NUMA node] --> B1[LLC/cache domain 0]
-    A --> B2[LLC/cache domain 1]
-    B1 --> C1[worker 0]
-    B1 --> C2[worker 1]
-    B1 --> C3[worker 2]
-    B2 --> C4[worker 3]
-    B2 --> C5[worker 4]
-    C1 --> D1[local tile group queue]
-    C2 --> D1
-    C3 --> D1
-    C4 --> D2[local tile group queue]
-    C5 --> D2
-```
-
-The desired policy is:
-
-1. keep a tile owned by one worker during execution;
-2. prefer work within the worker's cache/NUMA locality domain;
-3. steal from neighboring groups when local work is exhausted;
-4. avoid centralized synchronization in the pixel hot path.
-
----
-
-## Command-depth batching
-
-Spatial X/Y geometry is not the only tunable dimension. The vertical tile stream has a command dimension as well.
+Ordering classes reserve room for safe optimization:
 
 ```text
-Tile stream with 143 entries
+strict             preserve API-visible order
 
-entries 0..15    -> command batch
-entries 16..31   -> command batch
-entries 32..47   -> command batch
-...
+depth_reorderable  may later be front-to-back reordered only when semantics allow
+
+commutative        may later be freely combined/reordered when proven safe
 ```
 
-The profile's `command_batch` field provides an initial policy for how much ordered command metadata may be prepared/prefetched together. Batching does not reorder commands; it amortizes dispatch and state setup when neighboring operations share compatible state.
+No reordering optimization is implied merely by setting a packet's extent or raster path.
 
-The tuning dimensions therefore include:
+## Local, macro and global extent
+
+The planner classifies packet extent by scheduler-tile fanout:
 
 ```text
-scheduler width
-scheduler height
-microtile width
-microtile height
-locality-group width
-locality-group height
-command batch depth
-worker count
-future pipeline depth / prefetch distance
+LOCAL   small tile fanout
+MACRO   medium/broad fanout
+GLOBAL  very broad/full-surface fanout
 ```
 
----
+The current packet structure carries this class, but physical storage is still one per-tile stream. A later optimization must materialize macro/global packets as range or pass-level references so a full-screen operation does not create tens of thousands of duplicate packet records.
 
-## Future startup autotuning
+## Triangle setup boundary
 
-The deterministic policy in `tile_profile.zig` is intentionally replaceable. A later phase can benchmark a small legal candidate set during initialization and cache the winner for the process/device.
+Hierarchy and HZB rejection happen before expensive leaf work.
 
-The autotuner should not blindly select the widest ISA. It should optimize actual frame-time behavior.
-
-```mermaid
-flowchart TD
-    A[Detected capabilities] --> B[Generate legal candidates]
-    B --> C[Reject bad cache footprints]
-    C --> D[Fixed deterministic calibration scenes]
-    D --> E[Measure cycles/pixel and tail latency]
-    E --> F[Score candidate]
-    F --> G{More candidates?}
-    G -->|yes| D
-    G -->|no| H[Choose best stable profile]
-    H --> I[Cache profile for device/process]
-```
-
-Candidate scoring should include at least:
-
-- raster time / cycles per pixel;
-- tile scheduling overhead;
-- p95/p99 completion latency;
-- worker imbalance;
-- cache-miss behavior where portable counters are available;
-- memory footprint;
-- power/frequency side effects for wide-vector execution.
-
-The calibration must be bounded and deterministic so startup cost does not become a user-visible regression.
-
----
-
-## Profile invariants
-
-Every selected profile must satisfy structural invariants before reaching a hot path:
+The required next-stage rule is:
 
 ```text
-scheduler_w % micro_w == 0
-scheduler_h % micro_h == 0
-scheduler area >= microtile area
-group_w > 0
-group_h > 0
-executable ISA <= compiled/validated kernel boundary
-required OS vector state is enabled
+visible leaf cluster
+       │
+       v
+vertex/primitive preparation exactly once
+       │
+       v
+prepared primitive ranges / coverage masks
+       │
+       v
+tile execution
 ```
 
-The current tests exercise portable, AVX2, AVX-512-capable, and missing-vector-state inputs without depending on the test machine's actual CPUID result.
+The tile executor must not independently redo full triangle setup for every tile touched by the same cluster.
 
----
+## Primitive-SIMD versus pixel-SIMD
+
+Cluster bounding-box area divided by triangle count is not a valid primitive-size estimate. Sparse tiny triangles can cover a very large cluster bounding rectangle.
+
+The current classifier therefore consumes an optional post-setup `estimated_covered_samples` value:
+
+```text
+estimated samples / triangle <= threshold
+        -> primitive-SIMD
+
+larger estimated coverage
+        -> pixel-SIMD
+
+unknown estimate
+        -> primitive-SIMD conservative default
+```
+
+Future classification should operate on prepared primitive batches and measured kernel crossover points.
+
+## Pass graph
+
+The pass graph uses CSR adjacency plus a deterministic sequence-keyed ready heap.
+
+Complexity is:
+
+```text
+O(V + E + V log V)
+```
+
+rather than repeated full scans of all passes and edges.
+
+The current graph is still a generic bounded DAG. `ResourceUse` defines the start of a resource-access vocabulary, but complete Vulkan dependency derivation still requires image subresources, buffer ranges, stage/access masks, layouts and queue ownership before the graph can be called a complete Vulkan hazard graph.
+
+## Storage model
+
+High-rate structures are caller-owned reusable arrays:
+
+```text
+HZB values / levels
+visibility mask
+hierarchy stack
+macrobin headers / refs / cursors
+tile headers / packets / cursors
+```
+
+The planner exposes fixed requirements and conservative upper bounds before execution where possible.
+
+Two-pass bin construction is:
+
+```text
+pass 1: count references
+pass 2: prefix offsets + dense writes
+```
+
+No linked lists or one-allocation-per-tile queues are used.
+
+## Visibility buffer eligibility
+
+The visibility buffer is an optimization for eligible opaque work, not a replacement for all Vulkan fragment semantics.
+
+The future fast-path predicate must exclude or conservatively handle pipelines involving at least:
+
+- blending;
+- fragment storage writes or atomics;
+- fragment shader depth output;
+- discard / complex alpha testing;
+- sample shading / MSAA complications;
+- framebuffer feedback/interlocks;
+- query/statistics semantics that observe execution;
+- unsupported stencil behavior.
+
+Ineligible work remains on a strict conventional ordered path.
+
+## Multicore scheduling
+
+The CPU-locality layer now allows raster roles to map to distinct selected CPUs when enough CPUs are available. This is only the foundation.
+
+The target worker model is:
+
+```text
+NUMA node
+  ├── LLC domain
+  │     ├── persistent worker
+  │     ├── persistent worker
+  │     └── local tile-group deque
+  └── LLC domain
+        ├── persistent worker
+        └── local tile-group deque
+```
+
+Workers should prefer local Morton-like tile groups, then steal batches when local work is exhausted.
+
+## Autotuning
+
+Startup detection determines legal executable kernels. Final scheduler geometry should eventually consider:
+
+- executable vector width;
+- L1/L2/LLC capacity and sharing;
+- selected worker count;
+- attachment bytes per pixel;
+- depth/stencil format;
+- MSAA sample count;
+- depth-only versus G-buffer versus UI pass;
+- primitive-size distribution;
+- measured p95/p99 frame time;
+- frequency/power side effects of wide vectors.
+
+The current hard-coded geometry values are defaults/candidates only.
 
 ## Implementation phases
 
-### Phase 1 - host profile foundation (this branch)
+### Foundation implemented in this branch
 
-- [x] detect AVX/OSXSAVE/YMM/ZMM state and AVX2/AVX-512F capability;
-- [x] keep host capability separate from executable kernel class;
-- [x] select scheduler/microtile/group/command geometry;
-- [x] cache the selected profile during CPU-locality initialization;
-- [x] add deterministic policy tests.
+- [x] host/OS SIMD capability detection
+- [x] compiled-kernel gating
+- [x] scheduler/microtile candidate profile
+- [x] scalable deterministic pass DAG
+- [x] normal-Z and reverse-Z HZB
+- [x] exact odd-size HZB mapping
+- [x] HZB provenance contract
+- [x] minimal hierarchy traversal
+- [x] contiguous macrobins
+- [x] macrobin-driven tile packets
+- [x] explicit stable order keys
+- [x] checked count/capacity helpers
+- [x] primitive/pixel SIMD classifier input
+- [x] visibility-buffer storage type
+- [x] raster-worker CPU fanout foundation
 
-### Phase 2 - existing raster-loop integration
+### Next integration stage
 
-- [ ] replace the current width/lane-count-only 8/32 traversal heuristic with profile-driven scheduler W/H;
-- [ ] keep 32x32 dirty/depth metadata independent;
-- [ ] add profile-vs-scalar byte-for-byte regression tests;
-- [ ] benchmark p50/p95/p99 frame-time changes.
+- [ ] lower eligible Vulkan draws to coarse cluster submissions
+- [ ] prepare visible cluster triangles exactly once
+- [ ] add prepared primitive subsets / microtile coverage masks
+- [ ] execute tile packets through existing scalar oracle first
+- [ ] add portable primitive-SIMD kernels
+- [ ] add AVX2 primitive-SIMD kernels behind the existing v3 boundary
+- [ ] write visibility/depth for eligible opaque work
+- [ ] implement quad/material shading
+- [ ] preserve strict fallback for all ineligible Vulkan semantics
 
-### Phase 3 - ordered tile streams
+### Scale stage
 
-- [ ] lower render IR operations into compact ordered tile-entry arrays;
-- [ ] prepare triangles once and bin prepared primitives;
-- [ ] add local/macro/global operation classes;
-- [ ] execute one-owner-per-tile worker scheduling;
-- [ ] implement cache-local tile-group traversal and work stealing.
+- [ ] richer instance/cluster hierarchy with LOD and cone/frustum tests
+- [ ] physical macro/global packet streams
+- [ ] parallel hierarchy traversal and bin construction
+- [ ] LLC-local worker queues and stealing
+- [ ] pass-aware dynamic tile selection
+- [ ] bounded startup autotuning
+- [ ] optional validated x86-64-v4 kernels
 
-### Phase 4 - dependency epochs and broader Vulkan path
+## Success metrics
 
-- [ ] build explicit resource-dependency epochs;
-- [ ] preserve blending/depth/stencil/order guarantees across parallel tiles;
-- [ ] introduce conservative fallback for unsupported feedback/dependency cases.
-
-### Phase 5 - wider ISA and autotuning
-
-- [ ] add separately compiled x86-64-v4 kernels only after differential correctness and frame-tail evidence;
-- [ ] add bounded startup candidate benchmarking;
-- [ ] allow render-target format/sample-count to influence tile geometry;
-- [ ] persist or memoize stable profiles when safe.
-
----
-
-## Success criteria
-
-The tile design is successful only if it improves real CPU rendering without trading away determinism or tail latency. Evaluation should therefore emphasize:
+Do not report only triangle rate or average FPS. Track:
 
 ```text
-correct pixels first
-      |
-      v
-lower p99 frame time
-      |
-      v
-better multicore scaling
-      |
-      v
-better cache efficiency
-      |
-      v
-higher peak throughput
+logical source triangles
+hierarchy nodes tested
+leaf clusters reached
+clusters HZB-rejected
+triangles expanded
+triangles rasterized
+tile packet references
+covered samples
+shaded samples
+planning bytes/frame
+p50/p95/p99 frame time
+missed presentation deadlines
 ```
 
-Average FPS alone is not sufficient. Every optimization must preserve ZPU's existing scalar/differential correctness posture and be evaluated against frame-time distribution, missed presentation deadlines, worker balance, and memory overhead.
+The trillion-scale goal should mean **logical source geometry rejected through hierarchy**, not one trillion individually processed Vulkan draws or leaf clusters per second.
