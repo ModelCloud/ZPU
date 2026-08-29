@@ -10284,10 +10284,16 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
          threadsPerMeshThreadgroup:threadsPerMeshThreadgroup];
 }
 - (void)drawMeshThreadgroupsWithIndirectBuffer:(MTLGPUAddress)indirectBuffer threadsPerObjectThreadgroup:(MTLSize)threadsPerObjectThreadgroup threadsPerMeshThreadgroup:(MTLSize)threadsPerMeshThreadgroup {
-    (void)indirectBuffer;
-    (void)threadsPerObjectThreadgroup;
-    (void)threadsPerMeshThreadgroup;
-    [_owner markError];
+    ZPUBuffer *buffer = nil;
+    NSUInteger bufferOffset = 0;
+    if (!zpu_metal4_buffer_address_offset(_owner->_owner, indirectBuffer, &buffer, &bufferOffset)) {
+        [_owner markError];
+        return;
+    }
+    [(id)_legacy drawMeshThreadgroupsWithIndirectBuffer:(id<MTLBuffer>)buffer
+                                  indirectBufferOffset:bufferOffset
+                           threadsPerObjectThreadgroup:threadsPerObjectThreadgroup
+                             threadsPerMeshThreadgroup:threadsPerMeshThreadgroup];
 }
 - (void)dispatchThreadsPerTile:(MTLSize)threadsPerTile {
     [(id)_legacy dispatchThreadsPerTile:threadsPerTile];
@@ -13794,11 +13800,35 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     }
 }
 - (void)drawMeshThreadgroupsWithIndirectBuffer:(id<MTLBuffer>)indirectBuffer indirectBufferOffset:(NSUInteger)indirectBufferOffset threadsPerObjectThreadgroup:(MTLSize)threadsPerObjectThreadgroup threadsPerMeshThreadgroup:(MTLSize)threadsPerMeshThreadgroup API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)indirectBuffer;
-    (void)indirectBufferOffset;
-    (void)threadsPerObjectThreadgroup;
-    (void)threadsPerMeshThreadgroup;
-    [_owner markError];
+    ZPURenderPipelineState *state = _pipelineState;
+    ZPUBuffer *zpuIndirectBuffer = (ZPUBuffer *)indirectBuffer;
+    if (![state isKindOfClass:[ZPURenderPipelineState class]] || !state->_isMeshPipeline ||
+        ![state->_meshFunctionName isEqualToString:zpu_cpu_mesh_gradient_function_name] ||
+        ![state->_meshFragmentFunctionName isEqualToString:zpu_cpu_mesh_gradient_fragment_name] ||
+        state->_meshMaxTotalThreadgroupsPerMeshGrid != 0 ||
+        !zpu_metal_size_fits_cpu_threadgroup(threadsPerObjectThreadgroup, state->_meshMaxTotalThreadsPerObjectThreadgroup) ||
+        threadsPerObjectThreadgroup.width != 1 || threadsPerObjectThreadgroup.height != 1 ||
+        threadsPerObjectThreadgroup.depth != 1 ||
+        !zpu_metal_size_fits_cpu_threadgroup(threadsPerMeshThreadgroup, state->_meshMaxTotalThreadsPerMeshThreadgroup) ||
+        ![zpuIndirectBuffer isKindOfClass:[ZPUBuffer class]] ||
+        zpuIndirectBuffer->_owner != [_owner device] || indirectBufferOffset % sizeof(uint32_t) != 0 ||
+        indirectBufferOffset > zpuIndirectBuffer.length ||
+        zpuIndirectBuffer.length - indirectBufferOffset < 3 * sizeof(uint32_t)) {
+        [_owner markError];
+        return;
+    }
+    [_owner retainResource:zpuIndirectBuffer];
+    if (zpu_metal_render_encoder_draw_mesh_threadgroups_indirect(
+            _zpuEncoder, ZPU_METAL_MESH_FILL_GRADIENT_RGBA8, zpuIndirectBuffer->_zpuBuffer,
+            indirectBufferOffset,
+            (zpu_metal_size){(uint32_t)threadsPerObjectThreadgroup.width,
+                              (uint32_t)threadsPerObjectThreadgroup.height,
+                              (uint32_t)threadsPerObjectThreadgroup.depth},
+            (zpu_metal_size){(uint32_t)threadsPerMeshThreadgroup.width,
+                              (uint32_t)threadsPerMeshThreadgroup.height,
+                              (uint32_t)threadsPerMeshThreadgroup.depth}) != ZPU_METAL_OK) {
+        [_owner markError];
+    }
 }
 - (void)dispatchThreadsPerTile:(MTLSize)threadsPerTile API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
     if (_pipelineState == nil || !_pipelineState->_isTilePipeline ||

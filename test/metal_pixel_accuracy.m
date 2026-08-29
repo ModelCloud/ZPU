@@ -8447,6 +8447,70 @@ int main(void) {
             return 110;
         }
 
+        BOOL adapter_mesh_indirect_exact = YES;
+        if (@available(macOS 13.0, iOS 16.0, *)) {
+            const uint32_t adapter_mesh_indirect_initial[] = {1, 1, 1};
+            const uint32_t adapter_mesh_indirect_committed[] = {3, 2, 1};
+            id<MTLBuffer> adapter_mesh_indirect_buffer =
+                [adapter_device newBufferWithBytes:adapter_mesh_indirect_initial
+                                             length:sizeof(adapter_mesh_indirect_initial)
+                                            options:MTLResourceStorageModeShared];
+            MTLTextureDescriptor *adapter_mesh_indirect_texture_descriptor =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                    width:5 height:3 mipmapped:NO];
+            adapter_mesh_indirect_texture_descriptor.storageMode = MTLStorageModeShared;
+            adapter_mesh_indirect_texture_descriptor.usage = MTLTextureUsageRenderTarget;
+            id<MTLTexture> adapter_mesh_indirect_texture =
+                [adapter_device newTextureWithDescriptor:adapter_mesh_indirect_texture_descriptor];
+            MTLRenderPassDescriptor *adapter_mesh_indirect_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            adapter_mesh_indirect_pass.colorAttachments[0].texture = adapter_mesh_indirect_texture;
+            adapter_mesh_indirect_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            adapter_mesh_indirect_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            adapter_mesh_indirect_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+            id<MTLCommandBuffer> adapter_mesh_indirect_command_buffer = [adapter_queue commandBuffer];
+            id<MTLRenderCommandEncoder> adapter_mesh_indirect_encoder =
+                [adapter_mesh_indirect_command_buffer renderCommandEncoderWithDescriptor:adapter_mesh_indirect_pass];
+            [adapter_mesh_indirect_encoder setRenderPipelineState:adapter_legacy_mesh_pipeline];
+            [adapter_mesh_indirect_encoder drawMeshThreadgroupsWithIndirectBuffer:adapter_mesh_indirect_buffer
+                                                               indirectBufferOffset:0
+                                                        threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
+                                                          threadsPerMeshThreadgroup:MTLSizeMake(2, 2, 1)];
+            if (adapter_mesh_indirect_buffer != nil) {
+                memcpy(adapter_mesh_indirect_buffer.contents, adapter_mesh_indirect_committed,
+                       sizeof(adapter_mesh_indirect_committed));
+            }
+            [adapter_mesh_indirect_encoder endEncoding];
+            [adapter_mesh_indirect_command_buffer commit];
+            [adapter_mesh_indirect_command_buffer waitUntilCompleted];
+            uint8_t adapter_mesh_indirect_pixels[5 * 3 * 4] = {0};
+            if (adapter_mesh_indirect_texture != nil) {
+                [adapter_mesh_indirect_texture getBytes:adapter_mesh_indirect_pixels
+                                              bytesPerRow:5 * 4
+                                            fromRegion:MTLRegionMake2D(0, 0, 5, 3)
+                                           mipmapLevel:0];
+            }
+            uint8_t expected_mesh_indirect_pixels[5 * 3 * 4];
+            for (NSUInteger y = 0; y < 3; ++y) {
+                for (NSUInteger x = 0; x < 5; ++x) {
+                    const NSUInteger pixel = (y * 5 + x) * 4;
+                    expected_mesh_indirect_pixels[pixel + 0] = 64;
+                    expected_mesh_indirect_pixels[pixel + 1] = (uint8_t)(((y + 1) * 255 + 4) / 8);
+                    expected_mesh_indirect_pixels[pixel + 2] = (uint8_t)(((x + 1) * 255 + 4) / 8);
+                    expected_mesh_indirect_pixels[pixel + 3] = 255;
+                }
+            }
+            adapter_mesh_indirect_exact = adapter_mesh_indirect_buffer != nil &&
+                adapter_mesh_indirect_texture != nil && adapter_mesh_indirect_command_buffer != nil &&
+                adapter_mesh_indirect_encoder != nil &&
+                adapter_mesh_indirect_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                memcmp(adapter_mesh_indirect_pixels, expected_mesh_indirect_pixels,
+                       sizeof(expected_mesh_indirect_pixels)) == 0;
+        }
+        if (!adapter_mesh_indirect_exact) {
+            fprintf(stderr, "metal-pixel: CPU indirect mesh-grid pixel exactness failed\n");
+            return 114;
+        }
+
         /* A registered mesh profile can also be replayed from a CPU-owned
          * indirect command buffer. Keep this path separate from the native
          * mesh lifecycle test above: Apple Metal remains an API/oracle
@@ -8634,6 +8698,56 @@ int main(void) {
                     expected_mtl4_mesh_pixels[pixel + 3] = 255;
                 }
             }
+            BOOL adapter_mtl4_mesh_indirect_exact = YES;
+            const uint32_t adapter_mtl4_mesh_indirect_initial[] = {0, 1, 1, 1};
+            const uint32_t adapter_mtl4_mesh_indirect_committed[] = {3, 2, 1};
+            id<MTLBuffer> adapter_mtl4_mesh_indirect_buffer =
+                [adapter_device newBufferWithBytes:adapter_mtl4_mesh_indirect_initial
+                                             length:sizeof(adapter_mtl4_mesh_indirect_initial)
+                                            options:MTLResourceStorageModeShared];
+            MTLTextureDescriptor *adapter_mtl4_mesh_indirect_texture_descriptor =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                    width:5 height:3 mipmapped:NO];
+            adapter_mtl4_mesh_indirect_texture_descriptor.storageMode = MTLStorageModeShared;
+            adapter_mtl4_mesh_indirect_texture_descriptor.usage = MTLTextureUsageRenderTarget;
+            id<MTLTexture> adapter_mtl4_mesh_indirect_texture =
+                [adapter_device newTextureWithDescriptor:adapter_mtl4_mesh_indirect_texture_descriptor];
+            MTL4RenderPassDescriptor *adapter_mtl4_mesh_indirect_pass = [MTL4RenderPassDescriptor new];
+            adapter_mtl4_mesh_indirect_pass.colorAttachments[0].texture = adapter_mtl4_mesh_indirect_texture;
+            adapter_mtl4_mesh_indirect_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            adapter_mtl4_mesh_indirect_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            adapter_mtl4_mesh_indirect_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+            id<MTL4CommandBuffer> adapter_mtl4_mesh_indirect_command_buffer = [adapter_device newCommandBuffer];
+            [adapter_mtl4_mesh_indirect_command_buffer beginCommandBufferWithAllocator:adapter_mtl4_mesh_allocator];
+            id<MTL4RenderCommandEncoder> adapter_mtl4_mesh_indirect_encoder =
+                [adapter_mtl4_mesh_indirect_command_buffer renderCommandEncoderWithDescriptor:adapter_mtl4_mesh_indirect_pass];
+            [adapter_mtl4_mesh_indirect_encoder setRenderPipelineState:adapter_mtl4_archived_mesh_pipeline];
+            [adapter_mtl4_mesh_indirect_encoder
+                drawMeshThreadgroupsWithIndirectBuffer:adapter_mtl4_mesh_indirect_buffer.gpuAddress + sizeof(uint32_t)
+                threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
+                threadsPerMeshThreadgroup:MTLSizeMake(2, 2, 1)];
+            if (adapter_mtl4_mesh_indirect_buffer != nil) {
+                memcpy((uint8_t *)adapter_mtl4_mesh_indirect_buffer.contents + sizeof(uint32_t),
+                       adapter_mtl4_mesh_indirect_committed, sizeof(adapter_mtl4_mesh_indirect_committed));
+            }
+            [adapter_mtl4_mesh_indirect_encoder endEncoding];
+            [adapter_mtl4_mesh_indirect_command_buffer endCommandBuffer];
+            id<MTL4CommandBuffer> adapter_mtl4_mesh_indirect_command_buffers[] = {
+                adapter_mtl4_mesh_indirect_command_buffer,
+            };
+            [adapter_mtl4_mesh_queue commit:adapter_mtl4_mesh_indirect_command_buffers count:1];
+            uint8_t adapter_mtl4_mesh_indirect_pixels[5 * 3 * 4] = {0};
+            if (adapter_mtl4_mesh_indirect_texture != nil) {
+                [adapter_mtl4_mesh_indirect_texture getBytes:adapter_mtl4_mesh_indirect_pixels
+                                                  bytesPerRow:5 * 4
+                                                   fromRegion:MTLRegionMake2D(0, 0, 5, 3)
+                                                  mipmapLevel:0];
+            }
+            adapter_mtl4_mesh_indirect_exact = adapter_mtl4_mesh_indirect_buffer != nil &&
+                adapter_mtl4_mesh_indirect_texture != nil && adapter_mtl4_mesh_indirect_command_buffer != nil &&
+                adapter_mtl4_mesh_indirect_encoder != nil &&
+                memcmp(adapter_mtl4_mesh_indirect_pixels, expected_mtl4_mesh_pixels,
+                       sizeof(expected_mtl4_mesh_pixels)) == 0;
             BOOL adapter_mtl4_mesh_icb_exact = YES;
             MTLIndirectCommandBufferDescriptor *adapter_mtl4_mesh_icb_descriptor =
                 [MTLIndirectCommandBufferDescriptor new];
@@ -8703,6 +8817,7 @@ int main(void) {
                 [[[NSString alloc] initWithData:adapter_mtl4_mesh_binary_script
                                        encoding:NSUTF8StringEncoding]
                     rangeOfString:@"mesh zpu_cpu_mesh_gradient_rgba8"].location != NSNotFound &&
+                adapter_mtl4_mesh_indirect_exact &&
                 adapter_mtl4_mesh_texture != nil && adapter_mtl4_mesh_command_buffer != nil &&
                 adapter_mtl4_mesh_encoder != nil &&
                 adapter_mtl4_mesh_icb_exact &&

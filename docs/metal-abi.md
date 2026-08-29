@@ -252,6 +252,10 @@ triangle path:
 - Metal 4 indirect thread dispatch arguments (grid and threadgroup dimensions)
   are also read from the ZPU buffer at commit time, rather than when the
   encoder records the call
+- legacy and Metal 4 mesh-threadgroup indirect grid arguments are read from
+  the ZPU buffer at commit time; the CPU mesh profile multiplies the deferred
+  threadgroup grid by the mesh threadgroup dimensions before clipping to the
+  upper-left render target
 - compute `setBytes` bindings are copied into command-buffer-owned ZPU buffers
   and follow the same deferred lifetime rules
 - CPU command buffers expose host-clock `GPUStartTime`/`GPUEndTime` around
