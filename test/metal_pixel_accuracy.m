@@ -6156,6 +6156,80 @@ int main(void) {
             return 58;
         }
 
+        /* Resetting an ICB slot must remove its previously encoded draw and
+         * leave execution as a legal no-op. Compare the native reset path
+         * with the CPU-owned command representation so reset cannot leak
+         * stale pipeline, buffer, or fixed-function state into a later pass. */
+        id<MTLIndirectCommandBuffer> metal_reset_icb =
+            [device newIndirectCommandBufferWithDescriptor:icb_descriptor
+                                           maxCommandCount:1
+                                                   options:0];
+        id<MTLIndirectRenderCommand> metal_reset_icb_command =
+            [metal_reset_icb indirectRenderCommandAtIndex:0];
+        [metal_reset_icb_command drawPrimitives:MTLPrimitiveTypeTriangle
+                                    vertexStart:0 vertexCount:6 instanceCount:1 baseInstance:0];
+        [metal_reset_icb resetWithRange:NSMakeRange(0, 1)];
+        id<MTLTexture> metal_reset_icb_texture = [device newTextureWithDescriptor:texture_descriptor];
+        MTLRenderPassDescriptor *metal_reset_icb_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        metal_reset_icb_pass.colorAttachments[0].texture = metal_reset_icb_texture;
+        metal_reset_icb_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        metal_reset_icb_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        metal_reset_icb_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        id<MTLCommandBuffer> metal_reset_icb_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> metal_reset_icb_encoder =
+            [metal_reset_icb_command_buffer renderCommandEncoderWithDescriptor:metal_reset_icb_pass];
+        [metal_reset_icb_encoder setRenderPipelineState:pipeline];
+        [metal_reset_icb_encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
+        [metal_reset_icb_encoder executeCommandsInBuffer:metal_reset_icb withRange:NSMakeRange(0, 1)];
+        [metal_reset_icb_encoder endEncoding];
+        [metal_reset_icb_command_buffer commit];
+        [metal_reset_icb_command_buffer waitUntilCompleted];
+        uint8_t metal_reset_icb_pixels[byte_count];
+        [metal_reset_icb_texture getBytes:metal_reset_icb_pixels
+                               bytesPerRow:(NSUInteger)width * 4
+                                fromRegion:MTLRegionMake2D(0, 0, width, height)
+                               mipmapLevel:0];
+
+        id<MTLIndirectCommandBuffer> adapter_reset_icb =
+            [adapter_device newIndirectCommandBufferWithDescriptor:icb_descriptor
+                                                    maxCommandCount:1
+                                                            options:MTLResourceStorageModeShared];
+        id<MTLIndirectRenderCommand> adapter_reset_icb_command =
+            [adapter_reset_icb indirectRenderCommandAtIndex:0];
+        [adapter_reset_icb_command drawPrimitives:MTLPrimitiveTypeTriangle
+                                      vertexStart:0 vertexCount:6 instanceCount:1 baseInstance:0];
+        [adapter_reset_icb resetWithRange:NSMakeRange(0, 1)];
+        id<MTLTexture> adapter_reset_icb_texture = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTLRenderPassDescriptor *adapter_reset_icb_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_reset_icb_pass.colorAttachments[0].texture = adapter_reset_icb_texture;
+        adapter_reset_icb_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_reset_icb_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_reset_icb_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        id<MTLCommandBuffer> adapter_reset_icb_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_reset_icb_encoder =
+            [adapter_reset_icb_command_buffer renderCommandEncoderWithDescriptor:adapter_reset_icb_pass];
+        [adapter_reset_icb_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_reset_icb_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_reset_icb_encoder executeCommandsInBuffer:adapter_reset_icb withRange:NSMakeRange(0, 1)];
+        [adapter_reset_icb_encoder endEncoding];
+        [adapter_reset_icb_command_buffer commit];
+        [adapter_reset_icb_command_buffer waitUntilCompleted];
+        uint8_t adapter_reset_icb_pixels[byte_count];
+        [adapter_reset_icb_texture getBytes:adapter_reset_icb_pixels
+                                 bytesPerRow:(NSUInteger)width * 4
+                                  fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                 mipmapLevel:0];
+        if (metal_reset_icb == nil || metal_reset_icb_command == nil ||
+            metal_reset_icb_texture == nil || metal_reset_icb_encoder == nil ||
+            metal_reset_icb_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_reset_icb == nil || adapter_reset_icb_command == nil ||
+            adapter_reset_icb_texture == nil || adapter_reset_icb_encoder == nil ||
+            adapter_reset_icb_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(metal_reset_icb_pixels, adapter_reset_icb_pixels, byte_count) != 0) {
+            fprintf(stderr, "metal-pixel: reset indirect command buffer mismatch\n");
+            return 128;
+        }
+
         id<MTLTexture> parallel_texture =
             [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
         id<MTLCommandBuffer> parallel_command_buffer = [adapter_queue commandBuffer];

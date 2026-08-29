@@ -238,6 +238,7 @@ API_AVAILABLE(macos(15.0), ios(18.0))
     BOOL _hasDispatchThreadgroups;
     MTLSize _threadgroupsPerGrid;
     MTLSize _threadgroupsPerThreadgroup;
+    BOOL _unsupportedCommand;
 }
 - (instancetype)initWithOwner:(ZPUIndirectCommandBuffer *)owner;
 - (void)reset;
@@ -881,6 +882,16 @@ static BOOL zpu_u32(NSUInteger value, uint32_t *result) {
     if (value > UINT32_MAX) return NO;
     *result = (uint32_t)value;
     return YES;
+}
+
+static BOOL zpu_metal_size_fits_cpu_threadgroup(MTLSize size, NSUInteger maxTotalThreads) {
+    if (size.width == 0 || size.height == 0 || size.depth == 0 ||
+        size.width > UINT32_MAX || size.height > UINT32_MAX || size.depth > UINT32_MAX ||
+        maxTotalThreads == 0) return NO;
+    const uint64_t area = (uint64_t)size.width * (uint64_t)size.height;
+    const uint64_t maximum = (uint64_t)maxTotalThreads;
+    return area <= maximum && area <= UINT64_MAX / (uint64_t)size.depth &&
+        area * (uint64_t)size.depth <= maximum;
 }
 
 static BOOL zpu_region_fits(MTLRegion region) {
@@ -8054,7 +8065,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     }
 }
 - (BOOL)copyCommandsFrom:(ZPUIndirectCommandBuffer *)source sourceRange:(NSRange)sourceRange destinationIndex:(NSUInteger)destinationIndex {
-    if (source == nil || sourceRange.location > source->_maxCommandCount ||
+    if (source == nil || source->_owner != _owner || sourceRange.location > source->_maxCommandCount ||
         sourceRange.length > source->_maxCommandCount - sourceRange.location ||
         destinationIndex > _maxCommandCount || sourceRange.length > _maxCommandCount - destinationIndex) return NO;
     NSArray *commands = [source->_commands subarrayWithRange:sourceRange];
@@ -8120,6 +8131,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
             copy->_hasDispatchThreadgroups = computeCommand->_hasDispatchThreadgroups;
             copy->_threadgroupsPerGrid = computeCommand->_threadgroupsPerGrid;
             copy->_threadgroupsPerThreadgroup = computeCommand->_threadgroupsPerThreadgroup;
+            copy->_unsupportedCommand = computeCommand->_unsupportedCommand;
             _commands[destinationIndex + index] = copy;
         } else {
             return NO;
@@ -8375,26 +8387,58 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     _hasDispatchThreadgroups = NO;
     _threadgroupsPerGrid = MTLSizeMake(0, 0, 0);
     _threadgroupsPerThreadgroup = MTLSizeMake(0, 0, 0);
+    _unsupportedCommand = NO;
 }
 - (void)setComputePipelineState:(id<MTLComputePipelineState>)pipelineState API_AVAILABLE(macos(11.0), ios(13.0)) {
-    if ([pipelineState isKindOfClass:[ZPUComputePipelineState class]]) _pipelineState = pipelineState;
+    ZPUComputePipelineState *pipeline = (ZPUComputePipelineState *)pipelineState;
+    if (pipelineState == nil) {
+        _pipelineState = nil;
+        return;
+    }
+    if (![pipeline isKindOfClass:[ZPUComputePipelineState class]] || pipeline->_owner != _owner->_owner) {
+        _unsupportedCommand = YES;
+        return;
+    }
+    _pipelineState = pipeline;
 }
 - (void)setKernelBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
-    if (index != 0 || ![(id)buffer isKindOfClass:[ZPUBuffer class]]) return;
-    _kernelBuffer = (ZPUBuffer *)buffer;
-    _kernelBufferOffset = offset;
+    ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
+    if (index != 0 || (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
+                                         zpuBuffer->_owner != _owner->_owner || offset > zpuBuffer.length))) {
+        _unsupportedCommand = YES;
+        return;
+    }
+    _kernelBuffer = zpuBuffer;
+    _kernelBufferOffset = buffer == nil ? 0 : offset;
 }
 - (void)setKernelBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0)) {
-    (void)stride;
+    if (stride != 0) {
+        _unsupportedCommand = YES;
+        return;
+    }
     [self setKernelBuffer:buffer offset:offset atIndex:index];
 }
 - (void)concurrentDispatchThreadgroups:(MTLSize)threadgroupsPerGrid threadsPerThreadgroup:(MTLSize)threadsPerThreadgroup {
+    if ((_owner->_commandTypes & MTLIndirectCommandTypeConcurrentDispatch) == 0 ||
+        threadgroupsPerGrid.width > UINT32_MAX || threadgroupsPerGrid.height > UINT32_MAX ||
+        threadgroupsPerGrid.depth > UINT32_MAX ||
+        !zpu_metal_size_fits_cpu_threadgroup(threadsPerThreadgroup, 1024)) {
+        _unsupportedCommand = YES;
+        return;
+    }
     _threadgroupsPerGrid = threadgroupsPerGrid;
     _threadgroupsPerThreadgroup = threadsPerThreadgroup;
     _hasDispatchThreadgroups = YES;
     _hasDispatchThreads = NO;
 }
 - (void)concurrentDispatchThreads:(MTLSize)threadsPerGrid threadsPerThreadgroup:(MTLSize)threadsPerThreadgroup {
+    if ((_owner->_commandTypes & MTLIndirectCommandTypeConcurrentDispatchThreads) == 0 ||
+        threadsPerGrid.width > UINT32_MAX || threadsPerGrid.height > UINT32_MAX ||
+        threadsPerGrid.depth > UINT32_MAX ||
+        !zpu_metal_size_fits_cpu_threadgroup(threadsPerThreadgroup, 1024)) {
+        _unsupportedCommand = YES;
+        return;
+    }
     _threadsPerGrid = threadsPerGrid;
     _threadsPerThreadgroup = threadsPerThreadgroup;
     _hasDispatchThreads = YES;
@@ -8414,6 +8458,18 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     (void)region;
 }
 - (void)executeWithEncoder:(ZPUComputeEncoder *)encoder {
+    if (_unsupportedCommand) {
+        [encoder->_owner markError];
+        return;
+    }
+    /* A reset or never-recorded ICB slot is a legal no-op. */
+    if (_pipelineState == nil || (!_hasDispatchThreads && !_hasDispatchThreadgroups)) return;
+    ZPUComputePipelineState *pipeline = (ZPUComputePipelineState *)_pipelineState;
+    MTLSize threadgroup = _hasDispatchThreads ? _threadsPerThreadgroup : _threadgroupsPerThreadgroup;
+    if (!zpu_metal_size_fits_cpu_threadgroup(threadgroup, pipeline->_maxTotalThreadsPerThreadgroup)) {
+        [encoder->_owner markError];
+        return;
+    }
     if (_pipelineState != nil) [encoder setComputePipelineState:(id<MTLComputePipelineState>)_pipelineState];
     if (_kernelBuffer != nil) {
         [encoder setBuffer:(id<MTLBuffer>)_kernelBuffer offset:_kernelBufferOffset atIndex:0];

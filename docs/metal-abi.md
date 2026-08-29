@@ -213,7 +213,9 @@ triangle path:
   descriptors remain unsupported
 - CPU indirect compute commands for those registered kernels; the command
   buffer inherits the ZPU encoder's texture bindings and records pipeline,
-  buffer, and dispatch state for deferred execution
+  buffer, and dispatch state for deferred execution, with device ownership,
+  command-type, buffer-offset, dimension, and CPU threadgroup-limit checks;
+  reset slots remain legal no-ops
 - Metal 4 basic buffer/texture copy, buffer-fill, and tensor-slice copy commands
   append deferred ZPU work; CPU-owned tensors also provide contiguous and
   strided byte-addressable slice transfers. Tensor shader binding, advanced
