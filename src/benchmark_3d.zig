@@ -219,8 +219,11 @@ fn renderMode(target: []u8, depth: []u8, source: *const Scene, counters: *cube.C
     // framebuffer would measure cache lookup latency rather than 3D work.
     if (!two_core) {
         @memset(target, 0x19);
-        const depth_words = std.mem.bytesAsSlice(u32, @as([]align(4) u8, @alignCast(depth)));
-        @memset(depth_words, @bitCast(@as(f32, 1)));
+        const clear_depth: u32 = @bitCast(@as(f32, 1));
+        var depth_offset: usize = 0;
+        while (depth_offset + 4 <= depth.len) : (depth_offset += 4) {
+            std.mem.writeInt(u32, depth[depth_offset..][0..4], clear_depth, .little);
+        }
     }
     const written = if (two_core)
         if (count_work)
@@ -344,8 +347,8 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test "frozen cube is deterministic and mutants differ" {
-    var color: [width * height * 4]u8 = undefined;
-    var depth: [width * height * 4]u8 = undefined;
+    var color: [width * height * 4]u8 align(4) = undefined;
+    var depth: [width * height * 4]u8 align(4) = undefined;
     const frozen = scene(false);
     var a = cube.Counters{};
     const one = try render(&color, &depth, &frozen, &a, false);
@@ -413,8 +416,8 @@ test "random scene spans the screen with unique geometry and palette" {
 }
 
 test "two-core target preserves the cube oracle" {
-    var color: [width * height * 4]u8 = undefined;
-    var depth: [width * height * 4]u8 = undefined;
+    var color: [width * height * 4]u8 align(4) = undefined;
+    var depth: [width * height * 4]u8 align(4) = undefined;
     var counters = cube.Counters{};
     const frozen = scene(false);
     const got = try render(&color, &depth, &frozen, &counters, true);
@@ -426,8 +429,8 @@ test "two-core target preserves the cube oracle" {
 }
 
 test "two-core rendering repeats real raster work" {
-    var color: [width * height * 4]u8 = undefined;
-    var depth: [width * height * 4]u8 = undefined;
+    var color: [width * height * 4]u8 align(4) = undefined;
+    var depth: [width * height * 4]u8 align(4) = undefined;
     @memset(&color, 0x19);
     var offset: usize = 0;
     while (offset < depth.len) : (offset += 4) putFloat(&depth, offset, 1);
