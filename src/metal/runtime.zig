@@ -371,6 +371,13 @@ const DrawCommand = struct {
     visibility_result_type: abi.VisibilityResultType = .reset,
 };
 
+const TileCommand = struct {
+    target: *Texture,
+    kernel: u8,
+    tile_size: abi.Size,
+    threads_per_tile: abi.Size,
+};
+
 const VisibilitySlot = struct {
     buffer: *Buffer,
     offset: usize,
@@ -472,6 +479,7 @@ const ComputeCommand = struct {
 const Command = union(enum) {
     begin_render: BeginRenderCommand,
     draw: DrawCommand,
+    tile: TileCommand,
     copy_buffer: CopyBufferCommand,
     copy_buffer_to_texture: BufferTextureCommand,
     copy_texture_to_buffer: TextureBufferCommand,
@@ -800,6 +808,40 @@ pub const CommandBuffer = struct {
                         .counting => previous +| stats.fragments_covered,
                     };
                     writeU64Little(visibility_buffer.bytes, resolved_draw.visibility_offset, result);
+                }
+            },
+            .tile => |tile| {
+                const target_handle = active_target orelse return self.fail(error.InvalidCommand);
+                if (!validTexture(target_handle) or target_handle != tile.target) return self.fail(error.InvalidResource);
+                if (tile.kernel != 1 or
+                    (target_handle.format != .rgba8_unorm and target_handle.format != .bgra8_unorm) or
+                    tile.tile_size.width == 0 or tile.tile_size.height == 0 or tile.tile_size.depth != 1 or
+                    tile.threads_per_tile.width == 0 or tile.threads_per_tile.height == 0 or
+                    tile.threads_per_tile.depth != 1 or
+                    tile.threads_per_tile.width > tile.tile_size.width or
+                    tile.threads_per_tile.height > tile.tile_size.height) return self.fail(error.InvalidArgument);
+                const tile_count_x = (@as(usize, target_handle.width) + tile.tile_size.width - 1) / tile.tile_size.width;
+                const tile_count_y = (@as(usize, target_handle.height) + tile.tile_size.height - 1) / tile.tile_size.height;
+                var target = target_handle.asTarget();
+                for (0..tile_count_y) |tile_y| {
+                    for (0..tile_count_x) |tile_x| {
+                        const tile_origin_x = tile_x * tile.tile_size.width;
+                        const tile_origin_y = tile_y * tile.tile_size.height;
+                        for (0..tile.threads_per_tile.height) |local_y| {
+                            const y = tile_origin_y + local_y;
+                            if (y >= target.height) continue;
+                            for (0..tile.threads_per_tile.width) |local_x| {
+                                const x = tile_origin_x + local_x;
+                                if (x >= target.width) continue;
+                                target.storeColor(x, y, .{
+                                    (@as(f32, @floatFromInt(x)) + 1.0) / 8.0,
+                                    (@as(f32, @floatFromInt(y)) + 1.0) / 8.0,
+                                    0.25,
+                                    1.0,
+                                });
+                            }
+                        }
+                    }
                 }
             },
             .copy_buffer => |copy| {
@@ -1730,6 +1772,25 @@ pub const RenderEncoder = struct {
             .visibility_mode = self.visibility_mode,
             .visibility_offset = self.visibility_offset,
             .visibility_result_type = self.visibility_result_type,
+        } });
+    }
+
+    pub fn dispatchThreadsPerTile(self: *RenderEncoder, kernel: u8, tile_size: abi.Size, threads_per_tile: abi.Size) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        const target = switch (self.command_buffer.commands.items[self.begin_index]) {
+            .begin_render => |begin_render| begin_render.target,
+            else => return error.InvalidCommand,
+        };
+        if (kernel != 1 or
+            (target.format != .rgba8_unorm and target.format != .bgra8_unorm) or
+            tile_size.width == 0 or tile_size.height == 0 or tile_size.depth != 1 or
+            threads_per_tile.width == 0 or threads_per_tile.height == 0 or threads_per_tile.depth != 1 or
+            threads_per_tile.width > tile_size.width or threads_per_tile.height > tile_size.height) return error.InvalidArgument;
+        _ = try self.command_buffer.append(.{ .tile = .{
+            .target = target,
+            .kernel = kernel,
+            .tile_size = tile_size,
+            .threads_per_tile = threads_per_tile,
         } });
     }
 
@@ -4746,6 +4807,27 @@ test "CPU compute is deferred, bounded, and pixel deterministic" {
     try std.testing.expectError(error.InvalidCommand, beginCompute(command_buffer));
 }
 
+test "CPU tile dispatch preserves Metal's upper-left pixel origin" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const texture = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(texture);
+    @memset(texture.bytes, 0xa5);
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, texture, .{ .color = .{ .load_action = .load, .store_action = .store } });
+    try encoder.dispatchThreadsPerTile(1, .{ .width = 2, .height = 2, .depth = 1 }, .{ .width = 2, .height = 2, .depth = 1 });
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try std.testing.expectEqual(@as(u8, 0xa5), texture.bytes[0]);
+    try command_buffer.commit();
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 32, 32, 64, 255 }, texture.bytes[0..4]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 159, 96, 64, 255 }, texture.bytes[2 * texture.stride + 4 * 4 ..][0..4]);
+}
+
 test "CPU compute writes narrow unorm targets at their native stride" {
     const device = try createDevice();
     defer destroyDevice(device);
@@ -6260,6 +6342,11 @@ pub export fn zpu_metal_render_encoder_draw_indexed_primitives_base_vertex(encod
 
 pub export fn zpu_metal_render_encoder_draw_indexed_primitives_indirect(encoder: ?*RenderEncoder, primitive: abi.PrimitiveType, index_type: abi.IndexType, index_buffer: ?*Buffer, index_buffer_offset: usize, indirect_buffer: ?*Buffer, indirect_buffer_offset: usize) callconv(.c) c_int {
     (encoder orelse return -1).drawIndexedPrimitivesIndirect(primitive, index_type, index_buffer orelse return -1, index_buffer_offset, indirect_buffer orelse return -1, indirect_buffer_offset) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_dispatch_threads_per_tile(encoder: ?*RenderEncoder, kernel: u8, tile_size: abi.Size, threads_per_tile: abi.Size) callconv(.c) c_int {
+    (encoder orelse return -1).dispatchThreadsPerTile(kernel, tile_size, threads_per_tile) catch |err| return errorCode(err);
     return 0;
 }
 
