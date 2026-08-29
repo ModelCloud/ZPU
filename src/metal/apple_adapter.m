@@ -8461,8 +8461,14 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
                                                       error:(NSError **)error {
     (void)compilerTaskOptions;
     id<MTL4BinaryFunction> function = zpu_mtl4_binary_function_for_descriptor(_owner, descriptor, error);
-    if (function != nil && [_pipelineDataSetSerializer respondsToSelector:@selector(recordFunctionName:)]) {
-        [(ZPUMTL4PipelineDataSetSerializer *)_pipelineDataSetSerializer recordFunctionName:function.name];
+    if (function != nil) {
+        if ([function.name isEqualToString:zpu_cpu_tile_gradient_function_name] &&
+            [_pipelineDataSetSerializer respondsToSelector:@selector(recordTileFunctionName:)]) {
+            [(ZPUMTL4PipelineDataSetSerializer *)_pipelineDataSetSerializer
+                recordTileFunctionName:function.name];
+        } else if ([_pipelineDataSetSerializer respondsToSelector:@selector(recordFunctionName:)]) {
+            [(ZPUMTL4PipelineDataSetSerializer *)_pipelineDataSetSerializer recordFunctionName:function.name];
+        }
     }
     return function;
 }
