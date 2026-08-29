@@ -6914,7 +6914,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (NSUInteger)alignment { return _alignment; }
 - (void)setArgumentBuffer:(id<MTLBuffer>)argumentBuffer offset:(NSUInteger)offset {
     ZPUBuffer *buffer = (ZPUBuffer *)argumentBuffer;
-    if (argumentBuffer != nil && ![buffer isKindOfClass:[ZPUBuffer class]]) return;
+    if (argumentBuffer != nil && !zpu_buffer_belongs_to_device(_owner, buffer)) return;
     if (buffer != nil && offset > buffer.length) return;
     _argumentBuffer = buffer;
     _argumentOffset = offset;
@@ -6971,7 +6971,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     [self remember:object atIndex:index offset:0];
 }
 - (void)setBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
-    if (buffer != nil && ![(id)buffer isKindOfClass:[ZPUBuffer class]]) return;
+    if (buffer != nil && !zpu_buffer_belongs_to_device(_owner, (ZPUBuffer *)buffer)) return;
     if (buffer != nil && offset > [(ZPUBuffer *)buffer length]) return;
     [self remember:buffer atIndex:index offset:offset];
 }
@@ -6982,7 +6982,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     }
 }
 - (void)setTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
-    if (texture != nil && ![(id)texture isKindOfClass:[ZPUTexture class]]) return;
+    if (texture != nil && !zpu_texture_belongs_to_device(_owner, (ZPUTexture *)texture)) return;
     [self remember:texture atIndex:index];
 }
 - (void)setTextures:(const id<MTLTexture> __nullable [__nonnull])textures withRange:(NSRange)range {
@@ -6990,7 +6990,8 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     for (NSUInteger index = 0; index < range.length; ++index) [self setTexture:textures[index] atIndex:range.location + index];
 }
 - (void)setSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
-    if (sampler != nil && ![(id)sampler isKindOfClass:[ZPUSamplerState class]]) return;
+    if (sampler != nil && ![(ZPUSamplerState *)sampler isKindOfClass:[ZPUSamplerState class]]) return;
+    if (sampler != nil && ((ZPUSamplerState *)sampler)->_owner != _owner) return;
     [self remember:sampler atIndex:index];
 }
 - (void)setSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers withRange:(NSRange)range {
@@ -7013,7 +7014,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     return data.mutableBytes;
 }
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)pipeline atIndex:(NSUInteger)index API_AVAILABLE(macos(10.14), macCatalyst(13.0), ios(13.0)) {
-    if (pipeline != nil && ![(id)pipeline isKindOfClass:[ZPURenderPipelineState class]]) return;
+    if (pipeline != nil && (![(id)pipeline isKindOfClass:[ZPURenderPipelineState class]] || ((ZPURenderPipelineState *)pipeline)->_owner != _owner)) return;
     [self remember:pipeline atIndex:index];
 }
 - (void)setRenderPipelineStates:(const id<MTLRenderPipelineState> __nullable [__nonnull])pipelines withRange:(NSRange)range API_AVAILABLE(macos(10.14), macCatalyst(13.0), ios(13.0)) {
@@ -7021,7 +7022,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     for (NSUInteger index = 0; index < range.length; ++index) [self setRenderPipelineState:pipelines[index] atIndex:range.location + index];
 }
 - (void)setComputePipelineState:(id<MTLComputePipelineState>)pipeline atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(13.0)) {
-    if (pipeline != nil && ![(id)pipeline isKindOfClass:[ZPUComputePipelineState class]]) return;
+    if (pipeline != nil && (![(id)pipeline isKindOfClass:[ZPUComputePipelineState class]] || ((ZPUComputePipelineState *)pipeline)->_owner != _owner)) return;
     [self remember:pipeline atIndex:index];
 }
 - (void)setComputePipelineStates:(const id<MTLComputePipelineState> __nullable [__nonnull])pipelines withRange:(NSRange)range API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(13.0)) {
@@ -7029,7 +7030,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     for (NSUInteger index = 0; index < range.length; ++index) [self setComputePipelineState:pipelines[index] atIndex:range.location + index];
 }
 - (void)setIndirectCommandBuffer:(id<MTLIndirectCommandBuffer>)indirectCommandBuffer atIndex:(NSUInteger)index API_AVAILABLE(macos(10.14), ios(12.0)) {
-    if (indirectCommandBuffer != nil && ![(id)indirectCommandBuffer isKindOfClass:[ZPUIndirectCommandBuffer class]]) return;
+    if (indirectCommandBuffer != nil && (![(id)indirectCommandBuffer isKindOfClass:[ZPUIndirectCommandBuffer class]] || ((ZPUIndirectCommandBuffer *)indirectCommandBuffer)->_owner != _owner)) return;
     [self remember:indirectCommandBuffer atIndex:index];
 }
 - (void)setIndirectCommandBuffers:(const id<MTLIndirectCommandBuffer> __nullable [__nonnull])buffers withRange:(NSRange)range API_AVAILABLE(macos(10.14), ios(12.0)) {
