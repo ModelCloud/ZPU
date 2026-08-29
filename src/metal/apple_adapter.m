@@ -9468,8 +9468,14 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     return encoder == NULL ? nil : (id<MTLComputeCommandEncoder>)[[ZPUComputeEncoder alloc] initWithOwner:self encoder:encoder];
 }
 - (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDescriptor:(MTLComputePassDescriptor *)descriptor API_AVAILABLE(macos(11.0), ios(14.0)) {
-    (void)descriptor;
-    return [self computeCommandEncoder];
+    if (descriptor == nil ||
+        (descriptor.dispatchType != MTLDispatchTypeSerial && descriptor.dispatchType != MTLDispatchTypeConcurrent)) {
+        return nil;
+    }
+    ZPUComputeEncoder *encoder = (ZPUComputeEncoder *)[self computeCommandEncoder];
+    if (encoder == nil) return nil;
+    encoder->_dispatchType = descriptor.dispatchType;
+    return (id<MTLComputeCommandEncoder>)encoder;
 }
 - (id<MTLBlitCommandEncoder>)blitCommandEncoderWithDescriptor:(MTLBlitPassDescriptor *)descriptor API_AVAILABLE(macos(11.0), ios(14.0)) {
     (void)descriptor;

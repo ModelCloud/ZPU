@@ -7410,6 +7410,37 @@ int main(void) {
                 return 43;
             }
         }
+        if (@available(macOS 11.0, iOS 14.0, *)) {
+            MTLComputePassDescriptor *native_compute_pass_descriptor =
+                [MTLComputePassDescriptor computePassDescriptor];
+            native_compute_pass_descriptor.dispatchType = MTLDispatchTypeConcurrent;
+            id<MTLCommandBuffer> native_descriptor_command_buffer = [queue commandBuffer];
+            id<MTLComputeCommandEncoder> native_descriptor_encoder =
+                [native_descriptor_command_buffer computeCommandEncoderWithDescriptor:native_compute_pass_descriptor];
+            MTLDispatchType native_descriptor_dispatch_type = native_descriptor_encoder.dispatchType;
+            [native_descriptor_encoder endEncoding];
+            [native_descriptor_command_buffer commit];
+            [native_descriptor_command_buffer waitUntilCompleted];
+
+            MTLComputePassDescriptor *adapter_compute_pass_descriptor =
+                [MTLComputePassDescriptor computePassDescriptor];
+            adapter_compute_pass_descriptor.dispatchType = MTLDispatchTypeConcurrent;
+            id<MTLCommandBuffer> adapter_descriptor_command_buffer = [adapter_queue commandBuffer];
+            id<MTLComputeCommandEncoder> adapter_descriptor_encoder =
+                [adapter_descriptor_command_buffer computeCommandEncoderWithDescriptor:adapter_compute_pass_descriptor];
+            MTLDispatchType adapter_descriptor_dispatch_type = adapter_descriptor_encoder.dispatchType;
+            [adapter_descriptor_encoder endEncoding];
+            [adapter_descriptor_command_buffer commit];
+            [adapter_descriptor_command_buffer waitUntilCompleted];
+            if (native_descriptor_encoder == nil || adapter_descriptor_encoder == nil ||
+                native_descriptor_dispatch_type != MTLDispatchTypeConcurrent ||
+                adapter_descriptor_dispatch_type != MTLDispatchTypeConcurrent ||
+                native_descriptor_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                adapter_descriptor_command_buffer.status != MTLCommandBufferStatusCompleted) {
+                fprintf(stderr, "metal-pixel: compute pass descriptor dispatch type mismatch\n");
+                return 148;
+            }
+        }
 
         /* Every CPU adapter resource is scoped to the device that created
          * it. Cross-device buffers and events must be rejected before their
