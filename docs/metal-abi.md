@@ -129,10 +129,12 @@ triangle path:
   CPU functions while preserving the base ZPU kernel and exported handles;
   Metal 4 compiler and archive dynamic-linking descriptors accept the same
   registered visible binary functions and ZPU-owned dynamic libraries;
+  fixed render pipelines also support CPU specialization of an unspecialized
+  first-color blend state;
   asynchronous compiler tasks complete synchronously after CPU construction;
   dynamic libraries preserve registered symbol names and install names through
   a deterministic CPU serialization format; render/tile/mesh,
-  machine-learning, specialization, and arbitrary-MSL compiler requests remain fail-closed
+  machine-learning and arbitrary-MSL compiler requests remain fail-closed
 - CPU-owned Metal 4 pipeline-data serializers record those registered compute
   names and emit deterministic ZPU metadata scripts or the existing ZPU
   binary-archive format; these outputs are not Apple metal-tt scripts or

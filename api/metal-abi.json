@@ -307,6 +307,7 @@
     "MTL4Compiler.newComputePipelineStateWithDescriptorDynamicLinking",
     "MTL4Compiler.newRenderPipelineStateWithDescriptor",
     "MTL4Compiler.newRenderPipelineStateWithDescriptorDynamicLinking",
+    "MTL4Compiler.newRenderPipelineStateBySpecializationWithDescriptor",
     "MTL4Compiler.newBinaryFunctionWithDescriptor",
     "MTL4CompilerTask.compiler",
     "MTL4CompilerTask.status",
@@ -731,7 +732,7 @@
     "MTLAccelerationStructure ray-tracing execution",
     "MTLRayTracingPipelineState",
     "MTLComputePipelineState unregistered reflection",
-    "MTL4Compiler machine-learning, specialization, and arbitrary MSL families",
+    "MTL4Compiler machine-learning and arbitrary MSL families",
     "MTLLibrary stitched loading and arbitrary MSL compilation",
     "MTLIO compressed file-handle decoding",
     "MTLSparseTextureMapping"

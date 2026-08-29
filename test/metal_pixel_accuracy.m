@@ -4536,10 +4536,34 @@ int main(void) {
         adapter_mtl4_render_descriptor.supportFragmentBinaryLinking = YES;
         adapter_mtl4_render_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
         NSError *adapter_mtl4_render_error = nil;
+        NSError *adapter_mtl4_dynamic_error = nil;
         id<MTLRenderPipelineState> adapter_mtl4_compiled_render_pipeline =
             [adapter_mtl4_compiler newRenderPipelineStateWithDescriptor:adapter_mtl4_render_descriptor
                                                         compilerTaskOptions:nil
                                                                       error:&adapter_mtl4_render_error];
+        id<MTLRenderPipelineState> adapter_mtl4_unspecialized_render_pipeline = nil;
+        id<MTLRenderPipelineState> adapter_mtl4_specialized_render_pipeline = nil;
+        BOOL adapter_mtl4_specialization_ok = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTL4RenderPipelineDescriptor *adapter_mtl4_unspecialized_render_descriptor =
+                [adapter_mtl4_render_descriptor copy];
+            adapter_mtl4_unspecialized_render_descriptor.colorAttachments[0].blendingState =
+                MTL4BlendStateUnspecialized;
+            adapter_mtl4_unspecialized_render_pipeline =
+                [adapter_mtl4_compiler newRenderPipelineStateWithDescriptor:
+                    adapter_mtl4_unspecialized_render_descriptor compilerTaskOptions:nil
+                    error:&adapter_mtl4_dynamic_error];
+            MTL4RenderPipelineDescriptor *adapter_mtl4_specialized_render_descriptor =
+                [adapter_mtl4_unspecialized_render_descriptor copy];
+            adapter_mtl4_specialized_render_descriptor.colorAttachments[0].blendingState =
+                MTL4BlendStateEnabled;
+            adapter_mtl4_specialized_render_pipeline =
+                [adapter_mtl4_compiler newRenderPipelineStateBySpecializationWithDescriptor:
+                    adapter_mtl4_specialized_render_descriptor
+                    pipeline:adapter_mtl4_unspecialized_render_pipeline error:&adapter_mtl4_dynamic_error];
+            adapter_mtl4_specialization_ok = adapter_mtl4_unspecialized_render_pipeline != nil &&
+                adapter_mtl4_specialized_render_pipeline != nil;
+        }
         NSError *adapter_mtl4_archive_render_error = nil;
         id<MTLRenderPipelineState> adapter_mtl4_archived_render_pipeline =
             [adapter_mtl4_archive newRenderPipelineStateWithDescriptor:adapter_mtl4_render_descriptor
@@ -4559,7 +4583,6 @@ int main(void) {
         id<MTLFunctionHandle> adapter_mtl4_dynamic_compute_handle = nil;
         BOOL adapter_mtl4_binary_link_ok = YES;
         BOOL adapter_mtl4_dynamic_compute_ok = YES;
-        NSError *adapter_mtl4_dynamic_error = nil;
         if (@available(macOS 26.0, iOS 26.0, *)) {
             MTL4LibraryFunctionDescriptor *adapter_mtl4_additional_function_descriptor =
                 [MTL4LibraryFunctionDescriptor new];
@@ -4841,6 +4864,37 @@ int main(void) {
                                            bytesPerRow:(NSUInteger)width * 4
                                             fromRegion:MTLRegionMake2D(0, 0, width, height)
                                            mipmapLevel:0];
+        id<MTLTexture> adapter_mtl4_specialized_render_texture = nil;
+        id<MTLCommandBuffer> adapter_mtl4_specialized_render_command_buffer = nil;
+        uint8_t adapter_mtl4_specialized_render_pixels[byte_count] = {0};
+        if (adapter_mtl4_specialized_render_pipeline != nil) {
+            adapter_mtl4_specialized_render_texture =
+                [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+            MTLRenderPassDescriptor *adapter_mtl4_specialized_render_pass =
+                [MTLRenderPassDescriptor renderPassDescriptor];
+            adapter_mtl4_specialized_render_pass.colorAttachments[0].texture =
+                adapter_mtl4_specialized_render_texture;
+            adapter_mtl4_specialized_render_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            adapter_mtl4_specialized_render_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            adapter_mtl4_specialized_render_pass.colorAttachments[0].clearColor =
+                MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+            adapter_mtl4_specialized_render_command_buffer = [adapter_queue commandBuffer];
+            id<MTLRenderCommandEncoder> adapter_mtl4_specialized_render_encoder =
+                [adapter_mtl4_specialized_render_command_buffer
+                    renderCommandEncoderWithDescriptor:adapter_mtl4_specialized_render_pass];
+            [adapter_mtl4_specialized_render_encoder setRenderPipelineState:
+                adapter_mtl4_specialized_render_pipeline];
+            [adapter_mtl4_specialized_render_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+            [adapter_mtl4_specialized_render_encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                                                            vertexStart:0 vertexCount:6];
+            [adapter_mtl4_specialized_render_encoder endEncoding];
+            [adapter_mtl4_specialized_render_command_buffer commit];
+            [adapter_mtl4_specialized_render_command_buffer waitUntilCompleted];
+            [adapter_mtl4_specialized_render_texture getBytes:adapter_mtl4_specialized_render_pixels
+                                                    bytesPerRow:(NSUInteger)width * 4
+                                                     fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                                    mipmapLevel:0];
+        }
         MTLComputePipelineReflection *adapter_mtl4_compute_reflection =
             adapter_mtl4_compiled_pipeline.reflection;
         MTLRenderPipelineReflection *adapter_mtl4_render_reflection =
@@ -4872,7 +4926,7 @@ int main(void) {
             adapter_mtl4_archived_render_pipeline == nil || adapter_mtl4_binary_function == nil ||
             !adapter_mtl4_binary_link_ok || !adapter_mtl4_render_binary_link_ok ||
             !adapter_mtl4_dynamic_compute_ok || !adapter_mtl4_dynamic_render_ok ||
-            !adapter_mtl4_archive_dynamic_ok ||
+            !adapter_mtl4_archive_dynamic_ok || !adapter_mtl4_specialization_ok ||
             adapter_mtl4_compiled_pipeline.maxTotalThreadsPerThreadgroup != 64 ||
             adapter_mtl4_compiled_pipeline.requiredThreadsPerThreadgroup.width != 8 ||
             adapter_mtl4_compiled_pipeline.requiredThreadsPerThreadgroup.height != 8 ||
@@ -4894,6 +4948,11 @@ int main(void) {
               memcmp(native_compute_pixels, adapter_mtl4_archive_dynamic_pixels, byte_count) != 0)) ||
             adapter_mtl4_compiler_render_texture == nil || adapter_mtl4_compiler_render_encoder == nil ||
             adapter_mtl4_compiler_render_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            (adapter_mtl4_specialized_render_pipeline != nil &&
+             (adapter_mtl4_specialized_render_texture == nil ||
+              adapter_mtl4_specialized_render_command_buffer == nil ||
+              adapter_mtl4_specialized_render_command_buffer.status != MTLCommandBufferStatusCompleted ||
+              memcmp(metal_pixels, adapter_mtl4_specialized_render_pixels, byte_count) != 0)) ||
             adapter_mtl4_compute_reflection == nil ||
             adapter_mtl4_compute_reflection.bindings.count != 1 ||
             ![adapter_mtl4_compute_reflection.bindings[0].name isEqualToString:@"output"] ||
@@ -4910,10 +4969,11 @@ int main(void) {
             memcmp(metal_pixels, adapter_mtl4_compiler_render_pixels, byte_count) != 0 ||
             memcmp(native_compute_pixels, adapter_mtl4_compiler_pixels, byte_count) != 0) {
             if (!adapter_mtl4_dynamic_compute_ok || !adapter_mtl4_dynamic_render_ok ||
-                !adapter_mtl4_archive_dynamic_ok) {
-                fprintf(stderr, "metal-pixel: Metal 4 dynamic linking failed compute=%d render=%d archive=%d compute_pipeline=%p render_pipeline=%p archive_compute=%p archive_render=%p error=%s\n",
+                !adapter_mtl4_archive_dynamic_ok || !adapter_mtl4_specialization_ok) {
+                fprintf(stderr, "metal-pixel: Metal 4 dynamic/specialization failed compute=%d render=%d archive=%d specialization=%d compute_pipeline=%p render_pipeline=%p archive_compute=%p archive_render=%p error=%s\n",
                         adapter_mtl4_dynamic_compute_ok, adapter_mtl4_dynamic_render_ok,
-                        adapter_mtl4_archive_dynamic_ok, adapter_mtl4_dynamic_compute_pipeline,
+                        adapter_mtl4_archive_dynamic_ok, adapter_mtl4_specialization_ok,
+                        adapter_mtl4_dynamic_compute_pipeline,
                         adapter_mtl4_dynamic_render_pipeline, adapter_mtl4_archive_dynamic_compute_pipeline,
                         adapter_mtl4_archive_dynamic_render_pipeline,
                         adapter_mtl4_dynamic_error.localizedDescription == nil ? "(null)" :

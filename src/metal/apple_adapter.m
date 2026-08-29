@@ -463,6 +463,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     BOOL _supportsAddingFragmentBinaryFunctions;
     BOOL _invalidLinking;
     BOOL _blendingEnabled;
+    BOOL _blendingStateUnspecialized;
     MTLBlendFactor _sourceRGBBlendFactor;
     MTLBlendFactor _destinationRGBBlendFactor;
     MTLBlendOperation _rgbBlendOperation;
@@ -3339,6 +3340,7 @@ static BOOL zpu_append_visible_binary_function_names(
         _supportsAddingFragmentBinaryFunctions = pipeline->_supportsAddingFragmentBinaryFunctions;
         _invalidLinking = pipeline->_invalidLinking;
         _blendingEnabled = pipeline->_blendingEnabled;
+        _blendingStateUnspecialized = pipeline->_blendingStateUnspecialized;
         _sourceRGBBlendFactor = pipeline->_sourceRGBBlendFactor;
         _destinationRGBBlendFactor = pipeline->_destinationRGBBlendFactor;
         _rgbBlendOperation = pipeline->_rgbBlendOperation;
@@ -5321,13 +5323,23 @@ static id<MTLRenderPipelineState> zpu_mtl4_render_pipeline_for_descriptor(
     legacy.supportAddingFragmentBinaryFunctions = descriptor.supportFragmentBinaryLinking;
     legacy.supportIndirectCommandBuffers =
         descriptor.supportIndirectCommandBuffers == MTL4IndirectCommandBufferSupportStateEnabled;
+    BOOL unspecialized_blending = NO;
     for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
         MTL4RenderPipelineColorAttachmentDescriptor *source = descriptor.colorAttachments[index];
         MTLRenderPipelineColorAttachmentDescriptor *destination = legacy.colorAttachments[index];
         destination.pixelFormat = source.pixelFormat;
-        if (source.blendingState == MTL4BlendStateUnspecialized) {
-            zpu_set_error(error, @"ZPU CPU Metal 4 does not specialize unspecialized blending state");
+        if (source.blendingState != MTL4BlendStateDisabled &&
+            source.blendingState != MTL4BlendStateEnabled &&
+            source.blendingState != MTL4BlendStateUnspecialized) {
+            zpu_set_error(error, @"ZPU CPU Metal 4 render pipeline has an invalid blend state");
             return nil;
+        }
+        if (source.blendingState == MTL4BlendStateUnspecialized) {
+            if (index != 0) {
+                zpu_set_error(error, @"ZPU CPU Metal 4 specializes only the first color blend state");
+                return nil;
+            }
+            unspecialized_blending = YES;
         }
         destination.blendingEnabled = source.blendingState == MTL4BlendStateEnabled;
         destination.sourceRGBBlendFactor = source.sourceRGBBlendFactor;
@@ -5340,6 +5352,7 @@ static id<MTLRenderPipelineState> zpu_mtl4_render_pipeline_for_descriptor(
     }
     id<MTLRenderPipelineState> pipeline = [owner newRenderPipelineStateWithDescriptor:legacy error:error];
     if (pipeline != nil && [pipeline isKindOfClass:[ZPURenderPipelineState class]]) {
+        ((ZPURenderPipelineState *)pipeline)->_blendingStateUnspecialized = unspecialized_blending;
         ((ZPURenderPipelineState *)pipeline)->_reflection =
             zpu_render_pipeline_reflection(vertex.name, fragment.name);
     }
@@ -5526,10 +5539,67 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 - (id<MTLRenderPipelineState>)newRenderPipelineStateBySpecializationWithDescriptor:(MTL4PipelineDescriptor *)descriptor
                                                                                 pipeline:(id<MTLRenderPipelineState>)pipeline
                                                                                    error:(NSError **)error {
-    (void)descriptor;
-    (void)pipeline;
-    zpu_set_error(error, @"ZPU CPU Metal 4 does not specialize render pipelines");
-    return nil;
+    if (![descriptor isKindOfClass:[MTL4RenderPipelineDescriptor class]] ||
+        ![pipeline isKindOfClass:[ZPURenderPipelineState class]]) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 specialization requires a CPU render pipeline and descriptor");
+        return nil;
+    }
+    ZPURenderPipelineState *base = (ZPURenderPipelineState *)pipeline;
+    if (base->_owner != _owner || !base->_blendingStateUnspecialized) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 pipeline has no unspecialized blend state");
+        return nil;
+    }
+    MTL4RenderPipelineDescriptor *render = (MTL4RenderPipelineDescriptor *)descriptor;
+    MTL4LibraryFunctionDescriptor *vertex = (MTL4LibraryFunctionDescriptor *)render.vertexFunctionDescriptor;
+    MTL4LibraryFunctionDescriptor *fragment = (MTL4LibraryFunctionDescriptor *)render.fragmentFunctionDescriptor;
+    if ((vertex != nil && ![vertex isKindOfClass:[MTL4LibraryFunctionDescriptor class]]) ||
+        (fragment != nil && ![fragment isKindOfClass:[MTL4LibraryFunctionDescriptor class]]) ||
+        (vertex != nil && ![vertex.name isEqualToString:base->_vertexFunctionName]) ||
+        (fragment != nil && ![fragment.name isEqualToString:base->_fragmentFunctionName])) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 specialization cannot replace pipeline functions");
+        return nil;
+    }
+    id<MTLFunction> resolved_vertex = vertex == nil ? nil :
+        zpu_mtl4_resolve_library_function(_owner, vertex, error);
+    id<MTLFunction> resolved_fragment = fragment == nil ? nil :
+        zpu_mtl4_resolve_library_function(_owner, fragment, error);
+    if ((vertex != nil && (resolved_vertex == nil || resolved_vertex.functionType != MTLFunctionTypeVertex)) ||
+        (fragment != nil && (resolved_fragment == nil || resolved_fragment.functionType != MTLFunctionTypeFragment))) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 specialization has an invalid pipeline function");
+        return nil;
+    }
+    MTL4RenderPipelineColorAttachmentDescriptor *attachment = render.colorAttachments[0];
+    if (attachment == nil || (attachment.blendingState != MTL4BlendStateDisabled &&
+        attachment.blendingState != MTL4BlendStateEnabled)) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 specialization requires a resolved first color blend state");
+        return nil;
+    }
+    for (NSUInteger index = 1; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
+        if (render.colorAttachments[index].blendingState == MTL4BlendStateUnspecialized) {
+            zpu_set_error(error, @"ZPU CPU Metal 4 specializes only the first color blend state");
+            return nil;
+        }
+    }
+    if (attachment.pixelFormat != MTLPixelFormatInvalid && attachment.pixelFormat != base->_colorPixelFormat) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 specialization cannot change the color format");
+        return nil;
+    }
+    ZPURenderPipelineState *specialized = [[ZPURenderPipelineState alloc]
+        initWithPipeline:base vertexFunctionNames:base->_vertexLinkedFunctionNames
+        fragmentFunctionNames:base->_fragmentLinkedFunctionNames
+        vertexBinaryNames:base->_vertexBinaryFunctionNames
+        fragmentBinaryNames:base->_fragmentBinaryFunctionNames];
+    specialized->_blendingStateUnspecialized = NO;
+    specialized->_blendingEnabled = attachment.blendingState == MTL4BlendStateEnabled;
+    specialized->_sourceRGBBlendFactor = attachment.sourceRGBBlendFactor;
+    specialized->_destinationRGBBlendFactor = attachment.destinationRGBBlendFactor;
+    specialized->_rgbBlendOperation = attachment.rgbBlendOperation;
+    specialized->_sourceAlphaBlendFactor = attachment.sourceAlphaBlendFactor;
+    specialized->_destinationAlphaBlendFactor = attachment.destinationAlphaBlendFactor;
+    specialized->_alphaBlendOperation = attachment.alphaBlendOperation;
+    specialized->_writeMask = attachment.writeMask;
+    if (error != NULL) *error = nil;
+    return specialized;
 }
 - (id<MTL4BinaryFunction>)newBinaryFunctionWithDescriptor:(MTL4BinaryFunctionDescriptor *)descriptor
                                         compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
