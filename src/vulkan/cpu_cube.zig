@@ -2410,6 +2410,41 @@ fn rasterFlatSpanTriangle(comptime depth_test: bool, color_words: []align(4) u32
             const du = u_over_w_dx * flat_reciprocal_w;
             const sampled_v = v * flat_reciprocal_w;
             var x = first;
+            // Small glyph spans rarely contain a repeated texel. Avoid the
+            // transition-estimation divisions and look-ahead samples in that
+            // case; one shade and one depth/color write per covered pixel is
+            // both cheaper and exactly equivalent.
+            if (last - first <= 8) {
+                const texel_v = unitTextureCoordinate16(sampled_v);
+                var sampled_u = u * flat_reciprocal_w;
+                const sampled_du = du * flat_reciprocal_w;
+                while (x + 4 <= last) : (x += 4) {
+                    const pixel_index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
+                    var colors: [4]u32 = undefined;
+                    inline for (0..4) |lane| {
+                        const texel_u = unitTextureCoordinate16(sampled_u + sampled_du * @as(f32, @floatFromInt(lane)));
+                        colors[lane] = prelit[texel_v * 16 + texel_u];
+                    }
+                    const passes: @Vector(4, bool) = @as(@Vector(4, u32), @splat(flat_depth_bits)) <= depth_words[pixel_index..][0..4].*;
+                    if (@reduce(.And, passes)) {
+                        depth_words[pixel_index..][0..4].* = @as(@Vector(4, u32), @splat(flat_depth_bits));
+                        color_words[pixel_index..][0..4].* = colors;
+                        pixels_written += 4;
+                    } else inline for (0..4) |lane| if (passes[lane]) {
+                        depth_words[pixel_index + lane] = flat_depth_bits;
+                        color_words[pixel_index + lane] = colors[lane];
+                        pixels_written += 1;
+                    };
+                    sampled_u += sampled_du * 4.0;
+                }
+                while (x < last) : (x += 1) {
+                    const texel_u = unitTextureCoordinate16(sampled_u);
+                    const color = prelit[texel_v * 16 + texel_u];
+                    pixels_written += writeFlatColorSpan(depth_test, color_words, depth_words, width, @intCast(y), @intCast(x), @intCast(x + 1), flat_depth_bits, color);
+                    sampled_u += sampled_du;
+                }
+                continue;
+            }
             while (x < last) {
                 const color = shadeUnitTexture16x16(u * flat_reciprocal_w, sampled_v, prelit);
                 var run_last = x + 1;
