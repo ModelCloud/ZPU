@@ -65,9 +65,11 @@ triangle path:
   texture views, level-aware mipmap generation/copies, and ordered MTLFence
   update/wait commands
 - a deferred CPU compute encoder for the explicit
-  `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8` and
-  `ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE` kernels; they operate
-  directly on ZPU-owned buffers/textures and never invoke Apple's Metal runtime
+  `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8`,
+  `ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE`, and
+  `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY` kernels; they operate directly
+  on ZPU-owned buffers/textures and never invoke Apple's Metal runtime. Array
+  dispatches expand the logical z grid into ordered per-slice ZPU commands
 - CPU-owned Metal 4 command allocators, command buffers, command queues, and
   argument tables; Metal 4 compute dispatches bridge process-local argument
   table resource IDs to ZPU-owned resources and execute through the same
@@ -104,11 +106,12 @@ triangle path:
   blit sample points resolve to `MTLCounterResultTimestamp` records in shared
   ZPU buffers. Unsupported hardware-only counters remain unavailable rather
   than being reported as fabricated statistics
-- CPU library metadata can discover the two registered kernel names from
+- CPU library metadata can discover the three registered kernel names from
   source text, UTF-8 file/URL/data inputs, and the default bundle query;
   unsupported arbitrary MSL and stitched libraries fail closed
 - `newDefaultLibrary` returns the same CPU metadata library for the registered
-  ZPU kernels; it does not load or compile an Apple `.metallib`
+  ZPU kernels, including the array kernel; it does not load or compile an Apple
+  `.metallib`
 - CPU binary archives persist and reload deterministic metadata for registered
   ZPU compute/render functions; they never serialize Apple GPU binaries
 - CPU resource-state encoders preserve Metal encoder boundaries and fence

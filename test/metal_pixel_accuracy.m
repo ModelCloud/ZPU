@@ -21,6 +21,10 @@ static const char *const kShaderSource =
     "uint2 gid [[thread_position_in_grid]]) { "
     "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
     "output.write(float4((float(gid.x) + 1.0) / 8.0, (float(gid.y) + 1.0) / 8.0, 0.25, 1.0), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_rgba8_array(texture2d_array<float, access::write> output [[texture(0)]], "
+    "uint3 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height() || gid.z >= output.get_array_size()) return; "
+    "output.write(float4((float(gid.x) + 1.0) / 8.0, (float(gid.y) + 1.0) / 8.0, 0.25, 1.0), gid.xy, gid.z); }\n"
     "kernel void zpu_cpu_copy_rgba8_buffer_to_texture(device const uchar4 *source [[buffer(0)]], "
     "texture2d<float, access::write> output [[texture(1)]], uint2 gid [[thread_position_in_grid]]) { "
     "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
@@ -1045,7 +1049,8 @@ int main(void) {
         NSError *adapter_library_error = nil;
         NSString *adapter_cpu_source =
             @"kernel void zpu_cpu_fill_gradient_rgba8() {}\n"
-             "kernel void zpu_cpu_copy_rgba8_buffer_to_texture() {}";
+             "kernel void zpu_cpu_copy_rgba8_buffer_to_texture() {}\n"
+             "kernel void zpu_cpu_fill_gradient_rgba8_array() {}";
         id<MTLLibrary> adapter_library =
             [adapter_device newLibraryWithSource:adapter_cpu_source options:nil error:&adapter_library_error];
         id<MTLFunction> adapter_library_function =
@@ -1064,7 +1069,9 @@ int main(void) {
             adapter_constant_function == nil ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 2 || !adapter_library_completion_called ||
+            adapter_library.functionNames.count != 3 ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
+            !adapter_library_completion_called ||
             unsupported_adapter_library != nil || adapter_library_error == nil) {
             fail_with_error("CPU library/function metadata failed", adapter_library_error);
             return 50;
@@ -1203,6 +1210,88 @@ int main(void) {
                         index, native_compute_pixels[index], adapter_compute_pixels[index]);
                 return 43;
             }
+        }
+
+        MTLTextureDescriptor *compute_array_descriptor = [MTLTextureDescriptor new];
+        compute_array_descriptor.textureType = MTLTextureType2DArray;
+        compute_array_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        compute_array_descriptor.width = width;
+        compute_array_descriptor.height = height;
+        compute_array_descriptor.arrayLength = 2;
+        compute_array_descriptor.mipmapLevelCount = 1;
+        compute_array_descriptor.sampleCount = 1;
+        compute_array_descriptor.storageMode = MTLStorageModeShared;
+        compute_array_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        id<MTLFunction> native_array_compute_function =
+            [library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"];
+        id<MTLComputePipelineState> native_array_compute_pipeline =
+            [device newComputePipelineStateWithFunction:native_array_compute_function error:&error];
+        id<MTLTexture> native_array_compute_texture = [device newTextureWithDescriptor:compute_array_descriptor];
+        id<MTLCommandBuffer> native_array_compute_command_buffer = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> native_array_compute_encoder =
+            [native_array_compute_command_buffer computeCommandEncoder];
+        [native_array_compute_encoder setComputePipelineState:native_array_compute_pipeline];
+        [native_array_compute_encoder setTexture:native_array_compute_texture atIndex:0];
+        [native_array_compute_encoder dispatchThreads:MTLSizeMake(width, height, 2)
+                                  threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+        [native_array_compute_encoder endEncoding];
+        [native_array_compute_command_buffer commit];
+        [native_array_compute_command_buffer waitUntilCompleted];
+        id<MTLFunction> adapter_array_compute_function =
+            ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_fill_gradient_rgba8_array");
+        id<MTLComputePipelineState> adapter_array_compute_pipeline =
+            [adapter_device newComputePipelineStateWithFunction:adapter_array_compute_function error:&adapter_compute_error];
+        id<MTLTexture> adapter_array_compute_texture =
+            [adapter_device newTextureWithDescriptor:compute_array_descriptor];
+        id<MTLCommandBuffer> adapter_array_compute_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> adapter_array_compute_encoder =
+            [adapter_array_compute_command_buffer computeCommandEncoder];
+        [adapter_array_compute_encoder setComputePipelineState:adapter_array_compute_pipeline];
+        [adapter_array_compute_encoder setTexture:adapter_array_compute_texture atIndex:0];
+        [adapter_array_compute_encoder dispatchThreads:MTLSizeMake(width, height, 2)
+                                   threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+        [adapter_array_compute_encoder endEncoding];
+        uint8_t adapter_array_compute_deferred[2][byte_count];
+        for (NSUInteger slice = 0; slice < 2; ++slice) {
+            [adapter_array_compute_texture getBytes:adapter_array_compute_deferred[slice]
+                                       bytesPerRow:(NSUInteger)width * 4
+                                     bytesPerImage:byte_count
+                                      fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                                     mipmapLevel:0
+                                            slice:slice];
+        }
+        [adapter_array_compute_command_buffer commit];
+        [adapter_array_compute_command_buffer waitUntilCompleted];
+        uint8_t native_array_compute_pixels[2][byte_count];
+        uint8_t adapter_array_compute_pixels[2][byte_count];
+        for (NSUInteger slice = 0; slice < 2; ++slice) {
+            [native_array_compute_texture getBytes:native_array_compute_pixels[slice]
+                                      bytesPerRow:(NSUInteger)width * 4
+                                    bytesPerImage:byte_count
+                                     fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                                    mipmapLevel:0
+                                           slice:slice];
+            [adapter_array_compute_texture getBytes:adapter_array_compute_pixels[slice]
+                                       bytesPerRow:(NSUInteger)width * 4
+                                     bytesPerImage:byte_count
+                                      fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                                     mipmapLevel:0
+                                            slice:slice];
+        }
+        BOOL array_compute_exact = native_array_compute_function != nil && native_array_compute_pipeline != nil &&
+            native_array_compute_texture != nil &&
+            native_array_compute_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_array_compute_function != nil && adapter_array_compute_pipeline != nil &&
+            adapter_array_compute_texture != nil &&
+            adapter_array_compute_command_buffer.status == MTLCommandBufferStatusCompleted;
+        for (NSUInteger slice = 0; slice < 2; ++slice) {
+            array_compute_exact = array_compute_exact &&
+                memcmp(adapter_array_compute_deferred[slice], (const uint8_t[byte_count]){0}, byte_count) == 0 &&
+                memcmp(native_array_compute_pixels[slice], adapter_array_compute_pixels[slice], byte_count) == 0;
+        }
+        if (!array_compute_exact) {
+            fprintf(stderr, "metal-pixel: 2D-array compute exactness failed\n");
+            return 44;
         }
 
         uint8_t compute_source_bytes[byte_count];

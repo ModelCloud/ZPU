@@ -216,6 +216,7 @@ typedef uint8_t zpu_metal_compute_kernel;
 enum {
     ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8 = 1,
     ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE = 2,
+    ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY = 3,
 };
 
 typedef uint8_t zpu_metal_command_buffer_status;

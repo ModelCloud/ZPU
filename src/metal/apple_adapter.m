@@ -502,6 +502,9 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     zpu_metal_compute_encoder *_zpuEncoder;
     ZPUCommandBuffer *_owner;
     MTLDispatchType _dispatchType;
+    zpu_metal_compute_kernel _kernel;
+    ZPUTexture *_boundTexture;
+    NSUInteger _boundTextureIndex;
 }
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner encoder:(zpu_metal_compute_encoder *)encoder;
 - (void)setComputePipelineState:(id<MTLComputePipelineState>)state;
@@ -2008,7 +2011,7 @@ static uint64_t zpu_cpu_timestamp(void) {
 }
 - (id<MTLLibrary>)newDefaultLibrary {
     return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
-                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture"];
+                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array"];
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
@@ -2379,6 +2382,7 @@ static uint64_t zpu_cpu_timestamp(void) {
         for (NSString *name in @[
             @"zpu_cpu_fill_gradient_rgba8",
             @"zpu_cpu_copy_rgba8_buffer_to_texture",
+            @"zpu_cpu_fill_gradient_rgba8_array",
         ]) {
             if ([source rangeOfString:name].location != NSNotFound) [names addObject:name];
         }
@@ -3656,6 +3660,8 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
             _kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8;
         } else if (is_kernel && [name isEqualToString:@"zpu_cpu_copy_rgba8_buffer_to_texture"]) {
             _kernel = ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE;
+        } else if (is_kernel && [name isEqualToString:@"zpu_cpu_fill_gradient_rgba8_array"]) {
+            _kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY;
         } else {
             zpu_set_error(error, @"ZPU CPU Metal has no registered CPU implementation for this compute function");
             return nil;
@@ -3714,7 +3720,14 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 
 @implementation ZPUComputeEncoder
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner encoder:(zpu_metal_compute_encoder *)encoder {
-    if ((self = [super init])) { _owner = owner; _zpuEncoder = encoder; _dispatchType = MTLDispatchTypeSerial; }
+    if ((self = [super init])) {
+        _owner = owner;
+        _zpuEncoder = encoder;
+        _dispatchType = MTLDispatchTypeSerial;
+        _kernel = 0;
+        _boundTexture = nil;
+        _boundTextureIndex = 0;
+    }
     return self;
 }
 - (void)dealloc {
@@ -3734,6 +3747,7 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
         [_owner markError];
         return;
     }
+    _kernel = pipeline->_kernel;
     [_owner retainResource:pipeline];
 }
 - (void)setBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(10.11), ios(8.3)) {
@@ -3796,7 +3810,9 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
         [_owner markError];
         return;
     }
-    [_owner retainResource:zpuTexture];
+    _boundTexture = zpuTexture;
+    _boundTextureIndex = index;
+    if (zpuTexture != nil) [_owner retainResource:zpuTexture];
 }
 - (void)setTextures:(const id<MTLTexture> __nullable [__nonnull])textures withRange:(NSRange)range {
     if (textures == NULL) { [_owner markError]; return; }
@@ -3914,6 +3930,31 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
         [_owner markError];
         return;
     }
+    const BOOL arrayKernel = _kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY;
+    if (arrayKernel) {
+        if (_boundTexture == nil || _boundTexture->_textureType != MTLTextureType2DArray ||
+            threadsPerGrid.depth > _boundTexture.arrayLength) {
+            [_owner markError];
+            return;
+        }
+        for (NSUInteger slice = 0; slice < threadsPerGrid.depth; ++slice) {
+            zpu_metal_texture *sliceTexture = [_boundTexture zpuTextureAtLevel:0 slice:slice];
+            if (sliceTexture == NULL ||
+                zpu_metal_compute_encoder_set_texture(_zpuEncoder, sliceTexture, (uint32_t)_boundTextureIndex) != ZPU_METAL_OK ||
+                zpu_metal_compute_encoder_dispatch_threads(_zpuEncoder,
+                    (zpu_metal_size){(uint32_t)threadsPerGrid.width, (uint32_t)threadsPerGrid.height, 1},
+                    (zpu_metal_size){(uint32_t)threadsPerThreadgroup.width, (uint32_t)threadsPerThreadgroup.height,
+                                     (uint32_t)threadsPerThreadgroup.depth}) != ZPU_METAL_OK) {
+                [_owner markError];
+                return;
+            }
+        }
+        return;
+    }
+    if (_boundTexture != nil && _boundTexture->_textureType == MTLTextureType2DArray) {
+        [_owner markError];
+        return;
+    }
     if (zpu_metal_compute_encoder_dispatch_threads(_zpuEncoder,
             (zpu_metal_size){(uint32_t)threadsPerGrid.width, (uint32_t)threadsPerGrid.height, (uint32_t)threadsPerGrid.depth},
             (zpu_metal_size){(uint32_t)threadsPerThreadgroup.width, (uint32_t)threadsPerThreadgroup.height, (uint32_t)threadsPerThreadgroup.depth}) != ZPU_METAL_OK) {
@@ -3924,6 +3965,23 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     if (!zpu_u32(threadgroupsPerGrid.width, &(uint32_t){0}) || !zpu_u32(threadgroupsPerGrid.height, &(uint32_t){0}) ||
         !zpu_u32(threadgroupsPerGrid.depth, &(uint32_t){0}) || !zpu_u32(threadsPerThreadgroup.width, &(uint32_t){0}) ||
         !zpu_u32(threadsPerThreadgroup.height, &(uint32_t){0}) || !zpu_u32(threadsPerThreadgroup.depth, &(uint32_t){0})) {
+        [_owner markError];
+        return;
+    }
+    if (_kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY &&
+        _boundTexture != nil && _boundTexture->_textureType == MTLTextureType2DArray) {
+        const uint64_t gridWidth = (uint64_t)threadgroupsPerGrid.width * threadsPerThreadgroup.width;
+        const uint64_t gridHeight = (uint64_t)threadgroupsPerGrid.height * threadsPerThreadgroup.height;
+        if (gridWidth > UINT32_MAX || gridHeight > UINT32_MAX) {
+            [_owner markError];
+            return;
+        }
+        [self dispatchThreads:MTLSizeMake((NSUInteger)gridWidth, (NSUInteger)gridHeight, threadgroupsPerGrid.depth)
+             threadsPerThreadgroup:threadsPerThreadgroup];
+        return;
+    }
+    if (_kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY ||
+        (_boundTexture != nil && _boundTexture->_textureType == MTLTextureType2DArray)) {
         [_owner markError];
         return;
     }
