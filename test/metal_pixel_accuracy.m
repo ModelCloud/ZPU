@@ -2948,10 +2948,13 @@ int main(void) {
             [adapter_mtl4_compiler newLibraryWithDescriptor:adapter_mtl4_library_descriptor
                                                        error:&adapter_mtl4_compiler_error];
         MTLFunctionReflection *adapter_mtl4_function_reflection = nil;
+        MTLFunctionReflection *adapter_mtl4_no_raster_reflection = nil;
         MTLFunctionReflection *native_function_reflection = nil;
         if (@available(macOS 26.0, iOS 26.0, *)) {
             adapter_mtl4_function_reflection =
                 [adapter_mtl4_library reflectionForFunctionWithName:@"zpu_cpu_fill_gradient_rgba8"];
+            adapter_mtl4_no_raster_reflection =
+                [adapter_mtl4_library reflectionForFunctionWithName:@"zpu_test_no_raster_vertex"];
             native_function_reflection =
                 [library reflectionForFunctionWithName:@"zpu_cpu_fill_gradient_rgba8"];
         }
@@ -3111,6 +3114,8 @@ int main(void) {
             adapter_mtl4_function_reflection.bindings.count != 1 ||
             ![adapter_mtl4_function_reflection.bindings[0].name isEqualToString:@"output"] ||
             adapter_mtl4_function_reflection.bindings[0].type != MTLBindingTypeTexture ||
+            adapter_mtl4_no_raster_reflection == nil ||
+            adapter_mtl4_no_raster_reflection.bindings.count != 0 ||
             (native_function_reflection != nil && native_function_reflection.bindings.count != 1) ||
             adapter_mtl4_compiled_pipeline == nil || adapter_mtl4_compiled_render_pipeline == nil ||
             adapter_mtl4_archived_render_pipeline == nil || adapter_mtl4_binary_function == nil ||

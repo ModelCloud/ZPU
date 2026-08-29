@@ -2340,7 +2340,11 @@ static MTLRenderPipelineReflection *zpu_render_pipeline_reflection(NSString *ver
 
 API_AVAILABLE(macos(26.0), ios(26.0))
 static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
-    if ([name isEqualToString:@"zpu_test_vertex"] || [name isEqualToString:@"zpu_test_no_raster_vertex"]) {
+    if ([name isEqualToString:@"zpu_test_no_raster_vertex"]) {
+        return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+            initWithBindings:@[] userAnnotation:nil];
+    }
+    if ([name isEqualToString:@"zpu_test_vertex"]) {
         ZPUBinding *binding = zpu_reflection_binding(@"vertices", MTLBindingTypeBuffer,
                                                       MTLBindingAccessReadOnly, 0);
         [binding setBufferDataSize:sizeof(zpu_metal_vertex) dataType:MTLDataTypeStruct];
