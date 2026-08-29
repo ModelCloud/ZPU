@@ -6502,6 +6502,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     }
     [_owner->_legacyBuffer retainResource:source];
     [_owner->_legacyBuffer retainResource:destination];
+    _stages |= MTLStageBlit;
 }
 - (void)generateMipmapsForTexture:(id<MTLTexture>)texture {
     ZPUTexture *zpuTexture = (ZPUTexture *)texture;
@@ -6561,13 +6562,66 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     [_owner->_legacyBuffer retainResource:zpuBuffer];
     _stages |= MTLStageBlit;
 }
-- (void)optimizeContentsForGPUAccess:(id<MTLTexture>)texture { (void)texture; }
-- (void)optimizeContentsForGPUAccess:(id<MTLTexture>)texture slice:(NSUInteger)slice level:(NSUInteger)level { (void)texture; (void)slice; (void)level; }
-- (void)optimizeContentsForCPUAccess:(id<MTLTexture>)texture { (void)texture; }
-- (void)optimizeContentsForCPUAccess:(id<MTLTexture>)texture slice:(NSUInteger)slice level:(NSUInteger)level { (void)texture; (void)slice; (void)level; }
-- (void)resetCommandsInBuffer:(id<MTLIndirectCommandBuffer>)buffer withRange:(NSRange)range { (void)buffer; (void)range; [_owner markError]; }
-- (void)copyIndirectCommandBuffer:(id<MTLIndirectCommandBuffer>)source sourceRange:(NSRange)sourceRange destination:(id<MTLIndirectCommandBuffer>)destination destinationIndex:(NSUInteger)destinationIndex { (void)source; (void)sourceRange; (void)destination; (void)destinationIndex; [_owner markError]; }
-- (void)optimizeIndirectCommandBuffer:(id<MTLIndirectCommandBuffer>)indirectCommandBuffer withRange:(NSRange)range { (void)indirectCommandBuffer; (void)range; }
+- (void)optimizeContentsForGPUAccess:(id<MTLTexture>)texture {
+    ZPUTexture *zpuTexture = (ZPUTexture *)texture;
+    if (!zpu_texture_belongs_to_device(_owner->_owner, zpuTexture)) {
+        [_owner markError];
+        return;
+    }
+    [_owner->_legacyBuffer retainResource:zpuTexture];
+    _stages |= MTLStageBlit;
+}
+- (void)optimizeContentsForGPUAccess:(id<MTLTexture>)texture slice:(NSUInteger)slice level:(NSUInteger)level {
+    ZPUTexture *zpuTexture = (ZPUTexture *)texture;
+    if (!zpu_texture_belongs_to_device(_owner->_owner, zpuTexture) ||
+        [zpuTexture zpuTextureAtLevel:level slice:zpu_texture_type_is_3d(zpuTexture->_textureType) ? 0 : slice] == NULL) {
+        [_owner markError];
+        return;
+    }
+    [_owner->_legacyBuffer retainResource:zpuTexture];
+    _stages |= MTLStageBlit;
+}
+- (void)optimizeContentsForCPUAccess:(id<MTLTexture>)texture {
+    [self optimizeContentsForGPUAccess:texture];
+}
+- (void)optimizeContentsForCPUAccess:(id<MTLTexture>)texture slice:(NSUInteger)slice level:(NSUInteger)level {
+    [self optimizeContentsForGPUAccess:texture slice:slice level:level];
+}
+- (void)resetCommandsInBuffer:(id<MTLIndirectCommandBuffer>)buffer withRange:(NSRange)range {
+    ZPUIndirectCommandBuffer *zpuBuffer = (ZPUIndirectCommandBuffer *)buffer;
+    if (![zpuBuffer isKindOfClass:[ZPUIndirectCommandBuffer class]] || zpuBuffer->_owner != _owner->_owner ||
+        range.location > zpuBuffer->_maxCommandCount || range.length > zpuBuffer->_maxCommandCount - range.location) {
+        [_owner markError];
+        return;
+    }
+    [zpuBuffer resetWithRange:range];
+    [_owner->_legacyBuffer retainResource:zpuBuffer];
+    _stages |= MTLStageBlit;
+}
+- (void)copyIndirectCommandBuffer:(id<MTLIndirectCommandBuffer>)source sourceRange:(NSRange)sourceRange destination:(id<MTLIndirectCommandBuffer>)destination destinationIndex:(NSUInteger)destinationIndex {
+    ZPUIndirectCommandBuffer *zpuSource = (ZPUIndirectCommandBuffer *)source;
+    ZPUIndirectCommandBuffer *zpuDestination = (ZPUIndirectCommandBuffer *)destination;
+    if (![zpuSource isKindOfClass:[ZPUIndirectCommandBuffer class]] ||
+        ![zpuDestination isKindOfClass:[ZPUIndirectCommandBuffer class]] ||
+        zpuSource->_owner != _owner->_owner || zpuDestination->_owner != _owner->_owner ||
+        ![zpuDestination copyCommandsFrom:zpuSource sourceRange:sourceRange destinationIndex:destinationIndex]) {
+        [_owner markError];
+        return;
+    }
+    [_owner->_legacyBuffer retainResource:zpuSource];
+    [_owner->_legacyBuffer retainResource:zpuDestination];
+    _stages |= MTLStageBlit;
+}
+- (void)optimizeIndirectCommandBuffer:(id<MTLIndirectCommandBuffer>)indirectCommandBuffer withRange:(NSRange)range {
+    ZPUIndirectCommandBuffer *zpuBuffer = (ZPUIndirectCommandBuffer *)indirectCommandBuffer;
+    if (![zpuBuffer isKindOfClass:[ZPUIndirectCommandBuffer class]] || zpuBuffer->_owner != _owner->_owner ||
+        range.location > zpuBuffer->_maxCommandCount || range.length > zpuBuffer->_maxCommandCount - range.location) {
+        [_owner markError];
+        return;
+    }
+    [_owner->_legacyBuffer retainResource:zpuBuffer];
+    _stages |= MTLStageBlit;
+}
 - (void)buildAccelerationStructure:(id<MTLAccelerationStructure>)accelerationStructure descriptor:(MTL4AccelerationStructureDescriptor *)descriptor scratchBuffer:(MTL4BufferRange)scratchBuffer { (void)accelerationStructure; (void)descriptor; (void)scratchBuffer; [_owner markError]; }
 - (void)refitAccelerationStructure:(id<MTLAccelerationStructure>)sourceAccelerationStructure descriptor:(MTL4AccelerationStructureDescriptor *)descriptor destination:(id<MTLAccelerationStructure>)destinationAccelerationStructure scratchBuffer:(MTL4BufferRange)scratchBuffer { (void)sourceAccelerationStructure; (void)descriptor; (void)destinationAccelerationStructure; (void)scratchBuffer; [_owner markError]; }
 - (void)refitAccelerationStructure:(id<MTLAccelerationStructure>)sourceAccelerationStructure descriptor:(MTL4AccelerationStructureDescriptor *)descriptor destination:(id<MTLAccelerationStructure>)destinationAccelerationStructure scratchBuffer:(MTL4BufferRange)scratchBuffer options:(MTLAccelerationStructureRefitOptions)options { (void)sourceAccelerationStructure; (void)descriptor; (void)destinationAccelerationStructure; (void)scratchBuffer; (void)options; [_owner markError]; }

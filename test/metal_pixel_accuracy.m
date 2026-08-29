@@ -4637,6 +4637,7 @@ int main(void) {
                                 sliceDimensions:metal4_tensor_dimensions];
             if (metal4_source_tensor == nil || metal4_destination_tensor == nil ||
                 metal4_tensor_command_buffer == nil || metal4_tensor_encoder == nil ||
+                [metal4_tensor_encoder stages] != MTLStageBlit ||
                 memcmp(metal4_tensor_copy_values, metal4_tensor_values,
                        sizeof(metal4_tensor_values)) != 0) {
                 fail_with_error("Metal 4 CPU tensor copy failed", metal4_error);
@@ -5091,14 +5092,30 @@ int main(void) {
                                    sourceSize:MTLSizeMake(width, height, 1)
                                     toBuffer:metal4_buffer_back destinationOffset:0
                            destinationBytesPerRow:width * 4 destinationBytesPerImage:0];
+        [metal4_copy_encoder optimizeContentsForCPUAccess:metal4_texture_copy];
+        [metal4_copy_encoder optimizeContentsForGPUAccess:metal4_buffer_texture slice:0 level:0];
+        MTLIndirectCommandBufferDescriptor *metal4_copy_icb_descriptor = [MTLIndirectCommandBufferDescriptor new];
+        metal4_copy_icb_descriptor.commandTypes = MTLIndirectCommandTypeDraw;
+        id<MTLIndirectCommandBuffer> metal4_copy_icb_source =
+            [adapter_device newIndirectCommandBufferWithDescriptor:metal4_copy_icb_descriptor
+                                                     maxCommandCount:2 options:MTLResourceStorageModeShared];
+        id<MTLIndirectCommandBuffer> metal4_copy_icb_destination =
+            [adapter_device newIndirectCommandBufferWithDescriptor:metal4_copy_icb_descriptor
+                                                     maxCommandCount:2 options:MTLResourceStorageModeShared];
+        [metal4_copy_encoder resetCommandsInBuffer:metal4_copy_icb_source withRange:NSMakeRange(0, 2)];
+        [metal4_copy_encoder copyIndirectCommandBuffer:metal4_copy_icb_source sourceRange:NSMakeRange(0, 2)
+                                           destination:metal4_copy_icb_destination destinationIndex:0];
+        [metal4_copy_encoder optimizeIndirectCommandBuffer:metal4_copy_icb_destination withRange:NSMakeRange(0, 2)];
         [metal4_copy_encoder endEncoding];
         [metal4_copy_command_buffer endCommandBuffer];
         id<MTL4CommandBuffer> metal4_copy_command_buffers[] = {metal4_copy_command_buffer};
         [metal4_queue commit:metal4_copy_command_buffers count:1];
         if (metal4_buffer_copy == nil || metal4_texture_copy == nil || metal4_texture_back == nil ||
             metal4_buffer_texture == nil || metal4_buffer_back == nil || metal4_filled_buffer == nil ||
+            metal4_copy_icb_source == nil || metal4_copy_icb_destination == nil ||
             metal4_copy_command_buffer == nil ||
             metal4_copy_encoder == nil ||
+            [metal4_copy_encoder stages] != MTLStageBlit ||
             memcmp(adapter_copy_buffer.contents, metal4_buffer_copy.contents, byte_count) != 0 ||
             memcmp(metal4_pixels, metal4_texture_back.contents, byte_count) != 0 ||
             memcmp(adapter_copy_buffer.contents, metal4_buffer_back.contents, byte_count) != 0 ||
