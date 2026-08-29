@@ -656,13 +656,26 @@ int main(void) {
         [metal4_encoder endEncoding];
         [metal4_command_buffer endCommandBuffer];
         id<MTL4CommandBuffer> metal4_command_buffers[] = {metal4_command_buffer};
-        [metal4_queue commit:metal4_command_buffers count:1];
+        MTL4CommitOptions *metal4_commit_options = ZPUMetalCreateCPUCommitOptions();
+        __block BOOL metal4_feedback_called = NO;
+        __block NSError *metal4_feedback_error = nil;
+        __block CFTimeInterval metal4_feedback_start = 0.0;
+        __block CFTimeInterval metal4_feedback_end = 0.0;
+        [metal4_commit_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            metal4_feedback_called = YES;
+            metal4_feedback_error = feedback.error;
+            metal4_feedback_start = feedback.GPUStartTime;
+            metal4_feedback_end = feedback.GPUEndTime;
+        }];
+        [metal4_queue commit:metal4_command_buffers count:1 options:metal4_commit_options];
         uint8_t metal4_pixels[byte_count];
         [adapter_compute_texture getBytes:metal4_pixels bytesPerRow:(NSUInteger)width * 4
                                fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
         if (metal4_allocator == nil || metal4_queue == nil || metal4_table == nil ||
             metal4_event == nil || ((id<MTLSharedEvent>)metal4_event).signaledValue != 13 ||
             metal4_command_buffer == nil || metal4_encoder == nil ||
+            !metal4_feedback_called || metal4_feedback_error != nil || metal4_feedback_start <= 0.0 ||
+            metal4_feedback_end < metal4_feedback_start ||
             ![metal4_allocator conformsToProtocol:@protocol(MTL4CommandAllocator)] ||
             ![metal4_queue conformsToProtocol:@protocol(MTL4CommandQueue)] ||
             ![metal4_command_buffer conformsToProtocol:@protocol(MTL4CommandBuffer)] ||

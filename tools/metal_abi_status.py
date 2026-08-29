@@ -82,6 +82,7 @@ SOURCE_SYMBOL_ALIASES = {
     "MTLBlitCommandEncoder.fillBuffer": "zpu_metal_blit_encoder_fill_buffer",
     "MTLBlitCommandEncoder.synchronizeResource": "zpu_metal_blit_encoder_synchronize_resource",
     "MTL4ArgumentTable.setAddressAttributeStride": "setAddress",
+    "MTL4CommandQueue.commitWithOptions": "commit",
     "MTL4CommandBuffer.renderCommandEncoderWithDescriptorOptions": "renderCommandEncoderWithDescriptor",
     "MTLTextureViewPool.setTextureViewDescriptor": "setTextureView",
 }

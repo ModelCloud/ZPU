@@ -57,6 +57,10 @@ triangle path:
   argument tables; Metal 4 compute dispatches bridge process-local argument
   table resource IDs to ZPU-owned resources and execute through the same
   deferred CPU kernels
+- CPU-owned Metal 4 commit options and feedback; the explicit
+  `ZPUMetalCreateCPUCommitOptions()` extension creates options whose feedback
+  handlers receive host-time start/end values after the ZPU command buffers
+  complete
 - CPU-owned Metal 4 render encoders for ordinary render passes; they bridge
   MTL4 attachment descriptors, GPU-address argument tables, fixed-function
   raster state, indexed/indirect draws, fences, and viewport/scissor state to

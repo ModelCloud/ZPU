@@ -307,6 +307,24 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @end
 
 API_AVAILABLE(macos(26.0), ios(26.0))
+@interface ZPUMTL4CommitFeedback : NSObject <MTL4CommitFeedback> {
+@public
+    NSError *_error;
+    CFTimeInterval _GPUStartTime;
+    CFTimeInterval _GPUEndTime;
+}
+- (instancetype)initWithError:(NSError *)error startTime:(CFTimeInterval)startTime endTime:(CFTimeInterval)endTime;
+@end
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+@interface ZPUMTL4CommitOptions : MTL4CommitOptions {
+@public
+    NSMutableArray *_feedbackHandlers;
+}
+- (NSArray *)feedbackHandlers;
+@end
+
+API_AVAILABLE(macos(26.0), ios(26.0))
 @interface ZPUMTL4CommandBuffer : NSObject <MTL4CommandBuffer> {
 @public
     ZPUDevice *_owner;
@@ -2301,6 +2319,31 @@ static uint64_t zpu_cpu_timestamp(void) {
 - (void)reset {}
 @end
 
+@implementation ZPUMTL4CommitFeedback
+- (instancetype)initWithError:(NSError *)error startTime:(CFTimeInterval)startTime endTime:(CFTimeInterval)endTime {
+    if ((self = [super init])) {
+        _error = error;
+        _GPUStartTime = startTime;
+        _GPUEndTime = endTime;
+    }
+    return self;
+}
+- (NSError *)error { return _error; }
+- (CFTimeInterval)GPUStartTime { return _GPUStartTime; }
+- (CFTimeInterval)GPUEndTime { return _GPUEndTime; }
+@end
+
+@implementation ZPUMTL4CommitOptions
+- (instancetype)init {
+    if ((self = [super init])) _feedbackHandlers = [NSMutableArray array];
+    return self;
+}
+- (void)addFeedbackHandler:(MTL4CommitFeedbackHandler)block {
+    if (block != nil) [_feedbackHandlers addObject:[block copy]];
+}
+- (NSArray *)feedbackHandlers { return [_feedbackHandlers copy]; }
+@end
+
 @implementation ZPUMTL4ArgumentTable
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTL4ArgumentTableDescriptor *)descriptor {
     if ((self = [super init])) {
@@ -2513,8 +2556,26 @@ static uint64_t zpu_cpu_timestamp(void) {
     }
 }
 - (void)commit:(const id<MTL4CommandBuffer> __nonnull [__nonnull])commandBuffers count:(NSUInteger)count options:(MTL4CommitOptions *)options {
-    (void)options;
-    [self commit:commandBuffers count:count];
+    const CFTimeInterval startTime = CFAbsoluteTimeGetCurrent();
+    BOOL success = commandBuffers != NULL || count == 0;
+    for (NSUInteger index = 0; success && index < count; ++index) {
+        ZPUMTL4CommandBuffer *buffer = (ZPUMTL4CommandBuffer *)commandBuffers[index];
+        if (![buffer isKindOfClass:[ZPUMTL4CommandBuffer class]] || buffer->_owner != _owner ||
+            ![buffer commitCPU]) {
+            if ([buffer respondsToSelector:@selector(markError)]) [buffer markError];
+            success = NO;
+        }
+    }
+    if ([options isKindOfClass:[ZPUMTL4CommitOptions class]]) {
+        NSError *error = success ? nil : [NSError errorWithDomain:@"ZPUMetal"
+                                                              code:ZPU_METAL_INVALID_COMMAND
+                                                          userInfo:@{NSLocalizedDescriptionKey: @"ZPU Metal 4 CPU command queue commit failed"}];
+        ZPUMTL4CommitFeedback *feedback = [[ZPUMTL4CommitFeedback alloc]
+            initWithError:error startTime:startTime endTime:CFAbsoluteTimeGetCurrent()];
+        for (MTL4CommitFeedbackHandler block in [(ZPUMTL4CommitOptions *)options feedbackHandlers]) {
+            block((id<MTL4CommitFeedback>)feedback);
+        }
+    }
 }
 - (void)signalEvent:(id<MTLEvent>)event value:(uint64_t)value {
     ZPUSharedEvent *zpuEvent = (ZPUSharedEvent *)event;
@@ -4701,4 +4762,8 @@ id<MTLDevice> ZPUMetalCreateSystemDefaultDevice(void) {
 id<MTLFunction> ZPUMetalCreateCPUFunction(id<MTLDevice> device, NSString *name) {
     if (![device isKindOfClass:[ZPUDevice class]] || name == nil) return nil;
     return (id<MTLFunction>)[[ZPUCPUFunction alloc] initWithOwner:(ZPUDevice *)device name:name];
+}
+
+MTL4CommitOptions *ZPUMetalCreateCPUCommitOptions(void) API_AVAILABLE(macos(26.0), ios(26.0)) {
+    return (MTL4CommitOptions *)[[ZPUMTL4CommitOptions alloc] init];
 }
