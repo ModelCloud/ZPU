@@ -190,6 +190,16 @@ fn textureFormatFromRaw(format_raw: u16) ?TextureFormat {
     };
 }
 
+fn isDepthTextureFormat(format: TextureFormat) bool {
+    return format == .depth16_unorm or format == .depth32_float or
+        format == .depth24_unorm_stencil8 or format == .depth32_float_stencil8;
+}
+
+fn isStencilTextureFormat(format: TextureFormat) bool {
+    return format == .stencil8 or format == .depth24_unorm_stencil8 or
+        format == .depth32_float_stencil8 or format == .x32_stencil8 or format == .x24_stencil8;
+}
+
 fn textureFormatsViewCompatible(source: TextureFormat, view: TextureFormat) bool {
     if (source == view) return true;
     const source_packed_32 = source == .rgba8_unorm or source == .bgra8_unorm or source == .r32_float;
@@ -378,6 +388,7 @@ const BeginRenderCommand = struct {
     depth: ?[]f32 = null,
     depth_texture: ?*Texture = null,
     stencil: ?[]u8 = null,
+    stencil_texture: ?*Texture = null,
     stencil_load_action: abi.LoadAction = .dont_care,
     stencil_store_action: abi.StoreAction = .dont_care,
     stencil_clear: u8 = 0,
@@ -604,10 +615,17 @@ pub const CommandBuffer = struct {
         var active_depth_values: ?[]f32 = null;
         var active_depth_store_action: abi.StoreAction = .dont_care;
         var active_stencil: ?[]u8 = null;
+        var active_stencil_texture: ?*Texture = null;
+        var active_stencil_values: ?[]u8 = null;
+        var active_stencil_store_action: abi.StoreAction = .dont_care;
         var reset_visibility_slots: std.ArrayList(VisibilitySlot) = .empty;
         defer reset_visibility_slots.deinit(allocator);
         defer if (active_depth_values) |values| {
-            if (active_depth_store_action == .store) storeDepth16Texture(active_depth_texture.?, values);
+            if (active_depth_store_action == .store) storeDepthTexture(active_depth_texture.?, values);
+            allocator.free(values);
+        };
+        defer if (active_stencil_values) |values| {
+            if (active_stencil_store_action == .store) storeStencilTexture(active_stencil_texture.?, values);
             allocator.free(values);
         };
 
@@ -615,9 +633,14 @@ pub const CommandBuffer = struct {
             .begin_render => |begin_render| {
                 if (!validTexture(begin_render.target)) return self.fail(error.InvalidResource);
                 if (active_depth_values) |values| {
-                    if (active_depth_store_action == .store) storeDepth16Texture(active_depth_texture.?, values);
+                    if (active_depth_store_action == .store) storeDepthTexture(active_depth_texture.?, values);
                     allocator.free(values);
                     active_depth_values = null;
+                }
+                if (active_stencil_values) |values| {
+                    if (active_stencil_store_action == .store) storeStencilTexture(active_stencil_texture.?, values);
+                    allocator.free(values);
+                    active_stencil_values = null;
                 }
                 reset_visibility_slots.clearRetainingCapacity();
                 active_target = begin_render.target;
@@ -638,17 +661,29 @@ pub const CommandBuffer = struct {
                 active_depth = begin_render.depth;
                 if (begin_render.depth_texture) |depth_texture| {
                     if (!validTexture(depth_texture) or depth_texture.device != self.queue.device or
-                        depth_texture.format != .depth16_unorm or depth_texture.width != begin_render.target.width or
+                        !isDepthTextureFormat(depth_texture.format) or depth_texture.width != begin_render.target.width or
                         depth_texture.height != begin_render.target.height) return self.fail(error.InvalidResource);
                     const pixel_count = std.math.mul(usize, depth_texture.width, depth_texture.height) catch return self.fail(error.InvalidArgument);
                     const values = allocator.alloc(f32, pixel_count) catch return self.fail(error.OutOfMemory);
                     active_depth_values = values;
                     for (values, 0..) |*value, index| {
-                        value.* = @as(f32, @floatFromInt(readU16Little(depth_texture.bytes, index * 2))) / 65535.0;
+                        value.* = depthTextureValue(depth_texture, index);
                     }
                     active_depth = values;
                 }
                 active_stencil = begin_render.stencil;
+                active_stencil_texture = begin_render.stencil_texture;
+                active_stencil_store_action = begin_render.stencil_store_action;
+                if (begin_render.stencil_texture) |stencil_texture| {
+                    if (!validTexture(stencil_texture) or stencil_texture.device != self.queue.device or
+                        !isStencilTextureFormat(stencil_texture.format) or stencil_texture.width != begin_render.target.width or
+                        stencil_texture.height != begin_render.target.height) return self.fail(error.InvalidResource);
+                    const pixel_count = std.math.mul(usize, stencil_texture.width, stencil_texture.height) catch return self.fail(error.InvalidArgument);
+                    const values = allocator.alloc(u8, pixel_count) catch return self.fail(error.OutOfMemory);
+                    active_stencil_values = values;
+                    for (values, 0..) |*value, index| value.* = stencilTextureValue(stencil_texture, index);
+                    active_stencil = values;
+                }
                 const target = begin_render.target.asTarget();
                 if (begin_render.pass.depth.load_action != .dont_care) {
                     const depth = active_depth orelse return self.fail(error.InvalidResource);
@@ -1214,11 +1249,17 @@ pub const RenderEncoder = struct {
             0 => null,
             @intFromEnum(abi.PixelFormat.depth16_unorm) => abi.PixelFormat.depth16_unorm,
             @intFromEnum(abi.PixelFormat.depth32_float) => abi.PixelFormat.depth32_float,
+            @intFromEnum(abi.PixelFormat.depth24_unorm_stencil8) => abi.PixelFormat.depth24_unorm_stencil8,
+            @intFromEnum(abi.PixelFormat.depth32_float_stencil8) => abi.PixelFormat.depth32_float_stencil8,
             else => return error.UnsupportedFormat,
         };
         const expected_stencil = switch (stencil_format) {
             0 => null,
             @intFromEnum(abi.PixelFormat.stencil8) => abi.PixelFormat.stencil8,
+            @intFromEnum(abi.PixelFormat.depth24_unorm_stencil8) => abi.PixelFormat.depth24_unorm_stencil8,
+            @intFromEnum(abi.PixelFormat.depth32_float_stencil8) => abi.PixelFormat.depth32_float_stencil8,
+            @intFromEnum(abi.PixelFormat.x32_stencil8) => abi.PixelFormat.x32_stencil8,
+            @intFromEnum(abi.PixelFormat.x24_stencil8) => abi.PixelFormat.x24_stencil8,
             else => return error.UnsupportedFormat,
         };
         switch (self.command_buffer.commands.items[self.begin_index]) {
@@ -1273,7 +1314,10 @@ pub const RenderEncoder = struct {
                 if (begin_render.depth_texture) |depth_texture| {
                     if (expected_depth == null or texturePixelFormat(depth_texture) != expected_depth.?) return error.InvalidArgument;
                 }
-                if (expected_stencil != null and begin_render.stencil == null) return error.InvalidArgument;
+                if (expected_stencil != null and begin_render.stencil == null and begin_render.stencil_texture == null) return error.InvalidArgument;
+                if (begin_render.stencil_texture) |stencil_texture| {
+                    if (expected_stencil == null or texturePixelFormat(stencil_texture) != expected_stencil.?) return error.InvalidArgument;
+                }
             },
             else => return error.InvalidCommand,
         }
@@ -1332,7 +1376,7 @@ pub const RenderEncoder = struct {
 
     pub fn setDepthTexture(self: *RenderEncoder, texture: *Texture) Error!void {
         if (!self.open() or !validTexture(texture) or texture.device != self.command_buffer.queue.device or
-            (texture.format != .depth16_unorm and texture.format != .depth32_float)) return error.InvalidArgument;
+            !isDepthTextureFormat(texture.format)) return error.InvalidArgument;
         if (texture.width != self.colorWidth() or texture.height != self.colorHeight()) return error.InvalidArgument;
         switch (self.command_buffer.commands.items[self.begin_index]) {
             .begin_render => |*begin_render| {
@@ -1350,13 +1394,19 @@ pub const RenderEncoder = struct {
     }
 
     pub fn setStencilTexture(self: *RenderEncoder, texture: *Texture, load_action: u8, store_action: u8, clear_value: u8) Error!void {
-        if (!self.open() or !validTexture(texture) or texture.device != self.command_buffer.queue.device or texture.format != .stencil8) return error.InvalidArgument;
+        if (!self.open() or !validTexture(texture) or texture.device != self.command_buffer.queue.device or
+            !isStencilTextureFormat(texture.format)) return error.InvalidArgument;
         if (load_action > @intFromEnum(abi.LoadAction.clear) or store_action > @intFromEnum(abi.StoreAction.store) or
             texture.width != self.colorWidth() or texture.height != self.colorHeight()) return error.InvalidArgument;
         const stencil: []u8 = texture.bytes[0 .. @as(usize, texture.width) * texture.height];
         switch (self.command_buffer.commands.items[self.begin_index]) {
             .begin_render => |*begin_render| {
                 begin_render.stencil = stencil;
+                begin_render.stencil_texture = null;
+                if (texture.format != .stencil8) {
+                    begin_render.stencil = null;
+                    begin_render.stencil_texture = texture;
+                }
                 begin_render.stencil_load_action = @enumFromInt(load_action);
                 begin_render.stencil_store_action = @enumFromInt(store_action);
                 begin_render.stencil_clear = clear_value;
@@ -4035,18 +4085,76 @@ fn writeU16Little(bytes: []u8, offset: usize, value: u16) void {
     bytes[offset + 1] = @truncate(value >> 8);
 }
 
-fn storeDepth16Texture(texture: *Texture, values: []const f32) void {
-    for (values, 0..) |value, index| {
-        const quantized: u16 = @intFromFloat(std.math.clamp(value, 0, 1) * 65535.0 + 0.5);
-        writeU16Little(texture.bytes, index * 2, quantized);
-    }
-}
-
 fn readU32Little(bytes: []const u8, offset: usize) u32 {
     return @as(u32, bytes[offset]) |
         (@as(u32, bytes[offset + 1]) << 8) |
         (@as(u32, bytes[offset + 2]) << 16) |
         (@as(u32, bytes[offset + 3]) << 24);
+}
+
+fn writeU32Little(bytes: []u8, offset: usize, value: u32) void {
+    bytes[offset] = @truncate(value);
+    bytes[offset + 1] = @truncate(value >> 8);
+    bytes[offset + 2] = @truncate(value >> 16);
+    bytes[offset + 3] = @truncate(value >> 24);
+}
+
+fn readU24Little(bytes: []const u8, offset: usize) u32 {
+    return @as(u32, bytes[offset]) |
+        (@as(u32, bytes[offset + 1]) << 8) |
+        (@as(u32, bytes[offset + 2]) << 16);
+}
+
+fn depthTextureValue(texture: *const Texture, index: usize) f32 {
+    const offset = index * texture.format.bytesPerPixel();
+    return switch (texture.format) {
+        .depth16_unorm => @as(f32, @floatFromInt(readU16Little(texture.bytes, offset))) / 65535.0,
+        .depth24_unorm_stencil8 => @as(f32, @floatFromInt(readU24Little(texture.bytes, offset))) / 16777215.0,
+        .depth32_float, .depth32_float_stencil8 => @bitCast(readU32Little(texture.bytes, offset)),
+        else => unreachable,
+    };
+}
+
+fn stencilTextureValue(texture: *const Texture, index: usize) u8 {
+    const offset = index * texture.format.bytesPerPixel();
+    return switch (texture.format) {
+        .stencil8 => texture.bytes[offset],
+        .depth24_unorm_stencil8, .x24_stencil8 => texture.bytes[offset + 3],
+        .depth32_float_stencil8, .x32_stencil8 => texture.bytes[offset + 4],
+        else => unreachable,
+    };
+}
+
+fn storeDepthTexture(texture: *Texture, values: []const f32) void {
+    for (values, 0..) |value, index| {
+        const offset = index * texture.format.bytesPerPixel();
+        switch (texture.format) {
+            .depth16_unorm => {
+                const quantized: u16 = @intFromFloat(std.math.clamp(value, 0, 1) * 65535.0 + 0.5);
+                writeU16Little(texture.bytes, offset, quantized);
+            },
+            .depth24_unorm_stencil8 => {
+                const quantized: u32 = @intFromFloat(std.math.clamp(value, 0, 1) * 16777215.0 + 0.5);
+                texture.bytes[offset] = @truncate(quantized);
+                texture.bytes[offset + 1] = @truncate(quantized >> 8);
+                texture.bytes[offset + 2] = @truncate(quantized >> 16);
+            },
+            .depth32_float, .depth32_float_stencil8 => writeU32Little(texture.bytes, offset, @bitCast(value)),
+            else => unreachable,
+        }
+    }
+}
+
+fn storeStencilTexture(texture: *Texture, values: []const u8) void {
+    for (values, 0..) |value, index| {
+        const offset = index * texture.format.bytesPerPixel();
+        switch (texture.format) {
+            .stencil8 => texture.bytes[offset] = value,
+            .depth24_unorm_stencil8, .x24_stencil8 => texture.bytes[offset + 3] = value,
+            .depth32_float_stencil8, .x32_stencil8 => texture.bytes[offset + 4] = value,
+            else => unreachable,
+        }
+    }
 }
 
 fn readU64Little(bytes: []const u8, offset: usize) u64 {
@@ -5295,6 +5403,53 @@ test "depth16 texture attachment stores normalized CPU depth" {
     for (0..4 * 4) |index| {
         try std.testing.expectEqual(@as(u8, 0), depth.bytes[index * 2]);
         try std.testing.expectEqual(@as(u8, 0x40), depth.bytes[index * 2 + 1]);
+    }
+}
+
+test "combined depth stencil textures pack CPU attachment results" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.25, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.25, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.25, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, -1, 0.25, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.25, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, 1, 0.25, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+    };
+    const combined_formats = [_]struct { raw: u16, bytes_per_pixel: usize, depth_bytes: [3]u8, stencil_offset: usize }{
+        .{ .raw = @intFromEnum(abi.PixelFormat.depth24_unorm_stencil8), .bytes_per_pixel = 4, .depth_bytes = .{ 0, 0, 0x40 }, .stencil_offset = 3 },
+        .{ .raw = @intFromEnum(abi.PixelFormat.depth32_float_stencil8), .bytes_per_pixel = 8, .depth_bytes = .{ 0, 0, 0x80 }, .stencil_offset = 4 },
+    };
+    for (combined_formats) |format| {
+        const color = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+        defer destroyTexture(color);
+        const depth_stencil = try createTexture(device, 4, 4, format.raw);
+        defer destroyTexture(depth_stencil);
+        var command_buffer = try createCommandBuffer(queue);
+        defer destroyCommandBuffer(command_buffer);
+        var encoder = try beginRender(command_buffer, color, .{
+            .color = .{ .load_action = .clear, .store_action = .store },
+            .depth = .{ .load_action = .clear, .store_action = .store, .clear_depth = 1 },
+        });
+        try encoder.setDepthTexture(depth_stencil);
+        try encoder.setStencilTexture(depth_stencil, @intFromEnum(abi.LoadAction.clear), @intFromEnum(abi.StoreAction.store), 3);
+        try encoder.setStencilState(true, @intFromEnum(abi.CompareFunction.equal), @intFromEnum(abi.StencilOperation.keep), @intFromEnum(abi.StencilOperation.keep), @intFromEnum(abi.StencilOperation.increment_clamp), 0xff, 0xff);
+        try encoder.setStencilState(false, @intFromEnum(abi.CompareFunction.equal), @intFromEnum(abi.StencilOperation.keep), @intFromEnum(abi.StencilOperation.keep), @intFromEnum(abi.StencilOperation.increment_clamp), 0xff, 0xff);
+        try encoder.setStencilReference(3, 3);
+        try encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
+        try encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
+        try encoder.endEncoding();
+        destroyRenderEncoder(encoder);
+        try command_buffer.commit();
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, color.bytes[0..4]);
+        for (0..4 * 4) |index| {
+            const offset = index * format.bytes_per_pixel;
+            try std.testing.expectEqualSlices(u8, &format.depth_bytes, depth_stencil.bytes[offset..][0..3]);
+            try std.testing.expectEqual(@as(u8, 4), depth_stencil.bytes[offset + format.stencil_offset]);
+        }
     }
 }
 

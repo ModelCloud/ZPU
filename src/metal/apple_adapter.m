@@ -1575,15 +1575,34 @@ static BOOL zpu_vertex_layout_supported(MTLVertexDescriptor *descriptor, NSUInte
 }
 
 static BOOL zpu_depth_format_supported(MTLPixelFormat format) {
-    return format == MTLPixelFormatInvalid || format == MTLPixelFormatDepth16Unorm || format == MTLPixelFormatDepth32Float;
+    return format == MTLPixelFormatInvalid || format == MTLPixelFormatDepth16Unorm || format == MTLPixelFormatDepth32Float ||
+        format == MTLPixelFormatDepth32Float_Stencil8 ||
+#if !TARGET_OS_IPHONE || TARGET_OS_MACCATALYST
+        format == MTLPixelFormatDepth24Unorm_Stencil8 ||
+#endif
+        NO;
 }
 
 static BOOL zpu_depth_texture_format_supported(MTLPixelFormat format) {
-    return format == MTLPixelFormatDepth16Unorm || format == MTLPixelFormatDepth32Float;
+    return format == MTLPixelFormatDepth16Unorm || format == MTLPixelFormatDepth32Float ||
+        format == MTLPixelFormatDepth32Float_Stencil8 ||
+#if !TARGET_OS_IPHONE || TARGET_OS_MACCATALYST
+        format == MTLPixelFormatDepth24Unorm_Stencil8 ||
+#endif
+        NO;
+}
+
+static BOOL zpu_stencil_texture_format_supported(MTLPixelFormat format) {
+    return format == MTLPixelFormatStencil8 || format == MTLPixelFormatDepth32Float_Stencil8 ||
+        format == MTLPixelFormatX32_Stencil8 ||
+#if !TARGET_OS_IPHONE || TARGET_OS_MACCATALYST
+        format == MTLPixelFormatDepth24Unorm_Stencil8 || format == MTLPixelFormatX24_Stencil8 ||
+#endif
+        NO;
 }
 
 static BOOL zpu_stencil_format_supported(MTLPixelFormat format) {
-    return format == MTLPixelFormatInvalid || format == MTLPixelFormatStencil8;
+    return format == MTLPixelFormatInvalid || zpu_stencil_texture_format_supported(format);
 }
 
 static BOOL zpu_render_texture_type_supported(MTLTextureType type);
@@ -1596,7 +1615,7 @@ static BOOL zpu_render_texture_type_supported(MTLTextureType type);
 static ZPUTexture *zpu_hidden_color_target(ZPUDevice *owner, ZPUTexture *attachment,
                                            NSUInteger level, NSUInteger slice) {
     if (owner == nil || attachment == nil ||
-        (!zpu_depth_texture_format_supported(attachment->_pixelFormat) && attachment->_pixelFormat != MTLPixelFormatStencil8) ||
+        (!zpu_depth_texture_format_supported(attachment->_pixelFormat) && !zpu_stencil_texture_format_supported(attachment->_pixelFormat)) ||
         !zpu_render_texture_type_supported(attachment->_textureType)) return nil;
     zpu_metal_texture *attachmentTexture = [attachment zpuTextureAtLevel:level slice:slice];
     if (attachmentTexture == NULL) return nil;
@@ -1945,7 +1964,7 @@ static BOOL zpu_metal4_render_pass_descriptor(ZPUDevice *owner,
     }
     ZPUTexture *stencil = (ZPUTexture *)descriptor.stencilAttachment.texture;
     if (stencil != nil) {
-        if (![stencil isKindOfClass:[ZPUTexture class]] || stencil->_pixelFormat != MTLPixelFormatStencil8 ||
+        if (![stencil isKindOfClass:[ZPUTexture class]] || !zpu_stencil_texture_format_supported(stencil->_pixelFormat) ||
             !zpu_store_action_supported(descriptor.stencilAttachment.storeAction)) return NO;
         zpu_metal_texture *stencilTexture = [stencil zpuTextureAtLevel:descriptor.stencilAttachment.level
                                                                    slice:descriptor.stencilAttachment.slice];
@@ -8515,7 +8534,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     if (descriptor.stencilAttachment.texture != nil) {
         ZPUTexture *stencil = (ZPUTexture *)descriptor.stencilAttachment.texture;
         if (![stencil isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(stencil->_textureType) ||
-            stencil->_pixelFormat != MTLPixelFormatStencil8 ||
+            !zpu_stencil_texture_format_supported(stencil->_pixelFormat) ||
             !zpu_store_action_supported(descriptor.stencilAttachment.storeAction)) return nil;
         stencilTexture = [stencil zpuTextureAtLevel:descriptor.stencilAttachment.level
                                                slice:descriptor.stencilAttachment.slice];
@@ -8603,7 +8622,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     if (descriptor.stencilAttachment.texture != nil) {
         ZPUTexture *stencil = (ZPUTexture *)descriptor.stencilAttachment.texture;
         if (![stencil isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(stencil->_textureType) ||
-            stencil->_pixelFormat != MTLPixelFormatStencil8 ||
+            !zpu_stencil_texture_format_supported(stencil->_pixelFormat) ||
             !zpu_store_action_supported(descriptor.stencilAttachment.storeAction)) return nil;
         stencilTexture = [stencil zpuTextureAtLevel:descriptor.stencilAttachment.level
                                                slice:descriptor.stencilAttachment.slice];

@@ -1992,7 +1992,8 @@ int main(void) {
             return 5;
         }
 
-        enum { width = 8, height = 8, byte_count = width * height * 4 };
+        enum { width = 8, height = 8, byte_count = width * height * 4,
+               depth_stencil_byte_count = width * height * 8 };
         MTLTextureDescriptor *texture_descriptor =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                 width:width
@@ -13085,6 +13086,111 @@ int main(void) {
             }
             fprintf(stderr, "metal-pixel: Depth16Unorm color mismatch\n");
             return 145;
+        }
+
+        /* Apple exposes Depth32Float_Stencil8 on this M4 device. Combined
+         * getBytes readback is device-specific and is not a stable raw
+         * stencil oracle, so compare the rendered color result here; the CPU
+         * tests cover the explicit depth/stencil byte packing contract. */
+        MTLRenderPipelineDescriptor *depth_stencil_pipeline_descriptor = [depth_pipeline_descriptor copy];
+        depth_stencil_pipeline_descriptor.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+        depth_stencil_pipeline_descriptor.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+        id<MTLRenderPipelineState> metal_depth_stencil_pipeline =
+            [device newRenderPipelineStateWithDescriptor:depth_stencil_pipeline_descriptor error:&error];
+        MTLTextureDescriptor *metal_depth_stencil_texture_descriptor = [metal_depth_texture_descriptor copy];
+        metal_depth_stencil_texture_descriptor.pixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+        metal_depth_stencil_texture_descriptor.storageMode = MTLStorageModeShared;
+        id<MTLTexture> metal_depth_stencil_texture =
+            [device newTextureWithDescriptor:metal_depth_stencil_texture_descriptor];
+        id<MTLTexture> metal_depth_stencil_color = [device newTextureWithDescriptor:texture_descriptor];
+        if (metal_depth_stencil_pipeline == nil || metal_depth_stencil_texture == nil || metal_depth_stencil_color == nil) {
+            fail_with_error("Depth32Float_Stencil8 reference allocation failed", error);
+            return 146;
+        }
+        MTLRenderPassDescriptor *metal_depth_stencil_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        metal_depth_stencil_pass.colorAttachments[0].texture = metal_depth_stencil_color;
+        metal_depth_stencil_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        metal_depth_stencil_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        metal_depth_stencil_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        metal_depth_stencil_pass.depthAttachment.texture = metal_depth_stencil_texture;
+        metal_depth_stencil_pass.depthAttachment.loadAction = MTLLoadActionClear;
+        metal_depth_stencil_pass.depthAttachment.storeAction = MTLStoreActionStore;
+        metal_depth_stencil_pass.depthAttachment.clearDepth = 1.0;
+        metal_depth_stencil_pass.stencilAttachment.texture = metal_depth_stencil_texture;
+        metal_depth_stencil_pass.stencilAttachment.loadAction = MTLLoadActionClear;
+        metal_depth_stencil_pass.stencilAttachment.storeAction = MTLStoreActionStore;
+        metal_depth_stencil_pass.stencilAttachment.clearStencil = 3;
+        id<MTLCommandBuffer> metal_depth_stencil_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> metal_depth_stencil_encoder =
+            [metal_depth_stencil_command_buffer renderCommandEncoderWithDescriptor:metal_depth_stencil_pass];
+        [metal_depth_stencil_encoder setRenderPipelineState:metal_depth_stencil_pipeline];
+        [metal_depth_stencil_encoder setDepthStencilState:depth_state];
+        [metal_depth_stencil_encoder setVertexBuffer:metal_depth_vertex_buffer offset:0 atIndex:0];
+        [metal_depth_stencil_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
+        [metal_depth_stencil_encoder endEncoding];
+        [metal_depth_stencil_command_buffer commit];
+        [metal_depth_stencil_command_buffer waitUntilCompleted];
+        if (metal_depth_stencil_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: Depth32Float_Stencil8 reference command did not complete\n");
+            return 147;
+        }
+        uint8_t metal_depth_stencil_pixels[byte_count];
+        [metal_depth_stencil_color getBytes:metal_depth_stencil_pixels bytesPerRow:(NSUInteger)width * 4
+                                fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+
+        MTLTextureDescriptor *adapter_depth_stencil_texture_descriptor = [metal_depth_stencil_texture_descriptor copy];
+        id<MTLTexture> adapter_depth_stencil_texture =
+            [adapter_device newTextureWithDescriptor:adapter_depth_stencil_texture_descriptor];
+        id<MTLTexture> adapter_depth_stencil_color = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        id<MTLCommandBuffer> adapter_depth_stencil_command_buffer = [adapter_queue commandBuffer];
+        MTLRenderPassDescriptor *adapter_depth_stencil_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_depth_stencil_pass.colorAttachments[0].texture = adapter_depth_stencil_color;
+        adapter_depth_stencil_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_depth_stencil_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_depth_stencil_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        adapter_depth_stencil_pass.depthAttachment.texture = adapter_depth_stencil_texture;
+        adapter_depth_stencil_pass.depthAttachment.loadAction = MTLLoadActionClear;
+        adapter_depth_stencil_pass.depthAttachment.storeAction = MTLStoreActionStore;
+        adapter_depth_stencil_pass.depthAttachment.clearDepth = 1.0;
+        adapter_depth_stencil_pass.stencilAttachment.texture = adapter_depth_stencil_texture;
+        adapter_depth_stencil_pass.stencilAttachment.loadAction = MTLLoadActionClear;
+        adapter_depth_stencil_pass.stencilAttachment.storeAction = MTLStoreActionStore;
+        adapter_depth_stencil_pass.stencilAttachment.clearStencil = 3;
+        id<MTLRenderCommandEncoder> adapter_depth_stencil_encoder =
+            [adapter_depth_stencil_command_buffer renderCommandEncoderWithDescriptor:adapter_depth_stencil_pass];
+        NSError *adapter_depth_stencil_pipeline_error = nil;
+        MTLRenderPipelineDescriptor *adapter_depth_stencil_pipeline_descriptor = [depth_stencil_pipeline_descriptor copy];
+        adapter_depth_stencil_pipeline_descriptor.vertexFunction = adapter_vertex_function;
+        adapter_depth_stencil_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
+        id<MTLRenderPipelineState> adapter_depth_stencil_pipeline =
+            [adapter_device newRenderPipelineStateWithDescriptor:adapter_depth_stencil_pipeline_descriptor
+                                                            error:&adapter_depth_stencil_pipeline_error];
+        id<MTLDepthStencilState> adapter_depth_stencil_state =
+            [adapter_device newDepthStencilStateWithDescriptor:depth_state_descriptor];
+        if (adapter_depth_stencil_texture == nil || adapter_depth_stencil_color == nil ||
+            adapter_depth_stencil_command_buffer == nil || adapter_depth_stencil_encoder == nil ||
+            adapter_depth_stencil_pipeline == nil || adapter_depth_stencil_state == nil ||
+            adapter_depth_stencil_texture.allocatedSize != depth_stencil_byte_count) {
+            fail_with_error("Depth32Float_Stencil8 adapter allocation failed", adapter_depth_stencil_pipeline_error);
+            return 148;
+        }
+        [adapter_depth_stencil_encoder setRenderPipelineState:adapter_depth_stencil_pipeline];
+        [adapter_depth_stencil_encoder setDepthStencilState:adapter_depth_stencil_state];
+        [adapter_depth_stencil_encoder setVertexBuffer:adapter_depth_vertex_buffer offset:0 atIndex:0];
+        [adapter_depth_stencil_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
+        [adapter_depth_stencil_encoder endEncoding];
+        [adapter_depth_stencil_command_buffer commit];
+        [adapter_depth_stencil_command_buffer waitUntilCompleted];
+        if (adapter_depth_stencil_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: Depth32Float_Stencil8 adapter command did not complete\n");
+            return 149;
+        }
+        uint8_t adapter_depth_stencil_pixels[byte_count];
+        [adapter_depth_stencil_color getBytes:adapter_depth_stencil_pixels bytesPerRow:(NSUInteger)width * 4
+                                     fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (memcmp(metal_depth_stencil_pixels, adapter_depth_stencil_pixels, byte_count) != 0) {
+            fprintf(stderr, "metal-pixel: Depth32Float_Stencil8 color mismatch\n");
+            return 150;
         }
 
         /* Depth bounds are a fixed-function test on the interpolated depth

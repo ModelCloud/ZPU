@@ -39,10 +39,12 @@ triangle path:
   and packed B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10/RGB9E5/BGR10A2 textures preserve
   native texel widths for raw transfers, views, buffer-backed storage, and heap
   allocation accounting. Depth16Unorm and the combined depth/stencil formats
-  are transfer-only raw resources: their bytes, views, buffer-backed storage,
-  and heap accounting are CPU-owned, but they are not accepted as render
-  attachments until format-specific depth/stencil pack and compare semantics
-  are implemented; render paths accept A8Unorm, R8Unorm/R8Unorm_sRGB, R8Snorm,
+  use CPU-owned raw storage; Depth16Unorm, Depth24Unorm_Stencil8, and
+  Depth32Float_Stencil8 are accepted by the CPU depth/stencil attachment path
+  with explicit pack/unpack semantics, while X32_Stencil8 and X24_Stencil8
+  remain stencil-only. Native combined-format availability and raw readback
+  are device-specific, so CPU tests are the packing oracle; render paths accept
+  A8Unorm, R8Unorm/R8Unorm_sRGB, R8Snorm,
   R16Unorm/R16Snorm, RG8Unorm/RG8Unorm_sRGB/RG8Snorm,
   RG16Unorm/RG16Snorm, R16Float, RG16Float, RGBA8Unorm/RGBA8Unorm_sRGB,
   RGBA8Snorm, BGRA8Unorm/BGRA8Unorm_sRGB, RGBA16Unorm/RGBA16Snorm,
