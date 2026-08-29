@@ -7801,62 +7801,95 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     }
 }
 - (void)setObjectBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
-    [self setFragmentBytes:bytes length:length atIndex:index];
+    (void)bytes;
+    (void)length;
+    (void)index;
+    [_owner markError];
 }
 - (void)setObjectBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
-    [self setFragmentBuffer:buffer offset:offset atIndex:index];
+    (void)buffer;
+    (void)offset;
+    (void)index;
+    [_owner markError];
 }
-- (void)setObjectBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { [self setFragmentBufferOffset:offset atIndex:index]; }
+- (void)setObjectBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { (void)offset; (void)index; [_owner markError]; }
 - (void)setObjectBuffers:(const id<MTLBuffer> __nullable [__nonnull])buffers offsets:(const NSUInteger [__nonnull])offsets withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) {
-    [self setFragmentBuffers:buffers offsets:offsets withRange:range];
+    (void)buffers;
+    (void)offsets;
+    (void)range;
+    [_owner markError];
 }
-- (void)setObjectTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { [self setFragmentTexture:texture atIndex:index]; }
-- (void)setObjectTextures:(const id<MTLTexture> __nullable [__nonnull])textures withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) { [self setFragmentTextures:textures withRange:range]; }
-- (void)setObjectSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { [self setFragmentSamplerState:sampler atIndex:index]; }
-- (void)setObjectSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) { [self setFragmentSamplerStates:samplers withRange:range]; }
+- (void)setObjectTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { (void)texture; (void)index; [_owner markError]; }
+- (void)setObjectTextures:(const id<MTLTexture> __nullable [__nonnull])textures withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) { (void)textures; (void)range; [_owner markError]; }
+- (void)setObjectSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { (void)sampler; (void)index; [_owner markError]; }
+- (void)setObjectSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) { (void)samplers; (void)range; [_owner markError]; }
 - (void)setObjectSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMinClamp lodMaxClamp:(float)lodMaxClamp atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
-    [self setFragmentSamplerState:sampler lodMinClamp:lodMinClamp lodMaxClamp:lodMaxClamp atIndex:index];
+    (void)sampler;
+    (void)lodMinClamp;
+    (void)lodMaxClamp;
+    (void)index;
+    [_owner markError];
 }
 - (void)setObjectSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers
                 lodMinClamps:(const float [__nonnull])lodMinClamps
-                lodMaxClamps:(const float [__nonnull])lodMaxClamps
+                    lodMaxClamps:(const float [__nonnull])lodMaxClamps
                     withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) {
-    [self setFragmentSamplerStates:samplers lodMinClamps:lodMinClamps lodMaxClamps:lodMaxClamps withRange:range];
+    (void)samplers;
+    (void)lodMinClamps;
+    (void)lodMaxClamps;
+    (void)range;
+    [_owner markError];
 }
-- (void)setObjectThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { (void)length; (void)index; }
-- (void)setMeshBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { [self setFragmentBytes:bytes length:length atIndex:index]; }
-- (void)setMeshBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { [self setFragmentBuffer:buffer offset:offset atIndex:index]; }
-- (void)setMeshBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { [self setFragmentBufferOffset:offset atIndex:index]; }
-- (void)setMeshBuffers:(const id<MTLBuffer> __nullable [__nonnull])buffers offsets:(const NSUInteger [__nonnull])offsets withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) { [self setFragmentBuffers:buffers offsets:offsets withRange:range]; }
-- (void)setMeshTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { [self setFragmentTexture:texture atIndex:index]; }
-- (void)setMeshTextures:(const id<MTLTexture> __nullable [__nonnull])textures withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) { [self setFragmentTextures:textures withRange:range]; }
-- (void)setMeshSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { [self setFragmentSamplerState:sampler atIndex:index]; }
-- (void)setMeshSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) { [self setFragmentSamplerStates:samplers withRange:range]; }
+- (void)setObjectThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { (void)length; (void)index; [_owner markError]; }
+- (void)setMeshBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { (void)bytes; (void)length; (void)index; [_owner markError]; }
+- (void)setMeshBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { (void)buffer; (void)offset; (void)index; [_owner markError]; }
+- (void)setMeshBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { (void)offset; (void)index; [_owner markError]; }
+- (void)setMeshBuffers:(const id<MTLBuffer> __nullable [__nonnull])buffers offsets:(const NSUInteger [__nonnull])offsets withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) { (void)buffers; (void)offsets; (void)range; [_owner markError]; }
+- (void)setMeshTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { (void)texture; (void)index; [_owner markError]; }
+- (void)setMeshTextures:(const id<MTLTexture> __nullable [__nonnull])textures withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) { (void)textures; (void)range; [_owner markError]; }
+- (void)setMeshSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) { (void)sampler; (void)index; [_owner markError]; }
+- (void)setMeshSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) { (void)samplers; (void)range; [_owner markError]; }
 - (void)setMeshSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMinClamp lodMaxClamp:(float)lodMaxClamp atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
-    [self setFragmentSamplerState:sampler lodMinClamp:lodMinClamp lodMaxClamp:lodMaxClamp atIndex:index];
+    (void)sampler;
+    (void)lodMinClamp;
+    (void)lodMaxClamp;
+    (void)index;
+    [_owner markError];
 }
 - (void)setMeshSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers
                 lodMinClamps:(const float [__nonnull])lodMinClamps
-                lodMaxClamps:(const float [__nonnull])lodMaxClamps
+                    lodMaxClamps:(const float [__nonnull])lodMaxClamps
                     withRange:(NSRange)range API_AVAILABLE(macos(13.0), ios(16.0)) {
-    [self setFragmentSamplerStates:samplers lodMinClamps:lodMinClamps lodMaxClamps:lodMaxClamps withRange:range];
+    (void)samplers;
+    (void)lodMinClamps;
+    (void)lodMaxClamps;
+    (void)range;
+    [_owner markError];
 }
-- (void)setTileBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { [self setFragmentBytes:bytes length:length atIndex:index]; }
-- (void)setTileBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { [self setFragmentBuffer:buffer offset:offset atIndex:index]; }
-- (void)setTileBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { [self setFragmentBufferOffset:offset atIndex:index]; }
-- (void)setTileBuffers:(const id<MTLBuffer> __nullable [__nonnull])buffers offsets:(const NSUInteger [__nonnull])offsets withRange:(NSRange)range API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { [self setFragmentBuffers:buffers offsets:offsets withRange:range]; }
-- (void)setTileTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { [self setFragmentTexture:texture atIndex:index]; }
-- (void)setTileTextures:(const id<MTLTexture> __nullable [__nonnull])textures withRange:(NSRange)range API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { [self setFragmentTextures:textures withRange:range]; }
-- (void)setTileSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { [self setFragmentSamplerState:sampler atIndex:index]; }
-- (void)setTileSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers withRange:(NSRange)range API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { [self setFragmentSamplerStates:samplers withRange:range]; }
+- (void)setTileBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { (void)bytes; (void)length; (void)index; [_owner markError]; }
+- (void)setTileBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { (void)buffer; (void)offset; (void)index; [_owner markError]; }
+- (void)setTileBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { (void)offset; (void)index; [_owner markError]; }
+- (void)setTileBuffers:(const id<MTLBuffer> __nullable [__nonnull])buffers offsets:(const NSUInteger [__nonnull])offsets withRange:(NSRange)range API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { (void)buffers; (void)offsets; (void)range; [_owner markError]; }
+- (void)setTileTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { (void)texture; (void)index; [_owner markError]; }
+- (void)setTileTextures:(const id<MTLTexture> __nullable [__nonnull])textures withRange:(NSRange)range API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { (void)textures; (void)range; [_owner markError]; }
+- (void)setTileSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { (void)sampler; (void)index; [_owner markError]; }
+- (void)setTileSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers withRange:(NSRange)range API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { (void)samplers; (void)range; [_owner markError]; }
 - (void)setTileSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMinClamp lodMaxClamp:(float)lodMaxClamp atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
-    [self setFragmentSamplerState:sampler lodMinClamp:lodMinClamp lodMaxClamp:lodMaxClamp atIndex:index];
+    (void)sampler;
+    (void)lodMinClamp;
+    (void)lodMaxClamp;
+    (void)index;
+    [_owner markError];
 }
 - (void)setTileSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers
                 lodMinClamps:(const float [__nonnull])lodMinClamps
-                lodMaxClamps:(const float [__nonnull])lodMaxClamps
+                    lodMaxClamps:(const float [__nonnull])lodMaxClamps
                     withRange:(NSRange)range API_AVAILABLE(ios(11.0), tvos(14.5), macos(11.0), macCatalyst(14.0)) {
-    [self setFragmentSamplerStates:samplers lodMinClamps:lodMinClamps lodMaxClamps:lodMaxClamps withRange:range];
+    (void)samplers;
+    (void)lodMinClamps;
+    (void)lodMaxClamps;
+    (void)range;
+    [_owner markError];
 }
 - (void)setVertexVisibleFunctionTable:(id<MTLVisibleFunctionTable>)functionTable atBufferIndex:(NSUInteger)bufferIndex API_AVAILABLE(macos(12.0), ios(15.0), tvos(16.0)) { (void)functionTable; (void)bufferIndex; }
 - (void)setVertexVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __nullable [__nonnull])functionTables withBufferRange:(NSRange)range API_AVAILABLE(macos(12.0), ios(15.0), tvos(16.0)) { (void)functionTables; (void)range; }

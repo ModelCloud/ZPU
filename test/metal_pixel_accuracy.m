@@ -1936,6 +1936,29 @@ int main(void) {
             fprintf(stderr, "metal-pixel: invalid CPU render state did not fail closed\n");
             return 55;
         }
+        /* Mesh/object/tile shader stages have no CPU/ZPU execution path yet.
+         * Their resource setters must not masquerade as fragment bindings,
+         * because doing so can silently produce the wrong pixels. */
+        id<MTLCommandBuffer> adapter_unsupported_stage_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_unsupported_stage_encoder =
+            [adapter_unsupported_stage_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+        uint32_t adapter_unsupported_stage_bytes = 0x12345678u;
+        [adapter_unsupported_stage_encoder setObjectBytes:&adapter_unsupported_stage_bytes
+                                                    length:sizeof(adapter_unsupported_stage_bytes)
+                                                   atIndex:0];
+        [adapter_unsupported_stage_encoder setMeshBytes:&adapter_unsupported_stage_bytes
+                                                  length:sizeof(adapter_unsupported_stage_bytes)
+                                                 atIndex:0];
+        [adapter_unsupported_stage_encoder setTileBytes:&adapter_unsupported_stage_bytes
+                                                  length:sizeof(adapter_unsupported_stage_bytes)
+                                                 atIndex:0];
+        [adapter_unsupported_stage_encoder endEncoding];
+        [adapter_unsupported_stage_command_buffer commit];
+        [adapter_unsupported_stage_command_buffer waitUntilCompleted];
+        if (adapter_unsupported_stage_command_buffer.status != MTLCommandBufferStatusError) {
+            fprintf(stderr, "metal-pixel: unsupported CPU shader stage did not fail closed\n");
+            return 56;
+        }
         NSError *adapter_residency_error = nil;
         MTLResidencySetDescriptor *adapter_residency_descriptor = [MTLResidencySetDescriptor new];
         adapter_residency_descriptor.label = @"zpu-cpu-residency";
