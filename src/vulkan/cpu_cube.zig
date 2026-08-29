@@ -146,6 +146,7 @@ const PreparedTriangle = struct {
     valid: bool = false,
     vertices: [3]Vertex = undefined,
     lighting: *const [256]u8 = undefined,
+    light_key: u32 = 0,
     unit_uv: bool = false,
     prelit_texture: [16]u32 = undefined,
     prelit_texture_ptr: ?*const [16]u32 = null,
@@ -183,6 +184,7 @@ const PreparedDraw = struct {
 const prepared_cache_capacity = 8192;
 const PreparedCache = struct {
     valid: bool = false,
+    prepared_ready: bool = false,
     vertex_count: u32 = 0,
     uniform_len: usize = 0,
     texture_len: usize = 0,
@@ -482,28 +484,65 @@ var lighting_cache: [lighting_cache_levels][256]u8 = undefined;
 // The driver-facing cache intentionally quantizes lighting to 8-bit levels.
 // Counted performance runs retain the exact scalar table while avoiding a
 // costly 256-sample sRGB pow() rebuild on every frame.
-const exact_lighting_cache_capacity = 16;
+const exact_lighting_cache_capacity = 8192;
+const exact_lighting_index_capacity = 16384;
 var exact_lighting_cache_keys: [exact_lighting_cache_capacity]u32 = undefined;
 var exact_lighting_cache_tables: [exact_lighting_cache_capacity][256]u8 = undefined;
 var exact_lighting_cache_count: usize = 0;
+const exact_lighting_index_empty: u16 = std.math.maxInt(u16);
+var exact_lighting_cache_index: [exact_lighting_index_capacity]u16 = [_]u16{exact_lighting_index_empty} ** exact_lighting_index_capacity;
 var exact_lighting_cache_generation = std.atomic.Value(u64).init(0);
+
+const ExactLightingFastPath = struct {
+    generation: u64 = 0,
+    key: u32 = 0,
+    table: ?*const [256]u8 = null,
+};
+threadlocal var exact_lighting_fast_path: ExactLightingFastPath = .{};
+
+fn exactLightingCacheIndex(key: u32) usize {
+    return (@as(usize, key) *% 2654435761) % exact_lighting_index_capacity;
+}
+
+fn rememberExactLightingIndex(key: u32, entry_index: usize) void {
+    var index = exactLightingCacheIndex(key);
+    while (exact_lighting_cache_index[index] != exact_lighting_index_empty) index = (index + 1) % exact_lighting_index_capacity;
+    exact_lighting_cache_index[index] = @intCast(entry_index);
+}
 
 fn exactCachedLightingTable(light: f32) *const [256]u8 {
     const key: u32 = @bitCast(light);
+    const generation = exact_lighting_cache_generation.load(.acquire);
+    if (exact_lighting_fast_path.generation == generation and exact_lighting_fast_path.key == key) {
+        if (exact_lighting_fast_path.table) |table| return table;
+    }
     _ = std.c.pthread_mutex_lock(&lighting_cache_mutex);
     defer _ = std.c.pthread_mutex_unlock(&lighting_cache_mutex);
-    for (exact_lighting_cache_keys[0..exact_lighting_cache_count], 0..) |cached_key, index| {
-        if (cached_key == key) return &exact_lighting_cache_tables[index];
+    var index = exactLightingCacheIndex(key);
+    while (exact_lighting_cache_index[index] != exact_lighting_index_empty) : (index = (index + 1) % exact_lighting_index_capacity) {
+        const entry_index = exact_lighting_cache_index[index];
+        if (exact_lighting_cache_keys[entry_index] == key) {
+            exact_lighting_fast_path = .{ .generation = exact_lighting_cache_generation.load(.acquire), .key = key, .table = &exact_lighting_cache_tables[entry_index] };
+            return &exact_lighting_cache_tables[entry_index];
+        }
     }
-    const index = if (exact_lighting_cache_count < exact_lighting_cache_capacity) blk: {
+    const append = exact_lighting_cache_count < exact_lighting_cache_capacity;
+    const entry_index = if (append) blk: {
         const fresh = exact_lighting_cache_count;
         exact_lighting_cache_count += 1;
         break :blk fresh;
     } else 0;
-    exact_lighting_cache_keys[index] = key;
-    exact_lighting_cache_tables[index] = lightingTable(light);
-    _ = exact_lighting_cache_generation.fetchAdd(1, .release);
-    return &exact_lighting_cache_tables[index];
+    exact_lighting_cache_keys[entry_index] = key;
+    exact_lighting_cache_tables[entry_index] = lightingTable(light);
+    if (append) {
+        rememberExactLightingIndex(key, entry_index);
+    } else {
+        @memset(exact_lighting_cache_index[0..], exact_lighting_index_empty);
+        for (exact_lighting_cache_keys[0..exact_lighting_cache_count], 0..) |cached_key, cached_index| rememberExactLightingIndex(cached_key, cached_index);
+    }
+    const next_generation = exact_lighting_cache_generation.fetchAdd(1, .release) + 1;
+    exact_lighting_fast_path = .{ .generation = next_generation, .key = key, .table = &exact_lighting_cache_tables[entry_index] };
+    return &exact_lighting_cache_tables[entry_index];
 }
 
 // Unit-UV triangles are fully prelit before rasterization. Copying the exact
@@ -557,6 +596,32 @@ fn triangleLight(v0: Vertex, v1: Vertex, v2: Vertex) f32 {
     return std.math.clamp(normal[0] * 0.424 + normal[1] * 0.566 + normal[2] * 0.707, 0.15, 1.0);
 }
 
+fn canReuseFlatTriangleLight(first: [3]Vertex, second: [3]Vertex) bool {
+    if (first[0].screen[2] != first[1].screen[2] or first[0].screen[2] != first[2].screen[2] or
+        second[0].screen[2] != second[1].screen[2] or second[0].screen[2] != second[2].screen[2] or
+        first[0].screen[2] != second[0].screen[2]) return false;
+    const first_area = edge(.{ first[0].screen[0], first[0].screen[1] }, .{ first[1].screen[0], first[1].screen[1] }, .{ first[2].screen[0], first[2].screen[1] });
+    const second_area = edge(.{ second[0].screen[0], second[0].screen[1] }, .{ second[1].screen[0], second[1].screen[1] }, .{ second[2].screen[0], second[2].screen[1] });
+    return (first_area > 0 and second_area > 0) or (first_area < 0 and second_area < 0);
+}
+
+fn initializePreparedTriangle(triangle: *PreparedTriangle, vertices: [3]Vertex, light_key_override: ?u32) void {
+    var unit_uv = true;
+    for (vertices) |vertex| unit_uv = unit_uv and vertex.uv[0] >= 0 and vertex.uv[0] <= 1 and vertex.uv[1] >= 0 and vertex.uv[1] <= 1;
+    triangle.valid = true;
+    triangle.vertices = vertices;
+    const light: f32 = if (light_key_override) |key| @bitCast(key) else triangleLight(vertices[0], vertices[1], vertices[2]);
+    triangle.light_key = @bitCast(light);
+    triangle.lighting = cachedLightingTable(light);
+    triangle.unit_uv = unit_uv and ((vertices[0].clip_w > 0 and vertices[1].clip_w > 0 and vertices[2].clip_w > 0) or
+        (vertices[0].clip_w < 0 and vertices[1].clip_w < 0 and vertices[2].clip_w < 0));
+    triangle.has_prelit_texture = false;
+    triangle.prelit_texture_16x16_ptr = null;
+    triangle.has_prelit_texture_16x16 = false;
+    triangle.flat_color = null;
+    triangle.batch_raster = .{};
+}
+
 fn prepareDraw(uniform: []const u8, vertex_count: u32, base_vertex: u32, viewport: Viewport, indexed: ?IndexStream, output: *PreparedDraw) void {
     const source_vertex_count = if (indexed != null) packedVertexCount(uniform) orelse 0 else base_vertex +| vertex_count;
     const max_uniform_vertices = (std.math.maxInt(usize) - 64) / 32;
@@ -564,34 +629,50 @@ fn prepareDraw(uniform: []const u8, vertex_count: u32, base_vertex: u32, viewpor
         output.count = 0;
         output.spans_valid = false;
         output.spans_external = null;
+        output.quad_spans_external = null;
         output.batch_fast = false;
         return;
     }
     output.count = @min(vertex_count / 3, max_prepared_triangles);
     output.spans_valid = false;
     output.spans_external = null;
+    output.quad_spans_external = null;
     output.batch_fast = false;
     const identity_transform = isIdentityTransform(uniform);
+    if (base_vertex == 0 and indexed == null and vertex_count == 6 and uniform.len >= 64 + 6 * 32 and
+        std.mem.eql(u8, uniform[64 + 3 * 16 ..][0..16], uniform[64..][0..16]) and
+        std.mem.eql(u8, uniform[64 + 4 * 16 ..][0..16], uniform[64 + 2 * 16 ..][0..16]))
+    {
+        const maybe_v0 = if (identity_transform) transformedIdentityVertex(uniform, 0, source_vertex_count, viewport, null) else transformedVertex(uniform, 0, source_vertex_count, viewport, null);
+        const maybe_v1 = if (identity_transform) transformedIdentityVertex(uniform, 1, source_vertex_count, viewport, null) else transformedVertex(uniform, 1, source_vertex_count, viewport, null);
+        const maybe_v2 = if (identity_transform) transformedIdentityVertex(uniform, 2, source_vertex_count, viewport, null) else transformedVertex(uniform, 2, source_vertex_count, viewport, null);
+        const maybe_v3 = if (identity_transform) transformedIdentityVertex(uniform, 5, source_vertex_count, viewport, null) else transformedVertex(uniform, 5, source_vertex_count, viewport, null);
+        if (maybe_v0) |v0| {
+            if (maybe_v1) |v1| {
+                if (maybe_v2) |v2| {
+                    if (maybe_v3) |v3| {
+                        var second_v0 = v0;
+                        var second_v2 = v2;
+                        second_v0.uv = .{ readFloat(uniform, 64 + 6 * 16 + 3 * 16), readFloat(uniform, 64 + 6 * 16 + 3 * 16 + 4) };
+                        second_v2.uv = .{ readFloat(uniform, 64 + 6 * 16 + 4 * 16), readFloat(uniform, 64 + 6 * 16 + 4 * 16 + 4) };
+                        initializePreparedTriangle(&output.triangles[0], .{ v0, v1, v2 }, null);
+                        initializePreparedTriangle(&output.triangles[1], .{ second_v0, second_v2, v3 }, if (canReuseFlatTriangleLight(output.triangles[0].vertices, .{ second_v0, second_v2, v3 })) output.triangles[0].light_key else null);
+                        return;
+                    }
+                }
+            }
+        }
+    }
     for (output.triangles[0..output.count], 0..) |*triangle, index| {
-        triangle.* = .{};
+        triangle.valid = false;
         const first: u32 = @intCast(index * 3);
         const first_source = if (indexed != null) first else base_vertex +| first;
         const v0 = (if (identity_transform) transformedIdentityVertex(uniform, first_source, source_vertex_count, viewport, indexed) else transformedVertex(uniform, first_source, source_vertex_count, viewport, indexed)) orelse continue;
         const v1 = (if (identity_transform) transformedIdentityVertex(uniform, first_source +| 1, source_vertex_count, viewport, indexed) else transformedVertex(uniform, first_source +| 1, source_vertex_count, viewport, indexed)) orelse continue;
         const v2 = (if (identity_transform) transformedIdentityVertex(uniform, first_source +| 2, source_vertex_count, viewport, indexed) else transformedVertex(uniform, first_source +| 2, source_vertex_count, viewport, indexed)) orelse continue;
-        const unit_uv = for ([3]Vertex{ v0, v1, v2 }) |vertex| {
-            if (vertex.uv[0] < 0 or vertex.uv[0] > 1 or vertex.uv[1] < 0 or vertex.uv[1] > 1) break false;
-        } else (v0.clip_w > 0 and v1.clip_w > 0 and v2.clip_w > 0) or (v0.clip_w < 0 and v1.clip_w < 0 and v2.clip_w < 0);
-        triangle.valid = true;
-        triangle.vertices = .{ v0, v1, v2 };
-        triangle.lighting = cachedLightingTable(triangleLight(v0, v1, v2));
-        triangle.unit_uv = unit_uv;
-        triangle.has_prelit_texture = false;
-        triangle.prelit_texture_ptr = null;
-        triangle.prelit_texture_16x16_ptr = null;
-        triangle.has_prelit_texture_16x16 = false;
-        triangle.flat_color = null;
-        triangle.batch_raster = .{};
+        const vertices = [3]Vertex{ v0, v1, v2 };
+        const light_key_override = if (index > 0 and index % 2 == 1 and output.triangles[index - 1].valid and canReuseFlatTriangleLight(output.triangles[index - 1].vertices, vertices)) output.triangles[index - 1].light_key else null;
+        initializePreparedTriangle(triangle, vertices, light_key_override);
     }
 }
 
@@ -761,6 +842,7 @@ fn cachedPrelitTexture4(texture: []const u8, table: *const [256]u8) ?*const [16]
     return null;
 }
 
+const prelit_texture16_index_slots = 128;
 const PrelitTexture16Cache = struct {
     valid: bool = false,
     texture_address: usize = 0,
@@ -775,22 +857,38 @@ const PrelitTexture16Cache = struct {
 // PreparedTriangle value. The source snapshot preserves correctness for
 // callers that mutate texture bytes in place.
 threadlocal var prelit_texture16_cache: [prelit_texture16_cache_slots]PrelitTexture16Cache = [_]PrelitTexture16Cache{.{}} ** prelit_texture16_cache_slots;
+threadlocal var prelit_texture16_cache_index: [prelit_texture16_index_slots]u8 = [_]u8{0} ** prelit_texture16_index_slots;
+
+fn prelitTexture16CacheIndex(texture_address: usize, lighting_address: usize) usize {
+    return ((texture_address >> 6) ^ (lighting_address >> 4) ^ (lighting_address >> 12)) % prelit_texture16_index_slots;
+}
 
 fn cachedPrelitTexture16(texture: []const u8, table: *const [256]u8) ?*const [256]u32 {
     if (texture.len != 16 * 16 * 4) return null;
     const texture_address = @intFromPtr(texture.ptr);
     const lighting_address = @intFromPtr(table);
-    for (&prelit_texture16_cache) |*entry| {
+    const index = prelitTexture16CacheIndex(texture_address, lighting_address);
+    if (prelit_texture16_cache_index[index] != 0) {
+        const entry = &prelit_texture16_cache[prelit_texture16_cache_index[index] - 1];
         if (entry.valid and entry.texture_address == texture_address and entry.lighting_address == lighting_address and
             std.mem.eql(u8, entry.texture_snapshot[0..], texture)) return &entry.colors;
     }
-    for (&prelit_texture16_cache) |*entry| {
+    for (&prelit_texture16_cache, 0..) |*entry, entry_index| {
+        if (entry.valid and entry.texture_address == texture_address and entry.lighting_address == lighting_address and
+            std.mem.eql(u8, entry.texture_snapshot[0..], texture))
+        {
+            prelit_texture16_cache_index[index] = @intCast(entry_index + 1);
+            return &entry.colors;
+        }
+    }
+    for (&prelit_texture16_cache, 0..) |*entry, entry_index| {
         if (entry.valid) continue;
         @memcpy(entry.texture_snapshot[0..], texture);
         entry.colors = prelitTexture16x16(texture, table);
         entry.texture_address = texture_address;
         entry.lighting_address = lighting_address;
         entry.valid = true;
+        prelit_texture16_cache_index[index] = @intCast(entry_index + 1);
         return &entry.colors;
     }
     return null;
@@ -955,19 +1053,20 @@ fn refreshOpaqueQuad(prepared: *PreparedDraw) void {
     };
 }
 
-const PreparedCacheStatus = struct { hit: bool, cacheable: bool };
+const PreparedCacheStatus = struct { hit: bool, cacheable: bool, promote: bool };
 
 fn prepareDrawCached(uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, output: *PreparedDraw) PreparedCacheStatus {
     const cacheable = uniform.len <= prepared_cache_capacity and texture.len <= prepared_cache_capacity;
-    const hit = cacheable and prepared_cache.valid and prepared_cache.vertex_count == vertex_count and
+    const key_matches = cacheable and prepared_cache.valid and prepared_cache.vertex_count == vertex_count and
         prepared_cache.uniform_len == uniform.len and prepared_cache.texture_len == texture.len and
         prepared_cache.texture_width == texture_width and prepared_cache.texture_height == texture_height and
         std.meta.eql(prepared_cache.viewport, viewport) and
         std.mem.eql(u8, prepared_cache.uniform[0..uniform.len], uniform) and
         std.mem.eql(u8, prepared_cache.texture[0..texture.len], texture);
+    const hit = key_matches and prepared_cache.prepared_ready;
     if (hit) {
         output.* = prepared_cache.prepared;
-        return .{ .hit = true, .cacheable = true };
+        return .{ .hit = true, .cacheable = true, .promote = false };
     }
 
     prepareDraw(uniform, vertex_count, 0, viewport, null, output);
@@ -980,11 +1079,13 @@ fn prepareDrawCached(uniform: []const u8, texture: []const u8, texture_width: u3
         prepared_cache.texture_width = texture_width;
         prepared_cache.texture_height = texture_height;
         prepared_cache.viewport = viewport;
+        prepared_cache.prepared_ready = false;
         prepared_cache.valid = true;
     } else {
         prepared_cache.valid = false;
+        prepared_cache.prepared_ready = false;
     }
-    return .{ .hit = false, .cacheable = cacheable };
+    return .{ .hit = false, .cacheable = cacheable, .promote = cacheable and key_matches };
 }
 
 fn writeFragment(target: ?[]u8, depth: ?[]u8, pixel_index: usize, z: f32, flat_depth_bits: ?u32, inverse_w: f32, flat_reciprocal_w: ?f32, u_over_w: f32, v_over_w: f32, texture: []const u8, texture_width: u32, texture_height: u32, lighting: *const [256]u8, unit_uv: bool, prelit_texture: ?*const [16]u32, flat_color: ?u32, counters: *Counters, comptime count_work: bool) bool {
@@ -1035,7 +1136,7 @@ fn drawInternal(target: ?[]u8, depth: ?[]u8, width: u32, height: u32, uniform: [
     const stats: *Counters = if (count_work) &local_counters else counters;
     if (count_work) stats.triangles_submitted += vertex_count / 3;
     var row_lanes: [8192]u8 = undefined;
-    if (lane_count != 1) {
+    if (lane_count != 1 and stripe_count <= lane_count) {
         for (row_lanes[0..height], 0..) |*lane, y| lane.* = @intCast(stripeLane(@intCast(y), height, lane_count, stripe_count));
     }
     var pixels_written: usize = 0;
@@ -1741,11 +1842,9 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
         output.quad_spans_external = if (span_cache) |cache| if (cache.quad_spans_valid) &cache.quad_spans else null else null;
     }
     const lighting_refresh = !geometry_cache_hit or command_cache.lighting_generation != lighting_generation;
-    if (lighting_refresh) for (output.triangles[0..output.count]) |*triangle| {
-        if (!triangle.valid) continue;
-        const light = triangleLight(triangle.vertices[0], triangle.vertices[1], triangle.vertices[2]);
-        triangle.lighting = if (triangle.unit_uv) batchExactLightingTable(light) orelse exactCachedLightingTable(light) else exactCachedLightingTable(light);
-    };
+    for (output.triangles[0..output.count]) |*triangle| {
+        if (triangle.valid and lighting_refresh) triangle.lighting = exactCachedLightingTable(@bitCast(triangle.light_key));
+    }
     const texture_unchanged = command_cache.valid and command_cache.texture_len == command.texture.len and
         command_cache.texture_width == command.texture_width and command_cache.texture_height == command.texture_height and
         (command.texture_revision != 0 and command_cache.texture_revision == command.texture_revision and command_cache.texture_address == @intFromPtr(command.texture.ptr) or
@@ -1784,12 +1883,12 @@ fn prepareBatchOverlayCommand(command: DrawCommand, commands_address: usize, com
     command_cache.uniform_revision = command.uniform_revision;
 }
 
-fn drawPreparedBatchFast(comptime color_only: bool, target: []u8, depth: []u8, width: u32, height: u32, prepared: *const PreparedDraw, lane_index: usize, tile_min: ?[]u32, tile_max: ?[]u32, tile_columns: usize, tile_count: usize) ?usize {
+fn drawPreparedBatchFastImpl(comptime color_only: bool, target: []u8, depth: []u8, width: u32, height: u32, prepared: *const PreparedDraw, lane_index: usize, lane_count: usize, tile_min: ?[]u32, tile_max: ?[]u32, tile_columns: usize, tile_count: usize) ?usize {
     if (builtin.cpu.arch.endian() != .little or @intFromPtr(target.ptr) & 3 != 0 or @intFromPtr(depth.ptr) & 3 != 0) return null;
     const color_words = std.mem.bytesAsSlice(u32, @as([]align(4) u8, @alignCast(target)));
     const depth_words = std.mem.bytesAsSlice(u32, @as([]align(4) u8, @alignCast(depth)));
-    const lane_min_y: i32 = @intCast(@as(usize, height) * lane_index / parallel_band_count);
-    const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / parallel_band_count);
+    const lane_min_y: i32 = @intCast(@as(usize, height) * lane_index / lane_count);
+    const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / lane_count);
     var pixels_written: usize = 0;
     if (comptime color_only) if (prepared.count == 2 and prepared.opaque_quad.valid and prepared.spans_valid) {
         // Keep the two triangle spans separate. Their affine UV planes are
@@ -1804,7 +1903,7 @@ fn drawPreparedBatchFast(comptime color_only: bool, target: []u8, depth: []u8, w
         if (!triangle.valid or !triangle.batch_raster.ready) continue;
         if (comptime color_only) if (!triangle.has_prelit_texture_16x16 or triangle.batch_raster.v_over_w_dx != 0) return null;
         const raster = triangle.batch_raster;
-        pixels_written += rasterFlatSpanTriangle(!color_only, color_words, depth_words, width, height, parallel_band_count, lane_index, raster.p0, raster.p1, raster.p2, raster.inverse_area, raster.min_x, raster.min_y, raster.max_x, raster.max_y, @max(raster.min_y, lane_min_y), @min(raster.max_y, lane_max_y), if (prepared.spans_valid) preparedSpan(prepared, triangle_index) else null, raster.flat_depth_bits, triangle.flat_color, if (triangle.has_prelit_texture) if (triangle.prelit_texture_ptr) |colors| colors else &triangle.prelit_texture else null, if (triangle.has_prelit_texture_16x16) if (triangle.prelit_texture_16x16_ptr) |colors| colors else &triangle.prelit_texture_16x16 else null, tile_min, tile_max, tile_columns, tile_count, raster.flat_reciprocal_w, raster.u_over_w[0], raster.u_over_w[1], raster.u_over_w[2], raster.v_over_w[0], raster.v_over_w[1], raster.v_over_w[2], raster.u_over_w_dx, raster.v_over_w_dx);
+        pixels_written += rasterFlatSpanTriangle(!color_only, color_words, depth_words, width, height, lane_count, lane_index, raster.p0, raster.p1, raster.p2, raster.inverse_area, raster.min_x, raster.min_y, raster.max_x, raster.max_y, @max(raster.min_y, lane_min_y), @min(raster.max_y, lane_max_y), if (prepared.spans_valid) preparedSpan(prepared, triangle_index) else null, raster.flat_depth_bits, triangle.flat_color, if (triangle.has_prelit_texture) if (triangle.prelit_texture_ptr) |colors| colors else &triangle.prelit_texture else null, if (triangle.has_prelit_texture_16x16) if (triangle.prelit_texture_16x16_ptr) |colors| colors else &triangle.prelit_texture_16x16 else null, tile_min, tile_max, tile_columns, tile_count, raster.flat_reciprocal_w, raster.u_over_w[0], raster.u_over_w[1], raster.u_over_w[2], raster.v_over_w[0], raster.v_over_w[1], raster.v_over_w[2], raster.u_over_w_dx, raster.v_over_w_dx);
     }
     return pixels_written;
 }
@@ -2506,17 +2605,37 @@ fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, unif
     _ = cpu_locality.pinCurrent(.render);
     var prepared: PreparedDraw = undefined;
     const cache_status = prepareDrawCached(uniform, texture, texture_width, texture_height, vertex_count, viewport, &prepared);
+    const inline_fast = counters == null and clear_color_pattern == null and clear_depth_pattern == null and expected_target == null and !clear_spans_requested;
     if (!cache_status.hit) buildPreparedFlatSpans(&prepared, width, height);
     const lighting_generation = exact_lighting_cache_generation.load(.acquire);
     if (!cache_status.hit or prepared_cache.lighting_generation != lighting_generation) {
         for (prepared.triangles[0..prepared.count]) |*triangle| {
-            triangle.lighting = exactCachedLightingTable(triangleLight(triangle.vertices[0], triangle.vertices[1], triangle.vertices[2]));
+            triangle.lighting = exactCachedLightingTable(@bitCast(triangle.light_key));
         }
         prepared_cache.lighting_generation = exact_lighting_cache_generation.load(.acquire);
     }
     prepareLitTextures(&prepared, texture, texture_width, texture_height);
-    if (cache_status.cacheable) prepared_cache.prepared = prepared;
-    const prepared_ptr: *const PreparedDraw = if (cache_status.cacheable) &prepared_cache.prepared else &prepared;
+    if (inline_fast and !cache_status.hit) {
+        prepareBatchRaster(&prepared, width, height, scissor);
+        refreshBatchFastFlag(&prepared);
+    }
+    if (cache_status.cacheable and cache_status.promote) {
+        prepared_cache.prepared = prepared;
+        prepared_cache.prepared_ready = true;
+    }
+    const prepared_ptr: *const PreparedDraw = if (cache_status.hit or cache_status.promote) &prepared_cache.prepared else &prepared;
+    if (inline_fast) {
+        var inline_context = ParallelDraw{ .target = target, .depth = depth, .width = width, .height = height, .uniform = uniform, .texture = texture, .texture_width = texture_width, .texture_height = texture_height, .vertex_count = vertex_count, .base_vertex = 0, .viewport = viewport, .scissor = scissor, .cull_mode = 0, .front_face = 0, .indexed = null, .prepared = prepared_ptr, .stripe_count = parallel_slice_count };
+        if (prepared_ptr.batch_fast) {
+            if (drawPreparedBatchFastSerial(target, depth, width, height, prepared_ptr)) |pixels| return pixels;
+            runParallelJob(.{ .draw = &inline_context }, 0);
+            runParallelJob(.{ .draw = &inline_context }, 1);
+        } else {
+            runParallelJob(.{ .draw = &inline_context }, 0);
+            runParallelJob(.{ .draw = &inline_context }, 1);
+        }
+        return inline_context.bands[0].pixels_written + inline_context.bands[1].pixels_written;
+    }
     var validation_failed = std.atomic.Value(bool).init(false);
     const full_screen_scissor = scissor.x == 0 and scissor.y == 0 and scissor.width == width and scissor.height == height;
     const clear_spans = clear_spans_requested and expected_target != null and prepared.spans_valid and width == 800 and height == 600 and full_screen_scissor;
@@ -3216,4 +3335,11 @@ test "parallel shutdown waits for an active render job" {
     _ = std.c.pthread_mutex_unlock(&parallel_mutex);
     shutdown_thread.join();
     try std.testing.expect(done.load(.acquire));
+}
+fn drawPreparedBatchFast(comptime color_only: bool, target: []u8, depth: []u8, width: u32, height: u32, prepared: *const PreparedDraw, lane_index: usize, tile_min: ?[]u32, tile_max: ?[]u32, tile_columns: usize, tile_count: usize) ?usize {
+    return drawPreparedBatchFastImpl(color_only, target, depth, width, height, prepared, lane_index, parallel_band_count, tile_min, tile_max, tile_columns, tile_count);
+}
+
+fn drawPreparedBatchFastSerial(target: []u8, depth: []u8, width: u32, height: u32, prepared: *const PreparedDraw) ?usize {
+    return drawPreparedBatchFastImpl(false, target, depth, width, height, prepared, 0, 1, null, null, 0, 0);
 }
