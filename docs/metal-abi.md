@@ -125,6 +125,8 @@ triangle path:
   MTL4LibraryFunctionDescriptor objects resolve through ZPU libraries,
   compiler-created compute pipeline descriptors instantiate the existing ZPU
   CPU kernels, binary functions expose deterministic name/type metadata, and
+  compute pipeline binary linking accepts only same-device registered visible
+  CPU functions while preserving the base ZPU kernel and exported handles;
   asynchronous compiler tasks complete synchronously after CPU construction;
   dynamic libraries preserve registered symbol names and install names through
   a deterministic CPU serialization format; render/tile/mesh,
@@ -133,9 +135,10 @@ triangle path:
   names and emit deterministic ZPU metadata scripts or the existing ZPU
   binary-archive format; these outputs are not Apple metal-tt scripts or
   native GPU binaries
-- owner-checked CPU function handles expose registered compute names/types and
-  the required zero gpuResourceID sentinel; visible/intersection function
-  tables and GPU function-pointer execution remain unsupported
+- owner-checked CPU function handles expose registered compute and visible
+  callable names/types and the required zero gpuResourceID sentinel; visible
+  function-table invocation remains unsupported because the fixed CPU kernels
+  do not execute arbitrary function-pointer shader code
 - supported Apple-adapter render state and draw selectors propagate ZPU
   validation failures to `MTLCommandBufferStatusError`; invalid state is not
   silently reported as successful CPU work
@@ -247,7 +250,7 @@ triangle path:
 - classic Metal resource, pipeline, blit, event, indirect-command, and
   command-buffer selectors that have no portable CPU meaning are represented
   explicitly: metadata-only operations are deterministic no-ops, while
-  arbitrary shader compilation, binary linking, sparse/placement
+  arbitrary shader compilation, unregistered or arbitrary binary linking, sparse/placement
   resources, ray tracing, tensor shader/ML execution, I/O, and unsupported Metal 4 advanced
   families return nil or a stable error. They never fall through to Apple's
   native Metal runtime

@@ -30,6 +30,8 @@ static const char *const kShaderSource =
     "fragment float4 zpu_test_sample_fragment(Vertex input [[stage_in]], "
     "texture2d<float> source [[texture(0)]], sampler sourceSampler [[sampler(0)]]) { "
     "return source.sample(sourceSampler, input.color.xy); }\n"
+    "[[visible]] float4 zpu_test_visible(float4 value) { return value; }\n"
+    "[[visible]] float4 zpu_test_visible_secondary(float4 value) { return value + 1.0; }\n"
     "kernel void zpu_cpu_fill_gradient_rgba8(texture2d<float, access::write> output [[texture(0)]], "
     "uint2 gid [[thread_position_in_grid]]) { "
     "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
@@ -3789,7 +3791,9 @@ int main(void) {
             @"kernel void zpu_cpu_fill_gradient_rgba8() {}\n"
              "kernel void zpu_cpu_copy_rgba8_buffer_to_texture() {}\n"
              "kernel void zpu_cpu_fill_gradient_rgba8_array() {}\n"
-             "kernel void zpu_cpu_fill_gradient_rgba8_3d() {}";
+             "kernel void zpu_cpu_fill_gradient_rgba8_3d() {}\n"
+             "[[visible]] float4 zpu_test_visible(float4 value) { return value; }\n"
+             "[[visible]] float4 zpu_test_visible_secondary(float4 value) { return value + 1.0; }";
         id<MTLLibrary> adapter_library =
             [adapter_device newLibraryWithSource:adapter_cpu_source options:nil error:&adapter_library_error];
         id<MTLFunction> adapter_library_function =
@@ -3808,9 +3812,11 @@ int main(void) {
             adapter_constant_function == nil ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 4 ||
+            adapter_library.functionNames.count != 6 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_3d"] == nil ||
+            [adapter_library newFunctionWithName:@"zpu_test_visible"].functionType != MTLFunctionTypeVisible ||
+            [adapter_library newFunctionWithName:@"zpu_test_visible_secondary"].functionType != MTLFunctionTypeVisible ||
             !adapter_library_completion_called ||
             unsupported_adapter_library != nil || adapter_library_error == nil) {
             fail_with_error("CPU library/function metadata failed", adapter_library_error);
@@ -3975,8 +3981,112 @@ int main(void) {
         NSError *adapter_compute_error = nil;
         id<MTLFunction> adapter_compute_function =
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_fill_gradient_rgba8");
+        MTLComputePipelineDescriptor *adapter_compute_link_descriptor = [MTLComputePipelineDescriptor new];
+        adapter_compute_link_descriptor.computeFunction = adapter_compute_function;
+        adapter_compute_link_descriptor.supportAddingBinaryFunctions = YES;
+        MTLLinkedFunctions *adapter_linked_functions = [MTLLinkedFunctions new];
+        adapter_linked_functions.functions = @[[adapter_library newFunctionWithName:@"zpu_test_visible"]];
+        adapter_compute_link_descriptor.linkedFunctions = adapter_linked_functions;
         id<MTLComputePipelineState> adapter_compute_pipeline =
-            [adapter_device newComputePipelineStateWithFunction:adapter_compute_function error:&adapter_compute_error];
+            [adapter_device newComputePipelineStateWithDescriptor:adapter_compute_link_descriptor
+                                                            options:0 reflection:nil error:&adapter_compute_error];
+        /* Additional binary functions remain CPU-side metadata. The linked
+         * state reuses the same ZPU kernel and records the extra registered
+         * callable names so function handles stay device-scoped. Native Metal
+         * is queried only for the matching output oracle. */
+        BOOL adapter_compute_link_ok = YES;
+        id<MTLComputePipelineState> native_linked_compute_pipeline = nil;
+        id<MTLComputePipelineState> adapter_linked_compute_pipeline = nil;
+        id<MTLFunctionHandle> adapter_prelinked_function_handle = nil;
+        id<MTLFunctionHandle> adapter_linked_function_handle = nil;
+        uint8_t native_linked_compute_pixels[byte_count] = {0};
+        uint8_t adapter_linked_compute_pixels[byte_count] = {0};
+        NSError *native_link_error = nil;
+        NSError *adapter_link_error = nil;
+        if (@available(macOS 11.0, iOS 14.0, tvOS 16.0, *)) {
+            MTLComputePipelineDescriptor *native_compute_link_descriptor = [MTLComputePipelineDescriptor new];
+            native_compute_link_descriptor.computeFunction = native_compute_function;
+            native_compute_link_descriptor.supportAddingBinaryFunctions = YES;
+            MTLLinkedFunctions *native_linked_functions = [MTLLinkedFunctions new];
+            native_linked_functions.functions = @[[library newFunctionWithName:@"zpu_test_visible"]];
+            native_compute_link_descriptor.linkedFunctions = native_linked_functions;
+            id<MTLComputePipelineState> native_compute_link_pipeline =
+                [device newComputePipelineStateWithDescriptor:native_compute_link_descriptor
+                                                        options:0 reflection:nil error:&native_link_error];
+            MTLFunctionDescriptor *native_additional_function_descriptor = [MTLFunctionDescriptor new];
+            native_additional_function_descriptor.name = @"zpu_test_visible_secondary";
+            native_additional_function_descriptor.options = MTLFunctionOptionCompileToBinary;
+            id<MTLFunction> native_additional_compute_function =
+                [library newFunctionWithDescriptor:native_additional_function_descriptor error:&native_link_error];
+            id<MTLFunction> adapter_additional_compute_function =
+                [adapter_library newFunctionWithName:@"zpu_test_visible_secondary"];
+            native_linked_compute_pipeline =
+                [native_compute_link_pipeline newComputePipelineStateWithAdditionalBinaryFunctions:@[
+                    native_additional_compute_function] error:&native_link_error];
+            adapter_linked_compute_pipeline =
+                [adapter_compute_pipeline newComputePipelineStateWithAdditionalBinaryFunctions:@[
+                    adapter_additional_compute_function] error:&adapter_link_error];
+            adapter_prelinked_function_handle =
+                [adapter_compute_pipeline functionHandleWithFunction:
+                    [adapter_library newFunctionWithName:@"zpu_test_visible"]];
+            adapter_linked_function_handle =
+                [adapter_linked_compute_pipeline functionHandleWithFunction:adapter_additional_compute_function];
+            id<MTLTexture> native_linked_compute_texture = nil;
+            id<MTLCommandBuffer> native_linked_compute_command_buffer = nil;
+            id<MTLComputeCommandEncoder> native_linked_compute_encoder = nil;
+            if (native_linked_compute_pipeline != nil) {
+                native_linked_compute_texture = [device newTextureWithDescriptor:compute_texture_descriptor];
+                native_linked_compute_command_buffer = [queue commandBuffer];
+                native_linked_compute_encoder =
+                    [native_linked_compute_command_buffer computeCommandEncoder];
+            }
+            if (native_linked_compute_pipeline != nil && native_linked_compute_texture != nil &&
+                native_linked_compute_command_buffer != nil && native_linked_compute_encoder != nil) {
+                [native_linked_compute_encoder setComputePipelineState:native_linked_compute_pipeline];
+                [native_linked_compute_encoder setTexture:native_linked_compute_texture atIndex:0];
+                [native_linked_compute_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                          threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+                [native_linked_compute_encoder endEncoding];
+                [native_linked_compute_command_buffer commit];
+                [native_linked_compute_command_buffer waitUntilCompleted];
+                [native_linked_compute_texture getBytes:native_linked_compute_pixels
+                                             bytesPerRow:(NSUInteger)width * 4
+                                              fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                             mipmapLevel:0];
+            }
+            id<MTLTexture> adapter_linked_compute_texture = nil;
+            id<MTLCommandBuffer> adapter_linked_compute_command_buffer = nil;
+            id<MTLComputeCommandEncoder> adapter_linked_compute_encoder = nil;
+            if (adapter_linked_compute_pipeline != nil) {
+                adapter_linked_compute_texture =
+                    [adapter_device newTextureWithDescriptor:compute_texture_descriptor];
+                adapter_linked_compute_command_buffer = [adapter_queue commandBuffer];
+                adapter_linked_compute_encoder =
+                    [adapter_linked_compute_command_buffer computeCommandEncoder];
+            }
+            if (adapter_linked_compute_pipeline != nil && adapter_linked_compute_texture != nil &&
+                adapter_linked_compute_command_buffer != nil && adapter_linked_compute_encoder != nil) {
+                [adapter_linked_compute_encoder setComputePipelineState:adapter_linked_compute_pipeline];
+                [adapter_linked_compute_encoder setTexture:adapter_linked_compute_texture atIndex:0];
+                [adapter_linked_compute_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                           threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+                [adapter_linked_compute_encoder endEncoding];
+                [adapter_linked_compute_command_buffer commit];
+                [adapter_linked_compute_command_buffer waitUntilCompleted];
+                [adapter_linked_compute_texture getBytes:adapter_linked_compute_pixels
+                                              bytesPerRow:(NSUInteger)width * 4
+                                               fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                              mipmapLevel:0];
+                adapter_compute_link_ok =
+                    adapter_linked_compute_command_buffer.status == MTLCommandBufferStatusCompleted;
+            } else {
+                adapter_compute_link_ok = NO;
+            }
+            adapter_compute_link_ok = adapter_compute_link_ok &&
+                native_linked_compute_pipeline != nil && adapter_prelinked_function_handle != nil &&
+                adapter_linked_function_handle != nil &&
+                memcmp(native_linked_compute_pixels, adapter_linked_compute_pixels, byte_count) == 0;
+        }
         MTLComputePipelineReflection *native_legacy_compute_reflection = nil;
         MTLComputePipelineReflection *adapter_legacy_compute_reflection = nil;
         if (@available(macOS 26.0, iOS 26.0, *)) {
@@ -4029,7 +4139,17 @@ int main(void) {
             adapter_compute_function == nil || adapter_compute_pipeline == nil || adapter_default_library == nil ||
             adapter_default_compute_function == nil || adapter_compute_texture == nil || adapter_compute_encoder == nil ||
             adapter_compute_command_buffer.status != MTLCommandBufferStatusCompleted ||
-            adapter_non_argument_buffer_encoder != nil) {
+            adapter_non_argument_buffer_encoder != nil || !adapter_compute_link_ok) {
+            if (!adapter_compute_link_ok) {
+                fprintf(stderr, "metal-pixel: compute pipeline link probe native=%p adapter=%p handle=%p first=%u/%u native_error=%s adapter_error=%s\n",
+                        native_linked_compute_pipeline, adapter_linked_compute_pipeline,
+                        adapter_linked_function_handle, native_linked_compute_pixels[0],
+                        adapter_linked_compute_pixels[0],
+                        native_link_error.localizedDescription == nil ? "(null)" :
+                        native_link_error.localizedDescription.UTF8String,
+                        adapter_link_error.localizedDescription == nil ? "(null)" :
+                        adapter_link_error.localizedDescription.UTF8String);
+            }
             fail_with_error("compute adapter execution failed", adapter_compute_error);
             return 42;
         }
@@ -4277,6 +4397,7 @@ int main(void) {
         adapter_mtl4_compute_descriptor.computeFunctionDescriptor = adapter_mtl4_function_descriptor;
         adapter_mtl4_compute_descriptor.maxTotalThreadsPerThreadgroup = 64;
         adapter_mtl4_compute_descriptor.requiredThreadsPerThreadgroup = MTLSizeMake(8, 8, 1);
+        adapter_mtl4_compute_descriptor.supportBinaryLinking = YES;
         adapter_mtl4_compute_descriptor.supportIndirectCommandBuffers =
             MTL4IndirectCommandBufferSupportStateEnabled;
         id<MTLComputePipelineState> adapter_mtl4_compiled_pipeline =
@@ -4311,6 +4432,38 @@ int main(void) {
             [adapter_mtl4_compiler newBinaryFunctionWithDescriptor:adapter_mtl4_binary_descriptor
                                                   compilerTaskOptions:nil
                                                                 error:&adapter_mtl4_compiler_error];
+        id<MTL4BinaryFunction> adapter_mtl4_additional_binary_function = nil;
+        id<MTLComputePipelineState> adapter_mtl4_binary_linked_pipeline = nil;
+        id<MTLFunctionHandle> adapter_mtl4_binary_linked_handle = nil;
+        BOOL adapter_mtl4_binary_link_ok = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTL4LibraryFunctionDescriptor *adapter_mtl4_additional_function_descriptor =
+                [MTL4LibraryFunctionDescriptor new];
+            adapter_mtl4_additional_function_descriptor.name =
+                @"zpu_test_visible_secondary";
+            adapter_mtl4_additional_function_descriptor.library = adapter_mtl4_library;
+            MTL4BinaryFunctionDescriptor *adapter_mtl4_additional_binary_descriptor =
+                [MTL4BinaryFunctionDescriptor new];
+            adapter_mtl4_additional_binary_descriptor.name =
+                @"zpu_test_visible_secondary";
+            adapter_mtl4_additional_binary_descriptor.functionDescriptor =
+                adapter_mtl4_additional_function_descriptor;
+            adapter_mtl4_additional_binary_descriptor.options = MTL4BinaryFunctionOptionPipelineIndependent;
+            adapter_mtl4_additional_binary_function =
+                [adapter_mtl4_compiler newBinaryFunctionWithDescriptor:
+                    adapter_mtl4_additional_binary_descriptor compilerTaskOptions:nil
+                    error:&adapter_mtl4_compiler_error];
+            if (adapter_mtl4_additional_binary_function != nil && adapter_mtl4_compiled_pipeline != nil) {
+                adapter_mtl4_binary_linked_pipeline =
+                    [adapter_mtl4_compiled_pipeline newComputePipelineStateWithBinaryFunctions:@[
+                        adapter_mtl4_additional_binary_function] error:&adapter_mtl4_compiler_error];
+                adapter_mtl4_binary_linked_handle =
+                    [adapter_mtl4_binary_linked_pipeline functionHandleWithBinaryFunction:
+                        adapter_mtl4_additional_binary_function];
+            }
+            adapter_mtl4_binary_link_ok = adapter_mtl4_additional_binary_function != nil &&
+                adapter_mtl4_binary_linked_pipeline != nil && adapter_mtl4_binary_linked_handle != nil;
+        }
         id<MTLFunctionHandle> adapter_mtl4_binary_handle =
             [adapter_device functionHandleWithBinaryFunction:adapter_mtl4_binary_function];
         id<MTLFunction> adapter_mtl4_compiler_function =
@@ -4370,7 +4523,8 @@ int main(void) {
         id<MTLCommandBuffer> adapter_mtl4_compiler_command_buffer = [adapter_queue commandBuffer];
         id<MTLComputeCommandEncoder> adapter_mtl4_compiler_encoder =
             [adapter_mtl4_compiler_command_buffer computeCommandEncoder];
-        [adapter_mtl4_compiler_encoder setComputePipelineState:adapter_mtl4_compiled_pipeline];
+        [adapter_mtl4_compiler_encoder setComputePipelineState:
+            adapter_mtl4_binary_linked_pipeline ?: adapter_mtl4_compiled_pipeline];
         [adapter_mtl4_compiler_encoder setTexture:adapter_mtl4_compiler_texture atIndex:0];
         [adapter_mtl4_compiler_encoder dispatchThreads:MTLSizeMake(width, height, 1)
                                   threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
@@ -4432,6 +4586,7 @@ int main(void) {
             (native_function_reflection != nil && native_function_reflection.bindings.count != 1) ||
             adapter_mtl4_compiled_pipeline == nil || adapter_mtl4_compiled_render_pipeline == nil ||
             adapter_mtl4_archived_render_pipeline == nil || adapter_mtl4_binary_function == nil ||
+            !adapter_mtl4_binary_link_ok ||
             adapter_mtl4_compiled_pipeline.maxTotalThreadsPerThreadgroup != 64 ||
             adapter_mtl4_compiled_pipeline.requiredThreadsPerThreadgroup.width != 8 ||
             adapter_mtl4_compiled_pipeline.requiredThreadsPerThreadgroup.height != 8 ||

@@ -916,6 +916,8 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @public
     ZPUDevice *_owner;
     zpu_metal_compute_kernel _kernel;
+    NSArray *_linkedFunctionNames;
+    BOOL _supportsAddingBinaryFunctions;
     NSUInteger _maxTotalThreadsPerThreadgroup;
     MTLSize _requiredThreadsPerThreadgroup;
     BOOL _supportsIndirectCommandBuffers;
@@ -923,6 +925,8 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLComputePipelineReflection *_legacyReflection;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner function:(id<MTLFunction>)function error:(NSError **)error;
+- (instancetype)initWithPipeline:(ZPUComputePipelineState *)pipeline
+                linkedFunctionNames:(NSArray<NSString *> *)linkedFunctionNames;
 @end
 
 @interface ZPUComputeEncoder : NSObject <MTLComputeCommandEncoder> {
@@ -3717,6 +3721,67 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
 
 #pragma clang diagnostic pop
 
+static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel);
+static NSString *zpu_compute_visible_function_name_for_name(NSString *name);
+
+static BOOL zpu_append_legacy_compute_functions(
+    ZPUComputePipelineState *pipeline, NSArray<id<MTLFunction>> *functions,
+    NSMutableSet<NSString *> *allNames, NSMutableArray<NSString *> *exportedNames,
+    NSError **error, BOOL exportHandles) {
+    for (id<MTLFunction> function in functions) {
+        ZPUCPUFunction *cpuFunction = (ZPUCPUFunction *)function;
+        NSString *baseName = zpu_compute_kernel_name(pipeline->_kernel);
+        if (![cpuFunction isKindOfClass:[ZPUCPUFunction class]] || cpuFunction->_owner != pipeline->_owner ||
+            cpuFunction.functionType != MTLFunctionTypeVisible) {
+            zpu_set_error(error, @"ZPU CPU Metal compute pipeline has an invalid or duplicate linked function");
+            return NO;
+        }
+        NSString *name = cpuFunction->_name;
+        if (name.length == 0 ||
+            zpu_compute_visible_function_name_for_name(name) == nil || [name isEqualToString:baseName] ||
+            [allNames containsObject:name]) {
+            zpu_set_error(error, @"ZPU CPU Metal compute pipeline has an invalid or duplicate linked function");
+            return NO;
+        }
+        [allNames addObject:name];
+        if (exportHandles) [exportedNames addObject:name];
+    }
+    return YES;
+}
+
+static BOOL zpu_apply_legacy_compute_descriptor(
+    ZPUComputePipelineState *pipeline, MTLComputePipelineDescriptor *descriptor, NSError **error) {
+    if (pipeline == nil || descriptor == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal requires a compute pipeline descriptor");
+        return NO;
+    }
+    if (@available(macOS 11.0, iOS 14.0, tvOS 16.0, *)) {
+        pipeline->_supportsAddingBinaryFunctions = descriptor.supportAddingBinaryFunctions;
+        MTLLinkedFunctions *linked = descriptor.linkedFunctions;
+        if (linked != nil) {
+            NSMutableSet<NSString *> *allNames = [NSMutableSet set];
+            NSMutableArray<NSString *> *exportedNames = [NSMutableArray array];
+            if (!zpu_append_legacy_compute_functions(pipeline, linked.functions ?: @[], allNames,
+                                                       exportedNames, error, YES) ||
+                !zpu_append_legacy_compute_functions(pipeline, linked.privateFunctions ?: @[], allNames,
+                                                       exportedNames, error, NO)) return NO;
+            pipeline->_linkedFunctionNames = [exportedNames copy];
+        }
+    }
+    if (descriptor.maxTotalThreadsPerThreadgroup > pipeline->_maxTotalThreadsPerThreadgroup) {
+        zpu_set_error(error, @"ZPU CPU Metal compute pipeline thread limit is unsupported");
+        return NO;
+    }
+    if (descriptor.maxTotalThreadsPerThreadgroup != 0) {
+        pipeline->_maxTotalThreadsPerThreadgroup = descriptor.maxTotalThreadsPerThreadgroup;
+    }
+    if (@available(macOS 11.0, iOS 13.0, *)) {
+        pipeline->_supportsIndirectCommandBuffers = descriptor.supportIndirectCommandBuffers;
+    }
+    if (error != NULL) *error = nil;
+    return YES;
+}
+
 @implementation ZPUDevice
 - (instancetype)initWithDevice:(zpu_metal_device *)device {
     if ((self = [super init])) {
@@ -4096,8 +4161,15 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
 }
 - (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)descriptor options:(MTLPipelineOption)options reflection:(MTLAutoreleasedComputePipelineReflection * __nullable)reflection error:(NSError **)error API_AVAILABLE(macos(10.11), ios(9.0)) {
     if (reflection != NULL) *reflection = nil;
-    return descriptor == nil ? nil : [self newComputePipelineStateWithFunction:descriptor.computeFunction
-                                                                         options:options reflection:reflection error:error];
+    if (descriptor == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal requires a compute pipeline descriptor");
+        return nil;
+    }
+    ZPUComputePipelineState *pipeline = (ZPUComputePipelineState *)
+        [self newComputePipelineStateWithFunction:descriptor.computeFunction
+                                           options:options reflection:reflection error:error];
+    if (pipeline != nil && !zpu_apply_legacy_compute_descriptor(pipeline, descriptor, error)) return nil;
+    return (id<MTLComputePipelineState>)pipeline;
 }
 - (void)newComputePipelineStateWithFunction:(id<MTLFunction>)computeFunction completionHandler:(MTLNewComputePipelineStateCompletionHandler)completionHandler {
     if (completionHandler == nil) return;
@@ -4530,6 +4602,8 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
 - (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
 - (NSString *)name { return _name; }
 - (MTLFunctionType)functionType {
+    if ([_name isEqualToString:@"zpu_test_visible"] ||
+        [_name isEqualToString:@"zpu_test_visible_secondary"]) return MTLFunctionTypeVisible;
     if ([_name rangeOfString:@"vertex" options:NSCaseInsensitiveSearch].location != NSNotFound) return MTLFunctionTypeVertex;
     if ([_name rangeOfString:@"fragment" options:NSCaseInsensitiveSearch].location != NSNotFound) return MTLFunctionTypeFragment;
     return MTLFunctionTypeKernel;
@@ -4579,6 +4653,8 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
             @"zpu_test_depth_bounds_oracle",
             @"zpu_test_mrt_fragment",
             @"zpu_test_sample_fragment",
+            @"zpu_test_visible",
+            @"zpu_test_visible_secondary",
             @"zpu_cpu_uniform_color_fragment",
             @"zpu_cpu_fill_gradient_rgba8",
             @"zpu_cpu_copy_rgba8_buffer_to_texture",
@@ -5047,7 +5123,7 @@ static BOOL zpu_mtl4_apply_compute_descriptor(
         return NO;
     }
     MTL4StaticLinkingDescriptor *linking = descriptor.staticLinkingDescriptor;
-    if (descriptor.supportBinaryLinking || linking.functionDescriptors.count != 0 ||
+    if (linking.functionDescriptors.count != 0 ||
         linking.privateFunctionDescriptors.count != 0 || linking.groups.count != 0 ||
         descriptor.maxTotalThreadsPerThreadgroup > pipeline->_maxTotalThreadsPerThreadgroup) {
         zpu_set_error(error, @"ZPU CPU Metal 4 compute pipeline uses unsupported linking or thread limits");
@@ -5057,6 +5133,7 @@ static BOOL zpu_mtl4_apply_compute_descriptor(
         pipeline->_maxTotalThreadsPerThreadgroup = descriptor.maxTotalThreadsPerThreadgroup;
     }
     pipeline->_requiredThreadsPerThreadgroup = descriptor.requiredThreadsPerThreadgroup;
+    pipeline->_supportsAddingBinaryFunctions = descriptor.supportBinaryLinking;
     pipeline->_supportsIndirectCommandBuffers =
         descriptor.supportIndirectCommandBuffers == MTL4IndirectCommandBufferSupportStateEnabled;
     return YES;
@@ -7144,11 +7221,18 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
     }
 }
 
+static NSString *zpu_compute_visible_function_name_for_name(NSString *name) {
+    return ([name isEqualToString:@"zpu_test_visible"] ||
+            [name isEqualToString:@"zpu_test_visible_secondary"]) ? name : nil;
+}
+
 @implementation ZPUComputePipelineState
 - (instancetype)initWithOwner:(ZPUDevice *)owner function:(id<MTLFunction>)function error:(NSError **)error {
     if ((self = [super init])) {
         _owner = owner;
         _kernel = 0;
+        _linkedFunctionNames = @[];
+        _supportsAddingBinaryFunctions = NO;
         _maxTotalThreadsPerThreadgroup = 1024;
         _requiredThreadsPerThreadgroup = MTLSizeMake(0, 0, 0);
         _supportsIndirectCommandBuffers = YES;
@@ -7180,6 +7264,21 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
     if (error != NULL) *error = nil;
     return self;
 }
+- (instancetype)initWithPipeline:(ZPUComputePipelineState *)pipeline
+                linkedFunctionNames:(NSArray<NSString *> *)linkedFunctionNames {
+    if ((self = [super init])) {
+        _owner = pipeline->_owner;
+        _kernel = pipeline->_kernel;
+        _linkedFunctionNames = [linkedFunctionNames copy];
+        _supportsAddingBinaryFunctions = pipeline->_supportsAddingBinaryFunctions;
+        _maxTotalThreadsPerThreadgroup = pipeline->_maxTotalThreadsPerThreadgroup;
+        _requiredThreadsPerThreadgroup = pipeline->_requiredThreadsPerThreadgroup;
+        _supportsIndirectCommandBuffers = pipeline->_supportsIndirectCommandBuffers;
+        _reflection = pipeline->_reflection;
+        _legacyReflection = pipeline->_legacyReflection;
+    }
+    return self;
+}
 - (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
 - (NSUInteger)allocatedSize API_AVAILABLE(macos(15.0), ios(18.0)) { return 0; }
 - (NSString *)label { return @"ZPU CPU compute pipeline"; }
@@ -7202,13 +7301,42 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
 - (id<MTLFunctionHandle>)functionHandleWithBinaryFunction:(id<MTL4BinaryFunction>)function API_AVAILABLE(macos(26.0), ios(26.0)) {
     ZPUMTL4BinaryFunction *binary = (ZPUMTL4BinaryFunction *)function;
     if (![binary isKindOfClass:[ZPUMTL4BinaryFunction class]] || binary->_owner != _owner ||
-        binary->_functionType != MTLFunctionTypeKernel) return nil;
-    return [self functionHandleWithName:binary->_name];
+        (binary->_functionType != MTLFunctionTypeKernel && binary->_functionType != MTLFunctionTypeVisible)) return nil;
+    NSString *kernelName = zpu_compute_kernel_name(_kernel);
+    const BOOL isBaseKernel = binary->_functionType == MTLFunctionTypeKernel &&
+        kernelName != nil && [kernelName isEqualToString:binary->_name];
+    const BOOL isLinkedVisible = binary->_functionType == MTLFunctionTypeVisible &&
+        [_linkedFunctionNames containsObject:binary->_name];
+    if (!isBaseKernel && !isLinkedVisible) return nil;
+    return (id<MTLFunctionHandle>)[[ZPUFunctionHandle alloc] initWithOwner:_owner
+                                                                        name:binary->_name
+                                                                 functionType:binary->_functionType];
 }
 - (id<MTLComputePipelineState>)newComputePipelineStateWithBinaryFunctions:(NSArray<id<MTL4BinaryFunction>> *)additionalBinaryFunctions error:(NSError **)error API_AVAILABLE(macos(26.0), ios(26.0)) {
-    (void)additionalBinaryFunctions;
-    zpu_set_error(error, @"ZPU CPU Metal does not link Metal 4 binary functions");
-    return nil;
+    if (!_supportsAddingBinaryFunctions) {
+        zpu_set_error(error, @"ZPU CPU Metal compute pipeline was not created for binary-function linking");
+        return nil;
+    }
+    if (additionalBinaryFunctions == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal compute pipeline binary functions must be non-nil");
+        return nil;
+    }
+    NSMutableArray<NSString *> *linkedNames = [_linkedFunctionNames mutableCopy];
+    NSString *kernelName = zpu_compute_kernel_name(_kernel);
+    for (id<MTL4BinaryFunction> function in additionalBinaryFunctions) {
+        ZPUMTL4BinaryFunction *binary = (ZPUMTL4BinaryFunction *)function;
+        if (![binary isKindOfClass:[ZPUMTL4BinaryFunction class]] || binary->_owner != _owner ||
+            binary->_functionType != MTLFunctionTypeVisible || binary->_name.length == 0 ||
+            zpu_compute_visible_function_name_for_name(binary->_name) == nil ||
+            [binary->_name isEqualToString:kernelName] || [linkedNames containsObject:binary->_name]) {
+            zpu_set_error(error, @"ZPU CPU Metal compute pipeline binary function is invalid or already linked");
+            return nil;
+        }
+        [linkedNames addObject:binary->_name];
+    }
+    if (error != NULL) *error = nil;
+    return (id<MTLComputePipelineState>)[[ZPUComputePipelineState alloc]
+        initWithPipeline:self linkedFunctionNames:linkedNames];
 }
 - (NSUInteger)imageblockMemoryLengthForDimensions:(MTLSize)imageblockDimensions API_AVAILABLE(macos(11.0), ios(11.0)) {
     (void)imageblockDimensions;
@@ -7217,17 +7345,42 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
 - (id<MTLFunctionHandle>)functionHandleWithFunction:(id<MTLFunction>)function API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
     ZPUCPUFunction *cpuFunction = (ZPUCPUFunction *)function;
     if (![cpuFunction isKindOfClass:[ZPUCPUFunction class]] || cpuFunction->_owner != _owner ||
-        cpuFunction.functionType != MTLFunctionTypeKernel) return nil;
+        (cpuFunction.functionType != MTLFunctionTypeKernel && cpuFunction.functionType != MTLFunctionTypeVisible)) return nil;
     NSString *kernelName = zpu_compute_kernel_name(_kernel);
-    if (kernelName == nil || ![kernelName isEqualToString:cpuFunction->_name]) return nil;
+    const BOOL isBaseKernel = cpuFunction.functionType == MTLFunctionTypeKernel &&
+        kernelName != nil && [kernelName isEqualToString:cpuFunction->_name];
+    const BOOL isLinkedVisible = cpuFunction.functionType == MTLFunctionTypeVisible &&
+        [_linkedFunctionNames containsObject:cpuFunction->_name];
+    if (!isBaseKernel && !isLinkedVisible) return nil;
     return (id<MTLFunctionHandle>)[[ZPUFunctionHandle alloc] initWithOwner:_owner
-                                                                        name:kernelName
-                                                                 functionType:MTLFunctionTypeKernel];
+                                                                        name:cpuFunction->_name
+                                                                 functionType:cpuFunction.functionType];
 }
 - (id<MTLComputePipelineState>)newComputePipelineStateWithAdditionalBinaryFunctions:(NSArray<id<MTLFunction>> *)functions error:(NSError **)error API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)functions;
-    zpu_set_error(error, @"ZPU CPU Metal does not link binary functions");
-    return nil;
+    if (!_supportsAddingBinaryFunctions) {
+        zpu_set_error(error, @"ZPU CPU Metal compute pipeline was not created for binary-function linking");
+        return nil;
+    }
+    if (functions == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal compute pipeline functions must be non-nil");
+        return nil;
+    }
+    NSMutableArray<NSString *> *linkedNames = [_linkedFunctionNames mutableCopy];
+    NSString *kernelName = zpu_compute_kernel_name(_kernel);
+    for (id<MTLFunction> function in functions) {
+        ZPUCPUFunction *cpuFunction = (ZPUCPUFunction *)function;
+        if (![cpuFunction isKindOfClass:[ZPUCPUFunction class]] || cpuFunction->_owner != _owner ||
+            cpuFunction.functionType != MTLFunctionTypeVisible || cpuFunction->_name.length == 0 ||
+            zpu_compute_visible_function_name_for_name(cpuFunction->_name) == nil ||
+            [cpuFunction->_name isEqualToString:kernelName] || [linkedNames containsObject:cpuFunction->_name]) {
+            zpu_set_error(error, @"ZPU CPU Metal compute pipeline function is invalid or already linked");
+            return nil;
+        }
+        [linkedNames addObject:cpuFunction->_name];
+    }
+    if (error != NULL) *error = nil;
+    return (id<MTLComputePipelineState>)[[ZPUComputePipelineState alloc]
+        initWithPipeline:self linkedFunctionNames:linkedNames];
 }
 - (id<MTLVisibleFunctionTable>)newVisibleFunctionTableWithDescriptor:(MTLVisibleFunctionTableDescriptor *)descriptor API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
     if (descriptor == nil) return nil;
