@@ -4,16 +4,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 
-/// Host capability class used only to choose CPU scheduling geometry.  The
-/// executable class remains separate so a wider host never implies that ZPU
-/// may execute instructions whose separately compiled kernel boundary is not
-/// present yet.
-pub const IsaClass = enum {
-    scalar,
-    portable_vector,
-    avx2,
-    avx512,
-};
+pub const IsaClass = enum { scalar, portable_vector, avx2, avx512 };
 
 pub const Capabilities = struct {
     avx: bool = false,
@@ -24,9 +15,15 @@ pub const Capabilities = struct {
     avx512f: bool = false,
 };
 
-/// Spatial scheduling and inner-kernel geometry are intentionally independent.
-/// Scheduler tiles control locality and work granularity; microtiles describe
-/// the preferred contiguous pixel shape of the active vector backend.
+/// Separates CPU capability from the kernel objects actually present in the
+/// artifact. A host feature bit alone must never make an unsupported backend
+/// executable.
+pub const CompiledKernels = struct {
+    portable_vector: bool = true,
+    avx2: bool = false,
+    avx512: bool = false,
+};
+
 pub const Profile = struct {
     host_class: IsaClass,
     executable_class: IsaClass,
@@ -61,28 +58,37 @@ pub const baseline = Profile{
     .vector_lanes = 1,
 };
 
-/// Pure policy function so every host tier can be tested without depending on
-/// the machine that runs the test. AVX-512 is currently a scheduling input,
-/// not an executable backend: until a separately compiled v4 kernel boundary
-/// exists, an AVX-512 host retains the validated eight-lane AVX2 microtile.
-pub fn choose(caps: Capabilities) Profile {
+pub fn hostClass(caps: Capabilities) IsaClass {
     const avx2_ready = caps.avx and caps.osxsave and caps.ymm_state and caps.avx2;
     const avx512_ready = avx2_ready and caps.zmm_state and caps.avx512f;
+    if (avx512_ready) return .avx512;
+    if (avx2_ready) return .avx2;
+    return .portable_vector;
+}
 
-    if (avx512_ready) return .{
-        .host_class = .avx512,
-        .executable_class = .avx2,
+/// Initial deterministic candidate policy. Geometry is keyed primarily to the
+/// executable kernel width; wider host capability may be recorded for future
+/// autotuning but does not silently change the active kernel or its scheduler
+/// shape until measurements justify doing so.
+pub fn choose(caps: Capabilities, compiled: CompiledKernels) Profile {
+    const host = hostClass(caps);
+    const can_avx2 = (host == .avx2 or host == .avx512) and compiled.avx2;
+    const can_avx512 = host == .avx512 and compiled.avx512;
+
+    if (can_avx512) return .{
+        .host_class = host,
+        .executable_class = .avx512,
         .scheduler_w = 64,
         .scheduler_h = 16,
-        .micro_w = 8,
+        .micro_w = 16,
         .micro_h = 4,
         .group_w = 2,
         .group_h = 4,
         .command_batch = 24,
-        .vector_lanes = 8,
+        .vector_lanes = 16,
     };
-    if (avx2_ready) return .{
-        .host_class = .avx2,
+    if (can_avx2) return .{
+        .host_class = host,
         .executable_class = .avx2,
         .scheduler_w = 32,
         .scheduler_h = 32,
@@ -93,8 +99,8 @@ pub fn choose(caps: Capabilities) Profile {
         .command_batch = 16,
         .vector_lanes = 8,
     };
-    return .{
-        .host_class = .portable_vector,
+    if (compiled.portable_vector) return .{
+        .host_class = host,
         .executable_class = .portable_vector,
         .scheduler_w = 16,
         .scheduler_h = 16,
@@ -105,6 +111,9 @@ pub fn choose(caps: Capabilities) Profile {
         .command_batch = 8,
         .vector_lanes = 4,
     };
+    var result = baseline;
+    result.host_class = host;
+    return result;
 }
 
 const Cpuid = struct { a: u32, b: u32, c: u32, d: u32 };
@@ -143,7 +152,6 @@ fn xgetbv() u64 {
 
 pub fn detectCapabilities() Capabilities {
     if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .x86) return .{};
-
     const leaf0 = cpuid(0, 0);
     if (leaf0.a < 1) return .{};
     const leaf1 = cpuid(1, 0);
@@ -151,11 +159,8 @@ pub fn detectCapabilities() Capabilities {
     const avx = leaf1.c & (1 << 28) != 0;
     const xcr0 = if (osxsave and avx) xgetbv() else 0;
     const ymm_state = (xcr0 & 0x6) == 0x6;
-    // AVX-512 execution additionally requires opmask, ZMM_hi256 and
-    // hi16_ZMM state (XCR0 bits 5, 6 and 7) in addition to XMM/YMM.
     const zmm_state = (xcr0 & 0xe6) == 0xe6;
     const leaf7 = if (leaf0.a >= 7) cpuid(7, 0) else Cpuid{ .a = 0, .b = 0, .c = 0, .d = 0 };
-
     return .{
         .avx = avx,
         .osxsave = osxsave,
@@ -166,46 +171,38 @@ pub fn detectCapabilities() Capabilities {
     };
 }
 
-pub fn detect() Profile {
-    return choose(detectCapabilities());
+pub fn detect(compiled: CompiledKernels) Profile {
+    return choose(detectCapabilities(), compiled);
 }
 
-test "tile profile scales scheduler and microtile geometry by active ISA" {
-    const portable = choose(.{});
+test "kernel linkage gates executable ISA" {
+    const host_avx512 = Capabilities{ .avx = true, .osxsave = true, .ymm_state = true, .zmm_state = true, .avx2 = true, .avx512f = true };
+    const portable = choose(host_avx512, .{});
+    try std.testing.expectEqual(IsaClass.avx512, portable.host_class);
     try std.testing.expectEqual(IsaClass.portable_vector, portable.executable_class);
     try std.testing.expectEqual(@as(u8, 4), portable.vector_lanes);
-    try std.testing.expectEqual(@as(u16, 16), portable.scheduler_w);
 
-    const avx2 = choose(.{ .avx = true, .osxsave = true, .ymm_state = true, .avx2 = true });
-    try std.testing.expectEqual(IsaClass.avx2, avx2.host_class);
+    const avx2 = choose(host_avx512, .{ .avx2 = true });
     try std.testing.expectEqual(IsaClass.avx2, avx2.executable_class);
     try std.testing.expectEqual(@as(u16, 32), avx2.scheduler_w);
-    try std.testing.expectEqual(@as(u16, 32), avx2.scheduler_h);
-    try std.testing.expectEqual(@as(u8, 8), avx2.micro_w);
-    try std.testing.expectEqual(@as(u8, 4), avx2.micro_h);
+    try std.testing.expectEqual(@as(u8, 8), avx2.vector_lanes);
 
-    const avx512 = choose(.{ .avx = true, .osxsave = true, .ymm_state = true, .zmm_state = true, .avx2 = true, .avx512f = true });
-    try std.testing.expectEqual(IsaClass.avx512, avx512.host_class);
-    try std.testing.expectEqual(IsaClass.avx2, avx512.executable_class);
-    try std.testing.expectEqual(@as(u16, 64), avx512.scheduler_w);
-    try std.testing.expectEqual(@as(u16, 16), avx512.scheduler_h);
-    try std.testing.expectEqual(@as(u8, 8), avx512.vector_lanes);
+    const avx512 = choose(host_avx512, .{ .avx2 = true, .avx512 = true });
+    try std.testing.expectEqual(IsaClass.avx512, avx512.executable_class);
+    try std.testing.expectEqual(@as(u8, 16), avx512.vector_lanes);
 }
 
-test "OS vector state gates ISA selection" {
-    const no_ymm = choose(.{ .avx = true, .osxsave = true, .avx2 = true });
+test "OS vector state gates host class" {
+    const no_ymm = choose(.{ .avx = true, .osxsave = true, .avx2 = true }, .{ .avx2 = true });
     try std.testing.expectEqual(IsaClass.portable_vector, no_ymm.executable_class);
-
-    const no_zmm = choose(.{ .avx = true, .osxsave = true, .ymm_state = true, .avx2 = true, .avx512f = true });
+    const no_zmm = choose(.{ .avx = true, .osxsave = true, .ymm_state = true, .avx2 = true, .avx512f = true }, .{ .avx2 = true, .avx512 = true });
     try std.testing.expectEqual(IsaClass.avx2, no_zmm.host_class);
+    try std.testing.expectEqual(IsaClass.avx2, no_zmm.executable_class);
 }
 
-test "profile geometry remains internally aligned" {
-    const profiles = [_]Profile{
-        choose(.{}),
-        choose(.{ .avx = true, .osxsave = true, .ymm_state = true, .avx2 = true }),
-        choose(.{ .avx = true, .osxsave = true, .ymm_state = true, .zmm_state = true, .avx2 = true, .avx512f = true }),
-    };
+test "profile geometry remains aligned" {
+    const caps = Capabilities{ .avx = true, .osxsave = true, .ymm_state = true, .zmm_state = true, .avx2 = true, .avx512f = true };
+    const profiles = [_]Profile{ choose(.{}, .{}), choose(caps, .{ .avx2 = true }), choose(caps, .{ .avx2 = true, .avx512 = true }) };
     for (profiles) |profile| {
         try std.testing.expect(profile.scheduler_w % profile.micro_w == 0);
         try std.testing.expect(profile.scheduler_h % profile.micro_h == 0);
