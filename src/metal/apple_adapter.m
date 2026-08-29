@@ -7329,6 +7329,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (void)dispatchThreadgroupsWithIndirectBuffer:(id<MTLBuffer>)indirectBuffer indirectBufferOffset:(NSUInteger)indirectBufferOffset threadsPerThreadgroup:(MTLSize)threadsPerThreadgroup API_AVAILABLE(macos(10.11), ios(9.0)) {
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)indirectBuffer;
     if (indirectBuffer == nil || ![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
+        zpuBuffer->_owner != [_owner device] ||
         !zpu_u32(indirectBufferOffset, &(uint32_t){0}) ||
         !zpu_u32(threadsPerThreadgroup.width, &(uint32_t){0}) ||
         !zpu_u32(threadsPerThreadgroup.height, &(uint32_t){0}) ||
@@ -7391,7 +7392,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)updateFence:(id<MTLFence>)fence API_AVAILABLE(macos(10.13), ios(10.0)) {
     ZPUFence *zpuFence = (ZPUFence *)fence;
-    if (![zpuFence isKindOfClass:[ZPUFence class]] ||
+    if (![zpuFence isKindOfClass:[ZPUFence class]] || zpuFence->_owner != [_owner device] ||
         zpu_metal_compute_encoder_update_fence(_zpuEncoder, zpuFence->_zpuFence) != ZPU_METAL_OK) {
         [_owner markError];
         return;
@@ -7400,7 +7401,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)waitForFence:(id<MTLFence>)fence API_AVAILABLE(macos(10.13), ios(10.0)) {
     ZPUFence *zpuFence = (ZPUFence *)fence;
-    if (![zpuFence isKindOfClass:[ZPUFence class]] ||
+    if (![zpuFence isKindOfClass:[ZPUFence class]] || zpuFence->_owner != [_owner device] ||
         zpu_metal_compute_encoder_wait_for_fence(_zpuEncoder, zpuFence->_zpuFence) != ZPU_METAL_OK) {
         [_owner markError];
         return;
@@ -7409,7 +7410,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)executeCommandsInBuffer:(id<MTLIndirectCommandBuffer>)indirectCommandBuffer withRange:(NSRange)executionRange API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(13.0)) {
     ZPUIndirectCommandBuffer *buffer = (ZPUIndirectCommandBuffer *)indirectCommandBuffer;
-    if (![buffer isKindOfClass:[ZPUIndirectCommandBuffer class]] ||
+    if (![buffer isKindOfClass:[ZPUIndirectCommandBuffer class]] || buffer->_owner != [_owner device] ||
         executionRange.location > buffer->_maxCommandCount ||
         executionRange.length > buffer->_maxCommandCount - executionRange.location) {
         [_owner markError];

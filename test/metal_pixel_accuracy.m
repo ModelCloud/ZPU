@@ -3610,6 +3610,35 @@ int main(void) {
         [foreign_compute_command_buffer commit];
         [foreign_compute_command_buffer waitUntilCompleted];
 
+        MTLIndirectCommandBufferDescriptor *foreign_compute_icb_descriptor =
+            [MTLIndirectCommandBufferDescriptor new];
+        foreign_compute_icb_descriptor.commandTypes = MTLIndirectCommandTypeConcurrentDispatchThreads;
+        foreign_compute_icb_descriptor.maxKernelBufferBindCount = 1;
+        id<MTLIndirectCommandBuffer> foreign_compute_icb =
+            [foreign_adapter_device newIndirectCommandBufferWithDescriptor:foreign_compute_icb_descriptor
+                                                            maxCommandCount:1 options:0];
+        id<MTLFence> foreign_compute_fence = [foreign_adapter_device newFence];
+        id<MTLCommandBuffer> foreign_compute_state_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> foreign_compute_state_encoder =
+            [foreign_compute_state_command_buffer computeCommandEncoder];
+        [foreign_compute_state_encoder setComputePipelineState:adapter_compute_pipeline];
+        [foreign_compute_state_encoder updateFence:foreign_compute_fence];
+        [foreign_compute_state_encoder executeCommandsInBuffer:foreign_compute_icb withRange:NSMakeRange(0, 1)];
+        [foreign_compute_state_encoder endEncoding];
+        [foreign_compute_state_command_buffer commit];
+        [foreign_compute_state_command_buffer waitUntilCompleted];
+
+        id<MTLCommandBuffer> foreign_indirect_dispatch_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> foreign_indirect_dispatch_encoder =
+            [foreign_indirect_dispatch_command_buffer computeCommandEncoder];
+        [foreign_indirect_dispatch_encoder setComputePipelineState:adapter_compute_pipeline];
+        [foreign_indirect_dispatch_encoder dispatchThreadgroupsWithIndirectBuffer:foreign_adapter_buffer
+                                                                 indirectBufferOffset:0
+                                                               threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [foreign_indirect_dispatch_encoder endEncoding];
+        [foreign_indirect_dispatch_command_buffer commit];
+        [foreign_indirect_dispatch_command_buffer waitUntilCompleted];
+
         id<MTLTexture> foreign_render_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
         MTLRenderPassDescriptor *foreign_render_pass = [MTLRenderPassDescriptor renderPassDescriptor];
         foreign_render_pass.colorAttachments[0].texture = foreign_render_texture;
@@ -3643,6 +3672,11 @@ int main(void) {
         if (foreign_adapter_device == nil || foreign_adapter_buffer == nil ||
             foreign_compute_encoder == nil ||
             foreign_compute_command_buffer.status != MTLCommandBufferStatusError ||
+            foreign_compute_icb == nil || foreign_compute_fence == nil ||
+            foreign_compute_state_encoder == nil ||
+            foreign_compute_state_command_buffer.status != MTLCommandBufferStatusError ||
+            foreign_indirect_dispatch_encoder == nil ||
+            foreign_indirect_dispatch_command_buffer.status != MTLCommandBufferStatusError ||
             foreign_render_texture == nil || foreign_render_encoder == nil ||
             foreign_render_command_buffer.status != MTLCommandBufferStatusError ||
             foreign_blit_destination == nil || foreign_blit_encoder == nil ||
