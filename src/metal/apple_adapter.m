@@ -80,7 +80,7 @@
     NSUInteger _deallocatorLength;
     NSString *_label;
     BOOL _aliasable;
-    MTLSparsePageSize _sparsePageSize;
+    NSInteger _sparsePageSize;
     NSUInteger _sparsePageBytes;
     NSMutableDictionary *_sparseMappings;
 }
@@ -208,7 +208,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLStorageMode _storageMode;
     MTLCPUCacheMode _cpuCacheMode;
     MTLHazardTrackingMode _hazardTrackingMode;
-    MTLSparsePageSize _maxCompatiblePlacementSparsePageSize;
+    NSInteger _maxCompatiblePlacementSparsePageSize;
     NSMutableDictionary *_sparsePages;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner heap:(zpu_metal_heap *)heap descriptor:(MTLHeapDescriptor *)descriptor;
@@ -218,7 +218,6 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 /* A sparse page is a CPU-owned physical tile. Multiple virtual buffer pages
  * may retain the same object, which preserves Metal's aliasing rule for a
  * copied sparse mapping without allocating any native GPU storage. */
-API_AVAILABLE(macos(26.0), ios(26.0))
 @interface ZPUSparsePage : NSObject {
 @public
     NSMutableData *_data;
@@ -1582,7 +1581,7 @@ static BOOL zpu_sparse_axis_to_pixels(NSUInteger origin, NSUInteger size, NSUInt
     return YES;
 }
 
-static NSUInteger zpu_sparse_page_bytes(MTLSparsePageSize pageSize) {
+static NSUInteger zpu_sparse_page_bytes(NSInteger pageSize) {
     switch (pageSize) {
         case MTLSparsePageSize16: return 16u * 1024u;
         case MTLSparsePageSize64: return 64u * 1024u;
@@ -1603,7 +1602,7 @@ static NSUInteger zpu_sparse_tile_count(NSUInteger length, NSUInteger pageBytes)
 }
 @end
 
-static ZPUSparsePage *zpu_heap_sparse_page(ZPUHeap *heap, MTLSparsePageSize pageSize,
+static ZPUSparsePage *zpu_heap_sparse_page(ZPUHeap *heap, NSInteger pageSize,
                                             NSUInteger heapOffset, BOOL create) {
     if (heap == nil || heap->_sparsePages == nil) return nil;
     NSNumber *pageSizeKey = @(pageSize);
@@ -1667,7 +1666,7 @@ static BOOL zpu_sparse_buffer_range(ZPUBuffer *buffer, NSRange range) {
     return tileCount != 0 && range.location <= tileCount && range.length <= tileCount - range.location;
 }
 
-static BOOL zpu_sparse_heap_range(ZPUHeap *heap, MTLSparsePageSize pageSize,
+static BOOL zpu_sparse_heap_range(ZPUHeap *heap, NSInteger pageSize,
                                   NSUInteger heapOffset, NSUInteger tileCount) {
     const NSUInteger pageBytes = zpu_sparse_page_bytes(pageSize);
     if (heap == nil || heap->_type != MTLHeapTypePlacement || pageBytes == 0 ||
@@ -1882,7 +1881,7 @@ static ZPUTensor *zpu_create_tensor(ZPUDevice *owner, ZPUBuffer *storageBuffer,
         _cpuCacheMode = MTLCPUCacheModeDefaultCache;
         _hazardTrackingMode = MTLHazardTrackingModeTracked;
         _heapOffset = zpu_metal_buffer_heap_offset(buffer);
-        _sparsePageSize = (MTLSparsePageSize)0;
+        _sparsePageSize = 0;
         _sparsePageBytes = 0;
         _sparseMappings = nil;
         _resourceID = zpu_register_resource(self);
@@ -2635,7 +2634,7 @@ static NSUInteger zpu_acceleration_structure_size_for_descriptor(
         _storageMode = descriptor.storageMode;
         _cpuCacheMode = descriptor.cpuCacheMode;
         _hazardTrackingMode = descriptor.hazardTrackingMode;
-        _maxCompatiblePlacementSparsePageSize = (MTLSparsePageSize)0;
+        _maxCompatiblePlacementSparsePageSize = 0;
         _sparsePages = [NSMutableDictionary dictionary];
         if (@available(macOS 26.0, iOS 26.0, *)) {
             _maxCompatiblePlacementSparsePageSize = descriptor.maxCompatiblePlacementSparsePageSize;
@@ -4429,7 +4428,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (NSUInteger)sparseTileSizeInBytes { return 0; }
 - (NSUInteger)sparseTileSizeInBytesForSparsePageSize:(MTLSparsePageSize)pageSize API_AVAILABLE(macos(13.0), ios(16.0)) {
-    return zpu_sparse_page_bytes(pageSize);
+    return zpu_sparse_page_bytes((NSInteger)pageSize);
 }
 - (NSArray *)counterSets { return _counterSets; }
 - (void)sampleTimestamps:(MTLTimestamp *)cpuTimestamp gpuTimestamp:(MTLTimestamp *)gpuTimestamp {
@@ -5049,14 +5048,14 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     }
 }
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)options placementSparsePageSize:(MTLSparsePageSize)placementSparsePageSize API_AVAILABLE(macos(26.0), ios(26.0)) {
-    const NSUInteger pageBytes = zpu_sparse_page_bytes(placementSparsePageSize);
+    const NSUInteger pageBytes = zpu_sparse_page_bytes((NSInteger)placementSparsePageSize);
     const MTLStorageMode storageMode = (MTLStorageMode)((options & MTLResourceStorageModeMask) >> MTLResourceStorageModeShift);
     if (length == 0 || pageBytes == 0 || storageMode != MTLStorageModePrivate) return nil;
     zpu_metal_buffer *buffer = zpu_metal_device_new_buffer(_zpuDevice, length, NULL);
     if (buffer == NULL) return nil;
     ZPUBuffer *result = [[ZPUBuffer alloc] initWithOwner:self buffer:buffer];
     [result applyResourceOptions:options];
-    result->_sparsePageSize = placementSparsePageSize;
+    result->_sparsePageSize = (NSInteger)placementSparsePageSize;
     result->_sparsePageBytes = pageBytes;
     result->_sparseMappings = [NSMutableDictionary dictionary];
     return (id<MTLBuffer>)result;
