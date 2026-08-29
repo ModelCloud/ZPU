@@ -3970,6 +3970,81 @@ int main(void) {
             fprintf(stderr, "metal-pixel: Objective-C adapter origin-coordinate mismatch\n");
             return 53;
         }
+        /* Visibility results are produced by the CPU rasterizer from the
+         * same covered-fragment/depth/stencil accounting used for color.
+         * Native Metal is only the oracle: both adapter resources and writes
+         * stay in ZPU-owned CPU memory. Test both 64-bit counting and boolean
+         * modes at aligned offsets. */
+        enum { visibility_result_bytes = 16 };
+        id<MTLBuffer> native_visibility_buffer =
+            [device newBufferWithLength:visibility_result_bytes options:MTLResourceStorageModeShared];
+        id<MTLTexture> native_visibility_texture = [device newTextureWithDescriptor:texture_descriptor];
+        if (native_visibility_buffer == nil || native_visibility_texture == nil) {
+            fprintf(stderr, "metal-pixel: native visibility resources failed\n");
+            return 90;
+        }
+        memset(native_visibility_buffer.contents, 0xa5, visibility_result_bytes);
+        MTLRenderPassDescriptor *native_visibility_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_visibility_pass.colorAttachments[0].texture = native_visibility_texture;
+        native_visibility_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_visibility_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_visibility_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        native_visibility_pass.visibilityResultBuffer = native_visibility_buffer;
+        id<MTLCommandBuffer> native_visibility_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_visibility_encoder =
+            [native_visibility_command_buffer renderCommandEncoderWithDescriptor:native_visibility_pass];
+        [native_visibility_encoder setRenderPipelineState:pipeline];
+        [native_visibility_encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
+        [native_visibility_encoder setVisibilityResultMode:MTLVisibilityResultModeCounting offset:0];
+        [native_visibility_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_visibility_encoder setVisibilityResultMode:MTLVisibilityResultModeBoolean offset:8];
+        [native_visibility_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_visibility_encoder endEncoding];
+        [native_visibility_command_buffer commit];
+        [native_visibility_command_buffer waitUntilCompleted];
+        if (native_visibility_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: native visibility command did not complete\n");
+            return 91;
+        }
+
+        id<MTLBuffer> adapter_visibility_buffer =
+            [adapter_device newBufferWithLength:visibility_result_bytes options:MTLResourceStorageModeShared];
+        id<MTLTexture> adapter_visibility_texture = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTLRenderPassDescriptor *adapter_visibility_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_visibility_pass.colorAttachments[0].texture = adapter_visibility_texture;
+        adapter_visibility_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_visibility_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_visibility_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        adapter_visibility_pass.visibilityResultBuffer = adapter_visibility_buffer;
+        id<MTLCommandBuffer> adapter_visibility_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_visibility_encoder =
+            [adapter_visibility_command_buffer renderCommandEncoderWithDescriptor:adapter_visibility_pass];
+        if (adapter_visibility_buffer == nil || adapter_visibility_texture == nil ||
+            adapter_visibility_command_buffer == nil || adapter_visibility_encoder == nil) {
+            fprintf(stderr, "metal-pixel: adapter visibility resources failed\n");
+            return 92;
+        }
+        memset(adapter_visibility_buffer.contents, 0xa5, visibility_result_bytes);
+        [adapter_visibility_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_visibility_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_visibility_encoder setVisibilityResultMode:MTLVisibilityResultModeCounting offset:0];
+        [adapter_visibility_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_visibility_encoder setVisibilityResultMode:MTLVisibilityResultModeBoolean offset:8];
+        [adapter_visibility_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_visibility_encoder endEncoding];
+        [adapter_visibility_command_buffer commit];
+        [adapter_visibility_command_buffer waitUntilCompleted];
+        if (adapter_visibility_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_visibility_buffer.contents, adapter_visibility_buffer.contents, visibility_result_bytes) != 0) {
+            const uint64_t native_count = *(const uint64_t *)native_visibility_buffer.contents;
+            const uint64_t adapter_count = *(const uint64_t *)adapter_visibility_buffer.contents;
+            const uint64_t native_boolean = *(const uint64_t *)((const uint8_t *)native_visibility_buffer.contents + 8);
+            const uint64_t adapter_boolean = *(const uint64_t *)((const uint8_t *)adapter_visibility_buffer.contents + 8);
+            fprintf(stderr, "metal-pixel: visibility mismatch count=%llu/%llu boolean=%llu/%llu\n",
+                    (unsigned long long)native_count, (unsigned long long)adapter_count,
+                    (unsigned long long)native_boolean, (unsigned long long)adapter_boolean);
+            return 93;
+        }
         NSData *adapter_legacy_render_counter_resolved =
             [adapter_legacy_counter_sample_buffer resolveCounterRange:NSMakeRange(2, 1)];
         const MTLCounterResultTimestamp *adapter_legacy_render_counter_entry =
@@ -4034,6 +4109,50 @@ int main(void) {
             adapter_render_counter_entry[0].timestamp == 0) {
             fail_with_error("Metal 4 CPU render timestamp path failed", metal4_error);
             return 67;
+        }
+
+        /* MTL4 carries the same visibility mode but sources its result buffer
+         * from the render-pass descriptor. Verify that descriptor path also
+         * stays CPU-owned and agrees with the native legacy oracle. */
+        id<MTLBuffer> adapter_metal4_visibility_buffer =
+            [adapter_device newBufferWithLength:sizeof(uint64_t) options:MTLResourceStorageModeShared];
+        id<MTLTexture> adapter_metal4_visibility_texture =
+            [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTL4RenderPassDescriptor *adapter_metal4_visibility_pass = [MTL4RenderPassDescriptor new];
+        adapter_metal4_visibility_pass.colorAttachments[0].texture = adapter_metal4_visibility_texture;
+        adapter_metal4_visibility_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_metal4_visibility_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_metal4_visibility_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        adapter_metal4_visibility_pass.visibilityResultBuffer = adapter_metal4_visibility_buffer;
+        adapter_metal4_visibility_pass.visibilityResultType = MTLVisibilityResultTypeReset;
+        MTL4ArgumentTableDescriptor *adapter_metal4_visibility_table_descriptor = [MTL4ArgumentTableDescriptor new];
+        adapter_metal4_visibility_table_descriptor.maxBufferBindCount = 1;
+        id<MTL4ArgumentTable> adapter_metal4_visibility_table =
+            [adapter_device newArgumentTableWithDescriptor:adapter_metal4_visibility_table_descriptor error:&metal4_error];
+        [adapter_metal4_visibility_table setAddress:adapter_vertex_buffer.gpuAddress atIndex:0];
+        id<MTL4CommandBuffer> adapter_metal4_visibility_command_buffer = [adapter_device newCommandBuffer];
+        [adapter_metal4_visibility_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4RenderCommandEncoder> adapter_metal4_visibility_encoder =
+            [adapter_metal4_visibility_command_buffer renderCommandEncoderWithDescriptor:adapter_metal4_visibility_pass];
+        [adapter_metal4_visibility_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_metal4_visibility_encoder setArgumentTable:adapter_metal4_visibility_table
+                                                    atStages:MTLRenderStageVertex | MTLRenderStageFragment];
+        [adapter_metal4_visibility_encoder setVisibilityResultMode:MTLVisibilityResultModeCounting offset:0];
+        [adapter_metal4_visibility_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_metal4_visibility_encoder endEncoding];
+        [adapter_metal4_visibility_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> adapter_metal4_visibility_command_buffers[] = {adapter_metal4_visibility_command_buffer};
+        [metal4_queue commit:adapter_metal4_visibility_command_buffers count:1];
+        const uint64_t native_visibility_count = *(const uint64_t *)native_visibility_buffer.contents;
+        const uint64_t adapter_metal4_visibility_count = *(const uint64_t *)adapter_metal4_visibility_buffer.contents;
+        if (adapter_metal4_visibility_buffer == nil || adapter_metal4_visibility_texture == nil ||
+            adapter_metal4_visibility_table == nil || adapter_metal4_visibility_encoder == nil ||
+            adapter_metal4_visibility_command_buffer == nil ||
+            native_visibility_count != adapter_metal4_visibility_count) {
+            fprintf(stderr, "metal-pixel: Metal 4 visibility mismatch native=%llu adapter=%llu\n",
+                    (unsigned long long)native_visibility_count,
+                    (unsigned long long)adapter_metal4_visibility_count);
+            return 94;
         }
 
         id<MTLTexture> adapter_metal4_split_texture =
@@ -5174,7 +5293,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, legacy/Metal 4 counters, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, visibility results, legacy/Metal 4 counters, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }

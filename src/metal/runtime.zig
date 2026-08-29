@@ -155,6 +155,15 @@ const DrawCommand = struct {
     primitive: abi.PrimitiveType,
     options: raster3d.DrawOptions,
     sample_texture: ?*Texture = null,
+    visibility_buffer: ?*Buffer = null,
+    visibility_mode: abi.VisibilityResultMode = .disabled,
+    visibility_offset: usize = 0,
+    visibility_result_type: abi.VisibilityResultType = .reset,
+};
+
+const VisibilitySlot = struct {
+    buffer: *Buffer,
+    offset: usize,
 };
 
 const ColorAttachmentCommand = struct {
@@ -307,10 +316,13 @@ pub const CommandBuffer = struct {
         var active_color_attachments: [8]?*Texture = [_]?*Texture{null} ** 8;
         var active_depth: ?[]f32 = null;
         var active_stencil: ?[]u8 = null;
+        var reset_visibility_slots: std.ArrayList(VisibilitySlot) = .empty;
+        defer reset_visibility_slots.deinit(allocator);
 
         for (self.commands.items) |command| switch (command) {
             .begin_render => |begin_render| {
                 if (!validTexture(begin_render.target)) return self.fail(error.InvalidResource);
+                reset_visibility_slots.clearRetainingCapacity();
                 active_target = begin_render.target;
                 for (begin_render.color_attachments, 0..) |attachment, index| {
                     if (attachment) |value| {
@@ -366,7 +378,7 @@ pub const CommandBuffer = struct {
                         extra_count += 1;
                     }
                 }
-                _ = raster3d.drawWithTargets(
+                const stats = raster3d.drawWithTargets(
                     @constCast(&target),
                     extra_targets[0..extra_count],
                     sample_target,
@@ -376,6 +388,27 @@ pub const CommandBuffer = struct {
                     draw.primitive,
                     draw.options,
                 );
+                if (draw.visibility_mode != .disabled) {
+                    const visibility_buffer = draw.visibility_buffer orelse return self.fail(error.InvalidResource);
+                    if (!validBuffer(visibility_buffer) or visibility_buffer.device != self.queue.device or
+                        !rangeValid(visibility_buffer.bytes.len, draw.visibility_offset, @sizeOf(u64)))
+                    {
+                        return self.fail(error.InvalidArgument);
+                    }
+                    if (draw.visibility_result_type == .reset and
+                        !visibilitySlotSeen(reset_visibility_slots.items, visibility_buffer, draw.visibility_offset))
+                    {
+                        writeU64Little(visibility_buffer.bytes, draw.visibility_offset, 0);
+                        reset_visibility_slots.append(allocator, .{ .buffer = visibility_buffer, .offset = draw.visibility_offset }) catch return self.fail(error.OutOfMemory);
+                    }
+                    const previous = readU64Little(visibility_buffer.bytes, draw.visibility_offset);
+                    const result = switch (draw.visibility_mode) {
+                        .disabled => unreachable,
+                        .boolean => @max(previous, if (stats.fragments_covered != 0) @as(u64, 1) else 0),
+                        .counting => previous +| stats.fragments_covered,
+                    };
+                    writeU64Little(visibility_buffer.bytes, draw.visibility_offset, result);
+                }
             },
             .copy_buffer => |copy| {
                 if (!validBuffer(copy.source) or !validBuffer(copy.destination)) return self.fail(error.InvalidResource);
@@ -543,6 +576,10 @@ pub const RenderEncoder = struct {
     blend_color: [4]f32 = .{ 0, 0, 0, 0 },
     stencil_front: raster3d.StencilFace = .{},
     stencil_back: raster3d.StencilFace = .{},
+    visibility_buffer: ?*Buffer = null,
+    visibility_mode: abi.VisibilityResultMode = .disabled,
+    visibility_offset: usize = 0,
+    visibility_result_type: abi.VisibilityResultType = .reset,
 
     pub fn deinit(self: *RenderEncoder) void {
         self.inline_vertices.deinit(allocator);
@@ -782,6 +819,39 @@ pub const RenderEncoder = struct {
         self.stencil_back.reference = back_reference;
     }
 
+    pub fn setVisibilityResultBuffer(self: *RenderEncoder, buffer: ?*Buffer) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        if (buffer) |value| {
+            if (!validBuffer(value) or value.device != self.command_buffer.queue.device) return error.InvalidResource;
+        }
+        self.visibility_buffer = buffer;
+    }
+
+    pub fn setVisibilityResultMode(self: *RenderEncoder, mode: u8, offset: usize) Error!void {
+        if (!self.open() or offset % @sizeOf(u64) != 0) return error.InvalidArgument;
+        const parsed: abi.VisibilityResultMode = switch (mode) {
+            @intFromEnum(abi.VisibilityResultMode.disabled) => .disabled,
+            @intFromEnum(abi.VisibilityResultMode.boolean) => .boolean,
+            @intFromEnum(abi.VisibilityResultMode.counting) => .counting,
+            else => return error.InvalidArgument,
+        };
+        if (parsed != .disabled) {
+            const buffer = self.visibility_buffer orelse return error.InvalidResource;
+            if (!rangeValid(buffer.bytes.len, offset, @sizeOf(u64))) return error.InvalidArgument;
+        }
+        self.visibility_mode = parsed;
+        self.visibility_offset = offset;
+    }
+
+    pub fn setVisibilityResultType(self: *RenderEncoder, result_type: u8) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        self.visibility_result_type = switch (result_type) {
+            @intFromEnum(abi.VisibilityResultType.reset) => .reset,
+            @intFromEnum(abi.VisibilityResultType.accumulate) => .accumulate,
+            else => return error.InvalidArgument,
+        };
+    }
+
     pub fn updateFence(self: *RenderEncoder, fence: *Fence) Error!void {
         if (!self.open() or !validFence(fence) or fence.device != self.command_buffer.queue.device) return error.InvalidArgument;
         _ = try self.command_buffer.append(.{ .update_fence = fence });
@@ -897,6 +967,10 @@ pub const RenderEncoder = struct {
                 .primitive = primitive,
                 .options = self.options(),
                 .sample_texture = if (self.sample_texture) self.fragment_texture else null,
+                .visibility_buffer = self.visibility_buffer,
+                .visibility_mode = self.visibility_mode,
+                .visibility_offset = self.visibility_offset,
+                .visibility_result_type = self.visibility_result_type,
             } });
         }
     }
@@ -946,6 +1020,10 @@ pub const RenderEncoder = struct {
                 .primitive = primitive,
                 .options = self.options(),
                 .sample_texture = if (self.sample_texture) self.fragment_texture else null,
+                .visibility_buffer = self.visibility_buffer,
+                .visibility_mode = self.visibility_mode,
+                .visibility_offset = self.visibility_offset,
+                .visibility_result_type = self.visibility_result_type,
             } });
         }
     }
@@ -2107,6 +2185,33 @@ fn readU32Little(bytes: []const u8, offset: usize) u32 {
         (@as(u32, bytes[offset + 3]) << 24);
 }
 
+fn readU64Little(bytes: []const u8, offset: usize) u64 {
+    return @as(u64, bytes[offset]) |
+        (@as(u64, bytes[offset + 1]) << 8) |
+        (@as(u64, bytes[offset + 2]) << 16) |
+        (@as(u64, bytes[offset + 3]) << 24) |
+        (@as(u64, bytes[offset + 4]) << 32) |
+        (@as(u64, bytes[offset + 5]) << 40) |
+        (@as(u64, bytes[offset + 6]) << 48) |
+        (@as(u64, bytes[offset + 7]) << 56);
+}
+
+fn writeU64Little(bytes: []u8, offset: usize, value: u64) void {
+    bytes[offset] = @intCast(value);
+    bytes[offset + 1] = @intCast(value >> 8);
+    bytes[offset + 2] = @intCast(value >> 16);
+    bytes[offset + 3] = @intCast(value >> 24);
+    bytes[offset + 4] = @intCast(value >> 32);
+    bytes[offset + 5] = @intCast(value >> 40);
+    bytes[offset + 6] = @intCast(value >> 48);
+    bytes[offset + 7] = @intCast(value >> 56);
+}
+
+fn visibilitySlotSeen(slots: []const VisibilitySlot, buffer: *Buffer, offset: usize) bool {
+    for (slots) |slot| if (slot.buffer == buffer and slot.offset == offset) return true;
+    return false;
+}
+
 fn texturePixelFormat(texture: *const Texture) ?abi.PixelFormat {
     return switch (texture.format) {
         .rgba8_unorm => .rgba8_unorm,
@@ -2652,6 +2757,54 @@ test "multiple color attachments share one CPU fragment output" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, secondary.bytes[0..4]);
 }
 
+test "visibility results count CPU-covered fragments and accumulate" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const color = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(color);
+    const visibility = try createBuffer(device, 16, null);
+    defer destroyBuffer(visibility);
+    @memset(visibility.bytes, 0xa5);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+    };
+    var first = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(first);
+    var first_encoder = try beginRender(first, color, .{ .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } } });
+    try first_encoder.setVisibilityResultBuffer(visibility);
+    try first_encoder.setVisibilityResultType(@intFromEnum(abi.VisibilityResultType.reset));
+    try first_encoder.setVisibilityResultMode(@intFromEnum(abi.VisibilityResultMode.boolean), 0);
+    try first_encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
+    try first_encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
+    try first_encoder.setVisibilityResultMode(@intFromEnum(abi.VisibilityResultMode.counting), 8);
+    try first_encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
+    try first_encoder.endEncoding();
+    destroyRenderEncoder(first_encoder);
+    try first.commit();
+    try std.testing.expectEqual(@as(u64, 1), readU64Little(visibility.bytes, 0));
+    try std.testing.expectEqual(@as(u64, 16), readU64Little(visibility.bytes, 8));
+
+    var second = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(second);
+    var second_encoder = try beginRender(second, color, .{ .color = .{ .load_action = .load, .store_action = .store } });
+    try second_encoder.setVisibilityResultBuffer(visibility);
+    try second_encoder.setVisibilityResultType(@intFromEnum(abi.VisibilityResultType.accumulate));
+    try second_encoder.setVisibilityResultMode(@intFromEnum(abi.VisibilityResultMode.counting), 8);
+    try second_encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
+    try second_encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
+    try second_encoder.endEncoding();
+    destroyRenderEncoder(second_encoder);
+    try second.commit();
+    try std.testing.expectEqual(@as(u64, 32), readU64Little(visibility.bytes, 8));
+}
+
 test "fence update and wait preserve command ordering" {
     const device = try createDevice();
     defer destroyDevice(device);
@@ -3057,6 +3210,21 @@ pub export fn zpu_metal_render_encoder_set_stencil_state(encoder: ?*RenderEncode
 
 pub export fn zpu_metal_render_encoder_set_stencil_reference(encoder: ?*RenderEncoder, front_reference: u8, back_reference: u8) callconv(.c) c_int {
     (encoder orelse return -1).setStencilReference(front_reference, back_reference) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_visibility_result_buffer(encoder: ?*RenderEncoder, buffer: ?*Buffer) callconv(.c) c_int {
+    (encoder orelse return -1).setVisibilityResultBuffer(buffer) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_visibility_result_mode(encoder: ?*RenderEncoder, mode: u8, offset: usize) callconv(.c) c_int {
+    (encoder orelse return -1).setVisibilityResultMode(mode, offset) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_visibility_result_type(encoder: ?*RenderEncoder, result_type: u8) callconv(.c) c_int {
+    (encoder orelse return -1).setVisibilityResultType(result_type) catch |err| return errorCode(err);
     return 0;
 }
 

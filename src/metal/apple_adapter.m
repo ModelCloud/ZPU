@@ -789,6 +789,30 @@ static BOOL zpu_configure_additional_metal4_color_attachments(ZPUCommandBuffer *
     return YES;
 }
 
+static BOOL zpu_configure_visibility_result(ZPUCommandBuffer *owner,
+                                             zpu_metal_render_encoder *encoder,
+                                             id<MTLBuffer> buffer,
+                                             uint8_t resultType) {
+    if (owner == nil || encoder == NULL) return NO;
+    ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
+    if (zpuBuffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
+                              zpuBuffer->_owner != owner->_owner->_owner)) return NO;
+    if (zpu_metal_render_encoder_set_visibility_result_buffer(
+            encoder, zpuBuffer == nil ? NULL : zpuBuffer->_zpuBuffer) != ZPU_METAL_OK ||
+        zpu_metal_render_encoder_set_visibility_result_type(encoder, (uint8_t)resultType) != ZPU_METAL_OK) return NO;
+    if (zpuBuffer != nil) [owner retainResource:zpuBuffer];
+    return YES;
+}
+
+static uint8_t zpu_visibility_result_type(MTLRenderPassDescriptor *descriptor) {
+    if (descriptor != nil) {
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            return (uint8_t)descriptor.visibilityResultType;
+        }
+    }
+    return ZPU_METAL_VISIBILITY_RESET;
+}
+
 static BOOL zpu_texture_type_is_1d(MTLTextureType type) {
     return type == MTLTextureType1D || type == MTLTextureType1DArray;
 }
@@ -3109,6 +3133,11 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
             return nil;
         }
     }
+    if (!zpu_configure_visibility_result(self, encoder, descriptor.visibilityResultBuffer,
+                                         zpu_visibility_result_type(descriptor))) {
+        zpu_metal_render_encoder_destroy(encoder);
+        return nil;
+    }
     return (id<MTLRenderCommandEncoder>)[[ZPURenderEncoder alloc] initWithOwner:self encoder:encoder];
 }
 - (id<MTLParallelRenderCommandEncoder>)parallelRenderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)descriptor {
@@ -3445,6 +3474,12 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
             [self markError];
             return nil;
         }
+    }
+    if (!zpu_configure_visibility_result(_legacyBuffer, encoder, descriptor.visibilityResultBuffer,
+                                         descriptor.visibilityResultType)) {
+        zpu_metal_render_encoder_destroy(encoder);
+        [self markError];
+        return nil;
     }
     ZPURenderEncoder *legacy = [[ZPURenderEncoder alloc] initWithOwner:_legacyBuffer encoder:encoder];
     ZPUMTL4RenderEncoder *result = [[ZPUMTL4RenderEncoder alloc] initWithOwner:self legacy:legacy
@@ -5042,6 +5077,11 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
         zpu_metal_render_encoder_destroy(encoder);
         return nil;
     }
+    if (!zpu_configure_visibility_result(_owner, encoder, _descriptor.visibilityResultBuffer,
+                                         zpu_visibility_result_type(_descriptor))) {
+        zpu_metal_render_encoder_destroy(encoder);
+        return nil;
+    }
     _childCount += 1;
     return (id<MTLRenderCommandEncoder>)[[ZPURenderEncoder alloc] initWithOwner:_owner encoder:encoder];
 }
@@ -5948,7 +5988,9 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 - (void)setStencilFrontReferenceValue:(uint32_t)frontReferenceValue backReferenceValue:(uint32_t)backReferenceValue API_AVAILABLE(macos(10.11), ios(9.0)) {
     if (zpu_metal_render_encoder_set_stencil_reference(_zpuEncoder, (uint8_t)frontReferenceValue, (uint8_t)backReferenceValue) != ZPU_METAL_OK) [_owner markError];
 }
-- (void)setVisibilityResultMode:(MTLVisibilityResultMode)mode offset:(NSUInteger)offset { (void)mode; (void)offset; }
+- (void)setVisibilityResultMode:(MTLVisibilityResultMode)mode offset:(NSUInteger)offset {
+    if (zpu_metal_render_encoder_set_visibility_result_mode(_zpuEncoder, (uint8_t)mode, offset) != ZPU_METAL_OK) [_owner markError];
+}
 - (void)textureBarrier API_DEPRECATED_WITH_REPLACEMENT("Use memoryBarrierWithScope:MTLBarrierScopeRenderTargets", macos(10.11, 10.14)) API_UNAVAILABLE(ios) {}
 - (NSUInteger)tileWidth API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { return 0; }
 - (NSUInteger)tileHeight API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) { return 0; }

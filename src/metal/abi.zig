@@ -98,6 +98,8 @@ pub const BlendFactor = enum(u8) {
 };
 pub const BlendOperation = enum(u8) { add = 0, subtract = 1, reverse_subtract = 2, min = 3, max = 4 };
 pub const ColorWriteMask = enum(u8) { none = 0, red = 1, green = 2, blue = 4, alpha = 8, all = 15 };
+pub const VisibilityResultMode = enum(u8) { disabled = 0, boolean = 1, counting = 2 };
+pub const VisibilityResultType = enum(u8) { reset = 0, accumulate = 1 };
 
 pub const Color = extern struct { red: f32, green: f32, blue: f32, alpha: f32 };
 pub const Origin = extern struct { x: u32, y: u32, z: u32 };

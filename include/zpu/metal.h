@@ -168,6 +168,19 @@ enum {
     ZPU_METAL_COLOR_WRITE_ALL = 15,
 };
 
+typedef uint8_t zpu_metal_visibility_result_mode;
+enum {
+    ZPU_METAL_VISIBILITY_DISABLED = 0,
+    ZPU_METAL_VISIBILITY_BOOLEAN = 1,
+    ZPU_METAL_VISIBILITY_COUNTING = 2,
+};
+
+typedef uint8_t zpu_metal_visibility_result_type;
+enum {
+    ZPU_METAL_VISIBILITY_RESET = 0,
+    ZPU_METAL_VISIBILITY_ACCUMULATE = 1,
+};
+
 typedef struct zpu_metal_color { float red, green, blue, alpha; } zpu_metal_color;
 typedef struct zpu_metal_origin { uint32_t x, y, z; } zpu_metal_origin;
 typedef struct zpu_metal_size { uint32_t width, height, depth; } zpu_metal_size;
@@ -388,6 +401,9 @@ int zpu_metal_render_encoder_set_depth_buffer(zpu_metal_render_encoder *encoder,
 int zpu_metal_render_encoder_set_stencil_texture(zpu_metal_render_encoder *encoder, zpu_metal_texture *texture, zpu_metal_load_action load_action, zpu_metal_store_action store_action, uint8_t clear_value);
 int zpu_metal_render_encoder_set_stencil_state(zpu_metal_render_encoder *encoder, int front_face, zpu_metal_compare_function compare, zpu_metal_stencil_operation stencil_failure, zpu_metal_stencil_operation depth_failure, zpu_metal_stencil_operation depth_pass, uint8_t read_mask, uint8_t write_mask);
 int zpu_metal_render_encoder_set_stencil_reference(zpu_metal_render_encoder *encoder, uint8_t front_reference, uint8_t back_reference);
+int zpu_metal_render_encoder_set_visibility_result_buffer(zpu_metal_render_encoder *encoder, zpu_metal_buffer *buffer);
+int zpu_metal_render_encoder_set_visibility_result_mode(zpu_metal_render_encoder *encoder, zpu_metal_visibility_result_mode mode, size_t offset);
+int zpu_metal_render_encoder_set_visibility_result_type(zpu_metal_render_encoder *encoder, zpu_metal_visibility_result_type result_type);
 int zpu_metal_render_encoder_update_fence(zpu_metal_render_encoder *encoder, zpu_metal_fence *fence);
 int zpu_metal_render_encoder_wait_for_fence(zpu_metal_render_encoder *encoder, zpu_metal_fence *fence);
 int zpu_metal_render_encoder_draw_primitives(zpu_metal_render_encoder *encoder, zpu_metal_primitive_type primitive, size_t vertex_start, size_t vertex_count, size_t instance_count);

@@ -89,8 +89,9 @@ triangle path:
 - ordered render, parallel-render, and blit encoders, command-buffer status,
   buffer copies/fills, texture transfers, indexed and indirect draws, render
   indirect command buffers (including CPU blit-copy of encoded commands),
-  texture views, level-aware mipmap generation/copies, and ordered MTLFence
-  update/wait commands
+  texture views, level-aware mipmap generation/copies, ordered MTLFence
+  update/wait commands, and CPU-owned visibility result buffers with aligned
+  boolean/counting modes plus reset/accumulate behavior
 - a deferred CPU compute encoder for the explicit
   `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8`,
   `ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE`, and
@@ -196,7 +197,8 @@ draws, render and compute indirect command buffers, the CPU compute path
   against a native Metal oracle, the Metal 4 CPU argument-table compute and
   ordinary render paths, deferred indirect-thread dispatch, and deferred
   indirect array z filtering, explicit 3D texture plane/stride copies, and
-  legacy/Metal 4 3D mipmap generation, and 2D float mipmap raw-byte exactness,
+  legacy/Metal 4 3D mipmap generation, 2D float mipmap raw-byte exactness, and
+  legacy/Metal 4 visibility result byte exactness,
 and the explicit adapter; it is not a claim that every Metal feature is
 implemented.
 
