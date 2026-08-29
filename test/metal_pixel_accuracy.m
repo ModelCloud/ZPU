@@ -5921,6 +5921,17 @@ int main(void) {
             [adapter_sparse_texture_heap newTextureWithDescriptor:adapter_sparse_texture_tail_descriptor];
         id<MTLTexture> adapter_sparse_texture_tail_copy =
             [adapter_sparse_texture_heap newTextureWithDescriptor:adapter_sparse_texture_tail_descriptor];
+        MTLTextureDescriptor *native_sparse_texture_wide_tail_descriptor =
+            [native_sparse_texture_descriptor copy];
+        native_sparse_texture_wide_tail_descriptor.width = 1024;
+        native_sparse_texture_wide_tail_descriptor.height = 64;
+        native_sparse_texture_wide_tail_descriptor.mipmapLevelCount = 11;
+        id<MTLTexture> native_sparse_texture_wide_tail =
+            [device newTextureWithDescriptor:native_sparse_texture_wide_tail_descriptor];
+        MTLTextureDescriptor *adapter_sparse_texture_wide_tail_descriptor =
+            [native_sparse_texture_wide_tail_descriptor copy];
+        id<MTLTexture> adapter_sparse_texture_wide_tail =
+            [adapter_device newTextureWithDescriptor:adapter_sparse_texture_wide_tail_descriptor];
         id<MTLTexture> adapter_sparse_texture_tail_move =
             [adapter_sparse_texture_heap newTextureWithDescriptor:adapter_sparse_texture_tail_descriptor];
         id<MTLBuffer> adapter_sparse_texture_input =
@@ -5965,7 +5976,11 @@ int main(void) {
             adapter_sparse_texture_tail != nil && adapter_sparse_texture_tail_copy != nil &&
             adapter_sparse_texture_tail.firstMipmapInTail == native_sparse_texture_tail.firstMipmapInTail &&
             adapter_sparse_texture_tail.tailSizeInBytes == native_sparse_texture_tail.tailSizeInBytes &&
-            adapter_sparse_texture_tail.tailSizeInBytes == sparse_page_bytes * 2;
+            adapter_sparse_texture_tail.tailSizeInBytes == sparse_page_bytes * 2 &&
+            native_sparse_texture_wide_tail != nil && adapter_sparse_texture_wide_tail != nil &&
+            adapter_sparse_texture_wide_tail.firstMipmapInTail == native_sparse_texture_wide_tail.firstMipmapInTail &&
+            adapter_sparse_texture_wide_tail.tailSizeInBytes == native_sparse_texture_wide_tail.tailSizeInBytes &&
+            adapter_sparse_texture_wide_tail.tailSizeInBytes == sparse_page_bytes * 7;
         for (NSUInteger level = sparse_texture_tail_level;
              level < 4 && sparse_texture_tail_exact; ++level) {
             NSMutableData *levelOutput = [NSMutableData dataWithLength:

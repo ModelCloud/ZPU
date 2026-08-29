@@ -1634,11 +1634,11 @@ static MTLSize zpu_sparse_tile_size(MTLTextureType textureType, MTLPixelFormat p
     }
 }
 
-static NSUInteger zpu_sparse_tail_page_count(NSInteger pageSize) {
+static NSUInteger zpu_sparse_tail_page_overhead(NSInteger pageSize) {
     switch (pageSize) {
-        case MTLSparsePageSize16: return 1;
-        case MTLSparsePageSize64: return 2;
-        case MTLSparsePageSize256: return 3;
+        case MTLSparsePageSize16: return 0;
+        case MTLSparsePageSize64: return 1;
+        case MTLSparsePageSize256: return 2;
         default: return 0;
     }
 }
@@ -1660,12 +1660,51 @@ static NSUInteger zpu_sparse_first_mipmap_in_tail(MTLTextureType textureType,
     return mipmapLevelCount;
 }
 
-static NSUInteger zpu_sparse_tail_bytes(NSInteger pageSize, NSUInteger firstMipmapInTail,
-                                        NSUInteger mipmapLevelCount) {
+static NSUInteger zpu_sparse_tail_payload_bytes(MTLTextureType textureType, NSUInteger width,
+                                                NSUInteger height, NSUInteger depth,
+                                                NSUInteger firstMipmapInTail,
+                                                NSUInteger mipmapLevelCount, NSUInteger bytesPerPixel) {
+    if (mipmapLevelCount == 0 || firstMipmapInTail >= mipmapLevelCount || bytesPerPixel == 0) return 0;
+    if (zpu_texture_type_is_3d(textureType)) return 0;
+    (void)depth;
+    NSUInteger total = 0;
+    for (NSUInteger level = 0; level < firstMipmapInTail; ++level) {
+        width = width > 1 ? width / 2 : 1;
+        height = height > 1 ? height / 2 : 1;
+    }
+    for (NSUInteger level = firstMipmapInTail; level < mipmapLevelCount; ++level) {
+        if (height != 0 && width > SIZE_MAX / height) return 0;
+        const NSUInteger pixels = width * height;
+        if (pixels > SIZE_MAX / bytesPerPixel || total > SIZE_MAX - pixels * bytesPerPixel) return 0;
+        total += pixels * bytesPerPixel;
+        width = width > 1 ? width / 2 : 1;
+        height = height > 1 ? height / 2 : 1;
+    }
+    return total;
+}
+
+static NSUInteger zpu_sparse_tail_bytes(NSInteger pageSize, MTLTextureType textureType,
+                                        NSUInteger width, NSUInteger height, NSUInteger depth,
+                                        NSUInteger firstMipmapInTail, NSUInteger mipmapLevelCount,
+                                        MTLTextureUsage usage, NSUInteger bytesPerPixel) {
     const NSUInteger pageBytes = zpu_sparse_page_bytes(pageSize);
-    const NSUInteger pageCount = zpu_sparse_tail_page_count(pageSize);
-    if (pageBytes == 0 || pageCount == 0 || firstMipmapInTail >= mipmapLevelCount ||
-        pageCount > SIZE_MAX / pageBytes) return 0;
+    if (pageBytes == 0 || firstMipmapInTail >= mipmapLevelCount) return 0;
+    const NSUInteger payloadBytes = zpu_sparse_tail_payload_bytes(textureType, width, height, depth,
+                                                                   firstMipmapInTail, mipmapLevelCount,
+                                                                   bytesPerPixel);
+    if (zpu_texture_type_is_3d(textureType)) {
+        const NSUInteger pageCount = zpu_sparse_tail_page_overhead(pageSize) + 1;
+        if (pageCount > SIZE_MAX / pageBytes) return 0;
+        return pageBytes * pageCount;
+    }
+    if (payloadBytes == 0 || payloadBytes > SIZE_MAX - (pageBytes - 1)) return 0;
+    NSUInteger pageCount = (payloadBytes + pageBytes - 1) / pageBytes;
+    if ((usage & MTLTextureUsageShaderWrite) != 0) {
+        const NSUInteger overhead = zpu_sparse_tail_page_overhead(pageSize);
+        if (pageCount > SIZE_MAX - overhead) return 0;
+        pageCount += overhead;
+    }
+    if (pageCount == 0 || pageCount > SIZE_MAX / pageBytes) return 0;
     return pageBytes * pageCount;
 }
 
@@ -3364,8 +3403,13 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
                 zpu_texture_type_is_3d(_textureType) ? descriptor.depth : 1,
                 descriptor.mipmapLevelCount, _sparseTileSize);
             _sparseTailBytes = zpu_sparse_tail_bytes(sparsePageSize,
+                                                     _textureType, descriptor.width,
+                                                     zpu_texture_type_is_1d(_textureType) ? 1 : descriptor.height,
+                                                     zpu_texture_type_is_3d(_textureType) ? descriptor.depth : 1,
                                                      _sparseFirstMipmapInTail,
-                                                     descriptor.mipmapLevelCount);
+                                                     descriptor.mipmapLevelCount,
+                                                     descriptor.usage,
+                                                     zpu_texture_bytes_per_pixel(_pixelFormat));
             _sparseMappings = [NSMutableDictionary dictionary];
         }
     }
