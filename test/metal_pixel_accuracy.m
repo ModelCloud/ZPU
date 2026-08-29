@@ -106,13 +106,15 @@ static int test_vertex_attribute_stride_against_native(
         MTLRenderPipelineDescriptor *native_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
         native_pipeline_descriptor.vertexFunction = native_vertex_function;
         native_pipeline_descriptor.fragmentFunction = native_fragment_function;
-        native_pipeline_descriptor.vertexDescriptor = vertex_descriptor;
-        native_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+            native_pipeline_descriptor.vertexDescriptor = vertex_descriptor;
+            native_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        native_pipeline_descriptor.supportIndirectCommandBuffers = YES;
         MTLRenderPipelineDescriptor *adapter_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
         adapter_pipeline_descriptor.vertexFunction = adapter_vertex_function;
         adapter_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
-        adapter_pipeline_descriptor.vertexDescriptor = [vertex_descriptor copy];
-        adapter_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+            adapter_pipeline_descriptor.vertexDescriptor = [vertex_descriptor copy];
+            adapter_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        adapter_pipeline_descriptor.supportIndirectCommandBuffers = YES;
         NSError *native_error = nil;
         NSError *adapter_error = nil;
         id<MTLRenderPipelineState> native_pipeline =
@@ -9117,6 +9119,125 @@ int main(void) {
                 fprintf(stderr, "metal-pixel: indirect command buffer mismatch at byte %zu: Metal=%u ZPU=%u\n",
                         index, metal_icb_pixels[index], adapter_icb_pixels[index]);
                 return 40;
+            }
+        }
+
+        /* ICB dynamic vertex strides are part of the command, not the
+         * encoder. Preserve the stride through CPU replay and compare the
+         * stage-in result with Apple's native ICB byte-for-byte. */
+        if (@available(macOS 14.0, iOS 17.0, *)) {
+            const NSUInteger dynamic_icb_stride = 48;
+            uint8_t dynamic_icb_vertices[6 * dynamic_icb_stride];
+            memset(dynamic_icb_vertices, 0xcd, sizeof(dynamic_icb_vertices));
+            for (NSUInteger index = 0; index < 6; ++index) {
+                memcpy(dynamic_icb_vertices + index * dynamic_icb_stride,
+                       &vertices[index], sizeof(vertices[index]));
+            }
+            MTLVertexDescriptor *dynamic_icb_vertex_descriptor = [MTLVertexDescriptor vertexDescriptor];
+            dynamic_icb_vertex_descriptor.attributes[0].format = MTLVertexFormatFloat4;
+            dynamic_icb_vertex_descriptor.attributes[0].offset = 0;
+            dynamic_icb_vertex_descriptor.attributes[0].bufferIndex = 0;
+            dynamic_icb_vertex_descriptor.attributes[1].format = MTLVertexFormatFloat4;
+            dynamic_icb_vertex_descriptor.attributes[1].offset = sizeof(float) * 4;
+            dynamic_icb_vertex_descriptor.attributes[1].bufferIndex = 0;
+            dynamic_icb_vertex_descriptor.layouts[0].stride = MTLBufferLayoutStrideDynamic;
+            dynamic_icb_vertex_descriptor.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
+            dynamic_icb_vertex_descriptor.layouts[0].stepRate = 1;
+            MTLRenderPipelineDescriptor *native_dynamic_icb_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
+            native_dynamic_icb_pipeline_descriptor.vertexFunction = stage_in_vertex_function;
+            native_dynamic_icb_pipeline_descriptor.fragmentFunction = fragment_function;
+            native_dynamic_icb_pipeline_descriptor.vertexDescriptor = dynamic_icb_vertex_descriptor;
+            native_dynamic_icb_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+            native_dynamic_icb_pipeline_descriptor.supportIndirectCommandBuffers = YES;
+            MTLRenderPipelineDescriptor *adapter_dynamic_icb_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
+            adapter_dynamic_icb_pipeline_descriptor.vertexFunction = adapter_stage_in_vertex_function;
+            adapter_dynamic_icb_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
+            adapter_dynamic_icb_pipeline_descriptor.vertexDescriptor = [dynamic_icb_vertex_descriptor copy];
+            adapter_dynamic_icb_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+            adapter_dynamic_icb_pipeline_descriptor.supportIndirectCommandBuffers = YES;
+            id<MTLRenderPipelineState> native_dynamic_icb_pipeline =
+                [device newRenderPipelineStateWithDescriptor:native_dynamic_icb_pipeline_descriptor error:&error];
+            id<MTLRenderPipelineState> adapter_dynamic_icb_pipeline =
+                [adapter_device newRenderPipelineStateWithDescriptor:adapter_dynamic_icb_pipeline_descriptor
+                                                                 error:&adapter_pipeline_error];
+            MTLIndirectCommandBufferDescriptor *dynamic_icb_descriptor = [MTLIndirectCommandBufferDescriptor new];
+            dynamic_icb_descriptor.commandTypes = MTLIndirectCommandTypeDraw;
+            dynamic_icb_descriptor.inheritPipelineState = YES;
+            dynamic_icb_descriptor.inheritBuffers = NO;
+            dynamic_icb_descriptor.maxVertexBufferBindCount = 1;
+            dynamic_icb_descriptor.supportDynamicAttributeStride = YES;
+            id<MTLIndirectCommandBuffer> native_dynamic_icb =
+                [device newIndirectCommandBufferWithDescriptor:dynamic_icb_descriptor
+                                                maxCommandCount:1 options:0];
+            id<MTLIndirectCommandBuffer> adapter_dynamic_icb =
+                [adapter_device newIndirectCommandBufferWithDescriptor:dynamic_icb_descriptor
+                                                        maxCommandCount:1 options:MTLResourceStorageModeShared];
+            id<MTLIndirectRenderCommand> native_dynamic_icb_command =
+                [native_dynamic_icb indirectRenderCommandAtIndex:0];
+            id<MTLIndirectRenderCommand> adapter_dynamic_icb_command =
+                [adapter_dynamic_icb indirectRenderCommandAtIndex:0];
+            id<MTLBuffer> native_dynamic_icb_buffer =
+                [device newBufferWithBytes:dynamic_icb_vertices length:sizeof(dynamic_icb_vertices)
+                                   options:MTLResourceStorageModeShared];
+            id<MTLBuffer> adapter_dynamic_icb_buffer =
+                [adapter_device newBufferWithBytes:dynamic_icb_vertices length:sizeof(dynamic_icb_vertices)
+                                            options:MTLResourceStorageModeShared];
+            [native_dynamic_icb_command setVertexBuffer:native_dynamic_icb_buffer offset:0
+                                        attributeStride:dynamic_icb_stride atIndex:0];
+            [adapter_dynamic_icb_command setVertexBuffer:adapter_dynamic_icb_buffer offset:0
+                                          attributeStride:dynamic_icb_stride atIndex:0];
+            [native_dynamic_icb_command drawPrimitives:MTLPrimitiveTypeTriangle
+                                          vertexStart:0 vertexCount:6 instanceCount:1 baseInstance:0];
+            [adapter_dynamic_icb_command drawPrimitives:MTLPrimitiveTypeTriangle
+                                            vertexStart:0 vertexCount:6 instanceCount:1 baseInstance:0];
+            id<MTLTexture> native_dynamic_icb_texture = [device newTextureWithDescriptor:texture_descriptor];
+            id<MTLTexture> adapter_dynamic_icb_texture =
+                [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+            MTLRenderPassDescriptor *native_dynamic_icb_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            native_dynamic_icb_pass.colorAttachments[0].texture = native_dynamic_icb_texture;
+            native_dynamic_icb_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            native_dynamic_icb_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            native_dynamic_icb_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+            MTLRenderPassDescriptor *adapter_dynamic_icb_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            adapter_dynamic_icb_pass.colorAttachments[0].texture = adapter_dynamic_icb_texture;
+            adapter_dynamic_icb_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            adapter_dynamic_icb_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            adapter_dynamic_icb_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+            id<MTLCommandBuffer> native_dynamic_icb_command_buffer = [queue commandBuffer];
+            id<MTLCommandBuffer> adapter_dynamic_icb_command_buffer = [adapter_queue commandBuffer];
+            id<MTLRenderCommandEncoder> native_dynamic_icb_encoder =
+                [native_dynamic_icb_command_buffer renderCommandEncoderWithDescriptor:native_dynamic_icb_pass];
+            id<MTLRenderCommandEncoder> adapter_dynamic_icb_encoder =
+                [adapter_dynamic_icb_command_buffer renderCommandEncoderWithDescriptor:adapter_dynamic_icb_pass];
+            [native_dynamic_icb_encoder setRenderPipelineState:native_dynamic_icb_pipeline];
+            [adapter_dynamic_icb_encoder setRenderPipelineState:adapter_dynamic_icb_pipeline];
+            [native_dynamic_icb_encoder useResource:native_dynamic_icb_buffer
+                                             usage:MTLResourceUsageRead stages:MTLRenderStageVertex];
+            [native_dynamic_icb_encoder useResource:native_dynamic_icb
+                                             usage:MTLResourceUsageRead stages:MTLRenderStageVertex];
+            [adapter_dynamic_icb_encoder executeCommandsInBuffer:adapter_dynamic_icb withRange:NSMakeRange(0, 1)];
+            [native_dynamic_icb_encoder executeCommandsInBuffer:native_dynamic_icb withRange:NSMakeRange(0, 1)];
+            [native_dynamic_icb_encoder endEncoding];
+            [adapter_dynamic_icb_encoder endEncoding];
+            [native_dynamic_icb_command_buffer commit];
+            [adapter_dynamic_icb_command_buffer commit];
+            [native_dynamic_icb_command_buffer waitUntilCompleted];
+            [adapter_dynamic_icb_command_buffer waitUntilCompleted];
+            uint8_t native_dynamic_icb_pixels[byte_count];
+            uint8_t adapter_dynamic_icb_pixels[byte_count];
+            [native_dynamic_icb_texture getBytes:native_dynamic_icb_pixels bytesPerRow:width * 4
+                                       fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            [adapter_dynamic_icb_texture getBytes:adapter_dynamic_icb_pixels bytesPerRow:width * 4
+                                         fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            if (native_dynamic_icb_pipeline == nil || adapter_dynamic_icb_pipeline == nil ||
+                native_dynamic_icb == nil || adapter_dynamic_icb == nil ||
+                native_dynamic_icb_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                adapter_dynamic_icb_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                memcmp(native_dynamic_icb_pixels, adapter_dynamic_icb_pixels, byte_count) != 0) {
+                fprintf(stderr, "metal-pixel: dynamic indirect vertex-stride bytes mismatch\n");
+                fail_with_error("native dynamic indirect command error", native_dynamic_icb_command_buffer.error);
+                fail_with_error("adapter dynamic indirect command error", adapter_dynamic_icb_command_buffer.error);
+                return 144;
             }
         }
 

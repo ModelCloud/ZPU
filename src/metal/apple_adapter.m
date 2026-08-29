@@ -290,6 +290,8 @@ API_AVAILABLE(macos(15.0), ios(18.0))
     id _pipelineState;
     ZPUBuffer *_vertexBuffer;
     NSUInteger _vertexOffset;
+    NSUInteger _vertexStride;
+    BOOL _hasVertexStride;
     MTLPrimitiveType _primitiveType;
     NSUInteger _vertexStart;
     NSUInteger _vertexCount;
@@ -12436,6 +12438,8 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
             copy->_pipelineState = renderCommand->_pipelineState;
             copy->_vertexBuffer = renderCommand->_vertexBuffer;
             copy->_vertexOffset = renderCommand->_vertexOffset;
+            copy->_vertexStride = renderCommand->_vertexStride;
+            copy->_hasVertexStride = renderCommand->_hasVertexStride;
             copy->_primitiveType = renderCommand->_primitiveType;
             copy->_vertexStart = renderCommand->_vertexStart;
             copy->_vertexCount = renderCommand->_vertexCount;
@@ -12579,6 +12583,8 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     _vertexBuffer = nil;
     _indexBuffer = nil;
     _vertexOffset = 0;
+    _vertexStride = 0;
+    _hasVertexStride = NO;
     _vertexStart = 0;
     _vertexCount = 0;
     _instanceCount = 0;
@@ -12666,11 +12672,14 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     _hasFragmentBuffer = YES;
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0)) {
-    if (stride != 0) {
+    if (!_owner->_supportDynamicAttributeStride || stride == NSUIntegerMax || stride < sizeof(zpu_metal_vertex)) {
         _unsupportedCommand = YES;
         return;
     }
     [self setVertexBuffer:buffer offset:offset atIndex:index];
+    if (_unsupportedCommand) return;
+    _vertexStride = stride;
+    _hasVertexStride = YES;
 }
 - (void)drawPrimitives:(MTLPrimitiveType)primitiveType vertexStart:(NSUInteger)vertexStart vertexCount:(NSUInteger)vertexCount instanceCount:(NSUInteger)instanceCount baseInstance:(NSUInteger)baseInstance {
     if ((_owner->_commandTypes & MTLIndirectCommandTypeDraw) == 0 ||
@@ -12909,7 +12918,12 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     }
     if (_pipelineState != nil) [encoder setRenderPipelineState:(id<MTLRenderPipelineState>)_pipelineState];
     if (_hasVertexBuffer) {
-        [encoder setVertexBuffer:(id<MTLBuffer>)_vertexBuffer offset:_vertexOffset atIndex:0];
+        if (_hasVertexStride) {
+            [encoder setVertexBuffer:(id<MTLBuffer>)_vertexBuffer offset:_vertexOffset
+                      attributeStride:_vertexStride atIndex:0];
+        } else {
+            [encoder setVertexBuffer:(id<MTLBuffer>)_vertexBuffer offset:_vertexOffset atIndex:0];
+        }
     } else if (!_owner->_inheritBuffers) {
         [encoder setVertexBuffer:nil offset:0 atIndex:0];
     }
