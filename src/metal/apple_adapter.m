@@ -5311,7 +5311,7 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 - (void)generateMipmapsForTexture:(id<MTLTexture>)texture {
     ZPUTexture *zpuTexture = (ZPUTexture *)texture;
     if (![zpuTexture isKindOfClass:[ZPUTexture class]] ||
-        (zpuTexture->_pixelFormat != MTLPixelFormatRGBA8Unorm && zpuTexture->_pixelFormat != MTLPixelFormatBGRA8Unorm) ||
+        !zpu_render_pipeline_format_supported(zpuTexture->_pixelFormat) ||
         zpuTexture.mipmapLevelCount < 2) return;
     if (zpu_texture_type_is_3d(zpuTexture->_textureType)) {
         for (NSUInteger level = 0; level + 1 < zpuTexture.mipmapLevelCount; ++level) {

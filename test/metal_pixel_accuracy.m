@@ -2318,6 +2318,101 @@ int main(void) {
             return 78;
         }
 
+        /* Float mipmaps must use the same footprint and IEEE storage as the
+         * Apple blit path. Compare raw level-one bytes for both formats. */
+        enum { float_mipmap_width = 4, float_mipmap_height = 4 };
+        float r32_mipmap_source[float_mipmap_width * float_mipmap_height];
+        for (NSUInteger index = 0; index < sizeof(r32_mipmap_source) / sizeof(r32_mipmap_source[0]); ++index) {
+            r32_mipmap_source[index] = (float)index * 0.75f - 1.25f;
+        }
+        uint16_t rgba16_mipmap_source[float_mipmap_width * float_mipmap_height * 4];
+        for (NSUInteger index = 0; index < sizeof(rgba16_mipmap_source) / sizeof(rgba16_mipmap_source[0]); index += 4) {
+            rgba16_mipmap_source[index + 0] = 0x3c00; /* 1.0 */
+            rgba16_mipmap_source[index + 1] = 0x4000; /* 2.0 */
+            rgba16_mipmap_source[index + 2] = 0x3800; /* 0.5 */
+            rgba16_mipmap_source[index + 3] = 0x3c00; /* 1.0 */
+        }
+        MTLTextureDescriptor *native_r32_mipmap_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
+                                                                width:float_mipmap_width
+                                                               height:float_mipmap_height
+                                                            mipmapped:YES];
+        native_r32_mipmap_descriptor.storageMode = MTLStorageModeShared;
+        native_r32_mipmap_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        MTLTextureDescriptor *adapter_r32_mipmap_descriptor = [native_r32_mipmap_descriptor copy];
+        id<MTLTexture> native_r32_mipmap_texture = [device newTextureWithDescriptor:native_r32_mipmap_descriptor];
+        id<MTLTexture> adapter_r32_mipmap_texture = [adapter_device newTextureWithDescriptor:adapter_r32_mipmap_descriptor];
+        [native_r32_mipmap_texture replaceRegion:MTLRegionMake2D(0, 0, float_mipmap_width, float_mipmap_height)
+                                      mipmapLevel:0 withBytes:r32_mipmap_source bytesPerRow:float_mipmap_width * sizeof(float)];
+        [adapter_r32_mipmap_texture replaceRegion:MTLRegionMake2D(0, 0, float_mipmap_width, float_mipmap_height)
+                                       mipmapLevel:0 withBytes:r32_mipmap_source bytesPerRow:float_mipmap_width * sizeof(float)];
+        id<MTLCommandBuffer> native_r32_mipmap_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> native_r32_mipmap_blit = [native_r32_mipmap_command_buffer blitCommandEncoder];
+        [native_r32_mipmap_blit generateMipmapsForTexture:native_r32_mipmap_texture];
+        [native_r32_mipmap_blit endEncoding];
+        [native_r32_mipmap_command_buffer commit];
+        [native_r32_mipmap_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> adapter_r32_mipmap_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_r32_mipmap_blit = [adapter_r32_mipmap_command_buffer blitCommandEncoder];
+        [adapter_r32_mipmap_blit generateMipmapsForTexture:adapter_r32_mipmap_texture];
+        [adapter_r32_mipmap_blit endEncoding];
+        [adapter_r32_mipmap_command_buffer commit];
+        [adapter_r32_mipmap_command_buffer waitUntilCompleted];
+        uint8_t native_r32_mipmap_level_one[2 * 2 * sizeof(float)];
+        uint8_t adapter_r32_mipmap_level_one[2 * 2 * sizeof(float)];
+        [native_r32_mipmap_texture getBytes:native_r32_mipmap_level_one bytesPerRow:2 * sizeof(float)
+                                 fromRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:1];
+        [adapter_r32_mipmap_texture getBytes:adapter_r32_mipmap_level_one bytesPerRow:2 * sizeof(float)
+                                  fromRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:1];
+
+        MTLTextureDescriptor *native_rgba16_mipmap_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                                width:float_mipmap_width
+                                                               height:float_mipmap_height
+                                                            mipmapped:YES];
+        native_rgba16_mipmap_descriptor.storageMode = MTLStorageModeShared;
+        native_rgba16_mipmap_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        MTLTextureDescriptor *adapter_rgba16_mipmap_descriptor = [native_rgba16_mipmap_descriptor copy];
+        id<MTLTexture> native_rgba16_mipmap_texture = [device newTextureWithDescriptor:native_rgba16_mipmap_descriptor];
+        id<MTLTexture> adapter_rgba16_mipmap_texture = [adapter_device newTextureWithDescriptor:adapter_rgba16_mipmap_descriptor];
+        [native_rgba16_mipmap_texture replaceRegion:MTLRegionMake2D(0, 0, float_mipmap_width, float_mipmap_height)
+                                         mipmapLevel:0 withBytes:rgba16_mipmap_source
+                                       bytesPerRow:float_mipmap_width * 4 * sizeof(uint16_t)];
+        [adapter_rgba16_mipmap_texture replaceRegion:MTLRegionMake2D(0, 0, float_mipmap_width, float_mipmap_height)
+                                          mipmapLevel:0 withBytes:rgba16_mipmap_source
+                                        bytesPerRow:float_mipmap_width * 4 * sizeof(uint16_t)];
+        id<MTLCommandBuffer> native_rgba16_mipmap_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> native_rgba16_mipmap_blit = [native_rgba16_mipmap_command_buffer blitCommandEncoder];
+        [native_rgba16_mipmap_blit generateMipmapsForTexture:native_rgba16_mipmap_texture];
+        [native_rgba16_mipmap_blit endEncoding];
+        [native_rgba16_mipmap_command_buffer commit];
+        [native_rgba16_mipmap_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> adapter_rgba16_mipmap_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_rgba16_mipmap_blit = [adapter_rgba16_mipmap_command_buffer blitCommandEncoder];
+        [adapter_rgba16_mipmap_blit generateMipmapsForTexture:adapter_rgba16_mipmap_texture];
+        [adapter_rgba16_mipmap_blit endEncoding];
+        [adapter_rgba16_mipmap_command_buffer commit];
+        [adapter_rgba16_mipmap_command_buffer waitUntilCompleted];
+        uint8_t native_rgba16_mipmap_level_one[2 * 2 * 8];
+        uint8_t adapter_rgba16_mipmap_level_one[2 * 2 * 8];
+        [native_rgba16_mipmap_texture getBytes:native_rgba16_mipmap_level_one bytesPerRow:2 * 8
+                                    fromRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:1];
+        [adapter_rgba16_mipmap_texture getBytes:adapter_rgba16_mipmap_level_one bytesPerRow:2 * 8
+                                     fromRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:1];
+        if (native_r32_mipmap_texture == nil || adapter_r32_mipmap_texture == nil ||
+            native_r32_mipmap_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_r32_mipmap_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_r32_mipmap_level_one, adapter_r32_mipmap_level_one,
+                   sizeof(native_r32_mipmap_level_one)) != 0 ||
+            native_rgba16_mipmap_texture == nil || adapter_rgba16_mipmap_texture == nil ||
+            native_rgba16_mipmap_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_rgba16_mipmap_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_rgba16_mipmap_level_one, adapter_rgba16_mipmap_level_one,
+                   sizeof(native_rgba16_mipmap_level_one)) != 0) {
+            fprintf(stderr, "metal-pixel: float mipmap generation exactness failed\n");
+            return 85;
+        }
+
         /* Library/function discovery is also CPU metadata. The source text
          * is inspected only for registered ZPU kernel names; it is never sent
          * to Apple's compiler by the adapter. */

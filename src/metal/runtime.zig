@@ -1848,11 +1848,97 @@ fn mipmapAxis(source_size: u32, destination_size: u32, destination_index: usize)
     };
 }
 
-fn generateMipmap(command: MipmapCommand) Error!void {
-    if (command.source == command.destination or !command.source.format.isColor()) return error.UnsupportedFormat;
+fn readMipmapF32(bytes: []const u8, offset: usize) f64 {
+    return @floatCast(@as(f32, @bitCast(std.mem.readInt(u32, bytes[offset..][0..4], .little))));
+}
+
+fn writeMipmapF32(bytes: []u8, offset: usize, value: f64) void {
+    const narrowed: f32 = @floatCast(value);
+    std.mem.writeInt(u32, bytes[offset..][0..4], @bitCast(narrowed), .little);
+}
+
+fn readMipmapF16(bytes: []const u8, offset: usize) f64 {
+    return @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, bytes[offset..][0..2], .little))));
+}
+
+fn writeMipmapF16(bytes: []u8, offset: usize, value: f64) void {
+    const narrowed: f16 = @floatCast(value);
+    std.mem.writeInt(u16, bytes[offset..][0..2], @bitCast(narrowed), .little);
+}
+
+fn readFloatMipmapColor(texture: *const Texture, x: usize, y: usize) [4]f64 {
+    const offset = y * texture.stride + x * texture.format.bytesPerPixel();
+    return switch (texture.format) {
+        .r32_float => .{ readMipmapF32(texture.bytes, offset), 0, 0, 1 },
+        .rgba16_float => .{
+            readMipmapF16(texture.bytes, offset),
+            readMipmapF16(texture.bytes, offset + 2),
+            readMipmapF16(texture.bytes, offset + 4),
+            readMipmapF16(texture.bytes, offset + 6),
+        },
+        else => unreachable,
+    };
+}
+
+fn writeFloatMipmapColor(texture: *Texture, x: usize, y: usize, color: [4]f64) void {
+    const offset = y * texture.stride + x * texture.format.bytesPerPixel();
+    switch (texture.format) {
+        .r32_float => writeMipmapF32(texture.bytes, offset, color[0]),
+        .rgba16_float => {
+            writeMipmapF16(texture.bytes, offset, color[0]);
+            writeMipmapF16(texture.bytes, offset + 2, color[1]);
+            writeMipmapF16(texture.bytes, offset + 4, color[2]);
+            writeMipmapF16(texture.bytes, offset + 6, color[3]);
+        },
+        else => unreachable,
+    }
+}
+
+fn generateFloatMipmap(command: MipmapCommand) Error!void {
     const destination_width: u32 = if (command.source.width > 1) command.source.width / 2 else 1;
     const destination_height: u32 = if (command.source.height > 1) command.source.height / 2 else 1;
-    if (command.destination.width != destination_width or command.destination.height != destination_height) return error.InvalidArgument;
+    if (command.destination.width != destination_width or command.destination.height != destination_height or
+        command.destination.format != command.source.format) return error.InvalidArgument;
+    for (0..destination_height) |y| {
+        const source_y = mipmapAxis(command.source.height, destination_height, y);
+        for (0..destination_width) |x| {
+            const source_x = mipmapAxis(command.source.width, destination_width, x);
+            const denominator = @as(f64, @floatFromInt(source_x.denominator * source_y.denominator));
+            var sums = [_]f64{ 0, 0, 0, 0 };
+            const x_samples = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_x.low, .weight = source_x.low_weight },
+                .{ .index = source_x.high, .weight = source_x.high_weight },
+            };
+            const y_samples = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_y.low, .weight = source_y.low_weight },
+                .{ .index = source_y.high, .weight = source_y.high_weight },
+            };
+            for (y_samples) |y_sample| {
+                if (y_sample.weight == 0) continue;
+                for (x_samples) |x_sample| {
+                    if (x_sample.weight == 0) continue;
+                    const weight = @as(f64, @floatFromInt(x_sample.weight * y_sample.weight));
+                    const color = readFloatMipmapColor(command.source, x_sample.index, y_sample.index);
+                    for (0..4) |component| sums[component] += color[component] * weight;
+                }
+            }
+            writeFloatMipmapColor(command.destination, x, y, .{
+                sums[0] / denominator, sums[1] / denominator,
+                sums[2] / denominator, sums[3] / denominator,
+            });
+        }
+    }
+}
+
+fn generateMipmap(command: MipmapCommand) Error!void {
+    if (command.source == command.destination or !command.source.format.isColor()) return error.UnsupportedFormat;
+    if (command.source.format == .r32_float or command.source.format == .rgba16_float) {
+        return generateFloatMipmap(command);
+    }
+    const destination_width: u32 = if (command.source.width > 1) command.source.width / 2 else 1;
+    const destination_height: u32 = if (command.source.height > 1) command.source.height / 2 else 1;
+    if (command.destination.width != destination_width or command.destination.height != destination_height or
+        command.destination.format != command.source.format) return error.InvalidArgument;
     for (0..destination_height) |y| {
         const source_y = mipmapAxis(command.source.height, destination_height, y);
         for (0..destination_width) |x| {
@@ -1882,8 +1968,7 @@ fn generateMipmap(command: MipmapCommand) Error!void {
     }
 }
 
-fn generateMipmap3D(command: Mipmap3DCommand) Error!void {
-    if (command.source0 == command.destination or !command.source0.format.isColor()) return error.UnsupportedFormat;
+fn generateFloatMipmap3D(command: Mipmap3DCommand) Error!void {
     if (command.source1_weight_denominator == 0 or command.source1_weight_numerator > command.source1_weight_denominator or
         (command.source1 == null and command.source1_weight_numerator != 0)) return error.InvalidArgument;
     const source1 = command.source1;
@@ -1893,7 +1978,69 @@ fn generateMipmap3D(command: Mipmap3DCommand) Error!void {
     }
     const destination_width: u32 = if (command.source0.width > 1) command.source0.width / 2 else 1;
     const destination_height: u32 = if (command.source0.height > 1) command.source0.height / 2 else 1;
-    if (command.destination.width != destination_width or command.destination.height != destination_height) return error.InvalidArgument;
+    if (command.destination.width != destination_width or command.destination.height != destination_height or
+        command.destination.format != command.source0.format) return error.InvalidArgument;
+    const source0_z_weight = @as(u64, command.source1_weight_denominator - command.source1_weight_numerator);
+    const source1_z_weight = @as(u64, command.source1_weight_numerator);
+    for (0..destination_height) |y| {
+        const source_y = mipmapAxis(command.source0.height, destination_height, y);
+        for (0..destination_width) |x| {
+            const source_x = mipmapAxis(command.source0.width, destination_width, x);
+            const xy_denominator = @as(f64, @floatFromInt(source_x.denominator * source_y.denominator));
+            const z_denominator = @as(f64, @floatFromInt(command.source1_weight_denominator));
+            var sums = [_]f64{ 0, 0, 0, 0 };
+            const x_samples = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_x.low, .weight = source_x.low_weight },
+                .{ .index = source_x.high, .weight = source_x.high_weight },
+            };
+            const y_samples = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_y.low, .weight = source_y.low_weight },
+                .{ .index = source_y.high, .weight = source_y.high_weight },
+            };
+            for (y_samples) |y_sample| {
+                if (y_sample.weight == 0) continue;
+                for (x_samples) |x_sample| {
+                    if (x_sample.weight == 0) continue;
+                    const xy_weight = @as(f64, @floatFromInt(x_sample.weight * y_sample.weight));
+                    const color0 = readFloatMipmapColor(command.source0, x_sample.index, y_sample.index);
+                    for (0..4) |component| {
+                        sums[component] += color0[component] * xy_weight * @as(f64, @floatFromInt(source0_z_weight));
+                    }
+                    if (source1) |value| {
+                        if (source1_z_weight != 0) {
+                            const color1 = readFloatMipmapColor(value, x_sample.index, y_sample.index);
+                            for (0..4) |component| {
+                                sums[component] += color1[component] * xy_weight * @as(f64, @floatFromInt(source1_z_weight));
+                            }
+                        }
+                    }
+                }
+            }
+            const denominator = xy_denominator * z_denominator;
+            writeFloatMipmapColor(command.destination, x, y, .{
+                sums[0] / denominator, sums[1] / denominator,
+                sums[2] / denominator, sums[3] / denominator,
+            });
+        }
+    }
+}
+
+fn generateMipmap3D(command: Mipmap3DCommand) Error!void {
+    if (command.source0 == command.destination or !command.source0.format.isColor()) return error.UnsupportedFormat;
+    if (command.source0.format == .r32_float or command.source0.format == .rgba16_float) {
+        return generateFloatMipmap3D(command);
+    }
+    if (command.source1_weight_denominator == 0 or command.source1_weight_numerator > command.source1_weight_denominator or
+        (command.source1 == null and command.source1_weight_numerator != 0)) return error.InvalidArgument;
+    const source1 = command.source1;
+    if (source1) |value| {
+        if (value == command.destination or value.width != command.source0.width or
+            value.height != command.source0.height or value.format != command.source0.format) return error.InvalidArgument;
+    }
+    const destination_width: u32 = if (command.source0.width > 1) command.source0.width / 2 else 1;
+    const destination_height: u32 = if (command.source0.height > 1) command.source0.height / 2 else 1;
+    if (command.destination.width != destination_width or command.destination.height != destination_height or
+        command.destination.format != command.source0.format) return error.InvalidArgument;
     const source0_z_weight = @as(u64, command.source1_weight_denominator - command.source1_weight_numerator);
     const source1_z_weight = @as(u64, command.source1_weight_numerator);
     for (0..destination_height) |y| {
@@ -2169,6 +2316,51 @@ test "CPU blit mipmap generation is deferred and deterministic" {
         17, 18, 19, 255, 53, 54, 55, 255,
         101, 102, 103, 255, 197, 198, 199, 255,
     }, destination.bytes);
+}
+
+test "CPU float mipmap generation preserves format precision" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+
+    const r32_source = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.r32_float));
+    defer destroyTexture(r32_source);
+    const r32_destination = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.r32_float));
+    defer destroyTexture(r32_destination);
+    for (0..4) |y| for (0..4) |x| writeMipmapF32(r32_source.bytes,
+        y * r32_source.stride + x * 4, @floatFromInt(x + y * 4));
+
+    const rgba16_source = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba16_float));
+    defer destroyTexture(rgba16_source);
+    const rgba16_destination = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.rgba16_float));
+    defer destroyTexture(rgba16_destination);
+    for (0..4) |y| for (0..4) |x| {
+        const offset = y * rgba16_source.stride + x * 8;
+        writeMipmapF16(rgba16_source.bytes, offset, @floatFromInt(x + 1));
+        writeMipmapF16(rgba16_source.bytes, offset + 2, @floatFromInt(y + 1));
+        writeMipmapF16(rgba16_source.bytes, offset + 4, 0.25);
+        writeMipmapF16(rgba16_source.bytes, offset + 6, 1.0);
+    };
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginBlit(command_buffer);
+    try encoder.generateMipmap(r32_source, r32_destination);
+    try encoder.generateMipmap(rgba16_source, rgba16_destination);
+    try encoder.endEncoding();
+    destroyBlitEncoder(encoder);
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, r32_destination.bytes[0..4], .little));
+    try command_buffer.commit();
+
+    try std.testing.expectApproxEqAbs(@as(f64, 2.5), readMipmapF32(r32_destination.bytes, 0), 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.5), readMipmapF32(r32_destination.bytes, 4), 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 10.5), readMipmapF32(r32_destination.bytes, r32_destination.stride), 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 12.5), readMipmapF32(r32_destination.bytes, r32_destination.stride + 4), 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.5), readMipmapF16(rgba16_destination.bytes, 0), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.5), readMipmapF16(rgba16_destination.bytes, 2), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.25), readMipmapF16(rgba16_destination.bytes, 4), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), readMipmapF16(rgba16_destination.bytes, 6), 0.001);
 }
 
 test "CPU compute is deferred, bounded, and pixel deterministic" {

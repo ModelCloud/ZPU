@@ -30,7 +30,7 @@ triangle path:
   allocated CPU/ZPU slice×mip levels, exact level/slice read/write,
   level/slice-range views, and level/slice-aware blit copies; CPU mipmap
   generation uses Metal's destination-center linear filter and matches the
-  native RGBA8 oracle; buffer-backed and
+  native RGBA8/R32Float/RGBA16Float oracles; buffer-backed and
   heap-backed textures use independently allocated CPU/ZPU slice×mip levels
   with full allocation-size accounting; linear buffer-backed textures remain
   explicitly limited to one 2D level because their caller-supplied stride
@@ -196,7 +196,7 @@ draws, render and compute indirect command buffers, the CPU compute path
   against a native Metal oracle, the Metal 4 CPU argument-table compute and
   ordinary render paths, deferred indirect-thread dispatch, and deferred
   indirect array z filtering, explicit 3D texture plane/stride copies, and
-  legacy/Metal 4 3D mipmap generation,
+  legacy/Metal 4 3D mipmap generation, and 2D float mipmap raw-byte exactness,
 and the explicit adapter; it is not a claim that every Metal feature is
 implemented.
 
