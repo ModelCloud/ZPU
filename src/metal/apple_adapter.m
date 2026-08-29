@@ -5977,11 +5977,35 @@ static BOOL zpu_append_legacy_compute_functions(
     return YES;
 }
 
+static BOOL zpu_stage_input_descriptor_is_configured(MTLStageInputOutputDescriptor *descriptor) {
+    if (descriptor == nil) return NO;
+    if (descriptor.indexType != MTLIndexTypeUInt16 || descriptor.indexBufferIndex != 0) return YES;
+    for (NSUInteger index = 0; index < 31; ++index) {
+        MTLAttributeDescriptor *attribute = descriptor.attributes[index];
+        if (attribute != nil &&
+            (attribute.format != MTLAttributeFormatInvalid || attribute.offset != 0 || attribute.bufferIndex != 0)) {
+            return YES;
+        }
+        MTLBufferLayoutDescriptor *layout = descriptor.layouts[index];
+        if (layout != nil &&
+            (layout.stride != 0 || layout.stepFunction != MTLStepFunctionPerVertex || layout.stepRate != 1)) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 static BOOL zpu_apply_legacy_compute_descriptor(
     ZPUComputePipelineState *pipeline, MTLComputePipelineDescriptor *descriptor, NSError **error) {
     if (pipeline == nil || descriptor == nil) {
         zpu_set_error(error, @"ZPU CPU Metal requires a compute pipeline descriptor");
         return NO;
+    }
+    if (@available(macOS 10.12, iOS 10.0, *)) {
+        if (zpu_stage_input_descriptor_is_configured(descriptor.stageInputDescriptor)) {
+            zpu_set_error(error, @"ZPU CPU Metal compute profiles do not implement configured stage-input fetch descriptors");
+            return NO;
+        }
     }
     if (@available(macOS 11.0, iOS 14.0, tvOS 16.0, *)) {
         pipeline->_supportsAddingBinaryFunctions = descriptor.supportAddingBinaryFunctions;

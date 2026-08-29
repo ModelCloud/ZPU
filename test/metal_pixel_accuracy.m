@@ -4445,6 +4445,31 @@ int main(void) {
         NSError *adapter_compute_error = nil;
         id<MTLFunction> adapter_compute_function =
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_fill_gradient_rgba8");
+        MTLComputePipelineDescriptor *adapter_default_stage_input_descriptor = [MTLComputePipelineDescriptor new];
+        adapter_default_stage_input_descriptor.computeFunction = adapter_compute_function;
+        NSError *adapter_default_stage_input_error = nil;
+        id<MTLComputePipelineState> adapter_default_stage_input_pipeline =
+            [adapter_device newComputePipelineStateWithDescriptor:adapter_default_stage_input_descriptor
+                                                           options:0 reflection:nil
+                                                              error:&adapter_default_stage_input_error];
+        MTLComputePipelineDescriptor *adapter_configured_stage_input_descriptor = [MTLComputePipelineDescriptor new];
+        adapter_configured_stage_input_descriptor.computeFunction = adapter_compute_function;
+        MTLStageInputOutputDescriptor *adapter_stage_input_descriptor =
+            [MTLStageInputOutputDescriptor stageInputOutputDescriptor];
+        adapter_stage_input_descriptor.attributes[0].format = MTLAttributeFormatFloat4;
+        adapter_stage_input_descriptor.layouts[0].stride = sizeof(float) * 4;
+        adapter_configured_stage_input_descriptor.stageInputDescriptor = adapter_stage_input_descriptor;
+        NSError *adapter_configured_stage_input_error = nil;
+        id<MTLComputePipelineState> adapter_configured_stage_input_pipeline =
+            [adapter_device newComputePipelineStateWithDescriptor:adapter_configured_stage_input_descriptor
+                                                           options:0 reflection:nil
+                                                              error:&adapter_configured_stage_input_error];
+        if (adapter_default_stage_input_pipeline == nil || adapter_default_stage_input_error != nil ||
+            adapter_configured_stage_input_pipeline != nil || adapter_configured_stage_input_error == nil) {
+            fail_with_error("CPU compute stage-input descriptor validation failed",
+                            adapter_default_stage_input_error ?: adapter_configured_stage_input_error);
+            return 147;
+        }
         MTLComputePipelineDescriptor *adapter_compute_link_descriptor = [MTLComputePipelineDescriptor new];
         adapter_compute_link_descriptor.computeFunction = adapter_compute_function;
         adapter_compute_link_descriptor.supportAddingBinaryFunctions = YES;
