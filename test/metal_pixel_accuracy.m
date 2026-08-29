@@ -8827,6 +8827,14 @@ int main(void) {
         state_icb_descriptor.commandTypes = MTLIndirectCommandTypeDraw;
         state_icb_descriptor.inheritPipelineState = NO;
         state_icb_descriptor.inheritBuffers = NO;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            state_icb_descriptor.inheritDepthStencilState = NO;
+            state_icb_descriptor.inheritDepthBias = NO;
+            state_icb_descriptor.inheritDepthClipMode = NO;
+            state_icb_descriptor.inheritCullMode = NO;
+            state_icb_descriptor.inheritFrontFacingWinding = NO;
+            state_icb_descriptor.inheritTriangleFillMode = NO;
+        }
         state_icb_descriptor.maxVertexBufferBindCount = 1;
         state_icb_descriptor.maxFragmentBufferBindCount = 1;
         id<MTLIndirectCommandBuffer> metal_state_icb =
@@ -8840,6 +8848,7 @@ int main(void) {
         [metal_state_icb_command setFragmentBuffer:native_uniform_buffer offset:8 atIndex:0];
         BOOL native_indirect_state_supported = YES;
         @try {
+            [metal_state_icb_command setDepthStencilState:nil];
             [metal_state_icb_command setDepthBias:0.0f slopeScale:0.0f clamp:0.0f];
             [metal_state_icb_command setDepthClipMode:MTLDepthClipModeClip];
             [metal_state_icb_command setCullMode:MTLCullModeNone];
@@ -8879,6 +8888,7 @@ int main(void) {
         [adapter_state_icb_command setRenderPipelineState:adapter_uniform_pipeline];
         [adapter_state_icb_command setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
         [adapter_state_icb_command setFragmentBuffer:adapter_uniform_buffer offset:8 atIndex:0];
+        [adapter_state_icb_command setDepthStencilState:nil];
         [adapter_state_icb_command setDepthBias:0.0f slopeScale:0.0f clamp:0.0f];
         [adapter_state_icb_command setDepthClipMode:MTLDepthClipModeClip];
         [adapter_state_icb_command setCullMode:MTLCullModeNone];

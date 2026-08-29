@@ -340,6 +340,12 @@ API_AVAILABLE(macos(15.0), ios(18.0))
     MTLHazardTrackingMode _hazardTrackingMode;
     BOOL _inheritPipelineState;
     BOOL _inheritBuffers;
+    BOOL _inheritDepthStencilState;
+    BOOL _inheritDepthBias;
+    BOOL _inheritDepthClipMode;
+    BOOL _inheritCullMode;
+    BOOL _inheritFrontFacingWinding;
+    BOOL _inheritTriangleFillMode;
     NSUInteger _maxVertexBufferBindCount;
     NSUInteger _maxFragmentBufferBindCount;
     NSUInteger _maxKernelBufferBindCount;
@@ -12025,6 +12031,24 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         _hazardTrackingMode = (MTLHazardTrackingMode)((options & MTLResourceHazardTrackingModeMask) >> MTLResourceHazardTrackingModeShift);
         _inheritPipelineState = descriptor.inheritPipelineState;
         _inheritBuffers = descriptor.inheritBuffers;
+        /* Metal 4 documents these descriptor controls as defaulting to YES.
+         * Keep that behavior on older deployment targets, where the
+         * properties are not available, and only read them when the runtime
+         * can legally expose them. */
+        _inheritDepthStencilState = YES;
+        _inheritDepthBias = YES;
+        _inheritDepthClipMode = YES;
+        _inheritCullMode = YES;
+        _inheritFrontFacingWinding = YES;
+        _inheritTriangleFillMode = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            _inheritDepthStencilState = descriptor.inheritDepthStencilState;
+            _inheritDepthBias = descriptor.inheritDepthBias;
+            _inheritDepthClipMode = descriptor.inheritDepthClipMode;
+            _inheritCullMode = descriptor.inheritCullMode;
+            _inheritFrontFacingWinding = descriptor.inheritFrontFacingWinding;
+            _inheritTriangleFillMode = descriptor.inheritTriangleFillMode;
+        }
         _maxVertexBufferBindCount = descriptor.maxVertexBufferBindCount;
         _maxFragmentBufferBindCount = descriptor.maxFragmentBufferBindCount;
         _maxKernelBufferBindCount = descriptor.maxKernelBufferBindCount;
@@ -12485,6 +12509,17 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         [encoder->_owner markError];
         return;
     }
+    if ((!_owner->_inheritDepthStencilState && !_hasDepthStencilState) ||
+        (!_owner->_inheritDepthBias && !_hasDepthBias) ||
+        (!_owner->_inheritDepthClipMode && !_hasDepthClipMode) ||
+        (!_owner->_inheritCullMode && !_hasCullMode) ||
+        (!_owner->_inheritFrontFacingWinding && !_hasFrontFacingWinding) ||
+        (!_owner->_inheritTriangleFillMode && !_hasTriangleFillMode)) {
+        /* A command cannot safely emulate a non-inherited fixed-function
+         * value by leaving the encoder's previous state in place. */
+        [encoder->_owner markError];
+        return;
+    }
     if (_pipelineState != nil) [encoder setRenderPipelineState:(id<MTLRenderPipelineState>)_pipelineState];
     if (_hasVertexBuffer) {
         [encoder setVertexBuffer:(id<MTLBuffer>)_vertexBuffer offset:_vertexOffset atIndex:0];
@@ -12496,7 +12531,12 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     } else if (!_owner->_inheritBuffers) {
         [encoder setFragmentBuffer:nil offset:0 atIndex:0];
     }
-    if (_hasDepthStencilState) [encoder setDepthStencilState:(id<MTLDepthStencilState>)_depthStencilState];
+    /* MTLIndirectRenderCommand accepts a nullable depth-stencil state. The
+     * CPU render encoder quite correctly rejects nil, so an explicit nil
+     * command state is represented by leaving depth state unbound. */
+    if (_hasDepthStencilState && _depthStencilState != nil) {
+        [encoder setDepthStencilState:(id<MTLDepthStencilState>)_depthStencilState];
+    }
     if (_hasDepthBias) [encoder setDepthBias:_depthBias slopeScale:_slopeScale clamp:_depthBiasClamp];
     if (_hasDepthClipMode) [encoder setDepthClipMode:_depthClipMode];
     if (_hasCullMode) [encoder setCullMode:_cullMode];
