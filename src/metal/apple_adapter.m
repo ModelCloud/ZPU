@@ -277,6 +277,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     BOOL _multiTargetOutput;
     MTLPixelFormat _depthPixelFormat;
     MTLPixelFormat _stencilPixelFormat;
+    BOOL _sampleTexture;
     BOOL _blendingEnabled;
     MTLBlendFactor _sourceRGBBlendFactor;
     MTLBlendFactor _destinationRGBBlendFactor;
@@ -573,6 +574,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     zpu_metal_render_encoder *_zpuEncoder;
     ZPUCommandBuffer *_owner;
     ZPUBuffer *_vertexBuffer;
+    ZPUTexture *_fragmentTexture;
     ZPURenderPipelineState *_pipelineState;
     ZPUDepthStencilState *_depthStencilState;
 }
@@ -1891,6 +1893,7 @@ static uint64_t zpu_cpu_timestamp(void) {
             if (_colorPixelFormats[index] != MTLPixelFormatInvalid) _colorAttachmentCount = index + 1;
         }
         _multiTargetOutput = [descriptor.fragmentFunction.name rangeOfString:@"mrt" options:NSCaseInsensitiveSearch].location != NSNotFound;
+        _sampleTexture = [descriptor.fragmentFunction.name rangeOfString:@"sample" options:NSCaseInsensitiveSearch].location != NSNotFound;
         _depthPixelFormat = descriptor.depthAttachmentPixelFormat;
         _stencilPixelFormat = descriptor.stencilAttachmentPixelFormat;
         _blendingEnabled = attachment.blendingEnabled;
@@ -5641,10 +5644,19 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     for (NSUInteger index = 0; index < range.length; ++index) [self setFragmentBuffer:buffers[index] offset:offsets[index] atIndex:range.location + index];
 }
 - (void)setFragmentTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
-    [self setVertexTexture:texture atIndex:index];
+    ZPUTexture *zpuTexture = (ZPUTexture *)texture;
+    if (index > UINT32_MAX || (texture != nil && ![zpuTexture isKindOfClass:[ZPUTexture class]])) { [_owner markError]; return; }
+    if (zpu_metal_render_encoder_set_fragment_texture(
+            _zpuEncoder, texture == nil ? NULL : zpuTexture->_zpuTexture, (uint32_t)index) != ZPU_METAL_OK) {
+        [_owner markError];
+        return;
+    }
+    _fragmentTexture = zpuTexture;
+    if (zpuTexture != nil) [_owner retainResource:zpuTexture];
 }
 - (void)setFragmentTextures:(const id<MTLTexture> __nullable [__nonnull])textures withRange:(NSRange)range {
-    [self setVertexTextures:textures withRange:range];
+    if (textures == NULL) { [_owner markError]; return; }
+    for (NSUInteger index = 0; index < range.length; ++index) [self setFragmentTexture:textures[index] atIndex:range.location + index];
 }
 - (void)setFragmentSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
     [self setVertexSamplerState:sampler atIndex:index];
@@ -5861,6 +5873,7 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
             _zpuEncoder, colorFormats, state->_colorAttachmentCount,
             (uint16_t)state->_depthPixelFormat, (uint16_t)state->_stencilPixelFormat) != ZPU_METAL_OK) [_owner markError];
     if (zpu_metal_render_encoder_set_multi_target_output(_zpuEncoder, state->_multiTargetOutput) != ZPU_METAL_OK) [_owner markError];
+    if (zpu_metal_render_encoder_set_sample_texture(_zpuEncoder, state->_sampleTexture) != ZPU_METAL_OK) [_owner markError];
     if (zpu_metal_render_encoder_set_blend_state(
         _zpuEncoder, state->_blendingEnabled,
         (zpu_metal_blend_factor)state->_sourceRGBBlendFactor,

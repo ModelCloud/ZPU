@@ -20,6 +20,9 @@ static const char *const kShaderSource =
     "struct MRTOutput { float4 first [[color(0)]]; float4 second [[color(1)]]; };\n"
     "fragment MRTOutput zpu_test_mrt_fragment(Vertex input [[stage_in]]) { "
     "MRTOutput output; output.first = input.color; output.second = input.color; return output; }\n"
+    "fragment float4 zpu_test_sample_fragment(Vertex input [[stage_in]], "
+    "texture2d<float> source [[texture(0)]], sampler sourceSampler [[sampler(0)]]) { "
+    "return source.sample(sourceSampler, input.color.xy); }\n"
     "kernel void zpu_cpu_fill_gradient_rgba8(texture2d<float, access::write> output [[texture(0)]], "
     "uint2 gid [[thread_position_in_grid]]) { "
     "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
@@ -65,7 +68,8 @@ int main(void) {
         id<MTLFunction> vertex_function = [library newFunctionWithName:@"zpu_test_vertex"];
         id<MTLFunction> fragment_function = [library newFunctionWithName:@"zpu_test_fragment"];
         id<MTLFunction> mrt_fragment_function = [library newFunctionWithName:@"zpu_test_mrt_fragment"];
-        if (vertex_function == nil || fragment_function == nil || mrt_fragment_function == nil) {
+        id<MTLFunction> sample_fragment_function = [library newFunctionWithName:@"zpu_test_sample_fragment"];
+        if (vertex_function == nil || fragment_function == nil || mrt_fragment_function == nil || sample_fragment_function == nil) {
             fprintf(stderr, "metal-pixel: test functions missing\n");
             return 4;
         }
@@ -488,6 +492,8 @@ int main(void) {
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_vertex");
         id<MTLFunction> adapter_fragment_function =
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_fragment");
+        id<MTLFunction> adapter_sample_fragment_function =
+            ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_sample_fragment");
         id<MTLCommandQueue> adapter_queue = [adapter_device newCommandQueue];
         NSError *adapter_pipeline_error = nil;
 
@@ -579,6 +585,115 @@ int main(void) {
                     return 92 + (int)format_index;
                 }
             }
+        }
+
+        const uint8_t sample_source_bytes[] = {
+            255, 0, 0, 255,   0, 255, 0, 255,
+            0, 0, 255, 255,   255, 255, 255, 255,
+        };
+        MTLTextureDescriptor *sample_source_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                width:2 height:2 mipmapped:NO];
+        sample_source_descriptor.storageMode = MTLStorageModeShared;
+        sample_source_descriptor.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> native_sample_source = [device newTextureWithDescriptor:sample_source_descriptor];
+        id<MTLTexture> adapter_sample_source = [adapter_device newTextureWithDescriptor:sample_source_descriptor];
+        [native_sample_source replaceRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0
+                                  withBytes:sample_source_bytes bytesPerRow:2 * 4];
+        [adapter_sample_source replaceRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0
+                                   withBytes:sample_source_bytes bytesPerRow:2 * 4];
+        const zpu_metal_vertex sample_vertices[] = {
+            {{x0, y0, 0.5f, 1.0f}, {0.25f, 0.25f, 0.0f, 1.0f}},
+            {{x1, y0, 0.5f, 1.0f}, {0.75f, 0.25f, 0.0f, 1.0f}},
+            {{x1, y1, 0.5f, 1.0f}, {0.75f, 0.75f, 0.0f, 1.0f}},
+            {{x0, y0, 0.5f, 1.0f}, {0.25f, 0.25f, 0.0f, 1.0f}},
+            {{x1, y1, 0.5f, 1.0f}, {0.75f, 0.75f, 0.0f, 1.0f}},
+            {{x0, y1, 0.5f, 1.0f}, {0.25f, 0.75f, 0.0f, 1.0f}},
+        };
+        id<MTLBuffer> native_sample_vertex_buffer =
+            [device newBufferWithBytes:sample_vertices length:sizeof(sample_vertices)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_sample_vertex_buffer =
+            [adapter_device newBufferWithBytes:sample_vertices length:sizeof(sample_vertices)
+                                        options:MTLResourceStorageModeShared];
+        MTLRenderPipelineDescriptor *native_sample_pipeline_descriptor = [pipeline_descriptor copy];
+        native_sample_pipeline_descriptor.fragmentFunction = sample_fragment_function;
+        native_sample_pipeline_descriptor.supportIndirectCommandBuffers = NO;
+        id<MTLRenderPipelineState> native_sample_pipeline =
+            [device newRenderPipelineStateWithDescriptor:native_sample_pipeline_descriptor error:&error];
+        MTLRenderPipelineDescriptor *adapter_sample_pipeline_descriptor = [native_sample_pipeline_descriptor copy];
+        adapter_sample_pipeline_descriptor.vertexFunction = adapter_vertex_function;
+        adapter_sample_pipeline_descriptor.fragmentFunction = adapter_sample_fragment_function;
+        id<MTLRenderPipelineState> adapter_sample_pipeline =
+            [adapter_device newRenderPipelineStateWithDescriptor:adapter_sample_pipeline_descriptor error:&adapter_pipeline_error];
+        MTLTextureDescriptor *sample_output_descriptor = [texture_descriptor copy];
+        id<MTLTexture> native_sample_output = [device newTextureWithDescriptor:sample_output_descriptor];
+        id<MTLTexture> adapter_sample_output = [adapter_device newTextureWithDescriptor:sample_output_descriptor];
+        MTLSamplerDescriptor *sample_sampler_descriptor = [MTLSamplerDescriptor new];
+        sample_sampler_descriptor.minFilter = MTLSamplerMinMagFilterNearest;
+        sample_sampler_descriptor.magFilter = MTLSamplerMinMagFilterNearest;
+        sample_sampler_descriptor.mipFilter = MTLSamplerMipFilterNotMipmapped;
+        id<MTLSamplerState> native_sample_sampler = [device newSamplerStateWithDescriptor:sample_sampler_descriptor];
+        id<MTLSamplerState> adapter_sample_sampler = [adapter_device newSamplerStateWithDescriptor:sample_sampler_descriptor];
+        if (native_sample_pipeline == nil || native_sample_source == nil || native_sample_vertex_buffer == nil ||
+            native_sample_output == nil || native_sample_sampler == nil || adapter_sample_fragment_function == nil ||
+            adapter_sample_pipeline == nil || adapter_sample_source == nil || adapter_sample_vertex_buffer == nil ||
+            adapter_sample_output == nil || adapter_sample_sampler == nil) {
+            fail_with_error("sample pipeline or resource allocation failed", adapter_pipeline_error);
+            return 94;
+        }
+        MTLRenderPassDescriptor *native_sample_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_sample_pass.colorAttachments[0].texture = native_sample_output;
+        native_sample_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_sample_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_sample_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> native_sample_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_sample_encoder =
+            [native_sample_command_buffer renderCommandEncoderWithDescriptor:native_sample_pass];
+        [native_sample_encoder setRenderPipelineState:native_sample_pipeline];
+        [native_sample_encoder setVertexBuffer:native_sample_vertex_buffer offset:0 atIndex:0];
+        [native_sample_encoder setFragmentTexture:native_sample_source atIndex:0];
+        [native_sample_encoder setFragmentSamplerState:native_sample_sampler atIndex:0];
+        [native_sample_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_sample_encoder endEncoding];
+        [native_sample_command_buffer commit];
+        [native_sample_command_buffer waitUntilCompleted];
+        MTLRenderPassDescriptor *adapter_sample_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_sample_pass.colorAttachments[0].texture = adapter_sample_output;
+        adapter_sample_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_sample_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_sample_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> adapter_sample_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_sample_encoder =
+            [adapter_sample_command_buffer renderCommandEncoderWithDescriptor:adapter_sample_pass];
+        [adapter_sample_encoder setRenderPipelineState:adapter_sample_pipeline];
+        [adapter_sample_encoder setVertexBuffer:adapter_sample_vertex_buffer offset:0 atIndex:0];
+        [adapter_sample_encoder setFragmentTexture:adapter_sample_source atIndex:0];
+        [adapter_sample_encoder setFragmentSamplerState:adapter_sample_sampler atIndex:0];
+        [adapter_sample_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_sample_encoder endEncoding];
+        [adapter_sample_command_buffer commit];
+        [adapter_sample_command_buffer waitUntilCompleted];
+        uint8_t native_sample_bytes[byte_count];
+        uint8_t adapter_sample_bytes[byte_count];
+        [native_sample_output getBytes:native_sample_bytes bytesPerRow:(NSUInteger)width * 4
+                            fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_sample_output getBytes:adapter_sample_bytes bytesPerRow:(NSUInteger)width * 4
+                              fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (native_sample_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_sample_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fail_with_error("sample pipeline allocation or execution failed", adapter_pipeline_error);
+            return 94;
+        }
+        if (memcmp(native_sample_bytes, adapter_sample_bytes, byte_count) != 0) {
+            for (size_t byte = 0; byte < byte_count; ++byte) {
+                if (native_sample_bytes[byte] != adapter_sample_bytes[byte]) {
+                    fprintf(stderr, "metal-pixel: sample mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                            byte, native_sample_bytes[byte], adapter_sample_bytes[byte]);
+                    break;
+                }
+            }
+            return 95;
         }
         MTLRenderPipelineDescriptor *adapter_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
         adapter_pipeline_descriptor.vertexFunction = adapter_vertex_function;

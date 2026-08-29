@@ -64,6 +64,9 @@ triangle path:
   `zpu_test_mrt_fragment` profile mirrors one logical fragment color to every
   extra target, while ordinary single-output profiles leave extra targets at
   their load/clear value
+- the bounded `zpu_test_sample_fragment` profile samples a ZPU-owned color
+  texture with interpolated normalized coordinates and nearest filtering;
+  native Metal is used only as the byte-accuracy oracle
 - fixed-function render pipeline, depth-stencil, and sampler state objects;
   pipeline attachment format validation, blending factors/operations, color
   write masks, and Metal top-left triangle edge inclusion

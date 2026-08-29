@@ -154,11 +154,21 @@ pub const Target = struct {
             },
         }
     }
+
+    fn sampleNearest(self: *const Target, u: f32, v: f32) [4]f32 {
+        if (self.width == 0 or self.height == 0 or !std.math.isFinite(u) or !std.math.isFinite(v)) return .{ 0, 0, 0, 1 };
+        const normalized_u = std.math.clamp(u, 0, 0.99999994);
+        const normalized_v = std.math.clamp(v, 0, 0.99999994);
+        const x: usize = @min(@as(usize, self.width - 1), @as(usize, @intFromFloat(normalized_u * @as(f32, @floatFromInt(self.width)))));
+        const y: usize = @min(@as(usize, self.height - 1), @as(usize, @intFromFloat(normalized_v * @as(f32, @floatFromInt(self.height)))));
+        return self.readColor(x, y);
+    }
 };
 
 const Job = struct {
     target: *Target,
     extra_targets: []const *Target,
+    sample_texture: ?*const Target,
     depth: ?[]f32,
     stencil: ?[]u8,
     vertices: []const abi.Vertex,
@@ -307,8 +317,9 @@ fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [
         stats.depth_tests_passed += 1;
     }
     if (stencil_index) |index| applyStencil(job.stencil.?, index, stencil_state, stencil_state.depth_pass);
-    writeColor(job.target, x, y, color, job.options);
-    if (job.options.write_extra_targets) for (job.extra_targets) |target| writeColor(target, x, y, color, job.options);
+    const fragment_color = if (job.sample_texture) |texture| texture.sampleNearest(color[0], color[1]) else color;
+    writeColor(job.target, x, y, fragment_color, job.options);
+    if (job.options.write_extra_targets) for (job.extra_targets) |target| writeColor(target, x, y, fragment_color, job.options);
     stats.fragments_covered += 1;
     stats.color_writes += 1 + if (job.options.write_extra_targets) @as(u64, @intCast(job.extra_targets.len)) else 0;
 }
@@ -518,8 +529,8 @@ fn addStats(a: Stats, b: Stats) Stats {
     };
 }
 
-pub fn drawWithTargets(target: *Target, extra_targets: []const *Target, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
-    var job = Job{ .target = target, .extra_targets = extra_targets, .depth = depth, .stencil = stencil, .vertices = vertices, .primitive = primitive, .options = options };
+pub fn drawWithTargets(target: *Target, extra_targets: []const *Target, sample_texture: ?*const Target, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
+    var job = Job{ .target = target, .extra_targets = extra_targets, .sample_texture = sample_texture, .depth = depth, .stencil = stencil, .vertices = vertices, .primitive = primitive, .options = options };
     const worker = std.Thread.spawn(.{}, renderWorker, .{&job}) catch {
         job.bands[0] = drawBand(&job, 0);
         job.bands[1] = drawBand(&job, 1);
@@ -531,7 +542,7 @@ pub fn drawWithTargets(target: *Target, extra_targets: []const *Target, depth: ?
 }
 
 pub fn draw(target: *Target, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
-    return drawWithTargets(target, &[_]*Target{}, depth, stencil, vertices, primitive, options);
+    return drawWithTargets(target, &[_]*Target{}, null, depth, stencil, vertices, primitive, options);
 }
 
 pub fn drawSurface(target: *surface.Surface, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
@@ -668,4 +679,16 @@ test "float color targets retain native texel precision" {
     try std.testing.expectEqual(@as(f32, 0.5), color[1]);
     try std.testing.expectEqual(@as(f32, 0.75), color[2]);
     try std.testing.expectEqual(@as(f32, 1), color[3]);
+}
+
+test "CPU texture sampling uses normalized top-left texel coordinates" {
+    var pixels = [_]u8{
+        255, 0, 0, 255,   0, 255, 0, 255,
+        0, 0, 255, 255,   255, 255, 255, 255,
+    };
+    const target = try Target.init(&pixels, 2, 2, 2 * 4, .rgba8_unorm);
+    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.25, 0.25)[0]);
+    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.75, 0.25)[1]);
+    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.25, 0.75)[2]);
+    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.75, 0.75)[0]);
 }

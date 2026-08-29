@@ -154,6 +154,7 @@ const DrawCommand = struct {
     vertex_count: usize,
     primitive: abi.PrimitiveType,
     options: raster3d.DrawOptions,
+    sample_texture: ?*Texture = null,
 };
 
 const ColorAttachmentCommand = struct {
@@ -350,6 +351,13 @@ pub const CommandBuffer = struct {
                 var target = target_handle.asTarget();
                 var extra_targets_storage: [7]raster3d.Target = undefined;
                 var extra_targets: [7]*raster3d.Target = undefined;
+                var sample_target_storage: raster3d.Target = undefined;
+                var sample_target: ?*const raster3d.Target = null;
+                if (draw.sample_texture) |value| {
+                    if (!validTexture(value) or value.device != self.queue.device or !value.format.isColor()) return self.fail(error.InvalidResource);
+                    sample_target_storage = value.asTarget();
+                    sample_target = &sample_target_storage;
+                }
                 var extra_count: usize = 0;
                 for (active_color_attachments[1..]) |attachment| {
                     if (attachment) |value| {
@@ -361,6 +369,7 @@ pub const CommandBuffer = struct {
                 _ = raster3d.drawWithTargets(
                     @constCast(&target),
                     extra_targets[0..extra_count],
+                    sample_target,
                     active_depth,
                     active_stencil,
                     self.vertices.items[draw.vertex_start .. draw.vertex_start + draw.vertex_count],
@@ -508,6 +517,8 @@ pub const RenderEncoder = struct {
     depth_bias: f32 = 0,
     slope_scale: f32 = 0,
     depth_bias_clamp: f32 = 0,
+    fragment_texture: ?*Texture = null,
+    sample_texture: bool = false,
     depth_compare: abi.CompareFunction = .less_equal,
     depth_write_enabled: bool = true,
     blending_enabled: bool = false,
@@ -581,6 +592,19 @@ pub const RenderEncoder = struct {
     pub fn setMultiTargetOutput(self: *RenderEncoder, enabled: bool) Error!void {
         if (!self.open()) return error.InvalidCommand;
         self.write_extra_targets = enabled;
+    }
+
+    pub fn setSampleTexture(self: *RenderEncoder, enabled: bool) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        self.sample_texture = enabled;
+    }
+
+    pub fn setFragmentTexture(self: *RenderEncoder, texture: ?*Texture, index: u32) Error!void {
+        if (!self.open() or index != 0) return error.UnsupportedOperation;
+        if (texture) |value| {
+            if (!validTexture(value) or value.device != self.command_buffer.queue.device or !value.format.isColor()) return error.InvalidResource;
+        }
+        self.fragment_texture = texture;
     }
 
     pub fn setPipelineColorFormats(self: *RenderEncoder, color_formats: []const u16, depth_format: u16, stencil_format: u16) Error!void {
@@ -821,6 +845,7 @@ pub const RenderEncoder = struct {
 
     pub fn drawPrimitives(self: *RenderEncoder, primitive: abi.PrimitiveType, vertex_start: usize, vertex_count: usize, instance_count: usize) Error!void {
         if (!self.open() or !validPrimitive(primitive)) return error.InvalidCommand;
+        if (self.sample_texture and self.fragment_texture == null) return error.InvalidResource;
         if (instance_count == 0 or vertex_count == 0) return;
         const source = try self.sourceVertices();
         if (vertex_start > source.len or vertex_count > source.len - vertex_start) return error.InvalidArgument;
@@ -833,6 +858,7 @@ pub const RenderEncoder = struct {
                 .vertex_count = selected.len,
                 .primitive = primitive,
                 .options = self.options(),
+                .sample_texture = if (self.sample_texture) self.fragment_texture else null,
             } });
         }
     }
@@ -852,6 +878,7 @@ pub const RenderEncoder = struct {
 
     pub fn drawIndexedPrimitivesWithBaseVertex(self: *RenderEncoder, primitive: abi.PrimitiveType, index_count: usize, index_type: abi.IndexType, index_buffer: *Buffer, index_buffer_offset: usize, instance_count: usize, base_vertex: i64) Error!void {
         if (!self.open() or !validPrimitive(primitive) or !validIndexType(index_type)) return error.InvalidCommand;
+        if (self.sample_texture and self.fragment_texture == null) return error.InvalidResource;
         if (!validBuffer(index_buffer) or index_buffer.device != self.command_buffer.queue.device) return error.InvalidArgument;
         if (instance_count == 0 or index_count == 0) return;
         const source = try self.sourceVertices();
@@ -880,6 +907,7 @@ pub const RenderEncoder = struct {
                 .vertex_count = index_count,
                 .primitive = primitive,
                 .options = self.options(),
+                .sample_texture = if (self.sample_texture) self.fragment_texture else null,
             } });
         }
     }
@@ -2685,6 +2713,16 @@ pub export fn zpu_metal_render_encoder_set_pipeline_color_formats(encoder: ?*Ren
 
 pub export fn zpu_metal_render_encoder_set_multi_target_output(encoder: ?*RenderEncoder, enabled: bool) callconv(.c) c_int {
     (encoder orelse return -1).setMultiTargetOutput(enabled) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_sample_texture(encoder: ?*RenderEncoder, enabled: bool) callconv(.c) c_int {
+    (encoder orelse return -1).setSampleTexture(enabled) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_fragment_texture(encoder: ?*RenderEncoder, texture: ?*Texture, index: u32) callconv(.c) c_int {
+    (encoder orelse return -1).setFragmentTexture(texture, index) catch |err| return errorCode(err);
     return 0;
 }
 

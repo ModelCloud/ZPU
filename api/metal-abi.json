@@ -79,6 +79,8 @@
       "zpu_metal_render_encoder_set_color_attachment",
       "zpu_metal_render_encoder_set_pipeline_color_formats",
       "zpu_metal_render_encoder_set_multi_target_output",
+      "zpu_metal_render_encoder_set_sample_texture",
+      "zpu_metal_render_encoder_set_fragment_texture",
       "zpu_metal_render_encoder_set_depth_compare_function",
       "zpu_metal_render_encoder_set_blend_state",
       "zpu_metal_render_encoder_set_blend_color",
