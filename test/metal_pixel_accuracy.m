@@ -7750,7 +7750,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables, visibility results, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables, visibility results, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }
