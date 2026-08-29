@@ -1575,7 +1575,11 @@ static BOOL zpu_vertex_layout_supported(MTLVertexDescriptor *descriptor, NSUInte
 }
 
 static BOOL zpu_depth_format_supported(MTLPixelFormat format) {
-    return format == MTLPixelFormatInvalid || format == MTLPixelFormatDepth32Float;
+    return format == MTLPixelFormatInvalid || format == MTLPixelFormatDepth16Unorm || format == MTLPixelFormatDepth32Float;
+}
+
+static BOOL zpu_depth_texture_format_supported(MTLPixelFormat format) {
+    return format == MTLPixelFormatDepth16Unorm || format == MTLPixelFormatDepth32Float;
 }
 
 static BOOL zpu_stencil_format_supported(MTLPixelFormat format) {
@@ -1592,7 +1596,7 @@ static BOOL zpu_render_texture_type_supported(MTLTextureType type);
 static ZPUTexture *zpu_hidden_color_target(ZPUDevice *owner, ZPUTexture *attachment,
                                            NSUInteger level, NSUInteger slice) {
     if (owner == nil || attachment == nil ||
-        (attachment->_pixelFormat != MTLPixelFormatDepth32Float && attachment->_pixelFormat != MTLPixelFormatStencil8) ||
+        (!zpu_depth_texture_format_supported(attachment->_pixelFormat) && attachment->_pixelFormat != MTLPixelFormatStencil8) ||
         !zpu_render_texture_type_supported(attachment->_textureType)) return nil;
     zpu_metal_texture *attachmentTexture = [attachment zpuTextureAtLevel:level slice:slice];
     if (attachmentTexture == NULL) return nil;
@@ -1929,7 +1933,7 @@ static BOOL zpu_metal4_render_pass_descriptor(ZPUDevice *owner,
     };
     ZPUTexture *depth = (ZPUTexture *)descriptor.depthAttachment.texture;
     if (depth != nil) {
-        if (![depth isKindOfClass:[ZPUTexture class]] || depth->_pixelFormat != MTLPixelFormatDepth32Float ||
+        if (![depth isKindOfClass:[ZPUTexture class]] || !zpu_depth_texture_format_supported(depth->_pixelFormat) ||
             !zpu_store_action_supported(descriptor.depthAttachment.storeAction)) return NO;
         zpu_metal_texture *depthTexture = [depth zpuTextureAtLevel:descriptor.depthAttachment.level
                                                               slice:descriptor.depthAttachment.slice];
@@ -6635,7 +6639,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         !zpu_stencil_format_supported(descriptor.stencilAttachmentPixelFormat) ||
         (descriptor != nil && !zpu_vertex_layout_supported(descriptor.vertexDescriptor,
                                                              &vertexStride, &vertexStrideDynamic))) {
-        zpu_set_error(error, @"ZPU Metal supports only the fixed Vertex ABI with supported CPU color, depth32-float, and stencil8 attachments");
+        zpu_set_error(error, @"ZPU Metal supports only the fixed Vertex ABI with supported CPU color, depth16/depth32-float, and stencil8 attachments");
         return nil;
     }
     ZPUCPUFunction *vertexFunction = (ZPUCPUFunction *)descriptor.vertexFunction;
@@ -8499,7 +8503,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     if (descriptor.depthAttachment.texture != nil) {
         ZPUTexture *depth = (ZPUTexture *)descriptor.depthAttachment.texture;
         if (![depth isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(depth->_textureType) ||
-            depth->_pixelFormat != MTLPixelFormatDepth32Float ||
+            !zpu_depth_texture_format_supported(depth->_pixelFormat) ||
             !zpu_store_action_supported(descriptor.depthAttachment.storeAction)) return nil;
         depthTexture = [depth zpuTextureAtLevel:descriptor.depthAttachment.level
                                            slice:descriptor.depthAttachment.slice];
@@ -8587,7 +8591,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     if (descriptor.depthAttachment.texture != nil) {
         ZPUTexture *depth = (ZPUTexture *)descriptor.depthAttachment.texture;
         if (![depth isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(depth->_textureType) ||
-            depth->_pixelFormat != MTLPixelFormatDepth32Float ||
+            !zpu_depth_texture_format_supported(depth->_pixelFormat) ||
             !zpu_store_action_supported(descriptor.depthAttachment.storeAction)) return nil;
         depthTexture = [depth zpuTextureAtLevel:descriptor.depthAttachment.level
                                            slice:descriptor.depthAttachment.slice];

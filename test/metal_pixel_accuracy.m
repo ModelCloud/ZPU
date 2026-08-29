@@ -12981,6 +12981,112 @@ int main(void) {
             }
         }
 
+        /* Depth16Unorm uses the same CPU depth-test path, with an explicit
+         * decode/store boundary around the ZPU-owned normalized texels. */
+        enum { depth16_byte_count = width * height * 2 };
+        MTLRenderPipelineDescriptor *depth16_pipeline_descriptor = [depth_pipeline_descriptor copy];
+        depth16_pipeline_descriptor.depthAttachmentPixelFormat = MTLPixelFormatDepth16Unorm;
+        id<MTLRenderPipelineState> metal_depth16_pipeline =
+            [device newRenderPipelineStateWithDescriptor:depth16_pipeline_descriptor error:&error];
+        MTLTextureDescriptor *metal_depth16_texture_descriptor = [metal_depth_texture_descriptor copy];
+        metal_depth16_texture_descriptor.pixelFormat = MTLPixelFormatDepth16Unorm;
+        metal_depth16_texture_descriptor.storageMode = MTLStorageModeShared;
+        id<MTLTexture> metal_depth16_texture =
+            [device newTextureWithDescriptor:metal_depth16_texture_descriptor];
+        id<MTLTexture> metal_depth16_color = [device newTextureWithDescriptor:texture_descriptor];
+        if (metal_depth16_pipeline == nil || metal_depth16_texture == nil || metal_depth16_color == nil) {
+            fail_with_error("Depth16Unorm reference allocation failed", error);
+            return 140;
+        }
+        MTLRenderPassDescriptor *metal_depth16_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        metal_depth16_pass.colorAttachments[0].texture = metal_depth16_color;
+        metal_depth16_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        metal_depth16_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        metal_depth16_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        metal_depth16_pass.depthAttachment.texture = metal_depth16_texture;
+        metal_depth16_pass.depthAttachment.loadAction = MTLLoadActionClear;
+        metal_depth16_pass.depthAttachment.storeAction = MTLStoreActionStore;
+        metal_depth16_pass.depthAttachment.clearDepth = 1.0;
+        id<MTLCommandBuffer> metal_depth16_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> metal_depth16_encoder =
+            [metal_depth16_command_buffer renderCommandEncoderWithDescriptor:metal_depth16_pass];
+        [metal_depth16_encoder setRenderPipelineState:metal_depth16_pipeline];
+        [metal_depth16_encoder setDepthStencilState:depth_state];
+        [metal_depth16_encoder setVertexBuffer:metal_depth_vertex_buffer offset:0 atIndex:0];
+        [metal_depth16_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
+        [metal_depth16_encoder endEncoding];
+        [metal_depth16_command_buffer commit];
+        [metal_depth16_command_buffer waitUntilCompleted];
+        if (metal_depth16_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: Depth16Unorm reference command did not complete\n");
+            return 141;
+        }
+        uint8_t metal_depth16_pixels[byte_count];
+        uint8_t metal_depth16_values[depth16_byte_count];
+        [metal_depth16_color getBytes:metal_depth16_pixels bytesPerRow:(NSUInteger)width * 4
+                           fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [metal_depth16_texture getBytes:metal_depth16_values bytesPerRow:(NSUInteger)width * 2
+                            fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+
+        MTLTextureDescriptor *adapter_depth16_texture_descriptor = [metal_depth16_texture_descriptor copy];
+        id<MTLTexture> adapter_depth16_texture =
+            [adapter_device newTextureWithDescriptor:adapter_depth16_texture_descriptor];
+        id<MTLTexture> adapter_depth16_color = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        id<MTLCommandBuffer> adapter_depth16_command_buffer = [adapter_queue commandBuffer];
+        MTLRenderPassDescriptor *adapter_depth16_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_depth16_pass.colorAttachments[0].texture = adapter_depth16_color;
+        adapter_depth16_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_depth16_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_depth16_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        adapter_depth16_pass.depthAttachment.texture = adapter_depth16_texture;
+        adapter_depth16_pass.depthAttachment.loadAction = MTLLoadActionClear;
+        adapter_depth16_pass.depthAttachment.storeAction = MTLStoreActionStore;
+        adapter_depth16_pass.depthAttachment.clearDepth = 1.0;
+        id<MTLRenderCommandEncoder> adapter_depth16_encoder =
+            [adapter_depth16_command_buffer renderCommandEncoderWithDescriptor:adapter_depth16_pass];
+        NSError *adapter_depth16_pipeline_error = nil;
+        MTLRenderPipelineDescriptor *adapter_depth16_pipeline_descriptor = [depth16_pipeline_descriptor copy];
+        adapter_depth16_pipeline_descriptor.vertexFunction = adapter_vertex_function;
+        adapter_depth16_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
+        id<MTLRenderPipelineState> adapter_depth16_pipeline =
+            [adapter_device newRenderPipelineStateWithDescriptor:adapter_depth16_pipeline_descriptor
+                                                            error:&adapter_depth16_pipeline_error];
+        if (adapter_depth16_texture == nil || adapter_depth16_color == nil ||
+            adapter_depth16_command_buffer == nil || adapter_depth16_encoder == nil ||
+            adapter_depth16_pipeline == nil || adapter_depth16_texture.allocatedSize != depth16_byte_count) {
+            fail_with_error("Depth16Unorm adapter allocation failed", adapter_depth16_pipeline_error);
+            return 142;
+        }
+        [adapter_depth16_encoder setRenderPipelineState:adapter_depth16_pipeline];
+        [adapter_depth16_encoder setDepthStencilState:adapter_depth_state];
+        [adapter_depth16_encoder setVertexBuffer:adapter_depth_vertex_buffer offset:0 atIndex:0];
+        [adapter_depth16_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
+        [adapter_depth16_encoder endEncoding];
+        [adapter_depth16_command_buffer commit];
+        [adapter_depth16_command_buffer waitUntilCompleted];
+        if (adapter_depth16_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: Depth16Unorm adapter command did not complete\n");
+            return 143;
+        }
+        uint8_t adapter_depth16_pixels[byte_count];
+        uint8_t adapter_depth16_values[depth16_byte_count];
+        [adapter_depth16_color getBytes:adapter_depth16_pixels bytesPerRow:(NSUInteger)width * 4
+                              fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_depth16_texture getBytes:adapter_depth16_values bytesPerRow:(NSUInteger)width * 2
+                               fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (memcmp(metal_depth16_pixels, adapter_depth16_pixels, byte_count) != 0 ||
+            memcmp(metal_depth16_values, adapter_depth16_values, depth16_byte_count) != 0) {
+            for (size_t index = 0; index < depth16_byte_count; index++) {
+                if (metal_depth16_values[index] != adapter_depth16_values[index]) {
+                    fprintf(stderr, "metal-pixel: Depth16Unorm mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                            index, metal_depth16_values[index], adapter_depth16_values[index]);
+                    return 144;
+                }
+            }
+            fprintf(stderr, "metal-pixel: Depth16Unorm color mismatch\n");
+            return 145;
+        }
+
         /* Depth bounds are a fixed-function test on the interpolated depth
          * value. The current M4 Metal runtime traps when the SDK 26 native
          * selector is called, so the native oracle uses an equivalent

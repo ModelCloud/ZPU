@@ -376,6 +376,7 @@ const BeginRenderCommand = struct {
     pass: abi.RenderPassDescriptor,
     color_attachments: [8]?ColorAttachmentCommand = [_]?ColorAttachmentCommand{null} ** 8,
     depth: ?[]f32 = null,
+    depth_texture: ?*Texture = null,
     stencil: ?[]u8 = null,
     stencil_load_action: abi.LoadAction = .dont_care,
     stencil_store_action: abi.StoreAction = .dont_care,
@@ -599,13 +600,25 @@ pub const CommandBuffer = struct {
         var active_target: ?*Texture = null;
         var active_color_attachments: [8]?*Texture = [_]?*Texture{null} ** 8;
         var active_depth: ?[]f32 = null;
+        var active_depth_texture: ?*Texture = null;
+        var active_depth_values: ?[]f32 = null;
+        var active_depth_store_action: abi.StoreAction = .dont_care;
         var active_stencil: ?[]u8 = null;
         var reset_visibility_slots: std.ArrayList(VisibilitySlot) = .empty;
         defer reset_visibility_slots.deinit(allocator);
+        defer if (active_depth_values) |values| {
+            if (active_depth_store_action == .store) storeDepth16Texture(active_depth_texture.?, values);
+            allocator.free(values);
+        };
 
         for (self.commands.items) |command| switch (command) {
             .begin_render => |begin_render| {
                 if (!validTexture(begin_render.target)) return self.fail(error.InvalidResource);
+                if (active_depth_values) |values| {
+                    if (active_depth_store_action == .store) storeDepth16Texture(active_depth_texture.?, values);
+                    allocator.free(values);
+                    active_depth_values = null;
+                }
                 reset_visibility_slots.clearRetainingCapacity();
                 active_target = begin_render.target;
                 for (begin_render.color_attachments, 0..) |attachment, index| {
@@ -620,7 +633,21 @@ pub const CommandBuffer = struct {
                         }
                     }
                 }
+                active_depth_texture = begin_render.depth_texture;
+                active_depth_store_action = begin_render.pass.depth.store_action;
                 active_depth = begin_render.depth;
+                if (begin_render.depth_texture) |depth_texture| {
+                    if (!validTexture(depth_texture) or depth_texture.device != self.queue.device or
+                        depth_texture.format != .depth16_unorm or depth_texture.width != begin_render.target.width or
+                        depth_texture.height != begin_render.target.height) return self.fail(error.InvalidResource);
+                    const pixel_count = std.math.mul(usize, depth_texture.width, depth_texture.height) catch return self.fail(error.InvalidArgument);
+                    const values = allocator.alloc(f32, pixel_count) catch return self.fail(error.OutOfMemory);
+                    active_depth_values = values;
+                    for (values, 0..) |*value, index| {
+                        value.* = @as(f32, @floatFromInt(readU16Little(depth_texture.bytes, index * 2))) / 65535.0;
+                    }
+                    active_depth = values;
+                }
                 active_stencil = begin_render.stencil;
                 const target = begin_render.target.asTarget();
                 if (begin_render.pass.depth.load_action != .dont_care) {
@@ -1185,6 +1212,7 @@ pub const RenderEncoder = struct {
         if (!self.open()) return error.InvalidCommand;
         const expected_depth = switch (depth_format) {
             0 => null,
+            @intFromEnum(abi.PixelFormat.depth16_unorm) => abi.PixelFormat.depth16_unorm,
             @intFromEnum(abi.PixelFormat.depth32_float) => abi.PixelFormat.depth32_float,
             else => return error.UnsupportedFormat,
         };
@@ -1241,7 +1269,10 @@ pub const RenderEncoder = struct {
                     if ((expected == null) != (actual == null)) return error.InvalidArgument;
                     if (expected) |format| if (actual == null or format != actual.?) return error.InvalidArgument;
                 }
-                if (expected_depth != null and begin_render.depth == null) return error.InvalidArgument;
+                if (expected_depth != null and begin_render.depth == null and begin_render.depth_texture == null) return error.InvalidArgument;
+                if (begin_render.depth_texture) |depth_texture| {
+                    if (expected_depth == null or texturePixelFormat(depth_texture) != expected_depth.?) return error.InvalidArgument;
+                }
                 if (expected_stencil != null and begin_render.stencil == null) return error.InvalidArgument;
             },
             else => return error.InvalidCommand,
@@ -1291,18 +1322,29 @@ pub const RenderEncoder = struct {
         if (depth_count != 0 and depth == null) return error.InvalidArgument;
         const values: ?[]f32 = if (depth) |ptr| ptr[0..depth_count] else null;
         switch (self.command_buffer.commands.items[self.begin_index]) {
-            .begin_render => self.command_buffer.commands.items[self.begin_index].begin_render.depth = values,
+            .begin_render => |*begin_render| {
+                begin_render.depth = values;
+                begin_render.depth_texture = null;
+            },
             else => return error.InvalidCommand,
         }
     }
 
     pub fn setDepthTexture(self: *RenderEncoder, texture: *Texture) Error!void {
-        if (!self.open() or !validTexture(texture) or texture.device != self.command_buffer.queue.device or texture.format != .depth32_float) return error.InvalidArgument;
+        if (!self.open() or !validTexture(texture) or texture.device != self.command_buffer.queue.device or
+            (texture.format != .depth16_unorm and texture.format != .depth32_float)) return error.InvalidArgument;
         if (texture.width != self.colorWidth() or texture.height != self.colorHeight()) return error.InvalidArgument;
-        if (@intFromPtr(texture.bytes.ptr) % @alignOf(f32) != 0) return error.InvalidResource;
-        const depth: []f32 = @as([*]f32, @ptrCast(@alignCast(texture.bytes.ptr)))[0 .. @as(usize, texture.width) * texture.height];
         switch (self.command_buffer.commands.items[self.begin_index]) {
-            .begin_render => |*begin_render| begin_render.depth = depth,
+            .begin_render => |*begin_render| {
+                begin_render.depth_texture = null;
+                if (texture.format == .depth32_float) {
+                    if (@intFromPtr(texture.bytes.ptr) % @alignOf(f32) != 0) return error.InvalidResource;
+                    begin_render.depth = @as([*]f32, @ptrCast(@alignCast(texture.bytes.ptr)))[0 .. @as(usize, texture.width) * texture.height];
+                } else {
+                    begin_render.depth = null;
+                    begin_render.depth_texture = texture;
+                }
+            },
             else => return error.InvalidCommand,
         }
     }
@@ -3984,6 +4026,22 @@ fn validateRegion(width: u32, height: u32, region: abi.Region, stride: usize, st
     if (storage_length < needed) return error.InvalidArgument;
 }
 
+fn readU16Little(bytes: []const u8, offset: usize) u16 {
+    return @as(u16, bytes[offset]) | (@as(u16, bytes[offset + 1]) << 8);
+}
+
+fn writeU16Little(bytes: []u8, offset: usize, value: u16) void {
+    bytes[offset] = @truncate(value);
+    bytes[offset + 1] = @truncate(value >> 8);
+}
+
+fn storeDepth16Texture(texture: *Texture, values: []const f32) void {
+    for (values, 0..) |value, index| {
+        const quantized: u16 = @intFromFloat(std.math.clamp(value, 0, 1) * 65535.0 + 0.5);
+        writeU16Little(texture.bytes, index * 2, quantized);
+    }
+}
+
 fn readU32Little(bytes: []const u8, offset: usize) u32 {
     return @as(u32, bytes[offset]) |
         (@as(u32, bytes[offset + 1]) << 8) |
@@ -5202,6 +5260,42 @@ test "depth texture attachment rejects farther fragments" {
     destroyRenderEncoder(encoder);
     try command_buffer.commit();
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 255, 0, 255 }, color.bytes[0..4]);
+}
+
+test "depth16 texture attachment stores normalized CPU depth" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const color = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(color);
+    const depth = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.depth16_unorm));
+    defer destroyTexture(depth);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.25, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.25, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.25, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, -1, 0.25, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.25, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, 1, 0.25, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+    };
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, color, .{
+        .color = .{ .load_action = .clear, .store_action = .store },
+        .depth = .{ .load_action = .clear, .store_action = .store, .clear_depth = 1 },
+    });
+    try encoder.setDepthTexture(depth);
+    try encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
+    try encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try command_buffer.commit();
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, color.bytes[0..4]);
+    for (0..4 * 4) |index| {
+        try std.testing.expectEqual(@as(u8, 0), depth.bytes[index * 2]);
+        try std.testing.expectEqual(@as(u8, 0x40), depth.bytes[index * 2 + 1]);
+    }
 }
 
 test "depth bounds discard fragments outside the CPU depth range" {
