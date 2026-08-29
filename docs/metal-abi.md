@@ -41,6 +41,9 @@ triangle path:
   and swizzle metadata; indirect command buffers preserve their resource
   options, and texture views inherit those properties from their ZPU-owned
   backing resource
+- `newBufferWithBytesNoCopy` aliases caller-owned CPU memory through the ZPU
+  buffer while deferring the supplied deallocator until the adapter resource
+  is released
 - heap-backed buffers and textures with bounded allocation accounting; heap
   storage/cache mismatches are rejected, heap offsets are retained for
   resources, explicit aligned append placement is supported for heap buffers,

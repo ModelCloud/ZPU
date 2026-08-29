@@ -2146,7 +2146,7 @@ static uint64_t zpu_cpu_timestamp(void) {
 }
 - (id<MTLBuffer>)newBufferWithBytesNoCopy:(void *)pointer length:(NSUInteger)length options:(MTLResourceOptions)options deallocator:(void (^)(void *pointer, NSUInteger length))deallocator {
     if (pointer == NULL && length != 0) return nil;
-    zpu_metal_buffer *buffer = zpu_metal_device_new_buffer(_zpuDevice, length, pointer);
+    zpu_metal_buffer *buffer = zpu_metal_device_new_buffer_no_copy(_zpuDevice, length, pointer);
     if (buffer == NULL) return nil;
     ZPUBuffer *result = [[ZPUBuffer alloc] initWithOwner:self buffer:buffer
                                              deallocator:deallocator pointer:pointer length:length];

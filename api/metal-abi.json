@@ -25,6 +25,7 @@
       "zpu_metal_device_new_command_queue",
       "zpu_metal_command_queue_destroy",
       "zpu_metal_device_new_buffer",
+      "zpu_metal_device_new_buffer_no_copy",
       "zpu_metal_buffer_destroy",
       "zpu_metal_buffer_length",
       "zpu_metal_buffer_contents",

@@ -101,12 +101,13 @@ pub const Buffer = struct {
     magic: u64 = buffer_magic,
     device: *Device,
     bytes: []u8,
+    owns_bytes: bool = true,
     heap: ?*Heap = null,
     heap_allocation_offset: usize = 0,
     heap_allocation_size: usize = 0,
 
     pub fn deinit(self: *Buffer) void {
-        allocator.free(self.bytes);
+        if (self.owns_bytes) allocator.free(self.bytes);
         releaseHeapAllocation(self.heap, self.heap_allocation_size);
         self.magic = 0;
     }
@@ -1395,6 +1396,14 @@ pub fn createBuffer(device: *Device, length: usize, initial_bytes: ?[*]const u8)
     return result;
 }
 
+pub fn createBufferNoCopy(device: *Device, length: usize, bytes: ?[*]u8) Error!*Buffer {
+    if (!validDevice(device) or (length != 0 and bytes == null)) return error.InvalidArgument;
+    if (length == 0) return createBuffer(device, 0, null);
+    const result = allocator.create(Buffer) catch return error.OutOfMemory;
+    result.* = .{ .device = device, .bytes = bytes.?[0..length], .owns_bytes = false };
+    return result;
+}
+
 pub fn destroyBuffer(buffer: *Buffer) void {
     if (!validBuffer(buffer)) return;
     buffer.deinit();
@@ -2113,6 +2122,17 @@ test "CPU compute encoder resolves Metal 4 indirect thread arguments at commit" 
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 0 }, texture.bytes[3 * texture.stride ..][0..4]);
 }
 
+test "no-copy buffers alias caller storage" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    var bytes = [_]u8{ 1, 2, 3, 4 };
+    const buffer = try createBufferNoCopy(device, bytes.len, @ptrCast(&bytes));
+    defer destroyBuffer(buffer);
+    try std.testing.expectEqual(@intFromPtr(&bytes), @intFromPtr(buffer.bytes.ptr));
+    buffer.bytes[0] = 9;
+    try std.testing.expectEqual(@as(u8, 9), bytes[0]);
+}
+
 test "buffer-backed textures alias rows without copying" {
     const device = try createDevice();
     defer destroyDevice(device);
@@ -2374,6 +2394,10 @@ pub export fn zpu_metal_command_queue_destroy(queue: ?*CommandQueue) callconv(.c
 
 pub export fn zpu_metal_device_new_buffer(device: ?*Device, length: usize, initial_bytes: ?[*]const u8) callconv(.c) ?*Buffer {
     return createBuffer(device orelse return null, length, initial_bytes) catch null;
+}
+
+pub export fn zpu_metal_device_new_buffer_no_copy(device: ?*Device, length: usize, bytes: ?[*]u8) callconv(.c) ?*Buffer {
+    return createBufferNoCopy(device orelse return null, length, bytes) catch null;
 }
 
 pub export fn zpu_metal_buffer_destroy(buffer: ?*Buffer) callconv(.c) void {

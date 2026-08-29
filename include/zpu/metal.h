@@ -278,6 +278,7 @@ void zpu_metal_device_destroy(zpu_metal_device *device);
 zpu_metal_command_queue *zpu_metal_device_new_command_queue(zpu_metal_device *device);
 void zpu_metal_command_queue_destroy(zpu_metal_command_queue *queue);
 zpu_metal_buffer *zpu_metal_device_new_buffer(zpu_metal_device *device, size_t length, const void *initial_bytes);
+zpu_metal_buffer *zpu_metal_device_new_buffer_no_copy(zpu_metal_device *device, size_t length, void *bytes);
 void zpu_metal_buffer_destroy(zpu_metal_buffer *buffer);
 zpu_metal_texture *zpu_metal_buffer_new_texture(zpu_metal_buffer *buffer, const zpu_metal_texture_descriptor *descriptor, size_t offset, size_t bytes_per_row);
 size_t zpu_metal_buffer_length(const zpu_metal_buffer *buffer);

@@ -3122,20 +3122,33 @@ int main(void) {
             return 42;
         }
         memset(no_copy_memory, 0x4d, 16);
-        id<MTLBuffer> no_copy_buffer =
-            [adapter_device newBufferWithBytesNoCopy:no_copy_memory length:16
-                                             options:MTLResourceStorageModeShared
-                                         deallocator:^(void *pointer, NSUInteger length) {
-                                             (void)length;
-                                             no_copy_freed = YES;
-                                             free(pointer);
-                                         }];
-        if (no_copy_buffer == nil) {
-            free(no_copy_memory);
-            fprintf(stderr, "metal-pixel: no-copy adapter allocation failed\n");
-            return 43;
+        @autoreleasepool {
+            id<MTLBuffer> no_copy_buffer =
+                [adapter_device newBufferWithBytesNoCopy:no_copy_memory length:16
+                                                 options:MTLResourceStorageModeShared
+                                             deallocator:^(void *pointer, NSUInteger length) {
+                                                 (void)length;
+                                                 no_copy_freed = YES;
+                                                 free(pointer);
+                                             }];
+            if (no_copy_buffer == nil) {
+                free(no_copy_memory);
+                fprintf(stderr, "metal-pixel: no-copy adapter allocation failed\n");
+                return 43;
+            }
+            if (no_copy_buffer.contents != no_copy_memory) {
+                no_copy_buffer = nil;
+                fprintf(stderr, "metal-pixel: no-copy adapter did not alias caller storage\n");
+                return 43;
+            }
+            ((uint8_t *)no_copy_buffer.contents)[0] = 0x91;
+            if (no_copy_memory[0] != 0x91) {
+                no_copy_buffer = nil;
+                fprintf(stderr, "metal-pixel: no-copy adapter alias write failed\n");
+                return 43;
+            }
+            no_copy_buffer = nil;
         }
-        no_copy_buffer = nil;
         if (!no_copy_freed) {
             fprintf(stderr, "metal-pixel: no-copy adapter deallocator was not deferred\n");
             return 43;
