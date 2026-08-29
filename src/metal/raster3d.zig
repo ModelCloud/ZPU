@@ -88,6 +88,7 @@ pub const StencilFace = struct {
 };
 
 pub const TargetFormat = enum {
+    a8_unorm,
     r8_unorm,
     r8_unorm_srgb,
     r8_snorm,
@@ -122,6 +123,7 @@ pub const Target = struct {
 
     fn bytesPerPixel(format: TargetFormat) usize {
         return switch (format) {
+            .a8_unorm => 1,
             .r8_unorm, .r8_unorm_srgb, .r8_snorm => 1,
             .r16_unorm, .r16_snorm => 2,
             .r16_float => 2,
@@ -229,6 +231,7 @@ pub const Target = struct {
         const row_bytes = self.row(@intCast(y));
         const offset = x * bytesPerPixel(self.format);
         return switch (self.format) {
+            .a8_unorm => .{ 0, 0, 0, @as(f32, @floatFromInt(row_bytes[offset])) / 255.0 },
             .r8_unorm => .{ @as(f32, @floatFromInt(row_bytes[offset])) / 255.0, 0, 0, 1 },
             .r8_unorm_srgb => .{ srgbToLinear(row_bytes[offset]), 0, 0, 1 },
             .r8_snorm => .{ readS8(row_bytes, offset), 0, 0, 1 },
@@ -247,7 +250,7 @@ pub const Target = struct {
             .rg16_snorm => .{ readS16(row_bytes, offset), readS16(row_bytes, offset + 2), 0, 1 },
             .rg16_float => .{ readF16(row_bytes, offset), readF16(row_bytes, offset + 2), 0, 1 },
             .rgba8_snorm => .{
-                readS8(row_bytes, offset), readS8(row_bytes, offset + 1),
+                readS8(row_bytes, offset),     readS8(row_bytes, offset + 1),
                 readS8(row_bytes, offset + 2), readS8(row_bytes, offset + 3),
             },
             .rgba8_unorm, .rgba8_unorm_srgb, .bgra8_unorm, .bgra8_unorm_srgb => blk: {
@@ -282,6 +285,9 @@ pub const Target = struct {
         const row_bytes = self.row(@intCast(y));
         const offset = x * bytesPerPixel(self.format);
         switch (self.format) {
+            .a8_unorm => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) row_bytes[offset] = colorByte(color[3]);
+            },
             .r8_unorm, .r8_unorm_srgb => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) row_bytes[offset] = if (self.format == .r8_unorm_srgb) srgbByte(color[0]) else colorByte(color[0]);
             },

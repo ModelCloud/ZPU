@@ -35,7 +35,7 @@ triangle path:
   R32Float, RGBA16Unorm/RGBA16Snorm, RGBA16Float, RG32Float, RGBA32Float,
   and packed B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10/RGB9E5/BGR10A2 textures preserve
   native texel widths for raw transfers, views, buffer-backed storage, and heap
-  allocation accounting; render paths accept R8Unorm/R8Unorm_sRGB, R8Snorm,
+  allocation accounting; render paths accept A8Unorm, R8Unorm/R8Unorm_sRGB, R8Snorm,
   R16Unorm/R16Snorm, RG8Unorm/RG8Unorm_sRGB/RG8Snorm,
   RG16Unorm/RG16Snorm, R16Float, RG16Float, RGBA8Unorm/RGBA8Unorm_sRGB,
   RGBA8Snorm, BGRA8Unorm/BGRA8Unorm_sRGB, RGBA16Unorm/RGBA16Snorm,

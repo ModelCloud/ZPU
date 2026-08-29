@@ -107,7 +107,7 @@ pub const TextureFormat = enum {
     }
 
     fn isColor(self: TextureFormat) bool {
-        return self == .r8_unorm or self == .r8_unorm_srgb or self == .r8_snorm or self == .r16_unorm or self == .r16_snorm or self == .r16_float or
+        return self == .a8_unorm or self == .r8_unorm or self == .r8_unorm_srgb or self == .r8_snorm or self == .r16_unorm or self == .r16_snorm or self == .r16_float or
             self == .rg8_unorm or self == .rg8_unorm_srgb or self == .rg8_snorm or self == .rg16_unorm or self == .rg16_snorm or self == .rg16_float or
             self == .rgba8_unorm or self == .rgba8_unorm_srgb or self == .rgba8_snorm or self == .bgra8_unorm or self == .bgra8_unorm_srgb or
             self == .r32_float or self == .rgba16_unorm or self == .rgba16_snorm or self == .rgba16_float or self == .rg32_float or self == .rgba32_float;
@@ -267,7 +267,7 @@ pub const Texture = struct {
             .height = self.height,
             .stride = self.stride,
             .format = switch (self.format) {
-                .a8_unorm => unreachable,
+                .a8_unorm => .a8_unorm,
                 .r8_unorm => .r8_unorm,
                 .r8_unorm_srgb => .r8_unorm_srgb,
                 .r8_snorm => .r8_snorm,
@@ -1174,6 +1174,7 @@ pub const RenderEncoder = struct {
                     const expected_color = if (index < color_formats.len) color_formats[index] else 0;
                     const expected = switch (expected_color) {
                         0 => null,
+                        @intFromEnum(abi.PixelFormat.a8_unorm) => abi.PixelFormat.a8_unorm,
                         @intFromEnum(abi.PixelFormat.r8_unorm) => abi.PixelFormat.r8_unorm,
                         @intFromEnum(abi.PixelFormat.r8_unorm_srgb) => abi.PixelFormat.r8_unorm_srgb,
                         @intFromEnum(abi.PixelFormat.r8_snorm) => abi.PixelFormat.r8_snorm,
@@ -1990,6 +1991,7 @@ fn unorm8Fraction(numerator: u32, denominator: u32) u8 {
 
 fn unorm8ChannelCount(format: TextureFormat) usize {
     return switch (format) {
+        .a8_unorm => 1,
         .r8_unorm => 1,
         .rg8_unorm => 2,
         .rgba8_unorm, .bgra8_unorm => 4,
@@ -2992,7 +2994,105 @@ fn generateFloatMipmap(command: MipmapCommand) Error!void {
     }
 }
 
+fn generateA8Mipmap(command: MipmapCommand) Error!void {
+    const destination_width: u32 = if (command.source.width > 1) command.source.width / 2 else 1;
+    const destination_height: u32 = if (command.source.height > 1) command.source.height / 2 else 1;
+    if (command.destination.width != destination_width or command.destination.height != destination_height or
+        command.destination.format != .a8_unorm) return error.InvalidArgument;
+    for (0..destination_height) |y| {
+        const source_y = mipmapAxis(command.source.height, destination_height, y);
+        for (0..destination_width) |x| {
+            const source_x = mipmapAxis(command.source.width, destination_width, x);
+            var sum: f32 = 0;
+            const x_samples = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_x.low, .weight = source_x.low_weight },
+                .{ .index = source_x.high, .weight = source_x.high_weight },
+            };
+            const y_samples = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_y.low, .weight = source_y.low_weight },
+                .{ .index = source_y.high, .weight = source_y.high_weight },
+            };
+            for (y_samples) |y_sample| {
+                if (y_sample.weight == 0) continue;
+                var row_sum: f32 = 0;
+                for (x_samples) |x_sample| {
+                    if (x_sample.weight == 0) continue;
+                    const source_offset = y_sample.index * command.source.stride + x_sample.index;
+                    const weight: f32 = @floatFromInt(x_sample.weight);
+                    row_sum += @as(f32, @floatFromInt(command.source.bytes[source_offset])) / 255.0 * weight;
+                }
+                row_sum /= @as(f32, @floatFromInt(source_x.denominator));
+                sum += row_sum * @as(f32, @floatFromInt(y_sample.weight));
+            }
+            const normalized = sum / @as(f32, @floatFromInt(source_y.denominator));
+            const quantized: f64 = @as(f64, normalized) * 255.0 + 0.5;
+            command.destination.bytes[y * command.destination.stride + x] = @intFromFloat(quantized);
+        }
+    }
+}
+
+fn generateA8Mipmap3D(command: Mipmap3DCommand) Error!void {
+    if (command.source1_weight_denominator == 0 or command.source1_weight_numerator > command.source1_weight_denominator or
+        (command.source1 == null and command.source1_weight_numerator != 0)) return error.InvalidArgument;
+    const source1 = command.source1;
+    if (source1) |value| {
+        if (value == command.destination or value.width != command.source0.width or
+            value.height != command.source0.height or value.format != .a8_unorm) return error.InvalidArgument;
+    }
+    const destination_width: u32 = if (command.source0.width > 1) command.source0.width / 2 else 1;
+    const destination_height: u32 = if (command.source0.height > 1) command.source0.height / 2 else 1;
+    if (command.source0.format != .a8_unorm or command.destination.width != destination_width or
+        command.destination.height != destination_height or command.destination.format != .a8_unorm) return error.InvalidArgument;
+    const source0_z_weight = command.source1_weight_denominator - command.source1_weight_numerator;
+    const source1_z_weight = command.source1_weight_numerator;
+    for (0..destination_height) |y| {
+        const source_y = mipmapAxis(command.source0.height, destination_height, y);
+        for (0..destination_width) |x| {
+            const source_x = mipmapAxis(command.source0.width, destination_width, x);
+            const x_denominator: f32 = @floatFromInt(source_x.denominator);
+            const y_denominator: f32 = @floatFromInt(source_y.denominator);
+            const z_denominator: f32 = @floatFromInt(command.source1_weight_denominator);
+            const x_samples = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_x.low, .weight = source_x.low_weight },
+                .{ .index = source_x.high, .weight = source_x.high_weight },
+            };
+            const y_samples = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_y.low, .weight = source_y.low_weight },
+                .{ .index = source_y.high, .weight = source_y.high_weight },
+            };
+            var sum: f32 = 0;
+            const sources = [_]struct { texture: ?*Texture, weight: u64 }{
+                .{ .texture = command.source0, .weight = source0_z_weight },
+                .{ .texture = source1, .weight = source1_z_weight },
+            };
+            for (sources) |source_sample| {
+                const texture = source_sample.texture orelse continue;
+                if (source_sample.weight == 0) continue;
+                var xy_sum: f32 = 0;
+                for (y_samples) |y_sample| {
+                    if (y_sample.weight == 0) continue;
+                    var row_sum: f32 = 0;
+                    for (x_samples) |x_sample| {
+                        if (x_sample.weight == 0) continue;
+                        const source_offset = y_sample.index * texture.stride + x_sample.index;
+                        row_sum += @as(f32, @floatFromInt(texture.bytes[source_offset])) / 255.0 *
+                            @as(f32, @floatFromInt(x_sample.weight));
+                    }
+                    row_sum /= x_denominator;
+                    xy_sum += row_sum * @as(f32, @floatFromInt(y_sample.weight));
+                }
+                xy_sum /= y_denominator;
+                sum += xy_sum * @as(f32, @floatFromInt(source_sample.weight));
+            }
+            const normalized = sum / z_denominator;
+            const quantized: f64 = @as(f64, normalized) * 255.0 + 0.5;
+            command.destination.bytes[y * command.destination.stride + x] = @intFromFloat(quantized);
+        }
+    }
+}
+
 fn generateUnorm8Mipmap(command: MipmapCommand) Error!void {
+    if (command.source.format == .a8_unorm) return generateA8Mipmap(command);
     const channels = unorm8ChannelCount(command.source.format);
     const destination_width: u32 = if (command.source.width > 1) command.source.width / 2 else 1;
     const destination_height: u32 = if (command.source.height > 1) command.source.height / 2 else 1;
@@ -3022,7 +3122,13 @@ fn generateUnorm8Mipmap(command: MipmapCommand) Error!void {
                 }
             }
             const destination_offset = y * command.destination.stride + x * channels;
-            for (0..channels) |component| command.destination.bytes[destination_offset + component] = @intCast((sums[component] + weight_denominator / 2) / weight_denominator);
+            for (0..channels) |component| {
+                const value = if (command.source.format == .a8_unorm)
+                    sums[component] / weight_denominator
+                else
+                    (sums[component] + weight_denominator / 2) / weight_denominator;
+                command.destination.bytes[destination_offset + component] = @intCast(value);
+            }
         }
     }
 }
@@ -3215,6 +3321,7 @@ fn generateFloatMipmap3D(command: Mipmap3DCommand) Error!void {
 }
 
 fn generateUnorm8Mipmap3D(command: Mipmap3DCommand) Error!void {
+    if (command.source0.format == .a8_unorm) return generateA8Mipmap3D(command);
     const channels = unorm8ChannelCount(command.source0.format);
     if (command.source1_weight_denominator == 0 or command.source1_weight_numerator > command.source1_weight_denominator or
         (command.source1 == null and command.source1_weight_numerator != 0)) return error.InvalidArgument;

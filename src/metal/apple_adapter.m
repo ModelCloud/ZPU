@@ -1355,7 +1355,7 @@ static zpu_metal_region zpu_region(MTLRegion region) {
 }
 
 static BOOL zpu_color_texture_format_supported(MTLPixelFormat format) {
-    return format == MTLPixelFormatR8Unorm || format == MTLPixelFormatR16Unorm ||
+    return format == MTLPixelFormatA8Unorm || format == MTLPixelFormatR8Unorm || format == MTLPixelFormatR16Unorm ||
         format == MTLPixelFormatR16Float || format == MTLPixelFormatR8Unorm_sRGB ||
         format == MTLPixelFormatRG8Unorm || format == MTLPixelFormatRG8Unorm_sRGB ||
         format == MTLPixelFormatRG16Unorm || format == MTLPixelFormatRG16Float ||
@@ -1370,8 +1370,7 @@ static BOOL zpu_color_texture_format_supported(MTLPixelFormat format) {
 }
 
 static BOOL zpu_integer_texture_format_supported(MTLPixelFormat format) {
-    return format == MTLPixelFormatA8Unorm ||
-        format == MTLPixelFormatB5G6R5Unorm ||
+    return format == MTLPixelFormatB5G6R5Unorm ||
         format == MTLPixelFormatA1BGR5Unorm ||
         format == MTLPixelFormatABGR4Unorm ||
         format == MTLPixelFormatBGR5A1Unorm ||
