@@ -9179,12 +9179,12 @@ int main(void) {
             id<MTLRenderPipelineState> adapter_indexed_patch_icb_pipeline =
                 [adapter_device newRenderPipelineStateWithDescriptor:adapter_indexed_patch_icb_pipeline_descriptor
                                                                   error:&adapter_patch_error];
-            const uint16_t adapter_indexed_patch_icb_indices[] = {0, 1, 2};
+            const uint16_t adapter_indexed_patch_icb_indices[] = {0xffff, 0, 1, 2};
             id<MTLBuffer> adapter_indexed_patch_icb_control_point_index_buffer =
                 [adapter_device newBufferWithBytes:adapter_indexed_patch_icb_indices
                                              length:sizeof(adapter_indexed_patch_icb_indices)
                                             options:MTLResourceStorageModeShared];
-            const uint16_t adapter_indexed_patch_icb_factors[] = {0x3c00, 0x3c00, 0x3c00, 0x3c00};
+            const uint16_t adapter_indexed_patch_icb_factors[] = {0, 0, 0x3c00, 0x3c00, 0x3c00, 0x3c00};
             id<MTLBuffer> adapter_indexed_patch_icb_factor_buffer =
                 [adapter_device newBufferWithBytes:adapter_indexed_patch_icb_factors
                                              length:sizeof(adapter_indexed_patch_icb_factors)
@@ -9207,11 +9207,11 @@ int main(void) {
                                                   patchIndexBuffer:nil
                                             patchIndexBufferOffset:0
                                            controlPointIndexBuffer:adapter_indexed_patch_icb_control_point_index_buffer
-                                     controlPointIndexBufferOffset:0
+                                     controlPointIndexBufferOffset:sizeof(uint16_t)
                                                    instanceCount:1
                                                     baseInstance:0
                                        tessellationFactorBuffer:adapter_indexed_patch_icb_factor_buffer
-                                   tessellationFactorBufferOffset:0
+                                   tessellationFactorBufferOffset:sizeof(uint32_t)
                             tessellationFactorBufferInstanceStride:sizeof(adapter_indexed_patch_icb_factors)];
             MTLTextureDescriptor *adapter_indexed_patch_icb_texture_descriptor =
                 [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm

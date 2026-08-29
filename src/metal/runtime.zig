@@ -2180,6 +2180,10 @@ pub const RenderEncoder = struct {
         indirect_buffer: ?*Buffer,
         indirect_buffer_offset: usize,
     ) Error!void {
+        const control_point_index_alignment: usize = switch (control_point_index_type) {
+            .uint16 => @alignOf(u16),
+            .uint32, .none => @alignOf(u32),
+        };
         if (!self.open() or kernel != 1 or control_point_count != 3 or
             !patchControlPointIndexTypeValid(control_point_index_type, control_point_index_buffer) or
             (patch_index_buffer != null and (!validBuffer(patch_index_buffer.?) or
@@ -2187,7 +2191,7 @@ pub const RenderEncoder = struct {
                 patch_index_buffer_offset % @alignOf(u32) != 0)) or
             (control_point_index_buffer != null and (!validBuffer(control_point_index_buffer.?) or
                 control_point_index_buffer.?.device != self.command_buffer.queue.device or
-                control_point_index_buffer_offset % @alignOf(u32) != 0)) or
+                control_point_index_buffer_offset % control_point_index_alignment != 0)) or
             (indirect_buffer != null and (!validBuffer(indirect_buffer.?) or
                 indirect_buffer.?.device != self.command_buffer.queue.device or
                 indirect_buffer_offset % @alignOf(u32) != 0 or
