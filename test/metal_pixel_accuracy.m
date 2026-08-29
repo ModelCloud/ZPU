@@ -1024,6 +1024,287 @@ int main(void) {
             fprintf(stderr, "metal-pixel: 1D texture and 1D-array exactness failed\n");
             return 77;
         }
+
+        /* 3D textures are represented by one CPU/ZPU-owned 2D plane per
+         * depth slice. Native Metal supplies the volume byte oracle; every
+         * adapter operation below maps the same top-left x/y coordinates and
+         * explicit z plane range without creating an MTLTexture. */
+        enum {
+            three_d_width = 4,
+            three_d_height = 3,
+            three_d_depth = 3,
+            three_d_row_bytes = three_d_width * 4,
+            three_d_plane_bytes = three_d_row_bytes * three_d_height,
+            three_d_bytes = three_d_plane_bytes * three_d_depth,
+            three_d_mip_bytes = 2 * 1 * 1 * 4,
+            three_d_copy_width = 3,
+            three_d_copy_height = 2,
+            three_d_copy_depth = 2,
+            three_d_copy_row_bytes = three_d_copy_width * 4,
+            three_d_copy_row_stride = 16,
+            three_d_copy_image_stride = 32,
+            three_d_copy_buffer_length = three_d_copy_image_stride * three_d_copy_depth,
+        };
+        MTLTextureDescriptor *three_d_descriptor = [MTLTextureDescriptor new];
+        three_d_descriptor.textureType = MTLTextureType3D;
+        three_d_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        three_d_descriptor.width = three_d_width;
+        three_d_descriptor.height = three_d_height;
+        three_d_descriptor.depth = three_d_depth;
+        three_d_descriptor.arrayLength = 1;
+        three_d_descriptor.mipmapLevelCount = 2;
+        three_d_descriptor.sampleCount = 1;
+        three_d_descriptor.storageMode = MTLStorageModeShared;
+        three_d_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        id<MTLTexture> native_three_d_texture = [device newTextureWithDescriptor:three_d_descriptor];
+        id<MTLTexture> adapter_three_d_texture = [adapter_device newTextureWithDescriptor:three_d_descriptor];
+        uint8_t three_d_source[three_d_bytes];
+        for (NSUInteger index = 0; index < sizeof(three_d_source); ++index) {
+            three_d_source[index] = (uint8_t)((index * 31u + 13u) & 0xffu);
+        }
+        [native_three_d_texture replaceRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                  mipmapLevel:0 slice:0 withBytes:three_d_source
+                                  bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes];
+        [adapter_three_d_texture replaceRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                   mipmapLevel:0 slice:0 withBytes:three_d_source
+                                   bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes];
+        uint8_t native_three_d_bytes[three_d_bytes];
+        uint8_t adapter_three_d_bytes[three_d_bytes];
+        memset(native_three_d_bytes, 0xa5, sizeof(native_three_d_bytes));
+        memset(adapter_three_d_bytes, 0xa5, sizeof(adapter_three_d_bytes));
+        [native_three_d_texture getBytes:native_three_d_bytes
+                            bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes
+                             fromRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                            mipmapLevel:0 slice:0];
+        [adapter_three_d_texture getBytes:adapter_three_d_bytes
+                             bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes
+                              fromRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                             mipmapLevel:0 slice:0];
+        enum { three_d_sub_width = 2, three_d_sub_height = 2, three_d_sub_depth = 2,
+               three_d_sub_row_bytes = three_d_sub_width * 4,
+               three_d_sub_bytes = three_d_sub_row_bytes * three_d_sub_height * three_d_sub_depth };
+        uint8_t three_d_sub_source[three_d_sub_bytes];
+        for (NSUInteger index = 0; index < sizeof(three_d_sub_source); ++index) {
+            three_d_sub_source[index] = (uint8_t)((index * 17u + 91u) & 0xffu);
+        }
+        const MTLRegion three_d_sub_region = MTLRegionMake3D(1, 1, 1, three_d_sub_width, three_d_sub_height, three_d_sub_depth);
+        [native_three_d_texture replaceRegion:three_d_sub_region
+                                  mipmapLevel:0 slice:0 withBytes:three_d_sub_source
+                                  bytesPerRow:three_d_sub_row_bytes bytesPerImage:three_d_sub_row_bytes * three_d_sub_height];
+        [adapter_three_d_texture replaceRegion:three_d_sub_region
+                                   mipmapLevel:0 slice:0 withBytes:three_d_sub_source
+                                   bytesPerRow:three_d_sub_row_bytes bytesPerImage:three_d_sub_row_bytes * three_d_sub_height];
+        uint8_t native_three_d_sub_bytes[sizeof(three_d_sub_source)];
+        uint8_t adapter_three_d_sub_bytes[sizeof(three_d_sub_source)];
+        memset(native_three_d_sub_bytes, 0xa5, sizeof(native_three_d_sub_bytes));
+        memset(adapter_three_d_sub_bytes, 0xa5, sizeof(adapter_three_d_sub_bytes));
+        [native_three_d_texture getBytes:native_three_d_sub_bytes
+                            bytesPerRow:three_d_sub_row_bytes bytesPerImage:three_d_sub_row_bytes * three_d_sub_height
+                             fromRegion:three_d_sub_region
+                            mipmapLevel:0 slice:0];
+        [adapter_three_d_texture getBytes:adapter_three_d_sub_bytes
+                             bytesPerRow:three_d_sub_row_bytes bytesPerImage:three_d_sub_row_bytes * three_d_sub_height
+                              fromRegion:three_d_sub_region
+                             mipmapLevel:0 slice:0];
+        uint8_t native_three_d_mip_bytes[three_d_mip_bytes];
+        memset(native_three_d_mip_bytes, 0xa5, sizeof(native_three_d_mip_bytes));
+        [native_three_d_texture getBytes:native_three_d_mip_bytes
+                            bytesPerRow:2 * 4 bytesPerImage:2 * 4
+                             fromRegion:MTLRegionMake3D(0, 0, 0, 2, 1, 1)
+                            mipmapLevel:1 slice:0];
+        id<MTLTexture> adapter_three_d_view =
+            [adapter_three_d_texture newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                         textureType:MTLTextureType3D
+                                                              levels:NSMakeRange(1, 1)
+                                                              slices:NSMakeRange(0, 1)];
+        uint8_t adapter_three_d_view_bytes[three_d_mip_bytes];
+        memset(adapter_three_d_view_bytes, 0xa5, sizeof(adapter_three_d_view_bytes));
+        [adapter_three_d_view getBytes:adapter_three_d_view_bytes
+                            bytesPerRow:2 * 4
+                             fromRegion:MTLRegionMake3D(0, 0, 0, 2, 1, 1)
+                            mipmapLevel:0];
+
+        id<MTLTexture> native_three_d_copy = [device newTextureWithDescriptor:three_d_descriptor];
+        id<MTLTexture> adapter_three_d_copy = [adapter_device newTextureWithDescriptor:three_d_descriptor];
+        uint8_t three_d_clear[three_d_bytes] = {0};
+        [native_three_d_copy replaceRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                mipmapLevel:0 slice:0 withBytes:three_d_clear
+                                bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes];
+        [adapter_three_d_copy replaceRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                 mipmapLevel:0 slice:0 withBytes:three_d_clear
+                                 bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes];
+        const MTLSize three_d_copy_size = MTLSizeMake(three_d_copy_width, three_d_copy_height, three_d_copy_depth);
+        const MTLOrigin three_d_copy_source_origin = MTLOriginMake(1, 0, 1);
+        const MTLOrigin three_d_copy_destination_origin = MTLOriginMake(0, 1, 0);
+        id<MTLCommandBuffer> native_three_d_copy_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> native_three_d_copy_blit = [native_three_d_copy_command_buffer blitCommandEncoder];
+        [native_three_d_copy_blit copyFromTexture:native_three_d_texture
+                                       sourceSlice:0
+                                       sourceLevel:0
+                                      sourceOrigin:three_d_copy_source_origin
+                                        sourceSize:three_d_copy_size
+                                          toTexture:native_three_d_copy
+                                   destinationSlice:0
+                                   destinationLevel:0
+                                  destinationOrigin:three_d_copy_destination_origin];
+        [native_three_d_copy_blit endEncoding];
+        [native_three_d_copy_command_buffer commit];
+        [native_three_d_copy_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> adapter_three_d_copy_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_three_d_copy_blit = [adapter_three_d_copy_command_buffer blitCommandEncoder];
+        [adapter_three_d_copy_blit copyFromTexture:adapter_three_d_texture
+                                       sourceSlice:0
+                                       sourceLevel:0
+                                      sourceOrigin:three_d_copy_source_origin
+                                        sourceSize:three_d_copy_size
+                                          toTexture:adapter_three_d_copy
+                                   destinationSlice:0
+                                   destinationLevel:0
+                                  destinationOrigin:three_d_copy_destination_origin];
+        [adapter_three_d_copy_blit endEncoding];
+        [adapter_three_d_copy_command_buffer commit];
+        [adapter_three_d_copy_command_buffer waitUntilCompleted];
+        uint8_t native_three_d_copy_bytes[three_d_bytes];
+        uint8_t adapter_three_d_copy_bytes[three_d_bytes];
+        memset(native_three_d_copy_bytes, 0xa5, sizeof(native_three_d_copy_bytes));
+        memset(adapter_three_d_copy_bytes, 0xa5, sizeof(adapter_three_d_copy_bytes));
+        [native_three_d_copy getBytes:native_three_d_copy_bytes
+                          bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes
+                           fromRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                          mipmapLevel:0 slice:0];
+        [adapter_three_d_copy getBytes:adapter_three_d_copy_bytes
+                           bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes
+                            fromRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                           mipmapLevel:0 slice:0];
+
+        id<MTLBuffer> native_three_d_to_buffer =
+            [device newBufferWithLength:three_d_copy_buffer_length options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_three_d_to_buffer =
+            [adapter_device newBufferWithLength:three_d_copy_buffer_length options:MTLResourceStorageModeShared];
+        if (native_three_d_to_buffer != nil) memset(native_three_d_to_buffer.contents, 0xcd, native_three_d_to_buffer.length);
+        if (adapter_three_d_to_buffer != nil) memset(adapter_three_d_to_buffer.contents, 0xcd, adapter_three_d_to_buffer.length);
+        id<MTLCommandBuffer> native_three_d_to_buffer_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> native_three_d_to_buffer_blit = [native_three_d_to_buffer_command_buffer blitCommandEncoder];
+        [native_three_d_to_buffer_blit copyFromTexture:native_three_d_texture
+                                           sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(1, 0, 1)
+                                           sourceSize:three_d_copy_size toBuffer:native_three_d_to_buffer
+                                      destinationOffset:0 destinationBytesPerRow:three_d_copy_row_stride
+                                    destinationBytesPerImage:three_d_copy_image_stride];
+        [native_three_d_to_buffer_blit endEncoding];
+        [native_three_d_to_buffer_command_buffer commit];
+        [native_three_d_to_buffer_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> adapter_three_d_to_buffer_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_three_d_to_buffer_blit = [adapter_three_d_to_buffer_command_buffer blitCommandEncoder];
+        [adapter_three_d_to_buffer_blit copyFromTexture:adapter_three_d_texture
+                                            sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(1, 0, 1)
+                                            sourceSize:three_d_copy_size toBuffer:adapter_three_d_to_buffer
+                                       destinationOffset:0 destinationBytesPerRow:three_d_copy_row_stride
+                                     destinationBytesPerImage:three_d_copy_image_stride];
+        [adapter_three_d_to_buffer_blit endEncoding];
+        [adapter_three_d_to_buffer_command_buffer commit];
+        [adapter_three_d_to_buffer_command_buffer waitUntilCompleted];
+
+        enum { three_d_upload_offset = 4, three_d_upload_buffer_length = three_d_upload_offset + three_d_copy_buffer_length };
+        id<MTLBuffer> native_three_d_upload_buffer =
+            [device newBufferWithLength:three_d_upload_buffer_length options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_three_d_upload_buffer =
+            [adapter_device newBufferWithLength:three_d_upload_buffer_length options:MTLResourceStorageModeShared];
+        uint8_t three_d_upload_bytes[three_d_copy_buffer_length];
+        for (NSUInteger index = 0; index < sizeof(three_d_upload_bytes); ++index) {
+            three_d_upload_bytes[index] = (uint8_t)((index * 23u + 47u) & 0xffu);
+        }
+        if (native_three_d_upload_buffer != nil) {
+            memset(native_three_d_upload_buffer.contents, 0xee, native_three_d_upload_buffer.length);
+            memcpy((uint8_t *)native_three_d_upload_buffer.contents + three_d_upload_offset,
+                   three_d_upload_bytes, sizeof(three_d_upload_bytes));
+        }
+        if (adapter_three_d_upload_buffer != nil) {
+            memset(adapter_three_d_upload_buffer.contents, 0xee, adapter_three_d_upload_buffer.length);
+            memcpy((uint8_t *)adapter_three_d_upload_buffer.contents + three_d_upload_offset,
+                   three_d_upload_bytes, sizeof(three_d_upload_bytes));
+        }
+        id<MTLTexture> native_three_d_upload_texture = [device newTextureWithDescriptor:three_d_descriptor];
+        id<MTLTexture> adapter_three_d_upload_texture = [adapter_device newTextureWithDescriptor:three_d_descriptor];
+        [native_three_d_upload_texture replaceRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                          mipmapLevel:0 slice:0 withBytes:three_d_clear
+                                          bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes];
+        [adapter_three_d_upload_texture replaceRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                           mipmapLevel:0 slice:0 withBytes:three_d_clear
+                                           bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes];
+        id<MTLCommandBuffer> native_three_d_upload_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> native_three_d_upload_blit = [native_three_d_upload_command_buffer blitCommandEncoder];
+        [native_three_d_upload_blit copyFromBuffer:native_three_d_upload_buffer sourceOffset:three_d_upload_offset
+                                  sourceBytesPerRow:three_d_copy_row_stride sourceBytesPerImage:three_d_copy_image_stride
+                                         sourceSize:three_d_copy_size toTexture:native_three_d_upload_texture
+                                    destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 1, 0)];
+        [native_three_d_upload_blit endEncoding];
+        [native_three_d_upload_command_buffer commit];
+        [native_three_d_upload_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> adapter_three_d_upload_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_three_d_upload_blit = [adapter_three_d_upload_command_buffer blitCommandEncoder];
+        [adapter_three_d_upload_blit copyFromBuffer:adapter_three_d_upload_buffer sourceOffset:three_d_upload_offset
+                                   sourceBytesPerRow:three_d_copy_row_stride sourceBytesPerImage:three_d_copy_image_stride
+                                          sourceSize:three_d_copy_size toTexture:adapter_three_d_upload_texture
+                                     destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 1, 0)];
+        [adapter_three_d_upload_blit endEncoding];
+        [adapter_three_d_upload_command_buffer commit];
+        [adapter_three_d_upload_command_buffer waitUntilCompleted];
+        uint8_t native_three_d_upload_texture_bytes[three_d_bytes];
+        uint8_t adapter_three_d_upload_texture_bytes[three_d_bytes];
+        memset(native_three_d_upload_texture_bytes, 0xa5, sizeof(native_three_d_upload_texture_bytes));
+        memset(adapter_three_d_upload_texture_bytes, 0xa5, sizeof(adapter_three_d_upload_texture_bytes));
+        [native_three_d_upload_texture getBytes:native_three_d_upload_texture_bytes
+                                    bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes
+                                     fromRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                    mipmapLevel:0 slice:0];
+        [adapter_three_d_upload_texture getBytes:adapter_three_d_upload_texture_bytes
+                                     bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes
+                                      fromRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                     mipmapLevel:0 slice:0];
+
+        MTLSizeAndAlign three_d_heap_size_align =
+            [adapter_device heapTextureSizeAndAlignWithDescriptor:three_d_descriptor];
+        MTLHeapDescriptor *three_d_heap_descriptor = [MTLHeapDescriptor new];
+        three_d_heap_descriptor.size = three_d_heap_size_align.size;
+        three_d_heap_descriptor.storageMode = MTLStorageModeShared;
+        id<MTLHeap> adapter_three_d_heap = [adapter_device newHeapWithDescriptor:three_d_heap_descriptor];
+        id<MTLTexture> adapter_three_d_heap_texture =
+            [adapter_three_d_heap newTextureWithDescriptor:three_d_descriptor];
+        const NSUInteger expected_three_d_allocated_size = three_d_bytes + three_d_mip_bytes;
+        if (native_three_d_texture == nil || adapter_three_d_texture == nil ||
+            native_three_d_texture.textureType != MTLTextureType3D || adapter_three_d_texture.textureType != MTLTextureType3D ||
+            native_three_d_texture.width != three_d_width || adapter_three_d_texture.width != three_d_width ||
+            native_three_d_texture.height != three_d_height || adapter_three_d_texture.height != three_d_height ||
+            native_three_d_texture.depth != three_d_depth || adapter_three_d_texture.depth != three_d_depth ||
+            native_three_d_texture.arrayLength != 1 || adapter_three_d_texture.arrayLength != 1 ||
+            adapter_three_d_texture.mipmapLevelCount != 2 ||
+            adapter_three_d_texture.allocatedSize != expected_three_d_allocated_size ||
+            memcmp(native_three_d_bytes, adapter_three_d_bytes, sizeof(native_three_d_bytes)) != 0 ||
+            memcmp(native_three_d_sub_bytes, adapter_three_d_sub_bytes, sizeof(native_three_d_sub_bytes)) != 0 ||
+            adapter_three_d_view == nil || adapter_three_d_view.depth != 1 || adapter_three_d_view.width != 2 ||
+            adapter_three_d_view.height != 1 || adapter_three_d_view.mipmapLevelCount != 1 ||
+            memcmp(native_three_d_mip_bytes, adapter_three_d_view_bytes, sizeof(native_three_d_mip_bytes)) != 0 ||
+            native_three_d_copy_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_three_d_copy_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_three_d_copy_bytes, adapter_three_d_copy_bytes, sizeof(native_three_d_copy_bytes)) != 0 ||
+            native_three_d_to_buffer == nil || adapter_three_d_to_buffer == nil ||
+            native_three_d_to_buffer_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_three_d_to_buffer_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_three_d_to_buffer.contents, adapter_three_d_to_buffer.contents, three_d_copy_buffer_length) != 0 ||
+            native_three_d_upload_buffer == nil || adapter_three_d_upload_buffer == nil ||
+            native_three_d_upload_texture == nil || adapter_three_d_upload_texture == nil ||
+            native_three_d_upload_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_three_d_upload_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_three_d_upload_texture_bytes, adapter_three_d_upload_texture_bytes,
+                   sizeof(native_three_d_upload_texture_bytes)) != 0 ||
+            three_d_heap_size_align.size != expected_three_d_allocated_size || three_d_heap_size_align.align != 4 ||
+            adapter_three_d_heap == nil || adapter_three_d_heap_texture == nil ||
+            adapter_three_d_heap_texture.depth != three_d_depth ||
+            adapter_three_d_heap_texture.allocatedSize != expected_three_d_allocated_size ||
+            adapter_three_d_heap.usedSize != expected_three_d_allocated_size) {
+            fprintf(stderr, "metal-pixel: 3D texture bytes/view/heap/blit exactness failed\n");
+            return 81;
+        }
         MTLTextureDescriptor *array_render_descriptor = [array_descriptor copy];
         array_render_descriptor.usage = MTLTextureUsageRenderTarget;
         id<MTLTexture> native_array_render_texture = [device newTextureWithDescriptor:array_render_descriptor];
@@ -1635,6 +1916,62 @@ int main(void) {
             memcmp(metal4_mip_copy_bytes, native_mip_level_one, sizeof(mip_level_one)) != 0) {
             fail_with_error("Metal 4 CPU mip-level copy failed", metal4_error);
             return 70;
+        }
+
+        id<MTLTexture> metal4_three_d_copy = [adapter_device newTextureWithDescriptor:three_d_descriptor];
+        id<MTLTexture> metal4_three_d_upload_texture = [adapter_device newTextureWithDescriptor:three_d_descriptor];
+        id<MTLBuffer> metal4_three_d_to_buffer =
+            [adapter_device newBufferWithLength:three_d_copy_buffer_length options:MTLResourceStorageModeShared];
+        if (metal4_three_d_to_buffer != nil) memset(metal4_three_d_to_buffer.contents, 0xcd, metal4_three_d_to_buffer.length);
+        [metal4_three_d_copy replaceRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                mipmapLevel:0 slice:0 withBytes:three_d_clear
+                                bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes];
+        [metal4_three_d_upload_texture replaceRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                           mipmapLevel:0 slice:0 withBytes:three_d_clear
+                                           bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes];
+        id<MTL4CommandBuffer> metal4_three_d_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_three_d_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> metal4_three_d_encoder =
+            [metal4_three_d_command_buffer computeCommandEncoder];
+        [metal4_three_d_encoder copyFromTexture:adapter_three_d_texture
+                                     sourceSlice:0 sourceLevel:0 sourceOrigin:three_d_copy_source_origin
+                                     sourceSize:three_d_copy_size toTexture:metal4_three_d_copy
+                               destinationSlice:0 destinationLevel:0
+                              destinationOrigin:three_d_copy_destination_origin];
+        [metal4_three_d_encoder copyFromTexture:adapter_three_d_texture
+                                     sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(1, 0, 1)
+                                     sourceSize:three_d_copy_size toBuffer:metal4_three_d_to_buffer
+                                destinationOffset:0 destinationBytesPerRow:three_d_copy_row_stride
+                              destinationBytesPerImage:three_d_copy_image_stride];
+        [metal4_three_d_encoder copyFromBuffer:adapter_three_d_upload_buffer sourceOffset:three_d_upload_offset
+                               sourceBytesPerRow:three_d_copy_row_stride sourceBytesPerImage:three_d_copy_image_stride
+                                      sourceSize:three_d_copy_size toTexture:metal4_three_d_upload_texture
+                                destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 1, 0)];
+        [metal4_three_d_encoder endEncoding];
+        [metal4_three_d_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_three_d_command_buffers[] = {metal4_three_d_command_buffer};
+        [metal4_queue commit:metal4_three_d_command_buffers count:1];
+        uint8_t metal4_three_d_copy_bytes[three_d_bytes];
+        uint8_t metal4_three_d_upload_texture_bytes[three_d_bytes];
+        memset(metal4_three_d_copy_bytes, 0xa5, sizeof(metal4_three_d_copy_bytes));
+        memset(metal4_three_d_upload_texture_bytes, 0xa5, sizeof(metal4_three_d_upload_texture_bytes));
+        [metal4_three_d_copy getBytes:metal4_three_d_copy_bytes
+                           bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes
+                            fromRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                           mipmapLevel:0 slice:0];
+        [metal4_three_d_upload_texture getBytes:metal4_three_d_upload_texture_bytes
+                                    bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes
+                                     fromRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                    mipmapLevel:0 slice:0];
+        if (metal4_three_d_copy == nil || metal4_three_d_upload_texture == nil || metal4_three_d_to_buffer == nil ||
+            metal4_three_d_command_buffer == nil || metal4_three_d_encoder == nil ||
+            memcmp(metal4_three_d_copy_bytes, native_three_d_copy_bytes, sizeof(metal4_three_d_copy_bytes)) != 0 ||
+            memcmp(metal4_three_d_upload_texture_bytes, native_three_d_upload_texture_bytes,
+                   sizeof(metal4_three_d_upload_texture_bytes)) != 0 ||
+            memcmp(metal4_three_d_to_buffer.contents, native_three_d_to_buffer.contents,
+                   three_d_copy_buffer_length) != 0) {
+            fail_with_error("Metal 4 CPU 3D texture copy failed", metal4_error);
+            return 82;
         }
 
         id<MTLTexture> metal4_generate_mip_texture = [adapter_device newTextureWithDescriptor:generate_mip_descriptor];

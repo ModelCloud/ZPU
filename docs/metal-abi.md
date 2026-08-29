@@ -19,7 +19,7 @@ triangle path:
 - clip-space point, line, line-strip, triangle, and triangle-strip draws with
   viewport, scissor, cull, winding, fill-mode, color interpolation, and depth
 - two screen-band workers for a 3D draw: the submitting core plus one worker
-- owned RGBA8/BGRA8 buffers and 1D/2D textures with checked region read/write
+- owned RGBA8/BGRA8 buffers and 1D/2D/3D textures with checked region read/write
 - ordinary device-created 1D, 1D-array, 2D, and 2D-array textures with independently
   allocated CPU/ZPU slice×mip levels, exact level/slice read/write,
   level/slice-range views, and level/slice-aware blit copies; CPU box-filter
@@ -27,7 +27,10 @@ triangle path:
   heap-backed textures use independently allocated CPU/ZPU slice×mip levels
   with full allocation-size accounting; linear buffer-backed textures remain
   explicitly limited to one 2D level because their caller-supplied stride
-  cannot describe a portable mip layout
+  cannot describe a portable mip layout; 3D textures use one ZPU-owned 2D
+  plane per z slice, including mip-level depth reduction, explicit
+  `bytesPerImage` transfers, 3D views, heap placement, and legacy/Metal 4
+  texture and buffer copies
 - buffer and texture resource options preserve the requested storage mode, CPU
   cache mode, hazard mode, texture usage, optimization flag, compression mode,
   and swizzle metadata; indirect command buffers preserve their resource
@@ -164,7 +167,7 @@ ordering, pipeline/depth/sampler state, blending, texture views, indirect
 draws, render and compute indirect command buffers, the CPU compute path
   against a native Metal oracle, the Metal 4 CPU argument-table compute and
   ordinary render paths, deferred indirect-thread dispatch, and deferred
-  indirect array z filtering,
+  indirect array z filtering, and explicit 3D texture plane/stride copies,
 and the explicit adapter; it is not a claim that every Metal feature is
 implemented.
 
