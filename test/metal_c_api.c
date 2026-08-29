@@ -894,6 +894,121 @@ int main(void) {
     zpu_metal_command_buffer_destroy(event_commands);
     zpu_metal_shared_event_destroy(command_event);
 
+    const size_t sparse_page_bytes = ZPU_METAL_SPARSE_PAGE_SIZE_16K;
+    uint8_t sparse_pattern[ZPU_METAL_SPARSE_PAGE_SIZE_16K];
+    for (size_t index = 0; index < sizeof(sparse_pattern); ++index) {
+        sparse_pattern[index] = (uint8_t)((index * 37u + 5u) & 0xffu);
+    }
+    zpu_metal_buffer *sparse_upload = zpu_metal_device_new_buffer(
+        device, sizeof(sparse_pattern), sparse_pattern);
+    zpu_metal_buffer *sparse_source = zpu_metal_device_new_sparse_buffer(
+        device, sparse_page_bytes * 2, sparse_page_bytes);
+    zpu_metal_buffer *sparse_destination = zpu_metal_device_new_sparse_buffer(
+        device, sparse_page_bytes * 2, sparse_page_bytes);
+    zpu_metal_buffer *sparse_readback = zpu_metal_device_new_buffer(
+        device, sizeof(sparse_pattern), NULL);
+    if (sparse_upload == NULL || sparse_source == NULL || sparse_destination == NULL ||
+        sparse_readback == NULL || zpu_metal_buffer_is_sparse(sparse_source) != 1 ||
+        zpu_metal_buffer_sparse_page_size(sparse_source) != sparse_page_bytes ||
+        zpu_metal_buffer_contents(sparse_source) != NULL ||
+        zpu_metal_device_new_sparse_buffer(device, sizeof(sparse_pattern), 1234) != NULL) return 58;
+
+    zpu_metal_command_buffer *sparse_upload_commands =
+        zpu_metal_command_queue_command_buffer(queue);
+    zpu_metal_resource_state_encoder *sparse_upload_state =
+        zpu_metal_command_buffer_resource_state_encoder(sparse_upload_commands);
+    zpu_metal_blit_encoder *sparse_upload_encoder =
+        zpu_metal_command_buffer_blit_encoder(sparse_upload_commands);
+    if (sparse_upload_commands == NULL || sparse_upload_state == NULL ||
+        sparse_upload_encoder != NULL ||
+        zpu_metal_resource_state_encoder_update_buffer_mapping(
+            sparse_upload_state, sparse_source, ZPU_METAL_SPARSE_MAPPING_MAP,
+            0, sparse_page_bytes) != 0 ||
+        zpu_metal_resource_state_encoder_update_buffer_mapping(
+            sparse_upload_state, sparse_destination, ZPU_METAL_SPARSE_MAPPING_MAP,
+            0, sparse_page_bytes) != 0 ||
+        zpu_metal_resource_state_encoder_end_encoding(sparse_upload_state) != 0) return 59;
+    zpu_metal_resource_state_encoder_destroy(sparse_upload_state);
+    sparse_upload_encoder = zpu_metal_command_buffer_blit_encoder(sparse_upload_commands);
+    if (sparse_upload_encoder == NULL ||
+        zpu_metal_blit_encoder_copy_buffer(sparse_upload_encoder, sparse_upload, 0,
+                                           sparse_source, 0, sparse_page_bytes) != 0 ||
+        zpu_metal_blit_encoder_end_encoding(sparse_upload_encoder) != 0 ||
+        zpu_metal_command_buffer_commit(sparse_upload_commands) != 0) return 60;
+    zpu_metal_blit_encoder_destroy(sparse_upload_encoder);
+    zpu_metal_command_buffer_destroy(sparse_upload_commands);
+
+    zpu_metal_command_buffer *sparse_copy_commands =
+        zpu_metal_command_queue_command_buffer(queue);
+    zpu_metal_resource_state_encoder *sparse_copy_state =
+        zpu_metal_command_buffer_resource_state_encoder(sparse_copy_commands);
+    if (sparse_copy_commands == NULL || sparse_copy_state == NULL ||
+        zpu_metal_resource_state_encoder_copy_buffer_mappings(
+            sparse_copy_state, sparse_source, sparse_destination,
+            0, sparse_page_bytes, sparse_page_bytes) != 0 ||
+        zpu_metal_resource_state_encoder_end_encoding(sparse_copy_state) != 0) return 61;
+    zpu_metal_resource_state_encoder_destroy(sparse_copy_state);
+    zpu_metal_blit_encoder *sparse_copy_encoder =
+        zpu_metal_command_buffer_blit_encoder(sparse_copy_commands);
+    if (sparse_copy_encoder == NULL ||
+        zpu_metal_blit_encoder_copy_buffer(sparse_copy_encoder, sparse_destination,
+                                           sparse_page_bytes, sparse_readback, 0,
+                                           sparse_page_bytes) != 0 ||
+        zpu_metal_blit_encoder_end_encoding(sparse_copy_encoder) != 0 ||
+        zpu_metal_command_buffer_commit(sparse_copy_commands) != 0 ||
+        check_equal((const uint8_t *)zpu_metal_buffer_contents(sparse_readback),
+                    sparse_pattern, sparse_page_bytes) != 0) return 62;
+    zpu_metal_blit_encoder_destroy(sparse_copy_encoder);
+    zpu_metal_command_buffer_destroy(sparse_copy_commands);
+
+    memset(sparse_pattern, 0, sizeof(sparse_pattern));
+    if (zpu_metal_buffer_write(sparse_upload, 0, sparse_pattern,
+                               sparse_page_bytes) != 0) return 63;
+    zpu_metal_command_buffer *sparse_alias_commands =
+        zpu_metal_command_queue_command_buffer(queue);
+    zpu_metal_blit_encoder *sparse_alias_encoder =
+        zpu_metal_command_buffer_blit_encoder(sparse_alias_commands);
+    if (sparse_alias_commands == NULL || sparse_alias_encoder == NULL ||
+        zpu_metal_blit_encoder_copy_buffer(sparse_alias_encoder, sparse_upload, 0,
+                                           sparse_source, 0, sparse_page_bytes) != 0 ||
+        zpu_metal_blit_encoder_copy_buffer(sparse_alias_encoder, sparse_destination,
+                                           sparse_page_bytes, sparse_readback, 0,
+                                           sparse_page_bytes) != 0 ||
+        zpu_metal_blit_encoder_end_encoding(sparse_alias_encoder) != 0 ||
+        zpu_metal_command_buffer_commit(sparse_alias_commands) != 0 ||
+        check_equal((const uint8_t *)zpu_metal_buffer_contents(sparse_readback),
+                    sparse_pattern, sparse_page_bytes) != 0) return 64;
+    zpu_metal_blit_encoder_destroy(sparse_alias_encoder);
+    zpu_metal_command_buffer_destroy(sparse_alias_commands);
+
+    zpu_metal_command_buffer *sparse_unmap_commands =
+        zpu_metal_command_queue_command_buffer(queue);
+    zpu_metal_resource_state_encoder *sparse_unmap_state =
+        zpu_metal_command_buffer_resource_state_encoder(sparse_unmap_commands);
+    if (sparse_unmap_commands == NULL || sparse_unmap_state == NULL ||
+        zpu_metal_resource_state_encoder_update_buffer_mapping(
+            sparse_unmap_state, sparse_destination, ZPU_METAL_SPARSE_MAPPING_UNMAP,
+            sparse_page_bytes, sparse_page_bytes) != 0 ||
+        zpu_metal_resource_state_encoder_end_encoding(sparse_unmap_state) != 0) return 65;
+    zpu_metal_resource_state_encoder_destroy(sparse_unmap_state);
+    zpu_metal_blit_encoder *sparse_unmap_encoder =
+        zpu_metal_command_buffer_blit_encoder(sparse_unmap_commands);
+    if (sparse_unmap_encoder == NULL ||
+        zpu_metal_blit_encoder_copy_buffer(sparse_unmap_encoder, sparse_destination,
+                                           sparse_page_bytes, sparse_readback, 0,
+                                           sparse_page_bytes) != 0 ||
+        zpu_metal_blit_encoder_end_encoding(sparse_unmap_encoder) != 0 ||
+        zpu_metal_command_buffer_commit(sparse_unmap_commands) != 0) return 66;
+    const uint8_t sparse_zero[ZPU_METAL_SPARSE_PAGE_SIZE_16K] = {0};
+    if (check_equal((const uint8_t *)zpu_metal_buffer_contents(sparse_readback),
+                    sparse_zero, sparse_page_bytes) != 0) return 67;
+    zpu_metal_blit_encoder_destroy(sparse_unmap_encoder);
+    zpu_metal_command_buffer_destroy(sparse_unmap_commands);
+    zpu_metal_buffer_destroy(sparse_readback);
+    zpu_metal_buffer_destroy(sparse_destination);
+    zpu_metal_buffer_destroy(sparse_source);
+    zpu_metal_buffer_destroy(sparse_upload);
+
     zpu_metal_command_buffer *error_command_buffer =
         zpu_metal_command_queue_command_buffer(queue);
     zpu_metal_render_encoder *error_encoder =

@@ -253,6 +253,40 @@ pub const Heap = struct {
     used: usize = 0,
 };
 
+const SparsePage = struct {
+    bytes: []u8,
+    refs: usize = 1,
+
+    fn create(page_bytes: usize) Error!*SparsePage {
+        const bytes = allocator.alloc(u8, page_bytes) catch return error.OutOfMemory;
+        @memset(bytes, 0);
+        const result = allocator.create(SparsePage) catch {
+            allocator.free(bytes);
+            return error.OutOfMemory;
+        };
+        result.* = .{ .bytes = bytes };
+        return result;
+    }
+
+    fn retain(self: *SparsePage) void {
+        self.refs += 1;
+    }
+
+    fn release(self: *SparsePage) void {
+        std.debug.assert(self.refs != 0);
+        self.refs -= 1;
+        if (self.refs == 0) {
+            allocator.free(self.bytes);
+            allocator.destroy(self);
+        }
+    }
+};
+
+const SparseMapping = struct {
+    page_index: usize,
+    page: *SparsePage,
+};
+
 pub const Buffer = struct {
     magic: u64 = buffer_magic,
     device: *Device,
@@ -261,8 +295,12 @@ pub const Buffer = struct {
     heap: ?*Heap = null,
     heap_allocation_offset: usize = 0,
     heap_allocation_size: usize = 0,
+    sparse_page_bytes: usize = 0,
+    sparse_mappings: std.ArrayList(SparseMapping) = .empty,
 
     pub fn deinit(self: *Buffer) void {
+        for (self.sparse_mappings.items) |mapping| mapping.page.release();
+        self.sparse_mappings.deinit(allocator);
         if (self.owns_bytes) allocator.free(self.bytes);
         releaseHeapAllocation(self.heap, self.heap_allocation_size);
         self.magic = 0;
@@ -524,6 +562,21 @@ const FillBufferCommand = struct {
     value: u8,
 };
 
+const SparseBufferMappingCommand = struct {
+    buffer: *Buffer,
+    mode: u8,
+    offset: usize,
+    length: usize,
+};
+
+const SparseBufferCopyMappingCommand = struct {
+    source: *Buffer,
+    destination: *Buffer,
+    source_offset: usize,
+    destination_offset: usize,
+    length: usize,
+};
+
 const SharedEventCommand = struct {
     event: *SharedEvent,
     value: u64,
@@ -559,6 +612,8 @@ const Command = union(enum) {
     fill_buffer: FillBufferCommand,
     compute: ComputeCommand,
     synchronize_buffer: *Buffer,
+    sparse_buffer_mapping: SparseBufferMappingCommand,
+    sparse_buffer_copy_mapping: SparseBufferCopyMappingCommand,
     update_fence: *Fence,
     wait_fence: *Fence,
     signal_event: SharedEventCommand,
@@ -794,6 +849,18 @@ pub const CommandBuffer = struct {
             .draw => |draw| {
                 const target_handle = active_target orelse return self.fail(error.InvalidCommand);
                 if (!validTexture(target_handle)) return self.fail(error.InvalidResource);
+                sparseSyncOptionalBuffer(draw.vertex_buffer);
+                sparseSyncOptionalBuffer(draw.index_buffer);
+                sparseSyncOptionalBuffer(draw.indirect_buffer);
+                sparseSyncOptionalBuffer(draw.fragment_uniform_buffer);
+                sparseSyncOptionalBuffer(draw.visibility_buffer);
+                defer {
+                    sparseFlushOptionalBuffer(draw.vertex_buffer);
+                    sparseFlushOptionalBuffer(draw.index_buffer);
+                    sparseFlushOptionalBuffer(draw.indirect_buffer);
+                    sparseFlushOptionalBuffer(draw.fragment_uniform_buffer);
+                    sparseFlushOptionalBuffer(draw.visibility_buffer);
+                }
                 var resolved_draw = draw;
                 const instance_count = self.resolveIndirectDraw(&resolved_draw) catch |err| return self.fail(err);
                 if (instance_count == 0 or resolved_draw.vertex_count == 0) continue;
@@ -933,6 +1000,8 @@ pub const CommandBuffer = struct {
                 }
             },
             .mesh => |mesh| {
+                sparseSyncOptionalBuffer(mesh.indirect_buffer);
+                defer sparseFlushOptionalBuffer(mesh.indirect_buffer);
                 var resolved_mesh = mesh;
                 if (mesh.indirect_buffer) |indirect_buffer| {
                     if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.queue.device or
@@ -980,6 +1049,22 @@ pub const CommandBuffer = struct {
                 }
             },
             .patch => |patch| {
+                sparseSyncOptionalBuffer(patch.vertex_buffer);
+                sparseSyncOptionalBuffer(patch.patch_index_buffer);
+                sparseSyncOptionalBuffer(patch.indirect_buffer);
+                sparseSyncOptionalBuffer(patch.factor_buffer);
+                sparseSyncOptionalBuffer(patch.control_point_index_buffer);
+                sparseSyncOptionalBuffer(patch.fragment_uniform_buffer);
+                sparseSyncOptionalBuffer(patch.visibility_buffer);
+                defer {
+                    sparseFlushOptionalBuffer(patch.vertex_buffer);
+                    sparseFlushOptionalBuffer(patch.patch_index_buffer);
+                    sparseFlushOptionalBuffer(patch.indirect_buffer);
+                    sparseFlushOptionalBuffer(patch.factor_buffer);
+                    sparseFlushOptionalBuffer(patch.control_point_index_buffer);
+                    sparseFlushOptionalBuffer(patch.fragment_uniform_buffer);
+                    sparseFlushOptionalBuffer(patch.visibility_buffer);
+                }
                 var resolved_patch = patch;
                 if (patch.indirect_buffer) |indirect_buffer| {
                     if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.queue.device or
@@ -1149,16 +1234,26 @@ pub const CommandBuffer = struct {
                 if (!validBuffer(copy.source) or !validBuffer(copy.destination)) return self.fail(error.InvalidResource);
                 if (copy.source.device != copy.destination.device) return self.fail(error.InvalidResource);
                 if (!rangeValid(copy.source.bytes.len, copy.source_offset, copy.length) or !rangeValid(copy.destination.bytes.len, copy.destination_offset, copy.length)) return self.fail(error.InvalidArgument);
+                sparseSyncBuffer(copy.source);
+                sparseSyncBuffer(copy.destination);
+                defer {
+                    sparseFlushBuffer(copy.source);
+                    sparseFlushBuffer(copy.destination);
+                }
                 if (copy.length != 0) @memcpy(copy.destination.bytes[copy.destination_offset .. copy.destination_offset + copy.length], copy.source.bytes[copy.source_offset .. copy.source_offset + copy.length]);
             },
             .copy_buffer_to_texture => |copy| {
                 if (!validBuffer(copy.buffer) or !validTexture(copy.texture)) return self.fail(error.InvalidResource);
                 if (copy.buffer.device != copy.texture.device) return self.fail(error.InvalidResource);
+                sparseSyncBuffer(copy.buffer);
+                defer sparseFlushBuffer(copy.buffer);
                 copyBufferToTexture(copy) catch |err| return self.fail(err);
             },
             .copy_texture_to_buffer => |copy| {
                 if (!validTexture(copy.texture) or !validBuffer(copy.buffer)) return self.fail(error.InvalidResource);
                 if (copy.texture.device != copy.buffer.device) return self.fail(error.InvalidResource);
+                sparseSyncBuffer(copy.buffer);
+                defer sparseFlushBuffer(copy.buffer);
                 copyTextureToBuffer(copy) catch |err| return self.fail(err);
             },
             .copy_texture_to_texture => |copy| {
@@ -1189,9 +1284,17 @@ pub const CommandBuffer = struct {
             .fill_buffer => |fill| {
                 if (!validBuffer(fill.buffer)) return self.fail(error.InvalidResource);
                 if (!rangeValid(fill.buffer.bytes.len, fill.offset, fill.length)) return self.fail(error.InvalidArgument);
+                sparseSyncBuffer(fill.buffer);
+                defer sparseFlushBuffer(fill.buffer);
                 @memset(fill.buffer.bytes[fill.offset .. fill.offset + fill.length], fill.value);
             },
             .compute => |compute| {
+                sparseSyncOptionalBuffer(compute.buffer);
+                sparseSyncOptionalBuffer(compute.indirect_buffer);
+                defer {
+                    sparseFlushOptionalBuffer(compute.buffer);
+                    sparseFlushOptionalBuffer(compute.indirect_buffer);
+                }
                 var resolved = compute;
                 if (compute.indirect_buffer) |indirect_buffer| {
                     if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.queue.device or
@@ -1242,6 +1345,17 @@ pub const CommandBuffer = struct {
             },
             .synchronize_buffer => |buffer| {
                 if (!validBuffer(buffer)) return self.fail(error.InvalidResource);
+                sparseSyncBuffer(buffer);
+            },
+            .sparse_buffer_mapping => |mapping| {
+                if (!validBuffer(mapping.buffer) or mapping.buffer.device != self.queue.device) return self.fail(error.InvalidResource);
+                sparseUpdateBufferMapping(mapping.buffer, mapping.mode, mapping.offset, mapping.length) catch |err| return self.fail(err);
+            },
+            .sparse_buffer_copy_mapping => |mapping| {
+                if (!validBuffer(mapping.source) or !validBuffer(mapping.destination) or
+                    mapping.source.device != self.queue.device or mapping.destination.device != self.queue.device)
+                    return self.fail(error.InvalidResource);
+                sparseCopyBufferMappings(mapping.source, mapping.destination, mapping.source_offset, mapping.destination_offset, mapping.length) catch |err| return self.fail(err);
             },
             .update_fence => |fence| {
                 if (!validFence(fence) or fence.device != self.queue.device) return self.fail(error.InvalidResource);
@@ -2530,6 +2644,38 @@ pub const ResourceStateEncoder = struct {
         return error.UnsupportedOperation;
     }
 
+    /// Map or unmap page-aligned ranges of a sparse buffer. Mapping commands
+    /// are deferred with the rest of the command buffer, while the backing
+    /// pages remain CPU/ZPU-owned and preserve aliases across copies.
+    pub fn updateBufferMapping(self: *ResourceStateEncoder, buffer: *Buffer, mode: u8, offset: usize, length: usize) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        if (!validBuffer(buffer) or buffer.device != self.command_buffer.queue.device or
+            buffer.sparse_page_bytes == 0 or !sparseRangeValid(buffer, offset, length) or
+            (mode != 0 and mode != 1)) return error.InvalidArgument;
+        _ = try self.command_buffer.append(.{ .sparse_buffer_mapping = .{
+            .buffer = buffer,
+            .mode = mode,
+            .offset = offset,
+            .length = length,
+        } });
+    }
+
+    pub fn copyBufferMappings(self: *ResourceStateEncoder, source: *Buffer, destination: *Buffer, source_offset: usize, destination_offset: usize, length: usize) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        if (!validBuffer(source) or !validBuffer(destination) or source.device != self.command_buffer.queue.device or
+            destination.device != self.command_buffer.queue.device or source.sparse_page_bytes == 0 or
+            source.sparse_page_bytes != destination.sparse_page_bytes or
+            !sparseRangeValid(source, source_offset, length) or !sparseRangeValid(destination, destination_offset, length))
+            return error.InvalidArgument;
+        _ = try self.command_buffer.append(.{ .sparse_buffer_copy_mapping = .{
+            .source = source,
+            .destination = destination,
+            .source_offset = source_offset,
+            .destination_offset = destination_offset,
+            .length = length,
+        } });
+    }
+
     pub fn endEncoding(self: *ResourceStateEncoder) Error!void {
         if (!self.open()) return error.InvalidCommand;
         try self.command_buffer.end(.resource_state);
@@ -3228,6 +3374,17 @@ pub fn createBufferNoCopy(device: *Device, length: usize, bytes: ?[*]u8) Error!*
     return result;
 }
 
+/// Create a placement-sparse CPU buffer. The dense byte slice is an internal
+/// staging view only; public contents are unavailable until a mapped range is
+/// copied through an encoder. Mapping state lives in ZPU-owned pages.
+pub fn createSparseBuffer(device: *Device, length: usize, page_bytes: usize) Error!*Buffer {
+    if (!validDevice(device) or length == 0 or !validSparsePageBytes(page_bytes)) return error.InvalidArgument;
+    const result = try createBuffer(device, length, null);
+    errdefer destroyBuffer(result);
+    result.sparse_page_bytes = page_bytes;
+    return result;
+}
+
 pub fn destroyBuffer(buffer: *Buffer) void {
     if (!validBuffer(buffer)) return;
     buffer.deinit();
@@ -3273,6 +3430,7 @@ pub fn createTextureInHeapAtOffset(heap: *Heap, width: u32, height: u32, format_
 
 pub fn createTextureFromBuffer(buffer: *Buffer, width: u32, height: u32, format_raw: u16, offset: usize, bytes_per_row: usize) Error!*Texture {
     if (!validBuffer(buffer)) return error.InvalidResource;
+    if (buffer.sparse_page_bytes != 0) return error.UnsupportedOperation;
     const format: TextureFormat = switch (format_raw) {
         @intFromEnum(abi.PixelFormat.a8_unorm) => .a8_unorm,
         @intFromEnum(abi.PixelFormat.r8_unorm) => .r8_unorm,
@@ -3520,7 +3678,9 @@ pub fn destroyComputeEncoder(encoder: *ComputeEncoder) void {
 
 pub fn bufferWrite(buffer: *Buffer, offset: usize, bytes: ?[*]const u8, length: usize) Error!void {
     if (!validBuffer(buffer) or (length != 0 and bytes == null) or !rangeValid(buffer.bytes.len, offset, length)) return error.InvalidArgument;
+    sparseSyncBuffer(buffer);
     if (length != 0) @memcpy(buffer.bytes[offset .. offset + length], bytes.?[0..length]);
+    sparseFlushBuffer(buffer);
 }
 
 pub fn textureGetBytes(texture: *Texture, destination: ?[*]u8, destination_length: usize, bytes_per_row: usize, region: abi.Region) Error!void {
@@ -4924,6 +5084,126 @@ fn validCommandBuffer(command_buffer: *CommandBuffer) bool {
 
 fn validBuffer(buffer: *Buffer) bool {
     return buffer.magic == buffer_magic and validDevice(buffer.device);
+}
+
+fn validSparsePageBytes(page_bytes: usize) bool {
+    return page_bytes == 16 * 1024 or page_bytes == 64 * 1024 or page_bytes == 256 * 1024;
+}
+
+fn sparsePageCount(buffer: *const Buffer) ?usize {
+    if (buffer.sparse_page_bytes == 0 or !validSparsePageBytes(buffer.sparse_page_bytes) or
+        buffer.bytes.len > std.math.maxInt(usize) - (buffer.sparse_page_bytes - 1)) return null;
+    return (buffer.bytes.len + buffer.sparse_page_bytes - 1) / buffer.sparse_page_bytes;
+}
+
+fn sparseRangeValid(buffer: *const Buffer, offset: usize, length: usize) bool {
+    const page_count = sparsePageCount(buffer) orelse return false;
+    if (offset % buffer.sparse_page_bytes != 0 or length % buffer.sparse_page_bytes != 0 or
+        offset > buffer.bytes.len or length > buffer.bytes.len - offset) return false;
+    const first_page = offset / buffer.sparse_page_bytes;
+    const page_length = length / buffer.sparse_page_bytes;
+    return first_page <= page_count and page_length <= page_count - first_page;
+}
+
+fn sparseMappingIndex(buffer: *const Buffer, page_index: usize) ?usize {
+    for (buffer.sparse_mappings.items, 0..) |mapping, index| {
+        if (mapping.page_index == page_index) return index;
+    }
+    return null;
+}
+
+fn sparseSyncBuffer(buffer: *Buffer) void {
+    if (buffer.sparse_page_bytes == 0) return;
+    @memset(buffer.bytes, 0);
+    for (buffer.sparse_mappings.items) |mapping| {
+        const offset = mapping.page_index * buffer.sparse_page_bytes;
+        if (offset >= buffer.bytes.len) continue;
+        const length = @min(buffer.sparse_page_bytes, buffer.bytes.len - offset);
+        @memcpy(buffer.bytes[offset .. offset + length], mapping.page.bytes[0..length]);
+    }
+}
+
+fn sparseFlushBuffer(buffer: *Buffer) void {
+    if (buffer.sparse_page_bytes == 0) return;
+    for (buffer.sparse_mappings.items) |mapping| {
+        const offset = mapping.page_index * buffer.sparse_page_bytes;
+        if (offset >= buffer.bytes.len) continue;
+        const length = @min(buffer.sparse_page_bytes, buffer.bytes.len - offset);
+        @memcpy(mapping.page.bytes[0..length], buffer.bytes[offset .. offset + length]);
+        if (length < mapping.page.bytes.len) @memset(mapping.page.bytes[length..], 0);
+    }
+}
+
+fn sparseSyncOptionalBuffer(buffer: ?*Buffer) void {
+    if (buffer) |value| if (validBuffer(value)) sparseSyncBuffer(value);
+}
+
+fn sparseFlushOptionalBuffer(buffer: ?*Buffer) void {
+    if (buffer) |value| if (validBuffer(value)) sparseFlushBuffer(value);
+}
+
+fn sparseUpdateBufferMapping(buffer: *Buffer, mode: u8, offset: usize, length: usize) Error!void {
+    if (!validBuffer(buffer) or buffer.sparse_page_bytes == 0 or !sparseRangeValid(buffer, offset, length)) return error.InvalidArgument;
+    if (mode != 0 and mode != 1) return error.InvalidArgument;
+    sparseFlushBuffer(buffer);
+    const first_page = offset / buffer.sparse_page_bytes;
+    const page_length = length / buffer.sparse_page_bytes;
+    for (0..page_length) |index| {
+        const page_index = first_page + index;
+        const existing = sparseMappingIndex(buffer, page_index);
+        if (mode == 0) {
+            if (existing == null) {
+                const page = try SparsePage.create(buffer.sparse_page_bytes);
+                buffer.sparse_mappings.append(allocator, .{ .page_index = page_index, .page = page }) catch |err| {
+                    page.release();
+                    return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidArgument;
+                };
+            }
+        } else if (existing) |mapping_index| {
+            const removed = buffer.sparse_mappings.orderedRemove(mapping_index);
+            removed.page.release();
+        }
+    }
+    sparseSyncBuffer(buffer);
+}
+
+fn sparseCopyBufferMappings(source: *Buffer, destination: *Buffer, source_offset: usize, destination_offset: usize, length: usize) Error!void {
+    if (!validBuffer(source) or !validBuffer(destination) or source.device != destination.device or
+        source.sparse_page_bytes == 0 or source.sparse_page_bytes != destination.sparse_page_bytes or
+        !sparseRangeValid(source, source_offset, length) or !sparseRangeValid(destination, destination_offset, length)) return error.InvalidArgument;
+    sparseFlushBuffer(source);
+    sparseFlushBuffer(destination);
+    const page_length = length / source.sparse_page_bytes;
+    const source_first = source_offset / source.sparse_page_bytes;
+    const destination_first = destination_offset / destination.sparse_page_bytes;
+    const pages = allocator.alloc(?*SparsePage, page_length) catch return error.OutOfMemory;
+    defer {
+        for (pages) |page| if (page) |value| value.release();
+        allocator.free(pages);
+    }
+    for (0..page_length) |index| {
+        pages[index] = if (sparseMappingIndex(source, source_first + index)) |mapping_index| blk: {
+            const page = source.sparse_mappings.items[mapping_index].page;
+            page.retain();
+            break :blk page;
+        } else null;
+    }
+    for (0..page_length) |index| {
+        const destination_page = destination_first + index;
+        if (sparseMappingIndex(destination, destination_page)) |mapping_index| {
+            const removed = destination.sparse_mappings.orderedRemove(mapping_index);
+            removed.page.release();
+        }
+        if (pages[index]) |page| {
+            destination.sparse_mappings.append(allocator, .{ .page_index = destination_page, .page = page }) catch |err| {
+                page.release();
+                pages[index] = null;
+                return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidArgument;
+            };
+            pages[index] = null;
+        }
+    }
+    sparseSyncBuffer(destination);
 }
 
 fn validTexture(texture: *Texture) bool {
@@ -6556,6 +6836,81 @@ test "visibility results count CPU-covered fragments and accumulate" {
     try std.testing.expectEqual(@as(u64, 32), readU64Little(visibility.bytes, 8));
 }
 
+test "CPU sparse buffer mappings preserve deferred ordering, zeroing, and aliases" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const page_bytes = 64 * 1024;
+    const source_values = try allocator.alloc(u8, page_bytes);
+    defer allocator.free(source_values);
+    for (source_values, 0..) |*value, index| value.* = @truncate(index * 13 + 7);
+    const source = try createBuffer(device, page_bytes, source_values.ptr);
+    defer destroyBuffer(source);
+    const sparse_source = try createSparseBuffer(device, page_bytes * 2, page_bytes);
+    defer destroyBuffer(sparse_source);
+    const sparse_destination = try createSparseBuffer(device, page_bytes * 2, page_bytes);
+    defer destroyBuffer(sparse_destination);
+    const readback = try createBuffer(device, page_bytes, null);
+    defer destroyBuffer(readback);
+
+    try std.testing.expectEqual(@as(usize, page_bytes), sparse_source.sparse_page_bytes);
+    try std.testing.expectEqual(@as(?[*]u8, null), zpu_metal_buffer_contents(sparse_source));
+
+    var first = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(first);
+    var resource_state = try beginResourceState(first);
+    try std.testing.expectError(error.InvalidArgument, resource_state.updateBufferMapping(source, 0, 0, page_bytes));
+    try std.testing.expectError(error.InvalidArgument, resource_state.updateBufferMapping(sparse_source, 2, 0, page_bytes));
+    try resource_state.updateBufferMapping(sparse_source, 0, 0, page_bytes);
+    try resource_state.updateBufferMapping(sparse_destination, 0, 0, page_bytes);
+    try resource_state.endEncoding();
+    destroyResourceStateEncoder(resource_state);
+    var upload = try beginBlit(first);
+    try upload.copyBuffer(source, 0, sparse_source, 0, page_bytes);
+    try upload.endEncoding();
+    destroyBlitEncoder(upload);
+    try first.commit();
+
+    var second = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(second);
+    var remap = try beginResourceState(second);
+    try remap.copyBufferMappings(sparse_source, sparse_destination, 0, page_bytes, page_bytes);
+    try remap.endEncoding();
+    destroyResourceStateEncoder(remap);
+    var download = try beginBlit(second);
+    try download.copyBuffer(sparse_destination, page_bytes, readback, 0, page_bytes);
+    try download.endEncoding();
+    destroyBlitEncoder(download);
+    try second.commit();
+    try std.testing.expectEqualSlices(u8, source_values, readback.bytes);
+
+    for (source_values, 0..) |*value, index| value.* = @truncate(index * 19 + 3);
+    try bufferWrite(source, 0, source_values.ptr, page_bytes);
+    var third = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(third);
+    var alias_upload = try beginBlit(third);
+    try alias_upload.copyBuffer(source, 0, sparse_source, 0, page_bytes);
+    try alias_upload.copyBuffer(sparse_destination, page_bytes, readback, 0, page_bytes);
+    try alias_upload.endEncoding();
+    destroyBlitEncoder(alias_upload);
+    try third.commit();
+    try std.testing.expectEqualSlices(u8, source_values, readback.bytes);
+
+    var fourth = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(fourth);
+    var unmap = try beginResourceState(fourth);
+    try unmap.updateBufferMapping(sparse_destination, 1, page_bytes, page_bytes);
+    try unmap.endEncoding();
+    destroyResourceStateEncoder(unmap);
+    var zero_download = try beginBlit(fourth);
+    try zero_download.copyBuffer(sparse_destination, page_bytes, readback, 0, page_bytes);
+    try zero_download.endEncoding();
+    destroyBlitEncoder(zero_download);
+    try fourth.commit();
+    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** page_bytes, readback.bytes);
+}
+
 test "fence update and wait preserve command ordering" {
     const device = try createDevice();
     defer destroyDevice(device);
@@ -6627,6 +6982,10 @@ pub export fn zpu_metal_device_new_buffer(device: ?*Device, length: usize, initi
     return createBuffer(device orelse return null, length, initial_bytes) catch null;
 }
 
+pub export fn zpu_metal_device_new_sparse_buffer(device: ?*Device, length: usize, page_bytes: usize) callconv(.c) ?*Buffer {
+    return createSparseBuffer(device orelse return null, length, page_bytes) catch null;
+}
+
 pub export fn zpu_metal_device_new_buffer_no_copy(device: ?*Device, length: usize, bytes: ?[*]u8) callconv(.c) ?*Buffer {
     return createBufferNoCopy(device orelse return null, length, bytes) catch null;
 }
@@ -6679,8 +7038,18 @@ pub export fn zpu_metal_buffer_length(buffer: ?*const Buffer) callconv(.c) usize
 
 pub export fn zpu_metal_buffer_contents(buffer: ?*Buffer) callconv(.c) ?[*]u8 {
     const value = buffer orelse return null;
-    if (!validBuffer(value) or value.bytes.len == 0) return null;
+    if (!validBuffer(value) or value.sparse_page_bytes != 0 or value.bytes.len == 0) return null;
     return value.bytes.ptr;
+}
+
+pub export fn zpu_metal_buffer_is_sparse(buffer: ?*const Buffer) callconv(.c) c_int {
+    const value = buffer orelse return 0;
+    return if (validBuffer(@constCast(value)) and value.sparse_page_bytes != 0) 1 else 0;
+}
+
+pub export fn zpu_metal_buffer_sparse_page_size(buffer: ?*const Buffer) callconv(.c) usize {
+    const value = buffer orelse return 0;
+    return if (validBuffer(@constCast(value))) value.sparse_page_bytes else 0;
 }
 
 pub export fn zpu_metal_buffer_heap_offset(buffer: ?*const Buffer) callconv(.c) usize {
@@ -7314,6 +7683,35 @@ pub export fn zpu_metal_resource_state_encoder_update_fence(encoder: ?*ResourceS
 
 pub export fn zpu_metal_resource_state_encoder_wait_for_fence(encoder: ?*ResourceStateEncoder, fence: ?*Fence) callconv(.c) c_int {
     (encoder orelse return -1).waitForFence(fence orelse return -1) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_resource_state_encoder_update_buffer_mapping(
+    encoder: ?*ResourceStateEncoder,
+    buffer: ?*Buffer,
+    mode: u8,
+    offset: usize,
+    length: usize,
+) callconv(.c) c_int {
+    (encoder orelse return -1).updateBufferMapping(buffer orelse return -1, mode, offset, length) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_resource_state_encoder_copy_buffer_mappings(
+    encoder: ?*ResourceStateEncoder,
+    source: ?*Buffer,
+    destination: ?*Buffer,
+    source_offset: usize,
+    destination_offset: usize,
+    length: usize,
+) callconv(.c) c_int {
+    (encoder orelse return -1).copyBufferMappings(
+        source orelse return -1,
+        destination orelse return -1,
+        source_offset,
+        destination_offset,
+        length,
+    ) catch |err| return errorCode(err);
     return 0;
 }
 

@@ -9,7 +9,7 @@
 /* Native ZPU CPU Metal-layer ABI. This is intentionally separate from the
  * Apple Objective-C framework ABI; it is the portable FFI surface used by
  * clients that select ZPU's CPU renderer. */
-#define ZPU_METAL_ABI_VERSION 22u
+#define ZPU_METAL_ABI_VERSION 23u
 
 typedef uint8_t zpu_metal_workload;
 enum {
@@ -345,6 +345,21 @@ typedef struct zpu_metal_heap_descriptor {
     size_t size;
 } zpu_metal_heap_descriptor;
 
+/* Placement-sparse buffers use CPU-owned ZPU pages. The public contents
+ * pointer is intentionally NULL for these resources; ordinary copy/fill
+ * commands provide the access path, matching private Metal resources. */
+enum {
+    ZPU_METAL_SPARSE_PAGE_SIZE_16K = 16u * 1024u,
+    ZPU_METAL_SPARSE_PAGE_SIZE_64K = 64u * 1024u,
+    ZPU_METAL_SPARSE_PAGE_SIZE_256K = 256u * 1024u,
+};
+
+typedef uint8_t zpu_metal_sparse_mapping_mode;
+enum {
+    ZPU_METAL_SPARSE_MAPPING_MAP = 0,
+    ZPU_METAL_SPARSE_MAPPING_UNMAP = 1,
+};
+
 /* CPU compute kernels are explicit ZPU operations.  They are not MSL and
  * do not invoke Apple's Metal compiler or command encoder. */
 typedef uint8_t zpu_metal_compute_kernel;
@@ -429,11 +444,14 @@ void zpu_metal_device_destroy(zpu_metal_device *device);
 zpu_metal_command_queue *zpu_metal_device_new_command_queue(zpu_metal_device *device);
 void zpu_metal_command_queue_destroy(zpu_metal_command_queue *queue);
 zpu_metal_buffer *zpu_metal_device_new_buffer(zpu_metal_device *device, size_t length, const void *initial_bytes);
+zpu_metal_buffer *zpu_metal_device_new_sparse_buffer(zpu_metal_device *device, size_t length, size_t page_bytes);
 zpu_metal_buffer *zpu_metal_device_new_buffer_no_copy(zpu_metal_device *device, size_t length, void *bytes);
 void zpu_metal_buffer_destroy(zpu_metal_buffer *buffer);
 zpu_metal_texture *zpu_metal_buffer_new_texture(zpu_metal_buffer *buffer, const zpu_metal_texture_descriptor *descriptor, size_t offset, size_t bytes_per_row);
 size_t zpu_metal_buffer_length(const zpu_metal_buffer *buffer);
 void *zpu_metal_buffer_contents(zpu_metal_buffer *buffer);
+int zpu_metal_buffer_is_sparse(const zpu_metal_buffer *buffer);
+size_t zpu_metal_buffer_sparse_page_size(const zpu_metal_buffer *buffer);
 size_t zpu_metal_buffer_heap_offset(const zpu_metal_buffer *buffer);
 int zpu_metal_buffer_write(zpu_metal_buffer *buffer, size_t offset, const void *bytes, size_t length);
 zpu_metal_texture *zpu_metal_device_new_texture(zpu_metal_device *device, const zpu_metal_texture_descriptor *descriptor);
@@ -572,6 +590,8 @@ void zpu_metal_blit_encoder_destroy(zpu_metal_blit_encoder *encoder);
 zpu_metal_resource_state_encoder *zpu_metal_command_buffer_resource_state_encoder(zpu_metal_command_buffer *command_buffer);
 int zpu_metal_resource_state_encoder_update_fence(zpu_metal_resource_state_encoder *encoder, zpu_metal_fence *fence);
 int zpu_metal_resource_state_encoder_wait_for_fence(zpu_metal_resource_state_encoder *encoder, zpu_metal_fence *fence);
+int zpu_metal_resource_state_encoder_update_buffer_mapping(zpu_metal_resource_state_encoder *encoder, zpu_metal_buffer *buffer, zpu_metal_sparse_mapping_mode mode, size_t offset, size_t length);
+int zpu_metal_resource_state_encoder_copy_buffer_mappings(zpu_metal_resource_state_encoder *encoder, zpu_metal_buffer *source, zpu_metal_buffer *destination, size_t source_offset, size_t destination_offset, size_t length);
 int zpu_metal_resource_state_encoder_end_encoding(zpu_metal_resource_state_encoder *encoder);
 void zpu_metal_resource_state_encoder_destroy(zpu_metal_resource_state_encoder *encoder);
 
