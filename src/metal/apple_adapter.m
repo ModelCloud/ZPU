@@ -455,6 +455,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSMutableArray *_completedHandlers;
     NSError *_error;
     NSString *_label;
+    BOOL _scheduled;
 }
 - (instancetype)initWithOwner:(ZPUCommandQueue *)owner commandBuffer:(zpu_metal_command_buffer *)commandBuffer;
 - (void)retainResource:(id)resource;
@@ -2457,12 +2458,14 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
         case ZPU_METAL_COMMAND_BUFFER_COMMITTED: return MTLCommandBufferStatusCommitted;
         case ZPU_METAL_COMMAND_BUFFER_COMPLETED: return MTLCommandBufferStatusCompleted;
         case ZPU_METAL_COMMAND_BUFFER_ERROR: return MTLCommandBufferStatusError;
-        default: return MTLCommandBufferStatusNotEnqueued;
+        default: return _scheduled ? MTLCommandBufferStatusScheduled : MTLCommandBufferStatusNotEnqueued;
     }
 }
 - (NSError *)error { return _error; }
 - (void)enqueue { [self commit]; }
 - (void)commit {
+    if (_scheduled) return;
+    _scheduled = YES;
     NSArray *scheduled = [_scheduledHandlers copy];
     [_scheduledHandlers removeAllObjects];
     for (MTLCommandBufferHandler block in scheduled) block((id<MTLCommandBuffer>)self);

@@ -1867,10 +1867,11 @@ int main(void) {
         [adapter_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
         [adapter_encoder endEncoding];
         __block BOOL adapter_scheduled = NO;
+        __block BOOL adapter_scheduled_state = NO;
         __block BOOL adapter_completed = NO;
         [adapter_command_buffer addScheduledHandler:^(id<MTLCommandBuffer> buffer) {
-            (void)buffer;
             adapter_scheduled = YES;
+            adapter_scheduled_state = buffer.status == MTLCommandBufferStatusScheduled;
         }];
         [adapter_command_buffer addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
             (void)buffer;
@@ -1879,7 +1880,7 @@ int main(void) {
         [adapter_command_buffer commit];
         [adapter_command_buffer waitUntilCompleted];
         if (adapter_command_buffer.status != MTLCommandBufferStatusCompleted ||
-            !adapter_scheduled || !adapter_completed) {
+            !adapter_scheduled || !adapter_scheduled_state || !adapter_completed) {
             fprintf(stderr, "metal-pixel: Objective-C adapter command did not complete\n");
             return 20;
         }
