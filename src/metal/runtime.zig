@@ -168,6 +168,8 @@ const DrawCommand = struct {
     fragment_uniform_buffer: ?*Buffer = null,
     fragment_uniform_buffer_offset: usize = 0,
     sample_texture: ?*Texture = null,
+    sample_mipmap_start: usize = 0,
+    sample_mipmap_count: usize = 0,
     visibility_buffer: ?*Buffer = null,
     visibility_mode: abi.VisibilityResultMode = .disabled,
     visibility_offset: usize = 0,
@@ -290,11 +292,13 @@ pub const CommandBuffer = struct {
     active_encoder: EncoderKind = .none,
     commands: std.ArrayList(Command) = .empty,
     vertices: std.ArrayList(abi.Vertex) = .empty,
+    sample_mipmaps: std.ArrayList(*Texture) = .empty,
     owned_compute_buffers: std.ArrayList(*Buffer) = .empty,
 
     pub fn deinit(self: *CommandBuffer) void {
         self.commands.deinit(allocator);
         self.vertices.deinit(allocator);
+        self.sample_mipmaps.deinit(allocator);
         for (self.owned_compute_buffers.items) |buffer| destroyBuffer(buffer);
         self.owned_compute_buffers.deinit(allocator);
         self.magic = 0;
@@ -462,10 +466,22 @@ pub const CommandBuffer = struct {
                 var extra_targets: [7]*raster3d.Target = undefined;
                 var sample_target_storage: raster3d.Target = undefined;
                 var sample_target: ?*const raster3d.Target = null;
+                var sample_mipmap_targets: []raster3d.Target = &.{};
+                defer if (sample_mipmap_targets.len != 0) allocator.free(sample_mipmap_targets);
                 if (draw.sample_texture) |value| {
                     if (!validTexture(value) or value.device != self.queue.device or !value.format.isColor()) return self.fail(error.InvalidResource);
                     sample_target_storage = value.asTarget();
                     sample_target = &sample_target_storage;
+                }
+                if (draw.sample_mipmap_count != 0) {
+                    if (draw.sample_mipmap_start > self.sample_mipmaps.items.len or
+                        draw.sample_mipmap_count > self.sample_mipmaps.items.len - draw.sample_mipmap_start)
+                        return self.fail(error.InvalidCommand);
+                    sample_mipmap_targets = allocator.alloc(raster3d.Target, draw.sample_mipmap_count) catch return self.fail(error.OutOfMemory);
+                    for (self.sample_mipmaps.items[draw.sample_mipmap_start .. draw.sample_mipmap_start + draw.sample_mipmap_count], 0..) |value, index| {
+                        if (!validTexture(value) or value.device != self.queue.device or !value.format.isColor()) return self.fail(error.InvalidResource);
+                        sample_mipmap_targets[index] = value.asTarget();
+                    }
                 }
                 var extra_count: usize = 0;
                 for (active_color_attachments[1..]) |attachment| {
@@ -477,10 +493,11 @@ pub const CommandBuffer = struct {
                 }
                 var stats: raster3d.Stats = .{};
                 for (0..instance_count) |_| {
-                    stats = addRasterStats(stats, raster3d.drawWithTargets(
+                    stats = addRasterStats(stats, raster3d.drawWithTargetMipmaps(
                         @constCast(&target),
                         extra_targets[0..extra_count],
                         sample_target,
+                        sample_mipmap_targets,
                         active_depth,
                         active_stencil,
                         draw_vertices,
@@ -654,9 +671,13 @@ pub const RenderEncoder = struct {
     depth_test_min_bound: f32 = 0,
     depth_test_max_bound: f32 = 1,
     fragment_texture: ?*Texture = null,
+    fragment_mipmaps: std.ArrayList(*Texture) = .empty,
     sample_texture: bool = false,
     sample_min_filter: abi.SamplerFilter = .nearest,
     sample_mag_filter: abi.SamplerFilter = .nearest,
+    sample_mip_filter: abi.SamplerMipFilter = .not_mipmapped,
+    sample_lod_min_clamp: f32 = 0,
+    sample_lod_max_clamp: f32 = std.math.floatMax(f32),
     sample_address_s: abi.SamplerAddressMode = .clamp_to_edge,
     sample_address_t: abi.SamplerAddressMode = .clamp_to_edge,
     sample_border_color: abi.SamplerBorderColor = .transparent_black,
@@ -692,6 +713,7 @@ pub const RenderEncoder = struct {
 
     pub fn deinit(self: *RenderEncoder) void {
         self.inline_vertices.deinit(allocator);
+        self.fragment_mipmaps.deinit(allocator);
         self.magic = 0;
     }
 
@@ -714,6 +736,9 @@ pub const RenderEncoder = struct {
             .depth_test_max_bound = self.depth_test_max_bound,
             .sample_min_filter = self.sample_min_filter,
             .sample_mag_filter = self.sample_mag_filter,
+            .sample_mip_filter = self.sample_mip_filter,
+            .sample_lod_min_clamp = self.sample_lod_min_clamp,
+            .sample_lod_max_clamp = self.sample_lod_max_clamp,
             .sample_address_s = self.sample_address_s,
             .sample_address_t = self.sample_address_t,
             .sample_border_color = self.sample_border_color,
@@ -799,16 +824,57 @@ pub const RenderEncoder = struct {
             if (!validTexture(value) or value.device != self.command_buffer.queue.device or !value.format.isColor()) return error.InvalidResource;
         }
         self.fragment_texture = texture;
+        self.fragment_mipmaps.clearRetainingCapacity();
+        if (texture) |value| self.fragment_mipmaps.append(allocator, value) catch return error.OutOfMemory;
         self.sample_swizzle = .{ .red = .red, .green = .green, .blue = .blue, .alpha = .alpha };
     }
 
-    pub fn setFragmentSampler(self: *RenderEncoder, min_filter: u8, mag_filter: u8, address_s: u8, address_t: u8, border_color: u8) Error!void {
+    pub fn setFragmentTextureLevels(self: *RenderEncoder, textures: ?[*]const ?*Texture, count: usize, index: u32) Error!void {
+        if (!self.open() or index != 0) return error.UnsupportedOperation;
+        if (count == 0) {
+            self.fragment_texture = null;
+            self.fragment_mipmaps.clearRetainingCapacity();
+            self.sample_swizzle = .{ .red = .red, .green = .green, .blue = .blue, .alpha = .alpha };
+            return;
+        }
+        const values = textures orelse return error.InvalidArgument;
+        for (values[0..count]) |value| {
+            const texture = value orelse return error.InvalidResource;
+            if (!validTexture(texture) or texture.device != self.command_buffer.queue.device or !texture.format.isColor()) return error.InvalidResource;
+        }
+        self.fragment_mipmaps.clearRetainingCapacity();
+        for (values[0..count]) |value| self.fragment_mipmaps.append(allocator, value.?) catch return error.OutOfMemory;
+        self.fragment_texture = self.fragment_mipmaps.items[0];
+        self.sample_swizzle = .{ .red = .red, .green = .green, .blue = .blue, .alpha = .alpha };
+    }
+
+    fn appendSampleMipmaps(self: *RenderEncoder) Error!struct { start: usize, count: usize } {
+        if (!self.sample_texture) return .{ .start = 0, .count = 0 };
+        const texture = self.fragment_texture orelse return error.InvalidResource;
+        const start = self.command_buffer.sample_mipmaps.items.len;
+        if (self.fragment_mipmaps.items.len == 0) {
+            self.command_buffer.sample_mipmaps.append(allocator, texture) catch return error.OutOfMemory;
+            return .{ .start = start, .count = 1 };
+        }
+        self.command_buffer.sample_mipmaps.appendSlice(allocator, self.fragment_mipmaps.items) catch return error.OutOfMemory;
+        return .{ .start = start, .count = self.fragment_mipmaps.items.len };
+    }
+
+    pub fn setFragmentSampler(self: *RenderEncoder, min_filter: u8, mag_filter: u8, address_s: u8, address_t: u8, border_color: u8, mip_filter: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
         self.sample_min_filter = samplerFilterFromInt(min_filter) orelse return error.InvalidArgument;
         self.sample_mag_filter = samplerFilterFromInt(mag_filter) orelse return error.InvalidArgument;
+        self.sample_mip_filter = samplerMipFilterFromInt(mip_filter) orelse return error.InvalidArgument;
         self.sample_address_s = samplerAddressModeFromInt(address_s) orelse return error.InvalidArgument;
         self.sample_address_t = samplerAddressModeFromInt(address_t) orelse return error.InvalidArgument;
         self.sample_border_color = samplerBorderColorFromInt(border_color) orelse return error.InvalidArgument;
+    }
+
+    pub fn setFragmentSamplerLodClamps(self: *RenderEncoder, lod_min_clamp: f32, lod_max_clamp: f32) Error!void {
+        if (!self.open() or !std.math.isFinite(lod_min_clamp) or !std.math.isFinite(lod_max_clamp) or
+            lod_min_clamp < 0 or lod_max_clamp < lod_min_clamp) return error.InvalidArgument;
+        self.sample_lod_min_clamp = lod_min_clamp;
+        self.sample_lod_max_clamp = lod_max_clamp;
     }
 
     pub fn setFragmentTextureSwizzle(self: *RenderEncoder, red: u8, green: u8, blue: u8, alpha: u8) Error!void {
@@ -1154,6 +1220,7 @@ pub const RenderEncoder = struct {
         defer if (owned_source) |vertices| allocator.free(vertices);
         if (vertex_start > source.len or vertex_count > source.len - vertex_start) return error.InvalidArgument;
         const selected = source[vertex_start .. vertex_start + vertex_count];
+        const sample_mipmaps = try self.appendSampleMipmaps();
         var instance: usize = 0;
         while (instance < instance_count) : (instance += 1) {
             const bound_buffer = self.vertex_buffer;
@@ -1170,6 +1237,8 @@ pub const RenderEncoder = struct {
                 .fragment_uniform_buffer = self.fragment_uniform_buffer,
                 .fragment_uniform_buffer_offset = self.fragment_uniform_buffer_offset,
                 .sample_texture = if (self.sample_texture) self.fragment_texture else null,
+                .sample_mipmap_start = sample_mipmaps.start,
+                .sample_mipmap_count = sample_mipmaps.count,
                 .visibility_buffer = self.visibility_buffer,
                 .visibility_mode = self.visibility_mode,
                 .visibility_offset = self.visibility_offset,
@@ -1186,6 +1255,7 @@ pub const RenderEncoder = struct {
         defer if (owned_source) |vertices| allocator.free(vertices);
         const bound_buffer = self.vertex_buffer;
         const vertex_start = if (bound_buffer == null) try self.command_buffer.appendVertices(source) else 0;
+        const sample_mipmaps = try self.appendSampleMipmaps();
         _ = try self.command_buffer.append(.{ .draw = .{
             .vertex_start = vertex_start,
             .vertex_count = 0,
@@ -1201,6 +1271,8 @@ pub const RenderEncoder = struct {
             .fragment_uniform_buffer = self.fragment_uniform_buffer,
             .fragment_uniform_buffer_offset = self.fragment_uniform_buffer_offset,
             .sample_texture = if (self.sample_texture) self.fragment_texture else null,
+            .sample_mipmap_start = sample_mipmaps.start,
+            .sample_mipmap_count = sample_mipmaps.count,
             .visibility_buffer = self.visibility_buffer,
             .visibility_mode = self.visibility_mode,
             .visibility_offset = self.visibility_offset,
@@ -1225,6 +1297,7 @@ pub const RenderEncoder = struct {
         if (!rangeValid(index_buffer.bytes.len, index_buffer_offset, index_bytes)) return error.InvalidArgument;
         const bound_buffer = self.vertex_buffer;
         const vertex_start = if (bound_buffer == null) try self.command_buffer.appendVertices(source) else 0;
+        const sample_mipmaps = try self.appendSampleMipmaps();
         var instance: usize = 0;
         while (instance < instance_count) : (instance += 1) {
             _ = try self.command_buffer.append(.{ .draw = .{
@@ -1244,6 +1317,8 @@ pub const RenderEncoder = struct {
                 .fragment_uniform_buffer = self.fragment_uniform_buffer,
                 .fragment_uniform_buffer_offset = self.fragment_uniform_buffer_offset,
                 .sample_texture = if (self.sample_texture) self.fragment_texture else null,
+                .sample_mipmap_start = sample_mipmaps.start,
+                .sample_mipmap_count = sample_mipmaps.count,
                 .visibility_buffer = self.visibility_buffer,
                 .visibility_mode = self.visibility_mode,
                 .visibility_offset = self.visibility_offset,
@@ -1261,6 +1336,7 @@ pub const RenderEncoder = struct {
         defer if (owned_source) |vertices| allocator.free(vertices);
         const bound_buffer = self.vertex_buffer;
         const vertex_start = if (bound_buffer == null) try self.command_buffer.appendVertices(source) else 0;
+        const sample_mipmaps = try self.appendSampleMipmaps();
         _ = try self.command_buffer.append(.{ .draw = .{
             .vertex_start = vertex_start,
             .vertex_count = 0,
@@ -1279,6 +1355,8 @@ pub const RenderEncoder = struct {
             .fragment_uniform_buffer = self.fragment_uniform_buffer,
             .fragment_uniform_buffer_offset = self.fragment_uniform_buffer_offset,
             .sample_texture = if (self.sample_texture) self.fragment_texture else null,
+            .sample_mipmap_start = sample_mipmaps.start,
+            .sample_mipmap_count = sample_mipmaps.count,
             .visibility_buffer = self.visibility_buffer,
             .visibility_mode = self.visibility_mode,
             .visibility_offset = self.visibility_offset,
@@ -2624,6 +2702,15 @@ fn samplerFilterFromInt(value: u8) ?abi.SamplerFilter {
     };
 }
 
+fn samplerMipFilterFromInt(value: u8) ?abi.SamplerMipFilter {
+    return switch (value) {
+        @intFromEnum(abi.SamplerMipFilter.not_mipmapped) => .not_mipmapped,
+        @intFromEnum(abi.SamplerMipFilter.nearest) => .nearest,
+        @intFromEnum(abi.SamplerMipFilter.linear) => .linear,
+        else => null,
+    };
+}
+
 fn samplerAddressModeFromInt(value: u8) ?abi.SamplerAddressMode {
     return switch (value) {
         @intFromEnum(abi.SamplerAddressMode.clamp_to_edge) => .clamp_to_edge,
@@ -3759,23 +3846,47 @@ pub export fn zpu_metal_render_encoder_set_fragment_texture(encoder: ?*RenderEnc
     return 0;
 }
 
+pub export fn zpu_metal_render_encoder_set_fragment_texture_levels(
+    encoder: ?*RenderEncoder, textures: ?[*]const ?*Texture, count: usize, index: u32,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setFragmentTextureLevels(textures, count, index) catch |err| return errorCode(err);
+    return 0;
+}
+
 pub export fn zpu_metal_render_encoder_set_fragment_sampler(encoder: ?*RenderEncoder, filter: u8, address_s: u8, address_t: u8) callconv(.c) c_int {
     (encoder orelse return -1).setFragmentSampler(filter, filter, address_s, address_t,
-        @intFromEnum(abi.SamplerBorderColor.transparent_black)) catch |err| return errorCode(err);
+        @intFromEnum(abi.SamplerBorderColor.transparent_black),
+        @intFromEnum(abi.SamplerMipFilter.not_mipmapped)) catch |err| return errorCode(err);
     return 0;
 }
 
 pub export fn zpu_metal_render_encoder_set_fragment_sampler_with_border(
     encoder: ?*RenderEncoder, filter: u8, address_s: u8, address_t: u8, border_color: u8,
 ) callconv(.c) c_int {
-    (encoder orelse return -1).setFragmentSampler(filter, filter, address_s, address_t, border_color) catch |err| return errorCode(err);
+    (encoder orelse return -1).setFragmentSampler(filter, filter, address_s, address_t, border_color,
+        @intFromEnum(abi.SamplerMipFilter.not_mipmapped)) catch |err| return errorCode(err);
     return 0;
 }
 
 pub export fn zpu_metal_render_encoder_set_fragment_sampler_with_filters(
     encoder: ?*RenderEncoder, min_filter: u8, mag_filter: u8, address_s: u8, address_t: u8, border_color: u8,
 ) callconv(.c) c_int {
-    (encoder orelse return -1).setFragmentSampler(min_filter, mag_filter, address_s, address_t, border_color) catch |err| return errorCode(err);
+    (encoder orelse return -1).setFragmentSampler(min_filter, mag_filter, address_s, address_t, border_color,
+        @intFromEnum(abi.SamplerMipFilter.not_mipmapped)) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_fragment_sampler_with_filters_and_mip_filter(
+    encoder: ?*RenderEncoder, min_filter: u8, mag_filter: u8, address_s: u8, address_t: u8, border_color: u8, mip_filter: u8,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setFragmentSampler(min_filter, mag_filter, address_s, address_t, border_color, mip_filter) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_fragment_sampler_lod_clamps(
+    encoder: ?*RenderEncoder, lod_min_clamp: f32, lod_max_clamp: f32,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setFragmentSamplerLodClamps(lod_min_clamp, lod_max_clamp) catch |err| return errorCode(err);
     return 0;
 }
 

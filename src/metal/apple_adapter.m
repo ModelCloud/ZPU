@@ -17,6 +17,7 @@
 
 #include <string.h>
 #include <math.h>
+#include <float.h>
 #include <time.h>
 #include <mach/mach_time.h>
 #include <compression.h>
@@ -634,6 +635,9 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLSamplerAddressMode _sAddressMode;
     MTLSamplerAddressMode _tAddressMode;
     MTLSamplerBorderColor _borderColor;
+    BOOL _normalizedCoordinates;
+    float _lodMinClamp;
+    float _lodMaxClamp;
     uint64_t _resourceID;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLSamplerDescriptor *)descriptor;
@@ -5506,6 +5510,9 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _sAddressMode = descriptor.sAddressMode;
         _tAddressMode = descriptor.tAddressMode;
         _borderColor = descriptor.borderColor;
+        _normalizedCoordinates = descriptor.normalizedCoordinates;
+        _lodMinClamp = descriptor.lodMinClamp;
+        _lodMaxClamp = descriptor.lodMaxClamp;
         _resourceID = zpu_register_resource(self);
     }
     return self;
@@ -11988,6 +11995,21 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     }
     _fragmentTexture = zpuTexture;
     if (zpuTexture != nil) [_owner retainResource:zpuTexture];
+    if (zpuTexture != nil) {
+        const NSUInteger mipmapCount = zpuTexture.mipmapLevelCount;
+        if (mipmapCount > SIZE_MAX / sizeof(zpu_metal_texture *)) { [_owner markError]; return; }
+        NSMutableData *mipmapData = [NSMutableData dataWithLength:mipmapCount * sizeof(zpu_metal_texture *)];
+        zpu_metal_texture **mipmaps = (zpu_metal_texture **)mipmapData.mutableBytes;
+        for (NSUInteger level = 0; level < mipmapCount; ++level) {
+            mipmaps[level] = [zpuTexture zpuTextureAtLevel:level slice:0];
+            if (mipmaps[level] == NULL) { [_owner markError]; return; }
+        }
+        if (zpu_metal_render_encoder_set_fragment_texture_levels(
+                _zpuEncoder, mipmaps, mipmapCount, (uint32_t)index) != ZPU_METAL_OK) {
+            [_owner markError];
+            return;
+        }
+    }
     const MTLTextureSwizzleChannels swizzle = zpuTexture == nil ? MTLTextureSwizzleChannelsDefault : zpuTexture.swizzle;
     if (zpu_metal_render_encoder_set_fragment_texture_swizzle(
             _zpuEncoder, (zpu_metal_texture_swizzle)swizzle.red,
@@ -12016,8 +12038,14 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         (zpu_metal_sampler_address_mode)zpuSampler->_tAddressMode;
     const uint8_t borderColor = sampler == nil ? (uint8_t)MTLSamplerBorderColorTransparentBlack :
         (uint8_t)zpuSampler->_borderColor;
-    if (zpu_metal_render_encoder_set_fragment_sampler_with_filters(
-            _zpuEncoder, minFilter, magFilter, address_s, address_t, borderColor) != ZPU_METAL_OK) {
+    const zpu_metal_sampler_mip_filter mipFilter = sampler == nil ? ZPU_METAL_SAMPLER_NOT_MIPMAPPED :
+        (zpu_metal_sampler_mip_filter)zpuSampler->_mipFilter;
+    const float lodMinClamp = sampler == nil ? 0.0f : zpuSampler->_lodMinClamp;
+    const float lodMaxClamp = sampler == nil ? FLT_MAX : zpuSampler->_lodMaxClamp;
+    if (zpu_metal_render_encoder_set_fragment_sampler_with_filters_and_mip_filter(
+            _zpuEncoder, minFilter, magFilter, address_s, address_t, borderColor, mipFilter) != ZPU_METAL_OK ||
+        zpu_metal_render_encoder_set_fragment_sampler_lod_clamps(
+            _zpuEncoder, lodMinClamp, lodMaxClamp) != ZPU_METAL_OK) {
         [_owner markError];
         return;
     }
@@ -12028,9 +12056,9 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     for (NSUInteger index = 0; index < range.length; ++index) [self setFragmentSamplerState:samplers[index] atIndex:range.location + index];
 }
 - (void)setFragmentSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMinClamp lodMaxClamp:(float)lodMaxClamp atIndex:(NSUInteger)index {
-    (void)lodMinClamp;
-    (void)lodMaxClamp;
     [self setFragmentSamplerState:sampler atIndex:index];
+    if (index > UINT32_MAX || zpu_metal_render_encoder_set_fragment_sampler_lod_clamps(
+            _zpuEncoder, lodMinClamp, lodMaxClamp) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)setFragmentSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers
                 lodMinClamps:(const float [__nonnull])lodMinClamps

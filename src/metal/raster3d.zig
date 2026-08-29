@@ -44,6 +44,9 @@ pub const DrawOptions = struct {
     fragment_color: ?[4]f32 = null,
     sample_min_filter: abi.SamplerFilter = .nearest,
     sample_mag_filter: abi.SamplerFilter = .nearest,
+    sample_mip_filter: abi.SamplerMipFilter = .not_mipmapped,
+    sample_lod_min_clamp: f32 = 0,
+    sample_lod_max_clamp: f32 = std.math.floatMax(f32),
     sample_address_s: abi.SamplerAddressMode = .clamp_to_edge,
     sample_address_t: abi.SamplerAddressMode = .clamp_to_edge,
     sample_border_color: abi.SamplerBorderColor = .transparent_black,
@@ -298,6 +301,7 @@ const Job = struct {
     target: *Target,
     extra_targets: []const *Target,
     sample_texture: ?*const Target,
+    sample_mipmaps: []const Target,
     depth: ?[]f32,
     stencil: ?[]u8,
     vertices: []const abi.Vertex,
@@ -438,8 +442,39 @@ fn depthBias(job: *const Job, slope: f32) f32 {
     return result;
 }
 
+const SampleSelection = struct {
+    filter: abi.SamplerFilter,
+    level0: usize = 0,
+    level1: usize = 0,
+    level_weight: f32 = 0,
+};
+
+fn sampleSelection(job: *const Job, filter: abi.SamplerFilter, rho: f32) SampleSelection {
+    if (job.sample_mipmaps.len <= 1 or job.options.sample_mip_filter == .not_mipmapped) {
+        return .{ .filter = filter };
+    }
+    var lod = if (std.math.isFinite(rho) and rho > 0) std.math.log2(rho) else 0;
+    lod = std.math.clamp(lod, job.options.sample_lod_min_clamp, job.options.sample_lod_max_clamp);
+    lod = std.math.clamp(lod, 0, @as(f32, @floatFromInt(job.sample_mipmaps.len - 1)));
+    return switch (job.options.sample_mip_filter) {
+        .not_mipmapped => .{ .filter = filter },
+        .nearest => .{ .filter = filter, .level0 = @intFromFloat(@floor(lod + 0.5)) },
+        .linear => blk: {
+            const level0_float = @floor(lod);
+            const level0: usize = @intFromFloat(level0_float);
+            const level1 = @min(level0 + 1, job.sample_mipmaps.len - 1);
+            break :blk .{
+                .filter = filter,
+                .level0 = level0,
+                .level1 = level1,
+                .level_weight = lod - level0_float,
+            };
+        },
+    };
+}
+
 fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [4]f32,
-    sample_filter: abi.SamplerFilter, stats: *Stats, front_facing: bool) void {
+    selection: SampleSelection, stats: *Stats, front_facing: bool) void {
     const width: usize = @intCast(job.target.width);
     if (x >= width or y >= job.target.height) return;
     const adjusted_depth = adjustedDepth(job, z, depth_adjust) orelse return;
@@ -481,11 +516,18 @@ fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [
         stats.depth_tests_passed += 1;
     }
     if (stencil_index) |index| applyStencil(job.stencil.?, index, stencil_state, stencil_state.depth_pass);
-    const fragment_color = if (job.sample_texture) |texture|
-        texture.sample(color[0], color[1], sample_filter, job.options.sample_address_s, job.options.sample_address_t,
-            job.options.sample_border_color, job.options.sample_swizzle)
-    else
-        job.options.fragment_color orelse color;
+    const fragment_color = if (job.sample_texture) |texture| blk: {
+        const level0 = if (job.sample_mipmaps.len != 0) &job.sample_mipmaps[selection.level0] else texture;
+        const color0 = level0.sample(color[0], color[1], selection.filter, job.options.sample_address_s,
+            job.options.sample_address_t, job.options.sample_border_color, job.options.sample_swizzle);
+        if (selection.level1 == selection.level0 or job.sample_mipmaps.len == 0) break :blk color0;
+        const color1 = job.sample_mipmaps[selection.level1].sample(color[0], color[1], selection.filter,
+            job.options.sample_address_s, job.options.sample_address_t, job.options.sample_border_color,
+            job.options.sample_swizzle);
+        var result: [4]f32 = undefined;
+        for (0..4) |channel| result[channel] = color0[channel] + (color1[channel] - color0[channel]) * selection.level_weight;
+        break :blk result;
+    } else job.options.fragment_color orelse color;
     writeColor(job.target, x, y, fragment_color, job.options);
     if (job.options.write_extra_targets) for (job.extra_targets) |target| writeColor(target, x, y, fragment_color, job.options);
     stats.fragments_covered += 1;
@@ -542,17 +584,23 @@ fn drawPoint(job: *Job, vertex: ProjectedVertex, y0: usize, y1: usize, stats: *S
     const x = pixelCoordinate(vertex.x, bounds.x1) orelse return;
     const y = pixelCoordinate(vertex.y, bounds.y1) orelse return;
     if (x < bounds.x0 or y < @max(bounds.y0, y0) or y >= @min(bounds.y1, y1)) return;
-    writePixel(job, x, y, vertex.z, depthBias(job, 0), vertex.color, job.options.sample_mag_filter, stats, true);
+    writePixel(job, x, y, vertex.z, depthBias(job, 0), vertex.color,
+        sampleSelection(job, job.options.sample_mag_filter, 0), stats, true);
 }
 
-fn lineSampleFilter(job: *const Job, a: ProjectedVertex, b: ProjectedVertex) abi.SamplerFilter {
-    if (job.sample_texture == null) return job.options.sample_mag_filter;
+fn lineSampleSelection(job: *const Job, a: ProjectedVertex, b: ProjectedVertex) SampleSelection {
+    if (job.sample_texture == null) return .{ .filter = job.options.sample_mag_filter };
     const steps = @max(@abs(b.x - a.x), @abs(b.y - a.y));
-    if (!std.math.isFinite(steps) or steps <= 0) return job.options.sample_mag_filter;
+    if (!std.math.isFinite(steps) or steps <= 0) return .{ .filter = job.options.sample_mag_filter };
     const texture = job.sample_texture.?;
     const footprint_u = @abs(b.color[0] - a.color[0]) * @as(f32, @floatFromInt(texture.width)) / steps;
     const footprint_v = @abs(b.color[1] - a.color[1]) * @as(f32, @floatFromInt(texture.height)) / steps;
-    return if (@max(footprint_u, footprint_v) > 1) job.options.sample_min_filter else job.options.sample_mag_filter;
+    const rho = @max(footprint_u, footprint_v);
+    return sampleSelection(job, if (rho > 1) job.options.sample_min_filter else job.options.sample_mag_filter, rho);
+}
+
+fn lineSampleFilter(job: *const Job, a: ProjectedVertex, b: ProjectedVertex) abi.SamplerFilter {
+    return lineSampleSelection(job, a, b).filter;
 }
 
 fn drawLine(job: *Job, a: ProjectedVertex, b: ProjectedVertex, y0: usize, y1: usize, stats: *Stats) void {
@@ -574,21 +622,21 @@ fn drawLine(job: *Job, a: ProjectedVertex, b: ProjectedVertex, y0: usize, y1: us
         const y = pixelCoordinate(y_value, bounds.y1) orelse continue;
         if (x < bounds.x0 or y < @max(bounds.y0, y0) or y >= @min(bounds.y1, y1)) continue;
         writePixel(job, x, y, a.z + (b.z - a.z) * t, depth_adjust, interpolateLineColor(a, b, t),
-            lineSampleFilter(job, a, b), stats, true);
+            lineSampleSelection(job, a, b), stats, true);
     }
 }
 
-fn triangleSampleFilter(job: *const Job, vertices: [3]ProjectedVertex, w0: f32, w1: f32, w2: f32) abi.SamplerFilter {
-    if (job.sample_texture == null) return job.options.sample_mag_filter;
+fn triangleSampleSelection(job: *const Job, vertices: [3]ProjectedVertex, w0: f32, w1: f32, w2: f32) SampleSelection {
+    if (job.sample_texture == null) return .{ .filter = job.options.sample_mag_filter };
     const area = edge(vertices[0], vertices[1], vertices[2].x, vertices[2].y);
-    if (!std.math.isFinite(area) or @abs(area) < 0.000001) return job.options.sample_mag_filter;
+    if (!std.math.isFinite(area) or @abs(area) < 0.000001) return .{ .filter = job.options.sample_mag_filter };
     const dx10 = vertices[1].x - vertices[0].x;
     const dx20 = vertices[2].x - vertices[0].x;
     const dy10 = vertices[1].y - vertices[0].y;
     const dy20 = vertices[2].y - vertices[0].y;
     const denominator = -area;
     const perspective_denominator = vertices[0].inverse_w * w0 + vertices[1].inverse_w * w1 + vertices[2].inverse_w * w2;
-    if (!std.math.isFinite(perspective_denominator) or @abs(perspective_denominator) < 0.000001) return job.options.sample_mag_filter;
+    if (!std.math.isFinite(perspective_denominator) or @abs(perspective_denominator) < 0.000001) return .{ .filter = job.options.sample_mag_filter };
     const uq0 = vertices[0].color[0] * vertices[0].inverse_w;
     const uq1 = vertices[1].color[0] * vertices[1].inverse_w;
     const uq2 = vertices[2].color[0] * vertices[2].inverse_w;
@@ -613,13 +661,18 @@ fn triangleSampleFilter(job: *const Job, vertices: [3]ProjectedVertex, w0: f32, 
     const dv_dy = (d_v_dy_numerator * perspective_denominator -
         (vq0 * w0 + vq1 * w1 + vq2 * w2) * d_w_dy) / denominator_squared;
     if (!std.math.isFinite(du_dx) or !std.math.isFinite(du_dy) or
-        !std.math.isFinite(dv_dx) or !std.math.isFinite(dv_dy)) return job.options.sample_mag_filter;
+        !std.math.isFinite(dv_dx) or !std.math.isFinite(dv_dy)) return .{ .filter = job.options.sample_mag_filter };
     const texture = job.sample_texture.?;
     const width = @as(f32, @floatFromInt(texture.width));
     const height = @as(f32, @floatFromInt(texture.height));
     const rho_x = @sqrt((du_dx * width) * (du_dx * width) + (dv_dx * height) * (dv_dx * height));
     const rho_y = @sqrt((du_dy * width) * (du_dy * width) + (dv_dy * height) * (dv_dy * height));
-    return if (@max(rho_x, rho_y) > 1) job.options.sample_min_filter else job.options.sample_mag_filter;
+    const rho = @max(rho_x, rho_y);
+    return sampleSelection(job, if (rho > 1) job.options.sample_min_filter else job.options.sample_mag_filter, rho);
+}
+
+fn triangleSampleFilter(job: *const Job, vertices: [3]ProjectedVertex, w0: f32, w1: f32, w2: f32) abi.SamplerFilter {
+    return triangleSampleSelection(job, vertices, w0, w1, w2).filter;
 }
 
 fn drawTriangle(job: *Job, input: [3]ProjectedVertex, y0: usize, y1: usize, stats: *Stats) void {
@@ -668,7 +721,7 @@ fn drawTriangle(job: *Job, input: [3]ProjectedVertex, y0: usize, y1: usize, stat
             const w1 = edge1 * edge_sign * inverse_area;
             const w2 = edge2 * edge_sign * inverse_area;
             writePixel(job, x, y, vertices[0].z * w0 + vertices[1].z * w1 + vertices[2].z * w2,
-                depth_adjust, interpolateTriangleColor(vertices, w0, w1, w2), triangleSampleFilter(job, vertices, w0, w1, w2), stats, front_facing);
+                depth_adjust, interpolateTriangleColor(vertices, w0, w1, w2), triangleSampleSelection(job, vertices, w0, w1, w2), stats, front_facing);
         }
     }
     stats.primitives_rasterized += 1;
@@ -743,7 +796,7 @@ fn addStats(a: Stats, b: Stats) Stats {
     };
 }
 
-pub fn drawWithTargets(target: *Target, extra_targets: []const *Target, sample_texture: ?*const Target, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
+pub fn drawWithTargetMipmaps(target: *Target, extra_targets: []const *Target, sample_texture: ?*const Target, sample_mipmaps: []const Target, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
     if (!options.rasterization_enabled) return .{ .primitives_submitted = switch (primitive) {
         .point => @intCast(vertices.len),
         .line => @intCast(vertices.len / 2),
@@ -751,7 +804,7 @@ pub fn drawWithTargets(target: *Target, extra_targets: []const *Target, sample_t
         .triangle => @intCast(vertices.len / 3),
         .triangle_strip => if (vertices.len > 2) @intCast(vertices.len - 2) else 0,
     } };
-    var job = Job{ .target = target, .extra_targets = extra_targets, .sample_texture = sample_texture, .depth = depth, .stencil = stencil, .vertices = vertices, .primitive = primitive, .options = options };
+    var job = Job{ .target = target, .extra_targets = extra_targets, .sample_texture = sample_texture, .sample_mipmaps = sample_mipmaps, .depth = depth, .stencil = stencil, .vertices = vertices, .primitive = primitive, .options = options };
     const worker = std.Thread.spawn(.{}, renderWorker, .{&job}) catch {
         job.bands[0] = drawBand(&job, 0);
         job.bands[1] = drawBand(&job, 1);
@@ -760,6 +813,10 @@ pub fn drawWithTargets(target: *Target, extra_targets: []const *Target, sample_t
     job.bands[1] = drawBand(&job, 1);
     worker.join();
     return addStats(job.bands[0], job.bands[1]);
+}
+
+pub fn drawWithTargets(target: *Target, extra_targets: []const *Target, sample_texture: ?*const Target, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
+    return drawWithTargetMipmaps(target, extra_targets, sample_texture, &.{}, depth, stencil, vertices, primitive, options);
 }
 
 pub fn draw(target: *Target, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
@@ -1005,6 +1062,7 @@ test "CPU sampler selects minification and magnification filters from footprint"
         .target = &output,
         .extra_targets = &[_]*Target{},
         .sample_texture = &source,
+        .sample_mipmaps = &.{},
         .depth = null,
         .stencil = null,
         .vertices = &vertices,
@@ -1042,6 +1100,7 @@ test "CPU sampler LOD uses perspective-correct texture derivatives" {
         .target = &output,
         .extra_targets = &[_]*Target{},
         .sample_texture = &source,
+        .sample_mipmaps = &.{},
         .depth = null,
         .stencil = null,
         .vertices = &vertices,
@@ -1057,4 +1116,38 @@ test "CPU sampler LOD uses perspective-correct texture derivatives" {
     const w1 = edge(projected[2], projected[0], sample_x, sample_y) * edge_sign * inverse_area;
     const w2 = edge(projected[0], projected[1], sample_x, sample_y) * edge_sign * inverse_area;
     try std.testing.expectEqual(abi.SamplerFilter.linear, triangleSampleFilter(&job, projected, w0, w1, w2));
+}
+
+test "CPU sampler mip filter selects clamped levels" {
+    var level0_pixels = [_]u8{0} ** 64;
+    var level1_pixels = [_]u8{0} ** 16;
+    var level2_pixels = [_]u8{0} ** 4;
+    var level0 = try Target.init(&level0_pixels, 4, 4, 16, .rgba8_unorm);
+    const level1 = try Target.init(&level1_pixels, 2, 2, 8, .rgba8_unorm);
+    const level2 = try Target.init(&level2_pixels, 1, 1, 4, .rgba8_unorm);
+    var levels = [_]Target{ level0, level1, level2 };
+    const options = DrawOptions{
+        .viewport = .{ .origin_x = 0, .origin_y = 0, .width = 4, .height = 4, .znear = 0, .zfar = 1 },
+        .scissor = .{ .x = 0, .y = 0, .width = 4, .height = 4 },
+        .sample_mip_filter = .nearest,
+    };
+    var job = Job{
+        .target = &level0,
+        .extra_targets = &[_]*Target{},
+        .sample_texture = &level0,
+        .sample_mipmaps = &levels,
+        .depth = null,
+        .stencil = null,
+        .vertices = &[_]abi.Vertex{},
+        .primitive = .triangle,
+        .options = options,
+    };
+    try std.testing.expectEqual(@as(usize, 2), sampleSelection(&job, .nearest, 4).level0);
+    job.options.sample_mip_filter = .linear;
+    job.options.sample_lod_min_clamp = 0.5;
+    job.options.sample_lod_max_clamp = 1.5;
+    const selection = sampleSelection(&job, .linear, 0.25);
+    try std.testing.expectEqual(@as(usize, 0), selection.level0);
+    try std.testing.expectEqual(@as(usize, 1), selection.level1);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), selection.level_weight, 0.000001);
 }
