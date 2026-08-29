@@ -559,6 +559,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @public
     ZPUDevice *_owner;
     NSString *_label;
+    uint64_t _resourceID;
     MTLPixelFormat _colorPixelFormat;
     MTLPixelFormat _colorPixelFormats[ZPU_METAL_MAX_COLOR_ATTACHMENTS];
     NSUInteger _colorAttachmentCount;
@@ -1122,6 +1123,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @interface ZPUComputePipelineState : NSObject <MTLComputePipelineState> {
 @public
     ZPUDevice *_owner;
+    uint64_t _resourceID;
     zpu_metal_compute_kernel _kernel;
     NSArray *_linkedFunctionNames;
     BOOL _supportsAddingBinaryFunctions;
@@ -5174,6 +5176,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
     if ((self = [super init])) {
         _owner = owner;
         _label = [descriptor.label copy];
+        _resourceID = zpu_register_resource(self);
         MTLRenderPipelineColorAttachmentDescriptor *attachment = descriptor.colorAttachments[0];
         _vertexFunctionName = [descriptor.vertexFunction.name copy];
         _fragmentFunctionName = [descriptor.fragmentFunction.name copy];
@@ -5237,6 +5240,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
            fragmentBinaryNames:(NSArray<NSString *> *)fragmentBinaryNames {
     if ((self = [super init])) {
         _owner = pipeline->_owner;
+        _resourceID = zpu_register_resource(self);
         _label = [pipeline->_label copy];
         _colorPixelFormat = pipeline->_colorPixelFormat;
         memcpy(_colorPixelFormats, pipeline->_colorPixelFormats, sizeof(_colorPixelFormats));
@@ -5290,7 +5294,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
     return 0;
 }
 - (BOOL)supportIndirectCommandBuffers API_AVAILABLE(macos(10.14), ios(12.0)) { return _supportsIndirectCommandBuffers; }
-- (MTLResourceID)gpuResourceID API_AVAILABLE(macos(13.0), ios(16.0)) { return (MTLResourceID){0}; }
+- (MTLResourceID)gpuResourceID API_AVAILABLE(macos(13.0), ios(16.0)) { return (MTLResourceID){_resourceID}; }
 - (MTLShaderValidation)shaderValidation API_AVAILABLE(macos(15.0), ios(18.0)) { return (MTLShaderValidation)0; }
 - (MTLSize)requiredThreadsPerTileThreadgroup API_AVAILABLE(macos(26.0), ios(26.0)) { return MTLSizeMake(0, 0, 0); }
 - (MTLSize)requiredThreadsPerObjectThreadgroup API_AVAILABLE(macos(26.0), ios(26.0)) { return MTLSizeMake(0, 0, 0); }
@@ -9891,6 +9895,7 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
 - (instancetype)initWithOwner:(ZPUDevice *)owner function:(id<MTLFunction>)function error:(NSError **)error {
     if ((self = [super init])) {
         _owner = owner;
+        _resourceID = zpu_register_resource(self);
         _kernel = 0;
         _linkedFunctionNames = @[];
         _supportsAddingBinaryFunctions = NO;
@@ -9929,6 +9934,7 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
                 linkedFunctionNames:(NSArray<NSString *> *)linkedFunctionNames {
     if ((self = [super init])) {
         _owner = pipeline->_owner;
+        _resourceID = zpu_register_resource(self);
         _kernel = pipeline->_kernel;
         _linkedFunctionNames = [linkedFunctionNames copy];
         _supportsAddingBinaryFunctions = pipeline->_supportsAddingBinaryFunctions;
@@ -9948,7 +9954,7 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
 - (NSUInteger)threadExecutionWidth { return 1; }
 - (NSUInteger)staticThreadgroupMemoryLength { return 0; }
 - (BOOL)supportIndirectCommandBuffers API_AVAILABLE(macos(10.14), ios(12.0)) { return _supportsIndirectCommandBuffers; }
-- (MTLResourceID)gpuResourceID API_AVAILABLE(macos(13.0), ios(16.0)) { return (MTLResourceID){0}; }
+- (MTLResourceID)gpuResourceID API_AVAILABLE(macos(13.0), ios(16.0)) { return (MTLResourceID){_resourceID}; }
 - (MTLShaderValidation)shaderValidation API_AVAILABLE(macos(15.0), ios(18.0)) { return (MTLShaderValidation)0; }
 - (MTLSize)requiredThreadsPerThreadgroup API_AVAILABLE(macos(26.0), ios(26.0)) { return _requiredThreadsPerThreadgroup; }
 - (MTLComputePipelineReflection *)reflection API_AVAILABLE(macos(26.0), ios(26.0)) { return _reflection; }
@@ -10797,6 +10803,10 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
             resourceID = ((ZPUIndirectCommandBuffer *)object)->_resourceID;
         } else if ([object isKindOfClass:[ZPUDepthStencilState class]]) {
             resourceID = ((ZPUDepthStencilState *)object)->_resourceID;
+        } else if ([object isKindOfClass:[ZPURenderPipelineState class]]) {
+            resourceID = ((ZPURenderPipelineState *)object)->_resourceID;
+        } else if ([object isKindOfClass:[ZPUComputePipelineState class]]) {
+            resourceID = ((ZPUComputePipelineState *)object)->_resourceID;
         }
         memcpy((uint8_t *)_argumentBuffer.contents + destinationOffset, &resourceID, sizeof(resourceID));
         memcpy((uint8_t *)_argumentBuffer.contents + destinationOffset + sizeof(resourceID), &auxiliary, sizeof(auxiliary));

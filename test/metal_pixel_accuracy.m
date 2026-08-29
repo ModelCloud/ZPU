@@ -8239,23 +8239,32 @@ int main(void) {
         [adapter_argument_encoder setTexture:adapter_compute_icb_texture atIndex:1];
         [adapter_argument_encoder setSamplerState:adapter_sampler atIndex:4];
         [adapter_argument_encoder setComputePipelineState:adapter_icb_compute_pipeline atIndex:2];
+        [adapter_argument_encoder setRenderPipelineState:adapter_pipeline atIndex:6];
         [adapter_argument_encoder setIndirectCommandBuffer:adapter_compute_icb atIndex:3];
         id<MTLArgumentEncoder> nested_argument_encoder =
             [adapter_argument_encoder newArgumentEncoderForBufferAtIndex:0];
         uint64_t encoded_argument_resource = 0;
         uint64_t encoded_argument_offset = 0;
         uint64_t encoded_argument_icb_resource = 0;
+        uint64_t encoded_argument_compute_pipeline_resource = 0;
+        uint64_t encoded_argument_render_pipeline_resource = 0;
         if (adapter_argument_buffer != nil) {
             memcpy(&encoded_argument_resource, adapter_argument_buffer.contents, sizeof(encoded_argument_resource));
             memcpy(&encoded_argument_offset, (uint8_t *)adapter_argument_buffer.contents + sizeof(encoded_argument_resource), sizeof(encoded_argument_offset));
+            memcpy(&encoded_argument_compute_pipeline_resource, (uint8_t *)adapter_argument_buffer.contents + 2 * 16,
+                   sizeof(encoded_argument_compute_pipeline_resource));
             memcpy(&encoded_argument_icb_resource, (uint8_t *)adapter_argument_buffer.contents + 3 * 16,
                    sizeof(encoded_argument_icb_resource));
+            memcpy(&encoded_argument_render_pipeline_resource, (uint8_t *)adapter_argument_buffer.contents + 6 * 16,
+                   sizeof(encoded_argument_render_pipeline_resource));
         }
         if (adapter_argument_encoder == nil || adapter_argument_buffer == nil || nested_argument_encoder == nil ||
             [adapter_argument_encoder encodedLength] < 16 || [adapter_argument_encoder alignment] != 16 ||
             bound_constant_data == NULL || memcmp(bound_constant_data, &argument_constant, sizeof(argument_constant)) != 0 ||
             encoded_argument_resource != adapter_copy_buffer.gpuAddress || encoded_argument_offset != 0 ||
-            encoded_argument_icb_resource != adapter_compute_icb.gpuResourceID._impl) {
+            encoded_argument_compute_pipeline_resource != adapter_icb_compute_pipeline.gpuResourceID._impl ||
+            encoded_argument_icb_resource != adapter_compute_icb.gpuResourceID._impl ||
+            encoded_argument_render_pipeline_resource != adapter_pipeline.gpuResourceID._impl) {
             fprintf(stderr, "metal-pixel: CPU argument encoder allocation failed\n");
             return 49;
         }
@@ -9859,6 +9868,12 @@ int main(void) {
             state_icb_descriptor.inheritCullMode = NO;
             state_icb_descriptor.inheritFrontFacingWinding = NO;
             state_icb_descriptor.inheritTriangleFillMode = NO;
+        }
+        if (@available(macOS 13.0, iOS 16.0, *)) {
+            if (adapter_pipeline.gpuResourceID._impl == 0 || adapter_icb_compute_pipeline.gpuResourceID._impl == 0) {
+                fprintf(stderr, "metal-pixel: pipeline resource identity was not exposed\n");
+                return 52;
+            }
         }
         state_icb_descriptor.maxVertexBufferBindCount = 1;
         state_icb_descriptor.maxFragmentBufferBindCount = 1;

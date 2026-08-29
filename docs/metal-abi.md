@@ -154,7 +154,8 @@ triangle path:
 - legacy and Metal 4 render pipeline callable linking accepts only same-device
   registered visible CPU functions for vertex and fragment stages; derived
   pipeline states retain the fixed ZPU raster profile and expose stage-scoped
-  handles, while tile/object/mesh linking remains fail-closed
+  handles plus synthetic CPU resource IDs, while tile/object/mesh linking
+  remains fail-closed
 - CPU-owned Metal 4 commit options and feedback; the explicit
   `ZPUMetalCreateCPUCommitOptions()` extension creates options whose feedback
   handlers receive host-time start/end values after the ZPU command buffers
