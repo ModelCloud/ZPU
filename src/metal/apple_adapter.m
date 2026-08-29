@@ -3614,7 +3614,12 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
     if (positions == NULL) return;
     for (NSUInteger index = 0; index < count; ++index) positions[index] = (MTLSamplePosition){0.5f, 0.5f};
 }
-- (BOOL)supportsRasterizationRateMapWithLayerCount:(NSUInteger)layerCount { (void)layerCount; return NO; }
+- (BOOL)supportsRasterizationRateMapWithLayerCount:(NSUInteger)layerCount {
+    /* The CPU rasterizer can preserve an identity map for every declared
+     * layer. Variable-rate maps are rejected by newRasterizationRateMap...
+     * because they would require a different physical pixel grid. */
+    return layerCount != 0;
+}
 - (BOOL)supportsVertexAmplificationCount:(NSUInteger)count { return count <= 1; }
 - (BOOL)supportsDynamicLibraries { return NO; }
 - (BOOL)supportsRenderDynamicLibraries { return NO; }
@@ -8531,8 +8536,11 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 - (void)useResource:(id<MTLResource>)resource usage:(MTLResourceUsage)usage {
     (void)usage;
-    if ([resource isKindOfClass:[ZPUBuffer class]] || [resource isKindOfClass:[ZPUTexture class]]) {
+    if (zpu_buffer_belongs_to_device([_owner device], (ZPUBuffer *)resource) ||
+        zpu_texture_belongs_to_device([_owner device], (ZPUTexture *)resource)) {
         [_owner retainResource:resource];
+    } else if (resource != nil) {
+        [_owner markError];
     }
 }
 - (void)useResource:(id<MTLResource>)resource usage:(MTLResourceUsage)usage stages:(MTLRenderStages)stages API_AVAILABLE(macos(10.15), ios(13.0)) {
@@ -8540,7 +8548,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     [self useResource:resource usage:usage];
 }
 - (void)useResources:(const id<MTLResource> __nonnull[__nonnull])resources count:(NSUInteger)count usage:(MTLResourceUsage)usage {
-    if (resources == NULL) return;
+    if (resources == NULL) { [_owner markError]; return; }
     for (NSUInteger index = 0; index < count; ++index) [self useResource:resources[index] usage:usage];
 }
 - (void)useResources:(const id<MTLResource> __nonnull[__nonnull])resources count:(NSUInteger)count usage:(MTLResourceUsage)usage stages:(MTLRenderStages)stages API_AVAILABLE(macos(10.15), ios(13.0)) {
@@ -8548,10 +8556,15 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     for (NSUInteger index = 0; index < count; ++index) [self useResource:resources[index] usage:usage stages:stages];
 }
 - (void)useHeap:(id<MTLHeap>)heap {
-    if ([heap isKindOfClass:[ZPUHeap class]]) [_owner retainResource:heap];
+    ZPUHeap *zpuHeap = (ZPUHeap *)heap;
+    if ([zpuHeap isKindOfClass:[ZPUHeap class]] && zpuHeap->_owner == [_owner device]) {
+        [_owner retainResource:heap];
+    } else if (heap != nil) {
+        [_owner markError];
+    }
 }
 - (void)useHeaps:(const id<MTLHeap> __nonnull[__nonnull])heaps count:(NSUInteger)count {
-    if (heaps == NULL) return;
+    if (heaps == NULL) { [_owner markError]; return; }
     for (NSUInteger index = 0; index < count; ++index) [self useHeap:heaps[index]];
 }
 - (void)useHeap:(id<MTLHeap>)heap stages:(MTLRenderStages)stages API_AVAILABLE(macos(10.15), ios(13.0)) {

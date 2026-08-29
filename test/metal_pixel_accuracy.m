@@ -542,6 +542,11 @@ int main(void) {
         id<MTLDevice> adapter_rate_map_device = ZPUMetalCreateSystemDefaultDevice();
         id<MTLRasterizationRateMap> adapter_identity_rate_map =
             [adapter_rate_map_device newRasterizationRateMapWithDescriptor:identity_rate_descriptor];
+        if (![adapter_rate_map_device supportsRasterizationRateMapWithLayerCount:1] ||
+            [adapter_rate_map_device supportsRasterizationRateMapWithLayerCount:0]) {
+            fprintf(stderr, "metal-pixel: CPU rasterization-rate map capability advertisement is inconsistent\n");
+            return 47;
+        }
         const MTLCoordinate2D identity_screen_coordinate = {2.25f, 3.75f};
         const MTLCoordinate2D identity_physical_coordinate = {4.5f, 1.5f};
         const MTLSize native_identity_physical_size = [native_identity_rate_map physicalSizeForLayer:0];
@@ -3644,6 +3649,27 @@ int main(void) {
         foreign_render_pass.colorAttachments[0].texture = foreign_render_texture;
         foreign_render_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
         foreign_render_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        MTLHeapDescriptor *foreign_heap_descriptor = [MTLHeapDescriptor new];
+        foreign_heap_descriptor.size = 4096;
+        id<MTLHeap> foreign_adapter_heap = [foreign_adapter_device newHeapWithDescriptor:foreign_heap_descriptor];
+        id<MTLCommandBuffer> foreign_use_resource_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> foreign_use_resource_encoder =
+            [foreign_use_resource_command_buffer renderCommandEncoderWithDescriptor:foreign_render_pass];
+        [foreign_use_resource_encoder setRenderPipelineState:adapter_pipeline];
+        [foreign_use_resource_encoder useResource:foreign_adapter_buffer
+                                           usage:MTLResourceUsageRead
+                                           stages:MTLRenderStageVertex];
+        [foreign_use_resource_encoder endEncoding];
+        [foreign_use_resource_command_buffer commit];
+        [foreign_use_resource_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> foreign_use_heap_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> foreign_use_heap_encoder =
+            [foreign_use_heap_command_buffer renderCommandEncoderWithDescriptor:foreign_render_pass];
+        [foreign_use_heap_encoder setRenderPipelineState:adapter_pipeline];
+        [foreign_use_heap_encoder useHeap:foreign_adapter_heap stages:MTLRenderStageVertex];
+        [foreign_use_heap_encoder endEncoding];
+        [foreign_use_heap_command_buffer commit];
+        [foreign_use_heap_command_buffer waitUntilCompleted];
         id<MTLCommandBuffer> foreign_render_command_buffer = [adapter_queue commandBuffer];
         id<MTLRenderCommandEncoder> foreign_render_encoder =
             [foreign_render_command_buffer renderCommandEncoderWithDescriptor:foreign_render_pass];
@@ -3679,6 +3705,10 @@ int main(void) {
             foreign_indirect_dispatch_command_buffer.status != MTLCommandBufferStatusError ||
             foreign_render_texture == nil || foreign_render_encoder == nil ||
             foreign_render_command_buffer.status != MTLCommandBufferStatusError ||
+            foreign_adapter_heap == nil || foreign_use_resource_encoder == nil ||
+            foreign_use_resource_command_buffer.status != MTLCommandBufferStatusError ||
+            foreign_use_heap_encoder == nil ||
+            foreign_use_heap_command_buffer.status != MTLCommandBufferStatusError ||
             foreign_blit_destination == nil || foreign_blit_encoder == nil ||
             foreign_blit_command_buffer.status != MTLCommandBufferStatusError ||
             foreign_adapter_event == nil ||

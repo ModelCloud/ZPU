@@ -101,6 +101,10 @@ triangle path:
   texture views, level-aware mipmap generation/copies, ordered MTLFence
   update/wait commands, and CPU-owned visibility result buffers with aligned
   boolean/counting modes plus reset/accumulate behavior
+- identity rasterization-rate maps advertise capability consistently through
+  `supportsRasterizationRateMapWithLayerCount:` and preserve native physical
+  size/coordinate mappings; variable-rate maps remain rejected because the
+  CPU renderer owns a fixed 1:1 pixel grid
 - a deferred CPU compute encoder for the explicit
   `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8`,
   `ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE`, and

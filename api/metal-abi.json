@@ -262,6 +262,7 @@
     "MTLDevice.newLibraryWithSource",
     "MTLDevice.newDefaultLibrary",
     "MTLDevice.newDefaultLibraryWithBundle",
+    "MTLDevice.supportsRasterizationRateMapWithLayerCount",
     "MTLDevice.newLibraryWithFile",
     "MTLDevice.newLibraryWithURL",
     "MTLDevice.newLibraryWithData",
