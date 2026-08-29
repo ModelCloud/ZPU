@@ -213,6 +213,7 @@ const ComputeCommand = struct {
     indirect_buffer: ?*Buffer = null,
     indirect_buffer_offset: usize = 0,
     indirect_threads: bool = false,
+    array_slice: ?u32 = null,
 };
 
 const Command = union(enum) {
@@ -382,6 +383,9 @@ pub const CommandBuffer = struct {
                             .depth = if (compute.kernel == 3) groups.depth else 1,
                         };
                     }
+                }
+                if (resolved.array_slice) |slice| {
+                    if (resolved.threads_per_grid.depth <= slice) continue;
                 }
                 executeCompute(resolved) catch |err| return self.fail(err);
             },
@@ -837,6 +841,7 @@ pub const ComputeEncoder = struct {
     kernel: u8 = 0,
     texture: ?*Texture = null,
     texture_index: u32 = 0,
+    array_slice: ?u32 = null,
     buffer: ?*Buffer = null,
     buffer_offset: usize = 0,
 
@@ -885,6 +890,12 @@ pub const ComputeEncoder = struct {
         }
         self.texture = texture;
         self.texture_index = index;
+        self.array_slice = null;
+    }
+
+    pub fn setArraySlice(self: *ComputeEncoder, slice: u32, index: u32) Error!void {
+        if (!self.open() or self.texture == null or index != self.texture_index) return error.InvalidArgument;
+        self.array_slice = slice;
     }
 
     // Metal 4 exposes copy/fill operations on the compute encoder. They are
@@ -976,6 +987,7 @@ pub const ComputeEncoder = struct {
             .threads_per_threadgroup = threads_per_threadgroup,
             .indirect_buffer = indirect_buffer,
             .indirect_buffer_offset = indirect_buffer_offset,
+            .array_slice = self.array_slice,
         } });
     }
 
@@ -994,6 +1006,7 @@ pub const ComputeEncoder = struct {
             .threads_per_grid = .{ .width = 0, .height = 0, .depth = 1 },
             .indirect_buffer = indirect_buffer,
             .indirect_threads = true,
+            .array_slice = self.array_slice,
         } });
     }
 
@@ -2352,6 +2365,11 @@ pub export fn zpu_metal_compute_encoder_set_bytes(encoder: ?*ComputeEncoder, byt
 
 pub export fn zpu_metal_compute_encoder_set_texture(encoder: ?*ComputeEncoder, texture: ?*Texture, index: u32) callconv(.c) c_int {
     (encoder orelse return -1).setTexture(texture, index) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_compute_encoder_set_array_slice(encoder: ?*ComputeEncoder, slice: u32, index: u32) callconv(.c) c_int {
+    (encoder orelse return -1).setArraySlice(slice, index) catch |err| return errorCode(err);
     return 0;
 }
 

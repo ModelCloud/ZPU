@@ -356,6 +356,7 @@ int zpu_metal_compute_encoder_set_buffer(zpu_metal_compute_encoder *encoder, zpu
 int zpu_metal_compute_encoder_set_buffer_offset(zpu_metal_compute_encoder *encoder, size_t offset, uint32_t index);
 int zpu_metal_compute_encoder_set_bytes(zpu_metal_compute_encoder *encoder, const void *bytes, size_t length, uint32_t index);
 int zpu_metal_compute_encoder_set_texture(zpu_metal_compute_encoder *encoder, zpu_metal_texture *texture, uint32_t index);
+int zpu_metal_compute_encoder_set_array_slice(zpu_metal_compute_encoder *encoder, uint32_t slice, uint32_t index);
 int zpu_metal_compute_encoder_copy_buffer(zpu_metal_compute_encoder *encoder, zpu_metal_buffer *source, size_t source_offset, zpu_metal_buffer *destination, size_t destination_offset, size_t length);
 int zpu_metal_compute_encoder_copy_buffer_to_texture(zpu_metal_compute_encoder *encoder, zpu_metal_buffer *source, size_t source_offset, size_t source_bytes_per_row, zpu_metal_texture *destination, zpu_metal_region destination_region);
 int zpu_metal_compute_encoder_copy_texture_to_buffer(zpu_metal_compute_encoder *encoder, zpu_metal_texture *source, zpu_metal_region source_region, zpu_metal_buffer *destination, size_t destination_offset, size_t destination_bytes_per_row);

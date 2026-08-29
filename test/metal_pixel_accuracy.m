@@ -1299,6 +1299,128 @@ int main(void) {
             return 44;
         }
 
+        /* Indirect array dispatch must preserve Metal's deferred grid
+         * semantics. The CPU adapter records one ZPU command per slice and
+         * resolves the indirect z extent at commit time; native Metal is the
+         * oracle for the full two-slice dispatch. */
+        const uint32_t array_indirect_threadgroups[] = {1, 1, 2};
+        id<MTLBuffer> native_array_indirect_buffer =
+            [device newBufferWithBytes:array_indirect_threadgroups
+                                length:sizeof(array_indirect_threadgroups)
+                               options:MTLResourceStorageModeShared];
+        id<MTLTexture> native_array_indirect_texture = [device newTextureWithDescriptor:compute_array_descriptor];
+        id<MTLCommandBuffer> native_array_indirect_command_buffer = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> native_array_indirect_encoder =
+            [native_array_indirect_command_buffer computeCommandEncoder];
+        [native_array_indirect_encoder setComputePipelineState:native_array_compute_pipeline];
+        [native_array_indirect_encoder setTexture:native_array_indirect_texture atIndex:0];
+        [native_array_indirect_encoder dispatchThreadgroupsWithIndirectBuffer:native_array_indirect_buffer
+                                                           indirectBufferOffset:0
+                                                           threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+        [native_array_indirect_encoder endEncoding];
+        [native_array_indirect_command_buffer commit];
+        [native_array_indirect_command_buffer waitUntilCompleted];
+        uint8_t native_array_indirect_pixels[2][byte_count];
+        for (NSUInteger slice = 0; slice < 2; ++slice) {
+            [native_array_indirect_texture getBytes:native_array_indirect_pixels[slice]
+                                        bytesPerRow:(NSUInteger)width * 4
+                                      bytesPerImage:byte_count
+                                       fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                                      mipmapLevel:0
+                                             slice:slice];
+        }
+
+        id<MTLBuffer> adapter_array_indirect_buffer =
+            [adapter_device newBufferWithBytes:array_indirect_threadgroups
+                                         length:sizeof(array_indirect_threadgroups)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLTexture> adapter_array_indirect_texture =
+            [adapter_device newTextureWithDescriptor:compute_array_descriptor];
+        id<MTLCommandBuffer> adapter_array_indirect_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> adapter_array_indirect_encoder =
+            [adapter_array_indirect_command_buffer computeCommandEncoder];
+        [adapter_array_indirect_encoder setComputePipelineState:adapter_array_compute_pipeline];
+        [adapter_array_indirect_encoder setTexture:adapter_array_indirect_texture atIndex:0];
+        [adapter_array_indirect_encoder dispatchThreadgroupsWithIndirectBuffer:adapter_array_indirect_buffer
+                                                            indirectBufferOffset:0
+                                                            threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+        uint8_t adapter_array_indirect_deferred[2][byte_count];
+        for (NSUInteger slice = 0; slice < 2; ++slice) {
+            [adapter_array_indirect_texture getBytes:adapter_array_indirect_deferred[slice]
+                                        bytesPerRow:(NSUInteger)width * 4
+                                      bytesPerImage:byte_count
+                                       fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                                      mipmapLevel:0
+                                             slice:slice];
+        }
+        [adapter_array_indirect_encoder endEncoding];
+        [adapter_array_indirect_command_buffer commit];
+        [adapter_array_indirect_command_buffer waitUntilCompleted];
+        uint8_t adapter_array_indirect_pixels[2][byte_count];
+        for (NSUInteger slice = 0; slice < 2; ++slice) {
+            [adapter_array_indirect_texture getBytes:adapter_array_indirect_pixels[slice]
+                                        bytesPerRow:(NSUInteger)width * 4
+                                      bytesPerImage:byte_count
+                                       fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                                      mipmapLevel:0
+                                             slice:slice];
+        }
+        BOOL array_indirect_exact = native_array_indirect_buffer != nil &&
+            native_array_indirect_texture != nil && native_array_indirect_encoder != nil &&
+            native_array_indirect_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_array_indirect_buffer != nil && adapter_array_indirect_texture != nil &&
+            adapter_array_indirect_encoder != nil &&
+            adapter_array_indirect_command_buffer.status == MTLCommandBufferStatusCompleted;
+        for (NSUInteger slice = 0; slice < 2; ++slice) {
+            array_indirect_exact = array_indirect_exact &&
+                memcmp(adapter_array_indirect_deferred[slice], (const uint8_t[byte_count]){0}, byte_count) == 0 &&
+                memcmp(native_array_indirect_pixels[slice], adapter_array_indirect_pixels[slice], byte_count) == 0;
+        }
+        if (!array_indirect_exact) {
+            fprintf(stderr, "metal-pixel: deferred 2D-array indirect compute exactness failed\n");
+            return 45;
+        }
+
+        /* A changed indirect z extent must affect the already-recorded
+         * commands at commit time, just as it does for a native indirect
+         * dispatch. Only slice zero is selected here; slice one stays clear. */
+        const uint32_t array_indirect_one_threadgroup[] = {1, 1, 2};
+        id<MTLBuffer> adapter_array_indirect_one_buffer =
+            [adapter_device newBufferWithBytes:array_indirect_one_threadgroup
+                                         length:sizeof(array_indirect_one_threadgroup)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLTexture> adapter_array_indirect_one_texture =
+            [adapter_device newTextureWithDescriptor:compute_array_descriptor];
+        id<MTLCommandBuffer> adapter_array_indirect_one_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> adapter_array_indirect_one_encoder =
+            [adapter_array_indirect_one_command_buffer computeCommandEncoder];
+        [adapter_array_indirect_one_encoder setComputePipelineState:adapter_array_compute_pipeline];
+        [adapter_array_indirect_one_encoder setTexture:adapter_array_indirect_one_texture atIndex:0];
+        [adapter_array_indirect_one_encoder dispatchThreadgroupsWithIndirectBuffer:adapter_array_indirect_one_buffer
+                                                                indirectBufferOffset:0
+                                                                threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+        [adapter_array_indirect_one_encoder endEncoding];
+        ((uint32_t *)adapter_array_indirect_one_buffer.contents)[2] = 1;
+        [adapter_array_indirect_one_command_buffer commit];
+        [adapter_array_indirect_one_command_buffer waitUntilCompleted];
+        uint8_t adapter_array_indirect_one_pixels[2][byte_count];
+        for (NSUInteger slice = 0; slice < 2; ++slice) {
+            [adapter_array_indirect_one_texture getBytes:adapter_array_indirect_one_pixels[slice]
+                                            bytesPerRow:(NSUInteger)width * 4
+                                          bytesPerImage:byte_count
+                                           fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                                          mipmapLevel:0
+                                                 slice:slice];
+        }
+        if (adapter_array_indirect_one_buffer == nil || adapter_array_indirect_one_texture == nil ||
+            adapter_array_indirect_one_encoder == nil ||
+            adapter_array_indirect_one_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(adapter_array_indirect_one_pixels[0], native_array_compute_pixels[0], byte_count) != 0 ||
+            memcmp(adapter_array_indirect_one_pixels[1], (const uint8_t[byte_count]){0}, byte_count) != 0) {
+            fprintf(stderr, "metal-pixel: deferred 2D-array indirect z filtering failed\n");
+            return 46;
+        }
+
         uint8_t compute_source_bytes[byte_count];
         for (size_t index = 0; index < byte_count; ++index) {
             compute_source_bytes[index] = (uint8_t)((index * 17u + 3u) & 0xffu);
@@ -1496,6 +1618,43 @@ int main(void) {
         if (!metal4_array_compute_exact) {
             fail_with_error("Metal 4 CPU array compute failed", metal4_error);
             return 79;
+        }
+
+        const uint32_t metal4_array_indirect_threads[] = {width, height, 2, 8, 8, 1};
+        id<MTLBuffer> metal4_array_indirect_buffer =
+            [adapter_device newBufferWithBytes:metal4_array_indirect_threads
+                                         length:sizeof(metal4_array_indirect_threads)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLTexture> metal4_array_indirect_texture =
+            [adapter_device newTextureWithDescriptor:compute_array_descriptor];
+        [metal4_array_compute_table setTexture:metal4_array_indirect_texture.gpuResourceID atIndex:0];
+        id<MTL4CommandBuffer> metal4_array_indirect_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_array_indirect_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> metal4_array_indirect_encoder =
+            [metal4_array_indirect_command_buffer computeCommandEncoder];
+        [metal4_array_indirect_encoder setComputePipelineState:adapter_array_compute_pipeline];
+        [metal4_array_indirect_encoder setArgumentTable:metal4_array_compute_table];
+        [metal4_array_indirect_encoder dispatchThreadsWithIndirectBuffer:metal4_array_indirect_buffer.gpuAddress];
+        [metal4_array_indirect_encoder endEncoding];
+        ((uint32_t *)metal4_array_indirect_buffer.contents)[2] = 1;
+        [metal4_array_indirect_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_array_indirect_command_buffers[] = {metal4_array_indirect_command_buffer};
+        [metal4_queue commit:metal4_array_indirect_command_buffers count:1];
+        uint8_t metal4_array_indirect_pixels[2][byte_count];
+        for (NSUInteger slice = 0; slice < 2; ++slice) {
+            [metal4_array_indirect_texture getBytes:metal4_array_indirect_pixels[slice]
+                                        bytesPerRow:(NSUInteger)width * 4
+                                      bytesPerImage:byte_count
+                                       fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                                      mipmapLevel:0
+                                             slice:slice];
+        }
+        if (metal4_array_indirect_buffer == nil || metal4_array_indirect_texture == nil ||
+            metal4_array_indirect_command_buffer == nil || metal4_array_indirect_encoder == nil ||
+            memcmp(metal4_array_indirect_pixels[0], native_array_compute_pixels[0], byte_count) != 0 ||
+            memcmp(metal4_array_indirect_pixels[1], (const uint8_t[byte_count]){0}, byte_count) != 0) {
+            fail_with_error("Metal 4 CPU indirect array z filtering failed", metal4_error);
+            return 80;
         }
 
         const uint32_t metal4_indirect_threads[] = {width, height, 1, 8, 8, 1};

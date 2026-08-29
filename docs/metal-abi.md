@@ -69,7 +69,9 @@ triangle path:
   `ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE`, and
   `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY` kernels; they operate directly
   on ZPU-owned buffers/textures and never invoke Apple's Metal runtime. Array
-  dispatches expand the logical z grid into ordered per-slice ZPU commands
+  dispatches expand the logical z grid into ordered per-slice ZPU commands;
+  indirect array dispatches resolve the deferred z extent at commit and skip
+  slices outside that extent
 - CPU-owned Metal 4 command allocators, command buffers, command queues, and
   argument tables; Metal 4 compute dispatches bridge process-local argument
   table resource IDs to ZPU-owned resources and execute through the same
@@ -161,7 +163,8 @@ coverage, color interpolation, BGRA channel order, object lifetimes, depth
 ordering, pipeline/depth/sampler state, blending, texture views, indirect
 draws, render and compute indirect command buffers, the CPU compute path
   against a native Metal oracle, the Metal 4 CPU argument-table compute and
-  ordinary render paths, and deferred indirect-thread dispatch,
+  ordinary render paths, deferred indirect-thread dispatch, and deferred
+  indirect array z filtering,
 and the explicit adapter; it is not a claim that every Metal feature is
 implemented.
 
