@@ -1316,6 +1316,14 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(ZPUDevice *owner, MTLGPUAddress 
     return buffer->_owner == owner ? buffer : nil;
 }
 
+static BOOL zpu_buffer_belongs_to_device(ZPUDevice *owner, ZPUBuffer *buffer) {
+    return [buffer isKindOfClass:[ZPUBuffer class]] && buffer->_owner == owner;
+}
+
+static BOOL zpu_texture_belongs_to_device(ZPUDevice *owner, ZPUTexture *texture) {
+    return [texture isKindOfClass:[ZPUTexture class]] && texture->_owner == owner;
+}
+
 /* Sparse allocation is deliberately not advertised by the CPU adapter, but
  * Metal's pixel/tile conversion helpers are pure integer geometry. Keep them
  * useful for callers that use the helpers to prepare a mapping for another
@@ -4873,7 +4881,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 }
 - (void)encodeSignalEvent:(id<MTLEvent>)event value:(uint64_t)value API_AVAILABLE(macos(10.14), ios(12.0)) {
     ZPUSharedEvent *zpuEvent = (ZPUSharedEvent *)event;
-    if (![zpuEvent isKindOfClass:[ZPUSharedEvent class]] ||
+    if (![zpuEvent isKindOfClass:[ZPUSharedEvent class]] || zpuEvent->_owner != [_owner device] ||
         zpu_metal_command_buffer_encode_signal_event(_zpuCommandBuffer, zpuEvent->_zpuEvent, value) != ZPU_METAL_OK) {
         [self markError];
         return;
@@ -4882,7 +4890,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 }
 - (void)encodeWaitForEvent:(id<MTLEvent>)event value:(uint64_t)value API_AVAILABLE(macos(10.14), ios(12.0)) {
     ZPUSharedEvent *zpuEvent = (ZPUSharedEvent *)event;
-    if (![zpuEvent isKindOfClass:[ZPUSharedEvent class]] ||
+    if (![zpuEvent isKindOfClass:[ZPUSharedEvent class]] || zpuEvent->_owner != [_owner device] ||
         zpu_metal_command_buffer_encode_wait_for_event(_zpuCommandBuffer, zpuEvent->_zpuEvent, value) != ZPU_METAL_OK) {
         [self markError];
         return;
@@ -6474,7 +6482,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)setBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
-    if (index > UINT32_MAX || (buffer != nil && ![zpuBuffer isKindOfClass:[ZPUBuffer class]])) {
+    if (index > UINT32_MAX || (buffer != nil && !zpu_buffer_belongs_to_device([_owner device], zpuBuffer))) {
         [_owner markError];
         return;
     }
@@ -6517,7 +6525,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)setTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
     ZPUTexture *zpuTexture = (ZPUTexture *)texture;
-    if (index > UINT32_MAX || (texture != nil && ![zpuTexture isKindOfClass:[ZPUTexture class]])) {
+    if (index > UINT32_MAX || (texture != nil && !zpu_texture_belongs_to_device([_owner device], zpuTexture))) {
         [_owner markError];
         return;
     }
@@ -6537,7 +6545,8 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     }
 }
 - (void)setSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
-    if (sampler != nil && ![(id)sampler isKindOfClass:[ZPUSamplerState class]]) {
+    ZPUSamplerState *zpuSampler = (ZPUSamplerState *)sampler;
+    if (sampler != nil && (![zpuSampler isKindOfClass:[ZPUSamplerState class]] || zpuSampler->_owner != [_owner device])) {
         [_owner markError];
         return;
     }
@@ -6597,7 +6606,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)setStageInRegionWithIndirectBuffer:(id<MTLBuffer>)indirectBuffer indirectBufferOffset:(NSUInteger)indirectBufferOffset API_AVAILABLE(macos(10.14), ios(12.0)) {
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)indirectBuffer;
-    if (![zpuBuffer isKindOfClass:[ZPUBuffer class]] || indirectBufferOffset > zpuBuffer.length) {
+    if (!zpu_buffer_belongs_to_device([_owner device], zpuBuffer) || indirectBufferOffset > zpuBuffer.length) {
         [_owner markError];
         return;
     }
@@ -6605,7 +6614,9 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)useResource:(id<MTLResource>)resource usage:(MTLResourceUsage)usage API_AVAILABLE(macos(10.13), ios(11.0)) {
     (void)usage;
-    if ([resource isKindOfClass:[ZPUBuffer class]] || [resource isKindOfClass:[ZPUTexture class]]) {
+    ZPUBuffer *buffer = (ZPUBuffer *)resource;
+    ZPUTexture *texture = (ZPUTexture *)resource;
+    if (zpu_buffer_belongs_to_device([_owner device], buffer) || zpu_texture_belongs_to_device([_owner device], texture)) {
         [_owner retainResource:resource];
     } else if (resource != nil) {
         [_owner markError];
@@ -6616,7 +6627,8 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     for (NSUInteger index = 0; index < count; ++index) [self useResource:resources[index] usage:usage];
 }
 - (void)useHeap:(id<MTLHeap>)heap API_AVAILABLE(macos(10.13), ios(11.0)) {
-    if ([heap isKindOfClass:[ZPUHeap class]]) [_owner retainResource:heap];
+    ZPUHeap *zpuHeap = (ZPUHeap *)heap;
+    if ([zpuHeap isKindOfClass:[ZPUHeap class]] && zpuHeap->_owner == [_owner device]) [_owner retainResource:heap];
     else if (heap != nil) [_owner markError];
 }
 - (void)useHeaps:(const id<MTLHeap> __nonnull [__nonnull])heaps count:(NSUInteger)count API_AVAILABLE(macos(10.13), ios(11.0)) {
@@ -7641,8 +7653,10 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
-    if (buffer != nil && ![zpuBuffer isKindOfClass:[ZPUBuffer class]]) return;
-    if (index > UINT32_MAX) return;
+    if ((buffer != nil && !zpu_buffer_belongs_to_device([_owner device], zpuBuffer)) || index > UINT32_MAX) {
+        [_owner markError];
+        return;
+    }
     _vertexBuffer = zpuBuffer;
     [_owner retainResource:zpuBuffer];
     if (zpu_metal_render_encoder_set_vertex_buffer(
@@ -7684,7 +7698,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)setVertexTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
     ZPUTexture *zpuTexture = (ZPUTexture *)texture;
-    if (texture != nil && ![zpuTexture isKindOfClass:[ZPUTexture class]]) { [_owner markError]; return; }
+    if (texture != nil && !zpu_texture_belongs_to_device([_owner device], zpuTexture)) { [_owner markError]; return; }
     (void)index;
     if (zpuTexture != nil) [_owner retainResource:zpuTexture];
 }
@@ -7693,7 +7707,8 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     for (NSUInteger index = 0; index < range.length; ++index) [self setVertexTexture:textures[index] atIndex:range.location + index];
 }
 - (void)setVertexSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
-    if (sampler != nil && ![(id)sampler isKindOfClass:[ZPUSamplerState class]]) { [_owner markError]; return; }
+    ZPUSamplerState *zpuSampler = (ZPUSamplerState *)sampler;
+    if (sampler != nil && (![zpuSampler isKindOfClass:[ZPUSamplerState class]] || zpuSampler->_owner != [_owner device])) { [_owner markError]; return; }
     (void)index;
     if (sampler != nil) [_owner retainResource:sampler];
 }
@@ -7728,7 +7743,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)setFragmentBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
-    if (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] || offset > zpuBuffer.length)) { [_owner markError]; return; }
+    if (buffer != nil && (!zpu_buffer_belongs_to_device([_owner device], zpuBuffer) || offset > zpuBuffer.length)) { [_owner markError]; return; }
     if (index > UINT32_MAX || zpu_metal_render_encoder_set_fragment_buffer(
             _zpuEncoder, zpuBuffer == nil ? NULL : zpuBuffer->_zpuBuffer, offset, (uint32_t)index) != ZPU_METAL_OK) {
         [_owner markError];
@@ -7745,7 +7760,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)setFragmentTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
     ZPUTexture *zpuTexture = (ZPUTexture *)texture;
-    if (index > UINT32_MAX || (texture != nil && ![zpuTexture isKindOfClass:[ZPUTexture class]])) { [_owner markError]; return; }
+    if (index > UINT32_MAX || (texture != nil && !zpu_texture_belongs_to_device([_owner device], zpuTexture))) { [_owner markError]; return; }
     if (zpu_metal_render_encoder_set_fragment_texture(
             _zpuEncoder, texture == nil ? NULL : zpuTexture->_zpuTexture, (uint32_t)index) != ZPU_METAL_OK) {
         [_owner markError];
@@ -7766,7 +7781,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)setFragmentSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
     ZPUSamplerState *zpuSampler = (ZPUSamplerState *)sampler;
-    if (index > UINT32_MAX || (sampler != nil && ![zpuSampler isKindOfClass:[ZPUSamplerState class]])) {
+    if (index > UINT32_MAX || (sampler != nil && (![zpuSampler isKindOfClass:[ZPUSamplerState class]] || zpuSampler->_owner != [_owner device]))) {
         [_owner markError];
         return;
     }
@@ -8023,14 +8038,14 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (void)updateFence:(id<MTLFence>)fence afterStages:(MTLRenderStages)stages {
     (void)stages;
     ZPUFence *zpuFence = (ZPUFence *)fence;
-    if (![zpuFence isKindOfClass:[ZPUFence class]]) return;
+    if (![zpuFence isKindOfClass:[ZPUFence class]] || zpuFence->_owner != [_owner device]) { [_owner markError]; return; }
     [_owner retainResource:zpuFence];
     (void)zpu_metal_render_encoder_update_fence(_zpuEncoder, zpuFence->_zpuFence);
 }
 - (void)waitForFence:(id<MTLFence>)fence beforeStages:(MTLRenderStages)stages {
     (void)stages;
     ZPUFence *zpuFence = (ZPUFence *)fence;
-    if (![zpuFence isKindOfClass:[ZPUFence class]]) return;
+    if (![zpuFence isKindOfClass:[ZPUFence class]] || zpuFence->_owner != [_owner device]) { [_owner markError]; return; }
     [_owner retainResource:zpuFence];
     (void)zpu_metal_render_encoder_wait_for_fence(_zpuEncoder, zpuFence->_zpuFence);
 }
@@ -8213,7 +8228,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)executeCommandsInBuffer:(id<MTLIndirectCommandBuffer>)indirectCommandBuffer withRange:(NSRange)executionRange {
     ZPUIndirectCommandBuffer *buffer = (ZPUIndirectCommandBuffer *)indirectCommandBuffer;
-    if (![buffer isKindOfClass:[ZPUIndirectCommandBuffer class]] ||
+    if (![buffer isKindOfClass:[ZPUIndirectCommandBuffer class]] || buffer->_owner != [_owner device] ||
         executionRange.location > buffer->_maxCommandCount ||
         executionRange.length > buffer->_maxCommandCount - executionRange.location) {
         [_owner markError];
@@ -8228,7 +8243,9 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)executeCommandsInBuffer:(id<MTLIndirectCommandBuffer>)indirectCommandBuffer indirectBuffer:(id<MTLBuffer>)indirectRangeBuffer indirectBufferOffset:(NSUInteger)indirectBufferOffset {
     ZPUBuffer *rangeBuffer = (ZPUBuffer *)indirectRangeBuffer;
-    if (![rangeBuffer isKindOfClass:[ZPUBuffer class]] ||
+    ZPUIndirectCommandBuffer *buffer = (ZPUIndirectCommandBuffer *)indirectCommandBuffer;
+    if (![buffer isKindOfClass:[ZPUIndirectCommandBuffer class]] || buffer->_owner != [_owner device] ||
+        !zpu_buffer_belongs_to_device([_owner device], rangeBuffer) ||
         indirectBufferOffset > rangeBuffer.length ||
         rangeBuffer.length - indirectBufferOffset < sizeof(MTLIndirectCommandBufferExecutionRange)) {
         [_owner markError];

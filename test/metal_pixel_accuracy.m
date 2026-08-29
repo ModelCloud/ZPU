@@ -3319,6 +3319,55 @@ int main(void) {
             }
         }
 
+        /* Every CPU adapter resource is scoped to the device that created
+         * it. Cross-device buffers and events must be rejected before their
+         * opaque ZPU pointers can reach an encoder. */
+        id<MTLDevice> foreign_adapter_device = ZPUMetalCreateSystemDefaultDevice();
+        id<MTLBuffer> foreign_adapter_buffer =
+            [foreign_adapter_device newBufferWithBytes:vertices length:sizeof(vertices)
+                                                options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> foreign_compute_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> foreign_compute_encoder =
+            [foreign_compute_command_buffer computeCommandEncoder];
+        [foreign_compute_encoder setComputePipelineState:adapter_compute_pipeline];
+        [foreign_compute_encoder setBuffer:foreign_adapter_buffer offset:0 atIndex:0];
+        [foreign_compute_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                              threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+        [foreign_compute_encoder endEncoding];
+        [foreign_compute_command_buffer commit];
+        [foreign_compute_command_buffer waitUntilCompleted];
+
+        id<MTLTexture> foreign_render_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+        MTLRenderPassDescriptor *foreign_render_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        foreign_render_pass.colorAttachments[0].texture = foreign_render_texture;
+        foreign_render_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        foreign_render_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLCommandBuffer> foreign_render_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> foreign_render_encoder =
+            [foreign_render_command_buffer renderCommandEncoderWithDescriptor:foreign_render_pass];
+        [foreign_render_encoder setRenderPipelineState:adapter_pipeline];
+        [foreign_render_encoder setVertexBuffer:foreign_adapter_buffer offset:0 atIndex:0];
+        [foreign_render_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [foreign_render_encoder endEncoding];
+        [foreign_render_command_buffer commit];
+        [foreign_render_command_buffer waitUntilCompleted];
+
+        id<MTLSharedEvent> foreign_adapter_event = [foreign_adapter_device newSharedEvent];
+        id<MTLCommandBuffer> foreign_event_command_buffer = [adapter_queue commandBuffer];
+        [foreign_event_command_buffer encodeSignalEvent:foreign_adapter_event value:1];
+        [foreign_event_command_buffer commit];
+        [foreign_event_command_buffer waitUntilCompleted];
+        if (foreign_adapter_device == nil || foreign_adapter_buffer == nil ||
+            foreign_compute_encoder == nil ||
+            foreign_compute_command_buffer.status != MTLCommandBufferStatusError ||
+            foreign_render_texture == nil || foreign_render_encoder == nil ||
+            foreign_render_command_buffer.status != MTLCommandBufferStatusError ||
+            foreign_adapter_event == nil ||
+            foreign_event_command_buffer.status != MTLCommandBufferStatusError) {
+            fprintf(stderr, "metal-pixel: cross-device resource ownership did not fail closed\n");
+            return 131;
+        }
+
         /* Metal 4 compiler-created compute pipelines are still CPU-owned.
          * The compiler accepts only registered ZPU library functions; the
          * native Metal compiler above remains the pixel oracle. */
