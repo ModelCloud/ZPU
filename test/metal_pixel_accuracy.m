@@ -572,6 +572,43 @@ int main(void) {
             return 50;
         }
 
+        /* Binary archives remain CPU metadata caches. They persist only the
+         * registered ZPU function names and never contain native Metal code. */
+        NSError *adapter_archive_error = nil;
+        MTLBinaryArchiveDescriptor *adapter_archive_descriptor = [MTLBinaryArchiveDescriptor new];
+        id<MTLBinaryArchive> adapter_archive =
+            [adapter_device newBinaryArchiveWithDescriptor:adapter_archive_descriptor error:&adapter_archive_error];
+        MTLComputePipelineDescriptor *adapter_archive_compute_descriptor = [MTLComputePipelineDescriptor new];
+        adapter_archive_compute_descriptor.computeFunction = adapter_library_function;
+        MTLRenderPipelineDescriptor *adapter_archive_render_descriptor = [MTLRenderPipelineDescriptor new];
+        adapter_archive_render_descriptor.vertexFunction = adapter_vertex_function;
+        adapter_archive_render_descriptor.fragmentFunction = adapter_fragment_function;
+        adapter_archive_render_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        BOOL adapter_archive_compute_added =
+            [adapter_archive addComputePipelineFunctionsWithDescriptor:adapter_archive_compute_descriptor
+                                                                   error:&adapter_archive_error];
+        BOOL adapter_archive_render_added =
+            [adapter_archive addRenderPipelineFunctionsWithDescriptor:adapter_archive_render_descriptor
+                                                                  error:&adapter_archive_error];
+        NSURL *adapter_archive_url = [NSURL fileURLWithPath:
+            [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]]];
+        BOOL adapter_archive_serialized = [adapter_archive serializeToURL:adapter_archive_url error:&adapter_archive_error];
+        MTLBinaryArchiveDescriptor *adapter_reload_descriptor = [MTLBinaryArchiveDescriptor new];
+        adapter_reload_descriptor.url = adapter_archive_url;
+        id<MTLBinaryArchive> adapter_reloaded_archive =
+            [adapter_device newBinaryArchiveWithDescriptor:adapter_reload_descriptor error:&adapter_archive_error];
+        BOOL adapter_archive_reloaded =
+            [adapter_reloaded_archive addComputePipelineFunctionsWithDescriptor:adapter_archive_compute_descriptor
+                                                                             error:&adapter_archive_error];
+        [[NSFileManager defaultManager] removeItemAtURL:adapter_archive_url error:nil];
+        if (adapter_archive == nil ||
+            ![adapter_archive conformsToProtocol:@protocol(MTLBinaryArchive)] ||
+            !adapter_archive_compute_added || !adapter_archive_render_added ||
+            !adapter_archive_serialized || !adapter_reloaded_archive || !adapter_archive_reloaded) {
+            fail_with_error("CPU binary archive metadata failed", adapter_archive_error);
+            return 64;
+        }
+
         /* Apple Metal is used only as the oracle. The adapter receives a
          * ZPU-owned CPU function descriptor, records a ZPU compute command,
          * and executes the registered CPU kernel against its ZPU texture. */

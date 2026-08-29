@@ -94,6 +94,8 @@ triangle path:
   arbitrary MSL, file/data libraries, and stitched libraries fail closed
 - `newDefaultLibrary` returns the same CPU metadata library for the registered
   ZPU kernels; it does not load or compile an Apple `.metallib`
+- CPU binary archives persist and reload deterministic metadata for registered
+  ZPU compute/render functions; they never serialize Apple GPU binaries
 - CPU resource-state encoders preserve Metal encoder boundaries and fence
   ordering. Resource/cache transitions are ordered no-ops over ZPU's unified
   CPU memory, while sparse texture mapping requests fail closed

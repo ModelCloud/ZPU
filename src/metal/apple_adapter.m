@@ -36,6 +36,7 @@
 @class ZPURenderEncoder;
 @class ZPUResourceStateEncoder;
 @class ZPULibrary;
+@class ZPUBinaryArchive;
 @class ZPUMTL4CommandAllocator;
 @class ZPUMTL4CommandQueue;
 @class ZPUMTL4CommandBuffer;
@@ -405,6 +406,18 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSString *_label;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner source:(NSString *)source;
+@end
+
+/* A binary archive is a deterministic CPU metadata cache. It stores names of
+ * registered ZPU functions, never Apple's compiled shader binaries. */
+@interface ZPUBinaryArchive : NSObject <MTLBinaryArchive> {
+@public
+    ZPUDevice *_owner;
+    NSMutableSet *_functionNames;
+    NSURL *_sourceURL;
+    NSString *_label;
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLBinaryArchiveDescriptor *)descriptor error:(NSError **)error;
 @end
 
 @interface ZPUCommandQueue : NSObject <MTLCommandQueue> {
@@ -1784,9 +1797,7 @@ static uint64_t zpu_cpu_timestamp(void) {
     return nil;
 }
 - (id<MTLBinaryArchive>)newBinaryArchiveWithDescriptor:(MTLBinaryArchiveDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(11.0), ios(14.0)) {
-    (void)descriptor;
-    zpu_set_error(error, @"ZPU CPU Metal has no binary shader archive");
-    return nil;
+    return (id<MTLBinaryArchive>)[[ZPUBinaryArchive alloc] initWithOwner:self descriptor:descriptor error:error];
 }
 - (BOOL)supportsPlacementSparse API_AVAILABLE(macos(26.4), ios(26.4)) { return NO; }
 - (BOOL)supportsFunctionPointers API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) { return NO; }
@@ -2086,6 +2097,122 @@ static uint64_t zpu_cpu_timestamp(void) {
     NSError *error = nil;
     zpu_set_error(&error, @"ZPU CPU Metal has no intersection-function implementation");
     completionHandler(nil, error);
+}
+@end
+
+static NSString *zpu_binary_archive_function_name(ZPUDevice *owner, id<MTLFunction> function) {
+    if (![function isKindOfClass:[ZPUCPUFunction class]]) return nil;
+    ZPUCPUFunction *cpuFunction = (ZPUCPUFunction *)function;
+    if (cpuFunction->_owner != owner || cpuFunction->_name.length == 0) return nil;
+    return cpuFunction->_name;
+}
+
+static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
+    zpu_set_error(error, message);
+}
+
+@implementation ZPUBinaryArchive
+- (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLBinaryArchiveDescriptor *)descriptor error:(NSError **)error {
+    if (descriptor == nil) {
+        zpu_binary_archive_add_error(error, @"ZPU CPU Metal requires a binary archive descriptor");
+        return nil;
+    }
+    if ((self = [super init])) {
+        _owner = owner;
+        _functionNames = [NSMutableSet set];
+        _sourceURL = [descriptor.url copy];
+        if (_sourceURL != nil) {
+            NSData *data = [NSData dataWithContentsOfURL:_sourceURL];
+            NSString *serialized = data == nil ? nil : [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            NSArray<NSString *> *lines = [serialized componentsSeparatedByString:@"\n"];
+            if (serialized == nil || lines.count == 0 || ![lines[0] isEqualToString:@"ZPU CPU Metal Binary Archive v1"]) {
+                zpu_binary_archive_add_error(error, @"ZPU CPU Metal binary archive is not a ZPU archive");
+                return nil;
+            }
+            ZPULibrary *registered = [[ZPULibrary alloc] initWithOwner:owner source:serialized];
+            for (NSUInteger index = 1; index < lines.count; ++index) {
+                NSString *name = lines[index];
+                if (name.length != 0 && [registered newFunctionWithName:name] != nil) [_functionNames addObject:name];
+            }
+        }
+    }
+    if (error != NULL) *error = nil;
+    return self;
+}
+- (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
+- (BOOL)addComputePipelineFunctionsWithDescriptor:(MTLComputePipelineDescriptor *)descriptor error:(NSError **)error {
+    NSString *name = descriptor == nil ? nil : zpu_binary_archive_function_name(_owner, descriptor.computeFunction);
+    if (name == nil || descriptor.computeFunction.functionType != MTLFunctionTypeKernel) {
+        zpu_binary_archive_add_error(error, @"ZPU CPU Metal binary archives accept only CPU compute functions");
+        return NO;
+    }
+    [_functionNames addObject:name];
+    if (error != NULL) *error = nil;
+    return YES;
+}
+- (BOOL)addRenderPipelineFunctionsWithDescriptor:(MTLRenderPipelineDescriptor *)descriptor error:(NSError **)error {
+    NSString *vertex = descriptor == nil ? nil : zpu_binary_archive_function_name(_owner, descriptor.vertexFunction);
+    NSString *fragment = descriptor == nil ? nil : zpu_binary_archive_function_name(_owner, descriptor.fragmentFunction);
+    if (vertex == nil || fragment == nil || descriptor.vertexFunction.functionType != MTLFunctionTypeVertex ||
+        descriptor.fragmentFunction.functionType != MTLFunctionTypeFragment) {
+        zpu_binary_archive_add_error(error, @"ZPU CPU Metal binary archives accept only CPU render functions");
+        return NO;
+    }
+    [_functionNames addObject:vertex];
+    [_functionNames addObject:fragment];
+    if (error != NULL) *error = nil;
+    return YES;
+}
+- (BOOL)addTileRenderPipelineFunctionsWithDescriptor:(MTLTileRenderPipelineDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
+    (void)descriptor;
+    zpu_binary_archive_add_error(error, @"ZPU CPU Metal binary archives have no tile-shader implementation");
+    return NO;
+}
+- (BOOL)addMeshRenderPipelineFunctionsWithDescriptor:(MTLMeshRenderPipelineDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(15.0), ios(18.0)) {
+    (void)descriptor;
+    zpu_binary_archive_add_error(error, @"ZPU CPU Metal binary archives have no mesh-shader implementation");
+    return NO;
+}
+- (BOOL)addLibraryWithDescriptor:(MTLStitchedLibraryDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(15.0), ios(18.0)) {
+    (void)descriptor;
+    zpu_binary_archive_add_error(error, @"ZPU CPU Metal binary archives do not stitch arbitrary libraries");
+    return NO;
+}
+- (BOOL)serializeToURL:(NSURL *)url error:(NSError **)error {
+    if (url == nil) {
+        zpu_binary_archive_add_error(error, @"ZPU CPU Metal binary archive serialization requires a file URL");
+        return NO;
+    }
+    NSMutableString *serialized = [NSMutableString stringWithString:@"ZPU CPU Metal Binary Archive v1\n"];
+    NSArray<NSString *> *sortedNames = [[_functionNames allObjects] sortedArrayUsingSelector:@selector(compare:)];
+    for (NSString *name in sortedNames) [serialized appendFormat:@"%@\n", name];
+    NSData *data = [serialized dataUsingEncoding:NSUTF8StringEncoding];
+    NSError *writeError = nil;
+    BOOL result = [data writeToURL:url options:NSDataWritingAtomic error:&writeError];
+    if (!result) {
+        if (error != NULL) *error = writeError;
+        return NO;
+    }
+    if (error != NULL) *error = nil;
+    return YES;
+}
+- (BOOL)addFunctionWithDescriptor:(MTLFunctionDescriptor *)descriptor library:(id<MTLLibrary>)library error:(NSError **)error API_AVAILABLE(macos(12.0), ios(15.0)) {
+    ZPULibrary *zpuLibrary = (ZPULibrary *)library;
+    if (![zpuLibrary isKindOfClass:[ZPULibrary class]] || zpuLibrary->_owner != _owner || descriptor == nil || descriptor.name == nil) {
+        zpu_binary_archive_add_error(error, @"ZPU CPU Metal binary archives accept only registered ZPU library functions");
+        return NO;
+    }
+    id<MTLFunction> function = [zpuLibrary newFunctionWithName:descriptor.name];
+    NSString *name = zpu_binary_archive_function_name(_owner, function);
+    if (name == nil || function.functionType != MTLFunctionTypeKernel) {
+        zpu_binary_archive_add_error(error, @"ZPU CPU Metal binary archives accept only registered CPU functions");
+        return NO;
+    }
+    [_functionNames addObject:name];
+    if (error != NULL) *error = nil;
+    return YES;
 }
 @end
 
