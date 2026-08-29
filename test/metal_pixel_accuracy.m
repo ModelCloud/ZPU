@@ -5884,7 +5884,7 @@ int main(void) {
          * resource-property oracle; the adapter never routes this work to
          * Apple's command encoder. */
         const NSUInteger sparse_texture_width = sparse_page_bytes == 0 ? 0 : 256;
-        const NSUInteger sparse_texture_height = 128;
+        const NSUInteger sparse_texture_height = 256;
         const NSUInteger sparse_texture_row_bytes = sparse_texture_width * 4;
         const NSUInteger sparse_texture_bytes = sparse_texture_row_bytes * sparse_texture_height;
         const NSUInteger sparse_texture_tile_bytes = 128 * 128 * 4;
@@ -6366,8 +6366,14 @@ int main(void) {
             const uint8_t *adapter_bytes = adapter_sparse_texture_output.contents;
             const uint8_t *input_bytes = sparse_texture_input_data.bytes;
             for (NSUInteger row = 0; row < sparse_texture_height && sparse_texture_exact; ++row) {
-                sparse_texture_exact = memcmp(adapter_bytes + row * sparse_texture_row_bytes,
-                                              input_bytes + row * 128 * 4, 128 * 4) == 0;
+                const BOOL mappedRow = row < 128;
+                sparse_texture_exact = !mappedRow || memcmp(adapter_bytes + row * sparse_texture_row_bytes,
+                                                            input_bytes + row * 128 * 4, 128 * 4) == 0;
+                for (NSUInteger index = 0; index < 128 * 4 && sparse_texture_exact; ++index) {
+                    if (!mappedRow && adapter_bytes[row * sparse_texture_row_bytes + index] != 0) {
+                        sparse_texture_exact = NO;
+                    }
+                }
                 for (NSUInteger index = 128 * 4; index < sparse_texture_row_bytes && sparse_texture_exact; ++index) {
                     if (adapter_bytes[row * sparse_texture_row_bytes + index] != 0) sparse_texture_exact = NO;
                 }
@@ -6384,7 +6390,7 @@ int main(void) {
             .sourceSlice = 0,
             /* A nonzero tile origin catches accidental zero-point handling
              * in the X/Y sparse grid independently of viewport coordinates. */
-            .destinationOrigin = MTLOriginMake(1, 0, 0),
+            .destinationOrigin = MTLOriginMake(1, 1, 0),
             .destinationLevel = 0,
             .destinationSlice = 0,
         };
@@ -6411,16 +6417,26 @@ int main(void) {
         }
         const uint8_t *copied_sparse_texture_bytes = adapter_sparse_texture_output.contents;
         for (NSUInteger row = 0; row < sparse_texture_height; ++row) {
+            const BOOL mappedRow = row >= 128;
             for (NSUInteger index = 0; index < 128 * 4; ++index) {
+                const NSUInteger sourceIndex = (mappedRow ? row - 128 : 0) * 128 * 4 + index;
+                const NSUInteger destinationIndex = row * sparse_texture_row_bytes + 128 * 4 + index;
+                if (mappedRow && memcmp(copied_sparse_texture_bytes + destinationIndex,
+                                        sparse_texture_input_data.bytes + sourceIndex, 1) != 0) {
+                    fprintf(stderr, "metal-pixel: CPU sparse texture mapping copy lost a mapped Y tile\n");
+                    return 89;
+                }
                 if (copied_sparse_texture_bytes[row * sparse_texture_row_bytes + index] != 0) {
                     fprintf(stderr, "metal-pixel: CPU sparse texture mapping copy touched an unmapped row\n");
                     return 89;
                 }
             }
-            if (memcmp(copied_sparse_texture_bytes + row * sparse_texture_row_bytes + 128 * 4,
-                       sparse_texture_input_data.bytes + row * 128 * 4, 128 * 4) != 0) {
-                fprintf(stderr, "metal-pixel: CPU sparse texture mapping copy lost a mapped row\n");
-                return 89;
+            for (NSUInteger index = 0; index < sparse_texture_row_bytes; ++index) {
+                const BOOL mappedPixel = mappedRow && index >= 128 * 4;
+                if (!mappedPixel && copied_sparse_texture_bytes[row * sparse_texture_row_bytes + index] != 0) {
+                    fprintf(stderr, "metal-pixel: CPU sparse texture mapping copy touched an unmapped pixel\n");
+                    return 89;
+                }
             }
         }
         MTL4UpdateSparseTextureMappingOperation adapter_sparse_texture_unmap = adapter_sparse_texture_map;
@@ -6428,7 +6444,7 @@ int main(void) {
         [metal4_sparse_queue updateTextureMappings:adapter_sparse_texture heap:nil
                                          operations:&adapter_sparse_texture_unmap count:1];
         MTL4UpdateSparseTextureMappingOperation adapter_sparse_texture_copy_unmap = adapter_sparse_texture_unmap;
-        adapter_sparse_texture_copy_unmap.textureRegion = MTLRegionMake2D(1, 0, 1, 1);
+        adapter_sparse_texture_copy_unmap.textureRegion = MTLRegionMake2D(1, 1, 1, 1);
         [metal4_sparse_queue updateTextureMappings:adapter_sparse_texture_copy heap:nil
                                          operations:&adapter_sparse_texture_copy_unmap count:1];
         uint8_t adapter_sparse_texture_zero[sparse_texture_tile_bytes];
