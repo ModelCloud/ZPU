@@ -49,6 +49,7 @@
       "zpu_metal_heap_new_buffer",
       "zpu_metal_heap_new_buffer_at_offset",
       "zpu_metal_heap_new_texture",
+      "zpu_metal_heap_new_texture_at_offset",
       "zpu_metal_shared_event_destroy",
       "zpu_metal_shared_event_signaled_value",
       "zpu_metal_shared_event_set_signaled_value",

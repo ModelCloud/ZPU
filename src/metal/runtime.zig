@@ -1214,6 +1214,18 @@ pub fn createTextureInHeap(heap: *Heap, width: u32, height: u32, format_raw: u16
     return result;
 }
 
+pub fn createTextureInHeapAtOffset(heap: *Heap, width: u32, height: u32, format_raw: u16, offset: usize) Error!*Texture {
+    if (!validHeap(heap)) return error.InvalidResource;
+    const result = try createTexture(heap.device, width, height, format_raw);
+    errdefer destroyTexture(result);
+    const previous = heap.used;
+    const allocation_offset = try reserveHeapAllocationAtOffset(heap, result.bytes.len, @alignOf(f32), offset);
+    result.heap = heap;
+    result.heap_allocation_offset = allocation_offset;
+    result.heap_allocation_size = heap.used - previous;
+    return result;
+}
+
 pub fn createTextureFromBuffer(buffer: *Buffer, width: u32, height: u32, format_raw: u16, offset: usize, bytes_per_row: usize) Error!*Texture {
     if (!validBuffer(buffer)) return error.InvalidResource;
     const format: TextureFormat = switch (format_raw) {
@@ -2004,6 +2016,12 @@ pub export fn zpu_metal_heap_new_texture(heap: ?*Heap, descriptor: ?*const abi.T
     const value = heap orelse return null;
     const desc = descriptor orelse return null;
     return createTextureInHeap(value, desc.width, desc.height, desc.format) catch null;
+}
+
+pub export fn zpu_metal_heap_new_texture_at_offset(heap: ?*Heap, descriptor: ?*const abi.TextureDescriptor, offset: usize) callconv(.c) ?*Texture {
+    const value = heap orelse return null;
+    const desc = descriptor orelse return null;
+    return createTextureInHeapAtOffset(value, desc.width, desc.height, desc.format, offset) catch null;
 }
 
 pub export fn zpu_metal_texture_destroy(texture: ?*Texture) callconv(.c) void {

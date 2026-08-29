@@ -133,6 +133,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLHazardTrackingMode _hazardTrackingMode;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner heap:(zpu_metal_heap *)heap descriptor:(MTLHeapDescriptor *)descriptor;
+- (id<MTLTexture>)zpuNewTextureWithDescriptor:(MTLTextureDescriptor *)descriptor firstOffset:(NSUInteger)offset explicitOffset:(BOOL)explicitOffset;
 @end
 
 API_AVAILABLE(macos(15.0), ios(18.0))
@@ -1240,7 +1241,7 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
     [result applyResourceOptions:options];
     return (id<MTLBuffer>)result;
 }
-- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor {
+- (id<MTLTexture>)zpuNewTextureWithDescriptor:(MTLTextureDescriptor *)descriptor firstOffset:(NSUInteger)offset explicitOffset:(BOOL)explicitOffset {
     NSUInteger descriptorSize = 0;
     if (!zpu_texture_descriptor_size(descriptor, &descriptorSize)) return nil;
     if ((descriptor.storageMode != _storageMode && descriptor.storageMode != MTLStorageModeMemoryless) ||
@@ -1256,7 +1257,9 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
             zpu_metal_texture_descriptor zpu_descriptor = {
                 (uint32_t)levelWidth, (uint32_t)levelHeight, zpu_pixel_format(descriptor.pixelFormat),
             };
-            zpu_metal_texture *texture = zpu_metal_heap_new_texture(_zpuHeap, &zpu_descriptor);
+            zpu_metal_texture *texture = (explicitOffset && slice == 0 && level == 0) ?
+                zpu_metal_heap_new_texture_at_offset(_zpuHeap, &zpu_descriptor, offset) :
+                zpu_metal_heap_new_texture(_zpuHeap, &zpu_descriptor);
             if (texture == NULL) {
                 for (NSArray *createdSlice in sliceMipmapTextures) {
                     for (NSValue *value in createdSlice) zpu_metal_texture_destroy((zpu_metal_texture *)value.pointerValue);
@@ -1280,6 +1283,9 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
     [result applyDescriptor:descriptor];
     return (id<MTLTexture>)result;
 }
+- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor {
+    return [self zpuNewTextureWithDescriptor:descriptor firstOffset:0 explicitOffset:NO];
+}
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return state; }
 - (MTLHeapType)type { return _type; }
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)options offset:(NSUInteger)offset API_AVAILABLE(macos(10.15), ios(13.0)) {
@@ -1291,9 +1297,7 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
     return (id<MTLBuffer>)result;
 }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor offset:(NSUInteger)offset API_AVAILABLE(macos(10.15), ios(13.0)) {
-    (void)descriptor;
-    (void)offset;
-    return nil;
+    return [self zpuNewTextureWithDescriptor:descriptor firstOffset:offset explicitOffset:YES];
 }
 - (id<MTLAccelerationStructure>)newAccelerationStructureWithSize:(NSUInteger)size API_AVAILABLE(macos(13.0), ios(16.0)) {
     (void)size;

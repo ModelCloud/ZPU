@@ -274,6 +274,7 @@ size_t zpu_metal_heap_max_available_size(const zpu_metal_heap *heap, size_t alig
 zpu_metal_buffer *zpu_metal_heap_new_buffer(zpu_metal_heap *heap, size_t length, const void *initial_bytes);
 zpu_metal_buffer *zpu_metal_heap_new_buffer_at_offset(zpu_metal_heap *heap, size_t length, const void *initial_bytes, size_t offset);
 zpu_metal_texture *zpu_metal_heap_new_texture(zpu_metal_heap *heap, const zpu_metal_texture_descriptor *descriptor);
+zpu_metal_texture *zpu_metal_heap_new_texture_at_offset(zpu_metal_heap *heap, const zpu_metal_texture_descriptor *descriptor, size_t offset);
 void zpu_metal_texture_destroy(zpu_metal_texture *texture);
 uint32_t zpu_metal_texture_width(const zpu_metal_texture *texture);
 uint32_t zpu_metal_texture_height(const zpu_metal_texture *texture);

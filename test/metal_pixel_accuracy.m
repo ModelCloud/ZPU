@@ -2404,7 +2404,7 @@ int main(void) {
         MTLSizeAndAlign adapter_heap_mip_size_align =
             [adapter_device heapTextureSizeAndAlignWithDescriptor:adapter_heap_mip_descriptor];
         id<MTLTexture> adapter_heap_mip_texture =
-            [adapter_mip_heap newTextureWithDescriptor:adapter_heap_mip_descriptor];
+            [adapter_mip_heap newTextureWithDescriptor:adapter_heap_mip_descriptor offset:adapter_mip_heap_prefix.length];
         uint8_t adapter_heap_mip_bytes[sizeof(array_level_one)] = {0};
         [adapter_heap_mip_texture replaceRegion:MTLRegionMake2D(0, 0, 2, 2)
                                     mipmapLevel:1
