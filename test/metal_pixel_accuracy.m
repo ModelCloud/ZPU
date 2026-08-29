@@ -7275,9 +7275,11 @@ int main(void) {
         }
 
         const uint32_t metal4_indirect_threads[] = {width, height, 1, 8, 8, 1};
+        uint8_t metal4_indirect_threads_storage[sizeof(metal4_indirect_threads) + 16] = {0};
+        memcpy(metal4_indirect_threads_storage + 16, metal4_indirect_threads, sizeof(metal4_indirect_threads));
         id<MTLBuffer> metal4_indirect_threads_buffer =
-            [adapter_device newBufferWithBytes:metal4_indirect_threads
-                                         length:sizeof(metal4_indirect_threads)
+            [adapter_device newBufferWithBytes:metal4_indirect_threads_storage
+                                         length:sizeof(metal4_indirect_threads_storage)
                                         options:MTLResourceStorageModeShared];
         id<MTLTexture> metal4_indirect_texture =
             [adapter_device newTextureWithDescriptor:compute_texture_descriptor];
@@ -7287,7 +7289,7 @@ int main(void) {
         id<MTL4ComputeCommandEncoder> metal4_indirect_encoder = [metal4_indirect_command_buffer computeCommandEncoder];
         [metal4_indirect_encoder setComputePipelineState:adapter_compute_pipeline];
         [metal4_indirect_encoder setArgumentTable:metal4_table];
-        [metal4_indirect_encoder dispatchThreadsWithIndirectBuffer:metal4_indirect_threads_buffer.gpuAddress];
+        [metal4_indirect_encoder dispatchThreadsWithIndirectBuffer:metal4_indirect_threads_buffer.gpuAddress + 16];
         [metal4_indirect_encoder endEncoding];
         [metal4_indirect_command_buffer endCommandBuffer];
         id<MTL4CommandBuffer> metal4_indirect_command_buffers[] = {metal4_indirect_command_buffer};
@@ -8158,6 +8160,12 @@ int main(void) {
          * only through ZPU. */
         id<MTLTexture> adapter_metal4_origin_texture =
             [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        uint8_t adapter_metal4_origin_vertex_bytes[sizeof(origin_vertices) + 16] = {0};
+        memcpy(adapter_metal4_origin_vertex_bytes + 16, origin_vertices, sizeof(origin_vertices));
+        id<MTLBuffer> adapter_metal4_origin_vertex_buffer =
+            [adapter_device newBufferWithBytes:adapter_metal4_origin_vertex_bytes
+                                         length:sizeof(adapter_metal4_origin_vertex_bytes)
+                                        options:MTLResourceStorageModeShared];
         MTL4RenderPassDescriptor *adapter_metal4_origin_pass = [MTL4RenderPassDescriptor new];
         adapter_metal4_origin_pass.colorAttachments[0].texture = adapter_metal4_origin_texture;
         adapter_metal4_origin_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -8167,7 +8175,7 @@ int main(void) {
         adapter_metal4_origin_table_descriptor.maxBufferBindCount = 1;
         id<MTL4ArgumentTable> adapter_metal4_origin_table =
             [adapter_device newArgumentTableWithDescriptor:adapter_metal4_origin_table_descriptor error:&metal4_error];
-        [adapter_metal4_origin_table setAddress:adapter_origin_vertex_buffer.gpuAddress atIndex:0];
+        [adapter_metal4_origin_table setAddress:adapter_metal4_origin_vertex_buffer.gpuAddress + 16 atIndex:0];
         id<MTL4CommandBuffer> adapter_metal4_origin_command_buffer = [adapter_device newCommandBuffer];
         [adapter_metal4_origin_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
         id<MTL4RenderCommandEncoder> adapter_metal4_origin_encoder =
@@ -8197,7 +8205,8 @@ int main(void) {
                                       bytesPerRow:(NSUInteger)width * 4
                                        fromRegion:MTLRegionMake2D(0, 0, width, height)
                                       mipmapLevel:0];
-        if (adapter_metal4_origin_texture == nil || adapter_metal4_origin_table == nil ||
+        if (adapter_metal4_origin_texture == nil || adapter_metal4_origin_vertex_buffer == nil ||
+            adapter_metal4_origin_table == nil ||
             adapter_metal4_origin_command_buffer == nil || adapter_metal4_origin_encoder == nil ||
             memcmp(metal_origin_pixels, adapter_metal4_origin_pixels, sizeof(metal_origin_pixels)) != 0) {
             fail_with_error("Metal 4 CPU origin-coordinate render failed", metal4_error);

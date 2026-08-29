@@ -463,6 +463,7 @@ int zpu_metal_compute_encoder_dispatch_threads(zpu_metal_compute_encoder *encode
 int zpu_metal_compute_encoder_dispatch_threadgroups(zpu_metal_compute_encoder *encoder, zpu_metal_size threadgroups_per_grid, zpu_metal_size threads_per_threadgroup);
 int zpu_metal_compute_encoder_dispatch_threadgroups_indirect(zpu_metal_compute_encoder *encoder, zpu_metal_buffer *indirect_buffer, size_t indirect_buffer_offset, zpu_metal_size threads_per_threadgroup);
 int zpu_metal_compute_encoder_dispatch_threads_indirect(zpu_metal_compute_encoder *encoder, zpu_metal_buffer *indirect_buffer);
+int zpu_metal_compute_encoder_dispatch_threads_indirect_offset(zpu_metal_compute_encoder *encoder, zpu_metal_buffer *indirect_buffer, size_t indirect_buffer_offset);
 int zpu_metal_compute_encoder_update_fence(zpu_metal_compute_encoder *encoder, zpu_metal_fence *fence);
 int zpu_metal_compute_encoder_wait_for_fence(zpu_metal_compute_encoder *encoder, zpu_metal_fence *fence);
 int zpu_metal_compute_encoder_end_encoding(zpu_metal_compute_encoder *encoder);

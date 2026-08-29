@@ -150,6 +150,7 @@
       "zpu_metal_compute_encoder_dispatch_threadgroups",
       "zpu_metal_compute_encoder_dispatch_threadgroups_indirect",
       "zpu_metal_compute_encoder_dispatch_threads_indirect",
+      "zpu_metal_compute_encoder_dispatch_threads_indirect_offset",
       "zpu_metal_compute_encoder_update_fence",
       "zpu_metal_compute_encoder_wait_for_fence",
       "zpu_metal_compute_encoder_end_encoding",

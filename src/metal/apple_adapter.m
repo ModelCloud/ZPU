@@ -1616,11 +1616,14 @@ static BOOL zpu_heap_buffer_options_match(MTLStorageMode heapStorageMode,
 
 /* Metal 4 exposes opaque resource IDs and GPU addresses rather than
  * Objective-C resource objects. The CPU adapter gives each ZPU resource a
- * process-local opaque ID so an argument table can still resolve bindings
- * without manufacturing a native Metal resource. Values are intentionally
- * not exposed as real GPU addresses. */
+ * process-local synthetic address so argument tables and address-plus-offset
+ * ranges can resolve bindings without manufacturing a native Metal resource.
+ * IDs are widely spaced so an interior address cannot collide with another
+ * resource's base ID during a process-local lookup. They remain opaque CPU
+ * metadata, never native GPU virtual addresses. */
 static NSMapTable *zpu_resource_registry;
-static uint64_t zpu_next_resource_id = 1;
+static uint64_t zpu_next_resource_id = 1ULL << 32;
+static const uint64_t zpu_resource_address_stride = 1ULL << 32;
 
 static void zpu_init_resource_registry(void) {
     static dispatch_once_t once;
@@ -1633,7 +1636,8 @@ static void zpu_init_resource_registry(void) {
 static uint64_t zpu_register_resource(id resource) {
     zpu_init_resource_registry();
     @synchronized (zpu_resource_registry) {
-        const uint64_t result = zpu_next_resource_id++;
+        const uint64_t result = zpu_next_resource_id;
+        zpu_next_resource_id += zpu_resource_address_stride;
         [zpu_resource_registry setObject:resource forKey:@(result)];
         return result;
     }
@@ -1730,9 +1734,36 @@ static BOOL zpu_metal4_render_pass_descriptor(ZPUDevice *owner,
 
 static ZPUBuffer *zpu_metal4_buffer_for_address(ZPUDevice *owner, MTLGPUAddress address) {
     id resource = zpu_resource_for_id((uint64_t)address);
-    if (![resource isKindOfClass:[ZPUBuffer class]]) return nil;
-    ZPUBuffer *buffer = (ZPUBuffer *)resource;
-    return buffer->_owner == owner ? buffer : nil;
+    if ([resource isKindOfClass:[ZPUBuffer class]] && ((ZPUBuffer *)resource)->_owner == owner) {
+        return (ZPUBuffer *)resource;
+    }
+    zpu_init_resource_registry();
+    @synchronized (zpu_resource_registry) {
+        for (id candidate in zpu_resource_registry.objectEnumerator) {
+            if (![candidate isKindOfClass:[ZPUBuffer class]]) continue;
+            ZPUBuffer *buffer = (ZPUBuffer *)candidate;
+            if (buffer->_owner != owner) continue;
+            const uint64_t base = (uint64_t)buffer->_resourceID;
+            const uint64_t value = (uint64_t)address;
+            if (value >= base && value - base <= (uint64_t)buffer.length) return buffer;
+        }
+    }
+    return nil;
+}
+
+static BOOL zpu_metal4_buffer_address_offset(ZPUDevice *owner, MTLGPUAddress address,
+                                             ZPUBuffer **buffer, NSUInteger *offset) {
+    if (buffer == NULL || offset == NULL || address == 0) return NO;
+    ZPUBuffer *value = zpu_metal4_buffer_for_address(owner, address);
+    if (value == nil) return NO;
+    const uint64_t base = (uint64_t)value->_resourceID;
+    const uint64_t addressValue = (uint64_t)address;
+    if (addressValue < base) return NO;
+    const uint64_t relative = addressValue - base;
+    if (relative > (uint64_t)value.length || relative > (uint64_t)NSUIntegerMax) return NO;
+    *buffer = value;
+    *offset = (NSUInteger)relative;
+    return YES;
 }
 
 API_AVAILABLE(macos(26.0), ios(26.0))
@@ -1740,15 +1771,8 @@ static BOOL zpu_metal4_buffer_range(MTL4BufferRange range, ZPUDevice *owner,
                                      ZPUBuffer **buffer, NSUInteger *offset) {
     if (buffer == NULL || offset == NULL || range.bufferAddress == 0 ||
         range.length > (uint64_t)NSUIntegerMax) return NO;
-    ZPUBuffer *value = zpu_metal4_buffer_for_address(owner, range.bufferAddress);
-    if (value == nil || range.length > value.length) return NO;
-    *buffer = value;
-    *offset = 0;
-    /* ZPU resource IDs are opaque handles, not arithmetic GPU addresses. A
-     * Metal 4 range can therefore only name the beginning of a CPU buffer;
-     * rejecting an unrepresentable interior address preserves ownership and
-     * bounds validation instead of silently binding a different resource. */
-    return YES;
+    if (!zpu_metal4_buffer_address_offset(owner, range.bufferAddress, buffer, offset)) return NO;
+    return range.length == UINT64_MAX || range.length <= (uint64_t)(*buffer).length - *offset;
 }
 
 static BOOL zpu_buffer_belongs_to_device(ZPUDevice *owner, ZPUBuffer *buffer) {
@@ -8554,9 +8578,10 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 }
 - (void)resolveCounterHeap:(id<MTL4CounterHeap>)counterHeap withRange:(NSRange)range intoBuffer:(MTL4BufferRange)bufferRange waitFence:(id<MTLFence>)fenceToWait updateFence:(id<MTLFence>)fenceToUpdate {
     ZPUMTL4CounterHeap *heap = (ZPUMTL4CounterHeap *)counterHeap;
-    ZPUBuffer *buffer = zpu_metal4_buffer_for_address(_owner, bufferRange.bufferAddress);
+    ZPUBuffer *buffer = nil;
+    NSUInteger bufferOffset = 0;
     if (![heap isKindOfClass:[ZPUMTL4CounterHeap class]] || heap->_owner != _owner || _legacyBuffer == nil ||
-        ![buffer isKindOfClass:[ZPUBuffer class]] || buffer->_owner != _owner ||
+        !zpu_metal4_buffer_range(bufferRange, _owner, &buffer, &bufferOffset) ||
         (fenceToWait != nil && (![fenceToWait isKindOfClass:[ZPUFence class]] ||
                                 ((ZPUFence *)fenceToWait)->_owner != _owner)) ||
         (fenceToUpdate != nil && (![fenceToUpdate isKindOfClass:[ZPUFence class]] ||
@@ -8565,14 +8590,14 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
         return;
     }
     NSData *resolved = [heap resolveCounterRange:range];
-    if (resolved == nil || resolved.length > buffer.length ||
-        bufferRange.bufferAddress != buffer->_resourceID ||
+    if (resolved == nil || resolved.length > buffer.length - bufferOffset ||
         (bufferRange.length != UINT64_MAX &&
-         (bufferRange.length < resolved.length || bufferRange.length > (uint64_t)buffer.length))) {
+         (bufferRange.length < resolved.length ||
+          bufferRange.length > (uint64_t)(buffer.length - bufferOffset)))) {
         [self markError];
         return;
     }
-    if (resolved.length != 0) memcpy((uint8_t *)buffer.contents, resolved.bytes, resolved.length);
+    if (resolved.length != 0) memcpy((uint8_t *)buffer.contents + bufferOffset, resolved.bytes, resolved.length);
     [_legacyBuffer retainResource:heap];
     [_legacyBuffer retainResource:buffer];
     if (fenceToWait != nil) [_legacyBuffer retainResource:fenceToWait];
@@ -8971,44 +8996,62 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     [(id)_legacy drawPrimitives:primitiveType vertexStart:vertexStart vertexCount:vertexCount instanceCount:instanceCount baseInstance:baseInstance];
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)primitiveType indexCount:(NSUInteger)indexCount indexType:(MTLIndexType)indexType indexBuffer:(MTLGPUAddress)indexBuffer indexBufferLength:(NSUInteger)indexBufferLength {
-    ZPUBuffer *buffer = zpu_metal4_buffer_for_address(_owner->_owner, indexBuffer);
-    if (buffer == nil || indexBufferLength > buffer.length) { [_owner markError]; return; }
+    ZPUBuffer *buffer = nil;
+    NSUInteger bufferOffset = 0;
+    if (!zpu_metal4_buffer_address_offset(_owner->_owner, indexBuffer, &buffer, &bufferOffset) ||
+        indexBufferLength > buffer.length - bufferOffset) { [_owner markError]; return; }
     [(id)_legacy drawIndexedPrimitives:primitiveType indexCount:indexCount indexType:indexType
-                           indexBuffer:(id<MTLBuffer>)buffer indexBufferOffset:0];
+                           indexBuffer:(id<MTLBuffer>)buffer indexBufferOffset:bufferOffset];
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)primitiveType indexCount:(NSUInteger)indexCount indexType:(MTLIndexType)indexType indexBuffer:(MTLGPUAddress)indexBuffer indexBufferLength:(NSUInteger)indexBufferLength instanceCount:(NSUInteger)instanceCount {
-    ZPUBuffer *buffer = zpu_metal4_buffer_for_address(_owner->_owner, indexBuffer);
-    if (buffer == nil || indexBufferLength > buffer.length) { [_owner markError]; return; }
+    ZPUBuffer *buffer = nil;
+    NSUInteger bufferOffset = 0;
+    if (!zpu_metal4_buffer_address_offset(_owner->_owner, indexBuffer, &buffer, &bufferOffset) ||
+        indexBufferLength > buffer.length - bufferOffset) { [_owner markError]; return; }
     [(id)_legacy drawIndexedPrimitives:primitiveType indexCount:indexCount indexType:indexType
-                           indexBuffer:(id<MTLBuffer>)buffer indexBufferOffset:0 instanceCount:instanceCount];
+                           indexBuffer:(id<MTLBuffer>)buffer indexBufferOffset:bufferOffset instanceCount:instanceCount];
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)primitiveType indexCount:(NSUInteger)indexCount indexType:(MTLIndexType)indexType indexBuffer:(MTLGPUAddress)indexBuffer indexBufferLength:(NSUInteger)indexBufferLength instanceCount:(NSUInteger)instanceCount baseVertex:(NSInteger)baseVertex baseInstance:(NSUInteger)baseInstance {
-    ZPUBuffer *buffer = zpu_metal4_buffer_for_address(_owner->_owner, indexBuffer);
-    if (buffer == nil || indexBufferLength > buffer.length) { [_owner markError]; return; }
+    ZPUBuffer *buffer = nil;
+    NSUInteger bufferOffset = 0;
+    if (!zpu_metal4_buffer_address_offset(_owner->_owner, indexBuffer, &buffer, &bufferOffset) ||
+        indexBufferLength > buffer.length - bufferOffset) { [_owner markError]; return; }
     [(id)_legacy drawIndexedPrimitives:primitiveType indexCount:indexCount indexType:indexType
-                           indexBuffer:(id<MTLBuffer>)buffer indexBufferOffset:0 instanceCount:instanceCount
+                           indexBuffer:(id<MTLBuffer>)buffer indexBufferOffset:bufferOffset instanceCount:instanceCount
                            baseVertex:baseVertex baseInstance:baseInstance];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)primitiveType indirectBuffer:(MTLGPUAddress)indirectBuffer {
-    ZPUBuffer *buffer = zpu_metal4_buffer_for_address(_owner->_owner, indirectBuffer);
-    if (buffer == nil) { [_owner markError]; return; }
-    [(id)_legacy drawPrimitives:primitiveType indirectBuffer:(id<MTLBuffer>)buffer indirectBufferOffset:0];
+    ZPUBuffer *buffer = nil;
+    NSUInteger bufferOffset = 0;
+    if (!zpu_metal4_buffer_address_offset(_owner->_owner, indirectBuffer, &buffer, &bufferOffset)) {
+        [_owner markError];
+        return;
+    }
+    [(id)_legacy drawPrimitives:primitiveType indirectBuffer:(id<MTLBuffer>)buffer indirectBufferOffset:bufferOffset];
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)primitiveType indexType:(MTLIndexType)indexType indexBuffer:(MTLGPUAddress)indexBuffer indexBufferLength:(NSUInteger)indexBufferLength indirectBuffer:(MTLGPUAddress)indirectBuffer {
-    ZPUBuffer *indices = zpu_metal4_buffer_for_address(_owner->_owner, indexBuffer);
-    ZPUBuffer *indirect = zpu_metal4_buffer_for_address(_owner->_owner, indirectBuffer);
-    if (indices == nil || indirect == nil || indexBufferLength > indices.length) { [_owner markError]; return; }
+    ZPUBuffer *indices = nil;
+    ZPUBuffer *indirect = nil;
+    NSUInteger indexOffset = 0;
+    NSUInteger indirectOffset = 0;
+    if (!zpu_metal4_buffer_address_offset(_owner->_owner, indexBuffer, &indices, &indexOffset) ||
+        !zpu_metal4_buffer_address_offset(_owner->_owner, indirectBuffer, &indirect, &indirectOffset) ||
+        indexBufferLength > indices.length - indexOffset) { [_owner markError]; return; }
     [(id)_legacy drawIndexedPrimitives:primitiveType indexType:indexType
-                           indexBuffer:(id<MTLBuffer>)indices indexBufferOffset:0
-                           indirectBuffer:(id<MTLBuffer>)indirect indirectBufferOffset:0];
+                           indexBuffer:(id<MTLBuffer>)indices indexBufferOffset:indexOffset
+                           indirectBuffer:(id<MTLBuffer>)indirect indirectBufferOffset:indirectOffset];
 }
 - (void)executeCommandsInBuffer:(id<MTLIndirectCommandBuffer>)indirectCommandBuffer withRange:(NSRange)executionRange {
     [(id)_legacy executeCommandsInBuffer:indirectCommandBuffer withRange:executionRange];
 }
 - (void)executeCommandsInBuffer:(id<MTLIndirectCommandBuffer>)indirectCommandBuffer indirectBuffer:(MTLGPUAddress)indirectRangeBuffer {
-    ZPUBuffer *range = zpu_metal4_buffer_for_address(_owner->_owner, indirectRangeBuffer);
-    if (range == nil) { [_owner markError]; return; }
-    [(id)_legacy executeCommandsInBuffer:indirectCommandBuffer indirectBuffer:(id<MTLBuffer>)range indirectBufferOffset:0];
+    ZPUBuffer *range = nil;
+    NSUInteger rangeOffset = 0;
+    if (!zpu_metal4_buffer_address_offset(_owner->_owner, indirectRangeBuffer, &range, &rangeOffset)) {
+        [_owner markError];
+        return;
+    }
+    [(id)_legacy executeCommandsInBuffer:indirectCommandBuffer indirectBuffer:(id<MTLBuffer>)range indirectBufferOffset:rangeOffset];
 }
 - (void)setObjectThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index {
     (void)length;
@@ -9059,21 +9102,23 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     const uint64_t *bufferIDs = (const uint64_t *)_argumentTable->_bufferResources.bytes;
     const uint64_t *bufferStrides = (const uint64_t *)_argumentTable->_bufferStrides.bytes;
     for (NSUInteger index = 0; index < _argumentTable->_maxBufferBindCount; ++index) {
-        ZPUBuffer *buffer = zpu_metal4_buffer_for_address(_owner->_owner, (MTLGPUAddress)bufferIDs[index]);
-        if (bufferIDs[index] != 0 && buffer == nil) {
+        ZPUBuffer *buffer = nil;
+        NSUInteger bufferOffset = 0;
+        if (bufferIDs[index] != 0 && !zpu_metal4_buffer_address_offset(
+                _owner->_owner, (MTLGPUAddress)bufferIDs[index], &buffer, &bufferOffset)) {
             [_owner markError];
             return;
         }
         if ((stages & MTLRenderStageVertex) != 0) {
             if (bufferStrides[index] == 0 || bufferStrides[index] == NSUIntegerMax) {
-                [(id)_legacy setVertexBuffer:(id<MTLBuffer>)buffer offset:0 atIndex:index];
+                [(id)_legacy setVertexBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
             } else {
-                [(id)_legacy setVertexBuffer:(id<MTLBuffer>)buffer offset:0
+                [(id)_legacy setVertexBuffer:(id<MTLBuffer>)buffer offset:bufferOffset
                               attributeStride:(NSUInteger)bufferStrides[index] atIndex:index];
             }
         }
         if ((stages & MTLRenderStageFragment) != 0) {
-            [(id)_legacy setFragmentBuffer:(id<MTLBuffer>)buffer offset:0 atIndex:index];
+            [(id)_legacy setFragmentBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
         }
     }
     const uint64_t *textureIDs = (const uint64_t *)_argumentTable->_textureResources.bytes;
@@ -9149,16 +9194,24 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     _stages |= MTLStageDispatch;
 }
 - (void)dispatchThreadgroupsWithIndirectBuffer:(MTLGPUAddress)indirectBuffer threadsPerThreadgroup:(MTLSize)threadsPerThreadgroup {
-    ZPUBuffer *buffer = zpu_metal4_buffer_for_address(_owner->_owner, indirectBuffer);
-    if (buffer == nil) { [_owner markError]; return; }
-    [(id)_legacy dispatchThreadgroupsWithIndirectBuffer:(id<MTLBuffer>)buffer indirectBufferOffset:0
+    ZPUBuffer *buffer = nil;
+    NSUInteger bufferOffset = 0;
+    if (!zpu_metal4_buffer_address_offset(_owner->_owner, indirectBuffer, &buffer, &bufferOffset)) {
+        [_owner markError];
+        return;
+    }
+    [(id)_legacy dispatchThreadgroupsWithIndirectBuffer:(id<MTLBuffer>)buffer indirectBufferOffset:bufferOffset
                                   threadsPerThreadgroup:threadsPerThreadgroup];
     [_owner->_legacyBuffer retainResource:buffer];
     _stages |= MTLStageDispatch;
 }
 - (void)dispatchThreadsWithIndirectBuffer:(MTLGPUAddress)indirectBuffer {
-    ZPUBuffer *buffer = zpu_metal4_buffer_for_address(_owner->_owner, indirectBuffer);
-    if (buffer == nil) { [_owner markError]; return; }
+    ZPUBuffer *buffer = nil;
+    NSUInteger bufferOffset = 0;
+    if (!zpu_metal4_buffer_address_offset(_owner->_owner, indirectBuffer, &buffer, &bufferOffset)) {
+        [_owner markError];
+        return;
+    }
     const BOOL arrayKernel = _legacy->_kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY;
     if (arrayKernel) {
         if (_legacy->_boundTexture == nil || _legacy->_boundTexture->_textureType != MTLTextureType2DArray) {
@@ -9172,8 +9225,8 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
                     (uint32_t)_legacy->_boundTextureIndex) != ZPU_METAL_OK ||
                 zpu_metal_compute_encoder_set_array_slice(_legacy->_zpuEncoder, (uint32_t)slice,
                     (uint32_t)_legacy->_boundTextureIndex) != ZPU_METAL_OK ||
-                zpu_metal_compute_encoder_dispatch_threads_indirect(_legacy->_zpuEncoder,
-                    buffer->_zpuBuffer) != ZPU_METAL_OK) {
+                zpu_metal_compute_encoder_dispatch_threads_indirect_offset(_legacy->_zpuEncoder,
+                    buffer->_zpuBuffer, bufferOffset) != ZPU_METAL_OK) {
                 [_owner markError];
                 return;
             }
@@ -9190,8 +9243,8 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
                     (uint32_t)_legacy->_boundTextureIndex) != ZPU_METAL_OK ||
                 zpu_metal_compute_encoder_set_array_slice(_legacy->_zpuEncoder, (uint32_t)slice,
                     (uint32_t)_legacy->_boundTextureIndex) != ZPU_METAL_OK ||
-                zpu_metal_compute_encoder_dispatch_threads_indirect(_legacy->_zpuEncoder,
-                    buffer->_zpuBuffer) != ZPU_METAL_OK) {
+                zpu_metal_compute_encoder_dispatch_threads_indirect_offset(_legacy->_zpuEncoder,
+                    buffer->_zpuBuffer, bufferOffset) != ZPU_METAL_OK) {
                 [_owner markError];
                 return;
             }
@@ -9200,8 +9253,8 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
                                                  _legacy->_boundTexture->_textureType == MTLTextureType3D)) {
         [_owner markError];
         return;
-    } else if (zpu_metal_compute_encoder_dispatch_threads_indirect(
-            _legacy->_zpuEncoder, buffer->_zpuBuffer) != ZPU_METAL_OK) {
+        } else if (zpu_metal_compute_encoder_dispatch_threads_indirect_offset(
+            _legacy->_zpuEncoder, buffer->_zpuBuffer, bufferOffset) != ZPU_METAL_OK) {
         [_owner markError];
         return;
     }
@@ -9213,9 +9266,13 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     _stages |= MTLStageDispatch;
 }
 - (void)executeCommandsInBuffer:(id<MTLIndirectCommandBuffer>)indirectCommandBuffer indirectBuffer:(MTLGPUAddress)indirectRangeBuffer {
-    ZPUBuffer *buffer = zpu_metal4_buffer_for_address(_owner->_owner, indirectRangeBuffer);
-    if (buffer == nil) { [_owner markError]; return; }
-    [(id)_legacy executeCommandsInBuffer:indirectCommandBuffer indirectBuffer:(id<MTLBuffer>)buffer indirectBufferOffset:0];
+    ZPUBuffer *buffer = nil;
+    NSUInteger bufferOffset = 0;
+    if (!zpu_metal4_buffer_address_offset(_owner->_owner, indirectRangeBuffer, &buffer, &bufferOffset)) {
+        [_owner markError];
+        return;
+    }
+    [(id)_legacy executeCommandsInBuffer:indirectCommandBuffer indirectBuffer:(id<MTLBuffer>)buffer indirectBufferOffset:bufferOffset];
     _stages |= MTLStageDispatch;
 }
 - (void)barrierAfterQueueStages:(MTLStages)afterQueueStages beforeStages:(MTLStages)beforeStages visibilityOptions:(MTL4VisibilityOptions)visibilityOptions { (void)afterQueueStages; (void)beforeStages; (void)visibilityOptions; }
@@ -9244,17 +9301,19 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     if (_argumentTable->_invalid) { [_owner markError]; return; }
     const uint64_t *bufferIDs = (const uint64_t *)_argumentTable->_bufferResources.bytes;
     for (NSUInteger index = 0; index < _argumentTable->_maxBufferBindCount; ++index) {
-        id resource = zpu_resource_for_id(bufferIDs[index]);
-        if (bufferIDs[index] != 0 &&
-            (![resource isKindOfClass:[ZPUBuffer class]] || ((ZPUBuffer *)resource)->_owner != _owner->_owner)) {
+        ZPUBuffer *buffer = nil;
+        NSUInteger bufferOffset = 0;
+        if (bufferIDs[index] != 0 && !zpu_metal4_buffer_address_offset(
+                _owner->_owner, (MTLGPUAddress)bufferIDs[index], &buffer, &bufferOffset)) {
             [_owner markError];
             return;
         }
-        if (resource == nil) continue;
+        if (buffer == nil) continue;
         const uint64_t *strides = (const uint64_t *)_argumentTable->_bufferStrides.bytes;
-        [_legacy setBuffer:(id<MTLBuffer>)resource offset:0 atIndex:index];
+        [_legacy setBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
         if (strides[index] != 0 && strides[index] != NSUIntegerMax) {
-            [_legacy setBuffer:(id<MTLBuffer>)resource offset:0 attributeStride:(NSUInteger)strides[index] atIndex:index];
+            [_legacy setBuffer:(id<MTLBuffer>)buffer offset:bufferOffset
+                attributeStride:(NSUInteger)strides[index] atIndex:index];
         }
     }
     const uint64_t *textureIDs = (const uint64_t *)_argumentTable->_textureResources.bytes;

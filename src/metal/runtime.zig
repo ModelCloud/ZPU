@@ -1602,11 +1602,16 @@ pub const ComputeEncoder = struct {
     }
 
     pub fn dispatchThreadsIndirect(self: *ComputeEncoder, indirect_buffer: *Buffer) Error!void {
+        return self.dispatchThreadsIndirectAtOffset(indirect_buffer, 0);
+    }
+
+    pub fn dispatchThreadsIndirectAtOffset(self: *ComputeEncoder, indirect_buffer: *Buffer, indirect_buffer_offset: usize) Error!void {
         if (!self.open() or self.kernel == 0 or self.texture == null) return error.InvalidCommand;
         if (((self.kernel == 1 or self.kernel == 3 or self.kernel == 4) and self.texture_index != 0) or (self.kernel == 2 and
             (self.texture_index != 1 or self.buffer == null))) return error.InvalidCommand;
         if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
-            indirect_buffer.bytes.len < 2 * @sizeOf(abi.Size)) return error.InvalidArgument;
+            indirect_buffer_offset % @alignOf(u32) != 0 or
+            !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, 2 * @sizeOf(abi.Size))) return error.InvalidArgument;
         _ = try self.command_buffer.append(.{ .compute = .{
             .kernel = self.kernel,
             .texture = self.texture.?,
@@ -1615,6 +1620,7 @@ pub const ComputeEncoder = struct {
             .buffer_offset = self.buffer_offset,
             .threads_per_grid = .{ .width = 0, .height = 0, .depth = 1 },
             .indirect_buffer = indirect_buffer,
+            .indirect_buffer_offset = indirect_buffer_offset,
             .indirect_threads = true,
             .array_slice = self.array_slice,
         } });
@@ -4046,6 +4052,11 @@ pub export fn zpu_metal_compute_encoder_dispatch_threadgroups_indirect(encoder: 
 
 pub export fn zpu_metal_compute_encoder_dispatch_threads_indirect(encoder: ?*ComputeEncoder, indirect_buffer: ?*Buffer) callconv(.c) c_int {
     (encoder orelse return -1).dispatchThreadsIndirect(indirect_buffer orelse return -1) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_compute_encoder_dispatch_threads_indirect_offset(encoder: ?*ComputeEncoder, indirect_buffer: ?*Buffer, indirect_buffer_offset: usize) callconv(.c) c_int {
+    (encoder orelse return -1).dispatchThreadsIndirectAtOffset(indirect_buffer orelse return -1, indirect_buffer_offset) catch |err| return errorCode(err);
     return 0;
 }
 
