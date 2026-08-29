@@ -45,6 +45,7 @@ pub const DrawOptions = struct {
     sample_filter: abi.SamplerFilter = .nearest,
     sample_address_s: abi.SamplerAddressMode = .clamp_to_edge,
     sample_address_t: abi.SamplerAddressMode = .clamp_to_edge,
+    sample_border_color: abi.SamplerBorderColor = .transparent_black,
     sample_swizzle: abi.TextureSwizzleChannels = .{
         .red = .red,
         .green = .green,
@@ -209,9 +210,21 @@ pub const Target = struct {
         };
     }
 
-    fn sampleTexel(self: *const Target, x: i64, y: i64, address_s: abi.SamplerAddressMode, address_t: abi.SamplerAddressMode) [4]f32 {
-        const sample_x = sampleIndex(x, self.width, address_s) orelse return self.zeroSampleColor();
-        const sample_y = sampleIndex(y, self.height, address_t) orelse return self.zeroSampleColor();
+    fn borderSampleColor(self: *const Target, border_color: abi.SamplerBorderColor) [4]f32 {
+        return switch (border_color) {
+            .transparent_black => self.zeroSampleColor(),
+            .opaque_black => .{ 0, 0, 0, 1 },
+            .opaque_white => .{ 1, 1, 1, 1 },
+        };
+    }
+
+    fn outOfRangeSampleColor(self: *const Target, mode: abi.SamplerAddressMode, border_color: abi.SamplerBorderColor) [4]f32 {
+        return if (mode == .clamp_to_border_color) self.borderSampleColor(border_color) else self.zeroSampleColor();
+    }
+
+    fn sampleTexel(self: *const Target, x: i64, y: i64, address_s: abi.SamplerAddressMode, address_t: abi.SamplerAddressMode, border_color: abi.SamplerBorderColor) [4]f32 {
+        const sample_x = sampleIndex(x, self.width, address_s) orelse return self.outOfRangeSampleColor(address_s, border_color);
+        const sample_y = sampleIndex(y, self.height, address_t) orelse return self.outOfRangeSampleColor(address_t, border_color);
         return self.readColor(sample_x, sample_y);
     }
 
@@ -219,17 +232,17 @@ pub const Target = struct {
         return if (self.format == .r32_float) .{ 0, 0, 0, 1 } else .{ 0, 0, 0, 0 };
     }
 
-    fn sampleNearest(self: *const Target, u: f32, v: f32, address_s: abi.SamplerAddressMode, address_t: abi.SamplerAddressMode) [4]f32 {
-        const normalized_u = addressCoordinate(u, address_s) orelse return self.zeroSampleColor();
-        const normalized_v = addressCoordinate(v, address_t) orelse return self.zeroSampleColor();
+    fn sampleNearest(self: *const Target, u: f32, v: f32, address_s: abi.SamplerAddressMode, address_t: abi.SamplerAddressMode, border_color: abi.SamplerBorderColor) [4]f32 {
+        const normalized_u = addressCoordinate(u, address_s) orelse return self.outOfRangeSampleColor(address_s, border_color);
+        const normalized_v = addressCoordinate(v, address_t) orelse return self.outOfRangeSampleColor(address_t, border_color);
         const x: i64 = @intFromFloat(@min(normalized_u, 0.99999994) * @as(f32, @floatFromInt(self.width)));
         const y: i64 = @intFromFloat(@min(normalized_v, 0.99999994) * @as(f32, @floatFromInt(self.height)));
-        return self.sampleTexel(x, y, address_s, address_t);
+        return self.sampleTexel(x, y, address_s, address_t, border_color);
     }
 
-    fn sampleLinear(self: *const Target, u: f32, v: f32, address_s: abi.SamplerAddressMode, address_t: abi.SamplerAddressMode) [4]f32 {
-        const normalized_u = addressCoordinate(u, address_s) orelse return self.zeroSampleColor();
-        const normalized_v = addressCoordinate(v, address_t) orelse return self.zeroSampleColor();
+    fn sampleLinear(self: *const Target, u: f32, v: f32, address_s: abi.SamplerAddressMode, address_t: abi.SamplerAddressMode, border_color: abi.SamplerBorderColor) [4]f32 {
+        const normalized_u = addressCoordinate(u, address_s) orelse return self.outOfRangeSampleColor(address_s, border_color);
+        const normalized_v = addressCoordinate(v, address_t) orelse return self.outOfRangeSampleColor(address_t, border_color);
         const x = normalized_u * @as(f32, @floatFromInt(self.width)) - 0.5;
         const y = normalized_v * @as(f32, @floatFromInt(self.height)) - 0.5;
         const x0_float = @floor(x);
@@ -238,10 +251,10 @@ pub const Target = struct {
         const y0: i64 = @intFromFloat(y0_float);
         const x_weight = x - x0_float;
         const y_weight = y - y0_float;
-        const top_left = self.sampleTexel(x0, y0, address_s, address_t);
-        const top_right = self.sampleTexel(x0 + 1, y0, address_s, address_t);
-        const bottom_left = self.sampleTexel(x0, y0 + 1, address_s, address_t);
-        const bottom_right = self.sampleTexel(x0 + 1, y0 + 1, address_s, address_t);
+        const top_left = self.sampleTexel(x0, y0, address_s, address_t, border_color);
+        const top_right = self.sampleTexel(x0 + 1, y0, address_s, address_t, border_color);
+        const bottom_left = self.sampleTexel(x0, y0 + 1, address_s, address_t, border_color);
+        const bottom_right = self.sampleTexel(x0 + 1, y0 + 1, address_s, address_t, border_color);
         var result: [4]f32 = undefined;
         for (0..4) |channel| {
             const top = top_left[channel] + (top_right[channel] - top_left[channel]) * x_weight;
@@ -271,10 +284,10 @@ pub const Target = struct {
         };
     }
 
-    fn sample(self: *const Target, u: f32, v: f32, filter: abi.SamplerFilter, address_s: abi.SamplerAddressMode, address_t: abi.SamplerAddressMode, swizzle: abi.TextureSwizzleChannels) [4]f32 {
+    fn sample(self: *const Target, u: f32, v: f32, filter: abi.SamplerFilter, address_s: abi.SamplerAddressMode, address_t: abi.SamplerAddressMode, border_color: abi.SamplerBorderColor, swizzle: abi.TextureSwizzleChannels) [4]f32 {
         const color = switch (filter) {
-            .nearest => self.sampleNearest(u, v, address_s, address_t),
-            .linear => self.sampleLinear(u, v, address_s, address_t),
+            .nearest => self.sampleNearest(u, v, address_s, address_t, border_color),
+            .linear => self.sampleLinear(u, v, address_s, address_t, border_color),
         };
         return applySwizzle(color, swizzle);
     }
@@ -467,7 +480,8 @@ fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [
     }
     if (stencil_index) |index| applyStencil(job.stencil.?, index, stencil_state, stencil_state.depth_pass);
     const fragment_color = if (job.sample_texture) |texture|
-        texture.sample(color[0], color[1], job.options.sample_filter, job.options.sample_address_s, job.options.sample_address_t, job.options.sample_swizzle)
+        texture.sample(color[0], color[1], job.options.sample_filter, job.options.sample_address_s, job.options.sample_address_t,
+            job.options.sample_border_color, job.options.sample_swizzle)
     else
         job.options.fragment_color orelse color;
     writeColor(job.target, x, y, fragment_color, job.options);
@@ -862,10 +876,10 @@ test "CPU texture sampling uses normalized top-left texel coordinates" {
         0,   0, 255, 255, 255, 255, 255, 255,
     };
     const target = try Target.init(&pixels, 2, 2, 2 * 4, .rgba8_unorm);
-    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.25, 0.25, .clamp_to_edge, .clamp_to_edge)[0]);
-    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.75, 0.25, .clamp_to_edge, .clamp_to_edge)[1]);
-    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.25, 0.75, .clamp_to_edge, .clamp_to_edge)[2]);
-    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.75, 0.75, .clamp_to_edge, .clamp_to_edge)[0]);
+    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.25, 0.25, .clamp_to_edge, .clamp_to_edge, .transparent_black)[0]);
+    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.75, 0.25, .clamp_to_edge, .clamp_to_edge, .transparent_black)[1]);
+    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.25, 0.75, .clamp_to_edge, .clamp_to_edge, .transparent_black)[2]);
+    try std.testing.expectEqual(@as(f32, 1), target.sampleNearest(0.75, 0.75, .clamp_to_edge, .clamp_to_edge, .transparent_black)[0]);
 }
 
 test "CPU texture sampling supports linear filtering and address modes" {
@@ -874,30 +888,32 @@ test "CPU texture sampling supports linear filtering and address modes" {
         0,   0, 255, 255, 255, 255, 255, 255,
     };
     const target = try Target.init(&pixels, 2, 2, 2 * 4, .rgba8_unorm);
-    const center = target.sampleLinear(0.5, 0.5, .clamp_to_edge, .clamp_to_edge);
+    const center = target.sampleLinear(0.5, 0.5, .clamp_to_edge, .clamp_to_edge, .transparent_black);
     for (center[0..3]) |channel| try std.testing.expectApproxEqAbs(@as(f32, 0.5), channel, 0.001);
     try std.testing.expectEqual(@as(f32, 1), center[3]);
 
-    const repeated = target.sampleNearest(1.25, 0.25, .repeat, .repeat);
+    const repeated = target.sampleNearest(1.25, 0.25, .repeat, .repeat, .transparent_black);
     try std.testing.expectEqual(@as(f32, 1), repeated[0]);
     try std.testing.expectEqual(@as(f32, 0), repeated[1]);
-    const mirrored = target.sampleNearest(1.25, 0.25, .mirror_repeat, .mirror_repeat);
+    const mirrored = target.sampleNearest(1.25, 0.25, .mirror_repeat, .mirror_repeat, .transparent_black);
     try std.testing.expectEqual(@as(f32, 1), mirrored[1]);
-    const mirror_clamped = target.sampleNearest(-0.25, 0.25, .mirror_clamp_to_edge, .mirror_clamp_to_edge);
+    const mirror_clamped = target.sampleNearest(-0.25, 0.25, .mirror_clamp_to_edge, .mirror_clamp_to_edge, .transparent_black);
     try std.testing.expectEqual(@as(f32, 1), mirror_clamped[0]);
-    const outside = target.sampleNearest(-0.25, 0.25, .clamp_to_zero, .clamp_to_zero);
+    const outside = target.sampleNearest(-0.25, 0.25, .clamp_to_zero, .clamp_to_zero, .transparent_black);
     try std.testing.expectEqual([4]f32{ 0, 0, 0, 0 }, outside);
+    const border = target.sampleNearest(-0.25, 0.25, .clamp_to_border_color, .clamp_to_border_color, .opaque_white);
+    try std.testing.expectEqual([4]f32{ 1, 1, 1, 1 }, border);
 
     var scalar_pixels = [_]u8{ 0, 0, 128, 63 };
     const scalar_target = try Target.init(&scalar_pixels, 1, 1, 4, .r32_float);
-    const scalar_outside = scalar_target.sampleNearest(-0.25, 0.5, .clamp_to_zero, .clamp_to_zero);
+    const scalar_outside = scalar_target.sampleNearest(-0.25, 0.5, .clamp_to_zero, .clamp_to_zero, .transparent_black);
     try std.testing.expectEqual([4]f32{ 0, 0, 0, 1 }, scalar_outside);
 }
 
 test "CPU texture sampling applies texture-view channel swizzles" {
     var pixels = [_]u8{ 255, 0, 0, 255 };
     const target = try Target.init(&pixels, 1, 1, 4, .rgba8_unorm);
-    const swizzled = target.sample(0.5, 0.5, .nearest, .clamp_to_edge, .clamp_to_edge, .{
+    const swizzled = target.sample(0.5, 0.5, .nearest, .clamp_to_edge, .clamp_to_edge, .transparent_black, .{
         .red = .blue,
         .green = .red,
         .blue = .one,

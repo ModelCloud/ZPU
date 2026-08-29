@@ -633,6 +633,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLSamplerMipFilter _mipFilter;
     MTLSamplerAddressMode _sAddressMode;
     MTLSamplerAddressMode _tAddressMode;
+    MTLSamplerBorderColor _borderColor;
     uint64_t _resourceID;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLSamplerDescriptor *)descriptor;
@@ -5504,6 +5505,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _mipFilter = descriptor.mipFilter;
         _sAddressMode = descriptor.sAddressMode;
         _tAddressMode = descriptor.tAddressMode;
+        _borderColor = descriptor.borderColor;
         _resourceID = zpu_register_resource(self);
     }
     return self;
@@ -6417,7 +6419,8 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     return descriptor == nil ? nil : (id<MTLDepthStencilState>)[[ZPUDepthStencilState alloc] initWithOwner:self descriptor:descriptor];
 }
 - (id<MTLSamplerState>)newSamplerStateWithDescriptor:(MTLSamplerDescriptor *)descriptor {
-    return descriptor == nil ? nil : (id<MTLSamplerState>)[[ZPUSamplerState alloc] initWithOwner:self descriptor:descriptor];
+    if (descriptor == nil || descriptor.borderColor > MTLSamplerBorderColorOpaqueWhite) return nil;
+    return (id<MTLSamplerState>)[[ZPUSamplerState alloc] initWithOwner:self descriptor:descriptor];
 }
 - (id<MTLLibrary>)newLibraryWithSource:(NSString *)source options:(MTLCompileOptions *)options error:(NSError **)error {
     if (source == nil) {
@@ -12009,7 +12012,10 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         (zpu_metal_sampler_address_mode)zpuSampler->_sAddressMode;
     const zpu_metal_sampler_address_mode address_t = sampler == nil ? ZPU_METAL_SAMPLER_CLAMP_TO_EDGE :
         (zpu_metal_sampler_address_mode)zpuSampler->_tAddressMode;
-    if (zpu_metal_render_encoder_set_fragment_sampler(_zpuEncoder, filter, address_s, address_t) != ZPU_METAL_OK) {
+    const uint8_t borderColor = sampler == nil ? (uint8_t)MTLSamplerBorderColorTransparentBlack :
+        (uint8_t)zpuSampler->_borderColor;
+    if (zpu_metal_render_encoder_set_fragment_sampler_with_border(
+            _zpuEncoder, filter, address_s, address_t, borderColor) != ZPU_METAL_OK) {
         [_owner markError];
         return;
     }

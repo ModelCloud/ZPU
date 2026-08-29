@@ -1652,6 +1652,98 @@ int main(void) {
             return 95;
         }
 
+        /* Border color is part of Metal's sampler state, not an implicit
+         * transparent-black fallback. Use a full-screen pair of triangles
+         * with an out-of-range normalized coordinate so the native result is
+         * a compact oracle for the CPU raster sampler. */
+        MTLSamplerDescriptor *native_border_sampler_descriptor = [sample_sampler_descriptor copy];
+        native_border_sampler_descriptor.sAddressMode = MTLSamplerAddressModeClampToBorderColor;
+        native_border_sampler_descriptor.tAddressMode = MTLSamplerAddressModeClampToBorderColor;
+        native_border_sampler_descriptor.borderColor = MTLSamplerBorderColorOpaqueWhite;
+        MTLSamplerDescriptor *adapter_border_sampler_descriptor = [native_border_sampler_descriptor copy];
+        id<MTLSamplerState> native_border_sampler =
+            [device newSamplerStateWithDescriptor:native_border_sampler_descriptor];
+        id<MTLSamplerState> adapter_border_sampler =
+            [adapter_device newSamplerStateWithDescriptor:adapter_border_sampler_descriptor];
+        const zpu_metal_vertex border_vertices[] = {
+            {{-1.0f, -1.0f, 0.5f, 1.0f}, {-0.25f, -0.25f, 0.0f, 1.0f}},
+            {{ 1.0f, -1.0f, 0.5f, 1.0f}, {-0.25f, -0.25f, 0.0f, 1.0f}},
+            {{ 1.0f,  1.0f, 0.5f, 1.0f}, {-0.25f, -0.25f, 0.0f, 1.0f}},
+            {{-1.0f, -1.0f, 0.5f, 1.0f}, {-0.25f, -0.25f, 0.0f, 1.0f}},
+            {{ 1.0f,  1.0f, 0.5f, 1.0f}, {-0.25f, -0.25f, 0.0f, 1.0f}},
+            {{-1.0f,  1.0f, 0.5f, 1.0f}, {-0.25f, -0.25f, 0.0f, 1.0f}},
+        };
+        id<MTLBuffer> native_border_vertex_buffer =
+            [device newBufferWithBytes:border_vertices length:sizeof(border_vertices)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_border_vertex_buffer =
+            [adapter_device newBufferWithBytes:border_vertices length:sizeof(border_vertices)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLTexture> native_border_output = [device newTextureWithDescriptor:sample_output_descriptor];
+        id<MTLTexture> adapter_border_output = [adapter_device newTextureWithDescriptor:sample_output_descriptor];
+        MTLRenderPassDescriptor *native_border_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_border_pass.colorAttachments[0].texture = native_border_output;
+        native_border_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_border_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_border_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> native_border_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_border_encoder =
+            [native_border_command_buffer renderCommandEncoderWithDescriptor:native_border_pass];
+        [native_border_encoder setRenderPipelineState:native_sample_pipeline];
+        [native_border_encoder setVertexBuffer:native_border_vertex_buffer offset:0 atIndex:0];
+        [native_border_encoder setFragmentTexture:native_sample_source atIndex:0];
+        [native_border_encoder setFragmentSamplerState:native_border_sampler atIndex:0];
+        [native_border_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_border_encoder endEncoding];
+        [native_border_command_buffer commit];
+        [native_border_command_buffer waitUntilCompleted];
+        MTLRenderPassDescriptor *adapter_border_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_border_pass.colorAttachments[0].texture = adapter_border_output;
+        adapter_border_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_border_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_border_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> adapter_border_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_border_encoder =
+            [adapter_border_command_buffer renderCommandEncoderWithDescriptor:adapter_border_pass];
+        [adapter_border_encoder setRenderPipelineState:adapter_sample_pipeline];
+        [adapter_border_encoder setVertexBuffer:adapter_border_vertex_buffer offset:0 atIndex:0];
+        [adapter_border_encoder setFragmentTexture:adapter_sample_source atIndex:0];
+        [adapter_border_encoder setFragmentSamplerState:adapter_border_sampler atIndex:0];
+        [adapter_border_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_border_encoder endEncoding];
+        [adapter_border_command_buffer commit];
+        [adapter_border_command_buffer waitUntilCompleted];
+        uint8_t native_border_bytes[byte_count];
+        uint8_t adapter_border_bytes[byte_count];
+        [native_border_output getBytes:native_border_bytes bytesPerRow:(NSUInteger)width * 4
+                            fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_border_output getBytes:adapter_border_bytes bytesPerRow:(NSUInteger)width * 4
+                              fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (native_border_sampler == nil || adapter_border_sampler == nil ||
+            native_border_vertex_buffer == nil || adapter_border_vertex_buffer == nil ||
+            native_border_output == nil || adapter_border_output == nil ||
+            native_border_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_border_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_border_bytes, adapter_border_bytes, byte_count) != 0 ||
+            memcmp(adapter_border_bytes + (4 * width + 4) * 4, (const uint8_t[]){255, 255, 255, 255}, 4) != 0) {
+            size_t border_mismatch = 0;
+            while (border_mismatch < byte_count && native_border_bytes[border_mismatch] == adapter_border_bytes[border_mismatch]) {
+                border_mismatch += 1;
+            }
+            fprintf(stderr, "metal-pixel: border statuses=%lu/%lu center=%u,%u,%u,%u vs %u,%u,%u,%u mismatch=%zu nativeByte=%u adapterByte=%u\n",
+                    (unsigned long)native_border_command_buffer.status,
+                    (unsigned long)adapter_border_command_buffer.status,
+                    native_border_bytes[(4 * width + 4) * 4], native_border_bytes[(4 * width + 4) * 4 + 1],
+                    native_border_bytes[(4 * width + 4) * 4 + 2], native_border_bytes[(4 * width + 4) * 4 + 3],
+                    adapter_border_bytes[(4 * width + 4) * 4], adapter_border_bytes[(4 * width + 4) * 4 + 1],
+                    adapter_border_bytes[(4 * width + 4) * 4 + 2], adapter_border_bytes[(4 * width + 4) * 4 + 3],
+                    border_mismatch,
+                    border_mismatch < byte_count ? native_border_bytes[border_mismatch] : 0,
+                    border_mismatch < byte_count ? adapter_border_bytes[border_mismatch] : 0);
+            fail_with_error("sampler border-color CPU/native oracle mismatch", adapter_pipeline_error);
+            return 137;
+        }
+
         id<MTLCommandBuffer> invalid_fragment_sampler_command_buffer = [adapter_queue commandBuffer];
         id<MTLRenderCommandEncoder> invalid_fragment_sampler_encoder =
             [invalid_fragment_sampler_command_buffer renderCommandEncoderWithDescriptor:adapter_sample_pass];
@@ -11119,7 +11211,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables, visibility results, acceleration-structure resources, cube/cube-array textures, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables and border colors, visibility results, acceleration-structure resources, cube/cube-array textures, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }

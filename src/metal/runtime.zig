@@ -658,6 +658,7 @@ pub const RenderEncoder = struct {
     sample_filter: abi.SamplerFilter = .nearest,
     sample_address_s: abi.SamplerAddressMode = .clamp_to_edge,
     sample_address_t: abi.SamplerAddressMode = .clamp_to_edge,
+    sample_border_color: abi.SamplerBorderColor = .transparent_black,
     sample_swizzle: abi.TextureSwizzleChannels = .{
         .red = .red,
         .green = .green,
@@ -713,6 +714,7 @@ pub const RenderEncoder = struct {
             .sample_filter = self.sample_filter,
             .sample_address_s = self.sample_address_s,
             .sample_address_t = self.sample_address_t,
+            .sample_border_color = self.sample_border_color,
             .sample_swizzle = self.sample_swizzle,
             .rasterization_enabled = self.rasterization_enabled,
             .depth_compare = self.depth_compare,
@@ -798,11 +800,12 @@ pub const RenderEncoder = struct {
         self.sample_swizzle = .{ .red = .red, .green = .green, .blue = .blue, .alpha = .alpha };
     }
 
-    pub fn setFragmentSampler(self: *RenderEncoder, filter: u8, address_s: u8, address_t: u8) Error!void {
+    pub fn setFragmentSampler(self: *RenderEncoder, filter: u8, address_s: u8, address_t: u8, border_color: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
         self.sample_filter = samplerFilterFromInt(filter) orelse return error.InvalidArgument;
         self.sample_address_s = samplerAddressModeFromInt(address_s) orelse return error.InvalidArgument;
         self.sample_address_t = samplerAddressModeFromInt(address_t) orelse return error.InvalidArgument;
+        self.sample_border_color = samplerBorderColorFromInt(border_color) orelse return error.InvalidArgument;
     }
 
     pub fn setFragmentTextureSwizzle(self: *RenderEncoder, red: u8, green: u8, blue: u8, alpha: u8) Error!void {
@@ -2630,6 +2633,15 @@ fn samplerAddressModeFromInt(value: u8) ?abi.SamplerAddressMode {
     };
 }
 
+fn samplerBorderColorFromInt(value: u8) ?abi.SamplerBorderColor {
+    return switch (value) {
+        @intFromEnum(abi.SamplerBorderColor.transparent_black) => .transparent_black,
+        @intFromEnum(abi.SamplerBorderColor.opaque_black) => .opaque_black,
+        @intFromEnum(abi.SamplerBorderColor.opaque_white) => .opaque_white,
+        else => null,
+    };
+}
+
 fn textureSwizzleFromInt(value: u8) ?abi.TextureSwizzle {
     return switch (value) {
         @intFromEnum(abi.TextureSwizzle.zero) => .zero,
@@ -3745,7 +3757,15 @@ pub export fn zpu_metal_render_encoder_set_fragment_texture(encoder: ?*RenderEnc
 }
 
 pub export fn zpu_metal_render_encoder_set_fragment_sampler(encoder: ?*RenderEncoder, filter: u8, address_s: u8, address_t: u8) callconv(.c) c_int {
-    (encoder orelse return -1).setFragmentSampler(filter, address_s, address_t) catch |err| return errorCode(err);
+    (encoder orelse return -1).setFragmentSampler(filter, address_s, address_t,
+        @intFromEnum(abi.SamplerBorderColor.transparent_black)) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_fragment_sampler_with_border(
+    encoder: ?*RenderEncoder, filter: u8, address_s: u8, address_t: u8, border_color: u8,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setFragmentSampler(filter, address_s, address_t, border_color) catch |err| return errorCode(err);
     return 0;
 }
 

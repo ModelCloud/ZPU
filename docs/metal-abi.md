@@ -69,7 +69,9 @@ triangle path:
   their load/clear value
 - the bounded `zpu_test_sample_fragment` profile samples a ZPU-owned color
   texture with interpolated normalized coordinates and nearest filtering;
-  native Metal is used only as the byte-accuracy oracle
+  sampler address modes, linear filtering, and the three Metal border-color
+  modes are carried through the CPU raster path; native Metal is used only as
+  the byte-accuracy oracle
 - the bounded `zpu_cpu_uniform_color_fragment` profile consumes a 16-byte
   `float4` from `setFragmentBytes:length:atIndex:0` and applies it through
   the CPU raster path; it also consumes a ZPU-owned 16-byte `float4` buffer

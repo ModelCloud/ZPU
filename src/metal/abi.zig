@@ -45,6 +45,11 @@ pub const SamplerAddressMode = enum(u8) {
     clamp_to_zero = 4,
     clamp_to_border_color = 5,
 };
+pub const SamplerBorderColor = enum(u8) {
+    transparent_black = 0,
+    opaque_black = 1,
+    opaque_white = 2,
+};
 pub const TextureSwizzle = enum(u8) {
     zero = 0,
     one = 1,
