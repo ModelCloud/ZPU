@@ -205,7 +205,10 @@ triangle path:
   copies, while arbitrary ML graphs and arbitrary-MSL compiler requests remain
   fail-closed; the registered `zpu_cpu_tile_gradient_rgba8` tile profile is
   also compiled as CPU metadata and dispatches ordered ZPU tile work with
-  exact upper-left `(0,0)` coordinates and RGBA8/BGRA8 storage ordering
+  exact upper-left `(0,0)` coordinates and RGBA8/BGRA8 storage ordering; the
+  registered `zpu_cpu_mesh_gradient_rgba8` plus
+  `zpu_cpu_mesh_gradient_fragment` profile similarly dispatches one ordered
+  CPU/ZPU pixel per mesh-grid thread
 - CPU-owned Metal 4 pipeline-data serializers record those registered compute
   names and emit deterministic ZPU metadata scripts or the existing ZPU
   binary-archive format; these outputs are not Apple metal-tt scripts or
@@ -220,17 +223,18 @@ triangle path:
 - legacy and Metal 4 render pipeline callable linking accepts only same-device
   registered visible CPU functions for vertex and fragment stages; derived
   pipeline states retain the fixed ZPU raster profile and expose stage-scoped
-  handles plus synthetic CPU resource IDs. The bounded registered tile profile
-  is executable through both legacy and Metal 4 tile encoders; tile binary
-  linking and arbitrary tile/object/mesh functions remain fail-closed
+  handles plus synthetic CPU resource IDs. The bounded registered tile and mesh
+  profiles are executable through both legacy and Metal 4 encoders; tile/mesh
+  binary linking and arbitrary tile/object/mesh functions remain fail-closed
 - CPU-owned Metal 4 commit options and feedback; the explicit
   `ZPUMetalCreateCPUCommitOptions()` extension creates options whose feedback
   handlers receive host-time start/end values after the ZPU command buffers
   complete
 - CPU-owned Metal 4 render encoders for ordinary render passes and the bounded
-  registered tile profile; they bridge MTL4 attachment descriptors,
+  registered tile and mesh profiles; they bridge MTL4 attachment descriptors,
   GPU-address argument tables, fixed-function raster state, indexed/indirect
-  draws, fences, viewport/scissor state, and tile dispatch to the existing ZPU
+  draws, fences, viewport/scissor state, tile dispatch, and mesh-grid dispatch
+  to the existing ZPU
   encoders. The MTL4 path preserves the same upper-left pixel grid and
   clip-space +Y direction as the legacy adapter, including clipped edge tiles,
   and rejects GPU addresses and argument-table resources that are not owned by
@@ -372,8 +376,9 @@ triangle path:
   drawable signal/wait validates the same ownership graph and remains a CPU
   no-op. Tensor shader binding, arbitrary ML graph execution, ray-intersection
   execution, opaque native 3D sparse-tail backing layout, and arbitrary
-  tile/mesh render-pass features remain explicit fail-closed boundaries. The
-  registered tile profile is the bounded exception. Suspending/resuming render
+  arbitrary tile/mesh render-pass features remain explicit fail-closed
+  boundaries. The registered tile and mesh profiles are the bounded
+  exceptions. Suspending/resuming render
   passes are represented as sequential ordinary CPU passes because the CPU
   implementation has no tile-memory stitching requirement. The
   adapter never routes them to native Metal
@@ -475,9 +480,9 @@ reference: <https://developer.apple.com/documentation/metal>.
 The current checked-in implementation is intentionally not 100% of the Apple
 Metal ABI. The remaining framework surface includes additional compute and
 Metal 4 encoders, resource and pipeline descriptors beyond the fixed-function state
-implemented here, arbitrary Metal 4 tile/mesh render and remaining copy/optimization families. The registered RGBA8 tile profile is CPU/ZPU-owned
+implemented here, arbitrary Metal 4 tile/mesh render and remaining copy/optimization families. The registered RGBA8 tile and mesh profiles are CPU/ZPU-owned
 through legacy and Metal 4 pipeline creation, binary archives, and the Metal 4
-pipeline-data serializer; arbitrary tile functions remain unsupported. ICB mesh/tessellation-shader execution, other
+pipeline-data serializer; arbitrary tile/mesh functions remain unsupported. ICB mesh/tessellation-shader execution, other
 synchronization families, ray-tracing execution, opaque native 3D sparse-texture tail
 backing layout, arbitrary machine-learning/tensor execution, and arbitrary shader compilation. Function-table storage is
 implemented, but it does not imply ray-tracing or arbitrary function-pointer

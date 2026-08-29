@@ -43,6 +43,14 @@ static const MTLIndirectCommandType zpu_indirect_command_type_draw_indexed_patch
  * ZPU operation, not an arbitrary MSL or framework graph compiler entry. */
 static NSString *const zpu_cpu_ml_identity_function_name = @"zpu_cpu_ml_identity";
 static NSString *const zpu_cpu_tile_gradient_function_name = @"zpu_cpu_tile_gradient_rgba8";
+static NSString *const zpu_cpu_mesh_gradient_function_name = @"zpu_cpu_mesh_gradient_rgba8";
+static NSString *const zpu_cpu_mesh_gradient_fragment_name = @"zpu_cpu_mesh_gradient_fragment";
+/* MTLRenderStageObject/Mesh are introduced in iOS 16, while the shared
+ * function-handle selector is available from iOS 15. Keep the ABI bit values
+ * here so the adapter remains deployable to iOS 15 and still recognizes the
+ * newer stages when the caller runs on a newer OS. */
+static const MTLRenderStages zpu_mtl_render_stage_object = (MTLRenderStages)(1UL << 3);
+static const MTLRenderStages zpu_mtl_render_stage_mesh = (MTLRenderStages)(1UL << 4);
 static const MTLBindingType zpu_mtl_binding_type_tensor = (MTLBindingType)37;
 
 @class ZPUDevice;
@@ -620,6 +628,17 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSUInteger _tileMaxTotalThreadsPerThreadgroup;
     BOOL _tileThreadgroupSizeMatchesTileSize;
     MTLSize _tileRequiredThreadsPerThreadgroup;
+    BOOL _isMeshPipeline;
+    NSString *_objectFunctionName;
+    NSString *_meshFunctionName;
+    NSString *_meshFragmentFunctionName;
+    NSUInteger _meshMaxTotalThreadsPerObjectThreadgroup;
+    NSUInteger _meshMaxTotalThreadsPerMeshThreadgroup;
+    NSUInteger _meshMaxTotalThreadgroupsPerMeshGrid;
+    BOOL _meshObjectThreadgroupSizeMatchesExecutionWidth;
+    BOOL _meshThreadgroupSizeMatchesExecutionWidth;
+    MTLSize _meshRequiredThreadsPerObjectThreadgroup;
+    MTLSize _meshRequiredThreadsPerMeshThreadgroup;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLRenderPipelineDescriptor *)descriptor;
 - (instancetype)initWithOwner:(ZPUDevice *)owner tileFunctionName:(NSString *)tileFunctionName
@@ -627,6 +646,16 @@ API_AVAILABLE(macos(26.0), ios(26.0))
            maxTotalThreadsPerThreadgroup:(NSUInteger)maxTotalThreadsPerThreadgroup
              threadgroupSizeMatchesTileSize:(BOOL)threadgroupSizeMatchesTileSize
              requiredThreadsPerThreadgroup:(MTLSize)requiredThreadsPerThreadgroup;
+- (instancetype)initWithOwner:(ZPUDevice *)owner meshFunctionName:(NSString *)meshFunctionName
+        objectFunctionName:(NSString *)objectFunctionName fragmentFunctionName:(NSString *)fragmentFunctionName
+        label:(NSString *)label colorFormat:(MTLPixelFormat)colorFormat
+        maxTotalThreadsPerObjectThreadgroup:(NSUInteger)maxTotalThreadsPerObjectThreadgroup
+        maxTotalThreadsPerMeshThreadgroup:(NSUInteger)maxTotalThreadsPerMeshThreadgroup
+        maxTotalThreadgroupsPerMeshGrid:(NSUInteger)maxTotalThreadgroupsPerMeshGrid
+        objectThreadgroupSizeMatchesExecutionWidth:(BOOL)objectThreadgroupSizeMatchesExecutionWidth
+        threadgroupSizeMatchesExecutionWidth:(BOOL)threadgroupSizeMatchesExecutionWidth
+        requiredThreadsPerObjectThreadgroup:(MTLSize)requiredThreadsPerObjectThreadgroup
+        requiredThreadsPerMeshThreadgroup:(MTLSize)requiredThreadsPerMeshThreadgroup;
 - (instancetype)initWithPipeline:(ZPURenderPipelineState *)pipeline
              vertexFunctionNames:(NSArray<NSString *> *)vertexFunctionNames
            fragmentFunctionNames:(NSArray<NSString *> *)fragmentFunctionNames
@@ -1123,10 +1152,12 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTL4PipelineDataSetSerializerConfiguration _configuration;
     NSMutableSet *_functionNames;
     NSMutableSet *_tileFunctionNames;
+    NSMutableSet *_meshFunctionNames;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTL4PipelineDataSetSerializerDescriptor *)descriptor;
 - (void)recordFunctionName:(NSString *)name;
 - (void)recordTileFunctionName:(NSString *)name;
+- (void)recordMeshFunctionName:(NSString *)name;
 @end
 
 API_AVAILABLE(macos(26.0), ios(26.0))
@@ -5601,6 +5632,8 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         @"zpu_cpu_fill_gradient_r32_float",
         @"zpu_cpu_fill_gradient_rgba16_float",
         zpu_cpu_tile_gradient_function_name,
+        zpu_cpu_mesh_gradient_function_name,
+        zpu_cpu_mesh_gradient_fragment_name,
         zpu_cpu_ml_identity_function_name,
     ] containsObject:name];
 }
@@ -5692,6 +5725,42 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
     }
     return self;
 }
+- (instancetype)initWithOwner:(ZPUDevice *)owner meshFunctionName:(NSString *)meshFunctionName
+        objectFunctionName:(NSString *)objectFunctionName fragmentFunctionName:(NSString *)fragmentFunctionName
+        label:(NSString *)label colorFormat:(MTLPixelFormat)colorFormat
+        maxTotalThreadsPerObjectThreadgroup:(NSUInteger)maxTotalThreadsPerObjectThreadgroup
+        maxTotalThreadsPerMeshThreadgroup:(NSUInteger)maxTotalThreadsPerMeshThreadgroup
+        maxTotalThreadgroupsPerMeshGrid:(NSUInteger)maxTotalThreadgroupsPerMeshGrid
+        objectThreadgroupSizeMatchesExecutionWidth:(BOOL)objectThreadgroupSizeMatchesExecutionWidth
+        threadgroupSizeMatchesExecutionWidth:(BOOL)threadgroupSizeMatchesExecutionWidth
+        requiredThreadsPerObjectThreadgroup:(MTLSize)requiredThreadsPerObjectThreadgroup
+        requiredThreadsPerMeshThreadgroup:(MTLSize)requiredThreadsPerMeshThreadgroup {
+    if ((self = [super init])) {
+        _owner = owner;
+        _resourceID = zpu_register_resource(self);
+        _label = [label copy];
+        _isMeshPipeline = YES;
+        _objectFunctionName = [objectFunctionName copy];
+        _meshFunctionName = [meshFunctionName copy];
+        _meshFragmentFunctionName = [fragmentFunctionName copy];
+        _meshMaxTotalThreadsPerObjectThreadgroup = maxTotalThreadsPerObjectThreadgroup;
+        _meshMaxTotalThreadsPerMeshThreadgroup = maxTotalThreadsPerMeshThreadgroup;
+        _meshMaxTotalThreadgroupsPerMeshGrid = maxTotalThreadgroupsPerMeshGrid;
+        _meshObjectThreadgroupSizeMatchesExecutionWidth = objectThreadgroupSizeMatchesExecutionWidth;
+        _meshThreadgroupSizeMatchesExecutionWidth = threadgroupSizeMatchesExecutionWidth;
+        _meshRequiredThreadsPerObjectThreadgroup = requiredThreadsPerObjectThreadgroup;
+        _meshRequiredThreadsPerMeshThreadgroup = requiredThreadsPerMeshThreadgroup;
+        _colorPixelFormat = colorFormat;
+        _colorPixelFormats[0] = colorFormat;
+        _colorAttachmentCount = 1;
+        _rasterizationEnabled = YES;
+        _supportsIndirectCommandBuffers = NO;
+        _fragmentFunctionName = [fragmentFunctionName copy];
+        _reflection = (MTLRenderPipelineReflection *)[[ZPURenderPipelineReflection alloc]
+            initWithVertexArguments:@[] fragmentArguments:@[] vertexBindings:@[] fragmentBindings:@[]];
+    }
+    return self;
+}
 - (instancetype)initWithPipeline:(ZPURenderPipelineState *)pipeline
              vertexFunctionNames:(NSArray<NSString *> *)vertexFunctionNames
            fragmentFunctionNames:(NSArray<NSString *> *)fragmentFunctionNames
@@ -5731,6 +5800,22 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _fragmentLinkedFunctionNames = [fragmentFunctionNames copy];
         _vertexBinaryFunctionNames = [vertexBinaryNames copy];
         _fragmentBinaryFunctionNames = [fragmentBinaryNames copy];
+        _isTilePipeline = pipeline->_isTilePipeline;
+        _tileFunctionName = [pipeline->_tileFunctionName copy];
+        _tileMaxTotalThreadsPerThreadgroup = pipeline->_tileMaxTotalThreadsPerThreadgroup;
+        _tileThreadgroupSizeMatchesTileSize = pipeline->_tileThreadgroupSizeMatchesTileSize;
+        _tileRequiredThreadsPerThreadgroup = pipeline->_tileRequiredThreadsPerThreadgroup;
+        _isMeshPipeline = pipeline->_isMeshPipeline;
+        _objectFunctionName = [pipeline->_objectFunctionName copy];
+        _meshFunctionName = [pipeline->_meshFunctionName copy];
+        _meshFragmentFunctionName = [pipeline->_meshFragmentFunctionName copy];
+        _meshMaxTotalThreadsPerObjectThreadgroup = pipeline->_meshMaxTotalThreadsPerObjectThreadgroup;
+        _meshMaxTotalThreadsPerMeshThreadgroup = pipeline->_meshMaxTotalThreadsPerMeshThreadgroup;
+        _meshMaxTotalThreadgroupsPerMeshGrid = pipeline->_meshMaxTotalThreadgroupsPerMeshGrid;
+        _meshObjectThreadgroupSizeMatchesExecutionWidth = pipeline->_meshObjectThreadgroupSizeMatchesExecutionWidth;
+        _meshThreadgroupSizeMatchesExecutionWidth = pipeline->_meshThreadgroupSizeMatchesExecutionWidth;
+        _meshRequiredThreadsPerObjectThreadgroup = pipeline->_meshRequiredThreadsPerObjectThreadgroup;
+        _meshRequiredThreadsPerMeshThreadgroup = pipeline->_meshRequiredThreadsPerMeshThreadgroup;
         _reflection = pipeline->_reflection;
         _legacyReflection = pipeline->_legacyReflection;
     }
@@ -5741,12 +5826,14 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
 - (NSString *)label { return _label; }
 - (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (NSUInteger)maxTotalThreadsPerThreadgroup { return _isTilePipeline ? _tileMaxTotalThreadsPerThreadgroup : 1; }
-- (NSUInteger)maxTotalThreadsPerObjectThreadgroup { return 1; }
-- (NSUInteger)maxTotalThreadsPerMeshThreadgroup API_AVAILABLE(macos(13.0), ios(16.0)) { return 0; }
-- (NSUInteger)objectThreadExecutionWidth API_AVAILABLE(macos(13.0), ios(16.0)) { return 0; }
-- (NSUInteger)meshThreadExecutionWidth API_AVAILABLE(macos(13.0), ios(16.0)) { return 0; }
-- (NSUInteger)maxTotalThreadgroupsPerMeshGrid API_AVAILABLE(macos(13.0), ios(16.0)) { return 0; }
+- (NSUInteger)maxTotalThreadsPerObjectThreadgroup { return _isMeshPipeline ? _meshMaxTotalThreadsPerObjectThreadgroup : 1; }
+- (NSUInteger)maxTotalThreadsPerMeshThreadgroup API_AVAILABLE(macos(13.0), ios(16.0)) { return _isMeshPipeline ? _meshMaxTotalThreadsPerMeshThreadgroup : 0; }
+- (NSUInteger)objectThreadExecutionWidth API_AVAILABLE(macos(13.0), ios(16.0)) { return _isMeshPipeline ? 1 : 0; }
+- (NSUInteger)meshThreadExecutionWidth API_AVAILABLE(macos(13.0), ios(16.0)) { return _isMeshPipeline ? 1 : 0; }
+- (NSUInteger)maxTotalThreadgroupsPerMeshGrid API_AVAILABLE(macos(13.0), ios(16.0)) { return _isMeshPipeline ? _meshMaxTotalThreadgroupsPerMeshGrid : 0; }
 - (BOOL)threadgroupSizeMatchesTileSize { return _isTilePipeline && _tileThreadgroupSizeMatchesTileSize; }
+- (BOOL)objectThreadgroupSizeIsMultipleOfThreadExecutionWidth API_AVAILABLE(macos(13.0), ios(16.0)) { return _isMeshPipeline && _meshObjectThreadgroupSizeMatchesExecutionWidth; }
+- (BOOL)meshThreadgroupSizeIsMultipleOfThreadExecutionWidth API_AVAILABLE(macos(13.0), ios(16.0)) { return _isMeshPipeline && _meshThreadgroupSizeMatchesExecutionWidth; }
 - (NSUInteger)imageblockSampleLength API_AVAILABLE(macos(11.0), ios(11.0), macCatalyst(14.0), tvos(14.5)) { return 0; }
 - (NSUInteger)imageblockMemoryLengthForDimensions:(MTLSize)imageblockDimensions API_AVAILABLE(macos(11.0), ios(11.0), macCatalyst(14.0), tvos(14.5)) {
     (void)imageblockDimensions;
@@ -5758,17 +5845,24 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
 - (MTLSize)requiredThreadsPerTileThreadgroup API_AVAILABLE(macos(26.0), ios(26.0)) {
     return _isTilePipeline ? _tileRequiredThreadsPerThreadgroup : MTLSizeMake(0, 0, 0);
 }
-- (MTLSize)requiredThreadsPerObjectThreadgroup API_AVAILABLE(macos(26.0), ios(26.0)) { return MTLSizeMake(0, 0, 0); }
-- (MTLSize)requiredThreadsPerMeshThreadgroup API_AVAILABLE(macos(26.0), ios(26.0)) { return MTLSizeMake(0, 0, 0); }
+- (MTLSize)requiredThreadsPerObjectThreadgroup API_AVAILABLE(macos(26.0), ios(26.0)) {
+    return _isMeshPipeline ? _meshRequiredThreadsPerObjectThreadgroup : MTLSizeMake(0, 0, 0);
+}
+- (MTLSize)requiredThreadsPerMeshThreadgroup API_AVAILABLE(macos(26.0), ios(26.0)) {
+    return _isMeshPipeline ? _meshRequiredThreadsPerMeshThreadgroup : MTLSizeMake(0, 0, 0);
+}
 - (id<MTLFunctionHandle>)functionHandleWithFunction:(id<MTLFunction>)function stage:(MTLRenderStages)stage API_AVAILABLE(macos(12.0), ios(15.0), tvos(16.0)) {
     ZPUCPUFunction *cpuFunction = (ZPUCPUFunction *)function;
     if (![cpuFunction isKindOfClass:[ZPUCPUFunction class]] || cpuFunction->_owner != _owner) return nil;
     NSString *expectedName = _isTilePipeline && stage == MTLRenderStageTile ? _tileFunctionName :
+        (_isMeshPipeline && stage == zpu_mtl_render_stage_object ? _objectFunctionName :
+        (_isMeshPipeline && stage == zpu_mtl_render_stage_mesh ? _meshFunctionName :
         (stage == MTLRenderStageVertex ? _vertexFunctionName :
-        (stage == MTLRenderStageFragment ? _fragmentFunctionName : nil));
+        (stage == MTLRenderStageFragment ? _fragmentFunctionName : nil))));
     MTLFunctionType expectedType = _isTilePipeline && stage == MTLRenderStageTile ? MTLFunctionTypeKernel :
+        (_isMeshPipeline && (stage == zpu_mtl_render_stage_object || stage == zpu_mtl_render_stage_mesh) ? MTLFunctionTypeKernel :
         (stage == MTLRenderStageVertex ? MTLFunctionTypeVertex :
-        (stage == MTLRenderStageFragment ? MTLFunctionTypeFragment : MTLFunctionTypeKernel));
+        (stage == MTLRenderStageFragment ? MTLFunctionTypeFragment : MTLFunctionTypeKernel)));
     NSArray<NSString *> *linkedNames = stage == MTLRenderStageVertex ? _vertexLinkedFunctionNames :
         (stage == MTLRenderStageFragment ? _fragmentLinkedFunctionNames : @[]);
     NSArray<NSString *> *binaryNames = stage == MTLRenderStageVertex ? _vertexBinaryFunctionNames :
@@ -5799,28 +5893,34 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
 - (MTLRenderPipelineReflection *)reflection API_AVAILABLE(macos(26.0), ios(26.0)) { return _reflection; }
 - (id<MTLFunctionHandle>)functionHandleWithName:(NSString *)name stage:(MTLRenderStages)stage API_AVAILABLE(macos(26.0), ios(26.0)) {
     NSString *expectedName = _isTilePipeline && stage == MTLRenderStageTile ? _tileFunctionName :
+        (_isMeshPipeline && stage == zpu_mtl_render_stage_object ? _objectFunctionName :
+        (_isMeshPipeline && stage == zpu_mtl_render_stage_mesh ? _meshFunctionName :
         (stage == MTLRenderStageVertex ? _vertexFunctionName :
-        (stage == MTLRenderStageFragment ? _fragmentFunctionName : nil));
+        (stage == MTLRenderStageFragment ? _fragmentFunctionName : nil))));
     MTLFunctionType expectedType = _isTilePipeline && stage == MTLRenderStageTile ? MTLFunctionTypeKernel :
+        (_isMeshPipeline && (stage == zpu_mtl_render_stage_object || stage == zpu_mtl_render_stage_mesh) ? MTLFunctionTypeKernel :
         (stage == MTLRenderStageVertex ? MTLFunctionTypeVertex :
-        (stage == MTLRenderStageFragment ? MTLFunctionTypeFragment : MTLFunctionTypeKernel));
+        (stage == MTLRenderStageFragment ? MTLFunctionTypeFragment : MTLFunctionTypeKernel)));
     NSArray<NSString *> *linkedNames = stage == MTLRenderStageVertex ? _vertexLinkedFunctionNames :
         (stage == MTLRenderStageFragment ? _fragmentLinkedFunctionNames : @[]);
     if (expectedName == nil || (![expectedName isEqualToString:name] && ![linkedNames containsObject:name])) return nil;
     if ([linkedNames containsObject:name]) expectedType = MTLFunctionTypeVisible;
     return (id<MTLFunctionHandle>)[[ZPUFunctionHandle alloc] initWithOwner:_owner
-                                                                        name:expectedName
+                                                                        name:name
                                                                  functionType:expectedType];
 }
 - (id<MTLFunctionHandle>)functionHandleWithBinaryFunction:(id<MTL4BinaryFunction>)function stage:(MTLRenderStages)stage API_AVAILABLE(macos(26.0), ios(26.0)) {
     ZPUMTL4BinaryFunction *binary = (ZPUMTL4BinaryFunction *)function;
     if (![binary isKindOfClass:[ZPUMTL4BinaryFunction class]] || binary->_owner != _owner) return nil;
     NSString *expectedName = _isTilePipeline && stage == MTLRenderStageTile ? _tileFunctionName :
+        (_isMeshPipeline && stage == zpu_mtl_render_stage_object ? _objectFunctionName :
+        (_isMeshPipeline && stage == zpu_mtl_render_stage_mesh ? _meshFunctionName :
         (stage == MTLRenderStageVertex ? _vertexFunctionName :
-        (stage == MTLRenderStageFragment ? _fragmentFunctionName : nil));
+        (stage == MTLRenderStageFragment ? _fragmentFunctionName : nil))));
     MTLFunctionType expectedType = _isTilePipeline && stage == MTLRenderStageTile ? MTLFunctionTypeKernel :
+        (_isMeshPipeline && (stage == zpu_mtl_render_stage_object || stage == zpu_mtl_render_stage_mesh) ? MTLFunctionTypeKernel :
         (stage == MTLRenderStageVertex ? MTLFunctionTypeVertex :
-        (stage == MTLRenderStageFragment ? MTLFunctionTypeFragment : MTLFunctionTypeKernel));
+        (stage == MTLRenderStageFragment ? MTLFunctionTypeFragment : MTLFunctionTypeKernel)));
     NSArray<NSString *> *binaryNames = stage == MTLRenderStageVertex ? _vertexBinaryFunctionNames :
         (stage == MTLRenderStageFragment ? _fragmentBinaryFunctionNames : @[]);
     const BOOL isBaseFunction = expectedName != nil && [expectedName isEqualToString:binary->_name] &&
@@ -7061,7 +7161,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (id<MTLLibrary>)newDefaultLibrary {
     return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
-                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_tile_gradient_rgba8 zpu_cpu_ml_identity"];
+                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_ml_identity"];
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
@@ -7194,11 +7294,57 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     completionHandler(state, reflection, error);
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithMeshDescriptor:(MTLMeshRenderPipelineDescriptor *)descriptor options:(MTLPipelineOption)options reflection:(MTLAutoreleasedRenderPipelineReflection *)reflection error:(NSError **)error API_AVAILABLE(macos(13.0), ios(16.0)) {
-    (void)descriptor;
     (void)options;
     if (reflection != NULL) *reflection = nil;
-    zpu_set_error(error, @"ZPU CPU Metal has no mesh-shader implementation");
-    return nil;
+    if (descriptor == nil || descriptor.objectFunction != nil || descriptor.meshFunction == nil ||
+        descriptor.fragmentFunction == nil || descriptor.rasterSampleCount != 1 ||
+        !descriptor.isRasterizationEnabled || descriptor.depthAttachmentPixelFormat != MTLPixelFormatInvalid ||
+        descriptor.stencilAttachmentPixelFormat != MTLPixelFormatInvalid) {
+        zpu_set_error(error, @"ZPU CPU Metal supports only the registered mesh gradient profile");
+        return nil;
+    }
+    ZPUCPUFunction *meshFunction = (ZPUCPUFunction *)descriptor.meshFunction;
+    ZPUCPUFunction *fragmentFunction = (ZPUCPUFunction *)descriptor.fragmentFunction;
+    if (![meshFunction isKindOfClass:[ZPUCPUFunction class]] || meshFunction->_owner != self ||
+        meshFunction.functionType != MTLFunctionTypeKernel ||
+        ![meshFunction.name isEqualToString:zpu_cpu_mesh_gradient_function_name] ||
+        ![fragmentFunction isKindOfClass:[ZPUCPUFunction class]] || fragmentFunction->_owner != self ||
+        fragmentFunction.functionType != MTLFunctionTypeFragment ||
+        ![fragmentFunction.name isEqualToString:zpu_cpu_mesh_gradient_fragment_name]) {
+        zpu_set_error(error, @"ZPU CPU Metal supports only the registered mesh gradient profile");
+        return nil;
+    }
+    MTLRenderPipelineColorAttachmentDescriptor *attachment = descriptor.colorAttachments[0];
+    if (attachment == nil || (attachment.pixelFormat != MTLPixelFormatRGBA8Unorm &&
+                              attachment.pixelFormat != MTLPixelFormatBGRA8Unorm)) {
+        zpu_set_error(error, @"ZPU CPU Metal mesh gradients require an RGBA8 or BGRA8 color attachment");
+        return nil;
+    }
+    for (NSUInteger index = 1; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
+        if (descriptor.colorAttachments[index].pixelFormat != MTLPixelFormatInvalid) {
+            zpu_set_error(error, @"ZPU CPU Metal mesh gradients support only one color attachment");
+            return nil;
+        }
+    }
+    NSUInteger object_max = descriptor.maxTotalThreadsPerObjectThreadgroup;
+    if (object_max == 0) object_max = 1;
+    NSUInteger mesh_max = descriptor.maxTotalThreadsPerMeshThreadgroup;
+    if (mesh_max == 0) mesh_max = 1024;
+    if (object_max != 1 || mesh_max > 1024 || descriptor.maxTotalThreadgroupsPerMeshGrid > UINT32_MAX ||
+        descriptor.objectThreadgroupSizeIsMultipleOfThreadExecutionWidth ||
+        descriptor.meshThreadgroupSizeIsMultipleOfThreadExecutionWidth || descriptor.payloadMemoryLength != 0) {
+        zpu_set_error(error, @"ZPU CPU Metal mesh gradients use a one-thread object profile without payload state");
+        return nil;
+    }
+    if (error != NULL) *error = nil;
+    return (id<MTLRenderPipelineState>)[[ZPURenderPipelineState alloc]
+        initWithOwner:self meshFunctionName:meshFunction.name objectFunctionName:nil
+        fragmentFunctionName:fragmentFunction.name label:descriptor.label colorFormat:attachment.pixelFormat
+        maxTotalThreadsPerObjectThreadgroup:object_max maxTotalThreadsPerMeshThreadgroup:mesh_max
+        maxTotalThreadgroupsPerMeshGrid:descriptor.maxTotalThreadgroupsPerMeshGrid
+        objectThreadgroupSizeMatchesExecutionWidth:NO threadgroupSizeMatchesExecutionWidth:NO
+        requiredThreadsPerObjectThreadgroup:MTLSizeMake(0, 0, 0)
+        requiredThreadsPerMeshThreadgroup:MTLSizeMake(0, 0, 0)];
 }
 - (void)newRenderPipelineStateWithMeshDescriptor:(MTLMeshRenderPipelineDescriptor *)descriptor options:(MTLPipelineOption)options completionHandler:(MTLNewRenderPipelineStateWithReflectionCompletionHandler)completionHandler API_AVAILABLE(macos(13.0), ios(16.0)) {
     (void)descriptor;
@@ -7559,6 +7705,8 @@ static BOOL zpu_apply_legacy_compute_descriptor(
             @"zpu_cpu_fill_gradient_r32_float",
             @"zpu_cpu_fill_gradient_rgba16_float",
             zpu_cpu_tile_gradient_function_name,
+            zpu_cpu_mesh_gradient_function_name,
+            zpu_cpu_mesh_gradient_fragment_name,
             zpu_cpu_ml_identity_function_name,
         ]) {
             if ([source rangeOfString:name].location != NSNotFound) [names addObject:name];
@@ -7768,9 +7916,20 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     return YES;
 }
 - (BOOL)addMeshRenderPipelineFunctionsWithDescriptor:(MTLMeshRenderPipelineDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(15.0), ios(18.0)) {
-    (void)descriptor;
-    zpu_binary_archive_add_error(error, @"ZPU CPU Metal binary archives have no mesh-shader implementation");
-    return NO;
+    NSString *mesh = descriptor == nil ? nil : zpu_binary_archive_function_name(_owner, descriptor.meshFunction);
+    NSString *fragment = descriptor == nil ? nil : zpu_binary_archive_function_name(_owner, descriptor.fragmentFunction);
+    if (mesh == nil || fragment == nil || descriptor.objectFunction != nil ||
+        descriptor.meshFunction.functionType != MTLFunctionTypeKernel ||
+        descriptor.fragmentFunction.functionType != MTLFunctionTypeFragment ||
+        ![mesh isEqualToString:zpu_cpu_mesh_gradient_function_name] ||
+        ![fragment isEqualToString:zpu_cpu_mesh_gradient_fragment_name]) {
+        zpu_binary_archive_add_error(error, @"ZPU CPU Metal binary archives accept only the registered CPU mesh profile");
+        return NO;
+    }
+    [_functionNames addObject:mesh];
+    [_functionNames addObject:fragment];
+    if (error != NULL) *error = nil;
+    return YES;
 }
 - (BOOL)addLibraryWithDescriptor:(MTLStitchedLibraryDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(15.0), ios(18.0)) {
     (void)descriptor;
@@ -7823,6 +7982,7 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
         _configuration = descriptor.configuration;
         _functionNames = [NSMutableSet set];
         _tileFunctionNames = [NSMutableSet set];
+        _meshFunctionNames = [NSMutableSet set];
     }
     return self;
 }
@@ -7834,6 +7994,11 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 - (void)recordTileFunctionName:(NSString *)name {
     if (name.length != 0) {
         @synchronized (self) { [_tileFunctionNames addObject:name]; }
+    }
+}
+- (void)recordMeshFunctionName:(NSString *)name {
+    if (name.length != 0) {
+        @synchronized (self) { [_meshFunctionNames addObject:name]; }
     }
 }
 - (BOOL)serializeAsArchiveAndFlushToURL:(NSURL *)url error:(NSError **)error {
@@ -7850,6 +8015,7 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     @synchronized (self) {
         NSMutableSet *allNames = [_functionNames mutableCopy];
         [allNames unionSet:_tileFunctionNames];
+        [allNames unionSet:_meshFunctionNames];
         sortedNames = [[allNames allObjects] sortedArrayUsingSelector:@selector(compare:)];
     }
     for (NSString *name in sortedNames) [serialized appendFormat:@"%@\n", name];
@@ -7864,6 +8030,7 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     @synchronized (self) {
         [_functionNames removeAllObjects];
         [_tileFunctionNames removeAllObjects];
+        [_meshFunctionNames removeAllObjects];
     }
     return YES;
 }
@@ -7875,12 +8042,15 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     NSMutableString *serialized = [NSMutableString stringWithString:@"ZPU CPU Metal Pipeline Script v1\n"];
     NSArray<NSString *> *sortedComputeNames;
     NSArray<NSString *> *sortedTileNames;
+    NSArray<NSString *> *sortedMeshNames;
     @synchronized (self) {
         sortedComputeNames = [[_functionNames allObjects] sortedArrayUsingSelector:@selector(compare:)];
         sortedTileNames = [[_tileFunctionNames allObjects] sortedArrayUsingSelector:@selector(compare:)];
+        sortedMeshNames = [[_meshFunctionNames allObjects] sortedArrayUsingSelector:@selector(compare:)];
     }
     for (NSString *name in sortedComputeNames) [serialized appendFormat:@"compute %@\n", name];
     for (NSString *name in sortedTileNames) [serialized appendFormat:@"tile %@\n", name];
+    for (NSString *name in sortedMeshNames) [serialized appendFormat:@"mesh %@\n", name];
     if (error != NULL) *error = nil;
     return [serialized dataUsingEncoding:NSUTF8StringEncoding];
 }
@@ -8178,6 +8348,80 @@ static id<MTLRenderPipelineState> zpu_mtl4_tile_pipeline_for_descriptor(
         requiredThreadsPerThreadgroup:required];
 }
 
+API_AVAILABLE(macos(26.0), ios(26.0))
+static id<MTLRenderPipelineState> zpu_mtl4_mesh_pipeline_for_descriptor(
+    ZPUDevice *owner, MTL4MeshRenderPipelineDescriptor *descriptor, NSError **error) {
+    if (descriptor == nil || descriptor.objectFunctionDescriptor != nil ||
+        descriptor.meshFunctionDescriptor == nil || descriptor.fragmentFunctionDescriptor == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 requires the registered mesh and fragment functions");
+        return nil;
+    }
+    if (descriptor.rasterSampleCount != 0 && descriptor.rasterSampleCount != 1) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 supports only one-sample CPU mesh targets");
+        return nil;
+    }
+    MTL4StaticLinkingDescriptor *object_linking = descriptor.objectStaticLinkingDescriptor;
+    MTL4StaticLinkingDescriptor *mesh_linking = descriptor.meshStaticLinkingDescriptor;
+    MTL4StaticLinkingDescriptor *fragment_linking = descriptor.fragmentStaticLinkingDescriptor;
+    if (descriptor.supportObjectBinaryLinking || descriptor.supportMeshBinaryLinking ||
+        descriptor.supportFragmentBinaryLinking ||
+        descriptor.supportIndirectCommandBuffers != MTL4IndirectCommandBufferSupportStateDisabled ||
+        object_linking.functionDescriptors.count != 0 || object_linking.privateFunctionDescriptors.count != 0 ||
+        object_linking.groups.count != 0 || mesh_linking.functionDescriptors.count != 0 ||
+        mesh_linking.privateFunctionDescriptors.count != 0 || mesh_linking.groups.count != 0 ||
+        fragment_linking.functionDescriptors.count != 0 || fragment_linking.privateFunctionDescriptors.count != 0 ||
+        fragment_linking.groups.count != 0) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 mesh gradients do not support function linking or ICB execution");
+        return nil;
+    }
+    id<MTLFunction> mesh = zpu_mtl4_resolve_library_function(owner, descriptor.meshFunctionDescriptor, error);
+    id<MTLFunction> fragment = zpu_mtl4_resolve_library_function(owner, descriptor.fragmentFunctionDescriptor, error);
+    MTL4RenderPipelineColorAttachmentDescriptor *attachment = descriptor.colorAttachments[0];
+    if (mesh == nil || fragment == nil || mesh.functionType != MTLFunctionTypeKernel ||
+        fragment.functionType != MTLFunctionTypeFragment ||
+        ![mesh.name isEqualToString:zpu_cpu_mesh_gradient_function_name] ||
+        ![fragment.name isEqualToString:zpu_cpu_mesh_gradient_fragment_name] || attachment == nil ||
+        (attachment.pixelFormat != MTLPixelFormatRGBA8Unorm && attachment.pixelFormat != MTLPixelFormatBGRA8Unorm) ||
+        attachment.blendingState != MTL4BlendStateDisabled || attachment.writeMask != MTLColorWriteMaskAll ||
+        !descriptor.isRasterizationEnabled) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 supports only the registered RGBA8 mesh gradient profile");
+        return nil;
+    }
+    for (NSUInteger index = 1; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
+        if (descriptor.colorAttachments[index].pixelFormat != MTLPixelFormatInvalid) {
+            zpu_set_error(error, @"ZPU CPU Metal 4 mesh gradients support only one color attachment");
+            return nil;
+        }
+    }
+    NSUInteger object_max = descriptor.maxTotalThreadsPerObjectThreadgroup;
+    if (object_max == 0) object_max = 1;
+    NSUInteger mesh_max = descriptor.maxTotalThreadsPerMeshThreadgroup;
+    if (mesh_max == 0) mesh_max = 1024;
+    if (object_max != 1 || mesh_max > 1024 || descriptor.maxTotalThreadgroupsPerMeshGrid > UINT32_MAX ||
+        descriptor.payloadMemoryLength != 0) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 mesh gradients use a one-thread object profile without payload state");
+        return nil;
+    }
+    MTLSize required_object = descriptor.requiredThreadsPerObjectThreadgroup;
+    MTLSize required_mesh = descriptor.requiredThreadsPerMeshThreadgroup;
+    const BOOL object_required_any = required_object.width != 0 || required_object.height != 0 || required_object.depth != 0;
+    const BOOL mesh_required_any = required_mesh.width != 0 || required_mesh.height != 0 || required_mesh.depth != 0;
+    if ((object_required_any && (required_object.width != 1 || required_object.height != 1 || required_object.depth != 1)) ||
+        (mesh_required_any && !zpu_metal_size_fits_cpu_threadgroup(required_mesh, mesh_max))) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 mesh required threadgroup size is invalid");
+        return nil;
+    }
+    if (error != NULL) *error = nil;
+    return (id<MTLRenderPipelineState>)[[ZPURenderPipelineState alloc]
+        initWithOwner:owner meshFunctionName:mesh.name objectFunctionName:nil
+        fragmentFunctionName:fragment.name label:descriptor.label colorFormat:attachment.pixelFormat
+        maxTotalThreadsPerObjectThreadgroup:object_max maxTotalThreadsPerMeshThreadgroup:mesh_max
+        maxTotalThreadgroupsPerMeshGrid:descriptor.maxTotalThreadgroupsPerMeshGrid
+        objectThreadgroupSizeMatchesExecutionWidth:descriptor.objectThreadgroupSizeIsMultipleOfThreadExecutionWidth
+        threadgroupSizeMatchesExecutionWidth:descriptor.meshThreadgroupSizeIsMultipleOfThreadExecutionWidth
+        requiredThreadsPerObjectThreadgroup:required_object requiredThreadsPerMeshThreadgroup:required_mesh];
+}
+
 static BOOL zpu_mtl4_apply_compute_descriptor(
     ZPUComputePipelineState *pipeline, MTL4ComputePipelineDescriptor *descriptor, NSError **error) {
     if (pipeline == nil || descriptor == nil ||
@@ -8307,6 +8551,22 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
                                                    compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
                                                                  error:(NSError **)error {
     (void)compilerTaskOptions;
+    if ([descriptor isKindOfClass:[MTL4MeshRenderPipelineDescriptor class]]) {
+        id<MTLRenderPipelineState> pipeline = zpu_mtl4_mesh_pipeline_for_descriptor(
+            _owner, (MTL4MeshRenderPipelineDescriptor *)descriptor, error);
+        if (pipeline != nil && [_pipelineDataSetSerializer respondsToSelector:@selector(recordMeshFunctionName:)]) {
+            MTL4MeshRenderPipelineDescriptor *mesh = (MTL4MeshRenderPipelineDescriptor *)descriptor;
+            MTL4LibraryFunctionDescriptor *function = (MTL4LibraryFunctionDescriptor *)mesh.meshFunctionDescriptor;
+            MTL4LibraryFunctionDescriptor *fragment = (MTL4LibraryFunctionDescriptor *)mesh.fragmentFunctionDescriptor;
+            if ([function isKindOfClass:[MTL4LibraryFunctionDescriptor class]]) {
+                [(ZPUMTL4PipelineDataSetSerializer *)_pipelineDataSetSerializer recordMeshFunctionName:function.name];
+            }
+            if ([fragment isKindOfClass:[MTL4LibraryFunctionDescriptor class]]) {
+                [(ZPUMTL4PipelineDataSetSerializer *)_pipelineDataSetSerializer recordFunctionName:fragment.name];
+            }
+        }
+        return pipeline;
+    }
     if ([descriptor isKindOfClass:[MTL4TileRenderPipelineDescriptor class]]) {
         id<MTLRenderPipelineState> pipeline = zpu_mtl4_tile_pipeline_for_descriptor(
             _owner, (MTL4TileRenderPipelineDescriptor *)descriptor, error);
@@ -8340,6 +8600,29 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
                                                  compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
                                                                error:(NSError **)error {
     (void)compilerTaskOptions;
+    if ([descriptor isKindOfClass:[MTL4MeshRenderPipelineDescriptor class]]) {
+        id<MTLRenderPipelineState> pipeline = [self newRenderPipelineStateWithDescriptor:descriptor
+                                                                       compilerTaskOptions:nil
+                                                                                     error:error];
+        if (pipeline == nil || dynamicLinkingDescriptor == nil) return pipeline;
+        if (!zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.vertexLinkingDescriptor, error) ||
+            !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.fragmentLinkingDescriptor, error) ||
+            !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.tileLinkingDescriptor, error) ||
+            !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.objectLinkingDescriptor, error) ||
+            !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.meshLinkingDescriptor, error)) {
+            return nil;
+        }
+        if (dynamicLinkingDescriptor.vertexLinkingDescriptor.binaryLinkedFunctions.count != 0 ||
+            dynamicLinkingDescriptor.fragmentLinkingDescriptor.binaryLinkedFunctions.count != 0 ||
+            dynamicLinkingDescriptor.tileLinkingDescriptor.binaryLinkedFunctions.count != 0 ||
+            dynamicLinkingDescriptor.objectLinkingDescriptor.binaryLinkedFunctions.count != 0 ||
+            dynamicLinkingDescriptor.meshLinkingDescriptor.binaryLinkedFunctions.count != 0) {
+            zpu_set_error(error, @"ZPU CPU Metal 4 mesh gradients do not support binary linking");
+            return nil;
+        }
+        if (error != NULL) *error = nil;
+        return pipeline;
+    }
     if ([descriptor isKindOfClass:[MTL4TileRenderPipelineDescriptor class]]) {
         id<MTLRenderPipelineState> pipeline = [self newRenderPipelineStateWithDescriptor:descriptor
                                                                        compilerTaskOptions:nil
@@ -8466,6 +8749,10 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
             [_pipelineDataSetSerializer respondsToSelector:@selector(recordTileFunctionName:)]) {
             [(ZPUMTL4PipelineDataSetSerializer *)_pipelineDataSetSerializer
                 recordTileFunctionName:function.name];
+        } else if ([function.name isEqualToString:zpu_cpu_mesh_gradient_function_name] &&
+                   [_pipelineDataSetSerializer respondsToSelector:@selector(recordMeshFunctionName:)]) {
+            [(ZPUMTL4PipelineDataSetSerializer *)_pipelineDataSetSerializer
+                recordMeshFunctionName:function.name];
         } else if ([_pipelineDataSetSerializer respondsToSelector:@selector(recordFunctionName:)]) {
             [(ZPUMTL4PipelineDataSetSerializer *)_pipelineDataSetSerializer recordFunctionName:function.name];
         }
@@ -8642,6 +8929,21 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
         dynamicLinkingDescriptor.binaryLinkedFunctions ?: @[] error:error];
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4PipelineDescriptor *)descriptor error:(NSError **)error {
+    if ([descriptor isKindOfClass:[MTL4MeshRenderPipelineDescriptor class]]) {
+        MTL4MeshRenderPipelineDescriptor *mesh = (MTL4MeshRenderPipelineDescriptor *)descriptor;
+        MTL4LibraryFunctionDescriptor *mesh_function =
+            (MTL4LibraryFunctionDescriptor *)mesh.meshFunctionDescriptor;
+        MTL4LibraryFunctionDescriptor *fragment_function =
+            (MTL4LibraryFunctionDescriptor *)mesh.fragmentFunctionDescriptor;
+        if (![mesh_function isKindOfClass:[MTL4LibraryFunctionDescriptor class]] ||
+            ![fragment_function isKindOfClass:[MTL4LibraryFunctionDescriptor class]] ||
+            ![_functionNames containsObject:mesh_function.name] ||
+            ![_functionNames containsObject:fragment_function.name]) {
+            zpu_set_error(error, @"ZPU CPU Metal 4 archive does not contain this mesh pipeline");
+            return nil;
+        }
+        return zpu_mtl4_mesh_pipeline_for_descriptor(_owner, mesh, error);
+    }
     if ([descriptor isKindOfClass:[MTL4TileRenderPipelineDescriptor class]]) {
         MTL4TileRenderPipelineDescriptor *tile = (MTL4TileRenderPipelineDescriptor *)descriptor;
         MTL4LibraryFunctionDescriptor *function =
@@ -8671,6 +8973,27 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4PipelineDescriptor *)descriptor
                                             dynamicLinkingDescriptor:(MTL4RenderPipelineDynamicLinkingDescriptor *)dynamicLinkingDescriptor
                                                                error:(NSError **)error {
+    if ([descriptor isKindOfClass:[MTL4MeshRenderPipelineDescriptor class]]) {
+        id<MTLRenderPipelineState> pipeline = [self newRenderPipelineStateWithDescriptor:descriptor error:error];
+        if (pipeline == nil || dynamicLinkingDescriptor == nil) return pipeline;
+        if (!zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.vertexLinkingDescriptor, error) ||
+            !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.fragmentLinkingDescriptor, error) ||
+            !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.tileLinkingDescriptor, error) ||
+            !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.objectLinkingDescriptor, error) ||
+            !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.meshLinkingDescriptor, error)) {
+            return nil;
+        }
+        if (dynamicLinkingDescriptor.vertexLinkingDescriptor.binaryLinkedFunctions.count != 0 ||
+            dynamicLinkingDescriptor.fragmentLinkingDescriptor.binaryLinkedFunctions.count != 0 ||
+            dynamicLinkingDescriptor.tileLinkingDescriptor.binaryLinkedFunctions.count != 0 ||
+            dynamicLinkingDescriptor.objectLinkingDescriptor.binaryLinkedFunctions.count != 0 ||
+            dynamicLinkingDescriptor.meshLinkingDescriptor.binaryLinkedFunctions.count != 0) {
+            zpu_set_error(error, @"ZPU CPU Metal 4 archived mesh gradients do not support binary linking");
+            return nil;
+        }
+        if (error != NULL) *error = nil;
+        return pipeline;
+    }
     if ([descriptor isKindOfClass:[MTL4TileRenderPipelineDescriptor class]]) {
         id<MTLRenderPipelineState> pipeline = [self newRenderPipelineStateWithDescriptor:descriptor error:error];
         if (pipeline == nil || dynamicLinkingDescriptor == nil) return pipeline;
@@ -9939,21 +10262,17 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
     [(id)_legacy executeCommandsInBuffer:indirectCommandBuffer indirectBuffer:(id<MTLBuffer>)range indirectBufferOffset:rangeOffset];
 }
 - (void)setObjectThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index {
-    (void)length;
-    (void)index;
-    [_owner markError];
+    if (length != 0 || index != 0) [_owner markError];
 }
 - (void)drawMeshThreadgroups:(MTLSize)threadgroupsPerGrid threadsPerObjectThreadgroup:(MTLSize)threadsPerObjectThreadgroup threadsPerMeshThreadgroup:(MTLSize)threadsPerMeshThreadgroup {
-    (void)threadgroupsPerGrid;
-    (void)threadsPerObjectThreadgroup;
-    (void)threadsPerMeshThreadgroup;
-    [_owner markError];
+    [(id)_legacy drawMeshThreadgroups:threadgroupsPerGrid
+         threadsPerObjectThreadgroup:threadsPerObjectThreadgroup
+           threadsPerMeshThreadgroup:threadsPerMeshThreadgroup];
 }
 - (void)drawMeshThreads:(MTLSize)threadsPerGrid threadsPerObjectThreadgroup:(MTLSize)threadsPerObjectThreadgroup threadsPerMeshThreadgroup:(MTLSize)threadsPerMeshThreadgroup {
-    (void)threadsPerGrid;
-    (void)threadsPerObjectThreadgroup;
-    (void)threadsPerMeshThreadgroup;
-    [_owner markError];
+    [(id)_legacy drawMeshThreads:threadsPerGrid
+       threadsPerObjectThreadgroup:threadsPerObjectThreadgroup
+         threadsPerMeshThreadgroup:threadsPerMeshThreadgroup];
 }
 - (void)drawMeshThreadgroupsWithIndirectBuffer:(MTLGPUAddress)indirectBuffer threadsPerObjectThreadgroup:(MTLSize)threadsPerObjectThreadgroup threadsPerMeshThreadgroup:(MTLSize)threadsPerMeshThreadgroup {
     (void)indirectBuffer;
@@ -9976,7 +10295,8 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
     }
     _argumentTable = (ZPUMTL4ArgumentTable *)argumentTable;
     if (_argumentTable == nil) return;
-    if (_argumentTable->_invalid || (stages & ~(MTLRenderStageVertex | MTLRenderStageFragment | MTLRenderStageTile)) != 0) {
+    if (_argumentTable->_invalid || (stages & ~(MTLRenderStageVertex | MTLRenderStageFragment | MTLRenderStageTile |
+                                                zpu_mtl_render_stage_object | zpu_mtl_render_stage_mesh)) != 0) {
         [_owner markError];
         return;
     }
@@ -12719,7 +13039,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     return zpu_metal_render_encoder_set_vertex_buffer_stride(_zpuEncoder, _vertexStride) == ZPU_METAL_OK;
 }
 - (BOOL)validateVertexStrideForDraw {
-    if (_pipelineState != nil && _pipelineState->_isTilePipeline) {
+    if (_pipelineState != nil && (_pipelineState->_isTilePipeline || _pipelineState->_isMeshPipeline)) {
         [_owner markError];
         return NO;
     }
@@ -13196,7 +13516,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         [_owner markError];
         return;
     }
-    if (state->_isTilePipeline) {
+    if (state->_isTilePipeline || state->_isMeshPipeline) {
         _pipelineState = state;
         [_owner retainResource:state];
         uint16_t colorFormats[ZPU_METAL_MAX_COLOR_ATTACHMENTS];
@@ -13371,16 +13691,98 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     [_owner markError];
 }
 - (void)drawMeshThreadgroups:(MTLSize)threadgroupsPerGrid threadsPerObjectThreadgroup:(MTLSize)threadsPerObjectThreadgroup threadsPerMeshThreadgroup:(MTLSize)threadsPerMeshThreadgroup API_AVAILABLE(macos(13.0), ios(16.0), tvos(18.1), visionos(2.1)) {
-    (void)threadgroupsPerGrid;
-    (void)threadsPerObjectThreadgroup;
-    (void)threadsPerMeshThreadgroup;
-    [_owner markError];
+    ZPURenderPipelineState *state = _pipelineState;
+    if (![state isKindOfClass:[ZPURenderPipelineState class]] || !state->_isMeshPipeline ||
+        ![state->_meshFunctionName isEqualToString:zpu_cpu_mesh_gradient_function_name] ||
+        ![state->_meshFragmentFunctionName isEqualToString:zpu_cpu_mesh_gradient_fragment_name] ||
+        !zpu_metal_size_fits_cpu_threadgroup(threadsPerObjectThreadgroup, state->_meshMaxTotalThreadsPerObjectThreadgroup) ||
+        threadsPerObjectThreadgroup.width != 1 || threadsPerObjectThreadgroup.height != 1 || threadsPerObjectThreadgroup.depth != 1 ||
+        !zpu_metal_size_fits_cpu_threadgroup(threadsPerMeshThreadgroup, state->_meshMaxTotalThreadsPerMeshThreadgroup) ||
+        threadgroupsPerGrid.width == 0 || threadgroupsPerGrid.height == 0 || threadgroupsPerGrid.depth != 1 ||
+        (state->_meshRequiredThreadsPerObjectThreadgroup.width != 0 &&
+         (threadsPerObjectThreadgroup.width != state->_meshRequiredThreadsPerObjectThreadgroup.width ||
+          threadsPerObjectThreadgroup.height != state->_meshRequiredThreadsPerObjectThreadgroup.height ||
+          threadsPerObjectThreadgroup.depth != state->_meshRequiredThreadsPerObjectThreadgroup.depth)) ||
+        (state->_meshRequiredThreadsPerMeshThreadgroup.width != 0 &&
+         (threadsPerMeshThreadgroup.width != state->_meshRequiredThreadsPerMeshThreadgroup.width ||
+          threadsPerMeshThreadgroup.height != state->_meshRequiredThreadsPerMeshThreadgroup.height ||
+          threadsPerMeshThreadgroup.depth != state->_meshRequiredThreadsPerMeshThreadgroup.depth))) {
+        [_owner markError];
+        return;
+    }
+    if (state->_meshMaxTotalThreadgroupsPerMeshGrid != 0 &&
+        (uint64_t)threadgroupsPerGrid.width * (uint64_t)threadgroupsPerGrid.height * (uint64_t)threadgroupsPerGrid.depth >
+        state->_meshMaxTotalThreadgroupsPerMeshGrid) {
+        [_owner markError];
+        return;
+    }
+    uint32_t grid_width = 0;
+    uint32_t grid_height = 0;
+    uint32_t grid_depth = 0;
+    uint32_t object_width = 0;
+    uint32_t object_height = 0;
+    uint32_t object_depth = 0;
+    uint32_t mesh_width = 0;
+    uint32_t mesh_height = 0;
+    uint32_t mesh_depth = 0;
+    if (!zpu_u32(threadgroupsPerGrid.width, &grid_width) || !zpu_u32(threadgroupsPerGrid.height, &grid_height) ||
+        !zpu_u32(threadgroupsPerGrid.depth, &grid_depth) || !zpu_u32(threadsPerObjectThreadgroup.width, &object_width) ||
+        !zpu_u32(threadsPerObjectThreadgroup.height, &object_height) || !zpu_u32(threadsPerObjectThreadgroup.depth, &object_depth) ||
+        !zpu_u32(threadsPerMeshThreadgroup.width, &mesh_width) || !zpu_u32(threadsPerMeshThreadgroup.height, &mesh_height) ||
+        !zpu_u32(threadsPerMeshThreadgroup.depth, &mesh_depth) ||
+        zpu_metal_render_encoder_draw_mesh_threadgroups(
+            _zpuEncoder, ZPU_METAL_MESH_FILL_GRADIENT_RGBA8,
+            (zpu_metal_size){grid_width, grid_height, grid_depth},
+            (zpu_metal_size){object_width, object_height, object_depth},
+            (zpu_metal_size){mesh_width, mesh_height, mesh_depth}) != ZPU_METAL_OK) {
+        [_owner markError];
+    }
 }
 - (void)drawMeshThreads:(MTLSize)threadsPerGrid threadsPerObjectThreadgroup:(MTLSize)threadsPerObjectThreadgroup threadsPerMeshThreadgroup:(MTLSize)threadsPerMeshThreadgroup API_AVAILABLE(macos(13.0), ios(16.0), tvos(18.1), visionos(2.1)) {
-    (void)threadsPerGrid;
-    (void)threadsPerObjectThreadgroup;
-    (void)threadsPerMeshThreadgroup;
-    [_owner markError];
+    ZPURenderPipelineState *state = _pipelineState;
+    if (![state isKindOfClass:[ZPURenderPipelineState class]] || !state->_isMeshPipeline ||
+        ![state->_meshFunctionName isEqualToString:zpu_cpu_mesh_gradient_function_name] ||
+        ![state->_meshFragmentFunctionName isEqualToString:zpu_cpu_mesh_gradient_fragment_name] ||
+        !zpu_metal_size_fits_cpu_threadgroup(threadsPerObjectThreadgroup, state->_meshMaxTotalThreadsPerObjectThreadgroup) ||
+        threadsPerObjectThreadgroup.width != 1 || threadsPerObjectThreadgroup.height != 1 || threadsPerObjectThreadgroup.depth != 1 ||
+        !zpu_metal_size_fits_cpu_threadgroup(threadsPerMeshThreadgroup, state->_meshMaxTotalThreadsPerMeshThreadgroup) ||
+        threadsPerGrid.width == 0 || threadsPerGrid.height == 0 || threadsPerGrid.depth != 1 ||
+        (state->_meshRequiredThreadsPerObjectThreadgroup.width != 0 &&
+         (threadsPerObjectThreadgroup.width != state->_meshRequiredThreadsPerObjectThreadgroup.width ||
+          threadsPerObjectThreadgroup.height != state->_meshRequiredThreadsPerObjectThreadgroup.height ||
+          threadsPerObjectThreadgroup.depth != state->_meshRequiredThreadsPerObjectThreadgroup.depth)) ||
+        (state->_meshRequiredThreadsPerMeshThreadgroup.width != 0 &&
+         (threadsPerMeshThreadgroup.width != state->_meshRequiredThreadsPerMeshThreadgroup.width ||
+          threadsPerGrid.width < threadsPerMeshThreadgroup.width || threadsPerGrid.height < threadsPerMeshThreadgroup.height ||
+          threadsPerMeshThreadgroup.width == 0 || threadsPerMeshThreadgroup.height == 0 ||
+          threadsPerMeshThreadgroup.depth == 0 ||
+          threadsPerMeshThreadgroup.width != state->_meshRequiredThreadsPerMeshThreadgroup.width ||
+          threadsPerMeshThreadgroup.height != state->_meshRequiredThreadsPerMeshThreadgroup.height ||
+          threadsPerMeshThreadgroup.depth != state->_meshRequiredThreadsPerMeshThreadgroup.depth))) {
+        [_owner markError];
+        return;
+    }
+    uint32_t grid_width = 0;
+    uint32_t grid_height = 0;
+    uint32_t grid_depth = 0;
+    uint32_t object_width = 0;
+    uint32_t object_height = 0;
+    uint32_t object_depth = 0;
+    uint32_t mesh_width = 0;
+    uint32_t mesh_height = 0;
+    uint32_t mesh_depth = 0;
+    if (!zpu_u32(threadsPerGrid.width, &grid_width) || !zpu_u32(threadsPerGrid.height, &grid_height) ||
+        !zpu_u32(threadsPerGrid.depth, &grid_depth) || !zpu_u32(threadsPerObjectThreadgroup.width, &object_width) ||
+        !zpu_u32(threadsPerObjectThreadgroup.height, &object_height) || !zpu_u32(threadsPerObjectThreadgroup.depth, &object_depth) ||
+        !zpu_u32(threadsPerMeshThreadgroup.width, &mesh_width) || !zpu_u32(threadsPerMeshThreadgroup.height, &mesh_height) ||
+        !zpu_u32(threadsPerMeshThreadgroup.depth, &mesh_depth) ||
+        zpu_metal_render_encoder_draw_mesh_threads(
+            _zpuEncoder, ZPU_METAL_MESH_FILL_GRADIENT_RGBA8,
+            (zpu_metal_size){grid_width, grid_height, grid_depth},
+            (zpu_metal_size){object_width, object_height, object_depth},
+            (zpu_metal_size){mesh_width, mesh_height, mesh_depth}) != ZPU_METAL_OK) {
+        [_owner markError];
+    }
 }
 - (void)drawMeshThreadgroupsWithIndirectBuffer:(id<MTLBuffer>)indirectBuffer indirectBufferOffset:(NSUInteger)indirectBufferOffset threadsPerObjectThreadgroup:(MTLSize)threadsPerObjectThreadgroup threadsPerMeshThreadgroup:(MTLSize)threadsPerMeshThreadgroup API_AVAILABLE(macos(13.0), ios(16.0)) {
     (void)indirectBuffer;

@@ -378,6 +378,14 @@ const TileCommand = struct {
     threads_per_tile: abi.Size,
 };
 
+const MeshCommand = struct {
+    target: *Texture,
+    kernel: u8,
+    threads_per_grid: abi.Size,
+    threads_per_object_threadgroup: abi.Size,
+    threads_per_mesh_threadgroup: abi.Size,
+};
+
 const VisibilitySlot = struct {
     buffer: *Buffer,
     offset: usize,
@@ -480,6 +488,7 @@ const Command = union(enum) {
     begin_render: BeginRenderCommand,
     draw: DrawCommand,
     tile: TileCommand,
+    mesh: MeshCommand,
     copy_buffer: CopyBufferCommand,
     copy_buffer_to_texture: BufferTextureCommand,
     copy_texture_to_buffer: TextureBufferCommand,
@@ -841,6 +850,34 @@ pub const CommandBuffer = struct {
                                 });
                             }
                         }
+                    }
+                }
+            },
+            .mesh => |mesh| {
+                const target_handle = active_target orelse return self.fail(error.InvalidCommand);
+                if (!validTexture(target_handle) or target_handle != mesh.target) return self.fail(error.InvalidResource);
+                const mesh_threads = mesh.threads_per_mesh_threadgroup;
+                const object_threads = mesh.threads_per_object_threadgroup;
+                const mesh_thread_count = @as(u64, mesh_threads.width) * @as(u64, mesh_threads.height) * @as(u64, mesh_threads.depth);
+                const object_thread_count = @as(u64, object_threads.width) * @as(u64, object_threads.height) * @as(u64, object_threads.depth);
+                if (mesh.kernel != 1 or
+                    (target_handle.format != .rgba8_unorm and target_handle.format != .bgra8_unorm) or
+                    mesh.threads_per_grid.width == 0 or mesh.threads_per_grid.height == 0 or
+                    mesh.threads_per_grid.depth != 1 or
+                    object_threads.width != 1 or object_threads.height != 1 or object_threads.depth != 1 or
+                    mesh_threads.width == 0 or mesh_threads.height == 0 or mesh_threads.depth != 1 or
+                    mesh_thread_count > 1024 or object_thread_count != 1) return self.fail(error.InvalidArgument);
+                var target = target_handle.asTarget();
+                const width = @min(@as(usize, target.width), @as(usize, mesh.threads_per_grid.width));
+                const height = @min(@as(usize, target.height), @as(usize, mesh.threads_per_grid.height));
+                for (0..height) |y| {
+                    for (0..width) |x| {
+                        target.storeColor(x, y, .{
+                            (@as(f32, @floatFromInt(x)) + 1.0) / 8.0,
+                            (@as(f32, @floatFromInt(y)) + 1.0) / 8.0,
+                            0.25,
+                            1.0,
+                        });
                     }
                 }
             },
@@ -1792,6 +1829,58 @@ pub const RenderEncoder = struct {
             .tile_size = tile_size,
             .threads_per_tile = threads_per_tile,
         } });
+    }
+
+    fn validMeshThreadgroup(size: abi.Size) bool {
+        if (size.width == 0 or size.height == 0 or size.depth != 1) return false;
+        return @as(u64, size.width) * @as(u64, size.height) <= 1024;
+    }
+
+    pub fn drawMeshThreadgroups(
+        self: *RenderEncoder,
+        kernel: u8,
+        threadgroups_per_grid: abi.Size,
+        threads_per_object_threadgroup: abi.Size,
+        threads_per_mesh_threadgroup: abi.Size,
+    ) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        const target = switch (self.command_buffer.commands.items[self.begin_index]) {
+            .begin_render => |begin_render| begin_render.target,
+            else => return error.InvalidCommand,
+        };
+        if (kernel != 1 or
+            (target.format != .rgba8_unorm and target.format != .bgra8_unorm) or
+            threadgroups_per_grid.width == 0 or threadgroups_per_grid.height == 0 or threadgroups_per_grid.depth != 1 or
+            threads_per_object_threadgroup.width != 1 or threads_per_object_threadgroup.height != 1 or
+            threads_per_object_threadgroup.depth != 1 or !validMeshThreadgroup(threads_per_mesh_threadgroup))
+            return error.InvalidArgument;
+        const grid_width = std.math.mul(u32, threadgroups_per_grid.width, threads_per_mesh_threadgroup.width) catch return error.InvalidArgument;
+        const grid_height = std.math.mul(u32, threadgroups_per_grid.height, threads_per_mesh_threadgroup.height) catch return error.InvalidArgument;
+        _ = try self.command_buffer.append(.{ .mesh = .{
+            .target = target,
+            .kernel = kernel,
+            .threads_per_grid = .{ .width = grid_width, .height = grid_height, .depth = 1 },
+            .threads_per_object_threadgroup = threads_per_object_threadgroup,
+            .threads_per_mesh_threadgroup = threads_per_mesh_threadgroup,
+        } });
+    }
+
+    pub fn drawMeshThreads(
+        self: *RenderEncoder,
+        kernel: u8,
+        threads_per_grid: abi.Size,
+        threads_per_object_threadgroup: abi.Size,
+        threads_per_mesh_threadgroup: abi.Size,
+    ) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        if (threads_per_grid.width == 0 or threads_per_grid.height == 0 or threads_per_grid.depth != 1 or
+            threads_per_object_threadgroup.width != 1 or threads_per_object_threadgroup.height != 1 or
+            threads_per_object_threadgroup.depth != 1 or !validMeshThreadgroup(threads_per_mesh_threadgroup))
+            return error.InvalidArgument;
+        const rounded_width = (threads_per_grid.width / threads_per_mesh_threadgroup.width) * threads_per_mesh_threadgroup.width;
+        const rounded_height = (threads_per_grid.height / threads_per_mesh_threadgroup.height) * threads_per_mesh_threadgroup.height;
+        if (rounded_width == 0 or rounded_height == 0) return;
+        return self.drawMeshThreadgroups(kernel, .{ .width = rounded_width / threads_per_mesh_threadgroup.width, .height = rounded_height / threads_per_mesh_threadgroup.height, .depth = 1 }, threads_per_object_threadgroup, threads_per_mesh_threadgroup);
     }
 
     pub fn endEncoding(self: *RenderEncoder) Error!void {
@@ -6347,6 +6436,32 @@ pub export fn zpu_metal_render_encoder_draw_indexed_primitives_indirect(encoder:
 
 pub export fn zpu_metal_render_encoder_dispatch_threads_per_tile(encoder: ?*RenderEncoder, kernel: u8, tile_size: abi.Size, threads_per_tile: abi.Size) callconv(.c) c_int {
     (encoder orelse return -1).dispatchThreadsPerTile(kernel, tile_size, threads_per_tile) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_draw_mesh_threadgroups(
+    encoder: ?*RenderEncoder,
+    kernel: u8,
+    threadgroups_per_grid: abi.Size,
+    threads_per_object_threadgroup: abi.Size,
+    threads_per_mesh_threadgroup: abi.Size,
+) callconv(.c) c_int {
+    (encoder orelse return -1).drawMeshThreadgroups(
+        kernel, threadgroups_per_grid, threads_per_object_threadgroup, threads_per_mesh_threadgroup,
+    ) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_draw_mesh_threads(
+    encoder: ?*RenderEncoder,
+    kernel: u8,
+    threads_per_grid: abi.Size,
+    threads_per_object_threadgroup: abi.Size,
+    threads_per_mesh_threadgroup: abi.Size,
+) callconv(.c) c_int {
+    (encoder orelse return -1).drawMeshThreads(
+        kernel, threads_per_grid, threads_per_object_threadgroup, threads_per_mesh_threadgroup,
+    ) catch |err| return errorCode(err);
     return 0;
 }
 

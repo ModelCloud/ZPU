@@ -6968,6 +6968,8 @@ int main(void) {
              "kernel void zpu_cpu_fill_gradient_rgba8_array() {}\n"
              "kernel void zpu_cpu_fill_gradient_rgba8_3d() {}\n"
              "kernel void zpu_cpu_tile_gradient_rgba8() {}\n"
+             "kernel void zpu_cpu_mesh_gradient_rgba8() {}\n"
+             "fragment float4 zpu_cpu_mesh_gradient_fragment() { return float4(1.0); }\n"
              "[[visible]] float4 zpu_test_visible(float4 value) { return value; }\n"
              "[[visible]] float4 zpu_test_visible_secondary(float4 value) { return value + 1.0; }";
         id<MTLLibrary> adapter_library =
@@ -6990,10 +6992,12 @@ int main(void) {
             adapter_constant_function == nil ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 7 ||
+            adapter_library.functionNames.count != 9 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_3d"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_tile_gradient_rgba8"] == nil ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_mesh_gradient_rgba8"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_mesh_gradient_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_test_visible"].functionType != MTLFunctionTypeVisible ||
             [adapter_library newFunctionWithName:@"zpu_test_visible_secondary"].functionType != MTLFunctionTypeVisible ||
             !adapter_library_completion_called ||
@@ -8346,6 +8350,212 @@ int main(void) {
         if (!adapter_legacy_tile_exact) {
             fail_with_error("legacy CPU tile dispatch pixel exactness failed", adapter_legacy_tile_error);
             return 109;
+        }
+
+        /* The registered mesh profile is also CPU/ZPU-owned. It represents
+         * one logical pixel per mesh-grid thread, so the asymmetric target
+         * exercises Metal's upper-left (0,0) origin and clipped mesh grids.
+         * The mesh and fragment names are metadata only; no native mesh
+         * pipeline or encoder is submitted. */
+        BOOL adapter_legacy_mesh_exact = YES;
+        NSError *adapter_legacy_mesh_error = nil;
+        if (@available(macOS 13.0, iOS 16.0, *)) {
+            id<MTLFunction> adapter_legacy_mesh_function =
+                [adapter_default_library newFunctionWithName:@"zpu_cpu_mesh_gradient_rgba8"];
+            id<MTLFunction> adapter_legacy_mesh_fragment =
+                [adapter_default_library newFunctionWithName:@"zpu_cpu_mesh_gradient_fragment"];
+            MTLMeshRenderPipelineDescriptor *adapter_legacy_mesh_descriptor =
+                [MTLMeshRenderPipelineDescriptor new];
+            adapter_legacy_mesh_descriptor.meshFunction = adapter_legacy_mesh_function;
+            adapter_legacy_mesh_descriptor.fragmentFunction = adapter_legacy_mesh_fragment;
+            adapter_legacy_mesh_descriptor.rasterSampleCount = 1;
+            adapter_legacy_mesh_descriptor.maxTotalThreadsPerMeshThreadgroup = 4;
+            adapter_legacy_mesh_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+            id<MTLRenderPipelineState> adapter_legacy_mesh_pipeline =
+                [adapter_device newRenderPipelineStateWithMeshDescriptor:adapter_legacy_mesh_descriptor
+                                                                    options:0 reflection:nil
+                                                                       error:&adapter_legacy_mesh_error];
+            MTLTextureDescriptor *adapter_legacy_mesh_texture_descriptor =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                    width:5 height:3 mipmapped:NO];
+            adapter_legacy_mesh_texture_descriptor.storageMode = MTLStorageModeShared;
+            adapter_legacy_mesh_texture_descriptor.usage = MTLTextureUsageRenderTarget;
+            id<MTLTexture> adapter_legacy_mesh_texture =
+                [adapter_device newTextureWithDescriptor:adapter_legacy_mesh_texture_descriptor];
+            MTLRenderPassDescriptor *adapter_legacy_mesh_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            adapter_legacy_mesh_pass.colorAttachments[0].texture = adapter_legacy_mesh_texture;
+            adapter_legacy_mesh_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            adapter_legacy_mesh_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            adapter_legacy_mesh_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+            id<MTLCommandBuffer> adapter_legacy_mesh_command_buffer = [adapter_queue commandBuffer];
+            id<MTLRenderCommandEncoder> adapter_legacy_mesh_encoder =
+                [adapter_legacy_mesh_command_buffer renderCommandEncoderWithDescriptor:adapter_legacy_mesh_pass];
+            [adapter_legacy_mesh_encoder setRenderPipelineState:adapter_legacy_mesh_pipeline];
+            [adapter_legacy_mesh_encoder drawMeshThreadgroups:MTLSizeMake(3, 2, 1)
+                                   threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
+                                     threadsPerMeshThreadgroup:MTLSizeMake(2, 2, 1)];
+            [adapter_legacy_mesh_encoder endEncoding];
+            [adapter_legacy_mesh_command_buffer commit];
+            [adapter_legacy_mesh_command_buffer waitUntilCompleted];
+            uint8_t adapter_legacy_mesh_pixels[5 * 3 * 4] = {0};
+            if (adapter_legacy_mesh_texture != nil) {
+                [adapter_legacy_mesh_texture getBytes:adapter_legacy_mesh_pixels
+                                           bytesPerRow:5 * 4
+                                         fromRegion:MTLRegionMake2D(0, 0, 5, 3)
+                                        mipmapLevel:0];
+            }
+            uint8_t expected_legacy_mesh_pixels[5 * 3 * 4];
+            for (NSUInteger y = 0; y < 3; ++y) {
+                for (NSUInteger x = 0; x < 5; ++x) {
+                    const NSUInteger pixel = (y * 5 + x) * 4;
+                    expected_legacy_mesh_pixels[pixel + 0] = 64;
+                    expected_legacy_mesh_pixels[pixel + 1] = (uint8_t)(((y + 1) * 255 + 4) / 8);
+                    expected_legacy_mesh_pixels[pixel + 2] = (uint8_t)(((x + 1) * 255 + 4) / 8);
+                    expected_legacy_mesh_pixels[pixel + 3] = 255;
+                }
+            }
+            adapter_legacy_mesh_exact = adapter_legacy_mesh_function != nil &&
+                adapter_legacy_mesh_fragment != nil && adapter_legacy_mesh_pipeline != nil &&
+                adapter_legacy_mesh_texture != nil && adapter_legacy_mesh_command_buffer != nil &&
+                adapter_legacy_mesh_encoder != nil &&
+                adapter_legacy_mesh_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                adapter_legacy_mesh_pipeline.maxTotalThreadsPerObjectThreadgroup == 1 &&
+                adapter_legacy_mesh_pipeline.maxTotalThreadsPerMeshThreadgroup == 4 &&
+                adapter_legacy_mesh_pipeline.objectThreadExecutionWidth == 1 &&
+                adapter_legacy_mesh_pipeline.meshThreadExecutionWidth == 1 &&
+                memcmp(adapter_legacy_mesh_pixels, expected_legacy_mesh_pixels,
+                       sizeof(expected_legacy_mesh_pixels)) == 0;
+        }
+        if (!adapter_legacy_mesh_exact) {
+            fail_with_error("legacy CPU mesh dispatch pixel exactness failed", adapter_legacy_mesh_error);
+            return 110;
+        }
+
+        BOOL adapter_mtl4_mesh_exact = YES;
+        NSError *adapter_mtl4_mesh_error = nil;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTL4CommandAllocatorDescriptor *adapter_mtl4_mesh_allocator_descriptor =
+                [MTL4CommandAllocatorDescriptor new];
+            id<MTL4CommandAllocator> adapter_mtl4_mesh_allocator =
+                [adapter_device newCommandAllocatorWithDescriptor:adapter_mtl4_mesh_allocator_descriptor
+                                                              error:&adapter_mtl4_mesh_error];
+            MTL4CommandQueueDescriptor *adapter_mtl4_mesh_queue_descriptor =
+                [MTL4CommandQueueDescriptor new];
+            id<MTL4CommandQueue> adapter_mtl4_mesh_queue =
+                [adapter_device newMTL4CommandQueueWithDescriptor:adapter_mtl4_mesh_queue_descriptor
+                                                              error:&adapter_mtl4_mesh_error];
+            MTL4LibraryFunctionDescriptor *adapter_mtl4_mesh_function_descriptor =
+                [MTL4LibraryFunctionDescriptor new];
+            adapter_mtl4_mesh_function_descriptor.name = @"zpu_cpu_mesh_gradient_rgba8";
+            adapter_mtl4_mesh_function_descriptor.library = adapter_default_library;
+            MTL4LibraryFunctionDescriptor *adapter_mtl4_mesh_fragment_descriptor =
+                [MTL4LibraryFunctionDescriptor new];
+            adapter_mtl4_mesh_fragment_descriptor.name = @"zpu_cpu_mesh_gradient_fragment";
+            adapter_mtl4_mesh_fragment_descriptor.library = adapter_default_library;
+            MTL4MeshRenderPipelineDescriptor *adapter_mtl4_mesh_descriptor =
+                [MTL4MeshRenderPipelineDescriptor new];
+            adapter_mtl4_mesh_descriptor.meshFunctionDescriptor = adapter_mtl4_mesh_function_descriptor;
+            adapter_mtl4_mesh_descriptor.fragmentFunctionDescriptor = adapter_mtl4_mesh_fragment_descriptor;
+            adapter_mtl4_mesh_descriptor.rasterSampleCount = 1;
+            adapter_mtl4_mesh_descriptor.maxTotalThreadsPerMeshThreadgroup = 4;
+            adapter_mtl4_mesh_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+            id<MTLRenderPipelineState> adapter_mtl4_mesh_pipeline =
+                [adapter_mtl4_compiler newRenderPipelineStateWithDescriptor:adapter_mtl4_mesh_descriptor
+                                                            compilerTaskOptions:nil
+                                                                          error:&adapter_mtl4_mesh_error];
+            NSData *adapter_mtl4_mesh_pipeline_script =
+                [adapter_mtl4_serializer serializeAsPipelinesScriptWithError:&adapter_mtl4_mesh_error];
+            NSURL *adapter_mtl4_mesh_archive_url = [NSURL fileURLWithPath:
+                [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]]];
+            BOOL adapter_mtl4_mesh_archive_flushed =
+                [adapter_mtl4_serializer serializeAsArchiveAndFlushToURL:adapter_mtl4_mesh_archive_url
+                                                                      error:&adapter_mtl4_mesh_error];
+            id<MTL4Archive> adapter_mtl4_mesh_archive =
+                [adapter_device newArchiveWithURL:adapter_mtl4_mesh_archive_url
+                                             error:&adapter_mtl4_mesh_error];
+            id<MTLRenderPipelineState> adapter_mtl4_archived_mesh_pipeline =
+                [adapter_mtl4_mesh_archive newRenderPipelineStateWithDescriptor:adapter_mtl4_mesh_descriptor
+                                                                            error:&adapter_mtl4_mesh_error];
+            MTL4BinaryFunctionDescriptor *adapter_mtl4_mesh_binary_descriptor =
+                [MTL4BinaryFunctionDescriptor new];
+            adapter_mtl4_mesh_binary_descriptor.name = @"zpu_cpu_mesh_gradient_rgba8";
+            adapter_mtl4_mesh_binary_descriptor.functionDescriptor = adapter_mtl4_mesh_function_descriptor;
+            adapter_mtl4_mesh_binary_descriptor.options = MTL4BinaryFunctionOptionPipelineIndependent;
+            id<MTL4BinaryFunction> adapter_mtl4_mesh_binary_function =
+                [adapter_mtl4_compiler newBinaryFunctionWithDescriptor:adapter_mtl4_mesh_binary_descriptor
+                                                      compilerTaskOptions:nil
+                                                                    error:&adapter_mtl4_mesh_error];
+            id<MTLFunctionHandle> adapter_mtl4_mesh_binary_handle =
+                [adapter_mtl4_archived_mesh_pipeline functionHandleWithBinaryFunction:
+                    adapter_mtl4_mesh_binary_function stage:MTLRenderStageMesh];
+            id<MTLFunctionHandle> adapter_mtl4_mesh_function_handle =
+                [adapter_mtl4_archived_mesh_pipeline functionHandleWithFunction:
+                    [adapter_default_library newFunctionWithName:@"zpu_cpu_mesh_gradient_rgba8"]
+                                                                    stage:MTLRenderStageMesh];
+            NSData *adapter_mtl4_mesh_binary_script =
+                [adapter_mtl4_serializer serializeAsPipelinesScriptWithError:&adapter_mtl4_mesh_error];
+            MTLTextureDescriptor *adapter_mtl4_mesh_texture_descriptor =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                    width:5 height:3 mipmapped:NO];
+            adapter_mtl4_mesh_texture_descriptor.storageMode = MTLStorageModeShared;
+            adapter_mtl4_mesh_texture_descriptor.usage = MTLTextureUsageRenderTarget;
+            id<MTLTexture> adapter_mtl4_mesh_texture =
+                [adapter_device newTextureWithDescriptor:adapter_mtl4_mesh_texture_descriptor];
+            MTL4RenderPassDescriptor *adapter_mtl4_mesh_pass = [MTL4RenderPassDescriptor new];
+            adapter_mtl4_mesh_pass.colorAttachments[0].texture = adapter_mtl4_mesh_texture;
+            adapter_mtl4_mesh_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            adapter_mtl4_mesh_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            adapter_mtl4_mesh_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+            id<MTL4CommandBuffer> adapter_mtl4_mesh_command_buffer = [adapter_device newCommandBuffer];
+            [adapter_mtl4_mesh_command_buffer beginCommandBufferWithAllocator:adapter_mtl4_mesh_allocator];
+            id<MTL4RenderCommandEncoder> adapter_mtl4_mesh_encoder =
+                [adapter_mtl4_mesh_command_buffer renderCommandEncoderWithDescriptor:adapter_mtl4_mesh_pass];
+            [adapter_mtl4_mesh_encoder setRenderPipelineState:adapter_mtl4_archived_mesh_pipeline];
+            [adapter_mtl4_mesh_encoder drawMeshThreads:MTLSizeMake(5, 3, 1)
+                             threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
+                               threadsPerMeshThreadgroup:MTLSizeMake(1, 1, 1)];
+            [adapter_mtl4_mesh_encoder endEncoding];
+            [adapter_mtl4_mesh_command_buffer endCommandBuffer];
+            id<MTL4CommandBuffer> adapter_mtl4_mesh_command_buffers[] = {adapter_mtl4_mesh_command_buffer};
+            [adapter_mtl4_mesh_queue commit:adapter_mtl4_mesh_command_buffers count:1];
+            uint8_t adapter_mtl4_mesh_pixels[5 * 3 * 4] = {0};
+            if (adapter_mtl4_mesh_texture != nil) {
+                [adapter_mtl4_mesh_texture getBytes:adapter_mtl4_mesh_pixels
+                                         bytesPerRow:5 * 4
+                                          fromRegion:MTLRegionMake2D(0, 0, 5, 3)
+                                         mipmapLevel:0];
+            }
+            uint8_t expected_mtl4_mesh_pixels[5 * 3 * 4];
+            for (NSUInteger y = 0; y < 3; ++y) {
+                for (NSUInteger x = 0; x < 5; ++x) {
+                    const NSUInteger pixel = (y * 5 + x) * 4;
+                    expected_mtl4_mesh_pixels[pixel + 0] = (uint8_t)(((x + 1) * 255 + 4) / 8);
+                    expected_mtl4_mesh_pixels[pixel + 1] = (uint8_t)(((y + 1) * 255 + 4) / 8);
+                    expected_mtl4_mesh_pixels[pixel + 2] = 64;
+                    expected_mtl4_mesh_pixels[pixel + 3] = 255;
+                }
+            }
+            adapter_mtl4_mesh_exact = adapter_mtl4_mesh_allocator != nil && adapter_mtl4_mesh_queue != nil &&
+                adapter_mtl4_mesh_pipeline != nil && adapter_mtl4_mesh_archive_flushed &&
+                adapter_mtl4_mesh_archive != nil && adapter_mtl4_archived_mesh_pipeline != nil &&
+                adapter_mtl4_mesh_binary_function != nil && adapter_mtl4_mesh_binary_handle != nil &&
+                adapter_mtl4_mesh_function_handle != nil && adapter_mtl4_mesh_pipeline_script != nil &&
+                [[[NSString alloc] initWithData:adapter_mtl4_mesh_pipeline_script
+                                       encoding:NSUTF8StringEncoding]
+                    rangeOfString:@"mesh zpu_cpu_mesh_gradient_rgba8"].location != NSNotFound &&
+                adapter_mtl4_mesh_binary_script != nil &&
+                [[[NSString alloc] initWithData:adapter_mtl4_mesh_binary_script
+                                       encoding:NSUTF8StringEncoding]
+                    rangeOfString:@"mesh zpu_cpu_mesh_gradient_rgba8"].location != NSNotFound &&
+                adapter_mtl4_mesh_texture != nil && adapter_mtl4_mesh_command_buffer != nil &&
+                adapter_mtl4_mesh_encoder != nil &&
+                memcmp(adapter_mtl4_mesh_pixels, expected_mtl4_mesh_pixels,
+                       sizeof(expected_mtl4_mesh_pixels)) == 0;
+            [[NSFileManager defaultManager] removeItemAtURL:adapter_mtl4_mesh_archive_url error:nil];
+        }
+        if (!adapter_mtl4_mesh_exact) {
+            fail_with_error("Metal 4 CPU mesh dispatch pixel exactness failed", adapter_mtl4_mesh_error);
+            return 111;
         }
 
         /* Function tables retain CPU-side handles/resources only. The native

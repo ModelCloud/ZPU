@@ -364,6 +364,14 @@ enum {
     ZPU_METAL_TILE_FILL_GRADIENT_RGBA8 = 1,
 };
 
+/* Mesh kernels are explicit CPU/ZPU operations. They are not MSL and do not
+ * invoke Apple's Metal mesh encoder. The bounded profile emits one logical
+ * pixel per mesh-grid thread in the upper-left-origin render target. */
+typedef uint8_t zpu_metal_mesh_kernel;
+enum {
+    ZPU_METAL_MESH_FILL_GRADIENT_RGBA8 = 1,
+};
+
 typedef uint8_t zpu_metal_command_buffer_status;
 enum {
     ZPU_METAL_COMMAND_BUFFER_CREATED = 0,
@@ -514,6 +522,8 @@ int zpu_metal_render_encoder_draw_indexed_primitives(zpu_metal_render_encoder *e
 int zpu_metal_render_encoder_draw_indexed_primitives_base_vertex(zpu_metal_render_encoder *encoder, zpu_metal_primitive_type primitive, size_t index_count, zpu_metal_index_type index_type, zpu_metal_buffer *index_buffer, size_t index_buffer_offset, size_t instance_count, int64_t base_vertex);
 int zpu_metal_render_encoder_draw_indexed_primitives_indirect(zpu_metal_render_encoder *encoder, zpu_metal_primitive_type primitive, zpu_metal_index_type index_type, zpu_metal_buffer *index_buffer, size_t index_buffer_offset, zpu_metal_buffer *indirect_buffer, size_t indirect_buffer_offset);
 int zpu_metal_render_encoder_dispatch_threads_per_tile(zpu_metal_render_encoder *encoder, zpu_metal_tile_kernel kernel, zpu_metal_size tile_size, zpu_metal_size threads_per_tile);
+int zpu_metal_render_encoder_draw_mesh_threadgroups(zpu_metal_render_encoder *encoder, zpu_metal_mesh_kernel kernel, zpu_metal_size threadgroups_per_grid, zpu_metal_size threads_per_object_threadgroup, zpu_metal_size threads_per_mesh_threadgroup);
+int zpu_metal_render_encoder_draw_mesh_threads(zpu_metal_render_encoder *encoder, zpu_metal_mesh_kernel kernel, zpu_metal_size threads_per_grid, zpu_metal_size threads_per_object_threadgroup, zpu_metal_size threads_per_mesh_threadgroup);
 int zpu_metal_render_encoder_end_encoding(zpu_metal_render_encoder *encoder);
 void zpu_metal_render_encoder_destroy(zpu_metal_render_encoder *encoder);
 
