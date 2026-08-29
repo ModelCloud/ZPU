@@ -18,6 +18,9 @@ static const char *const kShaderSource =
     "device const Vertex *vertices [[buffer(0)]]) { return vertices[vertex_id]; }\n"
     "vertex void zpu_test_no_raster_vertex(uint vertex_id [[vertex_id]]) { (void)vertex_id; }\n"
     "fragment float4 zpu_test_fragment(Vertex input [[stage_in]]) { return input.color; }\n"
+    "fragment float4 zpu_test_depth_bounds_oracle(Vertex input [[stage_in]]) { "
+    "if (input.position.z < 0.5 || input.position.z > 1.0) discard_fragment(); "
+    "return input.color; }\n"
     "struct MRTOutput { float4 first [[color(0)]]; float4 second [[color(1)]]; };\n"
     "fragment MRTOutput zpu_test_mrt_fragment(Vertex input [[stage_in]]) { "
     "MRTOutput output; output.first = input.color; output.second = input.color; return output; }\n"
@@ -77,9 +80,11 @@ int main(void) {
         id<MTLFunction> vertex_function = [library newFunctionWithName:@"zpu_test_vertex"];
         id<MTLFunction> no_raster_vertex_function = [library newFunctionWithName:@"zpu_test_no_raster_vertex"];
         id<MTLFunction> fragment_function = [library newFunctionWithName:@"zpu_test_fragment"];
+        id<MTLFunction> depth_bounds_oracle_fragment = [library newFunctionWithName:@"zpu_test_depth_bounds_oracle"];
         id<MTLFunction> mrt_fragment_function = [library newFunctionWithName:@"zpu_test_mrt_fragment"];
         id<MTLFunction> sample_fragment_function = [library newFunctionWithName:@"zpu_test_sample_fragment"];
-        if (vertex_function == nil || no_raster_vertex_function == nil || fragment_function == nil || mrt_fragment_function == nil || sample_fragment_function == nil) {
+        if (vertex_function == nil || no_raster_vertex_function == nil || fragment_function == nil ||
+            depth_bounds_oracle_fragment == nil || mrt_fragment_function == nil || sample_fragment_function == nil) {
             fprintf(stderr, "metal-pixel: test functions missing\n");
             return 4;
         }
@@ -4878,6 +4883,91 @@ int main(void) {
                         index, metal_depth_pixels[index], adapter_depth_pixels[index]);
                 return 29;
             }
+        }
+
+        /* Depth bounds are a fixed-function test on the interpolated depth
+         * value. The current M4 Metal runtime traps when the SDK 26 native
+         * selector is called, so the native oracle uses an equivalent
+         * fragment discard; the adapter still exercises the real public
+         * setDepthTestMinBound:maxBound: selector entirely on CPU. */
+        MTLRenderPipelineDescriptor *metal_depth_bounds_oracle_descriptor = [depth_pipeline_descriptor copy];
+        metal_depth_bounds_oracle_descriptor.fragmentFunction = depth_bounds_oracle_fragment;
+        id<MTLRenderPipelineState> metal_depth_bounds_oracle_pipeline =
+            [device newRenderPipelineStateWithDescriptor:metal_depth_bounds_oracle_descriptor error:&error];
+        id<MTLTexture> metal_depth_bounds_texture =
+            [device newTextureWithDescriptor:metal_depth_texture_descriptor];
+        id<MTLTexture> metal_depth_bounds_color = [device newTextureWithDescriptor:texture_descriptor];
+        MTLRenderPassDescriptor *metal_depth_bounds_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        metal_depth_bounds_pass.colorAttachments[0].texture = metal_depth_bounds_color;
+        metal_depth_bounds_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        metal_depth_bounds_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        metal_depth_bounds_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        metal_depth_bounds_pass.depthAttachment.texture = metal_depth_bounds_texture;
+        metal_depth_bounds_pass.depthAttachment.loadAction = MTLLoadActionClear;
+        metal_depth_bounds_pass.depthAttachment.storeAction = MTLStoreActionStore;
+        metal_depth_bounds_pass.depthAttachment.clearDepth = 1.0;
+        id<MTLCommandBuffer> metal_depth_bounds_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> metal_depth_bounds_encoder =
+            [metal_depth_bounds_command_buffer renderCommandEncoderWithDescriptor:metal_depth_bounds_pass];
+        [metal_depth_bounds_encoder setRenderPipelineState:metal_depth_bounds_oracle_pipeline];
+        [metal_depth_bounds_encoder setDepthStencilState:depth_state];
+        [metal_depth_bounds_encoder setVertexBuffer:metal_depth_vertex_buffer offset:0 atIndex:0];
+        [metal_depth_bounds_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
+        [metal_depth_bounds_encoder endEncoding];
+        [metal_depth_bounds_command_buffer commit];
+        [metal_depth_bounds_command_buffer waitUntilCompleted];
+        uint8_t metal_depth_bounds_pixels[byte_count];
+        [metal_depth_bounds_color getBytes:metal_depth_bounds_pixels
+                               bytesPerRow:(NSUInteger)width * 4
+                                fromRegion:MTLRegionMake2D(0, 0, width, height)
+                               mipmapLevel:0];
+
+        id<MTLTexture> adapter_depth_bounds_texture =
+            [adapter_device newTextureWithDescriptor:adapter_depth_texture_descriptor];
+        id<MTLTexture> adapter_depth_bounds_color =
+            [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        id<MTLCommandBuffer> adapter_depth_bounds_command_buffer = [adapter_queue commandBuffer];
+        MTLRenderPassDescriptor *adapter_depth_bounds_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_depth_bounds_pass.colorAttachments[0].texture = adapter_depth_bounds_color;
+        adapter_depth_bounds_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_depth_bounds_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_depth_bounds_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        adapter_depth_bounds_pass.depthAttachment.texture = adapter_depth_bounds_texture;
+        adapter_depth_bounds_pass.depthAttachment.loadAction = MTLLoadActionClear;
+        adapter_depth_bounds_pass.depthAttachment.storeAction = MTLStoreActionStore;
+        adapter_depth_bounds_pass.depthAttachment.clearDepth = 1.0;
+        id<MTLRenderCommandEncoder> adapter_depth_bounds_encoder =
+            [adapter_depth_bounds_command_buffer renderCommandEncoderWithDescriptor:adapter_depth_bounds_pass];
+        id<MTLRenderPipelineState> adapter_depth_bounds_pipeline =
+            [adapter_device newRenderPipelineStateWithDescriptor:depth_pipeline_descriptor error:&adapter_depth_pipeline_error];
+        id<MTLDepthStencilState> adapter_depth_bounds_state =
+            [adapter_device newDepthStencilStateWithDescriptor:depth_state_descriptor];
+        if (metal_depth_bounds_oracle_pipeline == nil || metal_depth_bounds_texture == nil || metal_depth_bounds_color == nil ||
+            metal_depth_bounds_command_buffer == nil || metal_depth_bounds_encoder == nil ||
+            metal_depth_bounds_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_depth_bounds_texture == nil || adapter_depth_bounds_color == nil ||
+            adapter_depth_bounds_command_buffer == nil || adapter_depth_bounds_encoder == nil ||
+            adapter_depth_bounds_pipeline == nil || adapter_depth_bounds_state == nil) {
+            fail_with_error("depth bounds allocation or execution failed", adapter_depth_pipeline_error);
+            return 95;
+        }
+        [adapter_depth_bounds_encoder setRenderPipelineState:adapter_depth_bounds_pipeline];
+        [adapter_depth_bounds_encoder setDepthStencilState:adapter_depth_bounds_state];
+        [adapter_depth_bounds_encoder setDepthTestMinBound:0.5f maxBound:1.0f];
+        [adapter_depth_bounds_encoder setVertexBuffer:adapter_depth_vertex_buffer offset:0 atIndex:0];
+        [adapter_depth_bounds_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
+        [adapter_depth_bounds_encoder endEncoding];
+        [adapter_depth_bounds_command_buffer commit];
+        [adapter_depth_bounds_command_buffer waitUntilCompleted];
+        uint8_t adapter_depth_bounds_pixels[byte_count];
+        [adapter_depth_bounds_color getBytes:adapter_depth_bounds_pixels
+                                  bytesPerRow:(NSUInteger)width * 4
+                                   fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                  mipmapLevel:0];
+        if (adapter_depth_bounds_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(metal_depth_bounds_pixels, adapter_depth_bounds_pixels, byte_count) != 0) {
+            fprintf(stderr, "metal-pixel: depth bounds color mismatch\n");
+            return 96;
         }
 
         /* Depth clip mode uses the same top-left pixel grid but differs at

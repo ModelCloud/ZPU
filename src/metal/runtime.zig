@@ -550,6 +550,8 @@ pub const RenderEncoder = struct {
     depth_bias: f32 = 0,
     slope_scale: f32 = 0,
     depth_bias_clamp: f32 = 0,
+    depth_test_min_bound: f32 = 0,
+    depth_test_max_bound: f32 = 1,
     fragment_texture: ?*Texture = null,
     sample_texture: bool = false,
     sample_filter: abi.SamplerFilter = .nearest,
@@ -601,6 +603,8 @@ pub const RenderEncoder = struct {
             .depth_bias = self.depth_bias,
             .slope_scale = self.slope_scale,
             .depth_bias_clamp = self.depth_bias_clamp,
+            .depth_test_min_bound = self.depth_test_min_bound,
+            .depth_test_max_bound = self.depth_test_max_bound,
             .sample_filter = self.sample_filter,
             .sample_address_s = self.sample_address_s,
             .sample_address_t = self.sample_address_t,
@@ -939,6 +943,13 @@ pub const RenderEncoder = struct {
         self.depth_bias = depth_bias;
         self.slope_scale = slope_scale;
         self.depth_bias_clamp = clamp;
+    }
+
+    pub fn setDepthTestBounds(self: *RenderEncoder, min_bound: f32, max_bound: f32) Error!void {
+        if (!self.open() or !std.math.isFinite(min_bound) or !std.math.isFinite(max_bound) or
+            min_bound < 0 or max_bound > 1 or min_bound > max_bound) return error.InvalidArgument;
+        self.depth_test_min_bound = min_bound;
+        self.depth_test_max_bound = max_bound;
     }
 
     fn sourceVertices(self: *const RenderEncoder) Error![]const abi.Vertex {
@@ -2677,6 +2688,45 @@ test "depth texture attachment rejects farther fragments" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 255, 0, 255 }, color.bytes[0..4]);
 }
 
+test "depth bounds discard fragments outside the CPU depth range" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const color = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(color);
+    const depth = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.depth32_float));
+    defer destroyTexture(depth);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.75, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.75, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.75, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, -1, 0.75, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.75, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, 1, 0.75, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, -1, 0.25, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.25, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.25, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, -1, 0.25, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.25, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, 1, 0.25, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+    };
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, color, .{
+        .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } },
+        .depth = .{ .load_action = .clear, .store_action = .store, .clear_depth = 1 },
+    });
+    try encoder.setDepthTexture(depth);
+    try encoder.setDepthTestBounds(0.5, 1.0);
+    try encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
+    try encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try command_buffer.commit();
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, color.bytes[0..4]);
+}
+
 test "stencil attachment applies compare and pass/failure operations" {
     const device = try createDevice();
     defer destroyDevice(device);
@@ -3117,6 +3167,11 @@ pub export fn zpu_metal_render_encoder_set_depth_clip_mode(encoder: ?*RenderEnco
 
 pub export fn zpu_metal_render_encoder_set_depth_bias(encoder: ?*RenderEncoder, depth_bias: f32, slope_scale: f32, clamp: f32) callconv(.c) c_int {
     (encoder orelse return -1).setDepthBias(depth_bias, slope_scale, clamp) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_depth_test_bounds(encoder: ?*RenderEncoder, min_bound: f32, max_bound: f32) callconv(.c) c_int {
+    (encoder orelse return -1).setDepthTestBounds(min_bound, max_bound) catch |err| return errorCode(err);
     return 0;
 }
 

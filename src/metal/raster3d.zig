@@ -39,6 +39,8 @@ pub const DrawOptions = struct {
     depth_bias: f32 = 0,
     slope_scale: f32 = 0,
     depth_bias_clamp: f32 = 0,
+    depth_test_min_bound: f32 = 0,
+    depth_test_max_bound: f32 = 1,
     sample_filter: abi.SamplerFilter = .nearest,
     sample_address_s: abi.SamplerAddressMode = .clamp_to_edge,
     sample_address_t: abi.SamplerAddressMode = .clamp_to_edge,
@@ -431,6 +433,10 @@ fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [
             applyStencil(stencil, index, stencil_state, stencil_state.stencil_failure);
             return;
         }
+    }
+    if (adjusted_depth < job.options.depth_test_min_bound or adjusted_depth > job.options.depth_test_max_bound) {
+        if (stencil_index) |index| applyStencil(job.stencil.?, index, stencil_state, stencil_state.depth_failure);
+        return;
     }
     if (job.depth) |depth_buffer| {
         const index = y * width + x;

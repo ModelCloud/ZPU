@@ -3688,7 +3688,7 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     [(id)_legacy setDepthBias:depthBias slopeScale:slopeScale clamp:clamp];
 }
 - (void)setDepthTestMinBound:(float)minBound maxBound:(float)maxBound {
-    if (minBound != 0.0f || maxBound != 1.0f) [_owner markError];
+    [(id)_legacy setDepthTestMinBound:minBound maxBound:maxBound];
 }
 - (void)setScissorRect:(MTLScissorRect)rect { [(id)_legacy setScissorRect:rect]; }
 - (void)setScissorRects:(const MTLScissorRect [__nonnull])rects count:(NSUInteger)count {
@@ -5911,7 +5911,9 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 - (void)setDepthBias:(float)depthBias slopeScale:(float)slopeScale clamp:(float)clamp {
     if (zpu_metal_render_encoder_set_depth_bias(_zpuEncoder, depthBias, slopeScale, clamp) != ZPU_METAL_OK) [_owner markError];
 }
-- (void)setDepthTestMinBound:(float)minBound maxBound:(float)maxBound API_AVAILABLE(macos(26.0), ios(26.0)) { (void)minBound; (void)maxBound; }
+- (void)setDepthTestMinBound:(float)minBound maxBound:(float)maxBound API_AVAILABLE(macos(26.0), ios(26.0)) {
+    if (zpu_metal_render_encoder_set_depth_test_bounds(_zpuEncoder, minBound, maxBound) != ZPU_METAL_OK) [_owner markError];
+}
 - (void)setFrontFacingWinding:(MTLWinding)frontFacingWinding { (void)zpu_metal_render_encoder_set_front_facing(_zpuEncoder, (zpu_metal_winding)frontFacingWinding); }
 - (void)setTriangleFillMode:(MTLTriangleFillMode)fillMode { (void)zpu_metal_render_encoder_set_triangle_fill_mode(_zpuEncoder, (zpu_metal_triangle_fill_mode)fillMode); }
 - (void)setDepthStencilState:(id<MTLDepthStencilState>)depthStencilState {
