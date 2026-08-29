@@ -43,6 +43,9 @@ triangle path:
   until packed decode/encode profiles are added;
   fixed CPU compute profiles remain explicitly format-specific;
 - formats without a corresponding CPU shader profile remain rejected
+- CPU-owned `MTLDevice` identity and capability metadata, including a stable,
+  copyable `MTLArchitecture` named `ZPU CPU`; this metadata never wraps or
+  retains Apple's native Metal device
 - ordinary device-created 1D, 1D-array, 2D, 2D-array, cube, and cube-array
   textures with independently allocated CPU/ZPU slice×mip levels (six faces
   per cube), exact level/slice read/write,

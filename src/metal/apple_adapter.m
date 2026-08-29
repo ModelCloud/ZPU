@@ -39,6 +39,7 @@ static const MTLIndirectCommandType zpu_indirect_command_type_draw_indexed_patch
     (MTLIndirectCommandType)(1u << 3);
 
 @class ZPUDevice;
+@class ZPUArchitecture;
 @class ZPUBuffer;
 @class ZPUCommandQueue;
 @class ZPUCommandBuffer;
@@ -103,6 +104,16 @@ static const MTLIndirectCommandType zpu_indirect_command_type_draw_indexed_patch
 - (instancetype)initWithOwner:(id)owner buffer:(zpu_metal_buffer *)buffer heap:(ZPUHeap *)heap;
 - (instancetype)initWithOwner:(id)owner buffer:(zpu_metal_buffer *)buffer deallocator:(void (^)(void *pointer, NSUInteger length))deallocator pointer:(void *)pointer length:(NSUInteger)length;
 - (void)applyResourceOptions:(MTLResourceOptions)options;
+@end
+
+/* MTLArchitecture is descriptive device metadata, not an execution object.
+ * Keep it CPU-owned so callers can safely query and copy the adapter's
+ * architecture without creating or retaining a native Metal device. */
+@interface ZPUArchitecture : NSObject <NSCopying> {
+@public
+    NSString *_name;
+}
+- (instancetype)initWithName:(NSString *)name;
 @end
 
 /* Acceleration structures are resources even when ray-intersection execution
@@ -759,6 +770,7 @@ API_AVAILABLE(macos(15.0), ios(18.0))
 @interface ZPUDevice : NSObject <MTLDevice> {
 @public
     zpu_metal_device *_zpuDevice;
+    ZPUArchitecture *_architecture;
     NSArray *_counterSets;
     NSHashTable *_heaps;
 }
@@ -6339,10 +6351,23 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     return YES;
 }
 
+@implementation ZPUArchitecture
+- (instancetype)initWithName:(NSString *)name {
+    if ((self = [super init])) _name = [name copy];
+    return self;
+}
+- (NSString *)name { return _name; }
+- (id)copyWithZone:(NSZone *)zone {
+    (void)zone;
+    return self;
+}
+@end
+
 @implementation ZPUDevice
 - (instancetype)initWithDevice:(zpu_metal_device *)device {
     if ((self = [super init])) {
         _zpuDevice = device;
+        _architecture = [[ZPUArchitecture alloc] initWithName:@"ZPU CPU"];
         ZPUCounter *timestampCounter = [[ZPUCounter alloc] initWithName:MTLCommonCounterTimestamp];
         ZPUCounterSet *timestampSet = [[ZPUCounterSet alloc] initWithName:MTLCommonCounterSetTimestamp
                                                                     counters:@[timestampCounter]];
@@ -6363,7 +6388,9 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 - (BOOL)isRemovable { return NO; }
 - (BOOL)hasUnifiedMemory { return YES; }
 - (MTLSize)maxThreadsPerThreadgroup API_AVAILABLE(macos(10.11), ios(9.0)) { return MTLSizeMake(1024, 1024, 64); }
-- (MTLArchitecture *)architecture API_AVAILABLE(macos(14.0), ios(17.0)) { return nil; }
+- (MTLArchitecture *)architecture API_AVAILABLE(macos(14.0), ios(17.0)) {
+    return (MTLArchitecture *)_architecture;
+}
 #if !defined(TARGET_OS_IPHONE) || !TARGET_OS_IPHONE
 - (uint64_t)maxTransferRate { return 0; }
 - (MTLDeviceLocation)location { return MTLDeviceLocationBuiltIn; }

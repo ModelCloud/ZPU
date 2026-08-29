@@ -1169,6 +1169,21 @@ int main(void) {
          * supported way to use ZPU through Metal-shaped objects; it must keep
          * the same byte contract as both C entry points and Apple's device. */
         id<MTLDevice> adapter_device = ZPUMetalCreateSystemDefaultDevice();
+        if (adapter_device == nil) {
+            fprintf(stderr, "metal-pixel: CPU adapter device creation failed\n");
+            return 18;
+        }
+        if (@available(macOS 14.0, iOS 17.0, *)) {
+            MTLArchitecture *adapter_architecture = adapter_device.architecture;
+            MTLArchitecture *adapter_architecture_copy = [adapter_architecture copy];
+            if (adapter_architecture == nil ||
+                ![adapter_architecture.name isEqualToString:@"ZPU CPU"] ||
+                adapter_architecture_copy != adapter_architecture ||
+                ![adapter_architecture_copy.name isEqualToString:adapter_architecture.name]) {
+                fprintf(stderr, "metal-pixel: CPU adapter architecture metadata failed\n");
+                return 19;
+            }
+        }
         const MTLRegion sparse_pixels[] = {
             MTLRegionMake3D(1, 2, 1, 7, 5, 3),
             MTLRegionMake3D(8, 7, 0, 4, 2, 2),
