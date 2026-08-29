@@ -362,6 +362,136 @@ int main(void) {
     zpu_metal_command_buffer_destroy(mesh_threads_commands);
     zpu_metal_texture_destroy(mesh_threads_texture);
 
+    zpu_metal_texture *patch_texture =
+        zpu_metal_device_new_texture(device, &mesh_descriptor);
+    zpu_metal_texture *patch_reference_texture =
+        zpu_metal_device_new_texture(device, &mesh_descriptor);
+    const uint16_t initial_patch_factors[] = {0, 0, 0, 0};
+    const uint16_t committed_patch_factors[] = {0x3c00, 0x3c00, 0x3c00, 0x3c00};
+    zpu_metal_buffer *patch_factor_buffer = zpu_metal_device_new_buffer(
+        device, sizeof(initial_patch_factors), initial_patch_factors);
+    zpu_metal_command_buffer *patch_commands =
+        zpu_metal_command_queue_command_buffer(queue);
+    zpu_metal_render_encoder *patch_encoder =
+        zpu_metal_command_buffer_render_encoder(patch_commands, patch_texture, &render_pass);
+    zpu_metal_command_buffer *patch_reference_commands =
+        zpu_metal_command_queue_command_buffer(queue);
+    zpu_metal_render_encoder *patch_reference_encoder =
+        zpu_metal_command_buffer_render_encoder(
+            patch_reference_commands, patch_reference_texture, &render_pass);
+    uint8_t patch_before_commit[5 * 3 * 4] = {0};
+    if (patch_texture == NULL || patch_reference_texture == NULL || patch_factor_buffer == NULL ||
+        patch_commands == NULL || patch_encoder == NULL || patch_reference_commands == NULL ||
+        patch_reference_encoder == NULL ||
+        zpu_metal_render_encoder_set_vertex_buffer(patch_encoder, vertex_buffer, 0, 0) != 0 ||
+        zpu_metal_render_encoder_set_tessellation_factor_buffer(
+            patch_encoder, patch_factor_buffer, 0, sizeof(committed_patch_factors)) != 0 ||
+        zpu_metal_render_encoder_set_tessellation_factor_scale(patch_encoder, 1.0f) != 0 ||
+        zpu_metal_render_encoder_draw_patches(
+            patch_encoder, ZPU_METAL_PATCH_TRIANGLE_RGBA8, 3, 0, 1, NULL, 0, 1, 0,
+            ZPU_METAL_TESSELLATION_CONTROL_POINT_INDEX_NONE, NULL, 0) != 0 ||
+        zpu_metal_buffer_write(patch_factor_buffer, 0, committed_patch_factors,
+                               sizeof(committed_patch_factors)) != 0 ||
+        zpu_metal_render_encoder_end_encoding(patch_encoder) != 0 ||
+        zpu_metal_render_encoder_set_vertex_buffer(
+            patch_reference_encoder, vertex_buffer, 0, 0) != 0 ||
+        zpu_metal_render_encoder_draw_primitives(
+            patch_reference_encoder, ZPU_METAL_TRIANGLE, 0, 3, 1) != 0 ||
+        zpu_metal_render_encoder_end_encoding(patch_reference_encoder) != 0 ||
+        zpu_metal_texture_get_bytes(patch_texture, patch_before_commit, sizeof(patch_before_commit), 5 * 4,
+                                    (zpu_metal_region){{0, 0, 0}, {5, 3, 1}}) != 0 ||
+        memcmp(patch_before_commit, (const uint8_t[sizeof(patch_before_commit)]){0},
+               sizeof(patch_before_commit)) != 0) return 49;
+    if (zpu_metal_command_buffer_commit(patch_commands) != 0 ||
+        zpu_metal_command_buffer_commit(patch_reference_commands) != 0 ||
+        zpu_metal_command_buffer_get_status(patch_commands) != ZPU_METAL_COMMAND_BUFFER_COMPLETED ||
+        zpu_metal_command_buffer_get_status(patch_reference_commands) != ZPU_METAL_COMMAND_BUFFER_COMPLETED) return 50;
+    uint8_t patch_pixels[5 * 3 * 4] = {0};
+    uint8_t patch_reference_pixels[sizeof(patch_pixels)] = {0};
+    if (zpu_metal_texture_get_bytes(patch_texture, patch_pixels, sizeof(patch_pixels), 5 * 4,
+                                    (zpu_metal_region){{0, 0, 0}, {5, 3, 1}}) != 0 ||
+        zpu_metal_texture_get_bytes(patch_reference_texture, patch_reference_pixels,
+                                    sizeof(patch_reference_pixels), 5 * 4,
+                                    (zpu_metal_region){{0, 0, 0}, {5, 3, 1}}) != 0 ||
+        memcmp(patch_pixels, patch_reference_pixels, sizeof(patch_pixels)) != 0) return 51;
+    zpu_metal_render_encoder_destroy(patch_encoder);
+    zpu_metal_render_encoder_destroy(patch_reference_encoder);
+    zpu_metal_command_buffer_destroy(patch_commands);
+    zpu_metal_command_buffer_destroy(patch_reference_commands);
+    zpu_metal_buffer_destroy(patch_factor_buffer);
+    zpu_metal_texture_destroy(patch_texture);
+    zpu_metal_texture_destroy(patch_reference_texture);
+
+    zpu_metal_texture *indexed_patch_texture =
+        zpu_metal_device_new_texture(device, &mesh_descriptor);
+    zpu_metal_texture *indexed_patch_reference_texture =
+        zpu_metal_device_new_texture(device, &mesh_descriptor);
+    const uint32_t indexed_patch_ids[] = {1};
+    const uint16_t indexed_patch_control_points[] = {0, 0, 0, 0, 1, 2};
+    const uint8_t indexed_patch_initial_factors[20] = {0};
+    const uint16_t indexed_patch_factors[] = {0x3c00, 0x3c00, 0x3c00, 0x3c00};
+    zpu_metal_buffer *indexed_patch_id_buffer = zpu_metal_device_new_buffer(
+        device, sizeof(indexed_patch_ids), indexed_patch_ids);
+    zpu_metal_buffer *indexed_patch_control_point_buffer = zpu_metal_device_new_buffer(
+        device, sizeof(indexed_patch_control_points), indexed_patch_control_points);
+    zpu_metal_buffer *indexed_patch_factor_buffer = zpu_metal_device_new_buffer(
+        device, sizeof(indexed_patch_initial_factors), indexed_patch_initial_factors);
+    zpu_metal_command_buffer *indexed_patch_commands =
+        zpu_metal_command_queue_command_buffer(queue);
+    zpu_metal_render_encoder *indexed_patch_encoder =
+        zpu_metal_command_buffer_render_encoder(indexed_patch_commands, indexed_patch_texture, &render_pass);
+    zpu_metal_command_buffer *indexed_patch_reference_commands =
+        zpu_metal_command_queue_command_buffer(queue);
+    zpu_metal_render_encoder *indexed_patch_reference_encoder =
+        zpu_metal_command_buffer_render_encoder(
+            indexed_patch_reference_commands, indexed_patch_reference_texture, &render_pass);
+    if (indexed_patch_texture == NULL || indexed_patch_reference_texture == NULL ||
+        indexed_patch_id_buffer == NULL || indexed_patch_control_point_buffer == NULL ||
+        indexed_patch_factor_buffer == NULL || indexed_patch_commands == NULL ||
+        indexed_patch_encoder == NULL || indexed_patch_reference_commands == NULL ||
+        indexed_patch_reference_encoder == NULL ||
+        zpu_metal_render_encoder_set_vertex_buffer(indexed_patch_encoder, vertex_buffer, 0, 0) != 0 ||
+        zpu_metal_render_encoder_set_tessellation_factor_buffer(
+            indexed_patch_encoder, indexed_patch_factor_buffer, sizeof(uint32_t),
+            sizeof(indexed_patch_factors)) != 0 ||
+        zpu_metal_render_encoder_draw_patches(
+            indexed_patch_encoder, ZPU_METAL_PATCH_TRIANGLE_RGBA8, 3, 0, 1,
+            indexed_patch_id_buffer, 0, 1, 0,
+            ZPU_METAL_TESSELLATION_CONTROL_POINT_INDEX_UINT16,
+            indexed_patch_control_point_buffer, 0) != 0 ||
+        zpu_metal_buffer_write(indexed_patch_factor_buffer, sizeof(uint32_t),
+                               indexed_patch_factors, sizeof(indexed_patch_factors)) != 0 ||
+        zpu_metal_render_encoder_end_encoding(indexed_patch_encoder) != 0 ||
+        zpu_metal_render_encoder_set_vertex_buffer(
+            indexed_patch_reference_encoder, vertex_buffer, 0, 0) != 0 ||
+        zpu_metal_render_encoder_draw_primitives(
+            indexed_patch_reference_encoder, ZPU_METAL_TRIANGLE, 0, 3, 1) != 0 ||
+        zpu_metal_render_encoder_end_encoding(indexed_patch_reference_encoder) != 0 ||
+        zpu_metal_command_buffer_commit(indexed_patch_commands) != 0 ||
+        zpu_metal_command_buffer_commit(indexed_patch_reference_commands) != 0 ||
+        zpu_metal_command_buffer_get_status(indexed_patch_commands) != ZPU_METAL_COMMAND_BUFFER_COMPLETED ||
+        zpu_metal_command_buffer_get_status(indexed_patch_reference_commands) != ZPU_METAL_COMMAND_BUFFER_COMPLETED) return 53;
+    uint8_t indexed_patch_pixels[5 * 3 * 4] = {0};
+    uint8_t indexed_patch_reference_pixels[sizeof(indexed_patch_pixels)] = {0};
+    if (zpu_metal_texture_get_bytes(indexed_patch_texture, indexed_patch_pixels,
+                                    sizeof(indexed_patch_pixels), 5 * 4,
+                                    (zpu_metal_region){{0, 0, 0}, {5, 3, 1}}) != 0 ||
+        zpu_metal_texture_get_bytes(indexed_patch_reference_texture,
+                                    indexed_patch_reference_pixels,
+                                    sizeof(indexed_patch_reference_pixels), 5 * 4,
+                                    (zpu_metal_region){{0, 0, 0}, {5, 3, 1}}) != 0 ||
+        memcmp(indexed_patch_pixels, indexed_patch_reference_pixels,
+               sizeof(indexed_patch_pixels)) != 0) return 54;
+    zpu_metal_render_encoder_destroy(indexed_patch_encoder);
+    zpu_metal_render_encoder_destroy(indexed_patch_reference_encoder);
+    zpu_metal_command_buffer_destroy(indexed_patch_commands);
+    zpu_metal_command_buffer_destroy(indexed_patch_reference_commands);
+    zpu_metal_buffer_destroy(indexed_patch_id_buffer);
+    zpu_metal_buffer_destroy(indexed_patch_control_point_buffer);
+    zpu_metal_buffer_destroy(indexed_patch_factor_buffer);
+    zpu_metal_texture_destroy(indexed_patch_texture);
+    zpu_metal_texture_destroy(indexed_patch_reference_texture);
+
     const uint8_t indirect_dispatch_args[] = {2, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0};
     const uint8_t initial_indirect_dispatch_args[] = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
     zpu_metal_texture *compute_indirect_texture =

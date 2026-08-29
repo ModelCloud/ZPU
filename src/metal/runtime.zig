@@ -388,6 +388,40 @@ const MeshCommand = struct {
     indirect_buffer_offset: usize = 0,
 };
 
+const PatchCommand = struct {
+    target: *Texture,
+    kernel: u8,
+    control_point_count: u32,
+    patch_start: usize,
+    patch_count: usize,
+    patch_index_buffer: ?*Buffer,
+    patch_index_buffer_offset: usize,
+    control_point_index_type: abi.TessellationControlPointIndexType,
+    control_point_index_buffer: ?*Buffer,
+    control_point_index_buffer_offset: usize,
+    instance_count: usize,
+    base_instance: usize,
+    factor_buffer: *Buffer,
+    factor_buffer_offset: usize,
+    factor_instance_stride: usize,
+    factor_scale: f32,
+    indirect_buffer: ?*Buffer,
+    indirect_buffer_offset: usize,
+    vertex_buffer: ?*Buffer,
+    vertex_buffer_offset: usize,
+    vertex_stride: usize,
+    inline_vertex_start: usize,
+    inline_vertex_count: usize,
+    options: raster3d.DrawOptions,
+    fragment_uniform_enabled: bool,
+    fragment_uniform_buffer: ?*Buffer,
+    fragment_uniform_buffer_offset: usize,
+    visibility_buffer: ?*Buffer,
+    visibility_mode: abi.VisibilityResultMode,
+    visibility_offset: usize,
+    visibility_result_type: abi.VisibilityResultType,
+};
+
 const VisibilitySlot = struct {
     buffer: *Buffer,
     offset: usize,
@@ -491,6 +525,7 @@ const Command = union(enum) {
     draw: DrawCommand,
     tile: TileCommand,
     mesh: MeshCommand,
+    patch: PatchCommand,
     copy_buffer: CopyBufferCommand,
     copy_buffer_to_texture: BufferTextureCommand,
     copy_texture_to_buffer: TextureBufferCommand,
@@ -602,6 +637,16 @@ pub const CommandBuffer = struct {
         }
         if (draw.vertex_start > source.len or draw.vertex_count > source.len - draw.vertex_start) return error.InvalidCommand;
         return source[draw.vertex_start .. draw.vertex_start + draw.vertex_count];
+    }
+
+    fn resolvePatchVertices(self: *CommandBuffer, patch: PatchCommand, owned: *?[]abi.Vertex) Error![]const abi.Vertex {
+        if (patch.vertex_buffer) |buffer| {
+            return bufferVertices(buffer, patch.vertex_buffer_offset, patch.vertex_stride, owned);
+        }
+        if (patch.inline_vertex_start > self.vertices.items.len or
+            patch.inline_vertex_count > self.vertices.items.len - patch.inline_vertex_start)
+            return error.InvalidCommand;
+        return self.vertices.items[patch.inline_vertex_start .. patch.inline_vertex_start + patch.inline_vertex_count];
     }
 
     fn resolveIndirectDraw(self: *CommandBuffer, draw: *DrawCommand) Error!usize {
@@ -900,6 +945,167 @@ pub const CommandBuffer = struct {
                     }
                 }
             },
+            .patch => |patch| {
+                var resolved_patch = patch;
+                if (patch.indirect_buffer) |indirect_buffer| {
+                    if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.queue.device or
+                        !rangeValid(indirect_buffer.bytes.len, patch.indirect_buffer_offset, 4 * @sizeOf(u32)))
+                        return self.fail(error.InvalidArgument);
+                    const offset = patch.indirect_buffer_offset;
+                    resolved_patch.patch_count = readU32Little(indirect_buffer.bytes, offset);
+                    resolved_patch.instance_count = readU32Little(indirect_buffer.bytes, offset + 4);
+                    resolved_patch.patch_start = readU32Little(indirect_buffer.bytes, offset + 8);
+                    resolved_patch.base_instance = readU32Little(indirect_buffer.bytes, offset + 12);
+                }
+                const target_handle = active_target orelse return self.fail(error.InvalidCommand);
+                if (!validTexture(target_handle) or target_handle != resolved_patch.target or
+                    resolved_patch.kernel != 1 or resolved_patch.control_point_count != 3 or
+                    (target_handle.format != .rgba8_unorm and target_handle.format != .bgra8_unorm) or
+                    resolved_patch.factor_scale != 1.0)
+                    return self.fail(error.InvalidArgument);
+                if (resolved_patch.instance_count == 0 or resolved_patch.patch_count == 0) continue;
+
+                const patch_end = std.math.add(usize, resolved_patch.patch_start, resolved_patch.patch_count) catch
+                    return self.fail(error.InvalidArgument);
+                if (resolved_patch.patch_index_buffer) |buffer| {
+                    const bytes = std.math.mul(usize, resolved_patch.patch_count, @sizeOf(u32)) catch
+                        return self.fail(error.InvalidArgument);
+                    if (!validBuffer(buffer) or buffer.device != self.queue.device or
+                        !rangeValid(buffer.bytes.len, resolved_patch.patch_index_buffer_offset, bytes))
+                        return self.fail(error.InvalidArgument);
+                }
+
+                const factor_entry_size = @sizeOf(u16) * 4;
+                const last_instance = std.math.add(usize, resolved_patch.base_instance, resolved_patch.instance_count - 1) catch
+                    return self.fail(error.InvalidArgument);
+                const factor_instance_offset = std.math.mul(usize, last_instance, resolved_patch.factor_instance_stride) catch
+                    return self.fail(error.InvalidArgument);
+                const factor_patch_offset = std.math.mul(usize, patch_end - 1, factor_entry_size) catch
+                    return self.fail(error.InvalidArgument);
+                const factor_last = std.math.add(usize, factor_instance_offset, factor_patch_offset) catch
+                    return self.fail(error.InvalidArgument);
+                const factor_bytes = std.math.add(usize, factor_last, factor_entry_size) catch
+                    return self.fail(error.InvalidArgument);
+                if (!validBuffer(resolved_patch.factor_buffer) or resolved_patch.factor_buffer.device != self.queue.device or
+                    !rangeValid(resolved_patch.factor_buffer.bytes.len, resolved_patch.factor_buffer_offset, factor_bytes))
+                    return self.fail(error.InvalidArgument);
+
+                if (resolved_patch.control_point_index_buffer) |buffer| {
+                    if (!validBuffer(buffer) or buffer.device != self.queue.device) return self.fail(error.InvalidResource);
+                }
+                var owned_source_vertices: ?[]abi.Vertex = null;
+                const source_vertices = self.resolvePatchVertices(resolved_patch, &owned_source_vertices) catch |err| return self.fail(err);
+                defer if (owned_source_vertices) |vertices| allocator.free(vertices);
+
+                var draw_options = resolved_patch.options;
+                if (resolved_patch.fragment_uniform_enabled) {
+                    if (resolved_patch.fragment_uniform_buffer) |buffer| {
+                        if (!validBuffer(buffer) or buffer.device != self.queue.device or
+                            !rangeValid(buffer.bytes.len, resolved_patch.fragment_uniform_buffer_offset, @sizeOf(abi.Color)))
+                            return self.fail(error.InvalidArgument);
+                        const raw = buffer.bytes[resolved_patch.fragment_uniform_buffer_offset .. resolved_patch.fragment_uniform_buffer_offset + @sizeOf(abi.Color)];
+                        var color: [4]f32 = undefined;
+                        for (0..4) |channel| {
+                            color[channel] = @bitCast(std.mem.readInt(u32, raw[channel * @sizeOf(f32) ..][0..@sizeOf(f32)], .little));
+                            if (!std.math.isFinite(color[channel])) return self.fail(error.InvalidArgument);
+                        }
+                        draw_options.fragment_color = color;
+                    } else if (draw_options.fragment_color == null) {
+                        return self.fail(error.InvalidResource);
+                    }
+                }
+
+                var target = target_handle.asTarget();
+                var extra_targets_storage: [7]raster3d.Target = undefined;
+                var extra_targets: [7]*raster3d.Target = undefined;
+                var extra_count: usize = 0;
+                for (active_color_attachments[1..]) |attachment| {
+                    if (attachment) |value| {
+                        extra_targets_storage[extra_count] = value.asTarget();
+                        extra_targets[extra_count] = &extra_targets_storage[extra_count];
+                        extra_count += 1;
+                    }
+                }
+                var stats: raster3d.Stats = .{};
+                for (0..resolved_patch.instance_count) |instance| {
+                    const instance_id = std.math.add(usize, resolved_patch.base_instance, instance) catch
+                        return self.fail(error.InvalidArgument);
+                    for (0..resolved_patch.patch_count) |local_patch| {
+                        const draw_patch_index = std.math.add(usize, resolved_patch.patch_start, local_patch) catch
+                            return self.fail(error.InvalidArgument);
+                        const factor_offset = std.math.add(usize, std.math.add(usize, resolved_patch.factor_buffer_offset, std.math.mul(usize, instance_id, resolved_patch.factor_instance_stride) catch return self.fail(error.InvalidArgument)) catch
+                            return self.fail(error.InvalidArgument), std.math.mul(usize, draw_patch_index, factor_entry_size) catch return self.fail(error.InvalidArgument)) catch
+                            return self.fail(error.InvalidArgument);
+                        const factor_bytes_slice = resolved_patch.factor_buffer.bytes;
+                        const edge0 = readF16Little(factor_bytes_slice, factor_offset);
+                        const edge1 = readF16Little(factor_bytes_slice, factor_offset + 2);
+                        const edge2 = readF16Little(factor_bytes_slice, factor_offset + 4);
+                        const inside = readF16Little(factor_bytes_slice, factor_offset + 6);
+                        if (!std.math.isFinite(edge0) or !std.math.isFinite(edge1) or !std.math.isFinite(edge2) or
+                            !std.math.isFinite(inside)) return self.fail(error.InvalidArgument);
+                        if (edge0 <= 0 or edge1 <= 0 or edge2 <= 0) continue;
+                        if (edge0 != 1.0 or edge1 != 1.0 or edge2 != 1.0 or inside != 1.0)
+                            return self.fail(error.UnsupportedOperation);
+
+                        const patch_index = if (resolved_patch.patch_index_buffer) |buffer|
+                            readU32Little(buffer.bytes, resolved_patch.patch_index_buffer_offset + local_patch * @sizeOf(u32))
+                        else
+                            @as(u32, @intCast(draw_patch_index));
+                        const patch_index_usize: usize = patch_index;
+                        var patch_vertices: [3]abi.Vertex = undefined;
+                        for (0..3) |control_point| {
+                            var source_index: usize = undefined;
+                            if (resolved_patch.control_point_index_buffer) |buffer| {
+                                const index_size: usize = switch (resolved_patch.control_point_index_type) {
+                                    .uint16 => @sizeOf(u16),
+                                    .uint32 => @sizeOf(u32),
+                                    .none => return self.fail(error.InvalidArgument),
+                                };
+                                const index_offset = std.math.add(usize, resolved_patch.control_point_index_buffer_offset, std.math.mul(usize, std.math.add(usize, std.math.mul(usize, patch_index_usize, resolved_patch.control_point_count) catch return self.fail(error.InvalidArgument), control_point) catch return self.fail(error.InvalidArgument), index_size) catch return self.fail(error.InvalidArgument)) catch
+                                    return self.fail(error.InvalidArgument);
+                                source_index = if (index_size == @sizeOf(u16))
+                                    readU16Little(buffer.bytes, index_offset)
+                                else
+                                    readU32Little(buffer.bytes, index_offset);
+                            } else {
+                                source_index = std.math.add(usize, std.math.mul(usize, patch_index_usize, resolved_patch.control_point_count) catch return self.fail(error.InvalidArgument), control_point) catch return self.fail(error.InvalidArgument);
+                            }
+                            if (source_index >= source_vertices.len) return self.fail(error.InvalidArgument);
+                            patch_vertices[control_point] = source_vertices[source_index];
+                        }
+                        stats = addRasterStats(stats, raster3d.drawWithTargetMipmaps(
+                            @constCast(&target),
+                            extra_targets[0..extra_count],
+                            null,
+                            &.{},
+                            active_depth,
+                            active_stencil,
+                            &patch_vertices,
+                            .triangle,
+                            draw_options,
+                        ));
+                    }
+                }
+                if (resolved_patch.visibility_mode != .disabled) {
+                    const visibility_buffer = resolved_patch.visibility_buffer orelse return self.fail(error.InvalidResource);
+                    if (!validBuffer(visibility_buffer) or visibility_buffer.device != self.queue.device or
+                        !rangeValid(visibility_buffer.bytes.len, resolved_patch.visibility_offset, @sizeOf(u64)))
+                        return self.fail(error.InvalidArgument);
+                    if (resolved_patch.visibility_result_type == .reset and
+                        !visibilitySlotSeen(reset_visibility_slots.items, visibility_buffer, resolved_patch.visibility_offset))
+                    {
+                        writeU64Little(visibility_buffer.bytes, resolved_patch.visibility_offset, 0);
+                        reset_visibility_slots.append(allocator, .{ .buffer = visibility_buffer, .offset = resolved_patch.visibility_offset }) catch return self.fail(error.OutOfMemory);
+                    }
+                    const previous = readU64Little(visibility_buffer.bytes, resolved_patch.visibility_offset);
+                    const result = switch (resolved_patch.visibility_mode) {
+                        .disabled => unreachable,
+                        .boolean => @max(previous, if (stats.fragments_covered != 0) @as(u64, 1) else 0),
+                        .counting => previous +| stats.fragments_covered,
+                    };
+                    writeU64Little(visibility_buffer.bytes, resolved_patch.visibility_offset, result);
+                }
+            },
             .copy_buffer => |copy| {
                 if (!validBuffer(copy.source) or !validBuffer(copy.destination)) return self.fail(error.InvalidResource);
                 if (copy.source.device != copy.destination.device) return self.fail(error.InvalidResource);
@@ -1095,6 +1301,10 @@ pub const RenderEncoder = struct {
     visibility_mode: abi.VisibilityResultMode = .disabled,
     visibility_offset: usize = 0,
     visibility_result_type: abi.VisibilityResultType = .reset,
+    tessellation_factor_buffer: ?*Buffer = null,
+    tessellation_factor_buffer_offset: usize = 0,
+    tessellation_factor_buffer_instance_stride: usize = @sizeOf(u16) * 4,
+    tessellation_factor_scale: f32 = 1,
 
     pub fn deinit(self: *RenderEncoder) void {
         self.inline_vertices.deinit(allocator);
@@ -1569,6 +1779,22 @@ pub const RenderEncoder = struct {
         };
     }
 
+    pub fn setTessellationFactorBuffer(self: *RenderEncoder, buffer: *Buffer, offset: usize, instance_stride: usize) Error!void {
+        if (!self.open() or !validBuffer(buffer) or buffer.device != self.command_buffer.queue.device or
+            offset % @alignOf(u32) != 0 or !rangeValid(buffer.bytes.len, offset, @sizeOf(u16) * 4))
+            return error.InvalidArgument;
+        if (instance_stride != 0 and (instance_stride < @sizeOf(u16) * 4 or instance_stride % @alignOf(u16) != 0))
+            return error.InvalidArgument;
+        self.tessellation_factor_buffer = buffer;
+        self.tessellation_factor_buffer_offset = offset;
+        self.tessellation_factor_buffer_instance_stride = if (instance_stride == 0) @sizeOf(u16) * 4 else instance_stride;
+    }
+
+    pub fn setTessellationFactorScale(self: *RenderEncoder, scale: f32) Error!void {
+        if (!self.open() or !std.math.isFinite(scale) or scale <= 0) return error.InvalidArgument;
+        self.tessellation_factor_scale = scale;
+    }
+
     pub fn updateFence(self: *RenderEncoder, fence: *Fence) Error!void {
         if (!self.open() or !validFence(fence) or fence.device != self.command_buffer.queue.device) return error.InvalidArgument;
         _ = try self.command_buffer.append(.{ .update_fence = fence });
@@ -1932,6 +2158,149 @@ pub const RenderEncoder = struct {
             .indirect_buffer = indirect_buffer,
             .indirect_buffer_offset = indirect_buffer_offset,
         } });
+    }
+
+    fn patchControlPointIndexTypeValid(index_type: abi.TessellationControlPointIndexType, index_buffer: ?*Buffer) bool {
+        return if (index_buffer == null) index_type == .none else index_type != .none;
+    }
+
+    fn appendPatchCommand(
+        self: *RenderEncoder,
+        kernel: u8,
+        control_point_count: u32,
+        patch_start: usize,
+        patch_count: usize,
+        patch_index_buffer: ?*Buffer,
+        patch_index_buffer_offset: usize,
+        instance_count: usize,
+        base_instance: usize,
+        control_point_index_type: abi.TessellationControlPointIndexType,
+        control_point_index_buffer: ?*Buffer,
+        control_point_index_buffer_offset: usize,
+        indirect_buffer: ?*Buffer,
+        indirect_buffer_offset: usize,
+    ) Error!void {
+        if (!self.open() or kernel != 1 or control_point_count != 3 or
+            !patchControlPointIndexTypeValid(control_point_index_type, control_point_index_buffer) or
+            (patch_index_buffer != null and (!validBuffer(patch_index_buffer.?) or
+                patch_index_buffer.?.device != self.command_buffer.queue.device or
+                patch_index_buffer_offset % @alignOf(u32) != 0)) or
+            (control_point_index_buffer != null and (!validBuffer(control_point_index_buffer.?) or
+                control_point_index_buffer.?.device != self.command_buffer.queue.device or
+                control_point_index_buffer_offset % @alignOf(u32) != 0)) or
+            (indirect_buffer != null and (!validBuffer(indirect_buffer.?) or
+                indirect_buffer.?.device != self.command_buffer.queue.device or
+                indirect_buffer_offset % @alignOf(u32) != 0 or
+                !rangeValid(indirect_buffer.?.bytes.len, indirect_buffer_offset, 4 * @sizeOf(u32)))) or
+            self.tessellation_factor_buffer == null or
+            self.tessellation_factor_scale != 1.0)
+            return error.InvalidArgument;
+        const target = switch (self.command_buffer.commands.items[self.begin_index]) {
+            .begin_render => |begin_render| begin_render.target,
+            else => return error.InvalidCommand,
+        };
+        if (target.format != .rgba8_unorm and target.format != .bgra8_unorm) return error.UnsupportedFormat;
+        if (patch_index_buffer) |buffer| {
+            const bytes = std.math.mul(usize, patch_count, @sizeOf(u32)) catch return error.InvalidArgument;
+            if (!rangeValid(buffer.bytes.len, patch_index_buffer_offset, bytes)) return error.InvalidArgument;
+        } else if (patch_start > std.math.maxInt(usize) - patch_count) return error.InvalidArgument;
+        if (control_point_index_buffer) |buffer| {
+            const index_size: usize = switch (control_point_index_type) {
+                .uint16 => @sizeOf(u16),
+                .uint32 => @sizeOf(u32),
+                .none => return error.InvalidArgument,
+            };
+            if (patch_index_buffer == null) {
+                const patch_end = std.math.add(usize, patch_start, patch_count) catch return error.InvalidArgument;
+                const bytes = std.math.mul(usize, std.math.mul(usize, patch_end, control_point_count) catch return error.InvalidArgument, index_size) catch return error.InvalidArgument;
+                if (!rangeValid(buffer.bytes.len, control_point_index_buffer_offset, bytes)) return error.InvalidArgument;
+            } else if (control_point_index_buffer_offset > buffer.bytes.len) {
+                // A patch-index buffer can map drawPatchIndex to arbitrary,
+                // non-contiguous patch IDs. Validate the selected control
+                // point records at commit, after reading those IDs.
+                return error.InvalidArgument;
+            }
+        }
+        const factor_buffer = self.tessellation_factor_buffer.?;
+        const factor_end = std.math.add(usize, patch_start, patch_count) catch return error.InvalidArgument;
+        const factor_last_instance = if (instance_count == 0) base_instance else std.math.add(usize, base_instance, instance_count - 1) catch return error.InvalidArgument;
+        const factor_instance_offset = std.math.mul(usize, factor_last_instance, self.tessellation_factor_buffer_instance_stride) catch return error.InvalidArgument;
+        const factor_patch_offset = if (patch_count == 0) 0 else std.math.mul(usize, factor_end - 1, @sizeOf(u16) * 4) catch return error.InvalidArgument;
+        const factor_last = std.math.add(usize, factor_instance_offset, factor_patch_offset) catch return error.InvalidArgument;
+        const factor_bytes = std.math.add(usize, factor_last, @sizeOf(u16) * 4) catch return error.InvalidArgument;
+        if (!rangeValid(factor_buffer.bytes.len, self.tessellation_factor_buffer_offset, factor_bytes)) return error.InvalidArgument;
+        var inline_vertex_start: usize = 0;
+        var inline_vertex_count: usize = 0;
+        if (self.vertex_buffer == null) {
+            if (self.inline_vertices.items.len == 0) return error.InvalidResource;
+            inline_vertex_start = try self.command_buffer.appendVertices(self.inline_vertices.items);
+            inline_vertex_count = self.inline_vertices.items.len;
+        }
+        _ = try self.command_buffer.append(.{ .patch = .{
+            .target = target,
+            .kernel = kernel,
+            .control_point_count = control_point_count,
+            .patch_start = patch_start,
+            .patch_count = patch_count,
+            .patch_index_buffer = patch_index_buffer,
+            .patch_index_buffer_offset = patch_index_buffer_offset,
+            .control_point_index_type = control_point_index_type,
+            .control_point_index_buffer = control_point_index_buffer,
+            .control_point_index_buffer_offset = control_point_index_buffer_offset,
+            .instance_count = if (indirect_buffer == null) instance_count else 0,
+            .base_instance = base_instance,
+            .factor_buffer = factor_buffer,
+            .factor_buffer_offset = self.tessellation_factor_buffer_offset,
+            .factor_instance_stride = self.tessellation_factor_buffer_instance_stride,
+            .factor_scale = self.tessellation_factor_scale,
+            .indirect_buffer = indirect_buffer,
+            .indirect_buffer_offset = indirect_buffer_offset,
+            .vertex_buffer = self.vertex_buffer,
+            .vertex_buffer_offset = self.vertex_offset,
+            .vertex_stride = self.vertex_stride,
+            .inline_vertex_start = inline_vertex_start,
+            .inline_vertex_count = inline_vertex_count,
+            .options = self.options(),
+            .fragment_uniform_enabled = self.fragment_uniform_enabled,
+            .fragment_uniform_buffer = self.fragment_uniform_buffer,
+            .fragment_uniform_buffer_offset = self.fragment_uniform_buffer_offset,
+            .visibility_buffer = self.visibility_buffer,
+            .visibility_mode = self.visibility_mode,
+            .visibility_offset = self.visibility_offset,
+            .visibility_result_type = self.visibility_result_type,
+        } });
+    }
+
+    pub fn drawPatches(
+        self: *RenderEncoder,
+        kernel: u8,
+        control_point_count: u32,
+        patch_start: usize,
+        patch_count: usize,
+        patch_index_buffer: ?*Buffer,
+        patch_index_buffer_offset: usize,
+        instance_count: usize,
+        base_instance: usize,
+        control_point_index_type: abi.TessellationControlPointIndexType,
+        control_point_index_buffer: ?*Buffer,
+        control_point_index_buffer_offset: usize,
+    ) Error!void {
+        return self.appendPatchCommand(kernel, control_point_count, patch_start, patch_count, patch_index_buffer, patch_index_buffer_offset, instance_count, base_instance, control_point_index_type, control_point_index_buffer, control_point_index_buffer_offset, null, 0);
+    }
+
+    pub fn drawPatchesIndirect(
+        self: *RenderEncoder,
+        kernel: u8,
+        control_point_count: u32,
+        patch_index_buffer: ?*Buffer,
+        patch_index_buffer_offset: usize,
+        indirect_buffer: *Buffer,
+        indirect_buffer_offset: usize,
+        control_point_index_type: abi.TessellationControlPointIndexType,
+        control_point_index_buffer: ?*Buffer,
+        control_point_index_buffer_offset: usize,
+    ) Error!void {
+        return self.appendPatchCommand(kernel, control_point_count, 0, 0, patch_index_buffer, patch_index_buffer_offset, 0, 0, control_point_index_type, control_point_index_buffer, control_point_index_buffer_offset, indirect_buffer, indirect_buffer_offset);
     }
 
     pub fn endEncoding(self: *RenderEncoder) Error!void {
@@ -4281,6 +4650,10 @@ fn readU16Little(bytes: []const u8, offset: usize) u16 {
     return @as(u16, bytes[offset]) | (@as(u16, bytes[offset + 1]) << 8);
 }
 
+fn readF16Little(bytes: []const u8, offset: usize) f32 {
+    return @floatCast(@as(f16, @bitCast(readU16Little(bytes, offset))));
+}
+
 fn writeU16Little(bytes: []u8, offset: usize, value: u16) void {
     bytes[offset] = @truncate(value);
     bytes[offset + 1] = @truncate(value >> 8);
@@ -5009,6 +5382,51 @@ test "CPU mesh indirect grid is deferred and uses Metal threadgroup dimensions" 
     }
     try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
     try std.testing.expectEqualSlices(u8, &expected, texture.bytes);
+}
+
+test "CPU triangle patches use factor-one tessellation and preserve raster pixels" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const patch_texture = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.bgra8_unorm));
+    defer destroyTexture(patch_texture);
+    const primitive_texture = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.bgra8_unorm));
+    defer destroyTexture(primitive_texture);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.5, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 0, 1, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+    };
+    const vertex_buffer = try createBuffer(device, @sizeOf(@TypeOf(vertices)), @ptrCast(&vertices));
+    defer destroyBuffer(vertex_buffer);
+    const factors = [_]u16{ 0x3c00, 0x3c00, 0x3c00, 0x3c00 };
+    const factor_buffer = try createBuffer(device, @sizeOf(@TypeOf(factors)), @ptrCast(&factors));
+    defer destroyBuffer(factor_buffer);
+
+    var patch_commands = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(patch_commands);
+    var patch_encoder = try beginRender(patch_commands, patch_texture, .{ .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } } });
+    try patch_encoder.setVertexBuffer(vertex_buffer, 0, 0);
+    try patch_encoder.setTessellationFactorBuffer(factor_buffer, 0, @sizeOf(@TypeOf(factors)));
+    try patch_encoder.drawPatches(1, 3, 0, 1, null, 0, 1, 0, .none, null, 0);
+    try patch_encoder.endEncoding();
+    destroyRenderEncoder(patch_encoder);
+
+    var primitive_commands = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(primitive_commands);
+    var primitive_encoder = try beginRender(primitive_commands, primitive_texture, .{ .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } } });
+    try primitive_encoder.setVertexBuffer(vertex_buffer, 0, 0);
+    try primitive_encoder.drawPrimitives(.triangle, 0, 3, 1);
+    try primitive_encoder.endEncoding();
+    destroyRenderEncoder(primitive_encoder);
+
+    try std.testing.expectEqual(@as(u8, 0), patch_texture.bytes[0]);
+    try patch_commands.commit();
+    try primitive_commands.commit();
+    try std.testing.expectEqual(CommandStatus.completed, patch_commands.status);
+    try std.testing.expectEqualSlices(u8, patch_texture.bytes, primitive_texture.bytes);
+    try std.testing.expect(std.mem.indexOfScalar(u8, patch_texture.bytes, 255) != null);
 }
 
 test "CPU compute writes narrow unorm targets at their native stride" {
@@ -6579,6 +6997,84 @@ pub export fn zpu_metal_render_encoder_draw_mesh_threadgroups_indirect(
         indirect_buffer_offset,
         threads_per_object_threadgroup,
         threads_per_mesh_threadgroup,
+    ) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_tessellation_factor_buffer(
+    encoder: ?*RenderEncoder,
+    buffer: ?*Buffer,
+    offset: usize,
+    instance_stride: usize,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setTessellationFactorBuffer(
+        buffer orelse return -1,
+        offset,
+        instance_stride,
+    ) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_tessellation_factor_scale(
+    encoder: ?*RenderEncoder,
+    scale: f32,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setTessellationFactorScale(scale) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_draw_patches(
+    encoder: ?*RenderEncoder,
+    kernel: u8,
+    control_point_count: u32,
+    patch_start: usize,
+    patch_count: usize,
+    patch_index_buffer: ?*Buffer,
+    patch_index_buffer_offset: usize,
+    instance_count: usize,
+    base_instance: usize,
+    control_point_index_type: abi.TessellationControlPointIndexType,
+    control_point_index_buffer: ?*Buffer,
+    control_point_index_buffer_offset: usize,
+) callconv(.c) c_int {
+    (encoder orelse return -1).drawPatches(
+        kernel,
+        control_point_count,
+        patch_start,
+        patch_count,
+        patch_index_buffer,
+        patch_index_buffer_offset,
+        instance_count,
+        base_instance,
+        control_point_index_type,
+        control_point_index_buffer,
+        control_point_index_buffer_offset,
+    ) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_draw_patches_indirect(
+    encoder: ?*RenderEncoder,
+    kernel: u8,
+    control_point_count: u32,
+    patch_index_buffer: ?*Buffer,
+    patch_index_buffer_offset: usize,
+    indirect_buffer: ?*Buffer,
+    indirect_buffer_offset: usize,
+    control_point_index_type: abi.TessellationControlPointIndexType,
+    control_point_index_buffer: ?*Buffer,
+    control_point_index_buffer_offset: usize,
+) callconv(.c) c_int {
+    (encoder orelse return -1).drawPatchesIndirect(
+        kernel,
+        control_point_count,
+        patch_index_buffer,
+        patch_index_buffer_offset,
+        indirect_buffer orelse return -1,
+        indirect_buffer_offset,
+        control_point_index_type,
+        control_point_index_buffer,
+        control_point_index_buffer_offset,
     ) catch |err| return errorCode(err);
     return 0;
 }

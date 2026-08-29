@@ -45,6 +45,8 @@ static NSString *const zpu_cpu_ml_identity_function_name = @"zpu_cpu_ml_identity
 static NSString *const zpu_cpu_tile_gradient_function_name = @"zpu_cpu_tile_gradient_rgba8";
 static NSString *const zpu_cpu_mesh_gradient_function_name = @"zpu_cpu_mesh_gradient_rgba8";
 static NSString *const zpu_cpu_mesh_gradient_fragment_name = @"zpu_cpu_mesh_gradient_fragment";
+static NSString *const zpu_cpu_patch_triangle_vertex_name = @"zpu_cpu_tessellated_triangle_vertex";
+static NSString *const zpu_cpu_patch_triangle_fragment_name = @"zpu_cpu_tessellated_triangle_fragment";
 /* MTLRenderStageObject/Mesh are introduced in iOS 16, while the shared
  * function-handle selector is available from iOS 15. Keep the ABI bit values
  * here so the adapter remains deployable to iOS 15 and still recognizes the
@@ -639,6 +641,10 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     BOOL _meshThreadgroupSizeMatchesExecutionWidth;
     MTLSize _meshRequiredThreadsPerObjectThreadgroup;
     MTLSize _meshRequiredThreadsPerMeshThreadgroup;
+    BOOL _isPatchPipeline;
+    MTLPatchType _patchType;
+    NSInteger _patchControlPointCount;
+    MTLTessellationControlPointIndexType _tessellationControlPointIndexType;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLRenderPipelineDescriptor *)descriptor;
 - (instancetype)initWithOwner:(ZPUDevice *)owner tileFunctionName:(NSString *)tileFunctionName
@@ -1323,6 +1329,10 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     ZPUTexture *_fragmentTexture;
     ZPURenderPipelineState *_pipelineState;
     ZPUDepthStencilState *_depthStencilState;
+    ZPUBuffer *_tessellationFactorBuffer;
+    NSUInteger _tessellationFactorBufferOffset;
+    NSUInteger _tessellationFactorBufferInstanceStride;
+    float _tessellationFactorScale;
     NSUInteger _tileWidth;
     NSUInteger _tileHeight;
 }
@@ -5634,6 +5644,8 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         zpu_cpu_tile_gradient_function_name,
         zpu_cpu_mesh_gradient_function_name,
         zpu_cpu_mesh_gradient_fragment_name,
+        zpu_cpu_patch_triangle_vertex_name,
+        zpu_cpu_patch_triangle_fragment_name,
         zpu_cpu_ml_identity_function_name,
     ] containsObject:name];
 }
@@ -5665,6 +5677,10 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _supportsIndirectCommandBuffers = descriptor.supportIndirectCommandBuffers;
         _depthPixelFormat = descriptor.depthAttachmentPixelFormat;
         _stencilPixelFormat = descriptor.stencilAttachmentPixelFormat;
+        _isPatchPipeline = [_vertexFunctionName isEqualToString:zpu_cpu_patch_triangle_vertex_name];
+        _patchType = _isPatchPipeline ? MTLPatchTypeTriangle : MTLPatchTypeNone;
+        _patchControlPointCount = _isPatchPipeline ? 3 : -1;
+        _tessellationControlPointIndexType = descriptor.tessellationControlPointIndexType;
         _blendingEnabled = attachment.blendingEnabled;
         _sourceRGBBlendFactor = attachment.sourceRGBBlendFactor;
         _destinationRGBBlendFactor = attachment.destinationRGBBlendFactor;
@@ -5816,6 +5832,10 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _meshThreadgroupSizeMatchesExecutionWidth = pipeline->_meshThreadgroupSizeMatchesExecutionWidth;
         _meshRequiredThreadsPerObjectThreadgroup = pipeline->_meshRequiredThreadsPerObjectThreadgroup;
         _meshRequiredThreadsPerMeshThreadgroup = pipeline->_meshRequiredThreadsPerMeshThreadgroup;
+        _isPatchPipeline = pipeline->_isPatchPipeline;
+        _patchType = pipeline->_patchType;
+        _patchControlPointCount = pipeline->_patchControlPointCount;
+        _tessellationControlPointIndexType = pipeline->_tessellationControlPointIndexType;
         _reflection = pipeline->_reflection;
         _legacyReflection = pipeline->_legacyReflection;
     }
@@ -6953,6 +6973,18 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         zpu_set_error(error, @"ZPU CPU Metal render pipelines require ZPU-owned CPU vertex and fragment functions");
         return nil;
     }
+    const BOOL patchPipeline = [vertexFunction.name isEqualToString:zpu_cpu_patch_triangle_vertex_name];
+    if ([fragmentFunction.name isEqualToString:zpu_cpu_patch_triangle_fragment_name] != patchPipeline ||
+        (patchPipeline &&
+         (vertexFunction.patchType != MTLPatchTypeTriangle || vertexFunction.patchControlPointCount != 3 ||
+          descriptor.tessellationFactorFormat != MTLTessellationFactorFormatHalf ||
+          descriptor.tessellationFactorStepFunction != MTLTessellationFactorStepFunctionPerPatchAndPerInstance ||
+          descriptor.tessellationOutputWindingOrder != MTLWindingClockwise ||
+          descriptor.tessellationFactorScaleEnabled || descriptor.maxTessellationFactor < 1 ||
+          descriptor.rasterizationEnabled == NO))) {
+        zpu_set_error(error, @"ZPU CPU Metal supports only the registered factor-one triangle patch profile");
+        return nil;
+    }
     for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
         if (!zpu_render_pipeline_format_supported(descriptor.colorAttachments[index].pixelFormat)) {
             zpu_set_error(error, @"ZPU Metal supports only R8/R16Unorm/R16Float/RG8/RG16Unorm/RG16Float/RGBA8/BGRA8/R32Float/RGBA16Unorm/RGBA16Float/RG32Float/RGBA32Float color attachments");
@@ -7161,7 +7193,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (id<MTLLibrary>)newDefaultLibrary {
     return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
-                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_ml_identity"];
+                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_ml_identity"];
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
@@ -7656,8 +7688,12 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (NSString *)label { return _name; }
 - (void)setLabel:(NSString *)label { _name = [label copy]; }
-- (MTLPatchType)patchType API_AVAILABLE(macos(10.12), ios(10.0)) { return MTLPatchTypeNone; }
-- (NSInteger)patchControlPointCount API_AVAILABLE(macos(10.12), ios(10.0)) { return -1; }
+- (MTLPatchType)patchType API_AVAILABLE(macos(10.12), ios(10.0)) {
+    return [_name isEqualToString:zpu_cpu_patch_triangle_vertex_name] ? MTLPatchTypeTriangle : MTLPatchTypeNone;
+}
+- (NSInteger)patchControlPointCount API_AVAILABLE(macos(10.12), ios(10.0)) {
+    return [_name isEqualToString:zpu_cpu_patch_triangle_vertex_name] ? 3 : -1;
+}
 - (NSArray *)vertexAttributes { return @[]; }
 - (NSArray *)stageInputAttributes API_AVAILABLE(macos(10.12), ios(10.0)) { return @[]; }
 - (NSDictionary *)functionConstantsDictionary API_AVAILABLE(macos(10.12), ios(10.0)) { return @{}; }
@@ -7712,6 +7748,8 @@ static BOOL zpu_apply_legacy_compute_descriptor(
             zpu_cpu_tile_gradient_function_name,
             zpu_cpu_mesh_gradient_function_name,
             zpu_cpu_mesh_gradient_fragment_name,
+            zpu_cpu_patch_triangle_vertex_name,
+            zpu_cpu_patch_triangle_fragment_name,
             zpu_cpu_ml_identity_function_name,
         ]) {
             if ([source rangeOfString:name].location != NSNotFound) [names addObject:name];
@@ -13054,7 +13092,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     return zpu_metal_render_encoder_set_vertex_buffer_stride(_zpuEncoder, _vertexStride) == ZPU_METAL_OK;
 }
 - (BOOL)validateVertexStrideForDraw {
-    if (_pipelineState != nil && (_pipelineState->_isTilePipeline || _pipelineState->_isMeshPipeline)) {
+    if (_pipelineState != nil && (_pipelineState->_isTilePipeline || _pipelineState->_isMeshPipeline || _pipelineState->_isPatchPipeline)) {
         [_owner markError];
         return NO;
     }
@@ -13656,54 +13694,114 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     if (zpu_metal_render_encoder_draw_indexed_primitives_indirect(_zpuEncoder, (zpu_metal_primitive_type)primitiveType, (zpu_metal_index_type)(indexType == MTLIndexTypeUInt16 ? ZPU_METAL_INDEX_UINT16 : ZPU_METAL_INDEX_UINT32), zpuIndexBuffer->_zpuBuffer, indexBufferOffset, zpuIndirectBuffer->_zpuBuffer, indirectBufferOffset) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)setTessellationFactorBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset instanceStride:(NSUInteger)instanceStride API_AVAILABLE(macos(10.12), ios(10.0)) {
-    (void)buffer;
-    (void)offset;
-    (void)instanceStride;
-    [_owner markError];
+    ZPUBuffer *factor = (ZPUBuffer *)buffer;
+    if (![factor isKindOfClass:[ZPUBuffer class]] || factor->_owner != [_owner device] ||
+        zpu_metal_render_encoder_set_tessellation_factor_buffer(
+            _zpuEncoder, factor->_zpuBuffer, offset, instanceStride) != ZPU_METAL_OK) {
+        [_owner markError];
+        return;
+    }
+    _tessellationFactorBuffer = factor;
+    _tessellationFactorBufferOffset = offset;
+    _tessellationFactorBufferInstanceStride = instanceStride;
+    [_owner retainResource:factor];
 }
 - (void)setTessellationFactorScale:(float)scale API_AVAILABLE(macos(10.12), ios(10.0)) {
-    (void)scale;
-    [_owner markError];
+    if (zpu_metal_render_encoder_set_tessellation_factor_scale(_zpuEncoder, scale) != ZPU_METAL_OK) {
+        [_owner markError];
+        return;
+    }
+    _tessellationFactorScale = scale;
 }
 - (void)drawPatches:(NSUInteger)numberOfPatchControlPoints patchStart:(NSUInteger)patchStart patchCount:(NSUInteger)patchCount patchIndexBuffer:(id<MTLBuffer>)patchIndexBuffer patchIndexBufferOffset:(NSUInteger)patchIndexBufferOffset instanceCount:(NSUInteger)instanceCount baseInstance:(NSUInteger)baseInstance API_AVAILABLE(macos(10.12), ios(10.0)) {
-    (void)numberOfPatchControlPoints;
-    (void)patchStart;
-    (void)patchCount;
-    (void)patchIndexBuffer;
-    (void)patchIndexBufferOffset;
-    (void)instanceCount;
-    (void)baseInstance;
-    [_owner markError];
+    ZPURenderPipelineState *state = _pipelineState;
+    ZPUBuffer *patchIndex = (ZPUBuffer *)patchIndexBuffer;
+    if (![state isKindOfClass:[ZPURenderPipelineState class]] || !state->_isPatchPipeline ||
+        ![state->_vertexFunctionName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ||
+        ![state->_fragmentFunctionName isEqualToString:zpu_cpu_patch_triangle_fragment_name] ||
+        numberOfPatchControlPoints != 3 ||
+        (patchIndexBuffer != nil && (![patchIndex isKindOfClass:[ZPUBuffer class]] ||
+                                     patchIndex->_owner != [_owner device]))) {
+        [_owner markError];
+        return;
+    }
+    if (patchIndex != nil) [_owner retainResource:patchIndex];
+    if (zpu_metal_render_encoder_draw_patches(
+            _zpuEncoder, ZPU_METAL_PATCH_TRIANGLE_RGBA8,
+            3, patchStart, patchCount,
+            patchIndex == nil ? NULL : patchIndex->_zpuBuffer, patchIndexBufferOffset,
+            instanceCount, baseInstance,
+            (zpu_metal_tessellation_control_point_index_type)state->_tessellationControlPointIndexType,
+            NULL, 0) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)drawPatches:(NSUInteger)numberOfPatchControlPoints patchIndexBuffer:(id<MTLBuffer>)patchIndexBuffer patchIndexBufferOffset:(NSUInteger)patchIndexBufferOffset indirectBuffer:(id<MTLBuffer>)indirectBuffer indirectBufferOffset:(NSUInteger)indirectBufferOffset API_AVAILABLE(macos(10.12), ios(12.0), tvos(14.5)) {
-    (void)numberOfPatchControlPoints;
-    (void)patchIndexBuffer;
-    (void)patchIndexBufferOffset;
-    (void)indirectBuffer;
-    (void)indirectBufferOffset;
-    [_owner markError];
+    ZPURenderPipelineState *state = _pipelineState;
+    ZPUBuffer *patchIndex = (ZPUBuffer *)patchIndexBuffer;
+    ZPUBuffer *indirect = (ZPUBuffer *)indirectBuffer;
+    if (![state isKindOfClass:[ZPURenderPipelineState class]] || !state->_isPatchPipeline ||
+        ![state->_vertexFunctionName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ||
+        ![state->_fragmentFunctionName isEqualToString:zpu_cpu_patch_triangle_fragment_name] ||
+        numberOfPatchControlPoints != 3 ||
+        (patchIndexBuffer != nil && (![patchIndex isKindOfClass:[ZPUBuffer class]] || patchIndex->_owner != [_owner device])) ||
+        ![indirect isKindOfClass:[ZPUBuffer class]] || indirect->_owner != [_owner device]) {
+        [_owner markError];
+        return;
+    }
+    if (patchIndex != nil) [_owner retainResource:patchIndex];
+    [_owner retainResource:indirect];
+    if (zpu_metal_render_encoder_draw_patches_indirect(
+            _zpuEncoder, ZPU_METAL_PATCH_TRIANGLE_RGBA8, 3,
+            patchIndex == nil ? NULL : patchIndex->_zpuBuffer, patchIndexBufferOffset,
+            indirect->_zpuBuffer, indirectBufferOffset,
+            (zpu_metal_tessellation_control_point_index_type)state->_tessellationControlPointIndexType,
+            NULL, 0) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)drawIndexedPatches:(NSUInteger)numberOfPatchControlPoints patchStart:(NSUInteger)patchStart patchCount:(NSUInteger)patchCount patchIndexBuffer:(id<MTLBuffer>)patchIndexBuffer patchIndexBufferOffset:(NSUInteger)patchIndexBufferOffset controlPointIndexBuffer:(id<MTLBuffer>)controlPointIndexBuffer controlPointIndexBufferOffset:(NSUInteger)controlPointIndexBufferOffset instanceCount:(NSUInteger)instanceCount baseInstance:(NSUInteger)baseInstance API_AVAILABLE(macos(10.12), ios(10.0)) {
-    (void)numberOfPatchControlPoints;
-    (void)patchStart;
-    (void)patchCount;
-    (void)patchIndexBuffer;
-    (void)patchIndexBufferOffset;
-    (void)controlPointIndexBuffer;
-    (void)controlPointIndexBufferOffset;
-    (void)instanceCount;
-    (void)baseInstance;
-    [_owner markError];
+    ZPURenderPipelineState *state = _pipelineState;
+    ZPUBuffer *patchIndex = (ZPUBuffer *)patchIndexBuffer;
+    ZPUBuffer *controlPointIndex = (ZPUBuffer *)controlPointIndexBuffer;
+    if (![state isKindOfClass:[ZPURenderPipelineState class]] || !state->_isPatchPipeline ||
+        ![state->_vertexFunctionName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ||
+        ![state->_fragmentFunctionName isEqualToString:zpu_cpu_patch_triangle_fragment_name] ||
+        numberOfPatchControlPoints != 3 || state->_tessellationControlPointIndexType == MTLTessellationControlPointIndexTypeNone ||
+        (patchIndexBuffer != nil && (![patchIndex isKindOfClass:[ZPUBuffer class]] || patchIndex->_owner != [_owner device])) ||
+        ![controlPointIndex isKindOfClass:[ZPUBuffer class]] || controlPointIndex->_owner != [_owner device]) {
+        [_owner markError];
+        return;
+    }
+    if (patchIndex != nil) [_owner retainResource:patchIndex];
+    [_owner retainResource:controlPointIndex];
+    if (zpu_metal_render_encoder_draw_patches(
+            _zpuEncoder, ZPU_METAL_PATCH_TRIANGLE_RGBA8, 3, patchStart, patchCount,
+            patchIndex == nil ? NULL : patchIndex->_zpuBuffer, patchIndexBufferOffset,
+            instanceCount, baseInstance,
+            (zpu_metal_tessellation_control_point_index_type)state->_tessellationControlPointIndexType,
+            controlPointIndex->_zpuBuffer, controlPointIndexBufferOffset) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)drawIndexedPatches:(NSUInteger)numberOfPatchControlPoints patchIndexBuffer:(id<MTLBuffer>)patchIndexBuffer patchIndexBufferOffset:(NSUInteger)patchIndexBufferOffset controlPointIndexBuffer:(id<MTLBuffer>)controlPointIndexBuffer controlPointIndexBufferOffset:(NSUInteger)controlPointIndexBufferOffset indirectBuffer:(id<MTLBuffer>)indirectBuffer indirectBufferOffset:(NSUInteger)indirectBufferOffset API_AVAILABLE(macos(10.12), ios(12.0), tvos(14.5)) {
-    (void)numberOfPatchControlPoints;
-    (void)patchIndexBuffer;
-    (void)patchIndexBufferOffset;
-    (void)controlPointIndexBuffer;
-    (void)controlPointIndexBufferOffset;
-    (void)indirectBuffer;
-    (void)indirectBufferOffset;
-    [_owner markError];
+    ZPURenderPipelineState *state = _pipelineState;
+    ZPUBuffer *patchIndex = (ZPUBuffer *)patchIndexBuffer;
+    ZPUBuffer *controlPointIndex = (ZPUBuffer *)controlPointIndexBuffer;
+    ZPUBuffer *indirect = (ZPUBuffer *)indirectBuffer;
+    if (![state isKindOfClass:[ZPURenderPipelineState class]] || !state->_isPatchPipeline ||
+        ![state->_vertexFunctionName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ||
+        ![state->_fragmentFunctionName isEqualToString:zpu_cpu_patch_triangle_fragment_name] ||
+        numberOfPatchControlPoints != 3 || state->_tessellationControlPointIndexType == MTLTessellationControlPointIndexTypeNone ||
+        (patchIndexBuffer != nil && (![patchIndex isKindOfClass:[ZPUBuffer class]] || patchIndex->_owner != [_owner device])) ||
+        ![controlPointIndex isKindOfClass:[ZPUBuffer class]] || controlPointIndex->_owner != [_owner device] ||
+        ![indirect isKindOfClass:[ZPUBuffer class]] || indirect->_owner != [_owner device]) {
+        [_owner markError];
+        return;
+    }
+    if (patchIndex != nil) [_owner retainResource:patchIndex];
+    [_owner retainResource:controlPointIndex];
+    [_owner retainResource:indirect];
+    if (zpu_metal_render_encoder_draw_patches_indirect(
+            _zpuEncoder, ZPU_METAL_PATCH_TRIANGLE_RGBA8, 3,
+            patchIndex == nil ? NULL : patchIndex->_zpuBuffer, patchIndexBufferOffset,
+            indirect->_zpuBuffer, indirectBufferOffset,
+            (zpu_metal_tessellation_control_point_index_type)state->_tessellationControlPointIndexType,
+            controlPointIndex->_zpuBuffer, controlPointIndexBufferOffset) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)drawMeshThreadgroups:(MTLSize)threadgroupsPerGrid threadsPerObjectThreadgroup:(MTLSize)threadsPerObjectThreadgroup threadsPerMeshThreadgroup:(MTLSize)threadsPerMeshThreadgroup API_AVAILABLE(macos(13.0), ios(16.0), tvos(18.1), visionos(2.1)) {
     ZPURenderPipelineState *state = _pipelineState;
@@ -14568,9 +14666,72 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         return;
     }
     if (_hasPatches || _hasIndexedPatches) {
-        /* Patch command recording remains CPU-owned, but tessellation has no
-         * fixed ZPU executor and therefore fails closed at replay. */
-        [encoder->_owner markError];
+        ZPURenderPipelineState *state = (ZPURenderPipelineState *)_pipelineState;
+        ZPURenderPipelineState *effectiveState = state != nil ? state : encoder->_pipelineState;
+        ZPUBuffer *factor = _tessellationFactorBuffer;
+        if ((state != nil && (![state isKindOfClass:[ZPURenderPipelineState class]] ||
+                              state->_owner != [encoder->_owner device])) ||
+             ![effectiveState isKindOfClass:[ZPURenderPipelineState class]] ||
+             effectiveState->_owner != [encoder->_owner device] ||
+             !effectiveState->_isPatchPipeline ||
+             !effectiveState->_supportsIndirectCommandBuffers ||
+             ![effectiveState->_vertexFunctionName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ||
+             ![effectiveState->_fragmentFunctionName isEqualToString:zpu_cpu_patch_triangle_fragment_name] ||
+             effectiveState->_patchType != MTLPatchTypeTriangle ||
+             effectiveState->_patchControlPointCount != 3 ||
+             (!_owner->_inheritPipelineState && state == nil) ||
+             ![factor isKindOfClass:[ZPUBuffer class]] || factor->_owner != [encoder->_owner device] ||
+             (_hasIndexedPatches && effectiveState->_tessellationControlPointIndexType == MTLTessellationControlPointIndexTypeNone) ||
+             (!_hasIndexedPatches && effectiveState->_tessellationControlPointIndexType != MTLTessellationControlPointIndexTypeNone)) {
+            [encoder->_owner markError];
+            return;
+        }
+        if (_pipelineState != nil) [encoder setRenderPipelineState:(id<MTLRenderPipelineState>)_pipelineState];
+        if (_hasVertexBuffer) {
+            if (_hasVertexStride) {
+                if (@available(macOS 14.0, iOS 17.0, *)) {
+                    [encoder setVertexBuffer:(id<MTLBuffer>)_vertexBuffer offset:_vertexOffset
+                              attributeStride:_vertexStride atIndex:0];
+                } else {
+                    [encoder->_owner markError];
+                    return;
+                }
+            } else {
+                [encoder setVertexBuffer:(id<MTLBuffer>)_vertexBuffer offset:_vertexOffset atIndex:0];
+            }
+        } else if (!_owner->_inheritBuffers) {
+            [encoder setVertexBuffer:nil offset:0 atIndex:0];
+        }
+        if (_hasDepthStencilState && _depthStencilState != nil) {
+            [encoder setDepthStencilState:(id<MTLDepthStencilState>)_depthStencilState];
+        }
+        if (_hasDepthBias) [encoder setDepthBias:_depthBias slopeScale:_slopeScale clamp:_depthBiasClamp];
+        if (_hasDepthClipMode) [encoder setDepthClipMode:_depthClipMode];
+        if (_hasCullMode) [encoder setCullMode:_cullMode];
+        if (_hasFrontFacingWinding) [encoder setFrontFacingWinding:_frontFacingWinding];
+        if (_hasTriangleFillMode) [encoder setTriangleFillMode:_triangleFillMode];
+        [encoder setTessellationFactorBuffer:(id<MTLBuffer>)factor
+                                      offset:_tessellationFactorBufferOffset
+                              instanceStride:_tessellationFactorBufferInstanceStride];
+        if (_hasPatches) {
+            [encoder drawPatches:_patchControlPoints
+                      patchStart:_patchStart
+                      patchCount:_patchCount
+                patchIndexBuffer:(id<MTLBuffer>)_patchIndexBuffer
+          patchIndexBufferOffset:_patchIndexBufferOffset
+                     instanceCount:_patchInstanceCount
+                      baseInstance:_patchBaseInstance];
+        } else {
+            [encoder drawIndexedPatches:_patchControlPoints
+                              patchStart:_patchStart
+                              patchCount:_patchCount
+                        patchIndexBuffer:(id<MTLBuffer>)_patchIndexBuffer
+                  patchIndexBufferOffset:_patchIndexBufferOffset
+                 controlPointIndexBuffer:(id<MTLBuffer>)_controlPointIndexBuffer
+           controlPointIndexBufferOffset:_controlPointIndexBufferOffset
+                           instanceCount:_patchInstanceCount
+                            baseInstance:_patchBaseInstance];
+        }
         return;
     }
     if (!_hasDraw && !_hasIndexedDraw) return;

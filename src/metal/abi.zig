@@ -84,6 +84,7 @@ pub const LoadAction = enum(u8) { dont_care, load, clear };
 pub const StoreAction = enum(u8) { dont_care, store };
 pub const PrimitiveType = enum(u8) { point, line, line_strip, triangle, triangle_strip };
 pub const IndexType = enum(u8) { uint16, uint32 };
+pub const TessellationControlPointIndexType = enum(u8) { none, uint16, uint32 };
 pub const CullMode = enum(u8) { none, front, back };
 pub const Winding = enum(u8) { clockwise, counter_clockwise };
 pub const TriangleFillMode = enum(u8) { fill, lines };

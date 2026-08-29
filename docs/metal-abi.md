@@ -208,7 +208,11 @@ triangle path:
   exact upper-left `(0,0)` coordinates and RGBA8/BGRA8 storage ordering; the
   registered `zpu_cpu_mesh_gradient_rgba8` plus
   `zpu_cpu_mesh_gradient_fragment` profile similarly dispatches one ordered
-  CPU/ZPU pixel per mesh-grid thread
+  CPU/ZPU pixel per mesh-grid thread; the registered
+  `zpu_cpu_tessellated_triangle_vertex` plus
+  `zpu_cpu_tessellated_triangle_fragment` profile accepts factor-one triangle
+  patches and rasterizes their three control points through the ordinary
+  top-left-origin ZPU triangle path
 - CPU-owned Metal 4 pipeline-data serializers record those registered compute
   names and emit deterministic ZPU metadata scripts or the existing ZPU
   binary-archive format; these outputs are not Apple metal-tt scripts or
@@ -256,6 +260,11 @@ triangle path:
   the ZPU buffer at commit time; the CPU mesh profile multiplies the deferred
   threadgroup grid by the mesh threadgroup dimensions before clipping to the
   upper-left render target
+- legacy triangle-patch draws accept half-precision, per-patch-and-per-instance
+  tessellation factors and execute factor-one patches, including patch-index,
+  control-point-index, and indirect argument buffers. All of those buffers are
+  ZPU-owned and read at commit time; non-factor-one tessellation, quad patches,
+  and arbitrary tessellation shader profiles fail closed
 - compute `setBytes` bindings are copied into command-buffer-owned ZPU buffers
   and follow the same deferred lifetime rules
 - CPU command buffers expose host-clock `GPUStartTime`/`GPUEndTime` around
@@ -361,10 +370,11 @@ triangle path:
 - CPU indirect mesh command recording, copy, reset, and replay for the
   registered mesh-gradient profile; its thread dimensions remain in the
   CPU-owned ICB and arbitrary mesh shader execution fails closed at replay
-- CPU indirect patch and indexed-patch command recording, copy, and reset
-  state; patch buffers, tessellation-factor buffers, offsets, strides, and
-  draw ranges are retained in the CPU-owned ICB, while CPU tessellation
-  execution fails closed at replay
+- CPU indirect patch and indexed-patch command recording, copy, reset, and
+  replay for the registered factor-one triangle profile; patch buffers,
+  tessellation-factor buffers, offsets, strides, and draw ranges are retained
+  in the CPU-owned ICB, while arbitrary tessellation shader execution fails
+  closed at replay
 - CPU indirect render commands preserve the same one-slot constraint as the
   CPU raster ABI for vertex and fragment buffers; descriptor capacity beyond
   slot zero is accepted as metadata, but recording a non-zero binding fails
@@ -486,7 +496,9 @@ Metal ABI. The remaining framework surface includes additional compute and
 Metal 4 encoders, resource and pipeline descriptors beyond the fixed-function state
 implemented here, arbitrary Metal 4 tile/mesh render and remaining copy/optimization families. The registered RGBA8 tile and mesh profiles are CPU/ZPU-owned
 through legacy and Metal 4 pipeline creation, binary archives, and the Metal 4
-pipeline-data serializer; arbitrary tile/mesh functions remain unsupported. ICB arbitrary mesh/tessellation-shader execution, other
+pipeline-data serializer; the registered factor-one triangle-patch profile is
+CPU/ZPU-owned through the legacy render encoder and ICB path. Arbitrary
+tile/mesh/tessellation functions remain unsupported. ICB arbitrary mesh/tessellation-shader execution, other
 synchronization families, ray-tracing execution, opaque native 3D sparse-texture tail
 backing layout, arbitrary machine-learning/tensor execution, and arbitrary shader compilation. Function-table storage is
 implemented, but it does not imply ray-tracing or arbitrary function-pointer

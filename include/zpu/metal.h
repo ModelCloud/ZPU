@@ -372,6 +372,22 @@ enum {
     ZPU_METAL_MESH_FILL_GRADIENT_RGBA8 = 1,
 };
 
+/* Triangle-patch kernels are explicit CPU/ZPU operations. They are not MSL
+ * and do not invoke Apple's Metal tessellator. The bounded profile accepts
+ * factor-1 triangle patches and therefore rasterizes each patch's three
+ * control points as one ordinary top-left-origin triangle. */
+typedef uint8_t zpu_metal_patch_kernel;
+enum {
+    ZPU_METAL_PATCH_TRIANGLE_RGBA8 = 1,
+};
+
+typedef uint8_t zpu_metal_tessellation_control_point_index_type;
+enum {
+    ZPU_METAL_TESSELLATION_CONTROL_POINT_INDEX_NONE = 0,
+    ZPU_METAL_TESSELLATION_CONTROL_POINT_INDEX_UINT16 = 1,
+    ZPU_METAL_TESSELLATION_CONTROL_POINT_INDEX_UINT32 = 2,
+};
+
 typedef uint8_t zpu_metal_command_buffer_status;
 enum {
     ZPU_METAL_COMMAND_BUFFER_CREATED = 0,
@@ -514,6 +530,8 @@ int zpu_metal_render_encoder_set_stencil_reference(zpu_metal_render_encoder *enc
 int zpu_metal_render_encoder_set_visibility_result_buffer(zpu_metal_render_encoder *encoder, zpu_metal_buffer *buffer);
 int zpu_metal_render_encoder_set_visibility_result_mode(zpu_metal_render_encoder *encoder, zpu_metal_visibility_result_mode mode, size_t offset);
 int zpu_metal_render_encoder_set_visibility_result_type(zpu_metal_render_encoder *encoder, zpu_metal_visibility_result_type result_type);
+int zpu_metal_render_encoder_set_tessellation_factor_buffer(zpu_metal_render_encoder *encoder, zpu_metal_buffer *buffer, size_t offset, size_t instance_stride);
+int zpu_metal_render_encoder_set_tessellation_factor_scale(zpu_metal_render_encoder *encoder, float scale);
 int zpu_metal_render_encoder_update_fence(zpu_metal_render_encoder *encoder, zpu_metal_fence *fence);
 int zpu_metal_render_encoder_wait_for_fence(zpu_metal_render_encoder *encoder, zpu_metal_fence *fence);
 int zpu_metal_render_encoder_draw_primitives(zpu_metal_render_encoder *encoder, zpu_metal_primitive_type primitive, size_t vertex_start, size_t vertex_count, size_t instance_count);
@@ -525,6 +543,8 @@ int zpu_metal_render_encoder_dispatch_threads_per_tile(zpu_metal_render_encoder 
 int zpu_metal_render_encoder_draw_mesh_threadgroups(zpu_metal_render_encoder *encoder, zpu_metal_mesh_kernel kernel, zpu_metal_size threadgroups_per_grid, zpu_metal_size threads_per_object_threadgroup, zpu_metal_size threads_per_mesh_threadgroup);
 int zpu_metal_render_encoder_draw_mesh_threads(zpu_metal_render_encoder *encoder, zpu_metal_mesh_kernel kernel, zpu_metal_size threads_per_grid, zpu_metal_size threads_per_object_threadgroup, zpu_metal_size threads_per_mesh_threadgroup);
 int zpu_metal_render_encoder_draw_mesh_threadgroups_indirect(zpu_metal_render_encoder *encoder, zpu_metal_mesh_kernel kernel, zpu_metal_buffer *indirect_buffer, size_t indirect_buffer_offset, zpu_metal_size threads_per_object_threadgroup, zpu_metal_size threads_per_mesh_threadgroup);
+int zpu_metal_render_encoder_draw_patches(zpu_metal_render_encoder *encoder, zpu_metal_patch_kernel kernel, uint32_t control_point_count, size_t patch_start, size_t patch_count, zpu_metal_buffer *patch_index_buffer, size_t patch_index_buffer_offset, size_t instance_count, size_t base_instance, zpu_metal_tessellation_control_point_index_type control_point_index_type, zpu_metal_buffer *control_point_index_buffer, size_t control_point_index_buffer_offset);
+int zpu_metal_render_encoder_draw_patches_indirect(zpu_metal_render_encoder *encoder, zpu_metal_patch_kernel kernel, uint32_t control_point_count, zpu_metal_buffer *patch_index_buffer, size_t patch_index_buffer_offset, zpu_metal_buffer *indirect_buffer, size_t indirect_buffer_offset, zpu_metal_tessellation_control_point_index_type control_point_index_type, zpu_metal_buffer *control_point_index_buffer, size_t control_point_index_buffer_offset);
 int zpu_metal_render_encoder_end_encoding(zpu_metal_render_encoder *encoder);
 void zpu_metal_render_encoder_destroy(zpu_metal_render_encoder *encoder);
 
