@@ -39,6 +39,11 @@ static const MTLIndirectCommandType zpu_indirect_command_type_draw_patches =
 static const MTLIndirectCommandType zpu_indirect_command_type_draw_indexed_patches =
     (MTLIndirectCommandType)(1u << 3);
 
+/* This is a deliberately small, portable ML profile. It is a registered
+ * ZPU operation, not an arbitrary MSL or framework graph compiler entry. */
+static NSString *const zpu_cpu_ml_identity_function_name = @"zpu_cpu_ml_identity";
+static const MTLBindingType zpu_mtl_binding_type_tensor = (MTLBindingType)37;
+
 @class ZPUDevice;
 @class ZPUArchitecture;
 @class ZPUBuffer;
@@ -79,6 +84,9 @@ static const MTLIndirectCommandType zpu_indirect_command_type_draw_indexed_patch
 @class ZPUMTL4ComputeEncoder;
 @class ZPUMTL4RenderEncoder;
 @class ZPUMTL4MachineLearningEncoder;
+@class ZPUMTL4MachineLearningPipelineReflection;
+@class ZPUMTL4MachineLearningPipeline;
+@class ZPUMTL4MachineLearningIdentityOperation;
 @class ZPUIOCommandQueue;
 
 @interface ZPUBuffer : NSObject <MTLBuffer> {
@@ -823,6 +831,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     BOOL _ended;
     BOOL _submitted;
     BOOL _failed;
+    NSMutableArray *_machineLearningOperations;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner;
 - (void)markError;
@@ -874,11 +883,10 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @end
 
 /* Metal 4 exposes machine-learning encoding as a separate command-encoder
- * family. ZPU does not have a CPU implementation for arbitrary ML pipeline
- * graphs yet, so the object is still CPU-owned but every operation that would
- * execute a graph fails closed on the owning command buffer. Returning an
- * object here is important: selector discovery and encoder lifetime must not
- * depend on Apple's native Metal runtime. */
+ * family. The registered identity tensor profile is CPU-owned and deferred;
+ * arbitrary ML pipeline graphs still fail closed. Returning an object here is
+ * important: selector discovery and encoder lifetime must not depend on
+ * Apple's native Metal runtime. */
 API_AVAILABLE(macos(26.0), ios(26.0))
 @interface ZPUMTL4MachineLearningEncoder : NSObject <MTL4MachineLearningCommandEncoder> {
 @public
@@ -889,6 +897,40 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     BOOL _ended;
 }
 - (instancetype)initWithOwner:(ZPUMTL4CommandBuffer *)owner;
+@end
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+@interface ZPUMTL4MachineLearningPipelineReflection : MTL4MachineLearningPipelineReflection {
+@public
+    NSArray *_bindings;
+}
+- (instancetype)initWithBindings:(NSArray *)bindings;
+@end
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+@interface ZPUMTL4MachineLearningPipeline : NSObject <MTL4MachineLearningPipelineState> {
+@public
+    ZPUDevice *_owner;
+    NSString *_label;
+    NSString *_functionName;
+    MTL4MachineLearningPipelineReflection *_reflection;
+    MTLTensorExtents *_inputDimensions[2];
+    NSUInteger _intermediatesHeapSize;
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner
+                     descriptor:(MTL4MachineLearningPipelineDescriptor *)descriptor
+                    functionName:(NSString *)functionName
+                           error:(NSError **)error;
+@end
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+@interface ZPUMTL4MachineLearningIdentityOperation : NSObject {
+@public
+    ZPUTensor *_source;
+    ZPUTensor *_destination;
+}
+- (instancetype)initWithSource:(ZPUTensor *)source destination:(ZPUTensor *)destination;
+- (BOOL)execute;
 @end
 
 static CFTimeInterval zpu_drawable_host_time(void) {
@@ -3846,6 +3888,45 @@ static BOOL zpu_tensor_transfer_bytes(ZPUTensor *tensor, MTLTensorExtents *slice
     return YES;
 }
 
+static BOOL zpu_tensor_copy_identity(ZPUTensor *source, ZPUTensor *destination) {
+    if (source == nil || destination == nil || source->_owner == nil ||
+        source->_owner != destination->_owner || source->_dataType != destination->_dataType ||
+        source->_elementSize == 0 || destination->_elementSize != source->_elementSize ||
+        source->_dimensions == nil || destination->_dimensions == nil ||
+        source->_dimensions.rank != destination->_dimensions.rank) return NO;
+    const NSUInteger rank = source->_dimensions.rank;
+    NSUInteger dimensions[MTL_TENSOR_MAX_RANK];
+    NSUInteger destinationDimensions[MTL_TENSOR_MAX_RANK];
+    if (!zpu_tensor_read_extents(source->_dimensions, rank, dimensions, NO) ||
+        !zpu_tensor_read_extents(destination->_dimensions, rank, destinationDimensions, NO) ||
+        memcmp(dimensions, destinationDimensions, rank * sizeof(NSUInteger)) != 0) return NO;
+    NSUInteger elementCount = 1;
+    for (NSUInteger index = 0; index < rank; ++index) {
+        if (dimensions[index] != 0 && elementCount > SIZE_MAX / dimensions[index]) return NO;
+        elementCount *= dimensions[index];
+    }
+    if (elementCount > SIZE_MAX / source->_elementSize) return NO;
+    const NSUInteger byteCount = elementCount * source->_elementSize;
+    NSUInteger zeroValues[MTL_TENSOR_MAX_RANK] = {0};
+    MTLTensorExtents *zero = zpu_tensor_make_extents(rank, rank == 0 ? NULL : zeroValues);
+    NSMutableData *packed = [NSMutableData dataWithLength:byteCount];
+    if (zero == nil || packed == nil ||
+        !zpu_tensor_transfer_bytes(source, zero, source->_dimensions, nil, packed.mutableBytes, NO) ||
+        !zpu_tensor_transfer_bytes(destination, zero, destination->_dimensions, nil, packed.bytes, YES)) return NO;
+    return YES;
+}
+
+@implementation ZPUMTL4MachineLearningIdentityOperation
+- (instancetype)initWithSource:(ZPUTensor *)source destination:(ZPUTensor *)destination {
+    if ((self = [super init])) {
+        _source = source;
+        _destination = destination;
+    }
+    return self;
+}
+- (BOOL)execute { return zpu_tensor_copy_identity(_source, _destination); }
+@end
+
 typedef int (*ZPUTensorBufferCopyFunction)(void *encoder, zpu_metal_buffer *source, size_t sourceOffset,
                                            zpu_metal_buffer *destination, size_t destinationOffset, size_t length);
 
@@ -5495,6 +5576,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         @"zpu_cpu_fill_gradient_rgba8_3d",
         @"zpu_cpu_fill_gradient_r32_float",
         @"zpu_cpu_fill_gradient_rgba16_float",
+        zpu_cpu_ml_identity_function_name,
     ] containsObject:name];
 }
 
@@ -6913,7 +6995,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (id<MTLLibrary>)newDefaultLibrary {
     return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
-                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float"];
+                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_ml_identity"];
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
@@ -7371,6 +7453,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
             @"zpu_cpu_fill_gradient_rgba8_3d",
             @"zpu_cpu_fill_gradient_r32_float",
             @"zpu_cpu_fill_gradient_rgba16_float",
+            zpu_cpu_ml_identity_function_name,
         ]) {
             if ([source rangeOfString:name].location != NSNotFound) [names addObject:name];
         }
@@ -7719,6 +7802,62 @@ static id<MTLFunction> zpu_mtl4_resolve_library_function(
     if (error != NULL) *error = nil;
     return function;
 }
+
+@implementation ZPUMTL4MachineLearningPipelineReflection
+- (instancetype)initWithBindings:(NSArray *)bindings {
+    if ((self = [super init])) _bindings = [bindings copy];
+    return self;
+}
+- (NSArray *)bindings { return _bindings ?: @[]; }
+@end
+
+@implementation ZPUMTL4MachineLearningPipeline
+- (instancetype)initWithOwner:(ZPUDevice *)owner
+                     descriptor:(MTL4MachineLearningPipelineDescriptor *)descriptor
+                    functionName:(NSString *)functionName
+                           error:(NSError **)error {
+    if (owner == nil || descriptor == nil ||
+        ![functionName isEqualToString:zpu_cpu_ml_identity_function_name]) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 supports only the registered tensor identity ML profile");
+        return nil;
+    }
+    MTLTensorExtents *inputDimensions[2] = {
+        [descriptor inputDimensionsAtBufferIndex:0],
+        [descriptor inputDimensionsAtBufferIndex:1],
+    };
+    for (NSUInteger index = 0; index < 2; ++index) {
+        if (inputDimensions[index] == nil) continue;
+        NSUInteger values[MTL_TENSOR_MAX_RANK];
+        if (!zpu_tensor_read_extents(inputDimensions[index], inputDimensions[index].rank, values, NO)) {
+            zpu_set_error(error, @"ZPU CPU Metal 4 ML input dimensions are invalid");
+            return nil;
+        }
+    }
+    if ((self = [super init])) {
+        _owner = owner;
+        _label = [descriptor.label copy];
+        _functionName = [functionName copy];
+        _inputDimensions[0] = [inputDimensions[0] copy];
+        _inputDimensions[1] = [inputDimensions[1] copy];
+        _intermediatesHeapSize = 0;
+        ZPUBinding *input = [[ZPUBinding alloc] initWithName:@"input"
+                                                         type:zpu_mtl_binding_type_tensor
+                                                       access:MTLBindingAccessReadOnly index:0];
+        ZPUBinding *output = [[ZPUBinding alloc] initWithName:@"output"
+                                                          type:zpu_mtl_binding_type_tensor
+                                                        access:MTLBindingAccessWriteOnly index:1];
+        _reflection = [[ZPUMTL4MachineLearningPipelineReflection alloc]
+            initWithBindings:@[input, output]];
+    }
+    if (error != NULL) *error = nil;
+    return self;
+}
+- (NSString *)label { return _label; }
+- (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
+- (NSUInteger)allocatedSize { return 0; }
+- (MTL4MachineLearningPipelineReflection *)reflection { return _reflection; }
+- (NSUInteger)intermediatesHeapSize { return _intermediatesHeapSize; }
+@end
 
 static id<MTL4BinaryFunction> zpu_mtl4_binary_function_for_descriptor(
     ZPUDevice *owner, MTL4BinaryFunctionDescriptor *descriptor, NSError **error) {
@@ -8196,9 +8335,15 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 }
 - (id<MTL4MachineLearningPipelineState>)newMachineLearningPipelineStateWithDescriptor:(MTL4MachineLearningPipelineDescriptor *)descriptor
                                                                                   error:(NSError **)error {
-    (void)descriptor;
-    zpu_set_error(error, @"ZPU CPU Metal 4 has no machine-learning pipeline implementation");
-    return nil;
+    id<MTLFunction> function = descriptor == nil ? nil :
+        zpu_mtl4_resolve_library_function(self->_owner, descriptor.machineLearningFunctionDescriptor, error);
+    if (![function isKindOfClass:[ZPUCPUFunction class]] ||
+        ![function.name isEqualToString:zpu_cpu_ml_identity_function_name]) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 supports only the registered tensor identity ML profile");
+        return nil;
+    }
+    return (id<MTL4MachineLearningPipelineState>)[[ZPUMTL4MachineLearningPipeline alloc]
+        initWithOwner:self->_owner descriptor:descriptor functionName:function.name error:error];
 }
 - (id<MTL4CompilerTask>)newMachineLearningPipelineStateWithDescriptor:(MTL4MachineLearningPipelineDescriptor *)descriptor
                                                       completionHandler:(MTL4NewMachineLearningPipelineStateCompletionHandler)completionHandler {
@@ -8840,6 +8985,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 - (instancetype)initWithOwner:(ZPUDevice *)owner {
     if ((self = [super init])) {
         _owner = owner;
+        _machineLearningOperations = [NSMutableArray array];
         id queue = [owner newCommandQueue];
         if ([queue isKindOfClass:[ZPUCommandQueue class]]) _legacyQueue = (ZPUCommandQueue *)queue;
         else _failed = YES;
@@ -8887,6 +9033,12 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     if (!_ended || _submitted || _legacyBuffer == nil || _failed) {
         [self markError];
         return NO;
+    }
+    for (ZPUMTL4MachineLearningIdentityOperation *operation in _machineLearningOperations) {
+        if (![operation execute]) {
+            [self markError];
+            return NO;
+        }
     }
     [_legacyBuffer commit];
     _submitted = YES;
@@ -9031,6 +9183,16 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 }
 @end
 
+static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorExtents *actual) {
+    if (expected == nil) return YES;
+    if (actual == nil || expected.rank != actual.rank || expected.rank > MTL_TENSOR_MAX_RANK) return NO;
+    NSUInteger expectedValues[MTL_TENSOR_MAX_RANK];
+    NSUInteger actualValues[MTL_TENSOR_MAX_RANK];
+    return zpu_tensor_read_extents(expected, expected.rank, expectedValues, NO) &&
+        zpu_tensor_read_extents(actual, actual.rank, actualValues, NO) &&
+        memcmp(expectedValues, actualValues, expected.rank * sizeof(NSUInteger)) == 0;
+}
+
 @implementation ZPUMTL4MachineLearningEncoder
 - (instancetype)initWithOwner:(ZPUMTL4CommandBuffer *)owner {
     if ((self = [super init])) _owner = owner;
@@ -9068,9 +9230,15 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 - (void)pushDebugGroup:(NSString *)string { (void)string; }
 - (void)popDebugGroup {}
 - (void)setPipelineState:(id<MTL4MachineLearningPipelineState>)pipelineState {
-    (void)pipelineState;
-    _pipelineState = nil;
-    [_owner markError];
+    ZPUMTL4MachineLearningPipeline *pipeline = (ZPUMTL4MachineLearningPipeline *)pipelineState;
+    if (![pipeline isKindOfClass:[ZPUMTL4MachineLearningPipeline class]] ||
+        pipeline->_owner != _owner->_owner ||
+        ![pipeline->_functionName isEqualToString:zpu_cpu_ml_identity_function_name]) {
+        _pipelineState = nil;
+        [_owner markError];
+        return;
+    }
+    _pipelineState = pipeline;
 }
 - (void)setArgumentTable:(id<MTL4ArgumentTable>)argumentTable {
     if (argumentTable != nil &&
@@ -9082,10 +9250,40 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     _argumentTable = (ZPUMTL4ArgumentTable *)argumentTable;
 }
 - (void)dispatchNetworkWithIntermediatesHeap:(id<MTLHeap>)heap {
-    (void)heap;
-    /* There is no portable ZPU ML graph executor yet. Keep this operation
-     * CPU-only and report the unsupported execution at submission time. */
-    [_owner markError];
+    ZPUMTL4MachineLearningPipeline *pipeline = (ZPUMTL4MachineLearningPipeline *)_pipelineState;
+    ZPUHeap *zpuHeap = (ZPUHeap *)heap;
+    if (_ended || _owner == nil || _owner->_failed || _owner->_legacyBuffer == nil ||
+        ![pipeline isKindOfClass:[ZPUMTL4MachineLearningPipeline class]] ||
+        pipeline->_owner != _owner->_owner ||
+        ![pipeline->_functionName isEqualToString:zpu_cpu_ml_identity_function_name] ||
+        ![zpuHeap isKindOfClass:[ZPUHeap class]] || zpuHeap->_owner != _owner->_owner ||
+        zpuHeap.size < pipeline->_intermediatesHeapSize ||
+        ![_argumentTable isKindOfClass:[ZPUMTL4ArgumentTable class]] ||
+        _argumentTable->_owner != _owner->_owner || _argumentTable->_invalid ||
+        _argumentTable->_bufferResources.length < 2 * sizeof(uint64_t)) {
+        [_owner markError];
+        return;
+    }
+    const uint64_t *resourceIDs = (const uint64_t *)_argumentTable->_bufferResources.bytes;
+    ZPUTensor *source = (ZPUTensor *)zpu_resource_for_id(resourceIDs[0]);
+    ZPUTensor *destination = (ZPUTensor *)zpu_resource_for_id(resourceIDs[1]);
+    if (![source isKindOfClass:[ZPUTensor class]] || ![destination isKindOfClass:[ZPUTensor class]] ||
+        source->_owner != _owner->_owner || destination->_owner != _owner->_owner ||
+        (source->_usage & MTLTensorUsageMachineLearning) == 0 ||
+        (destination->_usage & MTLTensorUsageMachineLearning) == 0 ||
+        source->_dataType != destination->_dataType || source->_dimensions == nil ||
+        destination->_dimensions == nil || source->_dimensions.rank != destination->_dimensions.rank ||
+        !zpu_mtl4_ml_dimensions_match(pipeline->_inputDimensions[0], source->_dimensions) ||
+        !zpu_mtl4_ml_dimensions_match(pipeline->_inputDimensions[1], destination->_dimensions)) {
+        [_owner markError];
+        return;
+    }
+    ZPUMTL4MachineLearningIdentityOperation *operation =
+        [[ZPUMTL4MachineLearningIdentityOperation alloc] initWithSource:source destination:destination];
+    [_owner->_machineLearningOperations addObject:operation];
+    [_owner->_legacyBuffer retainResource:source];
+    [_owner->_legacyBuffer retainResource:destination];
+    [_owner->_legacyBuffer retainResource:zpuHeap];
 }
 - (void)endEncoding {
     if (_ended) return;

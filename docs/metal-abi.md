@@ -200,8 +200,10 @@ triangle path:
   first-color blend state;
   asynchronous compiler tasks complete synchronously after CPU construction;
   dynamic libraries preserve registered symbol names and install names through
-  a deterministic CPU serialization format; render/tile/mesh,
-  machine-learning and arbitrary-MSL compiler requests remain fail-closed
+  a deterministic CPU serialization format; the registered
+  `zpu_cpu_ml_identity` tensor pipeline executes through deferred CPU/ZPU
+  copies, while arbitrary ML graphs and arbitrary-MSL compiler requests remain
+  fail-closed
 - CPU-owned Metal 4 pipeline-data serializers record those registered compute
   names and emit deterministic ZPU metadata scripts or the existing ZPU
   binary-archive format; these outputs are not Apple metal-tt scripts or
@@ -364,17 +366,18 @@ triangle path:
   buffers defer presentation until synchronous CPU completion, deliver
   presented handlers, and expose host-time/monotonic-ID metadata. Metal 4
   drawable signal/wait validates the same ownership graph and remains a CPU
-  no-op. Tensor shader binding, ray-intersection execution, unsupported 3D
-  sparse-tail packing, machine-learning, and tile/mesh render-pass
-  features remain explicit fail-closed boundaries. Suspending/resuming render
+  no-op. Tensor shader binding, arbitrary ML graph execution, ray-intersection
+  execution, opaque native 3D sparse-tail backing layout, and tile/mesh
+  render-pass features remain explicit fail-closed boundaries. Suspending/resuming render
   passes are represented as sequential ordinary CPU passes because the CPU
   implementation has no tile-memory stitching requirement. The
   adapter never routes them to native Metal
 - classic Metal resource, pipeline, blit, event, indirect-command, and
   command-buffer selectors that have no portable CPU meaning are represented
   explicitly: metadata-only operations are deterministic no-ops, while
-  arbitrary shader compilation, unregistered or arbitrary binary linking, unsupported
-  sparse-texture tail layouts, CAMetalLayer drawable acquisition, ray tracing, tensor shader/ML execution, and unsupported
+  arbitrary shader compilation, unregistered or arbitrary binary linking, opaque
+  native sparse-texture tail layouts, CAMetalLayer drawable acquisition, ray tracing,
+  tensor shader and arbitrary ML execution, and unsupported
   Metal 4 advanced families return nil or a stable error. They never fall through to Apple's
   native Metal runtime
 
@@ -468,8 +471,8 @@ The current checked-in implementation is intentionally not 100% of the Apple
 Metal ABI. The remaining framework surface includes additional compute and
 Metal 4 encoders, resource and pipeline descriptors beyond the fixed-function state
 implemented here, Metal 4 tile/mesh render and remaining copy/optimization families, ICB mesh/tessellation-shader execution, other
-synchronization families, ray-tracing execution, unsupported 3D sparse-texture tail
-packing, machine learning/tensor execution, and arbitrary shader compilation. Function-table storage is
+synchronization families, ray-tracing execution, opaque native 3D sparse-texture tail
+backing layout, arbitrary machine-learning/tensor execution, and arbitrary shader compilation. Function-table storage is
 implemented, but it does not imply ray-tracing or arbitrary function-pointer
 execution. A strict completeness claim belongs only after the Apple SDK
 inventory and macOS/iOS behavior tests pass.

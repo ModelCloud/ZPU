@@ -8712,6 +8712,106 @@ int main(void) {
             return 62;
         }
 
+        /* The registered identity profile is the first executable ML slice.
+         * It remains entirely CPU/ZPU-owned: dispatch records tensor IDs,
+         * source bytes are changed after encoding, and the logical tensor
+         * copy happens only when the Metal 4 command buffer is committed. */
+        NSError *metal4_ml_identity_error = nil;
+        id<MTLLibrary> metal4_ml_identity_library = [adapter_device newDefaultLibrary];
+        MTL4LibraryFunctionDescriptor *metal4_ml_identity_function_descriptor =
+            [MTL4LibraryFunctionDescriptor new];
+        metal4_ml_identity_function_descriptor.library = metal4_ml_identity_library;
+        metal4_ml_identity_function_descriptor.name = @"zpu_cpu_ml_identity";
+        MTLTensorExtents *metal4_ml_identity_dimensions =
+            [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){4, 3}];
+        MTLTensorExtents *metal4_ml_identity_packed_strides =
+            [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){1, 4}];
+        MTL4MachineLearningPipelineDescriptor *metal4_ml_identity_descriptor =
+            [MTL4MachineLearningPipelineDescriptor new];
+        metal4_ml_identity_descriptor.label = @"zpu-cpu-ml-identity";
+        metal4_ml_identity_descriptor.machineLearningFunctionDescriptor =
+            metal4_ml_identity_function_descriptor;
+        [metal4_ml_identity_descriptor setInputDimensions:metal4_ml_identity_dimensions atBufferIndex:0];
+        [metal4_ml_identity_descriptor setInputDimensions:metal4_ml_identity_dimensions atBufferIndex:1];
+        id<MTL4MachineLearningPipelineState> metal4_ml_identity_pipeline =
+            [adapter_mtl4_compiler newMachineLearningPipelineStateWithDescriptor:
+                metal4_ml_identity_descriptor error:&metal4_ml_identity_error];
+        MTLTensorDescriptor *metal4_ml_identity_tensor_descriptor = [MTLTensorDescriptor new];
+        metal4_ml_identity_tensor_descriptor.dimensions = metal4_ml_identity_dimensions;
+        metal4_ml_identity_tensor_descriptor.dataType = MTLTensorDataTypeUInt8;
+        metal4_ml_identity_tensor_descriptor.usage = MTLTensorUsageMachineLearning;
+        metal4_ml_identity_tensor_descriptor.resourceOptions = MTLResourceStorageModeShared;
+        metal4_ml_identity_tensor_descriptor.storageMode = MTLStorageModeShared;
+        id<MTLTensor> metal4_ml_identity_source =
+            [adapter_device newTensorWithDescriptor:metal4_ml_identity_tensor_descriptor
+                                               error:&metal4_ml_identity_error];
+        id<MTLTensor> metal4_ml_identity_destination =
+            [adapter_device newTensorWithDescriptor:metal4_ml_identity_tensor_descriptor
+                                               error:&metal4_ml_identity_error];
+        const uint8_t metal4_ml_identity_initial[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+        const uint8_t metal4_ml_identity_committed[] = {41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52};
+        const uint8_t metal4_ml_identity_sentinel[] = {0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5,
+                                                       0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5};
+        uint8_t metal4_ml_identity_values[sizeof(metal4_ml_identity_committed)] = {0};
+        const NSInteger metal4_ml_identity_zero_values[] = {0, 0};
+        MTLTensorExtents *metal4_ml_identity_zero =
+            [[MTLTensorExtents alloc] initWithRank:2 values:metal4_ml_identity_zero_values];
+        [metal4_ml_identity_source replaceSliceOrigin:metal4_ml_identity_zero
+                                       sliceDimensions:metal4_ml_identity_dimensions
+                                             withBytes:metal4_ml_identity_initial
+                                               strides:metal4_ml_identity_packed_strides];
+        [metal4_ml_identity_destination replaceSliceOrigin:metal4_ml_identity_zero
+                                           sliceDimensions:metal4_ml_identity_dimensions
+                                                 withBytes:metal4_ml_identity_sentinel
+                                                   strides:metal4_ml_identity_packed_strides];
+        MTL4ArgumentTableDescriptor *metal4_ml_identity_table_descriptor =
+            [MTL4ArgumentTableDescriptor new];
+        metal4_ml_identity_table_descriptor.maxBufferBindCount = 2;
+        id<MTL4ArgumentTable> metal4_ml_identity_table =
+            [adapter_device newArgumentTableWithDescriptor:metal4_ml_identity_table_descriptor
+                                                       error:&metal4_ml_identity_error];
+        [metal4_ml_identity_table setResource:metal4_ml_identity_source.gpuResourceID atBufferIndex:0];
+        [metal4_ml_identity_table setResource:metal4_ml_identity_destination.gpuResourceID atBufferIndex:1];
+        id<MTL4CommandBuffer> metal4_ml_identity_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_ml_identity_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4MachineLearningCommandEncoder> metal4_ml_identity_encoder =
+            [metal4_ml_identity_command_buffer machineLearningCommandEncoder];
+        [metal4_ml_identity_encoder setPipelineState:metal4_ml_identity_pipeline];
+        [metal4_ml_identity_encoder setArgumentTable:metal4_ml_identity_table];
+        [metal4_ml_identity_encoder dispatchNetworkWithIntermediatesHeap:adapter_three_d_heap];
+        [metal4_ml_identity_source replaceSliceOrigin:metal4_ml_identity_zero
+                                       sliceDimensions:metal4_ml_identity_dimensions
+                                             withBytes:metal4_ml_identity_committed
+                                               strides:metal4_ml_identity_packed_strides];
+        [metal4_ml_identity_encoder endEncoding];
+        [metal4_ml_identity_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_ml_identity_command_buffers[] = {metal4_ml_identity_command_buffer};
+        MTL4CommitOptions *metal4_ml_identity_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *metal4_ml_identity_feedback_error = nil;
+        [metal4_ml_identity_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            metal4_ml_identity_feedback_error = feedback.error;
+        }];
+        [metal4_queue commit:metal4_ml_identity_command_buffers count:1 options:metal4_ml_identity_options];
+        [metal4_ml_identity_destination getBytes:metal4_ml_identity_values
+                                         strides:metal4_ml_identity_packed_strides
+                                fromSliceOrigin:metal4_ml_identity_zero
+                                sliceDimensions:metal4_ml_identity_dimensions];
+        if (metal4_ml_identity_library == nil ||
+            [metal4_ml_identity_library newFunctionWithName:@"zpu_cpu_ml_identity"] == nil ||
+            metal4_ml_identity_pipeline == nil || metal4_ml_identity_error != nil ||
+            metal4_ml_identity_pipeline.device != adapter_device ||
+            metal4_ml_identity_pipeline.intermediatesHeapSize != 0 ||
+            metal4_ml_identity_pipeline.reflection.bindings.count != 2 ||
+            metal4_ml_identity_pipeline.reflection.bindings[0].type != (MTLBindingType)37 ||
+            metal4_ml_identity_pipeline.reflection.bindings[1].type != (MTLBindingType)37 ||
+            metal4_ml_identity_table == nil || metal4_ml_identity_encoder == nil ||
+            metal4_ml_identity_feedback_error != nil ||
+            memcmp(metal4_ml_identity_values, metal4_ml_identity_committed,
+                   sizeof(metal4_ml_identity_values)) != 0) {
+            fail_with_error("Metal 4 CPU ML identity profile failed", metal4_ml_identity_error ?: metal4_ml_identity_feedback_error);
+            return 63;
+        }
+
         /* Placement-sparse buffers use CPU-owned physical pages. The native
          * Metal sparse implementation is not used for this path; its only
          * role in this test suite is to define the page-size and mapping

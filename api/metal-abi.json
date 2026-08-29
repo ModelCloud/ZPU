@@ -813,12 +813,12 @@
   "known_unimplemented_surface": [
     "MTLIndirectCommandBuffer mesh and tessellation shader execution",
     "MTL4RenderCommandEncoder tile/mesh execution",
-    "MTL4MachineLearningCommandEncoder",
+    "MTL4MachineLearningCommandEncoder arbitrary ML graph execution",
     "MTLAccelerationStructure ray-tracing execution",
     "MTLRayTracingPipelineState",
     "MTLComputePipelineState unregistered reflection",
-    "MTL4Compiler machine-learning and arbitrary MSL families",
+    "MTL4Compiler arbitrary ML graph and arbitrary MSL families",
     "MTLLibrary stitched loading and arbitrary MSL compilation",
-    "MTLSparseTextureTailPacking for unsupported 3D depth-packed layouts"
+    "MTLSparseTextureTailPacking raw 3D depth-packed backing layout"
   ]
 }
