@@ -8909,6 +8909,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     specialized->_destinationAlphaBlendFactor = attachment.destinationAlphaBlendFactor;
     specialized->_alphaBlendOperation = attachment.alphaBlendOperation;
     specialized->_writeMask = attachment.writeMask;
+    specialized->_specializationDescriptor = [render copy];
     if (error != NULL) *error = nil;
     return specialized;
 }

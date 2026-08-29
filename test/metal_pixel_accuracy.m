@@ -7776,6 +7776,7 @@ int main(void) {
         id<MTLRenderPipelineState> adapter_mtl4_unspecialized_render_pipeline = nil;
         id<MTLRenderPipelineState> adapter_mtl4_specialized_render_pipeline = nil;
         id<MTLRenderPipelineState> adapter_mtl4_getter_specialized_render_pipeline = nil;
+        id<MTLRenderPipelineState> adapter_mtl4_respecialized_render_pipeline = nil;
         BOOL adapter_mtl4_specialization_ok = YES;
         if (@available(macOS 26.0, iOS 26.0, *)) {
             MTL4RenderPipelineDescriptor *adapter_mtl4_unspecialized_render_descriptor =
@@ -7794,6 +7795,16 @@ int main(void) {
                 [adapter_mtl4_compiler newRenderPipelineStateBySpecializationWithDescriptor:
                     adapter_mtl4_specialized_render_descriptor
                     pipeline:adapter_mtl4_unspecialized_render_pipeline error:&adapter_mtl4_dynamic_error];
+            MTL4PipelineDescriptor *adapter_mtl4_specialized_getter_descriptor =
+                [adapter_mtl4_specialized_render_pipeline newRenderPipelineDescriptorForSpecialization];
+            if ([adapter_mtl4_specialized_getter_descriptor isKindOfClass:[MTL4RenderPipelineDescriptor class]]) {
+                MTL4RenderPipelineDescriptor *specialized_getter_descriptor =
+                    (MTL4RenderPipelineDescriptor *)adapter_mtl4_specialized_getter_descriptor;
+                adapter_mtl4_respecialized_render_pipeline =
+                    [adapter_mtl4_compiler newRenderPipelineStateBySpecializationWithDescriptor:
+                        specialized_getter_descriptor pipeline:adapter_mtl4_specialized_render_pipeline
+                        error:&adapter_mtl4_dynamic_error];
+            }
             MTL4PipelineDescriptor *adapter_mtl4_getter_descriptor =
                 [adapter_mtl4_unspecialized_render_pipeline newRenderPipelineDescriptorForSpecialization];
             if ([adapter_mtl4_getter_descriptor isKindOfClass:[MTL4RenderPipelineDescriptor class]]) {
@@ -7807,6 +7818,10 @@ int main(void) {
             }
             adapter_mtl4_specialization_ok = adapter_mtl4_unspecialized_render_pipeline != nil &&
                 adapter_mtl4_specialized_render_pipeline != nil &&
+                [adapter_mtl4_specialized_getter_descriptor isKindOfClass:[MTL4RenderPipelineDescriptor class]] &&
+                ((MTL4RenderPipelineDescriptor *)adapter_mtl4_specialized_getter_descriptor).colorAttachments[0].blendingState ==
+                    MTL4BlendStateEnabled &&
+                adapter_mtl4_respecialized_render_pipeline == nil &&
                 adapter_mtl4_getter_specialized_render_pipeline != nil;
         }
         NSError *adapter_mtl4_archive_render_error = nil;
