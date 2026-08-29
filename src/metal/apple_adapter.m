@@ -5081,6 +5081,28 @@ static BOOL zpu_append_visible_binary_function_names(
     return YES;
 }
 
+static BOOL zpu_cpu_function_name_supported(NSString *name) {
+    return [@[
+        @"zpu_test_vertex",
+        @"zpu_test_stage_in_vertex",
+        @"zpu_test_no_raster_vertex",
+        @"zpu_test_fragment",
+        @"zpu_test_uniform_fragment",
+        @"zpu_test_depth_bounds_oracle",
+        @"zpu_test_mrt_fragment",
+        @"zpu_test_sample_fragment",
+        @"zpu_test_visible",
+        @"zpu_test_visible_secondary",
+        @"zpu_cpu_uniform_color_fragment",
+        @"zpu_cpu_fill_gradient_rgba8",
+        @"zpu_cpu_copy_rgba8_buffer_to_texture",
+        @"zpu_cpu_fill_gradient_rgba8_array",
+        @"zpu_cpu_fill_gradient_rgba8_3d",
+        @"zpu_cpu_fill_gradient_r32_float",
+        @"zpu_cpu_fill_gradient_rgba16_float",
+    ] containsObject:name];
+}
+
 @implementation ZPURenderPipelineState
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLRenderPipelineDescriptor *)descriptor {
     if ((self = [super init])) {
@@ -6878,6 +6900,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         NSMutableArray *names = [NSMutableArray array];
         for (NSString *name in @[
             @"zpu_test_vertex",
+            @"zpu_test_stage_in_vertex",
             @"zpu_test_no_raster_vertex",
             @"zpu_test_fragment",
             @"zpu_test_uniform_fragment",
@@ -13097,7 +13120,7 @@ id<MTLDevice> ZPUMetalCreateSystemDefaultDevice(void) {
 }
 
 id<MTLFunction> ZPUMetalCreateCPUFunction(id<MTLDevice> device, NSString *name) {
-    if (![device isKindOfClass:[ZPUDevice class]] || name == nil) return nil;
+    if (![device isKindOfClass:[ZPUDevice class]] || !zpu_cpu_function_name_supported(name)) return nil;
     return (id<MTLFunction>)[[ZPUCPUFunction alloc] initWithOwner:(ZPUDevice *)device name:name];
 }
 

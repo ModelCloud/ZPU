@@ -1201,6 +1201,12 @@ int main(void) {
         id<MTLCommandQueue> adapter_queue = [adapter_device newCommandQueue];
         NSError *adapter_pipeline_error = nil;
 
+        if (adapter_stage_in_vertex_function == nil ||
+            ZPUMetalCreateCPUFunction(adapter_device, @"arbitrary_unregistered_vertex") != nil) {
+            fprintf(stderr, "metal-pixel: CPU function factory accepted an unregistered profile\n");
+            return 146;
+        }
+
         if (@available(macOS 14.0, iOS 17.0, *)) {
             const int vertex_stride_result = test_vertex_attribute_stride_against_native(
                 device, adapter_device, stage_in_vertex_function, fragment_function,
