@@ -191,6 +191,10 @@ triangle path:
 - process-local shared-texture handles round-trip shareable ZPU textures and
   preserve their CPU bytes and metadata; IOSurface-backed and foreign handles
   remain unsupported rather than importing native storage
+- CPU visible/intersection function tables retain ZPU-owned function handles,
+  buffer bindings, opaque-intersection signatures, and visible-table links;
+  they expose deterministic CPU resource metadata and IDs, while arbitrary
+  function-pointer dispatch and ray tracing remain unsupported
 - CPU indirect compute commands for those registered kernels; the command
   buffer inherits the ZPU encoder's texture bindings and records pipeline,
   buffer, and dispatch state for deferred execution
@@ -291,9 +295,11 @@ The current checked-in implementation is intentionally not 100% of the Apple
 Metal ABI. The remaining framework surface includes additional compute and
 Metal 4 encoders, resource and pipeline descriptors beyond the fixed-function state
 implemented here, Metal 4 tile/mesh render and remaining copy/optimization families, ICB patch/mesh commands, other
-synchronization families, ray tracing, sparse resources, machine
-learning/tensors, and arbitrary shader compilation. A strict completeness claim
-belongs only after the Apple SDK inventory and macOS/iOS behavior tests pass.
+synchronization families, ray tracing execution, sparse resources, machine
+learning/tensors, and arbitrary shader compilation. Function-table storage is
+implemented, but it does not imply ray-tracing or arbitrary function-pointer
+execution. A strict completeness claim belongs only after the Apple SDK
+inventory and macOS/iOS behavior tests pass.
 
 The SDK inventory on the current Xcode 26.6 host contains 96 headers, 253
 Metal-named types, 446 Objective-C selectors, and 11 C functions. Those counts

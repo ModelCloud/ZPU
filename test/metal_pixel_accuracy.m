@@ -3087,6 +3087,70 @@ int main(void) {
             return 101;
         }
 
+        /* Function tables retain CPU-side handles/resources only. The native
+         * table and handle below are an API/oracle probe; no native object is
+         * passed into the adapter and no native table participates in ZPU
+         * execution. */
+        id<MTLVisibleFunctionTable> native_visible_function_table = nil;
+        id<MTLFunctionHandle> native_visible_function_handle = nil;
+        if (@available(macOS 12.0, iOS 15.0, *)) {
+            MTLVisibleFunctionTableDescriptor *native_visible_descriptor = [MTLVisibleFunctionTableDescriptor new];
+            native_visible_descriptor.functionCount = 2;
+            native_visible_function_table =
+                [pipeline newVisibleFunctionTableWithDescriptor:native_visible_descriptor
+                                                          stage:MTLRenderStageFragment];
+            native_visible_function_handle =
+                [pipeline functionHandleWithFunction:fragment_function stage:MTLRenderStageFragment];
+            if (native_visible_function_table != nil && native_visible_function_handle != nil) {
+                [native_visible_function_table setFunction:native_visible_function_handle atIndex:0];
+            }
+        }
+        MTLVisibleFunctionTableDescriptor *adapter_visible_descriptor = [MTLVisibleFunctionTableDescriptor new];
+        adapter_visible_descriptor.functionCount = 4;
+        id<MTLVisibleFunctionTable> adapter_visible_function_table =
+            [adapter_mtl4_compiled_pipeline newVisibleFunctionTableWithDescriptor:adapter_visible_descriptor];
+        id<MTLFunctionHandle> adapter_table_handle = adapter_mtl4_named_handle;
+        id<MTLFunctionHandle> adapter_table_handles[] = {adapter_table_handle, nil};
+        [adapter_visible_function_table setFunction:adapter_table_handle atIndex:0];
+        [adapter_visible_function_table setFunctions:adapter_table_handles withRange:NSMakeRange(1, 2)];
+        adapter_visible_function_table.label = @"zpu-cpu-visible-functions";
+
+        MTLIntersectionFunctionTableDescriptor *adapter_intersection_descriptor =
+            [MTLIntersectionFunctionTableDescriptor new];
+        adapter_intersection_descriptor.functionCount = 2;
+        id<MTLIntersectionFunctionTable> adapter_intersection_function_table =
+            [adapter_mtl4_compiled_pipeline newIntersectionFunctionTableWithDescriptor:adapter_intersection_descriptor];
+        id<MTLBuffer> adapter_table_buffers[] = {adapter_vertex_buffer, nil};
+        NSUInteger adapter_table_offsets[] = {0, 16};
+        id<MTLFunctionHandle> adapter_intersection_handles[] = {adapter_table_handle, nil};
+        [adapter_intersection_function_table setBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_intersection_function_table setBuffers:adapter_table_buffers
+                                                offsets:adapter_table_offsets
+                                              withRange:NSMakeRange(0, 2)];
+        [adapter_intersection_function_table setFunction:adapter_table_handle atIndex:0];
+        [adapter_intersection_function_table setFunctions:adapter_intersection_handles withRange:NSMakeRange(0, 2)];
+        [adapter_intersection_function_table
+            setOpaqueTriangleIntersectionFunctionWithSignature:MTLIntersectionFunctionSignatureTriangleData
+                                                       atIndex:0];
+        [adapter_intersection_function_table
+            setOpaqueCurveIntersectionFunctionWithSignature:MTLIntersectionFunctionSignatureWorldSpaceData
+                                                     withRange:NSMakeRange(0, 2)];
+        [adapter_intersection_function_table setVisibleFunctionTable:adapter_visible_function_table atBufferIndex:0];
+        adapter_intersection_function_table.label = @"zpu-cpu-intersection-functions";
+        if (adapter_visible_function_table == nil ||
+            ![adapter_visible_function_table conformsToProtocol:@protocol(MTLVisibleFunctionTable)] ||
+            adapter_visible_function_table.device != adapter_device ||
+            adapter_visible_function_table.allocatedSize < 4 * sizeof(uint64_t) ||
+            adapter_visible_function_table.gpuResourceID._impl == 0 ||
+            adapter_intersection_function_table == nil ||
+            ![adapter_intersection_function_table conformsToProtocol:@protocol(MTLIntersectionFunctionTable)] ||
+            adapter_intersection_function_table.device != adapter_device ||
+            adapter_intersection_function_table.allocatedSize < 2 * sizeof(uint64_t) ||
+            adapter_intersection_function_table.gpuResourceID._impl == 0) {
+            fprintf(stderr, "metal-pixel: CPU function table layer failed\n");
+            return 102;
+        }
+
         const MTLPixelFormat compute_float_formats[] = {
             MTLPixelFormatR32Float, MTLPixelFormatRGBA16Float,
         };

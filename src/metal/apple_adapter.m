@@ -481,6 +481,35 @@ API_AVAILABLE(macos(26.0), ios(26.0))
                   functionType:(MTLFunctionType)functionType;
 @end
 
+/* Function tables are CPU-side resource metadata. They retain only ZPU-owned
+ * handles/resources and never expose a native Metal allocation. */
+@interface ZPUVisibleFunctionTable : NSObject <MTLVisibleFunctionTable> {
+@public
+    ZPUDevice *_owner;
+    NSUInteger _functionCount;
+    MTLRenderStages _stage;
+    NSMutableArray *_functions;
+    NSString *_label;
+    uint64_t _resourceID;
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner functionCount:(NSUInteger)functionCount stage:(MTLRenderStages)stage;
+@end
+
+@interface ZPUIntersectionFunctionTable : NSObject <MTLIntersectionFunctionTable> {
+@public
+    ZPUDevice *_owner;
+    NSUInteger _functionCount;
+    NSMutableArray *_buffers;
+    NSMutableData *_bufferOffsets;
+    NSMutableArray *_functions;
+    NSMutableData *_opaqueSignatures;
+    NSMutableArray *_visibleTables;
+    NSString *_label;
+    uint64_t _resourceID;
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner functionCount:(NSUInteger)functionCount;
+@end
+
 /* A library is a CPU-side name table for registered ZPU kernels and fixed
  * CPU render profiles. It never contains an Apple MTLLibrary or compiled MSL. */
 @interface ZPULibrary : NSObject <MTLLibrary> {
@@ -2052,14 +2081,15 @@ static uint64_t zpu_cpu_timestamp(void) {
     return nil;
 }
 - (id<MTLVisibleFunctionTable>)newVisibleFunctionTableWithDescriptor:(MTLVisibleFunctionTableDescriptor *)descriptor stage:(MTLRenderStages)stage API_AVAILABLE(macos(12.0), ios(15.0), tvos(16.0)) {
-    (void)descriptor;
-    (void)stage;
-    return nil;
+    if (descriptor == nil) return nil;
+    return (id<MTLVisibleFunctionTable>)[[ZPUVisibleFunctionTable alloc]
+        initWithOwner:_owner functionCount:descriptor.functionCount stage:stage];
 }
 - (id<MTLIntersectionFunctionTable>)newIntersectionFunctionTableWithDescriptor:(MTLIntersectionFunctionTableDescriptor *)descriptor stage:(MTLRenderStages)stage API_AVAILABLE(macos(12.0), ios(15.0), tvos(16.0)) {
-    (void)descriptor;
     (void)stage;
-    return nil;
+    if (descriptor == nil) return nil;
+    return (id<MTLIntersectionFunctionTable>)[[ZPUIntersectionFunctionTable alloc]
+        initWithOwner:_owner functionCount:descriptor.functionCount];
 }
 - (MTLRenderPipelineReflection *)reflection API_AVAILABLE(macos(26.0), ios(26.0)) { return nil; }
 - (id<MTLFunctionHandle>)functionHandleWithName:(NSString *)name stage:(MTLRenderStages)stage API_AVAILABLE(macos(26.0), ios(26.0)) {
@@ -5078,12 +5108,210 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
     return nil;
 }
 - (id<MTLVisibleFunctionTable>)newVisibleFunctionTableWithDescriptor:(MTLVisibleFunctionTableDescriptor *)descriptor API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)descriptor;
-    return nil;
+    if (descriptor == nil) return nil;
+    return (id<MTLVisibleFunctionTable>)[[ZPUVisibleFunctionTable alloc]
+        initWithOwner:_owner functionCount:descriptor.functionCount stage:0];
 }
 - (id<MTLIntersectionFunctionTable>)newIntersectionFunctionTableWithDescriptor:(MTLIntersectionFunctionTableDescriptor *)descriptor API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)descriptor;
-    return nil;
+    if (descriptor == nil) return nil;
+    return (id<MTLIntersectionFunctionTable>)[[ZPUIntersectionFunctionTable alloc]
+        initWithOwner:_owner functionCount:descriptor.functionCount];
+}
+@end
+
+static BOOL zpu_function_table_range_valid(NSUInteger count, NSRange range) {
+    return range.location <= count && range.length <= count - range.location;
+}
+
+static BOOL zpu_function_table_handle_belongs_to_device(ZPUDevice *owner,
+                                                          id<MTLFunctionHandle> function) {
+    if (function == nil) return YES;
+    ZPUFunctionHandle *handle = (ZPUFunctionHandle *)function;
+    return [handle isKindOfClass:[ZPUFunctionHandle class]] && handle->_owner == owner;
+}
+
+static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
+                                                          id<MTLBuffer> buffer) {
+    if (buffer == nil) return YES;
+    ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
+    return [zpuBuffer isKindOfClass:[ZPUBuffer class]] && zpuBuffer->_owner == owner;
+}
+
+@implementation ZPUVisibleFunctionTable
+- (instancetype)initWithOwner:(ZPUDevice *)owner functionCount:(NSUInteger)functionCount
+                         stage:(MTLRenderStages)stage {
+    if (owner == nil || functionCount > SIZE_MAX / sizeof(uint64_t)) return nil;
+    if ((self = [super init])) {
+        _owner = owner;
+        _functionCount = functionCount;
+        _stage = stage;
+        _functions = [NSMutableArray arrayWithCapacity:functionCount];
+        for (NSUInteger index = 0; index < functionCount; ++index) [_functions addObject:[NSNull null]];
+        _resourceID = zpu_register_resource(self);
+    }
+    return self;
+}
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
+- (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
+- (MTLCPUCacheMode)cpuCacheMode { return MTLCPUCacheModeDefaultCache; }
+- (MTLStorageMode)storageMode { return MTLStorageModeShared; }
+- (MTLHazardTrackingMode)hazardTrackingMode { return MTLHazardTrackingModeTracked; }
+- (MTLResourceOptions)resourceOptions { return MTLResourceStorageModeShared; }
+- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return state; }
+- (id<MTLHeap>)heap { return nil; }
+- (NSUInteger)heapOffset { return 0; }
+- (NSUInteger)allocatedSize {
+    return _functionCount > SIZE_MAX / sizeof(uint64_t) ? SIZE_MAX : _functionCount * sizeof(uint64_t);
+}
+- (void)makeAliasable {}
+- (BOOL)isAliasable { return NO; }
+- (kern_return_t)setOwnerWithIdentity:(task_id_token_t)task_id_token {
+    (void)task_id_token;
+    return KERN_SUCCESS;
+}
+- (MTLResourceID)gpuResourceID API_AVAILABLE(macos(13.0), ios(16.0)) {
+    return (MTLResourceID){_resourceID};
+}
+- (void)setFunction:(id<MTLFunctionHandle>)function atIndex:(NSUInteger)index {
+    if (index >= _functionCount || !zpu_function_table_handle_belongs_to_device(_owner, function)) return;
+    _functions[index] = function == nil ? (id)[NSNull null] : (id)function;
+}
+- (void)setFunctions:(const id<MTLFunctionHandle> __nullable [__nonnull])functions withRange:(NSRange)range {
+    if (functions == NULL || !zpu_function_table_range_valid(_functionCount, range)) return;
+    for (NSUInteger offset = 0; offset < range.length; ++offset) {
+        id<MTLFunctionHandle> function = functions[offset];
+        if (!zpu_function_table_handle_belongs_to_device(_owner, function)) return;
+    }
+    for (NSUInteger offset = 0; offset < range.length; ++offset) {
+        id<MTLFunctionHandle> function = functions[offset];
+        _functions[range.location + offset] = function == nil ? (id)[NSNull null] : (id)function;
+    }
+}
+@end
+
+@implementation ZPUIntersectionFunctionTable
+- (instancetype)initWithOwner:(ZPUDevice *)owner functionCount:(NSUInteger)functionCount {
+    if (owner == nil || functionCount > SIZE_MAX / sizeof(NSUInteger) ||
+        functionCount > SIZE_MAX / sizeof(MTLIntersectionFunctionSignature)) return nil;
+    if ((self = [super init])) {
+        _owner = owner;
+        _functionCount = functionCount;
+        _buffers = [NSMutableArray arrayWithCapacity:functionCount];
+        _functions = [NSMutableArray arrayWithCapacity:functionCount];
+        _visibleTables = [NSMutableArray arrayWithCapacity:functionCount];
+        _bufferOffsets = [NSMutableData dataWithLength:functionCount * sizeof(NSUInteger)];
+        _opaqueSignatures = [NSMutableData dataWithLength:functionCount * sizeof(MTLIntersectionFunctionSignature)];
+        for (NSUInteger index = 0; index < functionCount; ++index) {
+            [_buffers addObject:[NSNull null]];
+            [_functions addObject:[NSNull null]];
+            [_visibleTables addObject:[NSNull null]];
+        }
+        _resourceID = zpu_register_resource(self);
+    }
+    return self;
+}
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
+- (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
+- (MTLCPUCacheMode)cpuCacheMode { return MTLCPUCacheModeDefaultCache; }
+- (MTLStorageMode)storageMode { return MTLStorageModeShared; }
+- (MTLHazardTrackingMode)hazardTrackingMode { return MTLHazardTrackingModeTracked; }
+- (MTLResourceOptions)resourceOptions { return MTLResourceStorageModeShared; }
+- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return state; }
+- (id<MTLHeap>)heap { return nil; }
+- (NSUInteger)heapOffset { return 0; }
+- (NSUInteger)allocatedSize {
+    return _functionCount > SIZE_MAX / sizeof(uint64_t) ? SIZE_MAX : _functionCount * sizeof(uint64_t);
+}
+- (void)makeAliasable {}
+- (BOOL)isAliasable { return NO; }
+- (kern_return_t)setOwnerWithIdentity:(task_id_token_t)task_id_token {
+    (void)task_id_token;
+    return KERN_SUCCESS;
+}
+- (MTLResourceID)gpuResourceID API_AVAILABLE(macos(13.0), ios(16.0)) {
+    return (MTLResourceID){_resourceID};
+}
+- (void)setBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
+    if (index >= _functionCount || !zpu_function_table_buffer_belongs_to_device(_owner, buffer)) return;
+    _buffers[index] = buffer == nil ? (id)[NSNull null] : (id)buffer;
+    ((NSUInteger *)_bufferOffsets.mutableBytes)[index] = offset;
+}
+- (void)setBuffers:(const id<MTLBuffer> __nullable [__nonnull])buffers
+           offsets:(const NSUInteger [__nonnull])offsets withRange:(NSRange)range {
+    if (buffers == NULL || offsets == NULL || !zpu_function_table_range_valid(_functionCount, range)) return;
+    for (NSUInteger offset = 0; offset < range.length; ++offset) {
+        if (!zpu_function_table_buffer_belongs_to_device(_owner, buffers[offset])) return;
+    }
+    for (NSUInteger offset = 0; offset < range.length; ++offset) {
+        const NSUInteger index = range.location + offset;
+        _buffers[index] = buffers[offset] == nil ? (id)[NSNull null] : (id)buffers[offset];
+        ((NSUInteger *)_bufferOffsets.mutableBytes)[index] = offsets[offset];
+    }
+}
+- (void)setFunction:(id<MTLFunctionHandle>)function atIndex:(NSUInteger)index {
+    if (index >= _functionCount || !zpu_function_table_handle_belongs_to_device(_owner, function)) return;
+    _functions[index] = function == nil ? (id)[NSNull null] : (id)function;
+}
+- (void)setFunctions:(const id<MTLFunctionHandle> __nullable [__nonnull])functions withRange:(NSRange)range {
+    if (functions == NULL || !zpu_function_table_range_valid(_functionCount, range)) return;
+    for (NSUInteger offset = 0; offset < range.length; ++offset) {
+        if (!zpu_function_table_handle_belongs_to_device(_owner, functions[offset])) return;
+    }
+    for (NSUInteger offset = 0; offset < range.length; ++offset) {
+        id<MTLFunctionHandle> function = functions[offset];
+        _functions[range.location + offset] = function == nil ? (id)[NSNull null] : (id)function;
+    }
+}
+- (void)setOpaqueTriangleIntersectionFunctionWithSignature:(MTLIntersectionFunctionSignature)signature
+                                                   atIndex:(NSUInteger)index {
+    if (index >= _functionCount) return;
+    ((MTLIntersectionFunctionSignature *)_opaqueSignatures.mutableBytes)[index] = signature;
+}
+- (void)setOpaqueTriangleIntersectionFunctionWithSignature:(MTLIntersectionFunctionSignature)signature
+                                                  withRange:(NSRange)range {
+    if (!zpu_function_table_range_valid(_functionCount, range)) return;
+    for (NSUInteger offset = 0; offset < range.length; ++offset) {
+        ((MTLIntersectionFunctionSignature *)_opaqueSignatures.mutableBytes)[range.location + offset] = signature;
+    }
+}
+- (void)setOpaqueCurveIntersectionFunctionWithSignature:(MTLIntersectionFunctionSignature)signature
+                                                 atIndex:(NSUInteger)index {
+    if (index >= _functionCount) return;
+    ((MTLIntersectionFunctionSignature *)_opaqueSignatures.mutableBytes)[index] = signature;
+}
+- (void)setOpaqueCurveIntersectionFunctionWithSignature:(MTLIntersectionFunctionSignature)signature
+                                                withRange:(NSRange)range {
+    if (!zpu_function_table_range_valid(_functionCount, range)) return;
+    for (NSUInteger offset = 0; offset < range.length; ++offset) {
+        ((MTLIntersectionFunctionSignature *)_opaqueSignatures.mutableBytes)[range.location + offset] = signature;
+    }
+}
+- (void)setVisibleFunctionTable:(id<MTLVisibleFunctionTable>)functionTable atBufferIndex:(NSUInteger)bufferIndex {
+    if (bufferIndex >= _functionCount) return;
+    if (functionTable == nil) {
+        _visibleTables[bufferIndex] = [NSNull null];
+        return;
+    }
+    ZPUVisibleFunctionTable *table = (ZPUVisibleFunctionTable *)functionTable;
+    if (![table isKindOfClass:[ZPUVisibleFunctionTable class]] || table->_owner != _owner) return;
+    _visibleTables[bufferIndex] = functionTable;
+}
+- (void)setVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __nullable [__nonnull])functionTables
+                 withBufferRange:(NSRange)bufferRange {
+    if (functionTables == NULL || !zpu_function_table_range_valid(_functionCount, bufferRange)) return;
+    for (NSUInteger offset = 0; offset < bufferRange.length; ++offset) {
+        id<MTLVisibleFunctionTable> functionTable = functionTables[offset];
+        if (functionTable != nil) {
+            ZPUVisibleFunctionTable *table = (ZPUVisibleFunctionTable *)functionTable;
+            if (![table isKindOfClass:[ZPUVisibleFunctionTable class]] || table->_owner != _owner) return;
+        }
+    }
+    for (NSUInteger offset = 0; offset < bufferRange.length; ++offset) {
+        id<MTLVisibleFunctionTable> functionTable = functionTables[offset];
+        _visibleTables[bufferRange.location + offset] = functionTable == nil ? (id)[NSNull null] : (id)functionTable;
+    }
 }
 @end
 
