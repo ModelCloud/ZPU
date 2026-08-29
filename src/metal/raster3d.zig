@@ -48,6 +48,7 @@ pub const DrawOptions = struct {
         .blue = .blue,
         .alpha = .alpha,
     },
+    rasterization_enabled: bool = true,
     depth_compare: abi.CompareFunction = .less_equal,
     depth_write_enabled: bool = true,
     blending_enabled: bool = false,
@@ -652,6 +653,13 @@ fn addStats(a: Stats, b: Stats) Stats {
 }
 
 pub fn drawWithTargets(target: *Target, extra_targets: []const *Target, sample_texture: ?*const Target, depth: ?[]f32, stencil: ?[]u8, vertices: []const abi.Vertex, primitive: abi.PrimitiveType, options: DrawOptions) Stats {
+    if (!options.rasterization_enabled) return .{ .primitives_submitted = switch (primitive) {
+        .point => @intCast(vertices.len),
+        .line => @intCast(vertices.len / 2),
+        .line_strip => if (vertices.len > 1) @intCast(vertices.len - 1) else 0,
+        .triangle => @intCast(vertices.len / 3),
+        .triangle_strip => if (vertices.len > 2) @intCast(vertices.len - 2) else 0,
+    } };
     var job = Job{ .target = target, .extra_targets = extra_targets, .sample_texture = sample_texture, .depth = depth, .stencil = stencil, .vertices = vertices, .primitive = primitive, .options = options };
     const worker = std.Thread.spawn(.{}, renderWorker, .{&job}) catch {
         job.bands[0] = drawBand(&job, 0);

@@ -16,6 +16,7 @@ static const char *const kShaderSource =
     "struct Vertex { float4 position [[position]]; float4 color; };\n"
     "vertex Vertex zpu_test_vertex(uint vertex_id [[vertex_id]], "
     "device const Vertex *vertices [[buffer(0)]]) { return vertices[vertex_id]; }\n"
+    "vertex void zpu_test_no_raster_vertex(uint vertex_id [[vertex_id]]) { (void)vertex_id; }\n"
     "fragment float4 zpu_test_fragment(Vertex input [[stage_in]]) { return input.color; }\n"
     "struct MRTOutput { float4 first [[color(0)]]; float4 second [[color(1)]]; };\n"
     "fragment MRTOutput zpu_test_mrt_fragment(Vertex input [[stage_in]]) { "
@@ -66,10 +67,11 @@ int main(void) {
             return 3;
         }
         id<MTLFunction> vertex_function = [library newFunctionWithName:@"zpu_test_vertex"];
+        id<MTLFunction> no_raster_vertex_function = [library newFunctionWithName:@"zpu_test_no_raster_vertex"];
         id<MTLFunction> fragment_function = [library newFunctionWithName:@"zpu_test_fragment"];
         id<MTLFunction> mrt_fragment_function = [library newFunctionWithName:@"zpu_test_mrt_fragment"];
         id<MTLFunction> sample_fragment_function = [library newFunctionWithName:@"zpu_test_sample_fragment"];
-        if (vertex_function == nil || fragment_function == nil || mrt_fragment_function == nil || sample_fragment_function == nil) {
+        if (vertex_function == nil || no_raster_vertex_function == nil || fragment_function == nil || mrt_fragment_function == nil || sample_fragment_function == nil) {
             fprintf(stderr, "metal-pixel: test functions missing\n");
             return 4;
         }
@@ -1010,6 +1012,65 @@ int main(void) {
         id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
         id<MTLRenderPipelineState> adapter_pipeline =
             [adapter_device newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor error:&adapter_pipeline_error];
+
+        MTLRenderPipelineDescriptor *native_no_raster_descriptor = [pipeline_descriptor copy];
+        native_no_raster_descriptor.rasterizationEnabled = NO;
+        native_no_raster_descriptor.vertexFunction = no_raster_vertex_function;
+        native_no_raster_descriptor.fragmentFunction = nil;
+        id<MTLRenderPipelineState> native_no_raster_pipeline =
+            [device newRenderPipelineStateWithDescriptor:native_no_raster_descriptor error:&error];
+        MTLRenderPipelineDescriptor *adapter_no_raster_descriptor = [native_no_raster_descriptor copy];
+        adapter_no_raster_descriptor.vertexFunction = adapter_vertex_function;
+        adapter_no_raster_descriptor.fragmentFunction = adapter_fragment_function;
+        id<MTLRenderPipelineState> adapter_no_raster_pipeline =
+            [adapter_device newRenderPipelineStateWithDescriptor:adapter_no_raster_descriptor error:&adapter_pipeline_error];
+        id<MTLTexture> native_no_raster_output = [device newTextureWithDescriptor:texture_descriptor];
+        id<MTLTexture> adapter_no_raster_output = [adapter_device newTextureWithDescriptor:texture_descriptor];
+        if (native_no_raster_pipeline == nil || adapter_no_raster_pipeline == nil ||
+            native_no_raster_output == nil || adapter_no_raster_output == nil) {
+            fail_with_error("rasterization-disabled pipeline allocation failed", adapter_pipeline_error);
+            return 105;
+        }
+        MTLRenderPassDescriptor *native_no_raster_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_no_raster_pass.colorAttachments[0].texture = native_no_raster_output;
+        native_no_raster_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_no_raster_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_no_raster_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> native_no_raster_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_no_raster_encoder =
+            [native_no_raster_command_buffer renderCommandEncoderWithDescriptor:native_no_raster_pass];
+        [native_no_raster_encoder setRenderPipelineState:native_no_raster_pipeline];
+        [native_no_raster_encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
+        [native_no_raster_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_no_raster_encoder endEncoding];
+        [native_no_raster_command_buffer commit];
+        [native_no_raster_command_buffer waitUntilCompleted];
+        MTLRenderPassDescriptor *adapter_no_raster_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_no_raster_pass.colorAttachments[0].texture = adapter_no_raster_output;
+        adapter_no_raster_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_no_raster_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_no_raster_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> adapter_no_raster_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_no_raster_encoder =
+            [adapter_no_raster_command_buffer renderCommandEncoderWithDescriptor:adapter_no_raster_pass];
+        [adapter_no_raster_encoder setRenderPipelineState:adapter_no_raster_pipeline];
+        [adapter_no_raster_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_no_raster_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_no_raster_encoder endEncoding];
+        [adapter_no_raster_command_buffer commit];
+        [adapter_no_raster_command_buffer waitUntilCompleted];
+        uint8_t native_no_raster_bytes[byte_count];
+        uint8_t adapter_no_raster_bytes[byte_count];
+        [native_no_raster_output getBytes:native_no_raster_bytes bytesPerRow:(NSUInteger)width * 4
+                              fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_no_raster_output getBytes:adapter_no_raster_bytes bytesPerRow:(NSUInteger)width * 4
+                                fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (native_no_raster_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_no_raster_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_no_raster_bytes, adapter_no_raster_bytes, byte_count) != 0) {
+            fail_with_error("rasterization-disabled pipeline execution failed", adapter_pipeline_error);
+            return 106;
+        }
 
         /* Multiple color attachments use an explicit CPU shader profile. The
          * native oracle writes the same interpolated color to RGBA8 target 0

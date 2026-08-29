@@ -83,6 +83,7 @@
       "zpu_metal_render_encoder_set_fragment_texture",
       "zpu_metal_render_encoder_set_fragment_sampler",
       "zpu_metal_render_encoder_set_fragment_texture_swizzle",
+      "zpu_metal_render_encoder_set_rasterization_enabled",
       "zpu_metal_render_encoder_set_depth_compare_function",
       "zpu_metal_render_encoder_set_blend_state",
       "zpu_metal_render_encoder_set_blend_color",

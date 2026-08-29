@@ -528,6 +528,7 @@ pub const RenderEncoder = struct {
         .blue = .blue,
         .alpha = .alpha,
     },
+    rasterization_enabled: bool = true,
     depth_compare: abi.CompareFunction = .less_equal,
     depth_write_enabled: bool = true,
     blending_enabled: bool = false,
@@ -567,6 +568,7 @@ pub const RenderEncoder = struct {
             .sample_address_s = self.sample_address_s,
             .sample_address_t = self.sample_address_t,
             .sample_swizzle = self.sample_swizzle,
+            .rasterization_enabled = self.rasterization_enabled,
             .depth_compare = self.depth_compare,
             .depth_write_enabled = self.depth_write_enabled,
             .blending_enabled = self.blending_enabled,
@@ -636,6 +638,11 @@ pub const RenderEncoder = struct {
             .blue = textureSwizzleFromInt(blue) orelse return error.InvalidArgument,
             .alpha = textureSwizzleFromInt(alpha) orelse return error.InvalidArgument,
         };
+    }
+
+    pub fn setRasterizationEnabled(self: *RenderEncoder, enabled: bool) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        self.rasterization_enabled = enabled;
     }
 
     pub fn setPipelineColorFormats(self: *RenderEncoder, color_formats: []const u16, depth_format: u16, stencil_format: u16) Error!void {
@@ -2796,6 +2803,11 @@ pub export fn zpu_metal_render_encoder_set_fragment_sampler(encoder: ?*RenderEnc
 
 pub export fn zpu_metal_render_encoder_set_fragment_texture_swizzle(encoder: ?*RenderEncoder, red: u8, green: u8, blue: u8, alpha: u8) callconv(.c) c_int {
     (encoder orelse return -1).setFragmentTextureSwizzle(red, green, blue, alpha) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_rasterization_enabled(encoder: ?*RenderEncoder, enabled: bool) callconv(.c) c_int {
+    (encoder orelse return -1).setRasterizationEnabled(enabled) catch |err| return errorCode(err);
     return 0;
 }
 

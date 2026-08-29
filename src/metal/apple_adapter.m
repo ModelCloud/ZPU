@@ -275,6 +275,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLPixelFormat _colorPixelFormats[ZPU_METAL_MAX_COLOR_ATTACHMENTS];
     NSUInteger _colorAttachmentCount;
     BOOL _multiTargetOutput;
+    BOOL _rasterizationEnabled;
     MTLPixelFormat _depthPixelFormat;
     MTLPixelFormat _stencilPixelFormat;
     BOOL _sampleTexture;
@@ -1903,6 +1904,7 @@ static uint64_t zpu_cpu_timestamp(void) {
         }
         _multiTargetOutput = [descriptor.fragmentFunction.name rangeOfString:@"mrt" options:NSCaseInsensitiveSearch].location != NSNotFound;
         _sampleTexture = [descriptor.fragmentFunction.name rangeOfString:@"sample" options:NSCaseInsensitiveSearch].location != NSNotFound;
+        _rasterizationEnabled = descriptor.rasterizationEnabled;
         _depthPixelFormat = descriptor.depthAttachmentPixelFormat;
         _stencilPixelFormat = descriptor.stencilAttachmentPixelFormat;
         _blendingEnabled = attachment.blendingEnabled;
@@ -5913,6 +5915,7 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
             (uint16_t)state->_depthPixelFormat, (uint16_t)state->_stencilPixelFormat) != ZPU_METAL_OK) [_owner markError];
     if (zpu_metal_render_encoder_set_multi_target_output(_zpuEncoder, state->_multiTargetOutput) != ZPU_METAL_OK) [_owner markError];
     if (zpu_metal_render_encoder_set_sample_texture(_zpuEncoder, state->_sampleTexture) != ZPU_METAL_OK) [_owner markError];
+    if (zpu_metal_render_encoder_set_rasterization_enabled(_zpuEncoder, state->_rasterizationEnabled) != ZPU_METAL_OK) [_owner markError];
     if (zpu_metal_render_encoder_set_blend_state(
         _zpuEncoder, state->_blendingEnabled,
         (zpu_metal_blend_factor)state->_sourceRGBBlendFactor,
