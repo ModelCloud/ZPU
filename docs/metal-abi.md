@@ -47,8 +47,9 @@ triangle path:
   the Apple GPU profile exercised by the native oracle; signed-normalized
   attachment stores and 2D/3D mip generation use integer-domain normalized
   filtering with native-oracle quantization; all Uint/Sint formats remain
-  transfer-only; packed formats are transfer-only until packed decode/encode
-  profiles are added;
+  transfer-only; packed normalized B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/BGR10A2
+  formats use CPU decode/encode profiles for render targets and 2D/3D mip
+  generation, while packed RG11B10Float/RGB9E5Float remain transfer-only;
   fixed CPU compute profiles remain explicitly format-specific;
 - formats without a corresponding CPU shader profile remain rejected
 - CPU-owned `MTLDevice` identity and capability metadata, including a stable,
@@ -93,6 +94,7 @@ triangle path:
   adapters; a private discarded CPU color surface preserves the portable
   raster ABI while public depth bytes remain exact
 - up to eight R8/R16Unorm/R16Float/RG8/RG16Unorm/RG16Float/RGBA8/BGRA8/
+  B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/BGR10A2Unorm/
   R32Float/RGBA16Unorm/RGBA16Float/RG32Float/RGBA32Float color attachments can be
   described and cleared by a CPU render pass; the explicit
   `zpu_test_mrt_fragment` profile mirrors one logical fragment color to every
@@ -387,7 +389,7 @@ draws, render and compute indirect command buffers, the CPU compute path
   metadata paths, deferred indirect-thread dispatch, and deferred
   indirect array z filtering, explicit 3D texture plane/stride copies, and
   legacy/Metal 4 3D mipmap generation, cube/cube-array face and view transfers,
-  2D float mipmap raw-byte exactness, and
+  packed normalized 2D/3D mipmap raw-byte exactness, 2D float mipmap raw-byte exactness, and
   legacy/Metal 4 visibility result byte exactness, and CPU depth-bounds output
   against an equivalent native Metal fragment-discard oracle,
 and the explicit adapter; it is not a claim that every Metal feature is

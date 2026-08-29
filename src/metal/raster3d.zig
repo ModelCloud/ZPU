@@ -112,6 +112,12 @@ pub const TargetFormat = enum {
     rgba16_float,
     rg32_float,
     rgba32_float,
+    b5g6r5_unorm,
+    a1bgr5_unorm,
+    abgr4_unorm,
+    bgr5a1_unorm,
+    rgb10a2_unorm,
+    bgr10a2_unorm,
 };
 
 pub const Target = struct {
@@ -134,6 +140,8 @@ pub const Target = struct {
             .rgba16_unorm, .rgba16_snorm, .rgba16_float => 8,
             .rg32_float => 8,
             .rgba32_float => 16,
+            .b5g6r5_unorm, .a1bgr5_unorm, .abgr4_unorm, .bgr5a1_unorm => 2,
+            .rgb10a2_unorm, .bgr10a2_unorm => 4,
         };
     }
 
@@ -184,6 +192,30 @@ pub const Target = struct {
     fn writeU16(row_bytes: []u8, offset: usize, value: f32) void {
         const quantized: u16 = @intFromFloat(std.math.clamp(value, 0, 1) * 65535.0 + 0.5);
         std.mem.writeInt(u16, row_bytes[offset..][0..2], quantized, .little);
+    }
+
+    fn packedUnorm(value: f32, maximum: u32) u32 {
+        return @intFromFloat(std.math.clamp(value, 0, 1) * @as(f32, @floatFromInt(maximum)) + 0.5);
+    }
+
+    fn packedUnormValue(bits: u32, maximum: u32) f32 {
+        return @as(f32, @floatFromInt(bits)) / @as(f32, @floatFromInt(maximum));
+    }
+
+    fn readPacked16(row_bytes: []const u8, offset: usize) u16 {
+        return std.mem.readInt(u16, row_bytes[offset..][0..2], .little);
+    }
+
+    fn writePacked16(row_bytes: []u8, offset: usize, value: u16) void {
+        std.mem.writeInt(u16, row_bytes[offset..][0..2], value, .little);
+    }
+
+    fn readPacked32(row_bytes: []const u8, offset: usize) u32 {
+        return std.mem.readInt(u32, row_bytes[offset..][0..4], .little);
+    }
+
+    fn writePacked32(row_bytes: []u8, offset: usize, value: u32) void {
+        std.mem.writeInt(u32, row_bytes[offset..][0..4], value, .little);
     }
 
     fn writeS8(row_bytes: []u8, offset: usize, value: f32) void {
@@ -278,6 +310,51 @@ pub const Target = struct {
                 readF32(row_bytes, offset + 8), readF32(row_bytes, offset + 12),
             },
             .rg32_float => .{ readF32(row_bytes, offset), readF32(row_bytes, offset + 4), 0, 1 },
+            .b5g6r5_unorm => blk: {
+                const bits = readPacked16(row_bytes, offset);
+                break :blk .{
+                    packedUnormValue((bits >> 11) & 0x1f, 31),
+                    packedUnormValue((bits >> 5) & 0x3f, 63),
+                    packedUnormValue(bits & 0x1f, 31),
+                    1,
+                };
+            },
+            .a1bgr5_unorm => blk: {
+                const bits = readPacked16(row_bytes, offset);
+                break :blk .{
+                    packedUnormValue((bits >> 11) & 0x1f, 31),
+                    packedUnormValue((bits >> 6) & 0x1f, 31),
+                    packedUnormValue((bits >> 1) & 0x1f, 31),
+                    if ((bits & 1) != 0) 1 else 0,
+                };
+            },
+            .abgr4_unorm => blk: {
+                const bits = readPacked16(row_bytes, offset);
+                break :blk .{
+                    packedUnormValue((bits >> 12) & 0xf, 15),
+                    packedUnormValue((bits >> 8) & 0xf, 15),
+                    packedUnormValue((bits >> 4) & 0xf, 15),
+                    packedUnormValue(bits & 0xf, 15),
+                };
+            },
+            .bgr5a1_unorm => blk: {
+                const bits = readPacked16(row_bytes, offset);
+                break :blk .{
+                    packedUnormValue((bits >> 10) & 0x1f, 31),
+                    packedUnormValue((bits >> 5) & 0x1f, 31),
+                    packedUnormValue(bits & 0x1f, 31),
+                    if ((bits >> 15) != 0) 1 else 0,
+                };
+            },
+            .rgb10a2_unorm, .bgr10a2_unorm => blk: {
+                const bits = readPacked32(row_bytes, offset);
+                const red_bits = if (self.format == .rgb10a2_unorm) bits & 0x3ff else (bits >> 20) & 0x3ff;
+                const blue_bits = if (self.format == .rgb10a2_unorm) (bits >> 20) & 0x3ff else bits & 0x3ff;
+                break :blk .{
+                    packedUnormValue(red_bits, 1023),  packedUnormValue((bits >> 10) & 0x3ff, 1023),
+                    packedUnormValue(blue_bits, 1023), packedUnormValue((bits >> 30) & 3, 3),
+                };
+            },
         };
     }
 
@@ -370,6 +447,49 @@ pub const Target = struct {
             .rg32_float => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeF32(row_bytes, offset, color[0]);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeF32(row_bytes, offset + 4, color[1]);
+            },
+            .b5g6r5_unorm => {
+                var bits = readPacked16(row_bytes, offset);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) bits = (bits & ~@as(u16, 0xf800)) | @as(u16, @intCast(packedUnorm(color[0], 31) << 11));
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) bits = (bits & ~@as(u16, 0x07e0)) | @as(u16, @intCast(packedUnorm(color[1], 63) << 5));
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) bits = (bits & ~@as(u16, 0x001f)) | @as(u16, @intCast(packedUnorm(color[2], 31)));
+                writePacked16(row_bytes, offset, bits);
+            },
+            .a1bgr5_unorm => {
+                var bits = readPacked16(row_bytes, offset);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) bits = (bits & ~@as(u16, 0xf800)) | @as(u16, @intCast(packedUnorm(color[0], 31) << 11));
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) bits = (bits & ~@as(u16, 0x07c0)) | @as(u16, @intCast(packedUnorm(color[1], 31) << 6));
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) bits = (bits & ~@as(u16, 0x003e)) | @as(u16, @intCast(packedUnorm(color[2], 31) << 1));
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) bits = (bits & ~@as(u16, 0x0001)) | @as(u16, @intCast(packedUnorm(color[3], 1)));
+                writePacked16(row_bytes, offset, bits);
+            },
+            .abgr4_unorm => {
+                var bits = readPacked16(row_bytes, offset);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) bits = (bits & ~@as(u16, 0xf000)) | @as(u16, @intCast(packedUnorm(color[0], 15) << 12));
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) bits = (bits & ~@as(u16, 0x0f00)) | @as(u16, @intCast(packedUnorm(color[1], 15) << 8));
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) bits = (bits & ~@as(u16, 0x00f0)) | @as(u16, @intCast(packedUnorm(color[2], 15) << 4));
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) bits = (bits & ~@as(u16, 0x000f)) | @as(u16, @intCast(packedUnorm(color[3], 15)));
+                writePacked16(row_bytes, offset, bits);
+            },
+            .bgr5a1_unorm => {
+                var bits = readPacked16(row_bytes, offset);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) bits = (bits & ~@as(u16, 0x7c00)) | @as(u16, @intCast(packedUnorm(color[0], 31) << 10));
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) bits = (bits & ~@as(u16, 0x03e0)) | @as(u16, @intCast(packedUnorm(color[1], 31) << 5));
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) bits = (bits & ~@as(u16, 0x001f)) | @as(u16, @intCast(packedUnorm(color[2], 31)));
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) bits = (bits & ~@as(u16, 0x8000)) | @as(u16, @intCast(packedUnorm(color[3], 1) << 15));
+                writePacked16(row_bytes, offset, bits);
+            },
+            .rgb10a2_unorm, .bgr10a2_unorm => {
+                var bits = readPacked32(row_bytes, offset);
+                const red_mask: u32 = if (self.format == .rgb10a2_unorm) 0x000003ff else 0x3ff00000;
+                const blue_mask: u32 = if (self.format == .rgb10a2_unorm) 0x3ff00000 else 0x000003ff;
+                const red_bits: u32 = packedUnorm(color[0], 1023) << (if (self.format == .rgb10a2_unorm) 0 else 20);
+                const blue_bits: u32 = packedUnorm(color[2], 1023) << (if (self.format == .rgb10a2_unorm) 20 else 0);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) bits = (bits & ~red_mask) | red_bits;
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) bits = (bits & ~@as(u32, 0x000ffc00)) | (packedUnorm(color[1], 1023) << 10);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) bits = (bits & ~blue_mask) | blue_bits;
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) bits = (bits & ~@as(u32, 0xc0000000)) | (packedUnorm(color[3], 3) << 30);
+                writePacked32(row_bytes, offset, bits);
             },
         }
     }
@@ -1286,6 +1406,49 @@ test "narrow unorm color targets retain channel width and masks" {
     rg8.storeColor(0, 0, .{ 0.25, 0.5, 0.75, 1 });
     try std.testing.expectEqualSlices(u8, &[_]u8{ 64, 128, 0, 0 }, &rg8_bytes);
     try std.testing.expectApproxEqAbs(@as(f32, 128.0 / 255.0), rg8.readColor(0, 0)[1], 0.0001);
+}
+
+test "packed normalized color targets preserve component bits and masks" {
+    const color = [4]f32{ 0.25, 0.5, 0.75, 1 };
+    const formats = [_]struct { format: TargetFormat, bytes_per_pixel: usize, expected: u32 }{
+        .{ .format = .b5g6r5_unorm, .bytes_per_pixel = 2, .expected = 0x4417 },
+        .{ .format = .a1bgr5_unorm, .bytes_per_pixel = 2, .expected = 0x442f },
+        .{ .format = .abgr4_unorm, .bytes_per_pixel = 2, .expected = 0x48bf },
+        .{ .format = .bgr5a1_unorm, .bytes_per_pixel = 2, .expected = 0xa217 },
+        .{ .format = .rgb10a2_unorm, .bytes_per_pixel = 4, .expected = 0xeff80100 },
+        .{ .format = .bgr10a2_unorm, .bytes_per_pixel = 4, .expected = 0xd00802ff },
+    };
+    for (formats) |case| {
+        var bytes = [_]u8{ 0, 0, 0, 0 };
+        var target = try Target.init(&bytes, 1, 1, case.bytes_per_pixel, case.format);
+        target.storeColor(0, 0, color);
+        const actual = if (case.bytes_per_pixel == 2)
+            @as(u32, std.mem.readInt(u16, bytes[0..2], .little))
+        else
+            std.mem.readInt(u32, bytes[0..4], .little);
+        try std.testing.expectEqual(case.expected, actual);
+        const decoded = target.readColor(0, 0);
+        try std.testing.expectApproxEqAbs(color[0], decoded[0], 1.0 / 15.0);
+        try std.testing.expectApproxEqAbs(color[1], decoded[1], 1.0 / 15.0);
+        try std.testing.expectApproxEqAbs(color[2], decoded[2], 1.0 / 15.0);
+        try std.testing.expectApproxEqAbs(color[3], decoded[3], 1.0 / 3.0);
+
+        const preserved = actual;
+        target.writeColor(0, 0, .{ 0, 0, 0, 0 }, @intFromEnum(abi.ColorWriteMask.red));
+        const masked = if (case.bytes_per_pixel == 2)
+            @as(u32, std.mem.readInt(u16, bytes[0..2], .little))
+        else
+            std.mem.readInt(u32, bytes[0..4], .little);
+        const red_mask: u32 = switch (case.format) {
+            .b5g6r5_unorm, .a1bgr5_unorm => 0xf800,
+            .abgr4_unorm => 0xf000,
+            .bgr5a1_unorm => 0x7c00,
+            .rgb10a2_unorm => 0x000003ff,
+            .bgr10a2_unorm => 0x3ff00000,
+            else => unreachable,
+        };
+        try std.testing.expectEqual(preserved & ~red_mask, masked & ~red_mask);
+    }
 }
 
 test "CPU texture sampling uses normalized top-left texel coordinates" {
