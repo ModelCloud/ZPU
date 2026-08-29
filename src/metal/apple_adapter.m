@@ -15,6 +15,7 @@
 #import <Metal/Metal.h>
 
 #include <string.h>
+#include <math.h>
 #include <time.h>
 
 #include "zpu/metal.h"
@@ -467,6 +468,19 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     uint64_t _resourceID;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLSamplerDescriptor *)descriptor;
+@end
+
+/* The CPU rasterizer is intentionally 1:1. Keep rasterization-rate maps
+ * exact by accepting only identity maps; a variable-rate map cannot be
+ * represented by the fixed pixel grid without changing observable pixels. */
+@interface ZPURasterizationRateMap : NSObject <MTLRasterizationRateMap> {
+@public
+    ZPUDevice *_owner;
+    MTLSize _screenSize;
+    MTLSize _physicalGranularity;
+    NSUInteger _layerCount;
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLRasterizationRateMapDescriptor *)descriptor;
 @end
 
 @interface ZPUCounter : NSObject <MTLCounter> {
@@ -3051,6 +3065,60 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
 - (MTLResourceID)gpuResourceID API_AVAILABLE(macos(13.0), ios(16.0)) { return (MTLResourceID){_resourceID}; }
 @end
 
+static BOOL zpu_rasterization_rate_layer_is_identity(MTLRasterizationRateLayerDescriptor *layer) {
+    if (layer == nil) return NO;
+    const MTLSize count = layer.sampleCount;
+    if (count.width == 0 || count.height == 0) return NO;
+    const float *horizontal = layer.horizontalSampleStorage;
+    const float *vertical = layer.verticalSampleStorage;
+    if (horizontal == NULL || vertical == NULL) return NO;
+    for (NSUInteger index = 0; index < count.width; ++index) {
+        if (!isfinite(horizontal[index]) || horizontal[index] != 1.0f) return NO;
+    }
+    for (NSUInteger index = 0; index < count.height; ++index) {
+        if (!isfinite(vertical[index]) || vertical[index] != 1.0f) return NO;
+    }
+    return YES;
+}
+
+@implementation ZPURasterizationRateMap
+- (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLRasterizationRateMapDescriptor *)descriptor {
+    if (owner == nil || descriptor == nil || descriptor.screenSize.width == 0 || descriptor.screenSize.height == 0) return nil;
+    for (NSUInteger index = 0; index < descriptor.layerCount; ++index) {
+        if (!zpu_rasterization_rate_layer_is_identity([descriptor layerAtIndex:index])) return nil;
+    }
+    if ((self = [super init])) {
+        _owner = owner;
+        _screenSize = MTLSizeMake(descriptor.screenSize.width, descriptor.screenSize.height, 0);
+        /* Apple GPU rate maps report a 32x32 physical granularity even for
+         * an identity 1:1 map. Preserve that observable descriptor property
+         * while the CPU rasterizer still writes every pixel individually. */
+        _physicalGranularity = MTLSizeMake(32, 32, 0);
+        _layerCount = descriptor.layerCount;
+    }
+    return self;
+}
+- (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
+- (NSString *)label { return nil; }
+- (MTLSize)screenSize { return _screenSize; }
+- (MTLSize)physicalGranularity { return _physicalGranularity; }
+- (NSUInteger)layerCount { return _layerCount; }
+- (MTLSizeAndAlign)parameterBufferSizeAndAlign { return (MTLSizeAndAlign){0, 1}; }
+- (void)copyParameterDataToBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset {
+    ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
+    if (!zpu_buffer_belongs_to_device(_owner, zpuBuffer) || offset > zpuBuffer.length) return;
+}
+- (MTLSize)physicalSizeForLayer:(NSUInteger)layerIndex {
+    return layerIndex < _layerCount ? _screenSize : MTLSizeMake(0, 0, 0);
+}
+- (MTLCoordinate2D)mapScreenToPhysicalCoordinates:(MTLCoordinate2D)screenCoordinates forLayer:(NSUInteger)layerIndex {
+    return layerIndex < _layerCount ? screenCoordinates : (MTLCoordinate2D){0, 0};
+}
+- (MTLCoordinate2D)mapPhysicalToScreenCoordinates:(MTLCoordinate2D)physicalCoordinates forLayer:(NSUInteger)layerIndex {
+    return layerIndex < _layerCount ? physicalCoordinates : (MTLCoordinate2D){0, 0};
+}
+@end
+
 @implementation ZPUDevice
 - (instancetype)initWithDevice:(zpu_metal_device *)device {
     if ((self = [super init])) {
@@ -3514,8 +3582,7 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
     completionHandler(nil, nil, error);
 }
 - (id<MTLRasterizationRateMap>)newRasterizationRateMapWithDescriptor:(MTLRasterizationRateMapDescriptor *)descriptor API_AVAILABLE(macos(10.15), ios(13.0), macCatalyst(13.4), tvos(16.0)) {
-    (void)descriptor;
-    return nil;
+    return (id<MTLRasterizationRateMap>)[[ZPURasterizationRateMap alloc] initWithOwner:self descriptor:descriptor];
 }
 - (uint64_t)peerGroupID API_AVAILABLE(macos(10.15)) { return 0; }
 - (uint32_t)peerIndex API_AVAILABLE(macos(10.15)) { return 0; }

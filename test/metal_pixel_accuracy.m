@@ -362,6 +362,73 @@ int main(void) {
             }
         }
 
+        /* Identity rasterization-rate maps preserve the same top-left,
+         * 1:1 physical pixel grid. Variable-rate maps are intentionally
+         * rejected by the CPU adapter because silently treating them as
+         * identity would change their observable rasterization semantics. */
+        MTLRasterizationRateLayerDescriptor *native_identity_layer =
+            [[MTLRasterizationRateLayerDescriptor alloc] initWithSampleCount:MTLSizeMake(1, 1, 0)];
+        native_identity_layer.horizontal[0] = @1.0f;
+        native_identity_layer.vertical[0] = @1.0f;
+        MTLRasterizationRateMapDescriptor *identity_rate_descriptor =
+            [MTLRasterizationRateMapDescriptor rasterizationRateMapDescriptorWithScreenSize:MTLSizeMake(width, height, 0)
+                                                                                          layer:native_identity_layer];
+        id<MTLRasterizationRateMap> native_identity_rate_map =
+            [device newRasterizationRateMapWithDescriptor:identity_rate_descriptor];
+        id<MTLDevice> adapter_rate_map_device = ZPUMetalCreateSystemDefaultDevice();
+        id<MTLRasterizationRateMap> adapter_identity_rate_map =
+            [adapter_rate_map_device newRasterizationRateMapWithDescriptor:identity_rate_descriptor];
+        const MTLCoordinate2D identity_screen_coordinate = {2.25f, 3.75f};
+        const MTLCoordinate2D identity_physical_coordinate = {4.5f, 1.5f};
+        const MTLSize native_identity_physical_size = [native_identity_rate_map physicalSizeForLayer:0];
+        const MTLSize adapter_identity_physical_size = [adapter_identity_rate_map physicalSizeForLayer:0];
+        const MTLCoordinate2D native_identity_screen_to_physical =
+            [native_identity_rate_map mapScreenToPhysicalCoordinates:identity_screen_coordinate forLayer:0];
+        const MTLCoordinate2D adapter_identity_screen_to_physical =
+            [adapter_identity_rate_map mapScreenToPhysicalCoordinates:identity_screen_coordinate forLayer:0];
+        const MTLCoordinate2D native_identity_physical_to_screen =
+            [native_identity_rate_map mapPhysicalToScreenCoordinates:identity_physical_coordinate forLayer:0];
+        const MTLCoordinate2D adapter_identity_physical_to_screen =
+            [adapter_identity_rate_map mapPhysicalToScreenCoordinates:identity_physical_coordinate forLayer:0];
+        if (native_identity_rate_map == nil || adapter_identity_rate_map == nil ||
+            native_identity_rate_map.layerCount != adapter_identity_rate_map.layerCount ||
+            native_identity_rate_map.screenSize.width != adapter_identity_rate_map.screenSize.width ||
+            native_identity_rate_map.screenSize.height != adapter_identity_rate_map.screenSize.height ||
+            native_identity_rate_map.physicalGranularity.width != adapter_identity_rate_map.physicalGranularity.width ||
+            native_identity_rate_map.physicalGranularity.height != adapter_identity_rate_map.physicalGranularity.height ||
+            native_identity_physical_size.width != adapter_identity_physical_size.width ||
+            native_identity_physical_size.height != adapter_identity_physical_size.height ||
+            native_identity_screen_to_physical.x != adapter_identity_screen_to_physical.x ||
+            native_identity_screen_to_physical.y != adapter_identity_screen_to_physical.y ||
+            native_identity_physical_to_screen.x != adapter_identity_physical_to_screen.x ||
+            native_identity_physical_to_screen.y != adapter_identity_physical_to_screen.y) {
+            fprintf(stderr, "metal-pixel: identity rasterization-rate map mismatch nativeMap=%p adapterMap=%p layers=%zu/%zu screen=%zux%zu/%zux%zu granularity=%zux%zu/%zux%zu physical=%zux%zu/%zux%zu screenToPhysical=(%g,%g)/(%g,%g) physicalToScreen=(%g,%g)/(%g,%g)\n",
+                    native_identity_rate_map, adapter_identity_rate_map,
+                    native_identity_rate_map.layerCount, adapter_identity_rate_map.layerCount,
+                    native_identity_rate_map.screenSize.width, native_identity_rate_map.screenSize.height,
+                    adapter_identity_rate_map.screenSize.width, adapter_identity_rate_map.screenSize.height,
+                    native_identity_rate_map.physicalGranularity.width, native_identity_rate_map.physicalGranularity.height,
+                    adapter_identity_rate_map.physicalGranularity.width, adapter_identity_rate_map.physicalGranularity.height,
+                    native_identity_physical_size.width, native_identity_physical_size.height,
+                    adapter_identity_physical_size.width, adapter_identity_physical_size.height,
+                    native_identity_screen_to_physical.x, native_identity_screen_to_physical.y,
+                    adapter_identity_screen_to_physical.x, adapter_identity_screen_to_physical.y,
+                    native_identity_physical_to_screen.x, native_identity_physical_to_screen.y,
+                    adapter_identity_physical_to_screen.x, adapter_identity_physical_to_screen.y);
+            return 45;
+        }
+        MTLRasterizationRateLayerDescriptor *variable_rate_layer =
+            [[MTLRasterizationRateLayerDescriptor alloc] initWithSampleCount:MTLSizeMake(1, 1, 0)];
+        variable_rate_layer.horizontal[0] = @0.5f;
+        variable_rate_layer.vertical[0] = @1.0f;
+        MTLRasterizationRateMapDescriptor *variable_rate_descriptor =
+            [MTLRasterizationRateMapDescriptor rasterizationRateMapDescriptorWithScreenSize:MTLSizeMake(width, height, 0)
+                                                                                          layer:variable_rate_layer];
+        if ([adapter_rate_map_device newRasterizationRateMapWithDescriptor:variable_rate_descriptor] != nil) {
+            fprintf(stderr, "metal-pixel: variable-rate map was not rejected by CPU adapter\n");
+            return 46;
+        }
+
         /* Repeat the reference comparison for BGRA8. This catches a channel
          * order bug even when geometry and interpolation are otherwise exact. */
         MTLRenderPipelineDescriptor *bgra_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
@@ -7415,7 +7482,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables, visibility results, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, identity rasterization-rate maps, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables, visibility results, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }
