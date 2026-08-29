@@ -163,6 +163,8 @@ const PreparedTriangle = struct {
 };
 const OpaqueQuad = struct {
     valid: bool = false,
+    flat_color: ?u32 = null,
+    depth_bits: u32 = 0,
     x0: f32 = 0,
     y0: f32 = 0,
     u0: f32 = 0,
@@ -1096,7 +1098,15 @@ fn refreshOpaqueQuad(prepared: *PreparedDraw) void {
     if (prepared.count != 2) return;
     const first = &prepared.triangles[0];
     const second = &prepared.triangles[1];
-    if (!first.valid or !second.valid or !first.has_prelit_texture_16x16 or !second.has_prelit_texture_16x16) return;
+    if (!first.valid or !second.valid or (first.flat_color == null) != (second.flat_color == null)) return;
+    if (first.flat_color) |color| {
+        if (second.flat_color.? != color) return;
+    } else {
+        if (!first.has_prelit_texture_16x16 or !second.has_prelit_texture_16x16) return;
+        if (first.prelit_texture_16x16_ptr != null or second.prelit_texture_16x16_ptr != null) {
+            if (first.prelit_texture_16x16_ptr != second.prelit_texture_16x16_ptr) return;
+        } else if (!std.mem.eql(u32, first.prelit_texture_16x16[0..], second.prelit_texture_16x16[0..])) return;
+    }
     const a = first.vertices;
     const b = second.vertices;
     if (a[0].screen[0] != b[0].screen[0] or a[0].screen[1] != b[0].screen[1] or a[2].screen[0] != b[1].screen[0] or a[2].screen[1] != b[1].screen[1]) return;
@@ -1104,10 +1114,8 @@ fn refreshOpaqueQuad(prepared: *PreparedDraw) void {
     if (a[0].clip_w != a[1].clip_w or a[0].clip_w != a[2].clip_w or b[0].clip_w != a[0].clip_w or b[1].clip_w != a[2].clip_w or b[2].clip_w != a[0].clip_w) return;
     if (a[0].screen[2] != a[1].screen[2] or a[0].screen[2] != a[2].screen[2] or b[0].screen[2] != a[0].screen[2] or b[1].screen[2] != a[0].screen[2] or b[2].screen[2] != a[0].screen[2]) return;
     if (a[0].uv[0] != b[0].uv[0] or a[0].uv[1] != b[0].uv[1] or a[2].uv[0] != b[1].uv[0] or a[2].uv[1] != b[1].uv[1]) return;
-    if (first.prelit_texture_16x16_ptr != null or second.prelit_texture_16x16_ptr != null) {
-        if (first.prelit_texture_16x16_ptr != second.prelit_texture_16x16_ptr) return;
-    } else if (!std.mem.eql(u32, first.prelit_texture_16x16[0..], second.prelit_texture_16x16[0..])) return;
     if (!first.batch_raster.ready or !second.batch_raster.ready or first.batch_raster.min_x != second.batch_raster.min_x or first.batch_raster.max_x != second.batch_raster.max_x or first.batch_raster.min_y != second.batch_raster.min_y or first.batch_raster.max_y != second.batch_raster.max_y) return;
+    if (first.batch_raster.flat_depth_bits != second.batch_raster.flat_depth_bits) return;
     const quad_width = a[1].screen[0] - a[0].screen[0];
     const quad_height = a[2].screen[1] - a[0].screen[1];
     const du = (a[1].uv[0] - a[0].uv[0]) / quad_width;
@@ -1115,6 +1123,8 @@ fn refreshOpaqueQuad(prepared: *PreparedDraw) void {
     if (!std.math.isFinite(du) or !std.math.isFinite(dv) or du < 0) return;
     prepared.opaque_quad = .{
         .valid = true,
+        .flat_color = first.flat_color,
+        .depth_bits = first.batch_raster.flat_depth_bits,
         .x0 = a[0].screen[0],
         .y0 = a[0].screen[1],
         .u0 = a[0].uv[0],
@@ -1962,16 +1972,9 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
         // raster phase on the cached-span path. This is especially important
         // for animated 3D streams where every command changes each frame.
         buildPreparedFlatSpans(output, width, height);
-        if (span_cache) |cache| rememberBatchSpanCache(cache, output, width, height);
-        if (quad_span_cache) |cache| {
-            @memcpy(cache.spans[0..2], output.spans[0..2]);
-            cache.width = width;
-            cache.height = height;
-            cache.valid = true;
-        }
         output.spans_valid = true;
-        output.spans_external = if (span_cache) |cache| &cache.spans else null;
-        output.quad_spans_external = if (quad_span_cache) |cache| &cache.spans else null;
+        output.spans_external = null;
+        output.quad_spans_external = null;
     }
     const lighting_refresh = !geometry_cache_hit or command_cache.lighting_generation != lighting_generation;
     if (lighting_refresh) {
@@ -2006,7 +2009,7 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
     // Color runs are thread-local scratch. The batch shares its prepared
     // geometry across both raster lanes, so the direct prelit span path is
     // used instead of retaining a pointer into one worker's scratch buffer.
-    if (build_opaque_quad and output.triangles[0].flat_color == null) {
+    if (build_opaque_quad) {
         if (!(geometry_cache_hit and texture_unchanged and !lighting_refresh and refreshOpaqueQuadUvs(output))) refreshOpaqueQuad(output);
     } else output.opaque_quad = .{};
     output.bounds = if (geometry_cache_hit) command_cache.bounds else preparedBounds(output, width, height, command.scissor);
@@ -2044,6 +2047,9 @@ fn drawPreparedBatchFastImpl(comptime color_only: bool, target: []u8, depth: []u
     const lane_min_y: i32 = @intCast(@as(usize, height) * lane_index / lane_count);
     const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / lane_count);
     var pixels_written: usize = 0;
+    if (prepared.count == 2 and prepared.opaque_quad.valid and prepared.spans_valid) if (prepared.opaque_quad.flat_color) |color| {
+        if (rasterPreparedFlatColorQuad(!color_only, color_words, depth_words, width, height, lane_index, lane_count, prepared.opaque_quad.min_y, prepared.opaque_quad.max_y, preparedSpan(prepared, 0), preparedSpan(prepared, 1), prepared.opaque_quad.depth_bits, color)) |pixels| return pixels;
+    };
     if (comptime color_only) if (prepared.count == 2 and prepared.opaque_quad.valid and prepared.spans_valid) {
         // Keep the two triangle spans separate. Their affine UV planes are
         // mathematically identical, but evaluating each triangle's own
@@ -2058,10 +2064,22 @@ fn drawPreparedBatchFastImpl(comptime color_only: bool, target: []u8, depth: []u
         const second = rasterOpaqueTexturedTriangle(true, color_words, depth_words, width, height, lane_index, &prepared.triangles[1].batch_raster, preparedSpan(prepared, 1), prepared.opaque_quad.prelit);
         return first + second;
     };
-    // Keep prepared triangles by reference: each value carries up to 1 KiB of
-    // prelit texture storage, and copying it once per raster submission only
-    // adds cache traffic before the actual pixels are touched.
-    for (prepared.triangles[0..prepared.count], 0..) |*triangle, triangle_index| {
+    var triangle_index: usize = 0;
+    while (triangle_index < prepared.count) : (triangle_index += 1) {
+        const triangle = &prepared.triangles[triangle_index];
+        if (tile_min == null and prepared.spans_valid and triangle_index + 1 < prepared.count) {
+            const second = &prepared.triangles[triangle_index + 1];
+            if (triangle.valid and second.valid and triangle.batch_raster.ready and second.batch_raster.ready and
+                triangle.flat_color != null and triangle.flat_color == second.flat_color and
+                triangle.batch_raster.flat_depth_bits == second.batch_raster.flat_depth_bits)
+            {
+                if (rasterPreparedFlatColorQuad(!color_only, color_words, depth_words, width, height, lane_index, lane_count, @min(triangle.batch_raster.min_y, second.batch_raster.min_y), @max(triangle.batch_raster.max_y, second.batch_raster.max_y), preparedSpan(prepared, triangle_index), preparedSpan(prepared, triangle_index + 1), triangle.batch_raster.flat_depth_bits, triangle.flat_color.?)) |pixels| {
+                    pixels_written += pixels;
+                    triangle_index += 1;
+                    continue;
+                }
+            }
+        }
         if (!triangle.valid or !triangle.batch_raster.ready) continue;
         if (comptime color_only) if (!triangle.has_prelit_texture_16x16 or triangle.batch_raster.v_over_w_dx != 0) return null;
         const raster = &triangle.batch_raster;
@@ -2288,6 +2306,50 @@ inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: [
     return pixels_written;
 }
 
+fn rasterPreparedFlatColorQuad(comptime depth_test: bool, color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, lane_count: usize, min_y: i32, max_y: i32, first_spans: *const [flat_span_rows]FlatSpan, second_spans: *const [flat_span_rows]FlatSpan, depth_bits: u32, color: u32) ?usize {
+    const lane_min_y: i32 = @intCast(@as(usize, height) * lane_index / lane_count);
+    const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / lane_count);
+    const first_y = @max(min_y, lane_min_y);
+    const last_y = @min(max_y, lane_max_y);
+    if (first_y >= last_y) return 0;
+
+    // The fast writer is valid only when the two triangle spans form one
+    // contiguous row. Validate the lane before writing so an unusual quad
+    // cannot leave a partially rendered frame before falling back.
+    var y = first_y;
+    while (y < last_y) : (y += 1) {
+        const first = first_spans[@intCast(y)];
+        const second = second_spans[@intCast(y)];
+        if (first.last > first.first and second.last > second.first and (first.last < second.first or second.last < first.first)) {
+            return null;
+        }
+    }
+
+    var pixels_written: usize = 0;
+    y = first_y;
+    while (y < last_y) : (y += 1) {
+        const first = first_spans[@intCast(y)];
+        const second = second_spans[@intCast(y)];
+        const first_valid = first.last > first.first;
+        const second_valid = second.last > second.first;
+        if (!first_valid and !second_valid) continue;
+        var row_first: usize = 0;
+        var row_last: usize = 0;
+        if (!first_valid) {
+            row_first = second.first;
+            row_last = second.last;
+        } else if (!second_valid) {
+            row_first = first.first;
+            row_last = first.last;
+        } else {
+            row_first = @min(first.first, second.first);
+            row_last = @max(first.last, second.last);
+        }
+        pixels_written += writeFlatColorSpanAtRow(depth_test, color_words, depth_words, @as(usize, @intCast(y)) * @as(usize, width), row_first, row_last, depth_bits, color);
+    }
+    return pixels_written;
+}
+
 inline fn rasterPreparedFlatColor(comptime depth_test: bool, color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, lane_count: usize, raster: *const BatchRasterTriangle, spans: *const [flat_span_rows]FlatSpan, depth_bits: u32, color: u32) usize {
     const lane_min_y: i32 = @intCast(@as(usize, height) * lane_index / lane_count);
     const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / lane_count);
@@ -2336,10 +2398,9 @@ fn rasterFlatSpanTriangleTexture4x4(color_words: []align(4) u32, depth_words: []
         var stepped_u_over_w = b0 * u_over_w0 + b1 * u_over_w1 + b2 * u_over_w2;
         var stepped_v_over_w = b0 * v_over_w0 + b1 * v_over_w1 + b2 * v_over_w2;
         var x = first;
-        // Small material spans rarely cross enough texels to amortize the
-        // transition estimator's divisions and look-ahead samples. Walk these
-        // spans directly while retaining the exact same affine stepping and
-        // depth-test path as a one-pixel run.
+        // Small materialized faces are common in the scene workload. For a
+        // short span, transition estimation costs more than the texels it
+        // can merge, so walk the covered pixels directly.
         if (last - first <= 32) {
             const row_offset = @as(usize, @intCast(y)) * @as(usize, width);
             while (x + 4 <= last) : (x += 4) {
@@ -2355,11 +2416,13 @@ fn rasterFlatSpanTriangleTexture4x4(color_words: []align(4) u32, depth_words: []
                     depth_words[pixel_index..][0..4].* = @as(@Vector(4, u32), @splat(flat_depth_bits));
                     color_words[pixel_index..][0..4].* = colors;
                     pixels_written += 4;
-                } else inline for (0..4) |lane| if (passes[lane]) {
-                    depth_words[pixel_index + lane] = flat_depth_bits;
-                    color_words[pixel_index + lane] = colors[lane];
-                    pixels_written += 1;
-                };
+                } else {
+                    inline for (0..4) |lane| if (passes[lane]) {
+                        depth_words[pixel_index + lane] = flat_depth_bits;
+                        color_words[pixel_index + lane] = colors[lane];
+                        pixels_written += 1;
+                    };
+                }
                 stepped_u_over_w += u_over_w_dx * 4.0;
                 stepped_v_over_w += v_over_w_dx * 4.0;
             }
