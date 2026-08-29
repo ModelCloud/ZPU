@@ -507,6 +507,38 @@ fn transformedIdentityVertex(uniform: []const u8, index: u32, vertex_count: u32,
     const z = readFloat(uniform, position_base + 8);
     const clip_w = readFloat(uniform, position_base + 12);
     if (!std.math.isFinite(clip_w) or @abs(clip_w) < 0.000001) return null;
+    if (clip_w == 1.0) {
+        return .{
+            .screen = .{ viewport.x + (x * 0.5 + 0.5) * viewport.width, viewport.y + (y * 0.5 + 0.5) * viewport.height, viewport.min_depth + z * (viewport.max_depth - viewport.min_depth) },
+            .clip_w = clip_w,
+            .uv = .{ readFloat(uniform, attr_base), readFloat(uniform, attr_base + 4) },
+        };
+    }
+    const inverse_w = 1.0 / clip_w;
+    return .{
+        .screen = .{ viewport.x + (x * inverse_w * 0.5 + 0.5) * viewport.width, viewport.y + (y * inverse_w * 0.5 + 0.5) * viewport.height, viewport.min_depth + z * inverse_w * (viewport.max_depth - viewport.min_depth) },
+        .clip_w = clip_w,
+        .uv = .{ readFloat(uniform, attr_base), readFloat(uniform, attr_base + 4) },
+    };
+}
+
+// Fixed-shape non-indexed Vulkan batches have already passed the uniform-size
+// validation in prepareDraw. Avoid repeating source-index and vertex-count
+// checks for their compile-time-known vertex records while preserving the
+// exact clip-space divide and finite-value behavior.
+inline fn transformedIdentityVertexUnchecked(uniform: []const u8, index: u32, vertex_count: u32, viewport: Viewport) ?Vertex {
+    const position_base = 64 + @as(usize, index) * 16;
+    const attr_base = 64 + @as(usize, vertex_count) * 16 + @as(usize, index) * 16;
+    const x = readFloat(uniform, position_base);
+    const y = readFloat(uniform, position_base + 4);
+    const z = readFloat(uniform, position_base + 8);
+    const clip_w = readFloat(uniform, position_base + 12);
+    if (!std.math.isFinite(clip_w) or @abs(clip_w) < 0.000001) return null;
+    if (clip_w == 1.0) return .{
+        .screen = .{ viewport.x + (x * 0.5 + 0.5) * viewport.width, viewport.y + (y * 0.5 + 0.5) * viewport.height, viewport.min_depth + z * (viewport.max_depth - viewport.min_depth) },
+        .clip_w = clip_w,
+        .uv = .{ readFloat(uniform, attr_base), readFloat(uniform, attr_base + 4) },
+    };
     const inverse_w = 1.0 / clip_w;
     return .{
         .screen = .{ viewport.x + (x * inverse_w * 0.5 + 0.5) * viewport.width, viewport.y + (y * inverse_w * 0.5 + 0.5) * viewport.height, viewport.min_depth + z * inverse_w * (viewport.max_depth - viewport.min_depth) },
@@ -725,7 +757,7 @@ fn prepareDraw(uniform: []const u8, vertex_count: u32, base_vertex: u32, viewpor
                         else => 5,
                     };
                     face_vertices[face * 4 + corner] = (if (identity_transform)
-                        transformedIdentityVertex(uniform, source_index, source_vertex_count, viewport, null)
+                        transformedIdentityVertexUnchecked(uniform, source_index, source_vertex_count, viewport)
                     else
                         transformedVertex(uniform, source_index, source_vertex_count, viewport, null)) orelse {
                         all_valid = false;
@@ -753,10 +785,10 @@ fn prepareDraw(uniform: []const u8, vertex_count: u32, base_vertex: u32, viewpor
         std.mem.eql(u8, uniform[64 + 3 * 16 ..][0..16], uniform[64..][0..16]) and
         std.mem.eql(u8, uniform[64 + 4 * 16 ..][0..16], uniform[64 + 2 * 16 ..][0..16]))
     {
-        const maybe_v0 = if (identity_transform) transformedIdentityVertex(uniform, 0, source_vertex_count, viewport, null) else transformedVertex(uniform, 0, source_vertex_count, viewport, null);
-        const maybe_v1 = if (identity_transform) transformedIdentityVertex(uniform, 1, source_vertex_count, viewport, null) else transformedVertex(uniform, 1, source_vertex_count, viewport, null);
-        const maybe_v2 = if (identity_transform) transformedIdentityVertex(uniform, 2, source_vertex_count, viewport, null) else transformedVertex(uniform, 2, source_vertex_count, viewport, null);
-        const maybe_v3 = if (identity_transform) transformedIdentityVertex(uniform, 5, source_vertex_count, viewport, null) else transformedVertex(uniform, 5, source_vertex_count, viewport, null);
+        const maybe_v0 = if (identity_transform) transformedIdentityVertexUnchecked(uniform, 0, source_vertex_count, viewport) else transformedVertex(uniform, 0, source_vertex_count, viewport, null);
+        const maybe_v1 = if (identity_transform) transformedIdentityVertexUnchecked(uniform, 1, source_vertex_count, viewport) else transformedVertex(uniform, 1, source_vertex_count, viewport, null);
+        const maybe_v2 = if (identity_transform) transformedIdentityVertexUnchecked(uniform, 2, source_vertex_count, viewport) else transformedVertex(uniform, 2, source_vertex_count, viewport, null);
+        const maybe_v3 = if (identity_transform) transformedIdentityVertexUnchecked(uniform, 5, source_vertex_count, viewport) else transformedVertex(uniform, 5, source_vertex_count, viewport, null);
         if (maybe_v0) |v0| {
             if (maybe_v1) |v1| {
                 if (maybe_v2) |v2| {
@@ -975,13 +1007,17 @@ fn exactPrelitTexture4(texture: []const u8, light_key: u32) [16]u32 {
     const light: f32 = @bitCast(light_key);
     var colors: [16]u32 = undefined;
     for (0..16) |texel| {
-        const offset = texel * 4;
-        colors[texel] = @as(u32, exactLitByte(texture[offset + 2], light)) |
-            @as(u32, exactLitByte(texture[offset + 1], light)) << 8 |
-            @as(u32, exactLitByte(texture[offset], light)) << 16 |
-            @as(u32, texture[offset + 3]) << 24;
+        colors[texel] = exactPrelitColor4(texture, light, texel);
     }
     return colors;
+}
+
+inline fn exactPrelitColor4(texture: []const u8, light: f32, texel: usize) u32 {
+    const offset = texel * 4;
+    return @as(u32, exactLitByte(texture[offset + 2], light)) |
+        @as(u32, exactLitByte(texture[offset + 1], light)) << 8 |
+        @as(u32, exactLitByte(texture[offset], light)) << 16 |
+        @as(u32, texture[offset + 3]) << 24;
 }
 
 fn cachedPrelitTexture4(texture: []const u8, light_key: u32, texture_revision: u64) ?*const [16]u32 {
@@ -1062,6 +1098,15 @@ fn fillPrelitTexture(color: u32) [16]u32 {
 }
 
 fn prepareLitTextures(prepared: *PreparedDraw, texture: []const u8, texture_width: u32, texture_height: u32, texture_revision: u64) void {
+    // Materialized scene commands commonly contain adjacent triangles that
+    // sample the same texel. Reuse that exact conversion without changing the
+    // public ABI or the rounded lighting result.
+    var previous_flat_key: u32 = 0;
+    var previous_flat_texel: usize = 0;
+    var previous_flat_color: u32 = 0;
+    var previous_flat_valid = false;
+    var previous_texture4_key: u32 = 0;
+    var previous_texture4: ?*const [16]u32 = null;
     for (prepared.triangles[0..prepared.count]) |*triangle| {
         if (!triangle.valid or !triangle.unit_uv) continue;
         triangle.prelit_texture_ptr = null;
@@ -1080,21 +1125,34 @@ fn prepareLitTextures(prepared: *PreparedDraw, texture: []const u8, texture_widt
             var flat_texel = true;
             for (triangle.vertices) |vertex| flat_texel = flat_texel and unitTextureCoordinate(vertex.uv[0]) == first_u and unitTextureCoordinate(vertex.uv[1]) == first_v;
             if (flat_texel) {
-                const offset = (first_v * 4 + first_u) * 4;
+                const texel = first_v * 4 + first_u;
                 const light: f32 = @bitCast(triangle.light_key);
-                const color = @as(u32, exactLitByte(texture[offset + 2], light)) |
-                    @as(u32, exactLitByte(texture[offset + 1], light)) << 8 |
-                    @as(u32, exactLitByte(texture[offset], light)) << 16 |
-                    @as(u32, texture[offset + 3]) << 24;
+                const color = if (prepared.count >= 8) blk: {
+                    if (cachedPrelitTexture4(texture, triangle.light_key, texture_revision)) |colors| break :blk colors[texel];
+                    break :blk exactPrelitColor4(texture, light, texel);
+                } else if (previous_flat_valid and previous_flat_key == triangle.light_key and previous_flat_texel == texel)
+                    previous_flat_color
+                else blk: {
+                    const computed = exactPrelitColor4(texture, light, texel);
+                    previous_flat_key = triangle.light_key;
+                    previous_flat_texel = texel;
+                    previous_flat_color = computed;
+                    previous_flat_valid = true;
+                    break :blk computed;
+                };
                 triangle.prelit_texture = fillPrelitTexture(color);
                 triangle.has_prelit_texture = true;
                 triangle.flat_color = color;
                 continue;
             }
-            if (cachedPrelitTexture4(texture, triangle.light_key, texture_revision)) |colors| {
+            const cached_colors = if (previous_texture4) |colors| if (previous_texture4_key == triangle.light_key) colors else cachedPrelitTexture4(texture, triangle.light_key, texture_revision) else cachedPrelitTexture4(texture, triangle.light_key, texture_revision);
+            if (cached_colors) |colors| {
                 triangle.prelit_texture_ptr = colors;
+                previous_texture4_key = triangle.light_key;
+                previous_texture4 = colors;
             } else {
                 triangle.prelit_texture = prelitTexture4x4(texture, triangle.lighting);
+                previous_texture4 = null;
             }
             triangle.has_prelit_texture = true;
         } else if (texture_width == 16 and texture_height == 16) {
@@ -1700,6 +1758,8 @@ const BatchQuadSpanCache = struct {
     width: u32 = 0,
     height: u32 = 0,
     spans: [2][flat_span_rows]FlatSpan = [_][flat_span_rows]FlatSpan{[_]FlatSpan{.{}} ** flat_span_rows} ** 2,
+    union_spans_valid: bool = false,
+    union_spans: [flat_span_rows]FlatSpan = [_]FlatSpan{.{}} ** flat_span_rows,
 };
 const ParallelBand = struct { counters: Counters = .{}, pixels_written: usize = 0 };
 const ParallelDraw = struct {
@@ -1912,6 +1972,22 @@ fn rememberBatchSpanCache(cache: *BatchSpanCache, prepared: *const PreparedDraw,
     }
 }
 
+fn rememberBatchQuadSpanCache(cache: *BatchQuadSpanCache, prepared: *const PreparedDraw, width: u32, height: u32) void {
+    cache.* = .{ .valid = true, .width = width, .height = height, .union_spans_valid = true };
+    @memcpy(cache.spans[0..2], prepared.spans[0..2]);
+    for (0..height) |y| {
+        const first = cache.spans[0][y];
+        const second = cache.spans[1][y];
+        if (first.last <= first.first) {
+            cache.union_spans[y] = second;
+        } else if (second.last <= second.first) {
+            cache.union_spans[y] = first;
+        } else {
+            cache.union_spans[y] = .{ .first = @min(first.first, second.first), .last = @max(first.last, second.last) };
+        }
+    }
+}
+
 fn batchGeometryLen(vertex_count: u32) usize {
     return 64 + @as(usize, @min(vertex_count, max_prepared_triangles * 3)) * 16;
 }
@@ -2115,7 +2191,7 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
         output.spans_valid = true;
         output.spans_external = null;
         output.quad_spans_external = &quad_span_cache.?.spans;
-        output.quad_union_spans_external = null;
+        output.quad_union_spans_external = if (quad_span_cache.?.union_spans_valid) &quad_span_cache.?.union_spans else null;
     } else if (geometry_cache_hit and span_cache != null and span_cache.?.valid) {
         output.spans_valid = true;
         output.spans_external = &span_cache.?.spans;
@@ -2130,15 +2206,12 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
         buildPreparedFlatSpans(output, width, height);
         if (span_cache) |cache| rememberBatchSpanCache(cache, output, width, height);
         if (quad_span_cache) |cache| {
-            @memcpy(cache.spans[0..2], output.spans[0..2]);
-            cache.width = width;
-            cache.height = height;
-            cache.valid = true;
+            rememberBatchQuadSpanCache(cache, output, width, height);
         }
         output.spans_valid = true;
         output.spans_external = if (span_cache) |cache| &cache.spans else null;
         output.quad_spans_external = if (quad_span_cache) |cache| &cache.spans else null;
-        output.quad_union_spans_external = if (span_cache) |cache| if (cache.quad_spans_valid) &cache.quad_spans else null else null;
+        output.quad_union_spans_external = if (quad_span_cache) |cache| if (cache.union_spans_valid) &cache.union_spans else null else if (span_cache) |cache| if (cache.quad_spans_valid) &cache.quad_spans else null else null;
     } else {
         // Geometry revisions invalidate the retained screen-space spans, but
         // rebuilding them while the command is already prepared keeps the
@@ -2149,9 +2222,14 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
             rememberBatchSpanCache(cache, output, width, height);
             output.quad_union_spans_external = if (cache.quad_spans_valid) &cache.quad_spans else null;
         };
+        if (quad_span_cache) |cache| {
+            rememberBatchQuadSpanCache(cache, output, width, height);
+            output.quad_spans_external = &cache.spans;
+            output.quad_union_spans_external = &cache.union_spans;
+        }
         output.spans_valid = true;
         output.spans_external = null;
-        output.quad_spans_external = null;
+        if (quad_span_cache == null) output.quad_spans_external = null;
     }
     const lighting_refresh = !geometry_cache_hit or command_cache.lighting_generation != lighting_generation;
     // prepareDraw already assigns the quantized cached table used by 4x4
@@ -2254,6 +2332,7 @@ fn drawPreparedBatchFastImpl(comptime color_only: bool, target: []u8, depth: []u
     const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / lane_count);
     var pixels_written: usize = 0;
     if (prepared.count == 2 and prepared.opaque_quad.valid and prepared.spans_valid) if (prepared.opaque_quad.flat_color) |color| {
+        if (prepared.quad_union_spans_external) |spans| return rasterPreparedFlatSpan(!color_only, color_words, depth_words, width, height, lane_index, lane_count, prepared.opaque_quad.min_y, prepared.opaque_quad.max_y, spans, preparedSpan(prepared, 0), preparedSpan(prepared, 1), prepared.opaque_quad.depth_bits, color);
         if (rasterPreparedFlatColorQuad(!color_only, color_words, depth_words, width, height, lane_index, lane_count, prepared.opaque_quad.min_y, prepared.opaque_quad.max_y, preparedSpan(prepared, 0), preparedSpan(prepared, 1), prepared.opaque_quad.depth_bits, color)) |pixels| return pixels;
     };
     if (comptime color_only) if (prepared.count == 2 and prepared.opaque_quad.valid and prepared.spans_valid) {
@@ -2509,7 +2588,7 @@ inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: [
     return pixels_written;
 }
 
-inline fn rasterPreparedFlatSpan(comptime depth_test: bool, color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, lane_count: usize, min_y: i32, max_y: i32, spans: *const [flat_span_rows]FlatSpan, depth_bits: u32, color: u32) usize {
+inline fn rasterPreparedFlatSpan(comptime depth_test: bool, color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, lane_count: usize, min_y: i32, max_y: i32, spans: *const [flat_span_rows]FlatSpan, first_spans: *const [flat_span_rows]FlatSpan, second_spans: *const [flat_span_rows]FlatSpan, depth_bits: u32, color: u32) usize {
     const lane_min_y: i32 = @intCast(@as(usize, height) * lane_index / lane_count);
     const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / lane_count);
     const first_y = @max(min_y, lane_min_y);
@@ -2518,8 +2597,28 @@ inline fn rasterPreparedFlatSpan(comptime depth_test: bool, color_words: []align
     var pixels_written: usize = 0;
     var y = first_y;
     while (y < last_y) : (y += 1) {
-        const span = spans[@intCast(y)];
-        if (span.last > span.first) pixels_written += writeFlatColorSpanAtRow(depth_test, color_words, depth_words, @as(usize, @intCast(y)) * @as(usize, width), span.first, span.last, depth_bits, color);
+        const row: usize = @intCast(y);
+        const span = spans[row];
+        if (span.last <= span.first) continue;
+        const row_offset = @as(usize, @intCast(y)) * @as(usize, width);
+        pixels_written += writeFlatColorSpanAtRow(depth_test, color_words, depth_words, row_offset, span.first, span.last, depth_bits, color);
+        // The reference path visits both triangles, so their shared diagonal
+        // contributes twice to the observable write count. The union span
+        // stores each pixel once; count the overlap after the fused write.
+        const first = first_spans[row];
+        const second = second_spans[row];
+        if (first.last <= first.first or second.last <= second.first) continue;
+        const overlap_first = @max(first.first, second.first);
+        const overlap_last = @min(first.last, second.last);
+        if (overlap_first >= overlap_last) continue;
+        if (comptime !depth_test) {
+            pixels_written += overlap_last - overlap_first;
+        } else {
+            var overlap_x = overlap_first;
+            while (overlap_x < overlap_last) : (overlap_x += 1) {
+                if (depth_words[row_offset + overlap_x] == depth_bits) pixels_written += 1;
+            }
+        }
     }
     return pixels_written;
 }
