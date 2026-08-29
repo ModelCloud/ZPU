@@ -113,6 +113,17 @@ triangle path:
   argument tables; Metal 4 compute dispatches bridge process-local argument
   table resource IDs to ZPU-owned resources and execute through the same
   deferred CPU kernels
+- CPU-owned Metal 4 compiler metadata for the registered ZPU kernel set:
+  MTL4LibraryFunctionDescriptor objects resolve through ZPU libraries,
+  compiler-created compute pipeline descriptors instantiate the existing ZPU
+  CPU kernels, binary functions expose deterministic name/type metadata, and
+  asynchronous compiler tasks complete synchronously after CPU construction;
+  render/tile/mesh, dynamic-library, machine-learning, and arbitrary-MSL
+  compiler requests remain fail-closed
+- CPU-owned Metal 4 pipeline-data serializers record those registered compute
+  names and emit deterministic ZPU metadata scripts or the existing ZPU
+  binary-archive format; these outputs are not Apple metal-tt scripts or
+  native GPU binaries
 - supported Apple-adapter render state and draw selectors propagate ZPU
   validation failures to `MTLCommandBufferStatusError`; invalid state is not
   silently reported as successful CPU work
@@ -163,7 +174,8 @@ triangle path:
   ZPU kernels, including the array and 3D kernels; it does not load or compile an Apple
   `.metallib`
 - CPU binary archives persist and reload deterministic metadata for registered
-  ZPU compute/render functions; they never serialize Apple GPU binaries
+  ZPU compute/render functions; the Metal 4 archive view can reopen registered
+  compute metadata; neither archive API serializes Apple GPU binaries
 - CPU resource-state encoders preserve Metal encoder boundaries and fence
   ordering. Resource/cache transitions are ordered no-ops over ZPU's unified
   CPU memory, while sparse texture mapping requests fail closed
@@ -211,7 +223,8 @@ coverage, color interpolation, BGRA channel order, object lifetimes, depth
 ordering, pipeline/depth/sampler state, blending, texture views, indirect
 draws, render and compute indirect command buffers, the CPU compute path
   against a native Metal oracle, the Metal 4 CPU argument-table compute and
-  ordinary render paths, deferred indirect-thread dispatch, and deferred
+  ordinary render paths, compiler-created Metal 4 compute and archive
+  metadata paths, deferred indirect-thread dispatch, and deferred
   indirect array z filtering, explicit 3D texture plane/stride copies, and
   legacy/Metal 4 3D mipmap generation, 2D float mipmap raw-byte exactness, and
   legacy/Metal 4 visibility result byte exactness, and CPU depth-bounds output
