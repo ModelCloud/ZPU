@@ -268,6 +268,10 @@ triangle path:
 - CPU indirect mesh command recording, copy, and reset state; mesh command
   descriptors and thread dimensions are retained in the CPU-owned ICB and
   unsupported mesh shader execution fails closed at replay
+- CPU indirect patch and indexed-patch command recording, copy, and reset
+  state; patch buffers, tessellation-factor buffers, offsets, strides, and
+  draw ranges are retained in the CPU-owned ICB, while CPU tessellation
+  execution fails closed at replay
 - Metal 4 buffer/texture/tensor copies, buffer-fill, indirect-command reset/copy,
   and CPU/GPU access optimization commands append or apply CPU-owned ZPU work;
   CPU-owned tensors also provide contiguous and strided byte-addressable slice
@@ -372,7 +376,7 @@ reference: <https://developer.apple.com/documentation/metal>.
 The current checked-in implementation is intentionally not 100% of the Apple
 Metal ABI. The remaining framework surface includes additional compute and
 Metal 4 encoders, resource and pipeline descriptors beyond the fixed-function state
-implemented here, Metal 4 tile/mesh render and remaining copy/optimization families, ICB patch commands and mesh-shader execution, other
+implemented here, Metal 4 tile/mesh render and remaining copy/optimization families, ICB mesh/tessellation-shader execution, other
 synchronization families, ray-tracing execution, unsupported 3D sparse-texture tail
 packing, machine learning/tensor execution, and arbitrary shader compilation. Function-table storage is
 implemented, but it does not imply ray-tracing or arbitrary function-pointer

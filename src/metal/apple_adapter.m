@@ -32,6 +32,10 @@ static const MTLIndirectCommandType zpu_indirect_command_type_draw_mesh_threadgr
     (MTLIndirectCommandType)(1u << 7);
 static const MTLIndirectCommandType zpu_indirect_command_type_draw_mesh_threads =
     (MTLIndirectCommandType)(1u << 8);
+static const MTLIndirectCommandType zpu_indirect_command_type_draw_patches =
+    (MTLIndirectCommandType)(1u << 2);
+static const MTLIndirectCommandType zpu_indirect_command_type_draw_indexed_patches =
+    (MTLIndirectCommandType)(1u << 3);
 
 @class ZPUDevice;
 @class ZPUBuffer;
@@ -316,6 +320,20 @@ API_AVAILABLE(macos(15.0), ios(18.0))
     BOOL _hasFrontFacingWinding;
     BOOL _hasTriangleFillMode;
     BOOL _hasVertexBuffer;
+    BOOL _hasPatches;
+    NSUInteger _patchControlPoints;
+    NSUInteger _patchStart;
+    NSUInteger _patchCount;
+    NSUInteger _patchInstanceCount;
+    NSUInteger _patchBaseInstance;
+    ZPUBuffer *_patchIndexBuffer;
+    NSUInteger _patchIndexBufferOffset;
+    ZPUBuffer *_tessellationFactorBuffer;
+    NSUInteger _tessellationFactorBufferOffset;
+    NSUInteger _tessellationFactorBufferInstanceStride;
+    BOOL _hasIndexedPatches;
+    ZPUBuffer *_controlPointIndexBuffer;
+    NSUInteger _controlPointIndexBufferOffset;
     BOOL _hasMeshThreadgroups;
     MTLSize _meshThreadgroupsPerGrid;
     MTLSize _meshThreadsPerObjectThreadgroup;
@@ -6344,7 +6362,8 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     completionHandler(state, reflection, error);
 }
 - (id<MTLIndirectCommandBuffer>)newIndirectCommandBufferWithDescriptor:(MTLIndirectCommandBufferDescriptor *)descriptor maxCommandCount:(NSUInteger)maxCount options:(MTLResourceOptions)options API_AVAILABLE(macos(10.14), ios(12.0)) {
-    const MTLIndirectCommandType renderTypes = MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed;
+    const MTLIndirectCommandType renderTypes = MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed |
+        zpu_indirect_command_type_draw_patches | zpu_indirect_command_type_draw_indexed_patches;
     const MTLIndirectCommandType meshTypes = zpu_indirect_command_type_draw_mesh_threadgroups |
         zpu_indirect_command_type_draw_mesh_threads;
     const MTLIndirectCommandType computeTypes = MTLIndirectCommandTypeConcurrentDispatch |
@@ -12279,7 +12298,8 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         sourceRange.length > source->_maxCommandCount - sourceRange.location ||
         destinationIndex > _maxCommandCount || sourceRange.length > _maxCommandCount - destinationIndex) return NO;
     NSArray *commands = [source->_commands subarrayWithRange:sourceRange];
-    const MTLIndirectCommandType renderTypes = MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed;
+    const MTLIndirectCommandType renderTypes = MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed |
+        zpu_indirect_command_type_draw_patches | zpu_indirect_command_type_draw_indexed_patches;
     const MTLIndirectCommandType meshTypes = zpu_indirect_command_type_draw_mesh_threadgroups |
         zpu_indirect_command_type_draw_mesh_threads;
     const MTLIndirectCommandType computeTypes = MTLIndirectCommandTypeConcurrentDispatch |
@@ -12293,6 +12313,8 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
             if ((_commandTypes & (renderTypes | meshTypes)) == 0 ||
                 (renderCommand->_hasDraw && (_commandTypes & MTLIndirectCommandTypeDraw) == 0) ||
                 (renderCommand->_hasIndexedDraw && (_commandTypes & MTLIndirectCommandTypeDrawIndexed) == 0) ||
+                (renderCommand->_hasPatches && (_commandTypes & zpu_indirect_command_type_draw_patches) == 0) ||
+                (renderCommand->_hasIndexedPatches && (_commandTypes & zpu_indirect_command_type_draw_indexed_patches) == 0) ||
                 (renderCommand->_hasMeshThreadgroups &&
                  (_commandTypes & zpu_indirect_command_type_draw_mesh_threadgroups) == 0) ||
                 (renderCommand->_hasMeshThreads &&
@@ -12331,6 +12353,20 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
             copy->_hasFrontFacingWinding = renderCommand->_hasFrontFacingWinding;
             copy->_hasTriangleFillMode = renderCommand->_hasTriangleFillMode;
             copy->_hasVertexBuffer = renderCommand->_hasVertexBuffer;
+            copy->_hasPatches = renderCommand->_hasPatches;
+            copy->_patchControlPoints = renderCommand->_patchControlPoints;
+            copy->_patchStart = renderCommand->_patchStart;
+            copy->_patchCount = renderCommand->_patchCount;
+            copy->_patchInstanceCount = renderCommand->_patchInstanceCount;
+            copy->_patchBaseInstance = renderCommand->_patchBaseInstance;
+            copy->_patchIndexBuffer = renderCommand->_patchIndexBuffer;
+            copy->_patchIndexBufferOffset = renderCommand->_patchIndexBufferOffset;
+            copy->_tessellationFactorBuffer = renderCommand->_tessellationFactorBuffer;
+            copy->_tessellationFactorBufferOffset = renderCommand->_tessellationFactorBufferOffset;
+            copy->_tessellationFactorBufferInstanceStride = renderCommand->_tessellationFactorBufferInstanceStride;
+            copy->_hasIndexedPatches = renderCommand->_hasIndexedPatches;
+            copy->_controlPointIndexBuffer = renderCommand->_controlPointIndexBuffer;
+            copy->_controlPointIndexBufferOffset = renderCommand->_controlPointIndexBufferOffset;
             copy->_hasMeshThreadgroups = renderCommand->_hasMeshThreadgroups;
             copy->_meshThreadgroupsPerGrid = renderCommand->_meshThreadgroupsPerGrid;
             copy->_meshThreadsPerObjectThreadgroup = renderCommand->_meshThreadsPerObjectThreadgroup;
@@ -12390,6 +12426,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 }
 - (id<MTLIndirectRenderCommand>)indirectRenderCommandAtIndex:(NSUInteger)commandIndex {
     const MTLIndirectCommandType renderTypes = MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed |
+        zpu_indirect_command_type_draw_patches | zpu_indirect_command_type_draw_indexed_patches |
         zpu_indirect_command_type_draw_mesh_threadgroups | zpu_indirect_command_type_draw_mesh_threads;
     if (commandIndex >= _maxCommandCount || (_commandTypes & renderTypes) == 0) return nil;
     id command = _commands[commandIndex];
@@ -12456,6 +12493,20 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     _hasFrontFacingWinding = NO;
     _hasTriangleFillMode = NO;
     _hasVertexBuffer = NO;
+    _hasPatches = NO;
+    _patchControlPoints = 0;
+    _patchStart = 0;
+    _patchCount = 0;
+    _patchInstanceCount = 0;
+    _patchBaseInstance = 0;
+    _patchIndexBuffer = nil;
+    _patchIndexBufferOffset = 0;
+    _tessellationFactorBuffer = nil;
+    _tessellationFactorBufferOffset = 0;
+    _tessellationFactorBufferInstanceStride = 0;
+    _hasIndexedPatches = NO;
+    _controlPointIndexBuffer = nil;
+    _controlPointIndexBufferOffset = 0;
     _hasMeshThreadgroups = NO;
     _meshThreadgroupsPerGrid = MTLSizeMake(0, 0, 0);
     _meshThreadsPerObjectThreadgroup = MTLSizeMake(0, 0, 0);
@@ -12576,32 +12627,66 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     _meshBufferOffsets[@(index)] = @(buffer == nil ? 0 : offset);
 }
 - (void)drawPatches:(NSUInteger)numberOfPatchControlPoints patchStart:(NSUInteger)patchStart patchCount:(NSUInteger)patchCount patchIndexBuffer:(id<MTLBuffer>)patchIndexBuffer patchIndexBufferOffset:(NSUInteger)patchIndexBufferOffset instanceCount:(NSUInteger)instanceCount baseInstance:(NSUInteger)baseInstance tessellationFactorBuffer:(id<MTLBuffer>)buffer tessellationFactorBufferOffset:(NSUInteger)offset tessellationFactorBufferInstanceStride:(NSUInteger)instanceStride API_AVAILABLE(tvos(14.5)) {
-    (void)numberOfPatchControlPoints;
-    (void)patchStart;
-    (void)patchCount;
-    (void)patchIndexBuffer;
-    (void)patchIndexBufferOffset;
-    (void)instanceCount;
-    (void)baseInstance;
-    (void)buffer;
-    (void)offset;
-    (void)instanceStride;
-    _unsupportedCommand = YES;
+    ZPUBuffer *patchIndex = (ZPUBuffer *)patchIndexBuffer;
+    ZPUBuffer *factor = (ZPUBuffer *)buffer;
+    if ((_owner->_commandTypes & zpu_indirect_command_type_draw_patches) == 0 ||
+        numberOfPatchControlPoints == 0 || numberOfPatchControlPoints > 32 ||
+        (patchIndexBuffer != nil && (![patchIndex isKindOfClass:[ZPUBuffer class]] ||
+                                     patchIndex->_owner != _owner->_owner ||
+                                     patchIndexBufferOffset > patchIndex.length)) ||
+        ![factor isKindOfClass:[ZPUBuffer class]] || factor->_owner != _owner->_owner ||
+        offset > factor.length) {
+        _unsupportedCommand = YES;
+        return;
+    }
+    _patchControlPoints = numberOfPatchControlPoints;
+    _patchStart = patchStart;
+    _patchCount = patchCount;
+    _patchIndexBuffer = patchIndex;
+    _patchIndexBufferOffset = patchIndexBuffer == nil ? 0 : patchIndexBufferOffset;
+    _patchInstanceCount = instanceCount;
+    _patchBaseInstance = baseInstance;
+    _tessellationFactorBuffer = factor;
+    _tessellationFactorBufferOffset = offset;
+    _tessellationFactorBufferInstanceStride = instanceStride;
+    _hasPatches = YES;
+    _hasIndexedPatches = NO;
+    _hasDraw = NO;
+    _hasIndexedDraw = NO;
 }
 - (void)drawIndexedPatches:(NSUInteger)numberOfPatchControlPoints patchStart:(NSUInteger)patchStart patchCount:(NSUInteger)patchCount patchIndexBuffer:(id<MTLBuffer>)patchIndexBuffer patchIndexBufferOffset:(NSUInteger)patchIndexBufferOffset controlPointIndexBuffer:(id<MTLBuffer>)controlPointIndexBuffer controlPointIndexBufferOffset:(NSUInteger)controlPointIndexBufferOffset instanceCount:(NSUInteger)instanceCount baseInstance:(NSUInteger)baseInstance tessellationFactorBuffer:(id<MTLBuffer>)buffer tessellationFactorBufferOffset:(NSUInteger)offset tessellationFactorBufferInstanceStride:(NSUInteger)instanceStride API_AVAILABLE(tvos(14.5)) {
-    (void)numberOfPatchControlPoints;
-    (void)patchStart;
-    (void)patchCount;
-    (void)patchIndexBuffer;
-    (void)patchIndexBufferOffset;
-    (void)controlPointIndexBuffer;
-    (void)controlPointIndexBufferOffset;
-    (void)instanceCount;
-    (void)baseInstance;
-    (void)buffer;
-    (void)offset;
-    (void)instanceStride;
-    _unsupportedCommand = YES;
+    ZPUBuffer *patchIndex = (ZPUBuffer *)patchIndexBuffer;
+    ZPUBuffer *controlPointIndex = (ZPUBuffer *)controlPointIndexBuffer;
+    ZPUBuffer *factor = (ZPUBuffer *)buffer;
+    if ((_owner->_commandTypes & zpu_indirect_command_type_draw_indexed_patches) == 0 ||
+        numberOfPatchControlPoints == 0 || numberOfPatchControlPoints > 32 ||
+        (patchIndexBuffer != nil && (![patchIndex isKindOfClass:[ZPUBuffer class]] ||
+                                     patchIndex->_owner != _owner->_owner ||
+                                     patchIndexBufferOffset > patchIndex.length)) ||
+        ![controlPointIndex isKindOfClass:[ZPUBuffer class]] ||
+        controlPointIndex->_owner != _owner->_owner ||
+        controlPointIndexBufferOffset > controlPointIndex.length ||
+        ![factor isKindOfClass:[ZPUBuffer class]] || factor->_owner != _owner->_owner ||
+        offset > factor.length) {
+        _unsupportedCommand = YES;
+        return;
+    }
+    _patchControlPoints = numberOfPatchControlPoints;
+    _patchStart = patchStart;
+    _patchCount = patchCount;
+    _patchIndexBuffer = patchIndex;
+    _patchIndexBufferOffset = patchIndexBuffer == nil ? 0 : patchIndexBufferOffset;
+    _controlPointIndexBuffer = controlPointIndex;
+    _controlPointIndexBufferOffset = controlPointIndexBufferOffset;
+    _patchInstanceCount = instanceCount;
+    _patchBaseInstance = baseInstance;
+    _tessellationFactorBuffer = factor;
+    _tessellationFactorBufferOffset = offset;
+    _tessellationFactorBufferInstanceStride = instanceStride;
+    _hasPatches = NO;
+    _hasIndexedPatches = YES;
+    _hasDraw = NO;
+    _hasIndexedDraw = NO;
 }
 - (void)drawMeshThreadgroups:(MTLSize)threadgroupsPerGrid threadsPerObjectThreadgroup:(MTLSize)threadsPerObjectThreadgroup threadsPerMeshThreadgroup:(MTLSize)threadsPerMeshThreadgroup API_AVAILABLE(macos(14.0), ios(17.0), tvos(18.1), visionos(2.1)) {
     if ((_owner->_commandTypes & zpu_indirect_command_type_draw_mesh_threadgroups) == 0 ||
@@ -12685,10 +12770,11 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     }
     /* A reset or never-recorded ICB slot is a legal no-op, even when the
      * descriptor does not inherit pipeline state. */
-    if (_hasMeshThreadgroups || _hasMeshThreads) {
-        /* The CPU adapter records mesh geometry commands so ICB ownership,
-         * reset, and copy semantics remain observable. It cannot execute an
-         * arbitrary object/mesh shader without a CPU shader interpreter. */
+    if (_hasPatches || _hasIndexedPatches || _hasMeshThreadgroups || _hasMeshThreads) {
+        /* The CPU adapter records patch/mesh geometry commands so ICB
+         * ownership, reset, and copy semantics remain observable. It cannot
+         * execute tessellation or arbitrary object/mesh shaders without a CPU
+         * shader interpreter. */
         [encoder->_owner markError];
         return;
     }

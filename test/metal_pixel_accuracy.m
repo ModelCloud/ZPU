@@ -9203,6 +9203,84 @@ int main(void) {
             return 130;
         }
 
+        /* Patch commands have no CPU tessellation executor yet, but their
+         * indirect recording contract is still representable. Preserve all
+         * CPU-owned buffers and scalar arguments through ICB copy/reset, then
+         * fail closed only when replay would require tessellation. */
+        const MTLIndirectCommandType patch_command_types =
+            (MTLIndirectCommandType)((1u << 2) | (1u << 3));
+        MTLIndirectCommandBufferDescriptor *patch_icb_descriptor = [MTLIndirectCommandBufferDescriptor new];
+        patch_icb_descriptor.commandTypes = patch_command_types;
+        id<MTLIndirectCommandBuffer> adapter_patch_icb =
+            [adapter_device newIndirectCommandBufferWithDescriptor:patch_icb_descriptor
+                                                    maxCommandCount:2
+                                                            options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_patch_factor_buffer =
+            [adapter_device newBufferWithLength:256 options:MTLResourceStorageModeShared];
+        id<MTLIndirectRenderCommand> adapter_patch_command =
+            [adapter_patch_icb indirectRenderCommandAtIndex:0];
+        id<MTLIndirectRenderCommand> adapter_indexed_patch_command =
+            [adapter_patch_icb indirectRenderCommandAtIndex:1];
+        [adapter_patch_command drawPatches:4
+                                patchStart:3
+                                patchCount:5
+                          patchIndexBuffer:nil
+                    patchIndexBufferOffset:0
+                               instanceCount:2
+                                baseInstance:1
+                     tessellationFactorBuffer:adapter_patch_factor_buffer
+                 tessellationFactorBufferOffset:16
+          tessellationFactorBufferInstanceStride:32];
+        [adapter_indexed_patch_command drawIndexedPatches:4
+                                               patchStart:2
+                                               patchCount:6
+                                         patchIndexBuffer:adapter_vertex_buffer
+                                   patchIndexBufferOffset:4
+                                  controlPointIndexBuffer:adapter_vertex_buffer
+                            controlPointIndexBufferOffset:8
+                                              instanceCount:2
+                                               baseInstance:1
+                                    tessellationFactorBuffer:adapter_patch_factor_buffer
+                                tessellationFactorBufferOffset:32
+                         tessellationFactorBufferInstanceStride:32];
+        id<MTLIndirectCommandBuffer> adapter_patch_copy_icb =
+            [adapter_device newIndirectCommandBufferWithDescriptor:patch_icb_descriptor
+                                                    maxCommandCount:2
+                                                            options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> adapter_patch_copy_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_patch_copy_encoder =
+            [adapter_patch_copy_command_buffer blitCommandEncoder];
+        [adapter_patch_copy_encoder copyIndirectCommandBuffer:adapter_patch_icb
+                                                  sourceRange:NSMakeRange(0, 2)
+                                                 destination:adapter_patch_copy_icb
+                                            destinationIndex:0];
+        [adapter_patch_copy_encoder endEncoding];
+        [adapter_patch_copy_command_buffer commit];
+        [adapter_patch_copy_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> adapter_patch_execute_command_buffer = [adapter_queue commandBuffer];
+        MTLRenderPassDescriptor *adapter_patch_execute_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_patch_execute_pass.colorAttachments[0].texture = adapter_texture;
+        adapter_patch_execute_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_patch_execute_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> adapter_patch_execute_encoder =
+            [adapter_patch_execute_command_buffer renderCommandEncoderWithDescriptor:adapter_patch_execute_pass];
+        [adapter_patch_execute_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_patch_execute_encoder executeCommandsInBuffer:adapter_patch_copy_icb withRange:NSMakeRange(0, 2)];
+        [adapter_patch_execute_encoder endEncoding];
+        [adapter_patch_execute_command_buffer commit];
+        [adapter_patch_execute_command_buffer waitUntilCompleted];
+        BOOL adapter_patch_icb_exact =
+            adapter_patch_icb != nil && adapter_patch_factor_buffer != nil &&
+            adapter_patch_command != nil && adapter_indexed_patch_command != nil &&
+            adapter_patch_copy_icb != nil &&
+            adapter_patch_copy_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_patch_execute_command_buffer.status == MTLCommandBufferStatusError;
+        [adapter_patch_copy_icb resetWithRange:NSMakeRange(0, 2)];
+        if (!adapter_patch_icb_exact) {
+            fprintf(stderr, "metal-pixel: CPU indirect patch command lifecycle failed\n");
+            return 131;
+        }
+
         /* ICB object/mesh bindings have no CPU/ZPU shader-stage executor.
          * They must invalidate the recorded command instead of being silently
          * discarded before replay. */

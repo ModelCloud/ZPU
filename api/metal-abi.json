@@ -600,6 +600,8 @@
     "MTLIndirectCommandBuffer.indirectComputeCommandAtIndex",
     "MTLIndirectRenderCommand.setRenderPipelineState",
     "MTLIndirectRenderCommand.setVertexBuffer",
+    "MTLIndirectRenderCommand.drawPatches",
+    "MTLIndirectRenderCommand.drawIndexedPatches",
     "MTLIndirectRenderCommand.drawPrimitives",
     "MTLIndirectRenderCommand.drawIndexedPrimitives",
     "MTLIndirectComputeCommand.setComputePipelineState",
@@ -742,7 +744,7 @@
     "MTLResourceStateCommandEncoder.endEncoding"
   ],
   "known_unimplemented_surface": [
-    "MTLIndirectCommandBuffer.patch commands and mesh shader execution",
+    "MTLIndirectCommandBuffer mesh and tessellation shader execution",
     "MTL4RenderCommandEncoder tile/mesh execution",
     "MTL4MachineLearningCommandEncoder",
     "MTLAccelerationStructure ray-tracing execution",
