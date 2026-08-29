@@ -1192,6 +1192,36 @@ int main(void) {
             return 73;
         }
 
+        id<MTLTexture> metal4_array_copy = [adapter_device newTextureWithDescriptor:array_descriptor];
+        id<MTL4CommandBuffer> metal4_array_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_array_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> metal4_array_encoder = [metal4_array_command_buffer computeCommandEncoder];
+        [metal4_array_encoder copyFromTexture:adapter_array_texture
+                                  sourceSlice:1
+                                  sourceLevel:1
+                                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                                   sourceSize:MTLSizeMake(2, 2, 1)
+                                 toTexture:metal4_array_copy
+                          destinationSlice:0
+                          destinationLevel:1
+                         destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [metal4_array_encoder endEncoding];
+        [metal4_array_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_array_command_buffers[] = {metal4_array_command_buffer};
+        [metal4_queue commit:metal4_array_command_buffers count:1];
+        uint8_t metal4_array_copy_bytes[sizeof(array_level_one)];
+        [metal4_array_copy getBytes:metal4_array_copy_bytes
+                         bytesPerRow:2 * 4
+                       bytesPerImage:sizeof(array_level_one)
+                        fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                       mipmapLevel:1
+                              slice:0];
+        if (metal4_array_copy == nil || metal4_array_command_buffer == nil || metal4_array_encoder == nil ||
+            memcmp(metal4_array_copy_bytes, native_array_level_one, sizeof(array_level_one)) != 0) {
+            fail_with_error("Metal 4 CPU array slice/level copy failed", metal4_error);
+            return 76;
+        }
+
         const uint32_t metal4_indirect_threads[] = {width, height, 1, 8, 8, 1};
         id<MTLBuffer> metal4_indirect_threads_buffer =
             [adapter_device newBufferWithBytes:metal4_indirect_threads
