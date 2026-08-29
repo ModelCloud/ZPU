@@ -54,7 +54,7 @@ pub fn fill(comptime lanes: usize, row: []u8, start: usize, count: usize, format
     const values: V = @splat(pixel_bits);
     var i: usize = 0;
     while (i + lanes <= count) : (i += lanes) storeNativePacked(lanes, row, (start + i) * 4, values);
-    scalar.fillSpan(row, start + i, count - i, format, color);
+    if (i < count) scalar.fillSpan(row, start + i, count - i, format, color);
 }
 
 pub inline fn blend(comptime lanes: usize, row: []u8, start: usize, count: usize, format: s.Format, color: s.Color) void {
@@ -100,7 +100,7 @@ pub inline fn blend(comptime lanes: usize, row: []u8, start: usize, count: usize
         const packed_output = (if (format == .rgba8_unorm) rr | (rg << @as(V, @splat(8))) | (rb << @as(V, @splat(16))) else rb | (rg << @as(V, @splat(8))) | (rr << @as(V, @splat(16)))) | (out_a << @as(V, @splat(24)));
         storeNativePacked(lanes, row, (start + i) * 4, packed_output);
     }
-    scalar.blendSpan(row, start + i, count - i, format, color);
+    if (i < count) scalar.blendSpan(row, start + i, count - i, format, color);
 }
 
 /// Source-over blend for a span whose destination alpha has already been
@@ -128,7 +128,7 @@ pub inline fn blendOpaque(comptime lanes: usize, row: []u8, start: usize, count:
         const packed_output = (if (format == .rgba8_unorm) rr | (rg << @as(V, @splat(8))) | (rb << @as(V, @splat(16))) else rb | (rg << @as(V, @splat(8))) | (rr << @as(V, @splat(16)))) | @as(V, @splat(0xff000000));
         storeNativePacked(lanes, row, (start + i) * 4, packed_output);
     }
-    scalar.blendSpan(row, start + i, count - i, format, color);
+    if (i < count) scalar.blendSpan(row, start + i, count - i, format, color);
 }
 
 pub inline fn blendPixels(comptime lanes: usize, row: []u8, start: usize, source: []const u8, count: usize, format: s.Format) void {
@@ -175,7 +175,7 @@ pub inline fn blendPixels(comptime lanes: usize, row: []u8, start: usize, source
         const packed_output = (if (format == .rgba8_unorm) rr | (rg << @as(V, @splat(8))) | (rb << @as(V, @splat(16))) else rb | (rg << @as(V, @splat(8))) | (rr << @as(V, @splat(16)))) | (out_a << @as(V, @splat(24)));
         storeNativePacked(lanes, row, (start + i) * 4, packed_output);
     }
-    scalar.blendPixels(row, start + i, source[i * 4 ..], count - i, format);
+    if (i < count) scalar.blendPixels(row, start + i, source[i * 4 ..], count - i, format);
 }
 
 /// Blend arbitrary-alpha source pixels over a destination that the caller has
@@ -217,7 +217,7 @@ pub inline fn blendPixelsOpaque(comptime lanes: usize, row: []u8, start: usize, 
             rb | (rg << @as(V, @splat(8))) | (rr << @as(V, @splat(16))) | @as(V, @splat(0xff000000));
         storeNativePacked(lanes, row, (start + i) * 4, packed_output);
     }
-    scalar.blendPixels(row, start + i, source[i * 4 ..], count - i, format);
+    if (i < count) scalar.blendPixels(row, start + i, source[i * 4 ..], count - i, format);
 }
 
 /// Blend a source span with binary alpha coverage. The vector path selects
@@ -244,7 +244,7 @@ pub fn blendPixelsBinary(comptime lanes: usize, row: []u8, start: usize, source:
         const packed_output = @select(u32, opaque_mask, source_as_destination, packed_destination);
         storeNativePacked(lanes, row, (start + i) * 4, packed_output);
     }
-    scalar.blendPixelsBinary(row, start + i, source[i * 4 ..], count - i, format);
+    if (i < count) scalar.blendPixelsBinary(row, start + i, source[i * 4 ..], count - i, format);
 }
 
 /// RGBA8 specialization of the binary-alpha span. Packed source and
@@ -263,5 +263,5 @@ pub fn blendPixelsBinaryRgba(comptime lanes: usize, row: []u8, start: usize, sou
         const packed_output = @select(u32, opaque_mask, packed_source, packed_destination);
         storeNativePacked(lanes, row, (start + i) * 4, packed_output);
     }
-    scalar.blendPixelsBinary(row, start + i, source[i * 4 ..], count - i, .rgba8_unorm);
+    if (i < count) scalar.blendPixelsBinary(row, start + i, source[i * 4 ..], count - i, .rgba8_unorm);
 }

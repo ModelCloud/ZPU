@@ -242,10 +242,12 @@ pub fn blendOpaqueRects8(surface: *s.Surface, draws: []const RectColorCommand) v
     } else @panic("eight-lane kernels require an x86_64 artifact target");
 }
 
-pub fn blendSpriteBatch8(surface: *s.Surface, commands: []const abi.SpriteCommand, source: []const u8, source_stride: usize, opaque_destination: bool) void {
+pub fn blendSpriteBatch8(surface: *s.Surface, commands: []const abi.SpriteCommand, source: []const u8, source_stride: usize, opaque_destination: bool, binary_alpha: bool) void {
     if (comptime eight_lane_boundary) {
         requireEightLaneSupport();
-        const format_tag = @intFromEnum(surface.format) | if (opaque_destination) abi.opaque_format_bit else 0;
+        const format_tag = @intFromEnum(surface.format) |
+            (if (opaque_destination) abi.opaque_format_bit else 0) |
+            (if (binary_alpha) abi.binary_alpha_format_bit else 0);
         v3.blend_sprite_batch_8(surface.pixels.ptr, surface.pixels.len, surface.stride, commands.ptr, commands.len, source.ptr, source.len, source_stride, format_tag);
     } else @panic("eight-lane kernels require an x86_64 artifact target");
 }
@@ -341,7 +343,7 @@ pub fn blendPixelsRowsBatch(backend: Backend, surface: *s.Surface, destinations:
                     command_count += 1;
                 }
                 if (command_count >= 2) {
-                    blendSpriteBatch8(surface, commands[0..command_count], source, @as(usize, source_width) * 4, false);
+                    blendSpriteBatch8(surface, commands[0..command_count], source, @as(usize, source_width) * 4, false, false);
                     return;
                 }
             }
@@ -392,7 +394,7 @@ pub fn blendPixelsRowsOpaqueBatch(backend: Backend, surface: *s.Surface, destina
                     command_count += 1;
                 }
                 if (command_count >= 2) {
-                    blendSpriteBatch8(surface, commands[0..command_count], source, @as(usize, source_width) * 4, true);
+                    blendSpriteBatch8(surface, commands[0..command_count], source, @as(usize, source_width) * 4, true, false);
                     return;
                 }
             }
@@ -450,6 +452,12 @@ pub fn blendPixelsRowsRegionsBatch(backend: Backend, surface: *s.Surface, region
         },
         .avx2 => if (comptime eight_lane_boundary) {
             requireEightLaneSupport();
+            // Atlas draws have independent source origins, so the fixed-size
+            // sprite batch path is the only way to avoid one ABI call per
+            // glyph. Flush bounded command chunks to keep stack usage fixed
+            // while preserving the original draw order across chunks.
+            var commands: [256]abi.SpriteCommand = undefined;
+            var command_count: usize = 0;
             for (regions) |region| {
                 const destination = region.destination;
                 const source_rect = region.source;
@@ -461,17 +469,21 @@ pub fn blendPixelsRowsRegionsBatch(backend: Backend, surface: *s.Surface, region
                 const clipped = s.clip(destination, surface.width, surface.height) orelse continue;
                 const source_x: usize = @intCast(source_rect.x + (clipped.x - destination.x));
                 const source_y: usize = @intCast(source_rect.y + (clipped.y - destination.y));
-                if (binary_alpha) {
-                    for (0..clipped.height) |dy| {
-                        const source_offset = ((source_y + dy) * source_width + source_x) * 4;
-                        if (surface.format == .rgba8_unorm) vector.blendPixelsBinaryRgba(8, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width) else vector.blendPixelsBinary(8, surface.row(@intCast(@as(usize, @intCast(clipped.y)) + dy)), @intCast(clipped.x), source[source_offset..], clipped.width, surface.format);
-                    }
-                } else {
-                    const destination_offset = std.math.mul(usize, @as(usize, @intCast(clipped.y)), surface.stride) catch unreachable;
-                    const source_offset = std.math.mul(usize, std.math.add(usize, std.math.mul(usize, source_y, source_width) catch unreachable, source_x) catch unreachable, 4) catch unreachable;
-                    v3.blend_pixels_rows_8(surface.pixels.ptr + destination_offset, surface.pixels.len - destination_offset, surface.stride, source.ptr + source_offset, source.len - source_offset, @as(usize, source_width) * 4, @intCast(clipped.x), clipped.width, clipped.height, @intFromEnum(surface.format));
+                commands[command_count] = .{
+                    .x = clipped.x,
+                    .y = clipped.y,
+                    .source_x = @intCast(source_x),
+                    .source_y = @intCast(source_y),
+                    .width = clipped.width,
+                    .height = clipped.height,
+                };
+                command_count += 1;
+                if (command_count == commands.len) {
+                    blendSpriteBatch8(surface, commands[0..command_count], source, @as(usize, source_width) * 4, false, binary_alpha);
+                    command_count = 0;
                 }
             }
+            if (command_count != 0) blendSpriteBatch8(surface, commands[0..command_count], source, @as(usize, source_width) * 4, false, binary_alpha);
         } else @panic("eight-lane kernels require an x86_64 artifact target"),
     }
 }

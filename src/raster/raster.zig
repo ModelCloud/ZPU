@@ -388,14 +388,9 @@ pub fn drawSpriteRegionsWith(surface: *s.Surface, regions: []const SpriteRegion,
     const source_pixels = std.math.mul(usize, source_width, source_height) catch return;
     const source_bytes = std.math.mul(usize, source_pixels, 4) catch return;
     if (source.len < source_bytes) return;
-    for (regions) |region| {
-        const source_rect = region.source;
-        if (source_rect.x < 0 or source_rect.y < 0) continue;
-        const sx: u32 = @intCast(source_rect.x);
-        const sy: u32 = @intCast(source_rect.y);
-        if (sx > source_width or sy > source_height or source_rect.width > source_width - sx or source_rect.height > source_height - sy) continue;
-        if (region.destination.width != source_rect.width or region.destination.height != source_rect.height) continue;
-    }
+    // The backend route owns the per-region geometry checks. Keeping that
+    // validation in one place avoids scanning large glyph/atlas batches twice
+    // while preserving the invalid-region skip semantics for every tier.
     dispatch.blendPixelsRowsRegionsBatch(backend, surface, regions, source, source_width, source_height, hasBinaryAlpha(source, source_width, source_height));
 }
 
