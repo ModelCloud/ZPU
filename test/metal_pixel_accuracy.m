@@ -9021,6 +9021,41 @@ int main(void) {
             return 133;
         }
 
+        const uint32_t lifetime_range_words[] = {0, 1};
+        __weak id<MTLBuffer> weak_lifetime_range_buffer = nil;
+        id<MTLBuffer> lifetime_range_buffer =
+            [adapter_device newBufferWithBytes:lifetime_range_words
+                                        length:sizeof(lifetime_range_words)
+                                       options:MTLResourceStorageModeShared];
+        weak_lifetime_range_buffer = lifetime_range_buffer;
+        id<MTLTexture> indirect_range_lifetime_texture =
+            [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTLRenderPassDescriptor *indirect_range_lifetime_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        indirect_range_lifetime_pass.colorAttachments[0].texture = indirect_range_lifetime_texture;
+        indirect_range_lifetime_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        indirect_range_lifetime_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLCommandBuffer> indirect_range_lifetime_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> indirect_range_lifetime_encoder =
+            [indirect_range_lifetime_command_buffer renderCommandEncoderWithDescriptor:indirect_range_lifetime_pass];
+        [indirect_range_lifetime_encoder setRenderPipelineState:adapter_pipeline];
+        [indirect_range_lifetime_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [indirect_range_lifetime_encoder executeCommandsInBuffer:adapter_icb
+                                                   indirectBuffer:lifetime_range_buffer
+                                              indirectBufferOffset:0];
+        [indirect_range_lifetime_encoder endEncoding];
+        lifetime_range_buffer = nil;
+        if (weak_lifetime_range_buffer == nil) {
+            fprintf(stderr, "metal-pixel: render ICB range buffer was not retained by command buffer\n");
+            return 135;
+        }
+        [indirect_range_lifetime_command_buffer commit];
+        [indirect_range_lifetime_command_buffer waitUntilCompleted];
+        if (indirect_range_lifetime_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: retained render ICB range command did not complete\n");
+            fail_with_error("retained render ICB range command error", indirect_range_lifetime_command_buffer.error);
+            return 136;
+        }
+
         /* The CPU renderer currently has one representable vertex binding.
          * An ICB descriptor may advertise more slots, but accepting an index
          * other than zero would replay that resource at the wrong slot. The

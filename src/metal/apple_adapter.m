@@ -12165,6 +12165,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         [_owner markError];
         return;
     }
+    [_owner retainResource:rangeBuffer];
     const uint8_t *bytes = (const uint8_t *)rangeBuffer.contents + indirectBufferOffset;
     const MTLIndirectCommandBufferExecutionRange range = {
         (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) | ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24),
