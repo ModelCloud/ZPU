@@ -41,8 +41,8 @@ jobs:
       - name: Install reproducible Ubuntu coverage and Vulkan-loader tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends kcov libvulkan1 libvulkan-dev libxcb1-dev libxcb1-dev:arm64 libvulkan-dev:arm64 twm vulkan-tools xauth xvfb
-          dpkg-query -W -f='${Package}=${Version}\n' kcov libvulkan1 libvulkan-dev libxcb1-dev libxcb1-dev:arm64 libvulkan-dev:arm64 twm vulkan-tools xauth xvfb
+          sudo apt-get install -y --no-install-recommends kcov libvulkan1 libvulkan-dev libxcb1-dev libxcb1-dev:arm64 libvulkan-dev:arm64 ripgrep twm vulkan-tools xauth xvfb
+          dpkg-query -W -f='${Package}=${Version}\n' kcov libvulkan1 libvulkan-dev libxcb1-dev libxcb1-dev:arm64 libvulkan-dev:arm64 ripgrep twm vulkan-tools xauth xvfb
       - run: tools/limited-cpus.sh zig fmt --check build.zig src tools
       - run: tools/limited-cpus.sh zig build
       - run: test "$(realpath zig-out/share/vulkan/icd.d/../../../lib/libvulkan_zpu.so)" = "$(realpath zig-out/lib/libvulkan_zpu.so)"
