@@ -22,6 +22,8 @@ pub const Workload = enum(u8) {
 pub const PixelFormat = enum(u16) {
     bgra8_unorm = 80,
     rgba8_unorm = 70,
+    r32_float = 55,
+    rgba16_float = 115,
     depth32_float = 252,
     stencil8 = 253,
 };

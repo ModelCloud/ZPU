@@ -33,11 +33,17 @@ const shared_event_magic: u64 = 0x5a50555f53455654; // ZPU_SEVT
 pub const TextureFormat = enum {
     rgba8_unorm,
     bgra8_unorm,
+    r32_float,
+    rgba16_float,
     depth32_float,
     stencil8,
 
     fn bytesPerPixel(self: TextureFormat) usize {
-        return if (self == .stencil8) 1 else 4;
+        return switch (self) {
+            .stencil8 => 1,
+            .rgba16_float => 8,
+            else => 4,
+        };
     }
 
     fn isColor(self: TextureFormat) bool {
@@ -135,6 +141,7 @@ pub const Texture = struct {
             .format = switch (self.format) {
                 .rgba8_unorm => .rgba8_unorm,
                 .bgra8_unorm => .bgra8_unorm,
+                .r32_float, .rgba16_float => unreachable,
                 .depth32_float => unreachable,
                 .stencil8 => unreachable,
             },
@@ -1338,6 +1345,8 @@ pub fn createTexture(device: *Device, width: u32, height: u32, format_raw: u16) 
     const format: TextureFormat = switch (format_raw) {
         @intFromEnum(abi.PixelFormat.rgba8_unorm) => .rgba8_unorm,
         @intFromEnum(abi.PixelFormat.bgra8_unorm) => .bgra8_unorm,
+        @intFromEnum(abi.PixelFormat.r32_float) => .r32_float,
+        @intFromEnum(abi.PixelFormat.rgba16_float) => .rgba16_float,
         @intFromEnum(abi.PixelFormat.depth32_float) => .depth32_float,
         @intFromEnum(abi.PixelFormat.stencil8) => .stencil8,
         else => return error.UnsupportedFormat,
@@ -1381,6 +1390,8 @@ pub fn createTextureFromBuffer(buffer: *Buffer, width: u32, height: u32, format_
     const format: TextureFormat = switch (format_raw) {
         @intFromEnum(abi.PixelFormat.rgba8_unorm) => .rgba8_unorm,
         @intFromEnum(abi.PixelFormat.bgra8_unorm) => .bgra8_unorm,
+        @intFromEnum(abi.PixelFormat.r32_float) => .r32_float,
+        @intFromEnum(abi.PixelFormat.rgba16_float) => .rgba16_float,
         @intFromEnum(abi.PixelFormat.stencil8) => .stencil8,
         else => return error.UnsupportedFormat,
     };
@@ -1771,6 +1782,8 @@ fn texturePixelFormat(texture: *const Texture) ?abi.PixelFormat {
     return switch (texture.format) {
         .rgba8_unorm => .rgba8_unorm,
         .bgra8_unorm => .bgra8_unorm,
+        .r32_float => .r32_float,
+        .rgba16_float => .rgba16_float,
         .depth32_float => .depth32_float,
         .stencil8 => .stencil8,
     };
@@ -2052,6 +2065,28 @@ test "buffer-backed textures alias rows without copying" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 5, 6, 7, 8, 0xee, 0xee, 0xee, 0xee, 13, 14, 15, 16, 0xdd, 0xdd, 0xdd, 0xdd }, &result);
     try textureReplaceRegion(texture, .{ .origin = .{ .x = 1, .y = 1, .z = 0 }, .size = .{ .width = 1, .height = 1, .depth = 1 } }, &[_]u8{ 31, 32, 33, 34 }, 4, 4);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 31, 32, 33, 34 }, buffer.bytes[4 + 12 + 4 ..][0..4]);
+}
+
+test "raw texture formats preserve their native texel widths" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const r32 = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.r32_float));
+    defer destroyTexture(r32);
+    const rgba16 = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.rgba16_float));
+    defer destroyTexture(rgba16);
+    try std.testing.expectEqual(@as(usize, 24), r32.bytes.len);
+    try std.testing.expectEqual(@as(usize, 48), rgba16.bytes.len);
+    const r32_values = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23 };
+    const rgba16_values = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+        0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7,
+        0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7,
+        0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7,
+        0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7,
+        0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7 };
+    try textureReplaceRegion(r32, .{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = 3, .height = 2, .depth = 1 } }, &r32_values, r32_values.len, 12);
+    try textureReplaceRegion(rgba16, .{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = 3, .height = 2, .depth = 1 } }, &rgba16_values, rgba16_values.len, 24);
+    try std.testing.expectEqualSlices(u8, &r32_values, r32.bytes);
+    try std.testing.expectEqualSlices(u8, &rgba16_values, rgba16.bytes);
 }
 
 test "indexed render encoding produces the same pixels as direct vertices" {

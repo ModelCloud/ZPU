@@ -649,13 +649,17 @@ static zpu_metal_region zpu_region(MTLRegion region) {
 
 static zpu_metal_pixel_format zpu_pixel_format(MTLPixelFormat format) {
     if (format == MTLPixelFormatBGRA8Unorm) return ZPU_METAL_BGRA8_UNORM;
+    if (format == MTLPixelFormatR32Float) return ZPU_METAL_R32_FLOAT;
+    if (format == MTLPixelFormatRGBA16Float) return ZPU_METAL_RGBA16_FLOAT;
     if (format == MTLPixelFormatDepth32Float) return ZPU_METAL_DEPTH32_FLOAT;
     if (format == MTLPixelFormatStencil8) return ZPU_METAL_STENCIL8;
     return ZPU_METAL_RGBA8_UNORM;
 }
 
 static NSUInteger zpu_texture_bytes_per_pixel(MTLPixelFormat format) {
-    return format == MTLPixelFormatStencil8 ? 1 : 4;
+    if (format == MTLPixelFormatStencil8) return 1;
+    if (format == MTLPixelFormatRGBA16Float) return 8;
+    return 4;
 }
 
 static zpu_metal_load_action zpu_load_action(MTLLoadAction action) {
@@ -729,6 +733,7 @@ static BOOL zpu_texture_descriptor_size(MTLTextureDescriptor *descriptor, NSUInt
         descriptor.mipmapLevelCount == 0 || descriptor.sampleCount != 1 ||
         descriptor.width > UINT32_MAX || descriptor.height > UINT32_MAX ||
         (descriptor.pixelFormat != MTLPixelFormatRGBA8Unorm && descriptor.pixelFormat != MTLPixelFormatBGRA8Unorm &&
+         descriptor.pixelFormat != MTLPixelFormatR32Float && descriptor.pixelFormat != MTLPixelFormatRGBA16Float &&
          descriptor.pixelFormat != MTLPixelFormatDepth32Float && descriptor.pixelFormat != MTLPixelFormatStencil8)) return NO;
     NSUInteger total = 0;
     const NSUInteger sliceCount = zpu_texture_type_is_3d(descriptor.textureType) ? 1 : descriptor.arrayLength;
@@ -975,6 +980,7 @@ static ZPUBuffer *zpu_metal4_buffer_for_address(MTLGPUAddress address) {
         (descriptor.textureType == MTLTextureType1D && descriptor.height != 1) || descriptor.depth != 1 ||
         descriptor.arrayLength != 1 || descriptor.mipmapLevelCount != 1 || descriptor.sampleCount != 1 ||
         (descriptor.pixelFormat != MTLPixelFormatRGBA8Unorm && descriptor.pixelFormat != MTLPixelFormatBGRA8Unorm &&
+         descriptor.pixelFormat != MTLPixelFormatR32Float && descriptor.pixelFormat != MTLPixelFormatRGBA16Float &&
          descriptor.pixelFormat != MTLPixelFormatStencil8)) return nil;
     if (descriptor.width > UINT32_MAX || descriptor.height > UINT32_MAX) return nil;
     zpu_metal_texture_descriptor zpu_descriptor = {

@@ -149,6 +149,8 @@
       "scissor_rect",
       "rgba8_unorm",
       "bgra8_unorm",
+      "r32_float",
+      "rgba16_float",
       "load_actions",
       "store_actions",
       "point_line_triangle_topologies"

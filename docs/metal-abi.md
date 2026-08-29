@@ -20,6 +20,10 @@ triangle path:
   viewport, scissor, cull, winding, fill-mode, color interpolation, and depth
 - two screen-band workers for a 3D draw: the submitting core plus one worker
 - owned RGBA8/BGRA8 buffers and 1D/2D/3D textures with checked region read/write
+- CPU-owned R32Float and RGBA16Float textures preserve native texel widths for
+  raw transfers, views, buffer-backed storage, and heap allocation accounting;
+  render/compute paths still reject formats without a corresponding CPU shader
+  profile
 - ordinary device-created 1D, 1D-array, 2D, and 2D-array textures with independently
   allocated CPU/ZPU slice×mip levels, exact level/slice read/write,
   level/slice-range views, and level/slice-aware blit copies; CPU mipmap

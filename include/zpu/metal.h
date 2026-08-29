@@ -21,6 +21,8 @@ typedef uint16_t zpu_metal_pixel_format;
 enum {
     ZPU_METAL_RGBA8_UNORM = 70,
     ZPU_METAL_BGRA8_UNORM = 80,
+    ZPU_METAL_R32_FLOAT = 55,
+    ZPU_METAL_RGBA16_FLOAT = 115,
     ZPU_METAL_DEPTH32_FLOAT = 252,
     ZPU_METAL_STENCIL8 = 253,
 };
