@@ -297,6 +297,11 @@ API_AVAILABLE(macos(15.0), ios(18.0))
     MTLSize _meshThreadsPerMeshThreadgroup;
     BOOL _hasMeshThreads;
     MTLSize _meshThreadsPerGrid;
+    NSMutableDictionary *_objectBuffers;
+    NSMutableDictionary *_objectBufferOffsets;
+    NSMutableDictionary *_meshBuffers;
+    NSMutableDictionary *_meshBufferOffsets;
+    NSMutableDictionary *_objectThreadgroupMemoryLengths;
     BOOL _unsupportedCommand;
 }
 - (instancetype)initWithOwner:(ZPUIndirectCommandBuffer *)owner;
@@ -338,6 +343,9 @@ API_AVAILABLE(macos(15.0), ios(18.0))
     NSUInteger _maxVertexBufferBindCount;
     NSUInteger _maxFragmentBufferBindCount;
     NSUInteger _maxKernelBufferBindCount;
+    NSUInteger _maxObjectBufferBindCount;
+    NSUInteger _maxMeshBufferBindCount;
+    NSUInteger _maxObjectThreadgroupMemoryBindCount;
     NSMutableArray *_commands;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLIndirectCommandBufferDescriptor *)descriptor maxCommandCount:(NSUInteger)maxCount options:(MTLResourceOptions)options;
@@ -12020,6 +12028,14 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         _maxVertexBufferBindCount = descriptor.maxVertexBufferBindCount;
         _maxFragmentBufferBindCount = descriptor.maxFragmentBufferBindCount;
         _maxKernelBufferBindCount = descriptor.maxKernelBufferBindCount;
+        _maxObjectBufferBindCount = 0;
+        _maxMeshBufferBindCount = 0;
+        _maxObjectThreadgroupMemoryBindCount = 0;
+        if (@available(macOS 14.0, iOS 17.0, *)) {
+            _maxObjectBufferBindCount = descriptor.maxObjectBufferBindCount;
+            _maxMeshBufferBindCount = descriptor.maxMeshBufferBindCount;
+            _maxObjectThreadgroupMemoryBindCount = descriptor.maxObjectThreadgroupMemoryBindCount;
+        }
         _commands = [NSMutableArray arrayWithCapacity:maxCount];
         for (NSUInteger index = 0; index < maxCount; ++index) [_commands addObject:[NSNull null]];
     }
@@ -12121,6 +12137,20 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
             copy->_unsupportedCommand = renderCommand->_unsupportedCommand;
             if ((renderCommand->_hasVertexBuffer && _maxVertexBufferBindCount == 0) ||
                 (renderCommand->_hasFragmentBuffer && _maxFragmentBufferBindCount == 0)) return NO;
+            for (NSNumber *index in renderCommand->_objectBuffers) {
+                if (index.unsignedIntegerValue >= _maxObjectBufferBindCount) return NO;
+            }
+            for (NSNumber *index in renderCommand->_meshBuffers) {
+                if (index.unsignedIntegerValue >= _maxMeshBufferBindCount) return NO;
+            }
+            for (NSNumber *index in renderCommand->_objectThreadgroupMemoryLengths) {
+                if (index.unsignedIntegerValue >= _maxObjectThreadgroupMemoryBindCount) return NO;
+            }
+            copy->_objectBuffers = [renderCommand->_objectBuffers mutableCopy];
+            copy->_objectBufferOffsets = [renderCommand->_objectBufferOffsets mutableCopy];
+            copy->_meshBuffers = [renderCommand->_meshBuffers mutableCopy];
+            copy->_meshBufferOffsets = [renderCommand->_meshBufferOffsets mutableCopy];
+            copy->_objectThreadgroupMemoryLengths = [renderCommand->_objectThreadgroupMemoryLengths mutableCopy];
             _commands[destinationIndex + index] = copy;
         } else if ([command isKindOfClass:[ZPUIndirectComputeCommand class]]) {
             ZPUIndirectComputeCommand *computeCommand = (ZPUIndirectComputeCommand *)command;
@@ -12172,7 +12202,14 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 
 @implementation ZPUIndirectRenderCommand
 - (instancetype)initWithOwner:(ZPUIndirectCommandBuffer *)owner {
-    if ((self = [super init])) _owner = owner;
+    if ((self = [super init])) {
+        _owner = owner;
+        _objectBuffers = [NSMutableDictionary dictionary];
+        _objectBufferOffsets = [NSMutableDictionary dictionary];
+        _meshBuffers = [NSMutableDictionary dictionary];
+        _meshBufferOffsets = [NSMutableDictionary dictionary];
+        _objectThreadgroupMemoryLengths = [NSMutableDictionary dictionary];
+    }
     return self;
 }
 - (void)reset {
@@ -12213,6 +12250,11 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     _meshThreadsPerMeshThreadgroup = MTLSizeMake(0, 0, 0);
     _hasMeshThreads = NO;
     _meshThreadsPerGrid = MTLSizeMake(0, 0, 0);
+    [_objectBuffers removeAllObjects];
+    [_objectBufferOffsets removeAllObjects];
+    [_meshBuffers removeAllObjects];
+    [_meshBufferOffsets removeAllObjects];
+    [_objectThreadgroupMemoryLengths removeAllObjects];
     _unsupportedCommand = NO;
 }
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)pipelineState {
@@ -12292,9 +12334,35 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
     _hasIndexedDraw = YES;
     _hasDraw = NO;
 }
-- (void)setObjectThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0), tvos(18.1), visionos(2.1)) { (void)length; (void)index; _unsupportedCommand = YES; }
-- (void)setObjectBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0), tvos(18.1), visionos(2.1)) { (void)buffer; (void)offset; (void)index; _unsupportedCommand = YES; }
-- (void)setMeshBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0), tvos(18.1), visionos(2.1)) { (void)buffer; (void)offset; (void)index; _unsupportedCommand = YES; }
+- (void)setObjectThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0), tvos(18.1), visionos(2.1)) {
+    if (index >= _owner->_maxObjectThreadgroupMemoryBindCount) {
+        _unsupportedCommand = YES;
+        return;
+    }
+    _objectThreadgroupMemoryLengths[@(index)] = @(length);
+}
+- (void)setObjectBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0), tvos(18.1), visionos(2.1)) {
+    ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
+    if (index >= _owner->_maxObjectBufferBindCount ||
+        (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
+                           zpuBuffer->_owner != _owner->_owner || offset > zpuBuffer.length))) {
+        _unsupportedCommand = YES;
+        return;
+    }
+    _objectBuffers[@(index)] = buffer == nil ? [NSNull null] : zpuBuffer;
+    _objectBufferOffsets[@(index)] = @(buffer == nil ? 0 : offset);
+}
+- (void)setMeshBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0), tvos(18.1), visionos(2.1)) {
+    ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
+    if (index >= _owner->_maxMeshBufferBindCount ||
+        (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
+                           zpuBuffer->_owner != _owner->_owner || offset > zpuBuffer.length))) {
+        _unsupportedCommand = YES;
+        return;
+    }
+    _meshBuffers[@(index)] = buffer == nil ? [NSNull null] : zpuBuffer;
+    _meshBufferOffsets[@(index)] = @(buffer == nil ? 0 : offset);
+}
 - (void)drawPatches:(NSUInteger)numberOfPatchControlPoints patchStart:(NSUInteger)patchStart patchCount:(NSUInteger)patchCount patchIndexBuffer:(id<MTLBuffer>)patchIndexBuffer patchIndexBufferOffset:(NSUInteger)patchIndexBufferOffset instanceCount:(NSUInteger)instanceCount baseInstance:(NSUInteger)baseInstance tessellationFactorBuffer:(id<MTLBuffer>)buffer tessellationFactorBufferOffset:(NSUInteger)offset tessellationFactorBufferInstanceStride:(NSUInteger)instanceStride API_AVAILABLE(tvos(14.5)) {
     (void)numberOfPatchControlPoints;
     (void)patchStart;

@@ -8938,6 +8938,9 @@ int main(void) {
             MTLIndirectCommandTypeDrawMeshThreads;
         mesh_icb_descriptor.inheritPipelineState = YES;
         mesh_icb_descriptor.inheritBuffers = YES;
+        mesh_icb_descriptor.maxObjectBufferBindCount = 1;
+        mesh_icb_descriptor.maxMeshBufferBindCount = 1;
+        mesh_icb_descriptor.maxObjectThreadgroupMemoryBindCount = 1;
         id<MTLIndirectCommandBuffer> native_mesh_icb =
             [device newIndirectCommandBufferWithDescriptor:mesh_icb_descriptor
                                             maxCommandCount:2 options:0];
@@ -8946,9 +8949,15 @@ int main(void) {
         id<MTLIndirectRenderCommand> native_mesh_threadgroups_command =
             [native_mesh_icb indirectRenderCommandAtIndex:1];
         if (native_mesh_threads_command != nil && native_mesh_threadgroups_command != nil) {
+            [native_mesh_threads_command setObjectThreadgroupMemoryLength:16 atIndex:0];
+            [native_mesh_threads_command setObjectBuffer:vertex_buffer offset:0 atIndex:0];
+            [native_mesh_threads_command setMeshBuffer:vertex_buffer offset:0 atIndex:0];
             [native_mesh_threads_command drawMeshThreads:MTLSizeMake(8, 4, 1)
                            threadsPerObjectThreadgroup:MTLSizeMake(8, 1, 1)
                              threadsPerMeshThreadgroup:MTLSizeMake(8, 1, 1)];
+            [native_mesh_threadgroups_command setObjectThreadgroupMemoryLength:16 atIndex:0];
+            [native_mesh_threadgroups_command setObjectBuffer:vertex_buffer offset:0 atIndex:0];
+            [native_mesh_threadgroups_command setMeshBuffer:vertex_buffer offset:0 atIndex:0];
             [native_mesh_threadgroups_command drawMeshThreadgroups:MTLSizeMake(1, 1, 1)
                                       threadsPerObjectThreadgroup:MTLSizeMake(8, 1, 1)
                                         threadsPerMeshThreadgroup:MTLSizeMake(8, 1, 1)];
@@ -8961,9 +8970,15 @@ int main(void) {
             [adapter_mesh_icb indirectRenderCommandAtIndex:0];
         id<MTLIndirectRenderCommand> adapter_mesh_threadgroups_command =
             [adapter_mesh_icb indirectRenderCommandAtIndex:1];
+        [adapter_mesh_threads_command setObjectThreadgroupMemoryLength:16 atIndex:0];
+        [adapter_mesh_threads_command setObjectBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_mesh_threads_command setMeshBuffer:adapter_vertex_buffer offset:0 atIndex:0];
         [adapter_mesh_threads_command drawMeshThreads:MTLSizeMake(8, 4, 1)
                        threadsPerObjectThreadgroup:MTLSizeMake(8, 1, 1)
                          threadsPerMeshThreadgroup:MTLSizeMake(8, 1, 1)];
+        [adapter_mesh_threadgroups_command setObjectThreadgroupMemoryLength:16 atIndex:0];
+        [adapter_mesh_threadgroups_command setObjectBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_mesh_threadgroups_command setMeshBuffer:adapter_vertex_buffer offset:0 atIndex:0];
         [adapter_mesh_threadgroups_command drawMeshThreadgroups:MTLSizeMake(1, 1, 1)
                                   threadsPerObjectThreadgroup:MTLSizeMake(8, 1, 1)
                                     threadsPerMeshThreadgroup:MTLSizeMake(8, 1, 1)];
