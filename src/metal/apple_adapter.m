@@ -2007,7 +2007,7 @@ static BOOL zpu_sparse_texture_tail_region_valid(ZPUTexture *texture, NSUInteger
     NSUInteger tileCountZ = 0;
     return zpu_sparse_texture_tail_level_range(texture, level, slice, &(NSUInteger){0}, &(NSUInteger){0}) &&
         zpu_sparse_texture_tile_grid(texture, level, &tileCountX, &tileCountY, &tileCountZ) &&
-        tileCountY == 1 && tileCountZ == 1 && region.size.width != 0 &&
+        tileCountZ == 1 && region.size.width != 0 &&
         region.origin.x <= tileCountX && region.size.width <= tileCountX - region.origin.x;
 }
 
@@ -2021,23 +2021,10 @@ static BOOL zpu_sparse_texture_tail_tile_range(ZPUTexture *texture, NSUInteger l
     NSUInteger tileCountY = 0;
     NSUInteger tileCountZ = 0;
     if (!zpu_sparse_texture_tile_grid(texture, level, &tileCountX, &tileCountY, &tileCountZ) ||
-        tileCountY != 1 || tileCountZ != 1 || tileX >= tileCountX || tileY != 0 || tileZ != 0) return NO;
+        tileX >= tileCountX || tileY >= tileCountY || tileZ != 0) return NO;
     const NSUInteger bytesPerPixel = zpu_texture_bytes_per_pixel(texture->_pixelFormat);
     if (bytesPerPixel == 0) return NO;
     NSUInteger levelOffset = *offset;
-    for (NSUInteger x = 0; x < tileX; ++x) {
-        NSUInteger pixelX = 0;
-        NSUInteger pixelY = 0;
-        NSUInteger pixelWidth = 0;
-        NSUInteger pixelHeight = 0;
-        zpu_metal_texture *zpuTexture = NULL;
-        if (!zpu_sparse_texture_tile_location(texture, level, slice, x, 0, 0, &pixelX, &pixelY,
-                                               &pixelWidth, &pixelHeight, &zpuTexture) ||
-            (pixelHeight != 0 && pixelWidth > SIZE_MAX / pixelHeight)) return NO;
-        const NSUInteger pixels = pixelWidth * pixelHeight;
-        if (pixels > SIZE_MAX / bytesPerPixel || levelOffset > SIZE_MAX - pixels * bytesPerPixel) return NO;
-        levelOffset += pixels * bytesPerPixel;
-    }
     NSUInteger pixelX = 0;
     NSUInteger pixelY = 0;
     NSUInteger pixelWidth = 0;
@@ -2046,6 +2033,18 @@ static BOOL zpu_sparse_texture_tail_tile_range(ZPUTexture *texture, NSUInteger l
     if (!zpu_sparse_texture_tile_location(texture, level, slice, tileX, tileY, tileZ, &pixelX, &pixelY,
                                           &pixelWidth, &pixelHeight, &zpuTexture) ||
         (pixelHeight != 0 && pixelWidth > SIZE_MAX / pixelHeight)) return NO;
+    NSUInteger levelWidth = 0;
+    NSUInteger levelHeight = 0;
+    NSUInteger levelDepth = 0;
+    if (!zpu_sparse_texture_level_dimensions(texture, level, slice, &levelWidth, &levelHeight, &levelDepth) ||
+        levelWidth > SIZE_MAX / bytesPerPixel || pixelX > levelWidth ||
+        pixelY > levelHeight || pixelWidth > levelWidth - pixelX ||
+        pixelHeight > levelHeight - pixelY) return NO;
+    const NSUInteger rowBytes = levelWidth * bytesPerPixel;
+    if (pixelY > SIZE_MAX / rowBytes || pixelX > SIZE_MAX / bytesPerPixel) return NO;
+    const NSUInteger tileOffset = pixelY * rowBytes + pixelX * bytesPerPixel;
+    if (levelOffset > SIZE_MAX - tileOffset) return NO;
+    levelOffset += tileOffset;
     const NSUInteger pixels = pixelWidth * pixelHeight;
     if (pixels > SIZE_MAX / bytesPerPixel || levelOffset > SIZE_MAX - pixels * bytesPerPixel) return NO;
     *offset = levelOffset;
@@ -2063,15 +2062,17 @@ static BOOL zpu_sparse_texture_tail_page_bindings(ZPUTexture *texture, NSUIntege
         NSUInteger tileCountY = 0;
         NSUInteger tileCountZ = 0;
         if (!zpu_sparse_texture_tile_grid(texture, level, &tileCountX, &tileCountY, &tileCountZ) ||
-            tileCountY != 1 || tileCountZ != 1) return NO;
-        for (NSUInteger tileX = 0; tileX < tileCountX; ++tileX) {
-            NSUInteger offset = 0;
-            NSUInteger length = 0;
-            if (!zpu_sparse_texture_tail_tile_range(texture, level, slice, tileX, 0, 0,
-                                                    &offset, &length)) return NO;
-            ZPUSparsePage *binding = zpu_sparse_texture_binding(pages, offset, length);
-            if (binding == nil) return NO;
-            bindings[zpu_sparse_texture_key(texture, level, slice, tileX, 0, 0)] = binding;
+            tileCountZ != 1) return NO;
+        for (NSUInteger tileY = 0; tileY < tileCountY; ++tileY) {
+            for (NSUInteger tileX = 0; tileX < tileCountX; ++tileX) {
+                NSUInteger offset = 0;
+                NSUInteger length = 0;
+                if (!zpu_sparse_texture_tail_tile_range(texture, level, slice, tileX, tileY, 0,
+                                                        &offset, &length)) return NO;
+                ZPUSparsePage *binding = zpu_sparse_texture_binding(pages, offset, length);
+                if (binding == nil) return NO;
+                bindings[zpu_sparse_texture_key(texture, level, slice, tileX, tileY, 0)] = binding;
+            }
         }
     }
     return YES;
@@ -2159,14 +2160,16 @@ static BOOL zpu_sparse_update_texture_tail_mapping(ZPUTexture *texture, ZPUHeap 
             NSUInteger tileCountY = 0;
             NSUInteger tileCountZ = 0;
             if (!zpu_sparse_texture_tile_grid(texture, tailLevel, &tileCountX, &tileCountY, &tileCountZ) ||
-                tileCountY != 1 || tileCountZ != 1) return NO;
-            for (NSUInteger tileX = 0; tileX < tileCountX; ++tileX) {
-                NSArray *key = zpu_sparse_texture_key(texture, tailLevel, slice, tileX, 0, 0);
-                ZPUSparsePage *oldPage = texture->_sparseMappings[key];
-                if (oldPage != nil && !zpu_sparse_texture_copy_tile_to_page(texture, tailLevel, slice,
-                                                                             tileX, 0, 0, oldPage)) return NO;
-                [texture->_sparseMappings removeObjectForKey:key];
-                if (!zpu_sparse_texture_zero_tile(texture, tailLevel, slice, tileX, 0, 0)) return NO;
+                tileCountZ != 1) return NO;
+            for (NSUInteger tileY = 0; tileY < tileCountY; ++tileY) {
+                for (NSUInteger tileX = 0; tileX < tileCountX; ++tileX) {
+                    NSArray *key = zpu_sparse_texture_key(texture, tailLevel, slice, tileX, tileY, 0);
+                    ZPUSparsePage *oldPage = texture->_sparseMappings[key];
+                    if (oldPage != nil && !zpu_sparse_texture_copy_tile_to_page(texture, tailLevel, slice,
+                                                                                 tileX, tileY, 0, oldPage)) return NO;
+                    [texture->_sparseMappings removeObjectForKey:key];
+                    if (!zpu_sparse_texture_zero_tile(texture, tailLevel, slice, tileX, tileY, 0)) return NO;
+                }
             }
         }
         return YES;
@@ -2185,12 +2188,14 @@ static BOOL zpu_sparse_update_texture_tail_mapping(ZPUTexture *texture, ZPUHeap 
         NSUInteger tileCountY = 0;
         NSUInteger tileCountZ = 0;
         if (!zpu_sparse_texture_tile_grid(texture, tailLevel, &tileCountX, &tileCountY, &tileCountZ) ||
-            tileCountY != 1 || tileCountZ != 1) return NO;
-        for (NSUInteger tileX = 0; tileX < tileCountX; ++tileX) {
-            NSArray *key = zpu_sparse_texture_key(texture, tailLevel, slice, tileX, 0, 0);
-            ZPUSparsePage *oldPage = texture->_sparseMappings[key];
-            if (oldPage != nil && !zpu_sparse_texture_copy_tile_to_page(texture, tailLevel, slice,
-                                                                         tileX, 0, 0, oldPage)) return NO;
+            tileCountZ != 1) return NO;
+        for (NSUInteger tileY = 0; tileY < tileCountY; ++tileY) {
+            for (NSUInteger tileX = 0; tileX < tileCountX; ++tileX) {
+                NSArray *key = zpu_sparse_texture_key(texture, tailLevel, slice, tileX, tileY, 0);
+                ZPUSparsePage *oldPage = texture->_sparseMappings[key];
+                if (oldPage != nil && !zpu_sparse_texture_copy_tile_to_page(texture, tailLevel, slice,
+                                                                             tileX, tileY, 0, oldPage)) return NO;
+            }
         }
     }
     NSMutableDictionary *bindings = [NSMutableDictionary dictionary];
