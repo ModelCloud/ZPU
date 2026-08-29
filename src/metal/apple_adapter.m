@@ -10559,7 +10559,6 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
             [_owner markError];
             return;
         }
-        if (resource == nil) continue;
         if ((stages & MTLRenderStageVertex) != 0) [(id)_legacy setVertexTexture:resource atIndex:index];
         if ((stages & MTLRenderStageFragment) != 0) [(id)_legacy setFragmentTexture:resource atIndex:index];
         if ((stages & MTLRenderStageTile) != 0) [(id)_legacy setTileTexture:resource atIndex:index];
@@ -10574,7 +10573,6 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
             [_owner markError];
             return;
         }
-        if (resource == nil) continue;
         if ((stages & MTLRenderStageVertex) != 0) [(id)_legacy setVertexSamplerState:resource atIndex:index];
         if ((stages & MTLRenderStageFragment) != 0) [(id)_legacy setFragmentSamplerState:resource atIndex:index];
         if ((stages & MTLRenderStageTile) != 0) [(id)_legacy setTileSamplerState:resource atIndex:index];
@@ -10760,7 +10758,6 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
             [_owner markError];
             return;
         }
-        if (resource == nil) continue;
         [_legacy setTexture:(id<MTLTexture>)resource atIndex:index];
     }
     const uint64_t *samplerIDs = (const uint64_t *)_argumentTable->_samplerResources.bytes;
@@ -10771,7 +10768,6 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
             [_owner markError];
             return;
         }
-        if (resource == nil) continue;
         [_legacy setSamplerState:(id<MTLSamplerState>)resource atIndex:index];
     }
 }

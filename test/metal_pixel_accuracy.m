@@ -9974,6 +9974,43 @@ int main(void) {
             return 60;
         }
 
+        /* Replacing an argument table must clear null entries. In particular,
+         * a CPU encoder cannot retain a prior texture binding just because a
+         * later table left that slot at its zero resource ID. Otherwise the
+         * adapter would execute a different dispatch from Metal while still
+         * reporting a valid command buffer. */
+        MTL4ArgumentTableDescriptor *metal4_empty_table_descriptor = [MTL4ArgumentTableDescriptor new];
+        metal4_empty_table_descriptor.maxTextureBindCount = 1;
+        metal4_empty_table_descriptor.maxSamplerStateBindCount = 1;
+        id<MTL4ArgumentTable> metal4_empty_table =
+            [adapter_device newArgumentTableWithDescriptor:metal4_empty_table_descriptor error:&metal4_error];
+        id<MTL4CommandBuffer> metal4_cleared_table_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_cleared_table_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> metal4_cleared_table_encoder =
+            [metal4_cleared_table_command_buffer computeCommandEncoder];
+        [metal4_cleared_table_encoder setComputePipelineState:adapter_compute_pipeline];
+        [metal4_cleared_table_encoder setArgumentTable:metal4_table];
+        [metal4_cleared_table_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                  threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+        [metal4_cleared_table_encoder setArgumentTable:metal4_empty_table];
+        [metal4_cleared_table_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                  threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+        [metal4_cleared_table_encoder endEncoding];
+        [metal4_cleared_table_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_cleared_table_buffers[] = {metal4_cleared_table_command_buffer};
+        MTL4CommitOptions *metal4_cleared_table_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *metal4_cleared_table_error = nil;
+        [metal4_cleared_table_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            metal4_cleared_table_error = feedback.error;
+        }];
+        [metal4_queue commit:metal4_cleared_table_buffers count:1 options:metal4_cleared_table_options];
+        if (metal4_empty_table == nil || metal4_cleared_table_command_buffer == nil ||
+            metal4_cleared_table_encoder == nil ||
+            metal4_cleared_table_error == nil) {
+            fprintf(stderr, "metal-pixel: Metal 4 CPU argument-table null binding was not applied\n");
+            return 134;
+        }
+
         /* Metal 4 acceleration commands share the CPU-owned storage and
          * descriptor-size model of the legacy acceleration encoder. Native
          * Metal is not used for this operation; only the earlier render and

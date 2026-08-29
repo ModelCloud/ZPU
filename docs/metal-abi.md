@@ -259,6 +259,9 @@ triangle path:
   clip-space +Y direction as the legacy adapter, including clipped edge tiles,
   and rejects GPU addresses and argument-table resources that are not owned by
   the ZPU device recording the command
+- MTL4 argument-table application binds zero resource IDs as explicit nulls for
+  CPU compute and render-stage state, so replacing a table cannot leak a prior
+  texture, sampler, or buffer binding into the next dispatch or draw
 - matching registered legacy tile, object, and mesh stage resource setters
   validate and retain ZPU-owned buffers, textures, samplers, offsets, threadgroup
   metadata, and inline byte snapshots; these bindings are metadata for the
