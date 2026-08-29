@@ -142,7 +142,9 @@ triangle path:
   MTL4 attachment descriptors, GPU-address argument tables, fixed-function
   raster state, indexed/indirect draws, fences, and viewport/scissor state to
   the existing ZPU raster encoder. The MTL4 path preserves the same upper-left
-  pixel grid and clip-space +Y direction as the legacy adapter
+  pixel grid and clip-space +Y direction as the legacy adapter, and rejects
+  GPU addresses and argument-table resources that are not owned by the ZPU
+  device recording the command
 - indirect threadgroup dispatch arguments are read from ZPU buffers at commit
   time, preserving Metal's deferred argument-buffer semantics
 - direct and indexed render draws read ZPU vertex and index buffer bindings at
