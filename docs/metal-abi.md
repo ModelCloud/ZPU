@@ -124,6 +124,9 @@ triangle path:
   names and emit deterministic ZPU metadata scripts or the existing ZPU
   binary-archive format; these outputs are not Apple metal-tt scripts or
   native GPU binaries
+- owner-checked CPU function handles expose registered compute names/types and
+  the required zero gpuResourceID sentinel; visible/intersection function
+  tables and GPU function-pointer execution remain unsupported
 - supported Apple-adapter render state and draw selectors propagate ZPU
   validation failures to `MTLCommandBufferStatusError`; invalid state is not
   silently reported as successful CPU work
