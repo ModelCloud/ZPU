@@ -4048,6 +4048,35 @@ int main(void) {
             return 62;
         }
 
+        /* Placement-sparse mappings are not represented by ZPU resources.
+         * A nonzero queue mapping request must poison that CPU queue and
+         * surface an error on its next feedback-enabled commit. */
+        id<MTL4CommandQueue> metal4_sparse_queue = [adapter_device newMTL4CommandQueue];
+        MTL4UpdateSparseBufferMappingOperation metal4_sparse_operation = {
+            .mode = MTLSparseTextureMappingModeMap,
+            .bufferRange = NSMakeRange(0, 1),
+            .heapOffset = 0,
+        };
+        [metal4_sparse_queue updateBufferMappings:adapter_copy_buffer
+                                             heap:adapter_three_d_heap
+                                        operations:&metal4_sparse_operation
+                                             count:1];
+        id<MTL4CommandBuffer> metal4_sparse_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_sparse_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        [metal4_sparse_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_sparse_command_buffers[] = {metal4_sparse_command_buffer};
+        MTL4CommitOptions *metal4_sparse_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *metal4_sparse_error = nil;
+        [metal4_sparse_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            metal4_sparse_error = feedback.error;
+        }];
+        [metal4_sparse_queue commit:metal4_sparse_command_buffers count:1 options:metal4_sparse_options];
+        if (metal4_sparse_queue == nil || metal4_sparse_command_buffer == nil ||
+            metal4_sparse_error == nil) {
+            fail_with_error("Metal 4 CPU sparse mapping did not fail closed", metal4_error);
+            return 63;
+        }
+
         id<MTLTexture> metal4_mip_copy = [adapter_device newTextureWithDescriptor:mip_descriptor];
         id<MTL4CommandBuffer> metal4_mip_command_buffer = [adapter_device newCommandBuffer];
         [metal4_mip_command_buffer beginCommandBufferWithAllocator:metal4_allocator];

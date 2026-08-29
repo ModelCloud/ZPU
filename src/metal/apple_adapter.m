@@ -562,6 +562,8 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     ZPUDevice *_owner;
     ZPUCommandQueue *_legacyQueue;
     NSString *_label;
+    NSMutableSet *_residencySets;
+    BOOL _failed;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTL4CommandQueueDescriptor *)descriptor;
 @end
@@ -753,6 +755,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     zpu_metal_command_queue *_zpuQueue;
     ZPUDevice *_owner;
     NSString *_label;
+    NSMutableSet *_residencySets;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner queue:(zpu_metal_command_queue *)queue;
 @end
@@ -4566,7 +4569,11 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 
 @implementation ZPUCommandQueue
 - (instancetype)initWithOwner:(ZPUDevice *)owner queue:(zpu_metal_command_queue *)queue {
-    if ((self = [super init])) { _owner = owner; _zpuQueue = queue; }
+    if ((self = [super init])) {
+        _owner = owner;
+        _zpuQueue = queue;
+        _residencySets = [NSMutableSet set];
+    }
     return self;
 }
 - (void)dealloc {
@@ -4578,14 +4585,23 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 - (void)insertDebugCaptureBoundary {}
 - (void)addResidencySet:(id)residencySet API_AVAILABLE(macos(15.0), ios(18.0)) {
     ZPUResidencySet *zpuSet = (ZPUResidencySet *)residencySet;
-    if ([zpuSet isKindOfClass:[ZPUResidencySet class]] && zpuSet->_owner == _owner) [zpuSet commit];
+    if (![zpuSet isKindOfClass:[ZPUResidencySet class]] || zpuSet->_owner != _owner) return;
+    [_residencySets addObject:zpuSet];
+    [zpuSet commit];
 }
 - (void)addResidencySets:(const id<MTLResidencySet> __nonnull [__nonnull])residencySets count:(NSUInteger)count API_AVAILABLE(macos(15.0), ios(18.0)) {
     if (residencySets == NULL) return;
     for (NSUInteger index = 0; index < count; ++index) [self addResidencySet:residencySets[index]];
 }
-- (void)removeResidencySet:(id)residencySet API_AVAILABLE(macos(15.0), ios(18.0)) { (void)residencySet; }
-- (void)removeResidencySets:(const id<MTLResidencySet> __nonnull [__nonnull])residencySets count:(NSUInteger)count API_AVAILABLE(macos(15.0), ios(18.0)) { (void)residencySets; (void)count; }
+- (void)removeResidencySet:(id)residencySet API_AVAILABLE(macos(15.0), ios(18.0)) {
+    ZPUResidencySet *zpuSet = (ZPUResidencySet *)residencySet;
+    if (![zpuSet isKindOfClass:[ZPUResidencySet class]] || zpuSet->_owner != _owner) return;
+    [_residencySets removeObject:zpuSet];
+}
+- (void)removeResidencySets:(const id<MTLResidencySet> __nonnull [__nonnull])residencySets count:(NSUInteger)count API_AVAILABLE(macos(15.0), ios(18.0)) {
+    if (residencySets == NULL) return;
+    for (NSUInteger index = 0; index < count; ++index) [self removeResidencySet:residencySets[index]];
+}
 - (id<MTLCommandBuffer>)commandBuffer {
     zpu_metal_command_buffer *commandBuffer = zpu_metal_command_queue_command_buffer(_zpuQueue);
     if (commandBuffer == NULL) return nil;
@@ -4650,9 +4666,9 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     (void)zpu_metal_command_buffer_wait_until_completed(_zpuCommandBuffer);
 }
 - (void)waitUntilScheduled {}
-- (void)presentDrawable:(id<MTLDrawable>)drawable { (void)drawable; }
-- (void)presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)presentationTime { (void)drawable; (void)presentationTime; }
-- (void)presentDrawable:(id<MTLDrawable>)drawable afterMinimumDuration:(CFTimeInterval)duration API_AVAILABLE(macos(10.15.4), ios(10.3), macCatalyst(13.4)) { (void)drawable; (void)duration; }
+- (void)presentDrawable:(id<MTLDrawable>)drawable { (void)drawable; [self markError]; }
+- (void)presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)presentationTime { (void)drawable; (void)presentationTime; [self markError]; }
+- (void)presentDrawable:(id<MTLDrawable>)drawable afterMinimumDuration:(CFTimeInterval)duration API_AVAILABLE(macos(10.15.4), ios(10.3), macCatalyst(13.4)) { (void)drawable; (void)duration; [self markError]; }
 - (void)addScheduledHandler:(MTLCommandBufferHandler)block {
     if (block == nil) return;
     if ([self status] != MTLCommandBufferStatusNotEnqueued) {
@@ -5236,15 +5252,27 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     if ((self = [super init])) {
         _owner = owner;
         _label = [descriptor.label copy];
+        _residencySets = [NSMutableSet set];
         id queue = [owner newCommandQueue];
         if ([queue isKindOfClass:[ZPUCommandQueue class]]) _legacyQueue = (ZPUCommandQueue *)queue;
+        else _failed = YES;
     }
     return self;
 }
 - (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
 - (NSString *)label { return _label; }
 - (void)commit:(const id<MTL4CommandBuffer> __nonnull [__nonnull])commandBuffers count:(NSUInteger)count {
-    if (commandBuffers == NULL && count != 0) return;
+    if (commandBuffers == NULL && count != 0) {
+        _failed = YES;
+        return;
+    }
+    if (_failed) {
+        for (NSUInteger index = 0; index < count; ++index) {
+            id buffer = commandBuffers[index];
+            if ([buffer respondsToSelector:@selector(markError)]) [buffer markError];
+        }
+        return;
+    }
     for (NSUInteger index = 0; index < count; ++index) {
         ZPUMTL4CommandBuffer *buffer = (ZPUMTL4CommandBuffer *)commandBuffers[index];
         if (![buffer isKindOfClass:[ZPUMTL4CommandBuffer class]] || buffer->_owner != _owner) {
@@ -5256,13 +5284,20 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 }
 - (void)commit:(const id<MTL4CommandBuffer> __nonnull [__nonnull])commandBuffers count:(NSUInteger)count options:(MTL4CommitOptions *)options {
     const CFTimeInterval startTime = CFAbsoluteTimeGetCurrent();
-    BOOL success = commandBuffers != NULL || count == 0;
-    for (NSUInteger index = 0; success && index < count; ++index) {
-        ZPUMTL4CommandBuffer *buffer = (ZPUMTL4CommandBuffer *)commandBuffers[index];
-        if (![buffer isKindOfClass:[ZPUMTL4CommandBuffer class]] || buffer->_owner != _owner ||
-            ![buffer commitCPU]) {
+    BOOL success = !_failed && (commandBuffers != NULL || count == 0);
+    if (success) {
+        for (NSUInteger index = 0; index < count; ++index) {
+            ZPUMTL4CommandBuffer *buffer = (ZPUMTL4CommandBuffer *)commandBuffers[index];
+            if (![buffer isKindOfClass:[ZPUMTL4CommandBuffer class]] || buffer->_owner != _owner ||
+                ![buffer commitCPU]) {
+                if ([buffer respondsToSelector:@selector(markError)]) [buffer markError];
+                success = NO;
+            }
+        }
+    } else if (commandBuffers != NULL) {
+        for (NSUInteger index = 0; index < count; ++index) {
+            id buffer = commandBuffers[index];
             if ([buffer respondsToSelector:@selector(markError)]) [buffer markError];
-            success = NO;
         }
     }
     if ([options isKindOfClass:[ZPUMTL4CommitOptions class]]) {
@@ -5278,34 +5313,86 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 }
 - (void)signalEvent:(id<MTLEvent>)event value:(uint64_t)value {
     ZPUSharedEvent *zpuEvent = (ZPUSharedEvent *)event;
-    if (![zpuEvent isKindOfClass:[ZPUSharedEvent class]] || _legacyQueue == nil) return;
+    if (![zpuEvent isKindOfClass:[ZPUSharedEvent class]] || zpuEvent->_owner != _owner || _legacyQueue == nil) {
+        _failed = YES;
+        return;
+    }
     ZPUCommandBuffer *buffer = (ZPUCommandBuffer *)[_legacyQueue commandBuffer];
-    if (buffer == nil || zpu_metal_command_buffer_encode_signal_event(buffer->_zpuCommandBuffer, zpuEvent->_zpuEvent, value) != ZPU_METAL_OK) return;
+    if (buffer == nil || zpu_metal_command_buffer_encode_signal_event(buffer->_zpuCommandBuffer, zpuEvent->_zpuEvent, value) != ZPU_METAL_OK) {
+        _failed = YES;
+        if (buffer != nil) [buffer markError];
+        return;
+    }
     [buffer commit];
 }
 - (void)waitForEvent:(id<MTLEvent>)event value:(uint64_t)value {
     ZPUSharedEvent *zpuEvent = (ZPUSharedEvent *)event;
-    if (![zpuEvent isKindOfClass:[ZPUSharedEvent class]] || _legacyQueue == nil) return;
+    if (![zpuEvent isKindOfClass:[ZPUSharedEvent class]] || zpuEvent->_owner != _owner || _legacyQueue == nil) {
+        _failed = YES;
+        return;
+    }
     ZPUCommandBuffer *buffer = (ZPUCommandBuffer *)[_legacyQueue commandBuffer];
-    if (buffer == nil || zpu_metal_command_buffer_encode_wait_for_event(buffer->_zpuCommandBuffer, zpuEvent->_zpuEvent, value) != ZPU_METAL_OK) return;
+    if (buffer == nil || zpu_metal_command_buffer_encode_wait_for_event(buffer->_zpuCommandBuffer, zpuEvent->_zpuEvent, value) != ZPU_METAL_OK) {
+        _failed = YES;
+        if (buffer != nil) [buffer markError];
+        return;
+    }
     [buffer commit];
 }
-- (void)signalDrawable:(id<MTLDrawable>)drawable { (void)drawable; }
-- (void)waitForDrawable:(id<MTLDrawable>)drawable { (void)drawable; }
+- (void)signalDrawable:(id<MTLDrawable>)drawable { (void)drawable; _failed = YES; }
+- (void)waitForDrawable:(id<MTLDrawable>)drawable { (void)drawable; _failed = YES; }
 - (void)addResidencySet:(id<MTLResidencySet>)residencySet {
     ZPUResidencySet *zpuSet = (ZPUResidencySet *)residencySet;
-    if ([zpuSet isKindOfClass:[ZPUResidencySet class]] && zpuSet->_owner == _owner) [zpuSet commit];
+    if (![zpuSet isKindOfClass:[ZPUResidencySet class]] || zpuSet->_owner != _owner) {
+        _failed = YES;
+        return;
+    }
+    [_residencySets addObject:zpuSet];
+    [zpuSet commit];
 }
 - (void)addResidencySets:(const id<MTLResidencySet> __nonnull [__nonnull])residencySets count:(NSUInteger)count {
     if (residencySets == NULL) return;
     for (NSUInteger index = 0; index < count; ++index) [self addResidencySet:residencySets[index]];
 }
-- (void)removeResidencySet:(id<MTLResidencySet>)residencySet { (void)residencySet; }
-- (void)removeResidencySets:(const id<MTLResidencySet> __nonnull [__nonnull])residencySets count:(NSUInteger)count { (void)residencySets; (void)count; }
-- (void)updateTextureMappings:(id<MTLTexture>)texture heap:(id<MTLHeap>)heap operations:(const MTL4UpdateSparseTextureMappingOperation [_Nonnull])operations count:(NSUInteger)count { (void)texture; (void)heap; (void)operations; (void)count; }
-- (void)copyTextureMappingsFromTexture:(id<MTLTexture>)sourceTexture toTexture:(id<MTLTexture>)destinationTexture operations:(const MTL4CopySparseTextureMappingOperation [_Nonnull])operations count:(NSUInteger)count { (void)sourceTexture; (void)destinationTexture; (void)operations; (void)count; }
-- (void)updateBufferMappings:(id<MTLBuffer>)buffer heap:(id<MTLHeap>)heap operations:(const MTL4UpdateSparseBufferMappingOperation [_Nonnull])operations count:(NSUInteger)count { (void)buffer; (void)heap; (void)operations; (void)count; }
-- (void)copyBufferMappingsFromBuffer:(id<MTLBuffer>)sourceBuffer toBuffer:(id<MTLBuffer>)destinationBuffer operations:(const MTL4CopySparseBufferMappingOperation [_Nonnull])operations count:(NSUInteger)count { (void)sourceBuffer; (void)destinationBuffer; (void)operations; (void)count; }
+- (void)removeResidencySet:(id<MTLResidencySet>)residencySet {
+    ZPUResidencySet *zpuSet = (ZPUResidencySet *)residencySet;
+    if (![zpuSet isKindOfClass:[ZPUResidencySet class]] || zpuSet->_owner != _owner) {
+        _failed = YES;
+        return;
+    }
+    [_residencySets removeObject:zpuSet];
+}
+- (void)removeResidencySets:(const id<MTLResidencySet> __nonnull [__nonnull])residencySets count:(NSUInteger)count {
+    if (residencySets == NULL) {
+        if (count != 0) _failed = YES;
+        return;
+    }
+    for (NSUInteger index = 0; index < count; ++index) [self removeResidencySet:residencySets[index]];
+}
+- (void)updateTextureMappings:(id<MTLTexture>)texture heap:(id<MTLHeap>)heap operations:(const MTL4UpdateSparseTextureMappingOperation [_Nonnull])operations count:(NSUInteger)count {
+    (void)texture;
+    (void)heap;
+    (void)operations;
+    if (count != 0) _failed = YES;
+}
+- (void)copyTextureMappingsFromTexture:(id<MTLTexture>)sourceTexture toTexture:(id<MTLTexture>)destinationTexture operations:(const MTL4CopySparseTextureMappingOperation [_Nonnull])operations count:(NSUInteger)count {
+    (void)sourceTexture;
+    (void)destinationTexture;
+    (void)operations;
+    if (count != 0) _failed = YES;
+}
+- (void)updateBufferMappings:(id<MTLBuffer>)buffer heap:(id<MTLHeap>)heap operations:(const MTL4UpdateSparseBufferMappingOperation [_Nonnull])operations count:(NSUInteger)count {
+    (void)buffer;
+    (void)heap;
+    (void)operations;
+    if (count != 0) _failed = YES;
+}
+- (void)copyBufferMappingsFromBuffer:(id<MTLBuffer>)sourceBuffer toBuffer:(id<MTLBuffer>)destinationBuffer operations:(const MTL4CopySparseBufferMappingOperation [_Nonnull])operations count:(NSUInteger)count {
+    (void)sourceBuffer;
+    (void)destinationBuffer;
+    (void)operations;
+    if (count != 0) _failed = YES;
+}
 @end
 
 @implementation ZPUMTL4RenderEncoder
