@@ -35,11 +35,14 @@ triangle path:
   R32Float, RGBA16Unorm/RGBA16Snorm, RGBA16Float, RG32Float, RGBA32Float,
   and packed B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10/RGB9E5/BGR10A2 textures preserve
   native texel widths for raw transfers, views, buffer-backed storage, and heap
-  allocation accounting; render paths accept R8Unorm, R16Unorm, RG8Unorm,
-  RG16Unorm, R16Float, RG16Float, RGBA16Unorm, RGBA16Float, R32Float,
-  RG32Float, and RGBA32Float as CPU color targets; all Uint/Sint formats are
-  transfer-only; signed-normalized and sRGB formats are transfer-only until
-  their CPU attachment conversions are added; packed formats are transfer-only
+  allocation accounting; render paths accept R8Unorm/R8Unorm_sRGB, R16Unorm,
+  RG8Unorm/RG8Unorm_sRGB, RG16Unorm, R16Float, RG16Float, RGBA8Unorm,
+  RGBA8Unorm_sRGB, BGRA8Unorm, BGRA8Unorm_sRGB, RGBA16Unorm, RGBA16Float,
+  R32Float, RG32Float, and RGBA32Float as CPU color targets; sRGB RGB channels
+  use Apple's 12-bit linear fixed-point transfer profile for CPU sampling,
+  attachment stores, clears, and mip generation; mip levels are filtered from
+  the base level to match Apple's CPU-visible Metal behavior; all Uint/Sint and
+  signed-normalized formats are transfer-only; packed formats are transfer-only
   until packed decode/encode profiles are added;
   fixed CPU compute profiles remain explicitly format-specific;
 - formats without a corresponding CPU shader profile remain rejected

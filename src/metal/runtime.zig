@@ -107,7 +107,10 @@ pub const TextureFormat = enum {
     }
 
     fn isColor(self: TextureFormat) bool {
-        return self == .r8_unorm or self == .r16_unorm or self == .r16_float or self == .rg8_unorm or self == .rg16_unorm or self == .rg16_float or self == .rgba8_unorm or self == .bgra8_unorm or self == .r32_float or self == .rgba16_unorm or self == .rgba16_float or self == .rg32_float or self == .rgba32_float;
+        return self == .r8_unorm or self == .r8_unorm_srgb or self == .r16_unorm or self == .r16_float or
+            self == .rg8_unorm or self == .rg8_unorm_srgb or self == .rg16_unorm or self == .rg16_float or
+            self == .rgba8_unorm or self == .rgba8_unorm_srgb or self == .bgra8_unorm or self == .bgra8_unorm_srgb or
+            self == .r32_float or self == .rgba16_unorm or self == .rgba16_float or self == .rg32_float or self == .rgba32_float;
     }
 };
 
@@ -266,7 +269,7 @@ pub const Texture = struct {
             .format = switch (self.format) {
                 .a8_unorm => unreachable,
                 .r8_unorm => .r8_unorm,
-                .r8_unorm_srgb => unreachable,
+                .r8_unorm_srgb => .r8_unorm_srgb,
                 .r8_snorm => unreachable,
                 .r8_uint, .r8_sint => unreachable,
                 .r16_unorm => .r16_unorm,
@@ -274,7 +277,7 @@ pub const Texture = struct {
                 .r16_uint, .r16_sint => unreachable,
                 .r16_float => .r16_float,
                 .rg8_unorm => .rg8_unorm,
-                .rg8_unorm_srgb => unreachable,
+                .rg8_unorm_srgb => .rg8_unorm_srgb,
                 .rg8_snorm => unreachable,
                 .rg8_uint, .rg8_sint => unreachable,
                 .rg16_unorm => .rg16_unorm,
@@ -283,11 +286,11 @@ pub const Texture = struct {
                 .rg16_float => .rg16_float,
                 .r32_uint, .r32_sint => unreachable,
                 .rgba8_unorm => .rgba8_unorm,
-                .rgba8_unorm_srgb => unreachable,
+                .rgba8_unorm_srgb => .rgba8_unorm_srgb,
                 .rgba8_snorm => unreachable,
                 .rgba8_uint, .rgba8_sint => unreachable,
                 .bgra8_unorm => .bgra8_unorm,
-                .bgra8_unorm_srgb => unreachable,
+                .bgra8_unorm_srgb => .bgra8_unorm_srgb,
                 .b5g6r5_unorm, .a1bgr5_unorm, .abgr4_unorm, .bgr5a1_unorm => unreachable,
                 .rgb10a2_unorm, .rgb10a2_uint, .rg11b10_float, .rgb9e5_float, .bgr10a2_unorm => unreachable,
                 .r32_float => .r32_float,
@@ -1137,14 +1140,18 @@ pub const RenderEncoder = struct {
                     const expected = switch (expected_color) {
                         0 => null,
                         @intFromEnum(abi.PixelFormat.r8_unorm) => abi.PixelFormat.r8_unorm,
+                        @intFromEnum(abi.PixelFormat.r8_unorm_srgb) => abi.PixelFormat.r8_unorm_srgb,
                         @intFromEnum(abi.PixelFormat.r16_unorm) => abi.PixelFormat.r16_unorm,
                         @intFromEnum(abi.PixelFormat.r16_float) => abi.PixelFormat.r16_float,
                         @intFromEnum(abi.PixelFormat.rg8_unorm) => abi.PixelFormat.rg8_unorm,
+                        @intFromEnum(abi.PixelFormat.rg8_unorm_srgb) => abi.PixelFormat.rg8_unorm_srgb,
                         @intFromEnum(abi.PixelFormat.rg16_unorm) => abi.PixelFormat.rg16_unorm,
                         @intFromEnum(abi.PixelFormat.rg16_float) => abi.PixelFormat.rg16_float,
                         @intFromEnum(abi.PixelFormat.rgba16_unorm) => abi.PixelFormat.rgba16_unorm,
                         @intFromEnum(abi.PixelFormat.rgba8_unorm) => abi.PixelFormat.rgba8_unorm,
+                        @intFromEnum(abi.PixelFormat.rgba8_unorm_srgb) => abi.PixelFormat.rgba8_unorm_srgb,
                         @intFromEnum(abi.PixelFormat.bgra8_unorm) => abi.PixelFormat.bgra8_unorm,
+                        @intFromEnum(abi.PixelFormat.bgra8_unorm_srgb) => abi.PixelFormat.bgra8_unorm_srgb,
                         @intFromEnum(abi.PixelFormat.r32_float) => abi.PixelFormat.r32_float,
                         @intFromEnum(abi.PixelFormat.rgba16_float) => abi.PixelFormat.rgba16_float,
                         @intFromEnum(abi.PixelFormat.rg32_float) => abi.PixelFormat.rg32_float,
@@ -1933,6 +1940,83 @@ fn unorm8ChannelCount(format: TextureFormat) usize {
     };
 }
 
+fn srgb8ChannelCount(format: TextureFormat) usize {
+    return switch (format) {
+        .r8_unorm_srgb => 1,
+        .rg8_unorm_srgb => 2,
+        .rgba8_unorm_srgb, .bgra8_unorm_srgb => 4,
+        else => unreachable,
+    };
+}
+
+fn srgb8ToLinear(value: u8) f64 {
+    const normalized = @as(f64, @floatFromInt(value)) / 255.0;
+    const decoded = if (normalized <= 0.04045)
+        normalized / 12.92
+    else
+        std.math.pow(f64, (normalized + 0.055) / 1.055, 2.4);
+    return @round(decoded * 4095.0) / 4095.0;
+}
+
+fn linearToSrgb8(value: f64) u8 {
+    // Apple texture filtering keeps the linear intermediate at 12-bit
+    // precision before converting it back to an 8-bit sRGB texel. Narrow to
+    // f32 before the fixed-point rounding to match the GPU's conversion
+    // boundary for halfway values.
+    const clamped: f32 = @floatCast(std.math.clamp(value, 0, 1));
+    const linear = @floor(@as(f64, clamped) * 4095.0 + 0.5) / 4095.0;
+    const encoded = if (linear <= 0.0031308)
+        linear * 12.92
+    else
+        1.055 * std.math.pow(f64, linear, 1.0 / 2.4) - 0.055;
+    return @intFromFloat(encoded * 255.0 + 0.5);
+}
+
+fn unorm8Value(value: f64) u8 {
+    return @intFromFloat(std.math.clamp(value, 0, 1) * 255.0 + 0.5);
+}
+
+fn readSrgb8MipmapColor(texture: *const Texture, x: usize, y: usize) [4]f64 {
+    const offset = y * texture.stride + x * texture.format.bytesPerPixel();
+    return switch (texture.format) {
+        .r8_unorm_srgb => .{ srgb8ToLinear(texture.bytes[offset]), 0, 0, 1 },
+        .rg8_unorm_srgb => .{ srgb8ToLinear(texture.bytes[offset]), srgb8ToLinear(texture.bytes[offset + 1]), 0, 1 },
+        .rgba8_unorm_srgb => .{
+            srgb8ToLinear(texture.bytes[offset]),     srgb8ToLinear(texture.bytes[offset + 1]),
+            srgb8ToLinear(texture.bytes[offset + 2]), @as(f64, @floatFromInt(texture.bytes[offset + 3])) / 255.0,
+        },
+        .bgra8_unorm_srgb => .{
+            srgb8ToLinear(texture.bytes[offset + 2]), srgb8ToLinear(texture.bytes[offset + 1]),
+            srgb8ToLinear(texture.bytes[offset]),     @as(f64, @floatFromInt(texture.bytes[offset + 3])) / 255.0,
+        },
+        else => unreachable,
+    };
+}
+
+fn writeSrgb8MipmapColor(texture: *Texture, x: usize, y: usize, color: [4]f64) void {
+    const offset = y * texture.stride + x * texture.format.bytesPerPixel();
+    switch (texture.format) {
+        .r8_unorm_srgb => texture.bytes[offset] = linearToSrgb8(color[0]),
+        .rg8_unorm_srgb => {
+            texture.bytes[offset] = linearToSrgb8(color[0]);
+            texture.bytes[offset + 1] = linearToSrgb8(color[1]);
+        },
+        .rgba8_unorm_srgb => {
+            texture.bytes[offset] = linearToSrgb8(color[0]);
+            texture.bytes[offset + 1] = linearToSrgb8(color[1]);
+            texture.bytes[offset + 2] = linearToSrgb8(color[2]);
+            texture.bytes[offset + 3] = unorm8Value(color[3]);
+        },
+        .bgra8_unorm_srgb => {
+            texture.bytes[offset] = linearToSrgb8(color[2]);
+            texture.bytes[offset + 1] = linearToSrgb8(color[1]);
+            texture.bytes[offset + 2] = linearToSrgb8(color[0]);
+            texture.bytes[offset + 3] = unorm8Value(color[3]);
+        },
+        else => unreachable,
+    }
+}
+
 fn unorm16ChannelCount(format: TextureFormat) usize {
     return switch (format) {
         .r16_unorm => 1,
@@ -2578,6 +2662,24 @@ fn mipmapAxis(source_size: u32, destination_size: u32, destination_index: usize)
     };
 }
 
+const MipmapRange = struct {
+    low: usize,
+    high: usize,
+};
+
+fn mipmapRange(source_size: u32, destination_size: u32, destination_index: usize) MipmapRange {
+    const source_size_u64 = @as(u64, source_size);
+    const destination_size_u64 = @as(u64, destination_size);
+    const index_u64 = @as(u64, destination_index);
+    const low_u64 = index_u64 * source_size_u64 / destination_size_u64;
+    const high_unclamped = (index_u64 + 1) * source_size_u64 + destination_size_u64 - 1;
+    const high_u64 = @min(high_unclamped / destination_size_u64, source_size_u64);
+    return .{
+        .low = @intCast(low_u64),
+        .high = @intCast(@max(high_u64, low_u64 + 1)),
+    };
+}
+
 fn readMipmapF32(bytes: []const u8, offset: usize) f64 {
     return @floatCast(@as(f32, @bitCast(std.mem.readInt(u32, bytes[offset..][0..4], .little))));
 }
@@ -2714,6 +2816,31 @@ fn generateUnorm8Mipmap(command: MipmapCommand) Error!void {
     }
 }
 
+fn generateSrgb8Mipmap(command: MipmapCommand) Error!void {
+    const channels = srgb8ChannelCount(command.source.format);
+    if (command.destination.width == 0 or command.destination.height == 0 or
+        command.destination.width >= command.source.width or command.destination.height >= command.source.height or
+        command.destination.format != command.source.format) return error.InvalidArgument;
+    for (0..command.destination.height) |y| {
+        const source_y = mipmapRange(command.source.height, command.destination.height, y);
+        for (0..command.destination.width) |x| {
+            const source_x = mipmapRange(command.source.width, command.destination.width, x);
+            const denominator = @as(f64, @floatFromInt((source_x.high - source_x.low) * (source_y.high - source_y.low)));
+            var sums = [_]f64{ 0, 0, 0, 0 };
+            for (source_y.low..source_y.high) |source_y_index| {
+                for (source_x.low..source_x.high) |source_x_index| {
+                    const color = readSrgb8MipmapColor(command.source, source_x_index, source_y_index);
+                    for (0..channels) |component| sums[component] += color[component];
+                }
+            }
+            writeSrgb8MipmapColor(command.destination, x, y, .{
+                sums[0] / denominator, sums[1] / denominator,
+                sums[2] / denominator, sums[3] / denominator,
+            });
+        }
+    }
+}
+
 fn generateUnorm16Mipmap(command: MipmapCommand) Error!void {
     const channels = unorm16ChannelCount(command.source.format);
     const bytes_per_pixel = channels * @sizeOf(u16);
@@ -2756,6 +2883,8 @@ fn generateUnorm16Mipmap(command: MipmapCommand) Error!void {
 
 fn generateMipmap(command: MipmapCommand) Error!void {
     if (command.source == command.destination or !command.source.format.isColor()) return error.UnsupportedFormat;
+    if (command.source.format == .r8_unorm_srgb or command.source.format == .rg8_unorm_srgb or
+        command.source.format == .rgba8_unorm_srgb or command.source.format == .bgra8_unorm_srgb) return generateSrgb8Mipmap(command);
     if (command.source.format == .r16_unorm or command.source.format == .rg16_unorm or command.source.format == .rgba16_unorm) return generateUnorm16Mipmap(command);
     if (command.source.format == .r16_float or command.source.format == .rg16_float or command.source.format == .r32_float or command.source.format == .rgba16_float or command.source.format == .rgba32_float) {
         return generateFloatMipmap(command);
@@ -2883,6 +3012,63 @@ fn generateUnorm8Mipmap3D(command: Mipmap3DCommand) Error!void {
     }
 }
 
+fn generateSrgb8Mipmap3D(command: Mipmap3DCommand) Error!void {
+    const channels = srgb8ChannelCount(command.source0.format);
+    if (command.source1_weight_denominator == 0 or command.source1_weight_numerator > command.source1_weight_denominator or
+        (command.source1 == null and command.source1_weight_numerator != 0)) return error.InvalidArgument;
+    const source1 = command.source1;
+    if (source1) |value| {
+        if (value == command.destination or value.width != command.source0.width or
+            value.height != command.source0.height or value.format != command.source0.format) return error.InvalidArgument;
+    }
+    const destination_width: u32 = if (command.source0.width > 1) command.source0.width / 2 else 1;
+    const destination_height: u32 = if (command.source0.height > 1) command.source0.height / 2 else 1;
+    if (command.destination.width != destination_width or command.destination.height != destination_height or
+        command.destination.format != command.source0.format) return error.InvalidArgument;
+    const source0_z_weight = @as(u64, command.source1_weight_denominator - command.source1_weight_numerator);
+    const source1_z_weight = @as(u64, command.source1_weight_numerator);
+    for (0..destination_height) |y| {
+        const source_y = mipmapAxis(command.source0.height, destination_height, y);
+        for (0..destination_width) |x| {
+            const source_x = mipmapAxis(command.source0.width, destination_width, x);
+            const denominator = @as(f64, @floatFromInt(source_x.denominator * source_y.denominator * command.source1_weight_denominator));
+            var sums = [_]f64{ 0, 0, 0, 0 };
+            const x_weights = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_x.low, .weight = source_x.low_weight },
+                .{ .index = source_x.high, .weight = source_x.high_weight },
+            };
+            const y_weights = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_y.low, .weight = source_y.low_weight },
+                .{ .index = source_y.high, .weight = source_y.high_weight },
+            };
+            if (source0_z_weight != 0) for (y_weights) |y_sample| {
+                if (y_sample.weight == 0) continue;
+                for (x_weights) |x_sample| {
+                    if (x_sample.weight == 0) continue;
+                    const color = readSrgb8MipmapColor(command.source0, x_sample.index, y_sample.index);
+                    const weight = @as(f64, @floatFromInt(source0_z_weight * x_sample.weight * y_sample.weight));
+                    for (0..channels) |component| sums[component] += color[component] * weight;
+                }
+            };
+            if (source1) |value| {
+                if (source1_z_weight != 0) for (y_weights) |y_sample| {
+                    if (y_sample.weight == 0) continue;
+                    for (x_weights) |x_sample| {
+                        if (x_sample.weight == 0) continue;
+                        const color = readSrgb8MipmapColor(value, x_sample.index, y_sample.index);
+                        const weight = @as(f64, @floatFromInt(source1_z_weight * x_sample.weight * y_sample.weight));
+                        for (0..channels) |component| sums[component] += color[component] * weight;
+                    }
+                };
+            }
+            writeSrgb8MipmapColor(command.destination, x, y, .{
+                sums[0] / denominator, sums[1] / denominator,
+                sums[2] / denominator, sums[3] / denominator,
+            });
+        }
+    }
+}
+
 fn generateUnorm16Mipmap3D(command: Mipmap3DCommand) Error!void {
     const channels = unorm16ChannelCount(command.source0.format);
     const bytes_per_pixel = channels * @sizeOf(u16);
@@ -2955,6 +3141,8 @@ fn generateUnorm16Mipmap3D(command: Mipmap3DCommand) Error!void {
 
 fn generateMipmap3D(command: Mipmap3DCommand) Error!void {
     if (command.source0 == command.destination or !command.source0.format.isColor()) return error.UnsupportedFormat;
+    if (command.source0.format == .r8_unorm_srgb or command.source0.format == .rg8_unorm_srgb or
+        command.source0.format == .rgba8_unorm_srgb or command.source0.format == .bgra8_unorm_srgb) return generateSrgb8Mipmap3D(command);
     if (command.source0.format == .r16_unorm or command.source0.format == .rg16_unorm or command.source0.format == .rgba16_unorm) return generateUnorm16Mipmap3D(command);
     if (command.source0.format == .r16_float or command.source0.format == .rg16_float or command.source0.format == .r32_float or command.source0.format == .rgba16_float or command.source0.format == .rgba32_float) {
         return generateFloatMipmap3D(command);
@@ -3286,6 +3474,31 @@ test "CPU blit mipmap generation is deferred and deterministic" {
         17,  18,  19,  255, 53,  54,  55,  255,
         101, 102, 103, 255, 197, 198, 199, 255,
     }, destination.bytes);
+}
+
+test "CPU sRGB mipmaps average in linear color space" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const source = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.rgba8_unorm_srgb));
+    defer destroyTexture(source);
+    const destination = try createTexture(device, 1, 1, @intFromEnum(abi.PixelFormat.rgba8_unorm_srgb));
+    defer destroyTexture(destination);
+    source.bytes[0..16].* = .{
+        0,   0,   0,   0,
+        255, 255, 255, 255,
+        0,   255, 255, 128,
+        255, 0,   255, 64,
+    };
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginBlit(command_buffer);
+    try encoder.generateMipmap(source, destination);
+    try encoder.endEncoding();
+    destroyBlitEncoder(encoder);
+    try command_buffer.commit();
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 188, 188, 225, 112 }, destination.bytes);
 }
 
 test "CPU float mipmap generation preserves format precision" {

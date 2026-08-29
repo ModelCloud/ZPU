@@ -1355,9 +1355,11 @@ static zpu_metal_region zpu_region(MTLRegion region) {
 
 static BOOL zpu_color_texture_format_supported(MTLPixelFormat format) {
     return format == MTLPixelFormatR8Unorm || format == MTLPixelFormatR16Unorm ||
-        format == MTLPixelFormatR16Float || format == MTLPixelFormatRG8Unorm ||
+        format == MTLPixelFormatR16Float || format == MTLPixelFormatR8Unorm_sRGB ||
+        format == MTLPixelFormatRG8Unorm || format == MTLPixelFormatRG8Unorm_sRGB ||
         format == MTLPixelFormatRG16Unorm || format == MTLPixelFormatRG16Float ||
-        format == MTLPixelFormatRGBA8Unorm || format == MTLPixelFormatBGRA8Unorm ||
+        format == MTLPixelFormatRGBA8Unorm || format == MTLPixelFormatRGBA8Unorm_sRGB ||
+        format == MTLPixelFormatBGRA8Unorm || format == MTLPixelFormatBGRA8Unorm_sRGB ||
         format == MTLPixelFormatR32Float || format == MTLPixelFormatRGBA16Unorm ||
         format == MTLPixelFormatRGBA16Float || format == MTLPixelFormatRG32Float ||
         format == MTLPixelFormatRGBA32Float;
@@ -1374,10 +1376,6 @@ static BOOL zpu_integer_texture_format_supported(MTLPixelFormat format) {
         format == MTLPixelFormatRG11B10Float ||
         format == MTLPixelFormatRGB9E5Float ||
         format == MTLPixelFormatBGR10A2Unorm ||
-        format == MTLPixelFormatR8Unorm_sRGB ||
-        format == MTLPixelFormatRG8Unorm_sRGB ||
-        format == MTLPixelFormatRGBA8Unorm_sRGB ||
-        format == MTLPixelFormatBGRA8Unorm_sRGB ||
         format == MTLPixelFormatR8Snorm ||
         format == MTLPixelFormatR16Snorm ||
         format == MTLPixelFormatRG8Snorm ||
@@ -1518,6 +1516,11 @@ static void zpu_set_error(NSError **error, NSString *description) {
 
 static BOOL zpu_render_pipeline_format_supported(MTLPixelFormat format) {
     return format == MTLPixelFormatInvalid || zpu_color_texture_format_supported(format);
+}
+
+static BOOL zpu_srgb_texture_format(MTLPixelFormat format) {
+    return format == MTLPixelFormatR8Unorm_sRGB || format == MTLPixelFormatRG8Unorm_sRGB ||
+        format == MTLPixelFormatRGBA8Unorm_sRGB || format == MTLPixelFormatBGRA8Unorm_sRGB;
 }
 
 static BOOL zpu_vertex_layout_supported(MTLVertexDescriptor *descriptor, NSUInteger *stride, BOOL *dynamic) {
@@ -9999,8 +10002,9 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     }
     for (NSUInteger slice = 0; slice < zpu_texture_transfer_slice_count(zpuTexture); ++slice) {
         for (NSUInteger level = 0; level + 1 < zpuTexture.mipmapLevelCount; ++level) {
+            const NSUInteger sourceLevel = zpu_srgb_texture_format(zpuTexture->_pixelFormat) ? 0 : level;
             if (zpu_metal_compute_encoder_generate_mipmap(
-                    _legacy->_zpuEncoder, [zpuTexture zpuTextureAtLevel:level slice:slice],
+                    _legacy->_zpuEncoder, [zpuTexture zpuTextureAtLevel:sourceLevel slice:slice],
                     [zpuTexture zpuTextureAtLevel:level + 1 slice:slice]) != ZPU_METAL_OK) {
                 [_owner markError];
                 return;
@@ -11583,8 +11587,9 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     }
     for (NSUInteger slice = 0; slice < zpu_texture_transfer_slice_count(zpuTexture); ++slice) {
         for (NSUInteger level = 0; level + 1 < zpuTexture.mipmapLevelCount; ++level) {
+            const NSUInteger sourceLevel = zpu_srgb_texture_format(zpuTexture->_pixelFormat) ? 0 : level;
             if (zpu_metal_blit_encoder_generate_mipmap(
-                    _zpuEncoder, [zpuTexture zpuTextureAtLevel:level slice:slice],
+                    _zpuEncoder, [zpuTexture zpuTextureAtLevel:sourceLevel slice:slice],
                     [zpuTexture zpuTextureAtLevel:level + 1 slice:slice]) != ZPU_METAL_OK) { [_owner markError]; return; }
         }
     }

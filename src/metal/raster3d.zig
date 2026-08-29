@@ -87,7 +87,25 @@ pub const StencilFace = struct {
     reference: u8 = 0,
 };
 
-pub const TargetFormat = enum { r8_unorm, r16_unorm, r16_float, rg8_unorm, rg16_unorm, rg16_float, rgba8_unorm, bgra8_unorm, r32_float, rgba16_unorm, rgba16_float, rg32_float, rgba32_float };
+pub const TargetFormat = enum {
+    r8_unorm,
+    r8_unorm_srgb,
+    r16_unorm,
+    r16_float,
+    rg8_unorm,
+    rg8_unorm_srgb,
+    rg16_unorm,
+    rg16_float,
+    rgba8_unorm,
+    rgba8_unorm_srgb,
+    bgra8_unorm,
+    bgra8_unorm_srgb,
+    r32_float,
+    rgba16_unorm,
+    rgba16_float,
+    rg32_float,
+    rgba32_float,
+};
 
 pub const Target = struct {
     pixels: []u8,
@@ -98,13 +116,13 @@ pub const Target = struct {
 
     fn bytesPerPixel(format: TargetFormat) usize {
         return switch (format) {
-            .r8_unorm => 1,
+            .r8_unorm, .r8_unorm_srgb => 1,
             .r16_unorm => 2,
             .r16_float => 2,
-            .rg8_unorm => 2,
+            .rg8_unorm, .rg8_unorm_srgb => 2,
             .rg16_unorm => 4,
             .rg16_float => 4,
-            .rgba8_unorm, .bgra8_unorm, .r32_float => 4,
+            .rgba8_unorm, .rgba8_unorm_srgb, .bgra8_unorm, .bgra8_unorm_srgb, .r32_float => 4,
             .rgba16_unorm, .rgba16_float => 8,
             .rg32_float => 8,
             .rgba32_float => 16,
@@ -150,11 +168,35 @@ pub const Target = struct {
         std.mem.writeInt(u16, row_bytes[offset..][0..2], quantized, .little);
     }
 
+    fn srgbToLinear(value: u8) f32 {
+        const normalized = @as(f32, @floatFromInt(value)) / 255.0;
+        const decoded = if (normalized <= 0.04045)
+            normalized / 12.92
+        else
+            std.math.pow(f32, (normalized + 0.055) / 1.055, 2.4);
+        return @round(decoded * 4095.0) / 4095.0;
+    }
+
+    fn linearToSrgb(value: f32) f32 {
+        const clamped = std.math.clamp(value, 0, 1);
+        return if (clamped <= 0.0031308)
+            clamped * 12.92
+        else
+            1.055 * std.math.pow(f32, clamped, 1.0 / 2.4) - 0.055;
+    }
+
+    fn srgbByte(value: f32) u8 {
+        const clamped = std.math.clamp(value, 0, 1);
+        const linear = @floor(clamped * 4095.0 + 0.5) / 4095.0;
+        return @intFromFloat(linearToSrgb(linear) * 255.0 + 0.5);
+    }
+
     fn readColor(self: *const Target, x: usize, y: usize) [4]f32 {
         const row_bytes = self.row(@intCast(y));
         const offset = x * bytesPerPixel(self.format);
         return switch (self.format) {
             .r8_unorm => .{ @as(f32, @floatFromInt(row_bytes[offset])) / 255.0, 0, 0, 1 },
+            .r8_unorm_srgb => .{ srgbToLinear(row_bytes[offset]), 0, 0, 1 },
             .r16_unorm => .{ readU16(row_bytes, offset), 0, 0, 1 },
             .r16_float => .{ readF16(row_bytes, offset), 0, 0, 1 },
             .rg8_unorm => .{
@@ -163,15 +205,19 @@ pub const Target = struct {
                 0,
                 1,
             },
+            .rg8_unorm_srgb => .{ srgbToLinear(row_bytes[offset]), srgbToLinear(row_bytes[offset + 1]), 0, 1 },
             .rg16_unorm => .{ readU16(row_bytes, offset), readU16(row_bytes, offset + 2), 0, 1 },
             .rg16_float => .{ readF16(row_bytes, offset), readF16(row_bytes, offset + 2), 0, 1 },
-            .rgba8_unorm, .bgra8_unorm => blk: {
-                const format: surface.Format = if (self.format == .rgba8_unorm) .rgba8_unorm else .bgra8_unorm;
+            .rgba8_unorm, .rgba8_unorm_srgb, .bgra8_unorm, .bgra8_unorm_srgb => blk: {
+                const format: surface.Format = if (self.format == .rgba8_unorm or self.format == .rgba8_unorm_srgb)
+                    .rgba8_unorm
+                else
+                    .bgra8_unorm;
                 const color = surface.Surface.read(row_bytes, offset, format);
                 break :blk .{
-                    @as(f32, @floatFromInt(color.r)) / 255.0,
-                    @as(f32, @floatFromInt(color.g)) / 255.0,
-                    @as(f32, @floatFromInt(color.b)) / 255.0,
+                    if (self.format == .rgba8_unorm_srgb or self.format == .bgra8_unorm_srgb) srgbToLinear(color.r) else @as(f32, @floatFromInt(color.r)) / 255.0,
+                    if (self.format == .rgba8_unorm_srgb or self.format == .bgra8_unorm_srgb) srgbToLinear(color.g) else @as(f32, @floatFromInt(color.g)) / 255.0,
+                    if (self.format == .rgba8_unorm_srgb or self.format == .bgra8_unorm_srgb) srgbToLinear(color.b) else @as(f32, @floatFromInt(color.b)) / 255.0,
                     @as(f32, @floatFromInt(color.a)) / 255.0,
                 };
             },
@@ -193,8 +239,8 @@ pub const Target = struct {
         const row_bytes = self.row(@intCast(y));
         const offset = x * bytesPerPixel(self.format);
         switch (self.format) {
-            .r8_unorm => {
-                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) row_bytes[offset] = colorByte(color[0]);
+            .r8_unorm, .r8_unorm_srgb => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) row_bytes[offset] = if (self.format == .r8_unorm_srgb) srgbByte(color[0]) else colorByte(color[0]);
             },
             .r16_unorm => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeU16(row_bytes, offset, color[0]);
@@ -202,9 +248,9 @@ pub const Target = struct {
             .r16_float => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeF16(row_bytes, offset, color[0]);
             },
-            .rg8_unorm => {
-                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) row_bytes[offset] = colorByte(color[0]);
-                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) row_bytes[offset + 1] = colorByte(color[1]);
+            .rg8_unorm, .rg8_unorm_srgb => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) row_bytes[offset] = if (self.format == .rg8_unorm_srgb) srgbByte(color[0]) else colorByte(color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) row_bytes[offset + 1] = if (self.format == .rg8_unorm_srgb) srgbByte(color[1]) else colorByte(color[1]);
             },
             .rg16_unorm => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeU16(row_bytes, offset, color[0]);
@@ -214,12 +260,16 @@ pub const Target = struct {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeF16(row_bytes, offset, color[0]);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeF16(row_bytes, offset + 2, color[1]);
             },
-            .rgba8_unorm, .bgra8_unorm => {
-                const format: surface.Format = if (self.format == .rgba8_unorm) .rgba8_unorm else .bgra8_unorm;
+            .rgba8_unorm, .rgba8_unorm_srgb, .bgra8_unorm, .bgra8_unorm_srgb => {
+                const srgb = self.format == .rgba8_unorm_srgb or self.format == .bgra8_unorm_srgb;
+                const format: surface.Format = if (self.format == .rgba8_unorm or self.format == .rgba8_unorm_srgb)
+                    .rgba8_unorm
+                else
+                    .bgra8_unorm;
                 var output = surface.Surface.read(row_bytes, offset, format);
-                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) output.r = colorByte(color[0]);
-                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) output.g = colorByte(color[1]);
-                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) output.b = colorByte(color[2]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) output.r = if (srgb) srgbByte(color[0]) else colorByte(color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) output.g = if (srgb) srgbByte(color[1]) else colorByte(color[1]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) output.b = if (srgb) srgbByte(color[2]) else colorByte(color[2]);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) output.a = colorByte(color[3]);
                 surface.Surface.write(row_bytes, offset, format, output);
             },
@@ -1111,6 +1161,40 @@ test "float color targets retain native texel precision" {
     try std.testing.expectEqual(@as(f32, 0.5), color[1]);
     try std.testing.expectEqual(@as(f32, 0.75), color[2]);
     try std.testing.expectEqual(@as(f32, 1), color[3]);
+}
+
+test "CPU sRGB targets decode samples and encode stores" {
+    var rgba_pixels = [_]u8{0} ** 4;
+    var rgba = try Target.init(&rgba_pixels, 1, 1, 4, .rgba8_unorm_srgb);
+    rgba.storeColor(0, 0, .{ 0.25, 0.5, 0.75, 0.5 });
+    try std.testing.expectEqual([4]u8{ 137, 188, 225, 128 }, rgba_pixels);
+    const rgba_color = rgba.readColor(0, 0);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), rgba_color[0], 0.005);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), rgba_color[1], 0.005);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.75), rgba_color[2], 0.005);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), rgba_color[3], 0.005);
+
+    var bgra_pixels = [_]u8{0} ** 4;
+    var bgra = try Target.init(&bgra_pixels, 1, 1, 4, .bgra8_unorm_srgb);
+    bgra.storeColor(0, 0, .{ 0.25, 0.5, 0.75, 0.5 });
+    try std.testing.expectEqual([4]u8{ 225, 188, 137, 128 }, bgra_pixels);
+
+    var r_pixels = [_]u8{0};
+    var r = try Target.init(&r_pixels, 1, 1, 1, .r8_unorm_srgb);
+    r.storeColor(0, 0, .{ 0.25, 0, 0, 1 });
+    try std.testing.expectEqual(@as(u8, 137), r_pixels[0]);
+
+    var rg_pixels = [_]u8{0} ** 2;
+    var rg = try Target.init(&rg_pixels, 1, 1, 2, .rg8_unorm_srgb);
+    rg.storeColor(0, 0, .{ 0.25, 0.5, 0, 1 });
+    try std.testing.expectEqual([2]u8{ 137, 188 }, rg_pixels);
+}
+
+test "CPU sRGB stores use Apple fixed-point conversion boundaries" {
+    var pixels = [_]u8{ 0, 0, 0, 0 };
+    var target = try Target.init(&pixels, 1, 1, 4, .rgba8_unorm_srgb);
+    clearTarget(&target, .{ 0.4045177, 0.4045177, 0.4045177, 1 });
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 171, 171, 171, 255 }, &pixels);
 }
 
 test "narrow unorm color targets retain channel width and masks" {
