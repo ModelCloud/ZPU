@@ -1267,6 +1267,45 @@ int main(void) {
                                       fromRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
                                      mipmapLevel:0 slice:0];
 
+        id<MTLTexture> native_three_d_mipmap_texture = [device newTextureWithDescriptor:three_d_descriptor];
+        id<MTLTexture> adapter_three_d_mipmap_texture = [adapter_device newTextureWithDescriptor:three_d_descriptor];
+        [native_three_d_mipmap_texture replaceRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                          mipmapLevel:0 slice:0 withBytes:three_d_source
+                                          bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes];
+        [adapter_three_d_mipmap_texture replaceRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                           mipmapLevel:0 slice:0 withBytes:three_d_source
+                                           bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes];
+        id<MTLCommandBuffer> native_three_d_mipmap_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> native_three_d_mipmap_blit = [native_three_d_mipmap_command_buffer blitCommandEncoder];
+        [native_three_d_mipmap_blit generateMipmapsForTexture:native_three_d_mipmap_texture];
+        [native_three_d_mipmap_blit endEncoding];
+        [native_three_d_mipmap_command_buffer commit];
+        [native_three_d_mipmap_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> adapter_three_d_mipmap_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_three_d_mipmap_blit = [adapter_three_d_mipmap_command_buffer blitCommandEncoder];
+        [adapter_three_d_mipmap_blit generateMipmapsForTexture:adapter_three_d_mipmap_texture];
+        [adapter_three_d_mipmap_blit endEncoding];
+        uint8_t adapter_three_d_mipmap_deferred[three_d_mip_bytes];
+        memset(adapter_three_d_mipmap_deferred, 0xa5, sizeof(adapter_three_d_mipmap_deferred));
+        [adapter_three_d_mipmap_texture getBytes:adapter_three_d_mipmap_deferred
+                                      bytesPerRow:2 * 4 bytesPerImage:2 * 4
+                                       fromRegion:MTLRegionMake3D(0, 0, 0, 2, 1, 1)
+                                      mipmapLevel:1 slice:0];
+        [adapter_three_d_mipmap_command_buffer commit];
+        [adapter_three_d_mipmap_command_buffer waitUntilCompleted];
+        uint8_t native_three_d_mipmap_level_one[three_d_mip_bytes];
+        uint8_t adapter_three_d_mipmap_level_one[three_d_mip_bytes];
+        memset(native_three_d_mipmap_level_one, 0xa5, sizeof(native_three_d_mipmap_level_one));
+        memset(adapter_three_d_mipmap_level_one, 0xa5, sizeof(adapter_three_d_mipmap_level_one));
+        [native_three_d_mipmap_texture getBytes:native_three_d_mipmap_level_one
+                                      bytesPerRow:2 * 4 bytesPerImage:2 * 4
+                                       fromRegion:MTLRegionMake3D(0, 0, 0, 2, 1, 1)
+                                      mipmapLevel:1 slice:0];
+        [adapter_three_d_mipmap_texture getBytes:adapter_three_d_mipmap_level_one
+                                       bytesPerRow:2 * 4 bytesPerImage:2 * 4
+                                        fromRegion:MTLRegionMake3D(0, 0, 0, 2, 1, 1)
+                                       mipmapLevel:1 slice:0];
+
         MTLSizeAndAlign three_d_heap_size_align =
             [adapter_device heapTextureSizeAndAlignWithDescriptor:three_d_descriptor];
         MTLHeapDescriptor *three_d_heap_descriptor = [MTLHeapDescriptor new];
@@ -1302,6 +1341,12 @@ int main(void) {
             adapter_three_d_upload_command_buffer.status != MTLCommandBufferStatusCompleted ||
             memcmp(native_three_d_upload_texture_bytes, adapter_three_d_upload_texture_bytes,
                    sizeof(native_three_d_upload_texture_bytes)) != 0 ||
+            native_three_d_mipmap_texture == nil || adapter_three_d_mipmap_texture == nil ||
+            native_three_d_mipmap_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_three_d_mipmap_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(adapter_three_d_mipmap_deferred, (const uint8_t[three_d_mip_bytes]){0}, three_d_mip_bytes) != 0 ||
+            memcmp(native_three_d_mipmap_level_one, adapter_three_d_mipmap_level_one,
+                   sizeof(native_three_d_mipmap_level_one)) != 0 ||
             three_d_heap_size_align.size != expected_three_d_allocated_size || three_d_heap_size_align.align != 4 ||
             adapter_three_d_heap == nil || adapter_three_d_heap_texture == nil ||
             adapter_three_d_heap_texture.depth != three_d_depth ||
@@ -1309,6 +1354,69 @@ int main(void) {
             adapter_three_d_heap.usedSize != expected_three_d_allocated_size) {
             fprintf(stderr, "metal-pixel: 3D texture bytes/view/heap/blit exactness failed\n");
             return 81;
+        }
+
+        enum { fractional_three_d_width = 5, fractional_three_d_height = 3, fractional_three_d_depth = 5,
+               fractional_three_d_row_bytes = fractional_three_d_width * 4,
+               fractional_three_d_plane_bytes = fractional_three_d_row_bytes * fractional_three_d_height,
+               fractional_three_d_bytes = fractional_three_d_plane_bytes * fractional_three_d_depth,
+               fractional_three_d_mip_bytes = 2 * 1 * 2 * 4 };
+        MTLTextureDescriptor *fractional_three_d_descriptor = [MTLTextureDescriptor new];
+        fractional_three_d_descriptor.textureType = MTLTextureType3D;
+        fractional_three_d_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        fractional_three_d_descriptor.width = fractional_three_d_width;
+        fractional_three_d_descriptor.height = fractional_three_d_height;
+        fractional_three_d_descriptor.depth = fractional_three_d_depth;
+        fractional_three_d_descriptor.arrayLength = 1;
+        fractional_three_d_descriptor.mipmapLevelCount = 2;
+        fractional_three_d_descriptor.sampleCount = 1;
+        fractional_three_d_descriptor.storageMode = MTLStorageModeShared;
+        fractional_three_d_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        id<MTLTexture> native_fractional_three_d = [device newTextureWithDescriptor:fractional_three_d_descriptor];
+        id<MTLTexture> adapter_fractional_three_d = [adapter_device newTextureWithDescriptor:fractional_three_d_descriptor];
+        uint8_t fractional_three_d_source[fractional_three_d_bytes];
+        for (NSUInteger index = 0; index < sizeof(fractional_three_d_source); ++index) {
+            fractional_three_d_source[index] = (uint8_t)((index * 19u + 23u) & 0xffu);
+        }
+        [native_fractional_three_d replaceRegion:MTLRegionMake3D(0, 0, 0, fractional_three_d_width,
+                                                                  fractional_three_d_height, fractional_three_d_depth)
+                                      mipmapLevel:0 slice:0 withBytes:fractional_three_d_source
+                                      bytesPerRow:fractional_three_d_row_bytes bytesPerImage:fractional_three_d_plane_bytes];
+        [adapter_fractional_three_d replaceRegion:MTLRegionMake3D(0, 0, 0, fractional_three_d_width,
+                                                                   fractional_three_d_height, fractional_three_d_depth)
+                                       mipmapLevel:0 slice:0 withBytes:fractional_three_d_source
+                                       bytesPerRow:fractional_three_d_row_bytes bytesPerImage:fractional_three_d_plane_bytes];
+        id<MTLCommandBuffer> native_fractional_three_d_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> native_fractional_three_d_blit =
+            [native_fractional_three_d_command_buffer blitCommandEncoder];
+        [native_fractional_three_d_blit generateMipmapsForTexture:native_fractional_three_d];
+        [native_fractional_three_d_blit endEncoding];
+        [native_fractional_three_d_command_buffer commit];
+        [native_fractional_three_d_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> adapter_fractional_three_d_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_fractional_three_d_blit =
+            [adapter_fractional_three_d_command_buffer blitCommandEncoder];
+        [adapter_fractional_three_d_blit generateMipmapsForTexture:adapter_fractional_three_d];
+        [adapter_fractional_three_d_blit endEncoding];
+        [adapter_fractional_three_d_command_buffer commit];
+        [adapter_fractional_three_d_command_buffer waitUntilCompleted];
+        uint8_t native_fractional_three_d_mip[fractional_three_d_mip_bytes];
+        uint8_t adapter_fractional_three_d_mip[fractional_three_d_mip_bytes];
+        [native_fractional_three_d getBytes:native_fractional_three_d_mip
+                                bytesPerRow:2 * 4 bytesPerImage:2 * 4
+                                 fromRegion:MTLRegionMake3D(0, 0, 0, 2, 1, 2)
+                                mipmapLevel:1 slice:0];
+        [adapter_fractional_three_d getBytes:adapter_fractional_three_d_mip
+                                 bytesPerRow:2 * 4 bytesPerImage:2 * 4
+                                  fromRegion:MTLRegionMake3D(0, 0, 0, 2, 1, 2)
+                                 mipmapLevel:1 slice:0];
+        if (native_fractional_three_d == nil || adapter_fractional_three_d == nil ||
+            native_fractional_three_d_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_fractional_three_d_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_fractional_three_d_mip, adapter_fractional_three_d_mip,
+                   sizeof(native_fractional_three_d_mip)) != 0) {
+            fprintf(stderr, "metal-pixel: fractional 3D mipmap exactness failed\n");
+            return 86;
         }
         MTLTextureDescriptor *array_render_descriptor = [array_descriptor copy];
         array_render_descriptor.usage = MTLTextureUsageRenderTarget;
@@ -2133,6 +2241,39 @@ int main(void) {
             memcmp(metal4_generated_mip_level_one, native_generated_mip_level_one, sizeof(mip_level_one)) != 0) {
             fail_with_error("Metal 4 CPU mipmap generation failed", metal4_error);
             return 73;
+        }
+
+        id<MTLTexture> metal4_three_d_mipmap_texture = [adapter_device newTextureWithDescriptor:three_d_descriptor];
+        [metal4_three_d_mipmap_texture replaceRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                          mipmapLevel:0 slice:0 withBytes:three_d_source
+                                          bytesPerRow:three_d_row_bytes bytesPerImage:three_d_plane_bytes];
+        id<MTL4CommandBuffer> metal4_three_d_mipmap_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_three_d_mipmap_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> metal4_three_d_mipmap_encoder =
+            [metal4_three_d_mipmap_command_buffer computeCommandEncoder];
+        [metal4_three_d_mipmap_encoder generateMipmapsForTexture:metal4_three_d_mipmap_texture];
+        [metal4_three_d_mipmap_encoder endEncoding];
+        [metal4_three_d_mipmap_command_buffer endCommandBuffer];
+        uint8_t metal4_three_d_mipmap_deferred[three_d_mip_bytes];
+        memset(metal4_three_d_mipmap_deferred, 0xa5, sizeof(metal4_three_d_mipmap_deferred));
+        [metal4_three_d_mipmap_texture getBytes:metal4_three_d_mipmap_deferred
+                                    bytesPerRow:2 * 4 bytesPerImage:2 * 4
+                                     fromRegion:MTLRegionMake3D(0, 0, 0, 2, 1, 1)
+                                    mipmapLevel:1 slice:0];
+        id<MTL4CommandBuffer> metal4_three_d_mipmap_command_buffers[] = {metal4_three_d_mipmap_command_buffer};
+        [metal4_queue commit:metal4_three_d_mipmap_command_buffers count:1];
+        uint8_t metal4_three_d_mipmap_level_one[three_d_mip_bytes];
+        [metal4_three_d_mipmap_texture getBytes:metal4_three_d_mipmap_level_one
+                                    bytesPerRow:2 * 4 bytesPerImage:2 * 4
+                                     fromRegion:MTLRegionMake3D(0, 0, 0, 2, 1, 1)
+                                    mipmapLevel:1 slice:0];
+        if (metal4_three_d_mipmap_texture == nil || metal4_three_d_mipmap_command_buffer == nil ||
+            metal4_three_d_mipmap_encoder == nil ||
+            memcmp(metal4_three_d_mipmap_deferred, (const uint8_t[three_d_mip_bytes]){0}, three_d_mip_bytes) != 0 ||
+            memcmp(metal4_three_d_mipmap_level_one, native_three_d_mipmap_level_one,
+                   sizeof(metal4_three_d_mipmap_level_one)) != 0) {
+            fail_with_error("Metal 4 CPU 3D mipmap generation failed", metal4_error);
+            return 85;
         }
 
         id<MTLTexture> metal4_array_copy = [adapter_device newTextureWithDescriptor:array_descriptor];

@@ -3951,10 +3951,40 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 - (void)generateMipmapsForTexture:(id<MTLTexture>)texture {
     ZPUTexture *zpuTexture = (ZPUTexture *)texture;
     if (![zpuTexture isKindOfClass:[ZPUTexture class]] ||
-        zpu_texture_type_is_3d(zpuTexture->_textureType) ||
         (zpuTexture->_pixelFormat != MTLPixelFormatRGBA8Unorm && zpuTexture->_pixelFormat != MTLPixelFormatBGRA8Unorm) ||
         zpuTexture.mipmapLevelCount < 2) {
         [_owner markError];
+        return;
+    }
+    if (zpu_texture_type_is_3d(zpuTexture->_textureType)) {
+        for (NSUInteger level = 0; level + 1 < zpuTexture.mipmapLevelCount; ++level) {
+            const NSUInteger sourceDepth = zpu_texture_depth_at_level(zpuTexture, level);
+            const NSUInteger destinationDepth = zpu_texture_depth_at_level(zpuTexture, level + 1);
+            if (sourceDepth == 0 || destinationDepth != (sourceDepth > 1 ? sourceDepth / 2 : 1)) {
+                [_owner markError];
+                return;
+            }
+            const NSUInteger zDenominator = destinationDepth * 2;
+            for (NSUInteger plane = 0; plane < destinationDepth; ++plane) {
+                const NSUInteger zPositionNumerator = (plane * 2 + 1) * sourceDepth - destinationDepth;
+                const NSUInteger sourcePlane = zPositionNumerator / zDenominator;
+                const NSUInteger zRemainder = zPositionNumerator % zDenominator;
+                const BOOL hasSource1 = zRemainder != 0 && sourcePlane + 1 < sourceDepth;
+                zpu_metal_texture *sourceTexture0 = [zpuTexture zpuTextureAtLevel:level slice:sourcePlane];
+                zpu_metal_texture *sourceTexture1 = hasSource1 ?
+                    [zpuTexture zpuTextureAtLevel:level slice:sourcePlane + 1] : NULL;
+                zpu_metal_texture *destinationTexture = [zpuTexture zpuTextureAtLevel:level + 1 slice:plane];
+                if (sourceTexture0 == NULL || (hasSource1 && sourceTexture1 == NULL) || destinationTexture == NULL ||
+                    zpu_metal_compute_encoder_generate_mipmap_3d_weighted(_legacy->_zpuEncoder, sourceTexture0,
+                        sourceTexture1, destinationTexture, hasSource1 ? (uint32_t)zRemainder : 0,
+                        hasSource1 ? (uint32_t)zDenominator : 1) != ZPU_METAL_OK) {
+                    [_owner markError];
+                    return;
+                }
+            }
+        }
+        [_owner->_legacyBuffer retainResource:zpuTexture];
+        _stages |= MTLStageBlit;
         return;
     }
     for (NSUInteger slice = 0; slice < zpuTexture.arrayLength; ++slice) {
@@ -4995,9 +5025,32 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 - (void)generateMipmapsForTexture:(id<MTLTexture>)texture {
     ZPUTexture *zpuTexture = (ZPUTexture *)texture;
     if (![zpuTexture isKindOfClass:[ZPUTexture class]] ||
-        zpu_texture_type_is_3d(zpuTexture->_textureType) ||
         (zpuTexture->_pixelFormat != MTLPixelFormatRGBA8Unorm && zpuTexture->_pixelFormat != MTLPixelFormatBGRA8Unorm) ||
         zpuTexture.mipmapLevelCount < 2) return;
+    if (zpu_texture_type_is_3d(zpuTexture->_textureType)) {
+        for (NSUInteger level = 0; level + 1 < zpuTexture.mipmapLevelCount; ++level) {
+            const NSUInteger sourceDepth = zpu_texture_depth_at_level(zpuTexture, level);
+            const NSUInteger destinationDepth = zpu_texture_depth_at_level(zpuTexture, level + 1);
+            if (sourceDepth == 0 || destinationDepth != (sourceDepth > 1 ? sourceDepth / 2 : 1)) return;
+            const NSUInteger zDenominator = destinationDepth * 2;
+            for (NSUInteger plane = 0; plane < destinationDepth; ++plane) {
+                const NSUInteger zPositionNumerator = (plane * 2 + 1) * sourceDepth - destinationDepth;
+                const NSUInteger sourcePlane = zPositionNumerator / zDenominator;
+                const NSUInteger zRemainder = zPositionNumerator % zDenominator;
+                const BOOL hasSource1 = zRemainder != 0 && sourcePlane + 1 < sourceDepth;
+                zpu_metal_texture *sourceTexture0 = [zpuTexture zpuTextureAtLevel:level slice:sourcePlane];
+                zpu_metal_texture *sourceTexture1 = hasSource1 ?
+                    [zpuTexture zpuTextureAtLevel:level slice:sourcePlane + 1] : NULL;
+                zpu_metal_texture *destinationTexture = [zpuTexture zpuTextureAtLevel:level + 1 slice:plane];
+                if (sourceTexture0 == NULL || (hasSource1 && sourceTexture1 == NULL) || destinationTexture == NULL ||
+                    zpu_metal_blit_encoder_generate_mipmap_3d_weighted(_zpuEncoder, sourceTexture0,
+                        sourceTexture1, destinationTexture, hasSource1 ? (uint32_t)zRemainder : 0,
+                        hasSource1 ? (uint32_t)zDenominator : 1) != ZPU_METAL_OK) return;
+            }
+        }
+        [_owner retainResource:zpuTexture];
+        return;
+    }
     for (NSUInteger slice = 0; slice < zpuTexture.arrayLength; ++slice) {
         for (NSUInteger level = 0; level + 1 < zpuTexture.mipmapLevelCount; ++level) {
             if (zpu_metal_blit_encoder_generate_mipmap(

@@ -190,6 +190,14 @@ const MipmapCommand = struct {
     destination: *Texture,
 };
 
+const Mipmap3DCommand = struct {
+    source0: *Texture,
+    source1: ?*Texture,
+    destination: *Texture,
+    source1_weight_numerator: u32,
+    source1_weight_denominator: u32,
+};
+
 const FillBufferCommand = struct {
     buffer: *Buffer,
     offset: usize,
@@ -224,6 +232,7 @@ const Command = union(enum) {
     copy_texture_to_buffer: TextureBufferCommand,
     copy_texture_to_texture: TextureTextureCommand,
     generate_mipmap: MipmapCommand,
+    generate_mipmap_3d: Mipmap3DCommand,
     fill_buffer: FillBufferCommand,
     compute: ComputeCommand,
     synchronize_buffer: *Buffer,
@@ -334,6 +343,13 @@ pub const CommandBuffer = struct {
                 if (!validTexture(mipmap.source) or !validTexture(mipmap.destination)) return self.fail(error.InvalidResource);
                 if (mipmap.source.device != mipmap.destination.device) return self.fail(error.InvalidResource);
                 generateMipmap(mipmap) catch |err| return self.fail(err);
+            },
+            .generate_mipmap_3d => |mipmap| {
+                if (!validTexture(mipmap.source0) or !validTexture(mipmap.destination) or
+                    (mipmap.source1 != null and !validTexture(mipmap.source1.?))) return self.fail(error.InvalidResource);
+                if (mipmap.source0.device != mipmap.destination.device or
+                    (mipmap.source1 != null and mipmap.source1.?.device != mipmap.destination.device)) return self.fail(error.InvalidResource);
+                generateMipmap3D(mipmap) catch |err| return self.fail(err);
             },
             .fill_buffer => |fill| {
                 if (!validBuffer(fill.buffer)) return self.fail(error.InvalidResource);
@@ -765,6 +781,28 @@ pub const BlitEncoder = struct {
         _ = try self.command_buffer.append(.{ .generate_mipmap = .{ .source = source, .destination = destination } });
     }
 
+    pub fn generateMipmap3D(self: *BlitEncoder, source0: *Texture, source1: ?*Texture, destination: *Texture) Error!void {
+        const denominator: u32 = if (source1 != null) 2 else 1;
+        try self.generateMipmap3DWeighted(source0, source1, destination, if (source1 != null) 1 else 0, denominator);
+    }
+
+    pub fn generateMipmap3DWeighted(self: *BlitEncoder, source0: *Texture, source1: ?*Texture, destination: *Texture, source1_weight_numerator: u32, source1_weight_denominator: u32) Error!void {
+        if (!self.open() or !validTexture(source0) or !validTexture(destination)) return error.InvalidArgument;
+        if (source0.device != destination.device or source0.format != destination.format) return error.InvalidArgument;
+        if (source1) |value| {
+            if (!validTexture(value) or value.device != destination.device or value.format != destination.format) return error.InvalidArgument;
+        }
+        if (source1_weight_denominator == 0 or source1_weight_numerator > source1_weight_denominator or
+            (source1 == null and source1_weight_numerator != 0)) return error.InvalidArgument;
+        _ = try self.command_buffer.append(.{ .generate_mipmap_3d = .{
+            .source0 = source0,
+            .source1 = source1,
+            .destination = destination,
+            .source1_weight_numerator = source1_weight_numerator,
+            .source1_weight_denominator = source1_weight_denominator,
+        } });
+    }
+
     pub fn fillBuffer(self: *BlitEncoder, buffer: *Buffer, offset: usize, length: usize, value: u8) Error!void {
         if (!self.open() or !validBuffer(buffer)) return error.InvalidArgument;
         if (!rangeValid(buffer.bytes.len, offset, length)) return error.InvalidArgument;
@@ -930,6 +968,28 @@ pub const ComputeEncoder = struct {
         if (!self.open() or !validTexture(source) or !validTexture(destination)) return error.InvalidArgument;
         if (source.device != destination.device or source.format != destination.format) return error.InvalidArgument;
         _ = try self.command_buffer.append(.{ .generate_mipmap = .{ .source = source, .destination = destination } });
+    }
+
+    pub fn generateMipmap3D(self: *ComputeEncoder, source0: *Texture, source1: ?*Texture, destination: *Texture) Error!void {
+        const denominator: u32 = if (source1 != null) 2 else 1;
+        try self.generateMipmap3DWeighted(source0, source1, destination, if (source1 != null) 1 else 0, denominator);
+    }
+
+    pub fn generateMipmap3DWeighted(self: *ComputeEncoder, source0: *Texture, source1: ?*Texture, destination: *Texture, source1_weight_numerator: u32, source1_weight_denominator: u32) Error!void {
+        if (!self.open() or !validTexture(source0) or !validTexture(destination)) return error.InvalidArgument;
+        if (source0.device != destination.device or source0.format != destination.format) return error.InvalidArgument;
+        if (source1) |value| {
+            if (!validTexture(value) or value.device != destination.device or value.format != destination.format) return error.InvalidArgument;
+        }
+        if (source1_weight_denominator == 0 or source1_weight_numerator > source1_weight_denominator or
+            (source1 == null and source1_weight_numerator != 0)) return error.InvalidArgument;
+        _ = try self.command_buffer.append(.{ .generate_mipmap_3d = .{
+            .source0 = source0,
+            .source1 = source1,
+            .destination = destination,
+            .source1_weight_numerator = source1_weight_numerator,
+            .source1_weight_denominator = source1_weight_denominator,
+        } });
     }
 
     pub fn fillBuffer(self: *ComputeEncoder, buffer: *Buffer, offset: usize, length: usize, value: u8) Error!void {
@@ -1497,26 +1557,125 @@ fn copyTextureToTexture(command: TextureTextureCommand) Error!void {
     }
 }
 
+const MipmapAxis = struct {
+    low: usize,
+    high: usize,
+    low_weight: u64,
+    high_weight: u64,
+    denominator: u64,
+};
+
+fn mipmapAxis(source_size: u32, destination_size: u32, destination_index: usize) MipmapAxis {
+    const source_size_u64 = @as(u64, source_size);
+    const destination_size_u64 = @as(u64, destination_size);
+    const denominator = destination_size_u64 * 2;
+    const numerator = (@as(u64, destination_index) * 2 + 1) * source_size_u64 - destination_size_u64;
+    const low_u64 = numerator / denominator;
+    const remainder = numerator % denominator;
+    const high_u64 = if (remainder != 0 and low_u64 + 1 < source_size_u64) low_u64 + 1 else low_u64;
+    const low: usize = @intCast(low_u64);
+    const high: usize = @intCast(high_u64);
+    return .{
+        .low = low,
+        .high = high,
+        .low_weight = if (low == high) denominator else denominator - remainder,
+        .high_weight = if (low == high) 0 else remainder,
+        .denominator = denominator,
+    };
+}
+
 fn generateMipmap(command: MipmapCommand) Error!void {
     if (command.source == command.destination or !command.source.format.isColor()) return error.UnsupportedFormat;
     const destination_width: u32 = if (command.source.width > 1) command.source.width / 2 else 1;
     const destination_height: u32 = if (command.source.height > 1) command.source.height / 2 else 1;
     if (command.destination.width != destination_width or command.destination.height != destination_height) return error.InvalidArgument;
     for (0..destination_height) |y| {
+        const source_y = mipmapAxis(command.source.height, destination_height, y);
         for (0..destination_width) |x| {
-            const source_x0 = x * 2;
-            const source_y0 = y * 2;
-            var sums = [_]u32{0, 0, 0, 0};
-            for (0..2) |sample_y| {
-                const source_y = @min(source_y0 + sample_y, @as(usize, command.source.height) - 1);
-                for (0..2) |sample_x| {
-                    const source_x = @min(source_x0 + sample_x, @as(usize, command.source.width) - 1);
-                    const source_offset = source_y * command.source.stride + source_x * 4;
-                    for (0..4) |component| sums[component] += command.source.bytes[source_offset + component];
+            const source_x = mipmapAxis(command.source.width, destination_width, x);
+            const weight_denominator = source_x.denominator * source_y.denominator;
+            var sums = [_]u64{ 0, 0, 0, 0 };
+            const x_weights = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_x.low, .weight = source_x.low_weight },
+                .{ .index = source_x.high, .weight = source_x.high_weight },
+            };
+            const y_weights = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_y.low, .weight = source_y.low_weight },
+                .{ .index = source_y.high, .weight = source_y.high_weight },
+            };
+            for (y_weights) |y_sample| {
+                if (y_sample.weight == 0) continue;
+                for (x_weights) |x_sample| {
+                    if (x_sample.weight == 0) continue;
+                    const source_offset = y_sample.index * command.source.stride + x_sample.index * 4;
+                    const weight = x_sample.weight * y_sample.weight;
+                    for (0..4) |component| sums[component] += @as(u64, command.source.bytes[source_offset + component]) * weight;
                 }
             }
             const destination_offset = y * command.destination.stride + x * 4;
-            for (0..4) |component| command.destination.bytes[destination_offset + component] = @intCast((sums[component] + 2) / 4);
+            for (0..4) |component| command.destination.bytes[destination_offset + component] = @intCast((sums[component] + weight_denominator / 2) / weight_denominator);
+        }
+    }
+}
+
+fn generateMipmap3D(command: Mipmap3DCommand) Error!void {
+    if (command.source0 == command.destination or !command.source0.format.isColor()) return error.UnsupportedFormat;
+    if (command.source1_weight_denominator == 0 or command.source1_weight_numerator > command.source1_weight_denominator or
+        (command.source1 == null and command.source1_weight_numerator != 0)) return error.InvalidArgument;
+    const source1 = command.source1;
+    if (source1) |value| {
+        if (value == command.destination or value.width != command.source0.width or
+            value.height != command.source0.height or value.format != command.source0.format) return error.InvalidArgument;
+    }
+    const destination_width: u32 = if (command.source0.width > 1) command.source0.width / 2 else 1;
+    const destination_height: u32 = if (command.source0.height > 1) command.source0.height / 2 else 1;
+    if (command.destination.width != destination_width or command.destination.height != destination_height) return error.InvalidArgument;
+    const source0_z_weight = @as(u64, command.source1_weight_denominator - command.source1_weight_numerator);
+    const source1_z_weight = @as(u64, command.source1_weight_numerator);
+    for (0..destination_height) |y| {
+        const source_y = mipmapAxis(command.source0.height, destination_height, y);
+        for (0..destination_width) |x| {
+            const source_x = mipmapAxis(command.source0.width, destination_width, x);
+            const weight_denominator = source_x.denominator * source_y.denominator * command.source1_weight_denominator;
+            var sums = [_]u64{ 0, 0, 0, 0 };
+            const x_weights = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_x.low, .weight = source_x.low_weight },
+                .{ .index = source_x.high, .weight = source_x.high_weight },
+            };
+            const y_weights = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_y.low, .weight = source_y.low_weight },
+                .{ .index = source_y.high, .weight = source_y.high_weight },
+            };
+            const sources = [_]struct { texture: *Texture, weight: u64 }{
+                .{ .texture = command.source0, .weight = source0_z_weight },
+            };
+            for (sources) |source_sample| {
+                if (source_sample.weight == 0) continue;
+                for (y_weights) |y_sample| {
+                    if (y_sample.weight == 0) continue;
+                    for (x_weights) |x_sample| {
+                        if (x_sample.weight == 0) continue;
+                        const source_offset = y_sample.index * source_sample.texture.stride + x_sample.index * 4;
+                        const weight = source_sample.weight * x_sample.weight * y_sample.weight;
+                        for (0..4) |component| sums[component] += @as(u64, source_sample.texture.bytes[source_offset + component]) * weight;
+                    }
+                }
+            }
+            if (source1) |value| {
+                if (source1_z_weight != 0) {
+                    for (y_weights) |y_sample| {
+                        if (y_sample.weight == 0) continue;
+                        for (x_weights) |x_sample| {
+                            if (x_sample.weight == 0) continue;
+                            const source_offset = y_sample.index * value.stride + x_sample.index * 4;
+                            const weight = source1_z_weight * x_sample.weight * y_sample.weight;
+                            for (0..4) |component| sums[component] += @as(u64, value.bytes[source_offset + component]) * weight;
+                        }
+                    }
+                }
+            }
+            const destination_offset = y * command.destination.stride + x * 4;
+            for (0..4) |component| command.destination.bytes[destination_offset + component] = @intCast((sums[component] + weight_denominator / 2) / weight_denominator);
         }
     }
 }
@@ -2321,6 +2480,16 @@ pub export fn zpu_metal_blit_encoder_generate_mipmap(encoder: ?*BlitEncoder, sou
     return 0;
 }
 
+pub export fn zpu_metal_blit_encoder_generate_mipmap_3d(encoder: ?*BlitEncoder, source0: ?*Texture, source1: ?*Texture, destination: ?*Texture) callconv(.c) c_int {
+    (encoder orelse return -1).generateMipmap3D(source0 orelse return -1, source1, destination orelse return -1) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_blit_encoder_generate_mipmap_3d_weighted(encoder: ?*BlitEncoder, source0: ?*Texture, source1: ?*Texture, destination: ?*Texture, source1_weight_numerator: u32, source1_weight_denominator: u32) callconv(.c) c_int {
+    (encoder orelse return -1).generateMipmap3DWeighted(source0 orelse return -1, source1, destination orelse return -1, source1_weight_numerator, source1_weight_denominator) catch |err| return errorCode(err);
+    return 0;
+}
+
 pub export fn zpu_metal_blit_encoder_fill_buffer(encoder: ?*BlitEncoder, buffer: ?*Buffer, offset: usize, length: usize, value: u8) callconv(.c) c_int {
     (encoder orelse return -1).fillBuffer(buffer orelse return -1, offset, length, value) catch |err| return errorCode(err);
     return 0;
@@ -2402,6 +2571,16 @@ pub export fn zpu_metal_compute_encoder_copy_texture_to_texture(encoder: ?*Compu
 
 pub export fn zpu_metal_compute_encoder_generate_mipmap(encoder: ?*ComputeEncoder, source: ?*Texture, destination: ?*Texture) callconv(.c) c_int {
     (encoder orelse return -1).generateMipmap(source orelse return -1, destination orelse return -1) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_compute_encoder_generate_mipmap_3d(encoder: ?*ComputeEncoder, source0: ?*Texture, source1: ?*Texture, destination: ?*Texture) callconv(.c) c_int {
+    (encoder orelse return -1).generateMipmap3D(source0 orelse return -1, source1, destination orelse return -1) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_compute_encoder_generate_mipmap_3d_weighted(encoder: ?*ComputeEncoder, source0: ?*Texture, source1: ?*Texture, destination: ?*Texture, source1_weight_numerator: u32, source1_weight_denominator: u32) callconv(.c) c_int {
+    (encoder orelse return -1).generateMipmap3DWeighted(source0 orelse return -1, source1, destination orelse return -1, source1_weight_numerator, source1_weight_denominator) catch |err| return errorCode(err);
     return 0;
 }
 
