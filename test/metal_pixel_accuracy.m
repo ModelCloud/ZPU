@@ -5716,6 +5716,29 @@ int main(void) {
             return 67;
         }
 
+        /* ZPU has one top-left viewport and scissor state. Never silently
+         * discard additional entries, since doing so could change either
+         * axis of the rendered pixel grid. */
+        MTLViewport invalid_viewports[2] = {origin_viewport, origin_viewport};
+        MTLScissorRect invalid_scissors[2] = {origin_scissor, origin_scissor};
+        MTLRenderPassDescriptor *invalid_grid_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        invalid_grid_pass.colorAttachments[0].texture = adapter_metal4_origin_texture;
+        invalid_grid_pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        invalid_grid_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLCommandBuffer> invalid_grid_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> invalid_grid_encoder =
+            [invalid_grid_command_buffer renderCommandEncoderWithDescriptor:invalid_grid_pass];
+        [invalid_grid_encoder setViewports:invalid_viewports count:2];
+        [invalid_grid_encoder setScissorRects:invalid_scissors count:2];
+        [invalid_grid_encoder endEncoding];
+        [invalid_grid_command_buffer commit];
+        [invalid_grid_command_buffer waitUntilCompleted];
+        if (invalid_grid_command_buffer == nil || invalid_grid_encoder == nil ||
+            invalid_grid_command_buffer.status != MTLCommandBufferStatusError) {
+            fprintf(stderr, "metal-pixel: CPU Metal accepted unrepresentable multi-viewport grid state\n");
+            return 70;
+        }
+
         /* Metal 4 splits argument-table bindings by stage. Bind the vertex
          * buffer through one table and the uniform fragment buffer through a
          * second table, then compare the CPU/ZPU result with the native

@@ -5874,10 +5874,15 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 }
 - (void)setViewport:(MTLViewport)viewport { [(id)_legacy setViewport:viewport]; }
 - (void)setViewports:(const MTLViewport [__nonnull])viewports count:(NSUInteger)count {
-    if (viewports == NULL || count == 0) { [_owner markError]; return; }
+    if (viewports == NULL || count != 1) { [_owner markError]; return; }
     [(id)_legacy setViewports:viewports count:count];
 }
 - (void)setVertexAmplificationCount:(NSUInteger)count viewMappings:(const MTLVertexAmplificationViewMapping *)viewMappings {
+    if (count != 1 || (viewMappings != NULL &&
+        (viewMappings[0].viewportArrayIndexOffset != 0 || viewMappings[0].renderTargetArrayIndexOffset != 0))) {
+        [_owner markError];
+        return;
+    }
     [(id)_legacy setVertexAmplificationCount:count viewMappings:viewMappings];
 }
 - (void)setCullMode:(MTLCullMode)cullMode { [(id)_legacy setCullMode:cullMode]; }
@@ -5890,7 +5895,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 }
 - (void)setScissorRect:(MTLScissorRect)rect { [(id)_legacy setScissorRect:rect]; }
 - (void)setScissorRects:(const MTLScissorRect [__nonnull])rects count:(NSUInteger)count {
-    if (rects == NULL || count == 0) { [_owner markError]; return; }
+    if (rects == NULL || count != 1) { [_owner markError]; return; }
     [(id)_legacy setScissorRects:rects count:count];
 }
 - (void)setTriangleFillMode:(MTLTriangleFillMode)fillMode { [(id)_legacy setTriangleFillMode:fillMode]; }
@@ -8480,12 +8485,14 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     }) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)setViewports:(const MTLViewport [__nonnull])viewports count:(NSUInteger)count API_AVAILABLE(macos(10.13), ios(12.0), tvos(14.5)) {
-    if (viewports == NULL || count == 0) { [_owner markError]; return; }
+    if (viewports == NULL || count != 1) { [_owner markError]; return; }
     [self setViewport:viewports[0]];
 }
 - (void)setVertexAmplificationCount:(NSUInteger)count viewMappings:(const MTLVertexAmplificationViewMapping * __nullable)viewMappings API_AVAILABLE(macos(10.15.4), ios(13.0), macCatalyst(13.4), tvos(16.0)) {
-    (void)viewMappings;
-    if (count > 1) [_owner markError];
+    if (count != 1 || (viewMappings != NULL &&
+        (viewMappings[0].viewportArrayIndexOffset != 0 || viewMappings[0].renderTargetArrayIndexOffset != 0))) {
+        [_owner markError];
+    }
 }
 - (void)setScissorRect:(MTLScissorRect)scissorRect {
     uint32_t x, y, width, height;
@@ -8496,7 +8503,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     if (zpu_metal_render_encoder_set_scissor_rect(_zpuEncoder, (zpu_metal_scissor_rect){x, y, width, height}) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)setScissorRects:(const MTLScissorRect [__nonnull])scissorRects count:(NSUInteger)count API_AVAILABLE(macos(10.13), ios(12.0), tvos(14.5)) {
-    if (scissorRects == NULL || count == 0) { [_owner markError]; return; }
+    if (scissorRects == NULL || count != 1) { [_owner markError]; return; }
     [self setScissorRect:scissorRects[0]];
 }
 - (void)setCullMode:(MTLCullMode)cullMode {
