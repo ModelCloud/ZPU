@@ -5808,7 +5808,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     if (![source isKindOfClass:[ZPUTensor class]] || ![destination isKindOfClass:[ZPUTensor class]] ||
         source->_owner != [_owner device] || destination->_owner != [_owner device] ||
         !zpu_tensor_encode_copy_slice(source, sourceOrigin, sourceDimensions, destination, destinationOrigin,
-                                       destinationDimensions, _legacy->_zpuEncoder, NO)) {
+                                       destinationDimensions, _legacy->_zpuEncoder, YES)) {
         [_owner markError];
         return;
     }

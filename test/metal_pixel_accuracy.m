@@ -4069,6 +4069,69 @@ int main(void) {
             return 82;
         }
 
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            const NSInteger metal4_tensor_dimension_values[] = {3, 2};
+            const NSInteger metal4_tensor_packed_stride_values[] = {1, 3};
+            const NSInteger metal4_tensor_buffer_stride_values[] = {1, 4};
+            MTLTensorExtents *metal4_tensor_dimensions =
+                [[MTLTensorExtents alloc] initWithRank:2 values:metal4_tensor_dimension_values];
+            MTLTensorExtents *metal4_tensor_packed_strides =
+                [[MTLTensorExtents alloc] initWithRank:2 values:metal4_tensor_packed_stride_values];
+            MTLTensorExtents *metal4_tensor_buffer_strides =
+                [[MTLTensorExtents alloc] initWithRank:2 values:metal4_tensor_buffer_stride_values];
+            MTLTensorDescriptor *metal4_tensor_descriptor = [MTLTensorDescriptor new];
+            metal4_tensor_descriptor.dimensions = metal4_tensor_dimensions;
+            metal4_tensor_descriptor.strides = metal4_tensor_buffer_strides;
+            metal4_tensor_descriptor.dataType = MTLTensorDataTypeUInt8;
+            metal4_tensor_descriptor.usage = MTLTensorUsageCompute;
+            metal4_tensor_descriptor.resourceOptions = MTLResourceStorageModeShared;
+            metal4_tensor_descriptor.storageMode = MTLStorageModeShared;
+            id<MTLBuffer> metal4_tensor_source_buffer =
+                [adapter_device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> metal4_tensor_destination_buffer =
+                [adapter_device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+            id<MTLTensor> metal4_source_tensor =
+                [metal4_tensor_source_buffer newTensorWithDescriptor:metal4_tensor_descriptor
+                                                                offset:1 error:&metal4_error];
+            id<MTLTensor> metal4_destination_tensor =
+                [metal4_tensor_destination_buffer newTensorWithDescriptor:metal4_tensor_descriptor
+                                                                     offset:2 error:&metal4_error];
+            const NSInteger metal4_tensor_zero_values[] = {0, 0};
+            MTLTensorExtents *metal4_tensor_zero =
+                [[MTLTensorExtents alloc] initWithRank:2 values:metal4_tensor_zero_values];
+            const uint8_t metal4_tensor_values[] = {50, 51, 52, 60, 61, 62};
+            uint8_t metal4_tensor_copy_values[sizeof(metal4_tensor_values)] = {0};
+            id<MTL4CommandBuffer> metal4_tensor_command_buffer = [adapter_device newCommandBuffer];
+            [metal4_tensor_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+            id<MTL4ComputeCommandEncoder> metal4_tensor_encoder =
+                [metal4_tensor_command_buffer computeCommandEncoder];
+            [metal4_source_tensor replaceSliceOrigin:metal4_tensor_zero
+                                      sliceDimensions:metal4_tensor_dimensions
+                                            withBytes:metal4_tensor_values
+                                              strides:metal4_tensor_packed_strides];
+            [metal4_tensor_encoder copyFromTensor:metal4_source_tensor
+                                      sourceOrigin:metal4_tensor_zero
+                                  sourceDimensions:metal4_tensor_dimensions
+                                          toTensor:metal4_destination_tensor
+                                 destinationOrigin:metal4_tensor_zero
+                             destinationDimensions:metal4_tensor_dimensions];
+            [metal4_tensor_encoder endEncoding];
+            [metal4_tensor_command_buffer endCommandBuffer];
+            id<MTL4CommandBuffer> metal4_tensor_command_buffers[] = {metal4_tensor_command_buffer};
+            [metal4_queue commit:metal4_tensor_command_buffers count:1];
+            [metal4_destination_tensor getBytes:metal4_tensor_copy_values
+                                        strides:metal4_tensor_packed_strides
+                               fromSliceOrigin:metal4_tensor_zero
+                                sliceDimensions:metal4_tensor_dimensions];
+            if (metal4_source_tensor == nil || metal4_destination_tensor == nil ||
+                metal4_tensor_command_buffer == nil || metal4_tensor_encoder == nil ||
+                memcmp(metal4_tensor_copy_values, metal4_tensor_values,
+                       sizeof(metal4_tensor_values)) != 0) {
+                fail_with_error("Metal 4 CPU tensor copy failed", metal4_error);
+                return 112;
+            }
+        }
+
         MTL4ArgumentTableDescriptor *metal4_three_d_compute_table_descriptor = [MTL4ArgumentTableDescriptor new];
         metal4_three_d_compute_table_descriptor.maxTextureBindCount = 1;
         id<MTL4ArgumentTable> metal4_three_d_compute_table =
