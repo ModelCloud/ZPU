@@ -513,6 +513,31 @@ fn transformedIdentityVertex(uniform: []const u8, index: u32, vertex_count: u32,
     };
 }
 
+// Fixed-shape non-indexed Vulkan batches have already passed the uniform-size
+// validation in prepareDraw. Avoid repeating source-index and vertex-count
+// checks for their compile-time-known vertex records while preserving the
+// exact clip-space divide and finite-value behavior.
+inline fn transformedIdentityVertexUnchecked(uniform: []const u8, index: u32, vertex_count: u32, viewport: Viewport) ?Vertex {
+    const position_base = 64 + @as(usize, index) * 16;
+    const attr_base = 64 + @as(usize, vertex_count) * 16 + @as(usize, index) * 16;
+    const x = readFloat(uniform, position_base);
+    const y = readFloat(uniform, position_base + 4);
+    const z = readFloat(uniform, position_base + 8);
+    const clip_w = readFloat(uniform, position_base + 12);
+    if (!std.math.isFinite(clip_w) or @abs(clip_w) < 0.000001) return null;
+    if (clip_w == 1.0) return .{
+        .screen = .{ viewport.x + (x * 0.5 + 0.5) * viewport.width, viewport.y + (y * 0.5 + 0.5) * viewport.height, viewport.min_depth + z * (viewport.max_depth - viewport.min_depth) },
+        .clip_w = clip_w,
+        .uv = .{ readFloat(uniform, attr_base), readFloat(uniform, attr_base + 4) },
+    };
+    const inverse_w = 1.0 / clip_w;
+    return .{
+        .screen = .{ viewport.x + (x * inverse_w * 0.5 + 0.5) * viewport.width, viewport.y + (y * inverse_w * 0.5 + 0.5) * viewport.height, viewport.min_depth + z * inverse_w * (viewport.max_depth - viewport.min_depth) },
+        .clip_w = clip_w,
+        .uv = .{ readFloat(uniform, attr_base), readFloat(uniform, attr_base + 4) },
+    };
+}
+
 fn lightingTable(light: f32) [256]u8 {
     var table: [256]u8 = undefined;
     for (&table, 0..) |*result, encoded_value| {
@@ -723,7 +748,7 @@ fn prepareDraw(uniform: []const u8, vertex_count: u32, base_vertex: u32, viewpor
                         else => 5,
                     };
                     face_vertices[face * 4 + corner] = (if (identity_transform)
-                        transformedIdentityVertex(uniform, source_index, source_vertex_count, viewport, null)
+                        transformedIdentityVertexUnchecked(uniform, source_index, source_vertex_count, viewport)
                     else
                         transformedVertex(uniform, source_index, source_vertex_count, viewport, null)) orelse {
                         all_valid = false;
@@ -751,10 +776,10 @@ fn prepareDraw(uniform: []const u8, vertex_count: u32, base_vertex: u32, viewpor
         std.mem.eql(u8, uniform[64 + 3 * 16 ..][0..16], uniform[64..][0..16]) and
         std.mem.eql(u8, uniform[64 + 4 * 16 ..][0..16], uniform[64 + 2 * 16 ..][0..16]))
     {
-        const maybe_v0 = if (identity_transform) transformedIdentityVertex(uniform, 0, source_vertex_count, viewport, null) else transformedVertex(uniform, 0, source_vertex_count, viewport, null);
-        const maybe_v1 = if (identity_transform) transformedIdentityVertex(uniform, 1, source_vertex_count, viewport, null) else transformedVertex(uniform, 1, source_vertex_count, viewport, null);
-        const maybe_v2 = if (identity_transform) transformedIdentityVertex(uniform, 2, source_vertex_count, viewport, null) else transformedVertex(uniform, 2, source_vertex_count, viewport, null);
-        const maybe_v3 = if (identity_transform) transformedIdentityVertex(uniform, 5, source_vertex_count, viewport, null) else transformedVertex(uniform, 5, source_vertex_count, viewport, null);
+        const maybe_v0 = if (identity_transform) transformedIdentityVertexUnchecked(uniform, 0, source_vertex_count, viewport) else transformedVertex(uniform, 0, source_vertex_count, viewport, null);
+        const maybe_v1 = if (identity_transform) transformedIdentityVertexUnchecked(uniform, 1, source_vertex_count, viewport) else transformedVertex(uniform, 1, source_vertex_count, viewport, null);
+        const maybe_v2 = if (identity_transform) transformedIdentityVertexUnchecked(uniform, 2, source_vertex_count, viewport) else transformedVertex(uniform, 2, source_vertex_count, viewport, null);
+        const maybe_v3 = if (identity_transform) transformedIdentityVertexUnchecked(uniform, 5, source_vertex_count, viewport) else transformedVertex(uniform, 5, source_vertex_count, viewport, null);
         if (maybe_v0) |v0| {
             if (maybe_v1) |v1| {
                 if (maybe_v2) |v2| {
@@ -1724,6 +1749,8 @@ const BatchQuadSpanCache = struct {
     width: u32 = 0,
     height: u32 = 0,
     spans: [2][flat_span_rows]FlatSpan = [_][flat_span_rows]FlatSpan{[_]FlatSpan{.{}} ** flat_span_rows} ** 2,
+    union_spans_valid: bool = false,
+    union_spans: [flat_span_rows]FlatSpan = [_]FlatSpan{.{}} ** flat_span_rows,
 };
 const ParallelBand = struct { counters: Counters = .{}, pixels_written: usize = 0 };
 const ParallelDraw = struct {
@@ -1936,6 +1963,22 @@ fn rememberBatchSpanCache(cache: *BatchSpanCache, prepared: *const PreparedDraw,
     }
 }
 
+fn rememberBatchQuadSpanCache(cache: *BatchQuadSpanCache, prepared: *const PreparedDraw, width: u32, height: u32) void {
+    cache.* = .{ .valid = true, .width = width, .height = height, .union_spans_valid = true };
+    @memcpy(cache.spans[0..2], prepared.spans[0..2]);
+    for (0..height) |y| {
+        const first = cache.spans[0][y];
+        const second = cache.spans[1][y];
+        if (first.last <= first.first) {
+            cache.union_spans[y] = second;
+        } else if (second.last <= second.first) {
+            cache.union_spans[y] = first;
+        } else {
+            cache.union_spans[y] = .{ .first = @min(first.first, second.first), .last = @max(first.last, second.last) };
+        }
+    }
+}
+
 fn batchGeometryLen(vertex_count: u32) usize {
     return 64 + @as(usize, @min(vertex_count, max_prepared_triangles * 3)) * 16;
 }
@@ -2139,7 +2182,7 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
         output.spans_valid = true;
         output.spans_external = null;
         output.quad_spans_external = &quad_span_cache.?.spans;
-        output.quad_union_spans_external = null;
+        output.quad_union_spans_external = if (quad_span_cache.?.union_spans_valid) &quad_span_cache.?.union_spans else null;
     } else if (geometry_cache_hit and span_cache != null and span_cache.?.valid) {
         output.spans_valid = true;
         output.spans_external = &span_cache.?.spans;
@@ -2154,15 +2197,12 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
         buildPreparedFlatSpans(output, width, height);
         if (span_cache) |cache| rememberBatchSpanCache(cache, output, width, height);
         if (quad_span_cache) |cache| {
-            @memcpy(cache.spans[0..2], output.spans[0..2]);
-            cache.width = width;
-            cache.height = height;
-            cache.valid = true;
+            rememberBatchQuadSpanCache(cache, output, width, height);
         }
         output.spans_valid = true;
         output.spans_external = if (span_cache) |cache| &cache.spans else null;
         output.quad_spans_external = if (quad_span_cache) |cache| &cache.spans else null;
-        output.quad_union_spans_external = if (span_cache) |cache| if (cache.quad_spans_valid) &cache.quad_spans else null else null;
+        output.quad_union_spans_external = if (quad_span_cache) |cache| if (cache.union_spans_valid) &cache.union_spans else null else if (span_cache) |cache| if (cache.quad_spans_valid) &cache.quad_spans else null else null;
     } else {
         // Geometry revisions invalidate the retained screen-space spans, but
         // rebuilding them while the command is already prepared keeps the
@@ -2173,9 +2213,14 @@ fn prepareBatchCommand(command: DrawCommand, commands_address: usize, command_in
             rememberBatchSpanCache(cache, output, width, height);
             output.quad_union_spans_external = if (cache.quad_spans_valid) &cache.quad_spans else null;
         };
+        if (quad_span_cache) |cache| {
+            rememberBatchQuadSpanCache(cache, output, width, height);
+            output.quad_spans_external = &cache.spans;
+            output.quad_union_spans_external = &cache.union_spans;
+        }
         output.spans_valid = true;
         output.spans_external = null;
-        output.quad_spans_external = null;
+        if (quad_span_cache == null) output.quad_spans_external = null;
     }
     const lighting_refresh = !geometry_cache_hit or command_cache.lighting_generation != lighting_generation;
     // prepareDraw already assigns the quantized cached table used by 4x4
