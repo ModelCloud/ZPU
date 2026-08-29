@@ -8905,10 +8905,11 @@ int main(void) {
             fail_with_error("adapter indirect command buffer error", adapter_icb_command_buffer.error);
             return 39;
         }
-        if (adapter_icb.resourceOptions != (MTLResourceStorageModePrivate | MTLResourceHazardTrackingModeUntracked) ||
+        if (metal_icb.size != 1 || adapter_icb.size != metal_icb.size ||
+            adapter_icb.resourceOptions != (MTLResourceStorageModePrivate | MTLResourceHazardTrackingModeUntracked) ||
             adapter_icb.storageMode != MTLStorageModePrivate ||
             adapter_icb.hazardTrackingMode != MTLHazardTrackingModeUntracked) {
-            fprintf(stderr, "metal-pixel: indirect command buffer resource metadata failed\n");
+            fprintf(stderr, "metal-pixel: indirect command buffer size/resource metadata failed\n");
             return 56;
         }
         for (size_t index = 0; index < byte_count; index++) {

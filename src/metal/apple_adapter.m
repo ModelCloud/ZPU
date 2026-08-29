@@ -12266,7 +12266,7 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 - (NSString *)label { return _label; }
 - (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
-- (NSUInteger)size { return _maxCommandCount * 64; }
+- (NSUInteger)size { return _maxCommandCount; }
 - (MTLResourceOptions)resourceOptions { return _resourceOptions; }
 - (MTLStorageMode)storageMode { return _storageMode; }
 - (MTLCPUCacheMode)cpuCacheMode { return _cpuCacheMode; }
