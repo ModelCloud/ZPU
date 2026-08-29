@@ -32,8 +32,19 @@ pub const ScreenBounds = struct {
     }
 };
 
-/// One coarse geometry packet. The packet represents many source triangles;
-/// triangle expansion is intentionally deferred until after coarse visibility.
+pub const OrderingClass = enum { strict, depth_reorderable, commutative };
+pub const OrderKey = struct {
+    submission: u32,
+    command: u32,
+    primitive_group: u32,
+
+    pub fn less(a: OrderKey, b: OrderKey) bool {
+        if (a.submission != b.submission) return a.submission < b.submission;
+        if (a.command != b.command) return a.command < b.command;
+        return a.primitive_group < b.primitive_group;
+    }
+};
+
 pub const Cluster = struct {
     id: ClusterId,
     draw_id: DrawId,
@@ -41,45 +52,70 @@ pub const Cluster = struct {
     first_triangle: u32,
     triangle_count: u16,
     bounds: ScreenBounds,
-    nearest_depth: f32,
+    /// Minimum candidate depth for LESS-family tests, maximum candidate depth
+    /// for GREATER-family tests.
+    best_depth: f32,
+    order_key: OrderKey,
+    ordering: OrderingClass = .strict,
+    /// Optional post-setup estimate. Zero keeps the primitive-SIMD path.
+    estimated_covered_samples: u32 = 0,
 };
 
-pub const RasterPath = enum {
-    primitive_simd,
-    pixel_simd,
+pub const ClusterNode = struct {
+    bounds: ScreenBounds,
+    best_depth: f32,
+    first_child: u32 = 0,
+    child_count: u16 = 0,
+    first_cluster: u32 = 0,
+    cluster_count: u16 = 0,
 };
 
-/// Tiny triangles are more naturally processed across primitives; larger
-/// primitives expose enough covered pixels to vectorize across pixels.
+pub const RasterPath = enum { primitive_simd, pixel_simd };
+
 pub fn chooseRasterPath(cluster: Cluster) RasterPath {
-    if (cluster.triangle_count == 0 or cluster.bounds.empty()) return .primitive_simd;
-    const pixels_per_triangle = cluster.bounds.area() / @as(u64, cluster.triangle_count);
-    return if (pixels_per_triangle <= 16) .primitive_simd else .pixel_simd;
+    if (cluster.triangle_count == 0 or cluster.bounds.empty() or cluster.estimated_covered_samples == 0) return .primitive_simd;
+    const samples_per_triangle = @as(u64, cluster.estimated_covered_samples) / @as(u64, cluster.triangle_count);
+    return if (samples_per_triangle <= 16) .primitive_simd else .pixel_simd;
 }
 
-pub const Visibility = packed struct {
-    primitive_id: u32,
-    material_id: u32,
+pub const Visibility = packed struct { primitive_id: u32, material_id: u32 };
+pub const invalid_visibility = Visibility{ .primitive_id = std.math.maxInt(u32), .material_id = std.math.maxInt(u32) };
+
+pub const DepthCompare = enum { less, less_equal, greater, greater_equal };
+pub const HzbSource = enum { same_frame_completed, depth_prepass, previous_frame_conservative };
+pub const HzbPolicy = struct {
+    source: HzbSource,
+    compare: DepthCompare,
+    temporal_reprojection_valid: bool = false,
+
+    pub fn valid(self: HzbPolicy) bool {
+        return self.source != .previous_frame_conservative or self.temporal_reprojection_valid;
+    }
 };
 
-pub const invalid_visibility = Visibility{
-    .primitive_id = std.math.maxInt(u32),
-    .material_id = std.math.maxInt(u32),
-};
+fn depthPass(compare: DepthCompare, candidate: f32, current: f32) bool {
+    return switch (compare) {
+        .less => candidate < current,
+        .less_equal => candidate <= current,
+        .greater => candidate > current,
+        .greater_equal => candidate >= current,
+    };
+}
 
-/// Visibility storage is intentionally split from shading. Opaque raster can
-/// publish compact primitive/material identity first; later shading operates
-/// only on samples that survived depth/coverage.
 pub const VisibilityBuffer = struct {
     ids: []Visibility,
     depth: []f32,
     width: u32,
     height: u32,
+    compare: DepthCompare,
 
-    pub fn init(ids: []Visibility, depth: []f32, width: u32, height: u32) !VisibilityBuffer {
-        const count = @as(usize, width) * @as(usize, height);
-        if (width == 0 or height == 0 or ids.len < count or depth.len < count) return error.InvalidVisibilityStorage;
-        return .{ .ids = ids[0..count], .depth = depth[0..count], .width = width, .height = height };
+    pub fn init(ids: []Visibility, depth: []f32, width: u32, height: u32, compare: DepthCompare) !VisibilityBuffer {
+        if (width == 0 or height == 0) return error.InvalidVisibilityStorage;
+        const count64 = @as(u64, width) * @as(u64, height);
+        if (count64 > std.math.maxInt(usize)) return error.InvalidVisibilityStorage;
+        const count: usize = @intCast(count64);
+        if (ids.len < count or depth.len < count) return error.InvalidVisibilityStorage;
+        return .{ .ids = ids[0..count], .depth = depth[0..count], .width = width, .height = height, .compare = compare };
     }
 
     pub fn clear(self: VisibilityBuffer, clear_depth: f32) void {
@@ -87,10 +123,10 @@ pub const VisibilityBuffer = struct {
         @memset(self.depth, clear_depth);
     }
 
-    pub fn writeIfNearer(self: VisibilityBuffer, x: u32, y: u32, depth: f32, visibility: Visibility) bool {
+    pub fn writeIfPasses(self: VisibilityBuffer, x: u32, y: u32, depth: f32, visibility: Visibility) bool {
         if (x >= self.width or y >= self.height or !std.math.isFinite(depth)) return false;
         const index = @as(usize, y) * @as(usize, self.width) + @as(usize, x);
-        if (depth >= self.depth[index]) return false;
+        if (!depthPass(self.compare, depth, self.depth[index])) return false;
         self.depth[index] = depth;
         self.ids[index] = visibility;
         return true;
@@ -101,14 +137,10 @@ pub const HzbLevel = struct {
     offset: usize,
     width: u32,
     height: u32,
+    footprint_shift: u6,
 };
 
-pub const HzbError = error{
-    InvalidExtent,
-    DepthSizeMismatch,
-    StorageTooSmall,
-    LevelStorageTooSmall,
-};
+pub const HzbError = error{ InvalidExtent, InvalidPolicy, DepthSizeMismatch, StorageTooSmall, LevelStorageTooSmall, CountOverflow };
 
 pub fn maxHzbLevels(width: u32, height: u32) usize {
     if (width == 0 or height == 0) return 0;
@@ -122,13 +154,17 @@ pub fn maxHzbLevels(width: u32, height: u32) usize {
     return levels;
 }
 
-pub fn hzbValueCount(width: u32, height: u32) usize {
+pub fn hzbValueCount(width: u32, height: u32) HzbError!usize {
     if (width == 0 or height == 0) return 0;
     var total: usize = 0;
     var w = width;
     var h = height;
     while (true) {
-        total += @as(usize, w) * @as(usize, h);
+        const level64 = @as(u64, w) * @as(u64, h);
+        if (level64 > std.math.maxInt(usize)) return error.CountOverflow;
+        const level: usize = @intCast(level64);
+        if (total > std.math.maxInt(usize) - level) return error.CountOverflow;
+        total += level;
         if (w == 1 and h == 1) break;
         w = @max(@as(u32, 1), (w + 1) / 2);
         h = @max(@as(u32, 1), (h + 1) / 2);
@@ -136,39 +172,53 @@ pub fn hzbValueCount(width: u32, height: u32) usize {
     return total;
 }
 
-/// A conservative HZB for a conventional 0-near/1-far LESS depth test.
-/// Coarse levels store the farthest depth in each covered region. A cluster
-/// can be rejected only when its nearest possible depth is farther than every
-/// depth represented by the sampled coarse cells.
+fn reduceDepth(compare: DepthCompare, aggregate: f32, value: f32) f32 {
+    return switch (compare) {
+        .less, .less_equal => @max(aggregate, value),
+        .greater, .greater_equal => @min(aggregate, value),
+    };
+}
+
+fn occludedByAggregate(compare: DepthCompare, best_depth: f32, aggregate: f32) bool {
+    return switch (compare) {
+        .less => best_depth >= aggregate,
+        .less_equal => best_depth > aggregate,
+        .greater => best_depth <= aggregate,
+        .greater_equal => best_depth < aggregate,
+    };
+}
+
 pub const Hzb = struct {
     values: []f32,
     levels: []HzbLevel,
     level_count: usize,
+    policy: HzbPolicy,
 
-    pub fn build(depth: []const f32, width: u32, height: u32, values: []f32, levels: []HzbLevel) HzbError!Hzb {
+    pub fn build(depth: []const f32, width: u32, height: u32, policy: HzbPolicy, values: []f32, levels: []HzbLevel) HzbError!Hzb {
         if (width == 0 or height == 0) return error.InvalidExtent;
-        if (depth.len != @as(usize, width) * @as(usize, height)) return error.DepthSizeMismatch;
+        if (!policy.valid()) return error.InvalidPolicy;
+        const base64 = @as(u64, width) * @as(u64, height);
+        if (base64 > std.math.maxInt(usize) or depth.len != @as(usize, @intCast(base64))) return error.DepthSizeMismatch;
         const needed_levels = maxHzbLevels(width, height);
-        const needed_values = hzbValueCount(width, height);
+        const needed_values = try hzbValueCount(width, height);
         if (levels.len < needed_levels) return error.LevelStorageTooSmall;
         if (values.len < needed_values) return error.StorageTooSmall;
 
-        var offset: usize = 0;
-        levels[0] = .{ .offset = 0, .width = width, .height = height };
+        levels[0] = .{ .offset = 0, .width = width, .height = height, .footprint_shift = 0 };
         @memcpy(values[0..depth.len], depth);
-        offset += depth.len;
-
+        var offset = depth.len;
         var level_index: usize = 1;
         while (level_index < needed_levels) : (level_index += 1) {
             const previous = levels[level_index - 1];
             const next_w = @max(@as(u32, 1), (previous.width + 1) / 2);
             const next_h = @max(@as(u32, 1), (previous.height + 1) / 2);
-            levels[level_index] = .{ .offset = offset, .width = next_w, .height = next_h };
+            levels[level_index] = .{ .offset = offset, .width = next_w, .height = next_h, .footprint_shift = @intCast(level_index) };
             var y: u32 = 0;
             while (y < next_h) : (y += 1) {
                 var x: u32 = 0;
                 while (x < next_w) : (x += 1) {
-                    var farthest: f32 = 0.0;
+                    var aggregate: f32 = 0;
+                    var have = false;
                     var dy: u32 = 0;
                     while (dy < 2) : (dy += 1) {
                         const py = y * 2 + dy;
@@ -177,42 +227,43 @@ pub const Hzb = struct {
                         while (dx < 2) : (dx += 1) {
                             const px = x * 2 + dx;
                             if (px >= previous.width) continue;
-                            const previous_index = previous.offset + @as(usize, py) * @as(usize, previous.width) + @as(usize, px);
-                            farthest = @max(farthest, values[previous_index]);
+                            const value = values[previous.offset + @as(usize, py) * @as(usize, previous.width) + @as(usize, px)];
+                            aggregate = if (have) reduceDepth(policy.compare, aggregate, value) else value;
+                            have = true;
                         }
                     }
-                    const next_index = offset + @as(usize, y) * @as(usize, next_w) + @as(usize, x);
-                    values[next_index] = farthest;
+                    std.debug.assert(have);
+                    values[offset + @as(usize, y) * @as(usize, next_w) + @as(usize, x)] = aggregate;
                 }
             }
             offset += @as(usize, next_w) * @as(usize, next_h);
         }
-        return .{ .values = values[0..needed_values], .levels = levels[0..needed_levels], .level_count = needed_levels };
+        return .{ .values = values[0..needed_values], .levels = levels[0..needed_levels], .level_count = needed_levels, .policy = policy };
     }
 
-    pub fn occludedAtLevel(self: Hzb, bounds: ScreenBounds, nearest_depth: f32, level_index: usize) bool {
-        if (bounds.empty() or level_index >= self.level_count or !std.math.isFinite(nearest_depth)) return false;
+    pub fn occludedAtLevel(self: Hzb, bounds: ScreenBounds, best_depth: f32, level_index: usize) bool {
+        if (bounds.empty() or level_index >= self.level_count or !std.math.isFinite(best_depth)) return false;
         const base = self.levels[0];
         const clipped = bounds.clipped(base.width, base.height);
         if (clipped.empty()) return false;
         const level = self.levels[level_index];
-        const scale_x = @max(@as(u32, 1), (base.width + level.width - 1) / level.width);
-        const scale_y = @max(@as(u32, 1), (base.height + level.height - 1) / level.height);
-        const first_x = @min(level.width - 1, clipped.min_x / scale_x);
-        const first_y = @min(level.height - 1, clipped.min_y / scale_y);
-        const last_x = @min(level.width - 1, (clipped.max_x - 1) / scale_x);
-        const last_y = @min(level.height - 1, (clipped.max_y - 1) / scale_y);
-
-        var farthest: f32 = 0.0;
+        const shift = level.footprint_shift;
+        const first_x = @min(level.width - 1, clipped.min_x >> shift);
+        const first_y = @min(level.height - 1, clipped.min_y >> shift);
+        const last_x = @min(level.width - 1, (clipped.max_x - 1) >> shift);
+        const last_y = @min(level.height - 1, (clipped.max_y - 1) >> shift);
+        var aggregate: f32 = 0;
+        var have = false;
         var y = first_y;
         while (y <= last_y) : (y += 1) {
             var x = first_x;
             while (x <= last_x) : (x += 1) {
-                const index = level.offset + @as(usize, y) * @as(usize, level.width) + @as(usize, x);
-                farthest = @max(farthest, self.values[index]);
+                const value = self.values[level.offset + @as(usize, y) * @as(usize, level.width) + @as(usize, x)];
+                aggregate = if (have) reduceDepth(self.policy.compare, aggregate, value) else value;
+                have = true;
             }
         }
-        return nearest_depth > farthest;
+        return have and occludedByAggregate(self.policy.compare, best_depth, aggregate);
     }
 };
 
@@ -224,39 +275,38 @@ pub fn chooseHzbLevel(bounds: ScreenBounds, level_count: usize) usize {
     return level;
 }
 
-pub const MacrobinHeader = struct {
-    offset: u32 = 0,
-    count: u32 = 0,
+pub const MacrobinHeader = struct { offset: u32 = 0, count: u32 = 0 };
+pub const MacrobinRef = struct { cluster_index: u32 };
+pub const TileHeader = struct { offset: u32 = 0, count: u32 = 0 };
+pub const ExtentClass = enum { local, macro, global };
+pub const TilePacket = struct {
+    order_key: OrderKey,
+    ordering: OrderingClass,
+    draw_id: DrawId,
+    cluster_id: ClusterId,
+    material_id: MaterialId,
+    first_triangle: u32,
+    triangle_count: u16,
+    path: RasterPath,
+    extent: ExtentClass,
 };
 
-pub const MacrobinRef = struct {
-    cluster_index: u32,
-};
+pub const BinError = error{ InvalidGeometry, HeaderStorageTooSmall, EntryStorageTooSmall, ScratchTooSmall, CountOverflow, InvalidHierarchy };
+const GridRange = struct { x0: usize, x1: usize, y0: usize, y1: usize };
 
-pub const BinError = error{
-    InvalidGeometry,
-    HeaderStorageTooSmall,
-    EntryStorageTooSmall,
-    ScratchTooSmall,
-    CountOverflow,
-};
-
-const GridRange = struct {
-    x0: usize,
-    x1: usize,
-    y0: usize,
-    y1: usize,
-};
+pub fn requiredGridHeaders(surface_w: u32, surface_h: u32, cell_w: u32, cell_h: u32) BinError!usize {
+    if (surface_w == 0 or surface_h == 0 or cell_w == 0 or cell_h == 0) return error.InvalidGeometry;
+    const columns = (@as(u64, surface_w) + cell_w - 1) / cell_w;
+    const rows = (@as(u64, surface_h) + cell_h - 1) / cell_h;
+    const count = columns * rows;
+    if (count > std.math.maxInt(usize)) return error.CountOverflow;
+    return @intCast(count);
+}
 
 fn gridRange(bounds: ScreenBounds, surface_w: u32, surface_h: u32, cell_w: u32, cell_h: u32, columns: usize, rows: usize) ?GridRange {
     const clipped = bounds.clipped(surface_w, surface_h);
     if (clipped.empty()) return null;
-    return .{
-        .x0 = @as(usize, clipped.min_x / cell_w),
-        .x1 = @min(columns - 1, @as(usize, (clipped.max_x - 1) / cell_w)),
-        .y0 = @as(usize, clipped.min_y / cell_h),
-        .y1 = @min(rows - 1, @as(usize, (clipped.max_y - 1) / cell_h)),
-    };
+    return .{ .x0 = @as(usize, clipped.min_x / cell_w), .x1 = @min(columns - 1, @as(usize, (clipped.max_x - 1) / cell_w)), .y0 = @as(usize, clipped.min_y / cell_h), .y1 = @min(rows - 1, @as(usize, (clipped.max_y - 1) / cell_h)) };
 }
 
 fn incrementCount(value: *u32) BinError!void {
@@ -264,34 +314,37 @@ fn incrementCount(value: *u32) BinError!void {
     value.* += 1;
 }
 
-fn selected(mask: ?[]const bool, index: usize) bool {
-    return if (mask) |values| values[index] else true;
+fn addTotal(total: *usize, value: u32) BinError!void {
+    if (total.* > std.math.maxInt(usize) - @as(usize, value)) return error.CountOverflow;
+    total.* += @as(usize, value);
+    if (total.* > std.math.maxInt(u32)) return error.CountOverflow;
 }
 
-/// Two-pass contiguous macrobinner. No per-bin allocations and no linked
-/// lists; the output is one dense reference array plus fixed headers.
-pub fn buildMacrobins(
-    clusters: []const Cluster,
-    visible: ?[]const bool,
-    surface_w: u32,
-    surface_h: u32,
-    macro_w: u32,
-    macro_h: u32,
-    headers: []MacrobinHeader,
-    entries: []MacrobinRef,
-    cursors: []u32,
-) BinError!usize {
+pub fn requiredMacroReferencesUpperBound(clusters: []const Cluster, visible: ?[]const bool, surface_w: u32, surface_h: u32, macro_w: u32, macro_h: u32) BinError!usize {
     if (visible) |mask| if (mask.len != clusters.len) return error.InvalidGeometry;
-    if (surface_w == 0 or surface_h == 0 or macro_w == 0 or macro_h == 0) return error.InvalidGeometry;
     const columns = (@as(usize, surface_w) + @as(usize, macro_w) - 1) / @as(usize, macro_w);
     const rows = (@as(usize, surface_h) + @as(usize, macro_h) - 1) / @as(usize, macro_h);
-    const bin_count = columns * rows;
+    var total: usize = 0;
+    for (clusters, 0..) |cluster, index| {
+        if (visible) |mask| if (!mask[index]) continue;
+        const range = gridRange(cluster.bounds, surface_w, surface_h, macro_w, macro_h, columns, rows) orelse continue;
+        const refs = (range.x1 - range.x0 + 1) * (range.y1 - range.y0 + 1);
+        if (total > std.math.maxInt(usize) - refs) return error.CountOverflow;
+        total += refs;
+    }
+    return total;
+}
+
+pub fn buildMacrobins(clusters: []const Cluster, visible: ?[]const bool, surface_w: u32, surface_h: u32, macro_w: u32, macro_h: u32, headers: []MacrobinHeader, entries: []MacrobinRef, cursors: []u32) BinError!usize {
+    if (visible) |mask| if (mask.len != clusters.len) return error.InvalidGeometry;
+    const bin_count = try requiredGridHeaders(surface_w, surface_h, macro_w, macro_h);
+    const columns = (@as(usize, surface_w) + @as(usize, macro_w) - 1) / @as(usize, macro_w);
+    const rows = bin_count / columns;
     if (headers.len < bin_count) return error.HeaderStorageTooSmall;
     if (cursors.len < bin_count) return error.ScratchTooSmall;
     for (headers[0..bin_count]) |*header| header.* = .{};
-
     for (clusters, 0..) |cluster, cluster_index| {
-        if (!selected(visible, cluster_index)) continue;
+        if (visible) |mask| if (!mask[cluster_index]) continue;
         const range = gridRange(cluster.bounds, surface_w, surface_h, macro_w, macro_h, columns, rows) orelse continue;
         var y = range.y0;
         while (y <= range.y1) : (y += 1) {
@@ -299,23 +352,21 @@ pub fn buildMacrobins(
             while (x <= range.x1) : (x += 1) try incrementCount(&headers[y * columns + x].count);
         }
     }
-
     var total: usize = 0;
     for (headers[0..bin_count], 0..) |*header, index| {
-        if (total > std.math.maxInt(u32)) return error.CountOverflow;
         header.offset = @intCast(total);
         cursors[index] = header.offset;
-        total += @as(usize, header.count);
+        try addTotal(&total, header.count);
     }
     if (entries.len < total) return error.EntryStorageTooSmall;
-
     for (clusters, 0..) |cluster, cluster_index| {
-        if (!selected(visible, cluster_index)) continue;
+        if (visible) |mask| if (!mask[cluster_index]) continue;
         const range = gridRange(cluster.bounds, surface_w, surface_h, macro_w, macro_h, columns, rows) orelse continue;
         var y = range.y0;
         while (y <= range.y1) : (y += 1) {
             var x = range.x0;
             while (x <= range.x1) : (x += 1) {
+                if (cluster_index > std.math.maxInt(u32)) return error.CountOverflow;
                 const bin = y * columns + x;
                 const destination = @as(usize, cursors[bin]);
                 entries[destination] = .{ .cluster_index = @intCast(cluster_index) };
@@ -326,83 +377,96 @@ pub fn buildMacrobins(
     return total;
 }
 
-pub const TilePacket = struct {
-    sequence: u64,
-    draw_id: DrawId,
-    cluster_id: ClusterId,
-    material_id: MaterialId,
-    first_triangle: u32,
-    triangle_count: u16,
-    path: RasterPath,
-};
+fn classifyExtent(range: GridRange) ExtentClass {
+    const tiles = (range.x1 - range.x0 + 1) * (range.y1 - range.y0 + 1);
+    return if (tiles <= 16) .local else if (tiles <= 256) .macro else .global;
+}
 
-pub const TileHeader = struct {
-    offset: u32 = 0,
-    count: u32 = 0,
-};
+fn packetLess(a: TilePacket, b: TilePacket) bool {
+    return OrderKey.less(a.order_key, b.order_key);
+}
 
-/// Expands visible coarse clusters into ordered tile packet streams. This
-/// still emits cluster/range packets, never one entry per triangle.
-pub fn buildTilePackets(
-    clusters: []const Cluster,
-    visible: []const bool,
-    sequence_base: u64,
-    surface_w: u32,
-    surface_h: u32,
-    tile_w: u32,
-    tile_h: u32,
-    headers: []TileHeader,
-    packets: []TilePacket,
-    cursors: []u32,
-) BinError!usize {
-    if (clusters.len != visible.len or surface_w == 0 or surface_h == 0 or tile_w == 0 or tile_h == 0) return error.InvalidGeometry;
-    const columns = (@as(usize, surface_w) + @as(usize, tile_w) - 1) / @as(usize, tile_w);
-    const rows = (@as(usize, surface_h) + @as(usize, tile_h) - 1) / @as(usize, tile_h);
-    const tile_count = columns * rows;
-    if (headers.len < tile_count) return error.HeaderStorageTooSmall;
+fn stableSortPackets(packets: []TilePacket) void {
+    var i: usize = 1;
+    while (i < packets.len) : (i += 1) {
+        const value = packets[i];
+        var j = i;
+        while (j != 0 and packetLess(value, packets[j - 1])) : (j -= 1) packets[j] = packets[j - 1];
+        packets[j] = value;
+    }
+}
+
+pub fn buildTilePacketsFromMacrobins(clusters: []const Cluster, surface_w: u32, surface_h: u32, macro_w: u32, macro_h: u32, macro_headers: []const MacrobinHeader, macro_entries: []const MacrobinRef, tile_w: u32, tile_h: u32, headers: []TileHeader, packets: []TilePacket, cursors: []u32) BinError!usize {
+    if (macro_w == 0 or macro_h == 0 or tile_w == 0 or tile_h == 0 or macro_w % tile_w != 0 or macro_h % tile_h != 0) return error.InvalidGeometry;
+    const macro_count = try requiredGridHeaders(surface_w, surface_h, macro_w, macro_h);
+    const tile_count = try requiredGridHeaders(surface_w, surface_h, tile_w, tile_h);
+    if (macro_headers.len < macro_count or headers.len < tile_count) return error.HeaderStorageTooSmall;
     if (cursors.len < tile_count) return error.ScratchTooSmall;
+    const macro_columns = (@as(usize, surface_w) + @as(usize, macro_w) - 1) / @as(usize, macro_w);
+    const tile_columns = (@as(usize, surface_w) + @as(usize, tile_w) - 1) / @as(usize, tile_w);
+    const tile_rows = tile_count / tile_columns;
     for (headers[0..tile_count]) |*header| header.* = .{};
 
-    for (clusters, visible) |cluster, is_visible| {
-        if (!is_visible) continue;
-        const range = gridRange(cluster.bounds, surface_w, surface_h, tile_w, tile_h, columns, rows) orelse continue;
-        var y = range.y0;
-        while (y <= range.y1) : (y += 1) {
-            var x = range.x0;
-            while (x <= range.x1) : (x += 1) try incrementCount(&headers[y * columns + x].count);
+    var macro_index: usize = 0;
+    while (macro_index < macro_count) : (macro_index += 1) {
+        const mx = macro_index % macro_columns;
+        const my = macro_index / macro_columns;
+        const macro_bounds = ScreenBounds{ .min_x = @intCast(mx * @as(usize, macro_w)), .min_y = @intCast(my * @as(usize, macro_h)), .max_x = @min(surface_w, @as(u32, @intCast((mx + 1) * @as(usize, macro_w)))), .max_y = @min(surface_h, @as(u32, @intCast((my + 1) * @as(usize, macro_h)))) };
+        const mh = macro_headers[macro_index];
+        const begin = @as(usize, mh.offset);
+        const end = begin + @as(usize, mh.count);
+        if (end > macro_entries.len) return error.InvalidGeometry;
+        for (macro_entries[begin..end]) |reference| {
+            const cluster_index = @as(usize, reference.cluster_index);
+            if (cluster_index >= clusters.len) return error.InvalidGeometry;
+            const cluster = clusters[cluster_index];
+            const clipped = ScreenBounds{ .min_x = @max(cluster.bounds.min_x, macro_bounds.min_x), .min_y = @max(cluster.bounds.min_y, macro_bounds.min_y), .max_x = @min(cluster.bounds.max_x, macro_bounds.max_x), .max_y = @min(cluster.bounds.max_y, macro_bounds.max_y) };
+            const range = gridRange(clipped, surface_w, surface_h, tile_w, tile_h, tile_columns, tile_rows) orelse continue;
+            var y = range.y0;
+            while (y <= range.y1) : (y += 1) {
+                var x = range.x0;
+                while (x <= range.x1) : (x += 1) try incrementCount(&headers[y * tile_columns + x].count);
+            }
         }
     }
 
     var total: usize = 0;
     for (headers[0..tile_count], 0..) |*header, index| {
-        if (total > std.math.maxInt(u32)) return error.CountOverflow;
         header.offset = @intCast(total);
         cursors[index] = header.offset;
-        total += @as(usize, header.count);
+        try addTotal(&total, header.count);
     }
     if (packets.len < total) return error.EntryStorageTooSmall;
 
-    for (clusters, visible, 0..) |cluster, is_visible, cluster_index| {
-        if (!is_visible) continue;
-        const range = gridRange(cluster.bounds, surface_w, surface_h, tile_w, tile_h, columns, rows) orelse continue;
-        var y = range.y0;
-        while (y <= range.y1) : (y += 1) {
-            var x = range.x0;
-            while (x <= range.x1) : (x += 1) {
-                const tile = y * columns + x;
-                const destination = @as(usize, cursors[tile]);
-                packets[destination] = .{
-                    .sequence = sequence_base + @as(u64, cluster_index),
-                    .draw_id = cluster.draw_id,
-                    .cluster_id = cluster.id,
-                    .material_id = cluster.material_id,
-                    .first_triangle = cluster.first_triangle,
-                    .triangle_count = cluster.triangle_count,
-                    .path = chooseRasterPath(cluster),
-                };
-                cursors[tile] += 1;
+    macro_index = 0;
+    while (macro_index < macro_count) : (macro_index += 1) {
+        const mx = macro_index % macro_columns;
+        const my = macro_index / macro_columns;
+        const macro_bounds = ScreenBounds{ .min_x = @intCast(mx * @as(usize, macro_w)), .min_y = @intCast(my * @as(usize, macro_h)), .max_x = @min(surface_w, @as(u32, @intCast((mx + 1) * @as(usize, macro_w)))), .max_y = @min(surface_h, @as(u32, @intCast((my + 1) * @as(usize, macro_h)))) };
+        const mh = macro_headers[macro_index];
+        const begin = @as(usize, mh.offset);
+        const end = begin + @as(usize, mh.count);
+        for (macro_entries[begin..end]) |reference| {
+            const cluster = clusters[@as(usize, reference.cluster_index)];
+            const clipped = ScreenBounds{ .min_x = @max(cluster.bounds.min_x, macro_bounds.min_x), .min_y = @max(cluster.bounds.min_y, macro_bounds.min_y), .max_x = @min(cluster.bounds.max_x, macro_bounds.max_x), .max_y = @min(cluster.bounds.max_y, macro_bounds.max_y) };
+            const range = gridRange(clipped, surface_w, surface_h, tile_w, tile_h, tile_columns, tile_rows) orelse continue;
+            const extent = classifyExtent(range);
+            var y = range.y0;
+            while (y <= range.y1) : (y += 1) {
+                var x = range.x0;
+                while (x <= range.x1) : (x += 1) {
+                    const tile = y * tile_columns + x;
+                    const destination = @as(usize, cursors[tile]);
+                    packets[destination] = .{ .order_key = cluster.order_key, .ordering = cluster.ordering, .draw_id = cluster.draw_id, .cluster_id = cluster.id, .material_id = cluster.material_id, .first_triangle = cluster.first_triangle, .triangle_count = cluster.triangle_count, .path = chooseRasterPath(cluster), .extent = extent };
+                    cursors[tile] += 1;
+                }
             }
         }
+    }
+    for (headers[0..tile_count]) |header| {
+        const begin = @as(usize, header.offset);
+        const end = begin + @as(usize, header.count);
+        stableSortPackets(packets[begin..end]);
     }
     return total;
 }
@@ -412,98 +476,102 @@ pub fn cullClustersHzb(clusters: []const Cluster, hzb: Hzb, visible: []bool) Bin
     var count: usize = 0;
     for (clusters, visible) |cluster, *is_visible| {
         const level = chooseHzbLevel(cluster.bounds, hzb.level_count);
-        is_visible.* = !hzb.occludedAtLevel(cluster.bounds, cluster.nearest_depth, level);
+        is_visible.* = !hzb.occludedAtLevel(cluster.bounds, cluster.best_depth, level);
         if (is_visible.*) count += 1;
     }
     return count;
 }
 
-test "visibility buffer publishes only nearer samples" {
-    var ids: [4]Visibility = undefined;
-    var depth: [4]f32 = undefined;
-    const visibility = try VisibilityBuffer.init(&ids, &depth, 2, 2);
-    visibility.clear(1.0);
-    try std.testing.expect(visibility.writeIfNearer(1, 0, 0.4, .{ .primitive_id = 3, .material_id = 9 }));
-    try std.testing.expect(!visibility.writeIfNearer(1, 0, 0.6, .{ .primitive_id = 4, .material_id = 10 }));
-    try std.testing.expectEqual(@as(u32, 3), visibility.ids[1].primitive_id);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.4), visibility.depth[1], 0.00001);
+pub fn cullHierarchyHzb(nodes: []const ClusterNode, roots: []const u32, clusters: []const Cluster, hzb: Hzb, visible: []bool, stack: []u32) BinError!usize {
+    if (visible.len != clusters.len or stack.len < nodes.len + roots.len) return error.ScratchTooSmall;
+    @memset(visible, false);
+    var stack_len: usize = 0;
+    for (roots) |root| {
+        if (@as(usize, root) >= nodes.len) return error.InvalidHierarchy;
+        stack[stack_len] = root;
+        stack_len += 1;
+    }
+    var count: usize = 0;
+    while (stack_len != 0) {
+        stack_len -= 1;
+        const node = nodes[@as(usize, stack[stack_len])];
+        const level = chooseHzbLevel(node.bounds, hzb.level_count);
+        if (hzb.occludedAtLevel(node.bounds, node.best_depth, level)) continue;
+        if (node.child_count != 0) {
+            const first = @as(usize, node.first_child);
+            const last = first + @as(usize, node.child_count);
+            if (last > nodes.len) return error.InvalidHierarchy;
+            var child = last;
+            while (child > first) {
+                child -= 1;
+                stack[stack_len] = @intCast(child);
+                stack_len += 1;
+            }
+        } else {
+            const first = @as(usize, node.first_cluster);
+            const last = first + @as(usize, node.cluster_count);
+            if (last > clusters.len) return error.InvalidHierarchy;
+            for (first..last) |cluster_index| {
+                const cluster = clusters[cluster_index];
+                const cluster_level = chooseHzbLevel(cluster.bounds, hzb.level_count);
+                if (!hzb.occludedAtLevel(cluster.bounds, cluster.best_depth, cluster_level) and !visible[cluster_index]) {
+                    visible[cluster_index] = true;
+                    count += 1;
+                }
+            }
+        }
+    }
+    return count;
 }
 
-test "HZB stores conservative farthest depth and rejects hidden clusters" {
-    const depth = [_]f32{
-        0.2, 0.3, 0.4, 0.5,
-        0.1, 0.2, 0.3, 0.4,
-        0.2, 0.2, 0.2, 0.2,
-        0.1, 0.1, 0.1, 0.1,
-    };
-    var values: [21]f32 = undefined;
-    var levels: [3]HzbLevel = undefined;
-    const hzb = try Hzb.build(&depth, 4, 4, &values, &levels);
-    try std.testing.expectEqual(@as(usize, 3), hzb.level_count);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.5), hzb.values[hzb.levels[2].offset], 0.00001);
-    try std.testing.expect(hzb.occludedAtLevel(.{ .min_x = 0, .min_y = 0, .max_x = 4, .max_y = 4 }, 0.8, 2));
-    try std.testing.expect(!hzb.occludedAtLevel(.{ .min_x = 0, .min_y = 0, .max_x = 4, .max_y = 4 }, 0.3, 2));
+test "HZB odd dimensions use exact power-of-two footprints" {
+    var depth = [_]f32{0.2} ** 9;
+    depth[3] = 1.0;
+    var values: [20]f32 = undefined;
+    var levels: [5]HzbLevel = undefined;
+    const hzb = try Hzb.build(&depth, 9, 1, .{ .source = .depth_prepass, .compare = .less }, &values, &levels);
+    try std.testing.expectEqual(@as(u6, 2), hzb.levels[2].footprint_shift);
+    try std.testing.expect(!hzb.occludedAtLevel(.{ .min_x = 3, .min_y = 0, .max_x = 8, .max_y = 1 }, 0.8, 2));
 }
 
-test "HZB holes remain conservative" {
-    const depth = [_]f32{ 0.2, 0.2, 0.2, 1.0 };
+test "HZB supports reverse Z" {
+    const depth = [_]f32{ 0.8, 0.8, 0.8, 0.8 };
     var values: [5]f32 = undefined;
     var levels: [2]HzbLevel = undefined;
-    const hzb = try Hzb.build(&depth, 2, 2, &values, &levels);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), hzb.values[hzb.levels[1].offset], 0.00001);
-    try std.testing.expect(!hzb.occludedAtLevel(.{ .min_x = 0, .min_y = 0, .max_x = 2, .max_y = 2 }, 0.8, 1));
+    const hzb = try Hzb.build(&depth, 2, 2, .{ .source = .same_frame_completed, .compare = .greater }, &values, &levels);
+    try std.testing.expect(hzb.occludedAtLevel(.{ .min_x = 0, .min_y = 0, .max_x = 2, .max_y = 2 }, 0.5, 1));
+    try std.testing.expect(!hzb.occludedAtLevel(.{ .min_x = 0, .min_y = 0, .max_x = 2, .max_y = 2 }, 0.9, 1));
 }
 
-test "macrobins and tile packets keep clusters coarse" {
-    const clusters = [_]Cluster{
-        .{ .id = 10, .draw_id = 1, .material_id = 7, .first_triangle = 0, .triangle_count = 128, .bounds = .{ .min_x = 0, .min_y = 0, .max_x = 40, .max_y = 40 }, .nearest_depth = 0.2 },
-        .{ .id = 11, .draw_id = 1, .material_id = 7, .first_triangle = 128, .triangle_count = 64, .bounds = .{ .min_x = 48, .min_y = 0, .max_x = 64, .max_y = 16 }, .nearest_depth = 0.3 },
-    };
-    var macro_headers: [4]MacrobinHeader = undefined;
-    var macro_entries: [8]MacrobinRef = undefined;
-    var macro_cursors: [4]u32 = undefined;
-    const macro_count = try buildMacrobins(&clusters, null, 64, 64, 32, 32, &macro_headers, &macro_entries, &macro_cursors);
-    try std.testing.expectEqual(@as(usize, 5), macro_count);
+test "previous-frame HZB requires conservative reprojection proof" {
+    const depth = [_]f32{0.5};
+    var values: [1]f32 = undefined;
+    var levels: [1]HzbLevel = undefined;
+    try std.testing.expectError(error.InvalidPolicy, Hzb.build(&depth, 1, 1, .{ .source = .previous_frame_conservative, .compare = .less }, &values, &levels));
+}
 
+test "tile packets consume macrobins and enforce order" {
+    const clusters = [_]Cluster{
+        .{ .id = 2, .draw_id = 1, .material_id = 1, .first_triangle = 64, .triangle_count = 64, .bounds = .{ .min_x = 0, .min_y = 0, .max_x = 16, .max_y = 16 }, .best_depth = 0.2, .order_key = .{ .submission = 0, .command = 2, .primitive_group = 0 }, .estimated_covered_samples = 64 },
+        .{ .id = 1, .draw_id = 1, .material_id = 1, .first_triangle = 0, .triangle_count = 64, .bounds = .{ .min_x = 0, .min_y = 0, .max_x = 16, .max_y = 16 }, .best_depth = 0.1, .order_key = .{ .submission = 0, .command = 1, .primitive_group = 0 }, .estimated_covered_samples = 64 },
+    };
     const visible = [_]bool{ true, true };
-    var tile_headers: [16]TileHeader = undefined;
-    var packets: [32]TilePacket = undefined;
-    var tile_cursors: [16]u32 = undefined;
-    const packet_count = try buildTilePackets(&clusters, &visible, 1000, 64, 64, 16, 16, &tile_headers, &packets, &tile_cursors);
-    try std.testing.expect(packet_count > 2);
-    for (packets[0..packet_count]) |packet| {
-        try std.testing.expect(packet.triangle_count == 128 or packet.triangle_count == 64);
-    }
+    var mh: [1]MacrobinHeader = undefined;
+    var me: [2]MacrobinRef = undefined;
+    var mc: [1]u32 = undefined;
+    _ = try buildMacrobins(&clusters, &visible, 16, 16, 16, 16, &mh, &me, &mc);
+    var th: [1]TileHeader = undefined;
+    var packets: [2]TilePacket = undefined;
+    var tc: [1]u32 = undefined;
+    const count = try buildTilePacketsFromMacrobins(&clusters, 16, 16, 16, 16, &mh, &me, 16, 16, &th, &packets, &tc);
+    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expectEqual(@as(ClusterId, 1), packets[0].cluster_id);
+    try std.testing.expectEqual(@as(ClusterId, 2), packets[1].cluster_id);
 }
 
-test "macrobinner skips HZB-culled clusters" {
-    const clusters = [_]Cluster{
-        .{ .id = 1, .draw_id = 1, .material_id = 1, .first_triangle = 0, .triangle_count = 64, .bounds = .{ .min_x = 0, .min_y = 0, .max_x = 32, .max_y = 32 }, .nearest_depth = 0.2 },
-        .{ .id = 2, .draw_id = 1, .material_id = 1, .first_triangle = 64, .triangle_count = 64, .bounds = .{ .min_x = 32, .min_y = 0, .max_x = 64, .max_y = 32 }, .nearest_depth = 0.9 },
-    };
-    const visible = [_]bool{ true, false };
-    var headers: [2]MacrobinHeader = undefined;
-    var entries: [2]MacrobinRef = undefined;
-    var cursors: [2]u32 = undefined;
-    const count = try buildMacrobins(&clusters, &visible, 64, 32, 32, 32, &headers, &entries, &cursors);
-    try std.testing.expectEqual(@as(usize, 1), count);
-    try std.testing.expectEqual(@as(u32, 0), entries[0].cluster_index);
-}
-
-test "off-screen clusters do not alias the last bin" {
-    const clusters = [_]Cluster{
-        .{ .id = 7, .draw_id = 1, .material_id = 1, .first_triangle = 0, .triangle_count = 32, .bounds = .{ .min_x = 1000, .min_y = 1000, .max_x = 1100, .max_y = 1100 }, .nearest_depth = 0.2 },
-    };
-    var headers: [4]MacrobinHeader = undefined;
-    var entries: [1]MacrobinRef = undefined;
-    var cursors: [4]u32 = undefined;
-    const count = try buildMacrobins(&clusters, null, 64, 64, 32, 32, &headers, &entries, &cursors);
-    try std.testing.expectEqual(@as(usize, 0), count);
-}
-
-test "raster path separates tiny and broad clusters" {
-    const tiny = Cluster{ .id = 1, .draw_id = 1, .material_id = 1, .first_triangle = 0, .triangle_count = 128, .bounds = .{ .min_x = 0, .min_y = 0, .max_x = 16, .max_y = 16 }, .nearest_depth = 0.2 };
-    const broad = Cluster{ .id = 2, .draw_id = 1, .material_id = 1, .first_triangle = 0, .triangle_count = 2, .bounds = .{ .min_x = 0, .min_y = 0, .max_x = 128, .max_y = 128 }, .nearest_depth = 0.2 };
+test "raster path uses covered-sample estimate, not cluster bbox" {
+    const tiny = Cluster{ .id = 1, .draw_id = 1, .material_id = 1, .first_triangle = 0, .triangle_count = 128, .bounds = .{ .min_x = 0, .min_y = 0, .max_x = 512, .max_y = 512 }, .best_depth = 0.2, .order_key = .{ .submission = 0, .command = 0, .primitive_group = 0 }, .estimated_covered_samples = 128 };
+    const broad = Cluster{ .id = 2, .draw_id = 1, .material_id = 1, .first_triangle = 0, .triangle_count = 2, .bounds = .{ .min_x = 0, .min_y = 0, .max_x = 128, .max_y = 128 }, .best_depth = 0.2, .order_key = .{ .submission = 0, .command = 1, .primitive_group = 0 }, .estimated_covered_samples = 4096 };
     try std.testing.expectEqual(RasterPath.primitive_simd, chooseRasterPath(tiny));
     try std.testing.expectEqual(RasterPath.pixel_simd, chooseRasterPath(broad));
 }
