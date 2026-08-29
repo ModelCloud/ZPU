@@ -215,7 +215,9 @@ triangle path:
 - compiler/archive-created fixed CPU pipelines expose deterministic modern
   binding reflection (and compatibility argument reflection) for their known
   buffer, texture, and sampler interfaces; ordinary device-created pipelines
-  retain Metal's default `nil` reflection behavior
+  retain Metal's default `nil` `pipelineState.reflection` behavior while the
+  legacy `options:reflection:` creation selectors return the same fixed CPU
+  binding metadata
 - registered CPU library functions expose matching binding reflection with a
   `nil` user annotation; unregistered functions and arbitrary specialized
   descriptors remain unsupported

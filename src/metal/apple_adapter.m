@@ -437,6 +437,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSString *_vertexFunctionName;
     NSString *_fragmentFunctionName;
     MTLRenderPipelineReflection *_reflection;
+    MTLRenderPipelineReflection *_legacyReflection;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLRenderPipelineDescriptor *)descriptor;
 @end
@@ -869,6 +870,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLSize _requiredThreadsPerThreadgroup;
     BOOL _supportsIndirectCommandBuffers;
     MTLComputePipelineReflection *_reflection;
+    MTLComputePipelineReflection *_legacyReflection;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner function:(id<MTLFunction>)function error:(NSError **)error;
 @end
@@ -3783,9 +3785,17 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
     return (id<MTLRenderPipelineState>)[[ZPURenderPipelineState alloc] initWithOwner:self descriptor:descriptor];
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)descriptor options:(MTLPipelineOption)options reflection:(MTLRenderPipelineReflection **)reflection error:(NSError **)error {
-    (void)options;
     if (reflection != NULL) *reflection = nil;
-    return [self newRenderPipelineStateWithDescriptor:descriptor error:error];
+    ZPURenderPipelineState *pipeline = (ZPURenderPipelineState *)[self newRenderPipelineStateWithDescriptor:descriptor error:error];
+    if (pipeline != nil && reflection != NULL &&
+        (options & (MTLPipelineOptionBindingInfo | MTLPipelineOptionBufferTypeInfo)) != 0) {
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            pipeline->_legacyReflection = zpu_render_pipeline_reflection(
+                pipeline->_vertexFunctionName, pipeline->_fragmentFunctionName);
+            *reflection = pipeline->_legacyReflection;
+        }
+    }
+    return (id<MTLRenderPipelineState>)pipeline;
 }
 - (void)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)descriptor completionHandler:(MTLNewRenderPipelineStateCompletionHandler)completionHandler {
     if (completionHandler == nil) return;
@@ -3794,11 +3804,11 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
     completionHandler(state, error);
 }
 - (void)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)descriptor options:(MTLPipelineOption)options completionHandler:(MTLNewRenderPipelineStateWithReflectionCompletionHandler)completionHandler {
-    (void)options;
     if (completionHandler == nil) return;
     NSError *error = nil;
-    id<MTLRenderPipelineState> state = [self newRenderPipelineStateWithDescriptor:descriptor error:&error];
-    completionHandler(state, nil, error);
+    MTLRenderPipelineReflection *reflection = nil;
+    id<MTLRenderPipelineState> state = [self newRenderPipelineStateWithDescriptor:descriptor options:options reflection:&reflection error:&error];
+    completionHandler(state, reflection, error);
 }
 - (id<MTLDepthStencilState>)newDepthStencilStateWithDescriptor:(MTLDepthStencilDescriptor *)descriptor {
     return descriptor == nil ? nil : (id<MTLDepthStencilState>)[[ZPUDepthStencilState alloc] initWithOwner:self descriptor:descriptor];
@@ -3863,14 +3873,21 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
     return (id<MTLComputePipelineState>)[[ZPUComputePipelineState alloc] initWithOwner:self function:computeFunction error:error];
 }
 - (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)computeFunction options:(MTLPipelineOption)options reflection:(MTLAutoreleasedComputePipelineReflection * __nullable)reflection error:(NSError **)error {
-    (void)options;
     if (reflection != NULL) *reflection = nil;
-    return [self newComputePipelineStateWithFunction:computeFunction error:error];
+    ZPUComputePipelineState *pipeline = (ZPUComputePipelineState *)[self newComputePipelineStateWithFunction:computeFunction error:error];
+    if (pipeline != nil && reflection != NULL &&
+        (options & (MTLPipelineOptionBindingInfo | MTLPipelineOptionBufferTypeInfo)) != 0) {
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            pipeline->_legacyReflection = zpu_compute_pipeline_reflection(pipeline->_kernel);
+            *reflection = pipeline->_legacyReflection;
+        }
+    }
+    return (id<MTLComputePipelineState>)pipeline;
 }
 - (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)descriptor options:(MTLPipelineOption)options reflection:(MTLAutoreleasedComputePipelineReflection * __nullable)reflection error:(NSError **)error API_AVAILABLE(macos(10.11), ios(9.0)) {
-    (void)options;
     if (reflection != NULL) *reflection = nil;
-    return descriptor == nil ? nil : [self newComputePipelineStateWithFunction:descriptor.computeFunction error:error];
+    return descriptor == nil ? nil : [self newComputePipelineStateWithFunction:descriptor.computeFunction
+                                                                         options:options reflection:reflection error:error];
 }
 - (void)newComputePipelineStateWithFunction:(id<MTLFunction>)computeFunction completionHandler:(MTLNewComputePipelineStateCompletionHandler)completionHandler {
     if (completionHandler == nil) return;
@@ -3879,18 +3896,19 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
     completionHandler(state, error);
 }
 - (void)newComputePipelineStateWithFunction:(id<MTLFunction>)computeFunction options:(MTLPipelineOption)options completionHandler:(MTLNewComputePipelineStateWithReflectionCompletionHandler)completionHandler {
-    (void)options;
     if (completionHandler == nil) return;
     NSError *error = nil;
-    id<MTLComputePipelineState> state = [self newComputePipelineStateWithFunction:computeFunction error:&error];
-    completionHandler(state, nil, error);
+    MTLComputePipelineReflection *reflection = nil;
+    id<MTLComputePipelineState> state = [self newComputePipelineStateWithFunction:computeFunction
+                                                                              options:options reflection:&reflection error:&error];
+    completionHandler(state, reflection, error);
 }
 - (void)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)descriptor options:(MTLPipelineOption)options completionHandler:(MTLNewComputePipelineStateWithReflectionCompletionHandler)completionHandler API_AVAILABLE(macos(10.11), ios(9.0)) {
-    (void)options;
     if (completionHandler == nil) return;
     NSError *error = nil;
-    id<MTLComputePipelineState> state = [self newComputePipelineStateWithDescriptor:descriptor options:0 reflection:nil error:&error];
-    completionHandler(state, nil, error);
+    MTLComputePipelineReflection *reflection = nil;
+    id<MTLComputePipelineState> state = [self newComputePipelineStateWithDescriptor:descriptor options:options reflection:&reflection error:&error];
+    completionHandler(state, reflection, error);
 }
 - (id<MTLIndirectCommandBuffer>)newIndirectCommandBufferWithDescriptor:(MTLIndirectCommandBufferDescriptor *)descriptor maxCommandCount:(NSUInteger)maxCount options:(MTLResourceOptions)options API_AVAILABLE(macos(10.14), ios(12.0)) {
     const MTLIndirectCommandType renderTypes = MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed;

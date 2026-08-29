@@ -674,7 +674,7 @@
     "MTL4MachineLearningCommandEncoder",
     "MTLAccelerationStructure",
     "MTLRayTracingPipelineState",
-    "MTLComputePipelineState.additional-function/reflection families",
+    "MTLComputePipelineState additional binary-function linking and unregistered reflection",
     "MTL4Compiler dynamic-library, machine-learning, specialization, dynamic-linking, and arbitrary MSL families",
     "MTLLibrary stitched loading and arbitrary MSL compilation",
     "MTLIO compressed file-handle decoding",

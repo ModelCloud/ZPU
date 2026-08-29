@@ -1710,6 +1710,27 @@ int main(void) {
         id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
         id<MTLRenderPipelineState> adapter_pipeline =
             [adapter_device newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor error:&adapter_pipeline_error];
+        MTLRenderPipelineReflection *native_legacy_render_reflection = nil;
+        MTLRenderPipelineReflection *adapter_legacy_render_reflection = nil;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            [device newRenderPipelineStateWithDescriptor:pipeline_descriptor
+                                                  options:MTLPipelineOptionBindingInfo
+                                               reflection:&native_legacy_render_reflection
+                                                    error:&error];
+            [adapter_device newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor
+                                                          options:MTLPipelineOptionBindingInfo
+                                                       reflection:&adapter_legacy_render_reflection
+                                                            error:&adapter_pipeline_error];
+        }
+        const BOOL adapter_legacy_render_reflection_ok =
+            adapter_legacy_render_reflection != nil &&
+            adapter_legacy_render_reflection.vertexBindings.count == 1 &&
+            [adapter_legacy_render_reflection.vertexBindings[0].name isEqualToString:@"vertices"] &&
+            adapter_legacy_render_reflection.vertexBindings[0].type == MTLBindingTypeBuffer &&
+            adapter_legacy_render_reflection.fragmentBindings.count == 0 &&
+            (native_legacy_render_reflection == nil ||
+             (native_legacy_render_reflection.vertexBindings.count == 1 &&
+              native_legacy_render_reflection.fragmentBindings.count == 0));
         MTLRenderPipelineDescriptor *foreign_function_descriptor = [pipeline_descriptor copy];
         if ([adapter_device newRenderPipelineStateWithDescriptor:foreign_function_descriptor
                                                            error:&adapter_pipeline_error] != nil) {
@@ -2147,6 +2168,12 @@ int main(void) {
             fail_with_error("Objective-C adapter pipeline/resource allocation failed", adapter_pipeline_error);
             fprintf(stderr, "metal-pixel: Objective-C adapter allocation failed\n");
             return 18;
+        }
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            if (!adapter_legacy_render_reflection_ok) {
+                fprintf(stderr, "metal-pixel: legacy CPU render pipeline reflection failed\n");
+                return 134;
+            }
         }
         [adapter_encoder setLabel:@"zpu cpu render encoder"];
         if (![adapter_pipeline.label isEqualToString:@"zpu cpu render pipeline"] ||
@@ -3711,6 +3738,33 @@ int main(void) {
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_fill_gradient_rgba8");
         id<MTLComputePipelineState> adapter_compute_pipeline =
             [adapter_device newComputePipelineStateWithFunction:adapter_compute_function error:&adapter_compute_error];
+        MTLComputePipelineReflection *native_legacy_compute_reflection = nil;
+        MTLComputePipelineReflection *adapter_legacy_compute_reflection = nil;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            [device newComputePipelineStateWithFunction:native_compute_function
+                                                 options:MTLPipelineOptionBindingInfo
+                                              reflection:&native_legacy_compute_reflection
+                                                   error:&error];
+            [adapter_device newComputePipelineStateWithFunction:adapter_compute_function
+                                                         options:MTLPipelineOptionBindingInfo
+                                                      reflection:&adapter_legacy_compute_reflection
+                                                           error:&adapter_compute_error];
+        }
+        const BOOL adapter_legacy_compute_reflection_ok =
+            adapter_legacy_compute_reflection != nil &&
+            adapter_legacy_compute_reflection.bindings.count == 1 &&
+            [adapter_legacy_compute_reflection.bindings[0].name isEqualToString:@"output"] &&
+            adapter_legacy_compute_reflection.bindings[0].type == MTLBindingTypeTexture &&
+            adapter_legacy_compute_reflection.bindings[0].access == MTLBindingAccessWriteOnly &&
+            (native_legacy_compute_reflection == nil ||
+             (native_legacy_compute_reflection.bindings.count == 1 &&
+              native_legacy_compute_reflection.bindings[0].type == MTLBindingTypeTexture));
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            if (!adapter_legacy_compute_reflection_ok) {
+                fail_with_error("legacy CPU compute pipeline reflection failed", adapter_compute_error);
+                return 135;
+            }
+        }
         id<MTLLibrary> adapter_default_library = [adapter_device newDefaultLibrary];
         id<MTLFunction> adapter_default_compute_function =
             [adapter_default_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8"];
