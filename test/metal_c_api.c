@@ -140,6 +140,41 @@ int main(void) {
         memcmp(rendered, view_bytes, sizeof(rendered)) != 0) return 12;
     zpu_metal_texture_destroy(r32_view);
 
+    zpu_metal_texture_descriptor narrow_r8_descriptor = {
+        .width = 3,
+        .height = 2,
+        .format = ZPU_METAL_R8_UNORM,
+    };
+    zpu_metal_texture_descriptor narrow_rg8_descriptor = narrow_r8_descriptor;
+    narrow_rg8_descriptor.format = ZPU_METAL_RG8_UNORM;
+    zpu_metal_texture *narrow_r8 =
+        zpu_metal_device_new_texture(device, &narrow_r8_descriptor);
+    zpu_metal_texture *narrow_rg8 =
+        zpu_metal_device_new_texture(device, &narrow_rg8_descriptor);
+    const uint8_t narrow_r8_values[] = {1, 2, 3, 9, 8, 7};
+    const uint8_t narrow_rg8_values[] = {
+        10, 11, 20, 21, 30, 31, 40, 41, 50, 51, 60, 61,
+    };
+    uint8_t narrow_r8_copy[sizeof(narrow_r8_values)] = {0};
+    uint8_t narrow_rg8_copy[sizeof(narrow_rg8_values)] = {0};
+    if (narrow_r8 == NULL || narrow_rg8 == NULL ||
+        zpu_metal_texture_replace_region(
+            narrow_r8, (zpu_metal_region){{0, 0, 0}, {3, 2, 1}},
+            narrow_r8_values, sizeof(narrow_r8_values), 3) != 0 ||
+        zpu_metal_texture_replace_region(
+            narrow_rg8, (zpu_metal_region){{0, 0, 0}, {3, 2, 1}},
+            narrow_rg8_values, sizeof(narrow_rg8_values), 6) != 0 ||
+        zpu_metal_texture_get_bytes(
+            narrow_r8, narrow_r8_copy, sizeof(narrow_r8_copy), 3,
+            (zpu_metal_region){{0, 0, 0}, {3, 2, 1}}) != 0 ||
+        zpu_metal_texture_get_bytes(
+            narrow_rg8, narrow_rg8_copy, sizeof(narrow_rg8_copy), 6,
+            (zpu_metal_region){{0, 0, 0}, {3, 2, 1}}) != 0 ||
+        memcmp(narrow_r8_copy, narrow_r8_values, sizeof(narrow_r8_copy)) != 0 ||
+        memcmp(narrow_rg8_copy, narrow_rg8_values, sizeof(narrow_rg8_copy)) != 0) return 72;
+    zpu_metal_texture_destroy(narrow_r8);
+    zpu_metal_texture_destroy(narrow_rg8);
+
     zpu_metal_texture_descriptor compute_descriptor = {
         .width = 4,
         .height = 4,

@@ -87,7 +87,7 @@ pub const StencilFace = struct {
     reference: u8 = 0,
 };
 
-pub const TargetFormat = enum { rgba8_unorm, bgra8_unorm, r32_float, rgba16_float };
+pub const TargetFormat = enum { r8_unorm, rg8_unorm, rgba8_unorm, bgra8_unorm, r32_float, rgba16_float };
 
 pub const Target = struct {
     pixels: []u8,
@@ -98,6 +98,8 @@ pub const Target = struct {
 
     fn bytesPerPixel(format: TargetFormat) usize {
         return switch (format) {
+            .r8_unorm => 1,
+            .rg8_unorm => 2,
             .rgba8_unorm, .bgra8_unorm, .r32_float => 4,
             .rgba16_float => 8,
         };
@@ -137,6 +139,13 @@ pub const Target = struct {
         const row_bytes = self.row(@intCast(y));
         const offset = x * bytesPerPixel(self.format);
         return switch (self.format) {
+            .r8_unorm => .{ @as(f32, @floatFromInt(row_bytes[offset])) / 255.0, 0, 0, 1 },
+            .rg8_unorm => .{
+                @as(f32, @floatFromInt(row_bytes[offset])) / 255.0,
+                @as(f32, @floatFromInt(row_bytes[offset + 1])) / 255.0,
+                0,
+                1,
+            },
             .rgba8_unorm, .bgra8_unorm => blk: {
                 const format: surface.Format = if (self.format == .rgba8_unorm) .rgba8_unorm else .bgra8_unorm;
                 const color = surface.Surface.read(row_bytes, offset, format);
@@ -159,6 +168,13 @@ pub const Target = struct {
         const row_bytes = self.row(@intCast(y));
         const offset = x * bytesPerPixel(self.format);
         switch (self.format) {
+            .r8_unorm => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) row_bytes[offset] = colorByte(color[0]);
+            },
+            .rg8_unorm => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) row_bytes[offset] = colorByte(color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) row_bytes[offset + 1] = colorByte(color[1]);
+            },
             .rgba8_unorm, .bgra8_unorm => {
                 const format: surface.Format = if (self.format == .rgba8_unorm) .rgba8_unorm else .bgra8_unorm;
                 var output = surface.Surface.read(row_bytes, offset, format);
@@ -1040,6 +1056,22 @@ test "float color targets retain native texel precision" {
     try std.testing.expectEqual(@as(f32, 0.5), color[1]);
     try std.testing.expectEqual(@as(f32, 0.75), color[2]);
     try std.testing.expectEqual(@as(f32, 1), color[3]);
+}
+
+test "narrow unorm color targets retain channel width and masks" {
+    var r8_bytes = [_]u8{ 0, 0, 0, 0 };
+    var r8 = try Target.init(&r8_bytes, 2, 2, 2, .r8_unorm);
+    clearTarget(&r8, .{ 0.25, 0.5, 0.75, 1 });
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 64, 64, 64, 64 }, &r8_bytes);
+    try std.testing.expectApproxEqAbs(@as(f32, 64.0 / 255.0), r8.readColor(1, 1)[0], 0.0001);
+    r8.writeColor(0, 0, .{ 1, 0, 0, 1 }, @intFromEnum(abi.ColorWriteMask.green));
+    try std.testing.expectEqual(@as(u8, 64), r8_bytes[0]);
+
+    var rg8_bytes = [_]u8{0} ** 4;
+    var rg8 = try Target.init(&rg8_bytes, 2, 1, 4, .rg8_unorm);
+    rg8.storeColor(0, 0, .{ 0.25, 0.5, 0.75, 1 });
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 64, 128, 0, 0 }, &rg8_bytes);
+    try std.testing.expectApproxEqAbs(@as(f32, 128.0 / 255.0), rg8.readColor(0, 0)[1], 0.0001);
 }
 
 test "CPU texture sampling uses normalized top-left texel coordinates" {

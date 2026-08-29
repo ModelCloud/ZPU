@@ -1337,6 +1337,66 @@ int main(void) {
             fprintf(stderr, "metal-pixel: non-renderable texture format byte mismatch\n");
             return 76;
         }
+
+        /* Narrow normalized formats must retain their one- and two-byte
+         * texels through the same CPU-owned storage and transfer path. */
+        enum { narrow_format_width = 4, narrow_format_height = 2,
+               narrow_r8_bytes = narrow_format_width * narrow_format_height,
+               narrow_rg8_bytes = narrow_r8_bytes * 2 };
+        const uint8_t narrow_r8_source[narrow_r8_bytes] = {
+            1, 2, 3, 4, 9, 8, 7, 6,
+        };
+        const uint8_t narrow_rg8_source[narrow_rg8_bytes] = {
+            10, 11, 20, 21, 30, 31, 40, 41,
+            50, 51, 60, 61, 70, 71, 80, 81,
+        };
+        MTLTextureDescriptor *native_r8_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+                                                                width:narrow_format_width
+                                                               height:narrow_format_height
+                                                            mipmapped:NO];
+        native_r8_descriptor.storageMode = MTLStorageModeShared;
+        native_r8_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        MTLTextureDescriptor *native_rg8_descriptor = [native_r8_descriptor copy];
+        native_rg8_descriptor.pixelFormat = MTLPixelFormatRG8Unorm;
+        id<MTLTexture> native_r8_texture = [device newTextureWithDescriptor:native_r8_descriptor];
+        id<MTLTexture> native_rg8_texture = [device newTextureWithDescriptor:native_rg8_descriptor];
+        id<MTLTexture> adapter_r8_texture = [adapter_device newTextureWithDescriptor:native_r8_descriptor];
+        id<MTLTexture> adapter_rg8_texture = [adapter_device newTextureWithDescriptor:native_rg8_descriptor];
+        if (native_r8_texture == nil || native_rg8_texture == nil ||
+            adapter_r8_texture == nil || adapter_rg8_texture == nil ||
+            adapter_r8_texture.allocatedSize != narrow_r8_bytes ||
+            adapter_rg8_texture.allocatedSize != narrow_rg8_bytes) {
+            fprintf(stderr, "metal-pixel: narrow normalized texture allocation failed\n");
+            return 77;
+        }
+        [native_r8_texture replaceRegion:MTLRegionMake2D(0, 0, narrow_format_width, narrow_format_height)
+                              mipmapLevel:0 withBytes:narrow_r8_source bytesPerRow:narrow_format_width];
+        [native_rg8_texture replaceRegion:MTLRegionMake2D(0, 0, narrow_format_width, narrow_format_height)
+                               mipmapLevel:0 withBytes:narrow_rg8_source bytesPerRow:narrow_format_width * 2];
+        [adapter_r8_texture replaceRegion:MTLRegionMake2D(0, 0, narrow_format_width, narrow_format_height)
+                               mipmapLevel:0 withBytes:narrow_r8_source bytesPerRow:narrow_format_width];
+        [adapter_rg8_texture replaceRegion:MTLRegionMake2D(0, 0, narrow_format_width, narrow_format_height)
+                                mipmapLevel:0 withBytes:narrow_rg8_source bytesPerRow:narrow_format_width * 2];
+        uint8_t native_r8_bytes[narrow_r8_bytes];
+        uint8_t adapter_r8_bytes[narrow_r8_bytes];
+        uint8_t native_rg8_bytes[narrow_rg8_bytes];
+        uint8_t adapter_rg8_bytes[narrow_rg8_bytes];
+        [native_r8_texture getBytes:native_r8_bytes bytesPerRow:narrow_format_width
+                          fromRegion:MTLRegionMake2D(0, 0, narrow_format_width, narrow_format_height) mipmapLevel:0];
+        [adapter_r8_texture getBytes:adapter_r8_bytes bytesPerRow:narrow_format_width
+                            fromRegion:MTLRegionMake2D(0, 0, narrow_format_width, narrow_format_height) mipmapLevel:0];
+        [native_rg8_texture getBytes:native_rg8_bytes bytesPerRow:narrow_format_width * 2
+                           fromRegion:MTLRegionMake2D(0, 0, narrow_format_width, narrow_format_height) mipmapLevel:0];
+        [adapter_rg8_texture getBytes:adapter_rg8_bytes bytesPerRow:narrow_format_width * 2
+                             fromRegion:MTLRegionMake2D(0, 0, narrow_format_width, narrow_format_height) mipmapLevel:0];
+        if (memcmp(native_r8_bytes, adapter_r8_bytes, narrow_r8_bytes) != 0 ||
+            memcmp(native_rg8_bytes, adapter_rg8_bytes, narrow_rg8_bytes) != 0 ||
+            memcmp(adapter_r8_bytes, narrow_r8_source, narrow_r8_bytes) != 0 ||
+            memcmp(adapter_rg8_bytes, narrow_rg8_source, narrow_rg8_bytes) != 0) {
+            fprintf(stderr, "metal-pixel: narrow normalized texture byte mismatch\n");
+            return 78;
+        }
         id<MTLFunction> adapter_vertex_function =
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_vertex");
         id<MTLFunction> adapter_stage_in_vertex_function =
@@ -1682,9 +1742,10 @@ int main(void) {
             }
         }
 
-        /* Float color attachments use the same CPU raster path as normalized
-         * targets, but their stored representation must remain native Metal's
-         * R32Float or RGBA16Float bytes rather than an RGBA8 conversion. */
+        /* Color attachments use the same CPU raster path across scalar,
+         * narrow, and packed normalized formats. Their stored representation
+         * must remain the native Metal texel width rather than an RGBA8
+         * conversion. */
         const zpu_metal_vertex float_vertices[] = {
             {{x0, y0, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
             {{x1, y0, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
@@ -1699,12 +1760,15 @@ int main(void) {
         id<MTLBuffer> adapter_float_vertex_buffer =
             [adapter_device newBufferWithBytes:float_vertices length:sizeof(float_vertices)
                                         options:MTLResourceStorageModeShared];
-        const MTLPixelFormat float_formats[] = {
+        const MTLPixelFormat color_formats[] = {
             MTLPixelFormatR32Float, MTLPixelFormatRGBA16Float,
+            MTLPixelFormatR8Unorm, MTLPixelFormatRG8Unorm,
         };
-        for (NSUInteger format_index = 0; format_index < sizeof(float_formats) / sizeof(float_formats[0]); ++format_index) {
-            const MTLPixelFormat format = float_formats[format_index];
-            const NSUInteger bytes_per_pixel = format == MTLPixelFormatR32Float ? 4 : 8;
+        for (NSUInteger format_index = 0; format_index < sizeof(color_formats) / sizeof(color_formats[0]); ++format_index) {
+            const MTLPixelFormat format = color_formats[format_index];
+            const NSUInteger bytes_per_pixel = format == MTLPixelFormatR32Float ? 4 :
+                format == MTLPixelFormatRGBA16Float ? 8 :
+                format == MTLPixelFormatR8Unorm ? 1 : 2;
             const NSUInteger float_byte_count = (NSUInteger)width * height * bytes_per_pixel;
             MTLRenderPipelineDescriptor *native_float_pipeline_descriptor = [pipeline_descriptor copy];
             native_float_pipeline_descriptor.colorAttachments[0].pixelFormat = format;
@@ -11612,7 +11676,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables and border colors, mip/coordinate/reduction/anisotropic sampler modes, visibility results, acceleration-structure resources, cube/cube-array textures, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for R8/RG8/RGBA8/BGRA8 core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables and border colors, mip/coordinate/reduction/anisotropic sampler modes, visibility results, acceleration-structure resources, cube/cube-array textures, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }

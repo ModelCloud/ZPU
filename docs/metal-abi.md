@@ -20,18 +20,19 @@ triangle path:
   viewport, scissor, cull, winding, fill-mode, color interpolation, depth
   bias/slope scale, and clip-vs-clamp depth behavior
 - two screen-band workers for a 3D draw: the submitting core plus one worker
-- owned RGBA8/BGRA8 buffers and 1D/2D/3D textures with checked region read/write
-- CPU-owned R32Float and RGBA16Float textures preserve native texel widths for
-  raw transfers, views, buffer-backed storage, and heap allocation accounting;
-  render/compute paths accept R32Float and RGBA16Float as CPU color targets;
-  formats without a corresponding CPU shader profile remain rejected
-  profile
+- owned R8/RG8/RGBA8/BGRA8 buffers and 1D/2D/3D textures with checked region
+  read/write
+- CPU-owned R8Unorm, RG8Unorm, R32Float, and RGBA16Float textures preserve
+  native texel widths for raw transfers, views, buffer-backed storage, and heap
+  allocation accounting; render/compute paths accept R8Unorm and RG8Unorm as
+  CPU color targets, alongside R32Float and RGBA16Float;
+- formats without a corresponding CPU shader profile remain rejected
 - ordinary device-created 1D, 1D-array, 2D, 2D-array, cube, and cube-array
   textures with independently allocated CPU/ZPU slice×mip levels (six faces
   per cube), exact level/slice read/write,
   level/slice-range views, and level/slice-aware blit copies; CPU mipmap
   generation uses Metal's destination-center linear filter and matches the
-  native RGBA8/R32Float/RGBA16Float oracles; buffer-backed and
+  native R8/RG8/RGBA8/R32Float/RGBA16Float oracles; buffer-backed and
   heap-backed textures use independently allocated CPU/ZPU slice×mip levels
   with full allocation-size accounting; linear buffer-backed textures remain
   explicitly limited to one 2D level because their caller-supplied stride
@@ -62,7 +63,7 @@ triangle path:
 - depth-only render passes are accepted by the legacy, parallel, and Metal 4
   adapters; a private discarded CPU color surface preserves the portable
   raster ABI while public depth bytes remain exact
-- up to eight RGBA8/BGRA8/R32Float/RGBA16Float color attachments can be
+- up to eight R8/RG8/RGBA8/BGRA8/R32Float/RGBA16Float color attachments can be
   described and cleared by a CPU render pass; the explicit
   `zpu_test_mrt_fragment` profile mirrors one logical fragment color to every
   extra target, while ordinary single-output profiles leave extra targets at
@@ -330,7 +331,7 @@ triangle path:
 
 The C header exposes both `zpu_metal_render`, an opt-in single-pass entry
 point, and a resource/command-buffer API for C, C++, and Objective-C clients.
-The latter owns RGBA8/BGRA8/depth32-float/Stencil8 buffers and textures, records
+The latter owns R8/RG8/RGBA8/BGRA8/depth32-float/Stencil8 buffers and textures, records
 render/blit work, and executes it at command-buffer commit. Its render state
 uses a fixed `zpu_metal_vertex` ABI; it does not parse MSL or execute arbitrary
 shader functions. The optional Apple adapter supplies the supported

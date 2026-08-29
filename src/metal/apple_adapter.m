@@ -1341,7 +1341,24 @@ static zpu_metal_region zpu_region(MTLRegion region) {
     };
 }
 
+static BOOL zpu_color_texture_format_supported(MTLPixelFormat format) {
+    return format == MTLPixelFormatR8Unorm || format == MTLPixelFormatRG8Unorm ||
+        format == MTLPixelFormatRGBA8Unorm || format == MTLPixelFormatBGRA8Unorm ||
+        format == MTLPixelFormatR32Float || format == MTLPixelFormatRGBA16Float;
+}
+
+static BOOL zpu_texture_format_supported(MTLPixelFormat format) {
+    return zpu_color_texture_format_supported(format) || format == MTLPixelFormatDepth32Float ||
+        format == MTLPixelFormatStencil8;
+}
+
+static BOOL zpu_buffer_texture_format_supported(MTLPixelFormat format) {
+    return zpu_color_texture_format_supported(format) || format == MTLPixelFormatStencil8;
+}
+
 static zpu_metal_pixel_format zpu_pixel_format(MTLPixelFormat format) {
+    if (format == MTLPixelFormatR8Unorm) return ZPU_METAL_R8_UNORM;
+    if (format == MTLPixelFormatRG8Unorm) return ZPU_METAL_RG8_UNORM;
     if (format == MTLPixelFormatBGRA8Unorm) return ZPU_METAL_BGRA8_UNORM;
     if (format == MTLPixelFormatR32Float) return ZPU_METAL_R32_FLOAT;
     if (format == MTLPixelFormatRGBA16Float) return ZPU_METAL_RGBA16_FLOAT;
@@ -1351,6 +1368,8 @@ static zpu_metal_pixel_format zpu_pixel_format(MTLPixelFormat format) {
 }
 
 static NSUInteger zpu_texture_bytes_per_pixel(MTLPixelFormat format) {
+    if (format == MTLPixelFormatR8Unorm) return 1;
+    if (format == MTLPixelFormatRG8Unorm) return 2;
     if (format == MTLPixelFormatStencil8) return 1;
     if (format == MTLPixelFormatRGBA16Float) return 8;
     return 4;
@@ -1381,9 +1400,7 @@ static void zpu_set_error(NSError **error, NSString *description) {
 }
 
 static BOOL zpu_render_pipeline_format_supported(MTLPixelFormat format) {
-    return format == MTLPixelFormatInvalid || format == MTLPixelFormatRGBA8Unorm ||
-        format == MTLPixelFormatBGRA8Unorm || format == MTLPixelFormatR32Float ||
-        format == MTLPixelFormatRGBA16Float;
+    return format == MTLPixelFormatInvalid || zpu_color_texture_format_supported(format);
 }
 
 static BOOL zpu_vertex_layout_supported(MTLVertexDescriptor *descriptor, NSUInteger *stride, BOOL *dynamic) {
@@ -1600,9 +1617,7 @@ static BOOL zpu_texture_descriptor_size(MTLTextureDescriptor *descriptor, NSUInt
         (zpu_texture_type_is_cube(descriptor.textureType) && descriptor.width != descriptor.height) ||
         descriptor.mipmapLevelCount == 0 || descriptor.sampleCount != 1 ||
         descriptor.width > UINT32_MAX || descriptor.height > UINT32_MAX ||
-        (descriptor.pixelFormat != MTLPixelFormatRGBA8Unorm && descriptor.pixelFormat != MTLPixelFormatBGRA8Unorm &&
-         descriptor.pixelFormat != MTLPixelFormatR32Float && descriptor.pixelFormat != MTLPixelFormatRGBA16Float &&
-         descriptor.pixelFormat != MTLPixelFormatDepth32Float && descriptor.pixelFormat != MTLPixelFormatStencil8)) return NO;
+        !zpu_texture_format_supported(descriptor.pixelFormat)) return NO;
     NSUInteger total = 0;
     const NSUInteger sliceCount = zpu_texture_type_is_3d(descriptor.textureType) ? 1 :
         zpu_texture_storage_slice_count(descriptor.textureType, descriptor.arrayLength);
@@ -3531,9 +3546,7 @@ static ZPUTensor *zpu_create_tensor(ZPUDevice *owner, ZPUBuffer *storageBuffer,
     if (descriptor == nil || (descriptor.textureType != MTLTextureType1D && descriptor.textureType != MTLTextureType2D) ||
         (descriptor.textureType == MTLTextureType1D && descriptor.height != 1) || descriptor.depth != 1 ||
         descriptor.arrayLength != 1 || descriptor.mipmapLevelCount != 1 || descriptor.sampleCount != 1 ||
-        (descriptor.pixelFormat != MTLPixelFormatRGBA8Unorm && descriptor.pixelFormat != MTLPixelFormatBGRA8Unorm &&
-         descriptor.pixelFormat != MTLPixelFormatR32Float && descriptor.pixelFormat != MTLPixelFormatRGBA16Float &&
-         descriptor.pixelFormat != MTLPixelFormatStencil8)) return nil;
+        !zpu_buffer_texture_format_supported(descriptor.pixelFormat)) return nil;
     if (descriptor.width > UINT32_MAX || descriptor.height > UINT32_MAX) return nil;
     zpu_metal_texture_descriptor zpu_descriptor = {
         (uint32_t)descriptor.width, (uint32_t)descriptor.height, zpu_pixel_format(descriptor.pixelFormat),
@@ -6469,7 +6482,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     }
     for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
         if (!zpu_render_pipeline_format_supported(descriptor.colorAttachments[index].pixelFormat)) {
-            zpu_set_error(error, @"ZPU Metal supports only RGBA8/BGRA8/R32Float/RGBA16Float color attachments");
+            zpu_set_error(error, @"ZPU Metal supports only R8/RG8/RGBA8/BGRA8/R32Float/RGBA16Float color attachments");
             return nil;
         }
     }
@@ -6564,9 +6577,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     if (descriptor == nil || iosurface == NULL || (planeCount == 0 ? plane != 0 : plane >= planeCount) ||
         descriptor.textureType != MTLTextureType2D || descriptor.depth != 1 || descriptor.arrayLength != 1 ||
         descriptor.mipmapLevelCount != 1 || descriptor.sampleCount != 1 ||
-        (descriptor.pixelFormat != MTLPixelFormatRGBA8Unorm && descriptor.pixelFormat != MTLPixelFormatBGRA8Unorm &&
-         descriptor.pixelFormat != MTLPixelFormatR32Float && descriptor.pixelFormat != MTLPixelFormatRGBA16Float &&
-         descriptor.pixelFormat != MTLPixelFormatStencil8)) return nil;
+        !zpu_buffer_texture_format_supported(descriptor.pixelFormat)) return nil;
     const NSUInteger width = planeCount == 0 ? IOSurfaceGetWidth(iosurface) : IOSurfaceGetWidthOfPlane(iosurface, plane);
     const NSUInteger height = planeCount == 0 ? IOSurfaceGetHeight(iosurface) : IOSurfaceGetHeightOfPlane(iosurface, plane);
     const NSUInteger bytesPerRow = planeCount == 0 ? IOSurfaceGetBytesPerRow(iosurface) : IOSurfaceGetBytesPerRowOfPlane(iosurface, plane);
