@@ -446,8 +446,10 @@ int main(void) {
         const BOOL adapter_selector_scissors = [adapter_encoder respondsToSelector:@selector(setScissorRects:count:)];
         const BOOL adapter_selectors_ok = adapter_selector_resource_state && adapter_selector_acceleration &&
             adapter_selector_event && adapter_selector_viewports && adapter_selector_scissors;
+        id<MTLLibrary> adapter_conformance_default_library = [adapter_device newDefaultLibrary];
         const BOOL adapter_fail_closed_ok =
-            [adapter_device newDefaultLibrary] == nil &&
+            adapter_conformance_default_library != nil &&
+            [adapter_conformance_default_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8"] != nil &&
             [adapter_command_buffer resourceStateCommandEncoder] == nil &&
             [adapter_command_buffer accelerationStructureCommandEncoder] == nil;
         if (!adapter_protocols_ok || !adapter_selectors_ok || !adapter_fail_closed_ok) {
@@ -586,6 +588,9 @@ int main(void) {
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_fill_gradient_rgba8");
         id<MTLComputePipelineState> adapter_compute_pipeline =
             [adapter_device newComputePipelineStateWithFunction:adapter_compute_function error:&adapter_compute_error];
+        id<MTLLibrary> adapter_default_library = [adapter_device newDefaultLibrary];
+        id<MTLFunction> adapter_default_compute_function =
+            [adapter_default_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8"];
         id<MTLTexture> adapter_compute_texture =
             [adapter_device newTextureWithDescriptor:compute_texture_descriptor];
         id<MTLCommandBuffer> adapter_compute_command_buffer = [adapter_queue commandBuffer];
@@ -603,7 +608,8 @@ int main(void) {
                               fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
         if (native_compute_function == nil || native_compute_pipeline == nil || native_compute_texture == nil ||
             native_compute_command_buffer.status != MTLCommandBufferStatusCompleted ||
-            adapter_compute_function == nil || adapter_compute_pipeline == nil || adapter_compute_texture == nil || adapter_compute_encoder == nil ||
+            adapter_compute_function == nil || adapter_compute_pipeline == nil || adapter_default_library == nil ||
+            adapter_default_compute_function == nil || adapter_compute_texture == nil || adapter_compute_encoder == nil ||
             adapter_compute_command_buffer.status != MTLCommandBufferStatusCompleted) {
             fail_with_error("compute adapter execution failed", adapter_compute_error);
             return 42;

@@ -191,6 +191,7 @@
     "MTLDevice.newDepthStencilStateWithDescriptor",
     "MTLDevice.newSamplerStateWithDescriptor",
     "MTLDevice.newLibraryWithSource",
+    "MTLDevice.newDefaultLibrary",
     "MTLLibrary.newFunctionWithName",
     "MTLLibrary.functionNames",
     "MTLDevice.newArgumentEncoderWithArguments",

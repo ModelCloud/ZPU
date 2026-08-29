@@ -1686,7 +1686,10 @@ static uint64_t zpu_cpu_timestamp(void) {
     return (id<MTLIndirectCommandBuffer>)[[ZPUIndirectCommandBuffer alloc]
         initWithOwner:self descriptor:descriptor maxCommandCount:maxCount options:options];
 }
-- (id<MTLLibrary>)newDefaultLibrary { return nil; }
+- (id<MTLLibrary>)newDefaultLibrary {
+    return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
+                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture"];
+}
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
     zpu_set_error(error, @"ZPU CPU Metal has no default shader library");

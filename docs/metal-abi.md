@@ -92,6 +92,8 @@ triangle path:
 - CPU library metadata can discover the two registered kernel names from
   source text and create ZPU-owned `MTLFunction` descriptors; unsupported
   arbitrary MSL, file/data libraries, and stitched libraries fail closed
+- `newDefaultLibrary` returns the same CPU metadata library for the registered
+  ZPU kernels; it does not load or compile an Apple `.metallib`
 - CPU indirect compute commands for those registered kernels; the command
   buffer inherits the ZPU encoder's texture bindings and records pipeline,
   buffer, and dispatch state for deferred execution
