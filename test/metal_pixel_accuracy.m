@@ -8904,6 +8904,7 @@ int main(void) {
                 [adapter_patch_reference_command_buffer renderCommandEncoderWithDescriptor:adapter_patch_reference_pass];
             [adapter_patch_encoder setRenderPipelineState:adapter_patch_pipeline];
             [adapter_patch_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+            [adapter_patch_encoder setTessellationFactorBuffer:nil offset:0 instanceStride:0];
             [adapter_patch_encoder setTessellationFactorBuffer:adapter_patch_factor_buffer offset:0 instanceStride:sizeof(adapter_committed_patch_factors)];
             [adapter_patch_encoder setTessellationFactorScale:1.0f];
             [adapter_patch_encoder drawPatches:3

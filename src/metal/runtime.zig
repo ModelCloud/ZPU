@@ -1779,13 +1779,21 @@ pub const RenderEncoder = struct {
         };
     }
 
-    pub fn setTessellationFactorBuffer(self: *RenderEncoder, buffer: *Buffer, offset: usize, instance_stride: usize) Error!void {
-        if (!self.open() or !validBuffer(buffer) or buffer.device != self.command_buffer.queue.device or
-            offset % @alignOf(u32) != 0 or !rangeValid(buffer.bytes.len, offset, @sizeOf(u16) * 4))
+    pub fn setTessellationFactorBuffer(self: *RenderEncoder, buffer: ?*Buffer, offset: usize, instance_stride: usize) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        if (buffer == null) {
+            self.tessellation_factor_buffer = null;
+            self.tessellation_factor_buffer_offset = 0;
+            self.tessellation_factor_buffer_instance_stride = @sizeOf(u16) * 4;
+            return;
+        }
+        const factor_buffer = buffer.?;
+        if (!validBuffer(factor_buffer) or factor_buffer.device != self.command_buffer.queue.device or
+            offset % @alignOf(u32) != 0 or !rangeValid(factor_buffer.bytes.len, offset, @sizeOf(u16) * 4))
             return error.InvalidArgument;
         if (instance_stride != 0 and (instance_stride < @sizeOf(u16) * 4 or instance_stride % @alignOf(u16) != 0))
             return error.InvalidArgument;
-        self.tessellation_factor_buffer = buffer;
+        self.tessellation_factor_buffer = factor_buffer;
         self.tessellation_factor_buffer_offset = offset;
         self.tessellation_factor_buffer_instance_stride = if (instance_stride == 0) @sizeOf(u16) * 4 else instance_stride;
     }
@@ -7012,7 +7020,7 @@ pub export fn zpu_metal_render_encoder_set_tessellation_factor_buffer(
     instance_stride: usize,
 ) callconv(.c) c_int {
     (encoder orelse return -1).setTessellationFactorBuffer(
-        buffer orelse return -1,
+        buffer,
         offset,
         instance_stride,
     ) catch |err| return errorCode(err);

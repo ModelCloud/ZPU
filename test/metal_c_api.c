@@ -385,6 +385,8 @@ int main(void) {
         patch_reference_encoder == NULL ||
         zpu_metal_render_encoder_set_vertex_buffer(patch_encoder, vertex_buffer, 0, 0) != 0 ||
         zpu_metal_render_encoder_set_tessellation_factor_buffer(
+            patch_encoder, NULL, 0, 0) != 0 ||
+        zpu_metal_render_encoder_set_tessellation_factor_buffer(
             patch_encoder, patch_factor_buffer, 0, sizeof(committed_patch_factors)) != 0 ||
         zpu_metal_render_encoder_set_tessellation_factor_scale(patch_encoder, 1.0f) != 0 ||
         zpu_metal_render_encoder_draw_patches(

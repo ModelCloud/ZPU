@@ -13706,6 +13706,17 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
 }
 - (void)setTessellationFactorBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset instanceStride:(NSUInteger)instanceStride API_AVAILABLE(macos(10.12), ios(10.0)) {
     ZPUBuffer *factor = (ZPUBuffer *)buffer;
+    if (buffer == nil) {
+        if (zpu_metal_render_encoder_set_tessellation_factor_buffer(
+                _zpuEncoder, NULL, 0, 0) != ZPU_METAL_OK) {
+            [_owner markError];
+            return;
+        }
+        _tessellationFactorBuffer = nil;
+        _tessellationFactorBufferOffset = 0;
+        _tessellationFactorBufferInstanceStride = 0;
+        return;
+    }
     if (![factor isKindOfClass:[ZPUBuffer class]] || factor->_owner != [_owner device] ||
         zpu_metal_render_encoder_set_tessellation_factor_buffer(
             _zpuEncoder, factor->_zpuBuffer, offset, instanceStride) != ZPU_METAL_OK) {
