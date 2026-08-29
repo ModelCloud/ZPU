@@ -355,8 +355,10 @@ triangle path:
   bytes, with native Metal used only as the test oracle
 - CPU resource-state encoders preserve Metal encoder boundaries and fence
   ordering. Resource/cache transitions are ordered no-ops over ZPU's unified
-  CPU memory; legacy sparse buffer and texture mapping operations update the
-  same CPU-owned physical-page store as the Metal 4 queue operations
+  CPU memory; legacy sparse texture map, batch, indirect, and move operations
+  are deferred into the same ZPU command stream as following blit/compute work,
+  while updating the same CPU-owned physical-page store as the Metal 4 queue
+  operations
 - CPU residency sets track ZPU allocations, committed byte totals, and
   request/end-residency state without introducing a GPU residency domain
 - process-local shared-event handles round-trip the same ZPU event and
