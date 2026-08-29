@@ -127,10 +127,12 @@ triangle path:
   CPU kernels, binary functions expose deterministic name/type metadata, and
   compute pipeline binary linking accepts only same-device registered visible
   CPU functions while preserving the base ZPU kernel and exported handles;
+  Metal 4 compiler and archive dynamic-linking descriptors accept the same
+  registered visible binary functions and ZPU-owned dynamic libraries;
   asynchronous compiler tasks complete synchronously after CPU construction;
   dynamic libraries preserve registered symbol names and install names through
   a deterministic CPU serialization format; render/tile/mesh,
-  machine-learning, and arbitrary-MSL compiler requests remain fail-closed
+  machine-learning, specialization, and arbitrary-MSL compiler requests remain fail-closed
 - CPU-owned Metal 4 pipeline-data serializers record those registered compute
   names and emit deterministic ZPU metadata scripts or the existing ZPU
   binary-archive format; these outputs are not Apple metal-tt scripts or

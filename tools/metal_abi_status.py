@@ -89,6 +89,10 @@ SOURCE_SYMBOL_ALIASES = {
     "MTL4CommandQueue.commitWithOptions": "commit",
     "MTL4CommandBuffer.renderCommandEncoderWithDescriptorOptions": "renderCommandEncoderWithDescriptor",
     "MTLTextureViewPool.setTextureViewDescriptor": "setTextureView",
+    "MTL4Compiler.newComputePipelineStateWithDescriptorDynamicLinking": "dynamicLinkingDescriptor",
+    "MTL4Compiler.newRenderPipelineStateWithDescriptorDynamicLinking": "dynamicLinkingDescriptor",
+    "MTL4Archive.newComputePipelineStateWithDescriptorDynamicLinking": "dynamicLinkingDescriptor",
+    "MTL4Archive.newRenderPipelineStateWithDescriptorDynamicLinking": "dynamicLinkingDescriptor",
 }
 
 

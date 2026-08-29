@@ -4464,6 +4464,7 @@ int main(void) {
             [adapter_mtl4_compiler newLibraryWithDescriptor:adapter_mtl4_library_descriptor
                                                        error:&adapter_mtl4_compiler_error];
         BOOL adapter_mtl4_dynamic_library_ok = YES;
+        id<MTLDynamicLibrary> adapter_mtl4_dynamic_reloaded = nil;
         if (@available(macOS 26.0, iOS 26.0, *)) {
             MTLCompileOptions *adapter_mtl4_dynamic_options = [MTLCompileOptions new];
             adapter_mtl4_dynamic_options.libraryType = MTLLibraryTypeDynamic;
@@ -4482,7 +4483,7 @@ int main(void) {
             BOOL adapter_mtl4_dynamic_serialized =
                 [adapter_mtl4_dynamic_library serializeToURL:adapter_mtl4_dynamic_url
                                                         error:&adapter_mtl4_compiler_error];
-            id<MTLDynamicLibrary> adapter_mtl4_dynamic_reloaded =
+            adapter_mtl4_dynamic_reloaded =
                 [adapter_mtl4_compiler newDynamicLibraryWithURL:adapter_mtl4_dynamic_url
                                                            error:&adapter_mtl4_compiler_error];
             adapter_mtl4_dynamic_library_ok =
@@ -4554,7 +4555,11 @@ int main(void) {
         id<MTL4BinaryFunction> adapter_mtl4_additional_binary_function = nil;
         id<MTLComputePipelineState> adapter_mtl4_binary_linked_pipeline = nil;
         id<MTLFunctionHandle> adapter_mtl4_binary_linked_handle = nil;
+        id<MTLComputePipelineState> adapter_mtl4_dynamic_compute_pipeline = nil;
+        id<MTLFunctionHandle> adapter_mtl4_dynamic_compute_handle = nil;
         BOOL adapter_mtl4_binary_link_ok = YES;
+        BOOL adapter_mtl4_dynamic_compute_ok = YES;
+        NSError *adapter_mtl4_dynamic_error = nil;
         if (@available(macOS 26.0, iOS 26.0, *)) {
             MTL4LibraryFunctionDescriptor *adapter_mtl4_additional_function_descriptor =
                 [MTL4LibraryFunctionDescriptor new];
@@ -4582,6 +4587,23 @@ int main(void) {
             }
             adapter_mtl4_binary_link_ok = adapter_mtl4_additional_binary_function != nil &&
                 adapter_mtl4_binary_linked_pipeline != nil && adapter_mtl4_binary_linked_handle != nil;
+            if (adapter_mtl4_additional_binary_function != nil) {
+                MTL4PipelineStageDynamicLinkingDescriptor *adapter_mtl4_compute_dynamic_linking =
+                    [MTL4PipelineStageDynamicLinkingDescriptor new];
+                adapter_mtl4_compute_dynamic_linking.binaryLinkedFunctions = @[
+                    adapter_mtl4_additional_binary_function];
+                adapter_mtl4_compute_dynamic_linking.preloadedLibraries =
+                    adapter_mtl4_dynamic_reloaded == nil ? @[] : @[adapter_mtl4_dynamic_reloaded];
+                adapter_mtl4_dynamic_compute_pipeline =
+                    [adapter_mtl4_compiler newComputePipelineStateWithDescriptor:adapter_mtl4_compute_descriptor
+                        dynamicLinkingDescriptor:adapter_mtl4_compute_dynamic_linking compilerTaskOptions:nil
+                        error:&adapter_mtl4_dynamic_error];
+                adapter_mtl4_dynamic_compute_handle =
+                    [adapter_mtl4_dynamic_compute_pipeline functionHandleWithBinaryFunction:
+                        adapter_mtl4_additional_binary_function];
+                adapter_mtl4_dynamic_compute_ok = adapter_mtl4_dynamic_compute_pipeline != nil &&
+                    adapter_mtl4_dynamic_compute_handle != nil;
+            }
         }
         id<MTLFunctionHandle> adapter_mtl4_binary_handle =
             [adapter_device functionHandleWithBinaryFunction:adapter_mtl4_binary_function];
@@ -4602,7 +4624,10 @@ int main(void) {
         id<MTL4BinaryFunction> adapter_mtl4_render_additional_binary_function = nil;
         id<MTLRenderPipelineState> adapter_mtl4_binary_render_linked_pipeline = nil;
         id<MTLFunctionHandle> adapter_mtl4_binary_render_fragment_handle = nil;
+        id<MTLRenderPipelineState> adapter_mtl4_dynamic_render_pipeline = nil;
+        id<MTLFunctionHandle> adapter_mtl4_dynamic_render_fragment_handle = nil;
         BOOL adapter_mtl4_render_binary_link_ok = YES;
+        BOOL adapter_mtl4_dynamic_render_ok = YES;
         if (@available(macOS 26.0, iOS 26.0, *)) {
             MTL4LibraryFunctionDescriptor *adapter_mtl4_render_additional_function_descriptor =
                 [MTL4LibraryFunctionDescriptor new];
@@ -4636,6 +4661,27 @@ int main(void) {
             adapter_mtl4_render_binary_link_ok = adapter_mtl4_render_additional_binary_function != nil &&
                 adapter_mtl4_binary_render_linked_pipeline != nil &&
                 adapter_mtl4_binary_render_fragment_handle != nil;
+            if (adapter_mtl4_render_additional_binary_function != nil) {
+                MTL4RenderPipelineDynamicLinkingDescriptor *adapter_mtl4_render_dynamic_linking =
+                    [MTL4RenderPipelineDynamicLinkingDescriptor new];
+                adapter_mtl4_render_dynamic_linking.vertexLinkingDescriptor.binaryLinkedFunctions = @[
+                    adapter_mtl4_render_additional_binary_function];
+                adapter_mtl4_render_dynamic_linking.vertexLinkingDescriptor.preloadedLibraries =
+                    adapter_mtl4_dynamic_reloaded == nil ? @[] : @[adapter_mtl4_dynamic_reloaded];
+                adapter_mtl4_render_dynamic_linking.fragmentLinkingDescriptor.binaryLinkedFunctions = @[
+                    adapter_mtl4_render_additional_binary_function];
+                adapter_mtl4_render_dynamic_linking.fragmentLinkingDescriptor.preloadedLibraries =
+                    adapter_mtl4_dynamic_reloaded == nil ? @[] : @[adapter_mtl4_dynamic_reloaded];
+                adapter_mtl4_dynamic_render_pipeline =
+                    [adapter_mtl4_compiler newRenderPipelineStateWithDescriptor:adapter_mtl4_render_descriptor
+                        dynamicLinkingDescriptor:adapter_mtl4_render_dynamic_linking compilerTaskOptions:nil
+                        error:&adapter_mtl4_dynamic_error];
+                adapter_mtl4_dynamic_render_fragment_handle =
+                    [adapter_mtl4_dynamic_render_pipeline functionHandleWithBinaryFunction:
+                        adapter_mtl4_render_additional_binary_function stage:MTLRenderStageFragment];
+                adapter_mtl4_dynamic_render_ok = adapter_mtl4_dynamic_render_pipeline != nil &&
+                    adapter_mtl4_dynamic_render_fragment_handle != nil;
+            }
         }
         id<MTLFunctionHandle> adapter_mtl4_render_binary_handle = nil;
         id<MTLFunctionHandle> adapter_mtl4_render_function_handle = nil;
@@ -4674,6 +4720,64 @@ int main(void) {
         id<MTL4BinaryFunction> adapter_mtl4_serializer_binary =
             [adapter_mtl4_serializer_archive newBinaryFunctionWithDescriptor:adapter_mtl4_binary_descriptor
                                                                           error:&adapter_mtl4_compiler_error];
+        id<MTL4BinaryFunction> adapter_mtl4_archive_visible_binary = nil;
+        id<MTLComputePipelineState> adapter_mtl4_archive_dynamic_compute_pipeline = nil;
+        id<MTLRenderPipelineState> adapter_mtl4_archive_dynamic_render_pipeline = nil;
+        id<MTLFunctionHandle> adapter_mtl4_archive_dynamic_compute_handle = nil;
+        id<MTLFunctionHandle> adapter_mtl4_archive_dynamic_render_fragment_handle = nil;
+        BOOL adapter_mtl4_archive_dynamic_ok = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTL4LibraryFunctionDescriptor *adapter_mtl4_archive_visible_function_descriptor =
+                [MTL4LibraryFunctionDescriptor new];
+            adapter_mtl4_archive_visible_function_descriptor.name = @"zpu_test_visible_secondary";
+            adapter_mtl4_archive_visible_function_descriptor.library = adapter_mtl4_library;
+            MTL4BinaryFunctionDescriptor *adapter_mtl4_archive_visible_binary_descriptor =
+                [MTL4BinaryFunctionDescriptor new];
+            adapter_mtl4_archive_visible_binary_descriptor.name = @"zpu_test_visible_secondary";
+            adapter_mtl4_archive_visible_binary_descriptor.functionDescriptor =
+                adapter_mtl4_archive_visible_function_descriptor;
+            adapter_mtl4_archive_visible_binary_descriptor.options = MTL4BinaryFunctionOptionPipelineIndependent;
+            adapter_mtl4_archive_visible_binary =
+                [adapter_mtl4_serializer_archive newBinaryFunctionWithDescriptor:
+                    adapter_mtl4_archive_visible_binary_descriptor error:&adapter_mtl4_dynamic_error];
+            if (adapter_mtl4_archive_visible_binary != nil && adapter_mtl4_serializer_archive != nil) {
+                MTL4PipelineStageDynamicLinkingDescriptor *adapter_mtl4_archive_compute_dynamic_linking =
+                    [MTL4PipelineStageDynamicLinkingDescriptor new];
+                adapter_mtl4_archive_compute_dynamic_linking.binaryLinkedFunctions = @[
+                    adapter_mtl4_archive_visible_binary];
+                adapter_mtl4_archive_compute_dynamic_linking.preloadedLibraries =
+                    adapter_mtl4_dynamic_reloaded == nil ? @[] : @[adapter_mtl4_dynamic_reloaded];
+                adapter_mtl4_archive_dynamic_compute_pipeline =
+                    [adapter_mtl4_serializer_archive newComputePipelineStateWithDescriptor:
+                        adapter_mtl4_compute_descriptor dynamicLinkingDescriptor:
+                        adapter_mtl4_archive_compute_dynamic_linking error:&adapter_mtl4_dynamic_error];
+                adapter_mtl4_archive_dynamic_compute_handle =
+                    [adapter_mtl4_archive_dynamic_compute_pipeline functionHandleWithBinaryFunction:
+                        adapter_mtl4_archive_visible_binary];
+                MTL4RenderPipelineDynamicLinkingDescriptor *adapter_mtl4_archive_render_dynamic_linking =
+                    [MTL4RenderPipelineDynamicLinkingDescriptor new];
+                adapter_mtl4_archive_render_dynamic_linking.vertexLinkingDescriptor.binaryLinkedFunctions = @[
+                    adapter_mtl4_archive_visible_binary];
+                adapter_mtl4_archive_render_dynamic_linking.vertexLinkingDescriptor.preloadedLibraries =
+                    adapter_mtl4_dynamic_reloaded == nil ? @[] : @[adapter_mtl4_dynamic_reloaded];
+                adapter_mtl4_archive_render_dynamic_linking.fragmentLinkingDescriptor.binaryLinkedFunctions = @[
+                    adapter_mtl4_archive_visible_binary];
+                adapter_mtl4_archive_render_dynamic_linking.fragmentLinkingDescriptor.preloadedLibraries =
+                    adapter_mtl4_dynamic_reloaded == nil ? @[] : @[adapter_mtl4_dynamic_reloaded];
+                adapter_mtl4_archive_dynamic_render_pipeline =
+                    [adapter_mtl4_serializer_archive newRenderPipelineStateWithDescriptor:
+                        adapter_mtl4_render_descriptor dynamicLinkingDescriptor:
+                        adapter_mtl4_archive_render_dynamic_linking error:&adapter_mtl4_dynamic_error];
+                adapter_mtl4_archive_dynamic_render_fragment_handle =
+                    [adapter_mtl4_archive_dynamic_render_pipeline functionHandleWithBinaryFunction:
+                        adapter_mtl4_archive_visible_binary stage:MTLRenderStageFragment];
+            }
+            adapter_mtl4_archive_dynamic_ok = adapter_mtl4_archive_visible_binary != nil &&
+                adapter_mtl4_archive_dynamic_compute_pipeline != nil &&
+                adapter_mtl4_archive_dynamic_compute_handle != nil &&
+                adapter_mtl4_archive_dynamic_render_pipeline != nil &&
+                adapter_mtl4_archive_dynamic_render_fragment_handle != nil;
+        }
         [[NSFileManager defaultManager] removeItemAtURL:adapter_mtl4_serializer_url error:nil];
         id<MTLTexture> adapter_mtl4_compiler_texture =
             [adapter_device newTextureWithDescriptor:compute_texture_descriptor];
@@ -4681,7 +4785,7 @@ int main(void) {
         id<MTLComputeCommandEncoder> adapter_mtl4_compiler_encoder =
             [adapter_mtl4_compiler_command_buffer computeCommandEncoder];
         [adapter_mtl4_compiler_encoder setComputePipelineState:
-            adapter_mtl4_binary_linked_pipeline ?: adapter_mtl4_compiled_pipeline];
+            adapter_mtl4_dynamic_compute_pipeline ?: adapter_mtl4_binary_linked_pipeline ?: adapter_mtl4_compiled_pipeline];
         [adapter_mtl4_compiler_encoder setTexture:adapter_mtl4_compiler_texture atIndex:0];
         [adapter_mtl4_compiler_encoder dispatchThreads:MTLSizeMake(width, height, 1)
                                   threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
@@ -4693,6 +4797,28 @@ int main(void) {
                                       bytesPerRow:(NSUInteger)width * 4
                                        fromRegion:MTLRegionMake2D(0, 0, width, height)
                                       mipmapLevel:0];
+        id<MTLTexture> adapter_mtl4_archive_dynamic_texture = nil;
+        id<MTLCommandBuffer> adapter_mtl4_archive_dynamic_command_buffer = nil;
+        uint8_t adapter_mtl4_archive_dynamic_pixels[byte_count] = {0};
+        if (adapter_mtl4_archive_dynamic_compute_pipeline != nil) {
+            adapter_mtl4_archive_dynamic_texture =
+                [adapter_device newTextureWithDescriptor:compute_texture_descriptor];
+            adapter_mtl4_archive_dynamic_command_buffer = [adapter_queue commandBuffer];
+            id<MTLComputeCommandEncoder> adapter_mtl4_archive_dynamic_encoder =
+                [adapter_mtl4_archive_dynamic_command_buffer computeCommandEncoder];
+            [adapter_mtl4_archive_dynamic_encoder setComputePipelineState:
+                adapter_mtl4_archive_dynamic_compute_pipeline];
+            [adapter_mtl4_archive_dynamic_encoder setTexture:adapter_mtl4_archive_dynamic_texture atIndex:0];
+            [adapter_mtl4_archive_dynamic_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                              threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            [adapter_mtl4_archive_dynamic_encoder endEncoding];
+            [adapter_mtl4_archive_dynamic_command_buffer commit];
+            [adapter_mtl4_archive_dynamic_command_buffer waitUntilCompleted];
+            [adapter_mtl4_archive_dynamic_texture getBytes:adapter_mtl4_archive_dynamic_pixels
+                                                bytesPerRow:(NSUInteger)width * 4
+                                                 fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                                mipmapLevel:0];
+        }
         id<MTLTexture> adapter_mtl4_compiler_render_texture =
             [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
         MTLRenderPassDescriptor *adapter_mtl4_compiler_render_pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -4704,7 +4830,7 @@ int main(void) {
         id<MTLRenderCommandEncoder> adapter_mtl4_compiler_render_encoder =
             [adapter_mtl4_compiler_render_command_buffer renderCommandEncoderWithDescriptor:adapter_mtl4_compiler_render_pass];
         [adapter_mtl4_compiler_render_encoder setRenderPipelineState:
-            adapter_mtl4_binary_render_linked_pipeline ?: adapter_mtl4_compiled_render_pipeline];
+            adapter_mtl4_dynamic_render_pipeline ?: adapter_mtl4_binary_render_linked_pipeline ?: adapter_mtl4_compiled_render_pipeline];
         [adapter_mtl4_compiler_render_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
         [adapter_mtl4_compiler_render_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
         [adapter_mtl4_compiler_render_encoder endEncoding];
@@ -4745,6 +4871,8 @@ int main(void) {
             adapter_mtl4_compiled_pipeline == nil || adapter_mtl4_compiled_render_pipeline == nil ||
             adapter_mtl4_archived_render_pipeline == nil || adapter_mtl4_binary_function == nil ||
             !adapter_mtl4_binary_link_ok || !adapter_mtl4_render_binary_link_ok ||
+            !adapter_mtl4_dynamic_compute_ok || !adapter_mtl4_dynamic_render_ok ||
+            !adapter_mtl4_archive_dynamic_ok ||
             adapter_mtl4_compiled_pipeline.maxTotalThreadsPerThreadgroup != 64 ||
             adapter_mtl4_compiled_pipeline.requiredThreadsPerThreadgroup.width != 8 ||
             adapter_mtl4_compiled_pipeline.requiredThreadsPerThreadgroup.height != 8 ||
@@ -4759,6 +4887,11 @@ int main(void) {
             adapter_mtl4_async_binary_function == nil || adapter_mtl4_async_error != nil ||
             adapter_mtl4_compiler_texture == nil || adapter_mtl4_compiler_encoder == nil ||
             adapter_mtl4_compiler_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            (adapter_mtl4_archive_dynamic_compute_pipeline != nil &&
+             (adapter_mtl4_archive_dynamic_texture == nil ||
+              adapter_mtl4_archive_dynamic_command_buffer == nil ||
+              adapter_mtl4_archive_dynamic_command_buffer.status != MTLCommandBufferStatusCompleted ||
+              memcmp(native_compute_pixels, adapter_mtl4_archive_dynamic_pixels, byte_count) != 0)) ||
             adapter_mtl4_compiler_render_texture == nil || adapter_mtl4_compiler_render_encoder == nil ||
             adapter_mtl4_compiler_render_command_buffer.status != MTLCommandBufferStatusCompleted ||
             adapter_mtl4_compute_reflection == nil ||
@@ -4776,6 +4909,16 @@ int main(void) {
             (native_render_reflection != nil && native_render_reflection.vertexBindings.count != 1) ||
             memcmp(metal_pixels, adapter_mtl4_compiler_render_pixels, byte_count) != 0 ||
             memcmp(native_compute_pixels, adapter_mtl4_compiler_pixels, byte_count) != 0) {
+            if (!adapter_mtl4_dynamic_compute_ok || !adapter_mtl4_dynamic_render_ok ||
+                !adapter_mtl4_archive_dynamic_ok) {
+                fprintf(stderr, "metal-pixel: Metal 4 dynamic linking failed compute=%d render=%d archive=%d compute_pipeline=%p render_pipeline=%p archive_compute=%p archive_render=%p error=%s\n",
+                        adapter_mtl4_dynamic_compute_ok, adapter_mtl4_dynamic_render_ok,
+                        adapter_mtl4_archive_dynamic_ok, adapter_mtl4_dynamic_compute_pipeline,
+                        adapter_mtl4_dynamic_render_pipeline, adapter_mtl4_archive_dynamic_compute_pipeline,
+                        adapter_mtl4_archive_dynamic_render_pipeline,
+                        adapter_mtl4_dynamic_error.localizedDescription == nil ? "(null)" :
+                        adapter_mtl4_dynamic_error.localizedDescription.UTF8String);
+            }
             fail_with_error("Metal 4 CPU compiler compute path failed", adapter_mtl4_compiler_error);
             return 101;
         }

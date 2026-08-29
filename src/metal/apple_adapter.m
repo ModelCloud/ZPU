@@ -5245,6 +5245,23 @@ static id<MTL4BinaryFunction> zpu_mtl4_binary_function_for_descriptor(
         initWithOwner:owner name:function.name functionType:function.functionType options:descriptor.options];
 }
 
+API_AVAILABLE(macos(26.0), ios(26.0))
+static BOOL zpu_mtl4_validate_dynamic_stage(
+    ZPUDevice *owner, MTL4PipelineStageDynamicLinkingDescriptor *descriptor, NSError **error) {
+    if (descriptor == nil) return YES;
+    /* The bounded CPU kernels never issue indirect calls, so the native
+     * callable-stack budget has no observable effect on their execution. */
+    NSArray<id<MTLDynamicLibrary>> *libraries = descriptor.preloadedLibraries;
+    for (id<MTLDynamicLibrary> library in libraries ?: @[]) {
+        ZPUDynamicLibrary *dynamicLibrary = (ZPUDynamicLibrary *)library;
+        if (![dynamicLibrary isKindOfClass:[ZPUDynamicLibrary class]] || dynamicLibrary->_owner != owner) {
+            zpu_set_error(error, @"ZPU CPU Metal 4 dynamic linking requires ZPU-owned dynamic libraries");
+            return NO;
+        }
+    }
+    return YES;
+}
+
 static id<MTLRenderPipelineState> zpu_mtl4_render_pipeline_for_descriptor(
     ZPUDevice *owner, MTL4RenderPipelineDescriptor *descriptor, NSError **error) {
     if (descriptor == nil || descriptor.vertexFunctionDescriptor == nil ||
@@ -5436,11 +5453,23 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
                                                 compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
                                                               error:(NSError **)error {
     (void)compilerTaskOptions;
-    if (dynamicLinkingDescriptor != nil) {
-        zpu_set_error(error, @"ZPU CPU Metal 4 does not link dynamic binary functions");
+    id<MTLComputePipelineState> pipeline = [self newComputePipelineStateWithDescriptor:descriptor
+                                                                       compilerTaskOptions:nil
+                                                                                     error:error];
+    if (pipeline == nil || dynamicLinkingDescriptor == nil) return pipeline;
+    if (!zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor, error)) {
         return nil;
     }
-    return [self newComputePipelineStateWithDescriptor:descriptor compilerTaskOptions:nil error:error];
+    ZPUComputePipelineState *cpuPipeline = (ZPUComputePipelineState *)pipeline;
+    cpuPipeline->_supportsAddingBinaryFunctions = YES;
+    id<MTLComputePipelineState> linked = [cpuPipeline newComputePipelineStateWithBinaryFunctions:
+        dynamicLinkingDescriptor.binaryLinkedFunctions ?: @[] error:error];
+    if (linked != nil && [_pipelineDataSetSerializer respondsToSelector:@selector(recordFunctionName:)]) {
+        for (id<MTL4BinaryFunction> function in dynamicLinkingDescriptor.binaryLinkedFunctions ?: @[]) {
+            [(ZPUMTL4PipelineDataSetSerializer *)_pipelineDataSetSerializer recordFunctionName:function.name];
+        }
+    }
+    return linked;
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4PipelineDescriptor *)descriptor
                                                    compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
@@ -5465,11 +5494,34 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
                                             dynamicLinkingDescriptor:(MTL4RenderPipelineDynamicLinkingDescriptor *)dynamicLinkingDescriptor
                                                  compilerTaskOptions:(MTL4CompilerTaskOptions *)compilerTaskOptions
                                                                error:(NSError **)error {
-    (void)descriptor;
-    (void)dynamicLinkingDescriptor;
     (void)compilerTaskOptions;
-    zpu_set_error(error, @"ZPU CPU Metal 4 does not link dynamic render functions");
-    return nil;
+    id<MTLRenderPipelineState> pipeline = [self newRenderPipelineStateWithDescriptor:descriptor
+                                                                      compilerTaskOptions:nil
+                                                                                    error:error];
+    if (pipeline == nil || dynamicLinkingDescriptor == nil) return pipeline;
+    if (!zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.vertexLinkingDescriptor, error) ||
+        !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.fragmentLinkingDescriptor, error) ||
+        !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.tileLinkingDescriptor, error) ||
+        !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.objectLinkingDescriptor, error) ||
+        !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.meshLinkingDescriptor, error)) {
+        return nil;
+    }
+    ZPURenderPipelineState *cpuPipeline = (ZPURenderPipelineState *)pipeline;
+    cpuPipeline->_supportsAddingVertexBinaryFunctions = YES;
+    cpuPipeline->_supportsAddingFragmentBinaryFunctions = YES;
+    MTL4RenderPipelineBinaryFunctionsDescriptor *binaryDescriptor =
+        [MTL4RenderPipelineBinaryFunctionsDescriptor new];
+    binaryDescriptor.vertexAdditionalBinaryFunctions =
+        dynamicLinkingDescriptor.vertexLinkingDescriptor.binaryLinkedFunctions;
+    binaryDescriptor.fragmentAdditionalBinaryFunctions =
+        dynamicLinkingDescriptor.fragmentLinkingDescriptor.binaryLinkedFunctions;
+    binaryDescriptor.tileAdditionalBinaryFunctions =
+        dynamicLinkingDescriptor.tileLinkingDescriptor.binaryLinkedFunctions;
+    binaryDescriptor.objectAdditionalBinaryFunctions =
+        dynamicLinkingDescriptor.objectLinkingDescriptor.binaryLinkedFunctions;
+    binaryDescriptor.meshAdditionalBinaryFunctions =
+        dynamicLinkingDescriptor.meshLinkingDescriptor.binaryLinkedFunctions;
+    return [cpuPipeline newRenderPipelineStateWithBinaryFunctions:binaryDescriptor error:error];
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateBySpecializationWithDescriptor:(MTL4PipelineDescriptor *)descriptor
                                                                                 pipeline:(id<MTLRenderPipelineState>)pipeline
@@ -5642,10 +5694,15 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 - (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTL4ComputePipelineDescriptor *)descriptor
                                            dynamicLinkingDescriptor:(MTL4PipelineStageDynamicLinkingDescriptor *)dynamicLinkingDescriptor
                                                                error:(NSError **)error {
-    (void)descriptor;
-    (void)dynamicLinkingDescriptor;
-    zpu_set_error(error, @"ZPU CPU Metal 4 archives do not link dynamic binary functions");
-    return nil;
+    id<MTLComputePipelineState> pipeline = [self newComputePipelineStateWithDescriptor:descriptor error:error];
+    if (pipeline == nil || dynamicLinkingDescriptor == nil) return pipeline;
+    if (!zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor, error)) {
+        return nil;
+    }
+    ZPUComputePipelineState *cpuPipeline = (ZPUComputePipelineState *)pipeline;
+    cpuPipeline->_supportsAddingBinaryFunctions = YES;
+    return [cpuPipeline newComputePipelineStateWithBinaryFunctions:
+        dynamicLinkingDescriptor.binaryLinkedFunctions ?: @[] error:error];
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4PipelineDescriptor *)descriptor error:(NSError **)error {
     if (![descriptor isKindOfClass:[MTL4RenderPipelineDescriptor class]]) {
@@ -5666,10 +5723,31 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4PipelineDescriptor *)descriptor
                                             dynamicLinkingDescriptor:(MTL4RenderPipelineDynamicLinkingDescriptor *)dynamicLinkingDescriptor
                                                                error:(NSError **)error {
-    (void)descriptor;
-    (void)dynamicLinkingDescriptor;
-    zpu_set_error(error, @"ZPU CPU Metal 4 archives do not link dynamic render functions");
-    return nil;
+    id<MTLRenderPipelineState> pipeline = [self newRenderPipelineStateWithDescriptor:descriptor error:error];
+    if (pipeline == nil || dynamicLinkingDescriptor == nil) return pipeline;
+    if (!zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.vertexLinkingDescriptor, error) ||
+        !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.fragmentLinkingDescriptor, error) ||
+        !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.tileLinkingDescriptor, error) ||
+        !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.objectLinkingDescriptor, error) ||
+        !zpu_mtl4_validate_dynamic_stage(_owner, dynamicLinkingDescriptor.meshLinkingDescriptor, error)) {
+        return nil;
+    }
+    ZPURenderPipelineState *cpuPipeline = (ZPURenderPipelineState *)pipeline;
+    cpuPipeline->_supportsAddingVertexBinaryFunctions = YES;
+    cpuPipeline->_supportsAddingFragmentBinaryFunctions = YES;
+    MTL4RenderPipelineBinaryFunctionsDescriptor *binaryDescriptor =
+        [MTL4RenderPipelineBinaryFunctionsDescriptor new];
+    binaryDescriptor.vertexAdditionalBinaryFunctions =
+        dynamicLinkingDescriptor.vertexLinkingDescriptor.binaryLinkedFunctions;
+    binaryDescriptor.fragmentAdditionalBinaryFunctions =
+        dynamicLinkingDescriptor.fragmentLinkingDescriptor.binaryLinkedFunctions;
+    binaryDescriptor.tileAdditionalBinaryFunctions =
+        dynamicLinkingDescriptor.tileLinkingDescriptor.binaryLinkedFunctions;
+    binaryDescriptor.objectAdditionalBinaryFunctions =
+        dynamicLinkingDescriptor.objectLinkingDescriptor.binaryLinkedFunctions;
+    binaryDescriptor.meshAdditionalBinaryFunctions =
+        dynamicLinkingDescriptor.meshLinkingDescriptor.binaryLinkedFunctions;
+    return [cpuPipeline newRenderPipelineStateWithBinaryFunctions:binaryDescriptor error:error];
 }
 - (id<MTL4BinaryFunction>)newBinaryFunctionWithDescriptor:(MTL4BinaryFunctionDescriptor *)descriptor error:(NSError **)error {
     if (descriptor == nil || descriptor.name.length == 0 || ![_functionNames containsObject:descriptor.name]) {
@@ -5681,8 +5759,10 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
         return nil;
     }
     if (error != NULL) *error = nil;
+    MTLFunctionType functionType = zpu_compute_visible_function_name_for_name(descriptor.name) != nil ?
+        MTLFunctionTypeVisible : MTLFunctionTypeKernel;
     return (id<MTL4BinaryFunction>)[[ZPUMTL4BinaryFunction alloc]
-        initWithOwner:_owner name:descriptor.name functionType:MTLFunctionTypeKernel options:descriptor.options];
+        initWithOwner:_owner name:descriptor.name functionType:functionType options:descriptor.options];
 }
 @end
 
