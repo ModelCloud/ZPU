@@ -22,8 +22,9 @@ triangle path:
 - owned RGBA8/BGRA8 buffers and 2D textures with checked region read/write
 - ordinary device-created 2D textures with independently allocated CPU/ZPU
   mip levels, exact level read/write, level-range views, and level-aware blit
-  copies; buffer-backed and heap-backed textures remain explicitly limited to
-  one level until a portable strided mip layout is added
+  copies; CPU box-filter mipmap generation matches the native RGBA8 oracle;
+  buffer-backed and heap-backed textures remain explicitly limited to one
+  level until a portable strided mip layout is added
 - buffer and texture resource options preserve the requested storage mode, CPU
   cache mode, hazard mode, texture usage, optimization flag, compression mode,
   and swizzle metadata; indirect command buffers preserve their resource
@@ -52,7 +53,8 @@ triangle path:
 - ordered render, parallel-render, and blit encoders, command-buffer status,
   buffer copies/fills, texture transfers, indexed and indirect draws, render
   indirect command buffers (including CPU blit-copy of encoded commands),
-  texture views, and ordered MTLFence update/wait commands
+  texture views, level-aware mipmap generation/copies, and ordered MTLFence
+  update/wait commands
 - a deferred CPU compute encoder for the explicit
   `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8` and
   `ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE` kernels; they operate

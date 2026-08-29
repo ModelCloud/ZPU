@@ -674,6 +674,57 @@ int main(void) {
             return 69;
         }
 
+        MTLTextureDescriptor *generate_mip_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                width:4
+                                                               height:4
+                                                            mipmapped:YES];
+        generate_mip_descriptor.storageMode = MTLStorageModeShared;
+        generate_mip_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        id<MTLTexture> native_generate_mip_texture = [device newTextureWithDescriptor:generate_mip_descriptor];
+        id<MTLTexture> adapter_generate_mip_texture = [adapter_device newTextureWithDescriptor:generate_mip_descriptor];
+        uint8_t generate_mip_base[4 * 4 * 4];
+        for (size_t index = 0; index < sizeof(generate_mip_base); ++index) {
+            generate_mip_base[index] = (uint8_t)((index * 29u + 7u) & 0xffu);
+        }
+        [native_generate_mip_texture replaceRegion:MTLRegionMake2D(0, 0, 4, 4)
+                                       mipmapLevel:0
+                                         withBytes:generate_mip_base
+                                       bytesPerRow:4 * 4];
+        [adapter_generate_mip_texture replaceRegion:MTLRegionMake2D(0, 0, 4, 4)
+                                        mipmapLevel:0
+                                          withBytes:generate_mip_base
+                                        bytesPerRow:4 * 4];
+        id<MTLCommandBuffer> native_generate_mip_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> native_generate_mip_blit = [native_generate_mip_command_buffer blitCommandEncoder];
+        [native_generate_mip_blit generateMipmapsForTexture:native_generate_mip_texture];
+        [native_generate_mip_blit endEncoding];
+        [native_generate_mip_command_buffer commit];
+        [native_generate_mip_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> adapter_generate_mip_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_generate_mip_blit = [adapter_generate_mip_command_buffer blitCommandEncoder];
+        [adapter_generate_mip_blit generateMipmapsForTexture:adapter_generate_mip_texture];
+        [adapter_generate_mip_blit endEncoding];
+        [adapter_generate_mip_command_buffer commit];
+        [adapter_generate_mip_command_buffer waitUntilCompleted];
+        uint8_t native_generated_mip_level_one[sizeof(mip_level_one)];
+        uint8_t adapter_generated_mip_level_one[sizeof(mip_level_one)];
+        [native_generate_mip_texture getBytes:native_generated_mip_level_one
+                                  bytesPerRow:2 * 4
+                                   fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                  mipmapLevel:1];
+        [adapter_generate_mip_texture getBytes:adapter_generated_mip_level_one
+                                   bytesPerRow:2 * 4
+                                    fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                   mipmapLevel:1];
+        if (native_generate_mip_texture == nil || adapter_generate_mip_texture == nil ||
+            native_generate_mip_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_generate_mip_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_generated_mip_level_one, adapter_generated_mip_level_one, sizeof(mip_level_one)) != 0) {
+            fprintf(stderr, "metal-pixel: mipmap generation exactness failed\n");
+            return 71;
+        }
+
         /* Library/function discovery is also CPU metadata. The source text
          * is inspected only for registered ZPU kernel names; it is never sent
          * to Apple's compiler by the adapter. */
