@@ -15,8 +15,10 @@ pub const Api = enum {
     viewport,
     scissor_rect,
     r8_unorm,
+    r16_unorm,
     r16_float,
     rg8_unorm,
+    rg16_unorm,
     rg16_float,
     r32_uint,
     rgba8_unorm,
@@ -24,6 +26,7 @@ pub const Api = enum {
     r32_float,
     rgba16_unorm,
     rgba16_float,
+    rg32_float,
     rgba32_float,
     load_dont_care,
     load_load,
@@ -57,8 +60,10 @@ pub fn entry(api: Api) Entry {
     return switch (api) {
         .color, .viewport, .scissor_rect => .{ .kind = .direct_vulkan },
         .r8_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 9 }, // VK_FORMAT_R8_UNORM
+        .r16_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 70 }, // VK_FORMAT_R16_UNORM
         .r16_float => .{ .kind = .direct_vulkan, .vulkan_value = 76 }, // VK_FORMAT_R16_SFLOAT
         .rg8_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 16 }, // VK_FORMAT_R8G8_UNORM
+        .rg16_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 77 }, // VK_FORMAT_R16G16_UNORM
         .rg16_float => .{ .kind = .direct_vulkan, .vulkan_value = 83 }, // VK_FORMAT_R16G16_SFLOAT
         .r32_uint => .{ .kind = .direct_vulkan, .vulkan_value = 98 }, // VK_FORMAT_R32_UINT
         .rgba8_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 37 }, // VK_FORMAT_R8G8B8A8_UNORM
@@ -66,6 +71,7 @@ pub fn entry(api: Api) Entry {
         .r32_float => .{ .kind = .direct_vulkan, .vulkan_value = 100 }, // VK_FORMAT_R32_SFLOAT
         .rgba16_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 91 }, // VK_FORMAT_R16G16B16A16_UNORM
         .rgba16_float => .{ .kind = .direct_vulkan, .vulkan_value = 97 }, // VK_FORMAT_R16G16B16A16_SFLOAT
+        .rg32_float => .{ .kind = .direct_vulkan, .vulkan_value = 103 }, // VK_FORMAT_R32G32_SFLOAT
         .rgba32_float => .{ .kind = .direct_vulkan, .vulkan_value = 109 }, // VK_FORMAT_R32G32B32A32_SFLOAT
         .load_dont_care => .{ .kind = .direct_vulkan, .vulkan_value = 1 }, // VK_ATTACHMENT_LOAD_OP_DONT_CARE
         .load_load => .{ .kind = .direct_vulkan, .vulkan_value = 0 }, // VK_ATTACHMENT_LOAD_OP_LOAD
@@ -83,8 +89,10 @@ pub fn entry(api: Api) Entry {
 
 test "mapping policy keeps direct values separate from native lifetimes" {
     try @import("std").testing.expectEqual(@as(?u32, 9), entry(.r8_unorm).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 70), entry(.r16_unorm).vulkan_value);
     try @import("std").testing.expectEqual(@as(?u32, 76), entry(.r16_float).vulkan_value);
     try @import("std").testing.expectEqual(@as(?u32, 16), entry(.rg8_unorm).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 77), entry(.rg16_unorm).vulkan_value);
     try @import("std").testing.expectEqual(@as(?u32, 83), entry(.rg16_float).vulkan_value);
     try @import("std").testing.expectEqual(@as(?u32, 98), entry(.r32_uint).vulkan_value);
     try @import("std").testing.expectEqual(Kind.direct_vulkan, entry(.bgra8_unorm).kind);
@@ -93,6 +101,7 @@ test "mapping policy keeps direct values separate from native lifetimes" {
     try @import("std").testing.expectEqual(@as(?u32, 97), entry(.rgba16_float).vulkan_value);
     try @import("std").testing.expectEqual(@as(?u32, 91), entry(.rgba16_unorm).vulkan_value);
     try @import("std").testing.expectEqual(@as(?u32, 109), entry(.rgba32_float).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 103), entry(.rg32_float).vulkan_value);
     try @import("std").testing.expectEqual(Kind.direct_vulkan, entry(.primitive_triangle_strip).kind);
     try @import("std").testing.expectEqual(@as(?u32, 5), entry(.primitive_triangle_strip).vulkan_value);
     try @import("std").testing.expectEqual(Kind.native_metal, entry(.command_buffer).kind);

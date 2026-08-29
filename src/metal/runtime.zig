@@ -30,8 +30,10 @@ const shared_event_magic: u64 = 0x5a50555f53455654; // ZPU_SEVT
 
 pub const TextureFormat = enum {
     r8_unorm,
+    r16_unorm,
     r16_float,
     rg8_unorm,
+    rg16_unorm,
     rg16_float,
     r32_uint,
     rgba8_unorm,
@@ -39,6 +41,7 @@ pub const TextureFormat = enum {
     r32_float,
     rgba16_unorm,
     rgba16_float,
+    rg32_float,
     rgba32_float,
     depth32_float,
     stencil8,
@@ -46,27 +49,32 @@ pub const TextureFormat = enum {
     fn bytesPerPixel(self: TextureFormat) usize {
         return switch (self) {
             .r8_unorm => 1,
+            .r16_unorm => 2,
             .r16_float => 2,
             .rg8_unorm => 2,
+            .rg16_unorm => 4,
             .rg16_float => 4,
             .r32_uint => 4,
             .stencil8 => 1,
             .rgba16_unorm, .rgba16_float => 8,
+            .rg32_float => 8,
             .rgba32_float => 16,
             else => 4,
         };
     }
 
     fn isColor(self: TextureFormat) bool {
-        return self == .r8_unorm or self == .r16_float or self == .rg8_unorm or self == .rg16_float or self == .rgba8_unorm or self == .bgra8_unorm or self == .r32_float or self == .rgba16_unorm or self == .rgba16_float or self == .rgba32_float;
+        return self == .r8_unorm or self == .r16_unorm or self == .r16_float or self == .rg8_unorm or self == .rg16_unorm or self == .rg16_float or self == .rgba8_unorm or self == .bgra8_unorm or self == .r32_float or self == .rgba16_unorm or self == .rgba16_float or self == .rg32_float or self == .rgba32_float;
     }
 };
 
 fn textureFormatFromRaw(format_raw: u16) ?TextureFormat {
     return switch (format_raw) {
         @intFromEnum(abi.PixelFormat.r8_unorm) => .r8_unorm,
+        @intFromEnum(abi.PixelFormat.r16_unorm) => .r16_unorm,
         @intFromEnum(abi.PixelFormat.r16_float) => .r16_float,
         @intFromEnum(abi.PixelFormat.rg8_unorm) => .rg8_unorm,
+        @intFromEnum(abi.PixelFormat.rg16_unorm) => .rg16_unorm,
         @intFromEnum(abi.PixelFormat.rg16_float) => .rg16_float,
         @intFromEnum(abi.PixelFormat.r32_uint) => .r32_uint,
         @intFromEnum(abi.PixelFormat.rgba8_unorm) => .rgba8_unorm,
@@ -74,6 +82,7 @@ fn textureFormatFromRaw(format_raw: u16) ?TextureFormat {
         @intFromEnum(abi.PixelFormat.r32_float) => .r32_float,
         @intFromEnum(abi.PixelFormat.rgba16_unorm) => .rgba16_unorm,
         @intFromEnum(abi.PixelFormat.rgba16_float) => .rgba16_float,
+        @intFromEnum(abi.PixelFormat.rg32_float) => .rg32_float,
         @intFromEnum(abi.PixelFormat.rgba32_float) => .rgba32_float,
         @intFromEnum(abi.PixelFormat.depth32_float) => .depth32_float,
         @intFromEnum(abi.PixelFormat.stencil8) => .stencil8,
@@ -178,8 +187,10 @@ pub const Texture = struct {
             .stride = self.stride,
             .format = switch (self.format) {
                 .r8_unorm => .r8_unorm,
+                .r16_unorm => .r16_unorm,
                 .r16_float => .r16_float,
                 .rg8_unorm => .rg8_unorm,
+                .rg16_unorm => .rg16_unorm,
                 .rg16_float => .rg16_float,
                 .r32_uint => unreachable,
                 .rgba8_unorm => .rgba8_unorm,
@@ -187,6 +198,7 @@ pub const Texture = struct {
                 .r32_float => .r32_float,
                 .rgba16_unorm => .rgba16_unorm,
                 .rgba16_float => .rgba16_float,
+                .rg32_float => .rg32_float,
                 .rgba32_float => .rgba32_float,
                 .depth32_float => unreachable,
                 .stencil8 => unreachable,
@@ -1027,14 +1039,17 @@ pub const RenderEncoder = struct {
                     const expected = switch (expected_color) {
                         0 => null,
                         @intFromEnum(abi.PixelFormat.r8_unorm) => abi.PixelFormat.r8_unorm,
+                        @intFromEnum(abi.PixelFormat.r16_unorm) => abi.PixelFormat.r16_unorm,
                         @intFromEnum(abi.PixelFormat.r16_float) => abi.PixelFormat.r16_float,
                         @intFromEnum(abi.PixelFormat.rg8_unorm) => abi.PixelFormat.rg8_unorm,
+                        @intFromEnum(abi.PixelFormat.rg16_unorm) => abi.PixelFormat.rg16_unorm,
                         @intFromEnum(abi.PixelFormat.rg16_float) => abi.PixelFormat.rg16_float,
                         @intFromEnum(abi.PixelFormat.rgba16_unorm) => abi.PixelFormat.rgba16_unorm,
                         @intFromEnum(abi.PixelFormat.rgba8_unorm) => abi.PixelFormat.rgba8_unorm,
                         @intFromEnum(abi.PixelFormat.bgra8_unorm) => abi.PixelFormat.bgra8_unorm,
                         @intFromEnum(abi.PixelFormat.r32_float) => abi.PixelFormat.r32_float,
                         @intFromEnum(abi.PixelFormat.rgba16_float) => abi.PixelFormat.rgba16_float,
+                        @intFromEnum(abi.PixelFormat.rg32_float) => abi.PixelFormat.rg32_float,
                         @intFromEnum(abi.PixelFormat.rgba32_float) => abi.PixelFormat.rgba32_float,
                         else => return error.UnsupportedFormat,
                     };
@@ -1820,6 +1835,15 @@ fn unorm8ChannelCount(format: TextureFormat) usize {
     };
 }
 
+fn unorm16ChannelCount(format: TextureFormat) usize {
+    return switch (format) {
+        .r16_unorm => 1,
+        .rg16_unorm => 2,
+        .rgba16_unorm => 4,
+        else => unreachable,
+    };
+}
+
 fn executeCompute(command: ComputeCommand) Error!void {
     if (!validTexture(command.texture) or !command.texture.format.isColor()) return error.InvalidResource;
     if (command.kernel != 3 and command.kernel != 4 and command.threads_per_grid.depth != 1) return error.InvalidArgument;
@@ -1855,7 +1879,7 @@ fn executeCompute(command: ComputeCommand) Error!void {
                         command.texture.bytes[offset + 2] = red;
                         command.texture.bytes[offset + 3] = 255;
                     },
-                    .r16_float, .rg16_float, .r32_uint, .r32_float, .rgba16_unorm, .rgba16_float, .rgba32_float, .depth32_float, .stencil8 => return error.UnsupportedFormat,
+                    .r16_unorm, .r16_float, .rg16_unorm, .rg16_float, .r32_uint, .r32_float, .rgba16_unorm, .rgba16_float, .rg32_float, .rgba32_float, .depth32_float, .stencil8 => return error.UnsupportedFormat,
                 }
             }
         },
@@ -1891,7 +1915,7 @@ fn executeCompute(command: ComputeCommand) Error!void {
                             command.texture.bytes[destination_offset + 2] = source.bytes[source_offset + 0];
                             command.texture.bytes[destination_offset + 3] = source.bytes[source_offset + 3];
                         },
-                        .r16_float, .rg16_float, .r32_uint, .r32_float, .rgba16_unorm, .rgba16_float, .rgba32_float, .depth32_float, .stencil8 => return error.UnsupportedFormat,
+                        .r16_unorm, .r16_float, .rg16_unorm, .rg16_float, .r32_uint, .r32_float, .rgba16_unorm, .rgba16_float, .rg32_float, .rgba32_float, .depth32_float, .stencil8 => return error.UnsupportedFormat,
                     }
                 }
             }
@@ -2075,8 +2099,10 @@ pub fn createTextureFromBuffer(buffer: *Buffer, width: u32, height: u32, format_
     if (!validBuffer(buffer)) return error.InvalidResource;
     const format: TextureFormat = switch (format_raw) {
         @intFromEnum(abi.PixelFormat.r8_unorm) => .r8_unorm,
+        @intFromEnum(abi.PixelFormat.r16_unorm) => .r16_unorm,
         @intFromEnum(abi.PixelFormat.r16_float) => .r16_float,
         @intFromEnum(abi.PixelFormat.rg8_unorm) => .rg8_unorm,
+        @intFromEnum(abi.PixelFormat.rg16_unorm) => .rg16_unorm,
         @intFromEnum(abi.PixelFormat.rg16_float) => .rg16_float,
         @intFromEnum(abi.PixelFormat.r32_uint) => .r32_uint,
         @intFromEnum(abi.PixelFormat.rgba8_unorm) => .rgba8_unorm,
@@ -2084,6 +2110,7 @@ pub fn createTextureFromBuffer(buffer: *Buffer, width: u32, height: u32, format_
         @intFromEnum(abi.PixelFormat.r32_float) => .r32_float,
         @intFromEnum(abi.PixelFormat.rgba16_unorm) => .rgba16_unorm,
         @intFromEnum(abi.PixelFormat.rgba16_float) => .rgba16_float,
+        @intFromEnum(abi.PixelFormat.rg32_float) => .rg32_float,
         @intFromEnum(abi.PixelFormat.rgba32_float) => .rgba32_float,
         @intFromEnum(abi.PixelFormat.stencil8) => .stencil8,
         else => return error.UnsupportedFormat,
@@ -2555,7 +2582,7 @@ fn generateUnorm8Mipmap(command: MipmapCommand) Error!void {
 }
 
 fn generateUnorm16Mipmap(command: MipmapCommand) Error!void {
-    const channels = 4;
+    const channels = unorm16ChannelCount(command.source.format);
     const bytes_per_pixel = channels * @sizeOf(u16);
     const destination_width: u32 = if (command.source.width > 1) command.source.width / 2 else 1;
     const destination_height: u32 = if (command.source.height > 1) command.source.height / 2 else 1;
@@ -2596,7 +2623,7 @@ fn generateUnorm16Mipmap(command: MipmapCommand) Error!void {
 
 fn generateMipmap(command: MipmapCommand) Error!void {
     if (command.source == command.destination or !command.source.format.isColor()) return error.UnsupportedFormat;
-    if (command.source.format == .rgba16_unorm) return generateUnorm16Mipmap(command);
+    if (command.source.format == .r16_unorm or command.source.format == .rg16_unorm or command.source.format == .rgba16_unorm) return generateUnorm16Mipmap(command);
     if (command.source.format == .r16_float or command.source.format == .rg16_float or command.source.format == .r32_float or command.source.format == .rgba16_float or command.source.format == .rgba32_float) {
         return generateFloatMipmap(command);
     }
@@ -2724,7 +2751,7 @@ fn generateUnorm8Mipmap3D(command: Mipmap3DCommand) Error!void {
 }
 
 fn generateUnorm16Mipmap3D(command: Mipmap3DCommand) Error!void {
-    const channels = 4;
+    const channels = unorm16ChannelCount(command.source0.format);
     const bytes_per_pixel = channels * @sizeOf(u16);
     if (command.source1_weight_denominator == 0 or command.source1_weight_numerator > command.source1_weight_denominator or
         (command.source1 == null and command.source1_weight_numerator != 0)) return error.InvalidArgument;
@@ -2795,7 +2822,7 @@ fn generateUnorm16Mipmap3D(command: Mipmap3DCommand) Error!void {
 
 fn generateMipmap3D(command: Mipmap3DCommand) Error!void {
     if (command.source0 == command.destination or !command.source0.format.isColor()) return error.UnsupportedFormat;
-    if (command.source0.format == .rgba16_unorm) return generateUnorm16Mipmap3D(command);
+    if (command.source0.format == .r16_unorm or command.source0.format == .rg16_unorm or command.source0.format == .rgba16_unorm) return generateUnorm16Mipmap3D(command);
     if (command.source0.format == .r16_float or command.source0.format == .rg16_float or command.source0.format == .r32_float or command.source0.format == .rgba16_float or command.source0.format == .rgba32_float) {
         return generateFloatMipmap3D(command);
     }
@@ -2848,8 +2875,10 @@ fn visibilitySlotSeen(slots: []const VisibilitySlot, buffer: *Buffer, offset: us
 fn texturePixelFormat(texture: *const Texture) ?abi.PixelFormat {
     return switch (texture.format) {
         .r8_unorm => .r8_unorm,
+        .r16_unorm => .r16_unorm,
         .r16_float => .r16_float,
         .rg8_unorm => .rg8_unorm,
+        .rg16_unorm => .rg16_unorm,
         .rg16_float => .rg16_float,
         .r32_uint => .r32_uint,
         .rgba8_unorm => .rgba8_unorm,
@@ -2857,6 +2886,7 @@ fn texturePixelFormat(texture: *const Texture) ?abi.PixelFormat {
         .r32_float => .r32_float,
         .rgba16_unorm => .rgba16_unorm,
         .rgba16_float => .rgba16_float,
+        .rg32_float => .rg32_float,
         .rgba32_float => .rgba32_float,
         .depth32_float => .depth32_float,
         .stencil8 => .stencil8,
@@ -3180,6 +3210,22 @@ test "CPU packed unorm and wide float mipmaps preserve format precision" {
         for (0..4) |component| std.mem.writeInt(u16, unorm_source.bytes[offset + component * 2 ..][0..2], @intCast(base + component * 100), .little);
     };
 
+    const r16_unorm_source = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.r16_unorm));
+    defer destroyTexture(r16_unorm_source);
+    const r16_unorm_destination = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.r16_unorm));
+    defer destroyTexture(r16_unorm_destination);
+    const rg16_unorm_source = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rg16_unorm));
+    defer destroyTexture(rg16_unorm_source);
+    const rg16_unorm_destination = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.rg16_unorm));
+    defer destroyTexture(rg16_unorm_destination);
+    for (0..4) |y| for (0..4) |x| {
+        const base = (x + y * 4) * 1000;
+        std.mem.writeInt(u16, r16_unorm_source.bytes[y * r16_unorm_source.stride + x * 2 ..][0..2], @intCast(base), .little);
+        const offset = y * rg16_unorm_source.stride + x * 4;
+        std.mem.writeInt(u16, rg16_unorm_source.bytes[offset..][0..2], @intCast(base), .little);
+        std.mem.writeInt(u16, rg16_unorm_source.bytes[offset + 2 ..][0..2], @intCast(base + 500), .little);
+    };
+
     const wide_source = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba32_float));
     defer destroyTexture(wide_source);
     const wide_destination = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.rgba32_float));
@@ -3194,6 +3240,8 @@ test "CPU packed unorm and wide float mipmaps preserve format precision" {
     defer destroyCommandBuffer(command_buffer);
     var encoder = try beginBlit(command_buffer);
     try encoder.generateMipmap(unorm_source, unorm_destination);
+    try encoder.generateMipmap(r16_unorm_source, r16_unorm_destination);
+    try encoder.generateMipmap(rg16_unorm_source, rg16_unorm_destination);
     try encoder.generateMipmap(wide_source, wide_destination);
     try encoder.endEncoding();
     destroyBlitEncoder(encoder);
@@ -3208,6 +3256,15 @@ test "CPU packed unorm and wide float mipmaps preserve format precision" {
             const actual = std.mem.readInt(u16, unorm_destination.bytes[offset + component * 2 ..][0..2], .little);
             try std.testing.expectEqual(unorm_bases[pixel] + @as(u16, @intCast(component * 100)), actual);
         }
+    }
+    for (0..4) |pixel| {
+        const row = pixel / 2;
+        const column = pixel % 2;
+        const r16_offset = row * r16_unorm_destination.stride + column * 2;
+        try std.testing.expectEqual(unorm_bases[pixel], std.mem.readInt(u16, r16_unorm_destination.bytes[r16_offset..][0..2], .little));
+        const rg16_offset = row * rg16_unorm_destination.stride + column * 4;
+        try std.testing.expectEqual(unorm_bases[pixel], std.mem.readInt(u16, rg16_unorm_destination.bytes[rg16_offset..][0..2], .little));
+        try std.testing.expectEqual(unorm_bases[pixel] + 500, std.mem.readInt(u16, rg16_unorm_destination.bytes[rg16_offset + 2 ..][0..2], .little));
     }
     const wide_bases = [_]f64{ 2.5, 4.5, 10.5, 12.5 };
     for (0..4) |pixel| {
@@ -3417,8 +3474,12 @@ test "buffer-backed textures alias rows without copying" {
 test "raw texture formats preserve their native texel widths" {
     const device = try createDevice();
     defer destroyDevice(device);
+    const r16 = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.r16_unorm));
+    defer destroyTexture(r16);
     const r32 = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.r32_float));
     defer destroyTexture(r32);
+    const rg16 = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.rg16_unorm));
+    defer destroyTexture(rg16);
     const r32_uint = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.r32_uint));
     defer destroyTexture(r32_uint);
     const rgba16_unorm = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.rgba16_unorm));
@@ -3427,26 +3488,41 @@ test "raw texture formats preserve their native texel widths" {
     defer destroyTexture(rgba16);
     const rgba32 = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.rgba32_float));
     defer destroyTexture(rgba32);
+    const rg32 = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.rg32_float));
+    defer destroyTexture(rg32);
+    try std.testing.expectEqual(@as(usize, 12), r16.bytes.len);
     try std.testing.expectEqual(@as(usize, 24), r32.bytes.len);
+    try std.testing.expectEqual(@as(usize, 24), rg16.bytes.len);
     try std.testing.expectEqual(@as(usize, 24), r32_uint.bytes.len);
     try std.testing.expectEqual(@as(usize, 48), rgba16_unorm.bytes.len);
     try std.testing.expectEqual(@as(usize, 48), rgba16.bytes.len);
     try std.testing.expectEqual(@as(usize, 96), rgba32.bytes.len);
+    try std.testing.expectEqual(@as(usize, 48), rg32.bytes.len);
+    const r16_values = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c };
     const r32_values = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23 };
+    const rg16_values = [_]u8{ 0x10, 0x11, 0x12, 0x13, 0x20, 0x21, 0x22, 0x23, 0x30, 0x31, 0x32, 0x33, 0x40, 0x41, 0x42, 0x43, 0x50, 0x51, 0x52, 0x53, 0x60, 0x61, 0x62, 0x63 };
     const r32_uint_values = [_]u8{ 0xf0, 0xf1, 0xf2, 0xf3, 0xe0, 0xe1, 0xe2, 0xe3, 0xd0, 0xd1, 0xd2, 0xd3, 0xc0, 0xc1, 0xc2, 0xc3, 0xb0, 0xb1, 0xb2, 0xb3, 0xa0, 0xa1, 0xa2, 0xa3 };
     const rgba16_values = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7 };
     var rgba32_values: [96]u8 = undefined;
     for (&rgba32_values, 0..) |*byte, index| byte.* = @intCast(index);
+    var rg32_values: [48]u8 = undefined;
+    for (&rg32_values, 0..) |*byte, index| byte.* = @intCast(255 - index);
+    try textureReplaceRegion(r16, .{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = 3, .height = 2, .depth = 1 } }, &r16_values, r16_values.len, 6);
     try textureReplaceRegion(r32, .{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = 3, .height = 2, .depth = 1 } }, &r32_values, r32_values.len, 12);
+    try textureReplaceRegion(rg16, .{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = 3, .height = 2, .depth = 1 } }, &rg16_values, rg16_values.len, 12);
     try textureReplaceRegion(r32_uint, .{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = 3, .height = 2, .depth = 1 } }, &r32_uint_values, r32_uint_values.len, 12);
     try textureReplaceRegion(rgba16_unorm, .{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = 3, .height = 2, .depth = 1 } }, &rgba16_values, rgba16_values.len, 24);
     try textureReplaceRegion(rgba16, .{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = 3, .height = 2, .depth = 1 } }, &rgba16_values, rgba16_values.len, 24);
     try textureReplaceRegion(rgba32, .{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = 3, .height = 2, .depth = 1 } }, &rgba32_values, rgba32_values.len, 48);
+    try textureReplaceRegion(rg32, .{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = 3, .height = 2, .depth = 1 } }, &rg32_values, rg32_values.len, 24);
+    try std.testing.expectEqualSlices(u8, &r16_values, r16.bytes);
     try std.testing.expectEqualSlices(u8, &r32_values, r32.bytes);
+    try std.testing.expectEqualSlices(u8, &rg16_values, rg16.bytes);
     try std.testing.expectEqualSlices(u8, &r32_uint_values, r32_uint.bytes);
     try std.testing.expectEqualSlices(u8, &rgba16_values, rgba16_unorm.bytes);
     try std.testing.expectEqualSlices(u8, &rgba16_values, rgba16.bytes);
     try std.testing.expectEqualSlices(u8, &rgba32_values, rgba32.bytes);
+    try std.testing.expectEqualSlices(u8, &rg32_values, rg32.bytes);
 }
 
 test "narrow unorm texture formats preserve bytes through checked transfers" {
