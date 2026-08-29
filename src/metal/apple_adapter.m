@@ -8521,6 +8521,8 @@ static id<MTLRenderPipelineState> zpu_mtl4_mesh_pipeline_for_descriptor(
     MTL4StaticLinkingDescriptor *fragment_linking = descriptor.fragmentStaticLinkingDescriptor;
     if (descriptor.supportObjectBinaryLinking || descriptor.supportMeshBinaryLinking ||
         descriptor.supportFragmentBinaryLinking ||
+        (descriptor.colorAttachmentMappingState != MTL4LogicalToPhysicalColorAttachmentMappingStateIdentity &&
+         descriptor.colorAttachmentMappingState != MTL4LogicalToPhysicalColorAttachmentMappingStateInherited) ||
         (descriptor.supportIndirectCommandBuffers != MTL4IndirectCommandBufferSupportStateDisabled &&
          descriptor.supportIndirectCommandBuffers != MTL4IndirectCommandBufferSupportStateEnabled) ||
         object_linking.functionDescriptors.count != 0 || object_linking.privateFunctionDescriptors.count != 0 ||
@@ -8579,6 +8581,8 @@ static id<MTLRenderPipelineState> zpu_mtl4_mesh_pipeline_for_descriptor(
         requiredThreadsPerObjectThreadgroup:required_object requiredThreadsPerMeshThreadgroup:required_mesh];
     pipeline->_supportsIndirectCommandBuffers =
         descriptor.supportIndirectCommandBuffers == MTL4IndirectCommandBufferSupportStateEnabled;
+    pipeline->_colorAttachmentMappingInherited =
+        descriptor.colorAttachmentMappingState == MTL4LogicalToPhysicalColorAttachmentMappingStateInherited;
     return (id<MTLRenderPipelineState>)pipeline;
 }
 

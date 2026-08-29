@@ -376,6 +376,7 @@ const TileCommand = struct {
     kernel: u8,
     tile_size: abi.Size,
     threads_per_tile: abi.Size,
+    color_attachment_map: [8]u8,
 };
 
 const MeshCommand = struct {
@@ -384,6 +385,7 @@ const MeshCommand = struct {
     threads_per_grid: abi.Size,
     threads_per_object_threadgroup: abi.Size,
     threads_per_mesh_threadgroup: abi.Size,
+    color_attachment_map: [8]u8,
     indirect_buffer: ?*Buffer = null,
     indirect_buffer_offset: usize = 0,
 };
@@ -456,6 +458,14 @@ fn validColorAttachmentMap(mapping: [8]u8) bool {
         seen |= bit;
     }
     return true;
+}
+
+fn validateColorAttachmentOutputs(active: [8]?*Texture, mapping: [8]u8, logical_output_count: usize) Error!void {
+    if (logical_output_count == 0 or logical_output_count > mapping.len or !validColorAttachmentMap(mapping))
+        return error.InvalidArgument;
+    for (mapping[0..logical_output_count]) |physical_index| {
+        if (active[physical_index] == null) return error.InvalidResource;
+    }
 }
 
 const CopyBufferCommand = struct {
@@ -735,6 +745,14 @@ pub const CommandBuffer = struct {
                         }
                     }
                 }
+                var missing_extra_attachment = false;
+                for (begin_render.color_attachments[1..]) |attachment| {
+                    if (attachment == null) {
+                        missing_extra_attachment = true;
+                    } else if (missing_extra_attachment) {
+                        return self.fail(error.InvalidResource);
+                    }
+                }
                 active_depth_texture = begin_render.depth_texture;
                 active_depth_store_action = begin_render.pass.depth.store_action;
                 active_depth = begin_render.depth;
@@ -849,20 +867,7 @@ pub const CommandBuffer = struct {
                     @min(extra_count + 1, 8)
                     else
                     1;
-                if (!validColorAttachmentMap(draw_options.color_attachment_map))
-                    return self.fail(error.InvalidArgument);
-                var highest_mapped_physical: usize = 0;
-                for (draw_options.color_attachment_map[0..logical_output_count]) |physical_index| {
-                    if (physical_index >= 8) return self.fail(error.InvalidArgument);
-                    highest_mapped_physical = @max(highest_mapped_physical, @as(usize, physical_index));
-                }
-                if (!std.mem.eql(u8, &draw_options.color_attachment_map, &identity_color_attachment_map)) {
-                    for (active_color_attachments[0 .. highest_mapped_physical + 1], 0..) |attachment, physical_index| {
-                        if (attachment == null) return self.fail(error.InvalidResource);
-                        if (physical_index > 0 and physical_index - 1 >= extra_count)
-                            return self.fail(error.InvalidResource);
-                    }
-                }
+                validateColorAttachmentOutputs(active_color_attachments, draw_options.color_attachment_map, logical_output_count) catch |err| return self.fail(err);
                 var stats: raster3d.Stats = .{};
                 for (0..instance_count) |_| {
                     stats = addRasterStats(stats, raster3d.drawWithTargetMipmaps(
@@ -902,8 +907,10 @@ pub const CommandBuffer = struct {
             .tile => |tile| {
                 const target_handle = active_target orelse return self.fail(error.InvalidCommand);
                 if (!validTexture(target_handle) or target_handle != tile.target) return self.fail(error.InvalidResource);
+                validateColorAttachmentOutputs(active_color_attachments, tile.color_attachment_map, 1) catch |err| return self.fail(err);
+                const output_texture = active_color_attachments[@as(usize, tile.color_attachment_map[0])] orelse return self.fail(error.InvalidResource);
                 if (tile.kernel != 1 or
-                    (target_handle.format != .rgba8_unorm and target_handle.format != .bgra8_unorm) or
+                    (output_texture.format != .rgba8_unorm and output_texture.format != .bgra8_unorm) or
                     tile.tile_size.width == 0 or tile.tile_size.height == 0 or tile.tile_size.depth != 1 or
                     tile.threads_per_tile.width == 0 or tile.threads_per_tile.height == 0 or
                     tile.threads_per_tile.depth != 1 or
@@ -911,7 +918,7 @@ pub const CommandBuffer = struct {
                     tile.threads_per_tile.height > tile.tile_size.height) return self.fail(error.InvalidArgument);
                 const tile_count_x = (@as(usize, target_handle.width) + tile.tile_size.width - 1) / tile.tile_size.width;
                 const tile_count_y = (@as(usize, target_handle.height) + tile.tile_size.height - 1) / tile.tile_size.height;
-                var target = target_handle.asTarget();
+                var target = output_texture.asTarget();
                 for (0..tile_count_y) |tile_y| {
                     for (0..tile_count_x) |tile_x| {
                         const tile_origin_x = tile_x * tile.tile_size.width;
@@ -953,18 +960,20 @@ pub const CommandBuffer = struct {
                 }
                 const target_handle = active_target orelse return self.fail(error.InvalidCommand);
                 if (!validTexture(target_handle) or target_handle != resolved_mesh.target) return self.fail(error.InvalidResource);
+                validateColorAttachmentOutputs(active_color_attachments, resolved_mesh.color_attachment_map, 1) catch |err| return self.fail(err);
+                const output_texture = active_color_attachments[@as(usize, resolved_mesh.color_attachment_map[0])] orelse return self.fail(error.InvalidResource);
                 const mesh_threads = resolved_mesh.threads_per_mesh_threadgroup;
                 const object_threads = resolved_mesh.threads_per_object_threadgroup;
                 const mesh_thread_count = @as(u64, mesh_threads.width) * @as(u64, mesh_threads.height) * @as(u64, mesh_threads.depth);
                 const object_thread_count = @as(u64, object_threads.width) * @as(u64, object_threads.height) * @as(u64, object_threads.depth);
                 if (resolved_mesh.kernel != 1 or
-                    (target_handle.format != .rgba8_unorm and target_handle.format != .bgra8_unorm) or
+                    (output_texture.format != .rgba8_unorm and output_texture.format != .bgra8_unorm) or
                     resolved_mesh.threads_per_grid.width == 0 or resolved_mesh.threads_per_grid.height == 0 or
                     resolved_mesh.threads_per_grid.depth != 1 or
                     object_threads.width != 1 or object_threads.height != 1 or object_threads.depth != 1 or
                     mesh_threads.width == 0 or mesh_threads.height == 0 or mesh_threads.depth != 1 or
                     mesh_thread_count > 1024 or object_thread_count != 1) return self.fail(error.InvalidArgument);
-                var target = target_handle.asTarget();
+                var target = output_texture.asTarget();
                 const width = @min(@as(usize, target.width), @as(usize, resolved_mesh.threads_per_grid.width));
                 const height = @min(@as(usize, target.height), @as(usize, resolved_mesh.threads_per_grid.height));
                 for (0..height) |y| {
@@ -1059,6 +1068,11 @@ pub const CommandBuffer = struct {
                         extra_count += 1;
                     }
                 }
+                const logical_output_count: usize = if (draw_options.write_extra_targets)
+                    @min(extra_count + 1, 8)
+                    else
+                    1;
+                validateColorAttachmentOutputs(active_color_attachments, draw_options.color_attachment_map, logical_output_count) catch |err| return self.fail(err);
                 var stats: raster3d.Stats = .{};
                 for (0..resolved_patch.instance_count) |instance| {
                     const instance_id = std.math.add(usize, resolved_patch.base_instance, instance) catch
@@ -2145,6 +2159,7 @@ pub const RenderEncoder = struct {
             .kernel = kernel,
             .tile_size = tile_size,
             .threads_per_tile = threads_per_tile,
+            .color_attachment_map = self.color_attachment_map,
         } });
     }
 
@@ -2179,6 +2194,7 @@ pub const RenderEncoder = struct {
             .threads_per_grid = .{ .width = grid_width, .height = grid_height, .depth = 1 },
             .threads_per_object_threadgroup = threads_per_object_threadgroup,
             .threads_per_mesh_threadgroup = threads_per_mesh_threadgroup,
+            .color_attachment_map = self.color_attachment_map,
         } });
     }
 
@@ -2227,6 +2243,7 @@ pub const RenderEncoder = struct {
             .threads_per_grid = .{ .width = 0, .height = 0, .depth = 0 },
             .threads_per_object_threadgroup = threads_per_object_threadgroup,
             .threads_per_mesh_threadgroup = threads_per_mesh_threadgroup,
+            .color_attachment_map = self.color_attachment_map,
             .indirect_buffer = indirect_buffer,
             .indirect_buffer_offset = indirect_buffer_offset,
         } });
@@ -6460,6 +6477,43 @@ test "CPU color attachment mapping routes logical output to its physical target"
     try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 255 }, color.bytes[0..4]);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, secondary.bytes[0..4]);
+}
+
+test "CPU tile and mesh maps are captured per deferred command" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const color = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(color);
+    const tile_target = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(tile_target);
+    const mesh_target = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(mesh_target);
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, color, .{
+        .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } },
+    });
+    defer destroyRenderEncoder(encoder);
+    const clear = abi.RenderPassColorAttachmentDescriptor{
+        .load_action = .clear,
+        .store_action = .store,
+        .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 },
+    };
+    try encoder.setColorAttachment(tile_target, clear, 1);
+    try encoder.setColorAttachment(mesh_target, clear, 2);
+    try encoder.setColorAttachmentMap(&[_]u8{ 1, 0, 2, 3, 4, 5, 6, 7 }, 8);
+    try encoder.dispatchThreadsPerTile(1, .{ .width = 2, .height = 2, .depth = 1 }, .{ .width = 2, .height = 2, .depth = 1 });
+    try encoder.setColorAttachmentMap(&[_]u8{ 2, 0, 1, 3, 4, 5, 6, 7 }, 8);
+    try encoder.drawMeshThreadgroups(1, .{ .width = 2, .height = 2, .depth = 1 }, .{ .width = 1, .height = 1, .depth = 1 }, .{ .width = 2, .height = 2, .depth = 1 });
+    try encoder.endEncoding();
+    try command_buffer.commit();
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 255 }, color.bytes[0..4]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 32, 32, 64, 255 }, tile_target.bytes[0..4]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 32, 32, 64, 255 }, mesh_target.bytes[0..4]);
 }
 
 test "visibility results count CPU-covered fragments and accumulate" {
