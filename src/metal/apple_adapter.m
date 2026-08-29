@@ -571,10 +571,12 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @public
     ZPUCommandBuffer *_owner;
     ZPUTexture *_texture;
+    zpu_metal_texture *_renderTexture;
+    zpu_metal_texture *_depthTexture;
     zpu_metal_render_pass_descriptor _pass;
     NSUInteger _childCount;
 }
-- (instancetype)initWithOwner:(ZPUCommandBuffer *)owner texture:(ZPUTexture *)texture pass:(zpu_metal_render_pass_descriptor)pass;
+- (instancetype)initWithOwner:(ZPUCommandBuffer *)owner texture:(ZPUTexture *)texture renderTexture:(zpu_metal_texture *)renderTexture depthTexture:(zpu_metal_texture *)depthTexture pass:(zpu_metal_render_pass_descriptor)pass;
 @end
 
 static BOOL zpu_u32(NSUInteger value, uint32_t *result) {
@@ -758,11 +760,13 @@ static BOOL zpu_metal4_render_pass_descriptor(MTL4RenderPassDescriptor *descript
                                                 zpu_metal_render_pass_descriptor *pass) {
     if (descriptor == nil || color_texture == NULL || depth_texture == NULL || pass == NULL) return NO;
     ZPUTexture *color = (ZPUTexture *)descriptor.colorAttachments[0].texture;
-    if (![color isKindOfClass:[ZPUTexture class]] || !color->_zpuTexture ||
+    if (![color isKindOfClass:[ZPUTexture class]] ||
         !zpu_render_pipeline_format_supported(color->_pixelFormat)) return NO;
+    zpu_metal_texture *colorTexture = [color zpuTextureAtLevel:descriptor.colorAttachments[0].level];
+    if (colorTexture == NULL || descriptor.colorAttachments[0].slice != 0) return NO;
     if (descriptor.renderTargetArrayLength > 1 || descriptor.defaultRasterSampleCount > 1 ||
-        (descriptor.renderTargetWidth != 0 && descriptor.renderTargetWidth != color.width) ||
-        (descriptor.renderTargetHeight != 0 && descriptor.renderTargetHeight != color.height) ||
+        (descriptor.renderTargetWidth != 0 && descriptor.renderTargetWidth != zpu_metal_texture_width(colorTexture)) ||
+        (descriptor.renderTargetHeight != 0 && descriptor.renderTargetHeight != zpu_metal_texture_height(colorTexture)) ||
         descriptor.stencilAttachment.texture != nil) return NO;
     for (NSUInteger index = 1; index < 8; ++index) {
         if (descriptor.colorAttachments[index].texture != nil) return NO;
@@ -783,7 +787,10 @@ static BOOL zpu_metal4_render_pass_descriptor(MTL4RenderPassDescriptor *descript
     ZPUTexture *depth = (ZPUTexture *)descriptor.depthAttachment.texture;
     if (depth != nil) {
         if (![depth isKindOfClass:[ZPUTexture class]] || depth->_pixelFormat != MTLPixelFormatDepth32Float ||
-            depth.width != color.width || depth.height != color.height) return NO;
+            descriptor.depthAttachment.slice != 0) return NO;
+        zpu_metal_texture *depthTexture = [depth zpuTextureAtLevel:descriptor.depthAttachment.level];
+        if (depthTexture == NULL || zpu_metal_texture_width(depthTexture) != zpu_metal_texture_width(colorTexture) ||
+            zpu_metal_texture_height(depthTexture) != zpu_metal_texture_height(colorTexture)) return NO;
         pass->depth.load_action = zpu_load_action(descriptor.depthAttachment.loadAction);
         pass->depth.store_action = zpu_store_action(descriptor.depthAttachment.storeAction);
         pass->depth.clear_depth = (float)descriptor.depthAttachment.clearDepth;
@@ -2547,6 +2554,10 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     if (descriptor == nil || descriptor.colorAttachments[0].texture == nil) return nil;
     ZPUTexture *texture = (ZPUTexture *)descriptor.colorAttachments[0].texture;
     if (![texture isKindOfClass:[ZPUTexture class]]) return nil;
+    if (descriptor.colorAttachments[0].slice != 0) return nil;
+    zpu_metal_texture *colorTexture = [texture zpuTextureAtLevel:descriptor.colorAttachments[0].level];
+    if (colorTexture == NULL) return nil;
+    zpu_metal_texture *depthTexture = NULL;
     zpu_metal_render_pass_descriptor pass = {
         .color = {
             .load_action = zpu_load_action(descriptor.colorAttachments[0].loadAction),
@@ -2562,18 +2573,21 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     };
     if (descriptor.depthAttachment.texture != nil) {
         ZPUTexture *depth = (ZPUTexture *)descriptor.depthAttachment.texture;
-        if (![depth isKindOfClass:[ZPUTexture class]] || depth->_pixelFormat != MTLPixelFormatDepth32Float) return nil;
+        if (![depth isKindOfClass:[ZPUTexture class]] || depth->_pixelFormat != MTLPixelFormatDepth32Float ||
+            descriptor.depthAttachment.slice != 0) return nil;
+        depthTexture = [depth zpuTextureAtLevel:descriptor.depthAttachment.level];
+        if (depthTexture == NULL) return nil;
         pass.depth.load_action = zpu_load_action(descriptor.depthAttachment.loadAction);
         pass.depth.store_action = zpu_store_action(descriptor.depthAttachment.storeAction);
         pass.depth.clear_depth = (float)descriptor.depthAttachment.clearDepth;
     }
-    zpu_metal_render_encoder *encoder = zpu_metal_command_buffer_render_encoder(_zpuCommandBuffer, texture->_zpuTexture, &pass);
+    zpu_metal_render_encoder *encoder = zpu_metal_command_buffer_render_encoder(_zpuCommandBuffer, colorTexture, &pass);
     if (encoder == NULL) return nil;
     [self retainResource:texture];
     if (descriptor.depthAttachment.texture != nil) {
         ZPUTexture *depth = (ZPUTexture *)descriptor.depthAttachment.texture;
         [self retainResource:depth];
-        if (zpu_metal_render_encoder_set_depth_texture(encoder, depth->_zpuTexture) != ZPU_METAL_OK) {
+        if (zpu_metal_render_encoder_set_depth_texture(encoder, depthTexture) != ZPU_METAL_OK) {
             zpu_metal_render_encoder_destroy(encoder);
             return nil;
         }
@@ -2584,6 +2598,10 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     if (descriptor == nil || descriptor.colorAttachments[0].texture == nil) return nil;
     ZPUTexture *texture = (ZPUTexture *)descriptor.colorAttachments[0].texture;
     if (![texture isKindOfClass:[ZPUTexture class]]) return nil;
+    if (descriptor.colorAttachments[0].slice != 0) return nil;
+    zpu_metal_texture *colorTexture = [texture zpuTextureAtLevel:descriptor.colorAttachments[0].level];
+    if (colorTexture == NULL) return nil;
+    zpu_metal_texture *depthTexture = NULL;
     zpu_metal_render_pass_descriptor pass = {
         .color = {
             .load_action = zpu_load_action(descriptor.colorAttachments[0].loadAction),
@@ -2599,14 +2617,18 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     };
     if (descriptor.depthAttachment.texture != nil) {
         ZPUTexture *depth = (ZPUTexture *)descriptor.depthAttachment.texture;
-        if (![depth isKindOfClass:[ZPUTexture class]] || depth->_pixelFormat != MTLPixelFormatDepth32Float) return nil;
+        if (![depth isKindOfClass:[ZPUTexture class]] || depth->_pixelFormat != MTLPixelFormatDepth32Float ||
+            descriptor.depthAttachment.slice != 0) return nil;
+        depthTexture = [depth zpuTextureAtLevel:descriptor.depthAttachment.level];
+        if (depthTexture == NULL) return nil;
         pass.depth.load_action = zpu_load_action(descriptor.depthAttachment.loadAction);
         pass.depth.store_action = zpu_store_action(descriptor.depthAttachment.storeAction);
         pass.depth.clear_depth = (float)descriptor.depthAttachment.clearDepth;
     }
     [self retainResource:texture];
     if (descriptor.depthAttachment.texture != nil) [self retainResource:descriptor.depthAttachment.texture];
-    return (id<MTLParallelRenderCommandEncoder>)[[ZPUParallelRenderEncoder alloc] initWithOwner:self texture:texture pass:pass];
+    return (id<MTLParallelRenderCommandEncoder>)[[ZPUParallelRenderEncoder alloc]
+        initWithOwner:self texture:texture renderTexture:colorTexture depthTexture:depthTexture pass:pass];
 }
 - (id<MTLBlitCommandEncoder>)blitCommandEncoder {
     zpu_metal_blit_encoder *encoder = zpu_metal_command_buffer_blit_encoder(_zpuCommandBuffer);
@@ -2843,8 +2865,11 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     ZPUTexture *depth = nil;
     zpu_metal_render_pass_descriptor pass;
     if (!zpu_metal4_render_pass_descriptor(descriptor, &color, &depth, &pass)) return nil;
+    zpu_metal_texture *colorTexture = [color zpuTextureAtLevel:descriptor.colorAttachments[0].level];
+    zpu_metal_texture *depthTexture = depth == nil ? NULL : [depth zpuTextureAtLevel:descriptor.depthAttachment.level];
+    if (colorTexture == NULL || (depth != nil && depthTexture == NULL)) return nil;
     zpu_metal_render_encoder *encoder = zpu_metal_command_buffer_render_encoder(
-        _legacyBuffer->_zpuCommandBuffer, color->_zpuTexture, &pass);
+        _legacyBuffer->_zpuCommandBuffer, colorTexture, &pass);
     if (encoder == NULL) {
         [self markError];
         return nil;
@@ -2852,7 +2877,7 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     [_legacyBuffer retainResource:color];
     if (depth != nil) {
         [_legacyBuffer retainResource:depth];
-        if (zpu_metal_render_encoder_set_depth_texture(encoder, depth->_zpuTexture) != ZPU_METAL_OK) {
+        if (zpu_metal_render_encoder_set_depth_texture(encoder, depthTexture) != ZPU_METAL_OK) {
             zpu_metal_render_encoder_destroy(encoder);
             [self markError];
             return nil;
@@ -4061,10 +4086,12 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
 @end
 
 @implementation ZPUParallelRenderEncoder
-- (instancetype)initWithOwner:(ZPUCommandBuffer *)owner texture:(ZPUTexture *)texture pass:(zpu_metal_render_pass_descriptor)pass {
+- (instancetype)initWithOwner:(ZPUCommandBuffer *)owner texture:(ZPUTexture *)texture renderTexture:(zpu_metal_texture *)renderTexture depthTexture:(zpu_metal_texture *)depthTexture pass:(zpu_metal_render_pass_descriptor)pass {
     if ((self = [super init])) {
         _owner = owner;
         _texture = texture;
+        _renderTexture = renderTexture;
+        _depthTexture = depthTexture;
         _pass = pass;
     }
     return self;
@@ -4077,17 +4104,10 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
         if (pass.depth.load_action != ZPU_METAL_LOAD_DONT_CARE) pass.depth.load_action = ZPU_METAL_LOAD_LOAD;
     }
     zpu_metal_command_buffer *commandBuffer = _owner->_zpuCommandBuffer;
-    zpu_metal_render_encoder *encoder = zpu_metal_command_buffer_render_encoder(commandBuffer, _texture->_zpuTexture, &pass);
+    zpu_metal_render_encoder *encoder = zpu_metal_command_buffer_render_encoder(commandBuffer, _renderTexture, &pass);
     if (encoder == NULL) return nil;
     if (pass.depth.load_action != ZPU_METAL_LOAD_DONT_CARE) {
-        ZPUTexture *depth = nil;
-        for (id resource in _owner->_retainedResources) {
-            if ([resource isKindOfClass:[ZPUTexture class]] && ((ZPUTexture *)resource)->_pixelFormat == MTLPixelFormatDepth32Float) {
-                depth = (ZPUTexture *)resource;
-                break;
-            }
-        }
-        if (depth == nil || zpu_metal_render_encoder_set_depth_texture(encoder, depth->_zpuTexture) != ZPU_METAL_OK) {
+        if (_depthTexture == NULL || zpu_metal_render_encoder_set_depth_texture(encoder, _depthTexture) != ZPU_METAL_OK) {
             zpu_metal_render_encoder_destroy(encoder);
             return nil;
         }

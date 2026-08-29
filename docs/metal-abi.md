@@ -45,6 +45,9 @@ triangle path:
   test. This is the Metal texture coordinate space on both macOS and iOS; any
   AppKit/UIKit view-coordinate conversion belongs to the caller and is not
   silently applied by the CPU adapter
+- render-pass attachment mip levels select the corresponding ZPU texture and
+  use that level's width/height for rasterization; array/depth-plane slices
+  remain explicitly rejected until sliced CPU storage is added
 - buffer-backed texture views that alias storage with checked row strides and
   preserve the backing resource lifetime
 - CPU-owned `MTLTextureViewPool` slots that create/copy ZPU texture views or

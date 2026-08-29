@@ -731,6 +731,78 @@ int main(void) {
             return 71;
         }
 
+        MTLTextureDescriptor *mip_render_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                width:4
+                                                               height:4
+                                                            mipmapped:YES];
+        mip_render_descriptor.storageMode = MTLStorageModeShared;
+        mip_render_descriptor.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> native_mip_render_texture = [device newTextureWithDescriptor:mip_render_descriptor];
+        id<MTLTexture> adapter_mip_render_texture = [adapter_device newTextureWithDescriptor:mip_render_descriptor];
+        const zpu_metal_vertex mip_render_vertices[] = {
+            {{-0.75f, -0.75f, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
+            {{ 0.75f, -0.75f, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
+            {{ 0.75f,  0.75f, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
+            {{-0.75f, -0.75f, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
+            {{ 0.75f,  0.75f, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
+            {{-0.75f,  0.75f, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
+        };
+        id<MTLBuffer> native_mip_render_vertex_buffer =
+            [device newBufferWithBytes:mip_render_vertices length:sizeof(mip_render_vertices)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_mip_render_vertex_buffer =
+            [adapter_device newBufferWithBytes:mip_render_vertices length:sizeof(mip_render_vertices)
+                                       options:MTLResourceStorageModeShared];
+        MTLRenderPassDescriptor *native_mip_render_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_mip_render_pass.colorAttachments[0].texture = native_mip_render_texture;
+        native_mip_render_pass.colorAttachments[0].level = 1;
+        native_mip_render_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_mip_render_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_mip_render_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        id<MTLCommandBuffer> native_mip_render_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_mip_render_encoder =
+            [native_mip_render_command_buffer renderCommandEncoderWithDescriptor:native_mip_render_pass];
+        [native_mip_render_encoder setRenderPipelineState:pipeline];
+        [native_mip_render_encoder setVertexBuffer:native_mip_render_vertex_buffer offset:0 atIndex:0];
+        [native_mip_render_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_mip_render_encoder endEncoding];
+        [native_mip_render_command_buffer commit];
+        [native_mip_render_command_buffer waitUntilCompleted];
+        MTLRenderPassDescriptor *adapter_mip_render_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_mip_render_pass.colorAttachments[0].texture = adapter_mip_render_texture;
+        adapter_mip_render_pass.colorAttachments[0].level = 1;
+        adapter_mip_render_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_mip_render_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_mip_render_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        id<MTLCommandBuffer> adapter_mip_render_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_mip_render_encoder =
+            [adapter_mip_render_command_buffer renderCommandEncoderWithDescriptor:adapter_mip_render_pass];
+        [adapter_mip_render_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_mip_render_encoder setVertexBuffer:adapter_mip_render_vertex_buffer offset:0 atIndex:0];
+        [adapter_mip_render_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_mip_render_encoder endEncoding];
+        [adapter_mip_render_command_buffer commit];
+        [adapter_mip_render_command_buffer waitUntilCompleted];
+        uint8_t native_mip_render_pixels[2 * 2 * 4];
+        uint8_t adapter_mip_render_pixels[2 * 2 * 4];
+        [native_mip_render_texture getBytes:native_mip_render_pixels
+                                bytesPerRow:2 * 4
+                                 fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                mipmapLevel:1];
+        [adapter_mip_render_texture getBytes:adapter_mip_render_pixels
+                                 bytesPerRow:2 * 4
+                                  fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                 mipmapLevel:1];
+        if (native_mip_render_texture == nil || adapter_mip_render_texture == nil ||
+            native_mip_render_vertex_buffer == nil || adapter_mip_render_vertex_buffer == nil ||
+            native_mip_render_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_mip_render_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_mip_render_pixels, adapter_mip_render_pixels, sizeof(native_mip_render_pixels)) != 0) {
+            fprintf(stderr, "metal-pixel: mip-level render exactness failed\n");
+            return 72;
+        }
+
         /* Library/function discovery is also CPU metadata. The source text
          * is inspected only for registered ZPU kernel names; it is never sent
          * to Apple's compiler by the adapter. */

@@ -471,6 +471,7 @@
     "MTLTexture.parentTexture",
     "MTLTexture.parentRelativeLevel",
     "MTLTexture.rootResource",
+    "MTLRenderPassAttachmentDescriptor.level",
     "MTLCommandBuffer.status",
     "MTLCommandBuffer.error",
     "MTLCommandBuffer.waitUntilCompleted",
