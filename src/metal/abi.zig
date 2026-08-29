@@ -39,10 +39,11 @@ pub const DepthClipMode = enum(u8) { clip = 0, clamp = 1 };
 pub const SamplerFilter = enum(u8) { nearest = 0, linear = 1 };
 pub const SamplerAddressMode = enum(u8) {
     clamp_to_edge = 0,
-    mirror_repeat = 1,
+    mirror_clamp_to_edge = 1,
     repeat = 2,
-    clamp_to_zero = 3,
-    clamp_to_border_color = 4,
+    mirror_repeat = 3,
+    clamp_to_zero = 4,
+    clamp_to_border_color = 5,
 };
 pub const TextureSwizzle = enum(u8) {
     zero = 0,

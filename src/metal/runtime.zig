@@ -2061,6 +2061,7 @@ fn samplerFilterFromInt(value: u8) ?abi.SamplerFilter {
 fn samplerAddressModeFromInt(value: u8) ?abi.SamplerAddressMode {
     return switch (value) {
         @intFromEnum(abi.SamplerAddressMode.clamp_to_edge) => .clamp_to_edge,
+        @intFromEnum(abi.SamplerAddressMode.mirror_clamp_to_edge) => .mirror_clamp_to_edge,
         @intFromEnum(abi.SamplerAddressMode.mirror_repeat) => .mirror_repeat,
         @intFromEnum(abi.SamplerAddressMode.repeat) => .repeat,
         @intFromEnum(abi.SamplerAddressMode.clamp_to_zero) => .clamp_to_zero,

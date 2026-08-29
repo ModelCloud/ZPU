@@ -169,6 +169,7 @@ pub const Target = struct {
         if (!std.math.isFinite(value)) return null;
         return switch (mode) {
             .clamp_to_edge => std.math.clamp(value, 0, 1),
+            .mirror_clamp_to_edge => if (value < -1) 0 else if (value > 1) 1 else @abs(value),
             .repeat => value - @floor(value),
             .mirror_repeat => blk: {
                 const period = value - @floor(value / 2) * 2;
@@ -183,6 +184,7 @@ pub const Target = struct {
         const extent: i64 = @intCast(limit);
         return switch (mode) {
             .clamp_to_edge => @intCast(std.math.clamp(index, 0, extent - 1)),
+            .mirror_clamp_to_edge => @intCast(std.math.clamp(index, 0, extent - 1)),
             .repeat => blk: {
                 var wrapped = @rem(index, extent);
                 if (wrapped < 0) wrapped += extent;
@@ -824,6 +826,8 @@ test "CPU texture sampling supports linear filtering and address modes" {
     try std.testing.expectEqual(@as(f32, 0), repeated[1]);
     const mirrored = target.sampleNearest(1.25, 0.25, .mirror_repeat, .mirror_repeat);
     try std.testing.expectEqual(@as(f32, 1), mirrored[1]);
+    const mirror_clamped = target.sampleNearest(-0.25, 0.25, .mirror_clamp_to_edge, .mirror_clamp_to_edge);
+    try std.testing.expectEqual(@as(f32, 1), mirror_clamped[0]);
     const outside = target.sampleNearest(-0.25, 0.25, .clamp_to_zero, .clamp_to_zero);
     try std.testing.expectEqual([4]f32{ 0, 0, 0, 0 }, outside);
 }

@@ -919,6 +919,89 @@ int main(void) {
             }
             return 101;
         }
+
+        const zpu_metal_vertex address_sample_vertices[] = {
+            {{x0, y0, 0.5f, 1.0f}, {-0.25f, -0.25f, 0.0f, 1.0f}},
+            {{x1, y0, 0.5f, 1.0f}, { 1.25f, -0.25f, 0.0f, 1.0f}},
+            {{x1, y1, 0.5f, 1.0f}, { 1.25f,  1.25f, 0.0f, 1.0f}},
+            {{x0, y0, 0.5f, 1.0f}, {-0.25f, -0.25f, 0.0f, 1.0f}},
+            {{x1, y1, 0.5f, 1.0f}, { 1.25f,  1.25f, 0.0f, 1.0f}},
+            {{x0, y1, 0.5f, 1.0f}, {-0.25f,  1.25f, 0.0f, 1.0f}},
+        };
+        id<MTLBuffer> native_address_vertex_buffer =
+            [device newBufferWithBytes:address_sample_vertices length:sizeof(address_sample_vertices)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_address_vertex_buffer =
+            [adapter_device newBufferWithBytes:address_sample_vertices length:sizeof(address_sample_vertices)
+                                        options:MTLResourceStorageModeShared];
+        MTLSamplerDescriptor *address_sampler_descriptor = [sample_sampler_descriptor copy];
+        address_sampler_descriptor.sAddressMode = MTLSamplerAddressModeRepeat;
+        address_sampler_descriptor.tAddressMode = MTLSamplerAddressModeMirrorRepeat;
+        id<MTLSamplerState> native_address_sampler =
+            [device newSamplerStateWithDescriptor:address_sampler_descriptor];
+        id<MTLSamplerState> adapter_address_sampler =
+            [adapter_device newSamplerStateWithDescriptor:address_sampler_descriptor];
+        id<MTLTexture> native_address_output = [device newTextureWithDescriptor:sample_output_descriptor];
+        id<MTLTexture> adapter_address_output = [adapter_device newTextureWithDescriptor:sample_output_descriptor];
+        if (native_address_vertex_buffer == nil || adapter_address_vertex_buffer == nil ||
+            native_address_sampler == nil || adapter_address_sampler == nil ||
+            native_address_output == nil || adapter_address_output == nil) {
+            fprintf(stderr, "metal-pixel: address-mode sampler resource allocation failed\n");
+            return 102;
+        }
+        MTLRenderPassDescriptor *native_address_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_address_pass.colorAttachments[0].texture = native_address_output;
+        native_address_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_address_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_address_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> native_address_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_address_encoder =
+            [native_address_command_buffer renderCommandEncoderWithDescriptor:native_address_pass];
+        [native_address_encoder setRenderPipelineState:native_sample_pipeline];
+        [native_address_encoder setVertexBuffer:native_address_vertex_buffer offset:0 atIndex:0];
+        [native_address_encoder setFragmentTexture:native_sample_source atIndex:0];
+        [native_address_encoder setFragmentSamplerState:native_address_sampler atIndex:0];
+        [native_address_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_address_encoder endEncoding];
+        [native_address_command_buffer commit];
+        [native_address_command_buffer waitUntilCompleted];
+        MTLRenderPassDescriptor *adapter_address_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_address_pass.colorAttachments[0].texture = adapter_address_output;
+        adapter_address_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_address_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_address_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> adapter_address_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_address_encoder =
+            [adapter_address_command_buffer renderCommandEncoderWithDescriptor:adapter_address_pass];
+        [adapter_address_encoder setRenderPipelineState:adapter_sample_pipeline];
+        [adapter_address_encoder setVertexBuffer:adapter_address_vertex_buffer offset:0 atIndex:0];
+        [adapter_address_encoder setFragmentTexture:adapter_sample_source atIndex:0];
+        [adapter_address_encoder setFragmentSamplerState:adapter_address_sampler atIndex:0];
+        [adapter_address_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_address_encoder endEncoding];
+        [adapter_address_command_buffer commit];
+        [adapter_address_command_buffer waitUntilCompleted];
+        uint8_t native_address_bytes[byte_count];
+        uint8_t adapter_address_bytes[byte_count];
+        [native_address_output getBytes:native_address_bytes bytesPerRow:(NSUInteger)width * 4
+                             fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_address_output getBytes:adapter_address_bytes bytesPerRow:(NSUInteger)width * 4
+                               fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (native_address_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_address_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fail_with_error("sampler address-mode execution failed", adapter_pipeline_error);
+            return 103;
+        }
+        if (memcmp(native_address_bytes, adapter_address_bytes, byte_count) != 0) {
+            for (size_t byte = 0; byte < byte_count; ++byte) {
+                if (native_address_bytes[byte] != adapter_address_bytes[byte]) {
+                    fprintf(stderr, "metal-pixel: sampler address mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                            byte, native_address_bytes[byte], adapter_address_bytes[byte]);
+                    break;
+                }
+            }
+            return 104;
+        }
         MTLRenderPipelineDescriptor *adapter_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
         adapter_pipeline_descriptor.vertexFunction = adapter_vertex_function;
         adapter_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
