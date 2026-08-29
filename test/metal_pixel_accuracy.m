@@ -705,6 +705,11 @@ int main(void) {
         id<MTLBlitCommandEncoder> adapter_generate_mip_blit = [adapter_generate_mip_command_buffer blitCommandEncoder];
         [adapter_generate_mip_blit generateMipmapsForTexture:adapter_generate_mip_texture];
         [adapter_generate_mip_blit endEncoding];
+        uint8_t adapter_deferred_mip_level_one[sizeof(mip_level_one)];
+        [adapter_generate_mip_texture getBytes:adapter_deferred_mip_level_one
+                                   bytesPerRow:2 * 4
+                                    fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                   mipmapLevel:1];
         [adapter_generate_mip_command_buffer commit];
         [adapter_generate_mip_command_buffer waitUntilCompleted];
         uint8_t native_generated_mip_level_one[sizeof(mip_level_one)];
@@ -720,6 +725,7 @@ int main(void) {
         if (native_generate_mip_texture == nil || adapter_generate_mip_texture == nil ||
             native_generate_mip_command_buffer.status != MTLCommandBufferStatusCompleted ||
             adapter_generate_mip_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(adapter_deferred_mip_level_one, (const uint8_t[sizeof(mip_level_one)]){0}, sizeof(mip_level_one)) != 0 ||
             memcmp(native_generated_mip_level_one, adapter_generated_mip_level_one, sizeof(mip_level_one)) != 0) {
             fprintf(stderr, "metal-pixel: mipmap generation exactness failed\n");
             return 71;

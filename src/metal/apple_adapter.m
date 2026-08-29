@@ -4263,7 +4263,8 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
         (zpuTexture->_pixelFormat != MTLPixelFormatRGBA8Unorm && zpuTexture->_pixelFormat != MTLPixelFormatBGRA8Unorm) ||
         zpuTexture.mipmapLevelCount < 2) return;
     for (NSUInteger level = 0; level + 1 < zpuTexture.mipmapLevelCount; ++level) {
-        if (!zpu_generate_unorm_mipmap([zpuTexture zpuTextureAtLevel:level], [zpuTexture zpuTextureAtLevel:level + 1])) return;
+        if (zpu_metal_blit_encoder_generate_mipmap(
+                _zpuEncoder, [zpuTexture zpuTextureAtLevel:level], [zpuTexture zpuTextureAtLevel:level + 1]) != ZPU_METAL_OK) return;
     }
     [_owner retainResource:zpuTexture];
 }

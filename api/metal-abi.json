@@ -87,6 +87,7 @@
       "zpu_metal_blit_encoder_copy_buffer_to_texture",
       "zpu_metal_blit_encoder_copy_texture_to_buffer",
       "zpu_metal_blit_encoder_copy_texture_to_texture",
+      "zpu_metal_blit_encoder_generate_mipmap",
       "zpu_metal_blit_encoder_fill_buffer",
       "zpu_metal_blit_encoder_synchronize_resource",
       "zpu_metal_blit_encoder_update_fence",

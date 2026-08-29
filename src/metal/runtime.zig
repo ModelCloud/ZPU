@@ -183,6 +183,11 @@ const TextureTextureCommand = struct {
     destination_region: abi.Region,
 };
 
+const MipmapCommand = struct {
+    source: *Texture,
+    destination: *Texture,
+};
+
 const FillBufferCommand = struct {
     buffer: *Buffer,
     offset: usize,
@@ -215,6 +220,7 @@ const Command = union(enum) {
     copy_buffer_to_texture: BufferTextureCommand,
     copy_texture_to_buffer: TextureBufferCommand,
     copy_texture_to_texture: TextureTextureCommand,
+    generate_mipmap: MipmapCommand,
     fill_buffer: FillBufferCommand,
     compute: ComputeCommand,
     synchronize_buffer: *Buffer,
@@ -320,6 +326,11 @@ pub const CommandBuffer = struct {
                 if (!validTexture(copy.source) or !validTexture(copy.destination)) return self.fail(error.InvalidResource);
                 if (copy.source.device != copy.destination.device or copy.source.format != copy.destination.format) return self.fail(error.InvalidResource);
                 copyTextureToTexture(copy) catch |err| return self.fail(err);
+            },
+            .generate_mipmap => |mipmap| {
+                if (!validTexture(mipmap.source) or !validTexture(mipmap.destination)) return self.fail(error.InvalidResource);
+                if (mipmap.source.device != mipmap.destination.device) return self.fail(error.InvalidResource);
+                generateMipmap(mipmap) catch |err| return self.fail(err);
             },
             .fill_buffer => |fill| {
                 if (!validBuffer(fill.buffer)) return self.fail(error.InvalidResource);
@@ -740,6 +751,12 @@ pub const BlitEncoder = struct {
         if (!self.open() or !validTexture(source) or !validTexture(destination)) return error.InvalidArgument;
         if (source.device != destination.device or source.format != destination.format) return error.InvalidArgument;
         _ = try self.command_buffer.append(.{ .copy_texture_to_texture = .{ .source = source, .source_region = source_region, .destination = destination, .destination_region = destination_region } });
+    }
+
+    pub fn generateMipmap(self: *BlitEncoder, source: *Texture, destination: *Texture) Error!void {
+        if (!self.open() or !validTexture(source) or !validTexture(destination)) return error.InvalidArgument;
+        if (source.device != destination.device or source.format != destination.format) return error.InvalidArgument;
+        _ = try self.command_buffer.append(.{ .generate_mipmap = .{ .source = source, .destination = destination } });
     }
 
     pub fn fillBuffer(self: *BlitEncoder, buffer: *Buffer, offset: usize, length: usize, value: u8) Error!void {
@@ -1418,6 +1435,30 @@ fn copyTextureToTexture(command: TextureTextureCommand) Error!void {
     }
 }
 
+fn generateMipmap(command: MipmapCommand) Error!void {
+    if (command.source == command.destination or !command.source.format.isColor()) return error.UnsupportedFormat;
+    const destination_width: u32 = if (command.source.width > 1) command.source.width / 2 else 1;
+    const destination_height: u32 = if (command.source.height > 1) command.source.height / 2 else 1;
+    if (command.destination.width != destination_width or command.destination.height != destination_height) return error.InvalidArgument;
+    for (0..destination_height) |y| {
+        for (0..destination_width) |x| {
+            const source_x0 = x * 2;
+            const source_y0 = y * 2;
+            var sums = [_]u32{0, 0, 0, 0};
+            for (0..2) |sample_y| {
+                const source_y = @min(source_y0 + sample_y, @as(usize, command.source.height) - 1);
+                for (0..2) |sample_x| {
+                    const source_x = @min(source_x0 + sample_x, @as(usize, command.source.width) - 1);
+                    const source_offset = source_y * command.source.stride + source_x * 4;
+                    for (0..4) |component| sums[component] += command.source.bytes[source_offset + component];
+                }
+            }
+            const destination_offset = y * command.destination.stride + x * 4;
+            for (0..4) |component| command.destination.bytes[destination_offset + component] = @intCast((sums[component] + 2) / 4);
+        }
+    }
+}
+
 fn validateRegion(width: u32, height: u32, region: abi.Region, stride: usize, storage_length: usize) Error!void {
     if (region.origin.z != 0 or region.size.depth != 1) return error.InvalidArgument;
     if (region.origin.x > width or region.origin.y > height or region.size.width > width - region.origin.x or region.size.height > height - region.origin.y) return error.InvalidArgument;
@@ -1579,6 +1620,40 @@ test "resource bytes and ordered blit command buffer are deterministic" {
     try command_buffer.commit();
     try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xee, 0xee, 0xee, 0xee, 1, 2, 3, 4, 5, 6, 7, 8, 0xee, 0xee, 0xee, 0xee }, destination.bytes);
+}
+
+test "CPU blit mipmap generation is deferred and deterministic" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const source = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(source);
+    const destination = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(destination);
+    const block_values = [_]u8{ 17, 53, 101, 197 };
+    for (0..4) |y| {
+        for (0..4) |x| {
+            const value = block_values[(y / 2) * 2 + x / 2];
+            const offset = y * source.stride + x * 4;
+            source.bytes[offset + 0] = value;
+            source.bytes[offset + 1] = value + 1;
+            source.bytes[offset + 2] = value + 2;
+            source.bytes[offset + 3] = 255;
+        }
+    }
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginBlit(command_buffer);
+    try encoder.generateMipmap(source, destination);
+    try encoder.endEncoding();
+    destroyBlitEncoder(encoder);
+    try std.testing.expectEqual(@as(u8, 0), destination.bytes[0]);
+    try command_buffer.commit();
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        17, 18, 19, 255, 53, 54, 55, 255,
+        101, 102, 103, 255, 197, 198, 199, 255,
+    }, destination.bytes);
 }
 
 test "CPU compute is deferred, bounded, and pixel deterministic" {
@@ -2156,6 +2231,11 @@ pub export fn zpu_metal_blit_encoder_copy_texture_to_buffer(encoder: ?*BlitEncod
 
 pub export fn zpu_metal_blit_encoder_copy_texture_to_texture(encoder: ?*BlitEncoder, source: ?*Texture, source_region: abi.Region, destination: ?*Texture, destination_region: abi.Region) callconv(.c) c_int {
     (encoder orelse return -1).copyTextureToTexture(source orelse return -1, source_region, destination orelse return -1, destination_region) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_blit_encoder_generate_mipmap(encoder: ?*BlitEncoder, source: ?*Texture, destination: ?*Texture) callconv(.c) c_int {
+    (encoder orelse return -1).generateMipmap(source orelse return -1, destination orelse return -1) catch |err| return errorCode(err);
     return 0;
 }
 
