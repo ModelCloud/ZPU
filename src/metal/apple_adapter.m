@@ -1819,6 +1819,13 @@ static BOOL zpu_texture_belongs_to_device(ZPUDevice *owner, ZPUTexture *texture)
     return [texture isKindOfClass:[ZPUTexture class]] && texture->_owner == owner;
 }
 
+/* NSRange is a count-based range, so the largest index touched by an array
+ * setter is location + length - 1. Keep that addition checked before using
+ * the caller's C array or forwarding an index into a CPU binding table. */
+static BOOL zpu_range_indices_fit(NSRange range) {
+    return range.length == 0 || range.location <= NSUIntegerMax - (range.length - 1);
+}
+
 static BOOL zpu_color_attachment_map_is_identity(MTLLogicalToPhysicalColorAttachmentMap *mapping)
     API_AVAILABLE(macos(26.0), ios(26.0)) {
     if (mapping == nil) return YES;
@@ -10829,7 +10836,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     [self remember:buffer atIndex:index offset:offset];
 }
 - (void)setBuffers:(const id<MTLBuffer> __nullable [__nonnull])buffers offsets:(const NSUInteger [__nonnull])offsets withRange:(NSRange)range {
-    if (buffers == NULL || offsets == NULL) return;
+    if (buffers == NULL || offsets == NULL || !zpu_range_indices_fit(range)) return;
     for (NSUInteger index = 0; index < range.length; ++index) {
         [self setBuffer:buffers[index] offset:offsets[index] atIndex:range.location + index];
     }
@@ -10839,7 +10846,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     [self remember:texture atIndex:index];
 }
 - (void)setTextures:(const id<MTLTexture> __nullable [__nonnull])textures withRange:(NSRange)range {
-    if (textures == NULL) return;
+    if (textures == NULL || !zpu_range_indices_fit(range)) return;
     for (NSUInteger index = 0; index < range.length; ++index) [self setTexture:textures[index] atIndex:range.location + index];
 }
 - (void)setSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
@@ -10848,7 +10855,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     [self remember:sampler atIndex:index];
 }
 - (void)setSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers withRange:(NSRange)range {
-    if (samplers == NULL) return;
+    if (samplers == NULL || !zpu_range_indices_fit(range)) return;
     for (NSUInteger index = 0; index < range.length; ++index) [self setSamplerState:samplers[index] atIndex:range.location + index];
 }
 - (void *)constantDataAtIndex:(NSUInteger)index {
@@ -10858,7 +10865,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         data = [NSMutableData dataWithLength:16];
         _constants[key] = data;
     }
-    if (_argumentBuffer != nil && index <= (NSUIntegerMax - _argumentOffset) / 16) {
+    if (_argumentBuffer != nil && _argumentBuffer.contents != nil && index <= (NSUIntegerMax - _argumentOffset) / 16) {
         NSUInteger offset = _argumentOffset + index * 16;
         if (offset <= _argumentBuffer.length && _argumentBuffer.length - offset >= 16) {
             return (uint8_t *)_argumentBuffer.contents + offset;
@@ -10871,7 +10878,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     [self remember:pipeline atIndex:index];
 }
 - (void)setRenderPipelineStates:(const id<MTLRenderPipelineState> __nullable [__nonnull])pipelines withRange:(NSRange)range API_AVAILABLE(macos(10.14), macCatalyst(13.0), ios(13.0)) {
-    if (pipelines == NULL) return;
+    if (pipelines == NULL || !zpu_range_indices_fit(range)) return;
     for (NSUInteger index = 0; index < range.length; ++index) [self setRenderPipelineState:pipelines[index] atIndex:range.location + index];
 }
 - (void)setComputePipelineState:(id<MTLComputePipelineState>)pipeline atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(13.0)) {
@@ -10879,7 +10886,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     [self remember:pipeline atIndex:index];
 }
 - (void)setComputePipelineStates:(const id<MTLComputePipelineState> __nullable [__nonnull])pipelines withRange:(NSRange)range API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(13.0)) {
-    if (pipelines == NULL) return;
+    if (pipelines == NULL || !zpu_range_indices_fit(range)) return;
     for (NSUInteger index = 0; index < range.length; ++index) [self setComputePipelineState:pipelines[index] atIndex:range.location + index];
 }
 - (void)setIndirectCommandBuffer:(id<MTLIndirectCommandBuffer>)indirectCommandBuffer atIndex:(NSUInteger)index API_AVAILABLE(macos(10.14), ios(12.0)) {
@@ -10887,7 +10894,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     [self remember:indirectCommandBuffer atIndex:index];
 }
 - (void)setIndirectCommandBuffers:(const id<MTLIndirectCommandBuffer> __nullable [__nonnull])buffers withRange:(NSRange)range API_AVAILABLE(macos(10.14), ios(12.0)) {
-    if (buffers == NULL) return;
+    if (buffers == NULL || !zpu_range_indices_fit(range)) return;
     for (NSUInteger index = 0; index < range.length; ++index) [self setIndirectCommandBuffer:buffers[index] atIndex:range.location + index];
 }
 - (void)setAccelerationStructure:(id<MTLAccelerationStructure>)accelerationStructure atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
@@ -10901,7 +10908,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     [self remember:visibleFunctionTable atIndex:index];
 }
 - (void)setVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __nullable [__nonnull])visibleFunctionTables withRange:(NSRange)range API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    if (visibleFunctionTables == NULL) return;
+    if (visibleFunctionTables == NULL || !zpu_range_indices_fit(range)) return;
     for (NSUInteger index = 0; index < range.length; ++index) {
         [self setVisibleFunctionTable:visibleFunctionTables[index] atIndex:range.location + index];
     }
@@ -10912,7 +10919,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     [self remember:intersectionFunctionTable atIndex:index];
 }
 - (void)setIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> __nullable [__nonnull])intersectionFunctionTables withRange:(NSRange)range API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    if (intersectionFunctionTables == NULL) return;
+    if (intersectionFunctionTables == NULL || !zpu_range_indices_fit(range)) return;
     for (NSUInteger index = 0; index < range.length; ++index) {
         [self setIntersectionFunctionTable:intersectionFunctionTables[index] atIndex:range.location + index];
     }

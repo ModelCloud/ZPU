@@ -8277,6 +8277,25 @@ int main(void) {
             return 49;
         }
 
+        /* A count-based NSArray-style range must not wrap its final binding
+         * index. The second entry below would alias slot zero if
+         * location + index were evaluated without overflow checking. */
+        id<MTLBuffer> argument_range_overflow_buffer =
+            [adapter_device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> argument_range_overflow_bindings[2] = {nil, argument_range_overflow_buffer};
+        NSUInteger argument_range_overflow_offsets[2] = {0, 0};
+        [adapter_argument_encoder setBuffers:argument_range_overflow_bindings
+                                      offsets:argument_range_overflow_offsets
+                                    withRange:NSMakeRange(NSUIntegerMax, 2)];
+        uint64_t range_overflow_resource = 0;
+        if (adapter_argument_buffer != nil) {
+            memcpy(&range_overflow_resource, adapter_argument_buffer.contents, sizeof(range_overflow_resource));
+        }
+        if (argument_range_overflow_buffer == nil || range_overflow_resource != adapter_copy_buffer.gpuAddress) {
+            fprintf(stderr, "metal-pixel: CPU argument encoder range overflow wrapped a binding\n");
+            return 51;
+        }
+
         /* A bound constantDataAtIndex: pointer aliases the selected argument
          * buffer. Rebinding must preserve those bytes and must not accept an
          * unaligned or truncated destination. */
