@@ -8276,6 +8276,8 @@ int main(void) {
                 [adapter_mtl4_compiler newRenderPipelineStateWithDescriptor:adapter_mtl4_tile_descriptor
                                                             compilerTaskOptions:nil
                                                                           error:&adapter_mtl4_tile_error];
+            MTL4PipelineDescriptor *adapter_mtl4_tile_specialization_descriptor =
+                [adapter_mtl4_tile_pipeline newRenderPipelineDescriptorForSpecialization];
             adapter_mtl4_tile_pipeline_script =
                 [adapter_mtl4_serializer serializeAsPipelinesScriptWithError:&adapter_mtl4_tile_error];
             adapter_mtl4_tile_archive_url = [NSURL fileURLWithPath:
@@ -8361,6 +8363,8 @@ int main(void) {
                 }
             }
             adapter_mtl4_tile_exact = adapter_mtl4_tile_pipeline != nil &&
+                [adapter_mtl4_tile_specialization_descriptor isKindOfClass:
+                    [MTL4TileRenderPipelineDescriptor class]] &&
                 adapter_mtl4_archived_tile_pipeline != nil &&
                 adapter_mtl4_tile_allocator != nil && adapter_mtl4_tile_queue != nil &&
                 adapter_mtl4_tile_texture != nil && adapter_mtl4_tile_stage_table != nil &&
@@ -8773,6 +8777,8 @@ int main(void) {
                 [adapter_mtl4_compiler newRenderPipelineStateWithDescriptor:adapter_mtl4_mesh_descriptor
                                                             compilerTaskOptions:nil
                                                                           error:&adapter_mtl4_mesh_error];
+            MTL4PipelineDescriptor *adapter_mtl4_mesh_specialization_descriptor =
+                [adapter_mtl4_mesh_pipeline newRenderPipelineDescriptorForSpecialization];
             NSData *adapter_mtl4_mesh_pipeline_script =
                 [adapter_mtl4_serializer serializeAsPipelinesScriptWithError:&adapter_mtl4_mesh_error];
             NSURL *adapter_mtl4_mesh_archive_url = [NSURL fileURLWithPath:
@@ -8962,6 +8968,8 @@ int main(void) {
                                            mipmapLevel:0];
             }
             adapter_mtl4_mesh_icb_exact = adapter_mtl4_mesh_pipeline != nil &&
+                [adapter_mtl4_mesh_specialization_descriptor isKindOfClass:
+                    [MTL4MeshRenderPipelineDescriptor class]] &&
                 adapter_mtl4_mesh_pipeline.supportIndirectCommandBuffers &&
                 adapter_mtl4_archived_mesh_pipeline != nil &&
                 adapter_mtl4_archived_mesh_pipeline.supportIndirectCommandBuffers &&

@@ -8503,11 +8503,13 @@ static id<MTLRenderPipelineState> zpu_mtl4_tile_pipeline_for_descriptor(
         return nil;
     }
     if (error != NULL) *error = nil;
-    return (id<MTLRenderPipelineState>)[[ZPURenderPipelineState alloc]
+    ZPURenderPipelineState *pipeline = [[ZPURenderPipelineState alloc]
         initWithOwner:owner tileFunctionName:tile.name label:descriptor.label
         colorFormat:attachment.pixelFormat maxTotalThreadsPerThreadgroup:max_threads
         threadgroupSizeMatchesTileSize:descriptor.threadgroupSizeMatchesTileSize
         requiredThreadsPerThreadgroup:required];
+    pipeline->_specializationDescriptor = [descriptor copy];
+    return (id<MTLRenderPipelineState>)pipeline;
 }
 
 API_AVAILABLE(macos(26.0), ios(26.0))
@@ -8589,6 +8591,7 @@ static id<MTLRenderPipelineState> zpu_mtl4_mesh_pipeline_for_descriptor(
         descriptor.supportIndirectCommandBuffers == MTL4IndirectCommandBufferSupportStateEnabled;
     pipeline->_colorAttachmentMappingInherited =
         descriptor.colorAttachmentMappingState == MTL4LogicalToPhysicalColorAttachmentMappingStateInherited;
+    pipeline->_specializationDescriptor = [descriptor copy];
     return (id<MTLRenderPipelineState>)pipeline;
 }
 
