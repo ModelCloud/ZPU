@@ -346,8 +346,13 @@ fn topLeftEdge(a: ProjectedVertex, b: ProjectedVertex) bool {
     return dy < 0 or (dy == 0 and dx > 0);
 }
 
-fn outsideTopLeft(value: f32, a: ProjectedVertex, b: ProjectedVertex) bool {
-    return value < 0 or (@abs(value) < 0.000001 and !topLeftEdge(a, b));
+fn outsideTopLeft(value: f32, a: ProjectedVertex, b: ProjectedVertex, positive_area: bool) bool {
+    // edge() is written as cross(point - a, b - a). For a positive-area
+    // triangle its positive half-plane uses the reverse directed edge; a
+    // negative-area triangle keeps the original direction. Metal's strip
+    // rasterizer relies on this distinction for the two alternating faces.
+    const inclusive_edge = if (positive_area) topLeftEdge(b, a) else topLeftEdge(a, b);
+    return value < 0 or (@abs(value) < 0.000001 and !inclusive_edge);
 }
 
 fn colorByte(value: f32) u8 {
@@ -547,7 +552,7 @@ fn drawLine(job: *Job, a: ProjectedVertex, b: ProjectedVertex, y0: usize, y1: us
 }
 
 fn drawTriangle(job: *Job, input: [3]ProjectedVertex, y0: usize, y1: usize, stats: *Stats) void {
-    var vertices = input;
+    const vertices = input;
     const area = edge(vertices[0], vertices[1], vertices[2].x, vertices[2].y);
     if (!std.math.isFinite(area) or @abs(area) < 0.000001) return;
     const front_facing = if (job.options.winding == .clockwise) area > 0 else area < 0;
@@ -570,27 +575,27 @@ fn drawTriangle(job: *Job, input: [3]ProjectedVertex, y0: usize, y1: usize, stat
     const row_start: usize = @intFromFloat(@min(max_y, @max(@as(f32, @floatFromInt(bounds.y0)), min_y)));
     const row_end: usize = @intFromFloat(@min(max_y, @as(f32, @floatFromInt(@min(bounds.y1, y1)))));
     if (x_end <= x_start or row_end <= row_start) return;
-    if (area < 0) {
-        const second = vertices[1];
-        vertices[1] = vertices[2];
-        vertices[2] = second;
-    }
     const depth_dx = ((vertices[1].z - vertices[0].z) * (vertices[2].y - vertices[0].y) -
         (vertices[2].z - vertices[0].z) * (vertices[1].y - vertices[0].y)) / area;
     const depth_dy = ((vertices[1].x - vertices[0].x) * (vertices[2].z - vertices[0].z) -
         (vertices[2].x - vertices[0].x) * (vertices[1].z - vertices[0].z)) / area;
     const depth_adjust = depthBias(job, @max(@abs(depth_dx), @abs(depth_dy)));
     const inverse_area = 1.0 / @abs(area);
+    const positive_area = area > 0;
+    const edge_sign: f32 = if (positive_area) 1.0 else -1.0;
     for (row_start..row_end) |y| {
         for (x_start..x_end) |x| {
             const px = @as(f32, @floatFromInt(x)) + 0.5;
             const py = @as(f32, @floatFromInt(y)) + 0.5;
-            const w0 = edge(vertices[1], vertices[2], px, py) * inverse_area;
-            const w1 = edge(vertices[2], vertices[0], px, py) * inverse_area;
-            const w2 = edge(vertices[0], vertices[1], px, py) * inverse_area;
-            if (outsideTopLeft(w0, vertices[1], vertices[2]) or
-                outsideTopLeft(w1, vertices[2], vertices[0]) or
-                outsideTopLeft(w2, vertices[0], vertices[1])) continue;
+            const edge0 = edge(vertices[1], vertices[2], px, py);
+            const edge1 = edge(vertices[2], vertices[0], px, py);
+            const edge2 = edge(vertices[0], vertices[1], px, py);
+            if (outsideTopLeft(edge0 * edge_sign, vertices[1], vertices[2], positive_area) or
+                outsideTopLeft(edge1 * edge_sign, vertices[2], vertices[0], positive_area) or
+                outsideTopLeft(edge2 * edge_sign, vertices[0], vertices[1], positive_area)) continue;
+            const w0 = edge0 * edge_sign * inverse_area;
+            const w1 = edge1 * edge_sign * inverse_area;
+            const w2 = edge2 * edge_sign * inverse_area;
             writePixel(job, x, y, vertices[0].z * w0 + vertices[1].z * w1 + vertices[2].z * w2, depth_adjust,
                 interpolateTriangleColor(vertices, w0, w1, w2), stats, front_facing);
         }
@@ -774,6 +779,32 @@ test "Metal viewport and scissor origins use the top-left pixel grid" {
     try std.testing.expectEqual(@as(u8, 0), pixels[1 * 8 * 4 + 3 * 4]);
     try std.testing.expectEqual(@as(u8, 0), pixels[6 * 8 * 4 + 3 * 4]);
     try std.testing.expectEqual(@as(u8, 0), pixels[3 * 8 * 4 + 0 * 4]);
+}
+
+test "Metal triangle strips preserve directed edge coverage" {
+    var pixels = [_]u8{0} ** (8 * 8 * 4);
+    var target = try Target.init(&pixels, 8, 8, 8 * 4, .rgba8_unorm);
+    const color = abi.Color{ .red = 0.25, .green = 0.5, .blue = 0.75, .alpha = 1 };
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -0.75, -0.75, 0.5, 1 }, .color = color },
+        .{ .position = .{ 0.75, -0.75, 0.5, 1 }, .color = color },
+        .{ .position = .{ 0.75, 0.75, 0.5, 1 }, .color = color },
+        .{ .position = .{ -0.75, 0.75, 0.5, 1 }, .color = color },
+    };
+    const options = DrawOptions{
+        .viewport = .{ .origin_x = 1, .origin_y = 1, .width = 6, .height = 6, .znear = 0, .zfar = 1 },
+        .scissor = .{ .x = 2, .y = 1, .width = 4, .height = 5 },
+    };
+    _ = draw(&target, null, null, &vertices, .triangle_strip, options);
+    for (0..8) |y| {
+        for (0..8) |x| {
+            const covered = (y == 2 and x >= 2 and x <= 5) or
+                (y == 3 and x >= 3 and x <= 5) or
+                (y == 4 and x >= 3 and x <= 5) or
+                (y == 5 and x >= 2 and x <= 5);
+            try std.testing.expectEqual(if (covered) @as(u8, 64) else @as(u8, 0), pixels[(y * 8 + x) * 4]);
+        }
+    }
 }
 
 test "Metal depth bias and clip modes are CPU deterministic" {

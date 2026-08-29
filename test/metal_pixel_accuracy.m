@@ -1233,6 +1233,97 @@ int main(void) {
         id<MTLRenderPipelineState> adapter_pipeline =
             [adapter_device newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor error:&adapter_pipeline_error];
 
+        /* Cover every core Metal primitive topology through the same
+         * Objective-C adapter. Constant vertex colors isolate coverage and
+         * the asymmetric viewport/scissor below keeps the test sensitive to
+         * the upper-left pixel-grid origin on both Apple platforms. */
+        const zpu_metal_vertex primitive_vertices[] = {
+            {{-0.75f, -0.75f, 0.5f, 1.0f}, {0.25f, 0.50f, 0.75f, 1.0f}},
+            {{ 0.75f, -0.75f, 0.5f, 1.0f}, {0.25f, 0.50f, 0.75f, 1.0f}},
+            {{ 0.75f,  0.75f, 0.5f, 1.0f}, {0.25f, 0.50f, 0.75f, 1.0f}},
+            {{-0.75f,  0.75f, 0.5f, 1.0f}, {0.25f, 0.50f, 0.75f, 1.0f}},
+        };
+        const MTLPrimitiveType primitive_types[] = {
+            MTLPrimitiveTypePoint, MTLPrimitiveTypeLine, MTLPrimitiveTypeLineStrip,
+            MTLPrimitiveTypeTriangleStrip,
+        };
+        const NSUInteger primitive_vertex_counts[] = {1, 2, 3, 4};
+        const MTLViewport primitive_viewport = {1.0, 1.0, 6.0, 6.0, 0.0, 1.0};
+        const MTLScissorRect primitive_scissor = {2, 1, 4, 5};
+        for (NSUInteger primitive_index = 0; primitive_index < sizeof(primitive_types) / sizeof(primitive_types[0]); ++primitive_index) {
+            id<MTLBuffer> native_primitive_buffer =
+                [device newBufferWithBytes:primitive_vertices
+                                     length:sizeof(primitive_vertices)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> adapter_primitive_buffer =
+                [adapter_device newBufferWithBytes:primitive_vertices
+                                             length:sizeof(primitive_vertices)
+                                            options:MTLResourceStorageModeShared];
+            id<MTLTexture> native_primitive_texture = [device newTextureWithDescriptor:texture_descriptor];
+            id<MTLTexture> adapter_primitive_texture = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+            MTLRenderPassDescriptor *native_primitive_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            native_primitive_pass.colorAttachments[0].texture = native_primitive_texture;
+            native_primitive_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            native_primitive_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            native_primitive_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+            id<MTLCommandBuffer> native_primitive_command_buffer = [queue commandBuffer];
+            id<MTLRenderCommandEncoder> native_primitive_encoder =
+                [native_primitive_command_buffer renderCommandEncoderWithDescriptor:native_primitive_pass];
+            [native_primitive_encoder setRenderPipelineState:pipeline];
+            [native_primitive_encoder setViewport:primitive_viewport];
+            [native_primitive_encoder setScissorRect:primitive_scissor];
+            [native_primitive_encoder setVertexBuffer:native_primitive_buffer offset:0 atIndex:0];
+            [native_primitive_encoder drawPrimitives:primitive_types[primitive_index]
+                                         vertexStart:0
+                                         vertexCount:primitive_vertex_counts[primitive_index]];
+            [native_primitive_encoder endEncoding];
+            [native_primitive_command_buffer commit];
+            [native_primitive_command_buffer waitUntilCompleted];
+
+            MTLRenderPassDescriptor *adapter_primitive_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            adapter_primitive_pass.colorAttachments[0].texture = adapter_primitive_texture;
+            adapter_primitive_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            adapter_primitive_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            adapter_primitive_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+            id<MTLCommandBuffer> adapter_primitive_command_buffer = [adapter_queue commandBuffer];
+            id<MTLRenderCommandEncoder> adapter_primitive_encoder =
+                [adapter_primitive_command_buffer renderCommandEncoderWithDescriptor:adapter_primitive_pass];
+            [adapter_primitive_encoder setRenderPipelineState:adapter_pipeline];
+            [adapter_primitive_encoder setViewport:primitive_viewport];
+            [adapter_primitive_encoder setScissorRect:primitive_scissor];
+            [adapter_primitive_encoder setVertexBuffer:adapter_primitive_buffer offset:0 atIndex:0];
+            [adapter_primitive_encoder drawPrimitives:primitive_types[primitive_index]
+                                          vertexStart:0
+                                          vertexCount:primitive_vertex_counts[primitive_index]];
+            [adapter_primitive_encoder endEncoding];
+            [adapter_primitive_command_buffer commit];
+            [adapter_primitive_command_buffer waitUntilCompleted];
+            uint8_t native_primitive_pixels[byte_count];
+            uint8_t adapter_primitive_pixels[byte_count];
+            [native_primitive_texture getBytes:native_primitive_pixels
+                                   bytesPerRow:(NSUInteger)width * 4
+                                    fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                   mipmapLevel:0];
+            [adapter_primitive_texture getBytes:adapter_primitive_pixels
+                                       bytesPerRow:(NSUInteger)width * 4
+                                        fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                       mipmapLevel:0];
+            if (native_primitive_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                adapter_primitive_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                native_primitive_encoder == nil || adapter_primitive_encoder == nil ||
+                memcmp(native_primitive_pixels, adapter_primitive_pixels, byte_count) != 0) {
+                fprintf(stderr, "metal-pixel: primitive topology mismatch at index %zu\n", primitive_index);
+                for (size_t byte = 0; byte < byte_count; ++byte) {
+                    if (native_primitive_pixels[byte] != adapter_primitive_pixels[byte]) {
+                        fprintf(stderr, "metal-pixel: primitive mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                                byte, native_primitive_pixels[byte], adapter_primitive_pixels[byte]);
+                        break;
+                    }
+                }
+                return 105;
+            }
+        }
+
         /* Bound vertex resources are read when the draw executes. Mutating
          * native and ZPU-owned storage after encoding but before commit checks
          * the CPU adapter's deferred buffer-binding semantics. */
@@ -6369,7 +6460,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, visibility results, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for RGBA8/BGRA8 core, CPU compute, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, visibility results, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }

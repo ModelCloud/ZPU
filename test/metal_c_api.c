@@ -49,8 +49,8 @@ int main(void) {
     }
     if (stats.primitives_submitted != 1 || stats.color_writes == 0) return 3;
 
-    const uint8_t expected_first_pixel[] = {255, 0, 0, 255};
-    if (check_equal(pixels, expected_first_pixel, sizeof(expected_first_pixel)) != 0) return 4;
+    const uint8_t expected_interior_pixel[] = {255, 0, 0, 255};
+    if (check_equal(pixels + 1 * surface.stride, expected_interior_pixel, sizeof(expected_interior_pixel)) != 0) return 4;
 
     surface.format = 999;
     if (zpu_metal_render(&surface, &pass, &state, NULL, 0,
