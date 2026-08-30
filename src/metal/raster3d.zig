@@ -1758,7 +1758,17 @@ fn drawTriangle(job: *Job, input: [3]ProjectedVertex, y0: usize, y1: usize, stat
             const w0 = edge0 * edge_sign * inverse_area;
             const w1 = edge1 * edge_sign * inverse_area;
             const w2 = edge2 * edge_sign * inverse_area;
-            writePixel(job, x, y, vertices[0].z * w0 + vertices[1].z * w1 + vertices[2].z * w2, depth_adjust, interpolateTriangleColor(vertices, w0, w1, w2), triangleSampleSelection(job, vertices, w0, w1, w2), stats, front_facing);
+            // Depth is a screen-space plane after perspective division. Keep
+            // the established barycentric path for varying depth (its
+            // rounding is part of the existing oracle contract), but avoid
+            // summing the weights for a constant plane: that can turn a
+            // constant vertex depth into a one-ULP different float on Apple
+            // CPUs while native Metal preserves the constant value.
+            const depth = if (depth_dx == 0 and depth_dy == 0)
+                vertices[0].z
+            else
+                vertices[0].z * w0 + vertices[1].z * w1 + vertices[2].z * w2;
+            writePixel(job, x, y, depth, depth_adjust, interpolateTriangleColor(vertices, w0, w1, w2), triangleSampleSelection(job, vertices, w0, w1, w2), stats, front_facing);
         }
     }
     stats.primitives_rasterized += 1;
@@ -2008,6 +2018,30 @@ test "Metal triangle strips preserve directed edge coverage" {
             try std.testing.expectEqual(if (covered) @as(u8, 64) else @as(u8, 0), pixels[(y * 8 + x) * 4]);
         }
     }
+}
+
+test "Metal constant triangle depth preserves the native float value" {
+    var pixels = [_]u8{0} ** (4 * 4 * 4);
+    var target = try Target.init(&pixels, 4, 4, 4 * 4, .rgba8_unorm);
+    var depth = [_]f32{1} ** (4 * 4);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.25, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.25, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.25, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+    };
+    const options = DrawOptions{
+        .viewport = .{ .origin_x = 0, .origin_y = 0, .width = 4, .height = 4, .znear = 0, .zfar = 1 },
+        .scissor = .{ .x = 0, .y = 0, .width = 4, .height = 4 },
+    };
+    _ = draw(&target, depth[0..], null, &vertices, .triangle, options);
+    var wrote_depth = false;
+    for (depth) |value| {
+        if (value != 1.0) {
+            try std.testing.expectEqual(@as(f32, 0.25), value);
+            wrote_depth = true;
+        }
+    }
+    try std.testing.expect(wrote_depth);
 }
 
 test "Metal depth bias and clip modes are CPU deterministic" {

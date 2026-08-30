@@ -143,8 +143,9 @@ triangle path:
   front/back compare functions, fail/depth-fail/pass operations, read/write
   masks, references, and clear/load/store behavior
 - depth-only render passes are accepted by the legacy, parallel, and Metal 4
-  adapters; a private discarded CPU color surface preserves the portable
-  raster ABI while public depth bytes remain exact
+  adapters, including layered 2D and multisample-array passes; a private
+  discarded CPU color surface preserves the portable raster ABI while public
+  depth/stencil bytes remain exact
 - up to eight R8/R16Unorm/R16Float/RG8/RG16Unorm/RG16Float/RGBA8/BGRA8/
   B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10Float/RGB9E5Float/BGR10A2Unorm/
   R32Float/RGBA16Unorm/RGBA16Float/RG32Float/RGBA32Float color attachments can be
