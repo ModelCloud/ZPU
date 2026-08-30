@@ -25,6 +25,13 @@ static const char *const kShaderSource =
     "uint instance_id [[instance_id]], device const Vertex *vertices [[buffer(0)]]) { "
     "LayeredVertex output; output.position = vertices[vertex_id].position; "
     "output.color = vertices[vertex_id].color; output.layer = instance_id; return output; }\n"
+    "[[patch(triangle, 3)]]\n"
+    "vertex LayeredVertex zpu_test_native_tessellated_vertex(float3 position_in_patch [[position_in_patch]], "
+    "uint instance_id [[instance_id]], device const Vertex *vertices [[buffer(0)]]) { "
+    "LayeredVertex output; output.position = vertices[0].position * position_in_patch.x + "
+    "vertices[1].position * position_in_patch.y + vertices[2].position * position_in_patch.z; "
+    "output.color = vertices[0].color * position_in_patch.x + vertices[1].color * position_in_patch.y + "
+    "vertices[2].color * position_in_patch.z; output.layer = instance_id; return output; }\n"
     "fragment float4 zpu_cpu_layered_fragment(LayeredVertex input [[stage_in]]) { return input.color; }\n"
     "fragment float4 zpu_test_layered_position_gradient(LayeredVertex input [[stage_in]]) { "
     "return float4((input.position.x + 0.5) / 8.0, (input.position.y + 0.5) / 8.0, 0.25, 1.0); }\n"
@@ -5455,6 +5462,156 @@ static int test_layered_patch_against_native(
     return 0;
 }
 
+/* Exercise Apple's fixed-function triangle tessellator directly. The adapter
+ * side uses the same public patch selectors, but its command is lowered to
+ * CPU/ZPU geometry; native Metal is only the accuracy oracle. The non-zero
+ * viewport/scissor origin keeps the comparison on the attachment-global
+ * upper-left X/Y grid instead of an origin-special case. */
+static int test_native_tessellation_patch_against_cpu(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLFunction> native_tessellated_vertex_function, id<MTLFunction> native_fragment_function,
+    id<MTLFunction> adapter_patch_vertex_function, id<MTLFunction> adapter_patch_fragment_function) {
+    enum { width = 9, height = 7, layers = 3, max_byte_count = width * height * 4 };
+    const zpu_metal_vertex vertices[] = {
+        {{-0.86f, -0.72f, 0.5f, 1.0f}, {0.41f, 0.67f, 0.23f, 0.91f}},
+        {{ 0.78f, -0.43f, 0.5f, 1.0f}, {0.41f, 0.67f, 0.23f, 0.91f}},
+        {{-0.21f,  0.84f, 0.5f, 1.0f}, {0.41f, 0.67f, 0.23f, 0.91f}},
+    };
+    const uint16_t factors[] = {
+        0x4000, 0x4000, 0x4000, 0x4000,
+        0x4000, 0x4000, 0x4000, 0x4000,
+        0x4000, 0x4000, 0x4000, 0x4000,
+    };
+    if (native_tessellated_vertex_function == nil || native_fragment_function == nil ||
+        adapter_patch_vertex_function == nil || adapter_patch_fragment_function == nil) return 241;
+
+    MTLRenderPipelineDescriptor *native_descriptor = [MTLRenderPipelineDescriptor new];
+    native_descriptor.vertexFunction = native_tessellated_vertex_function;
+    native_descriptor.fragmentFunction = native_fragment_function;
+    native_descriptor.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+    native_descriptor.tessellationPartitionMode = MTLTessellationPartitionModeInteger;
+    native_descriptor.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
+    native_descriptor.tessellationFactorStepFunction =
+        MTLTessellationFactorStepFunctionPerPatchAndPerInstance;
+    native_descriptor.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
+    native_descriptor.tessellationOutputWindingOrder = MTLWindingClockwise;
+    native_descriptor.tessellationFactorScaleEnabled = NO;
+    native_descriptor.maxTessellationFactor = 16.0f;
+    native_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    MTLRenderPipelineDescriptor *adapter_descriptor = [native_descriptor copy];
+    adapter_descriptor.vertexFunction = adapter_patch_vertex_function;
+    adapter_descriptor.fragmentFunction = adapter_patch_fragment_function;
+
+    NSError *native_error = nil;
+    NSError *adapter_error = nil;
+    id<MTLRenderPipelineState> native_pipeline =
+        [native_device newRenderPipelineStateWithDescriptor:native_descriptor error:&native_error];
+    id<MTLRenderPipelineState> adapter_pipeline =
+        [adapter_device newRenderPipelineStateWithDescriptor:adapter_descriptor error:&adapter_error];
+    id<MTLBuffer> native_vertex_buffer =
+        [native_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_vertex_buffer =
+        [adapter_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> native_factor_buffer =
+        [native_device newBufferWithBytes:factors length:sizeof(factors) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_factor_buffer =
+        [adapter_device newBufferWithBytes:factors length:sizeof(factors) options:MTLResourceStorageModeShared];
+    MTLTextureDescriptor *texture_descriptor = [MTLTextureDescriptor new];
+    texture_descriptor.textureType = MTLTextureType2DArray;
+    texture_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    texture_descriptor.width = width;
+    texture_descriptor.height = height;
+    texture_descriptor.arrayLength = layers;
+    texture_descriptor.mipmapLevelCount = 1;
+    texture_descriptor.sampleCount = 1;
+    texture_descriptor.storageMode = MTLStorageModeShared;
+    texture_descriptor.usage = MTLTextureUsageRenderTarget;
+    id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+    if (native_pipeline == nil || adapter_pipeline == nil || native_vertex_buffer == nil ||
+        adapter_vertex_buffer == nil || native_factor_buffer == nil || adapter_factor_buffer == nil ||
+        native_texture == nil || adapter_texture == nil) {
+        fail_with_error("native tessellation oracle resource/pipeline allocation", adapter_error ?: native_error);
+        return 242;
+    }
+
+    id<MTLCommandQueue> native_queue = [native_device newCommandQueue];
+    id<MTLCommandQueue> adapter_queue = [adapter_device newCommandQueue];
+    id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+    id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+    MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    native_pass.renderTargetArrayLength = layers;
+    native_pass.colorAttachments[0].texture = native_texture;
+    native_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    native_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.07, 0.11, 0.19, 1.0);
+    MTLRenderPassDescriptor *adapter_pass = [native_pass copy];
+    adapter_pass.colorAttachments[0].texture = adapter_texture;
+    id<MTLRenderCommandEncoder> native_encoder =
+        [native_command_buffer renderCommandEncoderWithDescriptor:native_pass];
+    id<MTLRenderCommandEncoder> adapter_encoder =
+        [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+    if (native_queue == nil || adapter_queue == nil || native_command_buffer == nil ||
+        adapter_command_buffer == nil || native_encoder == nil || adapter_encoder == nil) {
+        fail_with_error("native tessellation oracle encoder allocation", adapter_error ?: native_error);
+        return 243;
+    }
+
+    const MTLViewport viewport = {1.0, 1.0, width - 2.0, height - 2.0, 0.0, 1.0};
+    const MTLScissorRect scissor = {1, 1, width - 2, height - 2};
+    [native_encoder setViewport:viewport];
+    [native_encoder setScissorRect:scissor];
+    [native_encoder setRenderPipelineState:native_pipeline];
+    [native_encoder setVertexBuffer:native_vertex_buffer offset:0 atIndex:0];
+    [native_encoder setTessellationFactorBuffer:native_factor_buffer offset:0
+                                  instanceStride:sizeof(uint16_t) * 4];
+    [native_encoder drawPatches:3 patchStart:0 patchCount:1 patchIndexBuffer:nil
+              patchIndexBufferOffset:0 instanceCount:layers - 1 baseInstance:1];
+    [native_encoder endEncoding];
+    [adapter_encoder setViewport:viewport];
+    [adapter_encoder setScissorRect:scissor];
+    [adapter_encoder setRenderPipelineState:adapter_pipeline];
+    [adapter_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+    [adapter_encoder setTessellationFactorBuffer:adapter_factor_buffer offset:0
+                                    instanceStride:sizeof(uint16_t) * 4];
+    [adapter_encoder drawPatches:3 patchStart:0 patchCount:1 patchIndexBuffer:nil
+                patchIndexBufferOffset:0 instanceCount:layers - 1 baseInstance:1];
+    [adapter_encoder endEncoding];
+    [native_command_buffer commit];
+    [adapter_command_buffer commit];
+    [native_command_buffer waitUntilCompleted];
+    [adapter_command_buffer waitUntilCompleted];
+
+    uint8_t native_pixels[layers][max_byte_count] = {{0}};
+    uint8_t adapter_pixels[layers][max_byte_count] = {{0}};
+    for (NSUInteger layer = 0; layer < layers; ++layer) {
+        [native_texture getBytes:native_pixels[layer] bytesPerRow:width * 4 bytesPerImage:max_byte_count
+                       fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1) mipmapLevel:0 slice:layer];
+        [adapter_texture getBytes:adapter_pixels[layer] bytesPerRow:width * 4 bytesPerImage:max_byte_count
+                        fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1) mipmapLevel:0 slice:layer];
+        if (memcmp(native_pixels[layer], adapter_pixels[layer], max_byte_count) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < max_byte_count && native_pixels[layer][mismatch] == adapter_pixels[layer][mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: native tessellation slice %zu mismatch at byte %zu pixel=(%zu,%zu) channel=%zu native=%u adapter=%u\n",
+                    layer, mismatch, mismatch / 4 % width, mismatch / 4 / width, mismatch % 4,
+                    mismatch < max_byte_count ? native_pixels[layer][mismatch] : 0,
+                    mismatch < max_byte_count ? adapter_pixels[layer][mismatch] : 0);
+            fail_with_error("native tessellation oracle failed", native_command_buffer.error);
+            fail_with_error("adapter tessellation lowering failed", adapter_command_buffer.error);
+            return 244;
+        }
+    }
+    if (native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        adapter_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        memcmp(native_pixels[0], native_pixels[1], max_byte_count) == 0 ||
+        memcmp(native_pixels[1], native_pixels[2], max_byte_count) != 0) {
+        fail_with_error("native tessellation completion/routing failed", native_command_buffer.error);
+        fail_with_error("adapter tessellation completion/routing failed", adapter_command_buffer.error);
+        return 245;
+    }
+    return 0;
+}
+
 API_AVAILABLE(macos(11.0), ios(11.0))
 static int test_layered_patch_msaa_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
@@ -7828,6 +7985,8 @@ int main(void) {
         }
         id<MTLFunction> vertex_function = [library newFunctionWithName:@"zpu_test_vertex"];
         id<MTLFunction> layered_vertex_function = [library newFunctionWithName:@"zpu_cpu_layered_vertex"];
+        id<MTLFunction> native_tessellated_vertex_function =
+            [library newFunctionWithName:@"zpu_test_native_tessellated_vertex"];
         id<MTLFunction> stage_in_vertex_function = [library newFunctionWithName:@"zpu_test_stage_in_vertex"];
         id<MTLFunction> no_raster_vertex_function = [library newFunctionWithName:@"zpu_test_no_raster_vertex"];
         id<MTLFunction> fragment_function = [library newFunctionWithName:@"zpu_test_fragment"];
@@ -7854,7 +8013,8 @@ int main(void) {
         id<MTLFunction> depth_bounds_oracle_fragment = [library newFunctionWithName:@"zpu_test_depth_bounds_oracle"];
         id<MTLFunction> mrt_fragment_function = [library newFunctionWithName:@"zpu_test_mrt_fragment"];
         id<MTLFunction> sample_fragment_function = [library newFunctionWithName:@"zpu_test_sample_fragment"];
-        if (vertex_function == nil || layered_vertex_function == nil || stage_in_vertex_function == nil || no_raster_vertex_function == nil || fragment_function == nil ||
+        if (vertex_function == nil || layered_vertex_function == nil || native_tessellated_vertex_function == nil ||
+            stage_in_vertex_function == nil || no_raster_vertex_function == nil || fragment_function == nil ||
             layered_fragment_function == nil || layered_position_gradient_function == nil ||
             r8_uint_fragment_function == nil || r8_sint_fragment_function == nil ||
             r16_uint_fragment_function == nil || r16_sint_fragment_function == nil ||
@@ -9086,6 +9246,10 @@ int main(void) {
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_tessellated_triangle_vertex");
         id<MTLFunction> adapter_layered_patch_fragment_function =
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_tessellated_triangle_fragment");
+        const int native_tessellation_result = test_native_tessellation_patch_against_cpu(
+            device, adapter_device, native_tessellated_vertex_function, layered_fragment_function,
+            adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function);
+        if (native_tessellation_result != 0) return native_tessellation_result;
         const int layered_patch_result = test_layered_patch_against_native(
             device, adapter_device, layered_vertex_function, fragment_function,
             adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function);
