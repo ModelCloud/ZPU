@@ -72,13 +72,11 @@ triangle path:
   and packed RG11B10Float/RGB9E5Float formats use CPU decode/encode profiles
   for sampling, render targets, and 2D/3D mip generation, including the
   native packed-float mipmap truncation rule;
-  fixed CPU compute profiles remain explicitly format-specific; the
-  `zpu_cpu_fill_gradient_rgba32_uint` and
-  `zpu_cpu_fill_gradient_rgba32_sint` profiles write all four lanes of their
-  matching RGBA32 integer textures through the CPU/ZPU path, while the
-  `zpu_cpu_fill_gradient_r32_uint`, `zpu_cpu_fill_gradient_r32_sint`,
-  `zpu_cpu_fill_gradient_rg32_uint`, and `zpu_cpu_fill_gradient_rg32_sint`
-  profiles preserve scalar and dual-channel 32-bit integer lanes in the same
+  fixed CPU compute profiles remain explicitly format-specific; the registered
+  `zpu_cpu_fill_gradient_r8/r16/rg8/rg16/r32/rg32/rgba8/rgba16/rgba32_*` profiles
+  preserve their matching uint/sint lanes through the CPU/ZPU path, and
+  `zpu_cpu_fill_gradient_rgb10a2_uint` preserves the packed 10/10/10/2 fields;
+  scalar, dual-channel, four-channel, and packed profiles all use the same
   upper-left CPU dispatch grid;
 - formats without a corresponding CPU shader profile remain rejected
 - CPU-owned `MTLDevice` identity and capability metadata, including a stable,
