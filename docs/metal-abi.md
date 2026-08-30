@@ -404,8 +404,10 @@ triangle path:
 - CPU residency sets track ZPU allocations, committed byte totals, and
   request/end-residency state without introducing a GPU residency domain
 - process-local shared-event handles round-trip the same ZPU event and
-  preserve monotonic signaling; decoded or foreign handles fail closed because
-  the CPU adapter does not invent a cross-process GPU primitive
+  preserve monotonic signaling; CPU waits honor zero, finite, and indefinite
+  timeouts and wake when a later CPU or command-buffer signal reaches the
+  requested value. Decoded or foreign handles fail closed because the CPU
+  adapter does not invent a cross-process GPU primitive
 - process-local shared-texture handles round-trip shareable ZPU textures and
   preserve their CPU bytes and metadata; IOSurface-backed and foreign handles
   use a retained CPU no-copy view when explicitly created through the

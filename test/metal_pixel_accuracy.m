@@ -15824,6 +15824,22 @@ int main(void) {
             fprintf(stderr, "metal-pixel: shared event adapter failed\n");
             return 19;
         }
+        id<MTLSharedEvent> adapter_timeout_event = [adapter_device newSharedEvent];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_MSEC),
+                       dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+                           adapter_timeout_event.signaledValue = 13;
+                       });
+        id<MTLSharedEvent> adapter_expired_event = [adapter_device newSharedEvent];
+        const BOOL adapter_event_woke =
+            [adapter_timeout_event waitUntilSignaledValue:13 timeoutMS:1000];
+        const BOOL adapter_event_expired =
+            [adapter_expired_event waitUntilSignaledValue:1 timeoutMS:5];
+        if (adapter_timeout_event == nil || adapter_expired_event == nil ||
+            !adapter_event_woke || adapter_event_expired ||
+            adapter_timeout_event.signaledValue != 13) {
+            fprintf(stderr, "metal-pixel: shared event timeout/wake semantics failed\n");
+            return 20;
+        }
         id<MTLTexture> adapter_shared_texture =
             [adapter_device newSharedTextureWithDescriptor:adapter_texture_descriptor];
         MTLSharedTextureHandle *adapter_shared_texture_handle = [adapter_shared_texture newSharedTextureHandle];

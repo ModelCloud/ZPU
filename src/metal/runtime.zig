@@ -263,6 +263,8 @@ pub const SharedEvent = struct {
     magic: u64 = shared_event_magic,
     device: *Device,
     signaled_value: u64 = 0,
+    mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
+    condition: std.c.pthread_cond_t = std.c.PTHREAD_COND_INITIALIZER,
 };
 
 pub const Heap = struct {
@@ -1694,12 +1696,21 @@ pub const CommandBuffer = struct {
             },
             .signal_event => |signal| {
                 if (!validSharedEvent(signal.event) or signal.event.device != self.queue.device) return self.fail(error.InvalidResource);
-                if (signal.value < signal.event.signaled_value) return self.fail(error.InvalidCommand);
+                _ = std.c.pthread_mutex_lock(&signal.event.mutex);
+                if (signal.value < signal.event.signaled_value) {
+                    _ = std.c.pthread_mutex_unlock(&signal.event.mutex);
+                    return self.fail(error.InvalidCommand);
+                }
                 signal.event.signaled_value = signal.value;
+                _ = std.c.pthread_cond_broadcast(&signal.event.condition);
+                _ = std.c.pthread_mutex_unlock(&signal.event.mutex);
             },
             .wait_event => |wait| {
                 if (!validSharedEvent(wait.event) or wait.event.device != self.queue.device) return self.fail(error.InvalidResource);
-                if (wait.event.signaled_value < wait.value) return self.fail(error.InvalidCommand);
+                _ = std.c.pthread_mutex_lock(&wait.event.mutex);
+                const signaled = wait.event.signaled_value >= wait.value;
+                _ = std.c.pthread_mutex_unlock(&wait.event.mutex);
+                if (!signaled) return self.fail(error.InvalidCommand);
             },
         };
         if (active_resolve_target) |resolve| {
@@ -4221,19 +4232,58 @@ pub fn createSharedEvent(device: *Device) Error!*SharedEvent {
 
 pub fn destroySharedEvent(event: *SharedEvent) void {
     if (!validSharedEvent(event)) return;
+    _ = std.c.pthread_mutex_lock(&event.mutex);
     event.magic = 0;
+    _ = std.c.pthread_cond_broadcast(&event.condition);
+    _ = std.c.pthread_mutex_unlock(&event.mutex);
+    _ = std.c.pthread_cond_destroy(&event.condition);
+    _ = std.c.pthread_mutex_destroy(&event.mutex);
     allocator.destroy(event);
 }
 
 pub fn setSharedEventValue(event: *SharedEvent, value: u64) Error!void {
-    if (!validSharedEvent(event) or value < event.signaled_value) return error.InvalidArgument;
+    if (!validSharedEvent(event)) return error.InvalidResource;
+    _ = std.c.pthread_mutex_lock(&event.mutex);
+    defer _ = std.c.pthread_mutex_unlock(&event.mutex);
+    if (value < event.signaled_value) return error.InvalidArgument;
     event.signaled_value = value;
+    _ = std.c.pthread_cond_broadcast(&event.condition);
 }
 
 pub fn waitSharedEventValue(event: *const SharedEvent, value: u64, timeout_ms: u64) Error!void {
-    _ = timeout_ms;
     if (event.magic != shared_event_magic or !validDevice(event.device)) return error.InvalidResource;
-    if (event.signaled_value < value) return error.InvalidCommand;
+    const mutable_event: *SharedEvent = @constCast(event);
+    _ = std.c.pthread_mutex_lock(&mutable_event.mutex);
+    defer _ = std.c.pthread_mutex_unlock(&mutable_event.mutex);
+    if (mutable_event.signaled_value >= value) return;
+    if (timeout_ms == 0) return error.InvalidCommand;
+    if (timeout_ms == std.math.maxInt(u64)) {
+        while (mutable_event.signaled_value < value) {
+            _ = std.c.pthread_cond_wait(&mutable_event.condition, &mutable_event.mutex);
+        }
+        return;
+    }
+    var deadline: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.REALTIME, &deadline) != 0) return error.InvalidCommand;
+    const timeout_seconds: u64 = timeout_ms / 1000;
+    const timeout_nanos: u64 = (timeout_ms % 1000) * 1_000_000;
+    const seconds = @as(u64, @intCast(deadline.sec)) + timeout_seconds;
+    if (seconds > @as(u64, @intCast(std.math.maxInt(@TypeOf(deadline.sec))))) {
+        return error.InvalidCommand;
+    }
+    deadline.sec = @intCast(seconds);
+    const nanoseconds = @as(u64, @intCast(deadline.nsec)) + timeout_nanos;
+    if (nanoseconds >= 1_000_000_000) {
+        deadline.sec += 1;
+        deadline.nsec = @intCast(nanoseconds - 1_000_000_000);
+    } else {
+        deadline.nsec = @intCast(nanoseconds);
+    }
+    while (mutable_event.signaled_value < value) {
+        if (std.c.pthread_cond_timedwait(&mutable_event.condition, &mutable_event.mutex, &deadline) != .SUCCESS) {
+            return error.InvalidCommand;
+        }
+    }
 }
 
 pub fn createCommandBuffer(queue: *CommandQueue) Error!*CommandBuffer {
@@ -8343,7 +8393,10 @@ pub export fn zpu_metal_shared_event_destroy(event: ?*SharedEvent) callconv(.c) 
 pub export fn zpu_metal_shared_event_signaled_value(event: ?*const SharedEvent) callconv(.c) u64 {
     const value = event orelse return 0;
     if (value.magic != shared_event_magic or !validDevice(value.device)) return 0;
-    return value.signaled_value;
+    const mutable_value: *SharedEvent = @constCast(value);
+    _ = std.c.pthread_mutex_lock(&mutable_value.mutex);
+    defer _ = std.c.pthread_mutex_unlock(&mutable_value.mutex);
+    return mutable_value.signaled_value;
 }
 
 pub export fn zpu_metal_shared_event_set_signaled_value(event: ?*SharedEvent, value: u64) callconv(.c) c_int {
