@@ -2080,6 +2080,16 @@ static void zpu_set_error(NSError **error, NSString *description) {
     }
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+static void zpu_set_tensor_error(NSError **error, MTLTensorError code, NSString *description) {
+    if (error != NULL) {
+        *error = [NSError errorWithDomain:MTLTensorDomain code:code
+                                userInfo:@{NSLocalizedDescriptionKey: description}];
+    }
+}
+#pragma clang diagnostic pop
+
 static BOOL zpu_render_pipeline_format_supported(MTLPixelFormat format) {
     return format == MTLPixelFormatInvalid || zpu_color_texture_format_supported(format) ||
         zpu_integer_render_format_supported(format);
@@ -4999,13 +5009,15 @@ static ZPUTensor *zpu_create_tensor(ZPUDevice *owner, ZPUBuffer *storageBuffer,
         ((descriptor.usage & MTLTensorUsageMachineLearning) != 0 && backingBuffer != nil && bufferOffset != 0) ||
         (layout.elementBits < 8 && backingBuffer != nil && (bufferOffset % 128) != 0) ||
         (backingBuffer != nil && descriptor.storageMode != backingBuffer.storageMode)) {
-        zpu_set_error(error, @"ZPU CPU Metal tensor descriptor or backing range is invalid");
+        zpu_set_tensor_error(error, MTLTensorErrorInvalidDescriptor,
+                             @"ZPU CPU Metal tensor descriptor or backing range is invalid");
         return nil;
     }
     MTLTensorExtents *dimensions = zpu_tensor_make_extents(layout.rank, layout.dimensions);
     MTLTensorExtents *strides = zpu_tensor_make_extents(layout.rank, layout.strides);
     if (dimensions == nil || strides == nil) {
-        zpu_set_error(error, @"ZPU CPU Metal could not represent tensor extents");
+        zpu_set_tensor_error(error, MTLTensorErrorInvalidDescriptor,
+                             @"ZPU CPU Metal could not represent tensor extents");
         return nil;
     }
     if (error != NULL) *error = nil;
@@ -9895,12 +9907,14 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 - (id<MTLTensor>)newTensorWithDescriptor:(MTLTensorDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(26.0), ios(26.0)) {
     ZPUTensorLayout layout;
     if (!zpu_tensor_layout_for_descriptor(descriptor, &layout)) {
-        zpu_set_error(error, @"ZPU CPU Metal tensor descriptor is unsupported or invalid");
+        zpu_set_tensor_error(error, MTLTensorErrorInvalidDescriptor,
+                             @"ZPU CPU Metal tensor descriptor is unsupported or invalid");
         return nil;
     }
     zpu_metal_buffer *buffer = zpu_metal_device_new_buffer(_zpuDevice, layout.size, NULL);
     if (buffer == NULL) {
-        zpu_set_error(error, @"ZPU CPU Metal could not allocate tensor storage");
+        zpu_set_tensor_error(error, MTLTensorErrorInternalError,
+                             @"ZPU CPU Metal could not allocate tensor storage");
         return nil;
     }
     ZPUBuffer *storageBuffer = [[ZPUBuffer alloc] initWithOwner:self buffer:buffer];

@@ -10134,7 +10134,11 @@ int main(void) {
                 [metal4_ml_buffer newTensorWithDescriptor:noncontiguous_ml_descriptor
                                                      offset:0 error:&noncontiguous_ml_error];
             if (direct_strided_tensor != nil || direct_strided_error == nil ||
-                noncontiguous_ml_tensor != nil || noncontiguous_ml_error == nil) {
+                ![direct_strided_error.domain isEqualToString:MTLTensorDomain] ||
+                direct_strided_error.code != MTLTensorErrorInvalidDescriptor ||
+                noncontiguous_ml_tensor != nil || noncontiguous_ml_error == nil ||
+                ![noncontiguous_ml_error.domain isEqualToString:MTLTensorDomain] ||
+                noncontiguous_ml_error.code != MTLTensorErrorInvalidDescriptor) {
                 fail_with_error("CPU tensor stride validation accepted an invalid layout",
                                 direct_strided_error ?: noncontiguous_ml_error);
                 return 117;
@@ -10274,7 +10278,8 @@ int main(void) {
                     [buffer_subbyte_storage newTensorWithDescriptor:buffer_subbyte_descriptor
                                                                offset:1 error:&buffer_subbyte_error];
                 if (aligned_buffer_subbyte_tensor == nil || unaligned_buffer_subbyte_tensor != nil ||
-                    buffer_subbyte_error == nil) {
+                    buffer_subbyte_error == nil || ![buffer_subbyte_error.domain isEqualToString:MTLTensorDomain] ||
+                    buffer_subbyte_error.code != MTLTensorErrorInvalidDescriptor) {
                     fail_with_error("CPU packed tensor buffer offset validation failed", buffer_subbyte_error);
                     return 119;
                 }
