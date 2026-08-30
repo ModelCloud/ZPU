@@ -29,6 +29,15 @@ const ProjectedVertex = struct {
     color: [4]f32,
 };
 
+// Apple rasterizes screen coordinates on an 8-bit fractional grid. Keeping
+// this explicit makes CPU interpolation deterministic and matches the native
+// stage-in precision used by the Metal oracle.
+const metal_raster_subpixel_scale: f32 = 256.0;
+
+fn quantizeRasterCoordinate(value: f32) f32 {
+    return @round(value * metal_raster_subpixel_scale) / metal_raster_subpixel_scale;
+}
+
 pub const DrawOptions = struct {
     viewport: abi.Viewport,
     scissor: abi.ScissorRect,
@@ -1259,12 +1268,20 @@ fn project(vertex: abi.Vertex, viewport: abi.Viewport) ?ProjectedVertex {
     const ny = p[1] * inverse_w;
     const nz = p[2] * inverse_w;
     if (!std.math.isFinite(nx) or !std.math.isFinite(ny) or !std.math.isFinite(nz)) return null;
+    // Apple rasterizes primitive coordinates with an 8-bit fractional screen
+    // grid. Keep the CPU path on that same grid before evaluating edge
+    // functions and varyings; otherwise an f32 barycentric calculation can
+    // cross an 8-bit UNORM threshold even when the native interpolator does
+    // not. Coordinates remain attachment-global and retain Metal's top-left
+    // Y origin.
+    const screen_x = viewport.origin_x + (nx * 0.5 + 0.5) * viewport.width;
+    const screen_y = viewport.origin_y + (0.5 - ny * 0.5) * viewport.height;
     return .{
-        .x = viewport.origin_x + (nx * 0.5 + 0.5) * viewport.width,
+        .x = quantizeRasterCoordinate(screen_x),
         // Metal's render-target row zero is the top row: clip-space +Y maps
         // toward the viewport origin, while the CPU surface is addressed
         // with increasing Y down the image.
-        .y = viewport.origin_y + (0.5 - ny * 0.5) * viewport.height,
+        .y = quantizeRasterCoordinate(screen_y),
         .z = viewport.znear + nz * (viewport.zfar - viewport.znear),
         .inverse_w = inverse_w,
         .color = .{ vertex.color.red, vertex.color.green, vertex.color.blue, vertex.color.alpha },
@@ -1754,9 +1771,16 @@ fn drawTriangle(job: *Job, input: [3]ProjectedVertex, y0: usize, y1: usize, stat
             if (outsideTopLeft(edge0 * edge_sign, vertices[1], vertices[2], positive_area) or
                 outsideTopLeft(edge1 * edge_sign, vertices[2], vertices[0], positive_area) or
                 outsideTopLeft(edge2 * edge_sign, vertices[0], vertices[1], positive_area)) continue;
-            const w0 = edge0 * edge_sign * inverse_area;
-            const w1 = edge1 * edge_sign * inverse_area;
-            const w2 = edge2 * edge_sign * inverse_area;
+            // MSAA coverage is tested at each sample location, but Metal's
+            // default stage-in interpolation is evaluated at the pixel
+            // center. Keep those grids distinct: sample positions decide
+            // whether a sample invokes the fragment, while the center grid
+            // supplies its varying color/depth values.
+            const center_x = @as(f32, @floatFromInt(x)) + 0.5;
+            const center_y = @as(f32, @floatFromInt(y)) + 0.5;
+            const center_w0 = edge(vertices[1], vertices[2], center_x, center_y) * edge_sign * inverse_area;
+            const center_w1 = edge(vertices[2], vertices[0], center_x, center_y) * edge_sign * inverse_area;
+            const center_w2 = edge(vertices[0], vertices[1], center_x, center_y) * edge_sign * inverse_area;
             // Depth is a screen-space plane after perspective division. Keep
             // the established barycentric path for varying depth (its
             // rounding is part of the existing oracle contract), but avoid
@@ -1766,8 +1790,9 @@ fn drawTriangle(job: *Job, input: [3]ProjectedVertex, y0: usize, y1: usize, stat
             const depth = if (depth_dx == 0 and depth_dy == 0)
                 vertices[0].z
             else
-                vertices[0].z * w0 + vertices[1].z * w1 + vertices[2].z * w2;
-            writePixel(job, x, y, depth, depth_adjust, interpolateTriangleColor(vertices, w0, w1, w2), triangleSampleSelection(job, vertices, w0, w1, w2), stats, front_facing);
+                vertices[0].z * center_w0 + vertices[1].z * center_w1 + vertices[2].z * center_w2;
+            const interpolated_color = interpolateTriangleColor(vertices, center_w0, center_w1, center_w2);
+            writePixel(job, x, y, depth, depth_adjust, interpolated_color, triangleSampleSelection(job, vertices, center_w0, center_w1, center_w2), stats, front_facing);
         }
     }
     stats.primitives_rasterized += 1;
@@ -1953,6 +1978,12 @@ test "Apple MSAA default sample positions use the top-left pixel grid" {
     try std.testing.expectEqual([2]f32{ 0.875, 0.375 }, defaultSamplePosition(4, 1));
     try std.testing.expectEqual([2]f32{ 0.125, 0.625 }, defaultSamplePosition(4, 2));
     try std.testing.expectEqual([2]f32{ 0.625, 0.875 }, defaultSamplePosition(4, 3));
+}
+
+test "Apple raster coordinates use an 8-bit fractional screen grid" {
+    try std.testing.expectEqual(@as(f32, 1.25), quantizeRasterCoordinate(1.251));
+    try std.testing.expectEqual(@as(f32, 1.25390625), quantizeRasterCoordinate(1.25390625));
+    try std.testing.expectEqual(@as(f32, -0.75), quantizeRasterCoordinate(-0.751));
 }
 
 test "Metal viewport and scissor origins use the top-left pixel grid" {

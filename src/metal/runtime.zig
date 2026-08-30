@@ -2189,7 +2189,6 @@ pub const CommandBuffer = struct {
                 }
             },
             .patch => |patch| {
-                if (active_sample_count > 1) return self.fail(error.UnsupportedOperation);
                 sparseSyncOptionalBuffer(patch.vertex_buffer);
                 sparseSyncOptionalBuffer(patch.patch_index_buffer);
                 sparseSyncOptionalBuffer(patch.indirect_buffer);
@@ -2244,6 +2243,25 @@ pub const CommandBuffer = struct {
                     sparseSyncTexture(target_handle);
                     for (active_color_attachments) |attachment| sparseSyncOptionalTexture(attachment);
                 }
+                const layered_samples = active_sample_count > 1 and
+                    active_sample_array_color_attachments[0][0][0] != null;
+                if (active_sample_count > 1) {
+                    for (active_sample_targets[0..active_sample_count]) |sample| {
+                        sparseSyncTexture(sample orelse {
+                            return self.fail(error.InvalidResource);
+                        });
+                    }
+                    for (active_sample_color_attachments) |sample| sparseSyncOptionalTexture(sample);
+                    for (active_sample_array_color_attachments) |attachment_layers| {
+                        for (attachment_layers[0..active_array_target_count]) |layer_samples| {
+                            if (layer_samples[0] != null) {
+                                for (layer_samples[0..active_sample_count]) |sample| {
+                                    sparseSyncTexture(sample orelse return self.fail(error.InvalidResource));
+                                }
+                            }
+                        }
+                    }
+                }
                 defer {
                     if (active_array_target_count > 1) {
                         for (active_array_color_attachments[0][0..active_array_target_count]) |target| {
@@ -2259,6 +2277,17 @@ pub const CommandBuffer = struct {
                     } else {
                         sparseFlushTexture(target_handle);
                         for (active_color_attachments) |attachment| sparseFlushOptionalTexture(attachment);
+                    }
+                    if (active_sample_count > 1) {
+                        for (active_sample_targets[0..active_sample_count]) |sample| sparseFlushOptionalTexture(sample);
+                        for (active_sample_color_attachments) |sample| sparseFlushOptionalTexture(sample);
+                        for (active_sample_array_color_attachments) |attachment_layers| {
+                            for (attachment_layers[0..active_array_target_count]) |layer_samples| {
+                                for (layer_samples[0..active_sample_count]) |sample| {
+                                    sparseFlushOptionalTexture(sample);
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -2326,85 +2355,128 @@ pub const CommandBuffer = struct {
                     const instance_id = std.math.add(usize, resolved_patch.base_instance, instance) catch
                         return self.fail(error.InvalidArgument);
                     const array_index = if (active_array_target_count > 1) instance_id else 0;
-                    const instance_target = if (active_array_target_count > 1)
-                        active_array_color_attachments[0][array_index] orelse return self.fail(error.InvalidResource)
-                    else
-                        target_handle;
-                    var target = instance_target.asTarget();
-                    extra_targets = [_]?*raster3d.Target{null} ** 7;
-                    for (active_color_attachments[1..], 0..) |attachment, physical_index| {
-                        if (attachment != null) {
-                            const instance_extra = if (active_array_target_count > 1)
-                                active_array_color_attachments[physical_index + 1][array_index] orelse
-                                    return self.fail(error.InvalidResource)
+                    const sample_iterations = if (active_sample_count > 1) active_sample_count else 1;
+                    for (0..sample_iterations) |sample_index| {
+                        const instance_target = if (active_sample_count > 1)
+                            (if (layered_samples)
+                                active_sample_array_color_attachments[0][array_index][sample_index]
                             else
-                                attachment.?;
-                            extra_targets_storage[physical_index] = instance_extra.asTarget();
-                            extra_targets[physical_index] = &extra_targets_storage[physical_index];
-                        }
-                    }
-                    const depth_values = if (active_array_target_count > 1)
-                        active_depth_array_values[array_index]
-                    else
-                        active_depth;
-                    const stencil_values = if (active_array_target_count > 1)
-                        active_stencil_array_values[array_index]
-                    else
-                        active_stencil;
-                    for (0..resolved_patch.patch_count) |local_patch| {
-                        const draw_patch_index = std.math.add(usize, resolved_patch.patch_start, local_patch) catch
-                            return self.fail(error.InvalidArgument);
-                        const factor_offset = std.math.add(usize, std.math.add(usize, resolved_patch.factor_buffer_offset, std.math.mul(usize, instance_id, resolved_patch.factor_instance_stride) catch return self.fail(error.InvalidArgument)) catch
-                            return self.fail(error.InvalidArgument), std.math.mul(usize, draw_patch_index, factor_entry_size) catch return self.fail(error.InvalidArgument)) catch
-                            return self.fail(error.InvalidArgument);
-                        const factor_bytes_slice = resolved_patch.factor_buffer.bytes;
-                        const edge0 = readF16Little(factor_bytes_slice, factor_offset);
-                        const edge1 = readF16Little(factor_bytes_slice, factor_offset + 2);
-                        const edge2 = readF16Little(factor_bytes_slice, factor_offset + 4);
-                        const inside = readF16Little(factor_bytes_slice, factor_offset + 6);
-                        if (!std.math.isFinite(edge0) or !std.math.isFinite(edge1) or !std.math.isFinite(edge2) or
-                            !std.math.isFinite(inside)) return self.fail(error.InvalidArgument);
-                        if (edge0 <= 0 or edge1 <= 0 or edge2 <= 0) continue;
-                        if (edge0 != 1.0 or edge1 != 1.0 or edge2 != 1.0 or inside != 1.0)
-                            return self.fail(error.UnsupportedOperation);
-
-                        const patch_index = if (resolved_patch.patch_index_buffer) |buffer|
-                            readU32Little(buffer.bytes, resolved_patch.patch_index_buffer_offset + local_patch * @sizeOf(u32))
-                        else
-                            @as(u32, @intCast(draw_patch_index));
-                        const patch_index_usize: usize = patch_index;
-                        var patch_vertices: [3]abi.Vertex = undefined;
-                        for (0..3) |control_point| {
-                            var source_index: usize = undefined;
-                            if (resolved_patch.control_point_index_buffer) |buffer| {
-                                const index_size: usize = switch (resolved_patch.control_point_index_type) {
-                                    .uint16 => @sizeOf(u16),
-                                    .uint32 => @sizeOf(u32),
-                                    .none => return self.fail(error.InvalidArgument),
-                                };
-                                const index_offset = std.math.add(usize, resolved_patch.control_point_index_buffer_offset, std.math.mul(usize, std.math.add(usize, std.math.mul(usize, patch_index_usize, resolved_patch.control_point_count) catch return self.fail(error.InvalidArgument), control_point) catch return self.fail(error.InvalidArgument), index_size) catch return self.fail(error.InvalidArgument)) catch
-                                    return self.fail(error.InvalidArgument);
-                                source_index = if (index_size == @sizeOf(u16))
-                                    readU16Little(buffer.bytes, index_offset)
-                                else
-                                    readU32Little(buffer.bytes, index_offset);
-                            } else {
-                                source_index = std.math.add(usize, std.math.mul(usize, patch_index_usize, resolved_patch.control_point_count) catch return self.fail(error.InvalidArgument), control_point) catch return self.fail(error.InvalidArgument);
+                                active_sample_targets[sample_index]) orelse {
+                                return self.fail(error.InvalidResource);
                             }
-                            if (source_index >= source_vertices.len) return self.fail(error.InvalidArgument);
-                            patch_vertices[control_point] = source_vertices[source_index];
+                        else if (active_array_target_count > 1)
+                            active_array_color_attachments[0][array_index] orelse {
+                                return self.fail(error.InvalidResource);
+                            }
+                        else
+                            target_handle;
+                        var target = instance_target.asTarget();
+                        extra_targets = [_]?*raster3d.Target{null} ** 7;
+                        var sample_extra_count: usize = 0;
+                        for (active_color_attachments[1..], 0..) |attachment, physical_index| {
+                            if (attachment != null) {
+                                const instance_extra = if (active_sample_count > 1)
+                                    (if (layered_samples)
+                                        active_sample_array_color_attachments[physical_index + 1][array_index][sample_index]
+                                    else
+                                        active_sample_color_attachments[(physical_index + 1) * 4 + sample_index]) orelse
+                                        return self.fail(error.InvalidResource)
+                                else if (active_array_target_count > 1)
+                                    active_array_color_attachments[physical_index + 1][array_index] orelse
+                                        return self.fail(error.InvalidResource)
+                                else
+                                    attachment.?;
+                                extra_targets_storage[physical_index] = instance_extra.asTarget();
+                                extra_targets[physical_index] = &extra_targets_storage[physical_index];
+                                sample_extra_count = @max(sample_extra_count, physical_index + 1);
+                            }
                         }
-                        stats = addRasterStats(stats, raster3d.drawWithTargetMipmaps(
-                            @constCast(&target),
-                            extra_targets[0..extra_count],
-                            null,
-                            &.{},
-                            depth_values,
-                            stencil_values,
-                            &patch_vertices,
-                            .triangle,
-                            draw_options,
-                        ));
+                        const pixel_count = std.math.mul(usize, target.width, target.height) catch return self.fail(error.InvalidArgument);
+                        const depth_values: ?[]f32 = if (active_sample_count > 1) blk: {
+                            if (layered_samples) {
+                                if (active_depth_sample_array_values[array_index]) |values|
+                                    break :blk values[sample_index * pixel_count .. (sample_index + 1) * pixel_count];
+                            } else if (active_depth_values) |values| {
+                                break :blk values[sample_index * pixel_count .. (sample_index + 1) * pixel_count];
+                            }
+                            break :blk null;
+                        } else if (active_array_target_count > 1)
+                            active_depth_array_values[array_index]
+                        else
+                            active_depth;
+                        const stencil_values: ?[]u8 = if (active_sample_count > 1) blk: {
+                            if (layered_samples) {
+                                if (active_stencil_sample_array_values[array_index]) |values|
+                                    break :blk values[sample_index * pixel_count .. (sample_index + 1) * pixel_count];
+                            } else if (active_stencil_values) |values| {
+                                break :blk values[sample_index * pixel_count .. (sample_index + 1) * pixel_count];
+                            }
+                            break :blk null;
+                        } else if (active_array_target_count > 1)
+                            active_stencil_array_values[array_index]
+                        else
+                            active_stencil;
+                        if (active_sample_count > 1) {
+                            draw_options.sample_position = if (active_custom_sample_positions)
+                                .{ active_sample_positions[sample_index].x, active_sample_positions[sample_index].y }
+                            else
+                                raster3d.defaultSamplePosition(active_sample_count, sample_index);
+                        }
+                        for (0..resolved_patch.patch_count) |local_patch| {
+                            const draw_patch_index = std.math.add(usize, resolved_patch.patch_start, local_patch) catch
+                                return self.fail(error.InvalidArgument);
+                            const factor_offset = std.math.add(usize, std.math.add(usize, resolved_patch.factor_buffer_offset, std.math.mul(usize, instance_id, resolved_patch.factor_instance_stride) catch return self.fail(error.InvalidArgument)) catch
+                                return self.fail(error.InvalidArgument), std.math.mul(usize, draw_patch_index, factor_entry_size) catch return self.fail(error.InvalidArgument)) catch
+                                return self.fail(error.InvalidArgument);
+                            const factor_bytes_slice = resolved_patch.factor_buffer.bytes;
+                            const edge0 = readF16Little(factor_bytes_slice, factor_offset);
+                            const edge1 = readF16Little(factor_bytes_slice, factor_offset + 2);
+                            const edge2 = readF16Little(factor_bytes_slice, factor_offset + 4);
+                            const inside = readF16Little(factor_bytes_slice, factor_offset + 6);
+                            if (!std.math.isFinite(edge0) or !std.math.isFinite(edge1) or !std.math.isFinite(edge2) or
+                                !std.math.isFinite(inside)) return self.fail(error.InvalidArgument);
+                            if (edge0 <= 0 or edge1 <= 0 or edge2 <= 0) continue;
+                            if (edge0 != 1.0 or edge1 != 1.0 or edge2 != 1.0 or inside != 1.0)
+                                return self.fail(error.UnsupportedOperation);
+
+                            const patch_index = if (resolved_patch.patch_index_buffer) |buffer|
+                                readU32Little(buffer.bytes, resolved_patch.patch_index_buffer_offset + local_patch * @sizeOf(u32))
+                            else
+                                @as(u32, @intCast(draw_patch_index));
+                            const patch_index_usize: usize = patch_index;
+                            var patch_vertices: [3]abi.Vertex = undefined;
+                            for (0..3) |control_point| {
+                                var source_index: usize = undefined;
+                                if (resolved_patch.control_point_index_buffer) |buffer| {
+                                    const index_size: usize = switch (resolved_patch.control_point_index_type) {
+                                        .uint16 => @sizeOf(u16),
+                                        .uint32 => @sizeOf(u32),
+                                        .none => return self.fail(error.InvalidArgument),
+                                    };
+                                    const index_offset = std.math.add(usize, resolved_patch.control_point_index_buffer_offset, std.math.mul(usize, std.math.add(usize, std.math.mul(usize, patch_index_usize, resolved_patch.control_point_count) catch return self.fail(error.InvalidArgument), control_point) catch return self.fail(error.InvalidArgument), index_size) catch return self.fail(error.InvalidArgument)) catch
+                                        return self.fail(error.InvalidArgument);
+                                    source_index = if (index_size == @sizeOf(u16))
+                                        readU16Little(buffer.bytes, index_offset)
+                                    else
+                                        readU32Little(buffer.bytes, index_offset);
+                                } else {
+                                    source_index = std.math.add(usize, std.math.mul(usize, patch_index_usize, resolved_patch.control_point_count) catch return self.fail(error.InvalidArgument), control_point) catch return self.fail(error.InvalidArgument);
+                                }
+                                if (source_index >= source_vertices.len) return self.fail(error.InvalidArgument);
+                                patch_vertices[control_point] = source_vertices[source_index];
+                            }
+                            stats = addRasterStats(stats, raster3d.drawWithTargetMipmaps(
+                                @constCast(&target),
+                                extra_targets[0..sample_extra_count],
+                                null,
+                                &.{},
+                                depth_values,
+                                stencil_values,
+                                &patch_vertices,
+                                .triangle,
+                                draw_options,
+                            ));
+                        }
                     }
                 }
                 if (resolved_patch.visibility_mode != .disabled) {

@@ -17065,20 +17065,19 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
         [_owner markError];
         return;
     }
-    if (state->_isTilePipeline || state->_isMeshPipeline) {
+    if (state->_isTilePipeline || state->_isMeshPipeline || state->_isPatchPipeline) {
         _pipelineState = state;
         [_owner retainResource:state];
         uint16_t colorFormats[ZPU_METAL_MAX_COLOR_ATTACHMENTS];
         for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
             colorFormats[index] = (uint16_t)state->_colorPixelFormats[index];
         }
-        const BOOL rasterizes = state->_isMeshPipeline;
+        const BOOL rasterizes = state->_isMeshPipeline || state->_isPatchPipeline;
         if (zpu_metal_render_encoder_set_pipeline_color_formats(
                 _zpuEncoder, colorFormats, state->_colorAttachmentCount,
                 (uint16_t)state->_depthPixelFormat, (uint16_t)state->_stencilPixelFormat) != ZPU_METAL_OK ||
             zpu_metal_render_encoder_set_raster_sample_count(
-                _zpuEncoder, (uint8_t)((state->_isMeshPipeline || state->_isTilePipeline) ?
-                                           state->_rasterSampleCount : 1)) != ZPU_METAL_OK ||
+                _zpuEncoder, (uint8_t)state->_rasterSampleCount) != ZPU_METAL_OK ||
             zpu_metal_render_encoder_set_rasterization_enabled(_zpuEncoder, rasterizes) != ZPU_METAL_OK ||
             zpu_metal_render_encoder_set_blend_state(
                 _zpuEncoder, state->_blendingEnabled,
