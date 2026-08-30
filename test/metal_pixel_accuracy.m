@@ -6987,6 +6987,9 @@ static int test_layered_mesh_against_native(
     adapter_descriptor.fragmentFunction = adapter_fragment;
     adapter_descriptor.rasterSampleCount = 1;
     adapter_descriptor.maxTotalThreadsPerMeshThreadgroup = 1;
+    if (@available(macOS 14.0, ios 17.0, *)) {
+        adapter_descriptor.supportIndirectCommandBuffers = YES;
+    }
     adapter_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     NSError *adapter_error = nil;
     id<MTLRenderPipelineState> adapter_pipeline =
@@ -7075,11 +7078,62 @@ static int test_layered_mesh_against_native(
             return 227;
         }
     }
+    BOOL adapter_icb_exact = YES;
+    if (@available(macOS 14.0, ios 17.0, *)) {
+        MTLIndirectCommandBufferDescriptor *icb_descriptor = [MTLIndirectCommandBufferDescriptor new];
+        icb_descriptor.commandTypes = MTLIndirectCommandTypeDrawMeshThreads;
+        icb_descriptor.inheritPipelineState = YES;
+        icb_descriptor.inheritBuffers = YES;
+        icb_descriptor.maxObjectBufferBindCount = 1;
+        icb_descriptor.maxMeshBufferBindCount = 1;
+        icb_descriptor.maxObjectThreadgroupMemoryBindCount = 1;
+        id<MTLIndirectCommandBuffer> adapter_icb =
+            [adapter_device newIndirectCommandBufferWithDescriptor:icb_descriptor
+                                                        maxCommandCount:1
+                                                                options:MTLResourceStorageModeShared];
+        id<MTLIndirectRenderCommand> adapter_icb_command =
+            [adapter_icb indirectRenderCommandAtIndex:0];
+        [adapter_icb_command drawMeshThreads:MTLSizeMake(width, height, layers)
+                       threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
+                         threadsPerMeshThreadgroup:MTLSizeMake(1, 1, 1)];
+        id<MTLTexture> adapter_icb_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+        MTLRenderPassDescriptor *adapter_icb_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_icb_pass.renderTargetArrayLength = layers;
+        adapter_icb_pass.colorAttachments[0].texture = adapter_icb_texture;
+        adapter_icb_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_icb_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_icb_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        id<MTLCommandBuffer> adapter_icb_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_icb_encoder =
+            [adapter_icb_command_buffer renderCommandEncoderWithDescriptor:adapter_icb_pass];
+        if (adapter_icb_encoder != nil) {
+            [adapter_icb_encoder setViewport:adapter_viewport];
+            [adapter_icb_encoder setScissorRect:scissor];
+            [adapter_icb_encoder setRenderPipelineState:adapter_pipeline];
+            [adapter_icb_encoder executeCommandsInBuffer:adapter_icb withRange:NSMakeRange(0, 1)];
+            [adapter_icb_encoder endEncoding];
+        }
+        [adapter_icb_command_buffer commit];
+        [adapter_icb_command_buffer waitUntilCompleted];
+        uint8_t adapter_icb_pixels[layers][byte_count] = {{0}};
+        for (NSUInteger layer = 0; layer < layers; ++layer) {
+            if (adapter_icb_texture != nil) {
+                [adapter_icb_texture getBytes:adapter_icb_pixels[layer] bytesPerRow:width * 4 bytesPerImage:byte_count
+                                    fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                                   mipmapLevel:0 slice:layer];
+            }
+            adapter_icb_exact = adapter_icb_exact &&
+                memcmp(native_pixels[layer], adapter_icb_pixels[layer], byte_count) == 0;
+        }
+        adapter_icb_exact = adapter_icb_exact && adapter_icb != nil && adapter_icb_command != nil &&
+            adapter_icb_texture != nil && adapter_icb_command_buffer != nil && adapter_icb_encoder != nil &&
+            adapter_icb_command_buffer.status == MTLCommandBufferStatusCompleted;
+    }
     if (native_pipeline == nil || adapter_pipeline == nil || native_texture == nil || adapter_texture == nil ||
         native_buffer == nil || native_command_buffer.status != MTLCommandBufferStatusCompleted ||
         adapter_command_buffer.status != MTLCommandBufferStatusCompleted ||
         memcmp(native_pixels[0], native_pixels[1], byte_count) != 0 ||
-        memcmp(native_pixels[1], native_pixels[2], byte_count) != 0) {
+        memcmp(native_pixels[1], native_pixels[2], byte_count) != 0 || !adapter_icb_exact) {
         fail_with_error("native layered mesh completion/routing failed", native_error);
         fail_with_error("adapter layered mesh completion failed", adapter_error);
         return 228;
