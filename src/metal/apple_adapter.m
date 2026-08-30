@@ -1006,6 +1006,17 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLRasterizationRateMapDescriptor *)descriptor;
 @end
 
+/* A rate map is part of the render-pass coordinate contract, not merely
+ * descriptive metadata.  The CPU rasterizer currently implements the
+ * fixed 1:1 top-left grid only, so accept only maps compiled by this exact
+ * ZPU device.  In particular, do not silently accept a native variable-rate
+ * map (or a map from another device) and then render it as identity. */
+static BOOL zpu_rasterization_rate_map_compatible(ZPUDevice *owner, id map) {
+    if (map == nil) return YES;
+    if (![map isKindOfClass:[ZPURasterizationRateMap class]]) return NO;
+    return ((ZPURasterizationRateMap *)map)->_owner == owner;
+}
+
 /* Metal I/O is represented by CPU-owned file data and ordered operations.
  * Committing an I/O buffer executes its operations synchronously against ZPU
  * buffers/textures; no native MTL resource or command encoder is involved. */
@@ -2988,7 +2999,8 @@ static BOOL zpu_metal4_render_pass_descriptor(ZPUDevice *owner,
                                                 ZPUTexture **depth_texture,
                                                 ZPUTexture **stencil_texture,
                                                 zpu_metal_render_pass_descriptor *pass) {
-    if (descriptor == nil || color_texture == NULL || depth_texture == NULL || stencil_texture == NULL || pass == NULL) return NO;
+    if (descriptor == nil || color_texture == NULL || depth_texture == NULL || stencil_texture == NULL || pass == NULL ||
+        !zpu_rasterization_rate_map_compatible(owner, descriptor.rasterizationRateMap)) return NO;
     ZPUTexture *color = (ZPUTexture *)descriptor.colorAttachments[0].texture;
     const BOOL hasColor = color != nil;
     if (!hasColor) {
@@ -13052,7 +13064,7 @@ static BOOL zpu_tensor_encode_packed_copy_slice(
     [_completedHandlers addObject:[block copy]];
 }
 - (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)descriptor {
-    if (descriptor == nil) return nil;
+    if (descriptor == nil || !zpu_rasterization_rate_map_compatible(_owner->_owner, descriptor.rasterizationRateMap)) return nil;
     MTLRenderPassColorAttachmentDescriptor *colorAttachment = descriptor.colorAttachments[0];
     ZPUTexture *texture = (ZPUTexture *)colorAttachment.texture;
     ZPUTexture *depthAttachmentTexture = (ZPUTexture *)descriptor.depthAttachment.texture;
@@ -13212,7 +13224,7 @@ static BOOL zpu_tensor_encode_packed_copy_slice(
     return (id<MTLRenderCommandEncoder>)result;
 }
 - (id<MTLParallelRenderCommandEncoder>)parallelRenderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)descriptor {
-    if (descriptor == nil) return nil;
+    if (descriptor == nil || !zpu_rasterization_rate_map_compatible(_owner->_owner, descriptor.rasterizationRateMap)) return nil;
     MTLRenderPassColorAttachmentDescriptor *colorAttachment = descriptor.colorAttachments[0];
     ZPUTexture *texture = (ZPUTexture *)colorAttachment.texture;
     ZPUTexture *depthAttachmentTexture = (ZPUTexture *)descriptor.depthAttachment.texture;

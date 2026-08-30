@@ -10048,9 +10048,40 @@ int main(void) {
         MTLRasterizationRateMapDescriptor *variable_rate_descriptor =
             [MTLRasterizationRateMapDescriptor rasterizationRateMapDescriptorWithScreenSize:MTLSizeMake(width, height, 0)
                                                                                           layer:variable_rate_layer];
+        id<MTLRasterizationRateMap> native_variable_rate_map =
+            [device newRasterizationRateMapWithDescriptor:variable_rate_descriptor];
         if ([adapter_rate_map_device newRasterizationRateMapWithDescriptor:variable_rate_descriptor] != nil) {
             fprintf(stderr, "metal-pixel: variable-rate map was not rejected by CPU adapter\n");
             return 46;
+        }
+        if (native_variable_rate_map != nil) {
+            /* A native map is not a CPU/ZPU resource. Rejecting it at pass
+             * creation is required: accepting it and rendering on the fixed
+             * top-left grid would silently change both the physical origin
+             * and the X/Y pixel coverage. */
+            MTLTextureDescriptor *rate_map_texture_descriptor =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                    width:width
+                                                                   height:height
+                                                                mipmapped:NO];
+            rate_map_texture_descriptor.storageMode = MTLStorageModeShared;
+            rate_map_texture_descriptor.usage = MTLTextureUsageRenderTarget;
+            id<MTLTexture> rate_map_texture =
+                [adapter_rate_map_device newTextureWithDescriptor:rate_map_texture_descriptor];
+            id<MTLCommandQueue> rate_map_queue = [adapter_rate_map_device newCommandQueue];
+            MTLRenderPassDescriptor *foreign_rate_map_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            foreign_rate_map_pass.colorAttachments[0].texture = rate_map_texture;
+            foreign_rate_map_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            foreign_rate_map_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            foreign_rate_map_pass.rasterizationRateMap = native_variable_rate_map;
+            id<MTLCommandBuffer> foreign_rate_map_command_buffer = [rate_map_queue commandBuffer];
+            id<MTLRenderCommandEncoder> foreign_rate_map_encoder =
+                [foreign_rate_map_command_buffer renderCommandEncoderWithDescriptor:foreign_rate_map_pass];
+            if (rate_map_texture == nil || rate_map_queue == nil || foreign_rate_map_encoder != nil) {
+                [foreign_rate_map_encoder endEncoding];
+                fprintf(stderr, "metal-pixel: CPU adapter accepted a foreign rasterization-rate map\n");
+                return 48;
+            }
         }
 
         const int io_result = test_cpu_io_against_native(device, adapter_rate_map_device);

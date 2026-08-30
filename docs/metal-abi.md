@@ -265,7 +265,9 @@ triangle path:
 - identity rasterization-rate maps advertise capability consistently through
   `supportsRasterizationRateMapWithLayerCount:` and preserve native physical
   size/coordinate mappings; variable-rate maps remain rejected because the
-  CPU renderer owns a fixed 1:1 pixel grid
+  CPU renderer owns a fixed 1:1 pixel grid; legacy, parallel, and Metal 4
+  render-pass creation also rejects native or cross-device maps instead of
+  silently treating their screen-space coordinates as identity
 - a deferred CPU compute encoder for the explicit
   `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8`,
   `ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE`, and
