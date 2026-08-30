@@ -198,6 +198,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSUInteger _bufferOffset;
     NSUInteger _allocatedSize;
     NSUInteger _elementSize;
+    NSUInteger _elementBits;
     MTLTensorExtents *_dimensions;
     MTLTensorExtents *_strides;
     MTLTensorDataType _dataType;
@@ -4662,6 +4663,7 @@ typedef struct {
     NSUInteger dimensions[MTL_TENSOR_MAX_RANK];
     NSUInteger strides[MTL_TENSOR_MAX_RANK];
     NSUInteger elementSize;
+    NSUInteger elementBits;
     NSUInteger size;
 } ZPUTensorLayout;
 
@@ -4679,6 +4681,31 @@ static NSUInteger zpu_tensor_element_size(MTLTensorDataType dataType) {
         case MTLTensorDataTypeInt8:
         case MTLTensorDataTypeUInt8:
             return 1;
+        case MTLTensorDataTypeInt4:
+        case MTLTensorDataTypeUInt4:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static NSUInteger zpu_tensor_element_bits(MTLTensorDataType dataType) {
+    switch (dataType) {
+        case MTLTensorDataTypeFloat32:
+        case MTLTensorDataTypeInt32:
+        case MTLTensorDataTypeUInt32:
+            return 32;
+        case MTLTensorDataTypeFloat16:
+        case MTLTensorDataTypeBFloat16:
+        case MTLTensorDataTypeInt16:
+        case MTLTensorDataTypeUInt16:
+            return 16;
+        case MTLTensorDataTypeInt8:
+        case MTLTensorDataTypeUInt8:
+            return 8;
+        case MTLTensorDataTypeInt4:
+        case MTLTensorDataTypeUInt4:
+            return 4;
         default:
             return 0;
     }
@@ -4712,9 +4739,12 @@ static BOOL zpu_tensor_layout_for_descriptor(MTLTensorDescriptor *descriptor, ZP
         descriptor.usage == 0) return NO;
     const NSUInteger rank = descriptor.dimensions.rank;
     const NSUInteger elementSize = zpu_tensor_element_size(descriptor.dataType);
-    if (elementSize == 0 || !zpu_tensor_read_extents(descriptor.dimensions, rank, layout->dimensions, NO)) return NO;
+    const NSUInteger elementBits = zpu_tensor_element_bits(descriptor.dataType);
+    if (elementSize == 0 || elementBits == 0 ||
+        !zpu_tensor_read_extents(descriptor.dimensions, rank, layout->dimensions, NO)) return NO;
     layout->rank = rank;
     layout->elementSize = elementSize;
+    layout->elementBits = elementBits;
     if (descriptor.strides != nil) {
         if (!zpu_tensor_read_extents(descriptor.strides, rank, layout->strides, NO) ||
             (rank != 0 && layout->strides[0] != 1)) return NO;
@@ -4732,9 +4762,13 @@ static BOOL zpu_tensor_layout_for_descriptor(MTLTensorDescriptor *descriptor, ZP
             }
         }
     }
-    if ((descriptor.usage & MTLTensorUsageMachineLearning) != 0 && descriptor.strides != nil && rank > 1) {
-        if (layout->strides[1] > SIZE_MAX / elementSize ||
-            (layout->strides[1] * elementSize) % 64 != 0) return NO;
+    if (descriptor.strides != nil && rank > 1) {
+        if (elementBits < 8) {
+            if (layout->strides[1] > SIZE_MAX / elementBits ||
+                (layout->strides[1] * elementBits) % (128 * 8) != 0) return NO;
+        } else if ((descriptor.usage & MTLTensorUsageMachineLearning) != 0 &&
+                   (layout->strides[1] > SIZE_MAX / elementSize ||
+                    (layout->strides[1] * elementSize) % 64 != 0)) return NO;
     }
     NSUInteger lastElement = rank == 0 ? 0 : 1;
     if (rank != 0) {
@@ -4745,8 +4779,11 @@ static BOOL zpu_tensor_layout_for_descriptor(MTLTensorDescriptor *descriptor, ZP
             lastElement += (layout->dimensions[index] - 1) * layout->strides[index];
         }
     }
-    if (lastElement == SIZE_MAX || lastElement + 1 > SIZE_MAX / elementSize) return NO;
-    layout->size = (lastElement + 1) * elementSize;
+    if (lastElement == SIZE_MAX ||
+        elementBits > SIZE_MAX / (lastElement + 1) ||
+        (lastElement + 1) * elementBits > SIZE_MAX - 7) return NO;
+    const NSUInteger totalBits = (lastElement + 1) * elementBits;
+    layout->size = (totalBits + 7) / 8;
     return YES;
 }
 
@@ -4952,6 +4989,26 @@ static BOOL zpu_tensor_transfer_bytes(ZPUTensor *tensor, MTLTensorExtents *slice
             destinationElement += coordinates[dimension] * tensorStrides[dimension];
             sourceElement += coordinates[dimension] * sourceStrides[dimension];
         }
+        if (tensor->_elementBits < 8) {
+            if (tensor->_elementBits != 4 ||
+                tensor->_bufferOffset > SIZE_MAX - destinationElement / 2) return NO;
+            const NSUInteger destinationByte = tensor->_bufferOffset + destinationElement / 2;
+            const NSUInteger sourceByte = sourceElement / 2;
+            const uint8_t destinationShift = (uint8_t)((destinationElement & 1u) * 4u);
+            const uint8_t sourceShift = (uint8_t)((sourceElement & 1u) * 4u);
+            const uint8_t sourceValue = (uint8_t)(((const uint8_t *)bytes)[sourceByte] >> sourceShift) & 0x0fu;
+            if (write) {
+                uint8_t *destinationValue = storage + destinationByte;
+                const uint8_t mask = (uint8_t)(0x0fu << destinationShift);
+                *destinationValue = (uint8_t)((*destinationValue & (uint8_t)~mask) |
+                                               (uint8_t)(sourceValue << destinationShift));
+            } else {
+                uint8_t *destinationValue = (uint8_t *)bytes + sourceByte;
+                const uint8_t mask = (uint8_t)(0x0fu << sourceShift);
+                *destinationValue = (uint8_t)((*destinationValue & (uint8_t)~mask) |
+                                               (uint8_t)(((storage[destinationByte] >> destinationShift) & 0x0fu) << sourceShift));
+            }
+        } else {
         if (destinationElement > SIZE_MAX / tensor->_elementSize ||
             sourceElement > SIZE_MAX / tensor->_elementSize ||
             tensor->_bufferOffset > SIZE_MAX - destinationElement * tensor->_elementSize) return NO;
@@ -4961,6 +5018,7 @@ static BOOL zpu_tensor_transfer_bytes(ZPUTensor *tensor, MTLTensorExtents *slice
             memmove(storage + destinationByte, (const uint8_t *)bytes + sourceByte, tensor->_elementSize);
         } else {
             memmove((uint8_t *)bytes + sourceByte, storage + destinationByte, tensor->_elementSize);
+        }
         }
         for (NSUInteger dimension = 0; dimension < rank; ++dimension) {
             coordinates[dimension] += 1;
@@ -5451,6 +5509,7 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
                                          MTLTensorExtents *destinationOrigin, MTLTensorExtents *destinationDimensions,
                                          void *encoder, BOOL computeEncoder) {
     if (source == nil || destination == nil || source->_dataType != destination->_dataType ||
+        source->_elementBits < 8 || destination->_elementBits < 8 ||
         source->_elementSize == 0 || destination->_elementSize != source->_elementSize ||
         sourceDimensions == nil || sourceOrigin == nil || destinationOrigin == nil || destinationDimensions == nil ||
         sourceDimensions.rank != source->_dimensions.rank || destinationOrigin.rank != destination->_dimensions.rank ||
@@ -5529,6 +5588,7 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
         _bufferOffset = bufferOffset;
         _allocatedSize = allocatedSize;
         _elementSize = zpu_tensor_element_size(dataType);
+        _elementBits = zpu_tensor_element_bits(dataType);
         _dimensions = [dimensions copy];
         _strides = [strides copy];
         _dataType = dataType;

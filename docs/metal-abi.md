@@ -557,7 +557,9 @@ triangle path:
 - Metal 4 buffer/texture/tensor copies, buffer-fill, indirect-command reset/copy,
   and CPU/GPU access optimization commands append or apply CPU-owned ZPU work;
   CPU-owned tensors also provide contiguous and strided byte-addressable slice
-  transfers. Acceleration-structure build/refit/copy/compaction commands use
+  transfers, including packed low/high-nibble round trips for Int4 and UInt4
+  tensors; tensor blit copies of sub-byte resources remain fail-closed until
+  their packed-copy command path is added. Acceleration-structure build/refit/copy/compaction commands use
   the same CPU-owned storage path, and the bounded Float3 triangle trace
   profile executes from that storage. An explicit `ZPUMetalCreateCPUDrawable`
   factory wraps a ZPU texture in a CPU-owned `MTLDrawable`; ordinary command

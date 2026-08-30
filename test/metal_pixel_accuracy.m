@@ -10102,15 +10102,110 @@ int main(void) {
             }
 
             if (@available(macOS 26.4, iOS 26.4, *)) {
-                MTLTensorDescriptor *unsupported_tensor_descriptor = [tensor_descriptor copy];
-                unsupported_tensor_descriptor.dataType = MTLTensorDataTypeInt4;
-                NSError *unsupported_tensor_error = nil;
-                id<MTLTensor> unsupported_tensor =
-                    [adapter_device newTensorWithDescriptor:unsupported_tensor_descriptor
-                                                       error:&unsupported_tensor_error];
-                if (unsupported_tensor != nil || unsupported_tensor_error == nil) {
-                    fail_with_error("unsupported sub-byte tensor was not rejected", unsupported_tensor_error);
+                const uint8_t subbyte_initial_values[] = {0xa1, 0xb2, 0xc3};
+                uint8_t subbyte_adapter_values[sizeof(subbyte_initial_values)] = {0};
+                MTLTensorDescriptor *subbyte_descriptor = [tensor_descriptor copy];
+                subbyte_descriptor.dataType = MTLTensorDataTypeInt4;
+                NSError *subbyte_error = nil;
+                MTLSizeAndAlign subbyte_size_align =
+                    [adapter_device tensorSizeAndAlignWithDescriptor:subbyte_descriptor];
+                id<MTLTensor> subbyte_tensor =
+                    [adapter_device newTensorWithDescriptor:subbyte_descriptor error:&subbyte_error];
+                [subbyte_tensor replaceSliceOrigin:
+                                      [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                 sliceDimensions:tensor_dimensions
+                                       withBytes:subbyte_initial_values
+                                         strides:tensor_packed_strides];
+                [subbyte_tensor getBytes:subbyte_adapter_values
+                                 strides:tensor_packed_strides
+                        fromSliceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                         sliceDimensions:tensor_dimensions];
+                if (subbyte_tensor == nil || subbyte_error != nil || subbyte_size_align.size < sizeof(subbyte_initial_values) ||
+                    subbyte_size_align.align == 0 || memcmp(subbyte_adapter_values, subbyte_initial_values,
+                                                            sizeof(subbyte_initial_values)) != 0) {
+                    fail_with_error("CPU Int4 tensor allocation or transfer failed", subbyte_error);
                     return 111;
+                }
+
+                uint8_t native_subbyte_values[sizeof(subbyte_initial_values)] = {0};
+                BOOL native_subbyte_available = NO;
+                BOOL native_subbyte_oracle_ok = NO;
+                @try {
+                    MTLTensorDescriptor *native_subbyte_descriptor = [subbyte_descriptor copy];
+                    id<MTLTensor> native_subbyte_tensor =
+                        [device newTensorWithDescriptor:native_subbyte_descriptor error:&error];
+                    if (native_subbyte_tensor != nil) {
+                        native_subbyte_available = YES;
+                        [native_subbyte_tensor replaceSliceOrigin:
+                                              [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                         sliceDimensions:tensor_dimensions
+                                               withBytes:subbyte_initial_values
+                                                 strides:tensor_packed_strides];
+                        [native_subbyte_tensor getBytes:native_subbyte_values
+                                                 strides:tensor_packed_strides
+                                        fromSliceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                         sliceDimensions:tensor_dimensions];
+                        native_subbyte_oracle_ok = memcmp(native_subbyte_values, subbyte_adapter_values,
+                                                          sizeof(native_subbyte_values)) == 0;
+                    }
+                } @catch (NSException *exception) {
+                    (void)exception;
+                    native_subbyte_oracle_ok = NO;
+                }
+                if (native_subbyte_available && !native_subbyte_oracle_ok) {
+                    fail_with_error("native Int4 tensor transfer oracle mismatch", error);
+                    return 113;
+                }
+
+                const uint8_t uint4_initial_values[] = {0x5a, 0x69, 0x7f};
+                uint8_t uint4_adapter_values[sizeof(uint4_initial_values)] = {0};
+                MTLTensorDescriptor *uint4_descriptor = [tensor_descriptor copy];
+                uint4_descriptor.dataType = MTLTensorDataTypeUInt4;
+                NSError *uint4_error = nil;
+                id<MTLTensor> uint4_tensor =
+                    [adapter_device newTensorWithDescriptor:uint4_descriptor error:&uint4_error];
+                [uint4_tensor replaceSliceOrigin:
+                                  [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                             sliceDimensions:tensor_dimensions
+                                   withBytes:uint4_initial_values
+                                     strides:tensor_packed_strides];
+                [uint4_tensor getBytes:uint4_adapter_values
+                                 strides:tensor_packed_strides
+                        fromSliceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                         sliceDimensions:tensor_dimensions];
+                if (uint4_tensor == nil || uint4_error != nil ||
+                    memcmp(uint4_adapter_values, uint4_initial_values, sizeof(uint4_initial_values)) != 0) {
+                    fail_with_error("CPU UInt4 tensor allocation or transfer failed", uint4_error);
+                    return 112;
+                }
+                uint8_t native_uint4_values[sizeof(uint4_initial_values)] = {0};
+                BOOL native_uint4_available = NO;
+                BOOL native_uint4_oracle_ok = NO;
+                @try {
+                    MTLTensorDescriptor *native_uint4_descriptor = [uint4_descriptor copy];
+                    id<MTLTensor> native_uint4_tensor =
+                        [device newTensorWithDescriptor:native_uint4_descriptor error:&error];
+                    if (native_uint4_tensor != nil) {
+                        native_uint4_available = YES;
+                        [native_uint4_tensor replaceSliceOrigin:
+                                              [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                         sliceDimensions:tensor_dimensions
+                                               withBytes:uint4_initial_values
+                                                 strides:tensor_packed_strides];
+                        [native_uint4_tensor getBytes:native_uint4_values
+                                               strides:tensor_packed_strides
+                                      fromSliceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                       sliceDimensions:tensor_dimensions];
+                        native_uint4_oracle_ok = memcmp(native_uint4_values, uint4_adapter_values,
+                                                        sizeof(native_uint4_values)) == 0;
+                    }
+                } @catch (NSException *exception) {
+                    (void)exception;
+                    native_uint4_oracle_ok = NO;
+                }
+                if (native_uint4_available && !native_uint4_oracle_ok) {
+                    fail_with_error("native UInt4 tensor transfer oracle mismatch", error);
+                    return 114;
                 }
             }
 
