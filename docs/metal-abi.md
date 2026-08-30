@@ -565,9 +565,11 @@ triangle path:
   buffer inherits the ZPU encoder's texture bindings and records pipeline,
   buffer, and dispatch state for deferred execution, with device ownership,
   command-type, buffer-offset, dimension, and CPU threadgroup-limit checks.
-  The fixed CPU kernel ABI has one representable kernel-buffer binding, so an
-  ICB binding at any other index fails closed rather than being replayed at
-  index zero.
+  The fixed texture/copy kernels use their documented single buffer slot, while
+  the registered `zpu_cpu_add_f32` and `zpu_cpu_mul_f32` profiles preserve all
+  three kernel-buffer bindings at indices 0/1/2 through ICB record, copy, reset,
+  and replay; unsupported profile-specific slots still fail closed rather than
+  being silently rebound.
   Indirect imageblock dimensions, stage-in regions, and kernel threadgroup
   memory bindings are retained through copy/reset and checked against the
   descriptor's bind limit; they are metadata-only for the registered ZPU
