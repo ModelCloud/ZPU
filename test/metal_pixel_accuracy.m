@@ -118,6 +118,8 @@ static const char *const kShaderSource =
     "struct ZPUCPUArgumentBufferArray { device float *data[2]; "
     "texture2d<float> tex[2]; sampler samp[2]; float4 color[2]; };\n"
     "kernel void zpu_cpu_argument_buffer_array(constant ZPUCPUArgumentBufferArray &args [[buffer(0)]]) { (void)args; }\n"
+    "struct ZPUCPUTensorArgumentBuffer { tensor<device float, dextents<int32_t, 2>> input [[id(0)]]; };\n"
+    "kernel void zpu_cpu_tensor_argument_buffer(constant ZPUCPUTensorArgumentBuffer &args [[buffer(0)]]) { (void)args; }\n"
     "kernel void zpu_cpu_trace_triangles_rgba8(device const float *vertices [[buffer(0)]], "
     "texture2d<float, access::write> output [[texture(0)]], uint2 gid [[thread_position_in_grid]]) { "
     "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
@@ -15125,6 +15127,7 @@ int main(void) {
             "kernel void zpu_cpu_ml_matmul_f32() {}\n"
             "kernel void zpu_cpu_argument_buffer() {}\n"
             "kernel void zpu_cpu_argument_buffer_array() {}\n"
+            "kernel void zpu_cpu_tensor_argument_buffer() {}\n"
             "kernel void zpu_cpu_trace_triangles_rgba8() {}\n"
             "vertex void zpu_test_vertex() {}\n"
             "vertex void zpu_cpu_vertex() {}\n"
@@ -15687,7 +15690,7 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 39 ||
+            adapter_library.functionNames.count != 40 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_vertex"].functionType != MTLFunctionTypeVertex ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
@@ -15698,6 +15701,7 @@ int main(void) {
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_matmul_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer_array"] == nil ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_tensor_argument_buffer"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_position_gradient_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_trace_triangles_rgba8"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_tile_gradient_rgba8"] == nil ||
@@ -26701,6 +26705,85 @@ int main(void) {
         } else {
             fprintf(stderr, "metal-pixel: CPU nested argument array fixture allocation failed\n");
             return 261;
+        }
+
+        /* Tensor members in an argument buffer are reflection-only for the
+         * fixed CPU profile. Native Metal supplies the ABI oracle for the
+         * tensor reference metadata; the adapter intentionally provides no
+         * native tensor encoder or execution path. */
+        BOOL tensor_profile_reflection_ok = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTLFunctionReflection *native_tensor_profile_reflection =
+                [library reflectionForFunctionWithName:@"zpu_cpu_tensor_argument_buffer"];
+            MTLFunctionReflection *adapter_tensor_profile_reflection =
+                [adapter_library reflectionForFunctionWithName:@"zpu_cpu_tensor_argument_buffer"];
+            id<MTLBufferBinding> native_tensor_profile_binding =
+                (id<MTLBufferBinding>)native_tensor_profile_reflection.bindings.firstObject;
+            id<MTLBufferBinding> adapter_tensor_profile_binding =
+                (id<MTLBufferBinding>)adapter_tensor_profile_reflection.bindings.firstObject;
+            MTLStructType *native_tensor_profile_struct =
+                native_tensor_profile_binding.bufferStructType;
+            MTLStructType *adapter_tensor_profile_struct =
+                adapter_tensor_profile_binding.bufferStructType;
+            MTLStructMember *native_tensor_member = native_tensor_profile_struct.members.firstObject;
+            MTLStructMember *adapter_tensor_member = adapter_tensor_profile_struct.members.firstObject;
+            MTLTensorReferenceType *native_tensor_reference = native_tensor_member.tensorReferenceType;
+            MTLTensorReferenceType *adapter_tensor_reference = adapter_tensor_member.tensorReferenceType;
+            tensor_profile_reflection_ok =
+                native_tensor_profile_reflection != nil && adapter_tensor_profile_reflection != nil &&
+                native_tensor_profile_reflection.bindings.count == 1 &&
+                adapter_tensor_profile_reflection.bindings.count == 1 &&
+                native_tensor_profile_binding != nil && adapter_tensor_profile_binding != nil &&
+                native_tensor_profile_binding.type == MTLBindingTypeBuffer &&
+                adapter_tensor_profile_binding.type == MTLBindingTypeBuffer &&
+                native_tensor_profile_binding.name != nil &&
+                [native_tensor_profile_binding.name isEqualToString:@"args"] &&
+                [adapter_tensor_profile_binding.name isEqualToString:@"args"] &&
+                native_tensor_profile_binding.index == adapter_tensor_profile_binding.index &&
+                native_tensor_profile_binding.index == 0 &&
+                native_tensor_profile_binding.access == adapter_tensor_profile_binding.access &&
+                native_tensor_profile_binding.access == MTLBindingAccessReadOnly &&
+                native_tensor_profile_binding.bufferDataType == MTLDataTypeStruct &&
+                adapter_tensor_profile_binding.bufferDataType == MTLDataTypeStruct &&
+                native_tensor_profile_binding.bufferDataSize == adapter_tensor_profile_binding.bufferDataSize &&
+                native_tensor_profile_binding.bufferDataSize == 8 &&
+                native_tensor_profile_binding.bufferAlignment == adapter_tensor_profile_binding.bufferAlignment &&
+                native_tensor_profile_binding.bufferAlignment == 8 &&
+                native_tensor_profile_struct != nil && adapter_tensor_profile_struct != nil &&
+                native_tensor_profile_struct.members.count == 1 &&
+                adapter_tensor_profile_struct.members.count == 1 &&
+                native_tensor_member != nil && adapter_tensor_member != nil &&
+                [native_tensor_member.name isEqualToString:@"input"] &&
+                [adapter_tensor_member.name isEqualToString:@"input"] &&
+                native_tensor_member.dataType == adapter_tensor_member.dataType &&
+                native_tensor_member.dataType == MTLDataTypeTensor &&
+                native_tensor_member.offset == adapter_tensor_member.offset &&
+                native_tensor_member.offset == 0 &&
+                native_tensor_member.argumentIndex == adapter_tensor_member.argumentIndex &&
+                native_tensor_member.argumentIndex == 0 &&
+                native_tensor_reference != nil && adapter_tensor_reference != nil &&
+                native_tensor_reference.dataType == adapter_tensor_reference.dataType &&
+                native_tensor_reference.dataType == MTLDataTypeTensor &&
+                native_tensor_reference.tensorDataType == adapter_tensor_reference.tensorDataType &&
+                native_tensor_reference.tensorDataType == MTLTensorDataTypeFloat32 &&
+                native_tensor_reference.indexType == adapter_tensor_reference.indexType &&
+                native_tensor_reference.indexType == MTLDataTypeInt &&
+                native_tensor_reference.access == adapter_tensor_reference.access &&
+                native_tensor_reference.access == MTLBindingAccessReadWrite &&
+                native_tensor_reference.dimensions != nil &&
+                adapter_tensor_reference.dimensions != nil &&
+                native_tensor_reference.dimensions.rank == adapter_tensor_reference.dimensions.rank &&
+                native_tensor_reference.dimensions.rank == 2;
+            for (NSUInteger dimension = 0; tensor_profile_reflection_ok && dimension < 2; ++dimension) {
+                tensor_profile_reflection_ok =
+                    [native_tensor_reference.dimensions extentAtDimensionIndex:dimension] ==
+                        [adapter_tensor_reference.dimensions extentAtDimensionIndex:dimension] &&
+                    [native_tensor_reference.dimensions extentAtDimensionIndex:dimension] == -1;
+            }
+        }
+        if (!tensor_profile_reflection_ok) {
+            fprintf(stderr, "metal-pixel: CPU tensor argument reflection mismatch\n");
+            return 262;
         }
 
         /* A count-based NSArray-style range must not wrap its final binding

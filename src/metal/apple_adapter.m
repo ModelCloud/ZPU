@@ -73,6 +73,7 @@ static NSString *const zpu_cpu_argument_buffer_function_name = @"zpu_cpu_argumen
  * Its storage and encoding remain CPU-owned; native Metal is only an oracle
  * for the public reflection/layout contract in the test suite. */
 static NSString *const zpu_cpu_argument_buffer_array_function_name = @"zpu_cpu_argument_buffer_array";
+static NSString *const zpu_cpu_tensor_argument_buffer_function_name = @"zpu_cpu_tensor_argument_buffer";
 
 static BOOL zpu_cpu_ml_add_function_name_supported(NSString *name) {
     return [name isEqualToString:zpu_cpu_ml_add_u8_function_name] ||
@@ -658,6 +659,21 @@ API_AVAILABLE(macos(10.11), ios(8.0))
                   textureReferenceType:(MTLTextureReferenceType *)textureReferenceType
                          pointerType:(MTLPointerType *)pointerType
                   tensorReferenceType:(id)tensorReferenceType;
+@end
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+@interface ZPUTensorReferenceType : MTLTensorReferenceType {
+@public
+    MTLDataType _dataType;
+    MTLTensorDataType _tensorDataType;
+    MTLDataType _indexType;
+    MTLTensorExtents *_dimensions;
+    MTLBindingAccess _access;
+}
+- (instancetype)initWithTensorDataType:(MTLTensorDataType)tensorDataType
+                              indexType:(MTLDataType)indexType
+                            dimensions:(MTLTensorExtents *)dimensions
+                                access:(MTLBindingAccess)access;
 @end
 
 API_AVAILABLE(macos(10.13), ios(11.0))
@@ -7564,6 +7580,28 @@ API_AVAILABLE(macos(10.11), ios(8.0))
 }
 @end
 
+API_AVAILABLE(macos(26.0), ios(26.0))
+@implementation ZPUTensorReferenceType
+- (instancetype)initWithTensorDataType:(MTLTensorDataType)tensorDataType
+                              indexType:(MTLDataType)indexType
+                            dimensions:(MTLTensorExtents *)dimensions
+                                access:(MTLBindingAccess)access {
+    if ((self = [super init])) {
+        _dataType = MTLDataTypeTensor;
+        _tensorDataType = tensorDataType;
+        _indexType = indexType;
+        _dimensions = [dimensions copy];
+        _access = access;
+    }
+    return self;
+}
+- (MTLDataType)dataType { return _dataType; }
+- (MTLTensorDataType)tensorDataType { return _tensorDataType; }
+- (MTLDataType)indexType { return _indexType; }
+- (MTLTensorExtents *)dimensions { return _dimensions; }
+- (MTLBindingAccess)access { return _access; }
+@end
+
 API_AVAILABLE(macos(10.13), ios(11.0))
 @implementation ZPUPointerType
 - (instancetype)initWithElementType:(MTLDataType)elementType
@@ -8005,6 +8043,28 @@ static MTLFunctionReflection *zpu_mtl4_ml_function_reflection(NSString *name) {
 
 API_AVAILABLE(macos(26.0), ios(26.0))
 static MTLFunctionReflection *zpu_argument_buffer_function_reflection(NSString *name) {
+    if ([name isEqualToString:zpu_cpu_tensor_argument_buffer_function_name]) {
+        const NSInteger dynamicDimensionValues[] = {-1, -1};
+        MTLTensorExtents *dynamicDimensions =
+            [[MTLTensorExtents alloc] initWithRank:2 values:dynamicDimensionValues];
+        ZPUTensorReferenceType *tensorReference = [[ZPUTensorReferenceType alloc]
+            initWithTensorDataType:MTLTensorDataTypeFloat32 indexType:MTLDataTypeInt
+                         dimensions:dynamicDimensions access:MTLBindingAccessReadWrite];
+        ZPUStructMember *input = [[ZPUStructMember alloc] initWithName:@"input" offset:0
+            dataType:MTLDataTypeTensor argumentIndex:0];
+        [input setStructType:nil arrayType:nil tensorReferenceType:tensorReference];
+        MTLStructType *structType = [[ZPUStructType alloc] initWithMembers:@[input]];
+        ZPUBinding *binding = zpu_reflection_binding(@"args", MTLBindingTypeBuffer,
+                                                      MTLBindingAccessReadOnly, 0);
+        [binding setBufferDataSize:8 dataType:MTLDataTypeStruct];
+        binding->_bufferAlignment = 8;
+        binding->_bufferPointerType = [[ZPUPointerType alloc]
+            initWithElementType:MTLDataTypeStruct access:MTLBindingAccessReadOnly
+                      alignment:8 dataSize:8 structType:structType];
+        binding->_bufferStructType = structType;
+        return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+            initWithBindings:@[binding] userAnnotation:nil];
+    }
     if ([name isEqualToString:zpu_cpu_argument_buffer_array_function_name]) {
         ZPUPointerType *dataPointer = [[ZPUPointerType alloc]
             initWithElementType:MTLDataTypeFloat access:MTLBindingAccessReadWrite
@@ -9959,7 +10019,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (id<MTLLibrary>)newDefaultLibrary {
     return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
-                                                        source:@"zpu_cpu_vertex zpu_cpu_fragment zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_add_f32 zpu_cpu_mul_f32 zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_position_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_layered_vertex zpu_cpu_layered_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_ml_identity zpu_cpu_ml_add_u8 zpu_cpu_ml_add_f32 zpu_cpu_ml_add_i32 zpu_cpu_ml_add_u32 zpu_cpu_ml_add_u16 zpu_cpu_ml_add_i16 zpu_cpu_ml_add_i8 zpu_cpu_ml_add_f16 zpu_cpu_ml_add_bf16 zpu_cpu_ml_add_i4 zpu_cpu_ml_add_u4 zpu_cpu_ml_mul_f32 zpu_cpu_ml_matmul_f32"];
+                                                        source:@"zpu_cpu_vertex zpu_cpu_fragment zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_add_f32 zpu_cpu_mul_f32 zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_position_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_layered_vertex zpu_cpu_layered_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_ml_identity zpu_cpu_ml_add_u8 zpu_cpu_ml_add_f32 zpu_cpu_ml_add_i32 zpu_cpu_ml_add_u32 zpu_cpu_ml_add_u16 zpu_cpu_ml_add_i16 zpu_cpu_ml_add_i8 zpu_cpu_ml_add_f16 zpu_cpu_ml_add_bf16 zpu_cpu_ml_add_i4 zpu_cpu_ml_add_u4 zpu_cpu_ml_mul_f32 zpu_cpu_ml_matmul_f32 zpu_cpu_tensor_argument_buffer"];
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
@@ -10782,6 +10842,7 @@ static BOOL zpu_source_contains_identifier(NSString *source, NSString *identifie
             zpu_cpu_ml_matmul_f32_function_name,
             zpu_cpu_argument_buffer_function_name,
             zpu_cpu_argument_buffer_array_function_name,
+            zpu_cpu_tensor_argument_buffer_function_name,
         ]) {
             if (zpu_source_contains_identifier(source, name)) [names addObject:name];
         }
