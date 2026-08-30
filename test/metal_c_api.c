@@ -206,6 +206,61 @@ int main(void) {
     zpu_metal_command_buffer_destroy(compute_buffer);
     zpu_metal_texture_destroy(compute_texture);
 
+    const zpu_metal_texture_descriptor compute_rgba32_uint_descriptor = {
+        .width = 3,
+        .height = 2,
+        .format = ZPU_METAL_RGBA32_UINT,
+    };
+    zpu_metal_texture_descriptor compute_rgba32_sint_descriptor = compute_rgba32_uint_descriptor;
+    compute_rgba32_sint_descriptor.format = ZPU_METAL_RGBA32_SINT;
+    zpu_metal_texture *compute_rgba32_uint =
+        zpu_metal_device_new_texture(device, &compute_rgba32_uint_descriptor);
+    zpu_metal_texture *compute_rgba32_sint =
+        zpu_metal_device_new_texture(device, &compute_rgba32_sint_descriptor);
+    zpu_metal_command_buffer *compute_rgba32_commands =
+        zpu_metal_command_queue_command_buffer(queue);
+    zpu_metal_compute_encoder *compute_rgba32_encoder =
+        zpu_metal_command_buffer_compute_encoder(compute_rgba32_commands);
+    if (compute_rgba32_uint == NULL || compute_rgba32_sint == NULL ||
+        compute_rgba32_commands == NULL || compute_rgba32_encoder == NULL ||
+        zpu_metal_compute_encoder_set_kernel(
+            compute_rgba32_encoder, ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA32_UINT) != 0 ||
+        zpu_metal_compute_encoder_set_texture(compute_rgba32_encoder, compute_rgba32_uint, 0) != 0 ||
+        zpu_metal_compute_encoder_dispatch_threads(
+            compute_rgba32_encoder, (zpu_metal_size){3, 2, 1}, (zpu_metal_size){2, 2, 1}) != 0 ||
+        zpu_metal_compute_encoder_set_kernel(
+            compute_rgba32_encoder, ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA32_SINT) != 0 ||
+        zpu_metal_compute_encoder_set_texture(compute_rgba32_encoder, compute_rgba32_sint, 0) != 0 ||
+        zpu_metal_compute_encoder_dispatch_threads(
+            compute_rgba32_encoder, (zpu_metal_size){3, 2, 1}, (zpu_metal_size){2, 2, 1}) != 0 ||
+        zpu_metal_compute_encoder_end_encoding(compute_rgba32_encoder) != 0 ||
+        zpu_metal_command_buffer_commit(compute_rgba32_commands) != 0 ||
+        zpu_metal_command_buffer_get_status(compute_rgba32_commands) != ZPU_METAL_COMMAND_BUFFER_COMPLETED) return 46;
+    const uint32_t compute_rgba32_uint_expected[] = {
+        1, 1, 1, UINT32_MAX, 2, 1, 2, UINT32_MAX, 3, 1, 3, UINT32_MAX,
+        1, 2, 2, UINT32_MAX, 2, 2, 3, UINT32_MAX, 3, 2, 4, UINT32_MAX,
+    };
+    const int32_t compute_rgba32_sint_expected[] = {
+        1, -1, 0, INT32_MAX, 2, -1, 1, INT32_MAX, 3, -1, 2, INT32_MAX,
+        1, -2, 1, INT32_MAX, 2, -2, 2, INT32_MAX, 3, -2, 3, INT32_MAX,
+    };
+    uint32_t compute_rgba32_uint_pixels[sizeof(compute_rgba32_uint_expected) / sizeof(uint32_t)] = {0};
+    int32_t compute_rgba32_sint_pixels[sizeof(compute_rgba32_sint_expected) / sizeof(int32_t)] = {0};
+    if (zpu_metal_texture_get_bytes(
+            compute_rgba32_uint, compute_rgba32_uint_pixels, sizeof(compute_rgba32_uint_pixels), 3 * 16,
+            (zpu_metal_region){{0, 0, 0}, {3, 2, 1}}) != 0 ||
+        zpu_metal_texture_get_bytes(
+            compute_rgba32_sint, compute_rgba32_sint_pixels, sizeof(compute_rgba32_sint_pixels), 3 * 16,
+            (zpu_metal_region){{0, 0, 0}, {3, 2, 1}}) != 0 ||
+        memcmp(compute_rgba32_uint_pixels, compute_rgba32_uint_expected,
+               sizeof(compute_rgba32_uint_expected)) != 0 ||
+        memcmp(compute_rgba32_sint_pixels, compute_rgba32_sint_expected,
+               sizeof(compute_rgba32_sint_expected)) != 0) return 47;
+    zpu_metal_compute_encoder_destroy(compute_rgba32_encoder);
+    zpu_metal_command_buffer_destroy(compute_rgba32_commands);
+    zpu_metal_texture_destroy(compute_rgba32_uint);
+    zpu_metal_texture_destroy(compute_rgba32_sint);
+
     const float add_left_values[] = {1.25f, -2.5f, 3.0f, 8.0f};
     const float add_right_values[] = {2.5f, 0.5f, -1.0f, -3.0f};
     const float add_expected[] = {3.75f, -2.0f, 2.0f, 5.0f};
