@@ -5811,6 +5811,9 @@ int main(void) {
             {{ 0.65f, -0.70f, 0.50f, 1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}},
             {{ 0.00f,  0.20f, -0.20f, -1.0f}, {0.0f, 0.0f, 0.25f, 1.0f}},
         };
+        for (NSUInteger clip_fill_case = 0; clip_fill_case < 2; ++clip_fill_case) {
+        const MTLTriangleFillMode clip_fill_mode =
+            clip_fill_case == 0 ? MTLTriangleFillModeFill : MTLTriangleFillModeLines;
         id<MTLBuffer> native_clip_volume_buffer =
             [device newBufferWithBytes:clip_volume_vertices length:sizeof(clip_volume_vertices)
                                options:MTLResourceStorageModeShared];
@@ -5829,6 +5832,7 @@ int main(void) {
             [native_clip_volume_command_buffer renderCommandEncoderWithDescriptor:native_clip_volume_pass];
         [native_clip_volume_encoder setRenderPipelineState:pipeline];
         [native_clip_volume_encoder setVertexBuffer:native_clip_volume_buffer offset:0 atIndex:0];
+        [native_clip_volume_encoder setTriangleFillMode:clip_fill_mode];
         [native_clip_volume_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [native_clip_volume_encoder endEncoding];
         MTLRenderPassDescriptor *adapter_clip_volume_pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -5841,6 +5845,7 @@ int main(void) {
             [adapter_clip_volume_command_buffer renderCommandEncoderWithDescriptor:adapter_clip_volume_pass];
         [adapter_clip_volume_encoder setRenderPipelineState:adapter_pipeline];
         [adapter_clip_volume_encoder setVertexBuffer:adapter_clip_volume_buffer offset:0 atIndex:0];
+        [adapter_clip_volume_encoder setTriangleFillMode:clip_fill_mode];
         [adapter_clip_volume_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [adapter_clip_volume_encoder endEncoding];
         [native_clip_volume_command_buffer commit];
@@ -5868,6 +5873,7 @@ int main(void) {
                     mismatch < byte_count ? native_clip_volume_pixels[mismatch] : 0,
                     mismatch < byte_count ? adapter_clip_volume_pixels[mismatch] : 0);
             return 154;
+        }
         }
 
         /* Bound vertex resources are read when the draw executes. Mutating

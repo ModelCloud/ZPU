@@ -1599,6 +1599,9 @@ fn drawLine(job: *Job, a: ProjectedVertex, b: ProjectedVertex, y0: usize, y1: us
     }
     const slope = @abs(b.z - a.z) / @as(f32, @floatFromInt(steps));
     const depth_adjust = depthBias(job, slope);
+    const delta_x = b.x - a.x;
+    const delta_y = b.y - a.y;
+    const delta_length_squared = delta_x * delta_x + delta_y * delta_y;
     for (0..steps + 1) |step| {
         const t = @as(f32, @floatFromInt(step)) / @as(f32, @floatFromInt(steps));
         const x_value = a.x + (b.x - a.x) * t;
@@ -1606,7 +1609,15 @@ fn drawLine(job: *Job, a: ProjectedVertex, b: ProjectedVertex, y0: usize, y1: us
         const x = pixelCoordinate(x_value, bounds.x1) orelse continue;
         const y = pixelCoordinate(y_value, bounds.y1) orelse continue;
         if (x < bounds.x0 or y < @max(bounds.y0, y0) or y >= @min(bounds.y1, y1)) continue;
-        writePixel(job, x, y, a.z + (b.z - a.z) * t, depth_adjust, interpolateLineColor(a, b, t), lineSampleSelection(job, a, b), stats, true);
+        const pixel_center_x = @as(f32, @floatFromInt(x)) + 0.5;
+        const pixel_center_y = @as(f32, @floatFromInt(y)) + 0.5;
+        const center_t = if (delta_length_squared > 0)
+            std.math.clamp(((pixel_center_x - a.x) * delta_x + (pixel_center_y - a.y) * delta_y) /
+                delta_length_squared, 0, 1)
+        else
+            t;
+        writePixel(job, x, y, a.z + (b.z - a.z) * center_t, depth_adjust,
+            interpolateLineColor(a, b, center_t), lineSampleSelection(job, a, b), stats, true);
     }
 }
 
@@ -1711,6 +1722,28 @@ fn drawTriangle(job: *Job, input: [3]ProjectedVertex, y0: usize, y1: usize, stat
     stats.primitives_rasterized += 1;
 }
 
+fn drawClippedTriangle(job: *Job, vertices: []const abi.Vertex, y0: usize, y1: usize, stats: *Stats) void {
+    if (vertices.len < 3) return;
+    var projected: [16]ProjectedVertex = undefined;
+    for (vertices, 0..) |vertex, index| {
+        projected[index] = project(vertex, job.options.viewport) orelse return;
+    }
+    if (job.options.fill_mode == .lines) {
+        const area = edge(projected[0], projected[1], projected[2].x, projected[2].y);
+        if (!std.math.isFinite(area) or @abs(area) < 0.000001) return;
+        const front_facing = if (job.options.winding == .clockwise) area > 0 else area < 0;
+        if ((job.options.cull_mode == .front and front_facing) or (job.options.cull_mode == .back and !front_facing)) return;
+        for (0..vertices.len) |index| {
+            drawLine(job, projected[index], projected[(index + 1) % vertices.len], y0, y1, stats);
+        }
+        stats.primitives_rasterized += 1;
+        return;
+    }
+    for (1..vertices.len - 1) |fan_index| {
+        drawTriangle(job, .{ projected[0], projected[fan_index], projected[fan_index + 1] }, y0, y1, stats);
+    }
+}
+
 fn drawBand(job: *Job, band: usize) Stats {
     var stats = Stats{ .primitives_submitted = if (band == 0) switch (job.primitive) {
         .point => @intCast(job.vertices.len),
@@ -1753,16 +1786,7 @@ fn drawBand(job: *Job, band: usize) Stats {
                 const input = [3]abi.Vertex{ job.vertices[index], job.vertices[index + 1], job.vertices[index + 2] };
                 var clipped: [16]abi.Vertex = undefined;
                 const clipped_count = clipTriangle(input, job.options.depth_clip_mode, &clipped);
-                if (clipped_count >= 3) {
-                    for (1..clipped_count - 1) |fan_index| {
-                        const triangle = [3]ProjectedVertex{
-                            project(clipped[0], job.options.viewport) orelse continue,
-                            project(clipped[fan_index], job.options.viewport) orelse continue,
-                            project(clipped[fan_index + 1], job.options.viewport) orelse continue,
-                        };
-                        drawTriangle(job, triangle, y0, y1, &stats);
-                    }
-                }
+                drawClippedTriangle(job, clipped[0..clipped_count], y0, y1, &stats);
             }
         },
         .triangle_strip => {
@@ -1773,16 +1797,7 @@ fn drawBand(job: *Job, band: usize) Stats {
                 const input = [3]abi.Vertex{ job.vertices[index], job.vertices[b_index], job.vertices[c_index] };
                 var clipped: [16]abi.Vertex = undefined;
                 const clipped_count = clipTriangle(input, job.options.depth_clip_mode, &clipped);
-                if (clipped_count >= 3) {
-                    for (1..clipped_count - 1) |fan_index| {
-                        const triangle = [3]ProjectedVertex{
-                            project(clipped[0], job.options.viewport) orelse continue,
-                            project(clipped[fan_index], job.options.viewport) orelse continue,
-                            project(clipped[fan_index + 1], job.options.viewport) orelse continue,
-                        };
-                        drawTriangle(job, triangle, y0, y1, &stats);
-                    }
-                }
+                drawClippedTriangle(job, clipped[0..clipped_count], y0, y1, &stats);
             };
         },
     }
