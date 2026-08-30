@@ -9202,7 +9202,15 @@ static BOOL zpu_apply_legacy_compute_descriptor(
            point == MTLCounterSamplingPointAtDispatchBoundary ||
            point == MTLCounterSamplingPointAtBlitBoundary;
 }
-- (NSUInteger)sparseTileSizeInBytes { return 0; }
+- (NSUInteger)sparseTileSizeInBytes {
+    /* The legacy query uses Apple's default sparse page size. On Apple
+     * Silicon this is the 16 KiB page, while callers that need a specific
+     * placement size use sparseTileSizeInBytesForSparsePageSize:. */
+    /* Keep the raw enum value here because MTLSparsePageSize was introduced
+     * after this legacy property (and is unavailable at the iOS 15
+     * deployment target). */
+    return zpu_sparse_page_bytes(101); /* MTLSparsePageSize16 */
+}
 - (NSUInteger)sparseTileSizeInBytesForSparsePageSize:(MTLSparsePageSize)pageSize API_AVAILABLE(macos(13.0), ios(16.0)) {
     return zpu_sparse_page_bytes((NSInteger)pageSize);
 }

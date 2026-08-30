@@ -22506,6 +22506,8 @@ int main(void) {
             [adapter_device sparseTileSizeInBytesForSparsePageSize:MTLSparsePageSize64];
         const NSUInteger sparse_page_bytes_256 =
             [adapter_device sparseTileSizeInBytesForSparsePageSize:MTLSparsePageSize256];
+        const NSUInteger native_default_sparse_page_bytes = [device sparseTileSizeInBytes];
+        const NSUInteger adapter_default_sparse_page_bytes = [adapter_device sparseTileSizeInBytes];
         NSMutableData *sparse_input_data = [NSMutableData dataWithLength:sparse_page_bytes];
         for (NSUInteger index = 0; index < sparse_page_bytes; ++index) {
             ((uint8_t *)sparse_input_data.mutableBytes)[index] = (uint8_t)((index * 29u + 11u) & 0xffu);
@@ -22546,11 +22548,14 @@ int main(void) {
         id<MTLBuffer> sparse_zero_output = nil;
         if (sparse_page_bytes_16 != 16u * 1024u || sparse_page_bytes != 64u * 1024u ||
             sparse_page_bytes_256 != 256u * 1024u ||
+            native_default_sparse_page_bytes != adapter_default_sparse_page_bytes ||
             [device sparseTileSizeInBytesForSparsePageSize:MTLSparsePageSize16] != sparse_page_bytes_16 ||
             [device sparseTileSizeInBytesForSparsePageSize:MTLSparsePageSize64] != sparse_page_bytes ||
             [device sparseTileSizeInBytesForSparsePageSize:MTLSparsePageSize256] != sparse_page_bytes_256 ||
             !sparse_tile_exact) {
-            fprintf(stderr, "metal-pixel: CPU sparse page sizes are incorrect\n");
+            fprintf(stderr, "metal-pixel: CPU sparse page sizes are incorrect default=%lu/%lu\n",
+                    (unsigned long)native_default_sparse_page_bytes,
+                    (unsigned long)adapter_default_sparse_page_bytes);
             return 85;
         }
         MTLHeapDescriptor *sparse_heap_descriptor = [MTLHeapDescriptor new];

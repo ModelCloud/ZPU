@@ -417,6 +417,7 @@
     "MTLDevice.newPipelineDataSetSerializerWithDescriptor",
     "MTLDevice.functionHandleWithFunction",
     "MTLDevice.sparseTileSizeWithTextureType",
+    "MTLDevice.sparseTileSizeInBytes",
     "MTLDevice.sparseTileSizeWithTextureTypeSparsePageSize",
     "MTLDevice.sparseTileSizeInBytesForSparsePageSize",
     "MTLDevice.supportsPlacementSparse",
