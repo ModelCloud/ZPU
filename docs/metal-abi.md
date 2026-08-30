@@ -88,6 +88,15 @@ triangle path:
   plane per z slice, including mip-level depth reduction, explicit
   `bytesPerImage` transfers, 3D views, heap placement, and legacy/Metal 4
   texture and buffer copies plus center-sampled mipmap generation
+- CPU-owned 2D multisample textures with Apple-verified 2x and 4x default
+  sample locations, represented as independent ZPU sample planes. Ordered
+  render encoders can store those planes or resolve them into a matching
+  single-sample color texture using `MultisampleResolve` or
+  `StoreAndMultisampleResolve`; the resolver averages logical sample colors
+  before the destination format encode. This bounded profile rejects MSAA
+  depth/stencil, MRT, parallel render encoders, sparse placement, texture
+  views, direct CPU transfers, custom sample positions, and other sample
+  counts.
 - buffer and texture resource options preserve the requested storage mode, CPU
   cache mode, hazard mode, texture usage, optimization flag, compression mode,
   and swizzle metadata; indirect command buffers preserve their resource
@@ -160,11 +169,12 @@ triangle path:
   rejected
 - buffer-backed texture views that alias storage with checked row strides and
   preserve the backing resource lifetime
-- compatible pixel-format views for the supported 32-bit color group
-  (RGBA8Unorm, BGRA8Unorm, and R32Float) create view-owned ZPU handles over
-  the same bytes, so CPU sampling, rendering, and transfers observe the view
-  interpretation while the parent remains the storage owner; RGBA16Float,
-  depth32-float, and Stencil8 views remain same-format only
+- compatible pixel-format views for all supported color and integer formats
+  with the same bytes-per-texel create
+  view-owned ZPU handles over the same bytes, so CPU sampling, rendering, and
+  transfers observe the view interpretation while the parent remains the
+  storage owner; depth/stencil views remain same-format only, and multisample
+  views remain unsupported
 - CPU-owned `MTLTextureViewPool` slots that create/copy ZPU texture views or
   buffer-backed views and return synthetic resource IDs usable by MTL4
   argument tables

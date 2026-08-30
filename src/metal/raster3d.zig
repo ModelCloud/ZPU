@@ -1746,6 +1746,16 @@ pub fn clearDepth(depth: []f32, width: u32, value: f32) void {
     worker.join();
 }
 
+test "Apple MSAA default sample positions use the top-left pixel grid" {
+    try std.testing.expectEqual([2]f32{ 0.5, 0.5 }, defaultSamplePosition(1, 0));
+    try std.testing.expectEqual([2]f32{ 0.75, 0.75 }, defaultSamplePosition(2, 0));
+    try std.testing.expectEqual([2]f32{ 0.25, 0.25 }, defaultSamplePosition(2, 1));
+    try std.testing.expectEqual([2]f32{ 0.375, 0.125 }, defaultSamplePosition(4, 0));
+    try std.testing.expectEqual([2]f32{ 0.875, 0.375 }, defaultSamplePosition(4, 1));
+    try std.testing.expectEqual([2]f32{ 0.125, 0.625 }, defaultSamplePosition(4, 2));
+    try std.testing.expectEqual([2]f32{ 0.625, 0.875 }, defaultSamplePosition(4, 3));
+}
+
 test "Metal viewport and scissor origins use the top-left pixel grid" {
     var pixels = [_]u8{0} ** (8 * 8 * 4);
     var target = try Target.init(&pixels, 8, 8, 8 * 4, .rgba8_unorm);
