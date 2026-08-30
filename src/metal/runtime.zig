@@ -8981,6 +8981,48 @@ test "CPU uniform integer triangle patches preserve raster pixels" {
     }
 }
 
+test "CPU line-filled integer triangle patches rasterize their generated grid" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -0.86, -0.72, 0.5, 1 }, .color = .{ .red = 0.91, .green = 0.17, .blue = 0.63, .alpha = 0.81 } },
+        .{ .position = .{ 0.78, -0.43, 0.5, 1 }, .color = .{ .red = 0.23, .green = 0.87, .blue = 0.31, .alpha = 0.59 } },
+        .{ .position = .{ -0.21, 0.84, 0.5, 1 }, .color = .{ .red = 0.19, .green = 0.41, .blue = 0.97, .alpha = 0.73 } },
+    };
+    const vertex_buffer = try createBuffer(device, @sizeOf(@TypeOf(vertices)), @ptrCast(&vertices));
+    defer destroyBuffer(vertex_buffer);
+    const factors = [_]u16{ 0x4000, 0x4000, 0x4000, 0x4000 };
+    const factor_buffer = try createBuffer(device, @sizeOf(@TypeOf(factors)), @ptrCast(&factors));
+    defer destroyBuffer(factor_buffer);
+
+    const line_texture = try createTexture(device, 9, 7, @intFromEnum(abi.PixelFormat.bgra8_unorm));
+    defer destroyTexture(line_texture);
+    var line_commands = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(line_commands);
+    var line_encoder = try beginRender(line_commands, line_texture, .{ .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } } });
+    try line_encoder.setVertexBuffer(vertex_buffer, 0, 0);
+    try line_encoder.setPatchMaxTessellationFactor(2);
+    try line_encoder.setTriangleFillMode(.lines);
+    try line_encoder.setTessellationFactorBuffer(factor_buffer, 0, @sizeOf(@TypeOf(factors)));
+    try line_encoder.drawPatches(1, 3, 0, 1, null, 0, 1, 0, .none, null, 0);
+    try line_encoder.endEncoding();
+    destroyRenderEncoder(line_encoder);
+    try line_commands.commit();
+    try std.testing.expectEqual(CommandStatus.completed, line_commands.status);
+
+    var has_line_pixel = false;
+    for (0..line_texture.bytes.len / 4) |pixel| {
+        const offset = pixel * 4;
+        if (line_texture.bytes[offset] != 0 or line_texture.bytes[offset + 1] != 0 or line_texture.bytes[offset + 2] != 0) {
+            has_line_pixel = true;
+            break;
+        }
+    }
+    try std.testing.expect(has_line_pixel);
+}
+
 test "CPU compute writes narrow unorm targets at their native stride" {
     const device = try createDevice();
     defer destroyDevice(device);
