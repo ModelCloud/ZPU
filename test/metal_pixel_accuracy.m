@@ -10047,6 +10047,35 @@ int main(void) {
             return 134;
         }
 
+        /* A nil table is an explicit unbind, not a metadata-only pointer
+         * update. The second dispatch must fail after the first dispatch has
+         * installed a valid texture and the table is then cleared. */
+        id<MTL4CommandBuffer> metal4_nil_table_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_nil_table_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> metal4_nil_table_encoder =
+            [metal4_nil_table_command_buffer computeCommandEncoder];
+        [metal4_nil_table_encoder setComputePipelineState:adapter_compute_pipeline];
+        [metal4_nil_table_encoder setArgumentTable:metal4_table];
+        [metal4_nil_table_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                              threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+        [metal4_nil_table_encoder setArgumentTable:nil];
+        [metal4_nil_table_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                              threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+        [metal4_nil_table_encoder endEncoding];
+        [metal4_nil_table_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_nil_table_buffers[] = {metal4_nil_table_command_buffer};
+        MTL4CommitOptions *metal4_nil_table_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *metal4_nil_table_error = nil;
+        [metal4_nil_table_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            metal4_nil_table_error = feedback.error;
+        }];
+        [metal4_queue commit:metal4_nil_table_buffers count:1 options:metal4_nil_table_options];
+        if (metal4_nil_table_command_buffer == nil || metal4_nil_table_encoder == nil ||
+            metal4_nil_table_error == nil) {
+            fprintf(stderr, "metal-pixel: Metal 4 nil argument table did not unbind state\n");
+            return 152;
+        }
+
         /* Metal 4 acceleration commands share the CPU-owned storage and
          * descriptor-size model of the legacy acceleration encoder. Native
          * Metal is not used for this operation; only the earlier render and
@@ -13250,6 +13279,44 @@ int main(void) {
             adapter_render_counter_entry[0].timestamp == 0) {
             fail_with_error("Metal 4 CPU render timestamp path failed", metal4_error);
             return 67;
+        }
+
+        /* The render encoder must also clear the CPU-owned state when a
+         * caller explicitly unbinds a table for its stages. The second draw
+         * has no vertex address and therefore must fail instead of replaying
+         * the first draw's table binding. */
+        id<MTLTexture> metal4_nil_render_texture =
+            [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTL4RenderPassDescriptor *metal4_nil_render_pass = [MTL4RenderPassDescriptor new];
+        metal4_nil_render_pass.colorAttachments[0].texture = metal4_nil_render_texture;
+        metal4_nil_render_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        metal4_nil_render_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        metal4_nil_render_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        id<MTL4CommandBuffer> metal4_nil_render_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_nil_render_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4RenderCommandEncoder> metal4_nil_render_encoder =
+            [metal4_nil_render_command_buffer renderCommandEncoderWithDescriptor:metal4_nil_render_pass];
+        [metal4_nil_render_encoder setRenderPipelineState:adapter_pipeline];
+        [metal4_nil_render_encoder setColorAttachmentMap:identity_color_map];
+        [metal4_nil_render_encoder setArgumentTable:adapter_metal4_origin_table
+                                           atStages:MTLRenderStageVertex | MTLRenderStageFragment];
+        [metal4_nil_render_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
+        [metal4_nil_render_encoder setArgumentTable:nil
+                                           atStages:MTLRenderStageVertex | MTLRenderStageFragment];
+        [metal4_nil_render_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
+        [metal4_nil_render_encoder endEncoding];
+        [metal4_nil_render_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_nil_render_buffers[] = {metal4_nil_render_command_buffer};
+        MTL4CommitOptions *metal4_nil_render_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *metal4_nil_render_error = nil;
+        [metal4_nil_render_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            metal4_nil_render_error = feedback.error;
+        }];
+        [metal4_queue commit:metal4_nil_render_buffers count:1 options:metal4_nil_render_options];
+        if (metal4_nil_render_texture == nil || metal4_nil_render_command_buffer == nil ||
+            metal4_nil_render_encoder == nil || metal4_nil_render_error == nil) {
+            fprintf(stderr, "metal-pixel: Metal 4 nil render argument table did not unbind state\n");
+            return 153;
         }
 
         /* ZPU has one top-left viewport and scissor state. Never silently
