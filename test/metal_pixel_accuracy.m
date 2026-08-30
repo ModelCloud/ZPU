@@ -19700,6 +19700,7 @@ int main(void) {
         MTLSharedEventHandle *adapter_event_handle = [adapter_event newSharedEventHandle];
         id<MTLSharedEvent> adapter_event_from_handle =
             [adapter_device newSharedEventWithHandle:adapter_event_handle];
+        NSError *adapter_handle_archive_error = nil;
         adapter_event_from_handle.signaledValue = 11;
         if (adapter_event == nil || !adapter_event_notified ||
             adapter_event_handle == nil || adapter_event_from_handle != adapter_event ||
@@ -19707,6 +19708,25 @@ int main(void) {
             ![adapter_event waitUntilSignaledValue:7 timeoutMS:0]) {
             fprintf(stderr, "metal-pixel: shared event adapter failed\n");
             return 19;
+        }
+        NSData *adapter_shared_event_handle_data =
+            [NSKeyedArchiver archivedDataWithRootObject:adapter_event_handle
+                                  requiringSecureCoding:YES
+                                                  error:&adapter_handle_archive_error];
+        NSSet *adapter_event_handle_classes =
+            [NSSet setWithObjects:[MTLSharedEventHandle class], [NSString class], nil];
+        MTLSharedEventHandle *adapter_unarchived_event_handle =
+            (MTLSharedEventHandle *)[NSKeyedUnarchiver
+                unarchivedObjectOfClasses:adapter_event_handle_classes
+                                  fromData:adapter_shared_event_handle_data
+                                     error:&adapter_handle_archive_error];
+        id<MTLSharedEvent> adapter_unarchived_event =
+            [adapter_device newSharedEventWithHandle:adapter_unarchived_event_handle];
+        if (adapter_shared_event_handle_data == nil || adapter_unarchived_event_handle == nil ||
+            adapter_unarchived_event != adapter_event || adapter_handle_archive_error != nil ||
+            adapter_unarchived_event.signaledValue != adapter_event.signaledValue) {
+            fprintf(stderr, "metal-pixel: secure shared event handle round-trip failed\n");
+            return 76;
         }
         id<MTLSharedEvent> adapter_timeout_event = [adapter_device newSharedEvent];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_MSEC),
@@ -19735,6 +19755,24 @@ int main(void) {
             adapter_shared_texture_from_handle.height != adapter_shared_texture.height) {
             fprintf(stderr, "metal-pixel: shared texture handle adapter failed\n");
             return 74;
+        }
+        NSData *adapter_shared_texture_handle_data =
+            [NSKeyedArchiver archivedDataWithRootObject:adapter_shared_texture_handle
+                                  requiringSecureCoding:YES
+                                                  error:&adapter_handle_archive_error];
+        NSSet *adapter_texture_handle_classes =
+            [NSSet setWithObjects:[MTLSharedTextureHandle class], [NSString class], nil];
+        MTLSharedTextureHandle *adapter_unarchived_texture_handle =
+            (MTLSharedTextureHandle *)[NSKeyedUnarchiver
+                unarchivedObjectOfClasses:adapter_texture_handle_classes
+                                  fromData:adapter_shared_texture_handle_data
+                                     error:&adapter_handle_archive_error];
+        id<MTLTexture> adapter_unarchived_shared_texture =
+            [adapter_device newSharedTextureWithHandle:adapter_unarchived_texture_handle];
+        if (adapter_shared_texture_handle_data == nil || adapter_unarchived_texture_handle == nil ||
+            adapter_unarchived_shared_texture != adapter_shared_texture || adapter_handle_archive_error != nil) {
+            fprintf(stderr, "metal-pixel: secure shared texture handle round-trip failed\n");
+            return 75;
         }
         id<MTLEvent> adapter_command_event = [adapter_device newEvent];
         id<MTLCommandBuffer> adapter_event_command_buffer = [adapter_queue commandBuffer];

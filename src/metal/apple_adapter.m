@@ -495,6 +495,7 @@ API_AVAILABLE(macos(15.0), ios(18.0))
     ZPUDevice *_owner;
     NSMutableArray *_notifications;
     NSString *_label;
+    uint64_t _resourceID;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner event:(zpu_metal_shared_event *)event;
 @end
@@ -503,6 +504,7 @@ API_AVAILABLE(macos(15.0), ios(18.0))
 @public
     ZPUSharedEvent *_event;
     NSString *_label;
+    uint64_t _resourceID;
 }
 - (instancetype)initWithEvent:(ZPUSharedEvent *)event;
 @end
@@ -511,6 +513,7 @@ API_AVAILABLE(macos(15.0), ios(18.0))
 @public
     ZPUTexture *_texture;
     NSString *_label;
+    uint64_t _resourceID;
 }
 - (instancetype)initWithTexture:(ZPUTexture *)texture;
 @end
@@ -6027,16 +6030,25 @@ static BOOL zpu_residency_allocation_belongs_to_device(ZPUDevice *owner, id<MTLA
     if ((self = [super init])) {
         _event = event;
         _label = [event.label copy];
+        _resourceID = event->_resourceID;
     }
     return self;
 }
 - (NSString *)label { return _label; }
 + (BOOL)supportsSecureCoding { return YES; }
 - (instancetype)initWithCoder:(NSCoder *)coder {
-    if ((self = [super init])) _label = [[coder decodeObjectOfClass:[NSString class] forKey:@"label"] copy];
+    if ((self = [super init])) {
+        _label = [[coder decodeObjectOfClass:[NSString class] forKey:@"label"] copy];
+        _resourceID = [coder decodeInt64ForKey:@"resourceID"];
+        id resource = zpu_resource_for_id(_resourceID);
+        if ([resource isKindOfClass:[ZPUSharedEvent class]]) _event = (ZPUSharedEvent *)resource;
+    }
     return self;
 }
-- (void)encodeWithCoder:(NSCoder *)coder { [coder encodeObject:_label forKey:@"label"]; }
+- (void)encodeWithCoder:(NSCoder *)coder {
+    [coder encodeObject:_label forKey:@"label"];
+    [coder encodeInt64:(int64_t)_resourceID forKey:@"resourceID"];
+}
 @end
 
 @implementation ZPUSharedEvent
@@ -6045,6 +6057,7 @@ static BOOL zpu_residency_allocation_belongs_to_device(ZPUDevice *owner, id<MTLA
         _owner = owner;
         _zpuEvent = event;
         _notifications = [NSMutableArray array];
+        _resourceID = zpu_register_resource(self);
     }
     return self;
 }
@@ -6091,6 +6104,7 @@ static BOOL zpu_residency_allocation_belongs_to_device(ZPUDevice *owner, id<MTLA
     if ((self = [super init])) {
         _texture = texture;
         _label = [texture.label copy];
+        _resourceID = texture->_resourceID;
     }
     return self;
 }
@@ -6098,10 +6112,18 @@ static BOOL zpu_residency_allocation_belongs_to_device(ZPUDevice *owner, id<MTLA
 - (NSString *)label { return _label; }
 + (BOOL)supportsSecureCoding { return YES; }
 - (instancetype)initWithCoder:(NSCoder *)coder {
-    if ((self = [super init])) _label = [[coder decodeObjectOfClass:[NSString class] forKey:@"label"] copy];
+    if ((self = [super init])) {
+        _label = [[coder decodeObjectOfClass:[NSString class] forKey:@"label"] copy];
+        _resourceID = [coder decodeInt64ForKey:@"resourceID"];
+        id resource = zpu_resource_for_id(_resourceID);
+        if ([resource isKindOfClass:[ZPUTexture class]]) _texture = (ZPUTexture *)resource;
+    }
     return self;
 }
-- (void)encodeWithCoder:(NSCoder *)coder { [coder encodeObject:_label forKey:@"label"]; }
+- (void)encodeWithCoder:(NSCoder *)coder {
+    [coder encodeObject:_label forKey:@"label"];
+    [coder encodeInt64:(int64_t)_resourceID forKey:@"resourceID"];
+}
 @end
 
 static uint64_t zpu_cpu_timestamp(void) {
