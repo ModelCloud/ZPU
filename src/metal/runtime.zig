@@ -7517,6 +7517,72 @@ test "CPU layered tile dispatch broadcasts each slice on the upper-left grid" {
     }
 }
 
+test "CPU layered tile dispatch honors logical to physical attachment mapping" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    var logical_layers: [3]*Texture = undefined;
+    var physical_layers: [3]*Texture = undefined;
+    var references: [3]*Texture = undefined;
+    for (&logical_layers, &physical_layers, &references) |*logical, *physical, *reference| {
+        logical.* = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+        physical.* = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.bgra8_unorm));
+        reference.* = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.bgra8_unorm));
+        @memset(logical.*.bytes, 0xa5);
+        @memset(physical.*.bytes, 0xa5);
+        @memset(reference.*.bytes, 0xa5);
+    }
+    defer for (logical_layers, &physical_layers, &references) |logical, *physical, *reference| {
+        destroyTexture(logical);
+        destroyTexture(physical.*);
+        destroyTexture(reference.*);
+    };
+
+    var mapped_commands = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(mapped_commands);
+    var mapped_encoder = try beginRender(mapped_commands, logical_layers[0], .{
+        .color = .{ .load_action = .load, .store_action = .store },
+    });
+    try mapped_encoder.setRenderTargetArray(&logical_layers, logical_layers.len);
+    try mapped_encoder.setColorAttachmentArrayTargets(
+        &physical_layers,
+        physical_layers.len,
+        .{ .load_action = .load, .store_action = .store },
+        1,
+    );
+    try mapped_encoder.setColorAttachmentMap(&[_]u8{ 1, 0, 2, 3, 4, 5, 6, 7 }, 8);
+    try mapped_encoder.dispatchThreadsPerTile(1, .{ .width = 2, .height = 2, .depth = 1 }, .{ .width = 2, .height = 2, .depth = 1 });
+    try mapped_encoder.endEncoding();
+    destroyRenderEncoder(mapped_encoder);
+
+    var reference_commands = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(reference_commands);
+    for (references) |reference| {
+        var reference_encoder = try beginRender(reference_commands, reference, .{
+            .color = .{ .load_action = .load, .store_action = .store },
+        });
+        try reference_encoder.dispatchThreadsPerTile(1, .{ .width = 2, .height = 2, .depth = 1 }, .{ .width = 2, .height = 2, .depth = 1 });
+        try reference_encoder.endEncoding();
+        destroyRenderEncoder(reference_encoder);
+    }
+
+    try std.testing.expectEqual(@as(u8, 0xa5), physical_layers[0].bytes[0]);
+    try std.testing.expectEqual(@as(u8, 0xa5), logical_layers[0].bytes[0]);
+    try mapped_commands.commit();
+    try reference_commands.commit();
+    try std.testing.expectEqual(CommandStatus.completed, mapped_commands.status);
+    try std.testing.expectEqual(CommandStatus.completed, reference_commands.status);
+    for (physical_layers, &references) |physical, *reference| {
+        try std.testing.expectEqualSlices(u8, reference.*.bytes, physical.bytes);
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 64, 32, 32, 255 }, physical.bytes[0..4]);
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 64, 96, 159, 255 }, physical.bytes[2 * physical.stride + 4 * 4 ..][0..4]);
+    }
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xa5, 0xa5, 0xa5, 0xa5 }, logical_layers[0].bytes[0..4]);
+    try std.testing.expectEqualSlices(u8, logical_layers[0].bytes, logical_layers[1].bytes);
+    try std.testing.expectEqualSlices(u8, logical_layers[1].bytes, logical_layers[2].bytes);
+}
+
 test "CPU mesh indirect grid is deferred and uses Metal threadgroup dimensions" {
     const device = try createDevice();
     defer destroyDevice(device);
