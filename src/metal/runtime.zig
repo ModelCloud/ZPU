@@ -558,6 +558,8 @@ const BeginRenderCommand = struct {
     stencil_array_targets: [8]?*Texture = [_]?*Texture{null} ** 8,
     depth_sample_targets: [4]?*Texture = [_]?*Texture{null} ** 4,
     stencil_sample_targets: [4]?*Texture = [_]?*Texture{null} ** 4,
+    depth_sample_array_targets: [8][4]?*Texture = [_][4]?*Texture{[_]?*Texture{null} ** 4} ** 8,
+    stencil_sample_array_targets: [8][4]?*Texture = [_][4]?*Texture{[_]?*Texture{null} ** 4} ** 8,
     depth: ?[]f32 = null,
     depth_texture: ?*Texture = null,
     stencil: ?[]u8 = null,
@@ -902,17 +904,23 @@ pub const CommandBuffer = struct {
         for (&active_sample_array_resolve_targets) |*attachments| @memset(attachments, null);
         var active_depth_sample_targets: [4]?*Texture = [_]?*Texture{null} ** 4;
         var active_stencil_sample_targets: [4]?*Texture = [_]?*Texture{null} ** 4;
+        var active_depth_sample_array_targets: [8][4]?*Texture = undefined;
+        var active_stencil_sample_array_targets: [8][4]?*Texture = undefined;
+        for (&active_depth_sample_array_targets) |*layer_targets| @memset(layer_targets, null);
+        for (&active_stencil_sample_array_targets) |*layer_targets| @memset(layer_targets, null);
         var active_depth_array_targets: [8]?*Texture = [_]?*Texture{null} ** 8;
         var active_stencil_array_targets: [8]?*Texture = [_]?*Texture{null} ** 8;
         var active_depth: ?[]f32 = null;
         var active_depth_texture: ?*Texture = null;
         var active_depth_values: ?[]f32 = null;
         var active_depth_array_values: [8]?[]f32 = [_]?[]f32{null} ** 8;
+        var active_depth_sample_array_values: [8]?[]f32 = [_]?[]f32{null} ** 8;
         var active_depth_store_action: abi.StoreAction = .dont_care;
         var active_stencil: ?[]u8 = null;
         var active_stencil_texture: ?*Texture = null;
         var active_stencil_values: ?[]u8 = null;
         var active_stencil_array_values: [8]?[]u8 = [_]?[]u8{null} ** 8;
+        var active_stencil_sample_array_values: [8]?[]u8 = [_]?[]u8{null} ** 8;
         var active_stencil_store_action: abi.StoreAction = .dont_care;
         var reset_visibility_slots: std.ArrayList(VisibilitySlot) = .empty;
         defer reset_visibility_slots.deinit(allocator);
@@ -934,6 +942,19 @@ pub const CommandBuffer = struct {
                 allocator.free(values);
             }
         };
+        defer {
+            if (active_depth_store_action == .store) {
+                storeDepthSampleArrayTextures(
+                    active_depth_sample_array_targets,
+                    active_array_target_count,
+                    active_sample_count,
+                    active_depth_sample_array_values,
+                );
+            }
+            for (active_depth_sample_array_values) |values| {
+                if (values) |owned| allocator.free(owned);
+            }
+        }
         defer if (active_stencil_values) |values| {
             if (active_stencil_store_action == .store) {
                 if (active_sample_count == 1) {
@@ -952,6 +973,19 @@ pub const CommandBuffer = struct {
                 allocator.free(values);
             }
         };
+        defer {
+            if (active_stencil_store_action == .store) {
+                storeStencilSampleArrayTextures(
+                    active_stencil_sample_array_targets,
+                    active_array_target_count,
+                    active_sample_count,
+                    active_stencil_sample_array_values,
+                );
+            }
+            for (active_stencil_sample_array_values) |values| {
+                if (values) |owned| allocator.free(owned);
+            }
+        }
 
         for (self.commands.items) |command| switch (command) {
             .begin_render => |begin_render| {
@@ -978,6 +1012,10 @@ pub const CommandBuffer = struct {
                     return self.fail(error.UnsupportedOperation);
                 if (begin_render.sample_count > 1) {
                     const layered_samples = begin_render.sample_array_targets[0][0] != null;
+                    const layered_depth_samples = begin_render.depth_sample_array_targets[0][0] != null;
+                    const layered_stencil_samples = begin_render.stencil_sample_array_targets[0][0] != null;
+                    if (begin_render.depth_array_targets[0] != null or begin_render.stencil_array_targets[0] != null)
+                        return self.fail(error.UnsupportedOperation);
                     if (layered_samples) {
                         for (begin_render.sample_array_targets[0..begin_render.array_target_count], 0..) |layer_targets, layer| {
                             for (layer_targets[0..begin_render.sample_count], 0..) |sample, sample_index| {
@@ -999,6 +1037,8 @@ pub const CommandBuffer = struct {
                             }
                         }
                     } else {
+                        if (layered_depth_samples or layered_stencil_samples)
+                            return self.fail(error.InvalidArgument);
                         for (begin_render.sample_targets[0..begin_render.sample_count]) |sample| {
                             const texture = sample orelse return self.fail(error.InvalidResource);
                             if (!validTexture(texture) or texture.device != self.queue.device or !texture.format.isColor() or
@@ -1059,23 +1099,47 @@ pub const CommandBuffer = struct {
                             return self.fail(error.InvalidResource);
                         }
                     }
-                    for (begin_render.depth_sample_targets[0..begin_render.sample_count]) |depth| {
+                    if (layered_depth_samples) {
+                        for (begin_render.depth_sample_array_targets[0..begin_render.array_target_count]) |layer_targets| {
+                            for (layer_targets[0..begin_render.sample_count]) |depth| {
+                                const texture = depth orelse return self.fail(error.InvalidResource);
+                                if (!validTexture(texture) or texture.device != self.queue.device or
+                                    !isDepthTextureFormat(texture.format) or texture.width != begin_render.target.width or
+                                    texture.height != begin_render.target.height)
+                                    return self.fail(error.InvalidResource);
+                            }
+                        }
+                        if (begin_render.depth_sample_targets[0] != null or begin_render.depth_array_targets[0] != null)
+                            return self.fail(error.InvalidArgument);
+                    } else for (begin_render.depth_sample_targets[0..begin_render.sample_count]) |depth| {
                         if (depth) |texture| {
                             if (!validTexture(texture) or texture.device != self.queue.device or
                                 !isDepthTextureFormat(texture.format) or texture.width != begin_render.target.width or
                                 texture.height != begin_render.target.height) return self.fail(error.InvalidResource);
                         }
                     }
-                    for (begin_render.stencil_sample_targets[0..begin_render.sample_count]) |stencil| {
+                    if (layered_stencil_samples) {
+                        for (begin_render.stencil_sample_array_targets[0..begin_render.array_target_count]) |layer_targets| {
+                            for (layer_targets[0..begin_render.sample_count]) |stencil| {
+                                const texture = stencil orelse return self.fail(error.InvalidResource);
+                                if (!validTexture(texture) or texture.device != self.queue.device or
+                                    !isStencilTextureFormat(texture.format) or texture.width != begin_render.target.width or
+                                    texture.height != begin_render.target.height)
+                                    return self.fail(error.InvalidResource);
+                            }
+                        }
+                        if (begin_render.stencil_sample_targets[0] != null or begin_render.stencil_array_targets[0] != null)
+                            return self.fail(error.InvalidArgument);
+                    } else for (begin_render.stencil_sample_targets[0..begin_render.sample_count]) |stencil| {
                         if (stencil) |texture| {
                             if (!validTexture(texture) or texture.device != self.queue.device or
                                 !isStencilTextureFormat(texture.format) or texture.width != begin_render.target.width or
                                 texture.height != begin_render.target.height) return self.fail(error.InvalidResource);
                         }
                     }
-                    if (begin_render.depth_texture != null and begin_render.depth_sample_targets[0] == null)
+                    if (begin_render.depth_texture != null and begin_render.depth_sample_targets[0] == null and !layered_depth_samples)
                         return self.fail(error.InvalidResource);
-                    if (begin_render.stencil_texture != null and begin_render.stencil_sample_targets[0] == null)
+                    if (begin_render.stencil_texture != null and begin_render.stencil_sample_targets[0] == null and !layered_stencil_samples)
                         return self.fail(error.InvalidResource);
                 } else if (begin_render.resolve_target != null) return self.fail(error.InvalidArgument);
                 if (begin_render.sample_count == 1 and begin_render.array_target_count > 1) {
@@ -1147,6 +1211,12 @@ pub const CommandBuffer = struct {
                         for (layer_samples[0..active_sample_count]) |sample| sparseFlushOptionalTexture(sample);
                     }
                 }
+                for (active_depth_sample_array_targets[0..active_array_target_count]) |layer_samples| {
+                    for (layer_samples[0..active_sample_count]) |sample| sparseFlushOptionalTexture(sample);
+                }
+                for (active_stencil_sample_array_targets[0..active_array_target_count]) |layer_samples| {
+                    for (layer_samples[0..active_sample_count]) |sample| sparseFlushOptionalTexture(sample);
+                }
                 if (active_depth_values) |values| {
                     if (active_depth_store_action == .store) {
                         if (active_sample_count == 1) {
@@ -1167,6 +1237,20 @@ pub const CommandBuffer = struct {
                         active_depth_array_values[layer] = null;
                     }
                 }
+                if (active_depth_store_action == .store) {
+                    storeDepthSampleArrayTextures(
+                        active_depth_sample_array_targets,
+                        active_array_target_count,
+                        active_sample_count,
+                        active_depth_sample_array_values,
+                    );
+                }
+                for (0..active_depth_sample_array_values.len) |layer| {
+                    if (active_depth_sample_array_values[layer]) |values| {
+                        allocator.free(values);
+                        active_depth_sample_array_values[layer] = null;
+                    }
+                }
                 if (active_stencil_values) |values| {
                     if (active_stencil_store_action == .store) {
                         if (active_sample_count == 1) {
@@ -1185,6 +1269,20 @@ pub const CommandBuffer = struct {
                         }
                         allocator.free(values);
                         active_stencil_array_values[layer] = null;
+                    }
+                }
+                if (active_stencil_store_action == .store) {
+                    storeStencilSampleArrayTextures(
+                        active_stencil_sample_array_targets,
+                        active_array_target_count,
+                        active_sample_count,
+                        active_stencil_sample_array_values,
+                    );
+                }
+                for (0..active_stencil_sample_array_values.len) |layer| {
+                    if (active_stencil_sample_array_values[layer]) |values| {
+                        allocator.free(values);
+                        active_stencil_sample_array_values[layer] = null;
                     }
                 }
                 reset_visibility_slots.clearRetainingCapacity();
@@ -1214,6 +1312,16 @@ pub const CommandBuffer = struct {
                 active_stencil_array_targets = begin_render.stencil_array_targets;
                 active_depth_array_values = [_]?[]f32{null} ** 8;
                 active_stencil_array_values = [_]?[]u8{null} ** 8;
+                for (&active_depth_sample_array_targets) |*layer_targets| @memset(layer_targets, null);
+                for (&active_stencil_sample_array_targets) |*layer_targets| @memset(layer_targets, null);
+                active_depth_sample_array_values = [_]?[]f32{null} ** 8;
+                active_stencil_sample_array_values = [_]?[]u8{null} ** 8;
+                for (begin_render.depth_sample_array_targets[0..active_array_target_count], 0..) |layer_targets, layer| {
+                    active_depth_sample_array_targets[layer] = layer_targets;
+                }
+                for (begin_render.stencil_sample_array_targets[0..active_array_target_count], 0..) |layer_targets, layer| {
+                    active_stencil_sample_array_targets[layer] = layer_targets;
+                }
                 if (active_sample_count == 1) {
                     active_sample_targets[0] = begin_render.target;
                     sparseSyncTexture(begin_render.target);
@@ -1322,6 +1430,20 @@ pub const CommandBuffer = struct {
                     }
                     active_depth = null;
                     active_depth_texture = null;
+                } else if (active_sample_count > 1 and begin_render.depth_sample_array_targets[0][0] != null) {
+                    const pixel_count = std.math.mul(usize, begin_render.target.width, begin_render.target.height) catch return self.fail(error.InvalidArgument);
+                    const value_count = std.math.mul(usize, pixel_count, active_sample_count) catch return self.fail(error.InvalidArgument);
+                    for (begin_render.depth_sample_array_targets[0..active_array_target_count], 0..) |layer_targets, layer| {
+                        const values = allocator.alloc(f32, value_count) catch return self.fail(error.OutOfMemory);
+                        active_depth_sample_array_values[layer] = values;
+                        for (layer_targets[0..active_sample_count], 0..) |depth_texture, sample_index| {
+                            const texture = depth_texture orelse return self.fail(error.InvalidResource);
+                            const sample_values = values[sample_index * pixel_count .. (sample_index + 1) * pixel_count];
+                            for (sample_values, 0..) |*value, index| value.* = depthTextureValue(texture, index);
+                        }
+                    }
+                    active_depth = null;
+                    active_depth_texture = null;
                 } else if (active_sample_count > 1 and begin_render.depth_sample_targets[0] != null) {
                     const pixel_count = std.math.mul(usize, begin_render.target.width, begin_render.target.height) catch return self.fail(error.InvalidArgument);
                     const value_count = std.math.mul(usize, pixel_count, active_sample_count) catch return self.fail(error.InvalidArgument);
@@ -1358,6 +1480,20 @@ pub const CommandBuffer = struct {
                     }
                     active_stencil = null;
                     active_stencil_texture = null;
+                } else if (active_sample_count > 1 and begin_render.stencil_sample_array_targets[0][0] != null) {
+                    const pixel_count = std.math.mul(usize, begin_render.target.width, begin_render.target.height) catch return self.fail(error.InvalidArgument);
+                    const value_count = std.math.mul(usize, pixel_count, active_sample_count) catch return self.fail(error.InvalidArgument);
+                    for (begin_render.stencil_sample_array_targets[0..active_array_target_count], 0..) |layer_targets, layer| {
+                        const values = allocator.alloc(u8, value_count) catch return self.fail(error.OutOfMemory);
+                        active_stencil_sample_array_values[layer] = values;
+                        for (layer_targets[0..active_sample_count], 0..) |stencil_texture, sample_index| {
+                            const texture = stencil_texture orelse return self.fail(error.InvalidResource);
+                            const sample_values = values[sample_index * pixel_count .. (sample_index + 1) * pixel_count];
+                            for (sample_values, 0..) |*value, index| value.* = stencilTextureValue(texture, index);
+                        }
+                    }
+                    active_stencil = null;
+                    active_stencil_texture = null;
                 } else if (active_sample_count > 1 and begin_render.stencil_sample_targets[0] != null) {
                     const pixel_count = std.math.mul(usize, begin_render.target.width, begin_render.target.height) catch return self.fail(error.InvalidArgument);
                     const value_count = std.math.mul(usize, pixel_count, active_sample_count) catch return self.fail(error.InvalidArgument);
@@ -1383,7 +1519,11 @@ pub const CommandBuffer = struct {
                 if (begin_render.pass.depth.load_action != .dont_care) {
                     const pixel_count = std.math.mul(usize, target.width, target.height) catch return self.fail(error.InvalidArgument);
                     if (begin_render.pass.depth.load_action == .clear) {
-                        if (active_array_target_count > 1 and begin_render.depth_array_targets[0] != null) {
+                        if (active_array_target_count > 1 and begin_render.depth_sample_array_targets[0][0] != null) {
+                            for (active_depth_sample_array_values[0..active_array_target_count]) |values| {
+                                @memset(values orelse return self.fail(error.InvalidResource), begin_render.pass.depth.clear_depth);
+                            }
+                        } else if (active_array_target_count > 1 and begin_render.depth_array_targets[0] != null) {
                             for (active_depth_array_values[0..active_array_target_count]) |values| {
                                 @memset(values orelse return self.fail(error.InvalidResource), begin_render.pass.depth.clear_depth);
                             }
@@ -1400,7 +1540,11 @@ pub const CommandBuffer = struct {
                 if (begin_render.stencil_load_action != .dont_care) {
                     const pixel_count = std.math.mul(usize, target.width, target.height) catch return self.fail(error.InvalidArgument);
                     if (begin_render.stencil_load_action == .clear) {
-                        if (active_array_target_count > 1 and begin_render.stencil_array_targets[0] != null) {
+                        if (active_array_target_count > 1 and begin_render.stencil_sample_array_targets[0][0] != null) {
+                            for (active_stencil_sample_array_values[0..active_array_target_count]) |values| {
+                                @memset(values orelse return self.fail(error.InvalidResource), begin_render.stencil_clear);
+                            }
+                        } else if (active_array_target_count > 1 and begin_render.stencil_array_targets[0] != null) {
                             for (active_stencil_array_values[0..active_array_target_count]) |values| {
                                 @memset(values orelse return self.fail(error.InvalidResource), begin_render.stencil_clear);
                             }
@@ -1628,11 +1772,19 @@ pub const CommandBuffer = struct {
                                 .{ active_sample_positions[sample_index].x, active_sample_positions[sample_index].y }
                             else
                                 raster3d.defaultSamplePosition(active_sample_count, sample_index);
-                            const depth_values: ?[]f32 = if (active_depth_values) |values|
+                            const depth_values: ?[]f32 = if (layered_samples) blk: {
+                                if (active_depth_sample_array_values[instance_array_index]) |values|
+                                    break :blk values[sample_index * pixel_count .. (sample_index + 1) * pixel_count];
+                                break :blk null;
+                            } else if (active_depth_values) |values|
                                 values[sample_index * pixel_count .. (sample_index + 1) * pixel_count]
                             else
                                 null;
-                            const stencil_values: ?[]u8 = if (active_stencil_values) |values|
+                            const stencil_values: ?[]u8 = if (layered_samples) blk: {
+                                if (active_stencil_sample_array_values[instance_array_index]) |values|
+                                    break :blk values[sample_index * pixel_count .. (sample_index + 1) * pixel_count];
+                                break :blk null;
+                            } else if (active_stencil_values) |values|
                                 values[sample_index * pixel_count .. (sample_index + 1) * pixel_count]
                             else
                                 null;
@@ -3043,12 +3195,14 @@ pub const RenderEncoder = struct {
                     if (expected) |format| if (actual == null or format != actual.?) return error.InvalidArgument;
                 }
                 if (expected_depth != null and begin_render.depth == null and begin_render.depth_texture == null and
-                    begin_render.depth_sample_targets[0] == null and begin_render.depth_array_targets[0] == null) return error.InvalidArgument;
+                    begin_render.depth_sample_targets[0] == null and begin_render.depth_array_targets[0] == null and
+                    begin_render.depth_sample_array_targets[0][0] == null) return error.InvalidArgument;
                 if (begin_render.depth_texture) |depth_texture| {
                     if (expected_depth == null or texturePixelFormat(depth_texture) != expected_depth.?) return error.InvalidArgument;
                 }
                 if (expected_stencil != null and begin_render.stencil == null and begin_render.stencil_texture == null and
-                    begin_render.stencil_sample_targets[0] == null and begin_render.stencil_array_targets[0] == null) return error.InvalidArgument;
+                    begin_render.stencil_sample_targets[0] == null and begin_render.stencil_array_targets[0] == null and
+                    begin_render.stencil_sample_array_targets[0][0] == null) return error.InvalidArgument;
                 if (begin_render.stencil_texture) |stencil_texture| {
                     if (expected_stencil == null or texturePixelFormat(stencil_texture) != expected_stencil.?) return error.InvalidArgument;
                 }
@@ -3181,6 +3335,46 @@ pub const RenderEncoder = struct {
         }
     }
 
+    pub fn setMultisampleDepthAttachmentArrayTargets(
+        self: *RenderEncoder,
+        textures: ?[*]const ?*Texture,
+        array_count: usize,
+        sample_count: usize,
+    ) Error!void {
+        if (!self.open() or textures == null or array_count == 0 or array_count > 8 or
+            (sample_count != 2 and sample_count != 4)) return error.InvalidArgument;
+        const values = textures.?;
+        const first = values[0] orelse return error.InvalidResource;
+        if (!validTexture(first) or first.device != self.command_buffer.queue.device or !isDepthTextureFormat(first.format))
+            return error.InvalidResource;
+        for (0..array_count) |layer| {
+            for (0..sample_count) |sample_index| {
+                const texture = values[layer * sample_count + sample_index] orelse return error.InvalidResource;
+                if (!validTexture(texture) or texture.device != first.device or !isDepthTextureFormat(texture.format) or
+                    texture.width != first.width or texture.height != first.height or texture.format != first.format)
+                    return error.InvalidArgument;
+            }
+        }
+        switch (self.command_buffer.commands.items[self.begin_index]) {
+            .begin_render => |*begin_render| {
+                if (begin_render.sample_count != sample_count or begin_render.array_target_count != array_count or
+                    first.width != begin_render.target.width or first.height != begin_render.target.height)
+                    return error.InvalidArgument;
+                begin_render.depth_sample_array_targets = [_][4]?*Texture{[_]?*Texture{null} ** 4} ** 8;
+                for (0..array_count) |layer| {
+                    for (0..sample_count) |sample_index| {
+                        begin_render.depth_sample_array_targets[layer][sample_index] =
+                            values[layer * sample_count + sample_index];
+                    }
+                }
+                begin_render.depth_sample_targets = [_]?*Texture{null} ** 4;
+                begin_render.depth = null;
+                begin_render.depth_texture = null;
+            },
+            else => return error.InvalidCommand,
+        }
+    }
+
     pub fn setStencilTexture(self: *RenderEncoder, texture: *Texture, load_action: u8, store_action: u8, clear_value: u8) Error!void {
         if (!self.open() or !validTexture(texture) or texture.device != self.command_buffer.queue.device or
             !isStencilTextureFormat(texture.format)) return error.InvalidArgument;
@@ -3265,6 +3459,55 @@ pub const RenderEncoder = struct {
                     first.height != begin_render.target.height) return error.InvalidArgument;
                 begin_render.stencil_sample_targets = [_]?*Texture{null} ** 4;
                 for (values[0..count], 0..) |value, index| begin_render.stencil_sample_targets[index] = value;
+                begin_render.stencil = null;
+                begin_render.stencil_texture = null;
+                begin_render.stencil_load_action = @enumFromInt(load_action);
+                begin_render.stencil_store_action = @enumFromInt(store_action);
+                begin_render.stencil_clear = clear_value;
+            },
+            else => return error.InvalidCommand,
+        }
+    }
+
+    pub fn setMultisampleStencilAttachmentArrayTargets(
+        self: *RenderEncoder,
+        textures: ?[*]const ?*Texture,
+        array_count: usize,
+        sample_count: usize,
+        load_action: u8,
+        store_action: u8,
+        clear_value: u8,
+    ) Error!void {
+        if (!self.open() or textures == null or array_count == 0 or array_count > 8 or
+            (sample_count != 2 and sample_count != 4) or
+            load_action > @intFromEnum(abi.LoadAction.clear) or store_action > @intFromEnum(abi.StoreAction.store))
+            return error.InvalidArgument;
+        const values = textures.?;
+        const first = values[0] orelse return error.InvalidResource;
+        if (!validTexture(first) or !isStencilTextureFormat(first.format) or
+            first.device != self.command_buffer.queue.device)
+            return error.InvalidResource;
+        for (0..array_count) |layer| {
+            for (0..sample_count) |sample_index| {
+                const texture = values[layer * sample_count + sample_index] orelse return error.InvalidResource;
+                if (!validTexture(texture) or texture.device != first.device or !isStencilTextureFormat(texture.format) or
+                    texture.width != first.width or texture.height != first.height or texture.format != first.format)
+                    return error.InvalidArgument;
+            }
+        }
+        switch (self.command_buffer.commands.items[self.begin_index]) {
+            .begin_render => |*begin_render| {
+                if (begin_render.sample_count != sample_count or begin_render.array_target_count != array_count or
+                    first.width != begin_render.target.width or first.height != begin_render.target.height)
+                    return error.InvalidArgument;
+                begin_render.stencil_sample_array_targets = [_][4]?*Texture{[_]?*Texture{null} ** 4} ** 8;
+                for (0..array_count) |layer| {
+                    for (0..sample_count) |sample_index| {
+                        begin_render.stencil_sample_array_targets[layer][sample_index] =
+                            values[layer * sample_count + sample_index];
+                    }
+                }
+                begin_render.stencil_sample_targets = [_]?*Texture{null} ** 4;
                 begin_render.stencil = null;
                 begin_render.stencil_texture = null;
                 begin_render.stencil_load_action = @enumFromInt(load_action);
@@ -6622,6 +6865,19 @@ fn storeDepthSampleTextures(targets: [4]?*Texture, sample_count: usize, values: 
     }
 }
 
+fn storeDepthSampleArrayTextures(
+    targets: [8][4]?*Texture,
+    array_count: usize,
+    sample_count: usize,
+    values: [8]?[]f32,
+) void {
+    for (0..array_count) |layer| {
+        if (values[layer]) |layer_values| {
+            storeDepthSampleTextures(targets[layer], sample_count, layer_values);
+        }
+    }
+}
+
 fn storeStencilTexture(texture: *Texture, values: []const u8) void {
     for (values, 0..) |value, index| {
         const offset = index * texture.format.bytesPerPixel();
@@ -6640,6 +6896,19 @@ fn storeStencilSampleTextures(targets: [4]?*Texture, sample_count: usize, values
     for (targets[0..sample_count], 0..) |target, sample_index| {
         if (target) |texture| {
             storeStencilTexture(texture, values[sample_index * pixel_count .. (sample_index + 1) * pixel_count]);
+        }
+    }
+}
+
+fn storeStencilSampleArrayTextures(
+    targets: [8][4]?*Texture,
+    array_count: usize,
+    sample_count: usize,
+    values: [8]?[]u8,
+) void {
+    for (0..array_count) |layer| {
+        if (values[layer]) |layer_values| {
+            storeStencilSampleTextures(targets[layer], sample_count, layer_values);
         }
     }
 }
@@ -10516,6 +10785,18 @@ pub export fn zpu_metal_render_encoder_set_multisample_depth_targets(
     return 0;
 }
 
+pub export fn zpu_metal_render_encoder_set_multisample_depth_attachment_array_targets(
+    encoder: ?*RenderEncoder,
+    sample_textures: ?[*]const ?*Texture,
+    array_count: usize,
+    sample_count: usize,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setMultisampleDepthAttachmentArrayTargets(
+        sample_textures, array_count, sample_count,
+    ) catch |err| return errorCode(err);
+    return 0;
+}
+
 pub export fn zpu_metal_render_encoder_set_depth_buffer(encoder: ?*RenderEncoder, depth: ?[*]f32, depth_count: usize) callconv(.c) c_int {
     (encoder orelse return -1).setDepthBuffer(depth, depth_count) catch |err| return errorCode(err);
     return 0;
@@ -10552,6 +10833,21 @@ pub export fn zpu_metal_render_encoder_set_multisample_stencil_targets(
         load_action,
         store_action,
         clear_value,
+    ) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_multisample_stencil_attachment_array_targets(
+    encoder: ?*RenderEncoder,
+    sample_textures: ?[*]const ?*Texture,
+    array_count: usize,
+    sample_count: usize,
+    load_action: u8,
+    store_action: u8,
+    clear_value: u8,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setMultisampleStencilAttachmentArrayTargets(
+        sample_textures, array_count, sample_count, load_action, store_action, clear_value,
     ) catch |err| return errorCode(err);
     return 0;
 }

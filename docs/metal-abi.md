@@ -109,7 +109,7 @@ triangle path:
   `StoreAndMultisampleResolve`; the resolver averages logical sample colors
   before the destination format encode. This bounded profile supports 2D
   multisample depth/stencil attachments by maintaining independent ZPU depth
-  and stencil planes for every sample. Parallel render encoders support ordered
+  and stencil planes for every layer and sample. Parallel render encoders support ordered
   2x/4x CPU child passes with the same top-left sample positions and resolve
   semantics. Legacy, parallel, and Metal 4 render encoders also support 2x/4x
   MRT with independent CPU sample planes and per-attachment resolves. Sparse

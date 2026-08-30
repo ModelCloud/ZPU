@@ -9,7 +9,7 @@
 /* Native ZPU CPU Metal-layer ABI. This is intentionally separate from the
  * Apple Objective-C framework ABI; it is the portable FFI surface used by
  * clients that select ZPU's CPU renderer. */
-#define ZPU_METAL_ABI_VERSION 34u
+#define ZPU_METAL_ABI_VERSION 35u
 
 typedef uint8_t zpu_metal_workload;
 enum {
@@ -589,8 +589,14 @@ int zpu_metal_render_encoder_set_multisample_color_attachment_targets(zpu_metal_
 int zpu_metal_render_encoder_set_multisample_color_attachment_array_targets(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *sample_textures, size_t array_count, size_t sample_count, zpu_metal_texture *const *resolve_textures, const zpu_metal_render_pass_color_attachment_descriptor *attachment, uint32_t index);
 /* Installs per-sample CPU-owned depth planes for a 2x/4x render pass. */
 int zpu_metal_render_encoder_set_multisample_depth_targets(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *sample_textures, size_t sample_count);
+/* Installs flattened [array-slice][sample] CPU-owned depth planes for a
+ * layered 2x/4x render pass. */
+int zpu_metal_render_encoder_set_multisample_depth_attachment_array_targets(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *sample_textures, size_t array_count, size_t sample_count);
 /* Installs per-sample CPU-owned stencil planes and their pass actions for a 2x/4x render pass. */
 int zpu_metal_render_encoder_set_multisample_stencil_targets(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *sample_textures, size_t sample_count, zpu_metal_load_action load_action, zpu_metal_store_action store_action, uint8_t clear_value);
+/* Installs flattened [array-slice][sample] CPU-owned stencil planes and pass
+ * actions for a layered 2x/4x render pass. */
+int zpu_metal_render_encoder_set_multisample_stencil_attachment_array_targets(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *sample_textures, size_t array_count, size_t sample_count, zpu_metal_load_action load_action, zpu_metal_store_action store_action, uint8_t clear_value);
 int zpu_metal_render_encoder_set_color_attachment(zpu_metal_render_encoder *encoder, zpu_metal_texture *texture, const zpu_metal_render_pass_color_attachment_descriptor *attachment, uint32_t index);
 /* Maps logical fragment outputs to physical pass attachments. A NULL map with
  * count 0 restores identity mapping; otherwise count must be exactly eight
