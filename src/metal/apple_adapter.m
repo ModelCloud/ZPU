@@ -2338,13 +2338,16 @@ static BOOL zpu_texture_type_is_array(MTLTextureType type) {
 static BOOL zpu_texture_view_types_compatible(MTLTextureType source, MTLTextureType view,
                                                NSRange sliceRange) {
     if (source == view) return YES;
-    /* A one-slice 2D image can be exposed as either a scalar 2D texture or a
-     * one-element 2D array. The selected slice is still the same CPU/ZPU
-     * backing image; only the shader-facing texture type changes. */
+    /* A one-slice 1D/2D image can be exposed as either a scalar texture or a
+     * one-element array. The selected slice is still the same CPU/ZPU backing
+     * image; only the shader-facing texture type changes. */
+    const BOOL one_dimensional_pair =
+        (source == MTLTextureType1DArray && view == MTLTextureType1D) ||
+        (source == MTLTextureType1D && view == MTLTextureType1DArray);
     const BOOL two_dimensional_pair =
         (source == MTLTextureType2DArray && view == MTLTextureType2D) ||
         (source == MTLTextureType2D && view == MTLTextureType2DArray);
-    return two_dimensional_pair && sliceRange.length == 1;
+    return (one_dimensional_pair || two_dimensional_pair) && sliceRange.length == 1;
 }
 
 static BOOL zpu_texture_type_is_supported(MTLTextureType type) {

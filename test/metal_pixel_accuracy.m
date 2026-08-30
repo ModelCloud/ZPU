@@ -356,6 +356,119 @@ static int test_texture_view_format_compatibility(
                 adapter_array_to_2d_accepts, adapter_2d_to_array_accepts);
         return 144;
     }
+
+    MTLTextureDescriptor *native_1d_array_descriptor = [MTLTextureDescriptor new];
+    native_1d_array_descriptor.textureType = MTLTextureType1DArray;
+    native_1d_array_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    native_1d_array_descriptor.width = 4;
+    native_1d_array_descriptor.height = 1;
+    native_1d_array_descriptor.arrayLength = 2;
+    native_1d_array_descriptor.mipmapLevelCount = 1;
+    native_1d_array_descriptor.storageMode = MTLStorageModeShared;
+    native_1d_array_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    id<MTLTexture> native_1d_array_source = [native_device newTextureWithDescriptor:native_1d_array_descriptor];
+    id<MTLTexture> adapter_1d_array_source = [adapter_device newTextureWithDescriptor:native_1d_array_descriptor];
+    const uint8_t one_d_view_source_bytes[] = {
+        0x31, 0x42, 0x53, 0x64, 0x75, 0x86, 0x97, 0xa8,
+        0xb9, 0xca, 0xdb, 0xec, 0xfd, 0x0e, 0x1f, 0x20,
+    };
+    if (native_1d_array_source != nil && adapter_1d_array_source != nil) {
+        [native_1d_array_source replaceRegion:MTLRegionMake1D(0, 4)
+                                   mipmapLevel:0
+                                         slice:1
+                                     withBytes:one_d_view_source_bytes
+                                   bytesPerRow:sizeof(one_d_view_source_bytes)
+                                 bytesPerImage:sizeof(one_d_view_source_bytes)];
+        [adapter_1d_array_source replaceRegion:MTLRegionMake1D(0, 4)
+                                    mipmapLevel:0
+                                          slice:1
+                                      withBytes:one_d_view_source_bytes
+                                    bytesPerRow:sizeof(one_d_view_source_bytes)
+                                  bytesPerImage:sizeof(one_d_view_source_bytes)];
+    }
+    id<MTLTexture> native_1d_array_to_1d =
+        [native_1d_array_source newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                   textureType:MTLTextureType1D
+                                                        levels:NSMakeRange(0, 1)
+                                                        slices:NSMakeRange(1, 1)];
+    id<MTLTexture> adapter_1d_array_to_1d =
+        [adapter_1d_array_source newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                    textureType:MTLTextureType1D
+                                                         levels:NSMakeRange(0, 1)
+                                                         slices:NSMakeRange(1, 1)];
+    const BOOL native_1d_array_to_1d_accepts = native_1d_array_to_1d != nil;
+    const BOOL adapter_1d_array_to_1d_accepts = adapter_1d_array_to_1d != nil;
+    BOOL one_d_view_match = native_1d_array_to_1d_accepts == adapter_1d_array_to_1d_accepts;
+    if (native_1d_array_to_1d != nil && adapter_1d_array_to_1d != nil) {
+        uint8_t native_view_bytes[sizeof(one_d_view_source_bytes)] = {0};
+        uint8_t adapter_view_bytes[sizeof(one_d_view_source_bytes)] = {0};
+        [native_1d_array_to_1d getBytes:native_view_bytes bytesPerRow:sizeof(native_view_bytes)
+                            fromRegion:MTLRegionMake1D(0, 4) mipmapLevel:0];
+        [adapter_1d_array_to_1d getBytes:adapter_view_bytes bytesPerRow:sizeof(adapter_view_bytes)
+                             fromRegion:MTLRegionMake1D(0, 4) mipmapLevel:0];
+        one_d_view_match = one_d_view_match &&
+            native_1d_array_to_1d.textureType == MTLTextureType1D &&
+            adapter_1d_array_to_1d.textureType == native_1d_array_to_1d.textureType &&
+            native_1d_array_to_1d.arrayLength == 1 &&
+            adapter_1d_array_to_1d.arrayLength == native_1d_array_to_1d.arrayLength &&
+            native_1d_array_to_1d.parentRelativeSlice == 1 &&
+            adapter_1d_array_to_1d.parentRelativeSlice == native_1d_array_to_1d.parentRelativeSlice &&
+            memcmp(native_view_bytes, one_d_view_source_bytes, sizeof(native_view_bytes)) == 0 &&
+            memcmp(adapter_view_bytes, native_view_bytes, sizeof(native_view_bytes)) == 0;
+    }
+    MTLTextureDescriptor *native_1d_descriptor = [MTLTextureDescriptor new];
+    native_1d_descriptor.textureType = MTLTextureType1D;
+    native_1d_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    native_1d_descriptor.width = 4;
+    native_1d_descriptor.height = 1;
+    native_1d_descriptor.arrayLength = 1;
+    native_1d_descriptor.mipmapLevelCount = 1;
+    native_1d_descriptor.storageMode = MTLStorageModeShared;
+    native_1d_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    id<MTLTexture> native_1d_source = [native_device newTextureWithDescriptor:native_1d_descriptor];
+    id<MTLTexture> adapter_1d_source = [adapter_device newTextureWithDescriptor:native_1d_descriptor];
+    if (native_1d_source != nil && adapter_1d_source != nil) {
+        [native_1d_source replaceRegion:MTLRegionMake1D(0, 4) mipmapLevel:0
+                              withBytes:one_d_view_source_bytes bytesPerRow:sizeof(one_d_view_source_bytes)];
+        [adapter_1d_source replaceRegion:MTLRegionMake1D(0, 4) mipmapLevel:0
+                               withBytes:one_d_view_source_bytes bytesPerRow:sizeof(one_d_view_source_bytes)];
+    }
+    id<MTLTexture> native_1d_to_array =
+        [native_1d_source newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                textureType:MTLTextureType1DArray
+                                                     levels:NSMakeRange(0, 1)
+                                                     slices:NSMakeRange(0, 1)];
+    id<MTLTexture> adapter_1d_to_array =
+        [adapter_1d_source newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                 textureType:MTLTextureType1DArray
+                                                      levels:NSMakeRange(0, 1)
+                                                      slices:NSMakeRange(0, 1)];
+    const BOOL native_1d_to_array_accepts = native_1d_to_array != nil;
+    const BOOL adapter_1d_to_array_accepts = adapter_1d_to_array != nil;
+    BOOL reverse_one_d_view_match = native_1d_to_array_accepts == adapter_1d_to_array_accepts;
+    if (native_1d_to_array != nil && adapter_1d_to_array != nil) {
+        uint8_t native_view_bytes[sizeof(one_d_view_source_bytes)] = {0};
+        uint8_t adapter_view_bytes[sizeof(one_d_view_source_bytes)] = {0};
+        [native_1d_to_array getBytes:native_view_bytes bytesPerRow:sizeof(native_view_bytes)
+                         bytesPerImage:sizeof(native_view_bytes)
+                          fromRegion:MTLRegionMake1D(0, 4) mipmapLevel:0 slice:0];
+        [adapter_1d_to_array getBytes:adapter_view_bytes bytesPerRow:sizeof(adapter_view_bytes)
+                          bytesPerImage:sizeof(adapter_view_bytes)
+                           fromRegion:MTLRegionMake1D(0, 4) mipmapLevel:0 slice:0];
+        reverse_one_d_view_match = reverse_one_d_view_match &&
+            native_1d_to_array.textureType == MTLTextureType1DArray &&
+            adapter_1d_to_array.textureType == native_1d_to_array.textureType &&
+            native_1d_to_array.arrayLength == 1 &&
+            adapter_1d_to_array.arrayLength == native_1d_to_array.arrayLength &&
+            memcmp(native_view_bytes, one_d_view_source_bytes, sizeof(native_view_bytes)) == 0 &&
+            memcmp(adapter_view_bytes, native_view_bytes, sizeof(native_view_bytes)) == 0;
+    }
+    if (!one_d_view_match || !reverse_one_d_view_match) {
+        fprintf(stderr, "metal-pixel: 1D/1D-array texture view mismatch native=%d/%d adapter=%d/%d\n",
+                native_1d_array_to_1d_accepts, native_1d_to_array_accepts,
+                adapter_1d_array_to_1d_accepts, adapter_1d_to_array_accepts);
+        return 145;
+    }
     return mismatch ? 143 : 0;
 }
 
