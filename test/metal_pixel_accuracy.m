@@ -14172,18 +14172,55 @@ int main(void) {
             0x21, 0x32, 0x43, 0x54,  0x65, 0x76, 0x87, 0x98,
             0xa9, 0xba, 0xcb, 0xdc,  0xed, 0xfe, 0x0f, 0x10,
         };
+        const uint8_t array_level_two[] = {0xb1, 0xc2, 0xd3, 0xe4};
+        [native_array_texture replaceRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                mipmapLevel:1
+                                      slice:0
+                                  withBytes:array_level_one
+                                bytesPerRow:2 * 4
+                              bytesPerImage:sizeof(array_level_one)];
         [native_array_texture replaceRegion:MTLRegionMake2D(0, 0, 2, 2)
                                 mipmapLevel:1
                                       slice:1
                                   withBytes:array_level_one
                                 bytesPerRow:2 * 4
                               bytesPerImage:sizeof(array_level_one)];
+        [native_array_texture replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
+                                mipmapLevel:2
+                                      slice:0
+                                  withBytes:array_level_two
+                                bytesPerRow:4
+                              bytesPerImage:sizeof(array_level_two)];
+        [native_array_texture replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
+                                mipmapLevel:2
+                                      slice:1
+                                  withBytes:array_level_two
+                                bytesPerRow:4
+                              bytesPerImage:sizeof(array_level_two)];
+        [adapter_array_texture replaceRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                 mipmapLevel:1
+                                       slice:0
+                                   withBytes:array_level_one
+                                 bytesPerRow:2 * 4
+                               bytesPerImage:sizeof(array_level_one)];
         [adapter_array_texture replaceRegion:MTLRegionMake2D(0, 0, 2, 2)
                                  mipmapLevel:1
                                        slice:1
                                    withBytes:array_level_one
                                  bytesPerRow:2 * 4
                                bytesPerImage:sizeof(array_level_one)];
+        [adapter_array_texture replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
+                                 mipmapLevel:2
+                                       slice:0
+                                   withBytes:array_level_two
+                                 bytesPerRow:4
+                               bytesPerImage:sizeof(array_level_two)];
+        [adapter_array_texture replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
+                                 mipmapLevel:2
+                                       slice:1
+                                   withBytes:array_level_two
+                                 bytesPerRow:4
+                               bytesPerImage:sizeof(array_level_two)];
         uint8_t native_array_level_one[sizeof(array_level_one)];
         uint8_t adapter_array_level_one[sizeof(array_level_one)];
         [native_array_texture getBytes:native_array_level_one
@@ -14248,6 +14285,69 @@ int main(void) {
             memcmp(adapter_array_copy_bytes, native_array_level_one, sizeof(array_level_one)) != 0) {
             fprintf(stderr, "metal-pixel: 2D-array slice/level exactness failed\n");
             return 75;
+        }
+
+        MTLTextureDescriptor *native_array_convenience_descriptor = [array_descriptor copy];
+        native_array_convenience_descriptor.width = 2;
+        native_array_convenience_descriptor.height = 2;
+        native_array_convenience_descriptor.mipmapLevelCount = 2;
+        id<MTLTexture> native_array_convenience_texture =
+            [device newTextureWithDescriptor:native_array_convenience_descriptor];
+        id<MTLTexture> adapter_array_convenience_texture =
+            [adapter_device newTextureWithDescriptor:native_array_convenience_descriptor];
+        id<MTLCommandBuffer> native_array_convenience_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> native_array_convenience_blit =
+            [native_array_convenience_command_buffer blitCommandEncoder];
+        [native_array_convenience_blit copyFromTexture:native_array_texture
+                                             toTexture:native_array_convenience_texture];
+        [native_array_convenience_blit endEncoding];
+        [native_array_convenience_command_buffer commit];
+        [native_array_convenience_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> adapter_array_convenience_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_array_convenience_blit =
+            [adapter_array_convenience_command_buffer blitCommandEncoder];
+        [adapter_array_convenience_blit copyFromTexture:adapter_array_texture
+                                              toTexture:adapter_array_convenience_texture];
+        [adapter_array_convenience_blit endEncoding];
+        [adapter_array_convenience_command_buffer commit];
+        [adapter_array_convenience_command_buffer waitUntilCompleted];
+        uint8_t native_array_convenience_level_one[sizeof(array_level_one)];
+        uint8_t adapter_array_convenience_level_one[sizeof(array_level_one)];
+        uint8_t native_array_convenience_level_two[sizeof(array_level_two)];
+        uint8_t adapter_array_convenience_level_two[sizeof(array_level_two)];
+        BOOL array_convenience_match = native_array_convenience_texture != nil &&
+            adapter_array_convenience_texture != nil && native_array_convenience_blit != nil &&
+            adapter_array_convenience_blit != nil &&
+            native_array_convenience_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_array_convenience_command_buffer.status == MTLCommandBufferStatusCompleted;
+        for (NSUInteger slice = 0; slice < 2; ++slice) {
+            [native_array_convenience_texture getBytes:native_array_convenience_level_one
+                                          bytesPerRow:2 * 4 bytesPerImage:sizeof(array_level_one)
+                                           fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                          mipmapLevel:0 slice:slice];
+            [adapter_array_convenience_texture getBytes:adapter_array_convenience_level_one
+                                           bytesPerRow:2 * 4 bytesPerImage:sizeof(array_level_one)
+                                            fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                           mipmapLevel:0 slice:slice];
+            [native_array_convenience_texture getBytes:native_array_convenience_level_two
+                                          bytesPerRow:4 bytesPerImage:sizeof(array_level_two)
+                                           fromRegion:MTLRegionMake2D(0, 0, 1, 1)
+                                          mipmapLevel:1 slice:slice];
+            [adapter_array_convenience_texture getBytes:adapter_array_convenience_level_two
+                                           bytesPerRow:4 bytesPerImage:sizeof(array_level_two)
+                                            fromRegion:MTLRegionMake2D(0, 0, 1, 1)
+                                           mipmapLevel:1 slice:slice];
+            array_convenience_match = array_convenience_match &&
+                memcmp(native_array_convenience_level_one, array_level_one, sizeof(array_level_one)) == 0 &&
+                memcmp(adapter_array_convenience_level_one, native_array_convenience_level_one,
+                       sizeof(array_level_one)) == 0 &&
+                memcmp(native_array_convenience_level_two, array_level_two, sizeof(array_level_two)) == 0 &&
+                memcmp(adapter_array_convenience_level_two, native_array_convenience_level_two,
+                       sizeof(array_level_two)) == 0;
+        }
+        if (!array_convenience_match) {
+            fprintf(stderr, "metal-pixel: texture convenience copy did not select matching mip/slices\n");
+            return 76;
         }
 
         /* Cube storage is six ordinary CPU/ZPU-owned 2D faces. The native

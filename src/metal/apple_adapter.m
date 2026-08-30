@@ -2842,6 +2842,80 @@ static NSUInteger zpu_texture_depth_at_level(ZPUTexture *texture, NSUInteger lev
     return depth;
 }
 
+/* MTLBlitCommandEncoder's two-argument texture copy is not a one-level
+ * shorthand. It finds a mip on either side matching the other texture's
+ * base dimensions, then copies every remaining compatible level and slice.
+ * Keep this selection in the adapter so the public resources remain backed by
+ * the CPU/ZPU texture arrays. */
+static BOOL zpu_texture_copy_convenience_plan(ZPUTexture *source, ZPUTexture *destination,
+                                              NSUInteger *sourceLevel, NSUInteger *destinationLevel,
+                                              NSUInteger *sliceCount, NSUInteger *levelCount) {
+    if (source == nil || destination == nil || sourceLevel == NULL || destinationLevel == NULL ||
+        sliceCount == NULL || levelCount == NULL || source->_pixelFormat != destination->_pixelFormat ||
+        source.sampleCount != destination.sampleCount || source->_textureType != destination->_textureType ||
+        source->_mipmapTextures.count == 0 || destination->_mipmapTextures.count == 0) return NO;
+
+    zpu_metal_texture *sourceBase = [source zpuTextureAtLevel:0 slice:0];
+    zpu_metal_texture *destinationBase = [destination zpuTextureAtLevel:0 slice:0];
+    if (sourceBase == NULL || destinationBase == NULL) return NO;
+    NSUInteger selectedSourceLevel = 0;
+    NSUInteger selectedDestinationLevel = 0;
+    if (zpu_metal_texture_width(sourceBase) != zpu_metal_texture_width(destinationBase) ||
+        zpu_metal_texture_height(sourceBase) != zpu_metal_texture_height(destinationBase) ||
+        (zpu_texture_type_is_3d(source->_textureType) &&
+         zpu_texture_depth_at_level(source, 0) != zpu_texture_depth_at_level(destination, 0))) {
+        BOOL found = NO;
+        for (NSUInteger level = 1; level < source->_mipmapTextures.count; ++level) {
+            zpu_metal_texture *candidate = [source zpuTextureAtLevel:level slice:0];
+            if (candidate != NULL && zpu_metal_texture_width(candidate) == zpu_metal_texture_width(destinationBase) &&
+                zpu_metal_texture_height(candidate) == zpu_metal_texture_height(destinationBase) &&
+                (!zpu_texture_type_is_3d(source->_textureType) ||
+                 zpu_texture_depth_at_level(source, level) == zpu_texture_depth_at_level(destination, 0))) {
+                selectedSourceLevel = level;
+                found = YES;
+                break;
+            }
+        }
+        if (!found) {
+            for (NSUInteger level = 1; level < destination->_mipmapTextures.count; ++level) {
+                zpu_metal_texture *candidate = [destination zpuTextureAtLevel:level slice:0];
+                if (candidate != NULL && zpu_metal_texture_width(candidate) == zpu_metal_texture_width(sourceBase) &&
+                    zpu_metal_texture_height(candidate) == zpu_metal_texture_height(sourceBase) &&
+                    (!zpu_texture_type_is_3d(source->_textureType) ||
+                     zpu_texture_depth_at_level(source, 0) == zpu_texture_depth_at_level(destination, level))) {
+                    selectedDestinationLevel = level;
+                    found = YES;
+                    break;
+                }
+            }
+        }
+        if (!found) return NO;
+    }
+
+    const NSUInteger availableSourceLevels = source->_mipmapTextures.count - selectedSourceLevel;
+    const NSUInteger availableDestinationLevels = destination->_mipmapTextures.count - selectedDestinationLevel;
+    const NSUInteger selectedLevelCount = MIN(availableSourceLevels, availableDestinationLevels);
+    const NSUInteger selectedSliceCount = MIN(zpu_texture_transfer_slice_count(source),
+                                              zpu_texture_transfer_slice_count(destination));
+    if (selectedLevelCount == 0 || selectedSliceCount == 0) return NO;
+    for (NSUInteger level = 0; level < selectedLevelCount; ++level) {
+        const NSUInteger sourceIndex = selectedSourceLevel + level;
+        const NSUInteger destinationIndex = selectedDestinationLevel + level;
+        zpu_metal_texture *sourceTexture = [source zpuTextureAtLevel:sourceIndex slice:0];
+        zpu_metal_texture *destinationTexture = [destination zpuTextureAtLevel:destinationIndex slice:0];
+        if (sourceTexture == NULL || destinationTexture == NULL ||
+            zpu_metal_texture_width(sourceTexture) != zpu_metal_texture_width(destinationTexture) ||
+            zpu_metal_texture_height(sourceTexture) != zpu_metal_texture_height(destinationTexture) ||
+            (zpu_texture_type_is_3d(source->_textureType) &&
+             zpu_texture_depth_at_level(source, sourceIndex) != zpu_texture_depth_at_level(destination, destinationIndex))) return NO;
+    }
+    *sourceLevel = selectedSourceLevel;
+    *destinationLevel = selectedDestinationLevel;
+    *sliceCount = selectedSliceCount;
+    *levelCount = selectedLevelCount;
+    return YES;
+}
+
 static BOOL zpu_mipmap_range(NSUInteger sourceSize, NSUInteger destinationSize, NSUInteger destinationIndex,
                              NSUInteger *low, NSUInteger *high) {
     if (sourceSize == 0 || destinationSize == 0 || destinationSize > sourceSize ||
@@ -15159,7 +15233,7 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
     _stages |= MTLStageBlit;
 }
 - (void)copyFromTexture:(id<MTLTexture>)sourceTexture sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel sourceOrigin:(MTLOrigin)sourceOrigin sourceSize:(MTLSize)sourceSize toBuffer:(id<MTLBuffer>)destinationBuffer destinationOffset:(NSUInteger)destinationOffset destinationBytesPerRow:(NSUInteger)destinationBytesPerRow destinationBytesPerImage:(NSUInteger)destinationBytesPerImage options:(MTLBlitOption)options {
-    if (options != MTLBlitOptionNone) { [_owner markError]; return; }
+    (void)options;
     [self copyFromTexture:sourceTexture sourceSlice:sourceSlice sourceLevel:sourceLevel sourceOrigin:sourceOrigin sourceSize:sourceSize toBuffer:destinationBuffer destinationOffset:destinationOffset destinationBytesPerRow:destinationBytesPerRow destinationBytesPerImage:destinationBytesPerImage];
 }
 - (void)copyFromBuffer:(id<MTLBuffer>)sourceBuffer sourceOffset:(NSUInteger)sourceOffset toBuffer:(id<MTLBuffer>)destinationBuffer destinationOffset:(NSUInteger)destinationOffset size:(NSUInteger)size {
@@ -15233,7 +15307,7 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
     _stages |= MTLStageBlit;
 }
 - (void)copyFromBuffer:(id<MTLBuffer>)sourceBuffer sourceOffset:(NSUInteger)sourceOffset sourceBytesPerRow:(NSUInteger)sourceBytesPerRow sourceBytesPerImage:(NSUInteger)sourceBytesPerImage sourceSize:(MTLSize)sourceSize toTexture:(id<MTLTexture>)destinationTexture destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel destinationOrigin:(MTLOrigin)destinationOrigin options:(MTLBlitOption)options {
-    if (options != MTLBlitOptionNone) { [_owner markError]; return; }
+    (void)options;
     [self copyFromBuffer:sourceBuffer sourceOffset:sourceOffset sourceBytesPerRow:sourceBytesPerRow sourceBytesPerImage:sourceBytesPerImage sourceSize:sourceSize toTexture:destinationTexture destinationSlice:destinationSlice destinationLevel:destinationLevel destinationOrigin:destinationOrigin];
 }
 - (void)copyFromTensor:(id<MTLTensor>)sourceTensor sourceOrigin:(MTLTensorExtents *)sourceOrigin sourceDimensions:(MTLTensorExtents *)sourceDimensions toTensor:(id<MTLTensor>)destinationTensor destinationOrigin:(MTLTensorExtents *)destinationOrigin destinationDimensions:(MTLTensorExtents *)destinationDimensions {
@@ -17337,7 +17411,18 @@ static BOOL zpu_argument_encoder_offset_for_index(ZPUArgumentEncoder *encoder,
         [_owner markError];
         return;
     }
-    [self copyFromTexture:sourceTexture sourceSlice:0 sourceLevel:0 toTexture:destinationTexture destinationSlice:0 destinationLevel:0 sliceCount:1 levelCount:1];
+    NSUInteger sourceLevel = 0;
+    NSUInteger destinationLevel = 0;
+    NSUInteger sliceCount = 0;
+    NSUInteger levelCount = 0;
+    if (!zpu_texture_copy_convenience_plan(source, destination, &sourceLevel, &destinationLevel,
+                                           &sliceCount, &levelCount)) {
+        [_owner markError];
+        return;
+    }
+    [self copyFromTexture:sourceTexture sourceSlice:0 sourceLevel:sourceLevel
+                toTexture:destinationTexture destinationSlice:0 destinationLevel:destinationLevel
+               sliceCount:sliceCount levelCount:levelCount];
 }
 - (void)fillBuffer:(id<MTLBuffer>)buffer range:(NSRange)range value:(uint8_t)value {
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
