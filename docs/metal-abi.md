@@ -95,8 +95,9 @@ triangle path:
   `StoreAndMultisampleResolve`; the resolver averages logical sample colors
   before the destination format encode. This bounded profile rejects MSAA
   depth/stencil, MRT, parallel render encoders, sparse placement, texture
-  views, direct CPU transfers, custom sample positions, and other sample
-  counts.
+  views, and direct CPU transfers. Custom sample positions are accepted for
+  1x/2x/4x passes after finite `[0, 1]` validation and are interpreted in
+  Metal's top-left, pixel-local coordinates; other sample counts remain unsupported.
 - buffer and texture resource options preserve the requested storage mode, CPU
   cache mode, hazard mode, texture usage, optimization flag, compression mode,
   and swizzle metadata; indirect command buffers preserve their resource

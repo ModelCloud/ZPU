@@ -893,6 +893,22 @@ static int test_cpu_drawable_lifecycle(id<MTLDevice> native_device, id<MTLDevice
     return 0;
 }
 
+static int test_default_sample_positions_against_native(id<MTLDevice> native_device, id<MTLDevice> adapter_device) {
+    const NSUInteger sample_counts[] = {1, 2, 4};
+    for (NSUInteger index = 0; index < sizeof(sample_counts) / sizeof(sample_counts[0]); ++index) {
+        const NSUInteger sample_count = sample_counts[index];
+        MTLSamplePosition native_positions[4] = {0};
+        MTLSamplePosition adapter_positions[4] = {0};
+        [native_device getDefaultSamplePositions:native_positions count:sample_count];
+        [adapter_device getDefaultSamplePositions:adapter_positions count:sample_count];
+        if (memcmp(native_positions, adapter_positions, sample_count * sizeof(MTLSamplePosition)) != 0) {
+            fprintf(stderr, "metal-pixel: default sample position mismatch for %zux\n", sample_count);
+            return 148;
+        }
+    }
+    return 0;
+}
+
 static int test_multisample_resolve_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
@@ -952,7 +968,8 @@ static int test_multisample_resolve_against_native(
         native_pass.colorAttachments[0].texture = native_msaa;
         native_pass.colorAttachments[0].resolveTexture = native_resolve;
         native_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-        native_pass.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+        native_pass.colorAttachments[0].storeAction = sample_index == 0 ?
+            MTLStoreActionMultisampleResolve : MTLStoreActionStoreAndMultisampleResolve;
         native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.05, 0.1, 0.15, 0.2);
         MTLRenderPassDescriptor *adapter_pass = [native_pass copy];
         adapter_pass.colorAttachments[0].texture = adapter_msaa;
@@ -3666,6 +3683,8 @@ int main(void) {
         id<MTLCommandQueue> adapter_queue = [adapter_device newCommandQueue];
         NSError *adapter_pipeline_error = nil;
 
+        const int default_sample_position_result = test_default_sample_positions_against_native(device, adapter_device);
+        if (default_sample_position_result != 0) return default_sample_position_result;
         const int multisample_result = test_multisample_resolve_against_native(
             device, adapter_device, vertex_function, fragment_function,
             adapter_vertex_function, adapter_fragment_function);

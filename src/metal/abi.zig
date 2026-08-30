@@ -12,7 +12,7 @@
 /// This is intentionally not Apple's framework version.  The ZPU ABI is an
 /// opt-in compatibility surface and must never be confused with an
 /// implementation of the Objective-C Metal runtime.
-pub const abi_version: u32 = 27;
+pub const abi_version: u32 = 28;
 
 pub const Workload = enum(u8) {
     two_dimensional,
@@ -162,6 +162,9 @@ pub const VisibilityResultMode = enum(u8) { disabled = 0, boolean = 1, counting 
 pub const VisibilityResultType = enum(u8) { reset = 0, accumulate = 1 };
 
 pub const Color = extern struct { red: f32, green: f32, blue: f32, alpha: f32 };
+/// A sample location in Metal's pixel-local top-left coordinate space. Both
+/// coordinates are in [0, 1], where (0, 0) is the upper-left pixel corner.
+pub const SamplePosition = extern struct { x: f32, y: f32 };
 pub const Origin = extern struct { x: u32, y: u32, z: u32 };
 pub const Size = extern struct { width: u32, height: u32, depth: u32 };
 pub const Region = extern struct { origin: Origin, size: Size };
@@ -226,10 +229,11 @@ pub const CpuBudget = struct {
 
 test "Metal ABI layout and CPU budgets are pinned" {
     const std = @import("std");
-    try std.testing.expectEqual(@as(u32, 27), abi_version);
+    try std.testing.expectEqual(@as(u32, 28), abi_version);
     try std.testing.expectEqual(@as(u8, 1), (CpuBudget{ .workload = .two_dimensional }).maxCores());
     try std.testing.expectEqual(@as(u8, 2), (CpuBudget{ .workload = .three_dimensional }).maxCores());
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(Color));
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(SamplePosition));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(Region));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(SparseTextureMappingArguments));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(Vertex));

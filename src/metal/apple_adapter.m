@@ -1841,6 +1841,22 @@ static BOOL zpu_configure_multisample_targets(ZPUCommandBuffer *owner,
     return YES;
 }
 
+static BOOL zpu_configure_sample_positions(zpu_metal_render_encoder *encoder,
+                                           id descriptor,
+                                           NSUInteger sampleCount) {
+    if (encoder == NULL || descriptor == nil) return NO;
+    const NSUInteger count = [descriptor getSamplePositions:NULL count:0];
+    if (count == 0) return YES;
+    if (count != sampleCount || (count != 1 && count != 2 && count != 4)) return NO;
+    MTLSamplePosition nativePositions[4] = {0};
+    if ([descriptor getSamplePositions:nativePositions count:count] != count) return NO;
+    zpu_metal_sample_position positions[4] = {0};
+    for (NSUInteger index = 0; index < count; ++index) {
+        positions[index] = (zpu_metal_sample_position){ nativePositions[index].x, nativePositions[index].y };
+    }
+    return zpu_metal_render_encoder_set_sample_positions(encoder, positions, count) == ZPU_METAL_OK;
+}
+
 static void zpu_set_error(NSError **error, NSString *description) {
     if (error != NULL) {
         *error = [NSError errorWithDomain:@"ZPUMetal" code:ZPU_METAL_INVALID_ARGUMENT
@@ -7520,10 +7536,25 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (NSUInteger)maxThreadgroupMemoryLength { return 0; }
 - (NSUInteger)maxArgumentBufferSamplerCount { return 1024; }
-- (BOOL)areProgrammableSamplePositionsSupported { return NO; }
+- (BOOL)areProgrammableSamplePositionsSupported { return YES; }
 - (void)getDefaultSamplePositions:(MTLSamplePosition *)positions count:(NSUInteger)count {
     if (positions == NULL) return;
-    for (NSUInteger index = 0; index < count; ++index) positions[index] = (MTLSamplePosition){0.5f, 0.5f};
+    static const MTLSamplePosition defaults[4] = {
+        { 0.5f, 0.5f },
+        { 0.75f, 0.75f }, { 0.25f, 0.25f },
+        { 0.375f, 0.125f },
+    };
+    if (count == 1) {
+        positions[0] = defaults[0];
+    } else if (count == 2) {
+        positions[0] = defaults[1];
+        positions[1] = defaults[2];
+    } else if (count == 4) {
+        positions[0] = defaults[3];
+        positions[1] = (MTLSamplePosition){ 0.875f, 0.375f };
+        positions[2] = (MTLSamplePosition){ 0.125f, 0.625f };
+        positions[3] = (MTLSamplePosition){ 0.625f, 0.875f };
+    }
 }
 - (BOOL)supportsRasterizationRateMapWithLayerCount:(NSUInteger)layerCount {
     /* The CPU rasterizer can preserve an identity map for every declared
@@ -10324,6 +10355,10 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
         zpu_metal_render_encoder_destroy(encoder);
         return nil;
     }
+    if (!zpu_configure_sample_positions(encoder, descriptor, texture.sampleCount)) {
+        zpu_metal_render_encoder_destroy(encoder);
+        return nil;
+    }
     if (!zpu_configure_additional_color_attachments(self, encoder, descriptor)) {
         zpu_metal_render_encoder_destroy(encoder);
         return nil;
@@ -10748,6 +10783,11 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
         return nil;
     }
     if (!zpu_configure_multisample_targets(_legacyBuffer, encoder, color, descriptor.colorAttachments[0])) {
+        zpu_metal_render_encoder_destroy(encoder);
+        [self markError];
+        return nil;
+    }
+    if (!zpu_configure_sample_positions(encoder, descriptor, color.sampleCount)) {
         zpu_metal_render_encoder_destroy(encoder);
         [self markError];
         return nil;

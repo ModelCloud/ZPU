@@ -512,6 +512,13 @@ const BeginRenderCommand = struct {
     color_attachments: [8]?ColorAttachmentCommand = [_]?ColorAttachmentCommand{null} ** 8,
     sample_targets: [4]?*Texture = [_]?*Texture{null} ** 4,
     sample_count: u8 = 1,
+    custom_sample_positions: bool = false,
+    sample_positions: [4]abi.SamplePosition = .{
+        .{ .x = 0.5, .y = 0.5 },
+        .{ .x = 0.5, .y = 0.5 },
+        .{ .x = 0.5, .y = 0.5 },
+        .{ .x = 0.5, .y = 0.5 },
+    },
     resolve_target: ?*Texture = null,
     depth: ?[]f32 = null,
     depth_texture: ?*Texture = null,
@@ -833,6 +840,13 @@ pub const CommandBuffer = struct {
         var active_color_attachments: [8]?*Texture = [_]?*Texture{null} ** 8;
         var active_sample_targets: [4]?*Texture = [_]?*Texture{null} ** 4;
         var active_sample_count: usize = 1;
+        var active_custom_sample_positions = false;
+        var active_sample_positions: [4]abi.SamplePosition = .{
+            .{ .x = 0.5, .y = 0.5 },
+            .{ .x = 0.5, .y = 0.5 },
+            .{ .x = 0.5, .y = 0.5 },
+            .{ .x = 0.5, .y = 0.5 },
+        };
         var active_resolve_target: ?*Texture = null;
         var active_depth: ?[]f32 = null;
         var active_depth_texture: ?*Texture = null;
@@ -870,6 +884,7 @@ pub const CommandBuffer = struct {
                     }
                 } else if (begin_render.resolve_target != null) return self.fail(error.InvalidArgument);
                 if (active_resolve_target) |resolve| {
+                    sparseSyncTexture(resolve);
                     resolveMultisampleTargets(active_sample_targets, active_sample_count, resolve) catch |err| return self.fail(err);
                     sparseFlushTexture(resolve);
                 }
@@ -892,6 +907,8 @@ pub const CommandBuffer = struct {
                 active_color_attachments[0] = begin_render.target;
                 active_sample_targets = [_]?*Texture{null} ** 4;
                 active_sample_count = begin_render.sample_count;
+                active_custom_sample_positions = begin_render.custom_sample_positions;
+                active_sample_positions = begin_render.sample_positions;
                 active_resolve_target = begin_render.resolve_target;
                 if (active_sample_count == 1) {
                     active_sample_targets[0] = begin_render.target;
@@ -1075,7 +1092,10 @@ pub const CommandBuffer = struct {
                 } else {
                     for (active_sample_targets[0..active_sample_count], 0..) |sample, sample_index| {
                         var sample_target_value = sample.?.asTarget();
-                        draw_options.sample_position = raster3d.defaultSamplePosition(active_sample_count, sample_index);
+                        draw_options.sample_position = if (active_custom_sample_positions)
+                            .{ active_sample_positions[sample_index].x, active_sample_positions[sample_index].y }
+                        else
+                            raster3d.defaultSamplePosition(active_sample_count, sample_index);
                         for (0..instance_count) |_| {
                             stats = addRasterStats(stats, raster3d.drawWithTargetMipmaps(
                                 &sample_target_value,
@@ -1114,6 +1134,7 @@ pub const CommandBuffer = struct {
                 }
             },
             .tile => |tile| {
+                if (active_sample_count > 1) return self.fail(error.UnsupportedOperation);
                 const target_handle = active_target orelse return self.fail(error.InvalidCommand);
                 if (!validTexture(target_handle) or target_handle != tile.target) return self.fail(error.InvalidResource);
                 sparseSyncTexture(target_handle);
@@ -1152,6 +1173,7 @@ pub const CommandBuffer = struct {
                 }
             },
             .mesh => |mesh| {
+                if (active_sample_count > 1) return self.fail(error.UnsupportedOperation);
                 sparseSyncOptionalBuffer(mesh.indirect_buffer);
                 defer sparseFlushOptionalBuffer(mesh.indirect_buffer);
                 var resolved_mesh = mesh;
@@ -1203,6 +1225,7 @@ pub const CommandBuffer = struct {
                 }
             },
             .patch => |patch| {
+                if (active_sample_count > 1) return self.fail(error.UnsupportedOperation);
                 sparseSyncOptionalBuffer(patch.vertex_buffer);
                 sparseSyncOptionalBuffer(patch.patch_index_buffer);
                 sparseSyncOptionalBuffer(patch.indirect_buffer);
@@ -1581,6 +1604,7 @@ pub const CommandBuffer = struct {
             },
         };
         if (active_resolve_target) |resolve| {
+            sparseSyncTexture(resolve);
             resolveMultisampleTargets(active_sample_targets, active_sample_count, resolve) catch |err| return self.fail(err);
             sparseFlushTexture(resolve);
         }
@@ -1745,6 +1769,34 @@ pub const RenderEncoder = struct {
         self.pipeline_sample_count = sample_count;
     }
 
+    pub fn setSamplePositions(self: *RenderEncoder, positions: ?[*]const abi.SamplePosition, count: usize) Error!void {
+        if (!self.open() or count > 4 or (count != 0 and count != 1 and count != 2 and count != 4) or
+            (count != 0 and positions == null)) return error.InvalidArgument;
+        const values = positions orelse undefined;
+        var sample_positions: [4]abi.SamplePosition = .{
+            .{ .x = 0.5, .y = 0.5 },
+            .{ .x = 0.5, .y = 0.5 },
+            .{ .x = 0.5, .y = 0.5 },
+            .{ .x = 0.5, .y = 0.5 },
+        };
+        if (count != 0) {
+            for (values[0..count], 0..) |position, index| {
+                if (!std.math.isFinite(position.x) or !std.math.isFinite(position.y) or
+                    position.x < 0 or position.x > 1 or position.y < 0 or position.y > 1)
+                    return error.InvalidArgument;
+                sample_positions[index] = position;
+            }
+        }
+        switch (self.command_buffer.commands.items[self.begin_index]) {
+            .begin_render => |*begin_render| {
+                if (count != 0 and count != begin_render.sample_count) return error.InvalidArgument;
+                begin_render.custom_sample_positions = count != 0;
+                begin_render.sample_positions = sample_positions;
+            },
+            else => return error.InvalidCommand,
+        }
+    }
+
     pub fn setMultisampleTargets(self: *RenderEncoder, textures: ?[*]const ?*Texture, count: usize, resolve: ?*Texture) Error!void {
         if (!self.open() or (count != 1 and count != 2 and count != 4) or textures == null) return error.InvalidArgument;
         const values = textures.?;
@@ -1758,6 +1810,7 @@ pub const RenderEncoder = struct {
         if (resolve) |target| {
             if (!validTexture(target) or target.device != first.device or !target.format.isColor() or
                 target.width != first.width or target.height != first.height or target.format != first.format) return error.InvalidArgument;
+            for (values[0..count]) |sample| if (sample.? == target) return error.InvalidArgument;
         }
         switch (self.command_buffer.commands.items[self.begin_index]) {
             .begin_render => |*begin_render| {
@@ -8085,6 +8138,15 @@ pub export fn zpu_metal_render_encoder_set_pipeline_formats_with_stencil(encoder
 
 pub export fn zpu_metal_render_encoder_set_raster_sample_count(encoder: ?*RenderEncoder, sample_count: u8) callconv(.c) c_int {
     (encoder orelse return -1).setRasterSampleCount(sample_count) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_sample_positions(
+    encoder: ?*RenderEncoder,
+    positions: ?[*]const abi.SamplePosition,
+    count: usize,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setSamplePositions(positions, count) catch |err| return errorCode(err);
     return 0;
 }
 
