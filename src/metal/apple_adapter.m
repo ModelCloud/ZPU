@@ -8990,8 +8990,10 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithTileDescriptor:(MTLTileRenderPipelineDescriptor *)descriptor options:(MTLPipelineOption)options reflection:(MTLAutoreleasedRenderPipelineReflection *)reflection error:(NSError **)error API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
     (void)options;
     if (reflection != NULL) *reflection = nil;
-    if (descriptor == nil || descriptor.tileFunction == nil || descriptor.rasterSampleCount != 1) {
-        zpu_set_error(error, @"ZPU CPU Metal tile pipelines require one sample and a tile function");
+    if (descriptor == nil || descriptor.tileFunction == nil ||
+        (descriptor.rasterSampleCount != 1 && descriptor.rasterSampleCount != 2 &&
+         descriptor.rasterSampleCount != 4)) {
+        zpu_set_error(error, @"ZPU CPU Metal tile pipelines require a one-, two-, or four-sample tile function");
         return nil;
     }
     NSUInteger max_threads = descriptor.maxTotalThreadsPerThreadgroup;
@@ -9050,6 +9052,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         pipeline->_colorPixelFormats[index] = descriptor.colorAttachments[index].pixelFormat;
     }
     pipeline->_colorAttachmentCount = color_attachment_count;
+    pipeline->_rasterSampleCount = descriptor.rasterSampleCount;
     /* Legacy tile descriptors also lack a pipeline mapping-state property;
      * the macOS 26/iOS 26 encoder pass opt-in controls whether a non-identity
      * map can actually be used. */
@@ -10274,8 +10277,9 @@ static id<MTLRenderPipelineState> zpu_mtl4_tile_pipeline_for_descriptor(
         zpu_set_error(error, @"ZPU CPU Metal 4 requires a registered tile function");
         return nil;
     }
-    if (descriptor.rasterSampleCount != 0 && descriptor.rasterSampleCount != 1) {
-        zpu_set_error(error, @"ZPU CPU Metal 4 supports only one-sample CPU tile targets");
+    if (descriptor.rasterSampleCount != 0 && descriptor.rasterSampleCount != 1 &&
+        descriptor.rasterSampleCount != 2 && descriptor.rasterSampleCount != 4) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 supports only one-, two-, or four-sample CPU tile targets");
         return nil;
     }
     MTL4StaticLinkingDescriptor *linking = descriptor.staticLinkingDescriptor;
@@ -10335,6 +10339,7 @@ static id<MTLRenderPipelineState> zpu_mtl4_tile_pipeline_for_descriptor(
         pipeline->_colorPixelFormats[index] = descriptor.colorAttachments[index].pixelFormat;
     }
     pipeline->_colorAttachmentCount = color_attachment_count;
+    pipeline->_rasterSampleCount = descriptor.rasterSampleCount == 0 ? 1 : descriptor.rasterSampleCount;
     /* MTL4 tile descriptors do not expose a pipeline mapping-state property;
      * their encoder map is the authoritative state when the pass opts in. */
     pipeline->_colorAttachmentMappingInherited = YES;
@@ -17067,13 +17072,14 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
         for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
             colorFormats[index] = (uint16_t)state->_colorPixelFormats[index];
         }
-        const BOOL is_mesh = state->_isMeshPipeline;
+        const BOOL rasterizes = state->_isMeshPipeline;
         if (zpu_metal_render_encoder_set_pipeline_color_formats(
                 _zpuEncoder, colorFormats, state->_colorAttachmentCount,
                 (uint16_t)state->_depthPixelFormat, (uint16_t)state->_stencilPixelFormat) != ZPU_METAL_OK ||
             zpu_metal_render_encoder_set_raster_sample_count(
-                _zpuEncoder, (uint8_t)(is_mesh ? state->_rasterSampleCount : 1)) != ZPU_METAL_OK ||
-            zpu_metal_render_encoder_set_rasterization_enabled(_zpuEncoder, is_mesh) != ZPU_METAL_OK ||
+                _zpuEncoder, (uint8_t)((state->_isMeshPipeline || state->_isTilePipeline) ?
+                                           state->_rasterSampleCount : 1)) != ZPU_METAL_OK ||
+            zpu_metal_render_encoder_set_rasterization_enabled(_zpuEncoder, rasterizes) != ZPU_METAL_OK ||
             zpu_metal_render_encoder_set_blend_state(
                 _zpuEncoder, state->_blendingEnabled,
                 (zpu_metal_blend_factor)state->_sourceRGBBlendFactor,

@@ -101,7 +101,8 @@ triangle path:
   logical-to-physical map; the registered mesh-gradient profile maps mesh-grid
   Z one-to-one to layered slices while preserving attachment-global top-left
   X/Y; the same registered mesh profile also supports 2x and 4x sample
-  planes and resolves them through the CPU path; arbitrary mesh shader execution remains explicitly rejected, while
+  planes and resolves them through the CPU path; the registered tile profile
+  supports the same sample-plane and resolve path; arbitrary mesh shader execution remains explicitly rejected, while
   factor-one triangle patches select layers
   by `baseInstance`.
 - CPU-owned 2D multisample and 2D multisample-array textures with

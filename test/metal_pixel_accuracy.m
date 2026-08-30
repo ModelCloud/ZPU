@@ -7290,6 +7290,156 @@ static int test_layered_mesh_msaa_against_native(
     return 0;
 }
 
+API_AVAILABLE(macos(11.0), ios(11.0))
+static int test_layered_tile_msaa_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLLibrary> native_library, id<MTLLibrary> adapter_library,
+    id<MTLCommandQueue> adapter_queue) {
+    enum { width = 5, height = 3, layers = 3, byte_count = width * height * 4 };
+    id<MTLFunction> native_vertex = [native_library newFunctionWithName:@"zpu_cpu_layered_vertex"];
+    id<MTLFunction> native_fragment = [native_library newFunctionWithName:@"zpu_test_layered_position_gradient"];
+    id<MTLFunction> adapter_tile = [adapter_library newFunctionWithName:@"zpu_cpu_tile_gradient_rgba8"];
+    if (native_vertex == nil || native_fragment == nil || adapter_tile == nil) return 235;
+
+    const NSUInteger sample_counts[] = {2, 4};
+    for (NSUInteger sample_index = 0; sample_index < sizeof(sample_counts) / sizeof(sample_counts[0]); ++sample_index) {
+        const NSUInteger sample_count = sample_counts[sample_index];
+        if (![native_device supportsTextureSampleCount:sample_count] ||
+            ![adapter_device supportsTextureSampleCount:sample_count]) continue;
+
+        MTLRenderPipelineDescriptor *native_descriptor = [MTLRenderPipelineDescriptor new];
+        native_descriptor.vertexFunction = native_vertex;
+        native_descriptor.fragmentFunction = native_fragment;
+        native_descriptor.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+        native_descriptor.rasterSampleCount = sample_count;
+        native_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        NSError *native_error = nil;
+        id<MTLRenderPipelineState> native_pipeline =
+            [native_device newRenderPipelineStateWithDescriptor:native_descriptor error:&native_error];
+
+        MTLTileRenderPipelineDescriptor *adapter_descriptor = [MTLTileRenderPipelineDescriptor new];
+        adapter_descriptor.tileFunction = adapter_tile;
+        adapter_descriptor.rasterSampleCount = sample_count;
+        adapter_descriptor.maxTotalThreadsPerThreadgroup = 4;
+        adapter_descriptor.threadgroupSizeMatchesTileSize = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            adapter_descriptor.requiredThreadsPerThreadgroup = MTLSizeMake(2, 2, 1);
+        }
+        adapter_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        NSError *adapter_error = nil;
+        id<MTLRenderPipelineState> adapter_pipeline =
+            [adapter_device newRenderPipelineStateWithTileDescriptor:adapter_descriptor
+                                                                options:0 reflection:nil error:&adapter_error];
+
+        MTLTextureDescriptor *sample_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                width:width height:height mipmapped:NO];
+        sample_descriptor.textureType = MTLTextureType2DMultisampleArray;
+        sample_descriptor.arrayLength = layers;
+        sample_descriptor.sampleCount = sample_count;
+        sample_descriptor.storageMode = MTLStorageModeShared;
+        sample_descriptor.usage = MTLTextureUsageRenderTarget;
+        MTLTextureDescriptor *resolve_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                width:width height:height mipmapped:NO];
+        resolve_descriptor.textureType = MTLTextureType2DArray;
+        resolve_descriptor.arrayLength = layers;
+        resolve_descriptor.storageMode = MTLStorageModeShared;
+        resolve_descriptor.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> native_samples = [native_device newTextureWithDescriptor:sample_descriptor];
+        id<MTLTexture> adapter_samples = [adapter_device newTextureWithDescriptor:sample_descriptor];
+        id<MTLTexture> native_resolve = [native_device newTextureWithDescriptor:resolve_descriptor];
+        id<MTLTexture> adapter_resolve = [adapter_device newTextureWithDescriptor:resolve_descriptor];
+        id<MTLBuffer> native_buffer = [native_device newBufferWithLength:sizeof(zpu_metal_vertex) * 6
+                                                                  options:MTLResourceStorageModeShared];
+        const zpu_metal_vertex vertices[] = {
+            {{-1.0f, -1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+            {{ 1.0f, -1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+            {{ 1.0f,  1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+            {{-1.0f, -1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+            {{ 1.0f,  1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+            {{-1.0f,  1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+        };
+        if (native_buffer != nil) memcpy(native_buffer.contents, vertices, sizeof(vertices));
+        id<MTLCommandQueue> native_queue = [native_device newCommandQueue];
+        id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+        id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+        MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_pass.renderTargetArrayLength = layers;
+        native_pass.colorAttachments[0].texture = native_samples;
+        native_pass.colorAttachments[0].resolveTexture = native_resolve;
+        native_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_pass.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+        native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        MTLRenderPassDescriptor *adapter_pass = [native_pass copy];
+        adapter_pass.colorAttachments[0].texture = adapter_samples;
+        adapter_pass.colorAttachments[0].resolveTexture = adapter_resolve;
+        adapter_pass.tileWidth = 2;
+        adapter_pass.tileHeight = 2;
+        id<MTLRenderCommandEncoder> native_encoder =
+            [native_command_buffer renderCommandEncoderWithDescriptor:native_pass];
+        id<MTLRenderCommandEncoder> adapter_encoder =
+            [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+        const MTLViewport native_viewport = {0.0, 0.0, width, height, 0.0, 1.0};
+        const MTLViewport adapter_viewport = {2.0, 1.0, 3.0, 2.0, 0.0, 1.0};
+        const MTLScissorRect scissor = {1, 1, 3, 2};
+        if (native_encoder != nil) {
+            [native_encoder setViewport:native_viewport];
+            [native_encoder setScissorRect:scissor];
+            [native_encoder setRenderPipelineState:native_pipeline];
+            [native_encoder setVertexBuffer:native_buffer offset:0 atIndex:0];
+            [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6
+                              instanceCount:layers baseInstance:0];
+            [native_encoder endEncoding];
+        }
+        if (adapter_encoder != nil) {
+            [adapter_encoder setViewport:adapter_viewport];
+            [adapter_encoder setScissorRect:scissor];
+            [adapter_encoder setRenderPipelineState:adapter_pipeline];
+            [adapter_encoder dispatchThreadsPerTile:MTLSizeMake(2, 2, 1)];
+            [adapter_encoder endEncoding];
+        }
+        [native_command_buffer commit];
+        [adapter_command_buffer commit];
+        [native_command_buffer waitUntilCompleted];
+        [adapter_command_buffer waitUntilCompleted];
+
+        uint8_t native_pixels[layers][byte_count] = {{0}};
+        uint8_t adapter_pixels[layers][byte_count] = {{0}};
+        BOOL exact = native_pipeline != nil && adapter_pipeline != nil && native_samples != nil &&
+            adapter_samples != nil && native_resolve != nil && adapter_resolve != nil && native_buffer != nil &&
+            native_command_buffer != nil && adapter_command_buffer != nil && native_encoder != nil &&
+            adapter_encoder != nil && native_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_command_buffer.status == MTLCommandBufferStatusCompleted;
+        for (NSUInteger layer = 0; layer < layers; ++layer) {
+            if (native_resolve != nil) {
+                [native_resolve getBytes:native_pixels[layer] bytesPerRow:width * 4 bytesPerImage:byte_count
+                              fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1) mipmapLevel:0 slice:layer];
+            }
+            if (adapter_resolve != nil) {
+                [adapter_resolve getBytes:adapter_pixels[layer] bytesPerRow:width * 4 bytesPerImage:byte_count
+                               fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1) mipmapLevel:0 slice:layer];
+            }
+            if (memcmp(native_pixels[layer], adapter_pixels[layer], byte_count) != 0) {
+                size_t mismatch = 0;
+                while (mismatch < byte_count && native_pixels[layer][mismatch] == adapter_pixels[layer][mismatch]) mismatch += 1;
+                fprintf(stderr, "metal-pixel: layered tile %zux MSAA slice %zu mismatch at byte %zu native=%u adapter=%u\n",
+                        sample_count, layer, mismatch, mismatch < byte_count ? native_pixels[layer][mismatch] : 0,
+                        mismatch < byte_count ? adapter_pixels[layer][mismatch] : 0);
+                fail_with_error("native layered tile MSAA oracle failed", native_error);
+                fail_with_error("adapter layered tile MSAA failed", adapter_error);
+                return 236;
+            }
+        }
+        if (!exact) {
+            fail_with_error("native layered tile MSAA completion failed", native_error);
+            fail_with_error("adapter layered tile MSAA completion failed", adapter_error);
+            return 237;
+        }
+    }
+    return 0;
+}
+
 API_AVAILABLE(macos(26.0), ios(26.0))
 static int test_mtl4_layered_mesh_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
@@ -15288,6 +15438,11 @@ int main(void) {
         if (!adapter_layered_tile_exact) {
             fail_with_error("layered CPU tile dispatch pixel exactness failed", adapter_layered_tile_error);
             return 111;
+        }
+        if (@available(macOS 11.0, iOS 11.0, *)) {
+            const int layered_tile_msaa_result = test_layered_tile_msaa_against_native(
+                device, adapter_device, library, adapter_default_library, adapter_queue);
+            if (layered_tile_msaa_result != 0) return layered_tile_msaa_result;
         }
 
         /* Metal 4 tile pipelines may declare several physical color

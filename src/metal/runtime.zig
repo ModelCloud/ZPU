@@ -1825,7 +1825,6 @@ pub const CommandBuffer = struct {
                 }
             },
             .tile => |tile| {
-                if (active_sample_count > 1) return self.fail(error.UnsupportedOperation);
                 sparseSyncOptionalBuffer(tile.visibility_buffer);
                 defer sparseFlushOptionalBuffer(tile.visibility_buffer);
                 const target_handle = active_target orelse return self.fail(error.InvalidCommand);
@@ -1843,6 +1842,25 @@ pub const CommandBuffer = struct {
                 } else {
                     sparseSyncTexture(output_texture);
                 }
+                const layered_samples = active_sample_count > 1 and
+                    active_sample_array_color_attachments[output_index][0][0] != null;
+                if (active_sample_count > 1) {
+                    if (layered_samples) {
+                        for (active_sample_array_color_attachments[output_index][0..active_array_target_count]) |layer_samples| {
+                            for (layer_samples[0..active_sample_count]) |sample| {
+                                sparseSyncTexture(sample orelse return self.fail(error.InvalidResource));
+                            }
+                        }
+                    } else {
+                        for (0..active_sample_count) |sample_index| {
+                            const sample = if (output_index == 0)
+                                active_sample_targets[sample_index]
+                            else
+                                active_sample_color_attachments[output_index * 4 + sample_index];
+                            sparseSyncTexture(sample orelse return self.fail(error.InvalidResource));
+                        }
+                    }
+                }
                 defer {
                     if (active_array_target_count > 1) {
                         for (active_array_color_attachments[output_index][0..active_array_target_count]) |output| {
@@ -1850,6 +1868,23 @@ pub const CommandBuffer = struct {
                         }
                     } else {
                         sparseFlushTexture(output_texture);
+                    }
+                    if (active_sample_count > 1) {
+                        if (layered_samples) {
+                            for (active_sample_array_color_attachments[output_index][0..active_array_target_count]) |layer_samples| {
+                                for (layer_samples[0..active_sample_count]) |sample| {
+                                    sparseFlushOptionalTexture(sample);
+                                }
+                            }
+                        } else {
+                            for (0..active_sample_count) |sample_index| {
+                                const sample = if (output_index == 0)
+                                    active_sample_targets[sample_index]
+                                else
+                                    active_sample_color_attachments[output_index * 4 + sample_index];
+                                sparseFlushOptionalTexture(sample);
+                            }
+                        }
                     }
                 }
                 if (tile.kernel != 1 or
@@ -1875,35 +1910,69 @@ pub const CommandBuffer = struct {
                 const y1 = @min(y0 +| @as(usize, tile_options.scissor.height), @as(usize, target_handle.height));
                 var stats: raster3d.Stats = .{};
                 for (0..layer_count) |layer| {
-                    const layer_texture = if (active_array_target_count > 1)
-                        active_array_color_attachments[output_index][layer] orelse return self.fail(error.InvalidResource)
-                    else
-                        output_texture;
-                    var target = layer_texture.asTarget();
-                    for (0..tile_count_y) |tile_y| {
-                        for (0..tile_count_x) |tile_x| {
-                            const tile_origin_x = tile_x * tile.tile_size.width;
-                            const tile_origin_y = tile_y * tile.tile_size.height;
-                            for (0..tile.threads_per_tile.height) |local_y| {
-                                const y = tile_origin_y + local_y;
-                                if (y >= target.height or y < y0 or y >= y1) continue;
-                                for (0..tile.threads_per_tile.width) |local_x| {
-                                    const x = tile_origin_x + local_x;
-                                    if (x >= target.width or x < x0 or x >= x1) continue;
-                                    const depth_values = if (active_array_target_count > 1)
-                                        active_depth_array_values[layer]
-                                    else
-                                        active_depth;
-                                    const stencil_values = if (active_array_target_count > 1)
-                                        active_stencil_array_values[layer]
-                                    else
-                                        active_stencil;
-                                    stats = addRasterStats(stats, raster3d.writePoint(&target, depth_values, stencil_values, x, y, 0.5, .{
-                                        (@as(f32, @floatFromInt(x)) + 1.0) / 8.0,
-                                        (@as(f32, @floatFromInt(y)) + 1.0) / 8.0,
-                                        0.25,
-                                        1.0,
-                                    }, tile_options));
+                    const sample_iterations = if (active_sample_count > 1) active_sample_count else 1;
+                    for (0..sample_iterations) |sample_index| {
+                        const layer_texture = if (active_sample_count > 1)
+                            (if (layered_samples)
+                                active_sample_array_color_attachments[output_index][layer][sample_index]
+                            else if (output_index == 0)
+                                active_sample_targets[sample_index]
+                            else
+                                active_sample_color_attachments[output_index * 4 + sample_index]) orelse
+                                return self.fail(error.InvalidResource)
+                        else if (active_array_target_count > 1)
+                            active_array_color_attachments[output_index][layer] orelse return self.fail(error.InvalidResource)
+                        else
+                            output_texture;
+                        var target = layer_texture.asTarget();
+                        const pixel_count = std.math.mul(usize, target.width, target.height) catch return self.fail(error.InvalidArgument);
+                        const depth_values: ?[]f32 = if (active_sample_count > 1) blk: {
+                            if (layered_samples) {
+                                if (active_depth_sample_array_values[layer]) |values|
+                                    break :blk values[sample_index * pixel_count .. (sample_index + 1) * pixel_count];
+                            } else if (active_depth_values) |values| {
+                                break :blk values[sample_index * pixel_count .. (sample_index + 1) * pixel_count];
+                            }
+                            break :blk null;
+                        } else if (active_array_target_count > 1)
+                            active_depth_array_values[layer]
+                        else
+                            active_depth;
+                        const stencil_values: ?[]u8 = if (active_sample_count > 1) blk: {
+                            if (layered_samples) {
+                                if (active_stencil_sample_array_values[layer]) |values|
+                                    break :blk values[sample_index * pixel_count .. (sample_index + 1) * pixel_count];
+                            } else if (active_stencil_values) |values| {
+                                break :blk values[sample_index * pixel_count .. (sample_index + 1) * pixel_count];
+                            }
+                            break :blk null;
+                        } else if (active_array_target_count > 1)
+                            active_stencil_array_values[layer]
+                        else
+                            active_stencil;
+                        if (active_sample_count > 1) {
+                            tile_options.sample_position = if (active_custom_sample_positions)
+                                .{ active_sample_positions[sample_index].x, active_sample_positions[sample_index].y }
+                            else
+                                raster3d.defaultSamplePosition(active_sample_count, sample_index);
+                        }
+                        for (0..tile_count_y) |tile_y| {
+                            for (0..tile_count_x) |tile_x| {
+                                const tile_origin_x = tile_x * tile.tile_size.width;
+                                const tile_origin_y = tile_y * tile.tile_size.height;
+                                for (0..tile.threads_per_tile.height) |local_y| {
+                                    const y = tile_origin_y + local_y;
+                                    if (y >= target.height or y < y0 or y >= y1) continue;
+                                    for (0..tile.threads_per_tile.width) |local_x| {
+                                        const x = tile_origin_x + local_x;
+                                        if (x >= target.width or x < x0 or x >= x1) continue;
+                                        stats = addRasterStats(stats, raster3d.writePoint(&target, depth_values, stencil_values, x, y, 0.5, .{
+                                            (@as(f32, @floatFromInt(x)) + 1.0) / 8.0,
+                                            (@as(f32, @floatFromInt(y)) + 1.0) / 8.0,
+                                            0.25,
+                                            1.0,
+                                        }, tile_options));
+                                    }
                                 }
                             }
                         }
